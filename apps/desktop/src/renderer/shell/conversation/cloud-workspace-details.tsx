@@ -1,0 +1,227 @@
+import { useState } from "react";
+import {
+  Activity,
+  Clock,
+  Cloud,
+  Cpu,
+  FolderGit2,
+  HardDrive,
+  MemoryStick,
+  Wrench,
+} from "lucide-react";
+import { Button } from "../../shared/ui";
+import { Tooltip } from "../../shared/ui/primitives";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "../../shared/ui/primitives/popover";
+import {
+  cloudWorkspaceDetails,
+  manageCloudWorkspace,
+  refreshCloudWorkspace,
+} from "../../state/cloud-workspace-catalog";
+import { useCachedRead } from "../../state/use-cached-read";
+import {
+  cloudWorkspaceKey,
+  parseCloudWorkspaceKey,
+} from "../../platform/bridge/cloud-workspace-key";
+import { useTeams } from "../../features/team/team-store";
+import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import { toast } from "../../shared/ui/primitives/elements";
+
+export function cloudStatusLabel(status: string): string {
+  return (
+    (
+      {
+        ready: "Running",
+        busy: "Running",
+        creating: "Creating",
+        provisioning: "Setting up",
+        starting: "Starting",
+        stopping: "Stopping",
+        stopped: "Stopped",
+        archived: "Archived",
+        error: "Needs attention",
+        failed: "Setup failed",
+      } as Record<string, string>
+    )[status] ?? status.replaceAll("_", " ")
+  );
+}
+
+export function CloudWorkspaceDetailsContent({
+  workspace,
+  creator,
+}: {
+  workspace: CloudWorkspaceDocument;
+  creator: string;
+}) {
+  const resources = workspace.generation.resources;
+  const setup = ["ready", "busy", "stopped", "archived"].includes(
+    workspace.status,
+  )
+    ? "Setup succeeded"
+    : workspace.error
+      ? "Setup failed"
+      : "Setting up";
+  const rows = [
+    {
+      Icon: FolderGit2,
+      label: "Repository",
+      value: `${workspace.repository.owner}/${workspace.repository.name}`,
+    },
+    {
+      Icon: Clock,
+      label: "Created",
+      value: `${creator} · ${new Date(workspace.createdAt).toLocaleDateString()}`,
+    },
+    { Icon: Wrench, label: "Setup", value: setup },
+    { Icon: Cloud, label: "Environment", value: "Zeros Cloud" },
+    {
+      Icon: Activity,
+      label: "Status",
+      value: cloudStatusLabel(workspace.status),
+    },
+    {
+      Icon: Cpu,
+      label: "CPU",
+      value: `${resources.cpuMillicores / 1000} cores`,
+    },
+    {
+      Icon: MemoryStick,
+      label: "Memory",
+      value: `${Number((resources.memoryMiB / 1024).toFixed(2))} GiB`,
+    },
+    {
+      Icon: HardDrive,
+      label: "Disk",
+      value: `${Number((resources.storageMiB / 1024).toFixed(2))} GiB`,
+    },
+  ];
+  return (
+    <>
+      <h2 className="text-fg1 mb-3 truncate text-sm font-medium">
+        {workspace.name}
+      </h2>
+      <dl className="space-y-3">
+        {rows.map(({ Icon, label, value }, index) => (
+          <div
+            key={label}
+            className={
+              index === 3
+                ? "border-border1 flex items-start gap-3 border-t pt-3"
+                : "flex items-start gap-3"
+            }
+          >
+            <dt className="text-fg2 flex shrink-0 items-center gap-2 text-xs">
+              <Icon size={14} strokeWidth={1.5} />
+              {label}
+            </dt>
+            <dd className="text-fg1 ml-auto min-w-0 text-right text-xs break-words">
+              {value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      {workspace.error && (
+        <p className="text-error mt-3 text-xs" role="alert">
+          {workspace.error.message}
+        </p>
+      )}
+    </>
+  );
+}
+
+export function CloudWorkspaceDetails({ folder }: { folder: string }) {
+  const target = parseCloudWorkspaceKey(folder);
+  const key = target ? cloudWorkspaceKey(target) : null;
+  const [open, setOpen] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const { me } = useTeams();
+  const details = useCachedRead(
+    cloudWorkspaceDetails,
+    key,
+    (value) => refreshCloudWorkspace(parseCloudWorkspaceKey(value)!),
+    { enabled: open, maxAgeMs: 10_000 },
+  );
+  if (!key) return null;
+  const warm = () => {
+    void cloudWorkspaceDetails
+      .load(key, () => refreshCloudWorkspace(parseCloudWorkspaceKey(key)!), {
+        maxAgeMs: 10_000,
+      })
+      .catch(() => {});
+  };
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <Tooltip label="Cloud workspace details">
+        <PopoverTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Cloud workspace details"
+            className="text-fg2 size-7 shrink-0"
+            onPointerEnter={warm}
+            onFocus={warm}
+          >
+            <Cloud size={16} strokeWidth={1.5} />
+          </Button>
+        </PopoverTrigger>
+      </Tooltip>
+      <PopoverContent
+        align="start"
+        sideOffset={6}
+        className="w-[360px]"
+        aria-label="Cloud workspace details"
+      >
+        {details.data ? (
+          <CloudWorkspaceDetailsContent
+            workspace={details.data}
+            creator={
+              me?.user.id === details.data.createdBy
+                ? (me.user.displayName ?? "You")
+                : "Workspace member"
+            }
+          />
+        ) : (
+          <p className="text-fg2 text-xs">
+            {details.error?.message ?? "Loading workspace details…"}
+          </p>
+        )}
+        {details.data && details.error && (
+          <p className="text-fg3 mt-3 text-xs" role="status">
+            Couldn’t refresh. Showing the last confirmed details.
+          </p>
+        )}
+        {details.data &&
+          ["stopped", "archived"].includes(details.data.status) && (
+            <div className="mt-3">
+              <Button
+                size="sm"
+                disabled={starting || !details.data.capabilities.canStart}
+                onClick={() => {
+                  setStarting(true);
+                  void manageCloudWorkspace(target!, "wake")
+                    .catch((error) =>
+                      toast.error("Couldn't start cloud workspace", {
+                        description:
+                          error instanceof Error ? error.message : "Try again.",
+                      }),
+                    )
+                    .finally(() => setStarting(false));
+                }}
+              >
+                {starting ? "Starting…" : "Start workspace"}
+              </Button>
+              {!details.data.capabilities.canStart && (
+                <p className="text-fg3 mt-2 text-xs">
+                  {details.data.capabilities.startUnavailableReason}
+                </p>
+              )}
+            </div>
+          )}
+      </PopoverContent>
+    </Popover>
+  );
+}

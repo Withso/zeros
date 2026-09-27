@@ -28,6 +28,8 @@ import { getSetting, setSetting } from "../platform/settings";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { isWorktreePath } from "./workspace-resolution";
 import type { InspectFolderResult } from "../platform/git";
+import { getCloudProjects } from "./cloud-workspace-catalog";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import {
   bridgeProjectUpsert,
   bridgeProjectRemove,
@@ -102,6 +104,12 @@ function normalizeProjectList(projects: Project[]): {
 // ── Storage ──────────────────────────────────────────────
 
 export function loadProjects(): Project[] {
+  const local = loadStoredProjects();
+  const cloud = getCloudProjects();
+  return cloud.length ? [...local, ...cloud] : local;
+}
+
+function loadStoredProjects(): Project[] {
   const primary = getSetting<Project[]>(STORAGE_KEY, []);
   if (Array.isArray(primary) && primary.length > 0) {
     const normalized = normalizeProjectList(primary);
@@ -138,6 +146,7 @@ export function isKnownProjectRoot(cwd: string): boolean {
 }
 
 function saveProjects(projects: Project[]): void {
+  projects = projects.filter(project => !isCloudWorkspace(project.repoRoot));
   setSetting(STORAGE_KEY, projects);
   // Only update the backup when we have something worth keeping. An
   // accidental wipe-then-render cycle should NOT poison the backup
@@ -156,6 +165,7 @@ function saveProjects(projects: Project[]): void {
 // attached (e.g. before connect — the boot sync below re-pushes on connect).
 
 function pushUpsert(p: Project): void {
+  if (isCloudWorkspace(p.repoRoot)) return;
   const bridge = getActiveBridge();
   if (!bridge) return;
   void bridgeProjectUpsert(bridge, {
@@ -178,7 +188,7 @@ function pushRemove(repoRoot: string): void {
 export function syncProjectsToEngine(): void {
   const bridge = getActiveBridge();
   if (!bridge) return;
-  const projects = loadProjects();
+  const projects = loadStoredProjects();
   if (projects.length === 0) return;
   void bridgeProjectBulkUpsert(
     bridge,

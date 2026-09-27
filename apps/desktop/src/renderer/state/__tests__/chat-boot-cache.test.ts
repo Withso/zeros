@@ -19,6 +19,11 @@ beforeEach(() => {
 });
 
 describe("synchronous chat boot cache", () => {
+  it("does not restore cloud conversations before account authorization", () => {
+    const cloud = { id: "cloud-chat", folder: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", title: "Private" };
+    setSetting(CHATS_STORAGE_KEY, [cloud]); setSetting(CHATS_BACKUP_KEY, [cloud]);
+    expect(loadCachedChatsForBoot()).toEqual([]);
+  });
   it("preserves every current effort and permission value", () => {
     const chat = sanitizeCachedChat({
       id: "chat-1",

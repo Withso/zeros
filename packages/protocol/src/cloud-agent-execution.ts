@@ -6,7 +6,7 @@ const uuid=z.uuid(),identity=z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
 const token=z.string().min(16).max(16_384).regex(/^[A-Za-z0-9._~+\/-]+={0,2}$/);
 export const CloudAgentProviderSchema=z.enum(["claude","cursor","codex"]);
 export const CloudAgentExecutionAdmissionSchema=z.object({executionId:identity,delegationId:uuid,provider:CloudAgentProviderSchema,
-  model:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/),source:z.discriminatedUnion("kind",[
+  model:z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/),source:z.discriminatedUnion("kind",[
     z.object({kind:z.literal("session"),actorSessionId:uuid}).strict(),
     z.object({kind:z.literal("command"),commandId:uuid,claimId:uuid}).strict(),
   ])}).strict();

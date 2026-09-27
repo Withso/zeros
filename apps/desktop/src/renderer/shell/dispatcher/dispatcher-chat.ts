@@ -18,7 +18,7 @@ export function createDispatcherChat({
   payload: DispatcherCreatePayload;
   validationPending?: boolean;
 }): string {
-  const chatId = newChatId();
+  const chatId = newChatId(folder);
   const chat: ChatThread = {
     id: chatId,
     folder,

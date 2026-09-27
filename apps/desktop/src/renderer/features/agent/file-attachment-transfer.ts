@@ -162,7 +162,7 @@ export async function ensureFileAttachment(
             throw error;
         }
       }
-      const prepared = await prepareAttachmentSource(attachment);
+      const prepared = await prepareAttachmentSource(attachment, cwd.startsWith("cloud://"));
       if (prepared.nativeSourceId) {
         const result = await writeContextAttachment({
           ...args,

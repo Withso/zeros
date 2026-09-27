@@ -86,6 +86,9 @@ import {
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { useTerminalBusy } from "../terminal/terminal-activity";
 import { ChatHistoryMenu } from "./chat-history-menu";
+import { CloudWorkspaceDetails } from "./cloud-workspace-details";
+import { CloudTerminalIndicator } from "../terminal/cloud-terminal-indicator";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { NewChatMenu } from "./new-chat-menu";
 import { copyChatTranscript } from "../copy-chat-transcript";
 import type { TranscriptMode } from "../../features/agent/transcript-format";
@@ -509,12 +512,13 @@ export function ChatTabs({
   // hide it until the preload bridge lands, and until this pane resolves a
   // workspace folder to target.
   const nativeReady = useNativeRuntime().ready;
-  const showOpenIn = !readOnly && nativeReady && workspaceFolder !== "";
+  const showOpenIn = !readOnly && nativeReady && workspaceFolder !== "" && !isCloudWorkspace(workspaceFolder);
 
   // ── Render ───────────────────────────────────────────
 
   return (
     <div className={CHAT_STRIP_SHELL_CLS}>
+      {isCloudWorkspace(workspaceFolder) && <div className="flex h-full shrink-0 items-center pl-2" data-cloud-workspace-button=""><CloudWorkspaceDetails key={workspaceFolder} folder={workspaceFolder} /></div>}
       {/* Fixed leading slot — outside the scrolling lane, so the mode toggle
           holds the strip's left edge no matter how far the tabs scroll. */}
       {leading ? (
@@ -860,6 +864,7 @@ function TabRow({
           data-chat-tab="true"
           data-chat-id={chat.id}
         >
+          {isTerminal && <CloudTerminalIndicator folder={chat.folder} />}
           {isTerminal ? (
             isTerminalBusy ? (
               <ZerosSpinner

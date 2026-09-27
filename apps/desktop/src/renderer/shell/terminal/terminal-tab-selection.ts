@@ -1,4 +1,4 @@
-import { isRunSessionId } from "@zeros/protocol/run-actions";
+import { isRunSessionId } from "../../platform/workspace-run-identity";
 
 import { SETUP_SUBTAB } from "./use-setup-control";
 

@@ -71,6 +71,7 @@ export interface RunEnvContext {
   cwd: string;
   workspaceId: string | null;
   repoRoot?: string | null;
+  workspace?: Parameters<typeof buildRunCommandEnv>[0]["workspace"];
 }
 
 /** One action's status, as the Run tab consumes it. */
@@ -461,10 +462,12 @@ export class RunManager {
     args: RunStartArgs,
   ): Promise<Record<string, string> | undefined> {
     try {
+      const workspace = args.workspaceId ? getWorkspaceById(args.workspaceId) : null;
       return await this.envBuilder({
         cwd: args.cwd,
         workspaceId: args.workspaceId,
         repoRoot: args.repoRoot ?? null,
+        ...(workspace ? { workspace } : {}),
       });
     } catch {
       return undefined;

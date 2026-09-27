@@ -363,7 +363,7 @@ export type OrganizationSummary = {
   role: OrganizationRole;
   isPersonal: boolean;
   defaultTeamId: string | null;
-  workspaceCapabilities: { local: true; cloud: boolean };
+  workspaceCapabilities: { local: boolean; cloud: boolean };
   teamCapabilities: { multiple: false; canCreate: false };
 };
 
@@ -377,7 +377,7 @@ function organizationSummary(row: OrganizationRow): OrganizationSummary {
     isPersonal: row.is_personal,
     defaultTeamId: row.default_team_id,
     workspaceCapabilities: {
-      local: true,
+      local: row.is_personal,
       cloud: !row.is_personal && row.cloud_workspaces_allowed,
     },
     teamCapabilities: { multiple: false, canCreate: false },

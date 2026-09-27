@@ -17,6 +17,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useEffect, useRef } from "react";
+import { CloudWorkspaceLifecycle } from "./state/cloud-workspace-lifecycle";
 import {
   useChats,
   useActiveChatId,
@@ -151,6 +152,7 @@ import {
 } from "./state/chats-local-cache";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
+import { persistWorkspaceChatCache } from "./state/cloud-chat-cache";
 /** Engine-session prewarm claim.
  *
  *  This lives in agent-prewarm-singleflight's renderer-global state—not merely
@@ -514,8 +516,8 @@ function ChatsPersistence() {
         // clear the recovery copy and record the empty tombstone immediately;
         // otherwise a quit inside the generic 5s transient-empty debounce could
         // resurrect an engine-deleted chat on the next first paint.
-        setSetting(CHATS_STORAGE_KEY, reconciled.chats);
-        setSetting(CHATS_BACKUP_KEY, reconciled.chats);
+        persistWorkspaceChatCache(CHATS_STORAGE_KEY, reconciled.chats);
+        persistWorkspaceChatCache(CHATS_BACKUP_KEY, reconciled.chats);
         setSetting(CHATS_TOMBSTONE_KEY, reconciled.chats.length === 0);
 
         // Publish the authoritative baseline before dispatching. The chats
@@ -598,7 +600,7 @@ function ChatsPersistence() {
   const prevChatIdsRef = useRef<Set<string> | null>(null);
   const tombstoneTimerRef = useRef<number | null>(null);
   useEffect(() => {
-    setSetting(CHATS_STORAGE_KEY, chats);
+    persistWorkspaceChatCache(CHATS_STORAGE_KEY, chats);
     // Propagate DELETIONS to the engine. The bulk write below is a non-destructive
     // MERGE (so one device can't wipe another's chats), so a removed chat must be
     // deleted explicitly or it lingers in the engine and reappears on reload.
@@ -631,7 +633,7 @@ function ChatsPersistence() {
       pushRowsToEngine(rowsToPush);
     }
     if (chats.length > 0) {
-      setSetting(CHATS_BACKUP_KEY, chats);
+      persistWorkspaceChatCache(CHATS_BACKUP_KEY, chats);
       setSetting(CHATS_TOMBSTONE_KEY, false);
       if (tombstoneTimerRef.current !== null) {
         window.clearTimeout(tombstoneTimerRef.current);
@@ -1229,6 +1231,7 @@ export function AppShellBody() {
           <PreWarmAgents />
           <ReloadOnProjectChange />
           <ChatsPersistence />
+          <CloudWorkspaceLifecycle />
           <BrowserConfirmationController />
           <ShellRouter />
         </AgentSessionsProvider>

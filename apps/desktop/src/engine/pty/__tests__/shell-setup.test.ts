@@ -27,6 +27,9 @@ const PLANTED = [
   "npm_config__authToken",
 ];
 const ENGINE_INTERNAL_SECRETS = [
+  // Context must be rebuilt from this terminal's owner, never its parent app.
+  "ZEROS_WORKSPACE_CANONICAL_ID",
+  "ZEROS_WORKSPACE_ROOT",
   "ZEROS_GITHUB_TOKEN",
   "ZEROS_LOCAL_WS_TOKEN",
   "ZEROS_CLOUD_TOKEN",

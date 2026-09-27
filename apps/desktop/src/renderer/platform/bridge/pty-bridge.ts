@@ -88,6 +88,7 @@ export async function bridgePtyCreate(
       } as Partial<BridgeMessage> & { type: string },
       timeoutMs,
     )) as PtyCreatedLike;
+    if (resp.type !== "PTY_CREATED" || resp.sessionId !== args.sessionId) return null;
     return {
       sessionId: resp.sessionId,
       pid: resp.pid,

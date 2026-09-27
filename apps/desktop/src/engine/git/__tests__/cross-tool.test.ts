@@ -235,7 +235,7 @@ describe("cross-tool interop", () => {
       const result = await createWorkspaceFromBranch({
         repoRoot,
         branchName: "cursor/adopt-me",
-        organizationId: "org_active",
+        organizationId: null,
       });
       expect(result.workspaceId).toMatch(/^ws_[0-9a-f]{6}-/);
       expect(result.branch).toBe("cursor/adopt-me");
@@ -249,7 +249,7 @@ describe("cross-tool interop", () => {
       );
       expect(seed.branch).toBe("cursor/adopt-me");
       expect(seed).toMatchObject({
-        organizationId: "org_active",
+        organizationId: null,
         placement: "local",
       });
       expect(
@@ -257,7 +257,7 @@ describe("cross-tool interop", () => {
           (workspace) => workspace.id === result.workspaceId,
         ),
       ).toMatchObject({
-        organizationId: "org_active",
+        organizationId: null,
         placement: "local",
       });
       // Listed via the cross-tool listing it should now appear as zeros.
@@ -580,7 +580,7 @@ describe("cross-tool interop", () => {
         worktreePath: wt,
         branchName: "feature/ext",
         repoSlug: "acme-example",
-        organizationId: "org_active",
+        organizationId: null,
       });
       expect(res.workspaceId).toMatch(/^ws_[0-9a-f]{6}-/);
       expect(res.branch).toBe("feature/ext");
@@ -590,7 +590,7 @@ describe("cross-tool interop", () => {
       expect(row).toBeDefined();
       expect(row?.status).toBe("in-progress");
       expect(row).toMatchObject({
-        organizationId: "org_active",
+        organizationId: null,
         placement: "local",
       });
       // Crash-recovery seed is written to app-data, NOT a .zeros/ in the worktree.
@@ -599,7 +599,7 @@ describe("cross-tool interop", () => {
       expect(
         JSON.parse(await readFile(worktreeSeedPath(wt), "utf8")),
       ).toMatchObject({
-        organizationId: "org_active",
+        organizationId: null,
         placement: "local",
       });
     });

@@ -1305,6 +1305,51 @@ export function createCloudWorkspaceRoutes(
       nextCursor: hasMore ? encodeCursor(page[page.length - 1]!) : null,
     });
   };
+  // Read-only admission for the desktop's placement picker. Return only
+  // authorized installation record identities; provider credentials and
+  // provisioning remain behind the existing create boundary.
+  app.get(`${base}/create-options`, async (c) => {
+    c.header("Cache-Control", "no-store");
+    const organizationId = uuidParam(c.req.param("organization"));
+    const owner = parse(GithubNameSchema, c.req.query("owner"));
+    const repositoryName = c.req.query("repository") === undefined ? null : parse(GithubNameSchema, c.req.query("repository"));
+    const actorUserId = c.get("user").id;
+    const installations = await withSystemTx(pool, async (tx) => {
+      const teamId = await resolveAuthorizedTeam(tx, { organizationId, actorUserId, requestedTeamId: null });
+      await authorizeCloudWorkspaceOperation(tx, { organizationId, teamId, actorUserId,
+        billingOwnerUserId: actorUserId, workosEnabled: options.workosEnabled === true, requireWorkspaceOwner: true });
+      const result = await tx.query<{ id: string; accountLogin: string }>(
+        `SELECT gi.id, gi.account_login AS "accountLogin" FROM github_installations gi
+         WHERE gi.suspended_at IS NULL AND lower(gi.account_login) = lower($3)
+           AND (gi.org_id = $1 OR (gi.owner_user_id = $2 AND EXISTS (
+             SELECT 1 FROM github_authorizations ga WHERE ga.owner_user_id = $2 AND ga.app_variant = gi.app_variant)))
+         ORDER BY gi.last_verified_at DESC, gi.id LIMIT 100`,
+        [organizationId, actorUserId, owner],
+      );
+      return result.rows;
+    });
+    let repository: { owner: string; name: string; defaultBranch: string } | undefined;
+    if (repositoryName && repositoryResolver && installations[0]) {
+      const authorizeSource = (tx: Tx) => resolveAuthorizedGithubInstallation(tx, {
+        installationRecordId: installations[0]!.id, organizationId, actorUserId, repositoryOwner: owner,
+      });
+      const installation = await withSystemTx(pool, authorizeSource);
+      let resolved: CloudWorkspaceRepositoryIdentity;
+      try {
+        resolved = await repositoryResolver.resolve({ installationId: installation.githubInstallationId, owner, repository: repositoryName });
+      } catch {
+        throw new HttpError(503, "github_repository_verification_unavailable", "GitHub repository verification is temporarily unavailable");
+      }
+      await withSystemTx(pool, async tx => {
+        const teamId = await resolveAuthorizedTeam(tx, { organizationId, actorUserId, requestedTeamId: null });
+        await authorizeCloudWorkspaceOperation(tx, { organizationId, teamId, actorUserId, billingOwnerUserId: actorUserId,
+          workosEnabled: options.workosEnabled === true, requireWorkspaceOwner: true });
+        await authorizeSource(tx);
+      });
+      repository = { owner: resolved.owner, name: resolved.name, defaultBranch: resolved.defaultBranch };
+    }
+    return c.json({ configured: Boolean(config && repositoryResolver), installations, ...(repository ? { repository } : {}) });
+  });
   app.get(base,c=>listWorkspaces(c,uuidParam(c.req.param("organization"))));
   app.get("/v1/cloud-workspaces",c=>listWorkspaces(c,null));
   app.get("/v1/cloud-workspaces/:workspace",async c=>{

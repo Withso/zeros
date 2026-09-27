@@ -2,6 +2,13 @@ import { describe, it, expect } from "vitest";
 import { isSensitiveRepoPath } from "../read-file";
 
 describe("isSensitiveRepoPath (remote-boundary secret denylist)", () => {
+  it("denies portable Dev infrastructure credentials and allows their example", () => {
+    expect(isSensitiveRepoPath("zeros-dev-env.json")).toBe(true);
+    expect(isSensitiveRepoPath("config/zeros-dev-env.json")).toBe(true);
+    expect(isSensitiveRepoPath("config/ZEROS-DEV-ENV.JSON")).toBe(true);
+    expect(isSensitiveRepoPath("zeros-dev-env-example.json")).toBe(false);
+  });
+
   it("denies dotenv files (but allows public templates)", () => {
     expect(isSensitiveRepoPath(".env")).toBe(true);
     expect(isSensitiveRepoPath(".env.local")).toBe(true);

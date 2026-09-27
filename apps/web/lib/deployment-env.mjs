@@ -45,9 +45,16 @@ export function deploymentEnvironmentErrors(env) {
 
   const errors = [];
   const channel = (env.ZEROS_DEPLOY_ENV || "").trim();
-  const expected = CHANNELS[channel];
+  const devOwner = env.ZEROS_DEV_OWNER ?? "", devDomain = env.ZEROS_DEV_DOMAIN ?? "";
+  const devValid = /^[a-f0-9]{24}$/.test(devOwner) &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(env.ZEROS_DEV_GENERATION ?? "") &&
+    /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(devDomain) && devDomain.length <= 180;
+  const expected = channel === "dev" && devValid ? {
+    appOrigin: `https://app-dev-${devOwner}.${devDomain}`, opsOrigin: null,
+    controlPlaneOrigin: `https://api-dev-${devOwner}.${devDomain}`,
+  } : CHANNELS[channel];
   if (!expected) {
-    errors.push("ZEROS_DEPLOY_ENV must be alpha, beta, or production");
+    errors.push(channel === "dev" ? "Hosted Dev requires an exact owner, generation and domain" : "ZEROS_DEPLOY_ENV must be alpha, beta, or production");
     return errors;
   }
 
@@ -55,6 +62,7 @@ export function deploymentEnvironmentErrors(env) {
   if (authProvider !== "auth0" && authProvider !== "workos") {
     errors.push("AUTH_PROVIDER must be auth0 or workos");
   }
+  if (channel === "dev" && authProvider !== "workos") errors.push("Hosted Dev requires WorkOS");
 
   for (const name of ["APP_ORIGIN", "CONTROL_PLANE_URL"]) {
     if (!(env[name] || "").trim()) errors.push(`${name} is required`);
@@ -153,5 +161,6 @@ export function deploymentEnvironmentErrors(env) {
       `${channel === "beta" ? "Beta" : "Production"} Pages deployments must build release/X.Y.Z`,
     );
   }
+  if (channel === "dev" && branch !== "dev") errors.push("Dev Pages deployments must use the dev branch");
   return errors;
 }

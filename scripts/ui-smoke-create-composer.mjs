@@ -53,6 +53,33 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
   const cardBox = await card.boundingBox();
   expect(contextBox.y + contextBox.height).toBeLessThan(cardBox.y);
   await expectContextControlsInOneRow(page);
+  const location = page.getByRole("button", { name: "Workspace location", exact: true });
+  await expect(location).toHaveCount(0);
+  expect(await page.evaluate(() => window.folderWorkspaceRequests.filter(row => row.op === "cloud_workspace_capability").length)).toBe(0);
+  await editor.fill("Keep my draft when switching organizations");
+  await page.evaluate(() => window.setCreateOrganization("organization"));
+  await expect(location).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
+  await expect(page.getByRole("status").filter({ hasText: "Cloud workspaces are not enabled" })).toBeVisible();
+  await page.screenshot({ path: ".context/cloud-create-ui.png" });
+  await page.evaluate(() => window.setCreateOrganization("other"));
+  await expect(location).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
+  await page.evaluate(() => window.setCreateOrganization("personal"));
+  await expect(page.getByRole("status").filter({ hasText: "Cloud" })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
+  await expect(editor).toHaveText("Keep my draft when switching organizations");
+  await page.evaluate(() => window.setCreateOrganization("organization"));
+  await expect(card.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
+  await page.evaluate(() => window.setCreateOrganization("sign-out"));
+  await expect(card.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
+  await expect(editor).toHaveText("Keep my draft when switching organizations");
+  await page.evaluate(() => window.setCreateOrganization("organization"));
+  await expect(card.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
+  await page.evaluate(() => window.setCreateOrganization("personal"));
+  await editor.fill("");
+  await page.locator("[data-folder-workspace-surface]").screenshot({ path: ".context/personal-create-ui.png" });
+  check("Personal stays local, organizations require Cloud without a Local fallback, and composer drafts survive", true);
   await expect(
     card.getByRole("button", { name: "Choose project" }),
   ).toHaveCount(0);
@@ -246,4 +273,67 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
     "project, branch/PR and Code/Design controls share one row at normal and narrow window widths",
     true,
   );
+  await runCloudCreateOwnerSmoke({ page, check, harnessBase });
+}
+
+/** A delayed real create response must not retarget the newly selected owner. */
+export async function runCloudCreateOwnerSmoke({ page, check, harnessBase }) {
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+  let releaseCreate;
+  const createGate = new Promise(resolve => { releaseCreate = resolve; });
+  const creates = [];
+  await page.route("https://api.example.test/**", async route => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (pathname.endsWith("/create-options")) {
+      await route.fulfill({ json: { configured: true, installations: [{
+        id: "33333333-3333-4333-8333-333333333333", accountLogin: "example",
+      }] } });
+    } else if (pathname.endsWith("/cloud-workspaces") && request.method() === "POST") {
+      creates.push({ pathname, body: request.postDataJSON() });
+      await createGate;
+      await route.fulfill({ status: 201, json: { workspace: {
+        id: "44444444-4444-4444-8444-444444444444",
+        organizationId, teamId: organizationId, createdBy: organizationId,
+        name: "Created in Organization 1", placement: "cloud", status: "ready",
+        version: 1, error: null, deletedAt: null,
+        createdAt: "2026-09-26T10:00:00Z", updatedAt: "2026-09-26T10:00:00Z",
+        capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+        repository: { forge: "github.com", owner: "example", name: "project", revision: "refs/heads/main" },
+        generation: { number: 1, architecture: "x86_64", observedState: "running", lastObservedAt: null,
+          resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 } },
+      } } });
+    } else {
+      await route.fulfill({ status: 503, json: { error: { code: "fixture_unavailable", message: "Fixture unavailable" } } });
+    }
+  });
+  try {
+    await page.setViewportSize({ width: 1100, height: 780 });
+    await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled`);
+    await page.getByRole("button", { name: "Open folder fixture", exact: true }).click();
+    await page.getByRole("button", { name: "Initialize git and create", exact: true }).click();
+    await page.getByRole("button", { name: "Show Create", exact: true }).click();
+    await page.evaluate(() => {
+      window.setFolderGitState(true, "https://github.com/example/project.git");
+      window.setCreateOrganization("organization");
+    });
+    const card = page.locator("[data-dispatcher-composer]");
+    const editor = card.locator(".composer-pm");
+    const location = page.getByRole("button", { name: "Workspace location", exact: true });
+    await expect(location).toHaveCount(0);
+    await editor.fill("Preserve this prompt while creation finishes");
+    await card.getByRole("button", { name: "Create", exact: true }).click();
+    await expect.poll(() => creates.length).toBe(1);
+    expect(creates[0].pathname).toBe(`/v1/organizations/${organizationId}/cloud-workspaces`);
+    await page.evaluate(() => window.setCreateOrganization("personal"));
+    releaseCreate();
+    await expect(card.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
+    await expect(location).toHaveCount(0);
+    await expect(editor).toHaveText("Preserve this prompt while creation finishes");
+    await expect(page.getByText("Cloud workspace created in Organization 1", { exact: true })).toBeVisible();
+    check("A late Cloud creation stays in its original organization while Personal and the draft stay selected", true);
+  } finally {
+    releaseCreate();
+    await page.unrouteAll({ behavior: "wait" });
+  }
 }

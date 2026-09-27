@@ -10,6 +10,7 @@
 
 import type { PrState, Workspace, WorkspaceStatus } from "../platform/git";
 import { getSetting, removeSetting, setSetting } from "../platform/settings";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 
 const STORAGE_KEY = "workspace-lists:v1";
 const MAX_REPOSITORIES = 32;
@@ -69,6 +70,9 @@ export function sanitizePersistedWorkspace(
 ): Workspace | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
+  // Cloud discovery has its own account authority; the device-wide local
+  // repository mirror must never restore another account's cloud rows.
+  if (isCloudWorkspace(raw.path) || raw.placement === "cloud") return null;
   const id = string(raw.id);
   const rowRepoSlug = string(raw.repoSlug);
   const repoRoot = string(raw.repoRoot);
@@ -196,7 +200,7 @@ export function persistWorkspaceList(
   rows: Workspace[],
 ): void {
   if (!repoSlug) return;
-  const confirmed = sanitizeRows(rows, repoSlug);
+  const confirmed = sanitizeRows(rows.filter(row => !isCloudWorkspace(row.path) && row.placement !== "cloud"), repoSlug);
   if (!confirmed) return;
   const entries = loadEntries().filter((entry) => entry.repoSlug !== repoSlug);
   entries.push({ repoSlug, savedAt: Date.now(), rows: confirmed });

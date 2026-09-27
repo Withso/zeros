@@ -55,10 +55,10 @@ export function secretsFilePath(): string {
   return filePath();
 }
 
-function readAll(): Record<string, string> {
+function readAll(file = filePath()): Record<string, string> {
   let raw: string;
   try {
-    raw = fs.readFileSync(filePath(), "utf8");
+    raw = fs.readFileSync(file, "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
     console.warn(`[secret-store] read failed: ${(err as Error).message}`);
@@ -91,8 +91,7 @@ function readAll(): Record<string, string> {
   }
 }
 
-function writeAll(data: Record<string, string>): void {
-  const file = filePath();
+function writeAll(data: Record<string, string>, file = filePath()): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // Per-pid tmp so two worktrees flushing at once don't collide on the tmp name;
   // the rename is atomic so a reader always sees a complete file.
@@ -108,8 +107,8 @@ function writeAll(data: Record<string, string>): void {
  *  mutations with an O_EXCL lockfile; steal a stale lock after a bound so a
  *  crashed writer can't wedge every instance. Synchronous — mutations are rare
  *  (login only) and brief. */
-function withSecretsLock<T>(fn: () => T): T {
-  const lock = `${filePath()}.lock`;
+function withSecretsLock<T>(fn: () => T, file = filePath()): T {
+  const lock = `${file}.lock`;
   fs.mkdirSync(path.dirname(lock), { recursive: true });
   const waiter = new Int32Array(new SharedArrayBuffer(4));
   const start = Date.now();
@@ -184,20 +183,20 @@ export function setSecret(account: string, value: string): void {
  * absence check and whole-file update share the cross-process mutation lock,
  * so sibling Electron main processes cannot both publish different device
  * identities after observing the same earlier snapshot. */
-export function createSecretIfAbsent(account: string, value: string): boolean {
+export function createSecretIfAbsent(account: string, value: string, file = filePath()): boolean {
   ensureEncryptionAvailable();
   const encrypted = safeStorage.encryptString(value).toString("base64");
   return withSecretsLock(() => {
-    const data = readAll();
+    const data = readAll(file);
     if (account in data) return false;
     data[account] = encrypted;
-    writeAll(data);
+    writeAll(data, file);
     return true;
-  });
+  }, file);
 }
 
-export function getSecret(account: string): string | null {
-  const data = readAll();
+export function getSecret(account: string, file = filePath()): string | null {
+  const data = readAll(file);
   const b64 = data[account];
   if (typeof b64 !== "string" || b64.length === 0) return null;
   try {
@@ -237,10 +236,11 @@ export function replaceSecretIfUnchanged(
   account: string,
   expectedValue: string,
   nextValue: string | null,
+  file = filePath(),
 ): boolean {
   ensureEncryptionAvailable();
   return withSecretsLock(() => {
-    const data = readAll();
+    const data = readAll(file);
     const currentEncrypted = data[account];
     if (typeof currentEncrypted !== "string" || currentEncrypted.length === 0) {
       return false;
@@ -259,9 +259,9 @@ export function replaceSecretIfUnchanged(
     } else {
       data[account] = safeStorage.encryptString(nextValue).toString("base64");
     }
-    writeAll(data);
+    writeAll(data, file);
     return true;
-  });
+  }, file);
 }
 
 /** Number of stored entries. Useful for diagnostics and tests. */
@@ -283,13 +283,13 @@ export function entryCount(): number {
  *  Returns a disposer; never throws (a failed watch just disables live sync). */
 export function watchSecrets(
   onChange: (changedAccounts: readonly string[]) => void,
+  file = filePath(),
 ): () => void {
-  const file = filePath();
   const dir = path.dirname(file);
   const base = path.basename(file); // "secrets.json"
   let previous: Record<string, string>;
   try {
-    previous = readAll();
+    previous = readAll(file);
   } catch (err) {
     // Keep watching so a repaired shared file can still notify this process,
     // but never pretend its unreadable contents were an empty store.
@@ -306,7 +306,7 @@ export function watchSecrets(
       timer = null;
       let next: Record<string, string>;
       try {
-        next = readAll();
+        next = readAll(file);
       } catch (err) {
         console.warn(
           `[secret-store] watch read failed: ${(err as Error).message}`,

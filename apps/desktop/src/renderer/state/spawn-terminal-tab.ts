@@ -50,7 +50,7 @@ export function spawnTerminalTab(args: {
 
   const now = Date.now();
   const chat: ChatThread = {
-    id: newChatId(),
+    id: newChatId(folder),
     folder,
     kind: "terminal",
     agentId,

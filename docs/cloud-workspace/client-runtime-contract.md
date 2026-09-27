@@ -2,11 +2,14 @@
 
 This contract governs the backend expansion after the original cloud foundation.
 Implementation and live qualification are tracked separately in the roadmap.
-Native mobile and cloud creation UI remain deferred.
+Native mobile remains deferred. The desktop Create page and workspace catalog
+now route cloud workspaces through the same conversation and workbench surfaces.
 
 ## Identity and placement
 
-- Cloud workspaces belong to eligible Organizations; Personal stays local.
+- New Organization workspaces are cloud-owned; Personal stays local. The local
+  create, branch adoption and worktree adoption paths reject Organization
+  ownership before changing the filesystem. Legacy rows remain recoverable.
 - One cloud workspace has one provider allocation and one writable execution
   authority. A fenced replacement may temporarily retain an old allocation for
   cleanup, but never introduces a second writer.
@@ -19,6 +22,75 @@ Native mobile and cloud creation UI remain deferred.
   Changing a default never migrates an existing workspace or redirects cleanup.
 
 ## Portable client boundary
+
+### Desktop routing and presentation
+
+`WorkspaceRuntimeClient` retains the local engine and independently keyed cloud
+connections. Renderer workspace identities are `cloud://<organization>/<workspace>`;
+conversation/execution/terminal identities use `cloud:<organization>:<workspace>:<id>`.
+These are device UI keys, never remote filesystem paths. Only protocol envelope
+identities cross this mapping boundary; tool payloads, provider resume bindings,
+file contents and patches remain opaque. Switching focus cannot retarget a
+pending request. Retired connections and account changes reject late results.
+
+Create captures the selected Organization, GitHub installation, repository,
+remote ref and idempotency key. Ownership determines placement: Personal creates
+locally and Organizations create in cloud, with no Local/Cloud picker or local
+fallback when cloud is unavailable. Switching owners cannot carry a request into another
+Organization, and does not discard the composer's draft. Personal does not
+request cloud admission or capability data. If creation finishes after an
+owner switch, confirmation updates the original Organization's catalog and
+leaves navigation and the draft in place. Local-only refs and mismatched fork remotes stay
+unavailable with an inline explanation. Discovery uses the authorized paginated
+catalog. Cloud chat snapshots are bounded and account-scoped; they are excluded
+from the legacy local cache and restored only after access is confirmed. A
+worker chat snapshot and tombstones are read before mirroring device chat edits.
+
+The fixed cloud details button and details popover identify the execution host.
+Chat/tool transcripts, Files, Changes, Review and PR controls keep
+their existing renderers and receive the selected workspace's backend data.
+The popover displays configured capacities; no utilization or cost is inferred.
+
+Terminals use the same xterm view, primary tabs, sidebar and docked panel. A cloud
+icon identifies their workspace location, including while a Run action is busy.
+Discovery and attach-only Run checks query that workspace's terminal registry;
+creation, input, resize, output and close retain its scoped session identity.
+The worker resolves the real checkout directory and owns the shell process.
+Visible terminals reattach after cloud reconnection and replace their screen
+from the worker snapshot. Hidden terminals defer that work until reveal; healthy
+workspace switches retain the grid and selection without replay. A missing or
+exited session is not automatically restarted by reconnection; a failed registry
+read is unavailable data and does not discard the last confirmed terminal list.
+
+Cloud session attachment adapts the existing session UI to durable conversations
+and commands. Sending requires an existing, unexpired workspace/model credential
+delegation; local provider credentials and executable overrides are never read
+for cloud session admission. Command IDs derive from durable user-message IDs,
+so retrying an unknown acknowledgement does not duplicate a command. Stop uses
+the backend conversation queue. Ordered event replay retains native tool IDs and
+snapshot attachment restores pending permission/question controls and confirmed
+agent capabilities into the same session store, without starting provider work.
+
+Organization provider settings select a cloud workspace and use the worker's
+agent registry plus the credential API. Saving a cloud API key or Claude setup
+token is explicit; authorizing selected models creates a seven-day grant for
+the signed-in user and selected workspace. Disconnect revokes those grants,
+leaving other workspaces and local provider credentials untouched. Native
+subscription login continues to belong to Personal until a cloud account-login
+flow is qualified. Max and Ultra effort selections retain the same command and
+provider semantics as the existing composer. Model IDs retain native context
+suffixes such as `[1m]` through delegation, command admission and private execution.
+Migration `0105_cloud_agent_model_context.sql` widens the lease constraint while
+retaining the 256-character bound and rejecting arbitrary bracket syntax.
+
+The worker registers its primary checkout as the compatibility ID `local-main`,
+with its attested cloud UUID and Organization. Its target branch, view mode and
+PR metadata join the durable record projection and survive worker replacement.
+Archive, wake and delete use control-plane lifecycle operations. The existing
+deployment, entitlement and provider qualification gates remain authoritative;
+desktop wiring is not evidence of live macOS/provider qualification.
+
+### Network contracts
 
 Cloud control uses authenticated, versioned network contracts. Core creation,
 conversation, approval, file, Git and Design operations must work without
@@ -51,8 +123,9 @@ and require an explicit new user decision before continuing work.
 
 ### Agent authentication boundary
 
-Normal authenticated `AGENT_NEW_SESSION` and `AGENT_LOAD_SESSION` admission can
-provide a selected provider's model credential in its session environment.
+Cloud UI attachments do not issue direct `AGENT_NEW_SESSION` provider execution.
+The admitted command worker supplies the selected provider's delegated model
+credential to its execution environment.
 The cloud environment filter rejects host-authority and process-injection
 variables. It does not hide an admitted model key from that tenant's agent.
 Credentials are not durable prompt fields, replay events, checkpoint content,

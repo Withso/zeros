@@ -6,12 +6,12 @@ export type WorkspacePlacement = "local" | "cloud";
 
 /** One policy function for every create affordance. Server entitlements still
  * authorize provisioning; this prevents the desktop from offering an invalid
- * Personal/cloud combination in the first place. */
+ * ownership/placement combination in the first place. */
 export function canCreateWorkspaceIn(
   organization: OrganizationSummary | null,
   placement: WorkspacePlacement,
 ): boolean {
-  if (placement === "local") return true;
+  if (placement === "local") return !organization || organization.isPersonal;
   return Boolean(
     organization &&
     !organization.isPersonal &&
@@ -43,8 +43,11 @@ export function localWorkspaceOwner(
     (organization
       ? organization.isPersonal
       : ownerId != null && getKnownPersonalOrganizationIds().includes(ownerId));
+  if (ownerId && !isPersonal) {
+    throw new Error("Organization workspaces run in the cloud. Select Personal to create a local workspace.");
+  }
   return {
-    organizationId: isPersonal ? null : ownerId,
+    organizationId: null,
     placement: "local",
   };
 }

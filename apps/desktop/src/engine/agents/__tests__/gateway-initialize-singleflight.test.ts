@@ -39,6 +39,20 @@ afterEach(async () => {
 });
 
 describe("gateway agent initialization single-flight", () => {
+  it("reads confirmed capabilities without starting an adapter or returning another auth snapshot", async () => {
+    const config = vi.spyOn(providerEnv, "applyUserProviderConfig").mockReturnValue({ env: { OPENAI_API_KEY: "fixture-a" } });
+    const initialize = vi.fn(async () => ({ protocolVersion: 1 }));
+    const gateway = gatewayWith({ agentId: "codex", initialize, dispose: async () => {} } as unknown as AgentAdapter);
+    gateways.push(gateway);
+    expect(gateway.agentInitializeSnapshot("codex")).toBeNull();
+    expect(initialize).not.toHaveBeenCalled();
+    const confirmed = await gateway.initializeAgent("codex");
+    expect(gateway.agentInitializeSnapshot("codex")).toBe(confirmed);
+    expect(initialize).toHaveBeenCalledOnce();
+    config.mockReturnValue({ env: { OPENAI_API_KEY: "fixture-b" } });
+    expect(gateway.agentInitializeSnapshot("codex")).toBeNull();
+    expect(initialize).toHaveBeenCalledOnce();
+  });
   it("invalidates populated models and pending initialization when authentication changes", async () => {
     const config = vi
       .spyOn(providerEnv, "applyUserProviderConfig")

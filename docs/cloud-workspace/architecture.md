@@ -94,8 +94,10 @@ The pre-production control plane has lifecycle records, fenced setup admission,
 an internal workspace/generation-bound engine lease, and a short-lived desktop
 runtime admission. The renderer connection registry is keyed by exact runtime
 identity and refreshes generation-bound connections without exposing provider
-credentials. Product-level cloud workspace discovery and selection remain
-deferred UI work.
+credentials. Desktop discovery and selection use the authorized cloud catalog,
+while a workspace-keyed runtime router feeds the existing local/cloud UI tree.
+See [desktop routing](client-runtime-contract.md#desktop-routing-and-presentation)
+for identity, caching, durable command and reconnect behavior.
 
 The separate Phase-2 access broker is implemented in Electron main without
 pretending that bridge routing is complete. It obtains a current account token
@@ -113,9 +115,9 @@ desktop-owned and are stopped on revocation, sign-out, or app exit. A provider-
 wide SSH revocation invalidates only sibling local leases for the same workspace
 generation.
 
-This is a native service boundary, not the cloud-workspace product flow. The
-workspace catalog/details UI, automated port selection, and signed
-macOS/provider E2E are still required before users can rely on it.
+The desktop product flow now includes creation, discovery and workspace details.
+Automated port selection and signed macOS/provider E2E remain separate release
+requirements; the new UI does not expose SSH or resource billing controls.
 
 ## Provider boundary
 

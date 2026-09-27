@@ -68,6 +68,13 @@ private companion under the engine's local data directory; restore puts it
 back without overwriting a file already restored and subsequently edited.
 Permanent deletion removes the companion. These files are not cloud/team state.
 
+Archive scripts are best-effort by default. `scripts.archive_required = true`
+opts an idempotent cleanup command into required, retryable execution: failure or
+interruption keeps the workspace intact. The lifecycle journal pins its command
+and policy across retries, so editing settings cannot discard pending cleanup.
+`scripts.archive_timeout_seconds` sets a deadline from 1 to 3,600 seconds (default
+30). A completed required hook is not repeated while retrying the final snapshot.
+
 Legacy localStorage scripts migrate to setup and named `scripts.run_actions`;
 all run commands are retained. Existing TOML choices win. Malformed files are
 retried instead of marking migration complete.

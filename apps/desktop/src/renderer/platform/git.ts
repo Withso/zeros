@@ -22,6 +22,7 @@ import type {
 } from "@zeros/protocol/github-auth";
 import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "./bridge/active-bridge";
+import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
 import type {
   WorkingDirectoriesWire,
   WorkspaceFileListing,
@@ -1414,7 +1415,7 @@ async function readWorkspaceFileListing(
   // Local main is outside Electron's trusted worktree roots. Browser development,
   // optional relay clients, and a renderer whose preload has not appeared yet
   // also use the bridge.
-  if (isKnownProjectRoot(cwd) || !isNativeRuntime()) return listViaBridge();
+  if (isCloudWorkspace(cwd) || isKnownProjectRoot(cwd) || !isNativeRuntime()) return listViaBridge();
   try {
     const res = await nativeInvoke<WorkspaceFileListing>("git_list_files", {
       cwd,
@@ -1674,10 +1675,15 @@ export async function gitClean(args: {
 
 // ── GitHub ───────────────────────────────────────────────
 
-export async function ghAuthStatus(): Promise<AuthStatusResult> {
+export async function ghAuthStatus(workspaceId?: string): Promise<AuthStatusResult> {
   const bridge = getActiveBridge();
   if (!bridge) return { authenticated: false };
-  return bridgeGhAuthStatus(bridge);
+  if (isCloudWorkspace(workspaceId)) {
+    const access = await bridgeGhRepoAccess(bridge, workspaceId!);
+    if (access.connected === undefined) throw new Error(access.message ?? "Cloud repository access could not be confirmed");
+    return { authenticated: access.connected };
+  }
+  return bridgeGhAuthStatus(bridge, workspaceId);
 }
 
 /** Load the user/organization avatar for an open repository's GitHub owner.

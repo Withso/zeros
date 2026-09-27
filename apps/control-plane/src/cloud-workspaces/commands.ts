@@ -16,8 +16,8 @@ export const CloudQueuedPromptSchema = z.object({
   bubble: z.record(z.unknown()).optional(),
   modeRevision: revision,
   agentCredentialGrantId:uuid.optional(),
-  model:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/).optional(),
-  effort:z.enum(["low","medium","high","xhigh"]).optional(),
+  model:z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/).optional(),
+  effort:z.enum(["low","medium","high","xhigh","max","ultracode"]).optional(),
   fast:z.boolean().optional(),
 }).strict().superRefine((value,context)=>{
   if(value.agentCredentialGrantId&&(!value.model||!["claude","cursor","codex"].includes(value.agentId)))

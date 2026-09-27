@@ -23,7 +23,7 @@ import {
   parseRunActions,
   runSessionId,
   type RunAction,
-} from "@zeros/protocol/run-actions";
+} from "../../platform/workspace-run-identity";
 
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";

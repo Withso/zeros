@@ -130,7 +130,18 @@ describe("WorkspaceService", () => {
     const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID };
     await expect(cloud.handle("design.initialize", target, { remote: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
     await expect(svc.handle("design.initialize", target, { remote: true, cloudWorker: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    await expect(cloud.handle("workspace.setMode", { ...target, mode: "design" }, { remote: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    await expect(cloud.handle("workspace.setMode", { ...target, mode: "design" }, { remote: true, cloudWorker: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
     expect(fs.existsSync(path.join(dir, firstUseDesignDirectoryNameForRepo(dir)))).toBe(false);
+  });
+
+  it("switches the admitted cloud primary's mode through the existing lifecycle operation", async () => {
+    const cloud = new WorkspaceService(dir, { primaryDesignWorkspace: true });
+    const { workspaces } = await cloud.handle("workspace.list") as { workspaces: Workspace[] };
+    insertWorkspace({ ...workspaces.find(row => row.id === LOCAL_MAIN_WORKSPACE_ID)!, placement: "cloud", organizationId: cloudActorIdentity.userId, canonicalId: cloudActorIdentity.deviceId });
+    const options = { remote: true, cloudWorker: true, hostLocalResources: false, cloudActorIdentity };
+    expect(await cloud.handle("workspace.setMode", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, mode: "design" }, options)).toMatchObject({ ok: true, mode: "design", snapshot: { protocolCapability: null } });
+    expect(await cloud.handle("workspace.setMode", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, mode: "code" }, options)).toMatchObject({ ok: true, mode: "code" });
   });
 
   it("preserves the strict capture request when resolving an admitted cloud checkout", async () => {

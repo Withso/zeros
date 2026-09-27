@@ -9,6 +9,10 @@ it("carries explicit effort and fast settings without accepting credential or lo
   expect(env).not.toHaveProperty("NODE_OPTIONS");
 });
 describe("private provider coordinator view",()=>{
+  it.each(["max", "ultracode"])("preserves Claude's context suffix and %s effort in the private worker environment", effort => {
+    const env=cloudCoordinatorEnvironment({kind:"claude-api-key",apiKey:"synthetic-claude-key"},"claude-opus-5[1m]",{ZEROS_THINKING_EFFORT:effort});
+    expect(env).toMatchObject({ANTHROPIC_MODEL:"claude-opus-5[1m]",ZEROS_THINKING_EFFORT:effort});
+  });
   it("contains only one private HOME and scratch, with a fresh PID/proc view and fixed UID",()=>{
     const directory=`/run/zeros/coordinators/${"a".repeat(32)}`;
     const args=cloudCoordinatorArguments(directory,"/opt/zeros-runtime/bin/node",["/opt/zeros/host.cjs"]);

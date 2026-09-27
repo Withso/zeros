@@ -19,7 +19,7 @@ describe("normalizeOrganizationSummary", () => {
       isPersonal: false,
       legacyFlat: true,
       defaultTeamId: null,
-      workspaceCapabilities: { local: true, cloud: true },
+      workspaceCapabilities: { local: false, cloud: true },
       teamCapabilities: { multiple: false, canCreate: false },
     });
   });
@@ -35,6 +35,13 @@ describe("normalizeOrganizationSummary", () => {
         workspaceCapabilities: { local: true, cloud: true },
       }).workspaceCapabilities,
     ).toEqual({ local: true, cloud: false });
+  });
+
+  it("ignores old server permission to create organization workspaces locally", () => {
+    expect(normalizeOrganizationSummary({
+      id: "org-1", slug: "team", name: "Team", role: "owner", isPersonal: false,
+      workspaceCapabilities: { local: true, cloud: true },
+    }).workspaceCapabilities).toEqual({ local: false, cloud: true });
   });
 
   it("marks a pre-hierarchy flat Team for legacy local-row compatibility", () => {

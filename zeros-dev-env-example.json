@@ -1,0 +1,59 @@
+{
+  "version": 2,
+  "mode": "hosted",
+  "cloudflare": {
+    "accountId": "YOUR_ACCOUNT_ID",
+    "zoneId": "YOUR_ZONE_ID",
+    "domain": "example.com",
+    "apiToken": "YOUR_PAGES_AND_DNS_EDIT_TOKEN"
+  },
+  "railway": {
+    "projectId": "YOUR_EXISTING_ALPHA_PROJECT_ID",
+    "serviceId": "YOUR_EXISTING_BACKEND_SERVICE_ID",
+    "protectedEnvironmentIds": ["YOUR_ALPHA_ENVIRONMENT_ID"],
+    "apiToken": "YOUR_RAILWAY_WORKSPACE_API_TOKEN"
+  },
+  "planetscale": {
+    "organization": "your-organization",
+    "database": "your-alpha-database",
+    "protectedBranch": "main",
+    "region": "YOUR_POSTGRES_REGION_SLUG",
+    "clusterSize": "development",
+    "tokenId": "YOUR_SERVICE_TOKEN_ID",
+    "token": "YOUR_BRANCH_AND_ROLE_PROVISIONING_TOKEN"
+  },
+  "registry": {
+    "endpoint": "https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com",
+    "bucket": "zeros-dev-registry",
+    "accessKeyId": "YOUR_REGISTRY_S3_ACCESS_KEY_ID",
+    "secretAccessKey": "YOUR_REGISTRY_S3_SECRET_ACCESS_KEY",
+    "encryptionKey": "GENERATE_32_RANDOM_BYTES_ENCODED_AS_64_HEX_CHARACTERS"
+  },
+  "storage": {
+    "endpoint": "https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com",
+    "bucket": "zeros-dev-objects",
+    "accessKeyId": "YOUR_DEV_OBJECTS_S3_ACCESS_KEY_ID",
+    "secretAccessKey": "YOUR_DEV_OBJECTS_S3_SECRET_ACCESS_KEY"
+  },
+  "workos": {
+    "environment": "alpha",
+    "webClientId": "client_YOUR_WEB_APPLICATION",
+    "desktopClientId": "client_YOUR_DESKTOP_APPLICATION",
+    "apiKey": "YOUR_WORKOS_API_KEY"
+  },
+  "github": {
+    "appId": 1,
+    "appSlug": "your-alpha-app",
+    "clientId": "YOUR_GITHUB_OAUTH_CLIENT_ID",
+    "clientSecret": "YOUR_GITHUB_OAUTH_CLIENT_SECRET",
+    "privateKeyBase64": "YOUR_GITHUB_APP_PRIVATE_KEY_AS_BASE64"
+  },
+  "boat": {
+    "apiKey": "YOUR_BOAT_SERVICE_API_KEY",
+    "billingOrg": "YOUR_BOAT_BILLING_ORGANIZATION",
+    "accountScope": "YOUR_QUALIFIED_BOAT_ACCOUNT_SCOPE",
+    "baseSnapshot": "your-existing-qualified-snapshot",
+    "secondsPerDollar": "YOUR_VERIFIED_NUMERIC_BOAT_COMPUTE_CONVERSION_RATE",
+    "builderBudgetHours": 1
+  }
+}

@@ -55,8 +55,9 @@ import { useDefaultAgent } from "../../features/settings/default-agent";
 import {
   hasConfirmedAgents,
   loadAgents,
-  useAgentsSnapshot,
 } from "../../features/agent/agents-cache";
+import { useWorkspaceAgents, hasConfirmedWorkspaceAgents } from "../../features/agent/workspace-agent-registry";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { useEnabledAgents } from "../../features/agent/enabled-agents";
 import { isRemovedAgent } from "../../features/agent/agent-runnable";
 import { AgentRemovedPanel } from "../agent-removed-panel";
@@ -102,7 +103,7 @@ export function ChatView({
   // panes container derives per-pane display from the layout model).
   const active = useChatById(chatId);
   const dispatch = useWorkspaceDispatch();
-  const agents = useAgentsSnapshot();
+  const agents = useWorkspaceAgents(active?.folder, surfaceActive || preparing);
   // Canonical cwd resolution: the chat's own `folder` OR the current scope
   // (`newAgentFolder` — the worktree row the user has selected). Same chain
   // as useChatCwd / repository panel / the topbar. Without the fallback, a chat with
@@ -234,7 +235,7 @@ function AutoBindAgent({ chat }: { chat: ChatThread }) {
   const dispatch = useWorkspaceDispatch();
   const { agentId: starredId } = useDefaultAgent();
   const { isEnabled } = useEnabledAgents();
-  const agents = useAgentsSnapshot();
+  const agents = useWorkspaceAgents(chat.folder);
   // Latch so the settings update this triggers cannot make the effect
   // double-write the chat on its immediate re-render.
   const boundRef = useRef(false);
@@ -248,7 +249,7 @@ function AutoBindAgent({ chat }: { chat: ChatThread }) {
     // Unconfirmed covers more than a cold null: the cache publishes `[]` when a
     // load fails with nothing on disk, and that array reads exactly like an
     // authoritative empty registry while being nothing of the sort.
-    if (!hasConfirmedAgents()) rememberProvisionalBinding(chat.id, prior);
+    if (!hasConfirmedWorkspaceAgents(chat.folder)) rememberProvisionalBinding(chat.id, prior);
     // Several ChatViews are mounted at once in a split workspace. Updating
     // this one chat must not use HYDRATE_CHATS with `activeChatId: chat.id`:
     // an agentless chat in a background pane would steal keyboard/composer
@@ -282,9 +283,9 @@ function useProvisionalBindingReconcile(
   const dispatch = useWorkspaceDispatch();
   const { agentId: starredId } = useDefaultAgent();
   const { isEnabled } = useEnabledAgents();
-  const agents = useAgentsSnapshot();
+  const agents = useWorkspaceAgents(chat?.folder, enabled);
   const sessions = useAgentSessions();
-  const bridgeStatus = useBridgeStatus();
+  const bridgeStatus = useBridgeStatus(chat?.folder);
   const chatId = chat?.kind === "chat" ? chat.id : null;
   const boundAgentId = chat?.agentId ?? null;
   const hasSession = Boolean(chat?.providerBinding ?? chat?.sessionId);
@@ -302,17 +303,17 @@ function useProvisionalBindingReconcile(
   // so this retries when the array actually changes or the bridge reconnects.
   useEffect(() => {
     if (!enabled) return;
-    if (hasConfirmedAgents() || bridgeStatus !== "connected") return;
+    if (isCloudWorkspace(chat?.folder) || hasConfirmedAgents() || bridgeStatus !== "connected") return;
     void loadAgents((force) => sessions.listAgents(force)).catch(() => {
       /* still unconfirmed; the next snapshot or bridge flip tries again */
     });
-  }, [enabled, agents, bridgeStatus, sessions]);
+  }, [enabled, agents, bridgeStatus, sessions, chat?.folder]);
 
   useEffect(() => {
     if (
       !enabled ||
       !agents ||
-      !hasConfirmedAgents() ||
+      !hasConfirmedWorkspaceAgents(chat?.folder) ||
       !chatId ||
       !boundAgentId
     )
@@ -345,6 +346,7 @@ function useProvisionalBindingReconcile(
   }, [
     enabled,
     agents,
+    chat?.folder,
     boundAgentId,
     chatId,
     dispatch,
@@ -721,7 +723,7 @@ function ChatBody({
   // away and back to retry — a real "stuck" feeling. We only retry
   // once per reconnect: on the rising edge of bridgeStatus going to
   // "connected" while the session is in a failed/transient state.
-  const bridgeStatus = useBridgeStatus();
+  const bridgeStatus = useBridgeStatus(cwd);
   const lastBridgeStatusRef = useRef(bridgeStatus);
   useEffect(() => {
     const prev = lastBridgeStatusRef.current;

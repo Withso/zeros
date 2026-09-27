@@ -97,6 +97,34 @@ describe("pty-bridge", () => {
     ).toBeNull();
   });
 
+  it.each([
+    { type: "ERROR", message: "Cloud workspace access revoked" },
+    { type: "PTY_EXIT", sessionId: "s", exitCode: null, signal: null },
+    {
+      type: "PTY_CREATED",
+      sessionId: "other",
+      pid: 1,
+      cwd: "/w",
+      cols: 80,
+      rows: 24,
+    },
+  ])(
+    "does not treat a denial or another session's reply as a created terminal",
+    async (response) => {
+      const bridge = {
+        request: async () => response,
+      } as unknown as RuntimeClient;
+      await expect(
+        bridgePtyCreate(bridge, {
+          sessionId: "s",
+          cwd: "/w",
+          cols: 80,
+          rows: 24,
+        }),
+      ).resolves.toBeNull();
+    },
+  );
+
   it("write/resize/kill fire the right fire-and-forget messages", () => {
     const sent: Array<{ type: string }> = [];
     const bridge = {

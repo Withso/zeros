@@ -12,7 +12,8 @@ import {CODEX_AUTH_RUNTIME_VERSION,parseCodexNativeCache,sealCodexNativeCache,ty
 import {rememberCodexRefreshSeed} from "./codex-auth-renewal.js";
 
 const uuid=z.string().uuid().transform(value=>value.toLowerCase()),revision=z.number().int().positive().safe();
-export const CloudAgentModelSchema=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/);
+// Native context suffixes are part of the exact model identity, not a label.
+export const CloudAgentModelSchema=z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/);
 export const CloudAgentDelegationSchema=z.object({id:uuid,credentialId:uuid,expectedRevision:revision,workspaceId:uuid,
   granteeUserId:uuid,models:z.array(CloudAgentModelSchema).min(1).max(32),expiresAt:z.string().datetime(),
   computeConsent:z.object({fingerprint:z.string().regex(/^[a-f0-9]{64}$/),trust:z.enum(["zeros-managed","compute-administrator"])}).strict().optional()}).strict();

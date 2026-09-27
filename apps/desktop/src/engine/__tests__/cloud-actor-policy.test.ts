@@ -29,6 +29,9 @@ describe("actor roles at the worker message boundary",()=>{
       expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledTimes(["developer","manager","owner"].includes(role)?1:0);f.engine.handleWorkspaceMessage.mockClear();
       await f.send({type:"WORKSPACE_REQUEST",op:"design.initialize",params:{workspaceId:"local-main"}});
       expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledTimes(["manager","owner"].includes(role)?1:0);
+      f.engine.handleWorkspaceMessage.mockClear();
+      await f.send({type:"WORKSPACE_REQUEST",op:"workspace.setMode",params:{workspaceId:"local-main",mode:"design"}});
+      expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledTimes(["manager","owner"].includes(role)?1:0);
     }
   });
   it("requires current edit authority and a typed language request",async()=>{

@@ -80,6 +80,7 @@ const commandTable: Record<string, CommandHandler> = {
   cloud_workspace_tunnel_start: notImpl("cloud_workspace_tunnel_start", 3),
   cloud_workspace_access_revoke: notImpl("cloud_workspace_access_revoke", 3),
   cloud_workspace_runtime_open: notImpl("cloud_workspace_runtime_open", 3),
+  cloud_workspace_capability: notImpl("cloud_workspace_capability", 3),
   cloud_workspace_runtime_refresh: notImpl(
     "cloud_workspace_runtime_refresh",
     3,

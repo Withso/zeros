@@ -28,6 +28,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 import { GitError } from "./errors";
+import { localWorkspaceCreationError } from "./local-workspace-policy";
 import { generateWorkspaceId } from "./naming";
 import { runGit, assertSafeGitRef } from "./git-exec";
 import { refExists } from "./default-branch";
@@ -436,6 +437,8 @@ export function getCreateWorkspaceFromBranchStatus(args: {
 export function createWorkspaceFromBranch(
   opts: CreateWorkspaceFromBranchOptions,
 ): Promise<CreateWorkspaceFromBranchResult> {
+  const ownershipError = localWorkspaceCreationError(opts);
+  if (ownershipError) return Promise.reject(ownershipError);
   const key = createFromBranchFlightKey(opts.repoRoot, opts.branchName);
   const active = createFromBranchFlights.get(key);
   if (active) {
@@ -803,6 +806,8 @@ const adoptWorktreeFlights = new Map<
 export function adoptExistingWorktree(
   opts: AdoptExistingWorktreeOptions,
 ): Promise<CreateWorkspaceFromBranchResult> {
+  const ownershipError = localWorkspaceCreationError(opts);
+  if (ownershipError) return Promise.reject(ownershipError);
   const key = path.resolve(opts.worktreePath);
   const active = adoptWorktreeFlights.get(key);
   if (active) return active;

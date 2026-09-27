@@ -24,6 +24,7 @@ const methods=ZerosEngine.prototype as unknown as {
   deleteCloudConversation(this:unknown,id:string,operationId:string,client:TransportClient,remove:()=>Promise<unknown>):Promise<unknown>;
   agentSpawnOpts(this:unknown,message:Start,client:TransportClient,stage:string):Promise<Spawn>;
   validateCloudCommand(this:unknown,id:string,payload?:unknown):void;
+  handleCloudEventOperation(this:unknown,params:Record<string,unknown>):Promise<unknown>;
 };
 let root:string;
 beforeEach(async()=>{root=await mkdtemp(path.join(os.tmpdir(),"zeros-command-admit-"));setZerosDbPathForTesting(path.join(root,"state.db"));await mkdir(path.join(root,"workspace"));});
@@ -62,6 +63,19 @@ function failingRetirement(engine:ReturnType<typeof fixture>["engine"],execution
   return proof;
 }
 describe("cloud engine credential admission",()=>{
+  it("includes confirmed live session metadata in a reconnect snapshot without admitting work", async () => {
+    const { engine, claim } = fixture();
+    engine.conversationExecution.set("conversation", claim.executionId);
+    const session = { modes: { currentModeId: "ask", availableModes: [] } };
+    const initialize = { protocolVersion: 1, agentCapabilities: { steering: true } };
+    Object.assign(engine, { cloudEvents: { snapshot: (capture: () => unknown) => ({ snapshot: capture() }) },
+      sessionLoadResponses: new Map([[claim.executionId, session]]), pendingPermissionRequests: new Map(), pendingQuestionRequests: new Map() });
+    Object.assign(engine.agents, { agentInitializeSnapshot: vi.fn(() => initialize) });
+    expect(await methods.handleCloudEventOperation.call(engine, { request: { kind: "snapshot", conversationId: "conversation" } })).toMatchObject({
+      snapshot: { executionId: claim.executionId, session, initialize },
+    });
+    expect(engine.handleAgentMessage).not.toHaveBeenCalled();
+  });
   it("attempts strict retirement and quarantines when native cancellation fails",async()=>{
     const {claim,engine}=fixture();await methods.prepareCloudCommand.call(engine,claim);
     engine.agents.cancel.mockRejectedValueOnce(new Error("cancel proof failed"));

@@ -52,6 +52,19 @@ function fixture() {
 }
 
 describe("S3 immutable workspace objects", () => {
+  it("isolates identical logical keys across disposable Dev generations", async () => {
+    const { send } = fixture();
+    const client = { send } as unknown as S3Client;
+    const a = new S3CloudWorkspaceObjectStore(client, "workspace-objects", `dev/${"a".repeat(24)}/11111111-1111-4111-8111-111111111111/`);
+    const b = new S3CloudWorkspaceObjectStore(client, "workspace-objects", `dev/${"a".repeat(24)}/22222222-2222-4222-8222-222222222222/`);
+    await a.putIfAbsent(key, Buffer.from("first"));
+    await b.putIfAbsent(key, Buffer.from("second"));
+    await a.deleteAndFence(key);
+    expect(await a.get(key)).toBeNull();
+    expect(await b.get(key)).toEqual(Buffer.from("second"));
+    expect(() => new S3CloudWorkspaceObjectStore(client, "workspace-objects", "../release/")).toThrow(/prefix/);
+  });
+
   it("preserves the winning ciphertext during concurrent immutable publications", async () => {
     const { store } = fixture();
     expect(await store.get(key)).toBeNull();

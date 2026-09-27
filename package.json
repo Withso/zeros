@@ -51,9 +51,14 @@
     "electron:compile:watch": "tsup --config apps/desktop/electron/tsup.config.ts --watch",
     "electron:rename-dev": "node scripts/rename-electron-dev-binary.cjs",
     "electron:dev:prep": "node scripts/check-deps-installed.mjs && pnpm electron:rebuild && pnpm build:zsr-supervisor && pnpm build:engine && pnpm electron:compile",
-    "electron:dev": "pnpm electron:dev:prep && node scripts/dev-instance.mjs --watch",
-    "electron:dev:watch": "pnpm electron:dev:prep && node scripts/dev-instance.mjs --watch",
-    "electron:run": "pnpm electron:dev:prep && node scripts/dev-instance.mjs --run-only",
+    "electron:dev": "node --import tsx scripts/dev-environment/hosted-launcher.mjs start",
+    "electron:dev:watch": "node --import tsx scripts/dev-environment/hosted-launcher.mjs start",
+    "electron:run": "node --import tsx scripts/dev-environment/hosted-launcher.mjs start --run-only",
+    "electron:alpha": "node scripts/dev-environment/launcher.mjs alpha",
+    "dev:backend": "node --import tsx scripts/dev-environment/hosted-launcher.mjs backend",
+    "dev:archive": "node --import tsx scripts/dev-environment/hosted-launcher.mjs archive",
+    "dev:doctor": "node --import tsx scripts/dev-environment/hosted-launcher.mjs doctor",
+    "dev:setup": "bash scripts/setup-zeros-dev.sh",
     "electron:rebuild": "node scripts/electron-rebuild-sqlite.cjs",
     "doctor": "node scripts/doctor.mjs",
     "electron:build": "pnpm build:zsr-supervisor && pnpm build:sidecar && pnpm electron:compile && pnpm build:ui && node scripts/electron-builder-run.mjs",
@@ -106,7 +111,8 @@
     "typecheck:packages": "pnpm --filter @zeros/design-core run typecheck && pnpm --filter @zeros/design-web run typecheck && pnpm --filter @zeros/protocol run typecheck && pnpm --filter @zeros/marketing run typecheck",
     "schemas:build": "tsx scripts/build-settings-schemas.ts",
     "test:ui-smoke": "node scripts/ui-smoke-composer.mjs",
-    "test:control-plane": "pnpm --dir apps/control-plane test"
+    "test:control-plane": "pnpm --dir apps/control-plane test",
+    "dev:seed": "node --import tsx scripts/dev-environment/hosted-launcher.mjs seed"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.274",

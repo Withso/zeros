@@ -12,6 +12,9 @@
 // random suffix is collision-safe at the rate a single user creates
 // chats.
 
-export function newChatId(): string {
-  return `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+import { cloudScopedId, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
+
+export function newChatId(folder?: string | null): string {
+  const target = parseCloudWorkspaceKey(folder);
+  return target ? cloudScopedId(target, crypto.randomUUID()) : `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }

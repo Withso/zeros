@@ -218,8 +218,9 @@ import {
   invalidateAgentsCache,
   loadAgents,
   refreshAgents,
-  useAgentsSnapshot,
 } from "./agents-cache";
+import { useWorkspaceAgents } from "./workspace-agent-registry";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings } from "../settings/settings-navigation";
 import { isSubscriptionProvider } from "../settings/subscription-connection";
@@ -836,7 +837,7 @@ export function AgentChat({
   // Store selectors and dispatch are hoisted to the top of AgentChat so
   // composer-draft seeding can read on
   // first render. The original declaration here was removed.)
-  const agentsList = useAgentsSnapshot();
+  const agentsList = useWorkspaceAgents(chatThread?.folder, interactive);
   const agentSessions = useAgentSessions();
   const retryTurn = useCallback(
     (prompt: AgentTextMessage, events: AgentMessage[], newChat: boolean) => {
@@ -954,6 +955,7 @@ export function AgentChat({
   useEffect(() => {
     if (
       !session.agentId ||
+      isCloudWorkspace(chatThread?.folder) ||
       !interactive ||
       !canVerifyAgentRegistryInBackground(session.status)
     ) {
@@ -971,7 +973,7 @@ export function AgentChat({
       });
     }, AGENT_REGISTRY_VERIFICATION_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [agentSessions, chatId, session.agentId, session.status, interactive]);
+  }, [agentSessions, chatId, chatThread?.folder, session.agentId, session.status, interactive]);
 
   // Chat-thread-backed composer settings. When `chatId` is absent
   // (picker/beta flows) this returns null and the pills render stubs.
@@ -1295,7 +1297,7 @@ export function AgentChat({
         return;
       }
       const fresh: ChatThread = {
-        id: newChatId(),
+        id: newChatId(chatThread.folder),
         folder: chatThread.folder,
         kind: chatThread.kind,
         agentId: sel.agentId,
@@ -1339,6 +1341,7 @@ export function AgentChat({
     return (
       <>
         <ModelPill
+          agents={agentsList}
           agentId={chatThread.agentId}
           initialize={session.initialize}
           value={chatThread.model}
@@ -1576,7 +1579,7 @@ export function AgentChat({
           // chatId is set; this check just narrows the optional prop for TS.)
           if (!chatId) return false;
           const fresh: ChatThread = {
-            id: newChatId(),
+            id: newChatId(chatThread.folder),
             folder: chatThread.folder,
             kind: chatThread.kind,
             agentId: chatThread.agentId,
@@ -3561,7 +3564,7 @@ export function AgentChat({
     }
     // Check availability here; sendPrompt owns authentication so it can retain
     // the original message and attachments for explicit continuation.
-    if (agentsList) {
+    if (agentsList && !isCloudWorkspace(chatThread?.folder)) {
       const targetAgentId = session.agentId ?? chatThread?.agentId;
       const targetAgent = targetAgentId
         ? agentsList.find((a) => a.id === targetAgentId)

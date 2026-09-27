@@ -69,7 +69,7 @@ if (devAuth.source === "none") {
   );
 } else {
   console.log(
-    `[dev-instance] Alpha WorkOS auth configuration validated (source=${devAuth.source})`,
+    `[dev-instance] ${devAuth.source === "workspace" ? "Workspace" : "Alpha"} WorkOS auth configuration validated (source=${devAuth.source})`,
   );
 }
 if (devAuth.cachedOffline) {

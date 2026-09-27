@@ -67,6 +67,12 @@ import {
 } from "../../state/store";
 import type { ChatThread } from "../../state/store";
 import { createDispatcherChat } from "./dispatcher-chat";
+import { useCloudCreate } from "./cloud-create";
+import { registerCloudDesignCreation } from "../../state/cloud-creation-mode";
+import { createCloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import { acceptCloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { cloudWorkspaceKey, isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { spawnPreparedDefaultChat } from "../../state/spawn-default-chat";
 import { prepareProjectFolder } from "../project-folder-setup";
 import {
   loadAgents,
@@ -97,8 +103,9 @@ import {
 import {
   getActiveOrganizationIdSnapshot,
   getActiveOrganizationSnapshot,
+  getOrganizationStoreGeneration,
 } from "../../features/team/team-store";
-import { localWorkspaceOwner } from "../../features/team/organization-capabilities";
+import { canCreateWorkspaceIn, localWorkspaceOwner } from "../../features/team/organization-capabilities";
 import { useNativeRuntime } from "../../platform/runtime";
 import { createWorkspaceForProject } from "../create-workspace";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
@@ -165,6 +172,8 @@ export function DispatcherPage({
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [designBusy, setDesignBusy] = useState(false);
+  const cloudCreateIntent = useRef<{ fingerprint: string; key: string } | null>(null);
+  const createInFlight = useRef(false);
   // Which mode the NEXT workspace opens in. Renderer-local intent, kept across
   // project switches (a designer creating several design workspaces should not
   // re-pick Design each time); it collapses to Code wherever Design cannot run.
@@ -219,6 +228,59 @@ export function DispatcherPage({
     : sourceForProject(sourceSelection, selectedProject);
   const canCreateDesign = designWorkspaceCreationAvailable;
   const mode: WorkspaceMode = canCreateDesign ? requestedMode : "code";
+  const cloud = useCloudCreate(selectedProject, base, active);
+  // Ownership selects the backend synchronously; an unavailable cloud backend
+  // never falls back to creating an organization workspace on this device.
+  const placement = cloud.organization && !cloud.organization.isPersonal
+    ? "cloud" : "local";
+  const placementReason = placement === "cloud" ? cloud.reason : selectedProject && isCloudWorkspace(selectedProject.repoRoot) ? "Open a local checkout of this repository to create a Local workspace." : null;
+
+  const handleCreateCloud = async (payload?: DispatcherCreatePayload) => {
+    const project = selectedProject;
+    if (!active || !project || cloud.reason || !cloud.organization || !cloud.repository || !cloud.revision || !cloud.installationId || createInFlight.current) return;
+    const currentOrganization = getActiveOrganizationSnapshot();
+    if (currentOrganization?.id !== cloud.organization.id || !canCreateWorkspaceIn(currentOrganization, "cloud")) return;
+    const creationGeneration = getOrganizationStoreGeneration();
+    if (payload?.additionalDirectories.length) {
+      toast.error("Additional local folders cannot be used in a cloud workspace");
+      return;
+    }
+    const request = {
+      organizationId: cloud.organization.id,
+      ...(cloud.organization.defaultTeamId ? { teamId: cloud.organization.defaultTeamId } : {}),
+      repository: { forge: "github.com" as const, owner: cloud.repository.owner, name: cloud.repository.repo, revision: cloud.revision, githubInstallationId: cloud.installationId },
+    };
+    const createMode = mode;
+    const fingerprint = JSON.stringify([request, createMode]);
+    if (cloudCreateIntent.current?.fingerprint !== fingerprint) cloudCreateIntent.current = { fingerprint, key: crypto.randomUUID() };
+    const idempotencyKey = cloudCreateIntent.current.key;
+    createInFlight.current = true;
+    setBusy(true);
+    try {
+      const document = await createCloudWorkspaceDocument({ ...request, idempotencyKey });
+      if (creationGeneration !== getOrganizationStoreGeneration()) return;
+      acceptCloudWorkspaceDocument(document);
+      const folder = cloudWorkspaceKey({ organizationId: document.organizationId, workspaceId: document.id });
+      markWorkspaceSettling(folder);
+      if (createMode === "design") registerCloudDesignCreation(folder);
+      cloudCreateIntent.current = null;
+      notifyWorkspacesChanged(project.repoSlug);
+      // Creation remains owned by the organization captured at submission.
+      // A late confirmation must not pull Personal (or another organization)
+      // into that cloud chat. The original prompt remains in this composer.
+      const destination = getActiveOrganizationSnapshot();
+      if (destination?.id !== document.organizationId || destination.isPersonal) {
+        toast.success(`Cloud workspace created in ${currentOrganization.name}`, {
+          description: "Open it from that organization to continue. Your prompt is still in Create.",
+        });
+        return;
+      }
+      if (payload) createDispatcherChat({ dispatch, repoRoot: project.repoRoot, folder, payload, validationPending: true });
+      else spawnPreparedDefaultChat({ folder, repoRoot: project.repoRoot, dispatch });
+    } catch (error) {
+      toast.error("Couldn't confirm cloud workspace creation", { description: error instanceof Error ? error.message : "Retry to check the same creation request." });
+    } finally { createInFlight.current = false; setBusy(false); }
+  };
 
   useEffect(() => {
     if (!active) setProjectMenuOpen(false);
@@ -235,6 +297,7 @@ export function DispatcherPage({
   );
 
   const handleCreateDesign = async () => {
+    if (placement === "cloud") { await handleCreateCloud(); return; }
     const project = selectedProject;
     if (!active || !project || busy || designBusy || !canCreateDesign) {
       return;
@@ -255,15 +318,19 @@ export function DispatcherPage({
   };
 
   const handleCreate = async (payload: DispatcherCreatePayload) => {
+    if (placement === "cloud") { await handleCreateCloud(payload); return; }
     const project = selectedProject;
-    if (!active || !project || busy || designBusy) return;
+    if (!active || !project || busy || designBusy || placementReason) return;
     // Organization selection is part of the create intent. Snapshot it before
     // any asynchronous reservation so a switch during prepare cannot retarget
     // the new workspace.
-    const owner = localWorkspaceOwner(
-      getActiveOrganizationSnapshot(),
-      getActiveOrganizationIdSnapshot(),
-    );
+    let owner: ReturnType<typeof localWorkspaceOwner>;
+    try {
+      owner = localWorkspaceOwner(getActiveOrganizationSnapshot(), getActiveOrganizationIdSnapshot());
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Organization workspaces run in the cloud.");
+      return;
+    }
     // Optimistic create, three beats:
     //   1. prepareCreate reserves identity + final path without touching disk.
     //   2. Navigate NOW: add the chat bound to the announced
@@ -557,13 +624,15 @@ export function DispatcherPage({
             )}
           </div>
 
+          {placementReason && <p className="text-fg3 mb-2 px-2 text-xs" role="status">{placementReason}</p>}
           <section aria-label="Workspace prompt">
             <DispatcherComposer
               agents={agents}
               cwd={selectedProject?.repoRoot ?? null}
               originUrl={selectedProject?.originUrl ?? null}
               onCreate={handleCreate}
-              busy={busy || designBusy || !selectedProject}
+              busy={busy || designBusy}
+              disabled={!selectedProject || Boolean(placementReason)}
               mode={mode}
               design={{
                 projectName: selectedProject?.name ?? null,

@@ -26,7 +26,7 @@
 
 import type { BridgeRegistryAgent } from "../platform/bridge/messages";
 import type { SessionsCtx } from "../features/agent/sessions-context";
-import { getAgentsSnapshot } from "../features/agent/agents-cache";
+import { workspaceAgentsSnapshot } from "../features/agent/workspace-agent-registry";
 import { pickAgentForNewChat } from "../features/settings/default-agent";
 import { newChatBornDefaults } from "../features/agent/new-chat-defaults";
 import { newChatId } from "./chat-id";
@@ -46,7 +46,7 @@ export function bornChatThread(
 ): ChatThread {
   const born = newChatBornDefaults(agent?.id ?? null);
   return {
-    id: newChatId(),
+    id: newChatId(folder),
     folder,
     agentId: agent?.id ?? null,
     agentName: agent?.name ?? null,
@@ -61,14 +61,14 @@ export function bornChatThread(
   };
 }
 
-function cachedDefaultAgent(): BridgeRegistryAgent | null {
+function cachedDefaultAgent(folder: string): BridgeRegistryAgent | null {
   // pickAgentForNewChat relaxes from enabled+runnable down to best-detected,
   // so a warm snapshot binds the chat synchronously even on a machine where
   // nothing is signed in yet — the composer's sign-in flow is the recovery
   // surface. Null only for a cold or empty snapshot; AutoBindAgent then
   // resolves the binding (including the empty-registry product fallback)
   // once the live registry answers.
-  const cached = getAgentsSnapshot();
+  const cached = workspaceAgentsSnapshot(folder);
   return cached ? pickAgentForNewChat(cached) : null;
 }
 
@@ -84,7 +84,7 @@ export async function spawnNewChatTab(args: {
   const { folder, dispatch } = args;
   // Never put tab creation behind a native registry read. A cold cache creates
   // an agentless tab synchronously; AutoBindAgent fills it on first render.
-  const chat = bornChatThread(cachedDefaultAgent(), folder);
+  const chat = bornChatThread(cachedDefaultAgent(folder), folder);
   dispatch({ type: "ADD_CHAT", chat, recordWorkspaceActivity: true });
   return chat;
 }
@@ -98,7 +98,7 @@ export function spawnPreparedDefaultChat(args: {
   repoRoot: string;
   dispatch: Dispatch;
 }): ChatThread {
-  const chat = bornChatThread(cachedDefaultAgent(), args.folder);
+  const chat = bornChatThread(cachedDefaultAgent(args.folder), args.folder);
   args.dispatch({
     type: "ADD_CHAT",
     chat,
@@ -161,7 +161,7 @@ export async function spawnDefaultChatForWorkspace(args: {
     // A native registry read is server state and must never sit on the click
     // path. Cold cache is represented by a null binding; AutoBindAgent resolves
     // it after the Untitled tab is already visible.
-    const agent = cachedDefaultAgent();
+    const agent = cachedDefaultAgent(folder);
     // Born with the user's unified new-chat defaults (Settings → Models):
     // the global default model (or this family's product fallback), its exact
     // remembered effort/Fast pair, and the plan posture. Shared with the

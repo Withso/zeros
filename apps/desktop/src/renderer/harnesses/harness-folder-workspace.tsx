@@ -17,6 +17,7 @@ const savedFolder = new URLSearchParams(location.search).has("subdirectory")
   ? `${folder}/packages/app`
   : folder;
 const createFixture = new URLSearchParams(location.search).has("create");
+const cloudEnabled = new URLSearchParams(location.search).has("cloud-enabled");
 const scratchFixture = new URLSearchParams(location.search).has("scratch");
 const automatic =
   createFixture || scratchFixture || new URLSearchParams(location.search).has("automatic");
@@ -110,6 +111,9 @@ Object.assign(window, {
     on: () => () => {},
     invoke: async (op: string, params?: Record<string, unknown>) => {
       requests.push({ op, params });
+      if (op === "cloud_workspace_capability") return { enabled: cloudEnabled };
+      if (cloudEnabled && op === "auth_get_access_token") return { access_token: "fixture-only-access-token" };
+      if (cloudEnabled && op === "auth_get_session_user") return { sub: "fixture-user", email: "fixture@example.test", name: "Fixture", provider: "workos" };
       if (op === "pick_project_folder") return folder;
       if (op === "workspace_init_repo") {
         inspection = { ...inspection, isRepo: true, hasCommits: true };
@@ -225,7 +229,37 @@ const { notifyProjectsChanged } = await import("../state/use-projects");
 const { upsertProject, loadProjects } = await import("../state/projects-store");
 const { setSetting } = await import("../platform/settings");
 const { triggerGitRefresh } = await import("../shell/use-git-refresh-key");
+const { acceptOrganizationSnapshot, clearTeamStore } =
+  await import("../features/team/team-store");
+const { setActiveOrganizationSelection } =
+  await import("../features/team/active-team");
+const createOrganizations = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"].map((id, index) => ({
+  id,
+  slug: `fixture-${index}`,
+  name: `Organization ${index + 1}`,
+  logo: null,
+  role: "owner" as const,
+  isPersonal: false,
+  defaultTeamId: null,
+  workspaceCapabilities: { local: true as const, cloud: true },
+  teamCapabilities: { multiple: false as const, canCreate: false as const },
+}));
 Object.assign(window, {
+  setCreateOrganization: (selection: "personal" | "organization" | "other" | "sign-out") => {
+    if (selection === "sign-out") {
+      clearTeamStore({ resetSelection: true });
+      return;
+    }
+    acceptOrganizationSnapshot({
+      user: { id: "fixture-user", email: "fixture@example.test", displayName: "Fixture", staffRole: null },
+      organizations: createOrganizations,
+      teams: createOrganizations,
+    });
+    setActiveOrganizationSelection(
+      selection === "personal" ? null : createOrganizations[selection === "other" ? 1 : 0]!.id,
+      selection === "personal",
+    );
+  },
   setFolderFiles: (next: string[], ignored: string[] = [], fails = false) => {
     files = next;
     ignoredFiles = ignored;
@@ -378,7 +412,7 @@ function Harness() {
           Show dashboard
         </Button>
       </nav>
-      <div className="flex h-[600px]">
+      <div data-folder-workspace-surface className="flex h-[600px]">
         <HomeSidebar />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {scratchFixture && !project ? (

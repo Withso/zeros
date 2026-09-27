@@ -60,6 +60,8 @@ import { subscribeProviderAuth } from "../../platform/provider-auth-state";
 import { AgentIcon } from "../agent/agent-icon";
 import { InlineLoginTerminal } from "./inline-login-terminal";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
+import { CloudProviderConnections } from "./cloud-provider-connections";
+import { getActiveOrganizationIdSnapshot, useActiveOrganization } from "../team/team-store";
 import {
   connectionLabel,
   connectionMethod,
@@ -272,6 +274,15 @@ export function ProvidersPanel({
 }: {
   surfaceActive?: boolean;
 }) {
+  const organization = useActiveOrganization();
+  if (!organization && getActiveOrganizationIdSnapshot())
+    return <p className="text-fg2 text-xs">Loading organization agent settings…</p>;
+  return organization && !organization.isPersonal
+    ? <CloudProviderConnections key={organization.id} organizationId={organization.id} surfaceActive={surfaceActive} Tabs={ProviderTabs} />
+    : <LocalProvidersPanel surfaceActive={surfaceActive} />;
+}
+
+function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
   const bridge = useBridge();
   const agents = useAgentsSnapshot();
   // Persisted across reloads — Cmd+R on the Codex tab lands you on

@@ -12,7 +12,7 @@ import type { LiveTextAttachmentInput } from "./composer-text-attachment-deliver
  * and drafts intentionally do not cross the boundary. */
 export function createForkedChat(
   source: ChatThread,
-  id = newChatId(),
+  id = newChatId(source.folder),
   now = Date.now(),
 ): ChatThread {
   return {

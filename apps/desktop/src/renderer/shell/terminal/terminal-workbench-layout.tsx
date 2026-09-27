@@ -13,6 +13,7 @@ import { RunSessionButtons } from "./run-session-buttons";
 import { useFilesSidebarFraction } from "../workbench/tabs/files-sidebar-width";
 import { useSidebarResizeDrag } from "../workbench/tabs/use-sidebar-drag";
 import { useResizeHint } from "../use-resize-hint";
+import { CloudTerminalIndicator } from "./cloud-terminal-indicator";
 
 export interface TerminalNavigationEntry {
   id: string;
@@ -29,6 +30,7 @@ export interface TerminalNavigationEntry {
 }
 
 export function TerminalWorkbenchLayout({
+  folder,
   tab,
   entries,
   onSelect,
@@ -45,6 +47,7 @@ export function TerminalWorkbenchLayout({
   onToggleSidebar,
   bodyRef,
 }: {
+  folder: string;
   tab: WorkbenchTab | null;
   entries: TerminalNavigationEntry[];
   onSelect(id: string): void;
@@ -112,6 +115,7 @@ export function TerminalWorkbenchLayout({
         >
           <Tooltip label={tab?.title ?? "Terminal"}>
             <div className={WORKBENCH_TITLE_CHIP_CLS}>
+              <CloudTerminalIndicator folder={folder} />
               <span className="text-fg1 min-w-0 truncate text-xs font-medium">
                 {tab?.title ?? "Terminal"}
               </span>
@@ -266,6 +270,7 @@ export function TerminalWorkbenchLayout({
                           entry.runActionId && entry.running && "pr-16",
                         )}
                       >
+                        <CloudTerminalIndicator folder={folder} />
                         {entry.running ? (
                           <RunWave
                             size={12}

@@ -75,13 +75,21 @@ export async function createWorkspaceForProject(args: {
   const { project, dispatch } = args;
   const kind = args.kind === "design" ? "design" : "code";
   const baseBranch = args.baseBranch?.trim() || undefined;
+  const organization = getActiveOrganizationSnapshot();
+  if (organization && !organization.isPersonal) {
+    dispatch({ type: "OPEN_CREATE_PAGE", projectId: project.id });
+    return true;
+  }
   // Capture semantic ownership at intent time. The user can switch
   // organizations while prepare crosses the bridge; that must not silently
   // move the already-requested workspace to the newly selected owner.
-  const owner = localWorkspaceOwner(
-    getActiveOrganizationSnapshot(),
-    getActiveOrganizationIdSnapshot(),
-  );
+  let owner: ReturnType<typeof localWorkspaceOwner>;
+  try {
+    owner = localWorkspaceOwner(organization, getActiveOrganizationIdSnapshot());
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "Organization workspaces run in the cloud.");
+    return false;
+  }
   // The Design document API is intentionally desktop-local. This is a runtime
   // capability check, not a rollout/access flag: every desktop user gets the
   // Design option without account state or per-channel opt-in.

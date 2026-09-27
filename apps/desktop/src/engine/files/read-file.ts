@@ -66,6 +66,7 @@ const SENSITIVE_DIR_SEGMENTS = new Set([
   ".kube",
 ]);
 const SENSITIVE_BASENAMES = new Set([
+  "zeros-dev-env.json",
   ".npmrc",
   ".netrc",
   "_netrc",

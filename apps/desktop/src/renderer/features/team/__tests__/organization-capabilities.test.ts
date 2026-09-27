@@ -24,7 +24,7 @@ function organization(
 }
 
 describe("organization workspace capabilities", () => {
-  it("always allows a local workspace, including signed-out legacy use", () => {
+  it("allows local workspaces only in Personal, including signed-out use", () => {
     expect(canCreateWorkspaceIn(null, "local")).toBe(true);
     expect(
       canCreateWorkspaceIn(
@@ -35,6 +35,7 @@ describe("organization workspace capabilities", () => {
         "local",
       ),
     ).toBe(true);
+    expect(canCreateWorkspaceIn(organization(), "local")).toBe(false);
   });
 
   it("never allows Personal to create a cloud workspace", () => {
@@ -62,19 +63,13 @@ describe("organization workspace capabilities", () => {
     expect(canCreateWorkspaceIn(null, "cloud")).toBe(false);
   });
 
-  it("stamps new local rows with the selected semantic owner", () => {
-    expect(localWorkspaceOwner(organization())).toEqual({
-      organizationId: "org_1",
-      placement: "local",
-    });
+  it("rejects organization local creation even while membership revalidates", () => {
+    expect(() => localWorkspaceOwner(organization())).toThrow(/cloud/i);
     expect(localWorkspaceOwner(null)).toEqual({
       organizationId: null,
       placement: "local",
     });
-    expect(localWorkspaceOwner(null, "org_confirmed")).toEqual({
-      organizationId: "org_confirmed",
-      placement: "local",
-    });
+    expect(() => localWorkspaceOwner(null, "org_confirmed")).toThrow(/cloud/i);
   });
 
   it("never stamps Personal workspaces with a signed-in account's organization", () => {

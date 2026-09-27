@@ -144,6 +144,7 @@ interface DispatcherComposerProps {
   onCreate: (payload: DispatcherCreatePayload) => void;
   /** Disable the controls while a create is in flight. */
   busy?: boolean;
+  disabled?: boolean;
   /** Which mode the new workspace opens in. Defaults to Code — the composer
    *  as it always was. */
   mode?: WorkspaceMode;
@@ -157,6 +158,7 @@ export function DispatcherComposer({
   originUrl,
   onCreate,
   busy,
+  disabled = false,
   mode = "code",
   design,
 }: DispatcherComposerProps) {
@@ -258,7 +260,7 @@ export function DispatcherComposer({
   } = composer;
 
   submitRef.current = () => {
-    if (busy) return;
+    if (busy || disabled) return;
     if (designMode) {
       design.onCreate();
       return;
@@ -460,7 +462,7 @@ export function DispatcherComposer({
                 size="sm"
                 type="submit"
                 className="h-7 gap-1.5"
-                disabled={busy || (!designMode && !selection)}
+                disabled={busy || disabled || (!designMode && !selection)}
               >
                 {busy ? (
                   <ZerosSpinner size={16} tone="inverted" />

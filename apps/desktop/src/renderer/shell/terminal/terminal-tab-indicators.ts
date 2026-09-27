@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { isRunSessionId } from "@zeros/protocol/run-actions";
+import { isRunSessionId } from "../../platform/workspace-run-identity";
 
 /** Presentation only: Run icon names keep the settings registry's fallback. */
 export function terminalTabIconName(

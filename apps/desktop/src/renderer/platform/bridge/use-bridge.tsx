@@ -17,6 +17,8 @@ import React, {
   useLayoutEffect,
   useRef,
   useState,
+  useCallback,
+  useSyncExternalStore,
 } from "react";
 import {
   RuntimeClient,
@@ -29,7 +31,9 @@ import { getActiveBridge, setActiveBridge, wireCloudRuntimeRetirement } from "./
 import { wireGithubCredentialWriteback } from "./github-token-sync";
 import { nativeListen, useNativeRuntime } from "../runtime";
 import { toast } from "../../shared/ui/primitives/elements";
-import { refreshCloudWorkspaceRuntime } from "../cloud-workspace-access";
+import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
+import { openCloudRuntime } from "./open-cloud-runtime";
+import { cloudWorkspaceDocument, cloudWorkspaceOperation, getCloudWorkspaceRows } from "../../state/cloud-workspace-catalog";
 
 /** Stable toast key for the connection-rejected card: a re-rejection REPLACES
  *  the visible toast instead of stacking one per reconnect attempt. */
@@ -54,10 +58,12 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
   // already scoped to the real client. Connection itself remains asynchronous.
   const [client] = useState(
     () =>
-      new RuntimeClient(
-        { kind: "local" },
-        { refreshCloudConnectionTarget: refreshCloudWorkspaceRuntime },
-      ),
+      new WorkspaceRuntimeClient({
+        open: openCloudRuntime,
+        workspaces: () => getCloudWorkspaceRows() as unknown as Record<string, unknown>[],
+        canAccess: target => cloudWorkspaceDocument(target)?.deletedAt === null,
+        manage: cloudWorkspaceOperation,
+      }),
   );
   const nativeRuntime = useNativeRuntime();
   const connectionEffectEpoch = useRef(0);
@@ -203,19 +209,14 @@ export function useBridge(): RuntimeClient | null {
 }
 
 /** Reactive connection status. */
-export function useBridgeStatus(): ConnectionStatus {
+export function useBridgeStatus(folder?: string | null): ConnectionStatus {
   const bridge = useBridge();
-  const [status, setStatus] = useState<ConnectionStatus>(
-    bridge?.status ?? "disconnected",
-  );
-
-  useEffect(() => {
-    if (!bridge) return;
-    setStatus(bridge.status);
-    return bridge.onStatusChange(setStatus);
-  }, [bridge]);
-
-  return status;
+  const read = useCallback(() => bridge instanceof WorkspaceRuntimeClient ? bridge.statusForWorkspace(folder) : bridge?.status ?? "disconnected", [bridge, folder]);
+  const subscribe = useCallback((listener: () => void) => {
+    if (!bridge) return () => {};
+    return bridge instanceof WorkspaceRuntimeClient && folder ? bridge.onWorkspaceStatusChange(folder, listener) : bridge.onStatusChange(listener);
+  }, [bridge, folder]);
+  return useSyncExternalStore(subscribe, read, read);
 }
 
 /** Whether the engine is connected and ready. */

@@ -14,6 +14,7 @@ import { S3CloudWorkspaceObjectStore } from "./cloud-workspaces/s3-object-store.
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool } from "./db.js";
+import { assertHostedDatabaseOwnership } from "./development-environment.js";
 import { runServiceBootMigrations, verifyMigrations, type ServiceBootMigrationResult } from "./migrate.js";
 import { loadEmailConfig, sendEmailStrict } from "./email.js";
 import { startGithubOauthCleanup } from "./github.js";
@@ -45,6 +46,9 @@ import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig
 
 const config = loadConfig();
 const pool = createPool(config.databaseUrl, { maxConnections: config.databasePoolMax ?? 10 });
+if (config.development && "generation" in config.development) {
+  await assertHostedDatabaseOwnership(pool, config.development);
+}
 const emailConfig = loadEmailConfig();
 
 // LISTEN is session-scoped and must bypass transaction poolers. The optional
@@ -278,7 +282,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
             maxAttempts: 3,
             requestChecksumCalculation: "WHEN_REQUIRED",
             requestHandler: { connectionTimeout: 10_000, requestTimeout: 60_000, httpsAgent: new HttpsAgent({ keepAlive: true, maxSockets: 16 }) },
-          }), durability.s3.bucket)
+          }), durability.s3.bucket, durability.s3.prefix)
         : new FileCloudWorkspaceObjectStore(durability.objectStoreDirectory),
       encryptionKeys: durability.objectEncryptionKeys,
       keyVersion: durability.currentObjectEncryptionKeyVersion,
@@ -563,7 +567,7 @@ const app = createApp(config, pool, emailConfig, {
 });
 
 let shuttingDown = false;
-const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
+const server = serve({ fetch: app.fetch, port: config.port, ...(config.host ? { hostname: config.host } : {}) }, (info) => {
   if (shuttingDown) return;
   if(migrationResult.status.state==="current"){
     startCloudBackground();

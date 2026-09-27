@@ -4427,6 +4427,13 @@ export class AgentGateway {
     return this.listAgents();
   }
 
+  /** Confirmed public capabilities only. Reconnect snapshots must never boot
+   * an adapter or probe provider authentication to reconstruct UI metadata. */
+  agentInitializeSnapshot(agentId: string): InitializeResponse | null {
+    if (this.agentInitializeIdentities.get(agentId) !== this.providerAuthConfigFingerprint(agentId)) return null;
+    return this.agentInitializes.get(agentId) ?? null;
+  }
+
   async initializeAgent(agentId: string): Promise<InitializeResponse> {
     const identity = this.providerAuthConfigFingerprint(agentId);
     if (this.agentInitializeIdentities.get(agentId) !== identity) {
@@ -4643,7 +4650,7 @@ export class AgentGateway {
 
   private cloudProviderSettings(env:Record<string,string>|undefined):Record<string,string>{
     const settings:Record<string,string>={};
-    if(env?.ZEROS_THINKING_EFFORT&&["low","medium","high","xhigh"].includes(env.ZEROS_THINKING_EFFORT))settings.ZEROS_THINKING_EFFORT=env.ZEROS_THINKING_EFFORT;
+    if(env?.ZEROS_THINKING_EFFORT&&["low","medium","high","xhigh","max","ultracode"].includes(env.ZEROS_THINKING_EFFORT))settings.ZEROS_THINKING_EFFORT=env.ZEROS_THINKING_EFFORT;
     if(env?.ZEROS_FAST_MODE==="1"||env?.ZEROS_FAST_MODE==="0")settings.ZEROS_FAST_MODE=env.ZEROS_FAST_MODE;
     return settings;
   }

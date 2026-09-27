@@ -63,6 +63,18 @@ d("private provider execution leases",()=>{
       VALUES('daytona','snapshot-pinned',$1,'codex-chatgpt','zeros-cloud-worker-v3',true) ON CONFLICT DO NOTHING`,["a".repeat(64)]);
     return {input,grant,request:{executionId:randomUUID(),delegationId:grant,provider:"codex" as const,model:"gpt-5.6-sol",source:{kind:"session" as const,actorSessionId}}};
   }
+  it("persists an admitted Claude context suffix without weakening model validation",async()=>{
+    const credentialId=randomUUID(),delegationId=randomUUID(),model="claude-opus-5[1m]";
+    await credentials.put({ownerUserId:owner.id,credentialId,operationId:randomUUID(),expectedRevision:0,displayName:"Claude",
+      material:{kind:"claude-api-key",apiKey:"synthetic-claude-credential"}});
+    await credentials.delegate(owner.id,{id:delegationId,credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:owner.id,
+      models:[model],expiresAt:new Date(Date.now()+3600_000).toISOString()});
+    await pool.query(`INSERT INTO cloud_agent_runtime_qualifications(provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled)
+      VALUES('daytona','snapshot-pinned',$1,'claude-api-key','zeros-cloud-worker-v3',true)`,["a".repeat(64)]);
+    const lease=await service.admit(engine(),{executionId:randomUUID(),delegationId,provider:"claude",model,source:{kind:"session",actorSessionId}});
+    expect((await pool.query("SELECT model FROM cloud_agent_execution_leases WHERE id=$1",[lease.leaseId])).rows).toEqual([{model}]);
+    await expect(pool.query("UPDATE cloud_agent_execution_leases SET model=$2 WHERE id=$1",[lease.leaseId,"claude[anything]"])).rejects.toMatchObject({code:"23514"});
+  });
   it.each(["renew", "replay", "action"] as const)("rejects lease expiry after the %s transaction starts",async operation=>{
     const request=admission(),lease=await service.admit(engine(),request);
     let expired:Date|undefined;

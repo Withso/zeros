@@ -18,6 +18,8 @@ import {
 import { headRev, recordTombstone, tombstonesSince } from "./db/sync";
 import { reinsertTurns, type TurnDbRow } from "./db/turns";
 import type { CloudDurabilityAuthority } from "./cloud-durability-runtime";
+import { z } from "zod";
+import { getWorkspaceById, updateWorkspace } from "./git/state";
 
 const RECORD_HEAD_PATH = "/internal/v1/cloud-workspaces/engine/record/head";
 const RECORD_APPEND_PATH = "/internal/v1/cloud-workspaces/engine/record/append";
@@ -28,7 +30,16 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-type ManagedKind = "chat" | "message" | "turn";
+type ManagedKind = "chat" | "message" | "turn" | "metadata";
+const PRIMARY_METADATA_ID = "primary-workspace-v1";
+const PrimaryMetadataSchema = z.object({
+  version: z.literal(1), canonicalId: z.string().uuid(), organizationId: z.string().uuid(),
+  branch: z.string().min(1).max(512), baseBranch: z.string().min(1).max(512),
+  status: z.enum(["backlog", "in-progress", "in-review", "done", "cancelled"]),
+  viewMode: z.enum(["code", "design"]),
+  prNumber: z.number().int().positive().nullable(), prState: z.enum(["draft", "ready", "merged", "closed"]).nullable(),
+  prUrl: z.string().max(4096).nullable(), createdAt: z.number().nonnegative(),
+});
 type RemoteKind =
   | "workspace"
   | ManagedKind
@@ -320,6 +331,13 @@ export class CloudWorkspaceRecordRuntime {
   private localProjection(): Map<string, LocalEntity> {
     const db = openZerosDb();
     const entities = new Map<string, LocalEntity>();
+    const primary = getWorkspaceById("local-main");
+    if (primary?.placement === "cloud" && primary.path === this.repositoryRoot) {
+      const document = PrimaryMetadataSchema.parse({ version: 1, canonicalId: primary.canonicalId, organizationId: primary.organizationId,
+        branch: primary.branch, baseBranch: primary.baseBranch, status: primary.status, viewMode: primary.viewMode ?? "code",
+        prNumber: primary.prNumber, prState: primary.prState, prUrl: primary.prUrl, createdAt: primary.createdAt });
+      entities.set(entityKey("metadata", PRIMARY_METADATA_ID), { entityKind: "metadata", entityId: PRIMARY_METADATA_ID, schemaVersion: 1, document });
+    }
     const chats: Array<{ chat: ChatRow; folder: string }> = listChats()
       .map((chat) => ({ chat, folder: workspaceRelative(this.repositoryRoot, chat.folder) }))
       .filter((entry): entry is { chat: ChatRow; folder: string } =>
@@ -456,6 +474,15 @@ export class CloudWorkspaceRecordRuntime {
   ): void {
     const db = openZerosDb();
     const existing = this.localProjection();
+    const primaryRecord = remote.get(entityKey("metadata", PRIMARY_METADATA_ID));
+    if (primaryRecord && !primaryRecord.tombstonedAt && (mode === "replace" || state === null)) {
+      if (primaryRecord.schemaVersion !== 1) throw new Error("Cloud workspace metadata schema is unsupported");
+      const metadata = PrimaryMetadataSchema.parse(primaryRecord.document);
+      const primary = getWorkspaceById("local-main");
+      if (!primary || primary.path !== this.repositoryRoot || primary.placement !== "cloud" || primary.canonicalId !== metadata.canonicalId || primary.organizationId !== metadata.organizationId) throw new Error("Cloud workspace metadata identity changed");
+      updateWorkspace(primary.id, { branch: metadata.branch, baseBranch: metadata.baseBranch, status: metadata.status, viewMode: metadata.viewMode,
+        prNumber: metadata.prNumber, prState: metadata.prState, prUrl: metadata.prUrl });
+    }
     const locallyDeletedChatIds = new Set(tombstonesSince("chat", 0));
     const locallyResetChatIds = new Set(tombstonesSince("msgreset", state?.localHeadRevision ?? 0));
     const localChats = listChats();

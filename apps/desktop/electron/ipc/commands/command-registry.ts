@@ -107,6 +107,7 @@ import {
   cloudWorkspaceAccessRevoke,
   cloudWorkspaceRuntimeClose,
   cloudWorkspaceRuntimeOpen,
+  cloudWorkspaceCapability,
   cloudWorkspaceRuntimeRefresh,
   cloudWorkspaceSshCopy,
   cloudWorkspaceSshIde,
@@ -167,6 +168,7 @@ export function registerAllCommands(): void {
   setCommand("cloud_workspace_tunnel_start", cloudWorkspaceTunnelStart);
   setCommand("cloud_workspace_access_revoke", cloudWorkspaceAccessRevoke);
   setCommand("cloud_workspace_runtime_open", cloudWorkspaceRuntimeOpen);
+  setCommand("cloud_workspace_capability", cloudWorkspaceCapability);
   setCommand("cloud_workspace_runtime_refresh", cloudWorkspaceRuntimeRefresh);
   setCommand("cloud_workspace_runtime_close", cloudWorkspaceRuntimeClose);
 

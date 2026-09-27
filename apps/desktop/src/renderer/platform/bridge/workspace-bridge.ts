@@ -1384,8 +1384,9 @@ export async function bridgeGitChangeTargetBranch(
 /** Host's GitHub auth status (takes no workspaceId — probes the host token). */
 export async function bridgeGhAuthStatus(
   bridge: RuntimeClient,
+  workspaceId?: string,
 ): Promise<AuthStatusResult> {
-  return (await workspaceOp(bridge, "gh.authStatus")) as AuthStatusResult;
+  return (await workspaceOp(bridge, "gh.authStatus", workspaceId ? { workspaceId } : {})) as AuthStatusResult;
 }
 
 export interface GithubRepositoryOwnerAvatar {

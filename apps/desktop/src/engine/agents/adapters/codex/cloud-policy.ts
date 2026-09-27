@@ -79,7 +79,7 @@ export function cloudCodexRequest(execution:CloudProviderExecution,environmentId
         developer_instructions:typeof settings.developer_instructions==="string"?settings.developer_instructions:null}}:undefined};
   }
   if(method==="thread/settings/update")return {threadId:params.threadId,model,
-    ...(typeof params.effort==="string"&&["low","medium","high","xhigh"].includes(params.effort)?{effort:params.effort}:{})};
+    ...(typeof params.effort==="string"&&["low","medium","high","xhigh","max","ultra"].includes(params.effort)?{effort:params.effort}:{})};
   if(method==="turn/steer")return {...pick(params,["threadId","expectedTurnId"]),input:safeInput(params.input)};
   if(reads.has(method)||controls.has(method))return params;
   throw new Error("This native provider operation is not admitted for cloud execution");

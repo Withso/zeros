@@ -49,6 +49,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "auth_sign_out_everywhere",
   "auth_start_signin",
   "cloud_workspace_access_revoke",
+  "cloud_workspace_capability",
   "cloud_workspace_runtime_close",
   "cloud_workspace_runtime_open",
   "cloud_workspace_runtime_refresh",

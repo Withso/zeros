@@ -9,6 +9,10 @@ export type CloudWorkspaceAccessTarget = {
   workspaceId: string;
 };
 
+export function cloudWorkspaceCapability(): Promise<{ enabled: boolean }> {
+  return nativeInvoke("cloud_workspace_capability", {});
+}
+
 export type CloudWorkspaceAccessReceipt = {
   accessId: string;
   expiresAt: string;

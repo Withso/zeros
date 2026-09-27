@@ -62,6 +62,7 @@ import { AddLocalProjectDialog } from "./dialogs/add-local-project";
 import { PublishToGithubDialog } from "./dialogs/publish-to-github";
 import { prepareProjectFolder } from "./project-folder-setup";
 import { InitializeProjectDialog } from "./dialogs/initialize-project";
+import { getActiveOrganizationSnapshot } from "../features/team/team-store";
 
 /** A folder the user has just picked that hasn't finished registering yet.
  *  Drives the minimal shimmer state in the global top bar. */
@@ -194,6 +195,13 @@ export function AddProjectProvider({
       if (pendingOpens.current.has(repoRoot)) return;
       pendingOpens.current.add(repoRoot);
       const { autoCreate = true } = opts;
+      const organization = getActiveOrganizationSnapshot();
+      if (autoCreate && organization && !organization.isPersonal) {
+        pendingOpens.current.delete(repoRoot);
+        setPendingProject(null);
+        setOpenGithubOpen(true);
+        return;
+      }
       const land = (project: Project) => {
         const existing = leftmostLiveWorkspace(
           peekWorkspacesFor(project.repoSlug),
@@ -333,6 +341,11 @@ export function AddProjectProvider({
   }, [pendingProject]);
 
   const openProject = useCallback(async () => {
+    const organization = getActiveOrganizationSnapshot();
+    if (organization && !organization.isPersonal) {
+      setOpenGithubOpen(true);
+      return;
+    }
     if (!nativeRuntime) {
       return;
     }
@@ -389,6 +402,11 @@ export function AddProjectProvider({
   }, []);
 
   const quickStart = useCallback(() => {
+    const organization = getActiveOrganizationSnapshot();
+    if (organization && !organization.isPersonal) {
+      setOpenGithubOpen(true);
+      return;
+    }
     setQuickStartOpen(true);
   }, []);
 

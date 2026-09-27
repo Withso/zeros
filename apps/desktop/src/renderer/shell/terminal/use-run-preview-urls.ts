@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
-import { runSessionId, type RunAction } from "@zeros/protocol/run-actions";
+import { runSessionId, type RunAction } from "../../platform/workspace-run-identity";
 import { workspaceRunLog } from "../../platform/git";
 import { bindPtyWriter } from "./terminal-store";
 import { runPreviewCache, type RunPreviewTarget } from "./run-preview-cache";

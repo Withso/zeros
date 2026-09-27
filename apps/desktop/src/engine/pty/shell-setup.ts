@@ -17,6 +17,7 @@ import path from "node:path";
 import { zerosStateRoot } from "../db/paths";
 import { getLoginShellPath } from "../agents/adapters/shared/login-shell-path";
 import { stripEngineAuthorityEnv } from "../agents/adapters/shared/config-isolation";
+import { workspaceScriptIdentity, type ScriptWorkspaceIdentity } from "../env/workspace-identity";
 import {
   pruneLauncherScriptEnv,
   sanitizeProbedPath,
@@ -291,6 +292,7 @@ export function buildPtyEnv(opts?: {
   scrub?: boolean;
   cwd?: string;
   workspaceId?: string | null;
+  workspace?: ScriptWorkspaceIdentity | null;
 }): Record<string, string> {
   const src = process.env as Record<string, string>;
   let env: Record<string, string>;
@@ -364,6 +366,10 @@ export function buildPtyEnv(opts?: {
   // are set deliberately just below.
   delete env.ZEROS_INSTANCE;
   delete env.ZEROS_INSTANCE_NAME;
+  // A nested checkout resolves its own backend/auth profile and credentials.
+  delete env.ZEROS_DEV_ENVIRONMENT;
+  delete env.ZEROS_DEV_AUTH_PROFILE;
+  delete env.ZEROS_ISOLATE;
   delete env.ZEROS_VITE_PORT;
   delete env.ZEROS_ENGINE_BASE_PORT;
   delete env.ELECTRON_RENDERER_URL;
@@ -393,6 +399,9 @@ export function buildPtyEnv(opts?: {
     env.ZEROS_WORKTREE_PATH = opts.cwd;
   }
   delete env.OLDPWD;
+  delete env.ZEROS_WORKSPACE_CANONICAL_ID;
+  delete env.ZEROS_WORKSPACE_ROOT;
+  Object.assign(env, workspaceScriptIdentity(opts?.cwd, opts?.workspace));
   if (opts?.workspaceId) env.ZEROS_WORKSPACE_ID = opts.workspaceId;
   pruneInheritedZdotdir(env);
   const zdotdir = ensureZerosZdotdir();
@@ -425,8 +434,9 @@ export async function buildRunCommandEnv(ctx: {
   cwd: string;
   workspaceId: string | null;
   repoRoot?: string | null;
+  workspace?: ScriptWorkspaceIdentity | null;
 }): Promise<Record<string, string>> {
-  const env = buildPtyEnv({ cwd: ctx.cwd, workspaceId: ctx.workspaceId });
+  const env = buildPtyEnv({ cwd: ctx.cwd, workspaceId: ctx.workspaceId, workspace: ctx.workspace });
   try {
     const loginPath = sanitizeProbedPath(await getLoginShellPath());
     if (loginPath) env.PATH = loginPath;

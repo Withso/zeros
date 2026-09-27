@@ -6,12 +6,21 @@ and database tests exist.
 
 ## Scope and release boundary
 
+The active desktop phase enforces cloud ownership for every new Organization
+workspace and qualifies the existing workspace UI against Boat. Subsequent
+phases are receive-only directory sync, commands on connected Macs, registered
+execution hosts, and explicit copying between hosts with fresh identities.
+No Mac-to-cloud directory upload or bidirectional sync is planned.
+
 Phases 0–5 below record the earlier single-owner foundation. The current eight-step
 backend milestone includes individually funded Pro accounts, organization-shared
 workspaces and exact-workspace guests, with a staff-only pilot. Personal remains
-device-local. Desktop cloud creation/catalog/onboarding/management UI, native
-mobile clients, active ownership transfer and collaborative text editing remain
-separate deliveries. Current rules are in the [product contract](product-contract.md).
+device-local. Desktop cloud creation, discovery, details and terminal indicators
+now use the existing workspace UI and workspace-specific backend routing. Their
+browser tests use fixture transports; authenticated desktop/cloud qualification
+remains open. Onboarding/management UI, native mobile clients, active ownership
+transfer and collaborative text editing remain separate deliveries. Current
+rules are in the [product contract](product-contract.md).
 
 Local-to-cloud and cloud-to-local are immutable copy/fork operations:
 
@@ -299,7 +308,8 @@ Production exit evidence:
   database PITR, regional recovery, and deletion drills;
 - finish abuse, privacy, security, support, capacity, cost, licensing, and
   signed desktop reviews;
-- finish the deferred cloud UI and its E2E tests; and
+- qualify the wired desktop cloud UI end to end and finish the deferred
+  onboarding/management UI; and
 - only then enable the setup-worker and customer-facing feature flags.
 
 ## Collaboration expansion and remaining release work
@@ -326,7 +336,8 @@ replica writes.
 
 ## Explicitly deferred
 
-- cloud creation/catalog/details/onboarding and management UI in this branch;
+- cloud onboarding and management UI beyond the initial create/catalog/details
+  wiring, including device-replica controls;
 - native iOS and Android applications;
 - automatic bidirectional cloud/local file synchronization;
 - in-place local/cloud authority movement;

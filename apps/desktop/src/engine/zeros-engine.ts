@@ -2595,6 +2595,10 @@ export class ZerosEngine {
     // filesystem, and SQLite BEFORE any relocation or seed janitor can reinterpret
     // its source/target paths. A failed entry retains its journal and is skipped
     // by relocation below.
+    if (this.cloudWorker && this.cloudRuntimeConfig) {
+      const { ensureCloudPrimaryWorkspace } = await import("./git/cloud-primary-workspace");
+      await ensureCloudPrimaryWorkspace(this.root, this.cloudRuntimeConfig.execution);
+    }
     try {
       const { reconcileInterruptedWorkspaceLifecycles } =
         await import("./git/worktree");
@@ -3301,6 +3305,8 @@ export class ZerosEngine {
       const prompt = executionId ? this.activePromptContexts.get(executionId) : null;
       return {
         version: 1, conversationId: chat.id, agentId: chat.agentId, executionId,
+        session: executionId ? this.sessionLoadResponses.get(executionId) ?? null : null,
+        initialize: executionId && chat.agentId ? this.agents.agentInitializeSnapshot(chat.agentId) : null,
         mode: chat.composerMode ?? "code", modeRevision: chat.composerModeRevision ?? 0,
         messages: windowChatMessages(chat.id, 100),
         activeTurn: prompt ? { turnId: prompt.turnId, startedAt: prompt.startedAt } : null,
@@ -4872,7 +4878,7 @@ export class ZerosEngine {
       case "PTY_LIST": {
         const terminals = this.terminals.visibleTo({
           isRemote: this.isHostRelayClient(client),
-          restricted: listRemoteRestrictedWorkspaceIds(),
+          restricted: listRemoteRestrictedWorkspaceIds(Boolean(this.cloudWorker)),
           workspaceId:
             typeof msg.workspaceId === "string" && msg.workspaceId
               ? msg.workspaceId
@@ -7482,7 +7488,7 @@ export class ZerosEngine {
     // chat-list redaction it also can't discover one. Fails closed.
     if (
       this.cloudWorker === null &&
-      listRemoteRestrictedWorkspaceIds().has(workspaceId)
+      listRemoteRestrictedWorkspaceIds(Boolean(this.cloudWorker)).has(workspaceId)
     ) {
       throw new AgentFailureError({
         kind: "protocol-error",
@@ -8818,7 +8824,7 @@ export class ZerosEngine {
     void from;
     const targetWs =
       typeof params.workspaceId === "string" ? params.workspaceId : undefined;
-    return !(targetWs && listRemoteRestrictedWorkspaceIds().has(targetWs));
+    return !(targetWs && listRemoteRestrictedWorkspaceIds(Boolean(this.cloudWorker)).has(targetWs));
   }
 
   /** Whether a remote client may NOT act on / receive a given session.
@@ -8831,7 +8837,7 @@ export class ZerosEngine {
    *  remote clients. */
   private sessionRestrictedFromRemote(sessionId: string): boolean {
     const wsId = this.sessionWorkspace.get(sessionId);
-    return !!(wsId && listRemoteRestrictedWorkspaceIds().has(wsId));
+    return !!(wsId && listRemoteRestrictedWorkspaceIds(Boolean(this.cloudWorker)).has(wsId));
   }
 
   /** Authorize a route-less conversation lifecycle request. The cached
@@ -8848,7 +8854,7 @@ export class ZerosEngine {
       location?.workspaceId ??
       this.workspace.workspaceIdForCwd(location?.folder ?? undefined);
     return !!(
-      workspaceId && listRemoteRestrictedWorkspaceIds().has(workspaceId)
+      workspaceId && listRemoteRestrictedWorkspaceIds(Boolean(this.cloudWorker)).has(workspaceId)
     );
   }
 
@@ -9381,7 +9387,7 @@ export class ZerosEngine {
     if (!this.isHostRelayClient(client)) return true;
     return this.terminals.remoteMayOperate(
       sessionId,
-      listRemoteRestrictedWorkspaceIds(),
+      listRemoteRestrictedWorkspaceIds(Boolean(this.cloudWorker)),
     );
   }
 
@@ -9676,11 +9682,13 @@ export class ZerosEngine {
     }
     let env: Record<string, string> | undefined;
     const fullHumanEnvironment = client.kind === "local" && this.cloudWorker === null;
+    const scriptWorkspace = canonicalWsId ? getWorkspaceById(canonicalWsId) : null;
     if (!reattach && (fullHumanEnvironment || this.cloudWorker)) {
       const baseEnv = buildPtyEnv({
         scrub:!fullHumanEnvironment,
         cwd: resolvedCwd,
         workspaceId: canonicalWsId,
+        workspace: scriptWorkspace,
       });
       const credentialEnv = await prepareGitCredentialShellEnvironment(
         canonicalWsId ? `workspace:${canonicalWsId}` : `folder:${resolvedCwd}`,
@@ -9704,6 +9712,7 @@ export class ZerosEngine {
           scrub: !fullHumanEnvironment,
           cwd: resolvedCwd,
           workspaceId: canonicalWsId,
+          workspace: scriptWorkspace,
         });
         Object.assign(
           env,

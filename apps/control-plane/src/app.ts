@@ -212,17 +212,19 @@ export function createApp(
   app.get("/healthz", async (c) => {
     try {
       await pool.query("SELECT 1");
+      const development = config.development ? { development: config.development } : {};
       const migrationState =
         dependencies.migrationStatus?.state === "controlled_migration_pending"
           ? { migrations: dependencies.migrationStatus }
           : {};
       if (!dependencies.cloudWorkspaceHealthService) {
-        return c.json({ ok: true, ...migrationState });
+        return c.json({ ok: true, ...migrationState, ...development });
       }
       try {
         return c.json({
           ok: true,
           ...migrationState,
+          ...development,
           cloudWorkspaces:
             await dependencies.cloudWorkspaceHealthService.read(),
         });
@@ -233,6 +235,7 @@ export function createApp(
         return c.json({
           ok: true,
           ...migrationState,
+          ...development,
           cloudWorkspaces: {
             enabled: true,
             operationalState: "unknown",

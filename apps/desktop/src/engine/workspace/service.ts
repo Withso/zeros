@@ -2130,6 +2130,10 @@ export class WorkspaceService {
   /** A synthetic entry for the primary checkout so a remote client can browse
    *  the project root without a managed worktree. */
   private localMainEntry(): Workspace {
+    if (this.options.primaryDesignWorkspace) {
+      const primary = getWorkspaceById(LOCAL_MAIN_WORKSPACE_ID);
+      if (primary?.placement === "cloud" && primary.path === this.root) return { ...primary, present: true };
+    }
     return {
       id: LOCAL_MAIN_WORKSPACE_ID,
       repoSlug: "",
@@ -2220,7 +2224,7 @@ export class WorkspaceService {
     // drop chats whose workspace the owner restricted from remote — its
     // workspace is hidden, so its transcript must be too. No restrictions →
     // pass the rows through untouched.
-    const restricted = listRemoteRestrictedWorkspaceIds();
+    const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
     if (restricted.size === 0) return rows;
     const workspaces = listWorkspaces({});
     return rows.filter(
@@ -2241,7 +2245,7 @@ export class WorkspaceService {
   }
 
   private remoteFolderRestricted(folder: string): boolean {
-    const restricted = listRemoteRestrictedWorkspaceIds();
+    const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
     if (restricted.size === 0) return false;
     return restricted.has(
       this.redactChatFolderForRemote(folder, listWorkspaces({})),
@@ -2294,12 +2298,16 @@ export class WorkspaceService {
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
+    if (this.options.primaryDesignWorkspace && params.workspaceId === LOCAL_MAIN_WORKSPACE_ID &&
+        ["workspace.archive", "workspace.delete", "workspace.restore", "workspace.recover", "workspace.deleteSnapshot"].includes(op)) {
+      throw new GitError({ code: "REMOTE_RESTRICTED", message: "Manage the cloud allocation through its workspace lifecycle service." });
+    }
     // Cloud actors are role-admitted by the engine, independently of the
     // trusted-device relay policy. Only an immutable cloud deployment may
     // expose Design, and only for its opaque primary checkout. Keep `remote`
     // for all ordinary file/secret/path restrictions.
     const cloudDesign = remote && opts.cloudWorker === true &&
-      this.options.primaryDesignWorkspace === true && op.startsWith("design.");
+      this.options.primaryDesignWorkspace === true && (op.startsWith("design.") || op === "workspace.setMode");
     const humanActor = cloudDesign && opts.cloudActorIdentity
       ? { kind: "human" as const, id: `cloud:${opts.cloudActorIdentity.userId}:${opts.cloudActorIdentity.deviceId}` }
       : undefined;
@@ -2346,7 +2354,7 @@ export class WorkspaceService {
     // switch reaches them. (chats.upsert/bulkUpsert add/move the client's own
     // rows, so their requested destination folders are checked separately.)
     if (remote) {
-      const restricted = listRemoteRestrictedWorkspaceIds();
+      const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
       const targetWorkspaceId = optStr(params, "workspaceId");
       if (targetWorkspaceId && restricted.has(targetWorkspaceId)) {
         throw new GitError({
@@ -2462,7 +2470,7 @@ export class WorkspaceService {
         // The synthetic local-main trunk is a LIVE entry — never part of an
         // archived-only list (History).
         const base =
-          archived === true ? list : [this.localMainEntry(), ...list];
+          archived === true ? list : [this.localMainEntry(), ...list.filter(row => row.id !== LOCAL_MAIN_WORKSPACE_ID)];
         // Enrich with per-row `hasChanges` ONLY when asked (the Dashboard) — this
         // fires git probes per live row, so the sidebar's frequent refetches
         // (which don't pass withChanges) stay git-free.
@@ -2477,7 +2485,7 @@ export class WorkspaceService {
         // and needs real paths to open/spawn/create like local; the restriction
         // list, NOT path-hiding, is the boundary (a restricted workspace is gone
         // from this list entirely).
-        const restricted = listRemoteRestrictedWorkspaceIds();
+        const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
         return {
           workspaces: workspaces.filter((w) => !restricted.has(w.id)),
         };
@@ -2488,7 +2496,7 @@ export class WorkspaceService {
       // device can neither read nor change what's hidden from it. The desktop
       // owner manages the list from repo settings.
       case "workspace.listRemoteRestricted": {
-        return { ids: Array.from(listRemoteRestrictedWorkspaceIds()) };
+        return { ids: Array.from(listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace)) };
       }
       case "workspace.setRemoteRestricted": {
         setWorkspaceRemoteRestricted(
@@ -4846,16 +4854,15 @@ export class WorkspaceService {
         return { ok: true };
       }
       // ── Mode switch: one workspace, two modes ─────────────
-      // LOCAL-ONLY (on no remote allowlist — deny-by-default refuses a relay
-      // client): first entry may initialize uncommitted workspace-owned files,
-      // and a paired device is not the place to trigger that mutation blind.
+      // Desktop-local or an admitted cloud manager. The trusted-device relay
+      // remains denied: first entry can initialize workspace-owned files.
       // The lifecycle prologue already refused archived rows, active
       // lifecycle flights, and missing checkouts (setMode is in
       // LIFECYCLE_GATED_WORKSPACE_OPS).
       case "workspace.setMode": {
         // Deny-by-default already refuses relay clients before dispatch; keep
         // the defence-in-depth check anyway (same posture as prepareCreate).
-        if (remote) {
+        if (remote && !cloudDesign) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
             message: "Workspace modes can be switched only in the desktop app.",
@@ -4882,7 +4889,7 @@ export class WorkspaceService {
         if (current === mode) return { ok: true, mode };
         if (mode === "design") {
           const snapshot = await enterDesignMode(workspace, () =>
-            this.readDesignSnapshot(workspace, remote, {
+            this.readDesignSnapshot(workspace, designRemote, {
               hostLocalResources,
             }),
           );

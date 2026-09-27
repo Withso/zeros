@@ -87,6 +87,7 @@
 # that happens to keep an env file of its own. The tracked `.env.agent.example`
 # arrives through git like any tracked file.
 /.env*
+/zeros-dev-env.json
 /apps/control-plane/.env*
 
 # Cloudflare Workers local secrets, read by `wrangler dev` from the worker's own

@@ -179,6 +179,40 @@ d("cloud workspace API contracts", () => {
     return { response, body, key };
   };
 
+  it("returns only authorized installation metadata for Cloud creation", async () => {
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ configured: true, installations: [{ id: installationId, accountLogin: "withso" }] });
+    const otherOwner = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=another-owner`);
+    expect(await otherOwner.json()).toMatchObject({ installations: [] });
+    actor = outsider;
+    expect((await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso`)).status).toBeGreaterThanOrEqual(400);
+  });
+
+  it("does not offer a suspended GitHub installation", async () => {
+    await pool.query("UPDATE github_installations SET suspended_at=now() WHERE id=$1", [installationId]);
+    expect(await (await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso`)).json()).toMatchObject({ installations: [] });
+  });
+
+  it("resolves the cloud creation source without a device checkout", async () => {
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso&repository=zeros`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ repository: { owner: "withso", name: "zeros", defaultBranch: "main" } });
+    expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros" });
+  });
+
+  it("rechecks source authorization after GitHub returns", async () => {
+    const resolve = repositoryResolver.resolve;
+    repositoryResolver.resolve = async (input) => {
+      const result = await resolve(input);
+      await pool.query("UPDATE github_installations SET suspended_at=now() WHERE id=$1", [installationId]);
+      return result;
+    };
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso&repository=zeros`);
+    expect(response.status).toBeGreaterThanOrEqual(400);
+  });
+
   it("creates for a non-staff Pro member without an Organization subscription or seat",async()=>{
     await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1",[owner.id]);
     await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')",[owner.id]);

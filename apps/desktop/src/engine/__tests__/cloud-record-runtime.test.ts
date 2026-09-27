@@ -15,6 +15,7 @@ import { deleteChat, listChats, upsertChat, wasChatDeleted } from "../db/chats";
 import { deleteTurnsForChat, deleteTurnsFrom } from "../db/turns";
 import { clearChatMessages, windowChatMessages, listChatMessagesSince, upsertChatMessage } from "../db/messages";
 import { getTurn, startTurn } from "../db/turns";
+import { getWorkspaceById, insertWorkspace, updateWorkspace } from "../git/state";
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
 const authority = {
@@ -582,6 +583,21 @@ describe("cloud durable record runtime", () => {
       { chatId: "chat-1", msgId: "message-a" },
       { chatId: "chat-1", msgId: "message-b" },
     ]);
+  });
+
+  it("restores the cloud primary workspace's target branch, mode and PR after a worker replacement", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-cloud-metadata-"));
+    roots.push(root);
+    const primary = { id: "local-main", canonicalId: authority.workspaceId, organizationId: authority.organizationId, placement: "cloud" as const,
+      repoRoot: root, path: root, repoSlug: "fixture", branch: "cloud/work", baseBranch: "main", status: "in-progress" as const, createdAt: NOW,
+      archivedAt: null, stashRef: null, prNumber: null, prState: null, prUrl: null, agentId: null, lastActiveAt: null };
+    setZerosDbPathForTesting(":memory:"); openZerosDb(); insertWorkspace(primary);
+    updateWorkspace("local-main", { baseBranch: "release", viewMode: "design", prNumber: 42, prState: "draft", prUrl: "https://github.com/example/fixture/pull/42" });
+    const server = createRecordServer();
+    await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize(authority);
+    closeZerosDb(); setZerosDbPathForTesting(":memory:"); openZerosDb(); insertWorkspace(primary);
+    await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize(authority);
+    expect(getWorkspaceById("local-main")).toMatchObject({ ...primary, baseBranch: "release", viewMode: "design", prNumber: 42, prState: "draft", prUrl: "https://github.com/example/fixture/pull/42" });
   });
 
   it.each([

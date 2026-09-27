@@ -24,7 +24,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { create } from "zustand";
-import { isRunSessionId } from "@zeros/protocol/run-actions";
+import { isRunSessionId } from "../platform/workspace-run-identity";
 import {
   openTerminalTab,
   reconcileTerminalTabs,

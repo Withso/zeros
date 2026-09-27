@@ -2,6 +2,7 @@ import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { cachedBridgeWorkspaceRootForCwd } from "../../platform/bridge/workspace-id-resolver";
 import { folderIsWithinRoot } from "../../state/workspace-resolution";
 import type { ComposerAttachment } from "./composer-attachments";
+import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 
 let localHost: string | undefined;
 function localRuntime(): string {
@@ -21,6 +22,8 @@ function localRuntime(): string {
 export function attachmentOwner(
   cwd: string,
 ): NonNullable<ComposerAttachment["owner"]> {
+  const cloud = parseCloudWorkspaceKey(cwd);
+  if (cloud) return { runtime: `cloud:${cloud.organizationId}:${cloud.workspaceId}`, cwd: cloudWorkspaceKey(cloud) };
   const bridge = getActiveBridge();
   const identity = bridge?.executionIdentity;
   const root = bridge

@@ -26,7 +26,7 @@ const edits=new Set([
   "git.reset","git.restore","git.merge","git.cherryPick","git.revert","git.continue","git.abort",
   "git.stashApply","git.stashDrop","git.deleteBranch","git.stageHunk","git.unstageHunk","git.discardHunk","git.tagCreate","git.tagDelete",
 ]);
-const managers=new Set(["design.initialize","design.adoptDirectory","design.removeDirectory","design.renameDirectory"]);
+const managers=new Set(["design.initialize","design.adoptDirectory","design.removeDirectory","design.renameDirectory","workspace.setMode"]);
 const providerRuns=new Set([
   "AGENT_NEW_SESSION","AGENT_LOAD_SESSION","AGENT_FORK_CONVERSATION","AGENT_PROMPT","AGENT_GENERATE_TITLE",
   "AGENT_CANCEL","AGENT_STOP_BACKGROUND_TASK","AGENT_STEER","AGENT_PERMISSION_RESPONSE","AGENT_QUESTION_RESPONSE",

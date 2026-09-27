@@ -28,8 +28,8 @@ export const CloudQueuedPromptSchema = z.object({
   agentId: identity, userMessageId: identity, prompt: z.array(content).min(1).max(128),
   bubble: z.record(z.string(), z.unknown()).optional(), modeRevision: revision,
   agentCredentialGrantId:z.uuid().optional(),
-  model:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/).optional(),
-  effort:z.enum(["low","medium","high","xhigh"]).optional(),fast:z.boolean().optional(),
+  model:z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/).optional(),
+  effort:z.enum(["low","medium","high","xhigh","max","ultracode"]).optional(),fast:z.boolean().optional(),
 }).strict().superRefine((value,context)=>{
   if(value.agentCredentialGrantId&&(!value.model||!["claude","cursor","codex"].includes(value.agentId)))
     context.addIssue({code:"custom",message:"Personal credential execution requires an explicit provider and model"});

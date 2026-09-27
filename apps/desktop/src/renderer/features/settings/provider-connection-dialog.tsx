@@ -22,6 +22,7 @@ export function ProviderConnectionDialog({
   connected,
   busy,
   children,
+  methodOptions,
 }: {
   provider: string;
   name: string;
@@ -32,8 +33,9 @@ export function ProviderConnectionDialog({
   connected: boolean;
   busy: boolean;
   children: React.ReactNode;
+  methodOptions?: Array<{ id: ConnectionMethod; label: string; description: string }>;
 }) {
-  const methods = [
+  const methods = methodOptions ?? [
     {
       id: "account" as const,
       label: "Account",

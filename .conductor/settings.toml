@@ -10,7 +10,25 @@
 # docs/ is tracked, so each worktree receives the curated public engineering
 # documentation directly from Git.
 setup = '''
+set -e
+if [ -f zeros-dev-env.json ]; then
+  node scripts/dev-environment/setup.mjs --profile-only --profile "$PWD/zeros-dev-env.json"
+fi
 pnpm install --frozen-lockfile
 pnpm --dir apps/control-plane install --frozen-lockfile
 npm --prefix apps/web ci
 '''
+archive = "pnpm dev:archive"
+run_mode = "concurrent"
+
+[scripts.run.dev]
+available_in = ["local"]
+command = "pnpm electron:dev"
+default = true
+icon = "play"
+
+[scripts.run.backend]
+available_in = ["cloud"]
+command = "pnpm dev:backend"
+default = true
+icon = "cloud"

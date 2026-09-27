@@ -59,7 +59,9 @@ import type {
   AgentSteeredMessage,
 } from "../../platform/bridge/messages";
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
+import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 import { BackgroundTaskSnapshots, loadedBackgroundTaskState } from "./background-task-state";
+import { cloudSessionMetadata } from "./cloud-session-metadata";
 import {
   deriveProviderEnv,
   getProviderBinaryOverride,
@@ -821,6 +823,17 @@ export function AgentSessionsProvider({
       }
     };
 
+    const admissionMetadata = (raw: AgentSessionCreatedMessage | AgentSessionLoadedMessage) => {
+      const state = useSessionsStore.getState();
+      const executionId = raw.type === "AGENT_SESSION_CREATED" ? raw.session.executionId ?? raw.session.sessionId : raw.executionId ?? raw.sessionId;
+      const chatId = state.executionToChatId[executionId];
+      if (!chatId) return;
+      const patch = cloudSessionMetadata(state.sessions[chatId], raw);
+      if (patch) state.patchSession(chatId, patch);
+    };
+    const unsubCreated = bridge.on("AGENT_SESSION_CREATED", raw => admissionMetadata(raw as AgentSessionCreatedMessage));
+    const unsubLoaded = bridge.on("AGENT_SESSION_LOADED", raw => admissionMetadata(raw as AgentSessionLoadedMessage));
+
     const unsubUpdate = bridge.on("AGENT_SESSION_UPDATE", (raw) => {
       const msg = raw as {
         agentId: string;
@@ -1137,6 +1150,8 @@ export function AgentSessionsProvider({
       }
       flush();
       unsubUpdate();
+      unsubCreated();
+      unsubLoaded();
       unsubBoundaryStatus();
       unsubBoundaryPorts();
       unsubPerm();
@@ -1888,7 +1903,8 @@ export function AgentSessionsProvider({
         const attemptOnce = async (): Promise<
           AgentSessionCreatedMessage | AgentErrorMessage | null
         > => {
-          const cliBinaryOverride = getProviderBinaryOverride(agentId);
+          const cloud = isCloudWorkspace(resolvedCwd);
+          const cliBinaryOverride = cloud ? undefined : getProviderBinaryOverride(agentId);
           const spawnWorkspaceId = await resolveSpawnWorkspaceId(
             bridge,
             resolvedCwd,
@@ -1899,14 +1915,14 @@ export function AgentSessionsProvider({
           // gateway URL) with any explicit env the caller supplied.
           // Explicit env (e.g. from the AuthModal first-time flow)
           // wins on conflict.
-          const presetEnv = await deriveProviderEnv(agentId);
+          const presetEnv = cloud ? {} : await deriveProviderEnv(agentId);
           // MCP secret env vars (Keychain, user + this cwd's repo scope)
           // couriered into the agent's process env so stdio MCP servers
           // inherit them — never written into MCP config.
-          const mcpSecretEnv = await deriveMcpSecretEnv(bridge, resolvedCwd);
+          const mcpSecretEnv = cloud ? {} : await deriveMcpSecretEnv(bridge, resolvedCwd);
           // Environment vault (user scope + this cwd's repo scope) — ALL
           // UI-managed env vars, Keychain-only. Under provider/session env.
-          const envVaultEnv = await deriveEnvVaultEnv(bridge, resolvedCwd);
+          const envVaultEnv = cloud ? {} : await deriveEnvVaultEnv(bridge, resolvedCwd);
           const mergedEnv =
             options?.env ||
             Object.keys(presetEnv).length > 0 ||
@@ -2190,6 +2206,7 @@ export function AgentSessionsProvider({
       );
       if (
         entrySlot?.agentId &&
+        !isCloudWorkspace(entrySlot.cwd) &&
         entrySlot.status !== "auth-required" &&
         pendingAuthenticationPrompts(entrySlot.messages, flushBubbleId)
           .length === 0 &&
@@ -2921,12 +2938,13 @@ export function AgentSessionsProvider({
               recoverySlot.providerMetadata ??
               persistedChat?.providerMetadata ??
               null;
-            const presetEnv = await deriveProviderEnv(current.agentId!);
-            const mcpSecretEnv = await deriveMcpSecretEnv(
+            const cloud = isCloudWorkspace(current.cwd);
+            const presetEnv = cloud ? {} : await deriveProviderEnv(current.agentId!);
+            const mcpSecretEnv = cloud ? {} : await deriveMcpSecretEnv(
               bridge,
               current.cwd ?? null,
             );
-            const envVaultEnv = await deriveEnvVaultEnv(
+            const envVaultEnv = cloud ? {} : await deriveEnvVaultEnv(
               bridge,
               current.cwd ?? null,
             );
@@ -3452,7 +3470,7 @@ export function AgentSessionsProvider({
             try {
               const initResp = await bridge.request<
                 AgentAgentInitializedMessage | AgentErrorMessage
-              >({ type: "AGENT_INIT_AGENT", agentId: refreshAgentId }, 30_000);
+              >({ type: "AGENT_INIT_AGENT", agentId: refreshAgentId, ...(isCloudWorkspace(current.cwd) ? { chatId } : {}) }, 30_000);
               if (initResp.type === "AGENT_ERROR") return;
               const freshMeta = initResp.initialize?._meta;
               if (
@@ -4829,7 +4847,7 @@ export function AgentSessionsProvider({
         // and mid-respawn requests reject. Park the chat and let the
         // connected-edge drain retry, instead
         // of committing a blank transcript that nothing ever repairs.
-        if (!bridge || bridge.status !== "connected") {
+        if (!bridge || (!parseCloudScopedId(chatId) && bridge.status !== "connected")) {
           pendingHydratesRef.current.add(chatId);
           return;
         }
@@ -5128,7 +5146,8 @@ export function AgentSessionsProvider({
       );
       loadFlightAdoptOnlyRef.current.set(chatId, options?.adoptOnly === true);
       try {
-        const cliBinaryOverride = getProviderBinaryOverride(agentId);
+        const cloud = isCloudWorkspace(resolvedCwd);
+        const cliBinaryOverride = cloud ? undefined : getProviderBinaryOverride(agentId);
         const resumeWorkspaceId = await resolveSpawnWorkspaceId(
           bridge,
           resolvedCwd,
@@ -5137,9 +5156,9 @@ export function AgentSessionsProvider({
         // Resume must honour the same Provider prefs as new sessions:
         // env injection for API-key mode + binary-path override for the
         // /Settings → Advanced disclosure.
-        const presetEnv = await deriveProviderEnv(agentId);
-        const mcpSecretEnv = await deriveMcpSecretEnv(bridge, resolvedCwd);
-        const envVaultEnv = await deriveEnvVaultEnv(bridge, resolvedCwd);
+        const presetEnv = cloud ? {} : await deriveProviderEnv(agentId);
+        const mcpSecretEnv = cloud ? {} : await deriveMcpSecretEnv(bridge, resolvedCwd);
+        const envVaultEnv = cloud ? {} : await deriveEnvVaultEnv(bridge, resolvedCwd);
         const mergedEnv =
           options?.env ||
           Object.keys(presetEnv).length > 0 ||

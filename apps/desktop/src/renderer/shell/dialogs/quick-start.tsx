@@ -25,6 +25,7 @@ import {
 } from "../../state/use-projects";
 import { upsertProject } from "../../state/projects-store";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { getActiveOrganizationSnapshot } from "../../features/team/team-store";
 
 interface QuickStartDialogProps {
   open: boolean;
@@ -78,6 +79,11 @@ export function QuickStartDialog({
 
   const handleCreate = async () => {
     if (busy) return;
+    const organization = getActiveOrganizationSnapshot();
+    if (organization && !organization.isPersonal) {
+      toast.error("Organization workspaces run in the cloud. Open a GitHub project to continue.");
+      return;
+    }
     if (!name.trim() || !parentFolder.trim()) return;
     setBusy(true);
     try {
