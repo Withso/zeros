@@ -289,11 +289,10 @@ const SummaryContents = new URLSearchParams(location.search).has("summary")
 const DispatcherPage = createFixture
   ? (await import("../shell/dispatcher/dispatcher-modal")).DispatcherPage
   : null;
-const { TopBar } = await import("../shell/top-bar");
+const { AppSidebar } = await import("../shell/app-sidebar");
 const { NoProjectsView } = await import("../shell/no-projects-view");
 const { useProjectCapabilitiesRefresh } =
   await import("../shell/use-project-capabilities-refresh");
-const { HomeSidebar } = await import("../shell/home-sidebar");
 const { RepoPage } = await import("../features/repositories/repo-page");
 const { DashboardPage } = await import("../features/dashboard/dashboard-page");
 const { AddProjectProvider, useAddProject } =
@@ -343,7 +342,6 @@ function Harness() {
   return (
     <>
       <Toaster />
-      <TopBar />
       <nav className="flex gap-2 p-4">
         <Button
           onClick={
@@ -391,7 +389,7 @@ function Harness() {
         </Button>
       </nav>
       <div className="flex h-[600px]">
-        <HomeSidebar />
+        <AppSidebar />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {scratchFixture && !project ? (
             <NoProjectsView />

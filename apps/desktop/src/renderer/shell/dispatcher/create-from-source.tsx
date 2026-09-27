@@ -98,6 +98,10 @@ interface CreateFromSourceProps {
   onChange: (base: DispatcherBase | null) => void;
   active?: boolean;
   disabled?: boolean;
+  /** One-shot request to open the picker (a repository's "Create from…").
+   *  Each new id opens it once; the caller clears it via onOpenRequestHandled. */
+  openRequestId?: number | null;
+  onOpenRequestHandled?: () => void;
 }
 
 export function CreateFromSource({
@@ -106,6 +110,8 @@ export function CreateFromSource({
   onChange,
   active = true,
   disabled = false,
+  openRequestId = null,
+  onOpenRequestHandled,
 }: CreateFromSourceProps) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<Tab | null>(null);
@@ -200,6 +206,20 @@ export function CreateFromSource({
       })
       .catch(() => {});
   };
+  // A requested open behaves like the user clicking the trigger: reset the
+  // search and tab, warm the same reads, then open. Keyed by request id only;
+  // the caller clears the id once handled so a remount never reopens it.
+  useEffect(() => {
+    if (openRequestId == null) return;
+    onOpenRequestHandled?.();
+    if (!active || disabled || !project) return;
+    setQuery("");
+    setTab(null);
+    warm();
+    setOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRequestId]);
+
   const pick = (base: DispatcherBase) => {
     // Selecting the default restores the engine's fresh-default behavior.
     onChange(

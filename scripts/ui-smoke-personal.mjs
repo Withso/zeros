@@ -14,19 +14,22 @@ export async function runPersonalOrganizationSmoke({ page, check }) {
   const rows = page
     .getByRole("list", { name: "Visible workspaces" })
     .getByRole("listitem");
-  await expect(switcher).toHaveText("Personal");
+  await expect(switcher).toHaveText("Local");
   await switcher.click();
   await expect(
-    page.getByRole("menuitem", { name: "Personal", exact: true }),
+    page.getByRole("menuitem", { name: "Local", exact: true }),
   ).toHaveCount(1);
   await expect(
     page.getByRole("menuitem", { name: "Create organization", exact: true }),
   ).toHaveCount(0);
   await page.keyboard.press("Escape");
-  check("one existing Personal entry is available without an account", true);
+  check(
+    "one existing Local (device Personal) entry is available without an account",
+    true,
+  );
 
   await page.getByRole("button", { name: "Use account A" }).click();
-  await expect(switcher).toHaveText("Personal");
+  await expect(switcher).toHaveText("Local");
   await expect(rows).toHaveText(["Unowned local", "A legacy local"]);
   await page.getByRole("button", { name: "Create local fixture" }).click();
   await expect(rows.filter({ hasText: "Created local" })).toHaveAttribute(
@@ -44,7 +47,7 @@ export async function runPersonalOrganizationSmoke({ page, check }) {
   await expect(rows).toHaveText(["Business A cloud"]);
   await expect(page.getByTestId("cloud-capability")).toHaveText("allowed");
   await page.getByRole("button", { name: "Use account B" }).click();
-  await expect(switcher).toHaveText("Personal");
+  await expect(switcher).toHaveText("Local");
   await expect(rows).toHaveText([
     "Unowned local",
     "A legacy local",
@@ -58,7 +61,7 @@ export async function runPersonalOrganizationSmoke({ page, check }) {
 
   await switcher.click();
   await expect(
-    page.getByRole("menuitem", { name: "Personal", exact: true }),
+    page.getByRole("menuitem", { name: "Local", exact: true }),
   ).toHaveCount(1);
   await expect(
     page.getByRole("menuitem", { name: "Business A", exact: true }),
@@ -79,7 +82,7 @@ export async function runPersonalOrganizationSmoke({ page, check }) {
 
   await switcher.click();
   await page.getByRole("menuitem", { name: "Log out", exact: true }).click();
-  await expect(switcher).toHaveText("Personal");
+  await expect(switcher).toHaveText("Local");
   await expect(rows).toHaveText([
     "Unowned local",
     "A legacy local",
@@ -87,7 +90,7 @@ export async function runPersonalOrganizationSmoke({ page, check }) {
     "Created local",
   ]);
   await page.reload();
-  await expect(switcher).toHaveText("Personal");
+  await expect(switcher).toHaveText("Local");
   await expect(rows).toHaveText([
     "Unowned local",
     "A legacy local",

@@ -162,14 +162,20 @@ describe("design workspace agent isolation", () => {
     expect(archiveActions).toContain("opts?.onRestored?.(result)");
     expect(archiveActions).not.toContain("isInternalFeatureActive");
 
-    const topBar = read("apps/desktop/src/renderer/shell/top-bar.tsx");
-    expect(topBar).not.toContain(
+    const sidebar = [
+      "apps/desktop/src/renderer/shell/app-sidebar.tsx",
+      "apps/desktop/src/renderer/shell/sidebar-repository-header.tsx",
+      "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
+    ]
+      .map(read)
+      .join("\n");
+    expect(sidebar).not.toContain(
       'useInternalFeatureActive("designWorkspaces")',
     );
-    expect(topBar).not.toContain("activeFolderBlockedDesign");
-    // The workspace-kind picker moved to the Create page; the top bar's "+"
-    // is a route to it and carries no Design gate of its own.
-    expect(topBar).not.toContain("designWorkspaceCreationAvailable");
+    expect(sidebar).not.toContain("activeFolderBlockedDesign");
+    // The workspace-kind picker lives on the Create page; the sidebar's
+    // Create entries route to it and carry no Design gate of their own.
+    expect(sidebar).not.toContain("designWorkspaceCreationAvailable");
     const createPage = read(
       "apps/desktop/src/renderer/shell/dispatcher/dispatcher-modal.tsx",
     );
@@ -214,8 +220,9 @@ describe("design workspace agent isolation", () => {
   it("keeps every Design product surface independent of Internal feature flags", () => {
     const publicDesignSurfaces = [
       "apps/desktop/src/renderer/app-shell.tsx",
-      "apps/desktop/src/renderer/shell/top-bar.tsx",
-      "apps/desktop/src/renderer/shell/home-sidebar.tsx",
+      "apps/desktop/src/renderer/shell/app-sidebar.tsx",
+      "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
+      "apps/desktop/src/renderer/shell/sidebar-repository-header.tsx",
       "apps/desktop/src/renderer/shell/create-workspace.ts",
       "apps/desktop/src/renderer/shell/add-project-provider.tsx",
       "apps/desktop/src/renderer/features/dashboard/dashboard-page.tsx",

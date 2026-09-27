@@ -107,7 +107,7 @@ import {
 
 /** Outer shell — the chat-tab row. The tabs are floating Chrome-style pills
  *  on the pane's --pane-bg window fill (bg1 focused / bg0 not; no border/fill of
- *  its own). h-10 is the app's chrome-band height: the global TopBar, Workbench's
+ *  its own). h-10 is the app's chrome-band height: the sidebar's title band, Workbench's
  *  header, and the PR status row are all 40px, and Workbench's header seats the
  *  same h-7 pills in the same 6px of top/bottom breathing room via items-center
  *  — the row's height IS its vertical padding (children use h-full, so it stays

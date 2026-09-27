@@ -22,16 +22,19 @@ export async function runFolderFilesSmoke({ page, check }) {
     true,
   );
 
-  const repo = page
-    .getByRole("tablist", { name: "Home navigation" })
-    .getByRole("tab", { name: /^To-do app/ });
-  await expect(repo).toHaveText("To-do app");
+  const header = page.locator("[data-sidebar-repository]");
+  const folderRow = page.locator('[data-workspace-id="local:to-do-app"]');
+  await expect(header).toHaveCount(0);
+  await expect(folderRow).toHaveCount(1);
   await page.evaluate(() => window.setFolderGitState(true));
-  await expect(repo.getByText("1", { exact: true })).toBeVisible();
+  await expect(header).toHaveCount(1);
+  await expect(header).toContainText("To-do app");
+  await expect(folderRow).toHaveCount(1);
   await page.evaluate(() => window.setFolderGitState(false));
-  await expect(repo).toHaveText("To-do app");
+  await expect(header).toHaveCount(0);
+  await expect(folderRow).toHaveCount(1);
   check(
-    "Sidebar omits workspace counts for plain folders and retains them for Git repositories",
+    "Sidebar lists a plain folder as a standalone row and a Git repository under its header",
     true,
   );
 

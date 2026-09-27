@@ -1,9 +1,9 @@
 // ============================================
 // COMPONENT: WorkspaceChangeCounts
-// PURPOSE: The trailing ± pair on a top-bar workspace tab — everything the
+// PURPOSE: The trailing ± pair on a sidebar workspace row — everything the
 //          branch changed against its base, committed AND uncommitted (the
 //          same All Changes comparison the Changes badge counts files for).
-// USED IN: TopBar's WorkspaceTab
+// USED IN: SidebarWorkspaceRow (sidebar-workspace-row.tsx)
 // ============================================
 //
 // It sits immediately LEFT of the live-run indicator when both are showing, so

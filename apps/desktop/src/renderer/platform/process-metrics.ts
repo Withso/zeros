@@ -1,7 +1,7 @@
 // ============================================
 // NATIVE FACADE: Process metrics
 // PURPOSE: Typed, read-only access to the current Zeros process-tree sample.
-// USED IN: The global top-bar resource monitor.
+// USED IN: The app sidebar's resource monitor.
 // ============================================
 
 import { isElectron, nativeInvoke } from "./runtime";

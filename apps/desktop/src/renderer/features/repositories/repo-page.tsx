@@ -29,9 +29,9 @@
 //          repo file is migration input only; user defaults and any applicable
 //          managed/cloud policy retain their provenance tags.
 //
-// Reached from the Home rail's REPOS rows, the top bar's repo context menu
-// ("Repository Settings"), and the legacy `repo:<id>:<section>` settings
-// deep links (settings-page redirects them here).
+// Reached from a sidebar repository's settings and Configuration actions, its
+// context menu ("Repository Settings"), and the legacy `repo:<id>:<section>`
+// settings deep links (settings-page redirects them here).
 
 import React, { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import { useWarmWorkspaceHistory } from "../../state/use-warm-workspace-history";
@@ -391,7 +391,7 @@ export function RepoWorkspacesList({ project }: { project: Project }) {
                 : "No workspaces yet"}
             </span>
             <span className="text-fg2 text-sm">
-              Create one with + in the top bar to start an agent on{" "}
+              Create one with + in the sidebar to start an agent on{" "}
               {project.name}.
             </span>
           </div>

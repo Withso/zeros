@@ -141,7 +141,7 @@ export async function runDraftIndicatorsSmoke({
     await page.evaluate((theme) => {
       document.documentElement.className = theme;
     }, theme);
-    await verifySlot(workspace("a"), /^Archive workspace/, 180, theme);
+    await verifySlot(workspace("a"), /^Archive workspace/, 220, theme);
     const label = mark(workspace("a"))
       .locator("xpath=ancestor::span[span[contains(@class, 'truncate')]]")
       .locator("span.truncate");
@@ -190,11 +190,12 @@ export async function runDraftIndicatorsSmoke({
   });
   const busyBox = await busy.boundingBox();
   const draftBox = await mark(workspace("b")).boundingBox();
-  expect(draftBox.x + draftBox.width).toBeLessThanOrEqual(busyBox.x);
+  // Sidebar rows trail with state, then the pencil at the row's end.
+  expect(busyBox.x + busyBox.width).toBeLessThanOrEqual(draftBox.x);
   await verifySlot(
     workspace("b"),
     /^Archive workspace/,
-    180,
+    220,
     "mixed repositories",
   );
   await page.evaluate(() => window.draftIndicatorsHarness.mixedBusy(false));

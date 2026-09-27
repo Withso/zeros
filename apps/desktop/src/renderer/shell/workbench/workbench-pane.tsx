@@ -183,7 +183,7 @@ const RetainedBrowserView = React.memo(function RetainedBrowserView({
 
 // Header: h-10 is the shared chrome-band height, so its content centers at y=20
 // — the same midline as the conversation column's chat strip (h-10 too, since
-// 2026-09-01) and the global TopBar above both. That parity is load-bearing: the
+// 2026-09-01) and the app sidebar's title band. That parity is load-bearing: the
 // workbench expand control lives in THIS row while the panel is open and in the
 // chat strip's trailing slot while it is collapsed, and it must not shift as
 // ownership changes hands. It stays borderless: second-row chrome owns any

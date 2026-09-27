@@ -111,7 +111,7 @@ export function prefetchSettingsForRepo(repoRoot: string): void {
 }
 
 /** Warm the small settings documents that back global and repository forms.
- * Called once from the always-mounted top bar after project hydration so a
+ * Called once from the always-mounted app sidebar after project hydration so a
  * first Settings/repo-section switch can render from a complete snapshot. */
 export function usePrefetchSettings(repoRoots: readonly string[]): void {
   useEffect(() => {

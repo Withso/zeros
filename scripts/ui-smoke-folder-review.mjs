@@ -56,7 +56,7 @@ export async function runFolderReviewSmoke({ page, check }) {
   await expect(rootTab).toHaveCount(1);
   await expect(rootTab).toHaveCount(1);
   await expect(page.locator("[data-folder-state]")).toHaveText(chats);
-  for (const filter of ["To-do app", "Ungrouped", "Active", "Grouped"]) {
+  for (const filter of ["Ungrouped", "Grouped"]) {
     await page
       .getByRole("button", { name: "Filter workspaces", exact: true })
       .click();

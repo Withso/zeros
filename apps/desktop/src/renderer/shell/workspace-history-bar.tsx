@@ -120,7 +120,7 @@ export function WorkspaceHistoryBar({
   };
   const Icon = workspace.archivedAt == null ? FolderX : Archive;
   return (
-    <div className="mx-auto w-full max-w-[1152px] shrink-0 px-7 pt-2 pb-4">
+    <div className="mx-auto w-full max-w-[856px] shrink-0 px-7 pt-2 pb-4">
       <div
         className="border-border1 bg-bg2 flex items-center gap-3 rounded-lg border px-4 py-3"
         role="status"

@@ -1,17 +1,18 @@
 // ──────────────────────────────────────────────────────────
-// Home nav rail width — shared, persisted drag state
+// App sidebar width — shared, persisted drag state
 // ──────────────────────────────────────────────────────────
 //
-// The left Home rail (HomeSidebar) is resizable via a pointer-captured seam,
-// the same gesture the conversation/workbench seams use. Its width is ONE user
-// preference (not per-surface state): every place the rail mounts reads this
-// module store, so a drag is reflected everywhere and survives reloads via
-// localStorage.
+// The app sidebar (AppSidebar, which replaced the Home rail and kept its
+// persisted key) is resizable via a pointer-captured seam, the same gesture
+// the conversation/workbench seams use. Its width is ONE user preference (not
+// per-surface state): every place the sidebar mounts reads this module store,
+// so a drag is reflected everywhere and survives reloads via localStorage.
 //
 // Unlike the Files-tab sidebar — which persists a FRACTION so its sibling
-// viewer scales proportionally — the Home rail's neighbor is a plain `flex-1`
-// pane that simply absorbs the delta, so we persist a PIXEL width. Simpler,
-// and the clamp is pure + exported for tests.
+// viewer scales proportionally — the sidebar's neighbor is a plain `flex-1`
+// area that simply absorbs the delta, so we persist a PIXEL width. Simpler,
+// and the clamp is pure + exported for tests. The sidebar additionally caps
+// itself to the live window so the workspace columns keep their floors.
 
 import { useSyncExternalStore } from "react";
 

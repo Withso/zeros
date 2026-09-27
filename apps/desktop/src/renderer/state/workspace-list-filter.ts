@@ -4,8 +4,11 @@ import { findProjectForFolder } from "./workspace-resolution";
 
 export const DEFAULT_WORKSPACE_LIST_FILTER = "grouped" as const;
 
-/** App-wide top-bar presentation. Repository ids are persisted rather than
- * roots so a renamed/moved checkout keeps the same semantic selection. */
+/** App-wide workspace-list presentation. The sidebar offers Grouped and
+ * Ungrouped; Active and repository-only values remain parseable because
+ * earlier builds persisted them (the sidebar folds them when painted).
+ * Repository ids are persisted rather than roots so a renamed/moved checkout
+ * keeps the same semantic selection. */
 export type WorkspaceListFilter =
   | "grouped"
   | "ungrouped"

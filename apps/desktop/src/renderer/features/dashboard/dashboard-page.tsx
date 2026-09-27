@@ -354,7 +354,7 @@ export function DashboardPage() {
 
   return (
     <div className="bg-bg1 flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-      {/* The global top bar now owns native title-bar spacing. */}
+      {/* The app sidebar owns native title-bar spacing. */}
       <div
         className="flex shrink-0 items-center gap-3 px-6 pt-4 pb-4"
         data-tauri-drag-region
