@@ -89,13 +89,16 @@ function parseStringOrNull(raw: unknown): string | null {
  *  bad folder→chat mapping (it just falls back to an empty map). */
 function parseStringMap(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (k.length > 0 && typeof v === "string" && v.length > 0) {
-      out[k] = v;
-    }
-  }
-  return out;
+  // Define own data properties: persisted names must never invoke inherited
+  // setters (notably __proto__) while rebuilding a navigation dictionary.
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>).filter(
+      (entry): entry is [string, string] =>
+        entry[0].length > 0 &&
+        typeof entry[1] === "string" &&
+        entry[1].length > 0,
+    ),
+  );
 }
 
 /** Keep the newest valid entries from a persisted string map. Object insertion
@@ -272,7 +275,9 @@ export function loadPersistedUiState(): Partial<PersistedUiState> {
     ) {
       const legacyView = readLegacyRepoView();
       if (legacyView) {
-        out.repoPageViewByProject = { [out.activeRepoId]: legacyView };
+        out.repoPageViewByProject = Object.fromEntries([
+          [out.activeRepoId, legacyView],
+        ]);
       }
     }
     if ("newAgentFolder" in parsed) {
