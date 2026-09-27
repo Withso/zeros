@@ -335,11 +335,12 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   }
 
   // ── Display ──────────────────────────────────────────────
-  // A right-aligned, fit-to-content bubble (capped at min(768px, 100%)). The
+  // A right-aligned, fit-to-content bubble (capped at min(800px, 100%)). The
   // right offset + bubble shape is what signals "this is what *you* said"
-  // and distinguishes it from agent output. The 768px cap matches the
+  // and distinguishes it from agent output. The 800px cap matches the
   // agent answer lane's cap (turn-event-list.tsx): both content streams read
-  // at 768 inside the wider max-w-[1152px] band/composer envelope. The
+  // inside the conversation's 800px content column (the max-w-[856px]
+  // band/composer envelope minus its 28px gutters). The
   // wrapper's `items-end` right-anchors this bubble to the band's right edge
   // (lining up with the composer's right edge); the answer lane is the
   // left-anchored counterpart, so the conversation reads prompt-right /
@@ -349,7 +350,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   // inline attachment pill can push min-content past a narrow pane. Because
   // `items-end` anchors the RIGHT edge, every overflowing pixel spilled off
   // the LEFT edge, where the scroller's overflow-x-hidden clipped it — the
-  // bubble read as "cut off" until the pane was widened. min(768px, 100%)
+  // bubble read as "cut off" until the pane was widened. min(800px, 100%)
   // keeps the fit-to-content look but never lets the bubble exceed the lane
   // (text-message.tsx pairs this with `wrap-anywhere` so the text inside
   // wraps rather than clips). NOT sticky
@@ -378,7 +379,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     <div className="zeros-agent-turn-prompt group/usermsg relative flex flex-col items-end">
       <div
         className={cn(
-          "w-fit max-w-[min(768px,100%)] cursor-text border px-3 py-2 select-text",
+          "w-fit max-w-[min(800px,100%)] cursor-text border px-3 py-2 select-text",
           PROMPT_SURFACE_RADIUS,
           autoAction
             ? // font-medium (500) sets the auto-sent label apart from typed

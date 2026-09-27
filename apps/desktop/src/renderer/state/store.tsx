@@ -205,8 +205,8 @@ export type WorkspaceState = {
 
   activePage: WorkspacePage;
 
-  /** Persisted top-bar workspace presentation. Repository filters carry the
-   * semantic project id as `repo:<id>`. */
+  /** Persisted sidebar workspace presentation (Grouped / Ungrouped). Older
+   * builds also stored Active and `repo:<id>` repository filters. */
   workspaceListFilter: WorkspaceListFilter;
 
   /** Bounded, persisted clock of deliberate workspace actions, keyed by the

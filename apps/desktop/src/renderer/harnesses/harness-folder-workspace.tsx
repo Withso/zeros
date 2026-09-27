@@ -119,6 +119,15 @@ Object.assign(window, {
         inspection = { ...inspection, isRepo: true, hasCommits: true };
         return { repoRoot: folder, initialSha: "fixture-initial-commit" };
       }
+      if (op === "workspace_clone") {
+        inspection = {
+          ...inspection,
+          isRepo: true,
+          hasCommits: true,
+          originUrl: String(params?.url),
+        };
+        return { repoRoot: folder, defaultBranch: "main" };
+      }
       if (op === "workspace_inspect_folder") {
         if (inspectionFails) throw new Error("Folder temporarily unavailable");
         return inspection;
@@ -314,11 +323,10 @@ const SummaryContents = new URLSearchParams(location.search).has("summary")
 const DispatcherPage = createFixture
   ? (await import("../shell/dispatcher/dispatcher-modal")).DispatcherPage
   : null;
-const { TopBar } = await import("../shell/top-bar");
+const { AppSidebar } = await import("../shell/app-sidebar");
 const { NoProjectsView } = await import("../shell/no-projects-view");
 const { useProjectCapabilitiesRefresh } =
   await import("../shell/use-project-capabilities-refresh");
-const { HomeSidebar } = await import("../shell/home-sidebar");
 const { RepoPage } = await import("../features/repositories/repo-page");
 const { DashboardPage } = await import("../features/dashboard/dashboard-page");
 const { AddProjectProvider, useAddProject } =
@@ -346,13 +354,16 @@ const auth = {
 
 function Harness() {
   useProjectCapabilitiesRefresh();
-  const { openProject } = useAddProject();
+  const { openProject, openGithubProject, quickStart } = useAddProject();
   const openSavedWorkspace = useOpenWorkspace();
   const { projects } = useProjects();
   const project = projects.find((row) => row.repoRoot === folder);
   const activeRepoId = useWorkspaceStore((state) => state.activeRepoId);
   const repoProject = projects.find((row) => row.id === activeRepoId);
   const page = useWorkspaceStore((state) => state.activePage);
+  const createProjectId = useWorkspaceStore(
+    (state) => state.createWorkspaceProjectId,
+  );
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const chats = useWorkspaceStore((state) => state.chats);
   const activeChatId = useWorkspaceStore((state) => state.activeChatId);
@@ -365,12 +376,11 @@ function Harness() {
   return (
     <>
       <Toaster />
-      <TopBar />
       <nav className="flex gap-2 p-4">
         <Button
           onClick={
             automatic
-              ? openProject
+              ? () => openProject()
               : () => {
                   // Restore a pre-existing root-bound chat, not a new-project admission.
                   const saved = upsertProject({
@@ -413,17 +423,17 @@ function Harness() {
         </Button>
       </nav>
       <div data-folder-workspace-surface className="flex h-[600px]">
-        <HomeSidebar />
+        <AppSidebar />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {scratchFixture && !project ? (
             <NoProjectsView />
           ) : page === "create" && DispatcherPage ? (
             <DispatcherPage
               active
-              initialProjectId={project?.id}
+              initialProjectId={createProjectId}
               onOpenProject={openProject}
-              onOpenGithubProject={() => {}}
-              onQuickStart={() => {}}
+              onOpenGithubProject={openGithubProject}
+              onQuickStart={quickStart}
             />
           ) : page === "repo" && repoProject ? (
             <RepoPage project={repoProject} />

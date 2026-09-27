@@ -7,11 +7,11 @@
 // browser-owned at app.zeros.build; this page remains device configuration.
 // owns the USER scope only; repository settings live on each repository page
 // (Home rail → repository → Settings tab).
-// Settings is its own page: this section nav is the MAIN sidebar (the
-// Home rail is hidden while here), with a Back row (→ Home tab) at its
-// top. There is no header bar — "Open settings.toml" (reveal in Finder)
-// floats at the detail pane's top-right, mirroring the repo page; the
-// global top bar owns the macOS traffic lights. The sidebar sits flat on
+// Settings is its own page: this section nav takes the app sidebar's place
+// (the sidebar is hidden while here), with a Back row (→ Dashboard) under a
+// 40px title band that holds the macOS traffic lights. There is no header bar
+// — "Open settings.toml" (reveal in Finder) floats at the detail pane's
+// top-right, mirroring the repo page. The section nav sits flat on
 // the page canvas (`--sidebar-bg`); the detail pane is flat `--bg1`
 // separated by a single `border-l` seam, content in a centered reading
 // column.
@@ -48,6 +48,7 @@ import "./settings-page.css";
 import { useRetainedViewKeys } from "../../shell/use-retained-view-keys";
 import { useScrollMemoryRef } from "../../shell/scroll-memory";
 import { useInstantViewSwitch } from "../../shared/ui/use-instant-view-switch";
+import { useCustomWindowDrag } from "../../shell/use-custom-window-drag";
 import {
   Palette,
   Settings,
@@ -481,6 +482,10 @@ const SETTINGS_GROUP_HEADER_CLS =
 
 export function SettingsPage() {
   const pageSurfaceRef = useRef<HTMLDivElement | null>(null);
+  // Settings takes the app sidebar's place, so its nav owns the macOS
+  // traffic-light band, which drags the window like the sidebar's.
+  const titleBandRef = useRef<HTMLDivElement | null>(null);
+  useCustomWindowDrag(titleBandRef);
   const dispatch = useWorkspaceDispatch();
   const pageActive = useActivePage() === "settings";
   const { projects } = useProjects();
@@ -659,69 +664,76 @@ export function SettingsPage() {
       className="bg-sidebar-bg flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
     >
       {/* No header bar: Settings is its own
-          page — the section nav below is the MAIN sidebar with a Back row at
-          its top (→ Home tab), and "Open settings.toml" floats at the content's
-          top-right, mirroring the repo page. The global top bar owns the macOS
-          traffic lights + window drag. */}
+          page — the section nav below takes the app sidebar's place with a
+          Back row at its top (→ Dashboard), and "Open settings.toml" floats at
+          the content's top-right, mirroring the repo page. The nav's 40px band
+          holds the macOS traffic lights and drags the window. */}
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        {/* Sidebar — the MAIN nav now (the Home rail is hidden on Settings).
-              A Back row (→ Home tab) sits at the top, then the labelled
-              SECTION_GROUPS. Repo settings live on each repo's page. */}
-        <nav
-          className="flex shrink-0 basis-[256px] flex-col overflow-y-auto px-3 pt-4 pb-2"
-          role="tablist"
-          aria-label="Settings sections"
-        >
-          <Tooltip label="Back to home">
-            <Button
-              variant="ghost"
-              className={cn(SIDEBAR_ENTRY_CLS, "mb-2")}
-              onClick={handleBack}
-            >
-              <ArrowLeft size={14} strokeWidth={1.5} />
-              <span>Back</span>
-            </Button>
-          </Tooltip>
-          {SECTION_GROUPS.map((group, groupIndex) => {
-            const sections = group.ids.flatMap((id) => {
-              const section = availableSections.find((s) => s.id === id);
-              return section ? [section] : [];
-            });
-            if (sections.length === 0) return null;
-            return (
-              <React.Fragment key={group.label}>
-                <div
-                  className={cn(
-                    SETTINGS_GROUP_HEADER_CLS,
-                    groupIndex === 0 && "pt-1",
-                  )}
-                >
-                  {group.label}
-                </div>
-                <div className="flex flex-col gap-1">
-                  {sections.map((section) => (
-                    <SectionNavButton
-                      key={section.id}
-                      icon={section.icon}
-                      label={section.label}
-                      className={section.navClassName}
-                      isActive={
-                        selection.scope === "user" &&
-                        selection.section === section.id
-                      }
-                      onClick={() => setActive(userSelection(section.id))}
-                      onIntent={
-                        section.id === "integrations"
-                          ? prefetchGithubAuthSnapshot
-                          : undefined
-                      }
-                    />
-                  ))}
-                </div>
-              </React.Fragment>
-            );
-          })}
-        </nav>
+        {/* Sidebar — the MAIN nav here (the app sidebar is hidden on Settings).
+              A Back row (→ Dashboard) sits under the title band, then the
+              labelled SECTION_GROUPS. Repo settings live on each repo's page. */}
+        <div className="flex min-h-0 shrink-0 basis-[256px] flex-col">
+          <div
+            ref={titleBandRef}
+            className="h-10 shrink-0"
+            aria-hidden="true"
+          />
+          <nav
+            className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pt-4 pb-2"
+            role="tablist"
+            aria-label="Settings sections"
+          >
+            <Tooltip label="Back to home">
+              <Button
+                variant="ghost"
+                className={cn(SIDEBAR_ENTRY_CLS, "mb-2")}
+                onClick={handleBack}
+              >
+                <ArrowLeft size={14} strokeWidth={1.5} />
+                <span>Back</span>
+              </Button>
+            </Tooltip>
+            {SECTION_GROUPS.map((group, groupIndex) => {
+              const sections = group.ids.flatMap((id) => {
+                const section = availableSections.find((s) => s.id === id);
+                return section ? [section] : [];
+              });
+              if (sections.length === 0) return null;
+              return (
+                <React.Fragment key={group.label}>
+                  <div
+                    className={cn(
+                      SETTINGS_GROUP_HEADER_CLS,
+                      groupIndex === 0 && "pt-1",
+                    )}
+                  >
+                    {group.label}
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {sections.map((section) => (
+                      <SectionNavButton
+                        key={section.id}
+                        icon={section.icon}
+                        label={section.label}
+                        className={section.navClassName}
+                        isActive={
+                          selection.scope === "user" &&
+                          selection.section === section.id
+                        }
+                        onClick={() => setActive(userSelection(section.id))}
+                        onIntent={
+                          section.id === "integrations"
+                            ? prefetchGithubAuthSnapshot
+                            : undefined
+                        }
+                      />
+                    ))}
+                  </div>
+                </React.Fragment>
+              );
+            })}
+          </nav>
+        </div>
 
         {/* Detail pane — flat `--bg1`, full-bleed to the window edges, with
               a single `border-l` seam against the sidebar-bg canvas (the

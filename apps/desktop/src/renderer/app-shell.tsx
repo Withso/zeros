@@ -1,16 +1,20 @@
 // ──────────────────────────────────────────────────────────
-// Zeros Mac App — Global Top Bar + Two-Column Workspace Shell
+// Zeros Mac App — App Sidebar + Two-Column Workspace Shell
 // ──────────────────────────────────────────────────────────
 //
-// Layout: global repository/workspace navigation sits above the agent chat and
-// right-side work surface:
+// Layout: one left sidebar owns window chrome and navigation — organization,
+// Dashboard / Customize / Create, and every workspace grouped by repository —
+// beside the agent chat and right-side work surface:
 //
-//   ┌─────────────────────────────────────────────────────┐
-//   │ Home · Create · Filter │ repository/workspace tabs │
-//   ├─────────────────────────┬───────────────────────────┤
-//   │ Agent Workspace         │ Browser / panels          │
-//   │ chat                    │ tabs + workspace          │
-//   └─────────────────────────┴───────────────────────────┘
+//   ┌──────────────┬────────────────────────┬──────────────────┐
+//   │ ● ● ●        │ Agent Workspace        │ Browser / panels │
+//   │ Dashboard    │ chat                   │ tabs + workspace │
+//   │ Create       │                        │                  │
+//   │ Workspaces   │                        │                  │
+//   └──────────────┴────────────────────────┴──────────────────┘
+//
+// Home destinations (Dashboard, Customize, repository pages, Create) replace
+// the two columns; Settings replaces the sidebar with its own section nav.
 //
 // Workbench mounts the design workspace beside native-adjacent tools
 // such as Git, Terminal, Env, and Todo.
@@ -68,7 +72,9 @@ import { isFeedbackConfigured } from "./features/feedback/submit-feedback";
 import { BrowserConfirmationController } from "./features/browser/browser-confirmation-controller";
 import { BrowserSessionController } from "./features/browser/browser-session-controller";
 import { BrowserAgentPictureInPicture } from "./features/browser/browser-agent-picture-in-picture";
-import { TopBar } from "./shell/top-bar";
+import { AppSidebar } from "./shell/app-sidebar";
+import { useSidebarCollapsed } from "./shell/sidebar-collapsed";
+import { CollapsedSidebarControls } from "./shell/sidebar-toggle";
 import { ConversationPane } from "./shell/conversation/conversation-pane";
 import { WorkbenchPane } from "./shell/workbench/workbench-pane";
 import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
@@ -80,7 +86,6 @@ import {
 } from "./shell/add-project-provider";
 import { DispatcherPage } from "./shell/dispatcher/dispatcher-modal";
 import { NoProjectsView } from "./shell/no-projects-view";
-import { HomeSidebar } from "./shell/home-sidebar";
 import { useActiveWorkspace } from "./state/use-active-workspace";
 import { useProjects } from "./state/use-projects";
 import { SettingsPage } from "./features/settings/settings-page";
@@ -783,8 +788,8 @@ function ReloadOnProjectChange() {
 /** Settings remains a full-window route with its purpose-built header. */
 const WORKBENCH_COLLAPSED_KEY = "column-3-collapsed"; // gitleaks:allow — localStorage key name
 
-// Main workspace routes are a global 40px repository/workspace bar followed by
-// the two-column body. Settings retains its own full-window layout for now.
+// Main routes are the app sidebar followed by the two-column body (or a Home
+// page). Settings replaces the sidebar with its own section nav.
 const APP_ROOT_CLS =
   "fixed inset-0 flex flex-col overflow-hidden bg-bg1 font-sans text-sm text-fg1";
 const APP_BODY_CLS =
@@ -919,10 +924,10 @@ function ShellRouter() {
   // apps/desktop/src/renderer/shell/use-copy-logs-hotkey.ts.
   useCopyLogsHotkey();
 
-  // Every route now flows through MainShellBody so the global top bar is the one
+  // Every route flows through MainShellBody so the app sidebar is the one
   // constant across the workspace view and the Home sub-pages (Dashboard /
-  // Settings). Home renders a left nav rail beside the active sub-page; Settings
-  // drops its own full-window header and mounts embedded in that content pane.
+  // Customize / repository pages / Create). Settings takes the sidebar's place
+  // with its own section nav and a Back row.
   return (
     <div className={APP_ROOT_CLS}>
       <BrowserSessionController
@@ -1001,10 +1006,9 @@ function MainShellBody({
   // Zero projects -> full-window welcome (logo + Open project / GitHub /
   // Quick start tiles) instead of the empty three-column shell.
   const showWelcome = projects.length === 0;
-  // The Home tab's sub-pages share one shell: the top bar, a left nav rail
-  // (HomeSidebar), and the active sub-page beside it. "repo" is the per-repo
-  // page (workspaces + settings) reached from the rail's REPOS rows;
-  // "customize" is agent capabilities (MCP now) scoped User / per-repo.
+  // The Home sub-pages share one shell beside the app sidebar. "repo" is the
+  // per-repo page (workspaces + settings) reached from a repository's settings
+  // action; "customize" is agent capabilities (MCP now) scoped User / per-repo.
   const isHome =
     activePage === "create" ||
     activePage === "dashboard" ||
@@ -1055,10 +1059,24 @@ function MainShellBody({
     !workspaceLoading &&
     !showWelcome &&
     (workspaceShellRetainedRef.current || activePage === "workspace");
+  // Collapsing the sidebar leaves the traffic lights and its panel-left toggle
+  // floating over the content's top-left corner; the surface that owns that
+  // corner keeps it clear. Settings always replaces the sidebar with its own
+  // section nav and title band, so neither applies there.
+  const sidebarCollapsed = useSidebarCollapsed();
+  const settingsActive = activeHomePageId === "settings";
+  const collapsedControlsVisible = sidebarCollapsed && !settingsActive;
 
   return (
-    <div ref={shellSurfaceRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <TopBar />
+    <div
+      ref={shellSurfaceRef}
+      className="relative flex min-h-0 min-w-0 flex-1 flex-row"
+    >
+      {/* Always mounted: the sidebar also owns app-wide navigation keepers
+          (project sync, run activity, workspace validation). Collapsing it or
+          opening Settings (which shows its own section nav in its place) only
+          hides it. */}
+      <AppSidebar hidden={settingsActive || sidebarCollapsed} />
       <div className={APP_BODY_CLS}>
         <div className="text-fg1 bg-bg1 relative flex min-h-0 min-w-0 flex-1 overflow-hidden font-sans text-sm antialiased">
           {activePage === "workspace" && workspaceLoading && (
@@ -1083,6 +1101,7 @@ function MainShellBody({
                     workbenchCollapsed={workbenchCollapsed}
                     onToggleWorkbench={toggleWorkbench}
                     workspace={activeWorkspace}
+                    windowControlsInset={sidebarCollapsed}
                   />
                   {workspaceToolsAvailable && <WorkbenchPane
                     onToggleWorkbench={toggleWorkbench}
@@ -1112,17 +1131,17 @@ function MainShellBody({
               ].join(" ")}
               aria-hidden={!isHome}
             >
-              {/* Settings is its own page — its section nav is the main
-                  sidebar, so the Home rail is hidden there (Back returns to
-                  the Home tab). Dashboard and the repo hub keep the rail. */}
-              {activeHomePageId !== "settings" && <HomeSidebar />}
               {/* The Home sub-page column (dashboard / customize / repo hub /
                   team) — dropdown lists opened inside it stay inside it
                   (popover-boundary.ts). Settings stamps its own narrower
                   reading column below. */}
               <div
                 {...popoverBoundaryProps}
-                className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
+                className={[
+                  "relative flex min-h-0 min-w-0 flex-1 overflow-hidden",
+                  // Home pages start below the collapsed window controls.
+                  collapsedControlsVisible ? "mt-10" : "",
+                ].join(" ")}
               >
                 {homePageIdsToRender.includes("dashboard") && (
                   <div
@@ -1210,6 +1229,7 @@ function MainShellBody({
           )}
         </div>
       </div>
+      {collapsedControlsVisible && <CollapsedSidebarControls />}
     </div>
   );
 }

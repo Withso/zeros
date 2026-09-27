@@ -1,8 +1,8 @@
 // ──────────────────────────────────────────────────────────
-// useHomeSidebarResizeDrag — the Home rail seam drag gesture
+// useHomeSidebarResizeDrag — the app sidebar seam drag gesture
 // ──────────────────────────────────────────────────────────
 //
-// A pointer-captured drag for the HomeSidebar's right-edge seam. Mirrors the
+// A pointer-captured drag for the AppSidebar's right-edge seam. Mirrors the
 // workbench sidebar seam (use-sidebar-drag.ts): geometry is resolved once at
 // pointer-down (the captured pointer means the rail can't move mid-drag), the
 // live width is written straight to the element's inline style per rAF tick

@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import {
+  ArrowUpRight,
   Building2,
   Check,
-  ChevronsUpDown,
-  ExternalLink,
+  ChevronDown,
+  LaptopMinimal,
   LogIn,
   LogOut,
   Plus,
   Settings,
-  UserRound,
 } from "lucide-react";
 import { Button } from "../../shared/ui/primitives/button";
 import {
@@ -24,6 +24,7 @@ import { useAuth, type AuthStatus } from "../auth";
 import { setActiveOrganizationSelection } from "./active-team";
 import { organizationDashboardUrl } from "./organization-links";
 import { useActiveOrganization, useOrganizations } from "./team-store";
+import type { OrganizationSummary } from "./control-plane";
 import {
   desktopOrganizationChoices,
   PERSONAL_ORGANIZATION,
@@ -60,6 +61,29 @@ export function organizationSwitcherSessionActions(
       };
 }
 
+/** Device-local Personal is presented as "Local": its workspaces and chats
+ * live on this machine. The selection id and model name stay unchanged. */
+export const LOCAL_ORGANIZATION_LABEL = "Local";
+
+export function organizationDisplayName(
+  organization: Pick<OrganizationSummary, "isPersonal" | "name">,
+): string {
+  if (organization.isPersonal) return LOCAL_ORGANIZATION_LABEL;
+  return organization.name.trim() || "Organization";
+}
+
+function OrganizationIcon({
+  organization,
+}: {
+  organization: Pick<OrganizationSummary, "isPersonal"> | null;
+}) {
+  return organization?.isPersonal ? (
+    <LaptopMinimal strokeWidth={1.5} />
+  ) : (
+    <Building2 strokeWidth={1.5} />
+  );
+}
+
 export function OrganizationSwitcher({
   onOpenSettings,
   onOrganizationChanged,
@@ -85,9 +109,11 @@ export function OrganizationSwitcher({
   const organizations = sessionActions.showManagement
     ? availableOrganizations
     : desktopOrganizationChoices(null);
-  const label =
-    active?.name?.trim() ||
-    (organizationStatus === "loading" ? "Loading…" : "Personal");
+  const label = active
+    ? organizationDisplayName(active)
+    : organizationStatus === "loading"
+      ? "Loading…"
+      : LOCAL_ORGANIZATION_LABEL;
 
   // Keep Escape deterministic when another Radix layer is completing its exit.
   // The switcher has no nested menus, so the visible root is always the target.
@@ -102,25 +128,19 @@ export function OrganizationSwitcher({
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
+      {/* Sized to its name, up to the sidebar's width; a long organization
+          name truncates while the icon and trailing chevron stay whole. 4px
+          of padding on every side (px-1 beside the primitive's py-1). */}
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
           variant="ghost"
-          className="text-fg1 hover:bg-sidebar-bg-hover mb-2 h-8 w-full justify-start gap-2 rounded-md px-2.5 text-sm font-medium [&_svg]:size-3.5"
+          className="text-fg1 hover:bg-sidebar-bg-hover data-[state=open]:bg-sidebar-bg-hover [&_svg]:text-fg2 mb-2 h-7.5 w-fit max-w-full min-w-0 justify-start gap-2 rounded-md px-1 text-xs font-medium [&_svg]:shrink-0"
           aria-label="Switch organization"
         >
-          <span className="bg-bg2-hover inline-flex size-5 shrink-0 items-center justify-center rounded-sm">
-            {active?.isPersonal ? (
-              <UserRound strokeWidth={1.5} />
-            ) : (
-              <Building2 strokeWidth={1.5} />
-            )}
-          </span>
-          <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-          <ChevronsUpDown
-            className="text-muted-fg shrink-0"
-            strokeWidth={1.5}
-          />
+          <OrganizationIcon organization={active} />
+          <span className="min-w-0 truncate text-left">{label}</span>
+          <ChevronDown className="size-3" strokeWidth={1.5} />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">
@@ -139,9 +159,9 @@ export function OrganizationSwitcher({
               onOrganizationChanged?.();
             }}
           >
-            {organization.isPersonal ? <UserRound /> : <Building2 />}
+            <OrganizationIcon organization={organization} />
             <span className="min-w-0 flex-1 truncate">
-              {organization.name.trim() || "Personal"}
+              {organizationDisplayName(organization)}
             </span>
             {organization.id === active?.id && <Check aria-hidden="true" />}
           </DropdownMenuItem>
@@ -157,7 +177,7 @@ export function OrganizationSwitcher({
               >
                 <Plus />
                 <span>Create organization</span>
-                <ExternalLink className="text-muted-fg ml-auto" />
+                <ArrowUpRight className="text-muted-fg ml-auto" />
               </DropdownMenuItem>
             )}
             <DropdownMenuItem
@@ -174,7 +194,7 @@ export function OrganizationSwitcher({
               <span>
                 {active?.isPersonal ? "Manage account" : "Manage organization"}
               </span>
-              <ExternalLink className="text-muted-fg ml-auto" />
+              <ArrowUpRight className="text-muted-fg ml-auto" />
             </DropdownMenuItem>
           </>
         )}

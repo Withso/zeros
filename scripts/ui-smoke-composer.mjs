@@ -49,6 +49,9 @@
 //  15. Browser-tab A → B → A switching retains each iframe document in its
 //      original DOM position, preserving form state, scroll, and JS heap without
 //      another load.
+//  16. The app sidebar groups workspaces by repository by default, offers only
+//      Grouped/Ungrouped, persists per-repository collapse without hiding the
+//      selection, and routes the repository actions (+, settings, ⋯).
 //
 // Usage:  node scripts/ui-smoke-composer.mjs   (pnpm test:ui-smoke)
 // ============================================================
@@ -69,7 +72,7 @@ import { runSubscriptionSmoke } from "./ui-smoke-subscription.mjs";
 import { runFolderWorkspaceSmoke, runWorkspaceRecoveryNavigationSmoke } from "./ui-smoke-folder-workspace.mjs";
 import { runFolderReviewSmoke } from "./ui-smoke-folder-review.mjs";
 import { runFolderFilesSmoke } from "./ui-smoke-folder-files.mjs";
-import { runFolderCreateSmoke, runFolderDesignSetupSmoke, runFolderAutoSetupSmoke, runStartFromScratchSmoke } from "./ui-smoke-folder-create.mjs";
+import { runCreateProjectSelectionSmoke, runFolderCreateSmoke, runFolderDesignSetupSmoke, runFolderAutoSetupSmoke, runStartFromScratchSmoke } from "./ui-smoke-folder-create.mjs";
 import { runRepoSettingsSmoke } from "./ui-smoke-repo-settings.mjs";
 import { runDialogChromeSmoke } from "./ui-smoke-project-folder-setup.mjs";
 import { runFilePrefetchSmoke } from "./ui-smoke-file-prefetch.mjs";
@@ -88,6 +91,7 @@ import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
 import { runComposerAttachmentsSmoke } from "./ui-smoke-composer-attachments.mjs";
 import { runOverlayPositioningSmoke } from "./ui-smoke-overlay-positioning.mjs";
 import { runDraftIndicatorsSmoke } from "./ui-smoke-draft-indicators.mjs";
+import { runAppSidebarSmoke } from "./ui-smoke-app-sidebar.mjs";
 import { runChatTitlesSmoke } from "./ui-smoke-chat-titles.mjs";
 import { runPermissionHintsSmoke } from "./ui-smoke-permission-hints.mjs";
 import { runContextGaugeSmoke } from "./ui-smoke-context-gauge.mjs";
@@ -185,6 +189,11 @@ try {
   const draftPage = await browser.newPage();
   await runDraftIndicatorsSmoke({ page: draftPage, check, harnessBase });
   await draftPage.close();
+  const sidebarPage = await browser.newPage({
+    viewport: { width: 1280, height: 800 },
+  });
+  await runAppSidebarSmoke({ page: sidebarPage, check, harnessBase });
+  await sidebarPage.close();
   const titlePage = await browser.newPage();
   await runChatTitlesSmoke({ page: titlePage, check, harnessBase });
   await titlePage.close();
@@ -2571,6 +2580,7 @@ try {
   await runFolderFilesSmoke({ page, check });
   await runStartFromScratchSmoke({ page, check });
   await runFolderAutoSetupSmoke({ page, check });
+  await runCreateProjectSelectionSmoke({ page, check });
   await runFolderCreateSmoke({ page, check });
   await runFolderDesignSetupSmoke({ page, check });
   await runDialogChromeSmoke({ page, check });

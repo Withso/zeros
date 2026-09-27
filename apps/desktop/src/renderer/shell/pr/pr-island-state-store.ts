@@ -3,15 +3,15 @@
 // ──────────────────────────────────────────────────────────
 //
 // The PR status island derives its state only while mounted (the active
-// workspace's Changes/Review row). The top bar's workspace tabs want the same
+// workspace's Changes/Review row). The sidebar's workspace rows want the same
 // signal — "merge-conflicts" paints a red conflict glyph, "ready-to-merge" a
 // green PR arrow, … — so the island PUBLISHES each derived kind here and the
-// tabs subscribe. Entries persist after unmount (a tab keeps its last-known
+// rows subscribe. Entries persist after unmount (a row keeps its last-known
 // icon when you switch away) AND across relaunches (2026-07-21: hydrated from
 // localStorage, so a reload can't drop a green glyph to the brown "open"
 // fallback while nothing changed — the icon repaints only when the island
 // derives a different status). Workspaces that never derived here fall back
-// to their persisted prState (see top-bar.tsx); persisted TERMINAL prStates
+// to their persisted prState (see sidebar-workspace-row.tsx); persisted TERMINAL prStates
 // (merged/closed — engine-reconciled from GitHub) outrank this store there,
 // so a stale pre-relaunch kind can never hide an external merge/close.
 // Bounded by the number of live workspaces with PRs.

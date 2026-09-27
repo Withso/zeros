@@ -280,8 +280,9 @@ repository/provider revocation and, where required, managed-device controls.
 
 ## Client and management boundaries
 
-The desktop Home rail owns the active-organization switcher. It can select
-Personal or an organization, but creation, membership, billing, and destructive
+The desktop app sidebar owns the active-organization switcher. It can select
+Personal (labelled "Local", because its workspaces and chats stay on this
+machine) or an organization, but creation, membership, billing, and destructive
 organization management open `app.zeros.build` in the system browser. The
 desktop Settings surface intentionally contains no parallel administration UI.
 

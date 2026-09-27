@@ -72,15 +72,59 @@ owner removal. Missing paths, permission/config failures and unavailable Git
 are errors, not evidence that Git or an origin was removed. Both Review entry
 points (summary and tab strip) share the same capability predicate.
 
-Legacy plain folders are standalone tabs in Grouped, Ungrouped, Active, and
-repository-specific filters: never paint a second repository marker, group
-surface, or sticky lead for them. Their settings expose Environment, Actions,
+Legacy plain folders are standalone sidebar rows in both Grouped and
+Ungrouped: never paint a repository header or group for them, because the
+folder row already names the repository. A folder without workspace history
+opens its settings directly; listing or selecting it never creates a workspace
+or chat. Ungrouped places these unopened folders after workspace rows, in
+registration order. Their settings expose Environment, Actions,
 and Paths; Workspaces, Git, Files-to-copy, worktree lifecycle scripts, workspace
 storage paths, and the archive picker require Git. File browsing remains
 available in the workbench. Resolve an unavailable saved settings view to
 Environment synchronously without overwriting the preference, and evict retained
 Git-only views when capability disappears. A confirmed local Git repository
 gets the full settings navigation even without an origin or GitHub connection.
+
+### 1.2 App sidebar navigation
+
+One left sidebar replaces the former top bar and Home rail on every page except
+Settings, which takes its place with its own section nav. The sidebar stays
+mounted (hidden and inert on Settings, with its polling resource monitor
+unmounted and row Git reads suspended) because it also owns the app-wide
+keepers: project sync, settings prefetch, run-activity sync, idle file warming,
+and validation of a remembered workspace once its exact repository list settles.
+
+- Its 40px title band holds the macOS traffic lights, the panel-left toggle
+  right after them, and drags the window. Resources and Archive use 28px icon
+  buttons so both fit at the supported 200px sidebar width. Resource totals
+  remain available in the tooltip and details popover. The organization switcher
+  names device Personal "Local" and sizes to its label, truncating long names.
+  Destinations are Home (the Dashboard) and Customize; Create is an action and,
+  like a repository's +, never paints as selected. The profile row opens
+  Settings. Rows are 30px, labels 13px, with 2px between repository and
+  workspace rows; repository names and workspace glyphs stay on fg2. Adding a
+  repository lives on Create, the welcome view and the menu bar.
+- Collapsing is one persisted app preference. The sidebar stays mounted but
+  hidden; the traffic lights and the toggle then float over the content's
+  top-left corner at the same position, the first chat strip reserves that
+  corner in its leading slot, and Home pages start below it.
+- Workspaces are Grouped by default: every registered Git repository is a
+  header (even with no workspaces), with its in-flight creates and workspaces
+  newest first. Ungrouped is one mixed newest-first list whose rows lead with
+  their repository icon and trail with agent state. These are the only two
+  presentations; a persisted Active or repository-only filter folds into
+  Ungrouped or Grouped when painted and is written back once.
+- A header's icon becomes its disclosure chevron on hover; + (Create for that
+  repository) is always visible; settings and ⋯ (Create workspace, Create from…,
+  Configuration, Remove repository) appear on hover or keyboard focus.
+  Collapse belongs to the repository id, is bounded and pruned on removal, and
+  never hides the selected workspace.
+- Selecting a workspace from Home or a deep link reveals its row, including
+  returning to the same workspace after leaving it. Unrelated refreshes and
+  hiding/showing an unchanged selection preserve manual scroll.
+- Create from… publishes the Create route and project atomically; the "open
+  the source picker" intent is ephemeral and is consumed or dropped as soon as
+  Create shows (or cannot show) that repository.
 
 ### 2. Treat reads as exact-key server state
 
@@ -104,9 +148,14 @@ Two rules that pattern enforces:
 
 Create's project, source and Code/Design controls share one row above the prompt,
 with mode aligned right and long labels truncated in narrow windows. The project
-picker also owns Open project, Open GitHub project and Start from scratch. The source
-picker separates local branches from the configured remote's branches, shows
-the actual default branch, and retains each tab's confirmed rows independently
+picker also owns Open project, Open GitHub project and Start from scratch. These
+actions register and select their project while keeping Create and its draft open.
+Workspace creation waits for submission, as does Git preparation for opened
+folders. Opening a linked worktree here selects its primary repository without
+adopting a workspace.
+Welcome, sidebar and native-menu opens retain their immediate workspace flow.
+The source picker separates local branches from the configured remote's branches,
+shows the actual default branch, and retains each tab's confirmed rows independently
 of GitHub requests. Issues remain unavailable until issue creation is supported.
 Catalog keys include the checkout root and observed origin; local branch keys
 include the checkout root and repository slug. Intent warms local metadata;

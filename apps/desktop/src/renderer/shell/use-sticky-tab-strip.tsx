@@ -2,12 +2,12 @@
 // Sticky tab strip — shared scroll/pin/fade machinery
 // ──────────────────────────────────────────────────────────
 //
-// The DOM half of the sticky-active-tab pattern the top-bar workspace
-// strip and the conversation pane chat strip each carry a private copy of
-// (top-bar.tsx / conversation/chat-tabs.tsx; the pure math already lives in
-// workspace-tabs.ts). Extracted so workbench's two tab rows don't
-// become a third and fourth copy. New strips should use this hook;
-// the two original strips are candidates to migrate here later.
+// The DOM half of the sticky-active-tab pattern the conversation pane chat
+// strip carries a private copy of (conversation/chat-tabs.tsx; the pure math
+// already lives in workspace-tabs.ts; the former top-bar workspace strip was
+// the other original). Extracted so workbench's two tab rows don't become
+// more copies. New strips should use this hook; the chat strip is a candidate
+// to migrate here later.
 //
 // Behavior contract (identical to the originals):
 //

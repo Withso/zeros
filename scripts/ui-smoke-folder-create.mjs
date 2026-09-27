@@ -36,6 +36,164 @@ const openFixture = async (page, query, confirm = true) => {
   }
 };
 
+export async function runCreateProjectSelectionSmoke({ page, check }) {
+  await page.evaluate(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+  await page.goto(
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-folder-workspace.html?create`,
+  );
+  await page.evaluate(() => window.setFolderInspection(true));
+  await page.getByRole("button", { name: "Show Create", exact: true }).click();
+  const projectPicker = page.getByRole("button", { name: "Choose project", exact: true });
+  const editor = page.locator('[contenteditable="true"]');
+  const prompt = "Keep this draft while I add my first project";
+  await expect(projectPicker).toHaveText("Add project");
+  await editor.fill(prompt);
+  await projectPicker.click();
+  await page.getByRole("menuitem", { name: "Open project", exact: true }).click();
+  await expect(projectPicker).toHaveText("To-do app");
+  await expect(editor).toHaveText(prompt);
+  expect((await snapshot(page)).page).toBe("create");
+  expect((await snapshot(page)).chats).toEqual([]);
+  expect(await page.evaluate(() => window.folderWorkspaceRequests.filter(({ op }) =>
+    /^(workspace\.(prepareCreate|create|adoptExisting)|git\.initInPlace)$/.test(op),
+  ))).toEqual([]);
+  check("Adding the first project from Create selects it and keeps the draft without creating a workspace", true);
+
+  await page.locator("section").getByRole("button", { name: "Create", exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).chats.length).toBe(1);
+  const created = await snapshot(page);
+  expect(created.page).toBe("workspace");
+  expect(created.drafts[created.activeChatId].text).toBe(prompt);
+  await expect.poll(() => page.evaluate(() => window.folderWorkspaceRequests.filter(({ op }) =>
+    op === "workspace.create",
+  ).length)).toBe(1);
+  check("Submitting Create makes the first workspace with the preserved prompt", true);
+
+  await page.getByRole("button", { name: "Show Create", exact: true }).click();
+  await page.evaluate(async () => {
+    const { upsertProject } = await import("/apps/desktop/src/renderer/state/projects-store.ts");
+    const { notifyProjectsChanged } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
+    upsertProject({ repoRoot: "/fixture/Another project", isGitRepository: true });
+    notifyProjectsChanged();
+  });
+  await projectPicker.click();
+  await page.getByRole("menuitem", { name: "Another project", exact: true }).click();
+  await expect(projectPicker).toHaveText("Another project");
+  await editor.fill(prompt);
+  await projectPicker.click();
+  await page.getByRole("menuitem", { name: "Open project", exact: true }).click();
+  await expect(projectPicker).toHaveText("To-do app");
+  await expect(editor).toHaveText(prompt);
+  expect((await snapshot(page)).page).toBe("create");
+  expect((await snapshot(page)).chats).toEqual(created.chats);
+  check("Reopening a project selects it even when Create originally targeted it, without opening its existing workspace", true);
+
+  await page.evaluate(() => {
+    const invoke = window.__ZEROS_NATIVE__.invoke;
+    window.__ZEROS_NATIVE__.invoke = (op, params) => {
+      if (op === "pick_project_folder") {
+        window.__ZEROS_NATIVE__.invoke = invoke;
+        return Promise.resolve(null);
+      }
+      return invoke(op, params);
+    };
+  });
+  await projectPicker.click();
+  await page.getByRole("menuitem", { name: "Open project", exact: true }).click();
+  await expect(projectPicker).toHaveAttribute("aria-expanded", "false");
+  await expect(projectPicker).toHaveText("To-do app");
+  await expect(editor).toHaveText(prompt);
+  await page.evaluate(() => window.setFolderInspection(true, null, true));
+  await projectPicker.click();
+  await page.getByRole("menuitem", { name: "Open project", exact: true }).click();
+  await expect(page.getByText("Folder temporarily unavailable", { exact: true })).toBeVisible();
+  await expect(projectPicker).toHaveText("To-do app");
+  await expect(editor).toHaveText(prompt);
+  expect((await snapshot(page)).chats).toEqual(created.chats);
+  check("Canceling or failing a project open preserves the Create selection and draft", true);
+
+  await page.evaluate(() => window.setFolderInspection(true));
+  await page.getByRole("button", { name: "Open folder fixture", exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).page).toBe("workspace");
+  expect((await snapshot(page)).chats).toEqual(created.chats);
+  check("Opening a project outside the composer still opens its workspace while Create is visible", true);
+
+  const resetCreate = async () => {
+    await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
+    await page.reload();
+    await page.getByRole("button", { name: "Show Create", exact: true }).click();
+    await editor.fill(prompt);
+  };
+  const expectSelectionOnly = async () => {
+    await expect(projectPicker).toHaveText("To-do app");
+    await expect(editor).toHaveText(prompt);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect((await snapshot(page)).page).toBe("create");
+    expect((await snapshot(page)).chats).toEqual([]);
+    expect(await page.evaluate(() => window.folderWorkspaceRequests.filter(({ op }) =>
+      /^(workspace\.(prepareCreate|create|adoptExisting)|git\.initInPlace)$/.test(op),
+    ))).toEqual([]);
+  };
+  for (const isRepo of [false, true]) {
+    await resetCreate();
+    await page.evaluate((isRepo) => window.setFolderInspection(isRepo, null, false, false), isRepo);
+    await projectPicker.click();
+    await page.getByRole("menuitem", { name: "Open project", exact: true }).click();
+    await expectSelectionOnly();
+    await page.locator("section").getByRole("button", { name: "Create", exact: true }).click();
+    await expect.poll(async () => (await snapshot(page)).chats.length).toBe(1);
+    expect(await page.evaluate(() => window.folderWorkspaceRequests.filter(({ op }) =>
+      op === "git.initInPlace",
+    ).length)).toBe(1);
+  }
+  check("Plain folders and empty Git repositories defer initialization and workspace creation until submission", true);
+
+  await resetCreate();
+  await page.evaluate(() => {
+    window.setFolderInspection(true);
+    const invoke = window.__ZEROS_NATIVE__.invoke;
+    window.__ZEROS_NATIVE__.invoke = async (op, params) => {
+      const result = await invoke(op, params);
+      if (op === "pick_project_folder") return "/fixture/linked-worktree";
+      if (op === "workspace_inspect_folder" && params.path === "/fixture/linked-worktree") {
+        return { ...result, isWorktree: true, mainRoot: "/fixture/To-do app", branch: "feature/linked" };
+      }
+      return result;
+    };
+  });
+  await projectPicker.click();
+  await page.getByRole("menuitem", { name: "Open project", exact: true }).click();
+  await expectSelectionOnly();
+  const roots = await page.evaluate(async () => {
+    const { loadProjects } = await import("/apps/desktop/src/renderer/state/projects-store.ts");
+    return loadProjects().map(({ repoRoot }) => repoRoot);
+  });
+  expect(roots).toEqual([folder]);
+  check("Adding a linked worktree from Create selects its primary repository without adopting the worktree", true);
+
+  for (const action of ["Open GitHub project", "Start from scratch"]) {
+    await resetCreate();
+    await projectPicker.click();
+    await page.getByRole("menuitem", { name: action, exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("textbox", { name: "Parent folder", exact: true }).fill("/fixture");
+    if (action === "Open GitHub project") {
+      await dialog.getByRole("textbox", { name: "Repository URL", exact: true }).fill("https://github.com/example/to-do-app");
+      await dialog.getByRole("button", { name: "Clone", exact: false }).click();
+    } else {
+      await expect(dialog).not.toContainText("your first workspace");
+      await dialog.getByRole("textbox", { name: "Project name", exact: true }).fill("To-do app");
+      await dialog.getByRole("switch").click();
+      await dialog.getByRole("button", { name: "Create", exact: true }).click();
+    }
+    await expectSelectionOnly();
+  }
+  check("Cloning or starting a project from the Create picker selects it without creating a workspace", true);
+}
+
 export async function runFolderCreateSmoke({ page, check }) {
   await openFixture(page, "create");
   const before = await snapshot(page);

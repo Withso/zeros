@@ -57,7 +57,7 @@ interface TurnEventListProps {
   workflow?: WorkflowProgress | null;
   onStopWorkflow?: (taskId: string) => void;
   /** The turn footer (run time, copy, "…", file pills). Rendered INSIDE this
-   *  component's 768 lane so it hugs the answer and the pills align under it —
+   *  component's 800 lane so it hugs the answer and the pills align under it —
    *  as a TurnContainer sibling it picked up the container's gap-4 (a ~20px gap
    *  the user flagged). Null/absent for turns with no footer. */
   footer?: ReactNode;
@@ -110,19 +110,19 @@ export const TurnEventList = memo(function TurnEventList({
       ? { workflow, onStop: onStopWorkflow }
       : null;
 
-  // 2026-06-18: the agent's output + tool calls render in a LEFT-aligned lane
-  // capped at max-w-[768px] (`w-full max-w-[768px] self-start`) — the reading
-  // measure for the answer + tool feed. This cap is NARROWER than the
-  // conversation envelope: the band (agent-chat.tsx `.zeros-agent-messages`)
-  // and the composer are max-w-[1152px], but each turn's content reads at a
-  // comfortable 768. `self-start` left-anchors the lane to the band's left edge
-  // (which lines up with the composer's left edge); the user prompt is its
-  // right-anchored counterpart (turn-container.tsx: `items-end` +
-  // `max-w-[768px]`) — the answer hugs the LEFT, the prompt hugs the RIGHT,
-  // both capped at 768 inside the wide 1152 band. RESPONSIVE: the cap is
-  // ABSOLUTE, so `w-full` fills the band whenever it is narrower than 768 (a
-  // shrunk conversation pane → content fits the window) and only caps once it would exceed
-  // 768. A proportional cap (max-w-[80%]) was tried and reverted — it reserved
+  // The agent's output + tool calls render in a LEFT-aligned lane capped at
+  // max-w-[800px] (`w-full max-w-[800px] self-start`) — the reading measure
+  // for the answer + tool feed. 2026-09-27: it matches the conversation's
+  // 800px content column (agent-chat.tsx `.zeros-agent-messages` and the
+  // composer are max-w-[856px] with 28px gutters), so prose and the composer
+  // share one column. `self-start` left-anchors the lane to the band's left
+  // edge (which lines up with the composer's left edge); the user prompt is
+  // its right-anchored counterpart (turn-container.tsx: `items-end` +
+  // `max-w-[min(800px,100%)]`) — the answer hugs the LEFT, the prompt hugs the
+  // RIGHT. RESPONSIVE: the cap is ABSOLUTE, so `w-full` fills the band
+  // whenever it is narrower than 800 (a shrunk conversation pane → content
+  // fits the window) and only caps once it would exceed 800. A proportional
+  // cap (max-w-[80%]) was tried and reverted — it reserved
   // a fixed % gutter at *every* width, so content never filled a narrow window
   // ("only [cap] when it hits the width, not every time"). `min-w-0` keeps the
   // per-row `truncate` (event-row.tsx) working so long tool commands/paths
@@ -142,7 +142,7 @@ export const TurnEventList = memo(function TurnEventList({
   }
 
   return (
-    <div className="flex w-full max-w-[768px] min-w-0 flex-col self-start">
+    <div className="flex w-full max-w-[800px] min-w-0 flex-col self-start">
       {sequence.map((segment, index) => segment.kind === "working" ? (
         <EventStripe key={segment.key} events={segment.events} ctx={turnCtx} live={live}
           browserTailClosed={index < sequence.length - 1} />

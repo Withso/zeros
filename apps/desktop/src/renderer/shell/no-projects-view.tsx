@@ -70,19 +70,19 @@ export function NoProjectsView() {
           icon={FolderOpen}
           label="Open project"
           description="Open a local folder"
-          onClick={openProject}
+          onClick={() => openProject()}
         />
         <StartTile
           icon={GithubIcon}
           label="Open GitHub project"
           description="Clone a repository"
-          onClick={openGithubProject}
+          onClick={() => openGithubProject()}
         />
         <StartTile
           icon={Plus}
           label="Start from scratch"
           description="Start a fresh repo"
-          onClick={quickStart}
+          onClick={() => quickStart()}
         />
       </div>
     </div>

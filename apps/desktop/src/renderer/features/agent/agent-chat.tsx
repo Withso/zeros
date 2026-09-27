@@ -4332,24 +4332,22 @@ export function AgentChat({
       {/* 01m: scroll on the OUTER Conversation again (so scrollbar
           pins flush to conversation pane's right border at every column width),
           inner ConversationContent is overflow-visible and centered.
-          2026-06-18 (final): max-w-[1152px] is the SINGLE source of the
-          chat's responsive width — the roomy envelope the user wants for
-          tool cards / diffs / wide tables. It is a MAX, not a fixed
-          width: the band only reaches 1152 when conversation pane is that wide; when
-          conversation pane is narrower the band shrinks to the window (mx-auto adds
-          NO gutters below the cap). This 1152 band is the OUTER
-          envelope (scroll container + content column); the answer lane
-          inside it is separately capped at 768px (turn-event-list.tsx,
-          `max-w-[768px]`) so prose reads at a comfortable measure rather
-          than stretching the full band. A same-day experiment instead
-          capped the answer lane at 80% — reverted, because a proportional
-          cap reserved a fixed ~20% right gutter at EVERY width, so the
-          column never "fit in" when shrunk. The side
-          gap must appear ONLY once content hits the 1152 cap, never
-          before. To retune: THIS value sets the outer band (mirror it on
-          the composer + permission caps below); the inner reading measure
-          is the 768 cap in turn-event-list.tsx.
-          The 1152px measure balances reading width with the outer column,
+          2026-09-27: max-w-[856px] is the SINGLE source of the chat's
+          responsive width — an 800px content column inside the band's
+          28px gutters (px-7), shared by the transcript and the composer.
+          It is a MAX, not a fixed width: the band only reaches 856 when
+          conversation pane is that wide; when conversation pane is
+          narrower the band shrinks to the window (mx-auto adds NO gutters
+          below the cap). The answer lane and user prompt inside it share
+          the same 800px cap (turn-event-list.tsx / turn-container.tsx), so
+          prose, prompts and the composer align on one column. A
+          proportional cap was tried and reverted, because it reserved a
+          fixed gutter at EVERY width, so the column never "fit in" when
+          shrunk. The side gap must appear ONLY once content hits the cap,
+          never before. To retune: THIS value sets the outer band (mirror
+          it on the composer and the read-only history bar); the inner
+          lanes mirror its 800px content width.
+          The measure centres inside the outer column,
           which drag-resizes
           up to min(2400px, 70vw) via ConversationPane; this band centres
           inside that. Markdown tables fill the band (display:table +
@@ -4388,7 +4386,7 @@ export function AgentChat({
             // the transcript clear of the checkpoint rail's ticks (left-1 +
             // 20px hit zone = 28px) at all widths. Mirror any change on the
             // composer column below (lock-step alignment).
-            className="zeros-agent-messages mx-auto flex w-full max-w-[1152px] min-w-0 flex-none flex-col gap-5 overflow-visible px-7 pt-3 pb-8"
+            className="zeros-agent-messages mx-auto flex w-full max-w-[856px] min-w-0 flex-none flex-col gap-5 overflow-visible px-7 pt-3 pb-8"
           >
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
@@ -4567,7 +4565,7 @@ export function AgentChat({
                     dock was removed 2026-07-02 as too agent-dependent to trust. */}
                     {/* Per-turn footer (run time, copy output, "…" Reset to this
                     point, authored file pills) renders INSIDE TurnEventList's
-                    768 lane so it hugs the answer instead of inheriting the
+                    800 lane so it hugs the answer instead of inheriting the
                     TurnContainer's gap-4. Only turns with a user prompt (the
                     turn id) get one — the rare leading "system turn" has nothing
                     to reset to. */}
@@ -4770,12 +4768,12 @@ export function AgentChat({
           permission / task card lands above the composer (PromptInput
           isn't the only flex child here), the gap between that card
           and the composer matches the 16px bottom padding.
-          2026-06-18: max-w-[1152px], kept in lock-step with the
-          `.zeros-agent-messages` cap above so the composer stays aligned
-          with the centered conversation column. Like the messages band it's
-          a MAX: on a 2000px conversation pane the
-          composer sits in the 1152px centred measure; when conversation pane is
-          narrower it shrinks to the window. */}
+          2026-09-27: max-w-[856px] (an 800px composer inside px-7), kept in
+          lock-step with the `.zeros-agent-messages` cap above so the
+          composer stays aligned with the centered conversation column. Like
+          the messages band it's a MAX: on a 2000px conversation pane the
+          composer sits in the 800px centred measure; when conversation pane
+          is narrower it shrinks to the window. */}
         {/* gap-0.5 (2px): above-composer cards (permission, plan
           review, embedded terminal) sit nearly flush to the composer.
           The message list is a separate container, so its spacing is unaffected. */}
@@ -4783,7 +4781,7 @@ export function AgentChat({
           column's flat 28px gutter above so the composer's edges align with
           the message bubbles at every width. */}
         {readOnly ? composerReplacement : (
-        <div className="mx-auto box-border flex w-full max-w-[1152px] min-w-0 shrink-0 flex-col gap-0.5 border-t-0 bg-transparent px-7 pt-0 pb-4">
+        <div className="mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-0.5 border-t-0 bg-transparent px-7 pt-0 pb-4">
           {/* Inline composer errors use the shared toast surface: the
             "Error: <label>" surfaces as a toast.error from a useEffect
             higher up. The composer remains enabled when isErrorState is set:

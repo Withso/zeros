@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-const TOP_BAR = "apps/desktop/src/renderer/shell/top-bar.tsx";
+const WORKSPACE_ROW =
+  "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx";
 
 function source(relativePath: string): string {
   return readFileSync(resolve(process.cwd(), relativePath), "utf8");
@@ -17,9 +18,9 @@ function prIconCase(src: string, kind: string, nextKind: string): string {
   return src.slice(start, end);
 }
 
-describe("workspace tab PR icon", () => {
+describe("sidebar workspace row PR icon", () => {
   it("uses the standard merge glyph without reflecting it", () => {
-    const merged = prIconCase(source(TOP_BAR), "merged", "closed");
+    const merged = prIconCase(source(WORKSPACE_ROW), "merged", "closed");
 
     expect(merged).toMatch(/<GitMerge(?:\s|>)/);
     expect(merged).not.toContain("<GitBranch");

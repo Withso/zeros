@@ -48,8 +48,8 @@ import {
 // the conversation/workbench seam line came back, but workbench owns it now (`border-l` on
 // WORKBENCH_PANE_CLS) — conversation pane stays borderless so the seam is a single 1px line.
 // No top gutter (2026-07-12, restated 2026-09-01): the column's first row IS
-// its chrome band — it butts straight against the global TopBar with nothing
-// between them, like repository panel's and workbench's first rows. That row
+// its chrome band — it starts at the window's top edge beside the app sidebar,
+// like workbench's first row. That row
 // used to be the workspace/mode header; since its removal the chat strip is the
 // band, and it carries the column-level mode toggle and the collapsed-workbench
 // expand control as fixed slots. It shares Workbench's h-10 header height so the
@@ -125,7 +125,7 @@ const BODY_BASE_CLS =
  *  terminal deck both live here as siblings, so the long-lived
  *  terminal layers persist across pane-layout churn while each pane
  *  keyed-remounts its own chat view. (Chat-content centering is owned
- *  by AgentChat's inner `mx-auto max-w-[1152px]` measure; the per-pane
+ *  by AgentChat's inner `mx-auto max-w-[856px]` measure; the per-pane
  *  chat-root classes moved into conversation/pane-layout.tsx.) */
 const BODY_STACK_CLS = "relative size-full min-h-0";
 /** The pane tree fills the stack; terminal layers portal into panes. */
@@ -178,10 +178,14 @@ export function ConversationPane({
   workbenchCollapsed: requestedWorkbenchCollapsed = false,
   onToggleWorkbench,
   workspace = null,
+  windowControlsInset = false,
 }: {
   workbenchCollapsed?: boolean;
   onToggleWorkbench?: () => void;
   workspace?: Workspace | null;
+  /** The app sidebar is collapsed, so its traffic lights and panel-left
+   *  toggle float over this column's top-left corner (sidebar-toggle.tsx). */
+  windowControlsInset?: boolean;
 } = {}) {
   const readOnly = workspaceIsReadOnly(workspace);
   const surfaceActive = useActivePage() === "workspace";
@@ -402,20 +406,20 @@ export function ConversationPane({
       aria-label={readOnly ? "Workspace history" : "Agent Workspace"}
     >
       {/* 2026-09-01: the column's own h-10 workspace row is GONE. It carried
-          only the branch name (the global TopBar already shows it) plus the
+          only the branch name (the app sidebar already shows it) plus the
           mode toggle, so the whole band was a 40px tax on the transcript. The
           toggle and the collapsed-workbench expand control now ride the chat
           strip below as fixed, non-scrolling slots — the strip is the column's
           first row, and ConversationPaneLayout hands each control to the pane
           that owns its corner (see conversation/pane-layout.tsx). */}
       {/* The per-workspace bar (project › workspace breadcrumb +
-          "Open in" dropdown) is HIDDEN — the global TopBar already
-          carries the breadcrumb, so a second one was pure noise. It
+          "Open in" dropdown) is HIDDEN — the app sidebar already
+          shows the repository and workspace, so a second one was pure noise. It
           stays MOUNTED so its functionality survives —
           the ⌘O (open in default app) and ⌘C (copy path) window-level
           shortcuts it registers keep working. Window dragging is
-          unaffected (the global TopBar above the columns owns the drag
-          region). The chat strip's trailing slot now owns the workbench
+          unaffected (the app sidebar's title band and Workbench's header
+          own the drag regions). The chat strip's trailing slot now owns the workbench
           expand button while the panel is collapsed. Remove the `hidden`
           wrapper to bring this legacy row back. */}
       {!readOnly && (
@@ -441,6 +445,17 @@ export function ConversationPane({
                 readOnly={readOnly}
                 emptyContent={emptyHistory}
                 onMinimumSizeChange={setPaneMinimumSize}
+                // The collapsed sidebar's window controls are 110px wide; the
+                // leading slot's own 8px gutter plus this spacer clears them.
+                stripLeading={
+                  windowControlsInset ? (
+                    <span
+                      className="block h-full w-[102px] shrink-0"
+                      aria-hidden="true"
+                      data-window-controls-reserve=""
+                    />
+                  ) : null
+                }
                 stripTrailing={
                   !readOnly && (
                     <>

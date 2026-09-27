@@ -74,6 +74,7 @@ import { acceptCloudWorkspaceDocument } from "../../state/cloud-workspace-catalo
 import { cloudWorkspaceKey, isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { spawnPreparedDefaultChat } from "../../state/spawn-default-chat";
 import { prepareProjectFolder } from "../project-folder-setup";
+import type { AddProjectOptions } from "../add-project-provider";
 import {
   loadAgents,
   useAgentsSnapshot,
@@ -101,6 +102,11 @@ import {
   type DispatcherSourceSelection,
 } from "./dispatcher-source";
 import {
+  consumeCreateFromSourceRequest,
+  resolveCreateFromSourceRequest,
+  useCreateFromSourceRequest,
+} from "./create-source-request";
+import {
   getActiveOrganizationIdSnapshot,
   getActiveOrganizationSnapshot,
   getOrganizationStoreGeneration,
@@ -122,12 +128,12 @@ interface DispatcherPageProps {
   /** Retained Home surfaces stay mounted. Gate effects and selection resets to
    * the visible Create route so hidden pages remain inert. */
   active: boolean;
-  /** Repository context supplied by the global top bar, when available. */
+  /** Repository context supplied by the app sidebar, when available. */
   initialProjectId?: string | null;
   /** Shared add-project flows (from AddProjectProvider) inside the project picker. */
-  onOpenProject: () => void;
-  onOpenGithubProject: () => void;
-  onQuickStart: () => void;
+  onOpenProject: (options?: AddProjectOptions) => void;
+  onOpenGithubProject: (options?: AddProjectOptions) => void;
+  onQuickStart: (options?: AddProjectOptions) => void;
 }
 
 /** Resolve the project to pre-select: the one the active chat lives in (so
@@ -167,6 +173,8 @@ export function DispatcherPage({
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
   );
+  const selectAddedProject = (project: Project) =>
+    setSelectedProjectId(project.id);
   const [sourceSelection, setSourceSelection] =
     useState<DispatcherSourceSelection | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
@@ -285,6 +293,40 @@ export function DispatcherPage({
   useEffect(() => {
     if (!active) setProjectMenuOpen(false);
   }, [active]);
+
+  // A repository's "Create from…" opens this page for that repository and asks
+  // the source picker to open once. Wait while the routed repository is being
+  // selected; any other request is stale and dropped rather than kept armed.
+  const sourceRequest = useCreateFromSourceRequest();
+  const [sourcePickerRequestId, setSourcePickerRequestId] = useState<
+    number | null
+  >(null);
+  const projectIds = useMemo(
+    () => projects.map((project) => project.id),
+    [projects],
+  );
+  useEffect(() => {
+    if (!active || !sourceRequest) return;
+    const decision = resolveCreateFromSourceRequest({
+      request: sourceRequest,
+      routedProjectId: initialProjectId,
+      selectedProjectId,
+      projectIds,
+      sourceAvailable: !needsGitSetup && !busy && !designBusy,
+    });
+    if (decision === "wait") return;
+    consumeCreateFromSourceRequest(sourceRequest.id);
+    if (decision === "open") setSourcePickerRequestId(sourceRequest.id);
+  }, [
+    active,
+    busy,
+    designBusy,
+    initialProjectId,
+    needsGitSetup,
+    projectIds,
+    selectedProjectId,
+    sourceRequest,
+  ]);
 
   // What Design entry would do to the selected repository's main checkout
   // (open its design folder, or create "<repo> - Design"). Warmed while the
@@ -571,16 +613,24 @@ export function DispatcherPage({
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => onOpenProject()}>
+                <DropdownMenuItem
+                  onSelect={() => onOpenProject({ onSelect: selectAddedProject })}
+                >
                   <FolderOpen className="text-fg2" strokeWidth={1.5} />
                   <span>Open project</span>
                 </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => onOpenGithubProject()}>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    onOpenGithubProject({ onSelect: selectAddedProject })
+                  }
+                >
                   <GithubIcon className="text-fg2" strokeWidth={1.5} />
                   <span>Open GitHub project</span>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => onQuickStart()}>
+                <DropdownMenuItem
+                  onSelect={() => onQuickStart({ onSelect: selectAddedProject })}
+                >
                   <Plus className="text-fg2" strokeWidth={1.5} />
                   <span>Start from scratch</span>
                 </DropdownMenuItem>
@@ -599,6 +649,8 @@ export function DispatcherPage({
                 value={base}
                 active={active}
                 disabled={busy || designBusy}
+                openRequestId={sourcePickerRequestId}
+                onOpenRequestHandled={() => setSourcePickerRequestId(null)}
                 onChange={(next) =>
                   setSourceSelection(
                     next && selectedProject

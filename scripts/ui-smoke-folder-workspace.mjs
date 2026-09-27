@@ -33,16 +33,18 @@ export async function runWorkspaceRecoveryNavigationSmoke({ page, check }) {
     notifyProjectsChanged();
     return project;
   });
-  await selectFilter("Empty repo");
+  const emptyHeader = page.locator(`[data-sidebar-repository="${fresh.id}"]`);
+  await emptyHeader.hover();
+  await emptyHeader.getByRole("button", { name: "Empty repo settings", exact: true }).click();
   await expect.poll(async () => (await snapshot()).page).toBe("repo");
   const selected = await snapshot();
   expect(selected.projectId).toBe(fresh.id);
-  expect(selected.filter).toBe(`repo:${fresh.id}`);
+  expect(selected.filter).toBe("grouped");
   expect(selected.chats).toEqual(before.chats);
   expect(selected.memory[fresh.repoRoot]).toBeUndefined();
   await expect(page.locator('[data-workspace-id="local:empty-repo"]')).toHaveCount(0);
   expect(await page.evaluate(() => window.folderWorkspaceRequests.filter(({ op }) => op === "workspace.create").length)).toBe(1);
-  check("Filtering a repository without saved workspaces opens its page without creating an original-folder chat", true);
+  check("Opening a repository without saved workspaces from the sidebar shows its page without creating an original-folder chat", true);
 
   await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
   await page.goto(`${harness}?subdirectory`);
@@ -52,7 +54,7 @@ export async function runWorkspaceRecoveryNavigationSmoke({ page, check }) {
   const saved = await snapshot();
   expect(saved.folder).toBe(cwd);
   const tab = page.locator('[data-workspace-id="local:to-do-app"]');
-  for (const name of ["Grouped", "Ungrouped", "Active", "To-do app"]) {
+  for (const name of ["Grouped", "Ungrouped"]) {
     await selectFilter(name);
     await expect(tab).toHaveCount(1);
   }
@@ -64,7 +66,7 @@ export async function runWorkspaceRecoveryNavigationSmoke({ page, check }) {
   expect((await snapshot()).folder).toBe(cwd);
   expect((await snapshot()).chatId).toBe(saved.chatId);
   expect((await snapshot()).chats).toEqual(saved.chats);
-  check("Saved subdirectory chats remain in every workspace filter and reopen from the dashboard at the exact cwd", true);
+  check("Saved subdirectory chats remain in Grouped and Ungrouped and reopen from the dashboard at the exact cwd", true);
 
   const nested = await page.evaluate(async () => {
     const { upsertProject } = await import("/apps/desktop/src/renderer/state/projects-store.ts");
@@ -102,23 +104,18 @@ export async function runFolderWorkspaceSmoke({ page, check }) {
   await expect(tab).toHaveCount(1);
   await expect(tab).toContainText("To-do app");
   await expect(tab.locator("svg.lucide-folder")).toHaveCount(1);
-  await expect(
-    page.getByRole("button", {
-      name: "Show To-do app workspaces",
-      exact: true,
-    }),
-  ).toHaveCount(0);
-  for (const filter of ["Ungrouped", "Active", "To-do app", "Grouped"]) {
+  // A plain folder is its own standalone row: no repository header names it
+  // a second time, in either presentation.
+  await expect(page.locator("[data-sidebar-repository]")).toHaveCount(0);
+  for (const filter of ["Ungrouped", "Grouped"]) {
     await page
       .getByRole("button", { name: "Filter workspaces", exact: true })
       .click();
     await page.getByRole("menuitem", { name: filter, exact: true }).click();
     await expect(tab).toHaveCount(1);
     await expect(tab.locator("svg.lucide-folder")).toHaveCount(1);
-    await expect(page.locator('[data-top-bar-flow-item="true"]')).toHaveCount(
-      1,
-    );
-    await expect(page.locator("[data-top-bar-pinned-lead]")).toHaveCount(0);
+    await expect(page.locator('[data-workspace-tab="true"]')).toHaveCount(1);
+    await expect(page.locator("[data-sidebar-repository]")).toHaveCount(0);
   }
   await expect(
     tab.getByRole("button", { name: /Archive workspace/ }),

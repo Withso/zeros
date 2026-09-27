@@ -782,10 +782,11 @@ function createMainWindow(): BrowserWindow {
     height: restoredBounds?.height ?? 1000,
     ...(restoredPosition ?? {}),
     // minWidth keeps all three primary surfaces visible at the floor:
-    //   repository navigation: 248 px fixed
+    //   app sidebar: 256 px default, capped at 100vw − 580 px
+    //     (renderer/shell/app-sidebar.tsx), so 260 px at this floor
     //   conversation: 360 px hard min (renderer/shell/conversation/conversation-pane.tsx)
     //   workbench: 200 px hard min (renderer/shell/workbench/workbench-pane.tsx)
-    //   sum: 808 px + 32 px scrollbar/border breathing room → 840.
+    //   sum: 816 px + seams and breathing room → 840.
     // The constants live in window-state.ts so the restored-size clamp
     // and the live window floor can never disagree.
     minWidth: MAIN_WINDOW_MIN_WIDTH,
@@ -796,12 +797,12 @@ function createMainWindow(): BrowserWindow {
     title: WINDOW_TITLE,
     titleBarStyle: "hiddenInset",
     // Traffic-light vertical position is shared by EVERY surface that can own
-    // the window's left edge: repository navigation, the conversation top bar
-    // when navigation is hidden, and the Settings header. All are a full-bleed 40px h-10 top
-    // band. y=12 sits the ~12px buttons' midline at ~18-19 — a touch ABOVE
-    // the strip's geometric center (20), which optically matches the icon
-    // glyphs beside them; y=14 reads about 2px low next to the
-    // repository-navigation toggle. x=19 keeps them clear of the window's left edge.
+    // the window's left edge: the app sidebar's title band and, while
+    // Settings replaces the sidebar, the Settings nav's title band. Both are a
+    // full-bleed 40px h-10 top band. y=12 sits the ~12px buttons' midline at
+    // ~18-19 — a touch ABOVE the band's geometric center (20), which optically
+    // matches the icon glyphs beside them; y=14 reads about 2px low. x=19
+    // keeps them clear of the window's left edge.
     trafficLightPosition: { x: 19, y: 12 },
     // Pre-paint background. Tracks the app theme: the renderer reports
     // the resolved --bg1 via `window_set_background` on every theme

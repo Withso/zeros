@@ -35,7 +35,7 @@ describe("Create Workspace page routing", () => {
     expect(dispatcher).toContain('data-dispatcher-mode-switcher=""');
   });
 
-  it("routes the shared launcher into Create and mounts it beside HomeSidebar", () => {
+  it("routes the shared launcher into Create and mounts it beside the app sidebar", () => {
     const provider = source(
       "apps/desktop/src/renderer/shell/add-project-provider.tsx",
     );
@@ -45,7 +45,9 @@ describe("Create Workspace page routing", () => {
     expect(provider).not.toContain("setDispatcherOpen");
     expect(shell).toContain('activePage === "create"');
     expect(shell).toContain("useRetainedViewKeys(activeHomePageId, 5)");
-    expect(shell).toContain("<HomeSidebar />");
+    expect(shell).toContain(
+      "<AppSidebar hidden={settingsActive || sidebarCollapsed} />",
+    );
     expect(shell).toContain("<DispatcherPage");
     expect(shell).toContain(
       'useNewTabHotkeys(activePage === "workspace" && workspaceToolsAvailable)',
