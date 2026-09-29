@@ -18,7 +18,9 @@ export async function attestCloudCoordinator(lease:CloudAgentLease,canary:Bounda
       timer=setTimeout(()=>reject(new Error("Private coordinator admission timed out")),5000);timer.unref?.();
       if(lease.signal.aborted)rejectAbort();
     })]);
-    if(result.code!==0||output!==expected)throw new Error("Private coordinator admission failed");
+    // A fixed classification only: the canary's stderr can carry sandbox paths.
+    if(result.code!==0||output!==expected)throw Object.assign(new Error("Private coordinator admission failed"),
+      {code:result.code===0?"ZEROS_CANARY_OUTPUT":result.code!==null&&result.code>0&&result.code<=255?`ZEROS_CANARY_EXIT_${result.code}`:"ZEROS_CANARY_SIGNAL"});
     await lease.retire(canary);lease.assertLive();
   }catch(error){void lease.close().catch(()=>{});throw error;}
   finally{if(timer)clearTimeout(timer);lease.signal.removeEventListener("abort",rejectAbort);canary.stdout?.off("data",onData);}
