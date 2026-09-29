@@ -49,7 +49,7 @@ export function cloudCoordinatorArguments(directory, command, args = [], history
 /** Complete allowlisted environment; neither caller env nor the engine's HOME,
  * keys, proxy routing, loader knobs or control-plane authority are inherited. */
 export function cloudCoordinatorEnvironment(material, model, settings = {}) {
-  if (typeof model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(model))
+  if (typeof model !== "string" || model.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/.test(model))
     throw new Error("Invalid private coordinator model");
   const env = {
     PATH: "/opt/zeros-runtime/bin:/usr/local/bin:/usr/bin:/bin",
@@ -60,7 +60,8 @@ export function cloudCoordinatorEnvironment(material, model, settings = {}) {
     XDG_DATA_HOME: `${CLOUD_COORDINATOR_HOME}/.local/share`,
     ZEROS_REQUIRE_EXACT_MODEL: "1",
   };
-  if(["low","medium","high","xhigh"].includes(settings.ZEROS_THINKING_EFFORT))env.ZEROS_THINKING_EFFORT=settings.ZEROS_THINKING_EFFORT;
+  if(["low","medium","high","xhigh","max","ultracode"].includes(settings.ZEROS_THINKING_EFFORT))env.ZEROS_THINKING_EFFORT=settings.ZEROS_THINKING_EFFORT;
+  if(["auto","auto-edit","ask","default","accept-edits","plan","bypass","agent","full-access","read-only"].includes(settings.ZEROS_PERMISSION_MODE))env.ZEROS_PERMISSION_MODE=settings.ZEROS_PERMISSION_MODE;
   if(settings.ZEROS_FAST_MODE==="1"||settings.ZEROS_FAST_MODE==="0")env.ZEROS_FAST_MODE=settings.ZEROS_FAST_MODE;
   switch (material.kind) {
     case "claude-api-key": env.ANTHROPIC_API_KEY = material.apiKey; break;

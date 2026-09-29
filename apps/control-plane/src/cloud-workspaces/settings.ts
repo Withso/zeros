@@ -783,6 +783,7 @@ export async function resolveDatabaseCloudWorkspaceSettings(
     generation: number;
     actorUserId: string;
     isPersonal: boolean;
+    organizationProfileOverride?: { id: string; version: number };
     setupSecretKeyV1?: string | null;
     secretEncryptionKeys?: Readonly<Record<number, string>>;
     currentSecretEncryptionKeyVersion?: number | null;
@@ -794,6 +795,8 @@ export async function resolveDatabaseCloudWorkspaceSettings(
   const sourceVersions: Record<string, JsonValue> = Object.create(null);
   let environmentProfileId: string | null = null;
   let environmentProfileVersion: number | null = null;
+  let computerSetup: Array<{command:string;timeoutSeconds:number}> | null = null;
+  let repositorySetup: Array<{command:string;timeoutSeconds:number}> | null = null;
 
   if (input.isPersonal) {
     const profile = await loadDefaultProfile(tx, {
@@ -855,12 +858,25 @@ export async function resolveDatabaseCloudWorkspaceSettings(
     if (inheritedSources.length > 0) {
       sourceVersions.inheritedPersonalProfiles = inheritedSources;
     }
-    const organizationProfile = await loadDefaultProfile(tx, {
-      organizationId: input.organizationId,
-      ownerKind: "organization",
-      ownerUserId: null,
-    });
-    if (organizationProfile) {
+    const organizationProfile = input.organizationProfileOverride
+      ? (await tx.query<ProfileRow>(`SELECT profile.id,version.version,version.document FROM environment_profiles profile
+          JOIN environment_profile_versions version ON version.profile_id=profile.id AND version.org_id=profile.org_id AND version.version=$3
+          WHERE profile.id=$1 AND profile.org_id=$2 AND profile.owner_kind='organization' AND profile.placement='cloud' AND profile.deleted_at IS NULL`,
+          [input.organizationProfileOverride.id,input.organizationId,input.organizationProfileOverride.version])).rows[0] ?? null
+      : await loadDefaultProfile(tx, { organizationId: input.organizationId, ownerKind: "organization", ownerUserId: null });
+    if (input.organizationProfileOverride && !organizationProfile) throw new HttpError(409,"cloud_computer_changed","Cloud Computer version is unavailable.");
+    let applyOrganizationProfile = true;
+    if (organizationProfile && (await tx.query("SELECT 1 FROM cloud_computers WHERE org_id=$1 AND profile_id=$2",[input.organizationId,organizationProfile.id])).rowCount) {
+      const layer = parseLayer({ source:"Cloud Computer", document:organizationProfile.document });
+      const recipe = layer.values.cloudComputer;
+      const repository = (await tx.query<{ forge_repository_id:string }>("SELECT forge_repository_id FROM repositories WHERE id=$1 AND org_id=$2",[input.repositoryId,input.organizationId])).rows[0];
+      applyOrganizationProfile = plainRecord(recipe) && Array.isArray(recipe.repositories) && recipe.repositories.some(value=>plainRecord(value)&&value.id===repository?.forge_repository_id);
+      if (input.organizationProfileOverride && !applyOrganizationProfile) throw new HttpError(409,"cloud_computer_repository_required","This repository is not selected for the Cloud Computer build.");
+      const baked = (await tx.query("SELECT 1 FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=$2 AND org_id=$3 AND computer_image_id IS NOT NULL", [input.workspaceId,input.generation,input.organizationId])).rowCount;
+      if (baked) organizationProfile.document = { ...(organizationProfile.document as Record<string,unknown>), setupCommands: [] };
+      if (applyOrganizationProfile) computerSetup = baked ? [] : layer.setupCommands ?? [];
+    }
+    if (organizationProfile && applyOrganizationProfile) {
       const version = positiveVersion(organizationProfile.version);
       layers.push({
         source: `organization cloud profile:${organizationProfile.id}@${version}`,
@@ -884,12 +900,17 @@ export async function resolveDatabaseCloudWorkspaceSettings(
     const row = repository.get(scope);
     if (!row) continue;
     const version = positiveVersion(row.version);
+    if (computerSetup !== null) repositorySetup = parseLayer({source:"repository setup",document:row.document}).setupCommands ?? repositorySetup;
     layers.push({
       source: `repository ${scope}:${input.repositoryId}@${version}`,
       document: row.document,
     });
     sourceVersions[`repository${scope === "shared" ? "Shared" : "Cloud"}`] =
       version;
+  }
+
+  if (computerSetup !== null && repositorySetup !== null) {
+    layers.push({ source:"Cloud Computer and repository setup", document:{values:{},setupCommands:[...computerSetup,...repositorySetup]} });
   }
 
   const policy = await tx.query<VersionedDocumentRow>(

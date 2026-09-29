@@ -3,7 +3,7 @@ import {
   type WorkbenchScopeState,
   type WorkbenchTab,
 } from "./tab-model";
-import { isRunSessionId } from "@zeros/protocol/run-actions";
+import { isRunSessionId } from "../../platform/workspace-run-identity";
 
 export interface OpenTerminalIntent {
   terminalId: string;

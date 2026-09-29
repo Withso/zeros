@@ -8,6 +8,7 @@
 // post-paint hydration commit. The engine copy revalidates in the background.
 
 import { getSetting, setSetting } from "../platform/settings";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import type { ChatEffort, ChatThread } from "./store";
 import { normalizeChatPermissionMode } from "./chat-permission";
 import {
@@ -115,7 +116,7 @@ export function sanitizeCachedChat(value: unknown): ChatThread | null {
   };
 }
 
-function sanitizeCachedChats(value: unknown): ChatThread[] {
+export function sanitizeCachedChats(value: unknown): ChatThread[] {
   if (!Array.isArray(value)) return [];
   const chats: ChatThread[] = [];
   const ids = new Set<string>();
@@ -134,11 +135,11 @@ function sanitizeCachedChats(value: unknown): ChatThread[] {
 export function loadCachedChatsForBoot(): ChatThread[] {
   const primary = sanitizeCachedChats(
     getSetting<unknown>(CHATS_STORAGE_KEY, []),
-  );
+  ).filter(chat => !isCloudWorkspace(chat.folder));
   if (primary.length > 0) return primary;
   if (getSetting<boolean>(CHATS_TOMBSTONE_KEY, false)) return [];
 
-  const backup = sanitizeCachedChats(getSetting<unknown>(CHATS_BACKUP_KEY, []));
+  const backup = sanitizeCachedChats(getSetting<unknown>(CHATS_BACKUP_KEY, [])).filter(chat => !isCloudWorkspace(chat.folder));
   if (backup.length > 0) {
     console.warn(
       `[Zeros] primary chats empty — restored ${backup.length} from backup`,

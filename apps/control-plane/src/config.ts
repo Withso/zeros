@@ -18,6 +18,7 @@ import { z } from "zod";
 
 import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 import { validateDatabaseConnections } from "./database-config.js";
+import { developmentIdentity, type DevelopmentIdentity } from "./development-environment.js";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
@@ -76,6 +77,7 @@ const EnvSchema = z.object({
   /** Explicit escape from Zeros-hosted channel/domain assertions for templates. */
   ZEROS_SELF_HOSTED: z.enum(["true", "false"]).default("false"),
   PORT: z.coerce.number().int().positive().default(8080),
+  HOST: z.enum(["127.0.0.1", "0.0.0.0", "::"]).optional(),
   /** "production" tightens error bodies; anything else is dev-friendly. */
   NODE_ENV: z.string().default("development"),
   /** Optional server-only key; never projected into desktop or cloud agents. */
@@ -233,7 +235,7 @@ export type CloudWorkspaceBackendConfig = {
     objectRestoreWindowMs: number;
   } & (
     | { objectStoreDirectory: string; s3?: never }
-    | { objectStoreDirectory?: never; s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string } }
+    | { objectStoreDirectory?: never; s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; prefix?: string } }
   ) | null;
   /** Optional signed event sink. The database outbox remains authoritative
    * while this is absent; events are never silently acknowledged. */
@@ -315,6 +317,8 @@ export type Config = {
   /** Exact, environment-bound invitation landing page (without a query). */
   inviteLinkBase: string;
   port: number;
+  host?: string;
+  development?: DevelopmentIdentity;
   isProduction: boolean;
   deploymentChannel: "development" | "alpha" | "beta" | "production";
   /** Null when no GitHub App is registered for this environment. */
@@ -533,6 +537,7 @@ const CloudWorkspaceDurabilityEnvSchema = z.object({
   CLOUD_WORKSPACE_S3_BUCKET: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).optional(),
   CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: z.string().trim().min(1).max(256).optional(),
   CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: z.string().trim().min(1).max(256).optional(),
+  CLOUD_WORKSPACE_S3_KEY_PREFIX: z.string().max(100).optional(),
   /** Live objects outlive their last reference this long, so a point-in-time
    * database restore finds them. Match the database's backup retention
    * (PlanetScale: 48 hours); zero collects immediately. */
@@ -1325,6 +1330,7 @@ function loadCloudWorkspaceConfig(
       env.CLOUD_WORKSPACE_S3_BUCKET,
       env.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID,
       env.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY,
+      env.CLOUD_WORKSPACE_S3_KEY_PREFIX,
     ].some((entry) => typeof entry === "string" && entry.trim().length > 0);
   let durability: CloudWorkspaceBackendConfig["durability"] = null;
   if (durabilityRequested) {
@@ -1423,6 +1429,10 @@ function loadCloudWorkspaceConfig(
     }
     const store = parsedDurability.data;
     if (store.CLOUD_WORKSPACE_OBJECT_STORE_KIND === "s3") {
+      if (store.CLOUD_WORKSPACE_S3_KEY_PREFIX && (env.ZEROS_DEV_ENVIRONMENT !== "hosted" ||
+          store.CLOUD_WORKSPACE_S3_KEY_PREFIX !== `dev/${env.ZEROS_DEV_OWNER}/${env.ZEROS_DEV_GENERATION}/`)) {
+        throw new Error("Invalid cloud workspace object prefix: only the exact hosted Dev generation may select a prefix");
+      }
       if (!store.CLOUD_WORKSPACE_S3_ENDPOINT || !store.CLOUD_WORKSPACE_S3_BUCKET || !store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID || !store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY) {
         throw new Error("Invalid cloud workspace durability environment: all CLOUD_WORKSPACE_S3 endpoint, bucket and credential fields are required");
       }
@@ -1435,10 +1445,11 @@ function loadCloudWorkspaceConfig(
           bucket: store.CLOUD_WORKSPACE_S3_BUCKET,
           accessKeyId: store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID,
           secretAccessKey: store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY,
+          ...(store.CLOUD_WORKSPACE_S3_KEY_PREFIX ? { prefix: store.CLOUD_WORKSPACE_S3_KEY_PREFIX } : {}),
         },
       };
     } else {
-      if (store.CLOUD_WORKSPACE_S3_ENDPOINT || store.CLOUD_WORKSPACE_S3_BUCKET || store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID || store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY) throw new Error("Invalid cloud workspace durability environment: S3 configuration requires the s3 store kind");
+      if (store.CLOUD_WORKSPACE_S3_ENDPOINT || store.CLOUD_WORKSPACE_S3_BUCKET || store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID || store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY || store.CLOUD_WORKSPACE_S3_KEY_PREFIX) throw new Error("Invalid cloud workspace durability environment: S3 configuration requires the s3 store kind");
       const rawObjectStoreDirectory = store.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY;
       const objectStoreDirectory = path.resolve(rawObjectStoreDirectory ?? ".");
       if (!rawObjectStoreDirectory || !path.isAbsolute(rawObjectStoreDirectory) || objectStoreDirectory === path.parse(objectStoreDirectory).root || containsAsciiControl(rawObjectStoreDirectory)) {
@@ -1652,6 +1663,12 @@ function validateRailwayEnvironment(
   // Railway injects these values. Local processes and non-Railway hosts have no
   // project id and intentionally skip this deployment-topology assertion.
   if (!env.RAILWAY_PROJECT_ID) return;
+  // This branch has already passed the stricter workspace/source/database
+  // contract. Release names cannot enter it, even when the Dev flag is set.
+  if (env.ZEROS_DEV_ENVIRONMENT === "hosted") {
+    developmentIdentity(env);
+    return;
+  }
   // Public templates use installer-owned WorkOS credentials and Railway
   // domains, so the Zeros-hosted channel matrix does not apply. This opt-out
   // is explicit; official deployments keep the fail-closed assertions below.
@@ -1715,6 +1732,7 @@ function loadOperationsAlertEmail(env: NodeJS.ProcessEnv): string | null {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const development = developmentIdentity(env);
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
     const missing = parsed.error.issues
@@ -1783,6 +1801,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workos,
     inviteLinkBase,
     port: e.PORT,
+    ...(e.HOST ? { host: e.HOST } : {}),
+    ...(development ? { development } : {}),
     isProduction: e.NODE_ENV === "production",
     deploymentChannel: (() => {
       const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development")

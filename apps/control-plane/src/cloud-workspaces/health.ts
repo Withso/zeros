@@ -20,6 +20,8 @@ type HealthSignals = {
   outbox_stalled: boolean;
   deletion_jobs_failed: boolean;
   deletion_provider_stalled: boolean;
+  deletion_intent_stalled: boolean;
+  idle_stop_blocked: boolean;
   object_rotation_failed: boolean;
   object_deletion_stalled: boolean;
   provider_orphans_stalled: boolean;
@@ -82,6 +84,17 @@ export class DatabaseCloudWorkspaceHealthService {
                WHERE state = 'waiting_for_provider'
                  AND created_at <= now() - interval '24 hours'
              ) AS deletion_provider_stalled,
+             EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_intents intent
+               LEFT JOIN cloud_workspace_provider_bindings binding ON binding.workspace_id=intent.workspace_id AND binding.generation=intent.generation AND binding.org_id=intent.org_id
+               LEFT JOIN cloud_workspace_provider_operations operation ON operation.workspace_id=intent.workspace_id AND operation.generation=intent.generation AND operation.org_id=intent.org_id
+               WHERE intent.operation='delete' AND intent.state IN ('queued','dispatching','observing','failed')
+                 AND binding.deletion_verified_at IS NULL AND operation.deleted_at IS NULL
+                 AND (intent.state='failed' OR least(intent.created_at,operation.deletion_requested_at)<now()-interval '24 hours'
+                   OR coalesce(operation.deletion_progress_at,operation.deletion_requested_at,intent.created_at)<now()-interval '1 hour'))
+               OR EXISTS (SELECT 1 FROM cloud_workspace_provider_operations WHERE deletion_requested_at IS NOT NULL AND deleted_at IS NULL
+                 AND (deletion_requested_at<now()-interval '24 hours' OR coalesce(deletion_progress_at,deletion_requested_at)<now()-interval '1 hour')) AS deletion_intent_stalled,
+             EXISTS (SELECT 1 FROM workspace_checkpoint_requests WHERE idle_engine_instance_id IS NOT NULL
+               AND state IN ('queued','delivered') AND created_at<now()-interval '5 minutes') AS idle_stop_blocked,
              CASE WHEN $2::boolean THEN EXISTS (
                SELECT 1 FROM workspace_blob_rotation_jobs
                WHERE state = 'failed'

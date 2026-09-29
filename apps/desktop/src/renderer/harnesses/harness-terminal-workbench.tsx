@@ -5,7 +5,16 @@ import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 import React, { useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { RuntimeClient } from "../platform/bridge/ws-client";
+import {
+  RuntimeClient,
+  type ConnectionStatus,
+} from "../platform/bridge/ws-client";
+import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
+import {
+  cloudScopedId,
+  cloudWorkspaceKey,
+  isCloudWorkspace,
+} from "../platform/bridge/cloud-workspace-key";
 import { BridgeProvider } from "../platform/bridge/use-bridge";
 import { type BridgeMessage } from "../platform/bridge/messages";
 import {
@@ -14,7 +23,7 @@ import {
 } from "../features/agent/sessions-context";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { loadProjects, upsertProject } from "../state/projects-store";
-import { runSessionId } from "@zeros/protocol/run-actions";
+import { runSessionId } from "../platform/workspace-run-identity";
 import {
   selectWorkbench,
   useWorkspaceStore,
@@ -26,9 +35,64 @@ import { TerminalPanel } from "../shell/workbench/tabs/terminal-tab";
 import { visibleWorkbenchTabs } from "../shell/workbench/terminal-tabs";
 import { addWorkbenchTerminal } from "../shell/workbench/open-terminal";
 import { useWorkbenchFolder } from "../shell/workbench/use-workbench-folder";
+import {
+  acceptCloudWorkspaceDocument,
+  getCloudWorkspaceRows,
+} from "../state/cloud-workspace-catalog";
 
-const folderA = "/terminal-fixture/a";
-const folderB = "/terminal-fixture/b";
+const cloudFixture = new URLSearchParams(location.search).has("cloud");
+const cloudA = {
+  organizationId: "11111111-1111-4111-8111-111111111111",
+  workspaceId: "22222222-2222-4222-8222-222222222222",
+};
+const cloudB = {
+  ...cloudA,
+  workspaceId: "33333333-3333-4333-8333-333333333333",
+};
+const folderA = cloudFixture
+  ? cloudWorkspaceKey(cloudA)
+  : "/terminal-fixture/a";
+const folderB = cloudFixture
+  ? cloudWorkspaceKey(cloudB)
+  : "/terminal-fixture/b";
+const cloudStatuses = new Map<string, ConnectionStatus>();
+const cloudStatusListeners = new Map<string, Set<() => void>>();
+if (cloudFixture) {
+  for (const target of [cloudA, cloudB])
+    acceptCloudWorkspaceDocument({
+      id: target.workspaceId,
+      organizationId: target.organizationId,
+      teamId: target.organizationId,
+      createdBy: target.organizationId,
+      name: target === cloudA ? "Cloud A" : "Cloud B",
+      placement: "cloud",
+      status: "ready",
+      version: 1,
+      error: null,
+      deletedAt: null,
+      createdAt: "2026-09-26T10:00:00Z",
+      updatedAt: "2026-09-26T10:00:00Z",
+      capabilities: {
+        canWrite: true,
+        canManage: true,
+        canStart: true,
+        startUnavailableReason: null,
+      },
+      repository: {
+        forge: "github.com",
+        owner: "example",
+        name: "terminal-fixture",
+        revision: "refs/heads/main",
+      },
+      generation: {
+        number: 1,
+        architecture: "x86_64",
+        observedState: "running",
+        resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
+        lastObservedAt: null,
+      },
+    });
+}
 upsertProject({ repoRoot: folderA, name: "Terminal A" });
 upsertProject({ repoRoot: folderB, name: "Terminal B" });
 const listeners = new Map<string, Set<(message: BridgeMessage) => void>>();
@@ -41,10 +105,23 @@ const ptys = new Map<
   string,
   { sessionId: string; cwd: string; createdAt: number; exited?: boolean }
 >();
+if (cloudFixture) {
+  for (const target of [cloudA, cloudB]) {
+    const sessionId = cloudScopedId(target, "existing-shell");
+    ptys.set(sessionId, {
+      sessionId,
+      cwd: cloudWorkspaceKey(target),
+      createdAt: 1,
+    });
+  }
+}
 const messages: Array<Record<string, unknown>> = [];
 const runStates: Record<string, Record<string, unknown>> = {};
 const runLogs: Record<string, string> = {};
 const pendingRuns = new Map<string, () => void>();
+let delayNextAttach = false;
+let pendingAttach: { resolve(): void; reject(error: Error): void } | null =
+  null;
 const setupStates = new Map<
   string,
   { state: "running" | "passed" | "failed" | "stopped"; log: string }
@@ -91,10 +168,26 @@ RuntimeClient.prototype.request = async function <
   if (message.type === "PTY_LIST")
     return {
       type: "PTY_LIST_RESULT",
-      terminals: [...ptys.values()],
+      terminals: [...ptys.values()].filter((pty) =>
+        message.workspaceId
+          ? pty.cwd === message.workspaceId
+          : !isCloudWorkspace(pty.cwd),
+      ),
     } as unknown as T;
   if (message.type === "PTY_CREATE") {
     const sessionId = String(message.sessionId);
+    if (cloudStatuses.get(String(message.cwd)) === "disconnected")
+      throw new Error("Offline fixture");
+    if (delayNextAttach) {
+      delayNextAttach = false;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          pendingAttach = { resolve, reject };
+        });
+      } finally {
+        pendingAttach = null;
+      }
+    }
     ptys.set(sessionId, {
       sessionId,
       cwd: String(message.cwd),
@@ -141,7 +234,8 @@ RuntimeClient.prototype.request = async function <
       sources: {},
       warnings: [],
     };
-  if (message.op === "workspace.list") result = { workspaces: [] };
+  if (message.op === "workspace.list")
+    result = { workspaces: cloudFixture ? getCloudWorkspaceRows() : [] };
   if (message.op === "file.tree")
     result = { files: ["scripts/setup.sh", "src/test.ts"] };
   if (message.op === "workspace.setupInfo")
@@ -200,7 +294,7 @@ RuntimeClient.prototype.request = async function <
     pendingRuns.delete(String(params.actionId));
     const sessionId = String(params.sessionId);
     runLogs[sessionId] = "";
-    const folder = String(params.repoRoot);
+    const folder = String(params.repoRoot ?? params.workspaceId);
     ptys.set(sessionId, { sessionId, cwd: folder, createdAt: Date.now() });
     runStates[String(params.workspaceId)] = {
       ...runStates[String(params.workspaceId)],
@@ -237,6 +331,25 @@ RuntimeClient.prototype.request = async function <
   }
   return { type: "WORKSPACE_RESPONSE", result } as unknown as T;
 };
+if (cloudFixture) {
+  // This harness exercises real terminal UI against a deterministic transport.
+  // Separate WorkspaceRuntimeClient tests cover mapping to two engine peers.
+  WorkspaceRuntimeClient.prototype.request = RuntimeClient.prototype.request;
+  WorkspaceRuntimeClient.prototype.send = RuntimeClient.prototype.send;
+  WorkspaceRuntimeClient.prototype.statusForWorkspace = (folder) =>
+    cloudStatuses.get(folder ?? "") ?? "connected";
+  WorkspaceRuntimeClient.prototype.onWorkspaceStatusChange = (
+    folder,
+    listener,
+  ) => {
+    const handlers = cloudStatusListeners.get(folder) ?? new Set();
+    handlers.add(listener);
+    cloudStatusListeners.set(folder, handlers);
+    return () => {
+      handlers.delete(listener);
+    };
+  };
+}
 window.__ZEROS_NATIVE__ = {
   invoke: async <T,>(command: string) =>
     (command === "get_engine_root" ? "/terminal-fixture/ambient" : null) as T,
@@ -258,6 +371,17 @@ useWorkspaceStore.setState({
 Object.assign(window, {
   __zerosTerminalSmoke: {
     messages,
+    folders: { a: folderA, b: folderB },
+    delayNextAttach: () => {
+      delayNextAttach = true;
+    },
+    attachPending: () => pendingAttach !== null,
+    failAttach: () =>
+      pendingAttach?.reject(new Error("Connection lost while attaching")),
+    setConnectionStatus: (folder: string, status: ConnectionStatus) => {
+      cloudStatuses.set(folder, status);
+      for (const listener of cloudStatusListeners.get(folder) ?? []) listener();
+    },
     finishRun: (actionId?: string) =>
       (actionId
         ? pendingRuns.get(actionId)
@@ -345,7 +469,8 @@ Object.assign(window, {
     },
     output: (sessionId: string, data: string) => {
       runLogs[sessionId] = (runLogs[sessionId] ?? "") + data;
-      emit("PTY_DATA", { sessionId, data });
+      if (cloudStatuses.get(ptys.get(sessionId)?.cwd ?? "") !== "disconnected")
+        emit("PTY_DATA", { sessionId, data });
     },
     exit: (sessionId: string) =>
       emit("PTY_EXIT", { sessionId, exitCode: 0, signal: null }),
@@ -390,6 +515,20 @@ function Harness() {
         >
           Workspace B
         </button>
+        {cloudFixture && (
+          <button
+            onClick={() =>
+              useWorkspaceStore
+                .getState()
+                .dispatch({
+                  type: "SET_NEW_AGENT_FOLDER",
+                  folder: "/terminal-fixture/local",
+                })
+            }
+          >
+            Local workspace
+          </button>
+        )}
         <button onClick={() => setActive((value) => !value)}>
           Toggle workspace visibility
         </button>

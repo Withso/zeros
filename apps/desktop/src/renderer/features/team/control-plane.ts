@@ -41,7 +41,7 @@ export type OrganizationSummary = {
   /** Mixed-version marker for a pre-hierarchy flat Team response. */
   legacyFlat?: boolean;
   defaultTeamId: string | null;
-  workspaceCapabilities: { local: true; cloud: boolean };
+  workspaceCapabilities: { local: boolean; cloud: boolean };
   teamCapabilities: { multiple: false; canCreate: false };
 };
 export type TeamSummary = OrganizationSummary;

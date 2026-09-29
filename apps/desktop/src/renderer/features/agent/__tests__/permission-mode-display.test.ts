@@ -3,10 +3,10 @@ import { describe, expect, it } from "vitest";
 import { permissionModeIdForDisplay } from "../permission-mode-display";
 
 describe("permissionModeIdForDisplay", () => {
-  it("keeps the persisted icon stable while a provider bind is reconciling", () => {
+  it.each(["warming", "reconnecting"] as const)("keeps the persisted icon stable while %s", status => {
     expect(
       permissionModeIdForDisplay({
-        status: "warming",
+        status,
         liveModeId: "default",
         persistedModeId: "accept-edits",
         fallbackModeId: "auto",

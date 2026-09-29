@@ -72,7 +72,7 @@ export interface ReviewProvider {
   /** Human label for the external host ("GitHub"). */
   hostLabel: string;
   capabilities: ReviewProviderCapabilities;
-  authStatus(): Promise<AuthStatusResult>;
+  authStatus(workspaceId?: string): Promise<AuthStatusResult>;
   getPr(target: ReviewTarget): Promise<PR>;
   getChecks(target: ReviewTarget): Promise<PrChecksResult>;
   getCommits(target: ReviewTarget): Promise<PrCommitSummary[]>;
@@ -120,7 +120,7 @@ const githubProvider: ReviewProvider = {
       { id: "rebase", label: "Rebase & merge" },
     ],
   },
-  authStatus: () => ghAuthStatus(),
+  authStatus: (workspaceId) => ghAuthStatus(workspaceId),
   getPr: (target) => ghPrGet(githubArgs(target)),
   getChecks: (target) => ghPrChecks(githubArgs(target)),
   getCommits: (target) => ghPrCommits(githubArgs(target)),

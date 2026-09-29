@@ -25,6 +25,7 @@ import type {
 } from "./ws-client";
 
 import { nativeListen } from "../runtime";
+import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
 
 /** Main emits the payload directly. Exact runtime IDs keep late retirement
  * notifications from affecting a replacement account's connection. */
@@ -98,9 +99,11 @@ export function onActiveBridgeChange(fn: ActiveBridgeListener): () => void {
  *  a drop) reports `initial: false`, because data may have changed while the
  *  bridge was away. Callers that refetch should treat `initial: true` as
  *  "revalidate if stale", not "force" — otherwise every mount becomes a
- *  redundant fetch. */
+ *  redundant fetch. Pass `folder` for workspace-owned data so a cloud consumer
+ *  follows its own connection rather than the local sidecar's status. */
 export function onActiveBridgeConnected(
   fn: (client: RuntimeClient, info: { initial: boolean }) => void,
+  folder?: string,
 ): () => void {
   let stopStatusListener: (() => void) | undefined;
   let subscribing = true;
@@ -110,14 +113,22 @@ export function onActiveBridgeConnected(
     stopStatusListener = undefined;
     if (!client) return;
 
-    let connected = client.status === "connected";
+    const workspaceClient =
+      folder && client instanceof WorkspaceRuntimeClient ? client : null;
+    const status = () => workspaceClient
+      ? workspaceClient.statusForWorkspace(folder)
+      : client.status;
+    let connected = status() === "connected";
     if (connected) fn(client, { initial: subscribing });
-    stopStatusListener = client.onStatusChange((status) => {
-      const nextConnected = status === "connected";
+    const changed = () => {
+      const nextConnected = status() === "connected";
       const becameConnected = nextConnected && !connected;
       connected = nextConnected;
       if (becameConnected) fn(client, { initial: false });
-    });
+    };
+    stopStatusListener = workspaceClient
+      ? workspaceClient.onWorkspaceStatusChange(folder!, changed)
+      : client.onStatusChange(changed);
   };
 
   attach(active);

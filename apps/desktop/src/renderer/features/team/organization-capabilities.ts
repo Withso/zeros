@@ -1,17 +1,34 @@
 import type { OrganizationSummary } from "./control-plane";
 import { getKnownPersonalOrganizationIds } from "./organization-membership-history";
 import { PERSONAL_ORGANIZATION_ID } from "./personal-organization";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+
+/** Repository choices follow their runtime owner, even before any workspace
+ * rows are loaded. Never hand a cloud URI to the Local branch picker. */
+export function filterProjectsForOrganization<T extends { repoRoot: string }>(
+  projects: readonly T[], organization: OrganizationSummary | null, confirmedOrganizationId: string | null = null,
+): T[] {
+  const owner = organization?.isPersonal ? null : organization?.id ?? confirmedOrganizationId;
+  const local = !owner || owner === PERSONAL_ORGANIZATION_ID || getKnownPersonalOrganizationIds().includes(owner);
+  const filtered = projects.filter(project => {
+    if (!isCloudWorkspace(project.repoRoot)) return local;
+    if (local) return false;
+    try { return parseCloudWorkspaceKey(project.repoRoot)?.organizationId === owner?.toLowerCase(); }
+    catch { return false; }
+  });
+  return filtered.length === projects.length ? projects as T[] : filtered;
+}
 
 export type WorkspacePlacement = "local" | "cloud";
 
 /** One policy function for every create affordance. Server entitlements still
  * authorize provisioning; this prevents the desktop from offering an invalid
- * Personal/cloud combination in the first place. */
+ * ownership/placement combination in the first place. */
 export function canCreateWorkspaceIn(
   organization: OrganizationSummary | null,
   placement: WorkspacePlacement,
 ): boolean {
-  if (placement === "local") return true;
+  if (placement === "local") return !organization || organization.isPersonal;
   return Boolean(
     organization &&
     !organization.isPersonal &&
@@ -43,8 +60,11 @@ export function localWorkspaceOwner(
     (organization
       ? organization.isPersonal
       : ownerId != null && getKnownPersonalOrganizationIds().includes(ownerId));
+  if (ownerId && !isPersonal) {
+    throw new Error("Organization workspaces run in the cloud. Select Personal to create a local workspace.");
+  }
   return {
-    organizationId: isPersonal ? null : ownerId,
+    organizationId: null,
     placement: "local",
   };
 }

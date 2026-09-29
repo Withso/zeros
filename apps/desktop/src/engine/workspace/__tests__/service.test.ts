@@ -17,6 +17,7 @@ import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import { createDesignWebDocumentState } from "@zeros/design-web";
 import { WorkspaceService, LOCAL_MAIN_WORKSPACE_ID } from "../service";
 import * as mcpRegistry from "../../agents/mcp-registry";
+import * as git from "../../git";
 import {
   setStateRootForTesting,
   closeState,
@@ -130,7 +131,18 @@ describe("WorkspaceService", () => {
     const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID };
     await expect(cloud.handle("design.initialize", target, { remote: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
     await expect(svc.handle("design.initialize", target, { remote: true, cloudWorker: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    await expect(cloud.handle("workspace.setMode", { ...target, mode: "design" }, { remote: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    await expect(cloud.handle("workspace.setMode", { ...target, mode: "design" }, { remote: true, cloudWorker: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
     expect(fs.existsSync(path.join(dir, firstUseDesignDirectoryNameForRepo(dir)))).toBe(false);
+  });
+
+  it("switches the admitted cloud primary's mode through the existing lifecycle operation", async () => {
+    const cloud = new WorkspaceService(dir, { primaryDesignWorkspace: true });
+    const { workspaces } = await cloud.handle("workspace.list") as { workspaces: Workspace[] };
+    insertWorkspace({ ...workspaces.find(row => row.id === LOCAL_MAIN_WORKSPACE_ID)!, placement: "cloud", organizationId: cloudActorIdentity.userId, canonicalId: cloudActorIdentity.deviceId });
+    const options = { remote: true, cloudWorker: true, hostLocalResources: false, cloudActorIdentity };
+    expect(await cloud.handle("workspace.setMode", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, mode: "design" }, options)).toMatchObject({ ok: true, mode: "design", snapshot: { protocolCapability: null } });
+    expect(await cloud.handle("workspace.setMode", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, mode: "code" }, options)).toMatchObject({ ok: true, mode: "code" });
   });
 
   it("preserves the strict capture request when resolving an admitted cloud checkout", async () => {
@@ -4744,6 +4756,51 @@ describe("WorkspaceService", () => {
 
   // ── Remote deny-by-default allowlist (FIX 2) ──────────────────────────────
 
+  it("binds remote PR suggestions to the admitted checkout, ignoring caller repository overrides", async () => {
+    const resolve = vi.spyOn(git.githubForgeAdapter, "resolveRepository").mockResolvedValue({
+      schemaVersion: 1, forge: "github", host: "github.com", owner: "allowed", name: "project",
+    });
+    const list = vi.spyOn(git, "listPrs").mockResolvedValue([]);
+    try {
+      await svc.handle("gh.prList", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID, originUrl: "https://github.com/unrelated/private.git",
+        owner: "unrelated", repo: "private", state: "open",
+      }, { remote: true, cloudWorker: true });
+      expect(resolve).toHaveBeenCalledWith(LOCAL_MAIN_WORKSPACE_ID);
+      expect(list).toHaveBeenCalledWith({ owner: "allowed", repo: "project", state: "open" });
+    } finally { resolve.mockRestore(); list.mockRestore(); }
+  });
+
+  it("refuses remote PR discovery without a registered workspace before reaching GitHub", async () => {
+    const list = vi.spyOn(git, "listPrs").mockResolvedValue([]);
+    try {
+      for (const workspaceId of [undefined, dir, "unknown-workspace"]) {
+        await expect(svc.handle("gh.prList", {
+          workspaceId, owner: "unrelated", repo: "private",
+        }, { remote: true })).rejects.toMatchObject({ code: expect.stringMatching(/VALIDATION_FAILED|WORKSPACE_NOT_FOUND/) });
+      }
+      expect(list).not.toHaveBeenCalled();
+    } finally { list.mockRestore(); }
+  });
+
+  it("preserves the Local create-from repository PR discovery contract", async () => {
+    const list = vi.spyOn(git, "listPrs").mockResolvedValue([]);
+    try {
+      await svc.handle("gh.prList", { originUrl: "https://github.com/local/project.git", state: "open" });
+      expect(list).toHaveBeenCalledWith({ owner: "local", repo: "project", state: "open" });
+    } finally { list.mockRestore(); }
+  });
+
+  it("does not treat a cloud read credential as the actor's PR write permission", async () => {
+    const access = vi.spyOn(git, "getWorkspaceRepoAccess").mockResolvedValue({ state: "blocked", message: "Read credential" });
+    try {
+      expect(await svc.handle("gh.repoAccess", { workspaceId: dir }, { cloudWorker: true })).toEqual({ state: "unknown" });
+      expect(access).not.toHaveBeenCalled();
+      expect(await svc.handle("gh.repoAccess", { workspaceId: dir })).toEqual({ state: "blocked", message: "Read credential" });
+      expect(access).toHaveBeenCalledWith(dir);
+    } finally { access.mockRestore(); }
+  });
+
   it("allowlists supported relay reads and metadata ops, denying the rest", () => {
     // Reads an optional remote client drives over the bridge (workspace-bridge.ts).
     for (const op of [
@@ -4768,6 +4825,8 @@ describe("WorkspaceService", () => {
       "git.remoteBranches",
       "gh.authStatus",
       "gh.repoOwnerAvatar",
+      "gh.repoAccess",
+      "gh.prList",
       "gh.prGet",
       "gh.prChecks",
       "gh.prCommits",

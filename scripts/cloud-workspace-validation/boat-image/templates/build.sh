@@ -19,6 +19,7 @@ for name in runtime-layout.json cgroup-resources.mjs cloud-resource-admission.mj
  install -o root -g root -m 0555 "scripts/cloud-workspace-validation/sandbox/$name" "/opt/zeros-runtime/lib/zeros/$name"
 done
 install -o root -g root -m 0555 scripts/cloud-workspace-validation/sandbox/start-engine.sh /opt/zeros-runtime/bin/start-engine.sh
+node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs
 install -o root -g root -m 0444 scripts/cloud-workspace-validation/sandbox/cloud-worker.json /etc/zeros/cloud-worker.json
 install -o root -g root -m 0444 scripts/cloud-workspace-validation/sandbox/zeros-cloud-engine.apparmor /opt/zeros-runtime/lib/zeros/zeros-cloud-engine.apparmor
 cc -std=c11 -O2 -Wall -Wextra -Werror scripts/cloud-workspace-validation/sandbox/cloud-engine-namespace.c -o /opt/zeros-runtime/cloud-engine-namespace

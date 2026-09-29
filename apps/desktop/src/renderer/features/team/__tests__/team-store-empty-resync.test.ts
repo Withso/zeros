@@ -27,7 +27,7 @@ const storage = new Map<string, string>();
   },
 };
 
-const { acceptOrganizationSnapshot, clearTeamStore, refreshTeams } =
+const { acceptOrganizationSnapshot, clearTeamStore, refreshTeams, getTeamStoreState } =
   await import("../team-store");
 const { getActiveTeamId, setActiveOrganizationSelection } =
   await import("../active-team");
@@ -86,5 +86,29 @@ describe("empty organization refresh", () => {
     });
 
     expect(getActiveTeamId()).toBe("org_1");
+  });
+
+  it("deduplicates menu refreshes and retains the exact account snapshot while waiting", async () => {
+    const cached = { user: { id: "a", email: "a@example.test", displayName: "A", staffRole: null }, organizations: [], teams: [] };
+    acceptOrganizationSnapshot(cached);
+    let finish!: (value: typeof cached) => void;
+    mocks.me.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const first = refreshTeams();
+    expect(refreshTeams()).toBe(first);
+    expect(mocks.me).toHaveBeenCalledOnce();
+    expect(getTeamStoreState().me).toBe(cached);
+    finish(cached); await first;
+  });
+
+  it("does not apply a menu refresh that finishes after the account changes", async () => {
+    const a = { user: { id: "a", email: "a@example.test", displayName: "A", staffRole: null }, organizations: [], teams: [] };
+    const b = { ...a, user: { ...a.user, id: "b", email: "b@example.test" } };
+    acceptOrganizationSnapshot(a);
+    let finish!: (value: typeof a) => void;
+    mocks.me.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const pending = refreshTeams();
+    clearTeamStore({ resetSelection: true }); acceptOrganizationSnapshot(b);
+    finish(a); await pending;
+    expect(getTeamStoreState().me).toBe(b);
   });
 });

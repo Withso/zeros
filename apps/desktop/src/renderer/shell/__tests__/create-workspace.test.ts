@@ -20,6 +20,11 @@ const toastError = vi.fn();
 const isNativeRuntime = vi.fn(() => true);
 const isExpectedElectron = vi.fn(() => true);
 const discardQueuedContextGraphWrites = vi.fn();
+const selectedOrganization = vi.fn();
+vi.mock("../../features/team/team-store", () => ({
+  getActiveOrganizationSnapshot: () => selectedOrganization(),
+  getActiveOrganizationIdSnapshot: () => selectedOrganization()?.id ?? null,
+}));
 
 vi.mock("../../state/use-projects", () => ({
   peekWorkspacesFor: (slug: string) => peekWorkspacesFor(slug),
@@ -100,6 +105,7 @@ const project = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  selectedOrganization.mockReturnValue(null);
   prepareProjectFolder
     .mockReset()
     .mockResolvedValue({ isRepo: true, hasCommits: true });
@@ -169,6 +175,16 @@ describe("repoNeedsFirstWorkspace — the auto-create-on-add guard", () => {
 });
 
 describe("createWorkspaceForProject", () => {
+  it("routes organization creation to the cloud composer before local preparation", async () => {
+    selectedOrganization.mockReturnValue({ id: "org_test", isPersonal: false });
+    const dispatch = vi.fn();
+    expect(await createWorkspaceForProject({ project, dispatch })).toBe(true);
+    expect(dispatch).toHaveBeenCalledWith({ type: "OPEN_CREATE_PAGE", projectId: project.id });
+    expect(workspacePrepareCreate).not.toHaveBeenCalled();
+    expect(workspaceCreate).not.toHaveBeenCalled();
+    expect(prepareProjectFolder).not.toHaveBeenCalled();
+    expect(spawnPreparedDefaultChat).not.toHaveBeenCalled();
+  });
   it("does not reserve, navigate or spawn a chat when automatic Git setup fails", async () => {
     prepareProjectFolder.mockRejectedValue(new Error("Git unavailable"));
     const dispatch = vi.fn();

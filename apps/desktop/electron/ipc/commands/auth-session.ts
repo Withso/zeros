@@ -26,7 +26,7 @@ import { workOSDesktopClientForMain } from "../../workos-desktop-runtime";
 import { requestWorkOSDesktopRevocation } from "../../workos-desktop-revocation";
 import { channel } from "../../../src/engine/runtime";
 import { desktopAuthConfig } from "../../workos-desktop-config";
-import { devWorkOSConfigurationIssue } from "../../dev-workos-auth-policy";
+import { devWorkOSConfigurationIssue, workspaceDevAuthProfile } from "../../dev-workos-auth-policy";
 import { controlPlaneBaseUrl } from "../../workos-desktop-account";
 
 const TOKENS_KEY = "auth-session:tokens";
@@ -98,6 +98,8 @@ function devUsesWorkOS(): boolean {
       auth: desktopAuthConfig(),
       appOrigin: appBaseUrl(),
       controlPlaneOrigin: controlPlaneBaseUrl(),
+      localProfile: workspaceDevAuthProfile(),
+      isolated: process.env.ZEROS_ISOLATE === "1",
     }) === null;
   } catch {
     return false;

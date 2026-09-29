@@ -9,11 +9,11 @@ import type {CloudAgentLease} from "../cloud-agent-lease";
 import {CloudWorkloadTools} from "../cloud-workload-tools";
 import type {BoundaryProcess,BoundarySpawnRequest,PreparedBoundary} from "../containment/types";
 const roots:string[]=[],hosts:CloudWorkloadTools[]=[];
-async function fixture(){
+async function fixture(gitAuthor?:{name:string;email:string}){
   const root=await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-tools-"));roots.push(root);
   const domains=new Set<{stopAndProve():Promise<void>}>();
   const controller=new AbortController();
-  const lease={signal:controller.signal,assertLive:()=>{if(controller.signal.aborted)throw new Error("retired");},validate:async()=>{},
+  const lease={gitAuthor,signal:controller.signal,assertLive:()=>{if(controller.signal.aborted)throw new Error("retired");},validate:async()=>{},
     attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),
     launch:async(spawn:()=>Promise<BoundaryProcess>)=>{const child=await spawn();domains.add(child);return child;},
     retire:async(domain:{stopAndProve():Promise<void>})=>{await domain.stopAndProve();domains.delete(domain);},
@@ -32,6 +32,12 @@ async function fixture(){
 }
 afterEach(async()=>{for(const host of hosts.splice(0))await host.stopAndProve();for(const root of roots.splice(0))await rm(root,{recursive:true,force:true});});
 describe.skipIf(process.platform!=="linux")("credential-free cloud workspace tools",()=>{
+  it("gives saved tool-bridge conversations the prompting member's Git author",async()=>{
+    const author={name:"Test Member",email:"1234+test-member@users.noreply.github.com"};
+    const {tools}=await fixture(author);
+    expect(await tools.call({operation:"exec",command:"git init -q && git commit -q --allow-empty -m test && git show -s --format='%an|%ae|%cn|%ce'"}))
+      .toMatchObject({ok:true,data:{exit:{code:0},output:`${author.name}|${author.email}|${author.name}|${author.email}\n`}});
+  });
   it("refuses FIFOs immediately without waiting for another writer",async()=>{
     const {root,tools}=await fixture();execFileSync("mkfifo",[path.join(root,"pipe")]);
     expect(await tools.call({operation:"read",path:"pipe"},AbortSignal.timeout(500))).toEqual({ok:false,error:"denied"});

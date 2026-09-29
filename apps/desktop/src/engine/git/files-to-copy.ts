@@ -48,7 +48,8 @@
 // ──────────────────────────────────────────────────────────
 
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile, lstat } from "node:fs/promises";
+import { rm, lstat } from "node:fs/promises";
+import { createGitTemporaryDirectory, writeGitTemporaryFile } from "./git-temporary";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { opSettingsResolve } from "../settings/ops";
@@ -554,7 +555,7 @@ async function withExcludeFile<T>(
 ): Promise<T> {
   return withTempDir(async (dir) => {
     const file = path.join(dir, "include");
-    await writeFile(
+    await writeGitTemporaryFile(
       file,
       src.text ?? src.patterns.map((p) => p.raw).join("\n") + "\n",
     );
@@ -564,9 +565,10 @@ async function withExcludeFile<T>(
 
 /** Run `fn` against a private scratch directory and remove it afterwards.
  *  One owner for the exclude-file temp lifecycle, so cleanup, permissions and
- *  TMPDIR handling stay in a single place. `mkdtemp` already creates it 0700. */
+ *  TMPDIR handling stay in a single place. Only the Git execution owner can
+ *  access these disposable workspace files. */
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(path.join(tmpdir(), "zeros-ftc-"));
+  const dir = await createGitTemporaryDirectory(path.join(tmpdir(), "zeros-ftc-"));
   try {
     return await fn(dir);
   } finally {
@@ -881,7 +883,7 @@ async function attributePatterns(
       hasNegation && positiveLines.length > 0
         ? await countMatches(prunePathspecs(positiveLines), async () => {
             const file = path.join(dir, "positives");
-            await writeFile(
+            await writeGitTemporaryFile(
               file,
               positiveLines.map((p) => p.raw).join("\n") + "\n",
             );
@@ -909,7 +911,7 @@ async function attributePatterns(
           // resulting hit list MEANS.
           const hits = await countMatches(prune, async () => {
             const file = path.join(dir, `p${i}`);
-            await writeFile(file, `${p.pattern}\n`);
+            await writeGitTemporaryFile(file, `${p.pattern}\n`);
             return file;
           });
           // For a negation, the honest number is how many files it actually

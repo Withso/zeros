@@ -305,6 +305,37 @@ describe("branch ops", () => {
     expect(getWorkspace(workspaceId).branch).toBe("fresh-branch");
   });
 
+  it.each(["in-review", "done"] as const)("checkout detaches the previous branch's PR and %s lifecycle", async (status) => {
+    updateWorkspace(workspaceId, { prNumber: 42, prState: status === "done" ? "merged" : "ready",
+      prUrl: "https://github.com/example/project/pull/42", status });
+    await checkoutBranch({ workspaceId, branchName: "next-task", createIfMissing: true });
+    expect(getWorkspace(workspaceId)).toMatchObject({ branch: "next-task", prNumber: null,
+      prState: null, prUrl: null, status: "in-progress" });
+  });
+
+  it("checkout of the same branch preserves its PR and lifecycle", async () => {
+    const original = getWorkspace(workspaceId);
+    updateWorkspace(workspaceId, { prNumber: 42, prState: "merged",
+      prUrl: "https://github.com/example/project/pull/42", status: "done" });
+    await checkoutBranch({ workspaceId, branchName: original.branch });
+    expect(getWorkspace(workspaceId)).toMatchObject({ branch: original.branch, prNumber: 42,
+      prState: "merged", prUrl: "https://github.com/example/project/pull/42", status: "done" });
+  });
+
+  it("failed checkout preserves the previous branch's PR", async () => {
+    const original = getWorkspace(workspaceId);
+    updateWorkspace(workspaceId, { prNumber: 42, prState: "ready", status: "in-review" });
+    await expect(checkoutBranch({ workspaceId, branchName: "missing-target" })).rejects.toThrow();
+    expect(getWorkspace(workspaceId)).toMatchObject({ branch: original.branch, prNumber: 42,
+      prState: "ready", status: "in-review" });
+  });
+
+  it("checkout preserves an explicitly cancelled workspace status", async () => {
+    updateWorkspace(workspaceId, { prNumber: 42, prState: "closed", status: "cancelled" });
+    await checkoutBranch({ workspaceId, branchName: "other-task", createIfMissing: true });
+    expect(getWorkspace(workspaceId)).toMatchObject({ prNumber: null, prState: null, status: "cancelled" });
+  });
+
   it("checkout createIfMissing never resets an existing branch", async () => {
     const ws = getWorkspace(workspaceId);
     await execFileAsync("git", ["branch", "existing-target", "main"], {

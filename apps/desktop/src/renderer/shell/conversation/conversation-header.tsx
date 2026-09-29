@@ -90,6 +90,7 @@ import {
   useOpenInDefaultId,
   type DetectedOpenApp,
 } from "../../platform/open-apps";
+import { canOpenPathLocally } from "../../platform/app";
 import { OpenAppIcon } from "../../features/agent/open-app-icon";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
 
@@ -354,6 +355,7 @@ function useOpenInMenu(path: string) {
   }, [path]);
 
   return {
+    canOpenLocally: canOpenPathLocally(path),
     defaultId,
     ides,
     defaultApp,
@@ -386,6 +388,7 @@ function OpenInMenuRows({ menu }: { menu: OpenInMenu }) {
   return (
     <>
       <DropdownMenuItem
+        disabled={!menu.canOpenLocally}
         data-selected={defaultApp.id === finderApp.id || undefined}
         onSelect={() => selectApp(finderApp)}
       >
@@ -396,6 +399,7 @@ function OpenInMenuRows({ menu }: { menu: OpenInMenu }) {
       {ides.map((app) => (
         <DropdownMenuItem
           key={app.id}
+          disabled={!menu.canOpenLocally}
           data-selected={defaultApp.id === app.id || undefined}
           onSelect={() => selectApp(app)}
         >
@@ -405,6 +409,7 @@ function OpenInMenuRows({ menu }: { menu: OpenInMenu }) {
         </DropdownMenuItem>
       ))}
       <DropdownMenuItem
+        disabled={!menu.canOpenLocally}
         data-selected={defaultApp.id === terminalApp.id || undefined}
         onSelect={() => selectApp(terminalApp)}
       >
@@ -439,6 +444,7 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
   // ⌘O — open in the current default app. Reaches the renderer because
   // the native menu's Open Folder… accelerator moved to ⌘⇧O (menu.ts).
   useEffect(() => {
+    if (!menu.canOpenLocally) return;
     const handler = (e: KeyboardEvent) => {
       if (!workspacePageActive) return;
       if (e.defaultPrevented) return;
@@ -449,7 +455,7 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [defaultId, openWith, workspacePageActive]);
+  }, [defaultId, openWith, workspacePageActive, menu.canOpenLocally]);
 
   // ⌘C — copy the worktree path, but ONLY when it can't be a real copy:
   // no text selection anywhere and focus not on a typing surface.
@@ -476,6 +482,7 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
           variant="ghost"
           size="icon-sm"
           className={OPEN_IN_LOGO_BTN_CLS}
+          disabled={!menu.canOpenLocally}
           onClick={() => void openWith(defaultApp)}
           aria-label={`Open in ${defaultApp.name}`}
         >

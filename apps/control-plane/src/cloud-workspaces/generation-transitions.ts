@@ -9,6 +9,7 @@ type TransitionRow = {
   source_generation: number;
   candidate_generation: number;
   state: "draining" | "provisioning" | "setting_up" | "rolling_back";
+  operation?: "upgrade" | "rollback" | "recover";
 };
 
 function requestDigest(value: unknown): Buffer {
@@ -22,7 +23,7 @@ async function queueTransitionIntent(
     organizationId: string;
     generation: number;
     transitionId: string;
-    operation: "create" | "wake" | "delete";
+    operation: "create" | "wake" | "stop" | "delete";
     affectsWorkspace: boolean;
     delayMs?: number;
   },
@@ -77,20 +78,40 @@ export async function rollbackCloudWorkspaceGenerationTransition(
   },
 ): Promise<boolean> {
   const selected = await tx.query<TransitionRow>(
-    `SELECT gt.id, gt.source_generation, gt.candidate_generation, gt.state
+    `SELECT gt.id, gt.source_generation, gt.candidate_generation, gt.state, gt.operation
      FROM cloud_workspace_generation_transitions gt
      JOIN cloud_workspaces cw
        ON cw.id = gt.workspace_id AND cw.org_id = gt.org_id
      WHERE gt.workspace_id = $1 AND gt.org_id = $2
        AND gt.candidate_generation = $3
-       AND gt.state IN ('draining', 'provisioning', 'setting_up')
+       AND (gt.state IN ('draining', 'provisioning', 'setting_up') OR (gt.operation='recover' AND gt.state='rolling_back'))
        AND cw.current_generation IN (gt.source_generation, gt.candidate_generation)
-       AND cw.desired_state = 'running' AND cw.deleted_at IS NULL
+       AND (cw.desired_state = 'running' OR (gt.operation='recover' AND gt.state='rolling_back' AND cw.desired_state='stopped'))
+       AND cw.deleted_at IS NULL
      FOR UPDATE OF gt, cw`,
     [input.workspaceId, input.organizationId, input.candidateGeneration],
   );
   const transition = selected.rows[0];
   if (!transition) return false;
+
+  if (transition.operation === "recover") {
+    // Recovery is entered because the source is suspect. Keep it available
+    // for salvage, with no runtime authority; never roll a rejected candidate
+    // back into that allocation. Ordinary upgrade rollback remains below.
+    await retireCloudWorkspaceRuntimeAccess(tx, { ...input, generation: transition.candidate_generation, reason: "generation_candidate_rejected" });
+    await retireCloudWorkspaceRuntimeAccess(tx, { ...input, generation: transition.source_generation, reason: "generation_candidate_rejected" });
+    await tx.query(`UPDATE cloud_workspace_generation_transitions SET state='rollback_failed',completed_at=now(),updated_at=now(),
+      error_code=$2,error_message=$3 WHERE id=$1`, [transition.id,input.errorCode.slice(0,128),input.errorMessage.slice(0,2048)]);
+    await tx.query(`UPDATE cloud_workspaces SET current_generation=$2,status='failed',desired_state='stopped',authority_epoch=authority_epoch+1,
+      version=version+1,updated_at=now(),last_error_code='recovery_needed',last_error_message='Recovery did not complete. The source is preserved.'
+      WHERE id=$1 AND org_id=$3`, [input.workspaceId,transition.source_generation,input.organizationId]);
+    await tx.query(`UPDATE cloud_workspace_restore_incidents SET state='recovery_needed',reason=$2,updated_at=now() WHERE transition_id=$1`,[transition.id,input.errorCode.slice(0,128)]);
+    await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),updated_at=now()
+      WHERE generation_transition_id=$1 AND state IN ('queued','observing')`,[transition.id]);
+    await queueTransitionIntent(tx,{...input,generation:transition.candidate_generation,transitionId:transition.id,operation:"delete",affectsWorkspace:false});
+    if(transition.state === "draining" || transition.state === "rolling_back") await queueTransitionIntent(tx,{...input,generation:transition.source_generation,transitionId:transition.id,operation:"stop",affectsWorkspace:false});
+    return true;
+  }
 
   await retireCloudWorkspaceRuntimeAccess(tx, {
     workspaceId: input.workspaceId,
@@ -385,6 +406,7 @@ export async function completeCloudWorkspaceGenerationTransition(
      WHERE id = $1`,
     [transition.id],
   );
+  await tx.query("UPDATE cloud_workspace_restore_incidents SET state='succeeded',updated_at=now() WHERE transition_id=$1",[transition.id]);
   const cleanupIntentId = await queueTransitionIntent(tx, {
     workspaceId: input.workspaceId,
     organizationId: input.organizationId,

@@ -24,7 +24,7 @@ ARG ZEROS_IMAGE_CONTRACT_SHA256=000000000000000000000000000000000000000000000000
 ENV DEBIAN_FRONTEND=noninteractive \
     ZEROS_DATA_DIR=/srv/zeros/state \
     ZEROS_WORKSPACES_DIR=/srv/zeros/state/workspaces \
-    ZEROS_REPO_DIR=/srv/zeros/workspace \
+    ZEROS_REPO_DIR=/srv/zeros/files/workspace \
     ZEROS_ENGINE_LOG=/srv/zeros/log/engine.log \
     HOME=/srv/zeros/home/agent \
     USER=zeros-agent \
@@ -83,12 +83,14 @@ RUN pnpm install --frozen-lockfile \
  && PLAYWRIGHT_BROWSERS_PATH=/opt/zeros/design-browsers pnpm exec playwright-core install --with-deps chromium \
  && pnpm rebuild better-sqlite3 \
  && chmod -R go-w /opt/zeros \
- && git clone --no-hardlinks /opt/zeros /srv/zeros/workspace \
- && git -C /srv/zeros/workspace remote set-url origin "$ZEROS_REPO_URL" \
- && chown -R 10001:10001 /srv/zeros/workspace \
- && find /srv/zeros/workspace -type d -exec setfacl \
+ && install -d -o root -g root -m 0755 /srv/zeros/files \
+ && git clone --no-hardlinks /opt/zeros /srv/zeros/files/workspace \
+ && git -C /srv/zeros/files/workspace remote set-url origin "$ZEROS_REPO_URL" \
+ && chown -R 10001:10001 /srv/zeros/files/workspace \
+ && find /srv/zeros/files/workspace -type d -exec setfacl \
       -m u:zeros-agent:rwx,d:u:zeros-agent:rwx,d:m:rwx {} + \
- && find /srv/zeros/workspace -type f -exec setfacl -m u:zeros-agent:rw- {} + \
+ && find /srv/zeros/files/workspace -type f -exec setfacl -m u:zeros-agent:rw- {} + \
+ && node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs \
  && mkdir -p /srv/zeros/state/workspaces /srv/zeros/log /etc/zeros \
  && chown -R 10003:10003 /srv/zeros/state \
  && chmod 0700 /srv/zeros/state /srv/zeros/state/workspaces \
@@ -164,7 +166,7 @@ RUN chown root:root /opt/zeros-runtime/bin/start-engine.sh \
       "$ZEROS_REPO_REF" /opt/zeros "$ZEROS_IMAGE_CONTRACT_SHA256" \
  && rm -f /opt/zeros/.git/index
 
-WORKDIR /srv/zeros/workspace
+WORKDIR /srv/zeros/files/workspace
 
 # Keep the sandbox alive and launch engines only through a one-use root session.
 ENTRYPOINT ["/opt/zeros-runtime/bin/node", "/opt/zeros-runtime/lib/zeros/cloud-worker-supervisor.mjs"]

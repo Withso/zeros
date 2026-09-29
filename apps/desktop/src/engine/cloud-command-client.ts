@@ -23,9 +23,10 @@ async function requestCloudControl(authority: CloudRuntimeAuthority, request: Cl
   let response: Response;
   try {
     response = await requestFetch(new URL(`/internal/v1/cloud-workspaces/engine/${resource}`, heartbeatEndpoint), {
-      method: "POST", redirect: "error", cache: "no-store",
+      method: "POST", redirect: "error",
       signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
-      headers: { "content-type": "application/json", authorization: `Bearer ${heartbeatToken}` },
+      headers: { "content-type": "application/json", authorization: `Bearer ${heartbeatToken}`,
+        ...(resource==="commands"?{"x-zeros-native-commands":"1"}:{}) },
       body: JSON.stringify({ ...scope, request,...(actorSessionId?{actorSessionId}:{}) }),
     });
   } catch { throw new CloudCommandRuntimeError("command_service_unavailable"); }

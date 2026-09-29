@@ -1,3 +1,4 @@
+import { DevGithubConnectionSchema } from "./dev-github-reference";
 // Pure control-plane client for the desktop GitHub App flow.
 //
 // This module deliberately has no Electron imports so response validation,
@@ -407,6 +408,15 @@ export class GithubAppClient {
     };
   }
 
+  async exchangeDevReference(accessToken:string,nonce:string){
+    return DevGithubConnectionSchema.parse(await this.request(accessToken,"/v1/github/oauth/exchange",{nonce}));
+  }
+  async restoreDevReference(accessToken:string,organizationId?:string){
+    return DevGithubConnectionSchema.parse(await this.request(accessToken,"/v1/github/dev-reference",organizationId?{organizationId}:{}));
+  }
+  async removeDevReference(accessToken:string,bindingId:string,scope:"local"|"organization"|"global"){
+    await this.request(accessToken,"/v1/github/dev-reference/remove",{bindingId,scope});
+  }
   async exchange(
     accessToken: string,
     nonce: string,

@@ -23,6 +23,7 @@ import {
   nativeListen,
 } from "./runtime";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
+import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
 
 // Re-export the runtime predicates so call sites can pull them
 // from either module.
@@ -121,15 +122,20 @@ export async function shellOpenUrl(url: string): Promise<void> {
   await nativeInvoke<void>("shell_open_url", { url: normalized });
 }
 
+/** Host apps cannot open an opaque cloud workspace identity. */
+export function canOpenPathLocally(path: string | null | undefined): boolean {
+  return !!path && !isCloudWorkspace(path) && isNativeRuntime();
+}
+
 /** Reveal a path in macOS Finder. */
 export async function revealInFinder(path: string): Promise<void> {
-  if (!isNativeRuntime()) return;
+  if (!canOpenPathLocally(path)) return;
   await nativeInvoke<void>("reveal_in_finder", { path });
 }
 
 /** Launch macOS Terminal.app at the given directory. */
 export async function openInTerminal(path: string): Promise<void> {
-  if (!isNativeRuntime()) return;
+  if (!canOpenPathLocally(path)) return;
   await nativeInvoke<void>("open_in_terminal", { path });
 }
 

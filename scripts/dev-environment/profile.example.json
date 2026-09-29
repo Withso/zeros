@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "cloudflare": {
+    "accountId": "YOUR_CLOUDFLARE_ACCOUNT_ID",
+    "zoneId": "YOUR_CLOUDFLARE_ZONE_ID",
+    "domain": "example.com",
+    "apiToken": "YOUR_DEV_TUNNEL_AND_DNS_TOKEN"
+  },
+  "postgresBin": "/opt/homebrew/opt/postgresql@18/bin",
+  "workos": {
+    "environment": "dev",
+    "webClientId": "client_DEV_WEB",
+    "desktopClientId": "client_DEV_DESKTOP",
+    "apiKey": "YOUR_DEV_WORKOS_API_KEY"
+  },
+  "github": {
+    "appId": 1,
+    "appSlug": "your-zeros-dev-app",
+    "clientId": "YOUR_DEV_GITHUB_CLIENT_ID",
+    "clientSecret": "YOUR_DEV_GITHUB_CLIENT_SECRET",
+    "privateKeyBase64": "YOUR_DEV_GITHUB_APP_PRIVATE_KEY_BASE64"
+  },
+  "cloud": null
+}

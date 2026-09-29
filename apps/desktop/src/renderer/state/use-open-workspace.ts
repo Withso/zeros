@@ -16,6 +16,9 @@ import { resolveWorkspacePresentationKind } from "./workspace-resolution";
 import { pendingWorkspaceMode } from "./pending-workspaces";
 import type { WorkspaceListFilter } from "./workspace-list-filter";
 import { workspaceIsReadOnly } from "./workspace-history";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
+import { getActiveBridge } from "../platform/bridge/active-bridge";
+import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 
 interface OpenWorkspaceOptions {
   /** Publish a repository-filter change with the workspace destination in the
@@ -68,6 +71,12 @@ export function useOpenWorkspace(): (
         useWorkspaceStore.getState(),
         workspace.path,
       );
+      const bridge = getActiveBridge();
+      const chatHydrationPending = !fallbackId && (
+        useWorkspaceStore.getState().pendingChatHydrationFolder === workspace.path ||
+        (isCloudWorkspace(workspace.path) &&
+          (!(bridge instanceof WorkspaceRuntimeClient) || !bridge.hasChatSnapshot(workspace.path)))
+      );
       if (fallbackId) {
         void sessions.hydrateChat(fallbackId);
         if (!historyOnly) prepareChatView(fallbackId);
@@ -80,6 +89,7 @@ export function useOpenWorkspace(): (
         folder: workspace.path,
         repoRoot: workspace.repoRoot,
         chatId: fallbackId,
+        ...(chatHydrationPending ? { chatHydrationPending: true } : {}),
         validationPending: workspace.validationPending,
         workspaceListFilter: options?.workspaceListFilter,
       });
@@ -89,7 +99,7 @@ export function useOpenWorkspace(): (
       // A cold remembered target is visible immediately, but creating a chat
       // mutates durable data. Wait for its exact repository list to confirm the
       // worktree; Conversation pane's selection keeper spawns after resolution succeeds.
-      if (workspace.validationPending || historyOnly) return;
+      if (workspace.validationPending || chatHydrationPending || historyOnly) return;
       void spawnDefaultChatForWorkspace({
         folder: workspace.path,
         sessions,

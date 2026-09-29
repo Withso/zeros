@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 
 import { resolveBootActiveChatId } from "../boot-active-chat";
 import type { ChatThread } from "../store";
+import { cloudScopedId, cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 
 function chat(
   id: string,
@@ -88,13 +89,13 @@ describe("resolveBootActiveChatId", () => {
     ).toBe("a-new");
   });
 
-  it("falls back to the most-recent live chat anywhere when the last workspace has none", () => {
+  it("keeps a remembered Local workspace while its chat list is cold", () => {
     expect(
       resolveBootActiveChatId([chat("b1", B, 200)], null, {
         lastWorkspaceFolder: A,
         activeChatByFolder: {},
       }),
-    ).toBe("b1");
+    ).toBeNull();
   });
 
   it("falls back globally when no workspace was remembered", () => {
@@ -119,5 +120,36 @@ describe("resolveBootActiveChatId", () => {
         activeChatByFolder: {},
       }),
     ).toBeNull();
+  });
+});
+
+describe("cloud reload ownership", () => {
+  const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
+  const folder = cloudWorkspaceKey(target);
+  const id = cloudScopedId(target, "remembered");
+
+  it("retains the exact cloud chat identity before its authorized snapshot arrives", () => {
+    expect(resolveBootActiveChatId(chats, id, { lastWorkspaceFolder: folder, activeChatByFolder: {} })).toBe(id);
+  });
+
+  it("restores a cloud identity from workspace memory without using a Local fallback", () => {
+    expect(resolveBootActiveChatId(chats, null, { lastWorkspaceFolder: folder, activeChatByFolder: { [folder]: id } })).toBe(id);
+    expect(resolveBootActiveChatId(chats, null, { lastWorkspaceFolder: folder, activeChatByFolder: {} })).toBeNull();
+  });
+
+  it("does not let a partial cloud list select a different chat before validation", () => {
+    expect(resolveBootActiveChatId([...chats, chat(cloudScopedId(target, "other"), folder, 500)], id, {
+      lastWorkspaceFolder: folder, activeChatByFolder: {},
+    })).toBe(id);
+  });
+
+  it("falls back only within the same cloud workspace after authoritative deletion", () => {
+    const other = cloudScopedId(target, "other");
+    expect(resolveBootActiveChatId([...chats, chat(other, folder, 500)], id, {
+      lastWorkspaceFolder: folder, activeChatByFolder: {}, confirmedCloudWorkspaces: [folder],
+    })).toBe(other);
+    expect(resolveBootActiveChatId(chats, id, {
+      lastWorkspaceFolder: folder, activeChatByFolder: {}, confirmedCloudWorkspaces: [folder],
+    })).toBeNull();
   });
 });

@@ -15,6 +15,7 @@ import type { TransportClient } from "../transport/types";
 import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
 import type { CloudReplicaHostSession } from "../cloud-replica-host-control";
 import { NODE_DESIGN_WATCH_GUARD_FILENAME } from "../agents/containment/design-watch-isolation";
+import type { CloudGitAuthor } from "@zeros/protocol/cloud-agent-execution";
 import * as gitState from "../git/state";
 import type { CloudCheckpointDirective, CloudDurabilityAuthority } from "../cloud-durability-runtime";
 
@@ -198,6 +199,7 @@ interface ReaperInternals {
   globalDesignAuthorityStarts: Set<Promise<unknown>>;
   globalDesignTerritoryTransitionCount: number;
   cloudWorker: CloudWorkerConfiguration | null;
+  cloudRuntimeRegistration: { gitAuthorRequest(actorSessionId: string): Promise<CloudGitAuthor | null> } | null;
   cancelLiveAgentSessions(sessionIds: ReadonlySet<string>): Promise<boolean>;
   workspaceAllowsProcessStart(workspaceId: string | null): boolean;
   assertAgentSessionProcessStartAllowed(
@@ -1126,6 +1128,45 @@ describe("workspace terminal start barrier", () => {
     expect(env.env?.ZEROS_CLOUD_TOKEN).toBeUndefined();
     expect(env.env?.ANTHROPIC_API_KEY).toBeUndefined();
     expect(env.env?.CLOUD_NORMAL_VAR).toBeUndefined();
+    expect(env.env?.GIT_AUTHOR_NAME).toBe("");
+    expect(env.env?.GIT_AUTHOR_EMAIL).toBe("");
+  });
+
+  it.each([false, true])("binds terminal authors to the launching member and rechecks revocation (%s)", async revoked => {
+    const state = internals(new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_932 }));
+    state.cloudWorker = qualifiedCloudWorker();
+    const folder = "/tmp/zeros-lifecycle-root/worktree";
+    const remote: TransportClient = { ...client("cloud"),
+      cloudActor: { sessionId: "member-session", deviceId: "member-device", role: "developer", fingerprint: "a".repeat(64) },
+      authorized: () => live };
+    let live = true;
+    const author = { name: "Test Member", email: "1234+test-member@users.noreply.github.com" };
+    const getAuthor = vi.fn(async () => { if (revoked) live = false; return author; });
+    state.cloudRuntimeRegistration = { gitAuthorRequest: getAuthor };
+    vi.spyOn(state.workspace, "workspaceIdForCwd").mockReturnValue("ws_outer");
+    vi.spyOn(state.pty, "resolveCwd").mockReturnValue(folder);
+    vi.spyOn(state.pty, "isWithinAllowed").mockReturnValue(true);
+    vi.spyOn(state, "workspaceAllowsProcessStart").mockReturnValue(true);
+    const created = { sessionId: "member-terminal", pid: 123, cwd: folder, cols: 80, rows: 24, reattached: false };
+    const create = vi.spyOn(state.pty, "create").mockReturnValue(created);
+    const message = { type: "PTY_CREATE", id: "member-terminal-request", source: "browser", timestamp: 1,
+      sessionId: created.sessionId, workspaceId: "ws_outer", cwd: folder, cols: 80, rows: 24 } as Extract<EngineMessage, { type: "PTY_CREATE" }>;
+    await state.handlePtyCreate(message, remote);
+    expect(getAuthor).toHaveBeenCalledWith("member-session");
+    if (revoked) {
+      expect(create).not.toHaveBeenCalled();
+      expect(remote.send).toHaveBeenCalledWith(expect.objectContaining({ type: "PTY_EXIT" }));
+      return;
+    }
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ env: expect.objectContaining({
+      GIT_AUTHOR_NAME: author.name, GIT_AUTHOR_EMAIL: author.email,
+      GIT_COMMITTER_NAME: author.name, GIT_COMMITTER_EMAIL: author.email,
+    }) }));
+    vi.spyOn(state.pty, "has").mockReturnValue(true);
+    create.mockReturnValue({ ...created, reattached: true });
+    await state.handlePtyCreate(message, { ...remote, cloudActor: { ...remote.cloudActor!, sessionId: "another-member" } });
+    expect(getAuthor).toHaveBeenCalledOnce();
+    expect(create.mock.calls[1]?.[0]).not.toHaveProperty("env");
   });
 
   it("registers a terminal start before remote authorization yields", async () => {

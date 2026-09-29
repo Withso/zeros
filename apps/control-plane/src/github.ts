@@ -1,3 +1,4 @@
+import { devConnectionRuntime } from "./dev-connections/runtime.js";
 // GitHub App OAuth/install flow.
 //
 // The control plane is the confidential-client boundary: the GitHub client secret
@@ -15,13 +16,17 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import type pg from "pg";
 
 import type { GithubBackendConfig } from "./config.js";
 import { withSystemTx, withUserTx, type Tx } from "./db.js";
-import { HttpError } from "./authz.js";
+import { HttpError, requireOrganizationMembership } from "./authz.js";
+import { GithubCloudUserAccess } from "./cloud-workspaces/github-user-access.js";
+import { githubWritePreparation, type DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
 import { createGithubAppJwt } from "./github-app-jwt.js";
+import { githubCommitProfile, type GithubCommitProfile } from "./github-git-author.js";
 import { rateLimit } from "./ratelimit.js";
 
 export { createGithubAppJwt };
@@ -88,6 +93,7 @@ const CloudInstallationTokenBodySchema = z
 type FetchLike = typeof fetch;
 
 export interface GithubRouteDependencies {
+  writeGrants?: DatabaseCloudGithubWriteGrants;
   fetch?: FetchLike;
   now?: () => number;
   random?: (bytes: number) => Buffer;
@@ -507,7 +513,7 @@ async function githubUser(
   fetchImpl: FetchLike,
   config: GithubBackendConfig,
   token: string,
-): Promise<{ login: string }> {
+): Promise<GithubCommitProfile> {
   const response = await fetchWithTimeout(
     fetchImpl,
     `${config.apiBaseUrl}/user`,
@@ -524,19 +530,8 @@ async function githubUser(
         : "GitHub is temporarily unavailable.",
     );
   }
-  const raw = await responseJson(response);
-  const login =
-    raw && typeof raw === "object" && !Array.isArray(raw)
-      ? stringField((raw as Record<string, unknown>).login, 100)
-      : undefined;
-  if (!login) {
-    throw new HttpError(
-      503,
-      "github_bad_response",
-      "GitHub returned an incomplete user profile.",
-    );
-  }
-  return { login };
+  try { return githubCommitProfile(await responseJson(response)); }
+  catch { throw new HttpError(503, "github_bad_response", "GitHub returned an incomplete user profile."); }
 }
 
 async function installationRepositoryCount(
@@ -620,6 +615,7 @@ async function listGithubInstallations(
   token: string,
   nowMs: number,
   deadlineAtMs = nowMs + GITHUB_FLOW_DEADLINE_MS,
+  enrichCounts = true,
 ): Promise<GithubInstallationSnapshot> {
   const rawInstallations: unknown[] = [];
   let complete = false;
@@ -689,7 +685,7 @@ async function listGithubInstallations(
   // Repository counts enrich Settings only. Bound both cardinality and
   // concurrency so an account with hundreds of organizations cannot turn one
   // Refresh click into a 15-minute request train or a GitHub API burst.
-  const probeCount = Math.min(result.length, MAX_REPOSITORY_COUNT_PROBES);
+  const probeCount = enrichCounts ? Math.min(result.length, MAX_REPOSITORY_COUNT_PROBES) : 0;
   for (
     let offset = 0;
     offset < probeCount;
@@ -788,9 +784,12 @@ async function persistAuthorization(
     nonceHash: Buffer;
     bundle: GithubTokenBundle;
     login: string;
+    githubUserId: string;
+    gitName: string;
     installations: GithubInstallation[];
     installationsComplete: boolean;
     nowMs: number;
+    referenceBindingId?: string;
   },
 ): Promise<void> {
   await persistInstallations(tx, {
@@ -801,16 +800,20 @@ async function persistAuthorization(
   });
   await tx.query(
     `INSERT INTO github_authorizations (
-       owner_user_id, app_variant, github_login, last_verified_at
-     ) VALUES ($1, $2, $3, now())
+       owner_user_id, app_variant, github_login, github_user_id, git_author_name, last_verified_at
+     ) VALUES ($1, $2, $3, $4, $5, now())
      ON CONFLICT (owner_user_id, app_variant)
      DO UPDATE SET
        github_login = EXCLUDED.github_login,
+       github_user_id = EXCLUDED.github_user_id,
+       git_author_name = EXCLUDED.git_author_name,
        last_verified_at = now(),
        updated_at = now()`,
-    [input.pending.owner_user_id, input.pending.app_variant, input.login],
+    [input.pending.owner_user_id, input.pending.app_variant, input.login, input.githubUserId, input.gitName],
   );
-  await tx.query(
+  if(input.referenceBindingId)await tx.query(`INSERT INTO dev_github_handoffs(nonce_hash,owner_user_id,binding_id,expires_at) VALUES($1,$2,$3,$4)`,
+    [input.nonceHash,input.pending.owner_user_id,input.referenceBindingId,new Date(input.nowMs+GITHUB_HANDOFF_TTL_MS)]);
+  else await tx.query(
     `INSERT INTO github_oauth_handoffs (
        nonce_hash, owner_user_id, app_variant, access_token_sealed,
        access_token_expires_at, refresh_token_sealed, refresh_token_expires_at,
@@ -878,12 +881,14 @@ async function assertAuthorizedGithubLogin(
     ownerUserId: string;
     appVariant: string;
     login: string;
+    githubUserId: string;
+    gitName: string;
   },
 ): Promise<void> {
-  const expected = await tx.query<{ github_login: string }>(
-    `SELECT github_login
+  const expected = await tx.query<{ github_login: string; github_user_id: string | null }>(
+    `SELECT github_login, github_user_id
      FROM github_authorizations
-     WHERE owner_user_id = $1 AND app_variant = $2`,
+     WHERE owner_user_id = $1 AND app_variant = $2 FOR UPDATE`,
     [input.ownerUserId, input.appVariant],
   );
   const expectedLogin = expected.rows[0]?.github_login;
@@ -899,7 +904,8 @@ async function assertAuthorizedGithubLogin(
       "The GitHub authorization was disconnected. Connect the GitHub App again.",
     );
   }
-  if (expectedLogin.toLowerCase() !== input.login.toLowerCase()) {
+  if (expectedLogin.toLowerCase() !== input.login.toLowerCase() ||
+      (expected.rows[0]?.github_user_id != null && expected.rows[0].github_user_id !== input.githubUserId)) {
     throw new HttpError(
       403,
       "github_account_mismatch",
@@ -908,9 +914,9 @@ async function assertAuthorizedGithubLogin(
   }
   await tx.query(
     `UPDATE github_authorizations
-     SET last_verified_at = now(), updated_at = now()
+     SET github_user_id = $3, git_author_name = $4, last_verified_at = now(), updated_at = now()
      WHERE owner_user_id = $1 AND app_variant = $2`,
-    [input.ownerUserId, input.appVariant],
+    [input.ownerUserId, input.appVariant, input.githubUserId, input.gitName],
   );
 }
 
@@ -1185,7 +1191,7 @@ export function createGithubPublicRoutes(
       // that credential with no row, no audit entry, and nothing able to revoke
       // it. `installations_complete: false` is the honest way to say
       // "authorized, inventory unknown" — Settings Refresh fills it in.
-      const { login } = await githubUser(fetchImpl, config, bundle.accessToken);
+      const { login, githubUserId, gitName } = await githubUser(fetchImpl, config, bundle.accessToken);
       let installationSnapshot: GithubInstallationSnapshot = {
         installations: [],
         complete: false,
@@ -1212,12 +1218,16 @@ export function createGithubPublicRoutes(
           }`,
         );
       }
+      const dev=devConnectionRuntime(pool);
+      const reference=dev?await dev.connectGithub(pending.owner_user_id,{kind:'github-app',accessToken:bundle.accessToken,refreshToken:bundle.refreshToken,
+        expiresAt:Math.floor(bundle.expiresAtMs/1000),refreshExpiresAt:Math.floor(bundle.refreshTokenExpiresAtMs/1000),accountId:githubUserId,appId:String(config.appId),clientId:config.clientId}):null;
       await withSystemTx(pool, async (tx) => {
         await persistAuthorization(tx, {
+          ...(reference?{referenceBindingId:reference.bindingId}:{}),
           pending,
           nonceHash: sha256(pending.client_nonce),
           bundle,
-          login,
+          login, githubUserId, gitName,
           installations: installationSnapshot.installations,
           installationsComplete: installationSnapshot.complete,
           // Re-read the clock: the handoff TTL is the window the DESKTOP gets
@@ -1268,6 +1278,154 @@ export function createGithubRoutes(
   const fetchImpl = dependencies.fetch ?? fetch;
   const now = dependencies.now ?? Date.now;
   const random = dependencies.random ?? randomBytes;
+
+
+  const dev=devConnectionRuntime(pool);
+  const referenceMetadata=async(userId:string,organizationId?:string,bindingId?:string)=>{
+    if(!dev)throw new HttpError(404,'not_found','Dev references are unavailable');
+    const reference=await dev.githubReference(userId,organizationId,bindingId);
+    const access=await dev.githubGrant(userId,reference.org_id,{action:'github:catalog'},reference.binding_id);
+    const identity=await githubUser(fetchImpl,config,access.material.accessToken);
+    if(identity.githubUserId!==reference.reference.accountId)throw new HttpError(403,'github_authorization_changed','GitHub connection changed');
+    const inventory=await listGithubInstallations(fetchImpl,config,access.material.accessToken,now(),now()+GITHUB_FLOW_DEADLINE_MS,false);
+    await withSystemTx(pool,async tx=>{
+      await requireOrganizationMembership(tx,reference.org_id,userId);
+      await persistInstallations(tx,{ownerUserId:userId,appVariant:config.variantKey,installations:inventory.installations,complete:inventory.complete});
+      await tx.query(`INSERT INTO github_authorizations(owner_user_id,app_variant,github_login,github_user_id,git_author_name,last_verified_at)
+        VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(owner_user_id,app_variant) DO UPDATE SET github_login=EXCLUDED.github_login,
+        github_user_id=EXCLUDED.github_user_id,git_author_name=EXCLUDED.git_author_name,last_verified_at=now(),updated_at=now()`,
+      [userId,config.variantKey,identity.login,identity.githubUserId,identity.gitName]);
+    });
+    const r=reference.reference;
+    return {reference:{mode:'dev-reference' as const,bindingId:r.bindingId,connectionId:r.connectionId,generationId:r.generationId,issuer:reference.issuer,
+      subject:reference.subject,organization:r.organization,accountId:r.accountId,appScope:r.appScope,backendOrigin:new URL(config.oauthCallbackUrl).origin},
+      login:identity.login,variantKey:config.variantKey,installationCount:inventory.installations.length};
+  };
+  if(dev){
+    app.post('/v1/github/dev-reference',bodyLimit({maxSize:4096}),async c=>{
+      const input=parse(z.object({organizationId:z.string().uuid().optional()}).strict(),await c.req.json());
+      return c.json(await referenceMetadata(c.get('user').id,input.organizationId));
+    });
+    app.post('/v1/github/dev-reference/reattach',bodyLimit({maxSize:4096}),async c=>{
+      const input=parse(z.object({bindingId:z.string().uuid(),organizationId:z.string().uuid()}).strict(),await c.req.json());
+      await dev.reattach(c.get('user').id,input.organizationId,input.bindingId);
+      return c.json(await referenceMetadata(c.get('user').id,input.organizationId));
+    });
+    app.post('/v1/github/dev-reference/remove',bodyLimit({maxSize:4096}),async c=>{
+      const input=parse(z.object({bindingId:z.string().uuid(),scope:z.enum(['local','organization','global'])}).strict(),await c.req.json());
+      const row=await dev.githubReference(c.get('user').id,undefined,input.bindingId);
+      return c.json(await dev.remove(c.get('user').id,row.org_id,input.bindingId,input.scope));
+    });
+  }
+  const cloudScope = { organizationId: z.string().uuid() };
+  const cloudAuthority=dev?{devReference:z.string().uuid()}:{accessToken:TokenSchema};
+  const cloudRequest = z.discriminatedUnion("action", [
+    githubWritePreparation.extend(cloudAuthority),
+    z.object({ ...cloudScope, ...cloudAuthority, action: z.literal("catalog") }).strict(),
+    z.object({ ...cloudScope, ...cloudAuthority, action: z.literal("connect"), installationId: z.string().uuid() }).strict(),
+    z.object({ ...cloudScope, ...cloudAuthority, action: z.literal("repositories"), installationId: z.string().uuid(), page: z.number().int().min(1).max(100).default(1) }).strict(),
+    z.object({ ...cloudScope, ...cloudAuthority, action: z.literal("source"), owner: z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/), repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/), installationId: z.string().uuid().optional() }).strict(),
+    z.object({ organizationId: z.string().uuid(), action: z.literal("disconnect"), installationId: z.string().uuid() }).strict(),
+  ]);
+  app.post("/v1/github/cloud", bodyLimit({ maxSize: 8192 }), rateLimit("github-cloud", 40, 60_000), async c => {
+    c.header("Cache-Control", "no-store");
+    const parsed = cloudRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(422,"invalid_input","Invalid cloud GitHub request.");
+    let body = parsed.data;
+    const userId = c.get("user").id;
+    // Convert a member-bound reference into backend-only access before entering
+    // the released permission and constrained write-proxy implementation.
+    let devBinding:string|undefined;
+    if(dev&&body.action!=='disconnect'){
+      devBinding=('devReference' in body ? body.devReference : undefined) as string|undefined;
+      if(!devBinding)throw new HttpError(403,'github_authorization_required','Dev GitHub reference required');
+      const access=await dev.githubGrant(userId,body.organizationId,{action:'github:catalog'},devBinding);
+      body={...body,accessToken:access.material.accessToken};
+    }
+    const member = (tx: Tx) => requireOrganizationMembership(tx, body.organizationId, userId);
+    await withSystemTx(pool, member);
+    if (body.action === "disconnect") {
+      await withSystemTx(pool, async tx => {
+        await member(tx);
+        await tx.query("DELETE FROM cloud_github_connections WHERE org_id=$1 AND owner_user_id=$2 AND installation_id=$3", [body.organizationId,userId,body.installationId]);
+      });
+      return c.json({ disconnected: true });
+    }
+    const accessToken=('accessToken' in body ? body.accessToken : undefined);
+    if(typeof accessToken!=='string')throw new HttpError(403,'github_authorization_required','GitHub access unavailable');
+    const { login, githubUserId, gitName } = await githubUser(fetchImpl, config, accessToken);
+    if(dev)await withSystemTx(pool,async tx=>{
+      await member(tx);
+      await tx.query(`INSERT INTO github_authorizations(owner_user_id,app_variant,github_login,github_user_id,git_author_name,last_verified_at)
+        VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(owner_user_id,app_variant) DO UPDATE SET github_login=EXCLUDED.github_login,
+        github_user_id=EXCLUDED.github_user_id,git_author_name=EXCLUDED.git_author_name,last_verified_at=now(),updated_at=now()`,[userId,config.variantKey,login,githubUserId,gitName]);
+    });
+    const authorize = async (tx: Tx) => {
+      await member(tx);
+      await assertAuthorizedGithubLogin(tx, { ownerUserId: userId, appVariant: config.variantKey, login, githubUserId, gitName });
+      const row = (await tx.query<{ fingerprint: string | null }>("SELECT cloud_github_actor_fingerprint($1,$2) AS fingerprint", [body.organizationId,userId])).rows[0];
+      if (!row?.fingerprint) throw new HttpError(404,"not_found","Organization GitHub connection is unavailable.");
+      return row.fingerprint;
+    };
+    const fingerprint = await withSystemTx(pool, authorize);
+    const live = await listGithubInstallations(fetchImpl, config, accessToken, now(), now() + GITHUB_FLOW_DEADLINE_MS, false);
+    if (body.action === "prepareWrite") {
+      if (!dependencies.writeGrants) throw new HttpError(503, "github_writes_unavailable", "Cloud GitHub writes are not configured.");
+      const { accessToken: _access, devReference: _reference, ...request } = body as typeof body & {accessToken?:string;devReference?:string};
+      return c.json(await dependencies.writeGrants.prepare(request, userId, async snapshot => {
+        const installation = live.installations.find(row => String(row.installationId) === snapshot.installationId &&
+          row.accountLogin.toLowerCase() === snapshot.owner.toLowerCase());
+        if (!installation) throw new HttpError(403, "github_cloud_write_denied", "This GitHub repository is not available to your account.");
+        const api = new GithubCloudUserAccess(config, fetchImpl);
+        await api.assertAccount(accessToken, login, installation);
+        const source = await api.source(accessToken, installation, snapshot.owner, snapshot.repository, true);
+        if(dev&&devBinding){
+          await dev.consentGithubRepository(userId,body.organizationId,devBinding,`${snapshot.owner}/${snapshot.repository}`,true);
+          await dev.githubGrant(userId,body.organizationId,{action:'github:write',workspaceId:body.workspaceId,repository:`${snapshot.owner}/${snapshot.repository}`.toLowerCase(),installationId:installation.installationId},devBinding);
+        }
+        await withSystemTx(pool, async tx => {
+          if (await authorize(tx) !== fingerprint) throw new HttpError(409, "github_authorization_changed", "GitHub connection changed. Try again.");
+        });
+        return { installationId: installation.installationId, repositoryId: source.id };
+      }, accessToken));
+    }
+    const installations = await withSystemTx(pool, async tx => {
+      if (await authorize(tx) !== fingerprint) throw new HttpError(409,"github_authorization_changed","GitHub connection changed. Try again.");
+      await persistInstallations(tx, { ownerUserId: userId, appVariant: config.variantKey, installations: live.installations, complete: false });
+      return (await tx.query<{ id: string; installationId: string; connected: boolean }>(`SELECT installation.id,installation.github_installation_id AS "installationId",
+        EXISTS(SELECT 1 FROM cloud_github_connections connection WHERE connection.org_id=$3 AND connection.owner_user_id=$1 AND connection.installation_id=installation.id) AS connected
+        FROM github_installations installation WHERE installation.owner_user_id=$1 AND installation.app_variant=$2
+          AND installation.github_installation_id=ANY($4::bigint[]) ORDER BY lower(installation.account_login),installation.id`,
+      [userId,config.variantKey,body.organizationId,live.installations.map(row => row.installationId)])).rows;
+    });
+    const rows = installations.flatMap(row => {
+      const liveRow = live.installations.find(item => item.installationId === Number(row.installationId));
+      return liveRow ? [{ ...liveRow, id: row.id, connected: row.connected }] : [];
+    });
+    if (body.action === "catalog") return c.json({ login, installations: rows, complete: live.complete, installUrl: `https://github.com/apps/${encodeURIComponent(config.appSlug)}/installations/new` });
+    const installation = rows.find(row => (body.action === "source" && !body.installationId)
+      ? row.accountLogin.toLowerCase() === body.owner.toLowerCase() : row.id === body.installationId);
+    if (!installation) throw new HttpError(404,"github_installation_not_found","This GitHub installation is not available to your account.");
+    const api = new GithubCloudUserAccess(config, fetchImpl);
+    await api.assertAccount(accessToken, login, installation);
+    const repositories = body.action === "repositories" ? await api.repositories(accessToken, installation, body.page) : null;
+    const source = body.action === "source" ? await api.source(accessToken, installation, body.owner, body.repository) : null;
+    if(source&&dev&&devBinding)await dev.consentGithubRepository(userId,body.organizationId,devBinding,`${source.owner}/${source.name}`,false);
+    await withSystemTx(pool, async tx => {
+      if (await authorize(tx) !== fingerprint) throw new HttpError(409,"github_authorization_changed","GitHub connection changed. Try again.");
+      await tx.query(`INSERT INTO cloud_github_connections(org_id,owner_user_id,installation_id) VALUES($1,$2,$3)
+        ON CONFLICT(org_id,owner_user_id,installation_id) DO UPDATE SET verified_at=now()`, [body.organizationId,userId,installation.id]);
+      if (source) {
+        await tx.query("DELETE FROM cloud_github_source_access WHERE owner_user_id=$1 AND expires_at<=clock_timestamp()", [userId]);
+        await tx.query(`INSERT INTO cloud_github_source_access(org_id,owner_user_id,installation_id,repository_owner,repository_name,forge_repository_id,actor_fingerprint,expires_at)
+          VALUES($1,$2,$3,lower($4),lower($5),$6,$7,clock_timestamp()+interval '2 minutes')
+          ON CONFLICT(org_id,owner_user_id,installation_id,repository_owner,repository_name) DO UPDATE SET
+          forge_repository_id=EXCLUDED.forge_repository_id,actor_fingerprint=EXCLUDED.actor_fingerprint,expires_at=EXCLUDED.expires_at`,
+        [body.organizationId,userId,installation.id,source.owner,source.name,source.id,fingerprint]);
+      }
+    });
+    return c.json(source ? { installationId: installation.id, repository: source } : repositories ?? { connected: true, installationId: installation.id });
+  });
 
   app.post(
     "/v1/github/oauth/start",
@@ -1386,6 +1544,12 @@ export function createGithubRoutes(
         unknown
       >;
       const nonce = parse(NonceSchema, body.nonce);
+      if(dev){
+        const handoff=await withSystemTx(pool,async tx=>(await tx.query<{binding_id:string}>(`DELETE FROM dev_github_handoffs
+          WHERE nonce_hash=$1 AND owner_user_id=$2 AND expires_at>clock_timestamp() RETURNING binding_id`,[sha256(nonce),user.id])).rows[0]);
+        if(!handoff)throw new HttpError(404,'handoff_not_found','This Dev GitHub handoff expired or was already used');
+        return c.json(await referenceMetadata(user.id,undefined,handoff.binding_id));
+      }
       const row = await withUserTx(pool, user.id, async (tx) => {
         await tx.query(
           `DELETE FROM github_oauth_handoffs
@@ -1466,6 +1630,7 @@ export function createGithubRoutes(
     "/v1/github/oauth/refresh",
     rateLimit("github-oauth-refresh", 30, 60_000),
     async (c) => {
+      if(dev)throw new HttpError(409,'dev_connection_connect_once','Connect once into the Dev broker');
       const user = c.get("user");
       const body = (await c.req.json().catch(() => ({}))) as Record<
         string,
@@ -1661,12 +1826,12 @@ export function createGithubRoutes(
       // enumerating. Running both concurrently let any authenticated Zeros user
       // spend up to 60 outbound GitHub calls — against our IP reputation and
       // the token's own rate budget — on a token that is not theirs.
-      const { login } = await githubUser(fetchImpl, config, accessToken);
+      const { login, githubUserId, gitName } = await githubUser(fetchImpl, config, accessToken);
       await withUserTx(pool, user.id, (tx) =>
         assertAuthorizedGithubLogin(tx, {
           ownerUserId: user.id,
           appVariant: config.variantKey,
-          login,
+          login, githubUserId, gitName,
         }),
       );
       const snapshot = await listGithubInstallations(

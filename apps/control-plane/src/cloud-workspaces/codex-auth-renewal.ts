@@ -47,6 +47,17 @@ export type CodexRefreshReservation = {
   attemptId: string;
   cache?: CodexNativeAuthCache;
 };
+/** Retry only publication of an already known result, never external renewal.
+ * The port must read back the fenced attempt after an ambiguous COMMIT. */
+export async function publishKnownCredentialRenewal(publish: () => Promise<void>): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try { await publish(); return; }
+    catch (error) {
+      if (error instanceof HttpError || attempt >= 2) throw error;
+      await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+}
 function unavailable(): never {
   throw new HttpError(
     409,
@@ -258,8 +269,7 @@ export class DatabaseCodexAuthRenewal {
       // Only the database publication is retryable. Retain this known native
       // result while resolving a rolled-back or ambiguously committed write;
       // never run the external refresh a second time with its consumed seed.
-      for (let publicationAttempt = 0; ; publicationAttempt++) {
-        try {
+      await publishKnownCredentialRenewal(async () => {
           await withSystemTx(this.pool, async (tx) => {
             await tx.query(
               "SET LOCAL lock_timeout='250ms'; SET LOCAL statement_timeout='2s'",
@@ -370,15 +380,7 @@ export class DatabaseCodexAuthRenewal {
             // Deliberately preserve consent, delegation revisions and owner PUT
             // receipts. Delivery gets a separate full workspace authorization pass.
           });
-          break;
-        } catch (error) {
-          if (error instanceof HttpError || publicationAttempt >= 2)
-            throw error;
-          await new Promise((resolve) =>
-            setTimeout(resolve, 50 * (publicationAttempt + 1)),
-          );
-        }
-      }
+      });
     } catch {
       // Resolve a potentially lost commit acknowledgement before considering
       // this attempt uncertain. Never issue a second OAuth call from its seed.

@@ -82,6 +82,12 @@ jobs:
           cache: pnpm
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
+      - name: Verify hosted release contracts
+        run: |
+          pnpm --dir apps/control-plane install --frozen-lockfile
+          pnpm exec tsc -p scripts/release/tsconfig.json
+          pnpm exec vitest run --config scripts/release/vitest.config.ts --maxWorkers=2
+
       - name: Install web hub dependencies
         # apps/web is an independent npm deployment root, outside pnpm.
         run: npm --prefix apps/web ci

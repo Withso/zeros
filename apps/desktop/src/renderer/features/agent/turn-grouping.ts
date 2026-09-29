@@ -16,6 +16,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { AgentMessage, AgentTextMessage } from "./use-agent-session";
+import { isLegacyEnvironmentConnection } from "./renderers/tool-readiness";
 
 export interface Turn {
   /** The user prompt that started this turn. null only for the
@@ -77,6 +78,7 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
   const turns: Turn[] = [];
   let current: Turn | null = null;
   for (const m of uniqueDurableMessages(messages)) {
+    if (m.kind === "tool" && isLegacyEnvironmentConnection(m)) continue;
     if (m.kind === "error_notice" && m.code === "mcp_startup_status") {
       // Older engines persisted background MCP connection checks as chat
       // warnings. Keep those records intact, but omit them before grouping

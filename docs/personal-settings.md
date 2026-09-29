@@ -1,6 +1,7 @@
 # Personal settings and customization
 
-Personal organization settings belong to the device, independently of sign-in.
+Personal organization settings are presented as **Local** and belong to the device, independently of sign-in.
+The Settings selector switches to separately owned [organization settings](cloud-workspace/organization-setup.md); organization forms do not write Local TOML or select Local agent/GitHub authentication methods.
 Settings resolve from user defaults through repository defaults to private workspace overrides:
 
 | Owner      | File                                         | Applies to                                     |
@@ -67,6 +68,13 @@ force-add provisioned directories. Archive preserves their exact text in a
 private companion under the engine's local data directory; restore puts it
 back without overwriting a file already restored and subsequently edited.
 Permanent deletion removes the companion. These files are not cloud/team state.
+
+Archive scripts are best-effort by default. `scripts.archive_required = true`
+opts an idempotent cleanup command into required, retryable execution: failure or
+interruption keeps the workspace intact. The lifecycle journal pins its command
+and policy across retries, so editing settings cannot discard pending cleanup.
+`scripts.archive_timeout_seconds` sets a deadline from 1 to 3,600 seconds (default
+30). A completed required hook is not repeated while retrying the final snapshot.
 
 Legacy localStorage scripts migrate to setup and named `scripts.run_actions`;
 all run commands are retained. Existing TOML choices win. Malformed files are

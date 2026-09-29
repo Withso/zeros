@@ -98,7 +98,9 @@ static void validate_view(int qualification) {
     require_path("/opt/zeros/scripts", 1, 1);
     require_path("/opt/zeros/scripts/cloud-workspace-validation", 1, 1);
     require_path("/opt/zeros/scripts/cloud-workspace-validation/sandbox", 1, 1);
-    require_path("/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", 0, 1);
+    require_path(qualification == 2 ?
+      "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-agent.ts" :
+      "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", 0, 1);
   }
   const char *absent[] = {
     "/root", "/home/user", "/srv/zeros/broker", "/etc/shadow", "/etc/ssh",
@@ -210,7 +212,9 @@ int main(int argc, char **argv) {
   }
   const int version = argc >= 2 && strcmp(argv[1], "--v3") == 0 ? 3 : 2;
   const int option = version == 3 ? 2 : 1;
-  const int qualification = argc == option + 1 && strcmp(argv[option], "--qualify") == 0;
+  const int qualification = argc == option + 1 ?
+    (strcmp(argv[option], "--qualify") == 0 ? 1 :
+      (version == 3 && strcmp(argv[option], "--qualify-agent") == 0 ? 2 : 0)) : 0;
   if ((argc != option && !qualification) || getuid() != 0 || geteuid() != 0 || getgid() != 0 ||
       setgroups(0, NULL)) fail();
   validate_view(qualification);
@@ -244,7 +248,12 @@ int main(int argc, char **argv) {
     char *qualification_arguments[] = {
       "/opt/zeros-runtime/bin/node", "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", NULL,
     };
-    execv(arguments[0], qualification ? qualification_arguments : arguments);
+    char *agent_qualification_arguments[] = {
+      "/opt/zeros-runtime/bin/node", "--import", "tsx",
+      "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-agent.ts", NULL,
+    };
+    execv(arguments[0], qualification == 2 ? agent_qualification_arguments :
+      (qualification ? qualification_arguments : arguments));
     fail();
   }
   child_pid = (sig_atomic_t)child;

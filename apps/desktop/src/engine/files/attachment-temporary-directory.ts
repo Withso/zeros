@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { constants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { zerosDataDir } from "../db/paths";
@@ -57,6 +58,23 @@ export interface AttachmentTemporaryDirectory {
   dispose: () => Promise<void>;
 }
 
+/** st_dev identifies the filesystem, not the mount. Linux refuses rename
+ * across two bind mounts of the same filesystem. Read the kernel's mount ID
+ * for an opened directory rather than guessing from path prefixes. */
+async function mountId(directory: string): Promise<string | null> {
+  if (process.platform !== "linux") return null;
+  const handle = await fs.open(directory,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const info = await fs.readFile(`/proc/self/fdinfo/${handle.fd}`, "utf8");
+    const id = /^mnt_id:\s*(\d+)\s*$/m.exec(info)?.[1];
+    if (!id) throw new Error("Cannot identify attachment storage mount");
+    return id;
+  } finally {
+    await handle.close();
+  }
+}
+
 /** A copy can become visible in one rename only on its destination filesystem.
  * Keep every intermediate byte outside the workspace. Recovery uses the
  * separately persisted source, so these temporary files are disposable. */
@@ -65,6 +83,7 @@ export async function createAttachmentTemporaryDirectory(
 ): Promise<AttachmentTemporaryDirectory> {
   const workspace = await fs.realpath(workspaceRoot);
   const device = (await fs.stat(workspace)).dev;
+  const workspaceMount = await mountId(workspace);
   const dataRoot = zerosDataDir();
   if (!sweptRoots.has(dataRoot)) {
     sweptRoots.add(dataRoot);
@@ -76,6 +95,7 @@ export async function createAttachmentTemporaryDirectory(
       if (within(workspace, real)) return null;
       const stat = await fs.stat(real);
       if (!stat.isDirectory() || stat.dev !== device) return null;
+      if (await mountId(real) !== workspaceMount) return null;
       return (await outsideOwnedFolders(real)) ? real : null;
     } catch {
       return null;
@@ -112,7 +132,12 @@ export async function createAttachmentTemporaryDirectory(
 
   // Existing private app data is also useful when TMPDIR is on another disk
   // or points into a checkout. Never create a fallback folder in the repo.
-  const candidates = [os.tmpdir(), zerosDataDir()];
+  const candidates = [os.tmpdir()];
+  // The cloud image provides a private sibling of the repository in the same
+  // mount. This hint receives all the usual volume and ownership checks.
+  if (process.env.ZEROS_ATTACHMENT_TEMP_DIR)
+    candidates.push(process.env.ZEROS_ATTACHMENT_TEMP_DIR);
+  candidates.push(zerosDataDir());
   if (process.platform !== "win32") candidates.push("/var/tmp");
   for (const candidate of new Set(candidates)) {
     const parent = await suitable(candidate);

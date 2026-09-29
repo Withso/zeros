@@ -1911,24 +1911,14 @@ describe("CodexAppServerTranslator", () => {
       expect(serialized).not.toContain("/private/repo");
     });
 
-    it("reduces environment and import events to bounded product summaries", () => {
-      env.t.handle("thread/environment/connected", {
-        environmentId: "env-1",
-      });
-      expect(env.out.emitted[0]?.update).toMatchObject({
-        sessionUpdate: "tool_call",
-        title: "Environment connected",
-        status: "completed",
-      });
-      env.t.handle("thread/environment/disconnected", {
-        environmentId: "env-1",
-      });
-      expect(env.out.emitted[1]?.update).toMatchObject({
-        sessionUpdate: "tool_call_update",
-        title: "Environment disconnected",
-        status: "completed",
-        rawOutput: { environment: "env-1", state: "disconnected" },
-      });
+    it("keeps environment transport lifecycle out of the agent transcript", () => {
+      for (const state of ["connected", "disconnected", "connected", "disconnected"]) {
+        env.t.handle(`thread/environment/${state}`, { environmentId: "env-1" });
+      }
+      expect(env.out.emitted).toEqual([]);
+    });
+
+    it("reduces configuration import events to bounded product summaries", () => {
       env.t.handle("externalAgentConfig/import/completed", {
         importId: "import-1",
         itemTypeResults: [
@@ -1940,7 +1930,6 @@ describe("CodexAppServerTranslator", () => {
         ],
       });
       const serialized = JSON.stringify(env.out.emitted);
-      expect(serialized).toContain("env-1");
       expect(serialized).toContain('"successes":1');
       expect(serialized).toContain('"failures":1');
       expect(serialized).not.toContain("/private/source");

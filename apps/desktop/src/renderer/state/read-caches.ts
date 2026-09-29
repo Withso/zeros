@@ -28,6 +28,7 @@ import type {
 import type { FilesToCopyPreviewWire } from "../platform/bridge/workspace-bridge";
 import type { TurnInfo } from "../platform/turns";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import type { bridgeDesignListDirectories } from "../platform/bridge/design-bridge";
 import type { DesignReviewEvidence, DesignReviewSnapshot, DesignProposalReview, DesignReviewFileDetail } from "@zeros/protocol/design-review";
 
@@ -98,6 +99,20 @@ export function invalidateCreateSourceCaches(network = true): void {
 
 /** Keyed by origin URL — open PRs for create-from pickers. */
 export const openPrsCache = new KeyedAsyncCache<PR[]>(32);
+
+/** Composer results belong to an exact checkout, origin and cloud account
+ * generation. Identical origins must not share Local/cloud authorization. */
+export const composerPrsCache = new KeyedAsyncCache<PR[]>(32);
+let cloudComposerPrsEpoch = 0;
+export function composerPrsKey(cwd: string | null, originUrl: string): string {
+  return JSON.stringify([isCloudWorkspace(cwd) ? cloudComposerPrsEpoch : null, cwd, originUrl]);
+}
+export function clearCloudComposerPrs(): void {
+  cloudComposerPrsEpoch++;
+  for (const key of composerPrsCache.keys()) {
+    if (isCloudWorkspace(JSON.parse(key)[1])) composerPrsCache.forget(key);
+  }
+}
 
 /** Keyed by repo slug (or "*" for every repo) — workspace summaries for
  *  pickers that only need branch/name rows, not the live board collections. */
@@ -324,11 +339,20 @@ export function invalidateFilesToCopyForRepo(repoRoot: string): void {
 /** Workspace mutations (create/archive/branch ops) move branches and
  *  checkouts. Mark the affected picker rows stale — mounted pickers refresh in
  *  the background; closed ones pay nothing until reopened. Remote-branch
- *  entries are keyed by workspace id (not repo), so they are invalidated
- *  wholesale; the next open of a base picker refetches behind its cached
- *  rows. */
-export function invalidateRepoReadCaches(repoSlug: string | "*"): void {
-  invalidateCreateSourceCaches(false);
+ *  entries are keyed by workspace id (not repo). Cloud notifications supply
+ *  those exact owners; legacy Local notifications retain the coarse fallback.
+ *  The next open of a picker refetches behind its cached rows. */
+export function invalidateRepoReadCaches(repoSlug: string | "*", workspaceIds?: readonly string[]): void {
+  if (workspaceIds) {
+    const owners = new Set(workspaceIds);
+    for (const cache of [createLocalBranchesCache, createBranchCatalogCache])
+      for (const key of cache.keys())
+        if (owners.has(JSON.parse(key)[0])) cache.invalidate(key);
+    for (const id of owners) remoteBranchesCache.invalidate(id);
+  } else {
+    invalidateCreateSourceCaches(false);
+    remoteBranchesCache.invalidateAll();
+  }
   if (repoSlug === "*") {
     allBranchesCache.invalidateAll();
     pickerWorkspacesCache.invalidateAll();
@@ -337,7 +361,6 @@ export function invalidateRepoReadCaches(repoSlug: string | "*"): void {
     pickerWorkspacesCache.invalidate(repoSlug);
     pickerWorkspacesCache.invalidate("*");
   }
-  remoteBranchesCache.invalidateAll();
 }
 
 /** External fetch/ref changes arrive with opaque workspace ids, not repository
@@ -390,6 +413,7 @@ export function invalidateAllEngineReadCaches(): void {
   remoteBranchesCache.invalidateAll();
   allBranchesCache.invalidateAll();
   openPrsCache.invalidateAll();
+  composerPrsCache.invalidateAll();
   pickerWorkspacesCache.invalidateAll();
   ghAuthStatusCache.invalidateAll();
   ghOwnersCache.invalidateAll();

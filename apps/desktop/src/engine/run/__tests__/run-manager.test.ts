@@ -307,7 +307,8 @@ describe("RunManager", () => {
     // "command not found" here while working in the Terminal tab.
     expect(envs[0]).toMatchObject({ PATH: "/login/bin", FORCE_COLOR: "1" });
     expect(envCalls).toEqual([
-      { cwd: FOLDER, workspaceId: WS, repoRoot: "/tmp/test-repo" },
+      expect.objectContaining({ cwd: FOLDER, workspaceId: WS, repoRoot: "/tmp/test-repo",
+        workspace: expect.objectContaining({ path: FOLDER, canonicalId: expect.any(String) }) }),
     ]);
   });
 

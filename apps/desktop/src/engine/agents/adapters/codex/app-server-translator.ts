@@ -523,10 +523,10 @@ export class CodexAppServerTranslator {
         this.onSafetyBuffering(params);
         break;
       case "thread/environment/connected":
-        this.onEnvironmentConnection(params, true);
-        break;
       case "thread/environment/disconnected":
-        this.onEnvironmentConnection(params, false);
+        // Exec-server connection lifecycle is transport bookkeeping, not
+        // model-requested work. Actual interrupted turns still report their
+        // native error/result through the normal failure path.
         break;
       case "externalAgentConfig/import/progress":
         this.onExternalConfigImport(params, false);
@@ -1488,21 +1488,6 @@ export class CodexAppServerTranslator {
         message: `Codex is verifying this response${
           typeof p.model === "string" ? ` with ${truncate(p.model, 160)}` : ""
         }${reasons.length > 0 ? `: ${reasons.join(", ")}` : "."}`,
-      },
-    });
-  }
-
-  private onEnvironmentConnection(params: unknown, connected: boolean): void {
-    const environmentId = (params as { environmentId?: unknown }).environmentId;
-    if (typeof environmentId !== "string") return;
-    const toolCallId = this.ensureToolCallId(`environment:${environmentId}`);
-    this.emitToolCallUpsert(toolCallId, {
-      title: connected ? "Environment connected" : "Environment disconnected",
-      kind: "other",
-      status: "completed",
-      rawOutput: {
-        environment: truncate(environmentId, 160),
-        state: connected ? "connected" : "disconnected",
       },
     });
   }

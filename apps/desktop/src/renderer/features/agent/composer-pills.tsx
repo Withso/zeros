@@ -108,6 +108,7 @@ export const ComposerConcealedContext = createContext(false);
 // to it — a chat's agentId is set-once by design).
 
 export function ModelPill({
+  agents,
   agentId,
   iconUrl,
   initialize,
@@ -118,7 +119,9 @@ export function ModelPill({
   onConfigure,
   onSelectAgentModel,
   redirectCrossAgent,
+  selectionTiming,
 }: {
+  agents?: import("../../platform/bridge/messages").BridgeRegistryAgent[] | null;
   agentId: string | null;
   /** Optional brand-logo URL fallback. Usually unset — AgentIcon prefers
    *  the bundled SVG keyed by agentId (claude/codex/cursor/…). */
@@ -138,6 +141,7 @@ export function ModelPill({
   /** True once the chat's session has started (first prompt sent) — other
    *  agents' models then show a ↗ in the dropdown ("opens a new chat"). */
   redirectCrossAgent?: boolean;
+  selectionTiming?: "next-message";
 }) {
   const [open, setOpen] = useState(false);
   // Close while the host composer is concealed (see ComposerConcealedContext).
@@ -179,11 +183,13 @@ export function ModelPill({
 
   return (
     <AgentModelMenu
+      agents={agents}
       initialize={initialize}
       value={{ agentId, model: activeValue, effort, fast }}
       open={open && !concealed}
       onOpenChange={setOpen}
       redirectCrossAgent={redirectCrossAgent}
+      selectionTiming={selectionTiming}
       onConfigure={onConfigure}
       onSelect={(sel) => {
         if (agentFamily(sel.agentId) === agentFamily(agentId)) {

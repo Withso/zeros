@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
+import { Hono } from "hono";
+import type { AuthedUser } from "../auth.js";
 import {
   afterAll,
   beforeAll,
@@ -32,6 +34,9 @@ import { computeMicroUsd } from "./provider-compute.js";
 import { DatabaseCloudWorkspaceHealthService } from "./health.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
 import { DatabaseCloudProviderOperationStore } from "./provider-operation-store.js";
+import { recoverCloudDiagnostic, retainCloudDiagnostic } from "./cloud-diagnostic-store.js";
+import { createCloudWorkspaceRoutes } from "./routes.js";
+import { stopUnavailableCloudEngine } from "./engine-health.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("managed compute lifecycle admission", () => {
@@ -187,6 +192,64 @@ suite("managed compute lifecycle admission", () => {
     );
   }
 
+  async function publicWorkspaceError() {
+    const app = new Hono();
+    app.use("*", async (c,next) => { c.set("user", {id:f.userId} as AuthedUser); await next(); });
+    app.route("/", createCloudWorkspaceRoutes(pool, null, {workosEnabled:false}));
+    const response = await app.request(`/v1/cloud-workspaces/${f.workspaceId}`);
+    expect(response.status).toBe(200);
+    return (await response.json()).workspace.error;
+  }
+
+  it("preserves the initiating budget stop through pending checkpoint, repeated drain, failure and settlement", async () => {
+    await ready(); await age();
+    await requestManagedComputeStop(pool, {leaseId:input.intentId,reason:"compute_credit_exhausted"});
+    const incident = async () => (await pool.query("SELECT id,reason,first_cause,terminal_cause,occurrence_count FROM cloud_workspace_diagnostic_incidents WHERE operation_id=$1",[input.intentId])).rows[0];
+    const original = await incident();
+    expect(original.reason).toBe("budget_stop");
+    expect((await pool.query("SELECT state FROM workspace_checkpoint_requests WHERE workspace_id=$1",[f.workspaceId])).rows[0].state).toBe("queued");
+    for (let n=0;n<2;n++) {
+      await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1",[input.intentId]);
+      await coordinator.runOnce();
+    }
+    expect(await incident()).toEqual(original);
+    provider.readComputeUsage.mockRejectedValueOnce(new TypeError("synthetic drain observation"));
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1",[input.intentId]);
+    await coordinator.runOnce();
+    expect(await incident()).toMatchObject({id:original.id,reason:"budget_stop",terminal_cause:original.terminal_cause});
+    // Finite-lease fallback is still required; it reuses the initiating cause.
+    await requestManagedComputeStop(pool,{leaseId:input.intentId,reason:"compute_scope_unavailable",force:true});
+    expect(await publicWorkspaceError()).toMatchObject({code:"cloud_compute_allowance_exhausted",message:expect.stringContaining(original.id)});
+    stoppedMeter();
+    await pool.query("UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-interval '10 seconds',next_check_at=now() WHERE id=$1",[input.intentId]);
+    await coordinator.runOnce();
+    await pool.query("UPDATE cloud_workspaces SET status='stopped',last_error_code=NULL,last_error_message=NULL WHERE id=$1",[f.workspaceId]);
+    expect((await pool.query("SELECT state FROM managed_compute_allocation_leases WHERE id=$1",[input.intentId])).rows[0].state).toBe("settled");
+    expect(await publicWorkspaceError()).toMatchObject({code:"cloud_compute_allowance_exhausted",message:expect.stringContaining(original.id)});
+    // Ready clears the public error at its committed boundary, even if private
+    // recovery bookkeeping has not run before another ordinary stop.
+    await pool.query("UPDATE cloud_workspaces SET status='ready',desired_state='running' WHERE id=$1",[f.workspaceId]);
+    await pool.query("UPDATE cloud_workspaces SET status='stopped',desired_state='stopped' WHERE id=$1",[f.workspaceId]);
+    expect(await publicWorkspaceError()).toBeNull();
+  });
+
+  it("keeps an initiating engine-expiry stop visible through generic compute drain observations", async () => {
+    await ready(); await age();
+    // A compute incident can predate the engine stop but only become terminal
+    // later. Incident creation order is not the order in which stops started.
+    await retainCloudDiagnostic(pool,{workspaceId:f.workspaceId,organizationId:f.organizationId,generation:1,operationKind:"compute",operationId:input.intentId},
+      {phase:"provider_inspect",code:"provider_temporarily_unavailable",errorClass:"provider",retryable:true,decision:"retry"});
+    await recoverCloudDiagnostic(pool,{workspaceId:f.workspaceId,organizationId:f.organizationId,generation:1});
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1",[input.intentId]);
+    await pool.query("UPDATE cloud_workspace_engine_instances SET last_heartbeat_at=now()-interval '2 minutes',lease_expires_at=now()-interval '1 minute' WHERE id=$1",[f.engineInstanceId]);
+    expect(await stopUnavailableCloudEngine(pool,null)).toBe(true);
+    const original = await publicWorkspaceError();
+    expect(original.code).toBe("cloud_workspace_engine_expired");
+    provider.readComputeUsage.mockRejectedValueOnce(new TypeError("synthetic drain observation"));
+    await coordinator.runOnce();
+    expect(await publicWorkspaceError()).toEqual(original);
+  });
+
   it("routes the lifecycle reconciler's create through the funded allocation boundary",async()=>{
     await grant();provider.find.mockResolvedValue([]);
     const reconciler=new CloudWorkspaceReconciler({pool,provider:asProvider(),providerResolver:resolver(),computePolicy:policy,workosEnabled:false,intervalMs:1000});
@@ -270,6 +333,71 @@ suite("managed compute lifecycle admission", () => {
         )
       ).rows[0].state,
     ).toBe("queued");
+  });
+  it("retains a typed incident before safety stop and after settlement", async () => {
+    await ready(); await age();
+    provider.readComputeUsage.mockRejectedValueOnce(Object.assign(new Error("credential-canary"), { code: "40001" }));
+    await coordinator.runOnce();
+    const incident = (await pool.query("SELECT * FROM cloud_workspace_diagnostic_incidents WHERE operation_id=$1", [input.intentId])).rows[0];
+    expect(incident).toMatchObject({ reason: "safety_failure", first_cause: { phase: "meter_read", sqlState: "40001" }, occurrence_count: "1" });
+    expect(JSON.stringify(incident)).not.toContain("credential-canary");
+    expect((await pool.query("SELECT subject FROM audit_log WHERE action='cloud_workspace.compute_stop_requested' ORDER BY created_at DESC LIMIT 1")).rows[0]?.subject).toMatchObject({ incidentId: incident.id });
+    provider.inspect.mockResolvedValue({ ...resource(), state: "stopped" });
+    provider.readComputeUsage.mockImplementation(async (id, window) => ({ resourceId: id, since: window!.since.toISOString(), until: window!.until!.toISOString(), billableSeconds: 600,
+      secondsPerDollar: 100000, listPriceMicroUsd: computeMicroUsd(600, 100000), running: false }));
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now(),stopped_observed_at=now()-interval '10 seconds' WHERE id=$1",[input.intentId]);
+    coordinator = new CloudWorkspaceComputeLeaseCoordinator({ pool,providerResolver:resolver(),workosEnabled:false,policy });
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT state,last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0]).toEqual({ state: "settled", last_error_code: null });
+    expect((await pool.query("SELECT id,first_cause FROM cloud_workspace_diagnostic_incidents WHERE operation_id=$1", [input.intentId])).rows[0]).toMatchObject({ id: incident.id, first_cause: { sqlState: "40001" } });
+  });
+  it("still requests a safety stop if diagnostic storage is unavailable", async () => {
+    await ready(); await age();
+    await pool.query("DROP TABLE cloud_workspace_diagnostic_incidents");
+    provider.inspect.mockRejectedValueOnce(new TypeError("credential-canary"));
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT state,stop_intent_id FROM managed_compute_allocation_leases WHERE id=$1",[input.intentId])).rows[0]).toMatchObject({ state:"draining",stop_intent_id:expect.any(String) });
+    expect(Number((await pool.query("SELECT storage_failures FROM cloud_workspace_diagnostic_cleanup")).rows[0].storage_failures)).toBeGreaterThan(0);
+  });
+  it("does not report recovery before provider renewal has succeeded", async () => {
+    await ready(); await age();
+    const id = await retainCloudDiagnostic(pool, { workspaceId:f.workspaceId, organizationId:f.organizationId,
+      generation:1, operationKind:"engine", operationId:f.engineInstanceId },
+    { phase:"authority_check", code:"engine_unavailable", errorClass:"unknown", retryable:false });
+    provider.inspect.mockResolvedValue(resource(30));
+    provider.renewComputeLease.mockRejectedValueOnce(new TypeError("synthetic renewal failure"));
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT recovered_at FROM cloud_workspace_diagnostic_incidents WHERE id=$1",[id])).rows[0].recovered_at).toBeNull();
+  });
+  it.each(["provider_inspect","ledger_commit","authority_check","provider_renew","final_settlement"] as const)("retains the actual %s failure phase",async phase=>{
+    await ready(); await age();
+    let restore: (()=>void)|undefined;
+    if(phase==="provider_inspect") provider.inspect.mockRejectedValueOnce(new CloudProviderError("provider_request_timeout","credential-canary",true));
+    if(phase==="ledger_commit") {
+      const spy=vi.spyOn(DatabaseManagedComputeCreditLedger.prototype,"meter").mockRejectedValueOnce(Object.assign(new Error("credential-canary"),{code:"40001"}));
+      restore=()=>spy.mockRestore();
+    }
+    if(phase==="provider_renew") {
+      provider.inspect.mockResolvedValue(resource(30));
+      provider.renewComputeLease.mockRejectedValueOnce(new TypeError("credential-canary"));
+    }
+    if(phase==="authority_check") {
+      const spy=vi.spyOn(coordinator as unknown as {scope():Promise<never>},"scope").mockRejectedValueOnce(Object.assign(new Error("credential-canary"),{code:"40001"}));
+      restore=()=>spy.mockRestore();
+    }
+    if(phase==="final_settlement") {
+      stoppedMeter();
+      await pool.query("UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-interval '10 seconds' WHERE id=$1",[input.intentId]);
+      const spy=vi.spyOn(coordinator as unknown as {settle():Promise<void>},"settle").mockRejectedValueOnce(Object.assign(new Error("credential-canary"),{code:"40001"}));
+      restore=()=>spy.mockRestore();
+    }
+    try {
+      await coordinator.runOnce();
+      const incident=(await pool.query("SELECT first_cause FROM cloud_workspace_diagnostic_incidents WHERE operation_id=$1",[input.intentId])).rows[0];
+      expect(incident?.first_cause.phase).toBe(phase);
+      expect(JSON.stringify(incident)).not.toContain("credential-canary");
+      if(phase==="ledger_commit") expect(incident.first_cause.sqlState).toBe("40001");
+    } finally { restore?.(); }
   });
   it("uses the direct stop fallback when too little funded time remains for a checkpoint", async () => {
     await ready();

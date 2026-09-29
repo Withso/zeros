@@ -9,6 +9,7 @@ import {
   turnKey,
 } from "../turn-grouping";
 import { stabilizeTurns } from "../stable-turns";
+import { isVisibleTranscriptEvent, partitionTurnSequence } from "../turn-partition";
 
 function user(
   id: string,
@@ -49,6 +50,46 @@ function startupWarning(id: string): AgentMessage {
     createdAt: 1,
   };
 }
+
+describe("groupMessagesIntoTurns — legacy environment connection metadata", () => {
+  function connection(state: "connected" | "disconnected"): AgentMessage {
+    return {
+      ...event(`environment-${state}`), kind: "tool", toolKind: "other",
+      title: `Environment ${state}`, status: "completed",
+      rawOutput: { environment: "zeros-fixture", state },
+    } as AgentMessage;
+  }
+
+  it.each(["connected", "disconnected"] as const)("omits %s bookkeeping from counts, standalone and nested turns", (state) => {
+    const metadata = connection(state);
+    expect(groupMessagesIntoTurns([metadata])).toEqual([]);
+    expect(isVisibleTranscriptEvent(metadata)).toBe(false);
+    expect(partitionTurnSequence([metadata])).toEqual([]);
+    const answer: AgentMessage = { ...user("answer", "Done"), role: "agent" };
+    const prompt = user("u1", "Hello");
+    const previous = groupMessagesIntoTurns([prompt, answer]);
+    const messages = [prompt, answer, metadata];
+    const refreshed = groupMessagesIntoTurns(messages);
+    expect(refreshed[0].events).toEqual([answer]);
+    expect(stabilizeTurns(previous, refreshed)).toBe(previous);
+    expect(messages.at(-1)).toBe(metadata);
+  });
+
+  it("preserves actual tools, failures and unknown records with a similar title", () => {
+    const metadata = connection("disconnected");
+    const visible = [
+      { ...metadata, status: "failed" },
+      { ...metadata, status: "in_progress" },
+      { ...metadata, nativeToolCallId: "native-tool" },
+      { ...metadata, rawInput: { command: "check-environment" } },
+      { ...metadata, toolKind: "mcp" },
+      { ...metadata, rawOutput: { environment: "zeros-fixture", state: "disconnected", error: "Connection failed" } },
+      { ...metadata, rawOutput: { message: "Unknown provider output" } },
+    ].map((message, index) => ({ ...message, id: `visible-${index}` })) as AgentMessage[];
+    expect(groupMessagesIntoTurns(visible)[0].events).toEqual(visible);
+    expect(visible.every(isVisibleTranscriptEvent)).toBe(true);
+  });
+});
 
 describe("groupMessagesIntoTurns — background MCP status", () => {
   it("does not create a system turn for startup notices restored from older builds", () => {

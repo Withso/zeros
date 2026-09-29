@@ -14,6 +14,18 @@ import { opSettingsResolve } from "./ops";
 
 export type RepoScriptKind = "setup" | "run" | "archive";
 
+export function resolveArchiveScript(repoRoot: string) {
+  const resolved = opSettingsResolve(repoRoot);
+  if (resolved.warnings.some(warning => /scripts\.archive|file is malformed and was ignored/.test(warning))) {
+    throw new Error("Fix the archive script settings before archiving this workspace");
+  }
+  const scripts = resolved.effective.scripts as Record<string, unknown> | undefined;
+  const command = typeof scripts?.archive === "string" ? scripts.archive.trim() : "";
+  const required = scripts?.archive_required === true;
+  if (required && !command) throw new Error("A required archive script must have a command");
+  return { command, required, timeoutMs: typeof scripts?.archive_timeout_seconds === "number" ? scripts.archive_timeout_seconds * 1000 : 30_000 };
+}
+
 /** The repo's normalized run actions (per @zeros/protocol/run-actions: invalid
  *  entries skipped, exactly one default, legacy `scripts.run` migrated to one
  *  "run" action). Empty on any failure — a settings problem must never block

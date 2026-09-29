@@ -30,9 +30,11 @@ The shipping desktop target is macOS on Apple silicon (`dmg` and `zip`). Windows
 Linux, iOS, and Android applications are not present in this repository yet;
 their app directories will be added when implementation begins.
 
-Development of the desktop login flow depends on the hosted Zeros authentication
-service. A clone can build and reach the sign-in surface, but a fully self-hosted
-identity setup is not currently documented or supported.
+The standard Dev launcher uses an isolated Railway backend and PlanetScale
+database per development checkout. It requires a private Dev infrastructure
+profile; it does not silently connect a new clone to Alpha. See the
+[development environment runbook](docs/development-environments.md) for provider
+setup and the remaining live qualification requirements.
 
 ## Requirements
 
@@ -45,9 +47,27 @@ identity setup is not currently documented or supported.
 ## Getting started
 
 ```bash
-pnpm install
+# On a new Mac, transfer your private zeros-dev-env.json, then run from the clone:
+bash scripts/setup-zeros-dev.sh --profile "$HOME/Downloads/zeros-dev-env.json"
+# Open a new terminal to load the installed tools, then in each workspace:
 pnpm electron:dev
 ```
+
+Setup installs Node 22, the repository's pinned pnpm, Bun, native build tools,
+and locked dependencies. macOS may require completing the Xcode Command Line
+Tools dialog or authenticating the Homebrew installer. The command can be rerun.
+It imports the profile with private permissions into `~/.zeros-dev/zeros-dev-env.json`
+and the main checkout so future workspaces can copy it. It also configures native
+Zeros repository scripts with required, retryable Archive cleanup, preserving
+existing Setup/Run commands and reporting Archive conflicts. Start with
+[zeros-dev-env-example.json](zeros-dev-env-example.json) when configuring the
+shared Dev services for the first time; transfer the filled private file between
+your own devices, including its existing registry encryption key.
+
+`pnpm dev:setup --check` checks local prerequisites and profile format without
+provisioning. `pnpm dev:archive` deletes this workspace's hosted resources; the
+next launch creates a fresh environment. Closing the desktop keeps the hosted
+environment running. On Linux, use `pnpm dev:backend`; the desktop requires macOS.
 
 Useful checks:
 

@@ -4,6 +4,8 @@ import type pg from "pg";
 
 import { audit } from "../audit.js";
 import { withSystemTx, type Tx } from "../db.js";
+import type { CloudWorkspaceBackendConfig } from "../config.js";
+import { advanceCloudAutomaticRecovery, classifyCloudRestoreEvidence, enqueueCloudAutomaticRecovery, recordCloudRestoreEvidence } from "./automatic-recovery.js";
 import {
   completeCloudWorkspaceGenerationTransition,
   failCloudWorkspaceGenerationRollback,
@@ -127,6 +129,7 @@ export type CloudWorkspaceSetupWorkerOptions = {
   workerId?: string;
   logger?: SetupWorkerLogger;
   workosEnabled?: boolean;
+  recoveryConfig?: CloudWorkspaceBackendConfig;
 };
 
 type ClaimedSetup = CloudWorkspaceSetupExecution & {
@@ -141,6 +144,7 @@ type ClaimDecision =
 type SafeSetupFailure = {
   code: string;
   retryable: boolean;
+  restoreEvidence?: string | undefined;
 };
 
 function safeInteger(
@@ -215,6 +219,7 @@ function safeFailure(error: unknown): SafeSetupFailure {
         ? error.code
         : "setup_executor_failure",
       retryable: error.retryable,
+      restoreEvidence: classifyCloudRestoreEvidence(error.code, "diagnostic" in error ? error.diagnostic : null) ?? undefined,
     };
   }
   return { code: "setup_unknown_failure", retryable: true };
@@ -286,6 +291,7 @@ export class CloudWorkspaceSetupWorker {
   private readonly workerId: string;
   private readonly logger: SetupWorkerLogger;
   private readonly workosEnabled: boolean;
+  private readonly recoveryConfig: CloudWorkspaceBackendConfig | null;
   private readonly activeControllers = new Set<AbortController>();
   private timer: NodeJS.Timeout | null = null;
   private activeTick: Promise<void> | null = null;
@@ -306,6 +312,7 @@ export class CloudWorkspaceSetupWorker {
     this.workerId = options.workerId ?? `setup:${randomUUID()}`;
     this.logger = options.logger ?? console;
     this.workosEnabled = options.workosEnabled === true;
+    this.recoveryConfig = options.recoveryConfig ?? null;
 
     safeInteger(this.intervalMs, "intervalMs", 100, 60_000);
     safeInteger(this.leaseMs, "leaseMs", 1_000, 60 * 60_000);
@@ -514,7 +521,10 @@ export class CloudWorkspaceSetupWorker {
             errorMessage: "Cloud workspace setup did not complete",
           },
         );
-        if (!rolledBack) {
+        const recovering = !rolledBack && this.recoveryConfig && await enqueueCloudAutomaticRecovery(tx, {
+          workspaceId: workspace.id, organizationId: workspace.org_id, generation: workspace.current_generation, setupRunId: row.id,
+        });
+        if (!rolledBack && !recovering) {
           await tx.query(
             `UPDATE cloud_workspaces
              SET status = 'failed', version = version + 1,
@@ -895,6 +905,7 @@ export class CloudWorkspaceSetupWorker {
         organizationId: setup.organizationId,
         generation: setup.generation,
       });
+      await tx.query("UPDATE cloud_workspace_restore_incidents SET state='cancelled',reason='same_generation_ready',updated_at=now() WHERE setup_run_id=$1 AND state='observing'", [setup.setupRunId]);
       await tx.query(
         `UPDATE cloud_workspaces
          SET status = 'ready', version = version + 1,
@@ -927,6 +938,7 @@ export class CloudWorkspaceSetupWorker {
     failure: SafeSetupFailure,
   ): Promise<boolean> {
     return withSystemTx(this.pool, async (tx) => {
+      await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [setup.organizationId]);
       const workspace = await tx.query<{
         current_generation: number;
         desired_state: string;
@@ -1006,6 +1018,7 @@ export class CloudWorkspaceSetupWorker {
         return false;
       }
 
+      if (this.recoveryConfig) await recordCloudRestoreEvidence(tx, setup, failure.restoreEvidence ?? failure.code);
       if (failure.retryable && run.claim_count < this.maxClaims) {
         const delayMs = retryDelayMs(run.claim_count, this.retryBaseMs);
         await tx.query(
@@ -1049,7 +1062,8 @@ export class CloudWorkspaceSetupWorker {
         errorCode: failure.code,
         errorMessage: "Cloud workspace setup did not complete",
       });
-      if (!rolledBack) {
+      const recovering = !rolledBack && this.recoveryConfig && await enqueueCloudAutomaticRecovery(tx, setup);
+      if (!rolledBack && !recovering) {
         await tx.query(
           `UPDATE cloud_workspaces
            SET status = 'failed', version = version + 1,
@@ -1213,10 +1227,10 @@ export class CloudWorkspaceSetupWorker {
   }
 
   async runOnce(): Promise<boolean> {
+    if (this.recoveryConfig && await advanceCloudAutomaticRecovery(this.pool, this.recoveryConfig, this.workosEnabled)) return true;
     const decision = await this.claim();
     if (decision.kind === "none") return false;
     if (decision.kind === "claimed") await this.execute(decision.setup);
     return true;
   }
 }
-

@@ -10,6 +10,7 @@ import {
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 import {
   CloudEngineCgroup,
   CLOUD_SETUP_CGROUP,
@@ -233,7 +234,9 @@ function worker() {
         "/bin/bash",
         ["--noprofile", "--norc", "-lc", payload.command],
         {
-          cwd: "/srv/zeros/workspace",
+          // Setup precedes the engine's mount namespace. Its repository is
+          // the host path; the logical path exists only inside that view.
+          cwd: runtimeLayout.repository,
           env: { ...payload.environment, ...FIXED_ENV },
           stdio: ["ignore", "inherit", "inherit"],
           timeout: payload.timeoutMs,

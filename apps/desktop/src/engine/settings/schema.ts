@@ -121,6 +121,12 @@ const scriptsSchema = z
         "Named run actions — multiple concurrent run commands, each with an icon. Supersedes the single `run` string (which migrates to one default action at read time).",
       ),
     archive: z.string().describe("Runs before a workspace is archived."),
+    archive_required: z.boolean().describe(
+      "Require successful archive cleanup before removing the workspace. The command must be idempotent: interrupted or failed cleanup is retried.",
+    ),
+    archive_timeout_seconds: z.number().int().min(1).max(3600).describe(
+      "Archive script deadline in seconds (1–3600). Defaults to 30.",
+    ),
     run_mode: z
       .enum(RUN_MODES)
       .describe("Whether run scripts of multiple workspaces may run at once."),

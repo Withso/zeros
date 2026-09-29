@@ -24,6 +24,8 @@
 // — the bug from screenshot 6:24:32 PM.
 
 import type { Project } from "./projects-store";
+import { cloudProjectForFolder } from "./cloud-workspace-catalog";
+import { isCloudWorkspace, parseCloudWorkspaceKey, cloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import {
   findAdoptedWorktree,
   isAdoptedWorktreePath,
@@ -130,6 +132,7 @@ export function repoSlugFromWorktreePath(folder: string): string | null {
  *  findProjectForFolder). Re-exported from projects-store.ts for callers there. */
 export function isWorktreePath(folder: string | null | undefined): boolean {
   if (!folder) return false;
+  if (isCloudWorkspace(folder)) return true;
   // A Zeros-managed worktree path OR a foreign worktree the user
   // adopted in place (recorded path) — both must NEVER become a phantom
   // top-level project; they resolve to their parent project below.
@@ -147,6 +150,8 @@ export function workspaceIdFromWorktreePath(
   folder: string | null | undefined,
 ): string | null {
   if (!folder) return null;
+  const cloud = parseCloudWorkspaceKey(folder);
+  if (cloud) return cloudWorkspaceKey(cloud);
   const directory = worktreePathParts(folder)?.workspaceDirectory;
   return directory && /^ws_[A-Za-z0-9][A-Za-z0-9_-]*$/.test(directory)
     ? directory
@@ -292,6 +297,7 @@ export function findProjectForFolder(
   projects: readonly Project[],
 ): Project | null {
   if (!folder) return null;
+  if (isCloudWorkspace(folder)) return cloudProjectForFolder(folder);
   // Normalize the /private symlink on BOTH sides, matching
   // findWorkspaceForFolder — Finder/Electron hands us `/private/var/…`
   // while a stored repoRoot may be `/var/…` (or vice versa); a raw string

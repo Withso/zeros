@@ -1,0 +1,91 @@
+[
+  {
+    "channel": "alpha",
+    "releaseTag": "alpha",
+    "releaseName": "Zeros Alpha v0.1.20-alpha.176",
+    "releaseTarget": "29d20f9a545134c288dc185cc9a6bdf1af122c23",
+    "tagSha": "9d7a307f33018d984001e7d68fb204e8f90d309a",
+    "sources": [
+      {
+        "role": "tag",
+        "sha": "9d7a307f33018d984001e7d68fb204e8f90d309a",
+        "migrations": 100,
+        "head": "0100_cloud_deletion_verification_repair.sql"
+      },
+      {
+        "role": "releaseTarget",
+        "sha": "29d20f9a545134c288dc185cc9a6bdf1af122c23",
+        "migrations": 104,
+        "head": "0104_cloud_workspace_monthly_allowances.sql"
+      }
+    ],
+    "successfulTargetRuns": [
+      {
+        "id": 36576676946,
+        "run_number": 176,
+        "run_attempt": 1,
+        "head_sha": "29d20f9a545134c288dc185cc9a6bdf1af122c23",
+        "head_branch": "main",
+        "event": "push",
+        "conclusion": "success",
+        "path": ".github/workflows/release-alpha.yml",
+        "html_url": "https://github.com/Withso/zeros/actions/runs/36576676946"
+      }
+    ]
+  },
+  {
+    "channel": "beta",
+    "releaseTag": "beta",
+    "releaseName": "Zeros Beta v0.1.19-beta.25",
+    "releaseTarget": "c36533854f1899de4e2f9a157e3eab68d65d5249",
+    "tagSha": "e3f0848c5a21cef4fcc1353a420a9a2c43a4713c",
+    "sources": [
+      {
+        "role": "tag",
+        "sha": "e3f0848c5a21cef4fcc1353a420a9a2c43a4713c",
+        "migrations": 62,
+        "head": "0062_cloud_workspace_entitlement_operations.sql"
+      },
+      {
+        "role": "releaseTarget",
+        "sha": "c36533854f1899de4e2f9a157e3eab68d65d5249",
+        "migrations": 100,
+        "head": "0100_cloud_deletion_verification_repair.sql"
+      }
+    ],
+    "successfulTargetRuns": [
+      {
+        "id": 36140206612,
+        "run_number": 25,
+        "run_attempt": 1,
+        "head_sha": "c36533854f1899de4e2f9a157e3eab68d65d5249",
+        "head_branch": "release/0.1.19",
+        "event": "push",
+        "conclusion": "success",
+        "path": ".github/workflows/release-beta.yml",
+        "html_url": "https://github.com/Withso/zeros/actions/runs/36140206612"
+      }
+    ]
+  },
+  {
+    "channel": "production",
+    "releaseTag": "v0.1.19",
+    "releaseName": "Zeros v0.1.19",
+    "releaseTarget": "c36533854f1899de4e2f9a157e3eab68d65d5249",
+    "tagSha": "c36533854f1899de4e2f9a157e3eab68d65d5249",
+    "sources": [
+      {
+        "role": "tag",
+        "sha": "c36533854f1899de4e2f9a157e3eab68d65d5249",
+        "migrations": 100,
+        "head": "0100_cloud_deletion_verification_repair.sql"
+      },
+      {
+        "role": "releaseTarget",
+        "sha": "c36533854f1899de4e2f9a157e3eab68d65d5249",
+        "migrations": 100,
+        "head": "0100_cloud_deletion_verification_repair.sql"
+      }
+    ]
+  }
+]

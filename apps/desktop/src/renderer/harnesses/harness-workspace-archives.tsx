@@ -71,6 +71,7 @@ Object.assign(window, {
 });
 const { setActiveBridge } = await import("../platform/bridge/active-bridge");
 const requests: { op: string; params?: Record<string, unknown> }[] = [];
+const pendingHistoryReads = new Map<string, { promise: Promise<void>; finish(): void; readers: number }>();
 const archiveFlights = new Map<string, (fail: boolean) => void>();
 setActiveBridge({
   status: "connected",
@@ -179,8 +180,30 @@ setActiveBridge({
   },
 } as unknown as RuntimeClient);
 const { useWorkspaceStore } = await import("../state/store");
+const cloudStoppedReference = new URLSearchParams(location.search).has("cloud-stopped-reference");
+const cloudTarget = {
+  organizationId: "11111111-1111-4111-8111-111111111111",
+  workspaceId: "22222222-2222-4222-8222-222222222222",
+};
+const { cloudScopedId, cloudWorkspaceKey } = await import("../platform/bridge/cloud-workspace-key");
+if (cloudStoppedReference) {
+  rows[0] = { ...rows[0]!, path: cloudWorkspaceKey(cloudTarget), placement: "cloud" };
+  const { acceptCloudWorkspaceDocument } = await import("../state/cloud-workspace-catalog");
+  acceptCloudWorkspaceDocument({
+    id: cloudTarget.workspaceId, organizationId: cloudTarget.organizationId,
+    teamId: cloudTarget.organizationId, createdBy: cloudTarget.organizationId,
+    name: "Stopped fixture", placement: "cloud", status: "stopped", version: 1,
+    error: null, createdAt: "2026-09-28T00:00:00Z", updatedAt: "2026-09-28T00:00:00Z", deletedAt: null,
+    capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+    repository: { forge: "github.com", owner: "example", name: "project", revision: "refs/heads/main" },
+    generation: {
+      number: 1, architecture: "linux/amd64", observedState: "stopped", lastObservedAt: null,
+      resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
+    },
+  });
+}
 const chats = rows.map((row) => ({
-  id: `${row.id}-chat`,
+  id: cloudStoppedReference && row.id === "recent" ? cloudScopedId(cloudTarget, "recent-chat") : `${row.id}-chat`,
   title: row.branch.replace("example/", ""),
   folder: row.path,
   agentId: "fixture-agent",
@@ -191,19 +214,32 @@ const chats = rows.map((row) => ({
   createdAt: 1,
   updatedAt: 1,
 }));
-const activeReference = new URLSearchParams(location.search).has(
+const activeReference = cloudStoppedReference || new URLSearchParams(location.search).has(
   "active-chat-reference",
 );
 if (activeReference) rows[0] = { ...rows[0]!, present: true, archivedAt: null };
 useWorkspaceStore.setState({
   activePage: activeReference ? "workspace" : "dashboard",
-  activeChatId: activeReference ? "recent-chat" : null,
+  activeChatId: activeReference ? chats[0]!.id : null,
   chats,
 });
 Object.assign(window, {
   archiveFixture: {
     requests,
     snapshot: () => useWorkspaceStore.getState(),
+    forgetRetainedSession: (id: string, pendingRead = false) => {
+      if (pendingRead) {
+        let finish!: () => void;
+        const promise = new Promise<void>((resolve) => { finish = resolve; });
+        pendingHistoryReads.set(id, { promise, readers: 0, finish: () => {
+          pendingHistoryReads.delete(id);
+          finish();
+        } });
+      }
+      useSessionsStore.getState().removeSession(id);
+    },
+    pendingHistoryReaders: (id: string) => pendingHistoryReads.get(id)?.readers ?? 0,
+    finishPendingHistory: (id: string) => pendingHistoryReads.get(id)?.finish(),
     seedHistoryEdge: (kind: "empty" | "terminal" | "unbound" | "closed") => {
       const owner = rows.find((row) => row.id === "none")!;
       const id = `edge-${kind}`;
@@ -289,6 +325,8 @@ const { AuthContext } = await import("../features/auth/auth-context");
 const sessions = {
   getSession: (id: string) => useSessionsStore.getState().sessions[id],
   hydrateChat: async (id: string) => {
+    const pending = pendingHistoryReads.get(id);
+    if (pending) { pending.readers++; await pending.promise; return; }
     if (useSessionsStore.getState().sessions[id]) return;
     useSessionsStore.getState().setSession(id, {
       ...BLANK,

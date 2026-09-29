@@ -266,7 +266,7 @@ async function refreshFull(
       // every refresh, so signing in flips the gate open on the next poll; a
       // NOT_AUTHENTICATED read below re-arms this by flipping authed to false.
       if (e.snap.authed !== true) {
-        const status = await provider.authStatus();
+        const status = await provider.authStatus(target.workspaceId);
         if (e.generation !== generation) {
           superseded = true;
         } else {

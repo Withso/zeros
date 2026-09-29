@@ -24,7 +24,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { create } from "zustand";
-import { isRunSessionId } from "@zeros/protocol/run-actions";
+import { isRunSessionId } from "../platform/workspace-run-identity";
 import {
   openTerminalTab,
   reconcileTerminalTabs,
@@ -39,7 +39,8 @@ import {
   loadCachedChatsForBoot,
   loadLegacyActiveChatId,
 } from "./chat-boot-cache";
-import { resolveBootActiveChatId } from "./boot-active-chat";
+import { cloudFolderForChatId, resolveBootActiveChatId } from "./boot-active-chat";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import { setSetting } from "../platform/settings";
 import { ACTIVE_CHAT_KEY } from "./chats-local-cache";
 import {
@@ -145,6 +146,7 @@ export type Action =
       /** Cold remembered target: suppress destructive/default work until the
        * exact repository workspace snapshot confirms it. */
       validationPending?: boolean;
+      chatHydrationPending?: boolean;
       /** Repoint the active-workspace pointers (chat / folder / scope) WITHOUT
        *  leaving the current page. Set by the archive/delete repoint so removing
        *  the active workspace from a full-window Home page (Dashboard / Repo /
@@ -210,8 +212,10 @@ export type Action =
   | { type: "DISCONNECT_PROJECT" }
   | { type: "SET_AI_SETTINGS"; settings: AiSettings }
   // Chat threading
-  | { type: "HYDRATE_CHATS"; chats: ChatThread[]; activeChatId: string | null }
+  | { type: "HYDRATE_CHATS"; chats: ChatThread[]; activeChatId: string | null; confirmedCloudWorkspaces?: readonly string[]; confirmedLocalChats?: boolean }
   | { type: "MERGE_CHATS"; chats: ChatThread[] }
+  | { type: "REVALIDATE_CLOUD_CHATS" }
+  | { type: "PRUNE_CLOUD_WORKSPACES"; folders: readonly string[] }
   | {
       type: "ADD_CHAT";
       chat: ChatThread;
@@ -490,9 +494,11 @@ function initialPendingWorkspaceValidation(): string | null {
     : null;
   const folder =
     activeChatFolder ||
+    cloudFolderForChatId(bootActiveChatId) ||
     persistedUiState.newAgentFolder ||
     persistedUiState.lastWorkspaceFolder;
   if (!folder) return null;
+  if (isCloudWorkspace(folder)) return folder;
   const project = findProjectForFolder(folder, loadProjects());
   if (!project || folderIsWithinRoot(folder, project.repoRoot)) return null;
   return folder;
@@ -540,6 +546,10 @@ const initialState: WorkspaceState = {
   lastWorkspaceFolder: persistedUiState.lastWorkspaceFolder ?? null,
   lastWorkspaceByRepoRoot: initialWorkspaceByRepoRoot(),
   pendingWorkspaceValidationFolder: initialPendingWorkspaceValidation(),
+  pendingChatHydrationFolder:
+    bootChats.find(chat => chat.id === bootActiveChatId)?.folder ||
+    cloudFolderForChatId(bootActiveChatId) ||
+    persistedUiState.newAgentFolder || persistedUiState.lastWorkspaceFolder || null,
   // Per-workspace last-active chat, restored from persist-ui-state so that
   // switching back to a workspace after a reload still lands on the chat the
   // user was viewing there. See rememberActiveChatForFolder below.
@@ -569,7 +579,7 @@ export function selectLiveFolder(s: WorkspaceState): string | null {
   const activeChat = s.activeChatId
     ? (s.chats.find((c) => c.id === s.activeChatId) ?? null)
     : null;
-  return activeChat?.folder || s.newAgentFolder || null;
+  return activeChat?.folder || cloudFolderForChatId(s.activeChatId) || s.newAgentFolder || null;
 }
 
 /** The active-workspace folder for DISPLAY/resolution, with the persisted
@@ -945,6 +955,8 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     }
     case "OPEN_WORKSPACE": {
       const newAgentFolder = action.chatId ? null : action.folder;
+      const pendingChatHydrationFolder = action.chatHydrationPending ||
+        state.pendingChatHydrationFolder === action.folder ? action.folder : null;
       const pendingWorkspaceValidationFolder = action.validationPending
         ? action.folder
         : null;
@@ -974,6 +986,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         state.lastWorkspaceByRepoRoot === lastWorkspaceByRepoRoot &&
         state.pendingWorkspaceValidationFolder ===
           pendingWorkspaceValidationFolder &&
+        state.pendingChatHydrationFolder === pendingChatHydrationFolder &&
         state.workspaceListFilter === workspaceListFilter
       ) {
         return state;
@@ -987,6 +1000,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         lastWorkspaceByRepoRoot,
         workspaceListFilter,
         pendingWorkspaceValidationFolder,
+        pendingChatHydrationFolder,
       };
     }
     case "CONFIRM_WORKSPACE_TARGET":
@@ -1002,7 +1016,8 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         state.activeChatId === null &&
         state.newAgentFolder === null &&
         state.lastWorkspaceFolder === null &&
-        state.pendingWorkspaceValidationFolder === null
+        state.pendingWorkspaceValidationFolder === null &&
+        state.pendingChatHydrationFolder === null
       ) {
         return state;
       }
@@ -1012,6 +1027,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         newAgentFolder: null,
         lastWorkspaceFolder: null,
         pendingWorkspaceValidationFolder: null,
+        pendingChatHydrationFolder: null,
       };
     case "OPEN_REPO_PAGE": {
       const next = action.view
@@ -1133,6 +1149,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           folderWasRemoved(state.pendingWorkspaceValidationFolder)
             ? null
             : state.pendingWorkspaceValidationFolder,
+        pendingChatHydrationFolder:
+          state.pendingChatHydrationFolder && folderWasRemoved(state.pendingChatHydrationFolder)
+            ? null : state.pendingChatHydrationFolder,
       };
     }
     case "REMOVE_WORKSPACE_UI_STATE": {
@@ -1189,6 +1208,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           folderWasRemoved(state.pendingWorkspaceValidationFolder)
             ? null
             : state.pendingWorkspaceValidationFolder,
+        pendingChatHydrationFolder:
+          state.pendingChatHydrationFolder && folderWasRemoved(state.pendingChatHydrationFolder)
+            ? null : state.pendingChatHydrationFolder,
       };
     }
     case "MOVE_WORKSPACE_UI_STATE": {
@@ -1247,6 +1269,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         pendingWorkspaceValidationFolder: moveMaybe(
           state.pendingWorkspaceValidationFolder,
         ),
+        pendingChatHydrationFolder: moveMaybe(state.pendingChatHydrationFolder),
       };
     }
     case "SET_LOADING":
@@ -1254,15 +1277,71 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "SET_AI_SETTINGS":
       return { ...state, aiSettings: action.settings };
     // ── Chat threads ──────────────────────────────────────
+    case "REVALIDATE_CLOUD_CHATS": {
+      const folder = selectActiveFolder(state);
+      // A lifecycle remount (including hot refresh) must release cached cloud
+      // content until this account is confirmed, without treating that read as
+      // deletion. Keep navigation and owner-scoped UI until the catalog settles.
+      return {
+        ...state,
+        chats: state.chats.filter(chat => !isCloudWorkspace(chat.folder)),
+        ...(folder && isCloudWorkspace(folder) ? {
+          pendingWorkspaceValidationFolder: folder,
+          pendingChatHydrationFolder: folder,
+        } : {}),
+      };
+    }
+    case "PRUNE_CLOUD_WORKSPACES": {
+      const folders = action.folders.filter(isCloudWorkspace);
+      if (!folders.length) return state;
+      const removed = (folder: string) => folders.some(root => folderIsWithinRoot(folder, root));
+      const activeRemoved = removed(selectActiveFolder(state) ?? "");
+      let next = state;
+      for (const folder of folders) {
+        next = reducer(next, { type: "REMOVE_WORKSPACE_UI_STATE", folder, repoRoot: folder });
+      }
+      return {
+        ...next,
+        chats: next.chats.filter(chat => !removed(chat.folder)),
+        pendingChatHydrationFolder: next.pendingChatHydrationFolder && removed(next.pendingChatHydrationFolder) ? null : next.pendingChatHydrationFolder,
+        lastWorkspaceByRepoRoot: removeRecordKeysMatching(next.lastWorkspaceByRepoRoot, removed),
+        ...(activeRemoved ? {
+          activePage: "dashboard",
+          lastHomePage: "dashboard",
+          activeChatId: null,
+          newAgentFolder: null,
+          lastWorkspaceFolder: null,
+          pendingWorkspaceValidationFolder: null,
+          pendingChatHydrationFolder: null,
+        } : {}),
+      };
+    }
     case "HYDRATE_CHATS": {
       const chats = action.chats.map(migrateChatPermission);
+      const pending = state.pendingWorkspaceValidationFolder;
+      const pendingChats = state.pendingChatHydrationFolder;
+      const confirmed = action.confirmedCloudWorkspaces;
+      const conversationIds = new Set(chats.map((chat) => chat.id));
+      // A Local refresh cannot prune another backend's Browser tabs while its
+      // authorized conversation list has not arrived yet.
+      if (confirmed) for (const scope of Object.values(state.workbenchByScope)) {
+        for (const tab of scope.tabs) {
+          const owner = tab.browserConversationId;
+          const folder = cloudFolderForChatId(owner ?? null);
+          if (owner && folder && !confirmed.includes(folder)) conversationIds.add(owner);
+          if (owner && !folder && action.confirmedLocalChats === false) conversationIds.add(owner);
+        }
+      }
       return {
         ...state,
         chats,
         activeChatId: action.activeChatId,
+        pendingWorkspaceValidationFolder: pending && confirmed?.includes(pending) ? null : pending,
+        pendingChatHydrationFolder: pendingChats && confirmed &&
+          (isCloudWorkspace(pendingChats) ? confirmed.includes(pendingChats) : action.confirmedLocalChats !== false) ? null : pendingChats,
         workbenchByScope: retainBrowserTabsForConversations(
           state.workbenchByScope,
-          new Set(chats.map((chat) => chat.id)),
+          conversationIds,
         ),
       };
     }

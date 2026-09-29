@@ -17,17 +17,17 @@ that Beta validated.
 
 | Channel    | Source                                 | Railway                                                    | Cloudflare surfaces                     | Public origins                                                             |
 | ---------- | -------------------------------------- | ---------------------------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------- |
-| Alpha      | `main`                                 | `alpha` environment: control plane + its own Postgres      | `zeros-web-alpha`, `zeros-ops-alpha`    | `api-alpha.zeros.build`, `app-alpha.zeros.build`, `ops-alpha.zeros.build`  |
-| Beta       | current `release/X.Y.Z`                | `beta` environment: control plane + its own Postgres       | `zeros-web-beta`; **no Ops deployment** | `api-beta.zeros.build`, `app-beta.zeros.build`                             |
-| Production | the same release commit Beta validated | `production` environment: control plane + its own Postgres | `zeros-web`, `zeros-ops`                | `api.zeros.build`, `app.zeros.build`, `ops.zeros.build`, marketing domains |
+| Alpha      | `main`                                 | `alpha` environment: control plane + isolated PlanetScale Postgres      | `zeros-web-alpha`, `zeros-ops-alpha`    | `api-alpha.zeros.build`, `app-alpha.zeros.build`, `ops-alpha.zeros.build`  |
+| Beta       | current `release/X.Y.Z`                | `beta` environment: control plane + isolated PlanetScale Postgres       | `zeros-web-beta`; **no Ops deployment** | `api-beta.zeros.build`, `app-beta.zeros.build`                             |
+| Production | the same release commit Beta validated | `production` environment: control plane + isolated PlanetScale Postgres | `zeros-web`, `zeros-ops`                | `api.zeros.build`, `app.zeros.build`, `ops.zeros.build`, marketing domains |
 
 This remains one backend codebase and one frontend codebase. Each channel is an
 isolated deployment instance with independent data, credentials, sessions, and
 domains.
 
 Railway supports named persistent environments, so keep one Railway project and
-the same logical `zeros-control-plane` service in all three environments. Never
-share `DATABASE_URL` across them.
+the same logical control-plane service in all three environments. Each channel uses
+its own PlanetScale database and runtime login. Never share `DATABASE_URL` across them.
 
 Cloudflare Pages exposes only `production` and one shared `preview`
 configuration inside a project. Preview branches share variables and bindings,
@@ -73,7 +73,7 @@ Repository guards are a backstop, not a substitute for those controls:
 
 Create or rename the persistent environments to exactly `alpha`, `beta`, and
 `production`. Duplicate the existing service configuration to bootstrap Alpha
-and Beta, but provision a fresh PostgreSQL service in each environment; a
+and Beta, but provision an isolated PlanetScale PostgreSQL database for each; a
 configuration duplicate is not permission to copy or share Production data.
 
 For the control-plane service in every environment:
@@ -82,25 +82,28 @@ For the control-plane service in every environment:
 - Dockerfile builder using the colocated `Dockerfile`
 - health check: `/healthz`
 - service name: `zeros-control-plane`
-- one environment-local Postgres reference for `DATABASE_URL`
+- one channel-local, unprivileged PlanetScale runtime URL for `DATABASE_URL`
+- `DATABASE_MIGRATIONS_ON_BOOT=false`; no permanent migration-owner URL
 - watch paths restricted to `apps/control-plane/**` when Railway asks for them
 
-Configure sources and deploy controls as follows:
+Configure sources and deploy controls as follows **when enabling the ordered
+controller**. While it is disabled, existing Alpha/Beta Git autodeploy and
+Wait for CI can remain enabled; the disabled guard does not change them.
 
 | Railway environment | Git source                        | Autodeploy               | Wait for CI                   |
 | ------------------- | --------------------------------- | ------------------------ | ----------------------------- |
-| `alpha`             | `main`                            | on                       | on                            |
-| `beta`              | current `release/X.Y.Z`           | on after the release cut | on                            |
-| `production`        | current validated `release/X.Y.Z` | **off**                  | required before manual deploy |
+| `alpha`             | `main`                            | **off under the controller** | **off**                     |
+| `beta`              | current `release/X.Y.Z`           | **off under the controller** | **off**                     |
+| `production`        | current validated `release/X.Y.Z` | **off**                      | **off**                     |
 
 Attach each custom API domain to the matching service instance. Confirm all
 three `/healthz` endpoints before configuring a desktop build.
 
-For a normal Production promotion, freeze the validated release branch and use
-Railway's command palette → **Deploy Latest Commit**. Railway deploys the latest
-commit on the service's connected branch even while autodeploy is disabled.
-Compare the resulting deployment SHA with the Beta SHA before promoting the
-frontend.
+The ordered controller uses `serviceInstanceDeployV2` with the immutable event
+SHA. It refuses Railway autodeploy or Wait for CI: waiting for the whole desktop
+workflow would create a dependency cycle. Source retargets commit an explicit metadata patch
+with `skipDeploys:true`, then re-read the source and autodeploy state before
+migration. Never commit unrelated staged dashboard changes during a promotion.
 
 ### Railway variables
 
@@ -214,9 +217,9 @@ Configure each project:
 
 | Project           | Production branch                 | Automatic Production deploys      | Automatic Preview deploys | Custom domain(s)                                    |
 | ----------------- | --------------------------------- | --------------------------------- | ------------------------- | --------------------------------------------------- |
-| `zeros-web-alpha` | `main`                            | on                                | **off**                   | `app-alpha.zeros.build`                             |
-| `zeros-ops-alpha` | `main`                            | on                                | **off**                   | `ops-alpha.zeros.build`                             |
-| `zeros-web-beta`  | current `release/X.Y.Z`           | on while stabilizing that release | **off**                   | `app-beta.zeros.build`                              |
+| `zeros-web-alpha` | `main`                            | **off under the controller**       | **off**                   | `app-alpha.zeros.build`                             |
+| `zeros-ops-alpha` | `main`                            | **off under the controller**       | **off**                   | `ops-alpha.zeros.build`                             |
+| `zeros-web-beta`  | current `release/X.Y.Z`           | **off under the controller**       | **off**                   | `app-beta.zeros.build`                              |
 | `zeros-web`       | current validated `release/X.Y.Z` | **off**                           | **off**                   | `app.zeros.build` plus Production marketing domains |
 | `zeros-ops`       | current validated `release/X.Y.Z` | **off**                           | **off**                   | `ops.zeros.build`                                   |
 
@@ -224,13 +227,12 @@ Disable Preview deployments for these release projects. If PR previews are
 needed later, create a sixth preview-only project with preview-only credentials
 and data instead of sharing Alpha/Beta state.
 
-For manual Production builds, create a protected Pages deploy hook tied to the
-current frozen `release/X.Y.Z` branch (or call the Pages deployment API with
-that branch). Trigger it only after the backend is healthy, and verify that the
-deployment metadata contains the recorded Beta SHA. A deploy-hook URL is an
-unauthenticated secret: keep it in a protected password manager or GitHub
-Environment, rotate/recreate it when the release branch changes, and never put
-it in the repository. Do not temporarily turn Production autodeploy back on.
+The controller retargets the project production branch under the channel lock,
+keeps both production and preview autodeploys disabled, then uploads the exact
+checkout with the pinned Wrangler dependency. Disable independent deploy hooks
+as well. Direct upload into an existing Git-connected project is supported; it
+does not require recreating the project. The build sets `CF_PAGES=1` so the
+existing hosted environment guards run in Actions too.
 
 Each project retains its own `SESSIONS` KV namespace for Auth0 rollback and
 legacy abuse controls. Set these common values in the project's Production
@@ -360,7 +362,8 @@ variables:
 | `AUTH_AUDIENCE`                              | unused                    | matching channel API origin                                                     |
 | `ZEROS_CLOUD_WORKSPACES_ENABLED`             | `false`                   | `false` until that channel's desktop cloud client is release-approved           |
 | `VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES` | unused while cloud is off | 1-8 exact lowercase cloud-preview DNS suffixes when cloud is on                 |
-| `VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64`   | unused while cloud is off | canonical base64url OpenSSH pins covering `ssh.app.daytona.io` when cloud is on |
+| `CLOUD_WORKSPACE_PROVIDER`                  | unused while cloud is off | `boat` or `daytona`; omission preserves the legacy Daytona policy |
+| `VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64`   | unused while cloud is off | Daytona: canonical base64url OpenSSH pins covering `ssh.app.daytona.io`; optional for managed Boat |
 
 The authentication entries are public verification values baked only into
 Electron main. Never add a WorkOS API key—generic, web, desktop, or channel-
@@ -375,8 +378,10 @@ and Electron pins the child environment to the same decision. Leave it unset or
 set it to `false` until the channel is approved. Enabling only the backend does
 not activate a desktop client, and enabling only the desktop does not bypass
 backend admission. The release-environment check refuses an enabled build
-unless both public cloud-preview suffixes and a structurally valid, complete
-SSH host-key policy are present; flags-off builds remain valid without them.
+unless public cloud-preview suffixes are valid. Daytona also requires its
+complete SSH host-key policy. Managed Boat uses the backend terminal tunnel,
+so it needs no Daytona pin; a supplied pin document is still validated.
+Flags-off builds remain valid without either value.
 
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
 `main`; `beta` permits only `release/*`; `production` permits only `release/*`
@@ -506,43 +511,85 @@ hashes. Alpha/Beta run this immediately before publication; Production runs it
 before notary submission and separately rechecks notarization/Gatekeeper after
 stapling.
 
-1. Merge a green PR to `main`; Railway Alpha, `zeros-web-alpha`, and the Alpha
-   desktop channel update.
-2. Test Alpha.
-3. Cut `release/X.Y.Z` from the selected commit; point Beta's Railway and Pages
-   sources at that branch. Beta updates only from that stabilization branch.
-4. Fix Beta by cherry-picking onto the release branch; do not replace it with a
-   moving `main` build.
-5. Record the validated SHA. Point Production sources at the same frozen
-   release branch and keep autodeploy off. Use Railway **Deploy Latest Commit**,
-   then the Cloudflare deploy hook/API for that branch, then dispatch the stable
-   desktop workflow from that branch. Confirm all three report the recorded SHA.
-6. Verify `/healthz`, login, dashboard API, feedback, and deployment commit IDs.
+1. Merge a green PR to `main`. The Alpha quality job calls `hosted-promotion.yml`
+   before the signed desktop job.
+2. Test Alpha, then cut an exact `release/X.Y.Z` branch. Beta uses one global
+   destination lock across every release branch. The controller retargets
+   Railway and Pages metadata to the selected branch and deploys its event SHA.
+3. Stabilize with cherry-picks on that branch. Superseded same-branch commits
+   and branches older than an already-selected release version are rejected
+   before mutation. Never cancel an active migration/cutover.
+4. Dispatch `release.yml` from the frozen release branch. With hosted promotion
+   enabled, Production requires a successful `release-beta.yml` push run and
+   its unexpired success receipt for the same repository/branch/SHA. The
+   receipt's recorded attempt must contain a successful hosted mutation job.
+   An earlier hosted attempt of the same run remains valid after a successful
+   desktop-only retry. The Production human approval, notarization and all
+   macOS gates remain; disabled legacy mode does not enforce the Beta receipt.
+5. Keep the branch fixed until desktop publication completes. The whole release
+   workflow holds a non-cancelling, channel-global publication lock.
 
-Hosted control planes boot with `DATABASE_MIGRATIONS_ON_BOOT=false` and refuse
-to start while the ledger has a pending or unknown migration. Railway waits for
-a healthy `/healthz` before replacing a deployment, so when a merge adds a
-migration, Alpha's new deployment fails and the previous one keeps serving.
-Apply the migration with `release-migration:manage` (below), then promptly
-redeploy the same commit: the previous deployment cannot restart against a
-ledger that records a migration it does not know. Railway also skips a `main`
-deployment whose CI check suite failed, including the Release (alpha) desktop
-workflow. A later merge that changes no watched path does not retry the skipped
-deployment; deploy the current `main` commit explicitly.
+When enabled, the hosted controller performs a read-only provider plan, a
+short-lived migration-role SQL plan, source retarget, a fresh successful
+PlanetScale backup, strict production-mode migration, explicit exact-SHA
+Railway deploy, deployment `SUCCESS`, public release readiness, app/Ops Pages
+build and direct upload, custom-domain manifest verification, then saves
+`hosted-promotion-<channel>-<sha>`. Only then can desktop publication start.
+There is no Ops deployment in Beta. Every Pages artifact includes Functions
+and the applicable marketing output. Build/install output from provider-facing
+subprocesses is withheld, and receipts contain allowlisted public fields only.
 
-`pnpm --dir apps/control-plane release-migration:manage --database <database>`
-plans against a PlanetScale branch: it mints a one-hour owner role, lists the
-pending migrations and deletes the role. Add `--execute --confirm <database>`
-to take an on-demand backup first, run the strict runner (which verifies every
-recorded checksum), confirm that nothing remains pending and delete the role.
-It reads `PLANETSCALE_ORG`, `PLANETSCALE_SERVICE_TOKEN_ID` and
-`PLANETSCALE_SERVICE_TOKEN`; use a token that reaches only the target database.
-Grant that database `read_database`, `read_branch`, `read_backups`,
-`write_backups`, `connect_production_branch`,
-`create_production_branch_password` and `delete_production_branch_password`.
-Without `create_production_branch_password`, PlanetScale refuses the migration
-role with HTTP 403. At a release cut, run it for Beta and then Production, each
-immediately before promoting that channel's build.
+Immediately before each desktop publisher writes its release, it runs
+`scripts/release/publication-cli.ts`. With hosted promotion enabled, the gate
+downloads this run's receipt, verifies the successful hosted job in its recorded
+attempt, then rereads the current backend and every channel Pages manifest.
+Source SHA, migration manifest and complete worker tuple must still match the
+receipt; cloud-enabled desktops also require current `workerQualified=true`.
+Run A cannot publish after run B promoted a newer hosted state. A retry with
+unchanged hosted state is allowed. Production performs the same check before
+notary polling and again immediately before release publication, preserving
+the same signed artifact without rebuilding. Do not race dashboard/provider
+writes against these checks; external mutations are outside the workflow lock.
+
+`GET /v1/release-identity` is public and secret-free, including during
+maintenance. It returns version 1, deployed Railway Git SHA, channel,
+maintenance, packaged/recorded migration head and checksum-manifest digest,
+`current`/`pending`/`controlled`/`unknown` state, aggregate cloud readiness and
+the complete selected worker identity. It returns 503 unless ready; `/healthz`
+retains its existing liveness semantics. Provider errors, tenant information,
+credentials and cloud-health diagnostic strings never enter the identity body.
+The controller verifies the response against its exact checkout manifest.
+The additive `workerQualified` flag reports whether an enabled, audited native
+runtime approval with MCP qualification exists for the selected provider/image.
+It exposes no credential kind, account, evidence or owner identity; a failed
+approval read returns false. Each agent's runtime admission still enforces its
+own credential kind and exact runtime contract. This flag is separate from
+aggregate service readiness and does not alter `/healthz`.
+Enabled worker reuse and final hosted readiness require affirmative current
+qualification whenever the desktop publishes cloud capability. Reuse pins the
+entire live tuple after checking the committed input tree; final readiness
+requires that exact tuple. Missing, false or revoked approval blocks publication.
+The public boolean does not replace per-credential native launch qualification.
+
+Hosted control planes keep `DATABASE_MIGRATIONS_ON_BOOT=false`. The migration
+subprocess requires `NODE_ENV=production`, rejects pending controlled
+boundaries (use the reviewed drain ceremony separately), verifies checksums,
+and requires `ledger=verified`, a successful backup and `role.deleted=true`.
+The standalone command remains:
+
+```sh
+NODE_ENV=production pnpm --dir apps/control-plane release-migration:manage \
+  --database zeros-control-plane-alpha --branch main \
+  --execute --confirm zeros-control-plane-alpha
+```
+
+Its default plan creates/deletes a one-hour provider owner login even though
+its SQL is read-only. `scripts/release/cli.ts --plan` performs only read-only
+provider inspection and never creates a role. Neither plan authorizes a
+controlled migration. A failed or ambiguous deploy stops publication; no
+old-binary rollback or database restore runs automatically. Inspect provider
+state and retained receipts before a retry. Temporary-role cleanup failure is
+a failure, with the one-hour TTL only a backstop.
 
 `pnpm check:web-deploy` defaults to the two Alpha Pages projects and fails
 closed unless both `app-alpha.zeros.build` and `ops-alpha.zeros.build` publish
@@ -556,3 +603,325 @@ not a prerequisite for checking the custom domains users actually reach.
 Future schema changes should use expand/contract migrations so old and new
 server versions can overlap. Marking another migration for controlled downtime
 is an exceptional, reviewed release decision.
+
+## Ordered-controller rollout switches and owner setup
+
+This repository implements the hosted controller and a **worker execution
+stub**. They are shipped disabled. Do not interpret a green disabled guard or
+`worker-plan` artifact as a deployment receipt. Set `ZEROS_HOSTED_PROMOTION`
+to exactly `enabled` only after the channel setup below and an isolated live
+rehearsal. Missing required secrets with the switch enabled fails the guard.
+With it disabled, both the initial guard and the desktop publication step
+compare the candidate's complete committed schema and worker-input contract
+against the **published channel baseline**, never an event-local push diff.
+The guard derives the published SHA from a successful same-channel release
+workflow with a successful desktop publish step, checking the exact repository,
+source repository, workflow path, event, channel branch and job SHA. Alpha must
+publish from `main`; Beta/Production must publish from `release/X.Y.Z`. Beta's
+previous publication may be on an older release branch because its destination
+is global. The most recent successful publish-step time determines the baseline,
+including a later rerun of an older workflow. This reads retained Actions
+history with `actions:read`; it never trusts release `target_commitish` alone.
+
+That proof is cross-checked against the `alpha` or `beta` rolling tag, or the
+numerically highest stable `vX.Y.Z` tag for Production. Existing rolling refs
+can predate their published assets because the old publisher only updated
+release metadata. When the tag disagrees, the successful publication's SHA
+wins and the annotation/summary reports both SHAs and the proving run ID.
+The guard never changes tags. Checkouts fetch full history and tags; publication
+refreshes them again. Missing tags, unavailable/unverifiable publication history,
+or history exceeding the bounded scan require live manual-cutover proof.
+
+Migration identity hashes every ordered migration name and checksum from Git
+objects, so packaging edits cannot change the comparison. A dispatch or first
+branch push can publish without an identity endpoint **only when its schema
+matches this verified publication baseline** and the worker guard permits it.
+An unresolved change remains visible on every descendant push, even when its
+own diff contains only documentation. New migrations on this branch still
+require manual cutover regardless of legacy-tag bootstrap.
+
+Alpha/Beta advance the actual rolling Git tag ref only after their assets upload
+successfully. Updating a release's `--target` alone does not move an existing
+tag ([GitHub release API](https://docs.github.com/en/rest/releases/releases#update-a-release)).
+Production continues publishing `v${VERSION}`. Its highest stable tag may differ
+from GitHub's `Latest` flag when retired higher-version tags remain; the same
+successful-publication cross-check applies. Do not manufacture or move a
+baseline tag to bypass a cutover.
+
+Every guard performs one anonymous, five-second public identity read. If the
+endpoint answers, its readiness/schema/worker state takes precedence over the
+publication baseline. An answering but unready or malformed identity cannot be replaced
+with an older tag's proof. If neither a usable baseline nor an identity answers,
+publication blocks with operator steps. An unavailable endpoint alone does not
+block an unchanged published schema. Every disabled decision emits an annotation
+and step summary and creates no hosted receipt.
+
+- Worker input changes are warning-only when
+  `ZEROS_CLOUD_WORKSPACES_ENABLED` is not exactly `true`. Ordinary engine edits
+  therefore preserve legacy desktop publication for cloud-disabled channels
+  when the schema is unchanged or manual cutover is verified.
+- For a cloud-enabled desktop, changed worker inputs block unless the channel's
+  public release identity is ready, its cloud subsystem is enabled, and
+  `workerQualified=true`. The complete immutable worker tuple must use the
+  selected provider and either the candidate SHA or a source with identical
+  committed worker inputs. Missing qualification, stale inputs, unreadable
+  Git history or a missing endpoint cannot authorize this exception. An
+  answering identity with revoked qualification blocks a cloud-enabled desktop
+  even if its worker-input tree matches the tag baseline.
+- Migration changes relative to published channel state block until the fixed
+  channel API's `/v1/release-identity` verifies a completed manual cutover.
+  The response must be ready, belong to that channel, have maintenance off and
+  current migrations. It must report either the candidate's exact `sourceSha`,
+  or the candidate's complete migration manifest: `expectedHead` and recorded
+  `head` equal the candidate head, with equal `manifestSha256`. On success the
+  summary says **manual cutover verified**. The guard does not prove backup
+  history and does not produce an automated hosted promotion receipt.
+
+Missing, older, mismatched, malformed or timed-out identity responses keep an
+unverified migration candidate blocked, with the exact backup/migration/deploy/rerun procedure
+in its error annotation and summary. The worker condition remains independent:
+manual schema verification cannot authorize an unqualified cloud worker.
+
+While promotion is disabled, Railway's existing **Wait for CI** setting remains
+useful. A failed guard makes the release workflow fail, so Railway skips that
+SHA's waiting autodeploy. A cloud-disabled candidate with an unchanged published
+schema (or verified manual cutover) passes this guard, allowing normal Git
+autodeploy after the remaining workflows succeed. A descendant of an unverified
+migration stays blocked even if that push adds no SQL files.
+Railway evaluates workflow conclusions, not individual jobs, and also skips
+a deployment when its CI wait exceeds two hours. A rerun should not be treated
+as a guarantee that an already-skipped deployment restarts: complete the
+explicit manual deploy first. These are the documented provider semantics;
+this implementation has not rehearsed them live. See
+[Railway Wait for CI](https://docs.railway.com/deployments/github-autodeploys#wait-for-ci).
+Before enabling the ordered controller, disable independent autodeploy and
+Wait for CI as below; otherwise the hosted-before-desktop order would deadlock.
+
+The channel lock protects the running workflow, but GitHub may replace a
+**pending** workflow with a later one. Every desktop writer reruns the complete
+guard decision, so a displaced guard cannot authorize a descendant's desktop
+publication. This is not a provider deployment barrier: Railway can ignore a
+cancelled workflow if another workflow for that commit passed. Hold independent
+Railway and Pages autodeploy **before merging a migration cutover**, freeze the
+candidate until completion, or use the enabled ordered controller. Wait for CI
+alone cannot guarantee ordering for cancelled pending runs. See
+[GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
+and [Railway's cancellation rules](https://docs.railway.com/deployments/github-autodeploys#wait-for-ci).
+
+Configure these GitHub **environment** variables independently in `alpha`,
+`beta`, and `production` (not in `.env.agent`):
+
+| Variable | Required value or source |
+| --- | --- |
+| `ZEROS_HOSTED_PROMOTION` | unset/disabled initially; exactly `enabled` after rehearsal |
+| `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_SERVICE_ID` | target UUIDs; environment name must equal channel; API custom domain and repository/root are checked |
+| `PLANETSCALE_ORG` | organization owning this channel database |
+| `PLANETSCALE_DATABASE` | exactly `zeros-control-plane-alpha`, `zeros-control-plane-beta`, or `zeros-control-plane-production` |
+| `PLANETSCALE_BRANCH` | `main`; each is a separate database, not three branches of one database |
+| `CLOUDFLARE_ACCOUNT_ID` | account owning the channel's Pages projects |
+| `CF_PAGES_APP_PROJECT` | `zeros-web-alpha`, `zeros-web-beta`, or `zeros-web` |
+| `CF_PAGES_OPS_PROJECT` | `zeros-ops-alpha`, empty for Beta, or `zeros-ops` |
+| `AUTH_PROVIDER` | `workos` for the automated hosted lane |
+| `ZEROS_CLOUD_WORKSPACES_ENABLED` | exact desktop capability decision; `true` only after qualification |
+| `CLOUD_WORKSPACE_PROVIDER` | `boat` for managed Boat; `daytona` retains the legacy SSH requirement |
+| Existing desktop auth/origin/preview values | the exact channel values in the earlier tables |
+
+The event supplies `RELEASE_SHA`, `RELEASE_BRANCH` and channel;
+they are not owner-overridable deployment variables. `GITHUB_SHA` must equal
+the selected source. The workflow checks out that SHA with full history and
+refuses a dirty checkout before hosted mutation. The publication guard allows
+packaging's working-tree edits and reads contracts from committed Git objects.
+IDs, source, database and branch are checked before
+mutation, and the current branch head is rechecked after the migration plan.
+
+| Environment secret | Minimum authority |
+| --- | --- |
+| `RAILWAY_DEPLOY_TOKEN` | Railway project token scoped to the target environment, sent as `Project-Access-Token`; read target/config/autodeploy/deployment state, commit an explicit source patch with deploys suppressed, deploy the exact service SHA |
+| `PLANETSCALE_SERVICE_TOKEN_ID`, `PLANETSCALE_SERVICE_TOKEN` | database-scoped `read_database`, `read_branch`, `read_backups`, `write_backups`, `connect_production_branch`, `create_production_branch_password`, `delete_production_branch_password`; Alpha's main is also a production-class branch |
+| `CLOUDFLARE_API_TOKEN` | account-scoped Cloudflare Pages Edit for project inspection/update/direct upload; DNS changes stay a separate owner setup action |
+| Existing desktop secrets | `CSC_LINK`, `CSC_KEY_PASSWORD`, analytics public-build credentials; Production retains `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD` |
+
+Actions needs `contents:read` and `actions:read` even for the disabled guard's
+publication-history bootstrap. The workflow supplies `GH_TOKEN` from its
+repository-scoped `GITHUB_TOKEN`, never a provider token. The hosted lane also
+reads the successful Beta run and downloads
+that run's named receipt artifact; an arbitrary JSON file or a release branch
+name is insufficient. Artifacts are retained for 90 days. Expired evidence
+requires a new successful Beta run, never a bypass. Job provenance is read from
+`/actions/runs/<id>/attempts/<recorded-attempt>/jobs`, with the named promotion
+and receipt-upload steps both successful; overall Beta success is checked
+separately. Desktop publishing has `actions:read` for this check alongside its
+existing narrowly scoped `contents:write`. No migration/runtime owner URL,
+WorkOS server secret, GitHub App private key or R2 encryption key belongs in a
+Pages or desktop build environment.
+
+Inherited notarization follow-up: Production still passes
+`APPLE_APP_SPECIFIC_PASSWORD` to `notarytool --password`. Those existing submit,
+poll and log commands remain unchanged here. Apple's supported keychain-profile
+or App Store Connect private-key flow can avoid password argv, but secure profile
+bootstrap/key provisioning and retry behavior require a macOS rehearsal before
+changing Production authentication. This is an existing exception to the new
+controller's no-secret-argv rule, not a verified fix. See
+[Apple TN3147](https://developer.apple.com/documentation/technotes/tn3147-migrating-to-the-latest-notarization-tool).
+
+Owner setup, once per channel before **enabling** the controller:
+
+1. Configure protected environment branch policies (`main` for Alpha,
+   `release/*` for Beta/Production) and keep the Production human reviewer.
+   Confirm fork workflows cannot access release environments.
+2. Keep server WorkOS/GitHub App/database/object-store/keyring settings in
+   Railway. Provision separate channel databases, unprivileged runtime roles,
+   cloud buckets, encryption keys and validated callback allowlists. Supply
+   real preview DNS/TLS and a matching preview suffix when enabling desktop
+   cloud. Bootstrap the stable database object owner through the documented
+   migration procedure; the workflow cannot grant its own authority.
+3. Disable Railway independent autodeploy through its actual toggle and turn
+   Wait for CI off. A watch-pattern hold alone is not sufficient: the
+   controller checks `serviceInstanceAutoDeployStatus.enabled === false`.
+   Keep the Git repository connection, root `apps/control-plane`, custom API
+   domain, and correct source branch. Clear unrelated staged environment
+   changes; the controller refuses them. Reserve source/config writes to this
+   controller during promotion so a dashboard writer cannot race its
+   source retarget. The controller never accepts a shared staging area.
+4. Disable production AND preview Git builds on every channel Pages project
+   and retire independent deploy hooks. Set the project's **production**
+   runtime variables and app/Ops domain identity as above. WorkOS server/Dev
+   fields must be absent. Rehearse Wrangler upload into the existing
+   Git-connected project, including Functions and custom-domain manifests.
+5. Agree the recovery window. The migrator creates a fresh 14-day database
+   backup, but that alone does not retain R2 objects or encryption-key versions
+   for 14 days. Retain referenced objects/keys for the chosen window or declare
+   the shorter restorable workspace window. Never automatically restore a
+   database or delete a referenced rollback/customer snapshot.
+6. Rehearse a failed backup, checksum mismatch, role cleanup failure, lost deploy
+   acknowledgement, stale branch, active provider autodeploy and Pages manifest
+   mismatch on isolated targets. Every failure must withhold later publication.
+   Do not rerun a mutation after an ambiguous response until its provider state
+   is reconciled. Workflow cancellation/runner loss also requires reconciliation.
+
+## Worker lane and first rollout of this branch
+
+`cloud-worker-promotion.yml` supports dispatch and `workflow_call`, shares the
+hosted mutation lock, and uses `ZEROS_WORKER_PROMOTION=enabled` as its separate
+switch. It saves a clearly labelled plan. **Live execution is intentionally
+blocked before allocation** until a release-specific native-canary credential
+transport/broker is connected and rehearsed. Enabling the switch today fails
+the hosted call; it does not silently approve an image or use Dev authority.
+
+Implemented, fake-tested worker primitives in `scripts/release/` include:
+
+- Exact committed input-tree hashing using the existing worker input policy.
+- Existing Boat image kit export/build/attestation, fresh sanitation at snapshot
+  save, ready-state polling and confirmed owned-builder cleanup.
+- Pure native report verification reused from `hosted-agents.mjs`, rebound to
+  the release channel with a newly hashed version-3 evidence document (including native MCP). Every
+  selected credential kind must pass; Codex subscription requires the real
+  renewal/cache/account-binding evidence as well as image refresh adoption.
+- The audited `manageCloudAgentRuntime` operator with one short-lived
+  PlanetScale owner login for plan and execute, target/hash match and confirmed
+  role deletion before selection. No direct qualification-table INSERT.
+- A complete worker tuple passed to a single update callback:
+  `CLOUD_WORKSPACE_PROVIDER`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`,
+  `ZEROS_CLOUD_SOURCE_COMMIT`, `ZEROS_CLOUD_IMAGE_ARCHITECTURE`, and
+  `CLOUD_WORKSPACE_STORAGE_MIB`. The Railway adapter uses one
+  `variableCollectionUpsert` with `replace:false, skipDeploys:true`, then reads
+  back the tuple. Wiring the native transport and trusted receipt handoff into
+  the CLI remains outstanding.
+
+Before connecting execution, provide channel-isolated `BOAT_API_KEY`,
+`BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG`, `BOAT_BASE_SNAPSHOT`,
+`BOAT_BUILDER_BUDGET_HOURS` (positive, at most two hours),
+`RUNTIME_QUALIFICATION_ACTOR_USER_ID` (active accountable platform owner), and
+an explicit `RUNTIME_QUALIFICATION_CREDENTIAL_KINDS` policy. Define
+`WORKER_CANARY_CREDENTIALS` in the approved CI credential broker/secret store
+for the shipped Claude/Codex/Cursor account kinds; **its transport format is
+not yet a supported repository interface**. The broker must own renewal,
+never bake account credentials into snapshots, and deliver bounded private
+access material through stdin/private files rather than command arguments.
+These are worker setup requirements, not secrets consumed by today's plan job.
+Never copy Dev fixture identities or qualification approvals into a channel.
+
+Required live rehearsal still includes account/billing and snapshot ownership,
+quota and budget failure, runner interruption and cleanup recovery, native
+permission/tool execution, Codex real renewal, Files/Changes/Review, terminal,
+Git author/PR writes, reconnect, idle cancellation, checkpoint/stop/wake/archive
+and existing-generation compatibility. Machine attestation alone does not
+prove these user flows. Retain selected snapshots and encryption keys for old
+workspaces; selecting a new default does not upgrade running generations.
+
+For this branch's first rollout:
+
+1. Keep `ZEROS_HOSTED_PROMOTION` and `ZEROS_WORKER_PROMOTION` disabled and
+   `ZEROS_CLOUD_WORKSPACES_ENABLED=false` for the initial desktop release.
+   Hold independent Railway and Pages autodeploy before merging this schema
+   cutover; do not rely on Wait for CI if a pending workflow could be cancelled.
+   Freeze the candidate SHA until the release finishes. Merge the reviewed
+   candidate to `main`. Its schema differs from the published `alpha` baseline,
+   so the guard should fail until cutover is verified. An actual failed workflow
+   makes Railway skip that SHA when Wait for CI is on; a cancelled pending run
+   is not equivalent. Worker changes alone do not fail a cloud-disabled release.
+2. The operator records the exact event SHA, re-reads the live ledger/checksums,
+   builds the committed candidate and prepares the reviewed drain/maintenance
+   ceremony for any controlled migrations. Inspect the complete pending set;
+   do not assume migrations 0105–0112 are the entire change and never rewrite
+   applied SQL. Hold Railway autodeploy and turn Wait for CI off for the
+   explicit cutover, with no unrelated staged dashboard changes. The old
+   backend may refuse an advanced ledger on restart.
+3. From that exact checkout, run the strict release command:
+
+   ```sh
+   NODE_ENV=production pnpm --dir apps/control-plane release-migration:manage \
+     --database zeros-control-plane-alpha --branch main \
+     --execute --confirm zeros-control-plane-alpha
+   ```
+
+   It creates and awaits a fresh PlanetScale backup before migration. Complete
+   any separately reviewed controlled-migration approvals and require
+   `ledger=verified` and `role.deleted=true`; retain the backup/cleanup evidence.
+4. Immediately deploy the same SHA explicitly through Railway's
+   `serviceInstanceDeployV2(commitSha, environmentId, serviceId)` for Alpha,
+   wait for deployment `SUCCESS`, then verify
+   `https://api-alpha.zeros.build/v1/release-identity`: exact SHA, current
+   candidate migration manifest, maintenance false and readiness true.
+   This manual first cutover installs the endpoint even if the previous
+   backend had none; a separate identity bridge is optional for this disabled
+   path. Never use a moving “latest commit” deployment or bypass failed
+   readiness. Roll forward or use the separately authorized recovery plan.
+5. Upload matching Pages app/Ops, verify custom-domain manifests and auth
+   handoffs, then **re-run the failed Release (alpha) workflow for the same
+   SHA**. Its disabled guard now reports **manual cutover verified**, and the
+   desktop publisher reruns that decision against freshly fetched tags and live
+   identity before writing assets. The cloud-disabled desktop can publish and
+   advance the rolling `alpha` tag. A later docs-only push containing the same
+   unverified migrations cannot bypass cutover. All quality, signing, updater,
+   PTY and engine gates remain. Restore the chosen legacy Git autodeploy/Wait
+   for CI settings after reconciling the completed cutover; later ordinary
+   pushes with unchanged published schema keep their existing behavior while
+   promotion remains disabled. Beta's first branch push and Production dispatch
+   require either matching live identity or unchanged schema relative to a
+   successful channel publication verified against its tag. Stale rolling refs
+   alone cannot prove the previous published schema; successful publish-step
+   evidence can bootstrap them without ref mutation. If that evidence or the
+   channel tag is unavailable, perform the identity-verified manual cutover first.
+6. Cloud enablement is a separate step: qualify the exact candidate worker,
+   apply its audited runtime approval with the same owner login for plan/apply,
+   confirm cleanup, select the full worker tuple and verify it live. Finish and
+   rehearse the worker transport/receipt handoff before unattended automation;
+   today's worker stub is insufficient. Only then set the desktop cloud flag
+   true and build/smoke the cloud-enabled macOS app. A successful cloud-disabled
+   desktop release does not qualify the full-cloud launch.
+7. Enable the ordered controller only after the owner setup above and
+   isolated rehearsal pass. An unchanged worker can be reused only when the
+   selected public identity has `workerQualified=true` and its committed
+   worker-input tree matches the candidate; final readiness pins the same tuple;
+   a changed or unmeasurable worker blocks hosted promotion. Then repeat the
+   isolated setup for Beta and promote Production only from its successful
+   exact-SHA Beta receipt.
+
+Provider contracts used by the controller:
+[Railway service API](https://docs.railway.com/integrations/api/manage-services),
+[Railway environment schema](https://backboard.railway.com/schema/environment.schema.json),
+and [Pages CI direct upload](https://developers.cloudflare.com/pages/how-to/use-direct-upload-with-continuous-integration/).
+Provider mutations have not been rehearsed against a release channel by this
+implementation; unit fakes and read-only API schema inspection are not a live
+deployment qualification.

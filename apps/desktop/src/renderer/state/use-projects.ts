@@ -1,3 +1,6 @@
+import { cloudProjectForFolder } from "./cloud-workspace-catalog";
+import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
+import { isCloudRepositorySlug, isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 // ──────────────────────────────────────────────────────────
 // React bindings for projects + per-project workspaces
 // ──────────────────────────────────────────────────────────
@@ -39,7 +42,7 @@ import {
   workspaceCreateFromBranchStatus,
   workspaceGet,
   workspaceLifecycleStatus,
-  workspaceList,
+  workspaceListSnapshot,
   type CreateWorkspaceFromBranchStatus,
   type DesignWorkspaceSnapshotWire,
   type WorkspaceLifecycleStatus,
@@ -152,18 +155,20 @@ export function useProjectForFolder(
   );
 }
 
-/** On first bridge connect, push the localStorage projects to the engine DB so
- *  the engine has curated projects that have no worktree yet. */
+/** Reconcile the Local repository cache on connection boundaries, including
+ *  recovery when the renderer's origin-scoped cache is empty. */
 export function useSyncProjectsToEngine(): void {
   useEffect(() => {
-    let synced = false;
+    let warmed = false;
     let cancelWarm = () => {};
     const run = () => {
-      if (synced) return;
       const bridge = getActiveBridge();
       if (!bridge || bridge.status !== "connected") return;
-      synced = true;
-      syncProjectsToEngine();
+      void syncProjectsToEngine().then((recovered) => {
+        if (recovered) notifyProjectsChanged();
+      });
+      if (warmed) return;
+      warmed = true;
       // Warm inactive repository indexes only after critical workspace/chat
       // hydration has had the connection and main thread to itself.
       const warm = () => {
@@ -303,15 +308,20 @@ function stableWorkspaceRows(
  * create settlement so both paths participate in the same cache generation. */
 async function fetchLiveWorkspaceRows(repoSlug: string): Promise<Workspace[]> {
   const prior = workspaceCache.getSnapshot(repoSlug).data;
-  const fresh = await workspaceList({
+  const { workspaces: fresh, confirmedCloudWorkspaces, confirmedLocalWorkspaces } = await workspaceListSnapshot({
     repoSlug,
     archived: false,
     includeDesign: true,
   });
+  const cloudOwner = isCloudRepositorySlug(repoSlug) || [...fresh, ...(prior ?? [])]
+    .some(row => isCloudWorkspace(row.path));
+  if (cloudOwner ? confirmedCloudWorkspaces === false : !confirmedLocalWorkspaces)
+    throw new Error("Workspace list owner is not confirmed");
   // Cold-boot defense-in-depth ONLY: a seeded (provisional) slug that reads
   // empty on its first live response is usually a mid-swap / unsynced engine,
   // not a genuine emptying. Keep the seed and require one confirming read.
   if (
+    !(confirmedCloudWorkspaces && prior?.some(row => isCloudWorkspace(row.path))) &&
     provisionalWorkspaceSlugs.has(repoSlug) &&
     fresh.length === 0 &&
     prior &&
@@ -361,7 +371,7 @@ function loadCachedWorkspaces(
   maxAgeMs = WORKSPACE_CACHE_MAX_AGE_MS,
 ): void {
   const bridge = getActiveBridge();
-  if (!bridge || bridge.status !== "connected") return;
+  if (!bridge || (bridge.status !== "connected" && !(bridge instanceof WorkspaceRuntimeClient))) return;
   void workspaceCache
     .load(repoSlug, () => fetchLiveWorkspaceRows(repoSlug), { force, maxAgeMs })
     .then((rows) => {
@@ -376,20 +386,27 @@ function loadCachedWorkspaces(
 /** Populate a dashboard/archive collection while preserving its prior rows. */
 function loadCachedWorkspaceCollection(
   key: string,
-  fetcher: () => Promise<Workspace[]>,
+  fetcher: () => ReturnType<typeof workspaceListSnapshot>,
   force: boolean,
   maxAgeMs = WORKSPACE_CACHE_MAX_AGE_MS,
 ): void {
   const bridge = getActiveBridge();
-  if (!bridge || bridge.status !== "connected") return;
+  if (!bridge || (bridge.status !== "connected" && !(bridge instanceof WorkspaceRuntimeClient))) return;
   void workspaceCollectionCache
     .load(
       key,
-      async () =>
-        stableWorkspaceRows(
-          workspaceCollectionCache.getSnapshot(key).data,
-          await fetcher(),
-        ),
+      async () => {
+        const snapshot = await fetcher();
+        const prior = workspaceCollectionCache.getSnapshot(key).data;
+        if (!snapshot.confirmedLocalWorkspaces && snapshot.confirmedCloudWorkspaces !== true)
+          throw new Error("Workspace collection has no confirmed backend");
+        const retained = (prior ?? []).filter(row => isCloudWorkspace(row.path)
+          ? snapshot.confirmedCloudWorkspaces === false : !snapshot.confirmedLocalWorkspaces);
+        const confirmed = snapshot.workspaces.filter(row => isCloudWorkspace(row.path)
+          ? snapshot.confirmedCloudWorkspaces !== false : snapshot.confirmedLocalWorkspaces);
+        const rows = [...new Map([...retained, ...confirmed].map(row => [row.id, row])).values()];
+        return stableWorkspaceRows(prior, rows);
+      },
       { force, maxAgeMs },
     )
     .catch(() => {});
@@ -399,7 +416,7 @@ function loadCachedWorkspaceCollection(
  * source cache (superseding any in-flight per-repo load via the cache's
  * generation guard), persist it, index its ids, and wake cross-repo union
  * consumers — including for slugs they aren't individually subscribed to yet. */
-function ingestWorkspaceRows(repoSlug: string, rows: Workspace[]): void {
+function ingestWorkspaceRows(repoSlug: string, rows: Workspace[], cloudConfirmed = false): void {
   if (!repoSlug) return;
   const prior = workspaceCache.peekSnapshot(repoSlug).data;
   // Provisional-empty guard (mirrors loadCachedWorkspaces): a seeded slug that a
@@ -411,6 +428,7 @@ function ingestWorkspaceRows(repoSlug: string, rows: Workspace[]): void {
   // persistence with []. While held, further empty ingests keep prior; the
   // scheduled confirm is the single authoritative decider.
   if (
+    !cloudConfirmed &&
     rows.length === 0 &&
     provisionalWorkspaceSlugs.has(repoSlug) &&
     prior &&
@@ -539,6 +557,28 @@ export function commitWorkspaceDeleted(workspace: Workspace): void {
   });
 }
 
+/** Catalog tombstones are authoritative even for unmounted retained lists.
+ * Prune exact cloud identities without reading or discarding Local state. */
+export function pruneCloudWorkspaceCollections(workspaceIds: readonly string[]): void {
+  const removed = new Set(workspaceIds.filter(isCloudWorkspace));
+  if (!removed.size) return;
+  workspaceMutationEpoch++;
+  unstable_batchedUpdates(() => {
+    for (const slug of workspaceCache.keys()) {
+      const prior = workspaceCache.peekSnapshot(slug).data;
+      if (!prior) continue;
+      const next = prior.filter(row => !removed.has(row.id));
+      if (next.length !== prior.length) ingestWorkspaceRows(slug, next, true);
+    }
+    for (const key of workspaceCollectionCache.keys()) {
+      const prior = workspaceCollectionCache.peekSnapshot(key).data;
+      if (!prior) continue;
+      const next = prior.filter(row => !removed.has(row.id));
+      if (next.length !== prior.length) workspaceCollectionCache.setData(key, next);
+    }
+  });
+}
+
 /** Exact-key seed seam for cache transition tests. Production population goes
  * through bridge reads; exposing this explicitly keeps tests from pretending a
  * one-row mutation result is a complete repository collection. */
@@ -593,7 +633,7 @@ let discoveryPromise: Promise<void> | null = null;
  * Replaces the deleted heavy `withChanges` collection query. */
 function runDiscovery(force: boolean): Promise<void> {
   const bridge = getActiveBridge();
-  if (!bridge || bridge.status !== "connected") return Promise.resolve();
+  if (!bridge || (bridge.status !== "connected" && !(bridge instanceof WorkspaceRuntimeClient))) return Promise.resolve();
   if (discoveryInFlight) {
     if (force) discoveryQueued = true;
     return discoveryPromise ?? Promise.resolve();
@@ -606,7 +646,7 @@ function runDiscovery(force: boolean): Promise<void> {
   const revisionsAtStart = new Map(workspaceRevisionBySlug);
   discoveryPromise = (async () => {
     try {
-      const rows = await workspaceList({
+      const { workspaces: rows, confirmedLocalWorkspaces, confirmedCloudWorkspaces } = await workspaceListSnapshot({
         archived: false,
         includeDesign: true,
       });
@@ -632,6 +672,11 @@ function runDiscovery(force: boolean): Promise<void> {
         ...bySlug.keys(),
       ]);
       for (const slug of known) {
+        const cloudOwner = [...(bySlug.get(slug) ?? []), ...(workspaceCache.peekSnapshot(slug).data ?? [])]
+          .some(row => isCloudWorkspace(row.path)) || getProjectsSnapshot()
+          .some(project => project.repoSlug === slug && isCloudWorkspace(project.repoRoot));
+        if (!confirmedLocalWorkspaces && !cloudOwner) continue;
+        if (cloudOwner && confirmedCloudWorkspaces === false) continue;
         if (
           (workspaceRevisionBySlug.get(slug) ?? 0) !==
           (revisionsAtStart.get(slug) ?? 0)
@@ -640,7 +685,7 @@ function runDiscovery(force: boolean): Promise<void> {
           // was in flight. Keep it; other untouched slugs can still ingest.
           continue;
         }
-        ingestWorkspaceRows(slug, bySlug.get(slug) ?? []);
+        ingestWorkspaceRows(slug, bySlug.get(slug) ?? [], cloudOwner && confirmedCloudWorkspaces === true);
       }
       lastDiscoveryAt = Date.now();
     } catch {
@@ -669,7 +714,7 @@ export function runWorkspaceDiscoveryForTesting(): Promise<void> {
 export async function reloadWorkspacesFor(repoSlug: string): Promise<boolean> {
   if (!repoSlug) return false;
   const bridge = getActiveBridge();
-  if (!bridge || bridge.status !== "connected") return false;
+  if (!bridge || (bridge.status !== "connected" && !(bridge instanceof WorkspaceRuntimeClient))) return false;
   try {
     const rows = await workspaceCache.load(
       repoSlug,
@@ -955,7 +1000,10 @@ export function forgetWorkspacesFor(repoSlug: string): void {
 /** Tell every `useWorkspacesFor(slug)` consumer to refetch. Pass `*`
  *  to invalidate all consumers (used after sweeping operations like
  *  backfill). */
-export function notifyWorkspacesChanged(repoSlug: string | "*" = "*"): void {
+export function notifyWorkspacesChanged(
+  repoSlug: string | "*" = "*",
+  workspaceIds?: readonly string[],
+): void {
   // Any mutation makes a cross-repo discovery stale; reset its freshness clock
   // so a Dashboard/sidebar that REMOUNTS after this actually re-runs discovery
   // (its mount fires runDiscovery(false), which the time gate would otherwise
@@ -966,11 +1014,15 @@ export function notifyWorkspacesChanged(repoSlug: string | "*" = "*"): void {
   else workspaceCache.invalidate(repoSlug);
   // Dashboard/archive collections can contain rows from any repository. Mark
   // them stale, but let only mounted consumers perform the background read.
-  workspaceCollectionCache.invalidateAll();
+  if (repoSlug === "*") workspaceCollectionCache.invalidateAll();
+  else for (const key of workspaceCollectionCache.keys()) {
+    const [, owner] = JSON.parse(key) as [string, string | null];
+    if (owner === null || owner === repoSlug) workspaceCollectionCache.invalidate(key);
+  }
   // Workspace mutations move branches and checkouts, so picker rows (branch
   // lists, workspace summaries) are stale too. Marking them costs nothing
   // until a picker actually opens.
-  invalidateRepoReadCaches(repoSlug);
+  invalidateRepoReadCaches(repoSlug, workspaceIds);
   for (const fn of workspaceListeners) {
     try {
       fn(repoSlug);
@@ -983,25 +1035,26 @@ export function notifyWorkspacesChanged(repoSlug: string | "*" = "*"): void {
 /** Scoped variant of notifyWorkspacesChanged for a DB_CHANGED broadcast that
  *  carries opaque workspace ids: map each id → its repo slug and invalidate only
  *  those repos (each notifyWorkspacesChanged(slug) still refreshes the archived
- *  History collection). Any unmappable id — a brand-new remote workspace whose
- *  slug we've never seen — falls back to a full '*' invalidate + discovery so
- *  new rows still land. Keeps the common per-change case off the invalidate
+ *  History collection). Unmappable Local ids fall back to '*' + discovery;
+ *  cloud ids wait for their catalog's scoped row publication. Keeps the common per-change case off the invalidate
  *  storm that made the Dashboard lag the top bar. */
 export function notifyWorkspacesChangedForIds(ids: readonly string[]): void {
-  const slugs = new Set<string>();
+  if (!ids.length) { notifyWorkspacesChanged("*"); return; }
+  const owners = new Map<string, string[]>();
   for (const id of ids) {
-    const slug = workspaceSlugById.get(id);
+    const cloud = isCloudWorkspace(id);
+    const slug = workspaceSlugById.get(id) ?? (cloud ? cloudProjectForFolder(id)?.repoSlug : undefined);
     if (!slug) {
+      // An unobserved/retired cloud owner says nothing about Local. Catalog
+      // publication will register its repository before notifying its rows.
+      if (cloud) continue;
       notifyWorkspacesChanged("*");
       return;
     }
-    slugs.add(slug);
+    owners.set(slug, [...(owners.get(slug) ?? []), id]);
   }
-  if (slugs.size === 0) {
-    notifyWorkspacesChanged("*");
-    return;
-  }
-  for (const slug of slugs) notifyWorkspacesChanged(slug);
+  for (const [slug, workspaceIds] of owners)
+    notifyWorkspacesChanged(slug, workspaceIds.every(isCloudWorkspace) ? workspaceIds : undefined);
 }
 
 /** Live workspace list for one project. Refetches via IPC on mount,
@@ -1100,7 +1153,7 @@ export function useArchivedWorkspaces(repoSlug?: string): {
     loadCachedWorkspaceCollection(
       key,
       () =>
-        workspaceList({
+        workspaceListSnapshot({
           archived: true,
           includeDesign: true,
           ...(repoSlug ? { repoSlug } : {}),
@@ -1114,7 +1167,7 @@ export function useArchivedWorkspaces(repoSlug?: string): {
       loadCachedWorkspaceCollection(
         key,
         () =>
-          workspaceList({
+          workspaceListSnapshot({
             archived: true,
             includeDesign: true,
             ...(repoSlug ? { repoSlug } : {}),

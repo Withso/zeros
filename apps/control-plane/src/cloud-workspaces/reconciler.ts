@@ -4,6 +4,7 @@ import type pg from "pg";
 
 import { audit } from "../audit.js";
 import { withSystemTx } from "../db.js";
+import { deferCloudRecoveryResourceBlock } from "./automatic-recovery.js";
 import {
   assertProviderResourceIdentity,
   assertProviderAbsence,
@@ -408,6 +409,10 @@ export class CloudWorkspaceReconciler {
          LEFT JOIN workspace_checkpoint_requests checkpoint_request
            ON checkpoint_request.lifecycle_intent_id = i.id
          WHERE i.next_attempt_at <= now()
+           AND (i.resume_after_intent_id IS NULL OR EXISTS (
+             SELECT 1 FROM cloud_workspace_lifecycle_intents prerequisite
+             WHERE prerequisite.id=i.resume_after_intent_id AND prerequisite.state='succeeded'
+           ))
            AND (
              i.state IN ('queued', 'observing')
              OR (i.state = 'dispatching' AND i.lease_expires_at <= now())
@@ -709,9 +714,10 @@ export class CloudWorkspaceReconciler {
 
       const owned = await tx.query<{
         state: string;
+        affects_workspace: boolean;
         lease_owner: string | null;
       }>(
-        `SELECT state, lease_owner
+        `SELECT state, affects_workspace, lease_owner
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
         [intent.id],
@@ -725,10 +731,10 @@ export class CloudWorkspaceReconciler {
       const generationIsCurrent =
         current.current_generation === intent.generation;
       const intentIsCurrent =
-        intent.affectsWorkspace &&
+        row.affects_workspace &&
         generationIsCurrent &&
         desired === desiredForOperation(intent.operation);
-      const resultState = intent.affectsWorkspace
+      const resultState = row.affects_workspace
         ? intentIsCurrent
           ? intentState
           : "superseded"
@@ -764,7 +770,7 @@ export class CloudWorkspaceReconciler {
       );
 
       if (
-        intent.affectsWorkspace &&
+        row.affects_workspace &&
         generationIsCurrent &&
         resultState !== "superseded" &&
         intent.operation === "create" &&
@@ -779,7 +785,7 @@ export class CloudWorkspaceReconciler {
         );
       }
       if (
-        !intent.affectsWorkspace &&
+        !row.affects_workspace &&
         intent.operation === "delete" &&
         resultState === "succeeded"
       ) {
@@ -800,10 +806,11 @@ export class CloudWorkspaceReconciler {
           organizationId: intent.orgId,
           generation: intent.generation,
         });
+        await tx.query("UPDATE cloud_workspace_restore_incidents SET next_attempt_at=now() WHERE drain_intent_id=$1 AND state='queued'",[intent.id]);
       }
       if (
         resultState === "succeeded" &&
-        !intent.affectsWorkspace &&
+        !row.affects_workspace &&
         intent.operation === "stop" &&
         intent.generationTransitionId
       ) {
@@ -832,7 +839,7 @@ export class CloudWorkspaceReconciler {
         });
       }
 
-      if (intent.affectsWorkspace && generationIsCurrent) {
+      if (row.affects_workspace && generationIsCurrent) {
         const status = statusForObserved(desired, resource);
         await tx.query(
           `UPDATE cloud_workspaces
@@ -914,9 +921,10 @@ export class CloudWorkspaceReconciler {
 
       const owned = await tx.query<{
         state: string;
+        affects_workspace: boolean;
         lease_owner: string | null;
       }>(
-        `SELECT state, lease_owner
+        `SELECT state, affects_workspace, lease_owner
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
         [intent.id],
@@ -926,7 +934,7 @@ export class CloudWorkspaceReconciler {
 
       const superseded =
         !workspace ||
-        (intent.affectsWorkspace &&
+        (row.affects_workspace &&
           (workspace.current_generation !== intent.generation ||
             workspace.desired_state !== desiredForOperation(intent.operation)));
       if (superseded) {
@@ -964,6 +972,7 @@ export class CloudWorkspaceReconciler {
         return;
       }
 
+      if (await deferCloudRecoveryResourceBlock(tx, {workspaceId:intent.workspaceId,transitionId:intent.generationTransitionId,intentId:intent.id,code:failure.code})) return;
       if (failure.retryable) {
         await tx.query(
           `UPDATE cloud_workspace_lifecycle_intents
@@ -987,8 +996,17 @@ export class CloudWorkspaceReconciler {
            WHERE id = $1`,
           [intent.id, failure.code, failure.message],
         );
+        const blockedWake = await tx.query(`UPDATE cloud_workspace_lifecycle_intents
+          SET state='failed',completed_at=now(),updated_at=now(),error_code='workspace_drain_failed',
+            error_message='The previous engine could not be stopped. Retry starting the workspace.'
+          WHERE resume_after_intent_id=$1 AND affects_workspace AND state IN ('queued','observing') RETURNING id`, [intent.id]);
+        if (blockedWake.rowCount && workspace?.current_generation === intent.generation && workspace.desired_state === "running") {
+          await tx.query(`UPDATE cloud_workspaces SET status='failed',last_error_code='workspace_drain_failed',
+            last_error_message='The previous engine could not be stopped. Retry starting the workspace.',
+            version=version+1,updated_at=now() WHERE id=$1`, [intent.workspaceId]);
+        }
         const rolledBackFromDrain =
-          !intent.affectsWorkspace &&
+          !row.affects_workspace &&
           intent.operation === "stop" &&
           intent.generationTransitionId
             ? await rollbackCloudWorkspaceGenerationTransitionAfterDrainFailure(
@@ -1005,7 +1023,7 @@ export class CloudWorkspaceReconciler {
             : false;
         const rolledBack =
           rolledBackFromDrain ||
-          (intent.affectsWorkspace && intent.operation === "create"
+          (row.affects_workspace && intent.operation === "create"
             ? await rollbackCloudWorkspaceGenerationTransition(tx, {
                 workspaceId: intent.workspaceId,
                 organizationId: intent.orgId,
@@ -1014,7 +1032,7 @@ export class CloudWorkspaceReconciler {
                 errorMessage: failure.message,
               })
             : false);
-        if (intent.affectsWorkspace && !rolledBack) {
+        if (row.affects_workspace && !rolledBack) {
           await tx.query(
             `UPDATE cloud_workspaces
              SET status = 'failed', last_error_code = $2,
@@ -1079,6 +1097,8 @@ export class CloudWorkspaceReconciler {
            ON pb.workspace_id = cw.id
           AND pb.generation = cw.current_generation
          WHERE cw.status <> 'deleted'
+           AND NOT EXISTS (SELECT 1 FROM cloud_workspace_restore_incidents incident WHERE incident.workspace_id=cw.id
+             AND incident.source_generation=cw.current_generation AND incident.state IN ('queued','waiting_for_capacity','waiting_for_funding','restoring','recovery_needed'))
            AND ($1::text IS NULL OR pb.provider = $1)
            AND pb.next_drift_check_at <= clock_timestamp()
            AND (pb.last_observed_at IS NULL OR

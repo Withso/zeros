@@ -3,6 +3,7 @@ import {createHash} from "node:crypto";
 import {constants} from "node:fs";
 import {lstat,mkdir,open,readdir,realpath,rm,type FileHandle} from "node:fs/promises";
 import path from "node:path";
+import {prepareHistoryCustomization,readHistoryCustomization,writeHistoryCustomization,type HistoryCustomization} from "./cloud-customization-history";
 
 export const CLOUD_NATIVE_HISTORY_ROOT="/srv/zeros/state/native-agent-history";
 export type CloudNativeProvider="claude"|"cursor"|"codex";
@@ -38,14 +39,24 @@ async function lockConversation(input:{root:string;conversationId:string}):Promi
   }catch(error){await lock.close();throw error;}
 }
 
-export async function acquireCloudNativeHistory(input:{root:string;conversationId:string;provider:CloudNativeProvider;uid:number;gid:number}):Promise<{
-  mount:CloudNativeHistoryMount;release():Promise<void>;
-}>{
+export async function acquireCloudNativeHistory(input:{root:string;conversationId:string;provider:CloudNativeProvider;uid:number;gid:number;customization?:HistoryCustomization}) {
+  return acquireHistory(input, false);
+}
+async function acquireHistory(input:{root:string;conversationId:string;provider:CloudNativeProvider;uid:number;gid:number;customization?:HistoryCustomization},copyOnly:boolean) {
   if(!providers.has(input.provider))throw new Error("Cloud native history provider is invalid");
   const {owner,lock}=await lockConversation(input);
   try{
     await lstat(path.join(owner,".deleted")).then(()=>{throw new Error("Cloud conversation was deleted");},error=>{if(error.code!=="ENOENT")throw error;});
     const directory=path.join(owner,input.provider);await mkdir(directory,{mode:0o700}).catch(error=>{if(error.code!=="EEXIST")throw error;});
+    if (!input.customization && !copyOnly && await readHistoryCustomization(owner,input.provider))
+      throw new Error("Native history requires its customization authority");
+    const customization = input.customization ? await prepareHistoryCustomization({ parent:owner,conversationId:input.conversationId,provider:input.provider,
+      customization:input.customization,hasNativeContent:(await readdir(directory)).length>0 }) : undefined;
+    if (customization?.fresh) {
+      // A different actor never receives the previous actor's raw native store.
+      // The gateway starts a fresh native binding with the scrubbed handoff.
+      await rm(directory,{recursive:true,force:true}); await mkdir(directory,{mode:0o700});
+    }
     // Restores are written by the engine identity. Validate and adopt only
     // regular, single-link transcript entries before handing them to the SDK.
     let entries=0,bytes=0;
@@ -70,8 +81,22 @@ export async function acquireCloudNativeHistory(input:{root:string;conversationI
     }
     const handle=await open(directory,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
     try{await adopt(handle);}finally{await handle.close();}
-    let released=false;
-    return {mount:{provider:input.provider,directory},async release(){if(!released){released=true;await lock.close();}}};
+    let releasePromise: Promise<void> | undefined;
+    let writes = Promise.resolve();
+    return {mount:{provider:input.provider,directory},redactor:customization?.redactor,fresh:customization?.fresh??false,handoff:customization?.handoff,
+      record:customization?.record,
+      confirmBinding() {
+        if (releasePromise) return Promise.resolve();
+        writes = writes.then(() => customization?.confirmBinding());
+        return writes;
+      },
+      release() {
+        // Complete acknowledged writes before unlocking. A late confirmation
+        // must never overwrite the next owner's metadata after retirement.
+        return releasePromise ??= (async () => {
+          try { await writes; await customization?.save(); } finally { await lock.close(); }
+        })();
+      }};
   }catch(error){await lock.close();throw error;}
 }
 
@@ -85,8 +110,67 @@ export async function deleteCloudNativeHistory(input:{root:string;conversationId
       const stat=await marker.stat();if(!stat.isFile()||stat.nlink!==1||stat.uid!==process.getuid?.())throw new Error("Cloud history deletion fence is invalid");
       await marker.writeFile("zeros-native-conversation-deleted-v1\n");await marker.sync();
     }finally{await marker.close();}
-    for(const provider of providers)await rm(path.join(owner,provider),{recursive:true,force:true});
+    for(const provider of providers){await rm(path.join(owner,provider),{recursive:true,force:true});await rm(path.join(owner,`.customization-${provider}.json`),{force:true});}
     const parent=await open(owner,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
     try{await parent.sync();}finally{await parent.close();}
   }finally{await lock.close();}
+}
+
+/** Hold the source kernel lock through native fork admission and retirement.
+ * The destination starts empty and receives an independent byte copy, never a
+ * hard link. Its ordinary execution acquires its own lock before any SDK runs.
+ * Failed/uncertain forks retain their copy and must not be replayed. */
+export async function copyCloudNativeForkHistory<T>(input: {
+  root: string; conversationId: string; destinationConversationId: string;
+  provider: CloudNativeProvider; uid: number; gid: number;
+}, fork: () => Promise<T>): Promise<T> {
+  if (input.conversationId === input.destinationConversationId) throw new Error("Fork conversations must be distinct");
+  const source = await acquireHistory(input,true);
+  try {
+    const destination = await acquireHistory({...input, conversationId: input.destinationConversationId},true);
+    try {
+      if ((await readdir(destination.mount.directory)).length) throw new Error("Fork destination history must be empty");
+      let entries=0,bytes=0;
+      async function copy(directory: FileHandle, target: string): Promise<void> {
+        for (const name of await readdir(`/proc/self/fd/${directory.fd}`)) {
+          if (++entries > 25000) throw new Error("Cloud native history exceeds its limit");
+          const entry=`/proc/self/fd/${directory.fd}/${name}`, stat=await lstat(entry);
+          if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory()) || (stat.isFile() && stat.nlink !== 1))
+            throw new Error("Cloud native history contains an unsafe entry");
+          const handle=await open(entry,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK|(stat.isDirectory()?constants.O_DIRECTORY:0));
+          try {
+            const actual=await handle.stat();
+            if (actual.dev!==stat.dev || actual.ino!==stat.ino || actual.isDirectory()!==stat.isDirectory() ||
+              (!actual.isDirectory() && (!actual.isFile() || actual.nlink!==1))) throw new Error("Cloud native history contains an unsafe entry");
+            if (actual.isDirectory()) {
+              await mkdir(path.join(target,name),{mode:0o700});
+              await copy(handle,path.join(target,name));
+            } else {
+              if (actual.size>128*1024*1024 || (bytes+=actual.size)>2*1024*1024*1024) throw new Error("Cloud native history exceeds its limit");
+              const output=await open(path.join(target,name),constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);
+              try {
+                const buffer=Buffer.alloc(64*1024);
+                let offset=0;
+                while(offset<actual.size) {
+                  const {bytesRead}=await handle.read(buffer,0,Math.min(buffer.length,actual.size-offset),offset);
+                  if(!bytesRead)throw new Error("Cloud native history changed during fork");
+                  let written=0;
+                  while(written<bytesRead)written+=(await output.write(buffer,written,bytesRead-written)).bytesWritten;
+                  offset+=bytesRead;
+                }
+                const after=await handle.stat();
+                if(after.size!==actual.size || after.mtimeMs!==actual.mtimeMs)throw new Error("Cloud native history changed during fork");
+                await output.sync();
+              } finally {await output.close();}
+            }
+          } finally {await handle.close();}
+        }
+      }
+      const directory=await open(source.mount.directory,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
+      try {await copy(directory,destination.mount.directory);} finally {await directory.close();}
+      const customization=await readHistoryCustomization(path.dirname(source.mount.directory),input.provider);
+      if(customization)await writeHistoryCustomization(path.dirname(destination.mount.directory),input.provider,customization);
+    } finally {await destination.release();}
+    return await fork();
+  } finally {await source.release();}
 }

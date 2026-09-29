@@ -22,6 +22,7 @@ import type {
 } from "@zeros/protocol/github-auth";
 import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "./bridge/active-bridge";
+import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
 import type {
   WorkingDirectoriesWire,
   WorkspaceFileListing,
@@ -76,7 +77,8 @@ import {
   bridgeWorkspaceLifecycleStatus,
   bridgeWorkspaceCreateFromBranchStatus,
   bridgeWorkspacePrepareCreate,
-  bridgeWorkspaceList,
+  bridgeWorkspaceListSnapshot,
+  type WorkspaceListSnapshot,
   bridgeWorkspaceDelete,
   bridgeWorkspaceArchive,
   bridgeWorkspaceSetMode,
@@ -803,17 +805,24 @@ export async function workspaceList(
     includeDesign?: boolean;
   } = {},
 ): Promise<Workspace[]> {
+  return (await workspaceListSnapshot(args)).workspaces;
+}
+
+/** Preserve backend completeness alongside the desktop's filtered rows. */
+export async function workspaceListSnapshot(
+  args: Exclude<Parameters<typeof workspaceList>[0], undefined> = {},
+): Promise<WorkspaceListSnapshot> {
   const bridge = requireBridge("list workspaces");
   const { includeDesign = false, ...bridgeArgs } = args;
-  const list = await bridgeWorkspaceList(bridge, bridgeArgs);
+  const snapshot = await bridgeWorkspaceListSnapshot(bridge, bridgeArgs);
   // The engine prepends the synthetic `local-main` entry (the web list needs
   // it); the desktop list returned real worktrees only, so strip it to preserve
   // behavior — it's the sole entry with an empty repoSlug.
-  return list.filter(
+  return { ...snapshot, workspaces: snapshot.workspaces.filter(
     (workspace) =>
       workspace.repoSlug !== "" &&
       (includeDesign || workspace.kind !== "design"),
-  );
+  ) };
 }
 
 /** Exact local-engine workspace lookup. Unlike workspace.list, this can see a
@@ -1414,7 +1423,7 @@ async function readWorkspaceFileListing(
   // Local main is outside Electron's trusted worktree roots. Browser development,
   // optional relay clients, and a renderer whose preload has not appeared yet
   // also use the bridge.
-  if (isKnownProjectRoot(cwd) || !isNativeRuntime()) return listViaBridge();
+  if (isCloudWorkspace(cwd) || isKnownProjectRoot(cwd) || !isNativeRuntime()) return listViaBridge();
   try {
     const res = await nativeInvoke<WorkspaceFileListing>("git_list_files", {
       cwd,
@@ -1674,10 +1683,17 @@ export async function gitClean(args: {
 
 // ── GitHub ───────────────────────────────────────────────
 
-export async function ghAuthStatus(): Promise<AuthStatusResult> {
+export async function ghAuthStatus(workspaceId?: string): Promise<AuthStatusResult> {
   const bridge = getActiveBridge();
   if (!bridge) return { authenticated: false };
-  return bridgeGhAuthStatus(bridge);
+  if (isCloudWorkspace(workspaceId)) {
+    // Cloud Review probes readability through its authorized PR reads. The
+    // installation read credential cannot answer gh.repoAccess's human write
+    // preflight (older workers always return unknown). Actual read auth errors
+    // re-arm Review's sign-in gate; every mutation still needs its exact grant.
+    return { authenticated: true };
+  }
+  return bridgeGhAuthStatus(bridge, workspaceId);
 }
 
 /** Load the user/organization avatar for an open repository's GitHub owner.
@@ -1745,10 +1761,12 @@ export async function ghPatRestore(
 export async function ghAppConnect(options?: {
   installFlow?: boolean;
   forceInstall?: boolean;
+  preserveSelectedMethod?: boolean;
 }): Promise<{ flowKind: "oauth" | "install" } | null> {
   return nativeInvoke("gh_app_connect", {
     installFlow: options?.installFlow !== false,
     forceInstall: options?.forceInstall === true,
+    ...(options?.preserveSelectedMethod ? { preserveSelectedMethod: true } : {}),
   });
 }
 
@@ -1944,6 +1962,7 @@ export async function ghPrSync(workspaceId: string): Promise<PR | null> {
 }
 
 export async function ghPrList(args: {
+  workspaceId?: string;
   owner?: string;
   repo?: string;
   originUrl?: string;

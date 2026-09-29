@@ -55,7 +55,7 @@ import { create } from "zustand";
 import { clearTerminalTabIndicators } from "./terminal-tab-indicators";
 import { runPreviewCache } from "./run-preview-cache";
 
-import { isRunSessionId } from "@zeros/protocol/run-actions";
+import { isRunSessionId } from "../../platform/workspace-run-identity";
 
 import {
   onPtyData,
@@ -69,13 +69,14 @@ import {
   folderIsWithinRoot,
 } from "../../state/workspace-resolution";
 import { recordWorkspaceActivity } from "../../state/workspace-store";
+import { cloudScopedId, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 
 // Per-(folder, action) run session ids live in @zeros/protocol/run-actions now —
 // the ENGINE mints/validates the same ids (RunManager), so the hash has one
 // home. Re-exported verbatim so existing imports keep working: runSessionId
 // keeps the legacy unsuffixed id for the migrated "run" action, so persisted
 // run terminals keep matching.
-export { runSessionId, isRunSessionId } from "@zeros/protocol/run-actions";
+export { runSessionId, isRunSessionId } from "../../platform/workspace-run-identity";
 
 export interface TerminalSession {
   id: string;
@@ -449,6 +450,8 @@ export const useTerminalStore = create<TerminalStoreState>((set, get) => ({
   retentionGeneration: 0,
 
   createSession(folder, agentId, initialCommand, id, activate = true, title) {
+    const cloud = parseCloudWorkspaceKey(folder);
+    if (cloud) id = id && parseCloudScopedId(id) ? id : cloudScopedId(cloud, id ?? mintSessionId());
     // Reuse an existing session with the given explicit id (the per-folder
     // "run" terminal) — just refocus it instead of spawning a duplicate.
     if (id) {

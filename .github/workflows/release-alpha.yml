@@ -48,11 +48,11 @@ on:
   push:
     branches: [main]
 
-# One alpha at a time; a newer push cancels an in-flight build so the latest main
-# is what ships.
+# One Alpha destination. Finish an active cutover before starting another run.
 concurrency:
+  # One destination across branches; never cancel an active schema cutover.
   group: release-alpha
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 # Read-only default. The write scope this workflow genuinely needs (moving the
 # rolling `alpha` tag and its prerelease assets) is declared on the job instead, so
@@ -87,6 +87,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -105,6 +107,11 @@ jobs:
         # both independent package graphs.
         working-directory: apps/control-plane
         run: pnpm install --frozen-lockfile
+
+      - name: Verify hosted release contracts
+        run: |
+          pnpm exec tsc -p scripts/release/tsconfig.json
+          pnpm exec vitest run --config scripts/release/vitest.config.ts --maxWorkers=2
 
       - name: Install contained-execution runtime
         uses: ./.github/actions/contained-execution-runtime
@@ -125,9 +132,24 @@ jobs:
       - name: Run Vitest suite
         run: bash scripts/ci/with-userns.sh pnpm test:git
 
+  hosted:
+    name: Hosted promotion (alpha)
+    needs: test
+    if: github.event.repository.fork == false
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/hosted-promotion.yml
+    with:
+      channel: alpha
+      source_sha: ${{ github.sha }}
+      branch: ${{ github.ref_name }}
+      before_sha: ${{ github.event.before || '' }}
+    secrets: inherit
+
   alpha:
     name: Build + publish Alpha (macOS arm64 · signed · NOT notarized)
-    needs: test
+    needs: [test, hosted]
     # Don't fire on forks (no signing secrets / release perms there). Key this
     # to repository identity rather than an owner/name pair so an ownership
     # transfer cannot silently disable the alpha release job again.
@@ -140,7 +162,12 @@ jobs:
     # Publishes the rolling "alpha" prerelease and retargets its tag.
     permissions:
       contents: write
+      actions: read
     env:
+      RELEASE_CHANNEL: alpha
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
       # Seen by electron:compile (bakes __ZEROS_CHANNEL_BAKED__) AND the
       # electron-builder wrapper (applies the alpha appId/productName/artifact
       # overrides). One job-level value keeps them in lockstep.
@@ -148,6 +175,7 @@ jobs:
       # Protected release capability, baked into both Electron main and the
       # packaged engine. Unset environments remain explicitly fail-closed.
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
+      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
 
     steps:
       - name: Require signing credentials
@@ -182,6 +210,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           # Full history + tags so compute-version.mjs reads the existing
           # vMAJOR.MINOR.* release tags to derive the next stable base.
           fetch-depth: 0
@@ -359,9 +388,11 @@ jobs:
       - name: Publish rolling "alpha" prerelease
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          pnpm exec tsx scripts/release/publication-cli.ts
 
           # Assert the channel feed exists — if electron-builder ever stopped
           # emitting alpha-mac.yml (e.g. channel detection changed), fail loudly
@@ -438,6 +469,11 @@ jobs:
               --prerelease --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA" \
               "$DMG" "$ZIP" "$ZIP_BLOCKMAP" "$LATEST_DMG" "release/alpha-mac.yml"
           fi
+          # Updating a release's target_commitish does not move an existing tag.
+          # Advance the schema/worker baseline only after publishing the assets.
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+            -f sha="$GITHUB_SHA" -F force=true --silent
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)" = "$GITHUB_SHA"
           echo "✓ published $TITLE → release '$TAG' (prerelease, alpha-mac.yml feed)"
 
       - name: Prune old alpha assets (keep newest 3)

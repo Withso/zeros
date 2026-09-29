@@ -231,6 +231,9 @@ export function createCloudWorkspaceManagementRoutes(
     return c.json(result);
   });
 
+  app.get(`${root}/pending-deletion`, async c => c.json(await service.pendingDeletionCapacity({
+    organizationId: uuid(c.req.param("organization")), actorUserId: c.get("user").id,
+  })));
   app.get(`${root}/managed-policy`, async (c) =>
     c.json(
       await service.organizationManagedPolicy({

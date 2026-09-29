@@ -16,6 +16,21 @@ function knownHostsDocument(host = "ssh.app.daytona.io"): string {
 }
 
 describe("desktop release environment routing", () => {
+  it("allows Boat without Daytona pins while preserving preview and supplied-pin validation", () => {
+    const env = {
+      VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
+      VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
+      AUTH_PROVIDER: "auth0",
+      ZEROS_CLOUD_WORKSPACES_ENABLED: "true",
+      CLOUD_WORKSPACE_PROVIDER: "boat",
+      VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "preview.example.com",
+    };
+    expect(releaseEnvironmentErrors("alpha", env)).toEqual([]);
+    expect(releaseEnvironmentErrors("alpha", { ...env, CLOUD_WORKSPACE_PROVIDER: "daytona" })).toHaveLength(1);
+    expect(releaseEnvironmentErrors("alpha", { ...env, CLOUD_WORKSPACE_PROVIDER: "unknown" })).toContain("CLOUD_WORKSPACE_PROVIDER must be boat or daytona");
+    expect(releaseEnvironmentErrors("alpha", { ...env, VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "" })).toHaveLength(1);
+    expect(releaseEnvironmentErrors("alpha", { ...env, VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: "invalid" })).toHaveLength(1);
+  });
   it("accepts each channel's exact hosted origins", () => {
     for (const [environment, app, api, ref] of [
       [

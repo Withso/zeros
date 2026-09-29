@@ -1,0 +1,309 @@
+import { clearCloudComputers } from "../features/settings/cloud-computer-client";
+import { clearCloudGithub } from "../platform/cloud-github";
+import { useEffect } from "react";
+import { cloudWorkspaceCapability } from "../platform/cloud-workspace-access";
+import { getActiveBridge } from "../platform/bridge/active-bridge";
+import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
+import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
+import {
+  getSession,
+  onAuthStateChange,
+  type AuthSessionInfo,
+} from "../features/auth/auth-store";
+import {
+  clearCloudWorkspaceCatalog,
+  canReadCloudWorkspace,
+  cloudCatalogNeedsFastRefresh,
+  cloudCatalogGeneration,
+  cloudWorkspaceDocument,
+  refreshCloudWorkspaceCatalog,
+  subscribeCloudWorkspaces,
+  subscribeCloudWorkspaceRows,
+  subscribeCloudWorkspaceRefresh,
+} from "./cloud-workspace-catalog";
+import { notifyProjectsChanged, notifyWorkspacesChanged, pruneCloudWorkspaceCollections } from "./use-projects";
+import {
+  clearWorkspaceSettling,
+  usePendingWorkspacesStore,
+} from "./pending-workspaces";
+import {
+  finishCloudDesignCreation,
+  pendingCloudDesignCreations,
+  setCloudCreationModeOwner,
+} from "./cloud-creation-mode";
+import { workspaceSetMode } from "../platform/git";
+import { selectActiveFolder, useWorkspaceStore } from "./store";
+import { completeCloudChatCacheRestore, loadCloudChatCache, persistWorkspaceChatCache, setCloudChatCacheOwner } from "./cloud-chat-cache";
+import { CHATS_STORAGE_KEY } from "./chats-local-cache";
+import { useSessionsStore } from "../features/agent/sessions-store";
+import { clearCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
+import { clearCloudProviderConnections } from "../features/settings/cloud-provider-connection";
+import { toast } from "../shared/ui/primitives/elements";
+import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
+import { clearCloudLatencySpans, pruneCloudLatencySpans } from "./cloud-workspace-latency";
+
+/** Account/catalog lifecycle, mounted once beside the existing persistence
+ * controller. It never replaces the conversation or workbench renderers. */
+export function CloudWorkspaceLifecycle() {
+  const folder = useWorkspaceStore(selectActiveFolder);
+  useEffect(() => {
+    let alive = true;
+    let enabled = false;
+    let lastRefresh = 0;
+    let account: string | null = null;
+    let authVersion = 0;
+    let installed = false;
+    let restored = false;
+    let cached = loadCloudChatCache();
+    const pruneChats = (all: boolean) => {
+      const state = useWorkspaceStore.getState();
+      const activeFolder = selectActiveFolder(state);
+      const candidates = new Set(state.chats.map(chat => chat.folder));
+      if (activeFolder) candidates.add(activeFolder);
+      const folders = [...candidates].filter((folder) => {
+        const target = parseCloudWorkspaceKey(folder);
+        return (
+          target && (all || !canReadCloudWorkspace(cloudWorkspaceDocument(target)))
+        );
+      });
+      if (!folders.length) return;
+      const removed = state.chats.filter(chat => folders.includes(chat.folder));
+      for (const chat of removed)
+        useSessionsStore.getState().removeSession(chat.id);
+      state.dispatch({
+        type: "PRUNE_CLOUD_WORKSPACES",
+        folders,
+      });
+    };
+    const refresh = () => {
+      if (
+        !alive ||
+        !enabled ||
+        !account ||
+        document.visibilityState === "hidden"
+      )
+        return;
+      const pending = cloudCatalogNeedsFastRefresh();
+      if (Date.now() - lastRefresh < (pending ? 2_000 : 30_000)) return;
+      lastRefresh = Date.now();
+      const version = authVersion;
+      void refreshCloudWorkspaceCatalog()
+        .then(() => {
+          if (!alive || version !== authVersion) return;
+          const bridge = getActiveBridge();
+          if (bridge instanceof WorkspaceRuntimeClient)
+            bridge.pruneCloudConnections();
+          pruneChats(false);
+          if (restored) return;
+          restored = true;
+          const authorized = cached.filter((row) => {
+            const target = parseCloudWorkspaceKey(row.folder);
+            return target && canReadCloudWorkspace(cloudWorkspaceDocument(target));
+          });
+          if (authorized.length)
+            useWorkspaceStore
+              .getState()
+              .dispatch({ type: "MERGE_CHATS", chats: authorized });
+          completeCloudChatCacheRestore(account!);
+          persistWorkspaceChatCache(CHATS_STORAGE_KEY, useWorkspaceStore.getState().chats);
+          cached = [];
+        })
+        .catch(() => {});
+    };
+    const offCatalog = subscribeCloudWorkspaceRows((change) => {
+      pruneCloudLatencySpans();
+      const bridge = getActiveBridge();
+      if (bridge instanceof WorkspaceRuntimeClient) bridge.pruneCloudConnections();
+      if (change.removedWorkspaceIds.length) pruneCloudWorkspaceCollections(change.removedWorkspaceIds);
+      if (change.projectsChanged) notifyProjectsChanged();
+      for (const slug of change.repoSlugs)
+        notifyWorkspacesChanged(slug, change.workspaceIds);
+    });
+    const clear = (preservePendingTarget = false) => {
+      clearCloudLatencySpans();
+      setCloudChatCacheOwner(null);
+      setCloudCreationModeOwner(null);
+      if (preservePendingTarget) {
+        const state = useWorkspaceStore.getState();
+        for (const chat of state.chats) {
+          if (parseCloudWorkspaceKey(chat.folder)) useSessionsStore.getState().removeSession(chat.id);
+        }
+        state.dispatch({ type: "REVALIDATE_CLOUD_CHATS" });
+      } else {
+        pruneChats(true);
+      }
+      const bridge = getActiveBridge();
+      if (bridge instanceof WorkspaceRuntimeClient)
+        bridge.clearCloudConnections();
+      clearCloudWorkspaceCatalog();
+      clearCloudAgentRegistry();
+      clearCloudProviderConnections();
+      clearCloudGithub();
+      clearCloudComputers();
+    };
+    const install = (session: AuthSessionInfo | null) => {
+      if (!alive) return;
+      const next = session?.user.accountId ?? session?.user.sub ?? null;
+      if (installed && next === account) return;
+      // The first authenticated snapshot validates the saved identity below.
+      // Account changes/sign-out discard it; initial auth must not discard it
+      // just because no cloud chat has been released into the store yet.
+      clear(!installed && next !== null);
+      installed = true;
+      account = next;
+      lastRefresh = 0;
+      restored = false;
+      setCloudChatCacheOwner(next);
+      cached = loadCloudChatCache();
+      refresh();
+      setCloudCreationModeOwner(next);
+    };
+    const offAuth = onAuthStateChange((session) => {
+      authVersion++;
+      install(session);
+    });
+    const visibility = () => {
+      if (document.visibilityState === "hidden") {
+        const bridge = getActiveBridge();
+        if (bridge instanceof WorkspaceRuntimeClient) bridge.cancelSpeculativeWarmups();
+        clearCloudLatencySpans();
+      } else refresh();
+    };
+    const initialVersion = authVersion;
+    void getSession()
+      .then((session) => {
+        if (initialVersion === authVersion) install(session);
+      })
+      .catch(() => {});
+    void cloudWorkspaceCapability()
+      .then((capability) => {
+        if (!alive) return;
+        enabled = capability.enabled;
+        refresh();
+      })
+      .catch(() => {});
+    const timer = window.setInterval(refresh, 2_000);
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("focus", refresh);
+    return () => {
+      alive = false;
+      offCatalog();
+      offAuth();
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", visibility);
+      window.removeEventListener("focus", refresh);
+      setCloudChatCacheOwner(null);
+      setCloudCreationModeOwner(null);
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const flights = new Set<string>();
+    const completeModes = () => {
+      const bridge = getActiveBridge();
+      if (!(bridge instanceof WorkspaceRuntimeClient)) return;
+      for (const [key, token] of pendingCloudDesignCreations()) {
+        const target = parseCloudWorkspaceKey(key)!;
+        const doc = cloudWorkspaceDocument(target);
+        if (flights.has(key) || !doc || !["ready", "busy"].includes(doc.status))
+          continue;
+        flights.add(key);
+        void bridge
+          .warmWorkspace(target)
+          .then(() => {
+            if (
+              !alive ||
+              !pendingCloudDesignCreations().some(
+                ([folder, intent]) => folder === key && intent === token,
+              )
+            )
+              throw new Error("Cloud creation owner changed");
+            return workspaceSetMode({ workspaceId: key, mode: "design" });
+          })
+          .then(() => {
+            if (alive) {
+              finishCloudDesignCreation(key, token);
+              notifyWorkspacesChanged("*");
+            }
+          })
+          .catch((error) => {
+            if (!alive) return;
+            finishCloudDesignCreation(key, token);
+            toast.error("Couldn't open Design in the cloud workspace", {
+              description:
+                error instanceof Error
+                  ? error.message
+                  : "Use the workspace mode switch to try again.",
+            });
+          })
+          .finally(() => {
+            flights.delete(key);
+          });
+      }
+    };
+    completeModes();
+    const offCatalog = subscribeCloudWorkspaces(completeModes);
+    const offPending = usePendingWorkspacesStore.subscribe(completeModes);
+    return () => {
+      alive = false;
+      offCatalog();
+      offPending();
+    };
+  }, []);
+
+  useEffect(() => {
+    const target = parseCloudWorkspaceKey(folder);
+    if (!target) return;
+    const bridge = getActiveBridge();
+    if (!(bridge instanceof WorkspaceRuntimeClient)) return;
+    let cancelled = false;
+    let attaching: string | undefined;
+    const identity = () => `${cloudCatalogGeneration()}:${cloudWorkspaceDocument(target)?.generation.number}`;
+    const attach = () => {
+      if (document.visibilityState === "hidden") {
+        bridge.cancelSpeculativeWarmups();
+        return;
+      }
+      const doc = cloudWorkspaceDocument(target);
+      bridge.pruneCloudConnections();
+      const key = identity();
+      if (attaching === key || !canReadCloudWorkspace(doc)) return;
+      attaching = key;
+      void warmCloudWorkspaceDestination(folder!)
+        .then(() => {
+          if (!cancelled && identity() === key && folder) clearWorkspaceSettling(folder);
+        })
+        .catch((error) => {
+          if (!cancelled && identity() === key && doc && ["ready", "busy"].includes(doc.status))
+            toast.error("Couldn't connect to this cloud workspace", {
+              id: `cloud-connect:${folder}`,
+              description:
+                error instanceof Error
+                  ? error.message
+                  : "Try opening the workspace again.",
+            });
+        })
+        .finally(() => {
+          if (attaching === key) attaching = undefined;
+        });
+    };
+    attach();
+    const off = subscribeCloudWorkspaces(attach);
+    const offRefresh = subscribeCloudWorkspaceRefresh(() => {
+      if (cancelled || document.visibilityState === "hidden" ||
+          !canReadCloudWorkspace(cloudWorkspaceDocument(target))) return;
+      // History has its own revision and remains readable while the VM is
+      // stopped. Catalog polling must never acquire runtime admission here.
+      void bridge.warmHistoryWorkspace(target).catch(() => {});
+    });
+    document.addEventListener("visibilitychange", attach);
+    return () => {
+      cancelled = true;
+      off();
+      offRefresh();
+      document.removeEventListener("visibilitychange", attach);
+    };
+  }, [folder]);
+  return null;
+}

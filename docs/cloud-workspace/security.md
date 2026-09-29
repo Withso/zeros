@@ -63,6 +63,32 @@ compute cannot remain ownerless. These transitions block new authority
 immediately; provider deletion and provider-wide SSH revocation remain durable
 work whose completion must be observed.
 
+## Files, context, and saved history
+
+Qualified org VM clients use an explicit primary-checkout file policy, separate
+from the paired-desktop relay policy. Readers can list ignored repository files;
+developer, manager and owner roles can read and edit repository `.env` and PEM
+files. Viewer/prompter roles retain the sensitive-file read restriction and
+cannot edit. Immutable worker configuration and current actor admission enable
+this policy; client parameters cannot enable it or select another checkout.
+Lexical and realpath checks exclude engine state, credential homes, Zeros
+internal storage and nested registered owners/checkouts. Opened descriptors and
+hardlink checks protect file reads and atomic writes. Generic Files writes still
+refuse Design territory. The paired-desktop relay keeps its existing refusals.
+
+Cloud context list/scaffold/share and sparse working-directory selection use
+the Local implementations and mutation lifecycle barriers. Context listing and
+moves apply the same private-path/owner checks. Sparse selection preserves
+Local's dirty-file and Design-directory rules and refuses nested owners.
+
+Saved transcript search uses the control-plane projection without engine
+admission or compute. Each bounded page reauthorizes the account and tenant;
+continuations bind workspace, account, query, scope and projection revision.
+Deleted chats/messages are excluded. The renderer fences late account changes
+and limits pages, hits and retained bytes. Search uses PostgreSQL simple full-text
+matching with stable entity-ID pagination; it does not promise Local FTS5's
+relevance ordering. A changed projection retries the complete search once.
+
 ## Sandbox requirements
 
 - Isolate tenants at the provider's strongest supported compute boundary.

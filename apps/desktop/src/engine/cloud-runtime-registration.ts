@@ -1,4 +1,6 @@
 import type { CloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
+import { configureNativeGithubTransport } from "./git/github-native-client";
+import { requestCloudGithubWrite, type CloudGithubWriteRequest } from "./cloud-github-write-client";
 import type { CloudCommandEngineRequest } from "@zeros/protocol/cloud-commands";
 import { CloudActorAdmissionResponseSchema, type CloudActorContext } from "@zeros/protocol/cloud-actors";
 import type { CloudEventEngineRequest } from "@zeros/protocol/cloud-events";
@@ -46,6 +48,7 @@ export type CloudCheckpointDirective = {
     | "before_rebuild"
     | "manual";
   deadlineAtMs: number;
+  idleStop?: true;
 };
 
 export type CloudRuntimeConfig = {
@@ -404,6 +407,7 @@ export class CloudRuntimeRegistration {
       dependencies.acknowledgeRepositoryCredentialRefresh;
     this.onCheckpointRequested = dependencies.onCheckpointRequested;
     this.readObservedPorts = dependencies.readObservedPorts;
+    configureNativeGithubTransport(() => this.document && this.hasControlAuthority(this.document) ? this.authority(this.document) : null, this.fetch);
   }
 
   readiness(): CloudRuntimeReadiness | null {
@@ -493,6 +497,41 @@ export class CloudRuntimeRegistration {
     if (!this.hasControlAuthority(document))
       throw new CloudEventRuntimeError("engine_authority_rejected");
     return result;
+  }
+
+  async githubWriteRequest(request: CloudGithubWriteRequest) {
+    const document = this.document;
+    if (!document || (request.kind !== "release" && !this.hasControlAuthority(document)))
+      throw new Error("GitHub write authorization is unavailable.");
+    // Release remains possible after the engine's authority has been retired.
+    const signal = request.kind === "release" ? AbortSignal.timeout(5000) : this.abortController.signal;
+    const result = await requestCloudGithubWrite(this.authority(document), request, signal, this.fetch);
+    if (request.kind !== "release" && !this.hasControlAuthority(document))
+      throw new Error("GitHub write authorization is unavailable.");
+    return result;
+  }
+
+  async gitAuthorRequest(actorSessionId: string) {
+    const document = this.document;
+    if (!document || !this.hasControlAuthority(document)) throw new Error("Cloud Git author is unavailable.");
+    const author = await requestCloudGithubWrite(this.authority(document), { kind: "author", actorSessionId }, this.abortController.signal, this.fetch);
+    if (!this.hasControlAuthority(document)) throw new Error("Cloud Git author is unavailable.");
+    return author;
+  }
+
+  async idleStopRequest(request: { kind: "request"; attemptId: string } | { kind: "cancel"; requestId: string }): Promise<CloudCheckpointDirective | null> {
+    const document = this.document;
+    if (!document || !this.hasControlAuthority(document)) throw new Error("Cloud idle-stop authority is unavailable");
+    const { heartbeatEndpoint, heartbeatToken, ...scope } = this.authority(document);
+    const raw = await this.post(new URL("/internal/v1/cloud-workspaces/engine/idle-stop", heartbeatEndpoint).href, heartbeatToken, { ...scope, request });
+    if (request.kind === "cancel") {
+      if (!isRecord(raw) || !exactKeys(raw, ["cancelled"]) || raw.cancelled !== true) throw new Error("Invalid idle-stop cancellation");
+      return null;
+    }
+    if (!this.hasControlAuthority(document) || !isRecord(raw) || !exactKeys(raw, ["checkpoint"])) throw new Error("Cloud idle-stop authority is unavailable");
+    const directive = this.parseCheckpointRequest(raw.checkpoint, this.now());
+    if (directive && directive.idleStop !== true) throw new Error("Invalid idle-stop checkpoint");
+    return directive;
   }
 
   async actionRequest(request: CloudActionEngineRequest,actorSessionId?:string): Promise<unknown> {
@@ -849,7 +888,8 @@ export class CloudRuntimeRegistration {
     if (raw === undefined || raw === null) return null;
     if (
       !isRecord(raw) ||
-      !exactKeys(raw, ["deadlineAtMs", "id", "reason"]) ||
+      !exactKeys(raw, ["deadlineAtMs", "id", "reason", ...(raw.idleStop === undefined ? [] : ["idleStop"])]) ||
+      (raw.idleStop !== undefined && (raw.idleStop !== true || raw.reason !== "before_stop")) ||
       !UUID_PATTERN.test(String(raw.id ?? "")) ||
       ![
         "before_stop",
@@ -872,6 +912,7 @@ export class CloudRuntimeRegistration {
       id: String(raw.id),
       reason: raw.reason as CloudCheckpointDirective["reason"],
       deadlineAtMs: Number(raw.deadlineAtMs),
+      ...(raw.idleStop === true ? { idleStop: true as const } : {}),
     };
   }
 
@@ -1047,7 +1088,6 @@ export class CloudRuntimeRegistration {
       response = await this.fetch(endpoint, {
         method: "POST",
         redirect: "error",
-        cache: "no-store",
         signal: AbortSignal.any([
           this.abortController.signal,
           AbortSignal.timeout(REQUEST_TIMEOUT_MS),

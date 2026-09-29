@@ -100,3 +100,64 @@ promoting the values to Beta or Production.
 
 Delete a previous snapshot only after no environment references it and no
 workspace needs it for rollback.
+
+## Organization images
+
+Cloud Computer uses the same sanitation and worker-attestation scripts, extracted
+into `apps/control-plane/src/cloud-workspaces/computer-image-scripts.ts` so they
+ship in the control-plane deployment. The template files remain compatibility
+fixtures. No member, GitHub, engine-registration, setup, or agent credential is
+provided to the dedicated builder or its verification clone.
+
+Recipes run as uid 10004 in a disposable namespace with a read-only system and
+runtime, private temporary home, and one writable installation prefix:
+`$PREFIX=/usr/local/zeros-computer`. Install additional tools under `$PREFIX/bin`
+and data under that prefix. Sanitized tools are linked into `/usr/local/bin`;
+replacing existing tools, root package installation, and escaping links are
+rejected. Repository selection is workspace policy; builds do not clone private
+repositories. Recipes must not contain secrets. Known credential/history files
+are removed, and recognizable credential material elsewhere rejects sanitation.
+
+The build metadata binds the recipe digest, output digest, exact base image and
+artifact UUID. Capture is followed by a fresh clone that verifies the output and
+runs `attest-cloud-worker.mjs`. Runtime attestation **does not reuse the base's
+agent qualification**. Before activation, the operator must qualify the exact
+new `boat:<name>@sha256:<build>` through the existing runtime qualification
+workflow, for every enabled credential kind and contract on the base. This is
+deliberately a separate operator trust boundary: the web service cannot grant
+itself permission to use stored agent credentials. A changed base requires a
+rebuild; neither activation nor allocation silently falls back to another image.
+
+Admission reserves one of Boat's ten named slots under an account-scoped
+database lock, counting provider inventory plus outstanding reservations.
+Only managed `zeros-org-<uuid>` artifacts can be retired. The active image,
+previous image for rollback, every generation reference (including stopped or
+archived generations), all configured deployment bases, and base dependencies
+protect an artifact. Configured bases are pinned in
+`cloud_computer_image_base_references` at the Boat account scope, before image
+admission and worker reconciliation. These pins survive rolling deployments and
+rollback indefinitely; runtime workers cannot remove them. Install migration
+0117 and its retirement guard before promoting a managed org snapshot as a
+deployment base. A promotion that races with retirement fails closed; it must
+never proceed using an image that has begun retirement. Every deployment that
+shares the Boat account must use this same protection database. The worker
+rechecks durable references under the account lock before deleting a snapshot.
+Unreferenced
+artifacts older than seven days are retired by the worker. External release
+builders must still observe the account cap; a concurrent external capture can
+cause a safe provider refusal. Never remove release/base snapshots to make room.
+
+Build and cleanup phases are durable. Each create is journaled immediately
+before provider dispatch, after local validation. A certified Boat refusal
+closes only that attempt, never an earlier uncertain dispatch. Never-dispatched
+and wholly rejected creates release their slots without allocating cleanup VMs.
+Ambiguous provider outcomes retain their slot and identity for reconciliation;
+blocked replays do not prevent receipt-backed deletion of other known VMs.
+Legacy workspace-based builds are shown
+as legacy and cannot activate an image. New workspace admission pins the image;
+activating or rolling back does not modify existing workspace generations.
+Both default and explicitly selected hosted Boat connections use the active
+organization image. An explicit workspace upgrade selects that image into a
+new generation; retries retain the originally accepted image. Delegated
+customer connections keep their own provider's
+qualified profile and snapshot account.

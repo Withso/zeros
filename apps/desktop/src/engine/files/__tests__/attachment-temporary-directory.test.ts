@@ -205,6 +205,52 @@ it("uses a private sibling on a Linux workspace volume when ordinary temp storag
   }
 });
 
+it("rejects a separate Linux bind mount even when its device matches the workspace", async () => {
+  const staging = path.join(root, "attachment-staging");
+  await fs.mkdir(staging, { mode: 0o700 });
+  vi.stubEnv("ZEROS_ATTACHMENT_TEMP_DIR", staging);
+  vi.spyOn(os, "tmpdir").mockReturnValue(privateData);
+  vi.stubGlobal("process", Object.create(process, { platform: { value: "linux" } }));
+  const open = fs.open.bind(fs);
+  const readFile = fs.readFile.bind(fs);
+  const descriptors = new Map<number, string>();
+  vi.spyOn(fs, "open").mockImplementation((async (target, ...args) => {
+    const handle = await open(target, ...args);
+    descriptors.set(handle.fd, String(target));
+    return handle;
+  }) as typeof fs.open);
+  vi.spyOn(fs, "readFile").mockImplementation((async (target, ...args) => {
+    const fd = /^\/proc\/self\/fdinfo\/(\d+)$/.exec(String(target));
+    if (!fd) return readFile(target, ...args);
+    const directory = descriptors.get(Number(fd[1]));
+    const sameMount = directory === workspace || directory === staging ||
+      directory?.startsWith(staging + path.sep);
+    return `pos:\t0\nflags:\t0300000\nmnt_id:\t${sameMount ? 71 : 72}\n`;
+  }) as typeof fs.readFile);
+  const temporary = await createAttachmentTemporaryDirectory(workspace);
+  try {
+    expect(path.dirname(temporary.path)).toBe(staging);
+    expect(await fs.readdir(workspace)).toEqual([]);
+    // Publication remains one atomic rename, with no partial repository copy.
+    await fs.writeFile(path.join(temporary.path, "payload"), "complete bytes");
+    await fs.rename(path.join(temporary.path, "payload"), path.join(workspace, "attachment"));
+    expect(await fs.readFile(path.join(workspace, "attachment"), "utf8")).toBe("complete bytes");
+  } finally {
+    await temporary.dispose();
+  }
+});
+
+it("does not trust a configured attachment directory inside the repository", async () => {
+  vi.stubEnv("ZEROS_ATTACHMENT_TEMP_DIR", workspace);
+  const temporary = await createAttachmentTemporaryDirectory(workspace);
+  try {
+    expect(temporary.path.startsWith(workspace + path.sep)).toBe(false);
+    expect(await fs.readdir(workspace)).toEqual([]);
+  } finally {
+    await temporary.dispose();
+  }
+});
+
 it("never puts sibling fallback storage inside an enclosing repository", async () => {
   await fs.mkdir(path.join(root, ".git"));
   const stat = fs.stat.bind(fs);

@@ -8,6 +8,7 @@ import type {
 } from "@zeros/protocol/containment";
 
 import type { AgentFilesystemTerritory } from "../types";
+import type { CloudNativeHomeView } from "./cloud-native-view.mjs";
 
 /** Cancellation is not a containment failure: it means the owning UI/session
  * disappeared while preparation was still at a safe checkpoint. */
@@ -92,6 +93,9 @@ export interface BoundarySpawnRequest {
   /** Complete child environment. Implementations must never ambient-merge. */
   env: Readonly<Record<string, string>>;
   stdio?: "pipe" | "inherit";
+  /** Engine-minted private HOME/history projection for native cloud providers.
+   * Never accepted from renderer input, repository settings or provider RPC. */
+  cloudNativeHome?: CloudNativeHomeView;
 }
 
 /** Trusted description used to prepare one repository-controlled command.

@@ -1,8 +1,11 @@
 {
-  "version": 2,
+  "version": 3,
   "root": "/srv/zeros",
   "engine": "/opt/zeros",
-  "repository": "/srv/zeros/workspace",
+  "repository": "/srv/zeros/files/workspace",
+  "logicalRepository": "/srv/zeros/workspace",
+  "engineFilesRoot": "/srv/zeros/files",
+  "attachmentTemporaryRoot": "/srv/zeros/files/attachment-staging",
   "seedBackup": "/srv/zeros/.zeros-image-seed",
   "data": "/srv/zeros/state",
   "agentHome": "/srv/zeros/home/agent",

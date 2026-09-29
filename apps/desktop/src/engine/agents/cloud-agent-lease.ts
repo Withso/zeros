@@ -1,10 +1,17 @@
 import {
   CloudAgentExecutionAuthoritySchema,
   CloudAgentExecutionLeaseSchema,
+  CloudBackgroundStateSchema,
+  type CloudBackgroundOperation,
+  type CloudGitAuthor,
   type CloudAgentAccessMaterial,
   type CloudAgentExecutionAdmission,
   type CloudAgentExecutionRequest,
+  type CloudNativeCapabilities,
 } from "@zeros/protocol/cloud-agent-execution";
+import type { CloudCustomizationSnapshot } from "@zeros/protocol/cloud-customization";
+import { cloudMcpDigest, freezeCloudSnapshot } from "./cloud-mcp";
+import { isDeepStrictEqual } from "node:util";
 
 type Request = (request: CloudAgentExecutionRequest, signal: AbortSignal) => Promise<unknown>;
 type Clock = { wall(): number; monotonic(): number };
@@ -33,28 +40,43 @@ export class CloudAgentLease {
   private readonly stopping = new Map<ProcessDomain, Promise<void>>();
   private readonly launches = new Set<Promise<ProcessDomain>>();
   private material: CloudAgentAccessMaterial | null;
+  /** Safe diagnostic category retained after the one-shot material is consumed. */
+  readonly credentialKind: CloudAgentAccessMaterial["kind"];
   private codexMaterial: Extract<CloudAgentAccessMaterial,{kind:"codex-chatgpt"}> | null;
   private materialVersion: number;
   private validationTail: Promise<unknown> = Promise.resolve();
   private pendingValidations = 0;
+  private backgroundDeadline = Infinity;
   private constructor(
     readonly leaseId: string, readonly authorityId: string, credentialVersion: number,
     readonly admission: CloudAgentExecutionAdmission, material: CloudAgentAccessMaterial,
     private readonly request: Request, private readonly supervisor: CloudAgentLeaseSupervisor,
     private readonly time: Clock,
-  ) { this.material = material; this.materialVersion = credentialVersion; this.codexMaterial = material.kind === "codex-chatgpt" ? {...material} : null; }
+    readonly gitAuthor: CloudGitAuthor | null,
+    readonly customization: CloudCustomizationSnapshot | null,
+    readonly nativeCapabilities: Readonly<CloudNativeCapabilities> | null,
+    readonly backgroundTasksVersion: 1 | null,
+  ) { this.credentialKind = material.kind; this.material = material; this.materialVersion = credentialVersion; this.codexMaterial = material.kind === "codex-chatgpt" ? {...material} : null; }
 
   static async admit(
     admission: CloudAgentExecutionAdmission, request: Request, signal: AbortSignal,
     supervisor: CloudAgentLeaseSupervisor, time: Clock = clock,
   ): Promise<CloudAgentLease> {
     const start = time.monotonic();
-    const response = CloudAgentExecutionAuthoritySchema.safeParse(await request({ kind: "admit", admission }, signal));
+    const response = CloudAgentExecutionAuthoritySchema.safeParse(await request({ kind: "admit", admission, includeGitAuthor: true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1 }, signal));
     if (!response.success || response.data.provider !== admission.provider || response.data.model !== admission.model)
       throw new Error("Cloud agent admission failed");
     const value = response.data;
+    if (admission.customization) {
+      if (!value.customization || !isDeepStrictEqual(value.customization.servers.filter(entry => entry.scope === "repository").map(entry => entry.server), admission.customization.repositoryServers))
+        throw new Error("Cloud customization admission is unavailable. Update the cloud runtime and control plane.");
+      const { digest, ...snapshot } = value.customization;
+      if (digest !== cloudMcpDigest(snapshot)) throw new Error("Cloud customization admission is invalid");
+    }
     const lease = new CloudAgentLease(value.leaseId, value.authorityId, value.credentialVersion,
-      admission, value.material, request, supervisor, time);
+      freezeCloudSnapshot(structuredClone(admission)), value.material, request, supervisor, time, value.gitAuthor ? Object.freeze({ ...value.gitAuthor }) : null,
+      value.customization ? freezeCloudSnapshot(value.customization) : null,
+      value.nativeCapabilities ? Object.freeze({...value.nativeCapabilities}) : null,value.backgroundTasksVersion??null);
     try {
       lease.acceptExpiry(value.expiresAt, start);
       if (signal.aborted) throw new Error("Cloud agent admission cancelled");
@@ -107,17 +129,20 @@ export class CloudAgentLease {
     catch (error) { void this.close().catch(() => {}); throw error; }
   }
   assertLive(): void {
-    if (this.retired || this.controller.signal.aborted || this.time.monotonic() >= this.deadline) {
+    if (this.retired || this.controller.signal.aborted || this.time.monotonic() >= Math.min(this.deadline,this.backgroundDeadline)) {
       void this.close().catch(() => {}); throw new Error("Cloud agent lease is retired");
     }
   }
   private acceptExpiry(expiresAt: string, requestStart: number): void {
-    const remaining = Math.min(Date.parse(expiresAt) - this.time.wall() - 1000,
+    const remaining = Math.min(this.backgroundDeadline-this.time.monotonic(),Date.parse(expiresAt) - this.time.wall() - 1000,
       requestStart + 44_000 - this.time.monotonic());
     if (!Number.isFinite(remaining) || remaining <= 0) throw new Error("Cloud agent lease expired");
     this.deadline = this.time.monotonic() + remaining;
+    this.armExpiry();
+  }
+  private armExpiry():void{
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
-    this.expiryTimer = setTimeout(() => { this.expiryTimer = null; void this.close().catch(() => {}); }, remaining);
+    this.expiryTimer = setTimeout(() => { this.expiryTimer = null; void this.close().catch(() => {}); }, Math.max(0,this.deadline-this.time.monotonic()));
     this.expiryTimer.unref?.();
   }
   private schedule(): void {
@@ -136,6 +161,21 @@ export class CloudAgentLease {
     }
     return operation;
   }
+  async background(operation:CloudBackgroundOperation){
+    this.assertLive();
+    if(this.backgroundTasksVersion!==1)throw new Error("Cloud background execution requires an updated control plane");
+    const response=CloudBackgroundStateSchema.parse(await this.request({kind:"background",leaseId:this.leaseId,operation},this.signal));
+    this.assertLive();
+    if(response.leaseId!==this.leaseId||response.conversationId!==operation.conversationId)throw new Error("Cloud background execution changed");
+    if(((operation.kind==="retain"||operation.kind==="sync")&&response.revision!==operation.revision)||
+      (operation.kind==="retain"&&response.phase!=="background")||(operation.kind==="resume"&&response.phase!=="foreground"))throw new Error("Cloud background execution changed");
+    const remaining=Math.min(4*60*60_000,Date.parse(response.deadline)-this.time.wall()-1000);
+    if(!Number.isFinite(remaining)||remaining<=0){await this.close();throw new Error("Cloud background execution expired");}
+    // Neither wall-clock changes nor queued turns can extend the original cap.
+    this.backgroundDeadline=Math.min(this.backgroundDeadline,this.time.monotonic()+remaining);
+    this.deadline=Math.min(this.deadline,this.backgroundDeadline);this.armExpiry();
+    return response;
+  }
   /** Serialize adoption so an older HTTP response cannot roll back material
    * or authority. Concurrent callers remain bounded by the tool/host queues. */
   private check(renew:boolean,refreshVersion?:number):Promise<void>{
@@ -145,12 +185,13 @@ export class CloudAgentLease {
       this.assertLive();const start=this.time.monotonic();
       try{
         const request:CloudAgentExecutionRequest=refreshVersion===undefined?
-          {kind:"validate",leaseId:this.leaseId,renew,credentialVersion:this.materialVersion}:
-          {kind:"refresh-codex",leaseId:this.leaseId,credentialVersion:refreshVersion};
+          {kind:"validate",leaseId:this.leaseId,renew,credentialVersion:this.materialVersion,...(this.nativeCapabilities?{nativeCapabilitiesVersion:1 as const}:{})}:
+          {kind:"refresh-codex",leaseId:this.leaseId,credentialVersion:refreshVersion,...(this.nativeCapabilities?{nativeCapabilitiesVersion:1 as const}:{})};
         const parsed=CloudAgentExecutionLeaseSchema.safeParse(await this.request(request,this.signal));
         this.assertLive();
         if(!parsed.success||parsed.data.leaseId!==this.leaseId||parsed.data.credentialVersion<this.materialVersion)throw new Error("Invalid authority");
         const response=parsed.data,rotation=response.rotation;
+        if(!isDeepStrictEqual(response.nativeCapabilities??null,this.nativeCapabilities))throw new Error("Cloud native capabilities changed");
         if(rotation){
           const material=rotation.material;
           if(!this.codexMaterial||rotation.authorityId!==this.authorityId||material.accountId!==this.codexMaterial.accountId||

@@ -179,6 +179,58 @@ d("cloud workspace API contracts", () => {
     return { response, body, key };
   };
 
+  it("requires recent user repository access even when the GitHub App can read the repository", async () => {
+    await pool.query("DELETE FROM cloud_github_source_access WHERE owner_user_id=$1", [owner.id]);
+    const result = await createWorkspace();
+    expect(result.response.status).toBe(409);
+    expect(result.body).toMatchObject({ error: { code: "github_cloud_source_authorization_required" } });
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+  });
+
+  it.each(["expired", "repository-identity", "membership-revision"])("rejects %s repository access proofs", async reason => {
+    if (reason === "expired") await pool.query("UPDATE cloud_github_source_access SET expires_at=now()-interval '1 second'");
+    else if (reason === "repository-identity") await pool.query("UPDATE cloud_github_source_access SET forge_repository_id='999'");
+    else await pool.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2",[orgId,owner.id]);
+    const created = await createWorkspace();
+    expect(created.response.status).toBe(409);
+    expect(created.body).toMatchObject({error:{code:"github_cloud_source_authorization_required"}});
+    expect((await pool.query("SELECT 1 FROM cloud_workspaces")).rowCount).toBe(0);
+  });
+
+  it("returns only authorized installation metadata for Cloud creation", async () => {
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ configured: true, installations: [{ id: installationId, accountLogin: "withso" }] });
+    const otherOwner = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=another-owner`);
+    expect(await otherOwner.json()).toMatchObject({ installations: [] });
+    actor = outsider;
+    expect((await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso`)).status).toBeGreaterThanOrEqual(400);
+  });
+
+  it("does not offer a suspended GitHub installation", async () => {
+    await pool.query("UPDATE github_installations SET suspended_at=now() WHERE id=$1", [installationId]);
+    expect(await (await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso`)).json()).toMatchObject({ installations: [] });
+  });
+
+  it("resolves the cloud creation source without a device checkout", async () => {
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso&repository=zeros`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ repository: { owner: "withso", name: "zeros", defaultBranch: "main" } });
+    expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros" });
+  });
+
+  it("rechecks source authorization after GitHub returns", async () => {
+    const resolve = repositoryResolver.resolve;
+    repositoryResolver.resolve = async (input) => {
+      const result = await resolve(input);
+      await pool.query("UPDATE github_installations SET suspended_at=now() WHERE id=$1", [installationId]);
+      return result;
+    };
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso&repository=zeros`);
+    expect(response.status).toBeGreaterThanOrEqual(400);
+  });
+
   it("creates for a non-staff Pro member without an Organization subscription or seat",async()=>{
     await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1",[owner.id]);
     await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')",[owner.id]);
@@ -187,6 +239,7 @@ d("cloud workspace API contracts", () => {
     await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2",[orgId,owner.id]);
     await pool.query("UPDATE team_members SET role='member' WHERE team_id=$1 AND user_id=$2",[teamId,owner.id]);
     actor={...owner,staffRole:null};
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_github_source_access SET actor_fingerprint=cloud_github_actor_fingerprint(org_id,owner_user_id)"));
     const created=await createWorkspace();
     expect(created.response.status,JSON.stringify(created.body)).toBe(202);
     expect((await pool.query("SELECT billing_owner_user_id,entitlement_scope,entitlement_plan FROM workspace_billing_epochs WHERE workspace_id=$1",[created.body.workspace.id])).rows)
@@ -341,6 +394,11 @@ d("cloud workspace API contracts", () => {
     orgId = seeded.organizationId;
     teamId = seeded.defaultTeamId;
     installationId = seeded.installationId;
+    await withSystemTx(pool, async tx => {
+      await tx.query("INSERT INTO cloud_github_connections(org_id,owner_user_id,installation_id) VALUES($1,$2,$3)", [orgId,owner.id,installationId]);
+      await tx.query(`INSERT INTO cloud_github_source_access(org_id,owner_user_id,installation_id,repository_owner,repository_name,forge_repository_id,actor_fingerprint,expires_at)
+        VALUES($1,$2,$3,'withso','zeros','123456789',cloud_github_actor_fingerprint($1,$2),now()+interval '2 minutes')`, [orgId,owner.id,installationId]);
+    });
 
     accessService = {
       issue: vi.fn(async (input) => ({
@@ -438,6 +496,83 @@ d("cloud workspace API contracts", () => {
       workspace: { id: created.body.workspace.id },
     });
     expect(repositoryResolver.resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects legacy member-authorized builds before allocating a credential-bearing workspace", async () => {
+    configureApp(false, { ...managedBoatConfig(), setupExecution: {
+      controlPlaneOrigin: "https://api.example.test", allowedToolboxOrigins: [], setupSecretEncryptionKeys: {},
+      currentSetupSecretEncryptionKeyVersion: 1, setupSecretKeyV1: null, engineProtocolVersion: 1,
+      enginePort: 4317, engineHeartbeatIntervalMs: 5000, intervalMs: 1000, timeoutSeconds: 900, leaseMs: 60000, admissionTtlSeconds: 120,
+    } });
+    const root = `/v1/organizations/${orgId}/cloud-computer`;
+    const saved = await request(root, { method: "PUT", body: {
+      expectedRevision: 0, operationId: randomUUID(),
+      document: { repositories: [{id:"123456789",owner:"withso",name:"zeros",defaultBranch:"main",private:true}], installScript: "printf computer-setup", timeoutSeconds: 30 },
+      sources: [{repositoryId:"123456789",installationId}],
+    } });
+    expect(saved.status).toBe(200);
+    expect(saved.headers.get("cache-control")).toBe("no-store");
+    const id = randomUUID(), key = `computer-build.${id}`;
+    const body = createBody({cloudComputerBuild:{id,version:1}});
+    const created = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method:"POST",key,body });
+    const result = await created.json();
+    expect(created.status,JSON.stringify(result)).toBe(409);
+    expect(result.error.code).toBe("cloud_computer_build_unavailable");
+    expect((await pool.query("SELECT 1 FROM cloud_computer_builds WHERE org_id=$1",[orgId])).rowCount).toBe(0);
+    expect((await (await request(root)).json()).activeVersion).toBeNull();
+    const limited = await app.request(root, {method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({padding:"x".repeat(66000)})});
+    expect(limited.status).toBe(413);
+  });
+
+  it.each([false, true])("allocates the active Cloud Computer image (explicit hosted connection: %s)", async explicitConnection => {
+    const { DatabaseCloudComputerService } = await import("./computer.js");
+    const { cloudWorkspaceProvisioningProfile } = await import("./provisioning-profile.js");
+    const { ensureHostedCloudProviderConnection } = await import("./provider-connections.js");
+    const config = { ...managedBoatConfig(), imageRef: `boat:release-base@sha256:${"a".repeat(64)}` };
+    configureApp(false, config);
+    const original = explicitConnection ? null : await createWorkspace();
+    if (original) expect(original.response.status).toBe(202);
+    const computer = new DatabaseCloudComputerService(pool, config);
+    await computer.save(orgId, owner.id, { expectedRevision: 0, operationId: randomUUID(), sources: [],
+      document: { repositories: [], installScript: "true", timeoutSeconds: 30 } });
+    const id = randomUUID(), name = `zeros-org-${id.replaceAll("-", "")}`, imageRef = `boat:${name}@sha256:${"b".repeat(64)}`;
+    await pool.query(`INSERT INTO cloud_computer_builds(id,org_id,profile_id,version,requested_by,repository_owner,repository_name)
+      SELECT $1,org_id,profile_id,1,$3,'','' FROM cloud_computers WHERE org_id=$2`, [id, orgId, owner.id]);
+    await pool.query(`INSERT INTO cloud_computer_images(id,org_id,account_scope,snapshot_name,snapshot_id,image_ref,base_image_ref,base_source_commit,
+      recipe_sha256,build_sha256,source_contract,image_contract,profile,state,attested_at,attestation_sha256)
+      VALUES($1,$2,'fixture',$3,'snapshot-fixture',$4,$5,$6,$7,$7,$7,$7,$8,'attested',now(),$7)`,
+      [id,orgId,name,imageRef,config.imageRef,config.sourceCommit,"b".repeat(64),cloudWorkspaceProvisioningProfile(config,"boat")]);
+    await pool.query("UPDATE cloud_computer_builds SET state='succeeded',completed_at=now() WHERE id=$1", [id]);
+    for (const ref of [config.imageRef, imageRef]) await pool.query(`INSERT INTO cloud_agent_runtime_qualifications
+      (provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled,qualified_at)
+      VALUES('boat',$1,$2,'codex-api-key','zeros-cloud-worker-v3',true,clock_timestamp())`, [ref,"c".repeat(64)]);
+    await computer.activate(orgId,owner.id,1,1,id);
+    const connection = await withSystemTx(pool, tx => ensureHostedCloudProviderConnection(tx, {
+      organizationId:orgId,ownerUserId:owner.id,isPersonal:false,provider:"boat",actorUserId:owner.id,
+    }));
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, {
+      method:"POST",key:randomUUID(),body:createBody(explicitConnection ? {providerConnectionId:connection.id} : {}),
+    });
+    const body = await response.json();
+    expect(response.status,JSON.stringify(body)).toBe(202);
+    expect((await pool.query("SELECT image_ref,computer_image_id FROM cloud_workspace_generations WHERE workspace_id=$1", [body.workspace.id])).rows[0])
+      .toMatchObject({image_ref:imageRef,computer_image_id:id});
+    if (original) {
+      const workspaceId = original.body.workspace.id;
+      expect((await pool.query("SELECT image_ref FROM cloud_workspace_generations WHERE workspace_id=$1", [workspaceId])).rows[0].image_ref).toBe(config.imageRef);
+      await withSystemTx(pool, async tx => {
+        await tx.query("UPDATE cloud_workspaces SET status='ready' WHERE id=$1", [workspaceId]);
+        await tx.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='bx_23456789',observed_state='running',last_observed_at=now() WHERE workspace_id=$1", [workspaceId]);
+        await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1 AND operation='create'", [workspaceId]);
+        await tx.query("UPDATE cloud_workspace_quotas SET max_cpu_millicores=20000,max_memory_mib=40960 WHERE org_id=$1", [orgId]);
+      });
+      const upgrade = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/generations`, {
+        method:"POST",key:randomUUID(),body:{operation:"upgrade"},
+      });
+      expect(upgrade.status,JSON.stringify(await upgrade.json())).toBe(202);
+      expect((await pool.query("SELECT generation,image_ref,computer_image_id FROM cloud_workspace_generations WHERE workspace_id=$1 ORDER BY generation", [workspaceId])).rows)
+        .toMatchObject([{generation:1,image_ref:config.imageRef,computer_image_id:null},{generation:2,image_ref:imageRef,computer_image_id:id}]);
+    }
   });
 
   it("pins VM class in the generation and retains its create receipt across default changes",async()=>{
@@ -660,6 +795,25 @@ d("cloud workspace API contracts", () => {
     expect(response.status).toBe(200);
     expect(JSON.stringify(body)).not.toMatch(/boat|daytona|snapshot|secret-target|providerTarget|imageRef/i);
     expect(body.workspace.error).toEqual({code:'cloud_workspace_unavailable',message:'The cloud workspace is temporarily unavailable'});
+  });
+  it.each([
+    ["budget_stop", "cloud_compute_allowance_exhausted", "funded limit"],
+    ["safety_failure", "cloud_workspace_safety_failure", "safety check failed"],
+    ["engine_expired", "cloud_workspace_engine_expired", "engine lease expired"],
+    ["image_integrity_rejected", "cloud_workspace_image_integrity_rejected", "integrity verification"],
+  ])("projects retained %s with its incident reference after mutable errors clear", async (reason, code, text) => {
+    const created = await createWorkspace();
+    const workspaceId = created.body.workspace.id;
+    const incidentId = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_diagnostic_incidents(id,workspace_id,org_id,generation,operation_kind,operation_id,reason,first_cause,terminal_cause)
+      VALUES($1,$2,$3,1,'engine',$4,$5,'{}','{}')`, [incidentId,workspaceId,orgId,randomUUID(),reason]);
+    await pool.query("UPDATE cloud_workspaces SET last_error_code=NULL,last_error_message=NULL,status='stopped',desired_state='stopped' WHERE id=$1",[workspaceId]);
+    const response = await request(`/v1/cloud-workspaces/${workspaceId}`);
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.workspace.error).toEqual({code,message:expect.stringContaining(`${text} (incident ${incidentId})`)});
+    await pool.query("UPDATE cloud_workspaces SET desired_state='running',status='ready' WHERE id=$1",[workspaceId]);
+    expect((await (await request(`/v1/cloud-workspaces/${workspaceId}`)).json()).workspace.error).toBeNull();
   });
   it.each(['stopped','archived'])("reports funded start availability for a %s workspace without exposing the sponsor's balance",async status=>{
     const policy={provider:'daytona',policyId:'test-compute-v1',secondsPerDollar:100000,minimumTtlSeconds:60,maximumTtlSeconds:600,requestMarginSeconds:5};

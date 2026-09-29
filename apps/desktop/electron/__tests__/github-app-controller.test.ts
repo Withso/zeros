@@ -41,7 +41,7 @@ function harness(options?: {
 }) {
   let credential = options?.credential ?? null;
   let selected: GithubAuthMethod = "gh-cli";
-  let pending: { nonce: string; expiresAtMs: number } | null = null;
+  let pending: Parameters<GithubAppControllerDependencies["savePending"]>[0] | null = null;
   const events: Array<{ name: string; payload: unknown }> = [];
   const after = vi.fn();
   const afterTransientRefreshFailure = vi.fn();
@@ -122,8 +122,10 @@ function harness(options?: {
         return { status: "expired" };
       }
       if (pending.nonce !== nonce) return { status: "mismatch" };
+      const preserveSelectedMethod = pending.preserveSelectedMethod;
+      const ownerSub = pending.ownerSub;
       pending = null;
-      return { status: "consumed" };
+      return { status: "consumed", preserveSelectedMethod, ownerSub };
     },
     discardPending: (nonce) => {
       if (pending?.nonce === nonce) pending = null;
@@ -154,12 +156,114 @@ function harness(options?: {
 }
 
 describe("GitHub App desktop controller", () => {
+  it("stores only a Dev reference, never exchanges or refreshes the old rotating pair",async()=>{
+    const h=harness(),result={reference:{mode:'dev-reference' as const,bindingId:'11111111-1111-4111-8111-111111111111',connectionId:'22222222-2222-4222-8222-222222222222',
+      generationId:'33333333-3333-4333-8333-333333333333',issuer:'https://identity.example.test',subject:'auth0|one',organization:'org_dev',accountId:'1234',appScope:'42:client_dev',backendOrigin:'https://api.example.test'},
+      login:'octocat',variantKey:'github.com',installationCount:1};
+    h.deps.devReference={exchange:vi.fn(async()=>result),save:vi.fn(async()=>{}),disconnect:vi.fn(async()=>true)};
+    await h.controller.begin({scheme:'zeros-dev',installFlow:false});await h.controller.complete({nonce:'n'.repeat(43)});
+    expect(h.deps.devReference.save).toHaveBeenCalledWith(result);expect(h.client.exchange).not.toHaveBeenCalled();
+    expect(await h.controller.refresh({force:true})).toBeNull();expect(h.client.refresh).not.toHaveBeenCalled();expect(h.credential()).toBeNull();
+    expect(h.events).toContainEqual({name:'connected',payload:{login:'octocat',installationCount:1}});
+  });
+  it("discards Dev reference completion if the WorkOS owner changes during exchange",async()=>{
+    const h=harness();h.deps.devReference={exchange:vi.fn(async()=>{h.deps.getSession=async()=>({accessToken:'changed',sub:'user_other'});return {} as never;}),save:vi.fn(async()=>{}),disconnect:vi.fn(async()=>true)};
+    await h.controller.begin({scheme:'zeros-dev',installFlow:false});await h.controller.complete({nonce:'n'.repeat(43)});
+    expect(h.deps.devReference.save).not.toHaveBeenCalled();expect(h.client.exchange).not.toHaveBeenCalled();expect(h.events.some(e=>e.name==='connected')).toBe(false);
+  });
+  it.each(["disconnect", "account-change"])("does not publish a stale connected event after %s during credential delivery", async (change) => {
+    const h = harness(), entered = deferred<void>(), delivery = deferred<void>();
+    h.after.mockImplementationOnce(async () => { entered.resolve(); await delivery.promise; });
+    await h.controller.begin({ scheme: "zeros-dev", installFlow: false });
+    const completion = h.controller.complete({ nonce: "n".repeat(43) });
+    await entered.promise;
+    if (change === "disconnect") await h.controller.disconnect();
+    else h.deps.getSession = async () => ({ accessToken: "different", sub: "auth0|two" });
+    delivery.resolve(); await completion;
+    expect(h.events.some(event => event.name === "connected")).toBe(false);
+    if (change === "disconnect") expect(h.credential()).toBeNull();
+  });
+
+  it("keeps only the latest begin when the backend replies out of order", async () => {
+    const h = harness();
+    const older = deferred<Awaited<ReturnType<typeof h.client.start>>>();
+    h.deps.randomNonce = vi.fn().mockReturnValueOnce("a".repeat(43)).mockReturnValueOnce("b".repeat(43));
+    h.client.start.mockImplementationOnce(() => older.promise);
+    const first = h.controller.begin({ scheme: "zeros-dev", installFlow: false });
+    await vi.waitFor(() => expect(h.client.start).toHaveBeenCalledOnce());
+    await h.controller.begin({ scheme: "zeros-dev", installFlow: false });
+    older.resolve({ authorizeUrl: "https://github.com/login/oauth/authorize", expiresAtMs: 2_000_000, flowKind: "oauth" });
+    await expect(first).resolves.toBeNull();
+    expect(h.pending()?.nonce).toBe("b".repeat(43));
+    expect(h.deps.openExternal).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back a credential if cancellation lands while secure storage commits", async () => {
+    const h = harness();
+    const set = h.deps.credentialStore.set;
+    h.deps.credentialStore.set = async (...args) => { await set(...args); h.controller.cancel(); };
+    await h.controller.begin({ scheme: "zeros-dev", installFlow: false });
+    await h.controller.complete({ nonce: "n".repeat(43) });
+    expect(h.credential()).toBeNull();
+    expect(h.selected()).toBe("gh-cli");
+    expect(h.events.some(event => event.name === "connected")).toBe(false);
+  });
+
+  it("does not open an old account's browser after account switching during begin", async () => {
+    const h = harness();
+    const reply = await h.client.start();
+    h.client.start.mockImplementation(async () => { h.deps.getSession = async () => ({ sub: "another", accessToken: "another" }); return reply; });
+    await expect(h.controller.begin({ scheme: "zeros-dev", installFlow: false })).resolves.toBeNull();
+    expect(h.pending()).toBeNull();
+    expect(h.deps.openExternal).not.toHaveBeenCalled();
+  });
+  it("does not exchange an old account's browser attempt after account switching", async () => {
+    const h = harness();
+    await h.controller.begin({ scheme: "zeros-dev", installFlow: false });
+    h.deps.getSession = async () => ({ accessToken: "other-session", sub: "auth0|two" });
+    await h.controller.complete({ nonce: "n".repeat(43) });
+    expect(h.client.exchange).not.toHaveBeenCalled();
+    expect(h.credential()).toBeNull();
+  });
+
+  it.each(["cancel", "account switch"])("does not store a handoff completed after %s during exchange", async cause => {
+    const h = harness();
+    const exchange = deferred<GithubAppTokenResult>();
+    const response = await h.client.exchange();
+    h.client.exchange.mockImplementation(() => exchange.promise);
+    await h.controller.begin({ scheme: "zeros-dev", installFlow: false });
+    const completing = h.controller.complete({ nonce: "n".repeat(43) });
+    await vi.waitFor(() => expect(h.client.exchange).toHaveBeenCalledTimes(2));
+    if (cause === "cancel") h.controller.cancel();
+    else h.deps.getSession = async () => ({ accessToken: "other-session", sub: "auth0|two" });
+    exchange.resolve(response);
+    await completing;
+    expect(h.credential()).toBeNull();
+    expect(h.events.some(event => event.name === "connected")).toBe(false);
+  });
+
+  it("disconnect cancels a browser attempt that has not produced a credential yet", async () => {
+    const h = harness();
+    await h.controller.begin({ scheme: "zeros-dev", installFlow: false });
+    await h.controller.disconnect();
+    expect(h.pending()).toBeNull();
+  });
+
+  it("keeps Local's selected GitHub method when an organization connects the App", async () => {
+    const h = harness();
+    await h.controller.begin({ scheme: "zeros", installFlow: false, preserveSelectedMethod: true });
+    await h.controller.complete({ nonce: "n".repeat(43) });
+    expect(h.credential()?.method).toBe("github-app");
+    expect(h.selected()).toBe("gh-cli");
+  });
+
   it("persists the pending nonce before opening the browser", async () => {
     const h = harness();
     h.deps.openExternal = vi.fn(async () => {
       expect(h.pending()).toEqual({
         nonce: "n".repeat(43),
         expiresAtMs: 2_000_000,
+        ownerSub: "auth0|one",
       });
     });
     const controller = new GithubAppController(h.deps);

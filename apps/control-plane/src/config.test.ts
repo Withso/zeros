@@ -1064,6 +1064,10 @@ describe("cloud workspace backend configuration", () => {
     expect(() => loadConfig({ ...env, CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: "/data/objects" })).toThrow();
   });
 
+  it("does not ignore a cloud object prefix configured for a filesystem store", () => {
+    expect(() => loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_S3_KEY_PREFIX: "dev/invalid/" })).toThrow();
+  });
+
   it("rejects partial or unsafe setup execution configuration", () => {
     expect(() =>
       loadConfig({

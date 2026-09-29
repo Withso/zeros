@@ -7,6 +7,7 @@
   "type": "module",
   "exports": {
     "./cloud-agent-execution": "./src/cloud-agent-execution.ts",
+    "./cloud-customization": "./src/cloud-customization.ts",
     "./cloud-actors": "./src/cloud-actors.ts",
     "./cloud-actions": "./src/cloud-actions.ts",
     "./cloud-events": "./src/cloud-events.ts",

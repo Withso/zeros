@@ -151,7 +151,7 @@ d("organization routes", () => {
     };
     expect(body.organization).toMatchObject({
       isPersonal: false,
-      workspaceCapabilities: { cloud: true },
+      workspaceCapabilities: { local: false, cloud: true },
     });
 
     const teams = await request(

@@ -1,3 +1,4 @@
+import { CLOUD_GITHUB_PROXY_PATH, createCloudGithubProxyRoutes } from "./cloud-workspaces/github-write-proxy.js";
 // ──────────────────────────────────────────────────────────
 // HTTP surface assembly — pure, no side effects.
 //
@@ -11,6 +12,9 @@
 // ──────────────────────────────────────────────────────────
 
 import { Hono, type Context } from "hono";
+import { createCloudGithubWriteRoutes, CLOUD_GITHUB_WRITE_PATH } from "./cloud-workspaces/github-write-routes.js";
+import type { DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
+import { createCloudIdleStopRoutes, CLOUD_IDLE_STOP_PATH, type DatabaseCloudIdleStop } from "./cloud-workspaces/idle-stop.js";
 import {isCustomerCloudPath,publicCloudError} from "./cloud-workspaces/public-contract.js";
 import { HTTPException } from "hono/http-exception";
 import { cors } from "hono/cors";
@@ -19,6 +23,7 @@ import { isIP } from "node:net";
 import type pg from "pg";
 
 import type { Config } from "./config.js";
+import { createReleaseIdentityRoutes } from "./release-identity.js";
 import { createAuthMiddleware } from "./auth.js";
 import { rateLimit } from "./ratelimit.js";
 import { createChatTitleRoutes } from "./chat-titles.js";
@@ -75,6 +80,8 @@ import {
 } from "./cloud-workspaces/engine-heartbeat.js";
 
 export type CreateAppDependencies = {
+  cloudGithubWriteGrants?: DatabaseCloudGithubWriteGrants;
+  cloudIdleStop?: DatabaseCloudIdleStop;
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
   cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
   cloudRuntimeServiceAccess?: DatabaseCloudRuntimeServiceAccess;
@@ -120,6 +127,8 @@ export function createApp(
 ): Hono {
   const app = new Hono();
   app.use("*", requestTiming({ slowMs: config.slowRequestLogMs ?? DEFAULT_SLOW_REQUEST_LOG_MS }));
+  // Readiness stays public even during maintenance; /healthz remains liveness.
+  app.route("/", createReleaseIdentityRoutes(config, pool, dependencies));
   if (config.databaseMaintenanceMode) {
     // A restored database may contain deliverable outboxes and live sessions.
     // Do not even assemble provider/auth routers while fencing its writers.
@@ -212,17 +221,19 @@ export function createApp(
   app.get("/healthz", async (c) => {
     try {
       await pool.query("SELECT 1");
+      const development = config.development ? { development: config.development } : {};
       const migrationState =
         dependencies.migrationStatus?.state === "controlled_migration_pending"
           ? { migrations: dependencies.migrationStatus }
           : {};
       if (!dependencies.cloudWorkspaceHealthService) {
-        return c.json({ ok: true, ...migrationState });
+        return c.json({ ok: true, ...migrationState, ...development });
       }
       try {
         return c.json({
           ok: true,
           ...migrationState,
+          ...development,
           cloudWorkspaces:
             await dependencies.cloudWorkspaceHealthService.read(),
         });
@@ -233,6 +244,7 @@ export function createApp(
         return c.json({
           ok: true,
           ...migrationState,
+          ...development,
           cloudWorkspaces: {
             enabled: true,
             operationalState: "unknown",
@@ -350,6 +362,19 @@ export function createApp(
       CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
       CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
     ]);
+    if (dependencies.cloudGithubWriteGrants) {
+      app.use(CLOUD_GITHUB_WRITE_PATH, cloudWorkspaceInternalResponseHeaders);
+      app.use(CLOUD_GITHUB_WRITE_PATH, internalPreAuthLimit);
+      app.route("/", createCloudGithubWriteRoutes(dependencies.cloudGithubWriteGrants));
+      app.use(`${CLOUD_GITHUB_PROXY_PATH}/*`, cloudWorkspaceInternalResponseHeaders);
+      app.use(`${CLOUD_GITHUB_PROXY_PATH}/*`, internalPreAuthLimit);
+      app.route("/", createCloudGithubProxyRoutes(dependencies.cloudGithubWriteGrants));
+    }
+    if (dependencies.cloudIdleStop) {
+      app.use(CLOUD_IDLE_STOP_PATH, cloudWorkspaceInternalResponseHeaders);
+      app.use(CLOUD_IDLE_STOP_PATH, internalPreAuthLimit);
+      app.route("/", createCloudIdleStopRoutes(dependencies.cloudIdleStop));
+    }
     for (const path of CLOUD_WORKSPACE_INTERNAL_PATHS) {
       app.use(path, cloudWorkspaceInternalResponseHeaders);
       app.use(path, (c, next) =>
@@ -562,7 +587,9 @@ export function createApp(
       inviteLinkBase: config.inviteLinkBase,
     }),
   );
-  if (config.github) app.route("/", createGithubRoutes(pool, config.github));
+  if (config.github) app.route("/", createGithubRoutes(pool, config.github, {
+    ...(dependencies.cloudGithubWriteGrants ? { writeGrants: dependencies.cloudGithubWriteGrants } : {}),
+  }));
 
   app.onError((err, c) => {
     // Preserve deliberate framework responses such as bodyLimit's 413. Turning

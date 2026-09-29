@@ -18,6 +18,8 @@ import type { ComposerAttachment } from "./composer-attachments";
 type Source = { blob?: Blob; nativeSourceId?: string };
 const pending = new Map<string, Promise<Source>>();
 const preparing = new Set<string>();
+const sourceIdForKey = (key: string) => key.replace(/:portable$/, "");
+const sourceIsPreparing = (id: string) => preparing.has(id) || preparing.has(`${id}:portable`);
 interface StoredSource {
   version: 1;
   blob: Blob;
@@ -90,17 +92,19 @@ async function sourceStore<T>(
 
 export function prepareAttachmentSource(
   attachment: ComposerAttachment,
+  portable = false,
 ): Promise<Source> {
   stopQuitPreparation ??= onNativeBeforeQuit(async () => {
     await Promise.allSettled(pending.values());
   });
   const id = (attachment.sourceRecoveryId ??= crypto.randomUUID());
-  const existing = pending.get(id);
+  const pendingKey = portable ? `${id}:portable` : id;
+  const existing = pending.get(pendingKey);
   if (existing) return existing;
-  preparing.add(id);
+  preparing.add(pendingKey);
   const task = (async (): Promise<Source> => {
     const blob = attachment.sourceFile;
-    const local = getActiveBridge()?.executionIdentity?.kind !== "cloud";
+    const local = !portable && getActiveBridge()?.executionIdentity?.kind !== "cloud";
     if (blob) {
       if (local) {
         const nativeSourceId = await prepareNativeAttachmentFile(blob, id);
@@ -123,11 +127,11 @@ export function prepareAttachmentSource(
       "The unfinished attachment is not available — attach it again",
     );
   })().finally(() => {
-    preparing.delete(id);
+    preparing.delete(pendingKey);
   });
-  pending.set(id, task);
+  pending.set(pendingKey, task);
   void task.catch(() => {
-    if (pending.get(id) === task) pending.delete(id);
+    if (pending.get(pendingKey) === task) pending.delete(pendingKey);
   });
   return task;
 }
@@ -137,6 +141,7 @@ export async function releaseAttachmentSource(
 ): Promise<void> {
   if (!id) return;
   pending.delete(id);
+  pending.delete(`${id}:portable`);
   // Another workspace upload, editor undo entry or clipboard can share this
   // source. Maintenance releases bytes only after checking all owners.
 }
@@ -148,21 +153,21 @@ export function maintainAttachmentSources(): Promise<void> {
   if (maintenance) return maintenance;
   const run = async () => {
     const retained = retainedAttachmentSourceIds(
-      [...preparing].map((sourceRecoveryId) => ({ sourceRecoveryId })),
+      [...preparing].map((key) => ({ sourceRecoveryId: sourceIdForKey(key) })),
     );
     if (!retained) return;
     const clipboardIds =
       (await maintainNativeAttachmentSources(retained)) ??
       rememberedAttachmentClipboardSources();
     const current = retainedAttachmentSourceIds(
-      [...clipboardIds, ...preparing].map((sourceRecoveryId) => ({
-        sourceRecoveryId,
+      [...clipboardIds, ...preparing].map((key) => ({
+        sourceRecoveryId: sourceIdForKey(key),
       })),
     );
     if (!current) return;
     const keep = new Set(current);
-    for (const id of pending.keys())
-      if (!keep.has(id) && !preparing.has(id)) pending.delete(id);
+    for (const key of pending.keys())
+      if (!keep.has(sourceIdForKey(key)) && !sourceIsPreparing(sourceIdForKey(key))) pending.delete(key);
     await sourceStore((store) => {
       const cursor = store.openCursor(
         lastCleanupKey === undefined
@@ -187,7 +192,7 @@ export function maintainAttachmentSources(): Promise<void> {
               Number.isFinite(record?.touchedAt) &&
               Date.now() - record!.touchedAt! >= ATTACHMENT_SOURCE_GRACE_MS &&
               !keep.has(row.key) &&
-              !preparing.has(row.key)
+              !sourceIsPreparing(row.key)
             )
               row.delete();
           }

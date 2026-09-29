@@ -4,7 +4,10 @@ import {
   randomUUID,
   verify,
 } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { DevConnectionRuntime } from "./dev-connections/runtime.js";
+import { DatabaseDevConnectionRestore } from "./dev-connections/restore.js";
+import type { ConnectionReference } from "./dev-connections/types.js";
 import { Hono } from "hono";
 import pg from "pg";
 
@@ -23,6 +26,8 @@ import {
   resolveGithubOauthFlowKind,
   type GithubRouteDependencies,
 } from "./github.js";
+import { runMigrations } from "./migrate.js";
+import { withSystemTx } from "./db.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
 
 // An environment with no GitHub App registered used to get the router's generic
@@ -159,6 +164,40 @@ describe("GitHub OAuth flow selection", () => {
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const dbDescribe = databaseUrl ? describe : describe.skip;
 
+dbDescribe('hosted Dev GitHub ownership cutover',()=>{
+  let pool:pg.Pool;
+  beforeAll(async()=>{pool=new pg.Pool({connectionString:databaseUrl,max:3});await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');await runMigrations(pool);});
+  afterAll(async()=>{await pool.end();});
+  afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();});
+  it('hands OAuth material to the broker, exchanges only a reference and freezes the old refresh endpoint',async()=>{
+    const generation=randomUUID(),org=randomUUID(),subject=`user_${randomUUID()}`,issuer='https://identity.example.test';
+    const user=await ensureUser(pool,{provider:'workos',providerSubject:subject,email:`dev-${randomUUID()}@example.test`,displayName:'Dev member'});
+    await withSystemTx(pool,async tx=>{
+      await tx.query("INSERT INTO organizations(id,slug,name,created_by) VALUES($1,$2,'Dev connection test',$3)",[org,`dev-${org}`,user.id]);
+      await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')",[org,user.id]);
+      await tx.query("INSERT INTO workos_organization_links(organization_id,workos_organization_id,external_id,state) VALUES($1::uuid,'org_dev',($1::uuid)::text,'active')",[org]);
+    });
+    for(const [name,value] of Object.entries({ZEROS_DEPLOY_ENV:'dev',ZEROS_DEV_ENVIRONMENT:'hosted',ZEROS_DEV_CONNECTIONS_ENABLED:'true',ZEROS_DEV_GENERATION:generation,
+      DEV_CONNECTIONS_GENERATION:generation,DEV_CONNECTIONS_ORIGIN:'https://connections.example.test',DEV_CONNECTIONS_AUDIENCE:'zeros-dev-connections-v1',DEV_CONNECTIONS_GENERATION_CREDENTIAL:'a'.repeat(43)}))vi.stubEnv(name,value);
+    const ref:ConnectionReference={mode:'dev-reference',bindingId:randomUUID(),connectionId:randomUUID(),generationId:generation,organization:'org_dev',kind:'github-app',
+      accountId:'1234',appScope:'123456:Iv1.test-client',revision:1,consentRevision:1,consent:{models:[],repositories:[],scopes:['github:read','github:write']},connectionMethod:'account',expiresAt:new Date(Date.now()+3600000).toISOString()};
+    const connect=vi.spyOn(DevConnectionRuntime.prototype,'connectGithub').mockImplementation(async()=>{
+      await new DatabaseDevConnectionRestore(pool).replace({issuer,subject,workosOrganizationId:'org_dev',localUserId:user.id,localOrganizationId:org},generation,[ref]);return ref;
+    });
+    vi.spyOn(DevConnectionRuntime.prototype,'githubReference').mockImplementation(async()=>({binding_id:ref.bindingId,owner_user_id:user.id,org_id:org,issuer,subject,workos_org_id:'org_dev',generation_id:generation,reference:ref,fingerprint:'a'.repeat(64)}));
+    vi.spyOn(DevConnectionRuntime.prototype,'githubGrant').mockResolvedValue({material:{kind:'github-app',accessToken:'synthetic-broker-github-access',accountId:'1234'},expiresAt:new Date(Date.now()+60000).toISOString()} as never);
+    const calls:FetchCall[]=[],app=testApp(pool,user,{fetch:githubFetch(calls)}),nonce='d'.repeat(43);
+    const flow=await startFlow(app,nonce,false);expect((await callback(app,flow.state)).status).toBe(302);
+    expect(connect).toHaveBeenCalledWith(user.id,expect.objectContaining({kind:'github-app',refreshToken:'initial-refresh-token'}));
+    expect((await pool.query('SELECT * FROM github_oauth_handoffs')).rowCount).toBe(0);
+    const response=await app.request('/v1/github/oauth/exchange',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({nonce})});
+    expect(response.status).toBe(200);const body=await response.json();expect(body).toMatchObject({reference:{bindingId:ref.bindingId,generationId:generation,subject},login:'octocat'});
+    expect(JSON.stringify(body)).not.toMatch(/accessToken|refreshToken|refreshBinding/);
+    const refresh=await app.request('/v1/github/oauth/refresh',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({refreshToken:'old-refresh-token'})});
+    expect(refresh.status).toBe(409);expect(calls.filter(call=>call.url.endsWith('/login/oauth/access_token'))).toHaveLength(1);
+  });
+});
+
 const githubConfig: GithubBackendConfig = {
   appId: 123456,
   clientId: "Iv1.test-client",
@@ -233,7 +272,7 @@ function githubFetch(calls: FetchCall[]): typeof fetch {
       });
     }
     if (url.endsWith("/user")) {
-      return Response.json({ login: "octocat" });
+      return Response.json({ id: 1234, login: "octocat", name: "Test Member", email: "private@example.test" });
     }
     if (url.includes("/user/installations?")) {
       return Response.json({
@@ -514,6 +553,8 @@ dbDescribe("GitHub App OAuth handoff", () => {
         allRepositories: false,
       }),
     ]);
+    expect((await pool.query("SELECT github_user_id,git_author_name FROM github_authorizations WHERE owner_user_id=$1", [userA.id])).rows)
+      .toEqual([{ github_user_id: "1234", git_author_name: "Test Member" }]);
 
     const replayedHandoff = await appA.request("/v1/github/oauth/exchange", {
       method: "POST",
@@ -573,6 +614,8 @@ dbDescribe("GitHub App OAuth handoff", () => {
       body: JSON.stringify({ accessToken: "current-access-token" }),
     });
     expect(refreshed.status).toBe(200);
+    expect((await pool.query("SELECT github_user_id,git_author_name FROM github_authorizations WHERE owner_user_id=$1", [userA.id])).rows)
+      .toEqual([{ github_user_id: "1234", git_author_name: "Test Member" }]);
     expect(await refreshed.json()).toMatchObject({
       login: "octocat",
       complete: true,
@@ -584,6 +627,16 @@ dbDescribe("GitHub App OAuth handoff", () => {
         },
       ],
     });
+
+    // A recycled login must not silently replace the connected account.
+    await pool.query("UPDATE github_authorizations SET github_user_id=5678 WHERE owner_user_id=$1", [userA.id]);
+    const replacedAccount = await appA.request("/v1/github/installations/refresh", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accessToken: "current-access-token" }),
+    });
+    expect(replacedAccount.status).toBe(403);
+    expect((await pool.query("SELECT github_user_id FROM github_authorizations WHERE owner_user_id=$1", [userA.id])).rows[0]?.github_user_id).toBe("5678");
+    await pool.query("UPDATE github_authorizations SET github_user_id=1234 WHERE owner_user_id=$1", [userA.id]);
 
     // A Zeros account with no GitHub authorization at all is NOT a mismatch:
     // reporting it as one left the desktop's Settings row stuck on
@@ -963,5 +1016,88 @@ dbDescribe("GitHub App OAuth handoff", () => {
       [nonceHash],
     );
     expect(retained.rowCount).toBe(0);
+  });
+});
+
+dbDescribe("organization GitHub source authorization", () => {
+  let pool: pg.Pool;
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: databaseUrl, max: 3 });
+    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+    await runMigrations(pool);
+  });
+  afterAll(async () => { await pool.end(); });
+
+  async function fixture(options: { membership?: string; afterSource?: (user: AuthedUser) => Promise<void> } = {}) {
+    const user = await ensureUser(pool, { provider: "auth0", providerSubject: randomUUID(), email: `${randomUUID()}@example.test`, displayName: "Source owner" });
+    const org = randomUUID(), calls: FetchCall[] = [];
+    await withSystemTx(pool, async tx => {
+      await tx.query("INSERT INTO organizations(id,slug,name,created_by) VALUES($1,$2,'Source organization',$3)", [org, `source-${org}`, user.id]);
+      await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [org,user.id]);
+      await tx.query("INSERT INTO github_authorizations(owner_user_id,app_variant,github_login) VALUES($1,'github.com','octocat')", [user.id]);
+    });
+    const repository = { id: 123, name: "example", owner: { login: "acme" }, default_branch: "main", private: true, archived: false };
+    const fallback = githubFetch(calls);
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("/user/memberships/orgs/")) {
+        calls.push({url,init});
+        return Response.json({ state: options.membership ?? "active", organization: { login: "acme" } });
+      }
+      if (url.includes("/user/installations/987654/repositories")) {
+        calls.push({url,init});
+        return Response.json({ repositories: [repository, {...repository,id:124,name:"archived",archived:true}] });
+      }
+      if (url.endsWith("/repos/acme/example")) {
+        calls.push({url,init});
+        await options.afterSource?.(user);
+        return Response.json(repository);
+      }
+      return fallback(input,init);
+    };
+    const app = testApp(pool,user,{fetch:fetchImpl});
+    const request = (body: Record<string,unknown>) => app.request("/v1/github/cloud", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({organizationId:org,accessToken:"synthetic-user-token",...body}) });
+    const catalog = await request({action:"catalog"});
+    expect(catalog.status).toBe(200);
+    expect(catalog.headers.get("cache-control")).toBe("no-store");
+    const entry = (await catalog.json()).installations[0];
+    expect(entry).toMatchObject({accountLogin:"acme",connected:false});
+    return {user,org,request,entry,calls};
+  }
+
+  it("connects only the acting member, lists their repositories and produces a short-lived source proof", async () => {
+    const f = await fixture();
+    expect((await f.request({action:"connect",installationId:f.entry.id})).status).toBe(200);
+    const repos = await f.request({action:"repositories",installationId:f.entry.id,page:1});
+    expect(await repos.json()).toEqual({repositories:[{id:"123",owner:"acme",name:"example",defaultBranch:"main",private:true}],nextPage:null});
+    const source = await f.request({action:"source",owner:"acme",repository:"example"});
+    expect(await source.json()).toMatchObject({installationId:f.entry.id,repository:{id:"123"}});
+    const proof = await withSystemTx(pool,tx=>tx.query("SELECT actor_fingerprint=cloud_github_actor_fingerprint(org_id,owner_user_id) AS current,expires_at>now() AND expires_at<=now()+interval '2 minutes' AS short_lived FROM cloud_github_source_access WHERE org_id=$1 AND owner_user_id=$2",[f.org,f.user.id]));
+    expect(proof.rows).toEqual([{current:true,short_lived:true}]);
+    expect(f.calls.some(call=>call.url.includes("/access_tokens"))).toBe(false);
+    const before = f.calls.length;
+    const denied = await f.request({action:"source",organizationId:randomUUID(),owner:"acme",repository:"example"});
+    expect(denied.status).toBe(404);
+    expect(f.calls).toHaveLength(before);
+    expect((await f.request({action:"disconnect",installationId:f.entry.id,accessToken:undefined})).status).toBe(200);
+    expect((await pool.query("SELECT 1 FROM cloud_github_source_access WHERE org_id=$1",[f.org])).rowCount).toBe(0);
+  });
+
+  it("rejects an accessible GitHub installation when the person is not an active organization member", async () => {
+    const f = await fixture({membership:"pending"});
+    const response = await f.request({action:"connect",installationId:f.entry.id});
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({error:{code:"github_cloud_membership_required"}});
+    expect((await pool.query("SELECT 1 FROM cloud_github_connections WHERE org_id=$1",[f.org])).rowCount).toBe(0);
+  });
+
+  it("rejects a source result after the account authority changes during GitHub I/O", async () => {
+    const f = await fixture({afterSource: async user => {
+      await pool.query("UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1",[user.id]);
+    }});
+    const response = await f.request({action:"source",owner:"acme",repository:"example"});
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({error:{code:"github_authorization_changed"}});
+    expect((await pool.query("SELECT 1 FROM cloud_github_source_access WHERE org_id=$1",[f.org])).rowCount).toBe(0);
   });
 });

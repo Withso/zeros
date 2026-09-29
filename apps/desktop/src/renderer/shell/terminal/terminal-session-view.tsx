@@ -91,6 +91,8 @@ import {
 import { isContinuousLayoutResizeActive } from "./continuous-layout-resize";
 import { isUsableTerminalDimensions } from "./terminal-dimensions";
 import { recordWorkspaceActivity } from "../../state/workspace-store";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { onActiveBridgeConnected } from "../../platform/bridge/active-bridge";
 
 // Mirrors `--font-mono` in `styles/zeros-tokens.css` exactly — xterm can't
 // read a CSS variable, so this string has to be kept in sync by hand.
@@ -206,6 +208,9 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
    *  `ptyResize` calls so a ResizeObserver firing during the spawn
    *  window doesn't IPC into a non-existent session. */
   const createdRef = useRef(false);
+  const attachInFlightRef = useRef(false);
+  const reconnectPendingRef = useRef(false);
+  const launchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Once-only latch — we only auto-launch the bound agent on the
    *  initial PTY spawn, never on a re-mount (which would re-run
    *  `claude` etc. on top of an existing session). Reset by `restart`
@@ -264,7 +269,8 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     term.loadAddon(fit);
     term.open(host);
     onTerminalReady?.(term);
-    if (loginProvider) term.textarea?.setAttribute("aria-label", "Sign-in terminal");
+    if (loginProvider)
+      term.textarea?.setAttribute("aria-label", "Sign-in terminal");
     xtermRef.current = term;
     fitRef.current = fit;
     // Renderer choice — DOM (xterm's built-in default). See the
@@ -388,7 +394,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       evt.preventDefault();
       evt.stopPropagation();
     };
-    host.addEventListener("wheel", onWheelCapture, { capture: true, passive: false });
+    host.addEventListener("wheel", onWheelCapture, {
+      capture: true,
+      passive: false,
+    });
 
     // Forward xterm keystrokes to the PTY. Bound ONCE here — NOT
     // inside `spawn` — so a restart-after-exit respawn doesn't stack a
@@ -493,7 +502,11 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     //     dimension-checked ptyResize — the shell sees one clean SIGWINCH
     //     instead of the previous "draw at wrong width → SIGWINCH →
     //     redraw → ghost" cascade.
-    if (typeof document !== "undefined" && document.fonts && document.fonts.load) {
+    if (
+      typeof document !== "undefined" &&
+      document.fonts &&
+      document.fonts.load
+    ) {
       void document.fonts
         .load(`${TERMINAL_FONT_SIZE_PX}px "Geist Mono Variable"`)
         .catch(() => [])
@@ -516,6 +529,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
 
     return () => {
       cancelled = true;
+      if (launchTimerRef.current !== null) clearTimeout(launchTimerRef.current);
       cancelAnimationFrame(spawnRaf);
       trySpawnRef.current = null;
       spawnStartedRef.current = false;
@@ -543,101 +557,173 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   }, []);
 
   /** Spawn the PTY on the main process, wire stdin/stdout. */
-  const spawn = async (term: XTerm) => {
-    const { cols, rows } = lastDimsRef.current;
-    if (attachOnly) {
-      // Reattach-or-nothing: consult the engine's shared registry first. A
-      // PTY_CREATE for a missing session would SPAWN a fresh login shell
-      // under this id — exactly what attach-only exists to prevent.
-      const terms = await ptyTerminals();
-      const live =
-        terms?.some((t) => t.sessionId === sessionId && t.exited !== true) ??
-        false;
-      if (!live) {
-        // The PTY exited before we could attach — its live mirror is gone, but
-        // the engine may still hold the run's output buffer. Replay it so a
-        // fast run (an instant build/lint failure, a dev server that died on
-        // boot) shows WHY it ended instead of a blank pane. Never spawns.
-        try {
-          const replay = await replayOnMiss?.(sessionId);
-          if (replay) term.write(replay);
-        } catch {
-          /* buffer unavailable — fall through to the exited state */
+  const spawn = async (term: XTerm, reconnect = false) => {
+    if (attachInFlightRef.current || xtermRef.current !== term) return;
+    attachInFlightRef.current = true;
+    try {
+      const { cols, rows } = lastDimsRef.current;
+      if (attachOnly || (reconnect && createdRef.current)) {
+        // Reattach-or-nothing: consult the engine's shared registry first. A
+        // PTY_CREATE for a missing session would SPAWN a fresh login shell
+        // under this id — exactly what attach-only exists to prevent.
+        const terms = await ptyTerminals(
+          isCloudWorkspace(cwd) ? cwd : undefined,
+        );
+        if (xtermRef.current !== term || terms === null) return;
+        const live = terms.some(
+          (t) => t.sessionId === sessionId && t.exited !== true,
+        );
+        if (!live) {
+          // The PTY exited before we could attach — its live mirror is gone, but
+          // the engine may still hold the run's output buffer. Replay it so a
+          // fast run (an instant build/lint failure, a dev server that died on
+          // boot) shows WHY it ended instead of a blank pane. Never spawns.
+          try {
+            const replay = await replayOnMiss?.(sessionId);
+            if (xtermRef.current !== term) return;
+            if (replay) term.write(replay);
+          } catch {
+            /* buffer unavailable — fall through to the exited state */
+          }
+          if (xtermRef.current !== term) return;
+          markExited(sessionId);
+          createdRef.current = false;
+          exitedRef.current = true;
+          if (reconnect && !attachOnly && restartOnKeyRef.current)
+            term.writeln(
+              "\r\n\x1b[2m[terminal session ended — press any key to restart]\x1b[0m",
+            );
+          return;
         }
-        markExited(sessionId);
-        exitedRef.current = true;
+      }
+      const info = await ptyCreate({
+        sessionId,
+        cwd,
+        cols,
+        rows,
+        ephemeral,
+        loginProvider,
+      });
+      if (xtermRef.current !== term) return;
+      if (!info) {
+        // No-bridge fallback only. An optional connected relay client gets a real
+        // host shell; ptyCreate returns null when there is no engine connection.
+        term.writeln(
+          isCloudWorkspace(cwd)
+            ? "\x1b[33m(Cloud terminal unavailable — reconnect to this workspace to retry.)\x1b[0m"
+            : "\x1b[33m(No host connection — terminal needs the Mac app or a paired relay session.)\x1b[0m",
+        );
         return;
       }
-    }
-    const info = await ptyCreate({ sessionId, cwd, cols, rows, ephemeral, loginProvider });
-    if (!info) {
-      // No-bridge fallback only. An optional connected relay client gets a real
-      // host shell; ptyCreate returns null when there is no engine connection.
-      term.writeln(
-        "\x1b[33m(No host connection — terminal needs the Mac app or a paired relay session.)\x1b[0m",
-      );
-      return;
-    }
-    createdRef.current = true;
-    if (loginProvider) term.focus();
-    // A fresh/reattached PTY is live again — clear the exited latch so
-    // keystrokes flow to the shell instead of triggering another
-    // restart (matters on the restart path; harmless on first spawn).
-    exitedRef.current = false;
-    restartBlockedRef.current = false;
-    // Repaint from the main-side mirror's serialized snapshot (a clean
-    // escape blob of the resolved grid, NOT raw byte history) captured
-    // while this renderer was disconnected (page refresh, workbench
-    // collapse). Because main resizes the mirror to our measured dims
-    // before serializing, this xterm is already the matching size, so
-    // the snapshot reproduces the exact pre-refresh screen — including
-    // a live TUI's last frame, with no double-render. Written *before*
-    // the live data binding so the snapshot and live stream stay
-    // ordered.
-    if (info.reattached && info.replay) {
-      term.write(info.replay);
-    }
-    // If the main-side PTY's dims drifted from what we just measured
-    // (re-attach into a session that was resized in another renderer),
-    // push our measurement now so subsequent output is laid out
-    // against the live terminal grid.
-    if (info.cols !== cols || info.rows !== rows) {
-      void ptyResize({ sessionId, cols, rows }).catch(() => {
-        /* drop */
-      });
-    }
-    // Auto-launch input once the shell prompt is ready: an explicit
-    // `initialCommand` (the embedded-terminal `claude /mcp` runner) takes
-    // priority, else the bound terminal-agent's launch line. We give the login
-    // shell ~200 ms to draw its prompt so the line doesn't race shell init (zsh
-    // -l can take ~50–150 ms on a cold cache). The latch keeps re-mounts from
-    // firing a second launch on top of the live session. A re-attach
-    // (info.reattached) short-circuits it — the input already ran on the
-    // original spawn.
-    if (info.reattached) {
-      agentLaunchedRef.current = true;
-    }
-    if (!agentLaunchedRef.current && !loginProvider) {
-      const explicit = initialCommand?.trim();
-      const agent = !explicit && agentId ? resolveTerminalAgent(agentId) : null;
-      const line = explicit || (agent ? buildLaunchLine({ agent }) : "");
-      if (line) {
-        agentLaunchedRef.current = true;
-        // Leading-space prefix: with HIST_IGNORE_SPACE (set by Zeros'
-        // ZDOTDIR wrapper in shell-setup.ts), zsh DROPS commands that
-        // start with a space from history. These auto-injected lines
-        // (`claude`, `codex`, `claude /mcp`, …) are Zeros-driven, not
-        // user-typed — keeping them out of recall stops the user's
-        // ~/.zsh_history from filling with them. User-typed commands
-        // still flow through `term.onData` above and DO land in history.
-        window.setTimeout(() => {
-          void ptyWrite({ sessionId, data: ` ${line}\r` }).catch(() => {
-            /* pty already exited — drop */
-          });
-        }, 200);
+      createdRef.current = true;
+      if (loginProvider) term.focus();
+      // A fresh/reattached PTY is live again — clear the exited latch so
+      // keystrokes flow to the shell instead of triggering another
+      // restart (matters on the restart path; harmless on first spawn).
+      exitedRef.current = false;
+      restartBlockedRef.current = false;
+      // Repaint from the main-side mirror's serialized snapshot (a clean
+      // escape blob of the resolved grid, NOT raw byte history) captured
+      // while this renderer was disconnected (page refresh, workbench
+      // collapse). Because main resizes the mirror to our measured dims
+      // before serializing, this xterm is already the matching size, so
+      // the snapshot reproduces the exact pre-refresh screen — including
+      // a live TUI's last frame. Queuing the reset and replay together preserves
+      // the order with live writes that arrive before and after the response.
+      if (info.reattached && typeof info.replay === "string") {
+        // Queue the reset with the snapshot, after any already queued live bytes.
+        // Reconnect replaces the old grid instead of appending duplicate history.
+        term.write(`\x1bc${info.replay}`);
       }
+      // If the main-side PTY's dims drifted from what we just measured
+      // (re-attach into a session that was resized in another renderer),
+      // push our measurement now so subsequent output is laid out
+      // against the live terminal grid.
+      if (info.cols !== cols || info.rows !== rows) {
+        void ptyResize({ sessionId, cols, rows }).catch(() => {
+          /* drop */
+        });
+      }
+      // Auto-launch input once the shell prompt is ready: an explicit
+      // `initialCommand` (the embedded-terminal `claude /mcp` runner) takes
+      // priority, else the bound terminal-agent's launch line. We give the login
+      // shell ~200 ms to draw its prompt so the line doesn't race shell init (zsh
+      // -l can take ~50–150 ms on a cold cache). The latch keeps re-mounts from
+      // firing a second launch on top of the live session. A re-attach
+      // (info.reattached) short-circuits it — the input already ran on the
+      // original spawn.
+      if (info.reattached) {
+        agentLaunchedRef.current = true;
+      }
+      if (!agentLaunchedRef.current && !loginProvider) {
+        const explicit = initialCommand?.trim();
+        const agent =
+          !explicit && agentId ? resolveTerminalAgent(agentId) : null;
+        const line = explicit || (agent ? buildLaunchLine({ agent }) : "");
+        if (line) {
+          agentLaunchedRef.current = true;
+          // Leading-space prefix: with HIST_IGNORE_SPACE (set by Zeros'
+          // ZDOTDIR wrapper in shell-setup.ts), zsh DROPS commands that
+          // start with a space from history. These auto-injected lines
+          // (`claude`, `codex`, `claude /mcp`, …) are Zeros-driven, not
+          // user-typed — keeping them out of recall stops the user's
+          // ~/.zsh_history from filling with them. User-typed commands
+          // still flow through `term.onData` above and DO land in history.
+          launchTimerRef.current = setTimeout(() => {
+            if (
+              xtermRef.current !== term ||
+              !createdRef.current ||
+              exitedRef.current
+            )
+              return;
+            void ptyWrite({ sessionId, data: ` ${line}\r` }).catch(() => {
+              /* pty already exited — drop */
+            });
+          }, 200);
+        }
+      }
+    } finally {
+      attachInFlightRef.current = false;
+      // A newer connection may have arrived while the previous request was
+      // failing. Coalesce those boundaries into one fresh attachment.
+      if (xtermRef.current === term) resumeAfterReconnect();
     }
   };
+
+  const resumeAfterReconnect = () => {
+    const term = xtermRef.current;
+    if (
+      !reconnectPendingRef.current ||
+      !visibleRef.current ||
+      !term ||
+      !spawnStartedRef.current ||
+      attachInFlightRef.current ||
+      exitedRef.current
+    )
+      return;
+    reconnectPendingRef.current = false;
+    void spawn(term, true);
+  };
+
+  // Track connection boundaries while retained, like the existing output
+  // subscription, but perform no attachment reads until this view is visible.
+  // A healthy A → B → A switch preserves the current grid and selection.
+  useEffect(() => {
+    if (!isCloudWorkspace(cwd)) return;
+    return onActiveBridgeConnected((_client, { initial }) => {
+      if (initial || !spawnStartedRef.current || exitedRef.current) return;
+      reconnectPendingRef.current = true;
+      resumeAfterReconnect();
+    }, cwd);
+    // Identity is fixed for a mounted terminal; mutable liveness lives in refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cwd, sessionId]);
+
+  useEffect(() => {
+    if (visible) resumeAfterReconnect();
+    // The pending connection and current terminal are read from refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
 
   /** Respawn a fresh shell in place after the PTY exited. Triggered by
    *  the first keystroke on an exited terminal (see the once-bound
@@ -698,9 +784,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
           term.writeln(
             `\r\n\x1b[31m[terminal failed to start — ${exitPolicy.detail}]\x1b[0m`,
           );
-          term.writeln(
-            `\x1b[2m[${exitPolicy.recovery}]\x1b[0m`,
-          );
+          term.writeln(`\x1b[2m[${exitPolicy.recovery}]\x1b[0m`);
           return;
         }
         const hint = restartOnKeyRef.current

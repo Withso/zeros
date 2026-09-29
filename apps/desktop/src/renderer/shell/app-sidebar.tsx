@@ -1,3 +1,4 @@
+import { useOrganizationProjects } from "../state/use-organization-projects";
 // ============================================
 // COMPONENT: AppSidebar
 // PURPOSE: The app's single left navigation — window chrome, organization,
@@ -95,7 +96,6 @@ import {
   peekWorkspacesFor,
   useArchivedWorkspaces,
   useLiveWorkspaces,
-  useProjects,
   useSyncProjectsToEngine,
   useWorkspacesFor,
 } from "../state/use-projects";
@@ -460,7 +460,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const activeFolderProvisioning = useWorkspaceProvisioning(activeFolder);
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
-  const { projects } = useProjects();
+  const { projects } = useOrganizationProjects();
   const projectRepoRoots = useMemo(
     () => projects.map((project) => project.repoRoot),
     [projects],

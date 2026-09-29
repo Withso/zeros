@@ -15,6 +15,7 @@ import {
 } from "./bridge/workspace-bridge";
 import { resolveBridgeWorkspaceIdForCwd } from "./bridge/workspace-id-resolver";
 import { isKnownProjectRoot } from "../state/projects-store";
+import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
 
 export type ReadFileKind = "text" | "image" | "binary" | "too-large" | "error";
 
@@ -104,7 +105,7 @@ export async function readWorkspaceFile(
   // electron read_file would refuse it. Read it over the engine bridge instead —
   // the engine resolves the repo root via isKnownRepoRoot. Worktrees stay on the
   // faster electron IPC path below.
-  if (isKnownProjectRoot(cwd)) {
+  if (isCloudWorkspace(cwd) || isKnownProjectRoot(cwd)) {
     const { bridge, workspaceId } = await resolveBridgeFileTarget(
       cwd,
       "read the repository file",
@@ -170,10 +171,11 @@ export async function readWorkspaceImageThumbnail(
   relPath: string,
   maxDimension: 64 | 128 | 256 | 512 | 1024 | 1536 = 256,
 ): Promise<ReadImageThumbnailResult | null> {
-  if (!cwd || !relPath || !isNativeRuntime()) return null;
-  if (isKnownProjectRoot(cwd)) {
+  if (!cwd || !relPath) return null;
+  if (isCloudWorkspace(cwd) || isKnownProjectRoot(cwd)) {
     return fileReadAsThumbnail(await readWorkspaceFile(cwd, relPath));
   }
+  if (!isNativeRuntime()) return null;
   let nativeResult: ReadImageThumbnailResult | null = null;
   let nativeError: unknown;
   try {
@@ -232,7 +234,7 @@ export async function writeWorkspaceFile(
   // Desktop: Local main (a registered project root) has no workspace row
   // and isn't under electron-main's trusted IPC roots, so write it over the
   // engine bridge. Worktrees stay on the faster electron IPC path below.
-  if (isKnownProjectRoot(cwd)) {
+  if (isCloudWorkspace(cwd) || isKnownProjectRoot(cwd)) {
     const { bridge, workspaceId } = await resolveBridgeFileTarget(
       cwd,
       "write the repository file",

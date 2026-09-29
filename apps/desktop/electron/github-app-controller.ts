@@ -1,3 +1,4 @@
+import type { DevGithubConnection } from "./dev-github-reference";
 // Main-process GitHub App state machine with all host dependencies injected.
 //
 // Keeping the orchestration pure makes the security contracts executable:
@@ -52,12 +53,17 @@ export type GithubAppConnectionErrorReason =
   | "storage_failed";
 
 export type PendingConsumeResult =
-  | { status: "consumed" }
+  | { status: "consumed"; preserveSelectedMethod?: boolean | undefined; ownerSub?: string | undefined }
   | {
       status: "missing" | "mismatch" | "expired";
     };
 
 export interface GithubAppControllerDependencies {
+  devReference?: {
+    exchange(accessToken:string,nonce:string):Promise<DevGithubConnection>;
+    save(value:DevGithubConnection):Promise<void>;
+    disconnect():Promise<boolean>;
+  };
   client: Pick<
     GithubAppClient,
     "start" | "exchange" | "refresh" | "revoke" | "refreshInstallations"
@@ -74,7 +80,7 @@ export interface GithubAppControllerDependencies {
     next: GithubAppCredential | null,
   ): Promise<boolean>;
   getSession(): Promise<{ accessToken: string; sub: string } | null>;
-  savePending(input: { nonce: string; expiresAtMs: number }): void;
+  savePending(input: { nonce: string; expiresAtMs: number; preserveSelectedMethod?: boolean; ownerSub?: string }): void;
   consumePending(nonce: string): PendingConsumeResult;
   discardPending(nonce: string): void;
   clearPending(): void;
@@ -238,7 +244,9 @@ export class GithubAppController {
     scheme: string;
     installFlow: boolean;
     forceInstall?: boolean;
+    preserveSelectedMethod?: boolean;
   }): Promise<GithubAppFlowKind | null> {
+    this.cancel();
     const epoch = this.cancelEpoch;
     const session = await this.deps.getSession();
     if (!session) {
@@ -271,10 +279,13 @@ export class GithubAppController {
     // nonce now would leave a redeemable handoff, and for an already-authorized
     // app the browser redirects with no prompt — so a callback could still
     // connect and switch the selected method after the user said no.
-    if (epoch !== this.cancelEpoch) return null;
+    const currentSession = await this.deps.getSession();
+    if (epoch !== this.cancelEpoch || currentSession?.sub !== session.sub) return null;
     this.deps.savePending({
       nonce,
       expiresAtMs: started.expiresAtMs,
+      ownerSub: session.sub,
+      ...(input.preserveSelectedMethod ? { preserveSelectedMethod: true } : {}),
     });
     try {
       await this.deps.openExternal(started.authorizeUrl);
@@ -301,6 +312,7 @@ export class GithubAppController {
     nonce: string | null;
     error?: string | null;
   }): Promise<void> {
+    const epoch = this.cancelEpoch;
     if (!input.nonce || !validNonce(input.nonce)) {
       this.deps.emitError("invalid_callback");
       return;
@@ -320,11 +332,23 @@ export class GithubAppController {
 
     try {
       const session = await this.deps.getSession();
-      if (!session) {
+      if (!session || (consumed.ownerSub && consumed.ownerSub !== session.sub)) {
         throw new GithubAppFlowError(
           "Sign in to Zeros before finishing the GitHub connection.",
           "signed_out",
         );
+      }
+      if(this.deps.devReference){
+        const result=await this.deps.devReference.exchange(session.accessToken,input.nonce);
+        await this.deps.withCredentialLock(async()=>{
+          const current=await this.deps.getSession();
+          if(epoch!==this.cancelEpoch||current?.sub!==session.sub)throw new GithubAppFlowError("The GitHub connection was cancelled or the account changed.","signed_out");
+          await this.deps.devReference!.save(result);
+        });
+        await this.deps.afterCredentialChange(null);
+        const current=await this.deps.getSession();
+        if(epoch===this.cancelEpoch&&current?.sub===session.sub)this.deps.emitConnected({login:result.login,installationCount:result.installationCount});
+        return;
       }
       const result = await this.deps.client.exchange(
         session.accessToken,
@@ -349,9 +373,18 @@ export class GithubAppController {
           const previous = await this.deps.credentialStore.get("github-app");
           const previousMethod =
             await this.deps.credentialStore.getSelectedMethod();
+          const currentSession = await this.deps.getSession();
+          if (epoch !== this.cancelEpoch || currentSession?.sub !== session.sub)
+            throw new GithubAppFlowError("The GitHub connection was cancelled or the account changed.", "signed_out");
           await this.deps.credentialStore.set("github-app", next);
           try {
-            await this.deps.credentialStore.setSelectedMethod("github-app");
+            const afterStore = await this.deps.getSession();
+            if (epoch !== this.cancelEpoch || afterStore?.sub !== session.sub)
+              throw new GithubAppFlowError("The GitHub connection was cancelled or the account changed.", "signed_out");
+            if (!consumed.preserveSelectedMethod) await this.deps.credentialStore.setSelectedMethod("github-app");
+            const afterSelection = await this.deps.getSession();
+            if (epoch !== this.cancelEpoch || afterSelection?.sub !== session.sub)
+              throw new GithubAppFlowError("The GitHub connection was cancelled or the account changed.", "signed_out");
           } catch (error) {
             try {
               if (previous) {
@@ -367,7 +400,8 @@ export class GithubAppController {
             throw error;
           }
         });
-      } catch {
+      } catch (error) {
+        if (error instanceof GithubAppFlowError) throw error;
         throw new GithubAppFlowError(
           "The GitHub connection could not be stored securely.",
           "storage_failed",
@@ -381,6 +415,8 @@ export class GithubAppController {
         // and by the shared-store watcher, so it cannot turn success into a
         // misleading OAuth failure.
       }
+      const deliveredSession = await this.deps.getSession();
+      if (epoch !== this.cancelEpoch || deliveredSession?.sub !== session.sub) return;
       this.deps.emitConnected({
         login: result.login,
         installationCount: result.installationCount ?? 0,
@@ -398,6 +434,7 @@ export class GithubAppController {
       force?: boolean;
     } = {},
   ): Promise<GithubAppCredential | null> {
+    if(this.deps.devReference)return null;
     const initial = await this.deps.credentialStore.get("github-app");
     if (!initial) return null;
     const session = await this.deps.getSession();
@@ -619,6 +656,8 @@ export class GithubAppController {
   /** Best-effort remote revoke, then a CAS local removal. A transient control-plane
    *  outage never traps a user in a locally connected state. */
   async disconnect(): Promise<boolean> {
+    this.cancel();
+    if(this.deps.devReference)return this.deps.devReference.disconnect();
     return this.deps.withCredentialLock(async () => {
       const current = await this.deps.credentialStore.get("github-app");
       if (!current) return true;

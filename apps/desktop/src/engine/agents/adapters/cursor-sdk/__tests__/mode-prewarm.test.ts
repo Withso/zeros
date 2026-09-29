@@ -142,6 +142,38 @@ async function startSession(): Promise<{
 }
 
 describe("Cursor executor prewarm across a mode change", () => {
+  it("acknowledges the accepted mode so reconnects retain the latest selection", async () => {
+    const ctx = makeCtx();
+    const update = vi.fn();
+    ctx.emit.onSessionUpdate = update;
+    const adapter = new CursorSdkAdapter(ctx);
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj/wt", env: { CURSOR_API_KEY: "key_test" } });
+      await adapter.setMode({ sessionId: session.executionId, modeId: "plan" });
+      expect(update).toHaveBeenLastCalledWith("cursor", {
+        sessionId: session.executionId,
+        update: { sessionUpdate: "current_mode_update", currentModeId: "plan" },
+      });
+      update.mockClear();
+      await adapter.setMode({ sessionId: session.executionId, modeId: "unsupported" });
+      expect(update).not.toHaveBeenCalled();
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["plan", "auto", "agent"])("starts and resumes the exact saved %s mode before sending", async mode => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const env = {CURSOR_API_KEY:"key_test",ZEROS_PERMISSION_MODE:mode};
+    try {
+      const {session} = await adapter.newSession({cwd:"/tmp/proj/wt",env});
+      expect(session.modes?.currentModeId).toBe(mode);
+      expect(createSpy.mock.calls[0]?.[0].mode).toBe(mode === "plan" ? "plan" : "agent");
+      expect(!!createSpy.mock.calls[0]?.[0].local.autoReview).toBe(mode === "auto");
+      const resumed = await adapter.loadSession({cwd:"/tmp/proj/wt",sessionId:"native",env});
+      expect(resumed.modes?.currentModeId).toBe(mode);
+      expect(!!resumeSpy.mock.calls[0]?.[1].local.autoReview).toBe(mode === "auto");
+    } finally {await adapter.dispose();}
+  });
+
   it("preserves SSE through creation, prewarm, mode recreation, and resume", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     const mcpServers = [{ name: "reports", transport: "sse", url: "https://reports.example/events", headers: { "X-Version": "1" } }] as const;

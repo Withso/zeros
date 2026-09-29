@@ -237,7 +237,7 @@ describe("cloud worker image contract", () => {
     expect(SANDBOX_ENGINE_DIR).toBe("/opt/zeros");
     // Boat stop/resume does not retain /workspace or arbitrary /home roots.
     // New images use the same durable physical layout on both providers.
-    expect(SANDBOX_REPO_DIR).toBe("/srv/zeros/workspace");
+    expect(SANDBOX_REPO_DIR).toBe("/srv/zeros/files/workspace");
     expect(SANDBOX_DATA_DIR).toBe("/srv/zeros/state");
     expect(SANDBOX_ENGINE_DIR).not.toBe(SANDBOX_REPO_DIR);
   });

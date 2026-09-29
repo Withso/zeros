@@ -633,8 +633,9 @@ export interface AvailableSubagentsUpdate {
 }
 
 /** Full REPLACE snapshot of active background work for one exact session.
- * Empty is authoritative. Live activity is execution-owned, never restored
- * from persisted task records. */
+ * Empty is authoritative. Live activity is execution-owned. Cloud may restore
+ * a durable task snapshot only after validating its exact live execution lease;
+ * historical records never resurrect work after execution retirement. */
 export interface BackgroundTasksUpdate {
   sessionUpdate: "background_tasks_update";
   tasks: BackgroundTask[];
@@ -1084,6 +1085,10 @@ export interface SessionInfo {
 }
 
 export interface NewSessionResponse {
+  /** Last confirmed qualification for a cloud conversation attachment. */
+  nativeCapabilities?: import("./cloud-agent-execution").CloudNativeCapabilities;
+  /** Exact live task snapshot when restoring a cloud attachment's metadata. */
+  backgroundTasks?: BackgroundTasksUpdate;
   /** Canonical Zeros-owned live route, never persisted as provider identity. */
   executionId: ExecutionId;
   /** @deprecated Compatibility alias for executionId. */
@@ -1100,6 +1105,7 @@ export interface NewSessionResponse {
 }
 
 export interface LoadSessionResponse {
+  nativeCapabilities?: import("./cloud-agent-execution").CloudNativeCapabilities;
   executionId?: ExecutionId;
   providerBinding?: ProviderBinding;
   providerMetadata?: ProviderMetadata;

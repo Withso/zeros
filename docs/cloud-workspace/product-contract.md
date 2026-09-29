@@ -9,10 +9,18 @@ not create a second, incompatible workspace model.
 
 Tenant ownership, the workspace's immutable execution placement, and an
 optional local replica are distinct. Personal workspaces are permanently
-device-local; Organization workspaces may be created locally or in cloud. A
-local Organization workspace remains Organization-governed but its live source,
-chat, paths, and processes remain private to its device. See
+device-local; new Organization workspaces are cloud-owned and provisioned through
+the control plane. Their durable records and settings live in cloud storage;
+the running engine may keep a recoverable local projection. Legacy local
+Organization rows remain readable without silently changing ownership. See
 [data, copies, and local sync](data-and-sync.md).
+
+The active desktop milestone is Organization ownership and managed Boat runtime
+parity. Later milestones are receive-only cloud-to-device directory sync,
+authorized commands on connected Macs, registered machines as primary hosts,
+and explicit copies to another host with fresh workspace identities. Directory
+sync never uploads device edits. An Apply-local-changes action and continuous
+bidirectional sync are outside the product plan.
 
 ## User-visible guarantees
 

@@ -71,9 +71,46 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
         "list-style-type"
       ],
     ).toBe("disc");
+    const retained = reference.locator(".zeros-agent-surface").filter({ visible: true });
+    await retained.evaluate((node) => { node.dataset.retainedHistoryProbe = "same-view"; });
+    const admissions = await reference.evaluate(() =>
+      window.archiveFixture.requests.filter((row) =>
+        ["fixture.ensureSession", "fixture.loadIntoChat"].includes(row.op),
+      ).length,
+    );
+    await reference.evaluate(() => window.archiveFixture.forgetRetainedSession("recent-chat"));
+    await expect(reference.getByText("Your saved conversation remains readable here.", { exact: true })).toBeVisible();
+    await expect(retained).toHaveAttribute("data-retained-history-probe", "same-view");
+    expect(await reference.evaluate(() =>
+      window.archiveFixture.requests.filter((row) =>
+        ["fixture.ensureSession", "fixture.loadIntoChat"].includes(row.op),
+      ).length,
+    )).toBe(admissions);
+    check("A retained chat rehydrates after session cleanup without restarting the agent", true);
+    await reference.evaluate(() => window.archiveFixture.forgetRetainedSession("recent-chat", true));
+    await expect.poll(() => reference.evaluate(() => window.archiveFixture.pendingHistoryReaders("recent-chat"))).toBeGreaterThan(0);
+    await reference.evaluate(() => window.archiveFixture.finishPendingHistory("recent-chat"));
+    await expect(reference.getByText("Your saved conversation remains readable here.", { exact: true })).toBeVisible();
+    expect(await reference.evaluate(() =>
+      window.archiveFixture.requests.filter((row) =>
+        ["fixture.ensureSession", "fixture.loadIntoChat"].includes(row.op),
+      ).length,
+    )).toBe(admissions);
+    check("Session cleanup during an in-flight history read retries after that read retires", true);
     expect(referenceErrors).toEqual([]);
   } finally {
     await reference.close();
+  }
+  const stopped = await page.context().browser().newPage({ viewport: page.viewportSize() });
+  try {
+    await stopped.goto(`${fixtureUrl}?cloud-stopped-reference`);
+    await expect(stopped.getByText("Your saved conversation remains readable here.", { exact: true })).toBeVisible();
+    expect(await stopped.evaluate(() => window.archiveFixture.requests.some((row) =>
+      ["fixture.ensureSession", "fixture.loadIntoChat", "fixture.sendPrompt"].includes(row.op),
+    ))).toBe(false);
+    check("A stopped cloud workspace hydrates saved history without waking or admitting an agent", true);
+  } finally {
+    await stopped.close();
   }
   await page.goto(fixtureUrl);
   const options = (title) =>

@@ -3,6 +3,8 @@ import { expect } from "@playwright/test";
 export async function runToolPresentationSmoke({ page, check }) {
   const fixture = page.locator("#tool-presentation-fixture");
   const rows = fixture.locator("#tool-presentation-rows");
+  await expect(rows).not.toContainText("Environment connected");
+  await expect(rows).not.toContainText("Environment disconnected");
   const providers = ["claude", "codex", "cursor"];
   for (const provider of providers) {
     const read = rows.getByRole("button", { name: `Read ${provider}.txt`, exact: true });
@@ -11,6 +13,9 @@ export async function runToolPresentationSmoke({ page, check }) {
   }
   await fixture.getByRole("button", { name: "Finish reads", exact: true }).click();
   await fixture.getByRole("button", { name: "Reload transcript", exact: true }).click();
+  await expect(rows).not.toContainText("Environment connected");
+  await expect(rows).not.toContainText("Environment disconnected");
+  check("Legacy environment connection metadata stays out of tools before and after reload", true);
   for (const provider of providers) {
     const read = rows.getByRole("button", { name: `Read 415 lines ${provider}.txt`, exact: true });
     await expect(read).toHaveAttribute("aria-expanded", "true");

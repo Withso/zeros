@@ -481,7 +481,7 @@ RuntimeClient.prototype.request = async function <
       createdAt: m.createdAt,
     }));
   else if (request.op === "turns.get") result = null;
-  else if (request.op === "workspace.list") result = [];
+  else if (request.op === "workspace.list") result = { workspaces: [] };
   else if (request.op === "settings.read")
     result = { doc: {}, raw: "", exists: true };
   return { type: "WORKSPACE_RESPONSE", op: request.op, result } as unknown as T;

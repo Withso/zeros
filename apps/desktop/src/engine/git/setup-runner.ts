@@ -457,6 +457,7 @@ export class SetupManager {
         worktreePath: cwd,
         repoRoot,
         baseBranch,
+        ...(ws ? { workspace: ws } : {}),
       });
       // Stop/archive can land while the login-shell PATH probe is awaiting.
       // The request has already been acknowledged, but no child may spawn now.

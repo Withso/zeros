@@ -37,6 +37,13 @@ suite("cloud engine liveness and compute convergence", () => {
     await resetMigratedTestDatabase(pool);
     f = await seedReadyCloudWorkspace(pool);
   });
+  it("retains a distinct expired-engine reason and incident reference", async () => {
+    await pool.query("UPDATE cloud_workspace_engine_instances SET last_heartbeat_at=now()-interval '2 minutes',lease_expires_at=now()-interval '1 minute' WHERE id=$1",[f.engineInstanceId]);
+    expect(await stopUnavailableCloudEngine(pool,null)).toBe(true);
+    const incident=(await pool.query("SELECT id,reason FROM cloud_workspace_diagnostic_incidents WHERE workspace_id=$1",[f.workspaceId])).rows[0];
+    expect(incident?.reason).toBe("engine_expired");
+    expect((await pool.query("SELECT last_error_message FROM cloud_workspaces WHERE id=$1",[f.workspaceId])).rows[0].last_error_message).toContain(incident.id);
+  });
   function worker(managedBoatDefault = false) {
     let state: CloudProviderResource["state"] = "running";
     const resource = (): CloudProviderResource => ({

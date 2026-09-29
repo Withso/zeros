@@ -16,6 +16,7 @@ import { cn } from "@/renderer/shared/ui/cn";
 export interface CodeTextareaProps {
   /** The shell command being edited. */
   value: string;
+  readOnly?: boolean;
   /** Fires on user edits with the complete command text. */
   onChange?: (value: string) => void;
   /** Optional context rendered above the numbered editor. */
@@ -28,6 +29,7 @@ export interface CodeTextareaProps {
 
 export function CodeTextarea({
   value,
+  readOnly = false,
   description,
   onChange,
   id,
@@ -48,6 +50,7 @@ export function CodeTextarea({
       )}
       <CodeEditor
         value={value}
+        readOnly={readOnly}
         onChange={onChange}
         filePath="command.sh"
         compact

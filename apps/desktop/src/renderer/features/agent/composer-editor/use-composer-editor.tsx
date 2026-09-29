@@ -72,14 +72,16 @@ import {
   type MentionItem,
 } from "../mentions";
 import { MentionFileSearch } from "../mention-files-cache";
+import { ComposerPrSearch } from "../composer-pr-search";
 import { filterSlashCommands } from "../slash-command-filter";
+import {filterCloudNativeCommands} from "../cloud-native-ui";
+import type {CloudNativeCapabilities} from "@zeros/protocol/cloud-agent-execution";
 import { filterPrs, type PrPickerItem } from "../pr-picker";
 import {
   composerCommandsFor,
   mergeCommands,
 } from "../../../platform/bridge/agent-events";
 import type { AvailableCommand } from "../../../platform/bridge/agent-events";
-import { ghPrList } from "../../../platform/git";
 import { listSkills } from "../../../platform/app";
 import { useBrowserPickerSelection } from "../../../state/workspace-store";
 import { useWorkspaceProvisioning } from "../../../state/pending-workspaces";
@@ -132,6 +134,7 @@ export interface UseComposerEditorOpts {
   originUrl: string | null;
   /** Session-discovered slash commands (merged under the curated floor). */
   availableCommands: AvailableCommand[];
+  cloudNativeCapabilities?: CloudNativeCapabilities;
   placeholder: string;
   /** Plain Enter / ⌘Enter. */
   onSubmit: () => void;
@@ -360,16 +363,16 @@ export function useComposerEditor(
     executeGraphSync(cwd, plan);
   }, []);
 
-  const prsRef = useRef<PrPickerItem[]>([]);
-  // Load state for the @-file list and #-PR fetch, so the pickers can show a
-  // real "Loading…" / "Couldn't load…" message instead of silently empty.
-  const prsStatusRef = useRef<SuggestionStatus>("ready");
   // Re-pushes fresh items into the open picker when an async load lands.
   // Assigned below once the item getters exist; called indirectly through this
   // ref to sidestep the getPrItems → ensurePrsLoaded → refresh declaration cycle.
   const refreshRef = useRef<() => void>(() => {});
   const filesSearch = useMemo(
     () => new MentionFileSearch(() => refreshRef.current()),
+    [],
+  );
+  const prsSearch = useMemo(
+    () => new ComposerPrSearch(() => refreshRef.current()),
     [],
   );
   const filesQueryRef = useRef("");
@@ -416,11 +419,11 @@ export function useComposerEditor(
     // entries win on a name clash (they're authoritative + already kind-tagged
     // at the adapter); project skills fill in instantly and cover Cursor.
     () =>
-      composerCommandsFor(
+      filterCloudNativeCommands(composerCommandsFor(
         agentId,
         mergeCommands(projectSkills, availableCommands),
-      ),
-    [agentId, availableCommands, projectSkills],
+      ),agentId==="codex"?cwd:null,opts.cloudNativeCapabilities),
+    [agentId, availableCommands, projectSkills,cwd,opts.cloudNativeCapabilities],
   );
   const slashCommandsRef = useRef(slashCommands);
   slashCommandsRef.current = slashCommands;
@@ -465,30 +468,16 @@ export function useComposerEditor(
     [filesSearch, store],
   );
 
-  // ── #-PRs: lazy-load once per origin when first queried ──
-  const prsLoadedForUrl = useRef<string | null>(null);
-  const ensurePrsLoaded = useCallback(() => {
-    const url = originUrlRef.current;
-    if (!url || prsLoadedForUrl.current === url) return;
-    prsLoadedForUrl.current = url;
-    prsStatusRef.current = "loading";
-    void ghPrList({ originUrl: url, state: "open" })
-      .then((list) => {
-        prsRef.current = list.map((p) => ({
-          number: p.number,
-          title: p.title,
-        }));
-        prsStatusRef.current = "ready";
-      })
-      .catch(() => {
-        // No remote / not signed in / network timeout. Surface it as an error
-        // and clear the dedup latch so reopening the picker retries (a
-        // transient failure self-heals on the next "#").
-        prsStatusRef.current = "error";
-        prsLoadedForUrl.current = null;
-      })
-      .finally(() => refreshRef.current());
-  }, []);
+  useLayoutEffect(() => {
+    prsSearch.clear();
+    refreshRef.current();
+    return () => prsSearch.clear();
+  }, [cwd, originUrl, opts.attachmentImagesActive, prsSearch]);
+
+  useEffect(() => store.subscribe(() => {
+    const state = store.getSnapshot();
+    if (!state.open || state.trigger !== "#") prsSearch.clear();
+  }), [prsSearch, store]);
 
   // ── stable suggestion data + pick handlers (read refs) ──
   const getMentionItems = useCallback(
@@ -516,11 +505,19 @@ export function useComposerEditor(
 
   const getPrItems = useCallback(
     (query: string): PrPickerItem[] => {
-      ensurePrsLoaded();
-      return filterPrs(prsRef.current, query);
+      if (optsRef.current.attachmentImagesActive === false) return [];
+      const dir = optsRef.current.cwd, url = originUrlRef.current;
+      prsSearch.search(dir, url);
+      return filterPrs(prsSearch.snapshot(dir, url)?.data ?? [], query);
     },
-    [ensurePrsLoaded],
+    [prsSearch],
   );
+
+  const getPrStatus = useCallback((): SuggestionStatus => {
+    const snapshot = prsSearch.snapshot(optsRef.current.cwd, originUrlRef.current);
+    if (!snapshot || snapshot.data !== undefined) return "ready";
+    return snapshot.error ? "error" : "loading";
+  }, [prsSearch]);
 
   const prEnabled = useCallback(() => !!originUrlRef.current, []);
 
@@ -537,16 +534,15 @@ export function useComposerEditor(
       trigger === "@"
         ? getFilesStatus()
         : trigger === "#"
-          ? prsStatusRef.current
+          ? getPrStatus()
           : "ready",
-    [getFilesStatus],
+    [getFilesStatus, getPrStatus],
   );
 
   // Recompute the open picker's items + status after an async load lands, so
   // "Loading…" flips to results / empty / error without an extra keystroke.
-  // Reads the existing refs directly (getMentionItems / filterPrs) rather than
-  // getPrItems — the latter re-kicks ensurePrsLoaded, which on the error path
-  // (where the dedup latch is cleared for retry) would loop fetch→fail→refresh.
+  // Search subscriptions latch their exact key until close/switch, so a
+  // failed load notification cannot turn refresh into an automatic retry loop.
   const refreshActiveSuggestion = useCallback(() => {
     const s = store.getSnapshot();
     if (!s.open) return;
@@ -560,15 +556,15 @@ export function useComposerEditor(
       });
     } else if (s.trigger === "#") {
       store.setData({
-        items: filterPrs(prsRef.current, s.query),
-        status: prsStatusRef.current,
+        items: getPrItems(s.query),
+        status: getPrStatus(),
       });
     } else if (s.trigger === "/") {
       // Project skills land async (listSkills) → re-push into an already-open
       // "/" menu so they appear without the user re-typing.
       store.setData({ items: getSlashItems(s.query), status: "ready" });
     }
-  }, [store, getMentionItems, getSlashItems, getFilesStatus]);
+  }, [store, getMentionItems, getSlashItems, getFilesStatus, getPrItems, getPrStatus]);
   refreshRef.current = refreshActiveSuggestion;
 
   const onPickMention = useCallback(

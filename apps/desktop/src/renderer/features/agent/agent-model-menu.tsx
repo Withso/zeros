@@ -166,6 +166,7 @@ export function AgentModelMenu({
   onOpenChange,
   triggerTooltip = "Change model",
   redirectCrossAgent = false,
+  selectionTiming,
   children,
 }: {
   /** Registry snapshot override (the dispatcher passes its own). When
@@ -192,6 +193,7 @@ export function AgentModelMenu({
   /** When true (a chat whose session already started), picking a model under a
    *  DIFFERENT agent opens a new chat tab instead of switching in place. */
   redirectCrossAgent?: boolean;
+  selectionTiming?: "next-message";
   /** The trigger element (rendered via PopoverTrigger asChild). */
   children: React.ReactNode;
 }) {
@@ -447,7 +449,7 @@ export function AgentModelMenu({
         onOpenChange(nextOpen);
       }}
     >
-      <Tooltip label={triggerTooltip}>
+      <Tooltip label={selectionTiming === "next-message" ? "Model, effort and Fast apply to the next message" : triggerTooltip}>
         <PopoverTrigger asChild>{children}</PopoverTrigger>
       </Tooltip>
       <PopoverContent
@@ -472,6 +474,7 @@ export function AgentModelMenu({
         // composer without painting an unrelated ring on the trigger pill.
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
+        {selectionTiming === "next-message" && <p className="text-fg3 px-3 py-2 text-xs" role="note">Model, effort and Fast apply to the next message.</p>}
         {/* Active-model configuration stays inline. The Model section below is
             collapsed until search or selected-row hover/focus asks for more. */}
         {canConfigureActive &&

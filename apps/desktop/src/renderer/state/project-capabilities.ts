@@ -1,4 +1,5 @@
 import { workspaceInspectFolder } from "../platform/git";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import {
   applyProjectGitInspection,
   loadProjects,
@@ -11,6 +12,7 @@ const pending = new Map<string, Promise<boolean>>();
 /** One inspection per exact owner in flight. The persisted project is the
  * last confirmed snapshot; a failed read never clears it. */
 export function refreshProjectCapabilities(owner: Project): Promise<boolean> {
+  if (isCloudWorkspace(owner.repoRoot)) return Promise.resolve(false);
   const key = JSON.stringify([owner.id, owner.repoRoot]);
   const current = pending.get(key);
   if (current) return current;

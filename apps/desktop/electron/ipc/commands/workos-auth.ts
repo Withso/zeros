@@ -1,8 +1,6 @@
-import { shell } from "electron";
-
 import { channel, schemeForChannel } from "../../../src/engine/runtime";
 import { appBaseUrl } from "../../app-base-url";
-import { devWorkOSConfigurationIssue } from "../../dev-workos-auth-policy";
+import { devWorkOSConfigurationIssue, workspaceDevAuthProfile } from "../../dev-workos-auth-policy";
 import { desktopAuthConfig } from "../../workos-desktop-config";
 import {
   controlPlaneBaseUrl,
@@ -16,9 +14,16 @@ import type { CommandHandler } from "../router";
 import { cancelLegacyAuthHandoff } from "./auth-handoff";
 import { persistWorkOSSession } from "./auth-session";
 import { WorkOSDevCallbackRelay } from "../../workos-dev-callback-relay";
+import { localDevCallbackStore } from "../../local-dev-callback-store";
 
 let flow: WorkOSDesktopAuthorizationFlow | null = null;
 let callbackRelay: WorkOSDevCallbackRelay | null = null;
+let localCallbackRelay: WorkOSDevCallbackRelay | null = null;
+
+function isolatedDevCallbackRelay(): WorkOSDevCallbackRelay | null {
+  if (channel() !== "dev") return null;
+  return (localCallbackRelay ??= new WorkOSDevCallbackRelay(localDevCallbackStore()));
+}
 
 /** Share callback routing only for Dev instances using the shared secret store. */
 function sharedDevCallbackRelay(): WorkOSDevCallbackRelay | null {
@@ -34,11 +39,14 @@ function workOSFlow(): WorkOSDesktopAuthorizationFlow {
     client: workOSDesktopClientForMain(),
     appOrigin: appBaseUrl(),
     deepLinkScheme: schemeForChannel(channel()),
-    openExternal: (url) => shell.openExternal(url),
+    openExternal: async (url) => {
+      const { openDesktopAuthBrowser } = await import("../../deep-link");
+      await openDesktopAuthBrowser(url);
+    },
     resolveAccountId: resolveWorkOSDesktopAccountId,
     persistSession: persistWorkOSSession,
     registerCallback: (state, expiresAt, accept) =>
-      sharedDevCallbackRelay()?.register(state, expiresAt, accept) ??
+      (workspaceDevAuthProfile() !== undefined ? isolatedDevCallbackRelay() : sharedDevCallbackRelay())?.register(state, expiresAt, accept) ??
       (() => undefined),
     revokeSession: async (accessToken) => {
       if (!(await requestWorkOSDesktopRevocation("current", accessToken))) {
@@ -60,7 +68,13 @@ export function acceptWorkOSDesktopCallback(input: {
   error?: string | null;
 }): boolean {
   const relay = sharedDevCallbackRelay();
-  return relay ? relay.deliver(input) : (flow?.acceptCallback(input) ?? false);
+  // Any Dev window may receive zeros-dev://. Routing is shared independently
+  // from credentials so an isolated workspace can finish its own PKCE flow.
+  if (channel() === "dev") {
+    try { if (isolatedDevCallbackRelay()?.deliver(input)) return true; }
+    catch { console.warn("[auth] Local Dev callback relay unavailable"); }
+  }
+  return relay?.deliver(input) || (flow?.acceptCallback(input) ?? false);
 }
 
 /** Unified entry point: WorkOS stays entirely in Electron main; Auth0 tells the
@@ -83,6 +97,8 @@ export const authStartSignIn: CommandHandler = async () => {
         auth: config,
         appOrigin: appBaseUrl(),
         controlPlaneOrigin: controlPlaneBaseUrl(),
+        localProfile: workspaceDevAuthProfile(),
+        isolated: process.env.ZEROS_ISOLATE === "1",
       });
     } catch {
       issue = "token_contract";

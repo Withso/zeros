@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ChatThread } from "../store";
-import { reconcileChatSnapshot } from "../chat-reconciliation";
+import { canMirrorChat, reconcileChatSnapshot } from "../chat-reconciliation";
 
 function chat(id: string, updatedAt: number, title = id): ChatThread {
   return {
@@ -24,6 +24,31 @@ function chat(id: string, updatedAt: number, title = id): ChatThread {
 }
 
 describe("chat snapshot reconciliation", () => {
+  const cloudFolder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+  it("retains cached cloud chats without uploading them before their own history snapshot is confirmed", () => {
+    const cached = { ...chat("cloud", 3), folder: cloudFolder };
+    const local = chat("local", 3);
+    const result = reconcileChatSnapshot([cached, local], [], []);
+    expect(result.chats).toEqual([cached, local]);
+    expect(result.rowsToPush).toEqual([local]);
+    expect(canMirrorChat(cached, new Set())).toBe(false);
+    expect(canMirrorChat(local, new Set())).toBe(true);
+    expect(canMirrorChat(cached, new Set([cloudFolder]))).toBe(true);
+  });
+  it("allows newer cloud metadata only after confirmation of the exact workspace", () => {
+    const cached = { ...chat("cloud", 3), folder: cloudFolder };
+    const remote = { ...cached, updatedAt: 2 };
+    expect(reconcileChatSnapshot([cached], [remote], [], []).rowsToPush).toEqual([]);
+    expect(reconcileChatSnapshot([cached], [remote], [], [cloudFolder]).rowsToPush).toEqual([cached]);
+    expect(reconcileChatSnapshot([cached], [], [], [cloudFolder + "-other"]).rowsToPush).toEqual([]);
+  });
+  it("confirms a nested cloud cwd by its workspace owner without admitting malformed paths", () => {
+    const confirmed = new Set([cloudFolder]);
+    expect(canMirrorChat({ folder: cloudFolder + "/packages/app" }, confirmed)).toBe(true);
+    expect(canMirrorChat({ folder: cloudFolder.toUpperCase() }, confirmed)).toBe(true);
+    expect(canMirrorChat({ folder: cloudFolder + "/../other" }, confirmed)).toBe(false);
+    expect(canMirrorChat({ folder: "cloud://invalid" }, confirmed)).toBe(false);
+  });
   it("accepts an engine mode change despite a newer local title and rejects an older mode response", () => {
     const local = { ...chat("a", 5, "new title"), composerMode: "code" as const, composerModeRevision: 0 };
     const remote = { ...chat("a", 2), composerMode: "design" as const, composerModeRevision: 1 };

@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { currentCloudFilePolicy } from "./cloud-file-policy";
 import { runFile } from "../git/git-exec";
 import {
   assertContextDirectory,
@@ -131,6 +132,8 @@ export async function migrateLegacyContextDirectory(
       );
     const source = path.join(sourceRoot, relative);
     const target = path.join(targetRoot, relative);
+    currentCloudFilePolicy()?.assertPath(path.relative(workspaceRoot, source), true);
+    currentCloudFilePolicy()?.assertPath(path.relative(workspaceRoot, target), true);
     const stat = await fs.lstat(source);
     const existing = await statIfPresent(target);
     if (stat.isDirectory()) {

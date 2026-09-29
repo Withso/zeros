@@ -36,6 +36,7 @@ import {
   bridgeContextGraphSetShared,
   bridgeMessageWindow,
   bridgeMessageWindowOlder,
+  bridgeChatSnapshot,
 } from "../workspace-bridge";
 import type { RuntimeClient } from "../ws-client";
 
@@ -50,6 +51,15 @@ function fakeBridge(resp: unknown, seen: { op?: string; type?: string } = {}) {
     },
   } as unknown as RuntimeClient;
 }
+
+describe("chat snapshot authority", () => {
+  it.each([undefined, {}, { chats: null }, { chats: "invalid" }])("rejects malformed history instead of confirming an empty Local workspace (%j)", async result => {
+    await expect(bridgeChatSnapshot(fakeBridge({ type: "WORKSPACE_RESPONSE", result }))).rejects.toThrow(/conversation list/);
+  });
+  it("accepts an explicitly empty conversation list", async () => {
+    expect(await bridgeChatSnapshot(fakeBridge({ type: "WORKSPACE_RESPONSE", result: { chats: [] } }))).toEqual({ chats: [], chatDeletions: [], confirmedCloudWorkspaces: [] });
+  });
+});
 
 describe("requestWorkspaceList", () => {
   it("binds snapshot disposal to the reviewed archive and routes recovery separately", async () => {

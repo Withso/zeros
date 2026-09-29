@@ -98,6 +98,7 @@ function Workspaces() {
         {canCreateWorkspaceIn(active, "cloud") ? "allowed" : "blocked"}
       </output>
       <Button
+        disabled={!canCreateWorkspaceIn(active, "local")}
         onClick={() => {
           const owner = localWorkspaceOwner(
             getActiveOrganizationSnapshot(),

@@ -9,7 +9,9 @@ import {CODEX_AUTH_RUNTIME_VERSION,parseCodexNativeCache,type CodexNativeAuthCac
 const require=createRequire(import.meta.url);
 let active=0;
 function unavailable(){return new Error("Codex authentication renewal is unavailable");}
-export type CodexAuthRenewer=(cache:CodexNativeAuthCache,dispatch:()=>Promise<void>)=>Promise<CodexNativeAuthCache>;
+/** dispatch must commit durably before any provider-side rotation can happen. */
+export type CredentialRenewer<Material>=(cache:Material,dispatch:()=>Promise<void>)=>Promise<Material>;
+export type CodexAuthRenewer=CredentialRenewer<CodexNativeAuthCache>;
 
 async function binary(){
   if(process.platform!=="linux"||!["x64","arm64"].includes(process.arch))throw unavailable();

@@ -22,6 +22,7 @@ describe("ZerosEngine.stop", () => {
     const calls: string[] = [];
     const engine = {
       running: true,
+      cloudIdleStop: { close: async () => { calls.push("idle-stop"); } },
       cloudRuntimeRegistration: {
         stop: async () => {
           calls.push("cloud-registration");
@@ -68,6 +69,7 @@ describe("ZerosEngine.stop", () => {
       ]),
     );
     expect(calls).toEqual([
+      "idle-stop",
       "product-tools",
       "cloud-registration",
       "agents",

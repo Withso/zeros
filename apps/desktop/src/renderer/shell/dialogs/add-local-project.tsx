@@ -105,12 +105,12 @@ export function AddLocalProjectDialog({
     }
     // Ownership is part of the user's adoption intent. Capture it before any
     // project registration or bridge work so a switch cannot retarget the row.
-    const owner = localWorkspaceOwner(
-      getActiveOrganizationSnapshot(),
-      getActiveOrganizationIdSnapshot(),
-    );
     setBusy(true);
     try {
+      const owner = localWorkspaceOwner(
+        getActiveOrganizationSnapshot(),
+        getActiveOrganizationIdSnapshot(),
+      );
       // Register the PRIMARY checkout as the project (so Local main is the real
       // trunk), NOT the picked worktree. The engine resolved it via
       // git-common-dir; fall back to the picked path only if that failed

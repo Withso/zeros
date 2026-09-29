@@ -1,3 +1,6 @@
+import type pg from "pg";
+import { parseSetupDiagnostic, classifyCloudFailure, diagnosticCode, type SetupDiagnostic, type CloudDiagnosticPhase } from "./cloud-diagnostics.js";
+import { retainCloudDiagnostic, diagnosticStorageFailed } from "./cloud-diagnostic-store.js";
 import {
   CloudProviderError,
   isCloudWorkspaceProviderName,
@@ -62,6 +65,7 @@ export type DaytonaSetupCommandRunner = CloudWorkspaceCommandRunner;
 
 export type CloudWorkspaceLinuxSetupExecutorOptions = {
   admissionBroker: CloudWorkspaceSetupAdmissionBroker;
+  diagnosticPool?: pg.Pool;
   commandRunner?: DaytonaSetupCommandRunner;
   commandRunnerResolver?: (
     execution: CloudWorkspaceSetupExecution,
@@ -353,23 +357,34 @@ function parseReadyResponse(
   };
 }
 
-function helperFailure(output: string): CloudWorkspaceSetupError {
+function helperFailure(
+  output: string,
+  execution: CloudWorkspaceSetupExecution,
+): CloudWorkspaceSetupError {
   try {
     const parsed = JSON.parse(output) as Record<string, unknown>;
     if (
-      exactKeys(parsed, ["audience", "code", "outcome", "version"]) &&
-      parsed.version === 1 &&
+      ((parsed.version === 1 && exactKeys(parsed, ["audience", "code", "outcome", "version"])) ||
+        (parsed.version === 2 && exactKeys(parsed, ["audience", "code", "outcome", "version", "diagnostic"]) && parseSetupDiagnostic(parsed.diagnostic))) &&
       parsed.audience === SETUP_RESULT_AUDIENCE &&
       parsed.outcome === "error" &&
       typeof parsed.code === "string"
     ) {
       const mapped = HELPER_FAILURES[parsed.code];
       if (mapped) {
-        return setupError(
+        // Boat can expose its command channel while snapshot restoration is
+        // still replacing runtime files. A failed proof never admits the VM:
+        // let the setup worker's bounded claim budget rerun the entire helper
+        // with fresh credentials and a new fence. Persistent mismatches exhaust
+        // that budget and fail closed; other providers keep their policy.
+        const restoringBoatImage =
+          execution.provider.name === "boat" &&
+          parsed.code === "image_contract_invalid";
+        return Object.assign(setupError(
           mapped.code,
           "Cloud workspace setup helper did not complete",
-          mapped.retryable,
-        );
+          mapped.retryable || restoringBoatImage,
+        ), parsed.version === 2 ? { diagnostic: parseSetupDiagnostic(parsed.diagnostic)! } : {});
       }
     }
   } catch {
@@ -388,11 +403,11 @@ function normalizeExecutionError(error: unknown): CloudWorkspaceSetupError {
     const code = /^[a-z][a-z0-9_]{0,119}$/.test(error.code)
       ? `setup_${error.code}`
       : "setup_provider_failure";
-    return setupError(
+    return Object.assign(setupError(
       code,
       "Cloud workspace provider command did not complete",
       error.retryable,
-    );
+    ), "diagnostic" in error && parseSetupDiagnostic(error.diagnostic) ? { diagnostic: parseSetupDiagnostic(error.diagnostic)! } : {});
   }
   return setupError(
     "setup_provider_failure",
@@ -413,7 +428,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
   private readonly timeoutSeconds: number;
   private readonly now: () => number;
 
-  constructor(options: CloudWorkspaceLinuxSetupExecutorOptions) {
+  constructor(private readonly options: CloudWorkspaceLinuxSetupExecutorOptions) {
     if (
       (options.commandRunner ? 1 : 0) +
         (options.commandRunnerResolver ? 1 : 0) !==
@@ -435,6 +450,20 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
     this.now = options.now ?? Date.now;
   }
 
+  private async retain(execution: CloudWorkspaceSetupExecution, error: unknown, phase: CloudDiagnosticPhase, sourceError?: unknown): Promise<void> {
+    if (!this.options.diagnosticPool) return;
+    const setup = parseSetupDiagnostic((error as { diagnostic?: SetupDiagnostic } | null)?.diagnostic);
+    const typed = classifyCloudFailure(sourceError ?? error, setup?.phase ?? phase);
+    const code = diagnosticCode((error as {code?:unknown}|null)?.code);
+    typed.code = code === "compute_reconciliation_failed" ? "setup_provider_failure" : code;
+    if (error instanceof CloudWorkspaceSetupError) typed.retryable = error.retryable;
+    try {
+      const incidentId = await retainCloudDiagnostic(this.options.diagnosticPool, { ...execution, operationKind: "setup", operationId: execution.setupRunId },
+        { ...typed, ...(setup ? { setup } : {}), retryCount: Math.min(10000,execution.attempt), decision: "reject_setup", claim: "current" });
+      if (incidentId && error instanceof Error) Object.assign(error, { incidentId });
+    } catch { await diagnosticStorageFailed(this.options.diagnosticPool); }
+  }
+
   async execute(
     execution: CloudWorkspaceSetupExecution,
     signal: AbortSignal,
@@ -454,19 +483,19 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
         ? await this.commandRunnerResolver(execution)
         : this.commandRunner!;
     } catch (error) {
-      throw normalizeExecutionError(error);
+      const failure = normalizeExecutionError(error);
+      await this.retain(execution,failure,"bootstrap",error);
+      throw failure;
     }
 
     let admission: CloudWorkspaceSetupAdmission;
     try {
       admission = await this.admissionBroker.issue(execution, signal);
     } catch (error) {
-      if (error instanceof CloudWorkspaceSetupError) throw error;
-      throw setupError(
-        "setup_admission_unavailable",
-        "Cloud workspace setup admission is temporarily unavailable",
-        true,
-      );
+      const failure = error instanceof CloudWorkspaceSetupError ? error : setupError(
+        "setup_admission_unavailable", "Cloud workspace setup admission is temporarily unavailable", true);
+      await this.retain(execution,failure,"setup_admission",error);
+      throw failure;
     }
 
     let disposition: AdmissionDisposition = "failed";
@@ -507,7 +536,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
           false,
         );
       }
-      if (response.exitCode !== 0) throw helperFailure(response.output);
+      if (response.exitCode !== 0) throw helperFailure(response.output, execution);
       result = parseReadyResponse(
         response.output,
         execution,
@@ -516,17 +545,20 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       disposition = "completed";
     } catch (error) {
       failure = normalizeExecutionError(error);
+      await this.retain(execution,failure,"bootstrap",error);
       if (failure.code === "setup_admission_invalid") disposition = "rejected";
     }
 
     try {
       await this.admissionBroker.revoke(admission, disposition);
-    } catch {
-      throw setupError(
+    } catch (error) {
+      const revokeFailure = setupError(
         "setup_admission_revoke_failed",
         "Cloud workspace setup admission could not be retired",
         true,
       );
+      await this.retain(execution,revokeFailure,"setup_admission",error);
+      throw revokeFailure;
     }
     if (failure) throw failure;
     return result!;

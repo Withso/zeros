@@ -44,6 +44,8 @@ import type {
   ExecutionBoundaryStatus,
 } from "./containment";
 
+import type { CloudGithubNativeGrantRequest } from "./github-auth";
+
 export type MessageSource = "browser" | "engine";
 
 // ── Agent registry entry (mirror of the engine-side shape) ─
@@ -861,6 +863,9 @@ export interface AgentForkConversationMessage extends BaseMessage {
   agentId: string;
   sourceChatId: ConversationId;
   destinationChatId: ConversationId;
+  /** Cloud can qualify the shared bounded transcript handoff independently
+   * from Codex's full native-history fork. Local keeps its existing behavior. */
+  forkStrategy?: "native" | "transcript";
   /** Engine workspace id for the destination conversation. Remote clients must
    * supply it; the engine still verifies it against the persisted chat. */
   workspaceId?: WorkspaceId;
@@ -1311,6 +1316,11 @@ export interface AgentBinaryResolvedMessage extends BaseMessage {
   resolvedVia: "override" | "well-known" | "path" | "fallback";
 }
 
+export interface GithubNativeGrantRequestMessage extends BaseMessage {
+  type: "GITHUB_NATIVE_GRANT_REQUEST";
+  request: CloudGithubNativeGrantRequest;
+}
+
 // ── Union ────────────────────────────────────────────────
 
 export type BridgeMessage =
@@ -1323,6 +1333,7 @@ export type BridgeMessage =
   | GithubTokenSetMessage
   | GithubTokenChangedMessage
   | GithubCredentialChangedMessage
+  | GithubNativeGrantRequestMessage
   | EngineErrorMessage
   // Agent (browser → engine)
   | AgentListAgentsMessage

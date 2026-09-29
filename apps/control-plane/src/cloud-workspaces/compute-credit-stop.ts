@@ -2,6 +2,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withSystemTx } from "../db.js";
 import { audit } from "../audit.js";
+import { cloudStopReason, diagnosticCode } from "./cloud-diagnostics.js";
+import { findInitiatingCloudStopTx, tryRetainCloudDiagnosticTx } from "./cloud-diagnostic-store.js";
 import { enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import { cancelCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
@@ -15,6 +17,7 @@ export async function requestManagedComputeStop(
   input: {
     leaseId: string;
     reason: string;
+    incidentId?: string;
     force?: boolean;
     checkpointDeadlineMs?: number;
     expectedLeaseOwner?: string;
@@ -60,8 +63,8 @@ export async function requestManagedComputeStop(
     if (input.expectedLeaseOwner !== undefined &&
         (lease.lease_owner !== input.expectedLeaseOwner || !lease.claim_live)) return;
     await tx.query(
-      "UPDATE managed_compute_allocation_leases SET state='draining',last_error_code=$2,updated_at=now() WHERE id=$1",
-      [input.leaseId, input.reason],
+      "UPDATE managed_compute_allocation_leases SET state='draining',updated_at=now() WHERE id=$1",
+      [input.leaseId],
     );
     if (workspace.desired_state === "deleted" || workspace.status === "deleted")
       return;
@@ -109,19 +112,34 @@ export async function requestManagedComputeStop(
         pending.checkpoint_state === "succeeded")
     )
       return;
+    // An existing stop covers normal drain observations. Only a new stop or a
+    // required escalation reaches evidence retention; reuse its initiating
+    // cause when replacing the checkpoint with a direct safety stop.
+    const initiating = await findInitiatingCloudStopTx(tx, {
+      workspaceId:scope.workspace_id,organizationId:scope.org_id,generation:scope.generation,leaseId:input.leaseId,
+      workspaceStopping:workspace.desired_state !== "running" || ["stopping","stopped","failed","archiving","archived"].includes(workspace.status),
+    });
+    const code = initiating ? diagnosticCode(initiating.code) : input.reason;
+    const incidentId = initiating?.id ?? input.incidentId ?? await tryRetainCloudDiagnosticTx(tx, {
+      workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
+      operationKind: "compute", operationId: input.leaseId, ...(input.expectedLeaseOwner ? { leaseOwner: input.expectedLeaseOwner } : {}),
+    }, { phase: "authority_check", code: diagnosticCode(code), errorClass: "unknown", retryable: false,
+      decision: input.force ? "direct_stop" : "checkpoint", claim: "current" });
+    const reason = cloudStopReason(code);
+    await tx.query("UPDATE managed_compute_allocation_leases SET last_error_code=$2 WHERE id=$1",[input.leaseId,code]);
     const key = `system:compute-stop:${randomUUID()}`;
     if (affectsWorkspace) {
       await tx.query(
         `UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),updated_at=now(),
         lease_owner=NULL,lease_expires_at=NULL,error_code=$2,error_message='Managed compute stop replaced this intent'
         WHERE workspace_id=$1 AND affects_workspace AND operation<>'delete' AND state IN ('queued','observing')`,
-        [scope.workspace_id, input.reason],
+        [scope.workspace_id, code],
       );
       await tx.query(
         `UPDATE workspace_checkpoint_requests request SET state='cancelled',completed_at=now(),error_code=$2
         FROM cloud_workspace_lifecycle_intents intent WHERE request.lifecycle_intent_id=intent.id AND intent.workspace_id=$1
         AND intent.state='superseded' AND request.state IN ('queued','delivered')`,
-        [scope.workspace_id, input.reason],
+        [scope.workspace_id, code],
       );
     }
     const intentId = randomUUID();
@@ -169,8 +187,8 @@ export async function requestManagedComputeStop(
       });
       await tx.query(
         `UPDATE cloud_workspaces SET desired_state='stopped',status='stopping',authority_epoch=authority_epoch+1,
-        version=version+1,updated_at=now(),last_error_code=$2,last_error_message='Managed compute stopped at its funded limit' WHERE id=$1`,
-        [scope.workspace_id, input.reason],
+        version=version+1,updated_at=now(),last_error_code=$2,last_error_message=$3 WHERE id=$1`,
+        [scope.workspace_id, code, `${reason.message}${incidentId ? ` (incident ${incidentId})` : ''}`],
       );
     }
     await tx.query(
@@ -186,7 +204,9 @@ export async function requestManagedComputeStop(
         workspaceId: scope.workspace_id,
         generation: scope.generation,
         leaseId: input.leaseId,
-        reason: input.reason,
+        reason: code,
+        stopReason: reason.code,
+        incidentId,
         intentId,
         checkpointRequestId: checkpoint?.id ?? null,
         deadlineFallback: input.force === true,
