@@ -15,7 +15,7 @@ import {
   manageCloudWorkspaceQuota,
   validateCloudWorkspaceQuotaRequest,
 } from "./manage-cloud-workspace-quota.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -25,8 +25,7 @@ d("owner-managed cloud-workspace Organization entitlements", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   afterAll(async () => {

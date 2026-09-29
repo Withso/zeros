@@ -2,7 +2,7 @@ import {randomUUID} from "node:crypto";
 import pg from "pg";
 import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from "vitest";
 import {ensureUser} from "../auth.js";
-import {runMigrations} from "../migrate.js";
+import {resetMigratedTestDatabase} from "../test-database.js";
 import {getSecuritySnapshot,listSecurityEvents,publishPendingSecurityEvents,PostgresSecurityEventBroker,startSecurityEventPublisher} from "../security-events.js";
 import {seedReadyCloudWorkspace,seedReadyProCloudWorkspace} from "./test-fixtures.js";
 import {DatabaseCloudWorkspaceCollaborationService} from "./actors.js";
@@ -15,7 +15,7 @@ d("cloud workspace directory live updates",()=>{
   let pool:pg.Pool;
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:5});});
   afterAll(async()=>{await pool.end();});
-  beforeEach(async()=>{await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await runMigrations(pool);});
+  beforeEach(async()=>{await resetMigratedTestDatabase(pool);});
   const user=(id:string)=>ensureUser(pool,{provider:"workos",providerSubject:`workos|${id}`,email:`durable-${id}@example.test`,displayName:"Directory actor"});
   it("delivers deletion refreshes to more than 100 Pro viewers in bounded pages",async()=>{
     const fixture=await seedReadyProCloudWorkspace(pool);

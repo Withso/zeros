@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { ensureUser, resolveAuthenticatedUser } from "./auth.js";
 import { DeletionLifecycleProcessor } from "./deletion-lifecycle.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import {
   MAX_ACCOUNT_WORKOS_ERASURE_SUBJECTS,
   workOSProviderSubjectHash,
@@ -86,8 +86,7 @@ d("late WorkOS authentication during account erasure", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   afterAll(async () => pool.end());

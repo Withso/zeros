@@ -7,7 +7,7 @@ import {
   manageCloudWorkspaceObjectRotationRetry,
   validateCloudWorkspaceObjectRotationRetry,
 } from "../manage-cloud-workspace-object-rotation.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   DatabaseCloudWorkspaceBlobService,
   MemoryCloudWorkspaceObjectStore,
@@ -391,8 +391,7 @@ d("workspace object maintenance", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   it("rotates ciphertext without changing the logical blob id or plaintext", async () => {

@@ -5,7 +5,7 @@ import pg from "pg";
 
 import { ensureUser, type AuthedUser } from "../auth.js";
 import { withSystemTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   authorizeCloudWorkspaceOperation,
   CloudWorkspaceAuthorizationError,
@@ -28,8 +28,7 @@ d("cloud paid-work authorization", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     owner = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_${randomUUID().replaceAll("-", "")}`,

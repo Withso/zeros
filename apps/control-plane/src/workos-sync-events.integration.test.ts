@@ -3,7 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ensureUser } from "./auth.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import {
   WorkOSEventsReconciler,
   ingestWorkOSManagementEvent,
@@ -35,8 +35,7 @@ d("WorkOS normalized event synchronization", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 4 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   afterAll(async () => pool.end());

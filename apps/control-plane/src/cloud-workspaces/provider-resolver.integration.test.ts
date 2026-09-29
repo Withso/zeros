@@ -12,7 +12,7 @@ import {
 } from "vitest";
 
 import { withSystemTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import type { DaytonaWorkspaceProviderConfig } from "./daytona-provider.js";
 import { sealCloudProviderCredential } from "./provider-connections.js";
 import {
@@ -77,8 +77,7 @@ d("generation-bound cloud provider resolution", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
   });
 

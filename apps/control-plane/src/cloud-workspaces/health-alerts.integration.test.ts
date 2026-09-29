@@ -2,7 +2,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EmailDeliveryError } from "../email.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   CloudWorkspaceHealthAlertWorker,
   describeAlertFailure,
@@ -51,7 +51,7 @@ d("cloud health alerts", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 2 }); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"); await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     clock = Date.UTC(2026, 8, 23, 12, 30); readings = []; sent = [];
     send = vi.fn(async (alert: CloudWorkspaceHealthAlert) => { sent.push(alert); });
   });

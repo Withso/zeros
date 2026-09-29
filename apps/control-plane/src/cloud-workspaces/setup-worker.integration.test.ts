@@ -12,7 +12,7 @@ import {
 } from "vitest";
 
 import { withSystemTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 import {
   seedCanonicalCloudWorkspaceAuthority,
@@ -118,8 +118,7 @@ d("cloud workspace setup worker", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     ownerId = randomUUID();
     await pool.query(`INSERT INTO users(id,email,display_name,staff_role)
       VALUES ($1,$2,'Setup Owner','developer')`, [ownerId, `setup-${ownerId}@example.test`]);

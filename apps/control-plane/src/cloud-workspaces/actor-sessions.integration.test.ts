@@ -3,7 +3,7 @@ import pg from "pg";
 import { afterAll,beforeAll,beforeEach,describe,expect,it } from "vitest";
 import { withSystemTx } from "../db.js";
 import {ensureUser} from "../auth.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { ensureCloudPilotUser,seedReadyCloudWorkspace,seedReadyProCloudWorkspace } from "./test-fixtures.js";
 import { DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 import { assertCloudActorSession,assertRecordedCloudActor,DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
@@ -27,7 +27,7 @@ d.each(["legacy","pro"] as const)("actor-aware cloud runtime admission (%s)",fun
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:5});});
   afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture=await (funding==="pro"?seedReadyProCloudWorkspace:seedReadyCloudWorkspace)(pool);
     guest=await (funding==="pro"?ensureUser:ensureCloudPilotUser)(pool,{provider:"workos",providerSubject:`user_${randomUUID()}`,email:`guest-${randomUUID()}@example.test`,displayName:"Guest",
       session:{id:`session_${randomUUID()}`,clientKind:"desktop",authTime:Math.floor(Date.now()/1000),tokenExpiresAt:Math.floor(Date.now()/1000)+3600}});

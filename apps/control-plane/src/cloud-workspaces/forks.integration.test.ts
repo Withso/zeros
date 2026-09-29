@@ -12,7 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
 import { withSystemTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { deliverWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import { DatabaseCloudWorkspaceContentService } from "./content-record.js";
 import { DatabaseCloudWorkspaceDurableRecordService } from "./durable-record.js";
@@ -182,8 +182,7 @@ d("cloud workspace immutable forks", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     objectStore = new PausedUploadObjectStore();
     blobs = new DatabaseCloudWorkspaceBlobService({
