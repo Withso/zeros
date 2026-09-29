@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { sha256 } from "../dev-environment/state.mjs";
 import { newHostedGeneration, hostedName } from "../dev-environment/hosted-state.mjs";
-import { ensureRailwayEnvironment, deleteRailwayEnvironment, listRailwayEnvironments, deployRailwayBackend, configureRailwayBackend, railwayEnvironmentName } from "../dev-environment/railway.mjs";
+import { ensureRailwayEnvironment, deleteRailwayEnvironment, listRailwayEnvironments, deployRailwayBackend, configureRailwayBackend, railwayEnvironmentName, stopRailwayBackend, ensureRailwayDevDomain } from "../dev-environment/railway.mjs";
 
 const projectId = "11111111-1111-4111-8111-111111111111", serviceId = "22222222-2222-4222-8222-222222222222";
 const alphaId = "33333333-3333-4333-8333-333333333333", devId = "44444444-4444-4444-8444-444444444444";
@@ -25,6 +26,121 @@ function fixture() {
 }
 
 describe("Railway disposable Dev environments", () => {
+  it("journals domain creation before dispatch and recovers a lost response by exact parent", async () => {
+    const f = fixture(); await ensureRailwayEnvironment(f.lease, f.config, f.request);
+    let domain: any;
+    const request = vi.fn(async (query, variables) => {
+      if (query.includes("query DevDomains")) return { domains: { customDomains: domain ? [domain] : [] } };
+      if (query.includes("mutation DevDomain")) {
+        expect(f.state.resources.railway.domain.create.phase).toBe("dispatching");
+        domain = { id: "domain", ...variables.input, status: { dnsRecords: [{ requiredValue: "dev.up.railway.app" }] } };
+        throw new Error("lost response");
+      }
+      return f.request(query, variables);
+    });
+    const profile = { railway: f.config, cloudflare: { domain: "example.test" } };
+    await expect(ensureRailwayDevDomain(f.lease, profile, vi.fn(), request)).rejects.toThrow("lost response");
+    await ensureRailwayDevDomain(f.lease, profile, vi.fn(), request);
+    expect(f.state.resources.railway.domain.create.phase).toBe("acknowledged");
+    expect(request.mock.calls.filter(([query]) => query.includes("mutation DevDomain"))).toHaveLength(1);
+  });
+  it("uploads unchanged source again for a new configuration run and journals the dispatch", async () => {
+    const f = fixture(), directory = fs.mkdtempSync(path.join(os.tmpdir(), "dev-rotation-upload-"));
+    try {
+      await ensureRailwayEnvironment(f.lease, f.config, f.request);
+      const archive = path.join(directory, "backend.tar.gz"), body = Buffer.from("synthetic source"); fs.writeFileSync(archive, body);
+      const artifact = { archive, digest: sha256(body), archiveSha256: sha256(body) };
+      Object.assign(f.state.resources.railway, { digest: artifact.digest, deploymentId: devId, deploymentRunId: "previous-run" });
+      f.state.runId = "rotated-run";
+      const request = vi.fn(async (query, variables) => query.includes("query DevDeployment")
+        ? { deployment: { id: variables.id, projectId, environmentId: devId, serviceId, status: "SUCCESS" } } : f.request(query, variables));
+      const upload = vi.fn(async () => {
+        expect(f.state.resources.railway.uploadCreate.phase).toBe("dispatching");
+        return new Response(JSON.stringify({ deploymentId: alphaId }), { status: 200 });
+      });
+      await deployRailwayBackend(f.lease, f.config, artifact, request, upload);
+      expect(upload).toHaveBeenCalledOnce();
+      expect(f.state.resources.railway.deploymentRunId).toBe("rotated-run");
+      expect(f.state.resources.railway.uploadCreate.phase).toBe("acknowledged");
+      await deployRailwayBackend(f.lease, f.config, artifact, request, upload);
+      expect(upload).toHaveBeenCalledOnce();
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+  it.each(["SUCCESS", "DEPLOYING", "SLEEPING", "CRASHED"])("removes an owned %s deployment and confirms removal, independently of deploymentStopped", async status => {
+    const f = fixture(); await ensureRailwayEnvironment(f.lease, f.config, f.request);
+    let requested = false, reads = 0, clock = 0;
+    const request = vi.fn(async (query, variables) => {
+      if (query.includes("query DevInstances")) {
+        const deployment = { id: "owned-deployment", status: requested ? (++reads > 1 ? "REMOVED" : "REMOVING") : status, deploymentStopped: false };
+        return { environment: { serviceInstances: { edges: [{ node: { serviceId, activeDeployments: [deployment], latestDeployment: deployment } }] } } };
+      }
+      if (query.includes("mutation StopDevDeployment")) {
+        if (query.includes("deploymentRemove(")) requested = true;
+        return { deploymentRemove: true, deploymentStop: true };
+      }
+      return f.request(query, variables);
+    });
+    await stopRailwayBackend(f.lease, f.config, request, { timeout: 4, interval: 1, now: () => clock, delay: async () => { clock++; } });
+    expect(requested).toBe(true);
+    expect(reads).toBe(2);
+    const mutations = request.mock.calls.filter(([query]) => query.includes("mutation"));
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0][0]).toContain("deploymentRemove(id: $id)");
+    expect(mutations[0][1]).toEqual({ id: "owned-deployment" });
+    expect(f.state.resources.railway.stopped).toBe(true);
+  });
+
+  it("does not accept a stop flag as proof that a successful deployment was removed", async () => {
+    const f = fixture(); await ensureRailwayEnvironment(f.lease, f.config, f.request);
+    let removed = false;
+    const request = vi.fn(async (query, variables) => {
+      if (query.includes("query DevInstances")) return { environment: { serviceInstances: { edges: [{ node: {
+        serviceId, activeDeployments: [], latestDeployment: { id: "owned", status: removed ? "REMOVED" : "SUCCESS", deploymentStopped: true },
+      } }] } } };
+      if (query.includes("deploymentRemove(")) { removed = true; return { deploymentRemove: true }; }
+      return f.request(query, variables);
+    });
+    await stopRailwayBackend(f.lease, f.config, request);
+    expect(removed).toBe(true);
+  });
+
+  it("waits for an already-removing deployment without dispatching another mutation", async () => {
+    const f = fixture(); await ensureRailwayEnvironment(f.lease, f.config, f.request);
+    let reads = 0;
+    const request = vi.fn(async (query, variables) => {
+      if (query.includes("query DevInstances")) return { environment: { serviceInstances: { edges: [{ node: {
+        serviceId, activeDeployments: [], latestDeployment: { id: "owned", status: ++reads > 1 ? "REMOVED" : "REMOVING", deploymentStopped: false },
+      } }] } } };
+      return f.request(query, variables);
+    });
+    await stopRailwayBackend(f.lease, f.config, request);
+    expect(request.mock.calls.some(([query]) => query.includes("mutation"))).toBe(false);
+  });
+
+  it.each(["BUILDING", "INITIALIZING", "QUEUED", "WAITING"])("cancels an owned %s build and confirms removal", async status => {
+    const f = fixture(); await ensureRailwayEnvironment(f.lease, f.config, f.request);
+    let cancelled = false;
+    const request = vi.fn(async (query, variables) => {
+      if (query.includes("query DevInstances")) return { environment: { serviceInstances: { edges: [{ node: {
+        serviceId, activeDeployments: [], latestDeployment: { id: "owned", status: cancelled ? "REMOVED" : status, deploymentStopped: false },
+      } }] } } };
+      if (query.includes("deploymentCancel(")) { cancelled = true; return { deploymentCancel: true }; }
+      return f.request(query, variables);
+    });
+    await stopRailwayBackend(f.lease, f.config, request);
+    expect(cancelled).toBe(true);
+  });
+
+  it("retains the archive fence when a new service appears during shutdown", async () => {
+    const f = fixture(); await ensureRailwayEnvironment(f.lease, f.config, f.request);
+    let reads = 0;
+    const request = vi.fn(async (query, variables) => query.includes("query DevInstances")
+      ? { environment: { serviceInstances: { edges: ++reads === 1 ? [] : [{ node: { serviceId: alphaId, activeDeployments: [], latestDeployment: null } }] } } }
+      : f.request(query, variables));
+    await expect(stopRailwayBackend(f.lease, f.config, request)).rejects.toThrow(/Unexpected service/);
+    expect(f.state.resources.railway.stopped).toBeUndefined();
+  });
+
   it("materializes only the owned service before setting variables and limits, without starting a deployment", async () => {
     const f = fixture(); await ensureRailwayEnvironment(f.lease, f.config, f.request);
     let created = false;

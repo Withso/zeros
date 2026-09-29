@@ -50,6 +50,7 @@ import {
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { bindCloudCodexThread, cloudCodexCapabilities } from "./cloud-policy";
 import { readCodexSessionInventory } from "./session-inventory";
 import { createCodexToolArtworkResolver } from "./tool-artwork";
 import {
@@ -455,6 +456,7 @@ export interface CodexSession {
   backgroundWaiting: boolean;
   /** Latest-wins invalidation for overlapping list/terminate refreshes. */
   backgroundRefreshEpoch: number;
+  backgroundInspectionFailed?:boolean;
   /** One self-scheduling revalidation while native terminal rows are visible. */
   backgroundPollTimer: NodeJS.Timeout | null;
   /** Bounded engine-only raw events. The renderer receives only opaque ids and
@@ -1201,6 +1203,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
 
     try {
+      const cloud=cloudProviderExecution(opts.executionBoundary);
+      if(cloud)bindCloudCodexThread(cloud,source.resumeId);
       const response = await runtime.requestTyped<
         "thread/fork",
         ThreadForkResponse
@@ -1707,6 +1711,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
   /** Stop exactly one session-owned Codex background terminal. The renderer's
    * opaque task id is resolved through the latest authoritative snapshot; it
    * is never forwarded or parsed as a native process id. */
+  async backgroundWorkActive(sessionId:string):Promise<boolean>{
+    const session=this.sessions.get(sessionId);
+    if(!session?.runtimeAlive)return false;
+    await this.refreshBackgroundTasks(session,true);
+    return session.backgroundTasks.size>0||session.activeTurns.size>0||session.backgroundInspectionFailed===true;
+  }
+
   async stopBackgroundTask(opts: {
     sessionId: string;
     taskId: string;
@@ -2271,7 +2282,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // Disk MCP declarations (stdio AND HTTP) require Customize → Import.
     // Keep provider-installed plugins and the account app bridge in normal
     // chats; restricted actors retain only their explicitly admitted registry.
-    const cloudExtensions = nativeMcpPassthroughEnabled(
+    const cloudExecution=cloudProviderExecution(opts.executionBoundary);
+    const cloudExtensions = cloudExecution ? cloudCodexCapabilities(cloudExecution).connectedApps : nativeMcpPassthroughEnabled(
       undefined,
       opts.executionBoundary,
     );
@@ -2499,7 +2511,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session = {
       modelSelection: new FallbackModelSelection(opts.env?.OPENAI_MODEL?.trim() || threadModel),
       modelState,
-      accountExtensionsEnabled: cloudExtensions,
+      accountExtensionsEnabled: !cloudExecution && cloudExtensions,
       accountAppBridgeEnabled,
       excludedMcpServers: new Set(
         Object.keys((nativeMcpConfig.mcp_servers ?? {}) as object),
@@ -3030,6 +3042,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
     this.clearBackgroundTaskPoll(session);
     const epoch = ++session.backgroundRefreshEpoch;
+    session.backgroundInspectionFailed=true;
     const runtime = session.runtime;
     try {
       if (discoverLoadedDescendants) {
@@ -3147,6 +3160,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         );
       session.backgroundTasks = nextTasks;
       session.backgroundTaskTargets = nextTargets;
+      session.backgroundInspectionFailed=false;
       if (!unchanged) this.emitBackgroundTasks(session);
       this.scheduleBackgroundTaskPoll(session);
     } catch (error) {

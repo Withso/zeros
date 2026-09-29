@@ -9,17 +9,46 @@ import { assertCloudRequestActor, assertRecordedCloudActor, type CloudRecordedAc
 const identity = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/);
 const revision = z.number().int().safe().nonnegative();
 const uuid = z.string().uuid();
+export const CloudGoalUpdateSchema = z.object({
+  objective: z.string().trim().min(1).max(32_768).optional(),
+  status: z.enum(["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]).optional(),
+  tokenBudget: z.number().int().safe().positive().nullable().optional(),
+}).strict().refine(value => Object.keys(value).length > 0);
+export const CloudNativeOperationSchema = z.discriminatedUnion("kind", [
+  z.object({ version: z.literal(1), kind: z.literal("fork"), sourceConversationId: identity,
+    strategy: z.enum(["native", "transcript"]) }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("goal"), action: z.enum(["get", "set", "clear"]), update: CloudGoalUpdateSchema.optional() }).strict(),
+]).refine(value => value.kind !== "goal" || (value.action === "set") === (value.update !== undefined));
+export const CloudNativeResultSchema = z.object({ version: z.literal(1),
+  capabilities: z.object({version:z.literal(1),goals:z.boolean(),nativeFork:z.boolean(),transcriptFork:z.boolean(),
+    nativeReview:z.boolean(),connectedApps:z.boolean(),multiAgent:z.boolean()}).strict().optional(),model:z.string().min(1).max(256).optional(),
+  goal: z.object({ objective: z.string().max(32_768),
+    status: z.enum(["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]),
+    tokenBudget: z.number().int().safe().nonnegative().nullable(), tokensUsed: revision,
+    timeUsedSeconds: z.number().nonnegative(), createdAt: z.number(), updatedAt: z.number(),
+  }).strict().nullable().optional(),
+}).strict();
 export const CloudQueuedPromptSchema = z.object({
   agentId: identity,
   userMessageId: identity,
   prompt: z.array(z.record(z.unknown())).min(1).max(128),
   bubble: z.record(z.unknown()).optional(),
   modeRevision: revision,
+  permissionMode:z.string().min(1).max(32).optional(),
   agentCredentialGrantId:uuid.optional(),
   model:z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/).optional(),
   effort:z.enum(["low","medium","high","xhigh","max","ultracode"]).optional(),
   fast:z.boolean().optional(),
+  operation: CloudNativeOperationSchema.optional(),
 }).strict().superRefine((value,context)=>{
+  if (value.operation && (!value.agentCredentialGrantId || !value.model ||
+    (value.operation.kind !== "fork" && value.agentId !== "codex") ||
+    (value.operation.kind === "fork" && value.operation.strategy === "native" && value.agentId !== "codex")))
+    context.addIssue({code:"custom",message:"Native operations require explicit provider credential admission"});
+  if(value.permissionMode !== undefined) {
+    const modes:Record<string,readonly string[]> = {claude:["default","accept-edits","plan","auto","bypass"],codex:["ask","auto-edit","full-access","read-only"],cursor:["plan","auto","agent"]};
+    if(!modes[value.agentId]?.includes(value.permissionMode)) context.addIssue({code:"custom",message:"Invalid provider permission mode"});
+  }
   if(value.agentCredentialGrantId&&(!value.model||!["claude","cursor","codex"].includes(value.agentId)))
     context.addIssue({code:"custom",message:"Personal credential execution requires an explicit provider and model"});
 });
@@ -29,16 +58,27 @@ export const CloudCommandMutationSchema = z.object({
   expectedRevision: revision,
   action: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("enqueue"), commandId: uuid, payload: CloudQueuedPromptSchema }).strict(),
+    z.object({ kind: z.literal("fork"), commandId: uuid, payload: CloudQueuedPromptSchema }).strict(),
     z.object({ kind: z.literal("edit"), commandId: uuid, payload: CloudQueuedPromptSchema }).strict(),
     z.object({ kind: z.literal("remove"), commandId: uuid }).strict(),
     z.object({ kind: z.literal("pause") }).strict(),
     z.object({ kind: z.literal("resume") }).strict(),
   ]),
-}).strict();
+}).strict().superRefine((value, context) => {
+  const action = value.action;
+  if (action.kind === "fork" && (action.payload.operation?.kind !== "fork" ||
+      action.payload.operation.sourceConversationId === value.conversationId))
+    context.addIssue({code:"custom",message:"Fork requires distinct source and destination conversations"});
+  if ((action.kind === "enqueue" || action.kind === "edit") && action.payload.operation?.kind === "fork")
+    context.addIssue({code:"custom",message:"Forks require the fork action"});
+});
 export const CloudCommandSettleSchema = z.object({
   commandId: uuid, claimId: uuid, state: z.enum(["succeeded", "failed", "cancelled"]),
   resultCode: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).nullable(),
+  result: CloudNativeResultSchema.optional(),
 }).strict();
+const CloudGoalConfirmationSchema=z.object({kind:z.literal("confirm-goal"),commandId:uuid,claimId:uuid,
+  sequence:revision.refine(value=>value>0),goal:CloudNativeResultSchema.shape.goal.unwrap()}).strict();
 const admissionErrorSchema = z.enum(["command_context_changed", "command_not_found"]).nullable();
 export const CloudCommandRequestSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("snapshot"), conversationId: identity }).strict(),
@@ -48,7 +88,20 @@ export const CloudCommandRequestSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("stop"), conversationId: identity, operationId: uuid }).strict(),
   z.object({ kind: z.literal("claim"), conversationId: identity, executionId: identity, claimId: uuid.optional() }).strict(),
   z.object({ kind: z.literal("settle"), result: CloudCommandSettleSchema }).strict(),
+  CloudGoalConfirmationSchema,
 ]);
+export function legacyCloudCommandResponse(value:unknown):unknown {
+  if(!value||typeof value!=="object"||Array.isArray(value))return value;
+  const {nativeGoal:_goal,...row}=value as Record<string,unknown>;
+  const entry=(value:unknown)=>{
+    if(!value||typeof value!=="object"||Array.isArray(value))return value;
+    const {result:_result,...rest}=value as Record<string,unknown>;
+    return rest.payload&&typeof rest.payload==="object"&&"operation" in rest.payload?{...rest,payload:null}:rest;
+  };
+  return Array.isArray(row.pending)&&Array.isArray(row.receipts)
+    ?{...row,pending:row.pending.map(entry),receipts:row.receipts.map(entry)}:entry(row);
+}
+
 export type CloudCommandMutation = z.infer<typeof CloudCommandMutationSchema>;
 export type CloudQueuedPrompt = z.infer<typeof CloudQueuedPromptSchema>;
 export type CloudCommandEngineScope = {
@@ -65,6 +118,7 @@ export class CloudCommandError extends Error {
 type Control = { revision: string; paused: boolean; next_position: string };
 type Command = { id: string; position: string; state: CloudCommandState; payload: CloudQueuedPrompt | null;
   generation: number; engine_instance_id: string | null; execution_id: string | null; claim_id: string | null;
+  result: (z.infer<typeof CloudNativeResultSchema> & {goalRevision?:number;goalSequence?:number}) | null;
   result_code: string | null; created_at: Date; updated_at: Date;
   actor_user_id: string | null; actor_device_id: string | null;
   actor_device_key_version: string | null; actor_fingerprint: string | null;actor_source_session_id:string|null };
@@ -100,9 +154,13 @@ function parseMutation(value: unknown): { mutation: CloudCommandMutation; hash: 
   return { mutation: parsed.data, hash: createHash("sha256").update(serialized).digest() };
 }
 function commandView(row: Command) {
+  const {goalRevision:_revision,goalSequence:_sequence,...result}=row.result??{};
   return { commandId: row.id, position: safeInteger(row.position), state: row.state,
     payload: row.payload, executionId: row.execution_id, generation: row.generation,
-    resultCode: row.result_code, createdAt: row.created_at.toISOString(), updatedAt: row.updated_at.toISOString() };
+    resultCode: row.result_code, ...(row.result ? {result} : {}), createdAt: row.created_at.toISOString(), updatedAt: row.updated_at.toISOString() };
+}
+function goalSnapshot(conversationId:string,result:Command["result"]) {
+  return result?.goal!==undefined?{version:1 as const,conversationId,revision:result.goalRevision??0,goal:result.goal}:undefined;
 }
 
 type OperationActor = { actor_user_id: string | null; actor_device_id: string | null };
@@ -175,9 +233,16 @@ export class DatabaseCloudWorkspaceCommandService {
     const pending = await tx.query<Command>(`SELECT * FROM cloud_workspace_commands WHERE workspace_id=$1 AND conversation_id=$2
       AND state IN ('queued','dispatching') ORDER BY position LIMIT 33`, [scope.workspaceId, conversationId]);
     const receipts = await tx.query<Command>(`SELECT id,position,state,NULL::jsonb AS payload,generation,engine_instance_id,
-      execution_id,claim_id,result_code,created_at,updated_at FROM cloud_workspace_commands WHERE workspace_id=$1 AND conversation_id=$2
+      execution_id,claim_id,result_code,result,created_at,updated_at FROM cloud_workspace_commands WHERE workspace_id=$1 AND conversation_id=$2
       AND state NOT IN ('queued','dispatching') ORDER BY updated_at DESC,id LIMIT 50`, [scope.workspaceId, conversationId]);
+    // Read the last confirmation independently of the bounded receipt window,
+    // including a live command whose foreground outcome is still unknown.
+    const latestGoal=(await tx.query<Pick<Command,"result">>(`SELECT result FROM cloud_workspace_commands
+      WHERE workspace_id=$1 AND conversation_id=$2 AND result ? 'goal'
+      ORDER BY (result->>'goalRevision')::bigint DESC NULLS LAST,updated_at DESC,id LIMIT 1`,[scope.workspaceId,conversationId])).rows[0];
+    const nativeGoal=goalSnapshot(conversationId,latestGoal?.result??null);
     return { version: 1 as const, conversationId, revision: safeInteger(control.revision), paused: control.paused,
+      ...(nativeGoal?{nativeGoal}:{}),
       pending: pending.rows.map(commandView), receipts: receipts.rows.map(row => commandView({ ...row, payload: null })) };
   }
   async snapshot(scope: CloudCommandEngineScope, conversationId: string) {
@@ -234,13 +299,13 @@ export class DatabaseCloudWorkspaceCommandService {
       if (Number(receiptCount.rows[0]!.count) >= MAX_OPERATION_RECEIPTS)
         throw new CloudCommandError("command_limit", "Workspace command history capacity reached");
       const action = m.action;
-      if (action.kind === "enqueue" || action.kind === "edit") {
+      if (action.kind === "enqueue" || action.kind === "fork" || action.kind === "edit") {
         const retained = await tx.query<{ bytes: string }>(`SELECT coalesce(sum(octet_length(payload::text)),0) AS bytes
           FROM cloud_workspace_commands WHERE workspace_id=$1 AND payload IS NOT NULL`, [scope.workspaceId]);
         if (Number(retained.rows[0]!.bytes) + Buffer.byteLength(JSON.stringify(action.payload)) > MAX_RETAINED_PROMPT_BYTES)
           throw new CloudCommandError("command_limit", "Retained prompt capacity reached");
       }
-      if (action.kind === "enqueue") {
+      if (action.kind === "enqueue" || action.kind === "fork") {
         const count = (await tx.query<{ pending: string; total: string }>(`SELECT count(*) FILTER(WHERE state IN ('queued','dispatching')) AS pending,
           count(*) AS total FROM cloud_workspace_commands WHERE workspace_id=$1`, [scope.workspaceId])).rows[0]!;
         if (Number(count.pending) >= 32 || Number(count.total) >= 100000)
@@ -253,6 +318,14 @@ export class DatabaseCloudWorkspaceCommandService {
         if (!inserted.rowCount) throw new CloudCommandError("command_conflict", "Command already exists");
         await tx.query(`UPDATE cloud_workspace_conversation_controls SET next_position=next_position+1 WHERE workspace_id=$1 AND conversation_id=$2`, [scope.workspaceId, m.conversationId]);
       } else if (action.kind === "pause" || action.kind === "resume") {
+        // authorize holds the workspace lock also used by idle admission and
+        // checkpoint completion. A sleeping queue must wait for cancellation
+        // or a fresh engine; Resume cannot revive work during final capture.
+        if (action.kind === "resume" && (await tx.query(`SELECT 1 FROM workspace_checkpoint_requests
+          WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND idle_engine_instance_id IS NOT NULL
+            AND (state IN ('queued','delivered') OR (state='succeeded' AND idle_engine_instance_id=$4)) LIMIT 1`,
+        [scope.workspaceId, scope.organizationId, scope.generation, scope.engineInstanceId])).rowCount)
+          throw new CloudCommandError("command_conflict", "Idle checkpoint is in progress; resume after the workspace wakes");
         await tx.query(`UPDATE cloud_workspace_conversation_controls SET paused=$3 WHERE workspace_id=$1 AND conversation_id=$2`,
         [scope.workspaceId, m.conversationId, action.kind === "pause"]);
       } else {
@@ -308,7 +381,7 @@ export class DatabaseCloudWorkspaceCommandService {
       return { ...snapshot, replayed: false };
     });
   }
-  async claim(scope: CloudCommandEngineScope, conversationId: string, executionId: string, requestClaimId?: string) {
+  async claim(scope: CloudCommandEngineScope, conversationId: string, executionId: string, requestClaimId?: string, allowNative=true) {
     if (!identity.safeParse(executionId).success || (requestClaimId !== undefined && !uuid.safeParse(requestClaimId).success))
       throw new CloudCommandError("invalid_command", "Invalid execution or claim identity");
     return withSystemTx(this.options.pool, async tx => {
@@ -323,17 +396,18 @@ export class DatabaseCloudWorkspaceCommandService {
             throw new CloudCommandError("command_conflict", "Claim identity belongs to another dispatch");
           // Resolve an accepted claim even when Stop arrived after its commit.
           // The engine then settles it cancelled before entering the provider.
-          if (previous.state !== "dispatching") return null;
+          if (previous.state !== "dispatching" || (!allowNative && previous.payload?.operation)) return null;
           return { commandId: previous.id, claimId: requestClaimId, conversationId, executionId, payload: previous.payload!,
             ...await this.dispatchAuthority(tx,scope,previous) };
         }
       }
       const control = await this.control(tx, scope, conversationId);
-      if (control.paused) return null;
       const active = await tx.query(`SELECT 1 FROM cloud_workspace_commands WHERE workspace_id=$1 AND conversation_id=$2 AND state='dispatching'`, [scope.workspaceId, conversationId]);
       if (active.rowCount) return null;
       const row = (await tx.query<Command>(`SELECT * FROM cloud_workspace_commands WHERE workspace_id=$1 AND conversation_id=$2
-        AND state='queued' ORDER BY position LIMIT 1 FOR UPDATE`, [scope.workspaceId, conversationId])).rows[0];
+        AND state='queued' AND (NOT $3::boolean OR payload->'operation'->>'kind'='goal')
+        AND ($4::boolean OR NOT (payload ? 'operation'))
+        ORDER BY position LIMIT 1 FOR UPDATE`, [scope.workspaceId, conversationId,control.paused,allowNative])).rows[0];
       if (!row) return null;
       const claimId = requestClaimId ?? randomUUID();
       await tx.query(`UPDATE cloud_workspace_commands SET state='dispatching',engine_instance_id=$3,generation=$4,execution_id=$5,claim_id=$6,updated_at=now()
@@ -343,7 +417,30 @@ export class DatabaseCloudWorkspaceCommandService {
         ...await this.dispatchAuthority(tx,scope,row) };
     });
   }
-  async settle(scope: CloudCommandEngineScope, input: { commandId: string; claimId: string; state: "succeeded" | "failed" | "cancelled"; resultCode: string | null }) {
+  async confirmGoal(scope:CloudCommandEngineScope,input:z.infer<typeof CloudGoalConfirmationSchema>) {
+    input=CloudGoalConfirmationSchema.parse(input);
+    return withSystemTx(this.options.pool,async tx=>{
+      await this.authorize(tx,scope);
+      const row=(await tx.query<Command & {conversation_id:string}>(`SELECT * FROM cloud_workspace_commands
+        WHERE workspace_id=$1 AND id=$2 FOR UPDATE`,[scope.workspaceId,input.commandId])).rows[0];
+      if(!row||row.claim_id!==input.claimId||row.engine_instance_id!==scope.engineInstanceId||row.generation!==scope.generation)
+        throw new CloudCommandError("command_conflict","Goal dispatch authority changed");
+      const previous=row.result?.goalSequence??0;
+      if(input.sequence<=previous){
+        if(input.sequence===previous&&canonical(row.result?.goal??null)!==canonical(input.goal))
+          throw new CloudCommandError("command_conflict","Goal confirmation identity changed");
+        return goalSnapshot(row.conversation_id,row.result)!;
+      }
+      if(row.state!=="dispatching"||row.payload?.agentId!=="codex"||(await this.dispatchAuthority(tx,scope,row)).dispatchAllowed===false)
+        throw new CloudCommandError("command_conflict","Goal execution is no longer admitted");
+      const control=await this.control(tx,scope,row.conversation_id);
+      const result={...row.result,version:1 as const,goal:input.goal,goalSequence:input.sequence,goalRevision:safeInteger(control.revision)+1};
+      await tx.query(`UPDATE cloud_workspace_commands SET result=$3::jsonb WHERE workspace_id=$1 AND id=$2`,[scope.workspaceId,input.commandId,JSON.stringify(result)]);
+      await this.bump(tx,scope,row.conversation_id);
+      return goalSnapshot(row.conversation_id,result)!;
+    });
+  }
+  async settle(scope: CloudCommandEngineScope, input: z.infer<typeof CloudCommandSettleSchema>) {
     const valid = CloudCommandSettleSchema.safeParse(input);
     if (!valid.success) throw new CloudCommandError("invalid_command", "Invalid command result");
     return withSystemTx(this.options.pool, async tx => {
@@ -351,14 +448,18 @@ export class DatabaseCloudWorkspaceCommandService {
       const row = (await tx.query<Command & { conversation_id: string }>(`SELECT * FROM cloud_workspace_commands WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, [scope.workspaceId, input.commandId])).rows[0];
       if (!row || row.claim_id !== input.claimId || row.engine_instance_id !== scope.engineInstanceId || row.generation !== scope.generation)
         throw new CloudCommandError("command_conflict", "Command dispatch authority changed");
+      let result:Command["result"]=row.result||input.result?{...row.result,...input.result,version:1,
+        ...(row.result?.goalRevision!==undefined?{goal:row.result.goal,goalRevision:row.result.goalRevision,
+          ...(row.result.goalSequence!==undefined?{goalSequence:row.result.goalSequence}:{})}:{})}:null;
       if (row.state !== "dispatching") {
-        if (row.state !== input.state || row.result_code !== input.resultCode)
+        if (row.state !== input.state || row.result_code !== input.resultCode || canonical(row.result ?? null) !== canonical(result))
           throw new CloudCommandError("command_conflict", "Command result already settled");
         return { ...(await this.view(tx, scope, row.conversation_id)), replayed: true };
       }
-      await this.control(tx, scope, row.conversation_id);
-      await tx.query(`UPDATE cloud_workspace_commands SET state=$3,result_code=$4,payload=NULL,updated_at=now() WHERE workspace_id=$1 AND id=$2`,
-      [scope.workspaceId, input.commandId, input.state, input.resultCode]);
+      const control=await this.control(tx, scope, row.conversation_id);
+      if(result&&"goal" in result&&result.goalRevision===undefined)result={...result,goalRevision:safeInteger(control.revision)+1};
+      await tx.query(`UPDATE cloud_workspace_commands SET state=$3,result_code=$4,result=$5::jsonb,payload=NULL,updated_at=now() WHERE workspace_id=$1 AND id=$2`,
+      [scope.workspaceId, input.commandId, input.state, input.resultCode, result ? JSON.stringify(result) : null]);
       await this.bump(tx, scope, row.conversation_id);
       return { ...(await this.view(tx, scope, row.conversation_id)), replayed: false };
     });

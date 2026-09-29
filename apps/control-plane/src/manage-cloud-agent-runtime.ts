@@ -34,9 +34,27 @@ const checks = z
     authentication: z.literal(true),
   })
   .strict();
+const nativeChecks = z.object({
+  privateProviderHome: z.literal(true),
+  engineAuthorityIsolation: z.literal(true),
+  nativeWorkspaceTools: z.literal(true),
+  nativeMcp: z.literal(true).optional(),
+  nativeGoals: z.literal(true).optional(),
+  nativeFork: z.literal(true).optional(),
+  transcriptFork: z.literal(true).optional(),
+  nativeReview: z.literal(true).optional(),
+  nativeApps: z.literal(true).optional(),
+  nativeMultiAgent: z.literal(true).optional(),
+  actorAdmission: z.literal(true),
+  stopAndRevocation: z.literal(true),
+  nativeTurn: z.literal(true),
+  nativeResume: z.literal(true),
+  authentication: z.literal(true),
+}).strict();
 export const CloudAgentRuntimeEvidenceSchema = z
   .object({
-    version: z.literal(1),
+    version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    executionProfile: z.literal("zeros-cloud-native-v1").optional(),
     channel: z.enum(["development", "alpha", "beta", "production"]),
     provider: z.enum(["boat", "daytona"]),
     runtimeClass: z.literal("linux-vm"),
@@ -48,13 +66,23 @@ export const CloudAgentRuntimeEvidenceSchema = z
     qualifiedAt: z.string().datetime(),
     credentials: z
       .array(
-        z.object({ kind: credential, checks, renewal: z.boolean() }).strict(),
+        z.object({ kind: credential, checks: z.union([checks, nativeChecks]), renewal: z.boolean() }).strict(),
       )
       .min(1)
       .max(5),
   })
   .strict()
   .superRefine((value, context) => {
+    // Native tools deliberately share the active provider account's trust.
+    // Their evidence must prove private HOME/engine authority isolation and
+    // actual native tools, not claim the former credential-free tool boundary.
+    const native = value.version >= 2;
+    if(value.version===3&&value.credentials.some(row=>!("nativeMcp" in row.checks)||row.checks.nativeMcp!==true))
+      context.addIssue({code:"custom",message:"Customization requires native MCP evidence"});
+    if ((native ? value.executionProfile !== "zeros-cloud-native-v1" : value.executionProfile !== undefined) ||
+        value.credentials.some(row => native !== ("nativeWorkspaceTools" in row.checks))) {
+      context.addIssue({ code: "custom", message: "Runtime evidence does not match its execution profile" });
+    }
     if (
       new Set(value.credentials.map((row) => row.kind)).size !==
       value.credentials.length
@@ -91,6 +119,17 @@ export const CloudAgentRuntimeEvidenceSchema = z
 export type CloudAgentRuntimeEvidence = z.infer<
   typeof CloudAgentRuntimeEvidenceSchema
 >;
+/** Feature evidence is independent of basic native-turn qualification. Old
+ * evidence deliberately admits none of these extensions. */
+export function nativeCapabilitiesFromChecks(row: CloudAgentRuntimeEvidence["credentials"][number]) {
+  const proof = row.checks as Record<string, unknown>;
+  return {version:1 as const, goals:row.kind.startsWith("codex-") && proof.nativeGoals===true,
+    nativeFork:row.kind.startsWith("codex-") && proof.nativeFork===true,
+    transcriptFork:proof.transcriptFork===true,
+    nativeReview:row.kind.startsWith("codex-") && proof.nativeReview===true,
+    connectedApps:row.kind==="codex-chatgpt" && proof.nativeApps===true,
+    multiAgent:row.kind.startsWith("codex-") && proof.nativeMultiAgent===true};
+}
 const RequestSchema = z
   .object({
     operationId: z.string().uuid(),
@@ -102,6 +141,8 @@ const RequestSchema = z
   .strict();
 export type CloudAgentRuntimeChange = z.infer<typeof RequestSchema>;
 type Row = {
+  native_capabilities: ReturnType<typeof nativeCapabilitiesFromChecks> | null;
+  mcp_qualified: boolean;
   credential_kind: string;
   profile: string;
   enabled: boolean;
@@ -227,7 +268,7 @@ export async function manageCloudAgentRuntime(
     const kinds = evidence.credentials.map((row) => row.kind).sort();
     const previous = (
       await client.query<Row>(
-        `SELECT credential_kind,profile,enabled,qualified_at::text FROM cloud_agent_runtime_qualifications
+        `SELECT credential_kind,profile,enabled,qualified_at::text,mcp_qualified,native_capabilities FROM cloud_agent_runtime_qualifications
       WHERE provider=$1 AND image_ref=$2 AND runtime_contract_sha256=$3 AND credential_kind=ANY($4::text[]) ORDER BY credential_kind FOR UPDATE`,
         [
           evidence.provider,
@@ -241,6 +282,8 @@ export async function manageCloudAgentRuntime(
       credential_kind: kind,
       profile: evidence.profile,
       enabled: request.enabled,
+      mcp_qualified: evidence.version === 3,
+      native_capabilities: nativeCapabilitiesFromChecks(evidence.credentials.find(row=>row.kind===kind)!),
     }));
     const plan = hash(
       JSON.stringify({ target, request, revision, previous, next }),
@@ -260,9 +303,9 @@ export async function manageCloudAgentRuntime(
     for (const kind of kinds)
       await client.query(
         `INSERT INTO cloud_agent_runtime_qualifications
-      (provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled,qualified_at) VALUES ($1,$2,$3,$4,$5,$6,$7)
+      (provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled,qualified_at,mcp_qualified,native_capabilities) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
       ON CONFLICT(provider,image_ref,runtime_contract_sha256,credential_kind) DO UPDATE
-      SET enabled=EXCLUDED.enabled,profile=EXCLUDED.profile,qualified_at=EXCLUDED.qualified_at`,
+      SET enabled=EXCLUDED.enabled,profile=EXCLUDED.profile,qualified_at=EXCLUDED.qualified_at,mcp_qualified=EXCLUDED.mcp_qualified,native_capabilities=EXCLUDED.native_capabilities`,
         [
           evidence.provider,
           evidence.imageRef,
@@ -271,6 +314,8 @@ export async function manageCloudAgentRuntime(
           evidence.profile,
           request.enabled,
           evidence.qualifiedAt,
+          evidence.version === 3,
+          JSON.stringify(nativeCapabilitiesFromChecks(evidence.credentials.find(row=>row.kind===kind)!)),
         ],
       );
     await client.query(

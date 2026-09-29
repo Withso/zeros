@@ -68,8 +68,13 @@ outside collapsed activity. Automatic provider retry notices and user stops do
 not become terminal recovery cards. Pre-admission failures retain the user row,
 expanded request, attachment references, and `recoveryFailure` for reload.
 Chat errors, warnings and authentication notices share the `--brown-bg` surface
-with readable plain text and safe web links. Automatic reconnect activity keeps
-its live indicator. Authentication notices retain their Sign in action.
+with readable plain text and safe web links. They use the sent message's sans
+text, 12px corners and 8px/12px padding. Notices rely on their container's gap;
+the failure card adds an 8px margin only in the gapless turn lane. Actions sit
+4px below the text, aligned with it. On hover their label and icon pop from
+`--brown-fg` (lighter on dark, deeper in Light) with no background. Automatic
+reconnect activity keeps its live indicator. Authentication notices retain their
+Sign in action.
 
 Explicit Retry resends a request with no observed work, or continues an
 interrupted request with its original context. Retry in new chat copies chat
@@ -237,3 +242,19 @@ Before a new capability is called complete:
 Serialized compatibility remains additive. Existing provider bindings and
 conversation records are not renamed or rewritten merely to match an upstream
 provider vocabulary.
+
+Cloud command permission selection is part of the immutable queued prompt.
+The shared composer carries its exact native mode (including Claude Accept
+Edits versus Auto), and the admitted VM environment forwards that bounded value
+without inheriting arbitrary desktop environment variables. New and resumed
+native executions start in that mode before any prompt runs. Legacy commands
+without the field recover the saved chat choice. The conversation response
+advertises `permissionModeVersion: 1`; clients omit the additive field for older
+workers during a rolling update.
+
+Between cloud commands, changing the permission picker records the next command's
+selection. During a live turn, the provider must acknowledge the change. The
+Codex VM wrapper retains the native approval/sandbox policy while fixing the
+execution environment and workspace roots. Cursor retains its native Auto-review
+flag on create, resume and prewarm. Mode failure handling is scoped to the current
+chat, execution and request so an old rejection cannot overwrite a newer choice.

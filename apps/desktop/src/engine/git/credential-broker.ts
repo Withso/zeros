@@ -19,6 +19,7 @@ import { accessSync, constants as fsConstants } from "node:fs";
 import { chmod, chown, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { githubWriteCredential } from "./github-write-context";
 
 export interface GitCredentialRequest {
   contextId: string;
@@ -191,6 +192,25 @@ export async function prepareGitCredentialInvocation(
     consumerIdentity?: GitCredentialShellConsumerIdentity;
   } = {},
 ): Promise<GitCredentialInvocation | null> {
+  const scoped = githubWriteCredential();
+  if (scoped) {
+    const expected = `${scoped.owner}/${scoped.repository}`.toLowerCase();
+    if (request.protocol !== "https" || request.host !== "github.com" || request.authority !== "github.com" ||
+        (request.path ?? "").replace(/\.git$/i, "").toLowerCase() !== expected)
+      throw new Error("GitHub write authorization does not cover this remote.");
+    const activeBroker = await ensureBroker();
+    if (options.consumerIdentity) await activeBroker.grantConsumer(options.consumerIdentity);
+    // Do not fall back to the ambient read token, SSH, or a host helper.
+    githubWriteCredential();
+    const proxyUrl = new URL(`${scoped.owner}/${scoped.repository}.git`, scoped.gitBaseUrl);
+    const proxyRequest: GitCredentialRequest = { contextId: request.contextId, protocol: proxyUrl.protocol === "https:" ? "https" : "http",
+      host: proxyUrl.hostname, authority: proxyUrl.host, path: proxyUrl.pathname.slice(1) };
+    const invocation = activeBroker.grantInvocation(proxyRequest, { username: "x-access-token", password: scoped.token,
+      passwordExpiryUtc: Math.floor(scoped.expiresAtMs / 1000) });
+    const original = `https://${request.username ? `${encodeURIComponent(request.username)}@` : ""}github.com/${request.path}`;
+    invocation.gitConfigArgs.push("-c", `url.${proxyUrl.toString()}.insteadOf=${original}`, "-c", `credential.${proxyUrl.origin}.useHttpPath=true`, "-c", "http.followRedirects=false");
+    return invocation;
+  }
   const source = credentialSource;
   const sourceOwns =
     source?.supports(request) &&

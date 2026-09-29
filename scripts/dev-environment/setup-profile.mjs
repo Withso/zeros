@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 import { hostedProfileIssues } from "./hosted-profile.mjs";
-import { PROFILE_NAME, profileExists } from "./profile-path.mjs";
+import { PROFILE_NAME, profileExists, assertIgnoredProfileDestination } from "./profile-path.mjs";
 import { developmentHome, readPrivateJson, systemEnvironment, writePrivateFile } from "./state.mjs";
 
 // Transfers (AirDrop, encrypted vault downloads, etc.) may arrive mode 0644.
@@ -49,20 +49,14 @@ function git(root, args) {
   catch { throw new Error("Could not verify the Dev profile's Git destination; no credential output was retained"); }
 }
 
-function assertIgnoredDestination(root) {
-  if (git(root, ["ls-files", "-z", "--", PROFILE_NAME])) throw new Error("Refusing to import a tracked Dev profile");
-  try { git(root, ["check-ignore", "--no-index", "-q", "--", PROFILE_NAME]); }
-  catch { throw new Error("The checkout must ignore zeros-dev-env.json before importing credentials; update its .gitignore first"); }
-}
-
 function assertSameProfile(file, profile) {
   if (profileExists(file) && !isDeepStrictEqual(readPrivateJson(file), profile)) {
     throw new Error("An existing profile differs. It was preserved, including its registry key. Reconcile the profiles before retrying; never replace the registry key while environments exist.");
   }
 }
 
-/** Seed the main clone as well as this worktree, so Files to copy works for
- * future local/cloud workspaces. Never provision services or generate new keys. */
+/** Seed the main clone as well as this worktree for future local workspaces.
+ * Cloud workspaces receive a separately injected profile. */
 export function importDevelopmentProfile({ root, source, homeDir = os.homedir() }) {
   const candidate = transferredProfile(source, true);
   if (candidate.issues.length) throw new Error(candidate.issues.join("\n"));
@@ -76,7 +70,7 @@ export function importDevelopmentProfile({ root, source, homeDir = os.homedir() 
   const checkouts = [...new Set([main, checkout])];
   const directory = developmentHome(homeDir);
   const files = [path.join(directory, PROFILE_NAME), ...checkouts.map(p => path.join(p, PROFILE_NAME))];
-  for (const cwd of checkouts) assertIgnoredDestination(cwd);
+  for (const cwd of checkouts) assertIgnoredProfileDestination(cwd);
   // Detect stale copies before making any destination authoritative. Version 1
   // files can still be selected explicitly for legacy tunnel cleanup.
   for (const file of [...files, path.join(directory, "development.json"), ...checkouts.map(p => path.join(p, ".env.zeros-dev.json"))]) {

@@ -1,15 +1,19 @@
+import { startHosted } from "./hosted-lifecycle.mjs";
+import { persistentConnectionLifecycle } from "./hosted-connections.mjs";
+import { readPrivateJson } from "./state.mjs";
+import { r2Registry } from "./hosted-state.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPrivateKey } from "node:crypto";
-import { systemEnvironment } from "./state.mjs";
+import { systemEnvironment, privateDirectory } from "./state.mjs";
 import { captureDevelopmentSource } from "./source.mjs";
-import { ensurePlanetScaleBranch, ensurePlanetScaleRoles, deletePlanetScaleBranch, deletePlanetScaleMigrationRole, planetScaleDevClient } from "./planetscale.mjs";
+import { ensurePlanetScaleBranch, ensurePlanetScaleRoles, deletePlanetScaleBranch, deletePlanetScaleMigrationRole, planetScaleDevClient, retirePlanetScaleRuntimeRoles, verifyPlanetScaleRuntimeRole } from "./planetscale.mjs";
 import { ensureRailwayEnvironment, stopRailwayBackend, configureRailwayBackend, deployRailwayBackend, deleteRailwayEnvironment, railwayDevClient, listRailwayEnvironments, ensureRailwayDevDomain, isRailwayOwnerName } from "./railway.mjs";
 import { hostedCloudflareClient, ensureDevPages, ensureDevPagesDomain, ensureDevDns, verifyDevZone, deleteDevPagesAndDns } from "./hosted-cloudflare.mjs";
 import { ensureHostedWebhook, deleteHostedWebhook } from "./hosted-workos.mjs";
 import { hostedBackendEnvironment, hostedWebEnvironment, hostedPublicProfile } from "./hosted-profile.mjs";
-import { ensureDevImage, deleteDevImages, reconcileRetiredBuilders } from "./hosted-image.mjs";
+import { ensureDevImage, deleteDevImages, reconcileRetiredBuilders, verifyDevImage, devBoatClient } from "./hosted-image.mjs";
 import { devObjectStorage } from "./hosted-storage.mjs";
 import { run, waitForHttp, waitForDevSignIn } from "./processes.mjs";
 import { pollProvider } from "./provider-http.mjs";
@@ -18,20 +22,68 @@ import { endpoints, workosClient } from "./workos.mjs";
 import { packDevOperator, unpackDevOperator } from "./operator-artifact.mjs";
 import { assertCurrentFixtureFunding, bindFixture, verifyFixtureMembership } from "./hosted-fixtures.mjs";
 import { bindHostedProfile } from "./hosted-state.mjs";
+import { advanceHostedAgents } from "./hosted-agents.mjs";
+import { hostedAgentCanary, hostedAgentRequest } from "./hosted-agent-canary.mjs";
+import { startHostedAgentOverSsh, retireHostedAgentSsh } from "./hosted-agent-ssh.mjs";
+import { inventoryHostedProviders } from "./hosted-inventory.mjs";
+import { reserveHostedAdmission, releaseHostedAdmission } from "./hosted-admission.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-export function hostedServices(root, directory, profile, progress = () => {}) {
+/** Seeding must size its quota from the candidate being deployed (or the
+ * recorded deployment for standalone Seed), never an older image in the
+ * generation's cleanup ledger. Drain can run before deployment verification
+ * writes state.source; its provider uses the image only for configuration. */
+export function hostedDatabaseWorker(state, build, action) {
+  const inputs = build.workerInputsSha256 ?? state.source?.workerInputsSha256;
+  const worker = state.resources.images?.find(r => r.qualified && !r.deleted && !r.snapshotDeleted &&
+    (!["seed", "agents-inspect", "agents-enable"].includes(action) || (typeof inputs === "string" && /^[a-f0-9]{64}$/.test(inputs) && r.inputsSha256 === inputs)));
+  if (["seed", "agents-inspect", "agents-enable"].includes(action) && !worker) throw new Error("Dev fixture is missing its matching qualified worker image");
+  return worker;
+}
+
+/** Cleanup may happen months after the runtime credential expires. Repair
+ * only the recorded branch's privileges, without applying new migrations. */
+export async function ensureHostedDrainAuthority(lease, { verify, ensure, repair, retire }) {
+  if (!lease.state.steps.backendStopped || !lease.state.steps.railwayDeleted) throw new Error("Stop the owned backend before repairing cleanup authority");
+  if (!lease.state.drainRuntimeRepair) {
+    try { await verify(); return; } catch { /* Recheck branch ownership inside role rotation. */ }
+  }
+  lease.state.drainRuntimeRepair = true; await lease.save();
+  try {
+    await ensure(); await repair();
+    delete lease.state.drainRuntimeRepair; await lease.save();
+  } finally { await retire(); }
+}
+
+export function hostedServices(root, directory, profile, progress = () => {}, { registry, lifecycleHooks = [] } = {}) {
   const cf = hostedCloudflareClient(profile.cloudflare), ps = planetScaleDevClient(profile.planetscale), railway = railwayDevClient(profile.railway);
   const objects = devObjectStorage(profile.storage), env = systemEnvironment();
-  let candidate, cleanupBuild;
+  let candidate, cleanupBuild, cleanupDigest, connectionRegistry;
+  if(profile.connections?.enabled){
+    const operatorPath=process.env.ZEROS_DEV_CONNECTIONS_OPERATOR_PATH;
+    if(!operatorPath||!path.isAbsolute(operatorPath))throw new Error("Set the absolute private ZEROS_DEV_CONNECTIONS_OPERATOR_PATH on this launcher/GC host");
+    const operator=readPrivateJson(operatorPath);connectionRegistry=r2Registry(operator.registry);
+    lifecycleHooks=[...lifecycleHooks,...persistentConnectionLifecycle(profile,{operator,registry:connectionRegistry,source:()=>candidate})];
+  }
+  const generationDirectory = lease => privateDirectory(privateDirectory(directory, "generations"), lease.state.generation);
+  const operatorBuild = async lease => {
+    const digest = lease.state.resources.operator?.digest;
+    if (cleanupBuild && cleanupDigest !== digest) { fs.rmSync(cleanupBuild.directory, { recursive: true, force: true }); cleanupBuild = undefined; }
+    if (!cleanupBuild) {
+      cleanupBuild = unpackDevOperator(await objects.readOperator(lease.state), digest,
+        fs.mkdtempSync(path.join(generationDirectory(lease), "cleanup-")), root);
+      cleanupDigest = digest;
+    }
+    return cleanupBuild;
+  };
   const buildBackend = async (lease, source) => {
     await run("pnpm", ["--dir", "apps/control-plane", "build"], { cwd: source.directory, env, signal: lease.signal, timeout: 180_000, label: "Dev backend build" });
   };
   const source = async lease => {
     if (candidate) return candidate;
     progress("Capturing and checking this checkout's current source");
-    candidate = captureDevelopmentSource(root, directory);
+    candidate = captureDevelopmentSource(root, generationDirectory(lease));
     // The complete private snapshot is committed before scanning, so the normal
     // tracked-file secret gate covers formerly untracked source as well.
     await run(process.execPath, ["scripts/check-secrets.mjs"], { cwd: candidate.directory, env, signal: lease.signal, label: "Dev source secret scan" });
@@ -43,14 +95,18 @@ export function hostedServices(root, directory, profile, progress = () => {}) {
     }
     await buildBackend(lease, candidate); return candidate;
   };
-  const database = async (lease, action, build, fixtureProof) => {
+  const database = async (lease, action, build, fixtureProof, agentJob) => {
     await lease.fence();
     const state = lease.state;
-    const worker = state.resources.images?.find(r => r.qualified && !r.deleted);
+    const worker = hostedDatabaseWorker(state, build, action);
     return JSON.parse(await run(process.execPath, [path.join(here, "hosted-database.mjs")], { cwd: root, env, signal: lease.signal,
       timeout: 300_000, label: `Dev database ${action}`, input: JSON.stringify({ action, buildRoot: build.directory,
         owner: state.owner, generation: state.generation, roles: state.resources.planetscale.roles,
         backendStopped: state.steps.backendStopped && state.steps.railwayDeleted, boat: profile.boat, worker,
+        ...(["agents-inspect", "agents-enable"].includes(action) ? { agentRequest: hostedAgentRequest(state, profile,
+          agentJob?.organizationImageId ? { ...agentJob.image, id: agentJob.organizationImageId } : worker) } : {}),
+        ...(agentJob ? { agentConnection: agentJob.connection, agentChange: { operationId: agentJob.id, actorUserId: agentJob.actorUserId,
+          enabled: true, reason: `Automatic isolated Dev native qualification ${state.owner}/${state.generation}`, evidence: agentJob.evidence } } : {}),
         ...(action === "seed" ? { fixture: bindFixture(state, profile.fixture), fixtureProof } : {}) }) }));
   };
   const seed = async (lease, build) => {
@@ -58,13 +114,19 @@ export function hostedServices(root, directory, profile, progress = () => {}) {
     const fixture = bindFixture(lease.state, profile.fixture); await lease.save();
     const proof = fixture.bootstrapOrganization ? await verifyFixtureMembership(fixture, workosClient(profile)) : undefined;
     const result = await database(lease, "seed", build, proof);
-    progress(result.seeded ? "Dev test member has the standard Pro monthly allowance and one workspace/running-workspace quota"
+    progress(result.seeded ? "Dev test member has the standard Pro monthly allowance; initial workspace limits are seeded and operator quota changes are preserved"
       : fixture.bootstrapOrganization
-        ? "Sign into this Dev app, then run pnpm dev:seed to import your verified test Organization and enable its cloud fixture"
-        : "Sign into this Dev app and select the configured Organization, then run pnpm dev:seed to enable its cloud test fixture");
+        ? "Sign into this Dev app; the launcher will prepare your verified test Organization automatically"
+        : "Sign into this Dev app and select the configured Organization; the launcher will prepare its cloud test fixture automatically");
     return result;
   };
   return {
+    lifecycleHooks,
+    async reserveGeneration(lease) {
+      if (!registry) throw new Error("Dev allocation requires the account admission registry");
+      await reserveHostedAdmission(registry, lease.state, profile);
+    },
+    releaseAdmission: lease => registry ? releaseHostedAdmission(registry, lease, profile) : undefined,
     async preflight(lease) {
       assertCurrentFixtureFunding(profile.fixture);
       if (profile.fixture) { bindFixture(lease.state, profile.fixture); await lease.save(); }
@@ -101,9 +163,26 @@ export function hostedServices(root, directory, profile, progress = () => {}) {
       }
     },
     captureSource: source,
-    async ensureImage(lease, build) { progress("Qualifying the matching cloud worker image"); return ensureDevImage(lease, profile, build, directory, objects); },
-    async ensureDatabase(lease) { progress("Preparing this checkout's disposable PlanetScale branch"); await ensurePlanetScaleBranch(lease, profile.planetscale, ps); await ensurePlanetScaleRoles(lease, profile.planetscale, ps); },
-    async ensureBackend(lease) { progress("Preparing this checkout's Railway environment"); await ensureRailwayEnvironment(lease, profile.railway, railway); },
+    async ensureImage(lease, build) {
+      const existing = lease.state.resources.images?.some(r => r.inputsSha256 === build.workerInputsSha256 && r.qualified && !r.deleted);
+      progress(existing ? "Verifying the existing cloud worker image" : "Building and qualifying the changed cloud worker image; this can take several minutes");
+      if (!existing) {
+        if (!registry) throw new Error("Dev builder allocation requires the account admission registry");
+        const inventory = await inventoryHostedProviders(profile);
+        await reserveHostedAdmission(registry, lease.state, profile, { kind: "builder", inventory,
+          snapshotName: `dev-${lease.state.owner}-${lease.state.generation.slice(0, 8)}-${build.workerInputsSha256.slice(0, 16)}` });
+      }
+      try { return await ensureDevImage(lease, profile, build, directory, objects, { progress }); }
+      finally { if (registry) await releaseHostedAdmission(registry, lease, profile); }
+    },
+    async ensureDatabase(lease) {
+      progress(lease.state.resources.planetscale?.name ? "Reusing this checkout's PlanetScale Dev branch and its data" : "Creating this checkout's disposable PlanetScale Dev branch");
+      await ensurePlanetScaleBranch(lease, profile.planetscale, ps); await ensurePlanetScaleRoles(lease, profile.planetscale, ps);
+    },
+    async ensureBackend(lease) {
+      progress(lease.state.resources.railway?.id ? "Reusing this checkout's Railway Dev environment" : "Creating this checkout's Railway Dev environment");
+      await ensureRailwayEnvironment(lease, profile.railway, railway);
+    },
     stopBackend: lease => stopRailwayBackend(lease, profile.railway, railway),
     async migrate(lease, build) {
       progress("Applying the release migrations with a temporary database role");
@@ -122,12 +201,44 @@ export function hostedServices(root, directory, profile, progress = () => {}) {
       if (lease.state.status !== "ready") throw new Error("Launch the Dev environment before running dev:seed");
       bindHostedProfile(lease.state, profile);
       bindFixture(lease.state, profile.fixture); await lease.save();
-      cleanupBuild = unpackDevOperator(await objects.readOperator(lease.state), lease.state.resources.operator.digest,
-        fs.mkdtempSync(path.join(directory, "cleanup-")), root);
+      await operatorBuild(lease);
       await ensurePlanetScaleRoles(lease, profile.planetscale, ps);
       try { return await seed(lease, cleanupBuild); }
       finally { await deletePlanetScaleMigrationRole(lease, profile.planetscale, ps); }
     },
+    async agents(lease, options) {
+      if(lease.state.status==='ready' && profile.connections?.enabled && lease.state.connectionRegistration &&
+        Date.parse(lease.state.connectionRegistration.expiresAt)<=Date.now()+6*3600000)
+        await startHosted(lease,{owner:lease.state.owner,identity:lease.state.identity},profile,this);
+      if (lease.state.status !== "ready" || !profile.fixture) return { state: profile.connections?.enabled ? "ready" : "inactive" };
+      bindHostedProfile(lease.state, profile); bindFixture(lease.state, profile.fixture);
+      await retireHostedAgentSsh(lease, profile);
+      await operatorBuild(lease);
+      const canary = hostedAgentCanary(lease, profile, undefined, {
+        reserve: job => {
+          if (!registry) throw new Error("Dev canary allocation requires the account admission registry");
+          return reserveHostedAdmission(registry, lease.state, profile, { kind: "builder", computeId: `canary:${job.id}` });
+        },
+        release: () => registry ? releaseHostedAdmission(registry, lease, profile) : undefined,
+      });
+      return advanceHostedAgents(lease, profile, {
+        ...canary,
+        inspect: () => database(lease, "agents-inspect", cleanupBuild),
+        seed: () => this.seed(lease),
+        start: (job, image) => startHostedAgentOverSsh(lease, profile, generationDirectory(lease), {
+          ...hostedAgentRequest(lease.state, profile, image), target: canary.target(job), startedAt: job.startedAt,
+          credentialId: job.connection.credentialId, credentialRevision: job.connection.credentialRevision,
+          connectionRevision: job.connection.connectionRevision, model: job.connection.model,
+        }),
+        enable: async job => {
+          await ensurePlanetScaleRoles(lease, profile.planetscale, ps);
+          try { await database(lease, "agents-enable", cleanupBuild, undefined, job); }
+          finally { await deletePlanetScaleMigrationRole(lease, profile.planetscale, ps); }
+        },
+      }, options);
+    },
+    retireDatabaseCredentials: lease => retirePlanetScaleRuntimeRoles(lease, profile.planetscale, ps),
+    retireAgentAccess: lease => retireHostedAgentSsh(lease, profile),
     ensureWebhook: lease => ensureHostedWebhook(lease, profile),
     async deployBackend(lease, build, worker) {
       progress("Deploying the captured backend source to Railway");
@@ -149,6 +260,8 @@ export function hostedServices(root, directory, profile, progress = () => {}) {
     async verify(lease, build) {
       progress("Verifying the deployed owner, generation, source and sign-in routing");
       const state = lease.state, p = hostedPublicProfile(state, profile);
+      await verifyPlanetScaleRuntimeRole(lease, profile.planetscale, ps);
+      await verifyDevImage(state.resources.images?.find(image => image.inputsSha256 === build.workerInputsSha256 && !image.deleted), profile, devBoatClient(profile.boat, lease.signal));
       await waitForHttp(`${p.apiOrigin}/healthz`, { signal: lease.signal, timeout: 120_000, accept: async response => {
         if (!response.ok) return false;
         const d = (await response.json()).development;
@@ -161,10 +274,25 @@ export function hostedServices(root, directory, profile, progress = () => {}) {
     async deleteWorkers(lease) {
       if (!lease.state.backendEverDeployed) return;
       progress("Confirming deletion of this Dev database's cloud workers");
-      if (!cleanupBuild) cleanupBuild = unpackDevOperator(await objects.readOperator(lease.state), lease.state.resources.operator.digest,
-        fs.mkdtempSync(path.join(directory, "cleanup-")), root);
-      const build = cleanupBuild;
-      await pollProvider("Dev cloud worker cleanup", async () => (await database(lease, "drain", build)).complete,
+      const build = await operatorBuild(lease);
+      await ensureHostedDrainAuthority(lease, {
+        verify: () => verifyPlanetScaleRuntimeRole(lease, profile.planetscale, ps),
+        ensure: () => ensurePlanetScaleRoles(lease, profile.planetscale, ps),
+        repair: () => database(lease, "repair-runtime-role", build),
+        retire: () => deletePlanetScaleMigrationRole(lease, profile.planetscale, ps),
+      });
+      await pollProvider("Dev cloud worker cleanup", async () => {
+        const result = await database(lease, "drain", build);
+        if (result.retired?.length) {
+          const pending = new Map((lease.state.pendingWorkerDeletions ?? []).map(record => [record.deletionOperationId, record]));
+          for (const record of result.retired) pending.set(record.deletionOperationId, record);
+          lease.state.pendingWorkerDeletions = [...pending.values()];
+          // Commit the journal transfer BEFORE allowing lifecycle to delete
+          // the branch or operator artifact. A failed CAS keeps both intact.
+          await lease.save();
+        }
+        return result.complete;
+      },
         { signal: lease.signal, timeout: 300_000, interval: 3000 });
     },
     deleteBackend: lease => deleteRailwayEnvironment(lease, profile.railway, railway),
@@ -174,10 +302,11 @@ export function hostedServices(root, directory, profile, progress = () => {}) {
     deleteWebhook: lease => deleteHostedWebhook(lease, profile),
     deleteObjects: lease => objects.clear(lease),
     deleteDatabase: lease => deletePlanetScaleBranch(lease, profile.planetscale, ps),
-    close() { objects.close(); },
+    close() { objects.close(); connectionRegistry?.close(); },
     removeLocalSources() {
       if (candidate) { fs.rmSync(candidate.directory, { recursive: true, force: true }); fs.rmSync(candidate.worker.directory, { recursive: true, force: true }); fs.rmSync(candidate.backend.archive, { force: true }); }
       if (cleanupBuild) fs.rmSync(cleanupBuild.directory, { recursive: true, force: true });
+      candidate = undefined; cleanupBuild = undefined; cleanupDigest = undefined;
     },
   };
 }

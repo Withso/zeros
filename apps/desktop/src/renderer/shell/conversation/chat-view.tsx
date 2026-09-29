@@ -103,7 +103,11 @@ export function ChatView({
   // panes container derives per-pane display from the layout model).
   const active = useChatById(chatId);
   const dispatch = useWorkspaceDispatch();
-  const agents = useWorkspaceAgents(active?.folder, surfaceActive || preparing);
+  const cloud = isCloudWorkspace(active?.folder);
+  // Hidden cloud preparation may consume retained registry data and hydrate
+  // history, but a registry request would claim its speculative runtime peer.
+  const agents = useWorkspaceAgents(active?.folder, surfaceActive || (!cloud && preparing));
+  const bindingActive = !readOnly && (surfaceActive || !cloud);
   // Canonical cwd resolution: the chat's own `folder` OR the current scope
   // (`newAgentFolder` — the worktree row the user has selected). Same chain
   // as useChatCwd / repository panel / the topbar. Without the fallback, a chat with
@@ -117,7 +121,7 @@ export function ChatView({
   const resolvedCwd = useChatCwd();
   // A binding made before the registry answered is a guess. Correct it here —
   // this hook outlives AutoBindAgent, which unmounts the instant it binds.
-  useProvisionalBindingReconcile(active, !readOnly);
+  useProvisionalBindingReconcile(active, bindingActive);
 
   if (!active) {
     // EmptyComposer (the no-chat "start a new chat" landing) no longer exists
@@ -142,7 +146,7 @@ export function ChatView({
   // records, so this branch only catches edge cases (a brand-new
   // chat created elsewhere, a corrupted record bypassing migration).
   if (!readOnly && !active.agentId) {
-    return <AutoBindAgent chat={active} />;
+    return bindingActive ? <AutoBindAgent chat={active} /> : null;
   }
 
   // The chat is bound to an agent the registry no longer knows about —
@@ -461,6 +465,28 @@ function ChatBody({
   // carried over from a previous app run), we ask the provider to resume it
   // instead of creating a new one.
   const sessions = useAgentSessions();
+  const hasSessionSlot = useSessionsStore((state) => state.sessions[chatId] !== undefined);
+  const hasChatMetadata = Boolean(chat);
+  // Cloud history belongs to the database, including during stop/wake/setup.
+  // Authentication can also clear a slot while its view stays retained under
+  // the same chat id. Hydrate once authorized metadata is available, separately
+  // from agent admission below. Local creation still waits for its filesystem.
+  useEffect(() => {
+    if (!surfaceActive || !hasChatMetadata || hasSessionSlot ||
+        (!readOnly && workspaceProvisioning && !isCloudWorkspace(cwd))) return;
+    let cancelled = false;
+    void sessions.hydrateChat(chatId).then(() => {
+      // Cleanup may have removed the slot while an earlier shared read was
+      // retiring. That read cannot publish into an absent slot. Retry once
+      // after its request identity is released, provided this view still owns
+      // the same authorized chat. Do not turn ordinary failures into polling.
+      if (!cancelled && !sessions.getSession(chatId))
+        return sessions.hydrateChat(chatId);
+    }).catch(() => {
+      if (!cancelled && readOnly) setHistoryError("Couldn't load chat history.");
+    });
+    return () => { cancelled = true; };
+  }, [chatId, cwd, hasChatMetadata, hasSessionSlot, surfaceActive, readOnly, workspaceProvisioning, sessions]);
   // Optimistic create: render the provisional composer immediately, but do not
   // spawn into the announced path until the exact create lifecycle publishes.
   // Workbench's longer presentation-only settling window is deliberately not a

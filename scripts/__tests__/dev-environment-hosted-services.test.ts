@@ -13,7 +13,7 @@ import { unpackDevOperator } from "../dev-environment/operator-artifact.mjs";
 import { sha256 } from "../dev-environment/state.mjs";
 import { acquireWorkspaceLock } from "../dev-environment/state.mjs";
 import { cleanupHostedLocalState } from "../dev-environment/hosted-local.mjs";
-import { hostedServices } from "../dev-environment/hosted-services.mjs";
+import { hostedServices, hostedDatabaseWorker } from "../dev-environment/hosted-services.mjs";
 import { bindFixture } from "../dev-environment/hosted-fixtures.mjs";
 
 const directories: string[] = [];
@@ -35,6 +35,28 @@ function fixture() {
 }
 
 describe("hosted Dev boundaries", () => {
+  it("seeds capacity from the matching worker build instead of the first historical image", () => {
+    const previous = { inputsSha256: "a".repeat(64), qualified: true, storageMiB: 2048 };
+    const current = { inputsSha256: "b".repeat(64), qualified: true, storageMiB: 4096 };
+    const state = { source: { workerInputsSha256: previous.inputsSha256 }, resources: { images: [previous, current] } };
+    expect(hostedDatabaseWorker(state, { workerInputsSha256: current.inputsSha256 }, "seed")).toBe(current);
+    expect(hostedDatabaseWorker(state, {}, "seed")).toBe(previous);
+  });
+  it("never grants a fixture from an unqualified or deleted matching image", () => {
+    const input = "a".repeat(64);
+    const state = { source: { workerInputsSha256: input }, resources: { images: [
+      { inputsSha256: input, qualified: false },
+      { inputsSha256: input, qualified: true, deleted: true },
+      { inputsSha256: input, qualified: true, snapshotDeleted: true },
+      { inputsSha256: "b".repeat(64), qualified: true },
+    ] } };
+    expect(() => hostedDatabaseWorker(state, {}, "seed")).toThrow(/matching.*worker/i);
+    expect(() => hostedDatabaseWorker({ resources: state.resources }, {}, "seed")).toThrow(/matching.*worker/i);
+  });
+  it("can drain a partially deployed generation before its final source receipt exists", () => {
+    const worker = { inputsSha256: "a".repeat(64), qualified: true };
+    expect(hostedDatabaseWorker({ resources: { images: [worker] } }, {}, "drain")).toBe(worker);
+  });
   it("rejects retired funding before provider preflight and preserves its receipt for archive", async () => {
     const f = fixture(), selected = { workosUserId: "user_test", workosOrganizationId: "org_test",
       expectedEmail: "dev@example.test", expectedOrganizationSlug: "test-org", computeCreditMicroUsd: 1_000_000 };
@@ -53,7 +75,7 @@ describe("hosted Dev boundaries", () => {
     } finally { services.close(); }
   });
   it("preserves desktop data while its launcher is alive and removes it after shutdown", () => {
-    const directory = temporary(), f = fixture(), file = path.join(directory, "desktop-data");
+    const directory = temporary(), f = fixture(), file = path.join(directory, `desktop-${f.state.generation}`);
     fs.writeFileSync(file, "active sqlite");
     const release = acquireWorkspaceLock({ directory, state: f.state });
     expect(cleanupHostedLocalState(directory, f.state)).toBe(false);
@@ -72,6 +94,7 @@ describe("hosted Dev boundaries", () => {
   it("projects public desktop/web fields and never refreshes a workspace contract from Alpha", async () => {
     const f = fixture(); expect(hostedProfileIssues(f.profile)).toEqual([]);
     const env = hostedDesktopEnvironment(f.state, f.profile, temporary()), fetchImpl = vi.fn();
+    expect(env.ZEROS_DEV_NODE_EXECUTABLE).toBe(process.execPath);
     expect((await ensureDevAuthEnvironment({ processEnv: env, fetchImpl })).source).toBe("workspace");
     expect(fetchImpl).not.toHaveBeenCalled();
     for (const projection of [env, hostedWebEnvironment(f.state, f.profile)]) expect(JSON.stringify(projection)).not.toContain("private-");
@@ -158,6 +181,21 @@ describe("hosted Dev boundaries", () => {
     expect(f.state.pendingBuilderDeletions).toEqual([]);
   });
 
+  it("reconciles other retention records after one fails and bounds each pass", async () => {
+    const f = fixture();
+    f.state.pendingBuilderDeletions = Array.from({ length: 101 }, (_, index) => ({ id: `bx_${index}`, retiredAt: new Date().toISOString(),
+      deletionOperationId: `bdop_${index.toString(16).padStart(32, "0")}`, accountScope: f.profile.boat.accountScope, billingOrg: f.profile.boat.billingOrg }));
+    const request = vi.fn(async (_method, route) => {
+      const record = f.state.pendingBuilderDeletions.find(r => route.endsWith(r.deletionOperationId));
+      if (record.id === "bx_0") throw new Error("unavailable");
+      return { status: 200, body: { operation: { id: record.deletionOperationId, kind: "sandbox", targetId: record.id, status: "completed", completedAt: new Date().toISOString() } } };
+    });
+    await expect(reconcileRetiredBuilders(f.lease, f.profile, request, { maxRecords: 3 })).rejects.toThrow();
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(f.state.pendingBuilderDeletions.some(r => r.id === "bx_1")).toBe(false);
+    expect(f.state.pendingBuilderDeletions.find(r => r.id === "bx_0").reconcileAttempts).toBe(1);
+  });
+
   it("does not defer unknown builder failures or a builder that is still accessible", async () => {
     const f = fixture(), record: any = { id: "bx_23456789" }, id = "bdop_" + "a".repeat(32);
     for (const stage of ["retrying", "waiting_for_uploads"]) {
@@ -202,6 +240,37 @@ describe("hosted Dev boundaries", () => {
     await store.saveImageSource(f.lease, record, bytes);
     expect(await store.readImageSource(f.state, record)).toEqual(bytes);
     bytes = Buffer.from("replaced"); await expect(store.readImageSource(f.state, record)).rejects.toThrow(/checksum/);
+  });
+  it("allows a source upload slower than a control request while preserving cancellation", async () => {
+    vi.useFakeTimers();
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(milliseconds => {
+      const controller = new AbortController();
+      timers.push(setTimeout(() => controller.abort(), milliseconds));
+      return controller.signal;
+    });
+    try {
+      const f = fixture(), record: any = { inputsSha256: "a".repeat(64) };
+      class Command { constructor(public input: any) {} }
+      const client = { destroy() {}, send: vi.fn((_command: Command, { abortSignal }: { abortSignal: AbortSignal }) =>
+        new Promise((resolve, reject) => {
+          abortSignal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          timers.push(setTimeout(() => resolve({}), 21_000));
+        })) };
+      const store = devObjectStorage(f.profile.storage, { client, sdk: { PutObjectCommand: Command } });
+      const uploading = store.saveImageSource(f.lease, record, Buffer.alloc(9 * 1024 * 1024));
+      void uploading.catch(() => {});
+      await vi.advanceTimersByTimeAsync(21_000);
+      await uploading;
+      expect(record.sourceArchive.digest).toBeDefined();
+      const cancellation = new AbortController(); f.lease.signal = cancellation.signal;
+      const next: any = { inputsSha256: "b".repeat(64) };
+      const cancelled = store.saveImageSource(f.lease, next, Buffer.from("source"));
+      void cancelled.catch(() => {});
+      await vi.advanceTimersByTimeAsync(1); cancellation.abort();
+      await expect(cancelled).rejects.toThrow(/preserve/);
+      expect(next.sourceArchive).toBeUndefined();
+    } finally { for (const timer of timers) clearTimeout(timer); timeout.mockRestore(); vi.useRealTimers(); }
   });
   it("records named image retirement separately from physical backing storage deletion", async () => {
     const f = fixture(); f.state.status = "archiving";

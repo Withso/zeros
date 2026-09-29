@@ -2,6 +2,9 @@ import type { Workspace } from "../platform/git";
 import {
   CloudWorkspaceDocumentSchema,
   changeCloudWorkspaceLifecycle,
+  recoverCloudWorkspace,
+  CloudWorkspaceRecoveryInputSchema,
+  type CloudWorkspaceRecoveryInput,
   getCloudWorkspaceDocument,
   listCloudWorkspaceDocuments,
   type CloudWorkspaceDocument,
@@ -12,7 +15,8 @@ import {
   type CloudWorkspaceTarget,
 } from "../platform/bridge/cloud-workspace-key";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
-import { loadProjects, type Project } from "./projects-store";
+import type { Project } from "./projects-store";
+import { clearCloudComposerPrs } from "./read-caches";
 
 export const cloudWorkspaceDetails =
   new KeyedAsyncCache<CloudWorkspaceDocument>(128);
@@ -21,10 +25,36 @@ let rows: readonly Workspace[] = [];
 let projects: readonly Project[] = [];
 let ownerByKey = new Map<string, Project>();
 let epoch = 0;
+let catalogConfirmed = false;
 export const cloudCatalogGeneration = () => epoch;
+export const cloudWorkspaceCatalogConfirmed = () => catalogConfirmed;
 let inflight: Promise<void> | null = null;
+let catalogReadGeneration = 0;
+// Read provenance follows the published object without retaining removed owners.
+const detailCatalogGenerations = new WeakMap<CloudWorkspaceDocument, number>();
+const detailReads = new Map<string, Promise<CloudWorkspaceDocument>>();
+// Tokens live only with catalog owners or pending detail reads. Removing the
+// token is an exact-owner tombstone: an old read cannot match absence, nor a
+// newly allocated token if that owner later becomes readable again.
+const detailOwnerGenerations = new Map<string, number>();
+let nextDetailOwnerGeneration = 0;
 const listeners = new Set<() => void>();
+const refreshListeners = new Set<() => void>();
+export interface CloudWorkspaceRowsChange {
+  workspaceIds: readonly string[];
+  removedWorkspaceIds: readonly string[];
+  repoSlugs: readonly string[];
+  projectsChanged: boolean;
+}
+const rowListeners = new Set<(change: CloudWorkspaceRowsChange) => void>();
 const engineRows = new Map<string, Workspace>();
+
+function publishDocument(doc: CloudWorkspaceDocument): void {
+  const key = cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id });
+  const previous = cloudWorkspaceDetails.peekSnapshot(key).data;
+  if (previous && JSON.stringify(previous) === JSON.stringify(doc)) return;
+  cloudWorkspaceDetails.setData(key, doc);
+}
 
 export const subscribeCloudWorkspaces = (listener: () => void) => {
   listeners.add(listener);
@@ -32,8 +62,31 @@ export const subscribeCloudWorkspaces = (listener: () => void) => {
     listeners.delete(listener);
   };
 };
+export const subscribeCloudWorkspaceRows = (listener: (change: CloudWorkspaceRowsChange) => void) => {
+  rowListeners.add(listener);
+  return () => { rowListeners.delete(listener); };
+};
+/** A successful catalog read is a history revalidation opportunity, not a row
+ * mutation. Only the visible owner subscribes to this separate cadence. */
+export const subscribeCloudWorkspaceRefresh = (listener: () => void) => {
+  refreshListeners.add(listener);
+  return () => { refreshListeners.delete(listener); };
+};
 export const getCloudWorkspaceRows = () => rows;
 export const getCloudProjects = () => projects;
+/** Logical deletion revokes reads immediately, even while the provider is
+ * still removing its physical snapshot. Stopped/archived history stays readable. */
+export function canReadCloudWorkspace(doc: CloudWorkspaceDocument | undefined): boolean {
+  return doc !== undefined && doc.deletedAt === null &&
+    doc.status !== "deleting" && doc.status !== "deleted";
+}
+export function cloudCatalogNeedsFastRefresh(): boolean {
+  // Provider storage deletion can take much longer than an interactive setup
+  // transition. Keep observing it at the normal cadence without refetching
+  // every other workspace and its history every two seconds.
+  return documents.some(doc => doc.deletedAt === null &&
+    !["ready", "busy", "stopped", "archived", "failed", "error", "deleting", "deleted"].includes(doc.status));
+}
 export function cloudProjectForFolder(folder: string): Project | null {
   const target = parseCloudWorkspaceKey(folder);
   return target ? (ownerByKey.get(cloudWorkspaceKey(target)) ?? null) : null;
@@ -48,10 +101,10 @@ export function cloudWorkspaceDocument(
   );
 }
 
-function rebuild(): void {
+function rebuild(documentsChanged = false): void {
   const knownKeys = new Set(
     documents
-      .filter((doc) => doc.deletedAt === null)
+      .filter(canReadCloudWorkspace)
       .map((doc) =>
         cloudWorkspaceKey({
           organizationId: doc.organizationId,
@@ -61,14 +114,11 @@ function rebuild(): void {
   );
   for (const key of engineRows.keys())
     if (!knownKeys.has(key)) engineRows.delete(key);
-  const local = loadProjects().filter(
-    (project) => !project.repoRoot.startsWith("cloud://"),
-  );
   const nextProjects = new Map<string, Project>();
   const nextOwners = new Map<string, Project>();
   const prior = new Map(rows.map((row) => [row.id, row]));
   const nextRows = documents
-    .filter((doc) => doc.deletedAt === null)
+    .filter(canReadCloudWorkspace)
     .map((doc) => {
       const key = cloudWorkspaceKey({
         organizationId: doc.organizationId,
@@ -76,18 +126,8 @@ function rebuild(): void {
       });
       const slug = `${doc.repository.owner}/${doc.repository.name}`;
       const originUrl = `https://${doc.repository.forge}/${slug}.git`;
-      const matching = local.find(
-        (project) =>
-          project.originUrl
-            ?.replace(/\.git$/, "")
-            .replace(/\/$/, "")
-            .toLowerCase() === originUrl.replace(/\.git$/, "").toLowerCase() ||
-          project.originUrl?.toLowerCase() ===
-            `git@${doc.repository.forge}:${slug}.git`.toLowerCase(),
-      );
       const projectKey = `${doc.organizationId}:${doc.repository.forge}:${slug.toLowerCase()}`;
-      const project = matching ??
-        nextProjects.get(projectKey) ??
+      const project = nextProjects.get(projectKey) ??
         projects.find(
           (p) =>
             p.id === `cloud-repository:${projectKey}` &&
@@ -101,7 +141,7 @@ function rebuild(): void {
           isGitRepository: true,
           addedAt: Date.parse(doc.createdAt),
         };
-      if (!matching) nextProjects.set(projectKey, project);
+      nextProjects.set(projectKey, project);
       nextOwners.set(key, project);
       const engine = engineRows.get(key);
       const row: Workspace = {
@@ -129,7 +169,7 @@ function rebuild(): void {
         setupState:
           ["failed", "error"].includes(doc.status)
             ? "failed"
-            : ["ready", "busy", "stopped"].includes(doc.status)
+            : ["ready", "busy", "stopped", "archived"].includes(doc.status)
               ? "passed"
               : "running",
       };
@@ -138,21 +178,36 @@ function rebuild(): void {
     });
   ownerByKey = nextOwners;
   const newProjects = [...nextProjects.values()];
-  if (
+  const projectsChanged =
     newProjects.length !== projects.length ||
-    newProjects.some((row, i) => row !== projects[i])
-  )
-    projects = newProjects;
+    newProjects.some((row, i) => row !== projects[i]);
+  if (projectsChanged) projects = newProjects;
+  const nextById = new Map(nextRows.map(row => [row.id, row]));
+  const changed = [...rows.filter(row => nextById.get(row.id) !== row),
+    ...nextRows.filter(row => prior.get(row.id) !== row)];
   if (
     nextRows.length !== rows.length ||
     nextRows.some((row, i) => row !== rows[i])
   )
     rows = nextRows;
-  for (const listener of listeners) listener();
+  if (changed.length || projectsChanged) {
+    const change = {
+      workspaceIds: [...new Set(changed.map(row => row.id))],
+      removedWorkspaceIds: [...prior.keys()].filter(id => !nextById.has(id)),
+      repoSlugs: [...new Set(changed.map(row => row.repoSlug))],
+      projectsChanged,
+    };
+    for (const listener of rowListeners) listener(change);
+  }
+  // Status/capability observers still see document changes even when their
+  // workspace projection is unchanged; those changes are not cache invalidation.
+  if (documentsChanged || changed.length || projectsChanged)
+    for (const listener of listeners) listener();
 }
 
 export function acceptCloudWorkspaceDocument(
   document: CloudWorkspaceDocument,
+  detailReadGeneration?: number,
 ): void {
   const doc = CloudWorkspaceDocumentSchema.parse(document);
   const prior = documents.find((row) => row.id === doc.id);
@@ -162,16 +217,18 @@ export function acceptCloudWorkspaceDocument(
       Date.parse(prior.updatedAt) > Date.parse(doc.updatedAt))
   )
     return;
-  documents = [...documents.filter((row) => row.id !== doc.id), doc];
+  if (prior && JSON.stringify(prior) === JSON.stringify(doc)) {
+    if (detailReadGeneration === undefined) detailCatalogGenerations.delete(prior);
+    return;
+  }
+  if (detailReadGeneration === undefined) detailCatalogGenerations.delete(doc);
+  else detailCatalogGenerations.set(doc, detailReadGeneration);
+  documents = prior
+    ? documents.map(row => row === prior ? doc : row)
+    : [...documents, doc];
   settleLifecycleIntents(doc);
-  cloudWorkspaceDetails.setData(
-    cloudWorkspaceKey({
-      organizationId: doc.organizationId,
-      workspaceId: doc.id,
-    }),
-    doc,
-  );
-  rebuild();
+  publishDocument(doc);
+  rebuild(true);
 }
 
 export function acceptCloudEngineWorkspace(
@@ -187,6 +244,7 @@ export function acceptCloudEngineWorkspace(
 export async function refreshCloudWorkspaceCatalog(): Promise<void> {
   if (inflight) return inflight;
   const version = epoch;
+  const readGeneration = ++catalogReadGeneration;
   const before = documents;
   const flight = listCloudWorkspaceDocuments()
     .then((next) => {
@@ -195,9 +253,17 @@ export async function refreshCloudWorkspaceCatalog(): Promise<void> {
       const changed = documents.filter(
         (row) => before.find((old) => old.id === row.id) !== row,
       );
-      documents = next;
+      documents = next.map(raw => {
+        const row = CloudWorkspaceDocumentSchema.parse(raw);
+        const prior = documents.find(old => old.id === row.id);
+        return prior && JSON.stringify(prior) === JSON.stringify(row) ? prior : row;
+      });
       for (const row of changed) {
         const listed = documents.find((item) => item.id === row.id);
+        // A pre-list detail is not a concurrent create receipt. The newer
+        // catalog omission wins regardless of which response completes first.
+        if (!listed && (detailCatalogGenerations.get(row) ?? readGeneration) < readGeneration)
+          continue;
         if (
           !listed ||
           row.version > listed.version ||
@@ -206,17 +272,23 @@ export async function refreshCloudWorkspaceCatalog(): Promise<void> {
         )
           documents = [...documents.filter((item) => item.id !== row.id), row];
       }
+      const documentsChanged = JSON.stringify(before) !== JSON.stringify(documents);
+      const currentOwners = new Set(documents.map(row => cloudWorkspaceKey({
+        organizationId: row.organizationId, workspaceId: row.id,
+      })));
+      for (const key of new Set([...detailOwnerGenerations.keys(), ...cloudWorkspaceDetails.keys()])) {
+        if (currentOwners.has(key)) continue;
+        const hadRead = detailOwnerGenerations.delete(key);
+        if (hadRead || cloudWorkspaceDetails.peekSnapshot(key).data !== undefined)
+          cloudWorkspaceDetails.forget(key);
+      }
       for (const row of documents) {
         settleLifecycleIntents(row);
-        cloudWorkspaceDetails.setData(
-          cloudWorkspaceKey({
-            organizationId: row.organizationId,
-            workspaceId: row.id,
-          }),
-          row,
-        );
+        publishDocument(row);
       }
-      rebuild();
+      catalogConfirmed = true;
+      rebuild(documentsChanged);
+      for (const listener of refreshListeners) listener();
     })
     .finally(() => {
       if (inflight === flight) inflight = null;
@@ -229,23 +301,50 @@ export async function refreshCloudWorkspace(
   target: CloudWorkspaceTarget,
 ): Promise<CloudWorkspaceDocument> {
   const version = epoch;
-  const doc = await getCloudWorkspaceDocument(target);
-  if (version !== epoch) throw new Error("Cloud account changed");
-  acceptCloudWorkspaceDocument(doc);
-  return doc;
+  const readGeneration = catalogReadGeneration;
+  const generation = cloudWorkspaceDocument(target)?.generation.number;
+  const owner = cloudWorkspaceKey(target);
+  const ownerGeneration = detailOwnerGenerations.get(owner) ?? ++nextDetailOwnerGeneration;
+  const key = JSON.stringify([version, target.organizationId, target.workspaceId, generation, ownerGeneration]);
+  const pending = detailReads.get(key);
+  if (pending) return pending;
+  if (detailReads.size >= 128) throw new Error("Too many cloud catalog reads");
+  detailOwnerGenerations.set(owner, ownerGeneration);
+  const flight = getCloudWorkspaceDocument(target).then(doc => {
+    if (version !== epoch) throw new Error("Cloud account changed");
+    if (detailOwnerGenerations.get(owner) !== ownerGeneration)
+      throw new Error("Cloud workspace was removed while loading details");
+    if (doc.id !== target.workspaceId || doc.organizationId !== target.organizationId)
+      throw new Error("Cloud catalog returned a different workspace");
+    const current = cloudWorkspaceDocument(target);
+    if (current && current.generation.number !== doc.generation.number &&
+        (current.version >= doc.version || current.generation.number > doc.generation.number))
+      throw new Error("Cloud workspace generation changed");
+    // A newer stopped/deleted document must win over a late ready read, too.
+    acceptCloudWorkspaceDocument(doc, readGeneration);
+    return cloudWorkspaceDocument(target)!;
+  }).finally(() => {
+    if (detailReads.get(key) === flight) detailReads.delete(key);
+    if (!cloudWorkspaceDocument(target) && detailOwnerGenerations.get(owner) === ownerGeneration)
+      detailOwnerGenerations.delete(owner);
+  });
+  detailReads.set(key, flight);
+  return flight;
 }
 
 export function clearCloudWorkspaceCatalog(): void {
+  clearCloudComposerPrs();
   epoch++;
+  catalogConfirmed = false;
   inflight = null;
+  detailReads.clear();
+  detailOwnerGenerations.clear();
+  const hadDocuments = documents.length > 0;
   documents = [];
-  rows = [];
-  projects = [];
-  ownerByKey = new Map();
   engineRows.clear();
   cloudWorkspaceDetails.clear();
   lifecycleIntents.clear();
-  for (const listener of listeners) listener();
+  rebuild(hadDocuments);
 }
 
 const lifecycleIntents = new Map<
@@ -313,15 +412,23 @@ export async function manageCloudWorkspace(
 export async function cloudWorkspaceOperation(
   target: CloudWorkspaceTarget,
   op: string,
+  params?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const key = cloudWorkspaceKey(target);
+  const recovery = cloudWorkspaceDocument(target)?.recovery;
   const operation =
     op === "workspace.archive"
       ? "archive"
       : op === "workspace.delete"
         ? "delete"
         : "wake";
-  const doc = await manageCloudWorkspace(target, operation, true);
+  const doc = op === "workspace.recover"
+    ? await manageCloudWorkspaceRecovery(target, CloudWorkspaceRecoveryInputSchema.parse({
+        sourceGeneration: params?.sourceGeneration ?? recovery?.sourceGeneration,
+        checkpointId: params?.checkpointId ?? recovery?.checkpointId,
+        ...(params?.allowDataLoss === undefined ? {} : { allowDataLoss: params.allowDataLoss }),
+      }))
+    : await manageCloudWorkspace(target, operation, true);
   const workspace = rows.find((row) => row.id === key);
   if (operation === "archive")
     return { archivedAt: Date.parse(doc.updatedAt), stashRef: null, workspace };
@@ -334,4 +441,20 @@ export async function cloudWorkspaceOperation(
     adaptations: [],
     workspace,
   };
+}
+
+export async function manageCloudWorkspaceRecovery(target: CloudWorkspaceTarget, input: CloudWorkspaceRecoveryInput): Promise<CloudWorkspaceDocument> {
+  const version = epoch;
+  const key = `${epoch}:${cloudWorkspaceKey(target)}:recover:${input.sourceGeneration}:${input.checkpointId}:${input.allowDataLoss === true}`;
+  const intent = lifecycleIntents.get(key) ?? { id: crypto.randomUUID() };
+  if (intent.task) return intent.task;
+  const task = recoverCloudWorkspace(target, input, intent.id).then(doc => {
+    if (version !== epoch) throw new Error("Cloud account changed");
+    acceptCloudWorkspaceDocument(doc);
+    lifecycleIntents.delete(key);
+    return doc;
+  }).finally(() => { if (intent.task === task) delete intent.task; });
+  intent.task = task;
+  lifecycleIntents.set(key, intent);
+  return task;
 }

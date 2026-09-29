@@ -41,6 +41,49 @@ snapshot settles and proves it missing. `undefined`/cold is not an empty list;
 keep the remembered identity while revalidating, then apply an authoritative
 fallback as a new atomic navigation if necessary.
 
+Cloud reload restores the saved workspace/chat identity before authentication
+releases cached content. Only a confirmed chat snapshot for that exact cloud
+workspace can invalidate its saved chat; the Local engine's list cannot. Do not
+persist an early Local-only list over the cloud cache before its authorized
+restore completes. Sign-out, account replacement and authoritative workspace
+deletion prune the destination and its descendants atomically. A cold cloud
+selection must not fall back to an unrelated Local chat.
+
+Workspace existence and chat-history readiness are separate facts. Both Local
+and Cloud wait for the selected workspace's first authoritative chat list before
+automatically creating a default chat. A repository list arriving first is not
+evidence of an empty conversation. Preserve the selection and drafts during
+revalidation; a reload alone must not create an extra Untitled tab.
+
+When a cloud engine stops or changes, new work must not reuse an admission that
+is still disconnected or reconnecting. Reopen that workspace through normal
+admission, deduplicate concurrent opens, and fence all late responses from the
+retired connection. Keep its last confirmed chat snapshot until the replacement
+hydrates successfully, including when hydration fails or the old native close
+acknowledgement arrives late. Account replacement and owner deletion still
+prune that snapshot; another workspace and the Local connection stay independent.
+
+Cloud catalog polling is not a transcript mutation. Retain the cloud history
+revision and unchanged snapshot references, deduplicate concurrent history warms,
+and notify chat/message consumers only when that exact workspace's confirmed
+history changes. A history-only refresh must not invalidate Git, files or Local
+state. This keeps stopped-workspace history readable without turning lifecycle
+polling into a request loop across every retained chat.
+Cloud transcript hydration is independent of the VM's admission/provisioning
+gate. A retained active view whose session slot is cleared during authentication
+or engine replacement rehydrates once its authorized chat metadata is available.
+If it shared a read that retired after that cleanup, it retries once after the
+read releases its identity. This recovery must not start an agent, wake a VM,
+poll on ordinary failures, or reactivate a hidden surface.
+Sending immediately after Stop may race the cancelled command's durable
+retirement. Resume can retry only when the entire revision advance is accounted
+for by the same dispatching commands becoming terminal. A newer Stop, recovery,
+or queue edit still rejects the stale send. Native completion remains immediate;
+waiting for persistence must not keep the completed turn's timer running.
+Archived workspaces and pending provider storage deletion use the normal catalog
+cadence; neither keeps all workspaces on fast setup polling. Actual startup and
+interactive lifecycle transitions still receive fast refreshes.
+
 Deletion cleanup follows semantic path ownership, not raw equality: include
 normalized descendant cwd keys, but protect a separately registered nested
 repository (the most-specific known owner wins).

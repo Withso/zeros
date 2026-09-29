@@ -94,6 +94,11 @@ export class CloudEventReader {
           30_000,
         );
         if (this.closed) return;
+        if (!this.cursor) return;
+        // A replacement engine can send its first frames while the previous
+        // engine's request is still settling. Its late response has no authority
+        // over the new cursor; drain the new stream instead.
+        if (this.cursor.streamId !== cursor.streamId) continue;
         if (response.type === "WORKSPACE_ERROR") {
           if (
             [
@@ -123,7 +128,11 @@ export class CloudEventReader {
         }
         for (const entry of result.events)
           this.receive(entry.frame as unknown as BridgeMessage);
-        if (result.cursor >= result.head) return;
+        // A second gap may have arrived while this page was in flight. Its
+        // head describes the earlier read, not everything we have since seen
+        // live. Keep draining without waiting for another live frame (there
+        // may be none after the final answer/turn marker).
+        if (result.cursor >= result.head && this.buffered.size === 0) return;
         if (this.cursor.sequence <= cursor.sequence) {
           this.resnapshot();
           return;

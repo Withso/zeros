@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { classifyCloudFailure } from "./cloud-diagnostics.js";
 import { BoatApiClient } from "./boat-client.js";
 
 function fixture() {
@@ -16,6 +17,14 @@ function fixture() {
   };
 }
 describe("Boat API boundary", () => {
+  it("carries only the HTTP status class into lifecycle diagnostics", async () => {
+    const f=fixture();
+    f.fetcher.mockResolvedValue(Response.json({ok:false,message:"credential-canary"},{status:503}));
+    const error=await f.client.request("/sandboxes").catch(error=>error);
+    const diagnostic=classifyCloudFailure(error,"provider_inspect");
+    expect(diagnostic.httpClass).toBe("5xx");
+    expect(JSON.stringify(diagnostic)).not.toContain("credential-canary");
+  });
   it.each([
     "short",
     "boat_credential_with_é",

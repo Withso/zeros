@@ -19,6 +19,7 @@ import {
 import {
   cloudWorkspaceDetails,
   manageCloudWorkspace,
+  manageCloudWorkspaceRecovery,
   refreshCloudWorkspace,
 } from "../../state/cloud-workspace-catalog";
 import { useCachedRead } from "../../state/use-cached-read";
@@ -29,6 +30,7 @@ import {
 import { useTeams } from "../../features/team/team-store";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { toast } from "../../shared/ui/primitives/elements";
+import { Checkbox } from "../../shared/ui/primitives/checkbox";
 
 export function cloudStatusLabel(status: string): string {
   return (
@@ -44,6 +46,10 @@ export function cloudStatusLabel(status: string): string {
         archived: "Archived",
         error: "Needs attention",
         failed: "Setup failed",
+        restoring: "Restoring workspace from saved checkpoint",
+        waiting_for_capacity: "Recovery is waiting for capacity",
+        waiting_for_funding: "Recovery is waiting for compute funding",
+        recovery_needed: "Recovery needs attention",
       } as Record<string, string>
     )[status] ?? status.replaceAll("_", " ")
   );
@@ -57,7 +63,8 @@ export function CloudWorkspaceDetailsContent({
   creator: string;
 }) {
   const resources = workspace.generation.resources;
-  const setup = ["ready", "busy", "stopped", "archived"].includes(
+  const recoveryState = workspace.recovery?.state;
+  const setup = recoveryState ? cloudStatusLabel(recoveryState) : ["ready", "busy", "stopped", "archived"].includes(
     workspace.status,
   )
     ? "Setup succeeded"
@@ -80,7 +87,7 @@ export function CloudWorkspaceDetailsContent({
     {
       Icon: Activity,
       label: "Status",
-      value: cloudStatusLabel(workspace.status),
+      value: cloudStatusLabel(recoveryState ?? workspace.status),
     },
     {
       Icon: Cpu,
@@ -123,7 +130,10 @@ export function CloudWorkspaceDetailsContent({
           </div>
         ))}
       </dl>
-      {workspace.error && (
+      {recoveryState && workspace.recovery?.checkpointAt && (
+        <p className="text-fg3 mt-3 text-xs">Saved checkpoint · {new Date(workspace.recovery.checkpointAt).toLocaleString()}</p>
+      )}
+      {workspace.error && !recoveryState && (
         <p className="text-error mt-3 text-xs" role="alert">
           {workspace.error.message}
         </p>
@@ -137,6 +147,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   const key = target ? cloudWorkspaceKey(target) : null;
   const [open, setOpen] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [acknowledgedCheckpoint, setAcknowledgedCheckpoint] = useState<string | null>(null);
   const { me } = useTeams();
   const details = useCachedRead(
     cloudWorkspaceDetails,
@@ -194,7 +205,32 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
             Couldn’t refresh. Showing the last confirmed details.
           </p>
         )}
-        {details.data &&
+        {details.data?.recovery?.checkpointId && details.data.recovery.state !== "restoring" &&
+          (details.data.recovery.state || details.data.status === "failed") &&
+          ["failed", "stopped", "archived"].includes(details.data.status) && (
+            <div className="mt-3">
+              {details.data.recovery.needsAcknowledgement && (
+                <label className="text-fg2 mb-2 flex items-start gap-2 text-xs">
+                  <Checkbox checked={acknowledgedCheckpoint === `${key}:${details.data.recovery.checkpointId}`}
+                    onChange={() => setAcknowledgedCheckpoint(acknowledgedCheckpoint === `${key}:${details.data!.recovery!.checkpointId}` ? null : `${key}:${details.data!.recovery!.checkpointId}`)} />
+                  Recovering may discard changes after this saved checkpoint.
+                </label>
+              )}
+              <Button size="sm" disabled={starting || me?.user.id !== details.data.ownerUserId || !details.data.capabilities.canManage ||
+                (details.data.recovery.needsAcknowledgement && acknowledgedCheckpoint !== `${key}:${details.data.recovery.checkpointId}`)}
+                onClick={() => {
+                  const recovery = details.data!.recovery!;
+                  setStarting(true);
+                  void manageCloudWorkspaceRecovery(target!, { sourceGeneration: recovery.sourceGeneration, checkpointId: recovery.checkpointId!,
+                    ...(recovery.needsAcknowledgement ? { allowDataLoss: true } : {}) })
+                    .catch(error => toast.error("Couldn't recover cloud workspace", { description: error instanceof Error ? error.message : "Try again." }))
+                    .finally(() => setStarting(false));
+                }}>
+                {starting ? "Restoring…" : details.data.recovery.state?.startsWith("waiting_") ? "Retry recovery" : "Recover workspace"}
+              </Button>
+            </div>
+          )}
+        {details.data && !details.data.recovery?.state &&
           ["stopped", "archived"].includes(details.data.status) && (
             <div className="mt-3">
               <Button

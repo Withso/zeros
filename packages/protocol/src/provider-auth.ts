@@ -139,6 +139,27 @@ export type ProviderSubscriptionStatus = z.infer<
   typeof providerSubscriptionStatusSchema
 >;
 
+/** Cloud browser ceremonies expose metadata and a short-lived public device
+ * code only. Provider tokens and native cache files stay in Electron main. */
+export const cloudProviderAuthActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("connect"), attemptId: attemptIdSchema,
+    organizationId: z.string().uuid(), provider: z.enum(["codex", "cursor"]), displayName: z.string().trim().min(1).max(80) }).strict(),
+  z.object({ action: z.enum(["status", "cancel"]), attemptId: attemptIdSchema }).strict(),
+]);
+export type CloudProviderAuthAction = z.infer<typeof cloudProviderAuthActionSchema>;
+export const cloudProviderCredentialMetadataSchema = z.object({
+  id: z.string().uuid(), kind: z.string().max(64), displayName: z.string().max(80), revision: z.number().int().positive(), revoked: z.boolean(),
+  connectionMethod: z.enum(["api", "account"]).optional(),
+});
+export const cloudProviderAuthStatusSchema = z.object({
+  attemptId: attemptIdSchema, organizationId: z.string().uuid(), provider: z.enum(["codex", "cursor"]),
+  state: z.enum(["connecting", "connected", "failed", "canceled"]),
+  deviceCode: z.object({ verificationUrl: z.literal("https://auth.openai.com/codex/device"), userCode: z.string().regex(/^[A-Z0-9-]{4,32}$/) }).strict().optional(),
+  credential: cloudProviderCredentialMetadataSchema.optional(),
+  error: z.string().max(256).optional(),
+}).strict();
+export type CloudProviderAuthStatus = z.infer<typeof cloudProviderAuthStatusSchema>;
+
 export const cursorSubscriptionActionSchema = z
   .object({
     action: z.enum(["status", "connect", "cancel", "disconnect"]),

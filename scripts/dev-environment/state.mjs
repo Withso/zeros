@@ -9,7 +9,7 @@ export const sha256 = (value) => createHash("sha256").update(value).digest("hex"
 
 /** A branch name is display metadata. Conductor's cloud and synced Mac copies
  * share a UUID; standalone checkouts use their canonical filesystem identity. */
-export function workspaceIdentity(repositoryRoot, env = process.env) {
+export function derivedWorkspaceIdentity(repositoryRoot, env = process.env) {
   const root = fs.realpathSync(repositoryRoot);
   if (UUID.test(env.ZEROS_WORKSPACE_CANONICAL_ID ?? "") && env.ZEROS_WORKSPACE_ROOT) {
     try {
@@ -31,6 +31,70 @@ export function workspaceIdentity(repositoryRoot, env = process.env) {
   }
   const identity = conductorId ? `conductor:${conductorId.toLowerCase()}` : `checkout:${root}`;
   return { owner: sha256(identity).slice(0, 24), identity, repositoryRoot: root };
+}
+
+/** Migration must inspect each root-validated manager independently. The
+ * preferred manager only chooses an identity when no existing receipt exists. */
+export function legacyWorkspaceIdentities(repositoryRoot, env = process.env) {
+  const root = fs.realpathSync(repositoryRoot), identity = `checkout:${root}`;
+  const candidates = [derivedWorkspaceIdentity(root, env), derivedWorkspaceIdentity(root, {}),
+    derivedWorkspaceIdentity(root, { ZEROS_WORKSPACE_CANONICAL_ID: env.ZEROS_WORKSPACE_CANONICAL_ID, ZEROS_WORKSPACE_ROOT: env.ZEROS_WORKSPACE_ROOT }),
+    derivedWorkspaceIdentity(root, { CONDUCTOR_WORKSPACE_ID: env.CONDUCTOR_WORKSPACE_ID, CONDUCTOR_WORKSPACE_PATH: env.CONDUCTOR_WORKSPACE_PATH }),
+    { owner: sha256(identity).slice(0, 24), identity, repositoryRoot: root }];
+  return [...new Map(candidates.map(candidate => [candidate.owner, candidate])).values()];
+}
+
+export const OWNER_BINDING = ".context/zeros-dev/owner.json";
+
+/** The binding is private checkout state, not a file-to-copy credential. Keep
+ * the old derived names as migration candidates; never rename a live key. */
+export function workspaceIdentity(repositoryRoot, env = process.env, { adopt, create = true, inspect = false, replaceOwner } = {}) {
+  const candidate = derivedWorkspaceIdentity(repositoryRoot, env), root = candidate.repositoryRoot;
+  const stat = fs.statSync(root), instance = { device: sha256(os.hostname()), inode: String(stat.ino), volume: String(stat.dev) };
+  const file = path.join(root, OWNER_BINDING);
+  for (const [directory, shared] of [[path.join(root, ".context"), true], [path.dirname(file), false]]) {
+    // Inspect existing parents even for read-only discovery. A linked parent
+    // can otherwise substitute another checkout's valid private binding.
+    try { assertEntry(directory, true, shared); } catch (error) { if (error.code !== "ENOENT") throw new Error("Dev owner binding requires private, user-owned parent directories"); }
+  }
+  let binding = fs.existsSync(file) ? readPrivateJson(file) : undefined;
+  if (binding && (binding.version !== 1 || !UUID.test(binding.checkoutInstanceId ?? "") ||
+      !/^[a-f0-9]{24}$/.test(binding.owner ?? "") || sha256(binding.identity).slice(0, 24) !== binding.owner || !Array.isArray(binding.managers))) {
+    throw new Error("Invalid Dev owner binding; preserve it and use dev:doctor --all");
+  }
+  if (binding && !adopt && !inspect) {
+    if (JSON.stringify(binding.instance) !== JSON.stringify(instance)) {
+      // Conductor's synced Mac path (or a manager's root-checked canonical
+      // UUID) proves the same logical workspace across devices. An unrelated
+      // copied checkout has no such authority and still requires adoption.
+      if (legacyWorkspaceIdentities(root, env).some(value => /^(conductor|zeros):/.test(value.identity) && value.identity === binding.identity)) return workspaceIdentity(root, env, { adopt: binding });
+      throw new Error("Copied Dev owner binding requires explicit dev:adopt --owner and --generation");
+    }
+    if (!candidate.identity.startsWith("checkout:") && !binding.managers.includes(candidate.identity)) {
+      throw new Error(`Dev owner binding already selects ${binding.owner}; use dev:adopt to authorize this manager or dev:doctor --all`);
+    }
+  }
+  if (adopt) {
+    if (!/^[a-f0-9]{24}$/.test(adopt.owner ?? "") || sha256(adopt.identity).slice(0, 24) !== adopt.owner) throw new Error("Invalid Dev adoption identity");
+    if (binding && binding.owner !== adopt.owner && binding.owner !== replaceOwner) throw new Error("This checkout is bound to another owner; reconcile that binding before adoption");
+  }
+  if (!binding || adopt) {
+    if (!create && !adopt) return null;
+    const checkoutInstanceId = binding?.checkoutInstanceId ?? randomUUID();
+    const identity = adopt?.identity ?? (candidate.identity.startsWith("checkout:") ? `checkout-instance:${checkoutInstanceId}` : candidate.identity);
+    const directory = privateDirectory(privateDirectory(root, ".context", true), "zeros-dev");
+    const legacy = legacyWorkspaceIdentities(root, env);
+    const next = { version: 1, checkoutInstanceId, instance, owner: sha256(identity).slice(0, 24), identity,
+      managers: [...new Set([...(binding?.managers ?? []), ...legacy.map(value => value.identity)])],
+      legacyCandidates: [...new Set([...(binding?.legacyCandidates ?? []), ...(binding ? [binding.owner] : []), ...legacy.map(value => value.owner)])] };
+    writePrivateJson(path.join(directory, "owner.json"), next, { create: !binding });
+    binding = readPrivateJson(file);
+    if (binding.owner !== next.owner && adopt) throw new Error("Concurrent Dev owner binding changed; retry adoption");
+    // Validate a concurrent first writer before using its binding.
+    return workspaceIdentity(root, env, { create: false });
+  }
+  return { owner: binding.owner, identity: binding.identity, repositoryRoot: root, checkoutInstanceId: binding.checkoutInstanceId,
+    legacyCandidates: binding.legacyCandidates };
 }
 
 function assertEntry(file, directory, root = false) {
@@ -107,7 +171,8 @@ function validateState(state, identity) {
 }
 
 export function ensureWorkspace({ repositoryRoot, homeDir = os.homedir(), env = process.env }) {
-  const identity = workspaceIdentity(repositoryRoot, env);
+  // Preserve the separate legacy local-database ownership contract.
+  const identity = derivedWorkspaceIdentity(repositoryRoot, env);
   const directory = privateDirectory(privateDirectory(developmentHome(homeDir), "environments"), identity.owner);
   const file = path.join(directory, "workspace.json");
   if (!fs.existsSync(file)) {
@@ -136,8 +201,9 @@ export function saveWorkspace(workspace) {
 
 /** Atomic publication avoids partially written lock records. Stale locks are
  * recovered only for an exited PID; malformed locks require manual inspection. */
-export function acquireWorkspaceLock(workspace) {
-  const file = path.join(workspace.directory, "run.lock");
+export function acquireWorkspaceLock(workspace, name = "run.lock") {
+  if (!["run.lock", "mutation.lock"].includes(name)) throw new Error("Invalid Dev lock name");
+  const file = path.join(workspace.directory, name);
   const token = randomUUID();
   const record = { pid: process.pid, token, owner: workspace.state.owner };
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -165,9 +231,14 @@ export function acquireWorkspaceLock(workspace) {
         continue;
       }
     }
-    throw Object.assign(new Error("Zeros Dev is already running for this workspace"), { code: "DEV_ALREADY_RUNNING" });
+    throw Object.assign(new Error("Zeros Dev is already running for this workspace"), { code: name === "run.lock" ? "DEV_ALREADY_RUNNING" : "DEV_LOCAL_BUSY" });
   }
   throw new Error("Could not acquire the development workspace lock");
+}
+
+export async function withHostedMutation(directory, identity, operation) {
+  const release = acquireWorkspaceLock({ directory, state: identity }, "mutation.lock");
+  try { return await operation(); } finally { release(); }
 }
 
 /** Do not inherit an Alpha DSN, migration authority or provider credential into

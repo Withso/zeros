@@ -4,15 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { developmentProfilePath } from "./profile-path.mjs";
+import { developmentProfilePath, profileExists } from "./profile-path.mjs";
+import { hostedProfilePath } from "./hosted-profile.mjs";
 import { importDevelopmentProfile, inspectDevelopmentProfile } from "./setup-profile.mjs";
 import { developmentHome, privateDirectory, systemEnvironment, writePrivateFile } from "./state.mjs";
+import { ensureDevRailwayCli, RAILWAY_CLI_VERSION } from "./hosted-agent-ssh.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2);
 const check = args.includes("--check"), profileOnly = args.includes("--profile-only");
 const profileIndex = args.indexOf("--profile");
-const source = profileIndex < 0 ? developmentProfilePath(root) : path.resolve(args[profileIndex + 1]);
+let source = profileIndex < 0 ? developmentProfilePath(root) : path.resolve(args[profileIndex + 1]);
 const packageManager = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).packageManager;
 if (!/^pnpm@\d+\.\d+\.\d+$/.test(packageManager)) throw new Error("Expected an exact pnpm packageManager version");
 const pnpmVersion = packageManager.slice("pnpm@".length);
@@ -49,15 +51,18 @@ function installShellPath(directory, toolsBin) {
   }
 }
 
-function main() {
+async function main() {
   const [major, minor] = process.versions.node.split(".").map(Number);
+  const injected = !check && profileIndex < 0 && !process.env.ZEROS_DEV_PROFILE_PATH && !profileExists(source) && Boolean(process.env.ZEROS_DEV_PROFILE_B64);
+  if (injected) source = hostedProfilePath(root);
   const issues = inspectDevelopmentProfile(source).issues;
-  if (major < 22 || (major === 22 && minor < 18) || (!profileOnly && major !== 22)) {
+  if (major !== 22 || minor < 18) {
     issues.push("Use Node 22.18 or newer in the 22.x release line, matching CI/backend. Run bash scripts/setup-zeros-dev.sh to install it.");
   }
   if (check) {
     if (version("pnpm") !== pnpmVersion) issues.push(`Install ${packageManager}`);
     if (!version("bun")) issues.push("Install Bun");
+    if (version("railway") !== `railway ${RAILWAY_CLI_VERSION}`) issues.push(`Install Railway CLI ${RAILWAY_CLI_VERSION} using Zeros Dev setup`);
     if (!version("python3")) issues.push("Install Python 3 for native module builds");
     for (const [command, arguments_] of [["xcode-select", ["-p"]], ["xcrun", ["--find", "clang"]]]) {
       if (spawnSync(command, arguments_, { env, stdio: "pipe" }).status !== 0) issues.push("Install Xcode Command Line Tools");
@@ -67,8 +72,11 @@ function main() {
     return;
   }
   if (issues.length) throw new Error(issues.join("\n"));
-  importDevelopmentProfile({ root, source });
-  console.log("[zeros-dev] Profile imported with mode 0600 into ~/.zeros-dev, the main clone and this checkout. Registry key preserved.");
+  if (injected) console.log("[zeros-dev] Cloud profile imported with mode 0600 into this checkout. Registry key preserved.");
+  else {
+    importDevelopmentProfile({ root, source });
+    console.log("[zeros-dev] Profile imported with mode 0600 into ~/.zeros-dev, the main clone and this checkout. Registry key preserved.");
+  }
   if (profileOnly) return;
 
   const directory = developmentHome(), prefix = privateDirectory(directory, "tools"), toolsBin = path.join(prefix, "bin");
@@ -79,6 +87,7 @@ function main() {
   if (packages.length) run("npm", ["install", "--global", "--prefix", prefix, ...packages], directory);
   if (version("pnpm") !== pnpmVersion || !version("bun")) throw new Error("Installed tools could not be verified; rerun setup after checking PATH");
   installShellPath(directory, toolsBin);
+  await ensureDevRailwayCli();
   run("pnpm", ["install", "--frozen-lockfile"]);
   run("pnpm", ["--dir", "apps/control-plane", "install", "--frozen-lockfile"]);
   run("npm", ["--prefix", "apps/web", "ci"]);
@@ -86,7 +95,7 @@ function main() {
   console.log("[zeros-dev] Setup complete. Open a new terminal, then run pnpm electron:dev in this checkout. No hosted resources were provisioned by setup.");
 }
 
-try { main(); }
+try { await main(); }
 catch (error) {
   // Never print raw filesystem/JSON error objects, argv, environment or profile.
   const message = error instanceof Error && !error.code ? error.message : "Local setup could not complete; check file ownership, permissions and available tools";

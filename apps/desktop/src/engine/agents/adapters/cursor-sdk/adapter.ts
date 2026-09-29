@@ -1656,6 +1656,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     mcpServers?: McpServerRegistration[];
     executionBoundary?: PreparedBoundary;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
+    const initialMode: CursorSdkModeId = opts.env?.ZEROS_PERMISSION_MODE === "plan" ? "plan" : opts.env?.ZEROS_PERMISSION_MODE === "agent" ? "agent" : CURSOR_DEFAULT_MODE;
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
     const runtime = await this.createSessionRuntime(opts);
@@ -1664,7 +1665,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // Fire-and-forget, and BEFORE the awaits below on purpose: the whole point
     // is to overlap the workspace/backend warm-up with model discovery and
     // `Agent.create` rather than serialize behind them.
-    this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, mcpServers: catalog.servers, settingSources });
+    this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, mcpServers: catalog.servers, settingSources }, autoReviewFor(initialMode));
     // Discover the account's catalog (cached, once per process) so the model
     // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
@@ -1705,10 +1706,10 @@ export class CursorSdkAdapter implements AgentAdapter {
             local: this.buildLocalOpts(
               opts.cwd,
               opts.env,
-              autoReviewFor(CURSOR_DEFAULT_MODE),
+              autoReviewFor(initialMode),
               settingSources,
             ),
-            mode: sdkModeFor(CURSOR_DEFAULT_MODE),
+            mode: sdkModeFor(initialMode),
             ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
           }),
       );
@@ -1726,7 +1727,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       apiKey,
       modelState,
       modelId,
-      modeId: CURSOR_DEFAULT_MODE,
+      modeId: initialMode,
       agent,
       sdk,
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
@@ -1736,8 +1737,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: mcpSource,
       settingSources,
-      appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
-      prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
+      appliedAutoReview: autoReviewFor(initialMode),
+      prewarmedAutoReview: new Set([autoReviewFor(initialMode)]),
       appliedMcpCatalog: catalog.key,
     };
     this.sessions.set(executionId, session);
@@ -1748,7 +1749,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         sessionId: executionId,
         providerBinding: providerBindingForResume("cursor", agent.agentId),
         modes: {
-          currentModeId: CURSOR_DEFAULT_MODE,
+          currentModeId: initialMode,
           availableModes: CURSOR_SDK_MODES,
         },
       } as never,
@@ -1766,6 +1767,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     mcpServers?: McpServerRegistration[];
     executionBoundary?: PreparedBoundary;
   }): Promise<LoadSessionResponse> {
+    const initialMode: CursorSdkModeId = opts.env?.ZEROS_PERMISSION_MODE === "plan" ? "plan" : opts.env?.ZEROS_PERMISSION_MODE === "agent" ? "agent" : CURSOR_DEFAULT_MODE;
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
@@ -1783,7 +1785,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // Same overlap as newSession: a reopened chat pays the identical cold
     // workspace/backend cost on its first turn, so warm it while the catalog
     // and `Agent.resume` are still in flight.
-    this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, mcpServers: catalog.servers, settingSources });
+    this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, mcpServers: catalog.servers, settingSources }, autoReviewFor(initialMode));
     // Discover the account's catalog (cached, once per process) so the model
     // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
@@ -1840,7 +1842,7 @@ export class CursorSdkAdapter implements AgentAdapter {
             local: this.buildLocalOpts(
               opts.cwd,
               opts.env,
-              autoReviewFor(CURSOR_DEFAULT_MODE),
+              autoReviewFor(initialMode),
               settingSources,
             ),
             ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
@@ -1893,10 +1895,10 @@ export class CursorSdkAdapter implements AgentAdapter {
               local: this.buildLocalOpts(
                 opts.cwd,
                 opts.env,
-                autoReviewFor(CURSOR_DEFAULT_MODE),
+                autoReviewFor(initialMode),
                 settingSources,
               ),
-              mode: sdkModeFor(CURSOR_DEFAULT_MODE),
+              mode: sdkModeFor(initialMode),
               ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
             }),
         );
@@ -1914,7 +1916,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       apiKey,
       modelState,
       modelId,
-      modeId: CURSOR_DEFAULT_MODE,
+      modeId: initialMode,
       agent,
       sdk,
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
@@ -1924,15 +1926,15 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: mcpSource,
       settingSources,
-      appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
-      prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
+      appliedAutoReview: autoReviewFor(initialMode),
+      prewarmedAutoReview: new Set([autoReviewFor(initialMode)]),
       appliedMcpCatalog: catalog.key,
     });
     return {
       executionId,
       providerBinding: providerBindingForResume("cursor", agent.agentId),
       modes: {
-        currentModeId: CURSOR_DEFAULT_MODE,
+        currentModeId: initialMode,
         availableModes: CURSOR_SDK_MODES,
       },
       resumedFresh,
@@ -2464,6 +2466,10 @@ export class CursorSdkAdapter implements AgentAdapter {
       // Still cheap — fire-and-forget — but it starts the workspace build that
       // reconcile will otherwise do inside the user's next send.
       this.prewarmForDesiredMode(session);
+      this.ctx.emit.onSessionUpdate(AGENT_ID, {
+        sessionId: opts.sessionId,
+        update: { sessionUpdate: "current_mode_update", currentModeId: session.modeId },
+      });
     }
   }
 

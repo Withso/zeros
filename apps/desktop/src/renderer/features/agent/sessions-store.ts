@@ -826,6 +826,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       waiting?: boolean;
       activity?: AgentSessionState["backgroundActivity"];
       state?: "running" | "completed" | "failed" | "cancelled";
+      turnId?: string;
       stopReason?: AgentSessionState["lastStopReason"];
       startedAt?: number;
       effort?: string;
@@ -930,10 +931,12 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     // superseded session must never settle the replacement session.
     if (upd.sessionUpdate === "turn_state" && upd.state) {
       const slot = get().sessions[chatId];
+      const pendingTurn = get().pendingLocalTurns[chatId];
       if (
         !slot ||
         (slot.executionId ?? slot.sessionId) !==
-          (notification.executionId ?? notification.sessionId)
+          (notification.executionId ?? notification.sessionId) ||
+        (pendingTurn && upd.turnId && pendingTurn !== upd.turnId)
       )
         return;
       if (upd.state === "running") {
@@ -960,18 +963,30 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
                 : Math.min(slot.activeTurnStartedAt, engineStartedAt),
         });
       } else {
-        get().patchSession(chatId, {
-          // Deliberately NOT resetting error/failure: the engine emits this for
-          // locally-issued prompts too, a frame after sendPrompt recorded the
-          // real classification, so clearing here erased it (see
-          // settledTurnStatus). A re-adopted failure has nothing recorded and
-          // still settles to `ready`, letting the durable failed turn row
-          // render the honest AGENT STOPPED history.
-          status: settledTurnStatus(slot),
-          lastStopReason:
-            upd.state === "cancelled" ? "cancelled" : (upd.stopReason ?? null),
-          activeTurnStartedAt: null,
-        });
+        set(state => ({
+          sessions: {
+            ...state.sessions,
+            [chatId]: {
+              ...slot,
+              // Keep an already classified failure. A re-adopted terminal
+              // turn without a live failure settles to ready; its durable
+              // turn row supplies the saved stopped/failed presentation.
+              status: settledTurnStatus(slot),
+              lastStopReason:
+                upd.state === "cancelled" ? "cancelled" : (upd.stopReason ?? null),
+              activeTurnStartedAt: null,
+            },
+          },
+          // Cloud process retirement and its durable command receipt can
+          // outlast the actual turn. Clear this exact presentation owner with
+          // the terminal state, so Claude's activity selector cannot keep the
+          // finished answer running or restart its now-cleared elapsed clock.
+          // The pending RPC/queue lock remains independent. An older turn or
+          // another execution must never release a newer optimistic send.
+          pendingLocalTurns: state.pendingLocalTurns[chatId] === upd.turnId
+            ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId)
+            : state.pendingLocalTurns,
+        }));
       }
       return;
     }

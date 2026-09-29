@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { audit } from "../audit.js";
+import { tryRetainCloudDiagnosticTx } from "./cloud-diagnostic-store.js";
 import { withSystemTx } from "../db.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 
@@ -69,6 +70,10 @@ export async function stopUnavailableCloudEngine(
       if (pending.rowCount) continue;
 
       const intentId = randomUUID();
+      const incidentId = await tryRetainCloudDiagnosticTx(tx, {
+        workspaceId:candidate.id,organizationId:candidate.org_id,generation:workspace.current_generation,
+        operationKind:"engine",operationId:intentId,
+      }, { phase:"authority_check",code:"engine_unavailable",errorClass:"unknown",retryable:false,decision:"direct_stop",claim:"current" });
       await retireCloudWorkspaceRuntimeAccess(tx, {
         workspaceId: candidate.id,
         organizationId: candidate.org_id,
@@ -91,9 +96,9 @@ export async function stopUnavailableCloudEngine(
       await tx.query(
         `UPDATE cloud_workspaces SET desired_state='stopped',status='stopping',
       authority_epoch=authority_epoch+1,version=version+1,updated_at=now(),
-      last_error_code='engine_unavailable',last_error_message='The engine lost its live lease; compute is stopping while durable recovery remains available'
+      last_error_code='engine_unavailable',last_error_message=$3
       WHERE id=$1 AND org_id=$2`,
-        [candidate.id, candidate.org_id],
+        [candidate.id, candidate.org_id, `Workspace stopped because its engine lease expired${incidentId ? ` (incident ${incidentId})` : ''}`],
       );
       await audit(
         tx,
@@ -104,6 +109,8 @@ export async function stopUnavailableCloudEngine(
           workspaceId: candidate.id,
           generation: workspace.current_generation,
           intentId,
+          incidentId,
+          stopReason: "engine_expired",
           finalCheckpointSkipped: true,
           automaticReplay: false,
         },

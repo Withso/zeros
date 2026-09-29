@@ -22,6 +22,7 @@ function harness(options: {
   runError?: Error;
   deleteStatus?: number;
   roleStatus?: number;
+  incompleteRole?: boolean;
 } = {}) {
   const calls: string[] = [];
   const backupStates = [...(options.backupStates ?? ["pending", "success"])];
@@ -41,7 +42,7 @@ function harness(options: {
               id: "role1",
               name: (body as { name: string }).name,
               username: "migrator.fixture",
-              password: PASSWORD,
+              password: options.incompleteRole ? undefined : PASSWORD,
               access_host_url: "aws-us-west-2-1.pg.psdb.cloud",
               expires_at: "2026-09-25T12:00:00.000Z",
             },
@@ -77,6 +78,11 @@ function harness(options: {
 }
 
 describe("release migration runner", () => {
+  it("never reflects arbitrary driver diagnostics even without the minted password", async () => {
+    const { deps } = harness({ runError: new Error("provider-secret-from-a-driver") });
+    await expect(releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: true,
+      confirm: "zeros-control-plane-beta" }, deps)).rejects.toThrow("Migration step failed: database error");
+  });
   it("plans read-only with a short-lived role and always deletes the role", async () => {
     const { calls, deps, poolUrl } = harness();
     const result = await releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: false }, deps);
@@ -182,6 +188,12 @@ describe("release migration runner", () => {
     const { calls, deps } = harness({ roleStatus: 403 });
     await expect(releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: false }, deps))
       .rejects.toThrow("Migration role was not created (HTTP 403)");
+    expect(calls).not.toContain("pool");
+  });
+  it("deletes an acknowledged role even if its credential response is incomplete", async () => {
+    const { calls, deps } = harness({ incompleteRole: true });
+    await expect(releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: false }, deps)).rejects.toThrow();
+    expect(calls.at(-1)).toBe(`DELETE ${BRANCH}/roles/role1`);
     expect(calls).not.toContain("pool");
   });
 

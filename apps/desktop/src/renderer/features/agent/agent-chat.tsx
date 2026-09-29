@@ -10,6 +10,8 @@
 // ──────────────────────────────────────────────────────────
 
 import { transcriptParentId } from "./transcript-parent";
+import { useCloudTranscriptLatency } from "./use-cloud-transcript-latency";
+import { startCloudSubmitSpan } from "../../state/cloud-workspace-latency";
 import React, {
   useCallback,
   useEffect,
@@ -121,7 +123,7 @@ import {
   trackPendingTextAttachmentDelivery,
   waitForPendingTextAttachmentDeliveries,
 } from "./composer-text-attachment-delivery";
-import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
+import { admitTranscriptFork, buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
   composerOwnsFocus,
@@ -367,6 +369,8 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
+  const cloudNativeCapabilities=session.boundary?.cloudExecution?.capabilities??session.session?.nativeCapabilities;
+  const goalsAvailable=!isCloudWorkspace(chatThread?.folder)||cloudNativeCapabilities?.goals===true;
   const browserConfirmation = useBrowserConfirmation(chatId);
   const workflows = session.workflows;
   const activeWorkflow = useMemo(
@@ -992,8 +996,8 @@ export function AgentChat({
     chatCwdRef.current = cwd;
     // Prime the workspace file list so the FIRST file-chip click resolves
     // synchronously (instant open) instead of waiting on git ls-files.
-    if (!readOnly) warmWorkspaceFiles(cwd);
-  }, [session.cwd, chatThread?.folder, readOnly]);
+    if (!readOnly && (surfaceActive || !isCloudWorkspace(cwd))) warmWorkspaceFiles(cwd);
+  }, [session.cwd, chatThread?.folder, readOnly, surfaceActive]);
   const updateChatSettings = useCallback(
     (
       updates: Partial<
@@ -1212,6 +1216,11 @@ export function AgentChat({
       ? (s.sessions[chatId]?.transcriptState ?? "resident") === "resident"
       : true,
   );
+  const transcriptPaintReady = useSessionsStore((s) =>
+    !!chatId && s.sessions[chatId]?.transcriptState === "resident",
+  );
+  useCloudTranscriptLatency(chatThread?.folder ?? session.cwd, chatId, surfaceActive,
+    transcriptPaintReady, hasSessionMessages);
   // Which turn (if any) this renderer has an unsettled prompt for. The tail's
   // liveness is derived from this rather than from session status, so a chat
   // being REOPENED — a tab switch, a workspace switch, an app reload, all of
@@ -1349,6 +1358,7 @@ export function AgentChat({
           fast={!!chatThread.fast}
           onSelectAgentModel={switchAgentModel}
           redirectCrossAgent={conversationStarted}
+          selectionTiming={isCloudWorkspace(chatThread.folder) ? "next-message" : undefined}
           onConfigure={({ effort, fast }) => {
             const effortChanged = effort !== chatThread.effort;
             updateChatSettings({ effort, fast });
@@ -1567,6 +1577,7 @@ export function AgentChat({
           void session.compactContext?.();
           return true;
         case "goal":
+          if(!goalsAvailable){toast.error("Goals are unavailable for this cloud chat.");return true;}
           setGoalEditorOpen(true);
           return true;
         case "clear": {
@@ -1621,6 +1632,7 @@ export function AgentChat({
       agentSessions,
       updateChatSettings,
       isPlanMode,
+      goalsAvailable,
     ],
   );
 
@@ -1740,6 +1752,7 @@ export function AgentChat({
     attachmentImagesActive: interactive,
     originUrl: composerOriginUrl,
     availableCommands: session.availableCommands,
+    cloudNativeCapabilities,
     placeholder: resolveComposerPlaceholder(conversationStarted),
     onSubmit: () => submitRef.current(),
     onEscape: () => queueKeysRef.current.escape(),
@@ -2044,7 +2057,7 @@ export function AgentChat({
   );
 
   const forkToNewTab = useCallback(
-    (throughMessageId: string, promptFallback: string) => {
+    (throughMessageId: string, promptFallback: string, native=false) => {
       if (!chatThread) return;
       const transcript = readForkTranscript(throughMessageId, promptFallback);
       if (!transcript) return;
@@ -2056,7 +2069,7 @@ export function AgentChat({
       dispatch({ type: "ADD_CHAT", chat: fresh });
 
       const delivery = transcript.promise
-        .then((snapshot) => {
+        .then(async(snapshot) => {
           // The user may permanently delete the destination while the bounded
           // history walk is in flight. Do not retain an orphan delivery.
           if (
@@ -2068,6 +2081,11 @@ export function AgentChat({
           }
           if (snapshot.count === 0) {
             throw new Error("The selected turn has no concise transcript.");
+          }
+          if(isCloudWorkspace(chatThread.folder)) {
+            if(!capabilitiesBridge)throw new Error("Cloud connection is unavailable");
+            await admitTranscriptFork(chatThread,fresh,capabilitiesBridge.request.bind(capabilitiesBridge),native);
+            if(native || !useWorkspaceStore.getState().chats.some(candidate=>candidate.id===fresh.id))return;
           }
           deliverTextAttachmentToChat(
             fresh.id,
@@ -2088,11 +2106,11 @@ export function AgentChat({
             return;
           }
           console.error("[Zeros] conversation fork transcript failed:", error);
-          toast.error("Couldn't attach the fork transcript — try again.");
+          toast.error("Couldn't fork this chat. Reopen it and try again.");
         });
       trackPendingTextAttachmentDelivery(fresh.id, delivery);
     },
-    [chatThread, dispatch, readForkTranscript],
+    [chatThread, dispatch, readForkTranscript,capabilitiesBridge],
   );
 
   /** Second click on a pill whose read hasn't landed. Marks the in-flight
@@ -3752,6 +3770,7 @@ export function AgentChat({
       .catch(() => {
         /* error surfaces via session.error */
       });
+    return true;
   };
 
   /** Single-flight entry point for every send (button, Enter keymap, "Continue",
@@ -3774,9 +3793,14 @@ export function AgentChat({
   ): Promise<void> => {
     if (readOnly || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
+    // Queueing behind a streaming turn cannot own that turn's next chunk.
+    const cancelLatency = chatId && session.status !== "streaming"
+      ? startCloudSubmitSpan(chatId) : undefined;
     try {
-      await runSend(override, extras, recordActivity);
+      const submitted = await runSend(override, extras, recordActivity);
+      if (!submitted) cancelLatency?.();
     } catch (error) {
+      cancelLatency?.();
       toast.error("Message wasn't sent", {
         description: error instanceof Error ? error.message : String(error),
       });
@@ -4664,6 +4688,7 @@ export function AgentChat({
                                 forkToNewTab(
                                   turn.userPrompt!.id,
                                   turn.userPrompt!.text,
+                                  isCloudWorkspace(chatThread?.folder)&&chatThread?.agentId==="codex"&&isVisualTail&&cloudNativeCapabilities?.nativeFork===true,
                                 )
                               }
                               onForkIntent={() =>
@@ -4802,14 +4827,14 @@ export function AgentChat({
               onClose={() => setTerminalCommand(null)}
             />
           )}
-          <GoalCard
+          {goalsAvailable && <GoalCard
             goal={session.goal}
             editing={goalEditorOpen}
             onEditingChange={setGoalEditorOpen}
             onSave={saveGoal}
             onStatus={setGoalStatus}
             onDelete={deleteGoal}
-          />
+          />}
           {/* Composer task dock (<Plan>) REMOVED 2026-07-02: the plan/todo
             card was too agent-dependent to be trustworthy — it works for Codex
             (native plan), but is unpredictable for Claude/Cursor (they drive it
@@ -5034,6 +5059,8 @@ export function AgentChat({
                       honest note for Cursor (no usage in its SDK). */}
                       <ComposerTools
                         ownerId={chatId}
+                        cloudWorkspace={isCloudWorkspace(chatThread?.folder)}
+                        browserCapability={session.boundary?.browser}
                         agentId={session.agentId ?? chatThread?.agentId ?? null}
                         sessionId={session.executionId}
                         workspaceId={session.cwd ?? chatThread?.folder ?? null}

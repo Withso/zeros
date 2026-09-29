@@ -1,9 +1,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { developmentHome } from "./state.mjs";
+import { execFileSync } from "node:child_process";
+import { developmentHome, systemEnvironment } from "./state.mjs";
 
 export const PROFILE_NAME = "zeros-dev-env.json";
+
+export function assertIgnoredProfileDestination(root) {
+  const git = args => execFileSync("git", args, { cwd: root, env: systemEnvironment(), encoding: "utf8", stdio: "pipe" });
+  try {
+    if (fs.realpathSync(git(["rev-parse", "--show-toplevel"]).trimEnd()) !== fs.realpathSync(root) || git(["ls-files", "-z", "--", PROFILE_NAME])) throw new Error();
+    git(["check-ignore", "--no-index", "-q", "--", PROFILE_NAME]);
+  } catch { throw new Error("The checkout must ignore an untracked zeros-dev-env.json before importing credentials; existing files were preserved"); }
+}
 
 // lstat deliberately counts dangling links as present. A broken or unsafe
 // preferred profile must fail, never silently select another set of credentials.

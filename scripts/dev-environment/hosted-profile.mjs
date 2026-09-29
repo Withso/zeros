@@ -1,5 +1,7 @@
-import { readPrivateJson, privateDirectory } from "./state.mjs";
-import { developmentProfilePath, profileExists } from "./profile-path.mjs";
+import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { readPrivateJson, privateDirectory, writePrivateFile } from "./state.mjs";
+import { developmentProfilePath, profileExists, PROFILE_NAME, assertIgnoredProfileDestination } from "./profile-path.mjs";
 import { publicDevProfile } from "./profile.mjs";
 import { fixtureIssues } from "./hosted-fixtures.mjs";
 
@@ -9,10 +11,29 @@ const ID = /^[a-f0-9]{32}$/;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const BUCKET = /^(?=.*(?:^|-)dev(?:-|$))(?!.*(?:^|-)(?:alpha|beta|prod|production)(?:-|$))[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
 
-/** The gitignored checkout copy travels with Files to copy. A cloud archive
- * hook must have the same registry key as its Mac copy. */
-export function loadHostedProfile(root, { env = process.env, homeDir } = {}) {
+/** Cloud injection is a fallback only; never replace an existing registry key.
+ * Local Conductor Files to copy does not populate cloud workspaces. */
+export function hostedProfilePath(root, { env = process.env, homeDir } = {}) {
   const file = developmentProfilePath(root, { env, homeDir });
+  if (profileExists(file) || env.ZEROS_DEV_PROFILE_PATH || !env.ZEROS_DEV_PROFILE_B64) return file;
+  let bytes, profile;
+  try {
+    const encoded = env.ZEROS_DEV_PROFILE_B64;
+    if (typeof encoded !== "string" || encoded.length > 174764) throw new Error();
+    bytes = Buffer.from(encoded, "base64");
+    if (!bytes.length || bytes.length > 128 * 1024 || bytes.toString("base64") !== encoded) throw new Error();
+    profile = JSON.parse(bytes.toString("utf8"));
+  } catch { throw new Error("ZEROS_DEV_PROFILE_B64 must encode valid portable JSON smaller than 128 KiB; contents withheld"); }
+  if (hostedProfileIssues(profile).length || /YOUR_|GENERATE_32_|"your-/i.test(JSON.stringify(profile))) throw new Error("ZEROS_DEV_PROFILE_B64 contains an invalid hosted profile or example placeholders; contents withheld");
+  assertIgnoredProfileDestination(root);
+  const destination = path.join(root, PROFILE_NAME);
+  writePrivateFile(destination, bytes, { create: true });
+  if (!isDeepStrictEqual(readPrivateJson(destination), profile)) throw new Error("A concurrent Dev profile import differs; reconcile the existing registry key before retrying");
+  return destination;
+}
+
+export function loadHostedProfile(root, options = {}) {
+  const file = hostedProfilePath(root, options);
   if (!profileExists(file)) throw new Error("Run bash scripts/setup-zeros-dev.sh --profile /path/to/zeros-dev-env.json. Use zeros-dev-env-example.json for the required fields. Dev never falls back to the Alpha backend.");
   const profile = readPrivateJson(file);
   const issues = hostedProfileIssues(profile);
@@ -41,6 +62,8 @@ export function hostedProfileIssues(p) {
   if (!b?.apiKey || !b.billingOrg || !b.accountScope || !NAME.test(b.baseSnapshot ?? "") ||
       !Number.isFinite(b.secondsPerDollar) || b.secondsPerDollar <= 0 ||
       !Number.isFinite(b.builderBudgetHours) || b.builderBudgetHours <= 0 || b.builderBudgetHours > 2) issues.push("boat: configure API/billing identity, baseSnapshot, secondsPerDollar and builderBudgetHours (0–2 hours)");
+  if(p.connections && (p.connections.enabled!==true || p.connections.cutover!=="connect-once" || !UUID.test(p.connections.projectId??"") || p.connections.projectId===r?.projectId ||
+      Object.keys(p.connections).some(key=>!["enabled","cutover","projectId"].includes(key)))) issues.push("connections: use a separate protected projectId and connect-once cutover; operator secrets cannot enter this profile");
   return [...issues, ...fixtureIssues(p.fixture)];
 }
 
@@ -48,8 +71,9 @@ export const hostedPublicProfile = (state, profile) => publicDevProfile({ state 
 
 export function hostedDesktopEnvironment(state, profile, directory) {
   const p = hostedPublicProfile(state, profile);
-  return { ZEROS_DEV_ENVIRONMENT: "hosted", ZEROS_DEV_AUTH_PROFILE: JSON.stringify(p),
+  return { ...(profile.connections?.enabled?{ZEROS_DEV_CONNECTIONS_ENABLED:"true",ZEROS_DEV_GITHUB_REFERENCE_MODE:"true",ZEROS_DEV_GENERATION:state.generation}:{}), ZEROS_DEV_ENVIRONMENT: "hosted", ZEROS_DEV_AUTH_PROFILE: JSON.stringify(p),
     ZEROS_DEV: "1", ZEROS_CHANNEL: "dev", VITE_ZEROS_CHANNEL: "dev", ZEROS_ISOLATE: "1",
+    ZEROS_DEV_NODE_EXECUTABLE: process.execPath,
     ZEROS_INSTANCE: `dev-${state.owner}-${state.generation}`, ZEROS_DATA_DIR: privateDirectory(directory, `desktop-${state.generation}`),
     ZEROS_CONTROL_PLANE_URL: p.apiOrigin, AUTH_PROVIDER: "workos", AUTH_DESKTOP_CLIENT_ID: p.desktopClientId,
     AUTH_ISSUER: p.issuer, AUTH_JWKS_URL: p.jwksUrl, AUTH_AUDIENCE: p.audience,
@@ -61,8 +85,11 @@ export function hostedBackendEnvironment(state, profile, source, worker) {
   if (!roles?.runtime?.url || !state.resources.workos?.secret || !state.runId ||
       worker.inputsSha256 !== source.workerInputsSha256 || !HEX.test(worker.buildSha256 ?? "")) throw new Error("Dev deployment is missing its database, webhook or qualified matching worker");
   const url = new URL(roles.runtime.url), key = name => Buffer.from(state.keys[name], "hex").toString("base64url");
-  return { NODE_ENV: "production", HOST: "0.0.0.0", PORT: "3000",
+  if(profile.connections?.enabled && (!state.connectionRegistered || !state.connectionBackendEnvironment)) throw new Error("Register the Dev connection generation before backend deployment");
+  return { ...(profile.connections?.enabled?{ZEROS_DEPLOY_ENV:"dev",ZEROS_DEV_CONNECTIONS_ENABLED:"true",...state.connectionBackendEnvironment}:{}), NODE_ENV: "production", HOST: "0.0.0.0", PORT: "3000",
     ZEROS_DEV_ENVIRONMENT: "hosted", ZEROS_DEV_OWNER: state.owner, ZEROS_DEV_GENERATION: state.generation, ZEROS_DEV_RUN_ID: state.runId,
+    ...((state.fixture?.endsAt || state.expiresAt) ? { ZEROS_DEV_ADMISSION_EXPIRES_AT: new Date(Math.min(
+      ...[state.fixture?.endsAt, state.expiresAt].filter(Boolean).map(value => Date.parse(value)))).toISOString() } : {}),
     ZEROS_DEV_DOMAIN: p.domain, ZEROS_DEV_AUTH_ENVIRONMENT: p.authEnvironment,
     ZEROS_DEV_RAILWAY_PROJECT_ID: profile.railway.projectId, ZEROS_DEV_RAILWAY_ENVIRONMENT_ID: state.resources.railway.id,
     ZEROS_DEV_SOURCE_SHA256: source.sourceSha256, ZEROS_DEV_WORKER_INPUTS_SHA256: source.workerInputsSha256,
@@ -84,6 +111,11 @@ export function hostedBackendEnvironment(state, profile, source, worker) {
     ZEROS_CLOUD_IMAGE_ARCHITECTURE: "linux/amd64", CLOUD_WORKSPACE_CPU_MILLICORES: "4000", CLOUD_WORKSPACE_MEMORY_MIB: "8192",
     CLOUD_WORKSPACE_STORAGE_MIB: String(worker.storageMiB),
     CLOUD_WORKSPACE_SECRET_KEY_V1: key("settings"), CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1: key("provider"), CLOUD_WORKSPACE_OBJECT_KEY_V1: key("objects"),
+    // This generation's separate agent key was reserved in the original Dev
+    // receipt. Keep refresh-family fingerprints stable across redeploys and
+    // independent of credential encryption key rotation.
+    CLOUD_CODEX_REFRESH_FINGERPRINT_KEYS_JSON: JSON.stringify({ 1: key("agent") }),
+    CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION: "1",
     CLOUD_WORKSPACE_OBJECT_STORE_KIND: "s3", CLOUD_WORKSPACE_S3_ENDPOINT: profile.storage.endpoint, CLOUD_WORKSPACE_S3_BUCKET: profile.storage.bucket,
     CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: profile.storage.accessKeyId, CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: profile.storage.secretAccessKey,
     CLOUD_WORKSPACE_S3_KEY_PREFIX: `dev/${state.owner}/${state.generation}/` };

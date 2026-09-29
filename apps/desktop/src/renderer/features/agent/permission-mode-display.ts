@@ -10,7 +10,7 @@ export function permissionModeIdForDisplay(input: {
   persistedModeId: string | null;
   fallbackModeId: string | null;
 }): string | null {
-  if (input.status === "warming") {
+  if (input.status === "warming" || input.status === "reconnecting") {
     return (
       input.persistedModeId ?? input.liveModeId ?? input.fallbackModeId ?? null
     );

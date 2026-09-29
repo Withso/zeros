@@ -1,3 +1,17 @@
+import type { AgentSessionState } from "./use-agent-session";
+
+/** A turn can start and finish during one history read. Ready → ready does
+ * not prove freshness: compare the immutable transcript and execution captured
+ * before awaiting I/O, including edits, resets and local queued messages. */
+export function canApplyTranscriptRead(
+  before: AgentSessionState,
+  current: AgentSessionState | undefined,
+): boolean {
+  return Boolean(current && current.transcriptState === "resident" &&
+    current.status !== "streaming" && current.messages === before.messages &&
+    current.executionId === before.executionId && current.sessionId === before.sessionId);
+}
+
 export interface TranscriptRetentionPins {
   /** The chat still owns one of the bounded retained transcript views. */
   retained: boolean;

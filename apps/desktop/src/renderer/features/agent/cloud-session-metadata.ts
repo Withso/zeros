@@ -4,6 +4,7 @@ import type {
 } from "../../platform/bridge/messages";
 import { parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 import type { AgentSessionState } from "./use-agent-session";
+import { loadedBackgroundTaskState } from "./background-task-state";
 
 /** A cloud attachment outlives its command executions. Their real admission
  * metadata updates the existing slot without resetting its transcript or turn. */
@@ -27,6 +28,7 @@ export function cloudSessionMetadata(
   )
     return null;
   return {
+    ...(metadata.backgroundTasks ? loadedBackgroundTaskState(metadata.backgroundTasks) : {}),
     session: {
       ...slot.session,
       ...metadata,

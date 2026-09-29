@@ -6,7 +6,7 @@ import { ensureUser } from "./auth.js";
 import { runMigrations } from "./migrate.js";
 import { assertHostedDatabaseOwnership } from "./development-environment.js";
 import { bindFixture, seedHostedFixture } from "../../../scripts/dev-environment/hosted-fixtures.mjs";
-import { grantHostedRuntimeAuthority } from "../../../scripts/dev-environment/hosted-database.mjs";
+import { grantHostedRuntimeAuthority, repairHostedRuntimeAuthority } from "../../../scripts/dev-environment/hosted-database.mjs";
 import { authorizeCloudWorkspaceOperation } from "./cloud-workspaces/authorization.js";
 import { DatabaseProMonthlyAllowance, readProComputeUsage } from "./cloud-workspaces/pro-allowance.js";
 
@@ -27,6 +27,8 @@ database("hosted Dev database ownership", () => {
       await runMigrations(admin);
       await admin.query(`CREATE ROLE ${role} LOGIN NOINHERIT NOBYPASSRLS`);
       await grantHostedRuntimeAuthority(admin, role);
+      await admin.query(`REVOKE zeros_app FROM ${role}`);
+      await repairHostedRuntimeAuthority(admin, { ...identity, backendStopped: true, roles: { runtime: { baseUsername: role } } });
       const connection = new URL(url!); connection.username = role; connection.password = "";
       runtime = createPool(connection.toString(), { maxConnections: 1 });
       await expect(assertHostedDatabaseOwnership(runtime, identity)).resolves.toBeUndefined();

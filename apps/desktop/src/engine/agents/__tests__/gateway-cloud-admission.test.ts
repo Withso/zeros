@@ -8,6 +8,35 @@ import type {AgentAdapter,AgentGatewayOptions} from "../types";
 import {testExecutionBoundary} from "./helpers/test-execution-boundary";
 
 describe("cloud gateway admission",()=>{
+  it.each([
+    ["claude", "accept-edits"], ["claude", "plan"], ["claude", "auto"],
+    ["codex", "auto-edit"], ["codex", "ask"], ["cursor", "auto"], ["cursor", "plan"],
+  ])("retains %s mode %s through both private new and resumed admissions",async(agentId,mode)=>{
+    const root=await realpath(await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-mode-")));
+    const workload=testExecutionBoundary();
+    const factory={prepare:vi.fn(async(input:{workload:unknown;providerSettings?:Record<string,string>})=>({boundary:input.workload,
+      env:{...input.providerSettings},authorityId:"a".repeat(64)}))};
+    const native=vi.fn(async(opts:{executionId:string})=>({session:{executionId:opts.executionId,sessionId:opts.executionId},initialize:{}}));
+    const resumed=vi.fn(async(opts:{executionId:string})=>({executionId:opts.executionId}));
+    const gateway=new AgentGateway({projectRoot:root,executionBoundary:{...workload,backend:"cloud-worker"},cloudAgentExecutionFactory:factory,
+      events:{onSessionUpdate(){},onPermissionRequest(){},onQuestionRequest(){},onAgentStderr(){},onAgentExit(){}}} as AgentGatewayOptions);
+    (gateway as unknown as {adapters:Map<string,AgentAdapter>}).adapters.set(agentId,{agentId,newSession:native,loadSession:resumed,disposeSession:async()=>{},dispose:async()=>{}} as unknown as AgentAdapter);
+    const options={cwd:root,conversationId:"conversation",cloudExecution:{delegationId:randomUUID(),model:"test-model",source:{kind:"session",actorSessionId:randomUUID()}},
+      env:{ZEROS_PERMISSION_MODE:mode,ZEROS_FAST_MODE:"1",NODE_OPTIONS:"--require injected"}} as NewAgentSessionOptions;
+    try{
+      const created=await gateway.newSession(agentId,options);
+      const resumedSession=await gateway.loadSession(agentId,{version:1,kind:"native",providerId:agentId,resumeId:"test-binding"},options);
+      for(const session of [created,resumedSession]) {
+        expect(session.boundary).toHaveProperty("browser",expect.objectContaining({
+          version:1,provider:agentId,runtimeProfile:"zeros-cloud-worker-v3",credentialKind:"unknown",
+          state:"unavailable",reason:"not-reported",
+        }));
+      }
+      for(const method of [native,resumed])expect(method.mock.calls[0]?.[0]).not.toHaveProperty("browserUse");
+      for(const call of factory.prepare.mock.calls)expect(call[0].providerSettings).toEqual({ZEROS_PERMISSION_MODE:mode,ZEROS_FAST_MODE:"1"});
+      for(const method of [native,resumed])expect(method).toHaveBeenCalledWith(expect.objectContaining({env:{ZEROS_PERMISSION_MODE:mode,ZEROS_FAST_MODE:"1"}}));
+    }finally{await gateway.dispose();await rm(root,{recursive:true,force:true});}
+  });
   it.each(["newSession","loadSession","forkProviderBinding"] as const)("requires a credential grant before %s can touch a native provider",async stage=>{
     const root=await realpath(await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-admit-")));
     const native=vi.fn();

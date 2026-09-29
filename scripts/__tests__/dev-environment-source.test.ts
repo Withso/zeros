@@ -78,11 +78,29 @@ describe("immutable development candidates", () => {
     const ui = captureDevelopmentSource(f.root, f.state);
     expect(ui.sourceSha256).not.toBe(first.sourceSha256);
     expect(ui.workerInputsSha256).toBe(first.workerInputsSha256);
+    expect(ui.deploymentInputsSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(ui.deploymentInputsSha256).toBe(first.deploymentInputsSha256);
     f.write("apps/desktop/src/engine/main.ts", "export const engine = 2");
     const engine = captureDevelopmentSource(f.root, f.state);
     expect(engine.workerInputsSha256).not.toBe(ui.workerInputsSha256);
+    expect(engine.deploymentInputsSha256).not.toBe(ui.deploymentInputsSha256);
     f.write("pnpm-lock.yaml", "updated lockfile");
     expect(captureDevelopmentSource(f.root, f.state).workerInputsSha256).not.toBe(engine.workerInputsSha256);
+  });
+
+  it("reuses hosted inputs for desktop-only edits but redeploys backend, web and migration changes", () => {
+    const f = fixture();
+    f.write("apps/desktop/electron/main.ts", "// desktop one");
+    const first = captureDevelopmentSource(f.root, f.state);
+    f.write("apps/desktop/electron/main.ts", "// desktop two");
+    const desktop = captureDevelopmentSource(f.root, f.state);
+    expect(desktop.deploymentInputsSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(desktop.deploymentInputsSha256).toBe(first.deploymentInputsSha256);
+    for (const file of ["apps/control-plane/src/main.ts", "apps/control-plane/migrations/002.sql", "apps/web/src/page.ts", "scripts/dev-environment/hosted-profile.mjs", "packages/protocol/src/types.ts", "pnpm-lock.yaml"]) {
+      const before = captureDevelopmentSource(f.root, f.state);
+      f.write(file, "changed hosted input");
+      expect(captureDevelopmentSource(f.root, f.state).deploymentInputsSha256).not.toBe(before.deploymentInputsSha256);
+    }
   });
 
   it.each(["../secret.ts", ".npmrc", "apps/control-plane/.npmrc", "apps/.env", "apps/control-plane/node_modules/private.js", "scripts/private.pem", ".context/file.ts", "apps/web/.dev.vars.production", "zeros-dev-env.json", "apps/control-plane/zeros-dev-env.json", "scripts/zeros-dev-env.json"])("excludes private deploy input %s", file => {

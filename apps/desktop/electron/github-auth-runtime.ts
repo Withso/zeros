@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import { IS_PACKAGED } from "./runtime-mode";
+import { channel } from "../src/engine/runtime";
+import { DevGithubConnectionSchema, devGithubReferenceEnabled, type DevGithubConnection } from "./dev-github-reference";
+import { getValidSessionForMain } from "./ipc/commands/auth-session";
 // Production wiring for the main-process GitHub credential store.
 
 import type {
@@ -112,6 +117,7 @@ export async function replaceGithubAppCredentialIfCurrent(
  *  The method-addressed durable store remains the source of truth. */
 async function selectedWorkingCredential(): Promise<GithubCredential | null> {
   const selected = await githubCredentialStore.getSelectedCredential();
+  if(hostedDevGithubReferencesEnabled()&&selected?.method==='github-app')return null;
   return githubCredentialForEngine(selected, getProductAccountIdForMain());
 }
 
@@ -269,3 +275,29 @@ export const githubSelectedTokenStore: TokenStore = {
 export async function initializeGithubCredentialStore(): Promise<void> {
   await migrateLegacyGithubCredential(githubCredentialStore);
 }
+
+export function hostedDevGithubReferencesEnabled(){
+  return devGithubReferenceEnabled({isPackaged:IS_PACKAGED,deployment:channel(),env:process.env});
+}
+function devReferenceSlot(subject:string){
+  return `github-app-dev-reference-v1:${createHash('sha256').update(JSON.stringify([process.env.AUTH_ISSUER,subject,process.env.ZEROS_DEV_GENERATION,process.env.ZEROS_CONTROL_PLANE_URL])).digest('hex')}`;
+}
+async function devReferenceOwner(){
+  if(!hostedDevGithubReferencesEnabled())throw new Error('Dev GitHub reference mode is unavailable');
+  const session=await getValidSessionForMain();if(!session)throw new Error('Sign in to Zeros to restore GitHub');
+  return session;
+}
+function assertDevReferenceOwner(value:DevGithubConnection,subject:string){
+  const r=value.reference;
+  if(r.subject!==subject||r.issuer!==process.env.AUTH_ISSUER||r.generationId!==process.env.ZEROS_DEV_GENERATION||r.backendOrigin!==process.env.ZEROS_CONTROL_PLANE_URL)
+    throw new Error('Dev GitHub connection owner changed');
+}
+export async function saveDevGithubReference(value:DevGithubConnection){
+  const parsed=DevGithubConnectionSchema.parse(value),session=await devReferenceOwner();assertDevReferenceOwner(parsed,session.sub);
+  setSecret(devReferenceSlot(session.sub),JSON.stringify(parsed));
+}
+export async function readDevGithubReference(){
+  const session=await devReferenceOwner(),raw=getSecret(devReferenceSlot(session.sub));if(!raw)return null;
+  const parsed=DevGithubConnectionSchema.parse(JSON.parse(raw));assertDevReferenceOwner(parsed,session.sub);return parsed;
+}
+export async function clearDevGithubReference(){const session=await devReferenceOwner();deleteSecret(devReferenceSlot(session.sub));}

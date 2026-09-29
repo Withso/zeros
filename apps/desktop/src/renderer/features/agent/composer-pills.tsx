@@ -119,6 +119,7 @@ export function ModelPill({
   onConfigure,
   onSelectAgentModel,
   redirectCrossAgent,
+  selectionTiming,
 }: {
   agents?: import("../../platform/bridge/messages").BridgeRegistryAgent[] | null;
   agentId: string | null;
@@ -140,6 +141,7 @@ export function ModelPill({
   /** True once the chat's session has started (first prompt sent) — other
    *  agents' models then show a ↗ in the dropdown ("opens a new chat"). */
   redirectCrossAgent?: boolean;
+  selectionTiming?: "next-message";
 }) {
   const [open, setOpen] = useState(false);
   // Close while the host composer is concealed (see ComposerConcealedContext).
@@ -187,6 +189,7 @@ export function ModelPill({
       open={open && !concealed}
       onOpenChange={setOpen}
       redirectCrossAgent={redirectCrossAgent}
+      selectionTiming={selectionTiming}
       onConfigure={onConfigure}
       onSelect={(sel) => {
         if (agentFamily(sel.agentId) === agentFamily(agentId)) {

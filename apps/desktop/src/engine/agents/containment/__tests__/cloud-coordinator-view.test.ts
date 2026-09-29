@@ -48,3 +48,7 @@ describe("private provider coordinator view",()=>{
     expect(()=>cloudCoordinatorArguments(`/run/zeros/coordinators/${"a".repeat(32)}`,"/usr/bin/true",[],{...history,directory:"/srv/zeros/state"})).toThrow();
   });
 });
+
+it.each(["auto-edit", "ask", "accept-edits", "plan", "auto", "agent", "bypass"])("retains admitted permission mode %s in the private coordinator", mode => {
+  expect(cloudCoordinatorEnvironment({kind:"codex-api-key",apiKey:"synthetic-key"},"model",{ZEROS_PERMISSION_MODE:mode})).toHaveProperty("ZEROS_PERMISSION_MODE", mode);
+});

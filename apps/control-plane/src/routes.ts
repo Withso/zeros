@@ -31,6 +31,8 @@ import type { CloudWorkspaceBackendConfig } from "./config.js";
 import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
 import {createCloudWorkspaceCollaborationRoutes} from "./cloud-workspaces/collaboration-routes.js";
 import {createCloudAgentCredentialRoutes} from "./cloud-workspaces/agent-credential-routes.js";
+import { createCloudCustomizationRoutes } from "./cloud-workspaces/mcp-routes.js";
+import { DatabaseCloudCustomizationService } from "./cloud-workspaces/customization-store.js";
 import {cloudAgentCredentialKeys,DatabaseCloudAgentCredentialService} from "./cloud-workspaces/agent-credentials.js";
 import {workspaceInvitationDeliveryConfig} from "./cloud-workspaces/invitation-delivery.js";
 import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
@@ -487,6 +489,7 @@ export function createRoutes(
     workspaceInvitationDeliveryConfig(cloudWorkspaces,options.inviteLinkBase??DEFAULT_INVITE_LINK_BASE,email)));
   const agentCredentialKeys=cloudAgentCredentialKeys(cloudWorkspaces);
   if(agentCredentialKeys) app.route("/",createCloudAgentCredentialRoutes(new DatabaseCloudAgentCredentialService(pool,agentCredentialKeys)));
+  if(agentCredentialKeys) app.route("/",createCloudCustomizationRoutes(new DatabaseCloudCustomizationService(pool,agentCredentialKeys)));
 
   app.post(
     "/v1/invitations/accept",

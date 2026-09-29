@@ -6,13 +6,18 @@ export function devObjectStorage(config, dependencies) {
   const sdk = dependencies?.sdk ?? require("@aws-sdk/client-s3");
   const client = dependencies?.client ?? new sdk.S3Client({ region: "auto", endpoint: config.endpoint,
     credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey }, maxAttempts: 2 });
-  const send = command => client.send(command, { abortSignal: AbortSignal.timeout(20_000) });
+  // Archives can be tens of MiB on a developer's uplink. Keep metadata calls
+  // short while giving bounded artifact transfers their own deadline.
+  const transferTimeout = 180_000;
+  const send = (command, { timeout = 20_000, signal } = {}) => client.send(command, {
+    abortSignal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
+  });
   const prefix = state => {
     if (!/^[a-f0-9]{24}$/.test(state.owner ?? "") || !/^[a-f0-9-]{36}$/.test(state.generation ?? "")) throw new Error("Invalid Dev storage owner");
     return `dev/${state.owner}/${state.generation}/`;
   };
   const read = async (Key, maximum) => {
-    const result = await send(new sdk.GetObjectCommand({ Bucket: config.bucket, Key }));
+    const result = await send(new sdk.GetObjectCommand({ Bucket: config.bucket, Key }), { timeout: transferTimeout });
     if (result.ContentLength > maximum) throw new Error();
     const chunks = []; let size = 0;
     for await (const chunk of result.Body) { size += chunk.length; if (size > maximum) { result.Body.destroy?.(); throw new Error(); } chunks.push(chunk); }
@@ -23,7 +28,8 @@ export function devObjectStorage(config, dependencies) {
       if (body.length > 32 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(record.inputsSha256)) throw new Error("Invalid Dev worker archive");
       const digest = sha256(body), Key = `${prefix(lease.state)}_images/${record.inputsSha256}/${digest}.tar.gz`;
       await lease.fence();
-      try { await send(new sdk.PutObjectCommand({ Bucket: config.bucket, Key, Body: body, ContentType: "application/gzip" })); }
+      try { await send(new sdk.PutObjectCommand({ Bucket: config.bucket, Key, Body: body, ContentType: "application/gzip" }),
+        { timeout: transferTimeout, signal: lease.signal }); }
       catch { throw new Error("Could not preserve the Dev worker source; no install was dispatched"); }
       record.sourceArchive = { key: Key, digest }; await lease.save();
     },
@@ -43,7 +49,8 @@ export function devObjectStorage(config, dependencies) {
     async saveOperator(lease, artifact) {
       const Key = `${prefix(lease.state)}_operator/${artifact.digest}.gz`;
       await lease.fence();
-      try { await send(new sdk.PutObjectCommand({ Bucket: config.bucket, Key, Body: artifact.body, ContentType: "application/gzip" })); }
+      try { await send(new sdk.PutObjectCommand({ Bucket: config.bucket, Key, Body: artifact.body, ContentType: "application/gzip" }),
+        { timeout: transferTimeout, signal: lease.signal }); }
       catch { throw new Error("Could not preserve the Dev cleanup artifact; deployment stopped"); }
       lease.state.resources.operator = { key: Key, digest: artifact.digest }; await lease.save();
     },

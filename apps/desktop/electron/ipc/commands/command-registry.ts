@@ -1,3 +1,4 @@
+import { ghCloud } from "./cloud-github";
 // ──────────────────────────────────────────────────────────
 // Capability-grouped command registration
 // ──────────────────────────────────────────────────────────
@@ -12,6 +13,7 @@
 import { setCommand } from "../router";
 import { cursorSubscription } from "./cursor-subscription";
 import { providerSubscription } from "./provider-subscription";
+import { cloudProviderAuth } from "./cloud-provider-auth";
 import { nativeAppIcons, toolArtworkImages } from "./computer-use";
 import {
   dialogPickFolder,
@@ -122,6 +124,7 @@ export function registerAllCommands(): void {
   setCommand("app_info", appInfo);
   setCommand("cursor_subscription", cursorSubscription);
   setCommand("provider_subscription", providerSubscription);
+  setCommand("cloud_provider_auth", cloudProviderAuth);
 
   // App settings (plain-JSON, main-process readable) + in-place engine
   // restart. These settings persist to <userData>/app-settings.json so
@@ -269,6 +272,7 @@ export function registerAllCommands(): void {
   // which Electron would otherwise flatten into one prefixed string.
   setCommand("gh_auth_snapshot", withNativeErrors(ghAuthSnapshot));
   setCommand("gh_app_cancel", ghAppCancel);
+  setCommand("gh_cloud", ghCloud);
   setCommand("gh_app_connect", withNativeErrors(ghAppConnect));
   setCommand("gh_method_select", withNativeErrors(ghMethodSelect));
   setCommand("gh_pat_connect", withNativeErrors(ghPatConnect));

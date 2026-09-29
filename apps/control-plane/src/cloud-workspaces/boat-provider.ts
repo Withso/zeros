@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { assertHostedDevAdmission } from "../development-environment.js";
 import { z } from "zod";
 import { BoatApiClient, BoatCreateRejectedError, type BoatApiClientOptions, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
 import { computeMicroUsd, type CloudProviderComputeUsage, type CloudWorkspaceComputeProvider } from "./provider-compute.js";
@@ -47,6 +48,8 @@ const DeletionSchema = z.object({
   kind: z.literal("sandbox"),
   targetId: z.string().regex(BOAT_RESOURCE_ID_PATTERN),
   status: z.enum(["pending", "processing", "blocked", "completed"]),
+  // Unknown provider stages are not retained as arbitrary diagnostic strings.
+  stage: z.unknown().optional(),
   completedAt: z.string().datetime({ offset: true }).nullable(),
 });
 const STATES: Record<
@@ -89,6 +92,9 @@ export type BoatWorkspaceProviderOptions = BoatApiClientOptions & {
   /** Advertised capacity of the qualified image/profile. Boat's create API
    * cannot resize disk; readiness must independently verify this capacity. */
   qualifiedStorageMiB: number;
+  /** Organization snapshots must resolve through their immutable artifact and
+   * saved generation before dispatch, never through today's active selection. */
+  resolveSnapshot?: (input: CloudProviderCreateInput) => Promise<string>;
   now?: () => number;
 };
 
@@ -239,6 +245,7 @@ export class BoatWorkspaceProvider
   }
 
   private async createAllocation(input: CloudProviderCreateInput, ttlSeconds: number | null): Promise<CloudProviderResource> {
+    assertHostedDevAdmission(process.env, ttlSeconds, this.now());
     const type =
       input.cpuMillicores === 2000 && input.memoryMiB === 4096
         ? "small"
@@ -255,9 +262,12 @@ export class BoatWorkspaceProvider
       input.storageMiB !== this.options.qualifiedStorageMiB
     )
       throw failure("provider_profile_unsupported");
+    const resolvedName = this.options.resolveSnapshot ? await this.options.resolveSnapshot(input) : this.snapshotName;
+    if (resolvedName !== this.snapshotName || (this.snapshotName.startsWith("zeros-org-") && !this.options.resolveSnapshot))
+      throw failure("provider_snapshot_identity_mismatch");
     const body = {
       type,
-      from: this.snapshotName,
+      from: resolvedName,
       ttlSeconds,
       noEnv: true,
       env: {},
@@ -351,6 +361,11 @@ export class BoatWorkspaceProvider
         parsed.data.targetId !== resourceId
       )
         throw failure("provider_response_invalid");
+      if (parsed.data.status === "completed" && parsed.data.completedAt === null)
+        throw failure("provider_response_invalid");
+      const stage = typeof parsed.data.stage === "string" && ["waiting_for_uploads","kept_for_newer_snapshots","waiting_for_restore","deleting"].includes(parsed.data.stage)
+        ? parsed.data.stage : parsed.data.status;
+      await this.options.operations.recordDeletionProgress?.(resourceId,current.deletionOperationId,stage).catch(() => undefined);
       if (parsed.data.status === "completed") {
         if (parsed.data.completedAt === null)
           throw failure("provider_response_invalid");
@@ -390,6 +405,7 @@ export class BoatWorkspaceProvider
   }
 
   private async startAllocation(resourceId: string, ttlSeconds: number | null): Promise<CloudProviderResource> {
+    assertHostedDevAdmission(process.env, ttlSeconds, this.now());
     const record = await this.owned(resourceId);
     this.usable(record);
     const current = await this.allocatableResource(record);
@@ -444,6 +460,7 @@ export class BoatWorkspaceProvider
   }
 
   async renewComputeLease(resourceId: string, ttlSeconds: number): Promise<{ expiresAt: string }> {
+    assertHostedDevAdmission(process.env, ttlSeconds, this.now());
     this.assertFiniteLease(ttlSeconds);
     const record = await this.owned(resourceId);
     this.usable(record);

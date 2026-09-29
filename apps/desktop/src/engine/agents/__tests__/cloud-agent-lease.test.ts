@@ -1,6 +1,7 @@
 import {randomUUID} from "node:crypto";
 import {afterEach,describe,expect,it,vi} from "vitest";
 import {CloudAgentLease} from "../cloud-agent-lease";
+import { cloudMcpDigest } from "../cloud-mcp";
 const admission={executionId:randomUUID(),delegationId:randomUUID(),provider:"cursor" as const,model:"grok-4.6",source:{kind:"session" as const,actorSessionId:randomUUID()}};
 function fixture(){
   const origin=Date.parse("2026-01-01T00:00:00Z");let elapsed=0;
@@ -12,6 +13,34 @@ function fixture(){
 }
 afterEach(()=>vi.useRealTimers());
 describe("private agent execution lifetime",()=>{
+  it("pins a private customization snapshot and rejects absent or inconsistent admission", async () => {
+    vi.useFakeTimers(); const f=fixture(), request={...admission,customization:{version:1 as const,repositoryServers:[]}};
+    const content={version:1 as const,repositoryDigest:cloudMcpDigest([]),servers:[],skills:[{name:"test",content:"# Example"}],cursorTeamSettings:"disabled" as const};
+    const customization={...content,digest:cloudMcpDigest(content)};
+    f.request.mockResolvedValueOnce({...f.grant,customization});
+    const lease=await CloudAgentLease.admit(request,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time);
+    try {
+      expect(lease.customization).toEqual(customization);
+      expect(Object.isFrozen(lease.customization)).toBe(true);
+      expect(Object.isFrozen(lease.customization?.skills[0])).toBe(true);
+    } finally {await lease.close();}
+    for(const value of [undefined,{...customization,digest:"0".repeat(64)},{...customization,repositoryDigest:"0".repeat(64)}]) {
+      f.request.mockResolvedValueOnce({...f.grant,...(value?{customization:value}:{})});
+      await expect(CloudAgentLease.admit(request,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time)).rejects.toThrow(/customization/);
+    }
+  });
+  it("takes a private immutable author snapshot from the backend for each execution", async () => {
+    vi.useFakeTimers(); const f = fixture();
+    const author = { name: "Member", email: "1234+member@users.noreply.github.com" };
+    f.request.mockResolvedValueOnce({ ...f.grant, gitAuthor: author });
+    const lease = await CloudAgentLease.admit(admission, f.request, new AbortController().signal, { onRetirementFailure: vi.fn() }, f.time);
+    try {
+      expect(f.request).toHaveBeenCalledWith({ kind: "admit", admission, includeGitAuthor: true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1 }, expect.any(AbortSignal));
+      expect(lease.gitAuthor).toEqual(author);
+      author.name = "Changed outside the lease";
+      expect(lease.gitAuthor?.name).toBe("Member"); expect(Object.isFrozen(lease.gitAuthor)).toBe(true);
+    } finally { await lease.close(); }
+  });
   it("consumes material once and retires both domains on consent loss",async()=>{
     vi.useFakeTimers();const f=fixture(),lease=await CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time);
     const coordinator={stopAndProve:vi.fn().mockResolvedValue(undefined)},workload={stopAndProve:vi.fn().mockResolvedValue(undefined)};

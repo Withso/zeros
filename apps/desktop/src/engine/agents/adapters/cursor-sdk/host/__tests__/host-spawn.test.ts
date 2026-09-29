@@ -13,7 +13,10 @@ import { fileURLToPath } from "node:url";
 import type { ChildProcess } from "node:child_process";
 
 const { spawnSpy } = vi.hoisted(() => ({ spawnSpy: vi.fn() }));
-vi.mock("node:child_process", () => ({ spawn: spawnSpy }));
+vi.mock("node:child_process", async (original) => ({
+  ...await original<typeof import("node:child_process")>(),
+  spawn: spawnSpy,
+}));
 
 import {
   formatHostStderrLines,

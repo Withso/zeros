@@ -120,3 +120,31 @@ describe("PlanetScale disposable Dev branches", () => {
     await expect(ensurePlanetScaleRoles(f.lease, f.config, request, { interval: 1 })).rejects.toThrow(/role.*branch/);
   });
 });
+
+it.each(["expired", "disabled", "missing", "version"])("rotates a %s runtime role without replacing the branch", async reason => {
+  const f = fixture();
+  const syntheticUrl = new URL("postgresql://aws-us-west-2-1.pg.psdb.cloud:5432/postgres?sslmode=verify-full");
+  syntheticUrl.username = "pscale_api_old.branchid"; syntheticUrl.password = "synthetic";
+  const saved = { id: "old-runtime", name: "old-runtime", username: "pscale_api_old.branchid", baseUsername: "pscale_api_old", version: "1",
+    url: syntheticUrl.toString() };
+  const receipt: any = f.state.resources.planetscale = { id: f.branch.id, name: f.branch.name, databaseId: f.database.id,
+    database: f.config.database, organization: f.config.organization, roles: { runtime: saved } };
+  const created: Record<string, any> = {};
+  const request = vi.fn(async (route: string, options: any = {}) => {
+    if (!route) return f.database;
+    if (!route.includes("/roles")) return f.branch;
+    if (options.method === "POST") {
+      const kind = options.body.name.includes("migration") ? "migration" : "replacement";
+      return created[kind] = { id: kind, name: options.body.name, access_host_url: "aws-us-west-2-1.pg.psdb.cloud", username: `pscale_api_${kind}.branchid`,
+        base_username: `pscale_api_${kind}`, password: "synthetic", branch: f.branch, ready: true };
+    }
+    if (route.endsWith("/old-runtime")) return reason === "missing" ? null : { ...saved, branch: f.branch, ready: true,
+      expired: reason === "expired", disabled_at: reason === "disabled" ? new Date().toISOString() : null };
+    return created[route.split("/").at(-1)!];
+  });
+  await ensurePlanetScaleRoles(f.lease, { ...f.config, runtimeRoleVersion: reason === "version" ? "2" : "1" }, request);
+  expect(receipt.id).toBe(f.branch.id);
+  expect(receipt.roles.runtime.id).toBe("replacement");
+  expect(receipt.retiredRuntimeRoles[0].id).toBe(saved.id);
+  expect(request.mock.calls.some(([, options]) => options?.method === "DELETE")).toBe(false);
+});

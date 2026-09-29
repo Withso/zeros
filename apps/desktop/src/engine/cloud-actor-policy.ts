@@ -3,6 +3,7 @@ import { CloudCommandClientRequestSchema } from "@zeros/protocol/cloud-commands"
 import { CloudActionClientRequestSchema } from "@zeros/protocol/cloud-actions";
 import { CloudEventClientRequestSchema } from "@zeros/protocol/cloud-events";
 import { CloudLspRequestSchema } from "@zeros/protocol/cloud-lsp";
+import { cloudGithubNativeDesktopSchema } from "@zeros/protocol/github-auth";
 import type { EngineMessage } from "./types";
 import { PTY_AGENT_AUTH_CWD } from "@zeros/protocol/messages";
 
@@ -14,6 +15,7 @@ const reads=new Set([
   "design.projection","design.provenance","design.source","design.context.inspect","design.frames","design.frame",
   "design.snapshot","design.tokens","design.listDirectories","design.previewExistingDirectory",
   "context.graph.list","extensions.list","skills.listZeros","workspace.get","workspace.lifecycleStatus",
+  "file.ignored","workspace.listWorkingDirectories",
   "git.stashList","git.tagList","git.listAllBranches","cloudCommands.conversation",
 ]);
 const edits=new Set([
@@ -23,8 +25,10 @@ const edits=new Set([
   "design.node.styles","design.node.transfer","design.node.text","design.node.html","design.asset.insert",
   "design.stage","design.unstage","design.save","design.commit",
   "context.graph.scaffold","context.graph.setShared","skills.saveZeros","skills.removeZeros",
+  "workspace.setWorkingDirectories",
   "git.reset","git.restore","git.merge","git.cherryPick","git.revert","git.continue","git.abort",
   "git.stashApply","git.stashDrop","git.deleteBranch","git.stageHunk","git.unstageHunk","git.discardHunk","git.tagCreate","git.tagDelete",
+  "workspace.continueOnNewBranch",
 ]);
 const managers=new Set(["design.initialize","design.adoptDirectory","design.removeDirectory","design.renameDirectory","workspace.setMode"]);
 const providerRuns=new Set([
@@ -35,6 +39,7 @@ const providerRuns=new Set([
 ]);
 
 export function cloudWorkspaceCapability(op:string,params:Record<string,unknown>,workspace:WorkspacePolicy):Capability|null {
+  if(op==="github.nativeGrant")return cloudGithubNativeDesktopSchema.safeParse(params).success?"edit":null;
   if(op==="cloudLsp.request")return CloudLspRequestSchema.safeParse(params.request).success?"edit":null;
   if(op==="cloudCommands.request") {
     const parsed=CloudCommandClientRequestSchema.safeParse(params.request);
@@ -48,6 +53,10 @@ export function cloudWorkspaceCapability(op:string,params:Record<string,unknown>
   }
   if(op==="cloudEvents.request") return CloudEventClientRequestSchema.safeParse(params.request).success?"read":null;
   if(op==="cloudCommands.createConversation"||op==="cloudCommands.setMode")return "run";
+  // Organization customization is shared administrative state. The control
+  // plane additionally enforces organization administrator membership; a
+  // member's private scope can be edited by that admitted actor alone.
+  if(op==="skills.saveZeros"||op==="skills.removeZeros")return params.scope==="member"?"edit":"manage";
   if(reads.has(op))return "read";
   if(edits.has(op))return "edit";
   if(managers.has(op))return "manage";

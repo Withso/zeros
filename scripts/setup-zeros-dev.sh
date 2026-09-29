@@ -47,14 +47,8 @@ if [ "$(id -u)" = 0 ]; then
   echo 'Run Dev setup as your normal user, without sudo.' >&2; exit 1
 fi
 
-# Prefer our installed tools on repeated invocations, including non-login shells.
-for setup_path in /opt/homebrew/bin /opt/homebrew/opt/node@22/bin "$HOME/.zeros-dev/tools/bin"; do
-  if [ -d "$setup_path" ]; then export PATH="$setup_path:$PATH"; fi
-done
-
-node_ready() {
-  command -v node >/dev/null 2>&1 && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 22 && minor >= 18 ? 0 : 1)' >/dev/null 2>&1
-}
+. "$setup_root/scripts/dev-environment/toolchain.sh"
+node_ready() { zeros_dev_select_tools 2>/dev/null; }
 
 if [ "$setup_mode" = install ]; then
   if ! xcode-select -p >/dev/null 2>&1 || ! xcrun --find clang >/dev/null 2>&1; then
@@ -82,7 +76,7 @@ if [ "$setup_mode" = install ]; then
   fi
 fi
 
-if ! command -v node >/dev/null 2>&1; then
+if ! zeros_dev_select_tools; then
   echo 'Node is missing. Run setup without --check or --profile-only to install it.' >&2; exit 1
 fi
 export ZEROS_DEV_SETUP_NODE_BIN="$(dirname -- "$(command -v node)")"

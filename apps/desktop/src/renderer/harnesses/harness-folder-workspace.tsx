@@ -112,6 +112,7 @@ Object.assign(window, {
     invoke: async (op: string, params?: Record<string, unknown>) => {
       requests.push({ op, params });
       if (op === "cloud_workspace_capability") return { enabled: cloudEnabled };
+      if (cloudEnabled && op === "gh_cloud" && params?.action === "source") return {installationId:"33333333-3333-4333-8333-333333333333",repository:{id:"123",owner:"example",name:"project",defaultBranch:"main",private:true}};
       if (cloudEnabled && op === "auth_get_access_token") return { access_token: "fixture-only-access-token" };
       if (cloudEnabled && op === "auth_get_session_user") return { sub: "fixture-user", email: "fixture@example.test", name: "Fixture", provider: "workos" };
       if (op === "pick_project_folder") return folder;
@@ -232,6 +233,13 @@ setActiveBridge({
 } as unknown as RuntimeClient);
 const { useWorkspaceStore, selectActiveFolder } =
   await import("../state/store");
+// This focused harness omits app-shell's chat persistence. Supply its first
+// authoritative Local snapshot explicitly, including after a page reload;
+// workspace discovery alone must not authorize creating a default chat.
+{
+  const { chats, activeChatId, dispatch } = useWorkspaceStore.getState();
+  dispatch({ type: "HYDRATE_CHATS", chats, activeChatId, confirmedCloudWorkspaces: [] });
+}
 const { selectWorkbench } = await import("../state/workspace-store");
 const { useProjects } = await import("../state/use-projects");
 const { notifyProjectsChanged } = await import("../state/use-projects");

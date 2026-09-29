@@ -92,7 +92,7 @@ describe("GitHub method disconnect commit order", () => {
       ghAppConnect({ installFlow: true, forceInstall: true }, {} as never),
     ).resolves.toEqual({ flowKind: "install" });
 
-    expect(mocks.beginApp).toHaveBeenCalledWith(true, true);
+    expect(mocks.beginApp).toHaveBeenCalledWith(true, true, false);
   });
 
   it.each(["local", "hosted"])(
@@ -102,7 +102,7 @@ describe("GitHub method disconnect commit order", () => {
       vi.stubEnv("ZEROS_DEV_ENVIRONMENT", mode);
       vi.stubEnv("ZEROS_ISOLATE", "1");
       await ghAppConnect({ installFlow: true }, {} as never);
-      expect(mocks.beginApp).toHaveBeenCalledWith(false, false);
+      expect(mocks.beginApp).toHaveBeenCalledWith(false, false, false);
     },
   );
 
@@ -112,9 +112,14 @@ describe("GitHub method disconnect commit order", () => {
       vi.stubEnv("ZEROS_CHANNEL", channel);
       vi.stubEnv("ZEROS_DEV_ENVIRONMENT", "hosted");
       await ghAppConnect({ installFlow: true }, {} as never);
-      expect(mocks.beginApp).toHaveBeenCalledWith(true, false);
+      expect(mocks.beginApp).toHaveBeenCalledWith(true, false, false);
     },
   );
+
+  it("keeps organization connection setup from selecting a Local GitHub method", async () => {
+    await ghAppConnect({ installFlow: false, preserveSelectedMethod: true }, {} as never);
+    expect(mocks.beginApp).toHaveBeenCalledWith(false, false, true);
+  });
 
   it("keeps a selected PAT when its fallback preference cannot be stored", async () => {
     mocks.setFallbackMethod.mockRejectedValueOnce(

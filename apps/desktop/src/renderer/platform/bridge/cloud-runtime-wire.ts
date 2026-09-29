@@ -7,6 +7,7 @@ import {
   type CloudWorkspaceTarget,
 } from "./cloud-workspace-key";
 import { runSessionId } from "@zeros/protocol/run-actions";
+import { turnIdentitySchema } from "@zeros/protocol/changes-history";
 
 export type WireRecord = Record<string, unknown>;
 export interface CloudRuntimeScope extends CloudWorkspaceTarget {
@@ -48,6 +49,14 @@ export function cloudRequestTarget(
   collect(params);
   collect(record(params.chat));
   collect(record(params.initialChat));
+  if (message.type === "WORKSPACE_REQUEST") {
+    if (message.op === "turns.undoReset") candidates.push(params.resetId);
+    if (message.op === "turns.list") collect(record(params.after));
+    if (message.op === "git.diff" && record(params.history).kind === "turn-range") {
+      collect(record(record(params.history).from));
+      collect(record(record(params.history).to));
+    }
+  }
   let target: CloudWorkspaceTarget | null = null;
   for (const value of candidates) {
     const next = cloudTargetForValue(value);
@@ -128,6 +137,30 @@ function mapFields(
   return mapped;
 }
 
+/** Only the protocol's turn identity fields are translated. Native turn IDs,
+ * timestamps, provider metadata and diff contents remain opaque. */
+function mapTurnIdentity(
+  scope: CloudRuntimeScope,
+  value: unknown,
+  direction: "in" | "out",
+): WireRecord {
+  const identity = turnIdentitySchema.parse(value);
+  const row = record(value);
+  const chatId = nativeValue(scope, identity.chatId) as string;
+  // Check typed nested owners before replacing native fields with UI keys.
+  // Provider payloads and file rows never participate in routing.
+  nativeValue(scope, row.workspaceId);
+  nativeValue(scope, row.folder, true);
+  const owner: WireRecord = {};
+  if ("workspaceId" in row) owner.workspaceId = row.workspaceId;
+  if ("folder" in row) owner.folder = row.folder;
+  return {
+    ...row,
+    ...mapFields(scope, owner, direction),
+    chatId: direction === "in" ? cloudScopedId(scope, chatId) : chatId,
+  };
+}
+
 export function cloudOutgoing(
   scope: CloudRuntimeScope,
   message: WireRecord,
@@ -136,6 +169,18 @@ export function cloudOutgoing(
   if (message.params) {
     const original = record(message.params);
     const params = mapFields(scope, original, "out");
+    if (message.op === "turns.undoReset")
+      params.resetId = nativeValue(scope, original.resetId);
+    if (message.op === "turns.list" && original.after)
+      params.after = mapTurnIdentity(scope, original.after, "out");
+    if (message.op === "git.diff" && record(original.history).kind === "turn-range") {
+      const history = record(original.history);
+      params.history = {
+        ...history,
+        from: mapTurnIdentity(scope, history.from, "out"),
+        to: mapTurnIdentity(scope, history.to, "out"),
+      };
+    }
     if (message.op === "chats.delete")
       params.id = nativeValue(scope, original.id);
     for (const key of ["chat", "initialChat"])
@@ -178,10 +223,17 @@ export function cloudIncoming(
     );
   if (message.type === "DB_CHANGED") {
     out.workspaceId = cloudWorkspaceKey(scope);
+    out.workspaceIds = [cloudWorkspaceKey(scope)];
     out.cloudWorkspace = cloudWorkspaceKey(scope);
   }
   if (message.result && typeof message.result === "object") {
     const result = mapFields(scope, record(message.result), "in");
+    if (message.op === "turns.reset" && typeof result.resetId === "string")
+      result.resetId = cloudScopedId(scope, result.resetId);
+    if (message.op === "turns.get" && result.turn)
+      result.turn = mapTurnIdentity(scope, result.turn, "in");
+    if (message.op === "turns.list" && Array.isArray(result.turns))
+      result.turns = result.turns.map((turn) => mapTurnIdentity(scope, turn, "in"));
     const workspace = (row: unknown) => ({
       ...record(row),
       id: cloudWorkspaceKey(scope),

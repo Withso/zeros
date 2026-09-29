@@ -1018,6 +1018,9 @@ class PreparedZsrBoundary implements PreparedBoundary {
 
   wrapSpawn(request: BoundarySpawnRequest): BoundaryLaunchSpec {
     if (this.revoked) throw new Error("execution boundary is revoked");
+    if (request.cloudNativeHome && this.status.backend !== "cloud-worker") {
+      throw new Error("Native cloud homes require a cloud worker");
+    }
     if (!path.isAbsolute(request.command) || !path.isAbsolute(request.cwd)) {
       throw new Error("boundary spawn requires absolute command and cwd");
     }
@@ -1085,7 +1088,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
     writeFileSync(
       descriptor,
       `${JSON.stringify({
-        version: COMMAND_DESCRIPTOR_VERSION,
+        version: request.cloudNativeHome ? 7 : COMMAND_DESCRIPTOR_VERSION,
         generation: this.generation,
         command: request.command,
         args: [...request.args],
@@ -1093,6 +1096,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
         env: childEnvironment,
         deniedContainerSockets,
         ...(containerWorker ? { containerWorker } : {}),
+        ...(request.cloudNativeHome ? { cloudNativeHome: request.cloudNativeHome } : {}),
       })}\n`,
       { encoding: "utf8", mode: 0o600, flag: "wx" },
     );

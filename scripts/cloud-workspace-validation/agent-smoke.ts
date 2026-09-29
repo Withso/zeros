@@ -15,9 +15,12 @@ import { bridgeWsUrl, loadState, type CloudValidationState } from "./config";
 import { selectCloudPrimaryWorkspaceId } from "./lib/workspace-target";
 import {runPtyCommand} from "./lib/pty-command";
 import { CoreToolEvidence } from "./lib/core-tool-evidence";
+import { NativeToolEvidence } from "./lib/native-tool-evidence";
+import { nativeGithubQualification, NativeGithubEvidence } from "./lib/native-github-qualification";
 import {
   assertFullCloudBoundary,
   assertCloudCoreBoundary,
+  assertCloudNativeBoundary,
   assertCloudAgentModel,
   assertLiveAgentChallengeResponse,
   parseRequiredCloudAgents,
@@ -66,9 +69,10 @@ function messageError(message: BridgeMessage): Error {
 type QualificationClient = Pick<BridgeClient, "onMessage" | "sendMessage"> &
   Partial<Pick<BridgeClient, "request" | "engineCapabilities" | "ptyCreate" | "ptyWrite" | "onPtyData">>;
 
-export type CloudAgentQualificationProfile = "full-native" | "zeros-cloud-core-v1";
+export type CloudAgentQualificationProfile = "full-native" | "zeros-cloud-core-v1" | "zeros-cloud-native-v1";
 function assertExpectedBoundary(agentId:string,raw:unknown,profile:CloudAgentQualificationProfile):void{
   if(profile==="zeros-cloud-core-v1")assertCloudCoreBoundary(agentId,raw);
+  else if(profile==="zeros-cloud-native-v1")assertCloudNativeBoundary(agentId,raw);
   else assertFullCloudBoundary(agentId,raw);
 }
 
@@ -88,12 +92,16 @@ async function qualifyDurableAgent(
   const marker = `ZEROS_PING_${randomUUID().replaceAll("-", "").toUpperCase()}`;
   const effort = selection.env.ZEROS_THINKING_EFFORT;
   const core = profile === "zeros-cloud-core-v1";
-  const prefix = `zeros-core-qualification-${randomUUID()}`;
+  const toolChallenge = core || profile === "zeros-cloud-native-v1";
+  const github = nativeGithubQualification();
+  if (github && profile !== "zeros-cloud-native-v1") throw new Error("Native GitHub qualification requires the native profile");
+  const githubEvidence = github ? new NativeGithubEvidence(github.agentCommand) : null;
+  const prefix = `zeros-agent-qualification-${randomUUID()}`;
   const files = {challenge:`${prefix}.challenge`,edited:`${prefix}.edited`,executed:`${prefix}.executed`};
   const terminalClient = client.ptyCreate && client.ptyWrite && client.onPtyData ? {
     ptyCreate:client.ptyCreate.bind(client),ptyWrite:client.ptyWrite.bind(client),onPtyData:client.onPtyData.bind(client),
   } : null;
-  if(core&&!terminalClient)throw new Error("Core qualification requires a cleanup-capable workspace terminal");
+  if(toolChallenge&&!terminalClient)throw new Error("Workspace qualification requires a cleanup-capable workspace terminal");
   if (
     effort !== undefined &&
     !["low", "medium", "high", "xhigh"].includes(effort)
@@ -131,7 +139,7 @@ async function qualifyDurableAgent(
     }
   };
   try {
-    if(core)await request("file.write",{workspaceId,path:files.challenge,content:marker});
+    if(toolChallenge)await request("file.write",{workspaceId,path:files.challenge,content:marker});
     await request("cloudCommands.createConversation", {
       conversationId,
       workspaceId,
@@ -141,7 +149,7 @@ async function qualifyDurableAgent(
     // Each command obtains a fresh execution and lease. The second prompt omits
     // the marker, so only genuine native history continuation can answer it.
     for (const promptText of [
-      core ? `Use the Zeros workspace tools to read ${files.challenge}. Its contents are a unique marker. Use a file tool to create ${files.edited} containing exactly the marker, with no newline. Then use a workspace command tool to run: cat '${files.challenge}' > '${files.executed}'. Remember the marker and reply with it. Do not inspect credentials or change other files.` : `Remember this unique marker and reply with it: ${marker}`,
+      toolChallenge ? `Use ${core ? "the Zeros workspace tools" : "your normal native tools"} to read ${files.challenge}. Its contents are a unique marker. Use a file editing tool to create ${files.edited} containing exactly the marker, with no newline. Then use a shell tool to run: cat '${files.challenge}' > '${files.executed}'. Remember the marker and reply with it. Do not inspect credentials or change other files.${github ? ` Also run this exact command once with your native shell to qualify GitHub against the authorized test repository: ${github.agentCommand}` : ""}` : `Remember this unique marker and reply with it: ${marker}`,
       "Reply with the exact unique marker from our previous turn in this conversation. Use only your conversation history; do not call any tools.",
     ]) {
       const snapshot = (await request("cloudCommands.request", {
@@ -158,7 +166,7 @@ async function qualifyDurableAgent(
         responseText = "",
         boundary: unknown,
         settled = false;
-      const toolEvidence = new CoreToolEvidence();
+      const toolEvidence = core ? new CoreToolEvidence() : new NativeToolEvidence();
       let unsubscribe = () => {};
       const receiptPoll = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -195,7 +203,7 @@ async function qualifyDurableAgent(
             : "";
           if(message.type==="AGENT_SESSION_UPDATE"&&message.agentId===selection.agentId&&message.executionId===executionId){
             const notification=message.notification as {update?:unknown}|undefined;
-            try { if (core) toolEvidence.observe(notification?.update); }
+            try { if (toolChallenge) toolEvidence.observe(notification?.update); githubEvidence?.observe(notification?.update); }
             catch (error) { settled = true; reject(error); return; }
           }
           if (
@@ -268,20 +276,25 @@ async function qualifyDurableAgent(
           responseText,
           marker,
         );
-        if(core&&executions.size===1){
+        if(toolChallenge&&executions.size===1){
+          if (github) {
+            githubEvidence!.assert();
+            await runPtyCommand(terminalClient!, workspaceId, github.verifyAgentCommand);
+            await runPtyCommand(terminalClient!, workspaceId, github.terminalCommand);
+          }
           toolEvidence.assertEffects(selection.agentId, files, marker);
           for(const file of [files.edited,files.executed]){
             const value=await request("file.read",{workspaceId,path:file}) as {content?:unknown};
-            if(value.content!==marker)throw new Error("Core qualification workspace file or process effect did not match");
+            if(value.content!==marker)throw new Error("Workspace qualification workspace file or process effect did not match");
           }
           await runPtyCommand(terminalClient!,workspaceId,`rm -f -- '${files.challenge}' '${files.edited}' '${files.executed}'`);
           for (const file of Object.values(files)) {
             const value = await request("file.read", { workspaceId, path: file }) as {kind?:unknown; error?:unknown; content?:unknown};
             if (value.kind !== "error" || value.error !== "file no longer exists on disk" || value.content !== undefined)
-              throw new Error("Core qualification challenge removal was not verified");
+              throw new Error("Workspace qualification challenge removal was not verified");
           }
         }
-        if (core && executions.size === 2) toolEvidence.assertNoTools();
+        if (toolChallenge && executions.size === 2) toolEvidence.assertNoTools();
       } finally {
         receiptPoll.abort();
         if (timer) clearTimeout(timer);
@@ -296,7 +309,7 @@ async function qualifyDurableAgent(
         request: { kind: "stop", conversationId, operationId: randomUUID() },
       });
       if (activeCommandId) await waitForReceipt(activeCommandId, false);
-      if(core&&terminalClient)await runPtyCommand(terminalClient,workspaceId,`rm -f -- '${files.challenge}' '${files.edited}' '${files.executed}'`);
+      if(toolChallenge&&terminalClient)await runPtyCommand(terminalClient,workspaceId,`rm -f -- '${files.challenge}' '${files.edited}' '${files.executed}'`);
     } catch (cleanupError) {
       throw new AggregateError(
         failure ? [failure, cleanupError] : [cleanupError],
@@ -306,7 +319,7 @@ async function qualifyDurableAgent(
   }
   if (failure) throw failure;
   console.log(
-    `  ✓ ${selection.agentId}: ${profile}, delegated cold turns, ${core?"observed workspace tool effects, ":""}native continuation and durable retirement`,
+    `  ✓ ${selection.agentId}: ${profile}, delegated cold turns, ${toolChallenge?"observed workspace tool effects, ":""}native continuation and durable retirement`,
   );
 }
 
@@ -408,7 +421,7 @@ export async function qualifyAgent(
   timeoutMs: number,
   profile: CloudAgentQualificationProfile = "full-native",
 ): Promise<void> {
-  if(profile!=="full-native"&&profile!=="zeros-cloud-core-v1")throw new Error("Unknown cloud qualification profile");
+  if(profile!=="full-native"&&profile!=="zeros-cloud-core-v1"&&profile!=="zeros-cloud-native-v1")throw new Error("Unknown cloud qualification profile");
   const { agentId } = selection;
   const marker = `ZEROS_PING_${randomUUID().replaceAll("-", "").toUpperCase()}`;
   const conversationId = `zsr-cloud-${agentId}-${randomUUID()}`;
@@ -416,7 +429,7 @@ export async function qualifyAgent(
     client.engineCapabilities?.includes("cloud.commands.v1") === true;
   if (durable)
     return qualifyDurableAgent(client, selection, workspaceId, timeoutMs,profile);
-  if(profile!=="full-native")throw new Error("Core qualification requires the durable v3 admission path");
+  if(profile!=="full-native")throw new Error("Workspace qualification requires the durable v3 admission path");
   const created = await requestFrame(
     client,
     {
@@ -525,7 +538,7 @@ async function main(): Promise<void> {
   );
   const timeoutMs = promptTimeoutMs();
   const profile=process.env.ZEROS_CLOUD_AGENT_BOUNDARY_PROFILE??"full-native";
-  if(profile!=="full-native"&&profile!=="zeros-cloud-core-v1")throw new Error("Unknown cloud qualification profile");
+  if(profile!=="full-native"&&profile!=="zeros-cloud-core-v1"&&profile!=="zeros-cloud-native-v1")throw new Error("Unknown cloud qualification profile");
   const state = loadState();
   const client = makeClient(state);
   await client.connect();

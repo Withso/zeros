@@ -2,10 +2,24 @@ import type { AgentToolMessage } from "../use-agent-session";
 import { toolCompletionUnreported } from "./raw-output";
 import { toolRecord } from "./native-tool-presentation";
 
+/** Compatibility with Codex builds that persisted exec-server connection
+ * bookkeeping as synthetic completed tools. Match that exact record shape;
+ * never hide native tools, unknown payloads or genuine execution failures. */
+export function isLegacyEnvironmentConnection(tool: AgentToolMessage): boolean {
+  if (tool.toolKind !== "other" || tool.status !== "completed" ||
+      tool.nativeToolCallId || tool.rawInput != null) return false;
+  const output = toolRecord(tool.rawOutput);
+  return Object.keys(output).length === 2 &&
+    typeof output.environment === "string" && output.environment.length <= 160 &&
+    (output.state === "connected" || output.state === "disconnected") &&
+    tool.title === `Environment ${output.state}`;
+}
+
 /** Keep provisional native records in state; expose the same durable row when
  * its command/target is ready. Terminal and missing-completion records always
  * remain inspectable, even when the producer never supplied arguments. */
 export function toolPresentationReady(tool: AgentToolMessage): boolean {
+  if (isLegacyEnvironmentConnection(tool)) return false;
   if (
     !["pending", "in_progress"].includes(tool.status) ||
     toolCompletionUnreported(tool.rawOutput)

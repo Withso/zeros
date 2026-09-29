@@ -47,9 +47,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-async function resolveRuntime(
+export async function resolveRuntime(
   provider: "claude" | "codex",
   configDir?: string,
+  bundledOnly = false,
 ): Promise<SubscriptionRuntime> {
   const user = readSettingsFile(userSettingsPath());
   const managed = readSettingsFile(managedSettingsPath());
@@ -68,7 +69,7 @@ async function resolveRuntime(
   const override =
     typeof cfg.executable_path === "string" ? cfg.executable_path.trim() : "";
   const binary =
-    override ||
+    (!bundledOnly && override) ||
     (provider === "claude"
       ? resolveClaudeCliPaths().binary
       : resolveCodexCliPaths().binary);

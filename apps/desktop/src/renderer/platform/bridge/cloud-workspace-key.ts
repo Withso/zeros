@@ -76,6 +76,12 @@ export function isCloudWorkspace(value: unknown): boolean {
   return typeof value === "string" && /^cloud:\/\//i.test(value);
 }
 
+/** Persisted catalog repository namespace; membership can become empty without
+ * changing its backend owner. This is identity, never an access grant. */
+export function isCloudRepositorySlug(value: unknown): value is string {
+  return typeof value === "string" && new RegExp(`^cloud-${UUID}:[^:]+:.+/.+$`, "i").test(value);
+}
+
 export function cloudTargetForValue(
   value: unknown,
 ): CloudWorkspaceTarget | null {

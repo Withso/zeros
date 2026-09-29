@@ -1,3 +1,5 @@
+import { clearCloudComputers } from "../features/settings/cloud-computer-client";
+import { clearCloudGithub } from "../platform/cloud-github";
 import { useEffect } from "react";
 import { cloudWorkspaceCapability } from "../platform/cloud-workspace-access";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
@@ -10,12 +12,16 @@ import {
 } from "../features/auth/auth-store";
 import {
   clearCloudWorkspaceCatalog,
+  canReadCloudWorkspace,
+  cloudCatalogNeedsFastRefresh,
+  cloudCatalogGeneration,
   cloudWorkspaceDocument,
-  getCloudWorkspaceRows,
   refreshCloudWorkspaceCatalog,
   subscribeCloudWorkspaces,
+  subscribeCloudWorkspaceRows,
+  subscribeCloudWorkspaceRefresh,
 } from "./cloud-workspace-catalog";
-import { notifyProjectsChanged, notifyWorkspacesChanged } from "./use-projects";
+import { notifyProjectsChanged, notifyWorkspacesChanged, pruneCloudWorkspaceCollections } from "./use-projects";
 import {
   clearWorkspaceSettling,
   usePendingWorkspacesStore,
@@ -27,11 +33,14 @@ import {
 } from "./cloud-creation-mode";
 import { workspaceSetMode } from "../platform/git";
 import { selectActiveFolder, useWorkspaceStore } from "./store";
-import { loadCloudChatCache, setCloudChatCacheOwner } from "./cloud-chat-cache";
+import { completeCloudChatCacheRestore, loadCloudChatCache, persistWorkspaceChatCache, setCloudChatCacheOwner } from "./cloud-chat-cache";
+import { CHATS_STORAGE_KEY } from "./chats-local-cache";
 import { useSessionsStore } from "../features/agent/sessions-store";
 import { clearCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
 import { clearCloudProviderConnections } from "../features/settings/cloud-provider-connection";
 import { toast } from "../shared/ui/primitives/elements";
+import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
+import { clearCloudLatencySpans, pruneCloudLatencySpans } from "./cloud-workspace-latency";
 
 /** Account/catalog lifecycle, mounted once beside the existing persistence
  * controller. It never replaces the conversation or workbench renderers. */
@@ -43,34 +52,28 @@ export function CloudWorkspaceLifecycle() {
     let lastRefresh = 0;
     let account: string | null = null;
     let authVersion = 0;
+    let installed = false;
     let restored = false;
     let cached = loadCloudChatCache();
     const pruneChats = (all: boolean) => {
       const state = useWorkspaceStore.getState();
-      const removed = state.chats.filter((chat) => {
-        const target = parseCloudWorkspaceKey(chat.folder);
+      const activeFolder = selectActiveFolder(state);
+      const candidates = new Set(state.chats.map(chat => chat.folder));
+      if (activeFolder) candidates.add(activeFolder);
+      const folders = [...candidates].filter((folder) => {
+        const target = parseCloudWorkspaceKey(folder);
         return (
-          target && (all || cloudWorkspaceDocument(target)?.deletedAt !== null)
+          target && (all || !canReadCloudWorkspace(cloudWorkspaceDocument(target)))
         );
       });
-      if (!removed.length) return;
+      if (!folders.length) return;
+      const removed = state.chats.filter(chat => folders.includes(chat.folder));
       for (const chat of removed)
         useSessionsStore.getState().removeSession(chat.id);
-      const ids = new Set(removed.map((chat) => chat.id));
-      const activeRemoved = state.activeChatId && ids.has(state.activeChatId);
-      for (const folder of new Set(removed.map((chat) => chat.folder)))
-        state.dispatch({
-          type: "REMOVE_WORKSPACE_UI_STATE",
-          folder,
-          repoRoot: folder,
-        });
       state.dispatch({
-        type: "HYDRATE_CHATS",
-        chats: state.chats.filter((chat) => !ids.has(chat.id)),
-        activeChatId: activeRemoved ? null : state.activeChatId,
+        type: "PRUNE_CLOUD_WORKSPACES",
+        folders,
       });
-      if (activeRemoved)
-        state.dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" });
     };
     const refresh = () => {
       if (
@@ -80,9 +83,7 @@ export function CloudWorkspaceLifecycle() {
         document.visibilityState === "hidden"
       )
         return;
-      const pending = getCloudWorkspaceRows().some(
-        (row) => row.setupState === "running",
-      );
+      const pending = cloudCatalogNeedsFastRefresh();
       if (Date.now() - lastRefresh < (pending ? 2_000 : 30_000)) return;
       lastRefresh = Date.now();
       const version = authVersion;
@@ -97,36 +98,58 @@ export function CloudWorkspaceLifecycle() {
           restored = true;
           const authorized = cached.filter((row) => {
             const target = parseCloudWorkspaceKey(row.folder);
-            return target && cloudWorkspaceDocument(target)?.deletedAt === null;
+            return target && canReadCloudWorkspace(cloudWorkspaceDocument(target));
           });
           if (authorized.length)
             useWorkspaceStore
               .getState()
               .dispatch({ type: "MERGE_CHATS", chats: authorized });
+          completeCloudChatCacheRestore(account!);
+          persistWorkspaceChatCache(CHATS_STORAGE_KEY, useWorkspaceStore.getState().chats);
           cached = [];
         })
         .catch(() => {});
     };
-    const offCatalog = subscribeCloudWorkspaces(() => {
-      notifyProjectsChanged();
-      notifyWorkspacesChanged("*");
+    const offCatalog = subscribeCloudWorkspaceRows((change) => {
+      pruneCloudLatencySpans();
+      const bridge = getActiveBridge();
+      if (bridge instanceof WorkspaceRuntimeClient) bridge.pruneCloudConnections();
+      if (change.removedWorkspaceIds.length) pruneCloudWorkspaceCollections(change.removedWorkspaceIds);
+      if (change.projectsChanged) notifyProjectsChanged();
+      for (const slug of change.repoSlugs)
+        notifyWorkspacesChanged(slug, change.workspaceIds);
     });
-    const clear = () => {
+    const clear = (preservePendingTarget = false) => {
+      clearCloudLatencySpans();
       setCloudChatCacheOwner(null);
       setCloudCreationModeOwner(null);
+      if (preservePendingTarget) {
+        const state = useWorkspaceStore.getState();
+        for (const chat of state.chats) {
+          if (parseCloudWorkspaceKey(chat.folder)) useSessionsStore.getState().removeSession(chat.id);
+        }
+        state.dispatch({ type: "REVALIDATE_CLOUD_CHATS" });
+      } else {
+        pruneChats(true);
+      }
       const bridge = getActiveBridge();
       if (bridge instanceof WorkspaceRuntimeClient)
         bridge.clearCloudConnections();
       clearCloudWorkspaceCatalog();
       clearCloudAgentRegistry();
       clearCloudProviderConnections();
-      pruneChats(true);
+      clearCloudGithub();
+      clearCloudComputers();
     };
     const install = (session: AuthSessionInfo | null) => {
       if (!alive) return;
       const next = session?.user.accountId ?? session?.user.sub ?? null;
-      if (next === account) return;
-      clear();
+      if (installed && next === account) return;
+      // The first authenticated snapshot validates the saved identity below.
+      // Account changes/sign-out discard it; initial auth must not discard it
+      // just because no cloud chat has been released into the store yet.
+      clear(!installed && next !== null);
+      installed = true;
       account = next;
       lastRefresh = 0;
       restored = false;
@@ -139,6 +162,13 @@ export function CloudWorkspaceLifecycle() {
       authVersion++;
       install(session);
     });
+    const visibility = () => {
+      if (document.visibilityState === "hidden") {
+        const bridge = getActiveBridge();
+        if (bridge instanceof WorkspaceRuntimeClient) bridge.cancelSpeculativeWarmups();
+        clearCloudLatencySpans();
+      } else refresh();
+    };
     const initialVersion = authVersion;
     void getSession()
       .then((session) => {
@@ -153,14 +183,14 @@ export function CloudWorkspaceLifecycle() {
       })
       .catch(() => {});
     const timer = window.setInterval(refresh, 2_000);
-    document.addEventListener("visibilitychange", refresh);
+    document.addEventListener("visibilitychange", visibility);
     window.addEventListener("focus", refresh);
     return () => {
       alive = false;
       offCatalog();
       offAuth();
       window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", refresh);
+      document.removeEventListener("visibilitychange", visibility);
       window.removeEventListener("focus", refresh);
       setCloudChatCacheOwner(null);
       setCloudCreationModeOwner(null);
@@ -228,18 +258,24 @@ export function CloudWorkspaceLifecycle() {
     const bridge = getActiveBridge();
     if (!(bridge instanceof WorkspaceRuntimeClient)) return;
     let cancelled = false;
-    let attaching = false;
+    let attaching: string | undefined;
+    const identity = () => `${cloudCatalogGeneration()}:${cloudWorkspaceDocument(target)?.generation.number}`;
     const attach = () => {
+      if (document.visibilityState === "hidden") {
+        bridge.cancelSpeculativeWarmups();
+        return;
+      }
       const doc = cloudWorkspaceDocument(target);
-      if (attaching || !doc || !["ready", "busy"].includes(doc.status)) return;
-      attaching = true;
-      void bridge
-        .warmWorkspace(target)
+      bridge.pruneCloudConnections();
+      const key = identity();
+      if (attaching === key || !canReadCloudWorkspace(doc)) return;
+      attaching = key;
+      void warmCloudWorkspaceDestination(folder!)
         .then(() => {
-          if (!cancelled && folder) clearWorkspaceSettling(folder);
+          if (!cancelled && identity() === key && folder) clearWorkspaceSettling(folder);
         })
         .catch((error) => {
-          if (!cancelled)
+          if (!cancelled && identity() === key && doc && ["ready", "busy"].includes(doc.status))
             toast.error("Couldn't connect to this cloud workspace", {
               id: `cloud-connect:${folder}`,
               description:
@@ -249,14 +285,24 @@ export function CloudWorkspaceLifecycle() {
             });
         })
         .finally(() => {
-          attaching = false;
+          if (attaching === key) attaching = undefined;
         });
     };
     attach();
     const off = subscribeCloudWorkspaces(attach);
+    const offRefresh = subscribeCloudWorkspaceRefresh(() => {
+      if (cancelled || document.visibilityState === "hidden" ||
+          !canReadCloudWorkspace(cloudWorkspaceDocument(target))) return;
+      // History has its own revision and remains readable while the VM is
+      // stopped. Catalog polling must never acquire runtime admission here.
+      void bridge.warmHistoryWorkspace(target).catch(() => {});
+    });
+    document.addEventListener("visibilitychange", attach);
     return () => {
       cancelled = true;
       off();
+      offRefresh();
+      document.removeEventListener("visibilitychange", attach);
     };
   }, [folder]);
   return null;

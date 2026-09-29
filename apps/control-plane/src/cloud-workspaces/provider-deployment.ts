@@ -2,6 +2,8 @@ import type pg from "pg";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { BoatApiClient } from "./boat-client.js";
 import { BoatWorkspaceProvider } from "./boat-provider.js";
+import { resolveComputerSnapshot } from "./computer-image.js";
+import type { CloudProviderCreateInput } from "./provider.js";
 import { BoatRuntimeAccessProvider } from "./boat-runtime-access.js";
 import { BoatRuntimeEndpointResolver } from "./boat-runtime-endpoint.js";
 import { BoatSetupCommandRunner } from "./boat-setup-runner.js";
@@ -102,6 +104,7 @@ export function createCloudProviderDeployment(
       operations,
       access,
       ttlSeconds: cloud.boat.ttlSeconds,
+      resolveSnapshot: (input: CloudProviderCreateInput) => resolveComputerSnapshot(pool, cloud.boat!.accountScope, client, input),
     };
     const provider = new BoatWorkspaceProvider({
       ...providerOptions,

@@ -28,6 +28,8 @@ interface Dependencies {
   resolveRuntime(): Promise<SubscriptionRuntime>;
   openBrowser(url: string): Promise<void>;
   spawn?: typeof spawnStdioAgent;
+  /** Cloud import uses an isolated profile and the native device ceremony. */
+  onDeviceCode?: (code: { verificationUrl: "https://auth.openai.com/codex/device"; userCode: string }) => void;
 }
 
 /** Auth processes inherit config roots, locale, keychain access and network
@@ -332,9 +334,10 @@ export function createSubscriptionDriver(
           try {
             const response = await rpc.request<LoginAccountResponse>(
               "account/login/start",
-              { type: "chatgpt", useHostedLoginSuccessPage: true },
+              deps.onDeviceCode ? { type: "chatgptDeviceCode" } : { type: "chatgpt", useHostedLoginSuccessPage: true },
             );
-            if (response.type !== "chatgpt")
+            if (response.type !== (deps.onDeviceCode ? "chatgptDeviceCode" : "chatgpt") ||
+              (response.type !== "chatgpt" && response.type !== "chatgptDeviceCode"))
               throw new SubscriptionError("failed");
             loginId = response.loginId;
             signal.addEventListener("abort", cancel, { once: true });
@@ -342,7 +345,14 @@ export function createSubscriptionDriver(
             const existing = early.get(loginId);
             early.clear();
             if (existing) settle(existing);
-            await openBrowser(response.authUrl, signal);
+            if (response.type === "chatgptDeviceCode") {
+              // The pinned native runtime supplies only a public verification
+              // URL and one-time code. Never accept arbitrary browser targets.
+              if (response.verificationUrl !== "https://auth.openai.com/codex/device" ||
+                !/^[A-Z0-9-]{4,32}$/.test(response.userCode)) throw new SubscriptionError("failed");
+              signal.throwIfAborted();
+              deps.onDeviceCode?.({ verificationUrl: response.verificationUrl, userCode: response.userCode });
+            } else await openBrowser(response.authUrl, signal);
             const result = await Promise.race([
               completed,
               proc.exited.then(() => {

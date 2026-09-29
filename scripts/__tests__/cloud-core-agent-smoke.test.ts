@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CLOUD_CORE_PROVIDER_RESTRICTIONS } from "../../packages/protocol/src/containment";
+import { CLOUD_CORE_PROVIDER_RESTRICTIONS, CLOUD_NATIVE_PROVIDER_RESTRICTIONS } from "../../packages/protocol/src/containment";
 import { qualifyAgent } from "../cloud-workspace-validation/agent-smoke";
 import { runPtyCommand } from "../cloud-workspace-validation/lib/pty-command";
 import type { BridgeMessage } from "../cloud-workspace-validation/lib/bridge-client";
@@ -13,6 +13,7 @@ type Options = {
   noHistory?: boolean; genericTools?: boolean; omitOperation?: string; failedOperation?: string;
   foreignExecution?: boolean; completion?: boolean; resumeTools?: boolean;
   cleanupFails?: boolean; removalIgnored?: boolean;
+  native?: boolean; bridgedTools?: boolean;
 };
 function fixture(options: Options = {}) {
   const listeners = new Set<(message: BridgeMessage) => void>();
@@ -41,8 +42,8 @@ function fixture(options: Options = {}) {
       queueMicrotask(() => {
         publish({ type: turn === 1 ? "AGENT_SESSION_CREATED" : "AGENT_SESSION_LOADED", agentId: "cursor", requestId: commandId,
           session: { executionId, boundary: { version: 1, actor: "agent-code", state: "ready", backend: "cloud-worker",
-            designProtection: { required: true, enforced: true, protectedDirectoryCount: 1 }, parity: { level: "restricted", restrictions: [...CLOUD_CORE_PROVIDER_RESTRICTIONS.cursor, ...(options.restriction ? [options.restriction] : [])] },
-            cloudExecution: { version: 1, profile: "zeros-cloud-core-v1", runtimeProfile: "zeros-cloud-worker-v3", provider: "cursor", designApi: options.designApi ?? "admitted" } } } });
+            designProtection: { required: true, enforced: true, protectedDirectoryCount: 1 }, parity: { level: "restricted", restrictions: [...(options.native ? CLOUD_NATIVE_PROVIDER_RESTRICTIONS : CLOUD_CORE_PROVIDER_RESTRICTIONS).cursor, ...(options.restriction ? [options.restriction] : [])] },
+            cloudExecution: { version: 1, profile: options.native ? "zeros-cloud-native-v1" : "zeros-cloud-core-v1", runtimeProfile: "zeros-cloud-worker-v3", provider: "cursor", designApi: options.designApi ?? "admitted" } } } });
         const emit = (update: Record<string, unknown>) => publish({ type: "AGENT_SESSION_UPDATE", agentId: "cursor", executionId: options.foreignExecution ? "stale-execution" : executionId, notification: { update } });
         if (turn === 1) {
           const edited = challenge.replace(/\.challenge$/, ".edited"), executed = challenge.replace(/\.challenge$/, ".executed");
@@ -55,7 +56,11 @@ function fixture(options: Options = {}) {
               { operation: "exec", command: `cat '${challenge}' > '${executed}'` },
             ]) {
               if (options.omitOperation === request.operation) continue;
-              emit({ sessionUpdate: "tool_call", toolCallId: request.operation, title: "mcp", status: "in_progress", rawInput: { providerIdentifier: "custom-user-tools", toolName: "workspace", args: { request } } });
+              emit({ sessionUpdate: "tool_call", toolCallId: request.operation, status: "in_progress",
+                ...(options.native && !options.bridgedTools ? { nativeToolCallId: `native-${request.operation}`, title: request.operation,
+                  kind: request.operation === "read" ? "read" : request.operation === "write" ? "edit" : "execute",
+                  rawInput: request.operation === "exec" ? { command: request.command } : { path: request.path } }
+                  : { title: "mcp", rawInput: { providerIdentifier: "custom-user-tools", toolName: "workspace", args: { request } } }) });
               if (options.completion !== false) emit({ sessionUpdate: "tool_call_update", toolCallId: request.operation, status: options.failedOperation === request.operation ? "failed" : "completed",
                 rawOutput: { status: "success", value: { content: [{ text: { text: JSON.stringify({ ok: true, data: { state: "exited", exit: { code: 0, signal: null }, timedOut: false } }) } }], isError: false } } });
             }
@@ -108,5 +113,25 @@ describe("explicit core agent qualification", () => {
     const { client } = fixture(); client.engineCapabilities = [];
     await expect(qualifyAgent(client, selection, "workspace", 1000, "zeros-cloud-core-v1")).rejects.toThrow(/durable v3/);
     expect(client.request).not.toHaveBeenCalled(); expect(client.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("native workspace agent qualification", () => {
+  it("qualifies native effects and cold history while keeping declared restrictions explicit", async () => {
+    const { client, files, listeners } = fixture({ native: true });
+    await qualifyAgent(client, selection, "workspace", 1000, "zeros-cloud-native-v1");
+    expect(files.size).toBe(0); expect(listeners.size).toBe(0);
+    const prompts = client.request.mock.calls.filter(([op, input]) => op === "cloudCommands.request" && (input.request as {kind?: string}).kind === "mutate");
+    expect(JSON.stringify(prompts)).toContain("your normal native tools");
+    expect(JSON.stringify(prompts)).not.toContain("Zeros workspace tools");
+  });
+  it.each([
+    { native: true, bridgedTools: true }, { native: true, effects: false },
+    { native: true, resumeTools: true }, { native: true, foreignExecution: true },
+    { native: true, restriction: "provider-native-extensions-restricted" }, {},
+  ])("cannot qualify bridged tools, wrong boundaries or incomplete native evidence: %j", async options => {
+    const { client, listeners } = fixture(options);
+    await expect(qualifyAgent(client, selection, "workspace", 1000, "zeros-cloud-native-v1")).rejects.toThrow();
+    expect(listeners.size).toBe(0);
   });
 });

@@ -9,6 +9,15 @@ export type HostedDevelopmentIdentity = LocalDevelopmentIdentity & {
 };
 export type DevelopmentIdentity = LocalDevelopmentIdentity | HostedDevelopmentIdentity;
 
+/** Checked for every billable dispatch, not only at backend startup. A retry
+ * keeps the same TTL/body for idempotency; refuse a lease that crosses expiry. */
+export function assertHostedDevAdmission(env: NodeJS.ProcessEnv, ttlSeconds: number | null, now = Date.now()): void {
+  if (env.ZEROS_DEV_ENVIRONMENT !== "hosted" || env.ZEROS_DEV_ADMISSION_EXPIRES_AT === undefined) return;
+  const expiresAt = Date.parse(env.ZEROS_DEV_ADMISSION_EXPIRES_AT);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) throw new Error("Hosted Dev admission expired; archive and relaunch its generation");
+  if (ttlSeconds === null || !Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1 || now + ttlSeconds * 1000 > expiresAt) throw new Error("Hosted Dev admission requires a bounded compute lease within its expiry");
+}
+
 /** The URL and environment contract are necessary but not sufficient. The
  * database itself must confirm the generation before any API/background work
  * starts, including if someone manually changes Railway variables. */

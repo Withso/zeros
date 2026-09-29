@@ -1,4 +1,8 @@
+import { getWorkspace as getGithubWriteWorkspace } from "./git/worktree";
+import { githubWritePublication } from "./git/github-write-publication";
+import { configureNativeGithubDesktop, acceptNativeGithubDesktop } from "./git/github-native-desktop";
 import { readCloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
+import { CloudIdleStopScheduler, hasCloudUserProcesses, isCloudIdleMaintenance } from "./cloud-idle-stop";
 import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
@@ -21,7 +25,11 @@ import type { DesignCaptureService } from "./design/capture-service";
 import { SteeringReceiptCapacityError, SteeringReceipts } from "./agents/steering-receipts";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { isCloudGithubWriteOperation } from "@zeros/protocol/github-auth";
+import { runWithGithubWriteCredential } from "./git/github-write-context";
+import { cloudGitAuthorEnvironment, needsCloudGitAuthor, runWithCloudGitAuthor } from "./git/cloud-git-author";
+import { NativeGithubTerminals } from "./git/github-native-terminal";
 import {
   personalRepoRoot,
   personalWorkspaceRoot,
@@ -116,6 +124,7 @@ import {
 import { RunManager } from "./run/run-manager";
 import { getWorkspaceById, listWorkspaces } from "./git/state";
 import { CloudCommandRuntime } from "./cloud-command-runtime";
+import { CloudGoalRecorder } from "./cloud-goal-recorder";
 import { cloudActorMaySend, cloudWorkspaceCapability } from "./cloud-actor-policy";
 import { cloudAgentManifest } from "./agents/registry";
 import {createCloudAgentExecutionFactory,type CloudAgentSelection} from "./agents/cloud-provider-execution";
@@ -126,7 +135,7 @@ import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { CloudEventRuntime } from "./cloud-event-runtime";
 import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema } from "@zeros/protocol/cloud-events";
-import type { CloudCommandClaim, CloudCommandResult, CloudQueuedPrompt } from "@zeros/protocol/cloud-commands";
+import { cloudPermissionMode, legacyCloudCommandResponse, type CloudCommandClaim, type CloudCommandResult, type CloudQueuedPrompt } from "@zeros/protocol/cloud-commands";
 import { CloudConversationCreateSchema, CloudConversationReadSchema, CloudConversationModeSchema } from "@zeros/protocol/cloud-commands";
 import { listKnownRepoRoots } from "./db/projects";
 import { resolveRunActions } from "./settings/repo-scripts";
@@ -837,6 +846,10 @@ export class ZerosEngine {
    * settling. Keep their owner/chat/workspace tags until the terminal event is
    * routed and persisted, but never expose them as live executions. */
   private readonly exitedAgentExecutions = new Set<string>();
+  /** Cloud conversations outlive their per-command provider process. Once a
+   * prompt has settled, disposing that process is normal completion, not a
+   * disconnected conversation. Real exits/revocations during work still route. */
+  private readonly retiringCloudExecutions = new Set<string>();
   /** Latest provider-bind intent per Zeros conversation. A tab close removes
    * the token, and a newer create/load replaces it, so an older adapter result
    * can be disposed instead of publishing an orphan execution after the user's
@@ -988,6 +1001,7 @@ export class ZerosEngine {
    * owner-bound, short-lived projection. Agent processes cannot see this path. */
   private cloudGithubCredentialWatcher: CloudGithubCredentialProjectionWatcher | null =
     null;
+  private readonly nativeGithubTerminals = new NativeGithubTerminals();
   /** Parent-death watchdog (Electron host only — armed by ZEROS_PARENT_PID). */
   private parentWatchTimer: ReturnType<typeof setInterval> | null = null;
   private parentDeathExiting = false;
@@ -1003,10 +1017,14 @@ export class ZerosEngine {
   private readonly cloudRecordRuntime: CloudWorkspaceRecordRuntime | null;
   private readonly cloudCheckpointScheduler: CloudCheckpointScheduler | null;
   private readonly cloudCommands: CloudCommandRuntime | null;
+  private readonly cloudGoals=new CloudGoalRecorder((claim,sequence,goal)=>{
+    if(!this.cloudCommands)throw new CloudCommandRuntimeError("cloud_commands_unavailable");
+    return this.cloudCommands.confirmGoal(claim,sequence,goal);
+  });
   private readonly cloudCommandAdmissions=new WeakMap<TransportClient,CloudCommandClaim>();
   private readonly cloudConversationDeletions=new Set<string>();
   private readonly cloudCommandSessions=new Map<string,{
-    claim:CloudCommandClaim;receiver:TransportClient;controller:AbortController;preparation:Promise<void>;
+    claim:CloudCommandClaim;receiver:TransportClient;controller:AbortController;preparation:Promise<void>;ownsExecution?:boolean;
   }>();
   private readonly cloudActions: CloudActionRuntime | null;
   private readonly cloudEvents: CloudEventRuntime | null;
@@ -1022,10 +1040,38 @@ export class ZerosEngine {
   private cloudReplicaSessionChain: Promise<void> = Promise.resolve();
   private cloudRuntimeAuthorityStopping = false;
   private cloudRuntimeCheckpointQuiescing = false;
+  private cloudIdleReservation: (() => boolean) | null = null;
+  private cloudIdleCheckpoint: { id: string; promise: Promise<void> } | null = null;
+  private cloudUnresolvedFinalCheckpoint: { id: string; engineInstanceId: string; generation: number } | null = null;
+  private cloudFinalCheckpointReconciliationTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly cloudIdleStop = new CloudIdleStopScheduler({
+    busy: () => this.cloudIdleBusy(),
+    stop: async (authority, stillIdle) => {
+      await this.stopIdleCloudWorkspace(authority, stillIdle);
+      return this.cloudRuntimeCheckpointQuiescing && this.cloudIdleReservation === null;
+    },
+    blocked: state => console.warn("[Zeros cloud idle]", JSON.stringify(state)),
+    // Bounded, content-free lifecycle evidence. Never log request payloads,
+    // process arguments, workspace paths, or engine credentials here.
+    observed: state => console.info("[Zeros cloud idle]", JSON.stringify({
+      ...state,
+      prompts: this.activePromptContexts.size + this.promptSessions.size,
+      retiring: this.retiringCloudExecutions.size,
+      decisions: this.pendingPermissionRequests.size + this.pendingQuestionRequests.size,
+      mutations: this.cloudWorkspaceMutations.size,
+      starts: this.globalDesignAuthorityStarts.size + [...this.workspaceProcessStarts.values()].reduce((sum, starts) => sum + starts.size, 0),
+      setup: this.setup.hasRepositoryCodeAuthority(),
+      run: this.runs.hasRepositoryCodeAuthority(),
+      terminals: this.terminals.visibleTo({ isRemote: false, restricted: new Set() }).filter(terminal => !terminal.exited).length,
+      humanServices: this.cloudHumanServices?.hasActiveWork() === true,
+    })),
+    failed: () => console.warn("[Zeros cloud idle] stop attempt failed"),
+  });
   /** Includes requests waiting on recognition/Git before their first write.
    * Kept separate from territory starts so a registry mutation cannot drain
    * its own outer request while establishing its new boundary. */
   private readonly cloudWorkspaceMutations = new Set<Promise<unknown>>();
+  private readonly cloudWorkspaceIdleMaintenance = new Set<Promise<unknown>>();
   // Native per-CLI adapter runtime — multiplexes the per-agent
   // adapter implementations behind a single gateway surface.
   private agents: AgentGateway;
@@ -1200,6 +1246,10 @@ export class ZerosEngine {
         this.agents.readSessionTools(agentId, sessionId, cwd),
       authenticate: (agentId, sessionId, cwd, toolId) =>
         this.agents.authenticateSessionTool(agentId, sessionId, cwd, toolId),
+    });
+    this.workspace.setCloudCustomizationRequest((actorSessionId, operation, params) => {
+      if (!this.cloudWorker || !this.cloudRuntimeRegistration) throw new Error("Organization customization is unavailable.");
+      return this.cloudRuntimeRegistration.agentExecutionRequest({ kind: "customization", actorSessionId, operation, params }, AbortSignal.timeout(10000));
     });
     this.workspace.setNativeExtensionReader((query) => {
       if (query.provider === "codex" || query.provider === "claude") {
@@ -1730,13 +1780,19 @@ export class ZerosEngine {
           agentRuntime: readCloudAgentRuntimeAttestation(this.cloudWorker),
           onAuthorityLost: () => this.handleCloudRuntimeAuthorityLoss(),
           onDurableRecordSync: (authority, context) => {
+            this.cloudIdleStop.recordSync("pending");
+            this.cloudIdleStop.observe(authority);
             if (!this.cloudRecordRuntime) {
               throw new Error("cloud durable record runtime is unavailable");
             }
             return this.cloudRecordRuntime.synchronize(authority, {
               settleImportedRunningTurns: context.initial,
             }).then(() => {
+              this.cloudIdleStop.recordSync("ready");
               this.cloudCheckpointScheduler?.consider(authority);
+            }).catch(error => {
+              this.cloudIdleStop.recordSync("failed");
+              throw error;
             });
           },
           onDurableRecordConnected: () => this.cloudCommands?.wakePending(),
@@ -1761,6 +1817,7 @@ export class ZerosEngine {
             }),
         })
       : null;
+    if (this.cloudWorker) configureNativeGithubDesktop(() => this.router.remoteClients());
     this.cloudEvents = this.cloudRuntimeRegistration && this.cloudRuntimeConfig ? new CloudEventRuntime(this.cloudRuntimeConfig.engine.instanceId, {
       request: (request) => this.cloudRuntimeRegistration!.eventRequest(request),
       onFailure: () => this.handleCloudRuntimeAuthorityLoss(),
@@ -1787,8 +1844,14 @@ export class ZerosEngine {
         return executionId && this.sessionAgent.has(executionId) ? executionId : null;
       },
       dispatch: (claim) => this.dispatchCloudCommand(claim),
+      retainedExecution:conversationId=>{
+        const executionId=this.conversationExecution.get(conversationId);
+        if(!executionId||!this.agents.hasRetainedCloudExecution(executionId))return null;
+        this.agents.reserveCloudBackgroundExecution(executionId);return executionId;
+      },
+      releaseRetainedExecution:executionId=>this.agents.releaseCloudBackgroundReservation(executionId),
       prepare:claim=>this.prepareCloudCommand(claim),
-      retire:claim=>this.retireCloudCommand(claim),
+      retire:(claim,result)=>this.retireCloudCommand(claim,result.state==="succeeded"),
       cancel: conversationId=>this.cancelCloudCommandConversation(conversationId),
       changed: (conversationId) => this.broadcast(createMessage({
         type: "DB_CHANGED", source: "engine", kinds: ["chats"], chatIds: [conversationId],
@@ -1873,6 +1936,9 @@ export class ZerosEngine {
       events: {
         onBoundaryStatusChanged: (agentId, executionId, status) => {
           if (this.sessionAgent.get(executionId) !== agentId) return;
+          if (status.state === "revoked" &&
+              this.retiringCloudExecutions.has(executionId) &&
+              (!this.activePromptContexts.has(executionId) || this.cancelRequested.has(executionId))) return;
           this.routeSessionScoped(
             executionId,
             createMessage({
@@ -1960,6 +2026,11 @@ export class ZerosEngine {
             executionId,
             sessionId: executionId,
           };
+          if(notification.update.sessionUpdate==="goal_update"){
+            const claim=this.cloudGoalClaim(executionId);
+            if(claim)void this.cloudGoals.observe(claim,notification.update.goal).catch(()=>this.handleCloudRuntimeAuthorityLoss());
+          }
+          if(notification.update.sessionUpdate==="provider_binding_update"&&this.isCloudTranscriptFork(this.sessionChat.get(executionId)))return;
           if (notification.update.sessionUpdate === "turn_usage_update") {
             try {
               const update = notification.update;
@@ -2034,6 +2105,7 @@ export class ZerosEngine {
               agentId,
               notification.update.providerBinding,
               notification.update.providerMetadata,
+              executionId,
             );
           }
           if (
@@ -2228,6 +2300,8 @@ export class ZerosEngine {
           signal: string | null,
           sessionId?: string | null,
         ) => {
+          if (sessionId && this.retiringCloudExecutions.has(sessionId) &&
+              (!this.activePromptContexts.has(sessionId) || this.cancelRequested.has(sessionId))) return;
           const exited = createMessage({
             type: "AGENT_AGENT_EXITED",
             source: "engine",
@@ -2962,11 +3036,12 @@ export class ZerosEngine {
    * Stop the engine gracefully.
    */
   async stop(): Promise<void> {
+    const idleStopped = this.cloudIdleStop.close();
     const checkpointStopped = this.cloudCheckpointScheduler?.close();
     this.cloudActions?.close();
     this.cloudCommands?.close();
     this.cloudEvents?.close();
-    if (!this.running) { await checkpointStopped; return; }
+    if (!this.running) { await Promise.all([checkpointStopped, idleStopped]); return; }
     this.running = false;
     const failures: unknown[] = [];
     const settle = async (operation: () => unknown) => {
@@ -2993,6 +3068,7 @@ export class ZerosEngine {
       await settle(() => this.cloudRuntimeRegistration!.stop());
     }
     await settle(() => checkpointStopped);
+    await settle(() => idleStopped);
     await humanServicesRetired;
     await languageServicesRetired;
     if (this.cloudWorkspaceForkRuntime) {
@@ -3087,18 +3163,90 @@ export class ZerosEngine {
       });
   }
 
-  private async handleCloudCheckpointRequest(
+  private cloudIdleBusy(): boolean {
+    return !this.running || !this.cloudWorker || this.cloudRuntimeAuthorityStopping ||
+      this.activePromptContexts.size > 0 || this.promptSessions.size > 0 || this.retiringCloudExecutions.size > 0 ||
+      this.pendingPermissionRequests.size > 0 || this.pendingQuestionRequests.size > 0 ||
+      this.cloudWorkspaceMutations.size > this.cloudWorkspaceIdleMaintenance.size || this.globalDesignAuthorityStarts.size > 0 ||
+      [...this.workspaceProcessStarts.values()].some(starts => starts.size > 0) ||
+      this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() ||
+      this.terminals.visibleTo({ isRemote: false, restricted: new Set() }).some(terminal => !terminal.exited) ||
+      this.cloudHumanServices?.hasActiveWork() === true;
+  }
+
+  private async stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void> {
+    const runtime = this.cloudRuntimeRegistration;
+    if (!runtime || this.cloudRuntimeCheckpointQuiescing || !stillIdle()) return;
+    this.cloudRuntimeCheckpointQuiescing = true;
+    this.cloudIdleReservation = stillIdle;
+    this.cloud?.setHumanServicesPaused(true);
+    try {
+      // An idle language server is restartable infrastructure. User/provider
+      // processes remain untouched and prevent the stop instead.
+      await this.cloudLanguageServices?.pause();
+      if (!stillIdle() || await hasCloudUserProcesses() || !stillIdle()) return;
+      const directive = await runtime.idleStopRequest({ kind: "request", attemptId: randomUUID() });
+      if (!directive) return;
+      await this.handleCloudCheckpointRequest(directive, authority);
+    } finally {
+      if (this.cloudIdleReservation) {
+        this.cloudIdleReservation = null;
+        this.cloudRuntimeCheckpointQuiescing = false;
+        if (this.running && !this.cloudRuntimeAuthorityStopping) {
+          this.cloudLanguageServices?.resume();
+          this.cloud?.setHumanServicesPaused(false);
+        }
+      }
+    }
+  }
+
+  private handleCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void> {
+    // Explicit final requests can also be redelivered after an ambiguous
+    // response. Share their reconciliation just like an idle capture.
+    if (this.cloudIdleCheckpoint?.id === directive.id) return this.cloudIdleCheckpoint.promise;
+    const promise = this.performCloudCheckpointRequest(directive, authority);
+    this.cloudIdleCheckpoint = { id: directive.id, promise };
+    void promise.catch(() => { if (this.cloudIdleCheckpoint?.id === directive.id) this.cloudIdleCheckpoint = null; });
+    return promise;
+  }
+
+  private async performCloudCheckpointRequest(
     directive: CloudCheckpointDirective,
     authority: CloudDurabilityAuthority,
   ): Promise<void> {
+    const unresolved = this.cloudUnresolvedFinalCheckpoint;
+    if (unresolved) {
+      if (unresolved.id !== directive.id || unresolved.engineInstanceId !== authority.engineInstanceId ||
+          unresolved.generation !== authority.generation || !this.cloudRuntimeRegistration) {
+        throw new Error("cloud checkpoint runtime is awaiting final checkpoint reconciliation");
+      }
+      // Heartbeat redelivery must reconcile the original final request before
+      // considering another capture. A committed checkpoint rejects cancel;
+      // only an acknowledged cancellation releases this exact engine fence.
+      try {
+        await this.cloudRuntimeRegistration.idleStopRequest({ kind: "cancel", requestId: unresolved.id });
+      } catch (error) {
+        this.scheduleCloudFinalCheckpointReconciliation(directive, authority);
+        throw error;
+      }
+      this.cloudUnresolvedFinalCheckpoint = null;
+      this.resumeCloudCheckpointAdmission();
+      throw new Error("Cloud workspace is no longer idle; final checkpoint cancelled");
+    }
+    const idleReserved = directive.idleStop && this.cloudIdleReservation !== null;
+    if (directive.idleStop && (!this.cloudIdleReservation?.() || await hasCloudUserProcesses() || !this.cloudIdleReservation?.())) {
+      await this.cloudRuntimeRegistration?.idleStopRequest({ kind: "cancel", requestId: directive.id }).catch(() => undefined);
+      throw new Error("Cloud workspace is no longer idle");
+    }
     if (
       !this.cloudDurabilityRuntime ||
       !this.cloudRecordRuntime ||
-      this.cloudRuntimeCheckpointQuiescing
+      (this.cloudRuntimeCheckpointQuiescing && !idleReserved)
     ) {
       throw new Error("cloud checkpoint runtime is unavailable");
     }
     this.cloudRuntimeCheckpointQuiescing = true;
+    this.cloudIdleReservation = null;
     this.cloud?.setHumanServicesPaused(true);
     const retainQuiescence = [
       "before_stop",
@@ -3132,14 +3280,46 @@ export class ZerosEngine {
         this.cloudCheckpointScheduler?.resume();
       }
     } catch (error) {
-      this.cloudRuntimeCheckpointQuiescing = false;
-      if (!this.cloudRuntimeAuthorityStopping) {
-        this.cloudHumanServices?.resume();
-        this.cloudLanguageServices?.resume();
-        this.cloud?.setHumanServicesPaused(false);
+      if (retainQuiescence) {
+        // A lost checkpoint response can conceal a committed final snapshot.
+        // Only acknowledged cancellation permits this engine to admit writes.
+        this.cloudUnresolvedFinalCheckpoint = { id: directive.id, engineInstanceId: authority.engineInstanceId, generation: authority.generation };
+        try {
+          if (!this.cloudRuntimeRegistration) throw error;
+          await this.cloudRuntimeRegistration.idleStopRequest({ kind: "cancel", requestId: directive.id });
+        } catch {
+          this.scheduleCloudFinalCheckpointReconciliation(directive, authority);
+          throw error;
+        }
+        this.cloudUnresolvedFinalCheckpoint = null;
       }
-      this.cloudCheckpointScheduler?.resume();
+      this.resumeCloudCheckpointAdmission();
       throw error;
+    }
+  }
+
+  private scheduleCloudFinalCheckpointReconciliation(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): void {
+    if (this.cloudFinalCheckpointReconciliationTimer || !this.running || this.cloudRuntimeAuthorityStopping) return;
+    // The backend may have cancelled successfully while its reply was lost,
+    // so a heartbeat need not redeliver the checkpoint. Keep one bounded retry
+    // for this exact unresolved identity; stopping the engine ends retries.
+    this.cloudFinalCheckpointReconciliationTimer = setTimeout(() => {
+      this.cloudFinalCheckpointReconciliationTimer = null;
+      if (!this.running || this.cloudRuntimeAuthorityStopping || this.cloudUnresolvedFinalCheckpoint?.id !== directive.id) return;
+      void this.handleCloudCheckpointRequest(directive, authority).catch(() => undefined);
+    }, 30_000);
+    this.cloudFinalCheckpointReconciliationTimer.unref();
+  }
+
+  private resumeCloudCheckpointAdmission(): void {
+    if (this.cloudFinalCheckpointReconciliationTimer) clearTimeout(this.cloudFinalCheckpointReconciliationTimer);
+    this.cloudFinalCheckpointReconciliationTimer = null;
+    this.cloudRuntimeCheckpointQuiescing = false;
+    if (this.running && !this.cloudRuntimeAuthorityStopping) {
+      this.cloudHumanServices?.resume();
+      this.cloudLanguageServices?.resume();
+      this.cloud?.setHumanServicesPaused(false);
+      this.cloudCheckpointScheduler?.resume();
     }
   }
 
@@ -3152,6 +3332,13 @@ export class ZerosEngine {
       throw new CloudCommandRuntimeError("command_not_found");
     if (payload && (this.cloudConversationDeletions?.has(conversationId) || chat.archived || chat.agentId !== payload.agentId || (chat.composerModeRevision ?? 0) !== payload.modeRevision))
       throw new CloudCommandRuntimeError("command_conflict");
+    if (payload?.operation?.kind === "fork") {
+      const source=getChat(payload.operation.sourceConversationId);
+      if (!source?.folder || source.archived || this.cloudConversationDeletions?.has(source.id) ||
+        source.id===chat.id || source.agentId!==chat.agentId || chat.sourceChatId!==source.id ||
+        fs.realpathSync(source.folder)!==physical)
+        throw new CloudCommandRuntimeError("command_not_found");
+    }
   }
 
   private validateCloudAction(action: CloudAction): boolean {
@@ -3249,8 +3436,10 @@ export class ZerosEngine {
   private async handleCloudCommandOperation(op: string, params: Record<string, unknown>,client:TransportClient): Promise<unknown> {
     if (!this.cloudCommands) throw new CloudCommandRuntimeError("cloud_commands_unavailable");
     if (op === "cloudCommands.request") {
-      if (Object.keys(params).length !== 1 || !("request" in params)) throw new CloudCommandRuntimeError("invalid_command");
-      return this.cloudCommands.handle(params.request,client.cloudActor?.sessionId);
+      if (Object.keys(params).some(key=>key!=="request"&&key!=="nativeCommandsVersion") || !("request" in params) ||
+          (params.nativeCommandsVersion!==undefined&&params.nativeCommandsVersion!==1)) throw new CloudCommandRuntimeError("invalid_command");
+      const result=await this.cloudCommands.handle(params.request,client.cloudActor?.sessionId);
+      return params.nativeCommandsVersion===1?result:legacyCloudCommandResponse(result);
     }
     let conversationId: string;
     if (op === "cloudCommands.createConversation") {
@@ -3259,13 +3448,21 @@ export class ZerosEngine {
       const input = parsed.data;
       conversationId = input.conversationId;
       const folder = this.workspace.resolveReadCwd(input.workspaceId, false);
+      if(input.sourceConversationId) {
+        this.validateCloudCommand(input.sourceConversationId);
+        const source=getChat(input.sourceConversationId)!;
+        if(source.agentId!==input.agentId || source.folder!==folder || source.archived || input.sourceConversationId===conversationId)
+          throw new CloudCommandRuntimeError("command_not_found");
+      }
       const existing = getChat(conversationId);
-      if (existing && (existing.folder !== folder || existing.agentId !== input.agentId)) throw new CloudCommandRuntimeError("command_conflict");
+      if (existing && (existing.folder !== folder || existing.agentId !== input.agentId ||
+        (input.sourceConversationId!==undefined&&existing.sourceChatId!==input.sourceConversationId))) throw new CloudCommandRuntimeError("command_conflict");
       if (!existing) {
         if (wasChatDeleted(conversationId)) throw new CloudCommandRuntimeError("command_not_found");
         const row = coerceChatRow({ id: conversationId, folder, workspaceId: input.workspaceId,
           agentId: input.agentId, model: input.model ?? "", effort: input.effort ?? "", title: input.title ?? "",
           createdAt: Date.now(), updatedAt: Date.now() });
+        if(row && input.sourceConversationId)row.sourceChatId=input.sourceConversationId;
         if (!row) throw new CloudCommandRuntimeError("invalid_command");
         // Resolve and validate before persistence; client paths are never input.
         const physical = fs.realpathSync(folder), root = fs.realpathSync(this.root);
@@ -3288,7 +3485,8 @@ export class ZerosEngine {
     const chat = getChat(conversationId)!;
     if (op !== "cloudCommands.conversation") this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["chats"], chatIds: [conversationId] }));
     return { conversationId, workspaceId: this.workspace.workspaceIdForCwd(chat.folder), agentId: chat.agentId,
-      mode: chat.composerMode ?? "code", modeRevision: chat.composerModeRevision ?? 0 };
+      providerBinding:chat.providerBinding,nativeCommandsVersion:1,
+      mode: chat.composerMode ?? "code", modeRevision: chat.composerModeRevision ?? 0, permissionModeVersion: 1 };
   }
 
   private async handleCloudEventOperation(params: Record<string, unknown>): Promise<unknown> {
@@ -3299,13 +3497,17 @@ export class ZerosEngine {
     const request = parsed.data;
     if (request.kind === "replay") return this.cloudEvents.replay(request.cursor);
     this.validateCloudCommand(request.conversationId);
+    const retainedExecution=this.conversationExecution.get(request.conversationId);
+    const retainedTasks=retainedExecution?await this.agents.readCloudBackgroundTasks?.(retainedExecution):null;
     return this.cloudEvents.snapshot(() => {
       const chat = getChat(request.conversationId)!;
       const executionId = this.conversationExecution.get(request.conversationId) ?? null;
       const prompt = executionId ? this.activePromptContexts.get(executionId) : null;
+      const session=executionId?this.sessionLoadResponses.get(executionId):null;
+      const backgroundTasks=session?.backgroundTasks??(executionId===retainedExecution?retainedTasks:null);
       return {
         version: 1, conversationId: chat.id, agentId: chat.agentId, executionId,
-        session: executionId ? this.sessionLoadResponses.get(executionId) ?? null : null,
+        session: executionId ? (backgroundTasks?{...session,backgroundTasks}:session??null) : null,
         initialize: executionId && chat.agentId ? this.agents.agentInitializeSnapshot(chat.agentId) : null,
         mode: chat.composerMode ?? "code", modeRevision: chat.composerModeRevision ?? 0,
         messages: windowChatMessages(chat.id, 100),
@@ -3327,17 +3529,30 @@ export class ZerosEngine {
     if(this.cloudCommandSessions.has(claim.commandId))return Promise.reject(new Error("Cloud command is already admitted"));
     const receiver:TransportClient={id:`cloud-command:${claim.commandId}`,kind:"cloud",close:()=>{},
       cloudCommandActor:claim.actor,accountUserId:claim.actor.userId,send:message=>this.broadcast(message)};
-    const record={claim,receiver,controller:new AbortController(),preparation:Promise.resolve()};
+    const record={claim,receiver,controller:new AbortController(),preparation:Promise.resolve(),ownsExecution:false};
     this.cloudCommandSessions.set(claim.commandId,record);this.cloudCommandAdmissions.set(receiver,claim);
     record.preparation=Promise.resolve().then(async()=>{
       this.validateCloudCommand(claim.conversationId,claim.payload);
       const previous=this.conversationExecution.get(claim.conversationId);
       if(previous){
         if(this.activePromptContexts.has(previous))throw new Error("Cloud conversation is busy");
+        if(this.agents.hasRetainedCloudExecution?.(previous)){
+          if(previous!==claim.executionId||claim.payload.operation?.kind==="fork")throw new Error("Cloud conversation retains background work");
+          const provider=claim.payload.agentId;
+          if(provider!=="claude"&&provider!=="codex"&&provider!=="cursor")throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+          await this.agents.resumeCloudExecution(claim.payload.agentId,previous,{
+            executionId:previous,provider,delegationId:claim.payload.agentCredentialGrantId!,model:claim.payload.model!,
+            source:{kind:"command",commandId:claim.commandId,claimId:claim.claimId},
+          },claim.payload);
+          record.ownsExecution=true;
+          if(record.controller.signal.aborted)throw new Error("Cloud command admission stopped");
+          return;
+        }
         try{await this.agents.endSession(this.sessionAgent.get(previous)??claim.payload.agentId,previous,{failClosed:true});}
         catch(error){this.handleCloudRuntimeAuthorityLoss();throw error;}
         this.clearAgentExecutionRoute(previous);
       }
+      record.ownsExecution=true;
       if(record.controller.signal.aborted)throw new Error("Cloud command admission stopped");
       const chat=getChat(claim.conversationId);
       if(!chat?.agentId||chat.agentId!==claim.payload.agentId)throw new CloudCommandRuntimeError("command_not_found");
@@ -3348,7 +3563,19 @@ export class ZerosEngine {
       record.controller.signal.addEventListener("abort",invalidate,{once:true});
       try{
         const common={source:"engine" as const,agentId:chat.agentId,chatId:chat.id,workspaceId,
-          env:{...(claim.payload.effort?{ZEROS_THINKING_EFFORT:claim.payload.effort}:{}),ZEROS_FAST_MODE:claim.payload.fast?"1":"0"}};
+          env:{...(claim.payload.effort?{ZEROS_THINKING_EFFORT:claim.payload.effort}:{}),ZEROS_FAST_MODE:claim.payload.fast?"1":"0",
+            ZEROS_PERMISSION_MODE:cloudPermissionMode(claim.payload.agentId,claim.payload.permissionMode??getChat(claim.conversationId)?.lastModeId??getChat(claim.conversationId)?.permissionMode??"auto")}};
+        if (claim.payload.operation?.kind === "fork") {
+          if (binding) throw new Error("Cloud fork destination is already bound");
+          if (claim.payload.operation.strategy === "native") {
+            await this.handleAgentMessage({...createMessage({...common,type:"AGENT_FORK_CONVERSATION",
+              sourceChatId:claim.payload.operation.sourceConversationId,destinationChatId:chat.id}),id:claim.commandId},receiver,0,true);
+            if(record.controller.signal.aborted || !getChat(chat.id)?.providerBinding)throw new Error("Cloud fork admission failed");
+            return;
+          }
+          // Transcript handoff still qualifies and admits the destination's
+          // selected credential. No source provider identity is transplanted.
+        }
         // Admission and terminal frames share the durable command correlation.
         // Every device can match a cold start/resume without owning a socket
         // request, and admission failures remain attributable to this command.
@@ -3363,14 +3590,30 @@ export class ZerosEngine {
     return record.preparation;
   }
 
-  private async retireCloudCommand(claim:CloudCommandClaim):Promise<void>{
+  private async retireCloudCommand(claim:CloudCommandClaim,allowBackground=true):Promise<void>{
     const record=this.cloudCommandSessions.get(claim.commandId);
+    if(!record)return; // Claim assignment alone never acquires native ownership.
     if(record&&record.claim!==claim)throw new Error("Cloud command identity changed");
+    if(record.ownsExecution===true)this.retiringCloudExecutions.add(claim.executionId);
     try{
-      await this.agents.endSession(claim.payload.agentId,claim.executionId,{failClosed:true});
-      this.clearAgentExecutionRoute(claim.executionId);
+      // A rejected reuse claim never acquires the original actor's execution.
+      if(record.ownsExecution===true){
+        const retained=allowBackground&&await this.agents.completeCloudForeground?.(claim.payload.agentId,claim.executionId,
+          async()=>{
+            this.retiringCloudExecutions.add(claim.executionId);
+            try{await this.agents.endSession(claim.payload.agentId,claim.executionId,{failClosed:true});this.clearAgentExecutionRoute(claim.executionId);}
+            catch(error){this.handleCloudRuntimeAuthorityLoss();throw error;}
+            finally{this.retiringCloudExecutions.delete(claim.executionId);}
+          });
+        if(!retained){
+          await this.agents.endSession(claim.payload.agentId,claim.executionId,{failClosed:true});
+          this.clearAgentExecutionRoute(claim.executionId);
+        }
+      }
+      await this.cloudGoals.flush(claim);
       if(record){this.cloudCommandAdmissions.delete(record.receiver);this.cloudCommandSessions.delete(claim.commandId);}
     }catch(error){this.handleCloudRuntimeAuthorityLoss();throw error;}
+    finally{if(record.ownsExecution===true)this.retiringCloudExecutions.delete(claim.executionId);}
   }
 
   private async deleteCloudConversation(id:string,operationId:string,client:TransportClient,remove:()=>Promise<unknown>):Promise<unknown>{
@@ -3403,26 +3646,61 @@ export class ZerosEngine {
     const records=[...this.cloudCommandSessions.values()].filter(record=>record.claim.conversationId===conversationId);
     for(const record of records)record.controller.abort();
     this.invalidateConversationBind(conversationId);
+    const retained=this.conversationExecution.get(conversationId);
+    if(!records.length&&retained&&this.agents.hasRetainedCloudExecution?.(retained)){
+      const agentId=this.sessionAgent.get(retained);
+      if(agentId){
+        this.retiringCloudExecutions.add(retained);
+        try{
+          try{await this.agents.cancel(agentId,retained);}
+          finally{await this.agents.endSession(agentId,retained,{failClosed:true});}
+          this.clearAgentExecutionRoute(retained);
+        }
+        catch(error){this.handleCloudRuntimeAuthorityLoss();throw error;}
+        finally{this.retiringCloudExecutions.delete(retained);}
+      }
+    }
     const settled=await Promise.allSettled(records.map(async record=>{
       await record.preparation.catch(()=>{});
+      if(record.ownsExecution===false)return;
       const executionId=record.claim.executionId;
+      this.retiringCloudExecutions.add(executionId);
       try{
-        if(this.sessionAgent.has(executionId)){
-          this.markCancelIntent(executionId);
-          await this.agents.cancel(record.claim.payload.agentId,executionId);
-        }
-      }finally{await this.agents.endSession(record.claim.payload.agentId,executionId,{failClosed:true});}
+        try{
+          if(this.sessionAgent.has(executionId)){
+            this.markCancelIntent(executionId);
+            await this.agents.cancel(record.claim.payload.agentId,executionId);
+          }
+        }finally{await this.agents.endSession(record.claim.payload.agentId,executionId,{failClosed:true});}
+      }finally{this.retiringCloudExecutions.delete(executionId);}
     }));
     const failed=settled.find(result=>result.status==="rejected");
     if(failed?.status==="rejected"){this.handleCloudRuntimeAuthorityLoss();throw failed.reason;}
   }
 
-  private async dispatchCloudCommand(claim: CloudCommandClaim): Promise<Pick<CloudCommandResult, "state" | "resultCode">> {
-    let result: Pick<CloudCommandResult, "state" | "resultCode"> = { state: "failed", resultCode: "command_dispatch_rejected" };
+  private cloudGoalClaim(executionId:string):CloudCommandClaim|undefined{
+    if(!this.cloudCommands)return undefined;
+    return [...this.cloudCommandSessions.values()].find(record=>record.claim.executionId===executionId&&record.claim.payload.agentId==="codex")?.claim;
+  }
+
+  private async dispatchCloudCommand(claim: CloudCommandClaim): Promise<Pick<CloudCommandResult, "state" | "resultCode" | "result">> {
+    let result: Pick<CloudCommandResult, "state" | "resultCode" | "result"> = { state: "failed", resultCode: "command_dispatch_rejected" };
     // This receiver has no transport lifetime. Streaming still uses the shared
     // router; terminal receipts also reach all currently authorized devices.
     const admitted=this.cloudCommandSessions.get(claim.commandId);
     if(!admitted||admitted.claim!==claim||admitted.controller.signal.aborted)throw new Error("Cloud command execution is not admitted");
+    const operation=claim.payload.operation;
+    const capabilities=this.agents.cloudNativeCapabilities(claim.payload.agentId,claim.executionId);
+    const nativeResult=capabilities?{version:1 as const,capabilities,model:claim.payload.model}:undefined;
+    if(operation?.kind==="fork"){await this.cloudGoals.flush(claim);return {state:"succeeded",resultCode:null};}
+    if(operation?.kind==="goal") {
+      const revision=this.cloudGoals.revision(claim);
+      if(operation.action==="clear")await this.agents.clearGoal("codex",claim.executionId);
+      const goal=operation.action==="set" ? await this.agents.setGoal("codex",claim.executionId,operation.update!)
+        : operation.action==="clear" ? null : await this.agents.getGoal("codex",claim.executionId);
+      await this.cloudGoals.confirm(claim,goal,revision);
+      return {state:"succeeded",resultCode:null,result:{...nativeResult,version:1,goal:(await this.cloudGoals.flush(claim))!.goal}};
+    }
     const receiver: TransportClient = {
       id: `cloud-command:${claim.commandId}`, kind: "cloud", close: () => {},
       ...(claim.actor?{cloudCommandActor:claim.actor,accountUserId:claim.actor.userId}:{}),
@@ -3440,6 +3718,17 @@ export class ZerosEngine {
       prompt: claim.payload.prompt, userMessageId: claim.payload.userMessageId,
       promptId: claim.commandId, ...(claim.payload.bubble ? { bubble: claim.payload.bubble } : {}),
     }), id: claim.commandId }, receiver, 0, true);
+    if(nativeResult) {
+      result.result=nativeResult;
+      if(result.state==="succeeded" && capabilities?.goals) {
+        const revision=this.cloudGoals.revision(claim);
+        let goal;
+        try {goal=await this.agents.getGoal(claim.payload.agentId,claim.executionId);}catch{ /* a revoked lease cannot supply a new snapshot */ }
+        if(goal!==undefined)await this.cloudGoals.confirm(claim,goal,revision);
+      }
+    }
+    const confirmed=await this.cloudGoals.flush(claim);
+    if(confirmed)result.result={...nativeResult,version:1,goal:confirmed.goal};
     return result;
   }
 
@@ -4520,20 +4809,36 @@ export class ZerosEngine {
   /** The engine learns provider identity at creation/resume and sometimes
    * later from the stream (Claude init). Persist at every authoritative point
    * so renderer unmount can never be the durability boundary. */
+  private isCloudTranscriptFork(chatId:string|undefined):boolean{
+    return !!this.cloudWorker&&!!chatId&&[...this.cloudCommandSessions.values()].some(({claim})=>
+      claim.conversationId===chatId&&claim.payload.operation?.kind==="fork"&&claim.payload.operation.strategy==="transcript");
+  }
+
   private persistProviderIdentityForChat(
     chatId: string | undefined,
     agentId: string,
     providerBinding: ProviderBinding | null | undefined,
     providerMetadata?: ProviderMetadata | null,
+    executionId?: string,
   ): void {
     if (!chatId || !providerBinding) return;
+    // An empty native thread can disappear at retirement. The credential
+    // probe must not publish a resume handle before the transcript is sent.
+    if(this.isCloudTranscriptFork(chatId))return;
     try {
-      updateChatProviderIdentity(
+      const written = updateChatProviderIdentity(
         chatId,
         agentId,
         providerBinding,
         providerMetadata,
       );
+      if (written && executionId) {
+        // This acknowledgement follows the SQLite commit, never mere native
+        // startup/publication. Failure leaves the durable fresh-session fence.
+        void this.agents.confirmCloudHistoryBinding(executionId, providerBinding).catch(() => {
+          console.warn("[agents] native history binding confirmation remains pending");
+        });
+      }
     } catch (err) {
       // Identity durability is best-effort at the engine boundary; never break
       // provider startup/streaming. The renderer's chat-state mirror remains a
@@ -4766,6 +5071,10 @@ export class ZerosEngine {
       else client.close(1008,"workspace operation denied");
       return;
     }
+    if (this.cloudWorker && (msg.type === "WORKSPACE_REQUEST"
+      ? cloudWorkspaceCapability(msg.op, msg.params ?? {}, this.workspace) !== "read" && !isCloudIdleMaintenance(msg.op)
+      : ["PTY_CREATE", "PTY_WRITE", "PTY_KILL", "AGENT_PROMPT", "AGENT_PERMISSION_RESPONSE", "AGENT_QUESTION_RESPONSE"].includes(msg.type)))
+      this.cloudIdleStop.activity();
     // Account-binding ENFORCEMENT gate. When binding is REQUIRED, a remote client
     // must complete CONNECTED (valid access token → clientAccount populated)
     // before ANY privileged message is processed — otherwise "never send
@@ -4854,8 +5163,10 @@ export class ZerosEngine {
         // Shared terminal (multiplayer): ANY paired device may type into it —
         // the only gate is the per-workspace restriction (remote clients refused
         // for a restricted/unknown workspace; local desktop always allowed).
-        if (this.mayOperateTerminal(client, msg.sessionId))
+        if (this.mayOperateTerminal(client, msg.sessionId)) {
+          if (this.cloudWorker) this.nativeGithubTerminals.input(msg.sessionId, client);
           this.pty.write(msg.sessionId, msg.data);
+        }
         break;
       case "PTY_RESIZE":
         if (this.mayOperateTerminal(client, msg.sessionId))
@@ -5233,6 +5544,10 @@ export class ZerosEngine {
               executionId,
               session,
             );
+            if(this.isCloudTranscriptFork(msg.chatId)){
+              const {providerBinding:_binding,providerMetadata:_metadata,...unbound}=session;
+              session={...unbound,sessionId:executionId};
+            }
             this.sessionLoadResponses.set(executionId, {
               ...(this.sessionLoadResponses.get(executionId) ?? {}),
               // A reload before the first prompt still needs the chat's prior
@@ -5273,6 +5588,7 @@ export class ZerosEngine {
                 msg.agentId,
                 session.providerBinding,
                 session.providerMetadata,
+                executionId,
               );
             }
             return { initialize, session };
@@ -6223,12 +6539,18 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
+          const beforeModeChange = this.sessionLoadResponses.get(msg.sessionId);
           await this.agents.setMode(msg.agentId, msg.sessionId, msg.modeId);
           const cached = this.sessionLoadResponses.get(msg.sessionId);
+          // A provider may accept a different native mode (Claude Auto on an
+          // unsupported model becomes Accept Edits). Its emitted snapshot is
+          // authoritative; do not overwrite it with the requested value.
+          const appliedModeId = cached?.modes && cached.modes !== beforeModeChange?.modes
+            ? cached.modes.currentModeId : msg.modeId;
           if (cached?.modes) {
             this.sessionLoadResponses.set(msg.sessionId, {
               ...cached,
-              modes: { ...cached.modes, currentModeId: msg.modeId },
+              modes: { ...cached.modes, currentModeId: appliedModeId },
             });
           }
           client.send(
@@ -6239,7 +6561,7 @@ export class ZerosEngine {
               agentId: msg.agentId,
               executionId: msg.sessionId,
               sessionId: msg.sessionId,
-              modeId: msg.modeId,
+              modeId: appliedModeId,
             }),
           );
           return;
@@ -6249,12 +6571,14 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
+          const claim=this.cloudGoalClaim(msg.sessionId),revision=claim?this.cloudGoals.revision(claim):0;
           const goal = await this.agents.setGoal(msg.agentId, msg.sessionId, {
             ...msg.update,
             ...(msg.update.objective !== undefined
               ? { objective: msg.update.objective.trim() }
               : {}),
           });
+          if(claim)await this.cloudGoals.confirm(claim,goal,revision);
           client.send(
             createMessage({
               type: "AGENT_GOAL_CHANGED",
@@ -6273,7 +6597,9 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
+          const claim=this.cloudGoalClaim(msg.sessionId),revision=claim?this.cloudGoals.revision(claim):0;
           await this.agents.clearGoal(msg.agentId, msg.sessionId);
+          if(claim)await this.cloudGoals.confirm(claim,null,revision);
           client.send(
             createMessage({
               type: "AGENT_GOAL_CHANGED",
@@ -6614,6 +6940,8 @@ export class ZerosEngine {
 
           const forkSpawnOpts = await this.agentSpawnOpts(
             {
+              chatId: destinationChat.id,
+              agentId: msg.agentId,
               cwd: destinationChat.folder,
               env: msg.env,
               workspaceId: destinationWorkspaceId ?? undefined,
@@ -6644,6 +6972,10 @@ export class ZerosEngine {
           const providerBinding = await this.trackRepositoryCodeAuthorityStart(
             destinationWorkspaceId,
             this.agents.forkProviderBinding(msg.agentId, sourceBinding, {
+              conversationId: destinationChat.id,
+              sourceConversationId: sourceChat.id,
+              cloudExecution: forkSpawnOpts.cloudExecution,
+              cloudExecutionId: forkSpawnOpts.cloudExecutionId,
               cwd: forkSpawnOpts.cwd,
               env: forkSpawnOpts.env,
               workspaceId: forkSpawnOpts.workspaceId,
@@ -7227,6 +7559,7 @@ export class ZerosEngine {
               msg.agentId,
               response.providerBinding,
               response.providerMetadata,
+              executionId,
             );
           }
           this.sessionLoadResponses.set(executionId, {
@@ -7381,7 +7714,8 @@ export class ZerosEngine {
       if(!claim||claim.conversationId!==msg.chatId||claim.payload.agentId!==msg.agentId||!claim.payload.agentCredentialGrantId||!claim.payload.model)
         throw new AgentFailureError({kind:"protocol-error",stage,message:"Cloud agents start from an admitted durable command with delegated credentials."});
       return {cwd:this.assertRemoteWorkspaceOperable(msg.workspaceId,stage),workspaceId:msg.workspaceId,
-        env:{...(claim.payload.effort?{ZEROS_THINKING_EFFORT:claim.payload.effort}:{}),ZEROS_FAST_MODE:claim.payload.fast?"1":"0"},
+        env:{...(claim.payload.effort?{ZEROS_THINKING_EFFORT:claim.payload.effort}:{}),ZEROS_FAST_MODE:claim.payload.fast?"1":"0",
+            ZEROS_PERMISSION_MODE:cloudPermissionMode(claim.payload.agentId,claim.payload.permissionMode??getChat(claim.conversationId)?.lastModeId??getChat(claim.conversationId)?.permissionMode??"auto")},
         cloudExecutionId:claim.executionId,cloudExecution:{delegationId:claim.payload.agentCredentialGrantId,model:claim.payload.model,
           source:{kind:"command",commandId:claim.commandId,claimId:claim.claimId}}};
     }
@@ -8304,7 +8638,12 @@ export class ZerosEngine {
     cloudMutationAdmitted = false,
   ): Promise<void> {
     const { op } = msg;
-    const params = msg.params ?? {};
+    const { $cloudGithubWriteGrant, ...params } = msg.params ?? {};
+    if (this.cloudWorker && op === "github.nativeGrant") {
+      const accepted = !this.cloudRuntimeAuthorityStopping && !this.cloudRuntimeCheckpointQuiescing && acceptNativeGithubDesktop(client, params);
+      client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: msg.id, op, result: { accepted } }));
+      return;
+    }
     if (this.cloudWorker && !cloudMutationAdmitted &&
         cloudWorkspaceCapability(op, params, this.workspace) !== "read") {
       if (this.cloudRuntimeCheckpointQuiescing || this.cloudRuntimeAuthorityStopping) {
@@ -8316,8 +8655,12 @@ export class ZerosEngine {
       // Publish the entire request before yielding, including any async
       // preflight that precedes registration in a workspace's process lane.
       const operation = Promise.resolve().then(() => this.handleWorkspaceMessage(msg, client, true));
-      const tracked = operation.finally(() => this.cloudWorkspaceMutations.delete(tracked));
+      const tracked = operation.finally(() => {
+        this.cloudWorkspaceMutations.delete(tracked);
+        this.cloudWorkspaceIdleMaintenance.delete(tracked);
+      });
       this.cloudWorkspaceMutations.add(tracked);
+      if (isCloudIdleMaintenance(op)) this.cloudWorkspaceIdleMaintenance.add(tracked);
       await tracked;
       return;
     }
@@ -8398,7 +8741,30 @@ export class ZerosEngine {
             !!client.cloudActor&&["developer","manager","owner"].includes(client.cloudActor.role)&&!this.cloudRuntimeCheckpointQuiescing&&!this.cloudRuntimeAuthorityStopping,params.request);
         }
         const handleWorkspace=()=>this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay||client.cloudActor!==undefined,cloudWorker:!!this.cloudWorker,
-          ...(client.cloudActor && client.accountUserId ? { cloudActorIdentity: { userId: client.accountUserId, deviceId: client.cloudActor.deviceId } } : {})});
+          ...(client.cloudActor && client.accountUserId ? { cloudActorIdentity: { userId: client.accountUserId, deviceId: client.cloudActor.deviceId, sessionId: client.cloudActor.sessionId },
+            cloudFileActor: { role: client.cloudActor.role, authorized: () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping } } : {})});
+        if (this.cloudWorker && needsCloudGitAuthor(op, params)) {
+          if (!this.cloudRuntimeRegistration || !client.cloudActor) throw new Error("Cloud Git author is unavailable.");
+          const author = await this.cloudRuntimeRegistration.gitAuthorRequest(client.cloudActor.sessionId);
+          return runWithCloudGitAuthor(author, () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping, handleWorkspace);
+        }
+        if (this.cloudWorker && isCloudGithubWriteOperation(op)) {
+          const runtime = this.cloudRuntimeRegistration;
+          if (!runtime || !client.cloudActor || client.authorized?.() !== true || typeof $cloudGithubWriteGrant !== "string")
+            throw new Error("GitHub write authorization is unavailable. Reconnect GitHub and try again.");
+          const paramsSha256 = createHash("sha256").update(JSON.stringify([op, params])).digest("hex");
+          const publication = await githubWritePublication(getGithubWriteWorkspace(String(params.workspaceId)), op);
+          try {
+            const credential = await runtime.githubWriteRequest({ kind: "redeem", grant: $cloudGithubWriteGrant,
+              operation: op, paramsSha256, params, branch: publication.branch, baseBranch: publication.baseBranch, actorSessionId: client.cloudActor.sessionId });
+            if (!credential) throw new Error("GitHub write authorization is unavailable.");
+            return await runWithGithubWriteCredential(credential, () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping, handleWorkspace);
+          } finally {
+            // The backend also expires the proxy and encrypted user token if the
+            // response is lost or the engine exits before this release arrives.
+            await runtime.githubWriteRequest({ kind: "release", grant: $cloudGithubWriteGrant }).catch(() => undefined);
+          }
+        }
         return op === "cloudActions.request"
           ? await this.handleCloudActionOperation(params,client)
           : op === "cloudEvents.request"
@@ -9690,14 +10056,44 @@ export class ZerosEngine {
         workspaceId: canonicalWsId,
         workspace: scriptWorkspace,
       });
-      const credentialEnv = await prepareGitCredentialShellEnvironment(
+      const credentialEnv = this.cloudWorker ? null : await prepareGitCredentialShellEnvironment(
         canonicalWsId ? `workspace:${canonicalWsId}` : `folder:${resolvedCwd}`,
         baseEnv.PATH ?? "",
-        this.cloudWorker
-          ? { uid: this.cloudWorker.uid, gid: this.cloudWorker.gid }
-          : undefined,
       );
       env = credentialEnv ? { ...baseEnv, ...credentialEnv.env } : baseEnv;
+      if (this.cloudWorker) {
+        // Isolated image/login probes have no account actor. Keep their
+        // existing terminal admission and give them no default Git identity.
+        if (client.cloudActor && !this.cloudRuntimeRegistration) { ptyExit(); return; }
+        const author = client.cloudActor
+          ? await this.cloudRuntimeRegistration!.gitAuthorRequest(client.cloudActor.sessionId)
+          : null;
+        if (client.cloudActor && client.authorized?.() !== true) { ptyExit(); return; }
+        Object.assign(env, cloudGitAuthorEnvironment(author));
+        for (const key of Object.keys(env)) if (/^(GH_|GITHUB_)/.test(key)) delete env[key];
+        if (client.cloudActor) {
+          const { createNativeGithubBroker } = await import("./git/github-native-broker");
+          const { mkdtemp } = await import("node:fs/promises");
+          const directory = await mkdtemp("/tmp/zeros-native-github-");
+          // Keep a stable route for the live PTY; each operation requires a
+          // current admission of the creator, including after reconnect.
+          const preparedAt = Date.now();
+          let terminalPid: number | null = null;
+          const currentPid = () => this.pty.list().find(pty => pty.sessionId === msg.sessionId)?.pid ?? null;
+          const github = await createNativeGithubBroker({ directory, visibleDirectory: directory, cwd: resolvedCwd,
+            path: baseEnv.PATH ?? "/usr/bin:/bin", node: this.cloudWorker.toolchain.node, identity: this.cloudWorker,
+            ...this.nativeGithubTerminals.create(msg.sessionId, client),
+            peerProcess: currentPid,
+            authorized: () => {
+              if (this.cloudRuntimeAuthorityStopping || !this.workspaceAllowsProcessStart(canonicalWsId)) return false;
+              const pid = currentPid();
+              if (terminalPid !== null) return pid === terminalPid;
+              if (pid && pid > 0) { terminalPid = pid; return true; }
+              return Date.now() - preparedAt < 30000;
+            } });
+          Object.assign(env, github.env);
+        }
+      }
     }
     // Local credential setup is asynchronous too. Avoid spawning at all when
     // archive/delete acquired the workspace while it was resolving.
@@ -9728,6 +10124,7 @@ export class ZerosEngine {
       return;
     }
     if (client.cloudActor && client.authorized?.()!==true) {ptyExit();return;}
+    if (this.cloudWorker && reattach) this.nativeGithubTerminals.reattach(msg.sessionId, client);
     const loginProvider = msg.loginProvider;
     const loginBinary = loginProvider
       ? applyUserProviderConfig(this.root, loginProvider, {}).cliBinary ||

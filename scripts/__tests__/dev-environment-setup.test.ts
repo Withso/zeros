@@ -4,6 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { importDevelopmentProfile, inspectDevelopmentProfile } from "../dev-environment/setup-profile.mjs";
+import { loadHostedProfile } from "../dev-environment/hosted-profile.mjs";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -34,6 +35,57 @@ function fixture() {
 }
 
 describe("secure portable Dev setup", () => {
+  it("imports an injected cloud profile privately before backend/archive profile resolution", () => {
+    const f = fixture(), destination = path.join(f.root, "zeros-dev-env.json");
+    const env = { ZEROS_DEV_PROFILE_B64: Buffer.from(JSON.stringify(f.profile)).toString("base64") };
+    expect(loadHostedProfile(f.root, { env, homeDir: f.home })).toEqual(f.profile);
+    expect(fs.statSync(destination).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toEqual(f.profile);
+    expect(fs.existsSync(path.join(f.home, ".zeros-dev"))).toBe(false);
+    expect(f.git("status", "--porcelain")).toBe("");
+    env.ZEROS_DEV_PROFILE_B64 = "invalid-new-value";
+    expect(loadHostedProfile(f.root, { env, homeDir: f.home })).toEqual(f.profile);
+  });
+
+  it("imports the cloud setting through actual setup without printing credentials", () => {
+    const f = fixture(), repository = path.resolve(import.meta.dirname, "../..");
+    fs.cpSync(path.join(repository, "scripts/dev-environment"), path.join(f.root, "scripts/dev-environment"), { recursive: true });
+    for (const file of ["dev-auth-profile.mjs", "dev-ports.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(f.root, "scripts", file));
+    fs.writeFileSync(path.join(f.root, "qualified-node.cjs"), 'Object.defineProperty(process.versions, "node", {value: "22.18.0"});');
+    fs.writeFileSync(path.join(f.root, "package.json"), JSON.stringify({ packageManager: "pnpm@10.0.0" }));
+    const value = Buffer.from(JSON.stringify(f.profile)).toString("base64");
+    const output = execFileSync(process.execPath, ["-r", "./qualified-node.cjs", "scripts/dev-environment/setup.mjs", "--profile-only"], {
+      cwd: f.root, env: { PATH: process.env.PATH, HOME: f.home, ZEROS_DEV_PROFILE_B64: value }, encoding: "utf8", stdio: "pipe",
+    });
+    expect(JSON.parse(fs.readFileSync(path.join(f.root, "zeros-dev-env.json"), "utf8"))).toEqual(f.profile);
+    expect(output).not.toContain(value); expect(output).not.toContain(f.profile.cloudflare.apiToken);
+  });
+
+  it.each(["invalid-base64", "invalid-json", "invalid-profile", "oversized", "unignored", "tracked-absent"])("rejects %s cloud injection without writing or echoing it", scenario => {
+    const f = fixture(), destination = path.join(f.root, "zeros-dev-env.json");
+    let value = Buffer.from(JSON.stringify(f.profile)).toString("base64");
+    if (scenario === "invalid-base64") value = "private-invalid-sentinel";
+    if (scenario === "invalid-json") value = Buffer.from("private-json-sentinel").toString("base64");
+    if (scenario === "invalid-profile") value = Buffer.from(JSON.stringify({ version: 2, privateValue: "private-profile-sentinel" })).toString("base64");
+    if (scenario === "oversized") value = Buffer.from("x".repeat(131073)).toString("base64");
+    if (scenario === "unignored") fs.writeFileSync(path.join(f.root, ".gitignore"), "");
+    if (scenario === "tracked-absent") { fs.writeFileSync(destination, "{}"); f.git("add", "-f", "zeros-dev-env.json"); fs.unlinkSync(destination); }
+    let message = "";
+    try { loadHostedProfile(f.root, { env: { ZEROS_DEV_PROFILE_B64: value }, homeDir: f.home }); } catch (error) { message = String(error); }
+    expect(message).toMatch(/base64|profile|ignored|tracked|128/i); expect(message).not.toContain(value);
+    expect(message).not.toContain("private-json-sentinel"); expect(message).not.toContain("private-profile-sentinel");
+    expect(fs.existsSync(destination)).toBe(false);
+  });
+
+  it("preserves home and explicit profile precedence over cloud injection", () => {
+    const f = fixture(), directory = path.join(f.home, ".zeros-dev"); fs.mkdirSync(directory, { mode: 0o700 });
+    fs.writeFileSync(path.join(directory, "zeros-dev-env.json"), JSON.stringify(f.profile), { mode: 0o600 });
+    expect(loadHostedProfile(f.root, { env: { ZEROS_DEV_PROFILE_B64: "invalid" }, homeDir: f.home })).toEqual(f.profile);
+    expect(() => loadHostedProfile(f.root, { env: { ZEROS_DEV_PROFILE_B64: Buffer.from(JSON.stringify(f.profile)).toString("base64"),
+      ZEROS_DEV_PROFILE_PATH: path.join(f.home, "missing.json") }, homeDir: f.home })).toThrow();
+    expect(fs.existsSync(path.join(f.root, "zeros-dev-env.json"))).toBe(false);
+  });
+
   it("imports one file into home, main checkout and calling worktree, preserving the registry key", () => {
     const f = fixture(), worktree = path.join(f.home, "linked worktree");
     f.git("worktree", "add", "-qb", "feature", worktree);

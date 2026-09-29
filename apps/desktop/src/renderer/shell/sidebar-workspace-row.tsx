@@ -57,6 +57,7 @@ import {
 } from "../state/pending-workspaces";
 import type { Project } from "../state/projects-store";
 import { useWorkspaceDispatch } from "../state/store";
+import { startCloudNavigationSpan } from "../state/cloud-workspace-latency";
 import { cn } from "../shared/ui/cn";
 import { RunWave, ZerosSpinner } from "../shared/ui/loading";
 import { Button } from "../shared/ui/primitives/button";
@@ -342,10 +343,20 @@ export function SidebarWorkspaceRow({
       data-workspace-id={workspace.id}
       data-streaming={working || undefined}
       aria-busy={archiving || modeSwitching || undefined}
-      onPointerEnter={() => onPrefetch(workspace)}
-      onFocus={() => onPrefetch(workspace)}
+      onPointerEnter={() => {
+        if (!surfaceActive) return;
+        startCloudNavigationSpan(workspace.path, "intent");
+        onPrefetch(workspace);
+      }}
+      onFocus={() => {
+        if (!surfaceActive) return;
+        startCloudNavigationSpan(workspace.path, "intent");
+        onPrefetch(workspace);
+      }}
       onClick={() => {
-        if (!archiving) onSelect(workspace);
+        if (!surfaceActive || archiving) return;
+        startCloudNavigationSpan(workspace.path, "click");
+        onSelect(workspace);
       }}
     >
       <Button

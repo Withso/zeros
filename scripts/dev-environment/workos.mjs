@@ -1,3 +1,4 @@
+import { DevProviderError } from "./provider-http.mjs";
 import { saveWorkspace } from "./state.mjs";
 import { publicDevProfile } from "./profile.mjs";
 
@@ -17,7 +18,7 @@ export function workosClient(profile, fetchImpl = fetch) {
         ...(body ? { body: JSON.stringify(body) } : {}),
       });
     } catch { throw new Error("WorkOS Dev setup is unavailable; the provisioning receipt was preserved"); }
-    if (!response.ok) { await response.body?.cancel(); throw new Error(`WorkOS Dev setup failed (HTTP ${response.status}); credentials were withheld`); }
+    if (!response.ok) { await response.body?.cancel(); throw new DevProviderError("WorkOS", response.status); }
     if (response.status === 204) return null;
     const text = await response.text();
     if (text.length > 1024 * 1024) throw new Error("Oversized WorkOS setup response");

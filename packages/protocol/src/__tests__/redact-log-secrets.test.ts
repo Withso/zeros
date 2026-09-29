@@ -9,7 +9,7 @@ import { redactLogSecrets } from "../scrub";
 
 describe("redactLogSecrets — removes credentials", () => {
   it("removes cloud capabilities in headers and browser WebSocket protocols", () => {
-    for (const prefix of ["zws", "zwh", "zwb", "zwp", "zsh"]) {
+    for (const prefix of ["zws", "zwh", "zwb", "zwp", "zsh", "zgw", "zwa"]) {
       const token = `${prefix}_${"a".repeat(42)}-`;
       const input = JSON.stringify({ headers: { "x-zeros-runtime-service": token,
         "sec-websocket-protocol": `zeros.service.v1, zeros.authorization.${token}` } });
@@ -164,4 +164,9 @@ describe("redactLogSecrets — keeps debugging signal", () => {
     expect(out).toContain("/Users/someone/project/apps/desktop/src/engine/runtime.ts");
     expect(out).toContain("7bbf8eea24ed0b90c18b98bf03cbc39d18308a12");
   });
+});
+
+it("redacts native GitHub broker capabilities even outside an authorization field", () => {
+  const capability = `zgn_${"x".repeat(42)}-`;
+  expect(redactLogSecrets(`native request failed ${capability}`).includes(capability)).toBe(false);
 });

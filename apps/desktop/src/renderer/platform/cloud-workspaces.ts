@@ -1,5 +1,7 @@
+import { authorizeCloudGithubSource } from "./cloud-github";
 import { z } from "zod";
 import { getSession } from "../features/auth/auth-store";
+import { getOrganizationStoreGeneration } from "../features/team/team-store";
 import {
   CONTROL_PLANE_URL,
   ControlPlaneError,
@@ -12,6 +14,14 @@ export const CloudWorkspaceDocumentSchema = z.object({
   teamId: z.string().uuid(),
   name: z.string().min(1).max(120),
   createdBy: z.string().uuid(),
+  ownerUserId: z.string().uuid().optional(),
+  recovery: z.object({
+    state: z.string().nullable(),
+    checkpointId: z.string().uuid().nullable(),
+    checkpointAt: z.string().nullable(),
+    sourceGeneration: z.number().int().positive(),
+    needsAcknowledgement: z.boolean(),
+  }).nullable().optional(),
   placement: z.literal("cloud"),
   status: z.string().min(1).max(64),
   capabilities: z.object({
@@ -85,9 +95,8 @@ export async function cloudAccountRequest<T>(
 ): Promise<T> {
   if (!CONTROL_PLANE_URL)
     throw new Error("Cloud workspaces are not configured");
-  // Catalog consumers do not need to initialize the React auth/team tree.
-  const { getOrganizationStoreGeneration } =
-    await import("../features/team/team-store");
+  // Capture the initiating account synchronously, before token refresh or any
+  // other yield can replace it with the next signed-in account.
   const epoch = getOrganizationStoreGeneration();
   const session = await getSession();
   if (epoch !== getOrganizationStoreGeneration())
@@ -137,6 +146,7 @@ const AgentGrantsSchema = z.object({
         kind: z.string(),
         models: z.array(z.string()),
         expiresAt: z.string().datetime(),
+        runtimeQualified: z.boolean().optional(),
       }),
     )
     .max(100),
@@ -156,13 +166,18 @@ export async function cloudAgentGrant(
     throw new Error(
       "This agent and model need a cloud credential authorized for this workspace. Configure that authorization before sending.",
     );
+  if (grant.runtimeQualified === false)
+    throw new Error(
+      "This workspace's agent runtime needs an update before this agent can run. Your account connection is saved.",
+    );
   return grant.id;
 }
 
 export async function cloudAgentDelegations(target: CloudWorkspaceTarget) {
   const result = await request(
-    `/v1/cloud-workspaces/${z.string().uuid().parse(target.workspaceId)}/agent-credentials`,
+    `/v1/cloud-workspaces/${z.string().uuid().parse(target.workspaceId)}/agent-credentials/prepare`,
     AgentGrantsSchema,
+    { body: {}, idempotencyKey: crypto.randomUUID() },
   );
   return result.delegations.filter(
     (row) => Date.parse(row.expiresAt) > Date.now(),
@@ -236,11 +251,30 @@ export async function changeCloudWorkspaceLifecycle(
   return workspace;
 }
 
-export function getCloudWorkspaceCreateOptions(
+export const CloudWorkspaceRecoveryInputSchema = z.object({
+  sourceGeneration: z.number().int().positive(),
+  checkpointId: z.string().uuid(),
+  allowDataLoss: z.boolean().optional(),
+}).strict();
+export type CloudWorkspaceRecoveryInput = z.infer<typeof CloudWorkspaceRecoveryInputSchema>;
+
+export async function recoverCloudWorkspace(target: CloudWorkspaceTarget, input: CloudWorkspaceRecoveryInput, idempotencyKey: string): Promise<CloudWorkspaceDocument> {
+  const { workspace } = await request(
+    `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/generations`,
+    z.object({ workspace: CloudWorkspaceDocumentSchema }),
+    { body: { operation: "recover", ...CloudWorkspaceRecoveryInputSchema.parse(input) }, idempotencyKey },
+  );
+  if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
+    throw new Error("Cloud recovery response changed identity");
+  return workspace;
+}
+
+export async function getCloudWorkspaceCreateOptions(
   organizationId: string,
   owner: string,
   repository?: string,
 ): Promise<CloudWorkspaceCreateOptions> {
+  if (repository) await authorizeCloudGithubSource(organizationId, owner, repository);
   return request(
     `${organizationPath(organizationId)}/create-options?owner=${encodeURIComponent(owner)}${repository ? `&repository=${encodeURIComponent(repository)}` : ""}`,
     OptionsSchema,
@@ -251,6 +285,7 @@ export async function createCloudWorkspaceDocument(input: {
   organizationId: string;
   name?: string;
   teamId?: string;
+  cloudComputerBuild?: { id: string; version: number };
   repository: {
     forge: "github.com";
     owner: string;
@@ -260,12 +295,31 @@ export async function createCloudWorkspaceDocument(input: {
   };
   idempotencyKey: string;
 }): Promise<CloudWorkspaceDocument> {
+  const epoch = getOrganizationStoreGeneration();
   const { organizationId, idempotencyKey, ...body } = input;
-  const result = await request(
-    organizationPath(organizationId),
-    z.object({ workspace: CloudWorkspaceDocumentSchema }),
-    { body, idempotencyKey },
-  );
+  const assertAccount = () => {
+    if (epoch !== getOrganizationStoreGeneration())
+      throw new Error("Your account changed while creating the cloud workspace");
+  };
+  const create = () => {
+    assertAccount();
+    return request(
+      organizationPath(organizationId),
+      z.object({ workspace: CloudWorkspaceDocumentSchema }),
+      { body, idempotencyKey },
+    );
+  };
+  let result;
+  try { result = await create(); }
+  catch (error) {
+    // Preserve idempotent replay even after a source proof expires. Only a new
+    // create needing fresh user permissions takes the native verification path.
+    if (!(error instanceof ControlPlaneError) || error.code !== "github_cloud_source_authorization_required") throw error;
+    assertAccount();
+    await authorizeCloudGithubSource(organizationId, body.repository.owner, body.repository.name, body.repository.githubInstallationId);
+    result = await create();
+  }
+  assertAccount();
   if (result.workspace.organizationId !== organizationId)
     throw new Error("Cloud creation returned a different organization");
   return result.workspace;

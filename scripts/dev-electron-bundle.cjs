@@ -83,6 +83,38 @@ function readPlistValue(plist, key) {
   return m ? m[1] : null;
 }
 
+/** Dev bundles must declare their scheme before LaunchServices can make them
+ * the OAuth callback handler. Replace the whole nested array so a cloned or
+ * previously patched bundle cannot also claim Alpha, Beta or stable links. */
+function patchDevProtocol(plist) {
+  const declaration = `<key>CFBundleURLTypes</key>
+\t<array><dict>
+\t\t<key>CFBundleURLName</key><string>Zeros Dev</string>
+\t\t<key>CFBundleURLSchemes</key><array><string>zeros-dev</string></array>
+\t</dict></array>`;
+  const key = /<key>CFBundleURLTypes<\/key>/g.exec(plist);
+  if (!key) {
+    if (!/<\/dict>\s*<\/plist>\s*$/.test(plist)) {
+      throw new Error("Dev bundle plist has no root dictionary");
+    }
+    return plist.replace(/(<\/dict>\s*<\/plist>\s*)$/, `\t${declaration}\n$1`);
+  }
+  const after = plist.slice(key.index + key[0].length);
+  if (!/^\s*<array\s*\/?>/.test(after)) {
+    throw new Error("Dev bundle callback declaration is not an array");
+  }
+  let depth = 0;
+  for (const token of after.matchAll(/<!--[\s\S]*?-->|<(\/?)array\s*(\/?)>/g)) {
+    if (token[0].startsWith("<!--")) continue;
+    if (!token[2]) depth += token[1] ? -1 : 1;
+    if (depth === 0) {
+      const end = key.index + key[0].length + token.index + token[0].length;
+      return plist.slice(0, key.index) + declaration + plist.slice(end);
+    }
+  }
+  throw new Error("Dev bundle callback declaration is incomplete");
+}
+
 function patchPlist(plistPath, { name, exec, bundleId }) {
   let plist = fs.readFileSync(plistPath, "utf8");
   let changed = false;
@@ -118,6 +150,9 @@ function patchPlist(plistPath, { name, exec, bundleId }) {
       changed = true;
     }
   }
+  const withProtocol = patchDevProtocol(plist);
+  changed ||= withProtocol !== plist;
+  plist = withProtocol;
   if (changed) atomicWrite(plistPath, plist);
   return changed;
 }

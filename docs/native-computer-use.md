@@ -32,6 +32,20 @@ Subscription authentication is not a settings-sync API. The helper and Chrome
 extension must also exist on the execution Mac; a cloud engine does not acquire
 control of a user's laptop merely by signing into the same account.
 
+Organization cloud workspaces explicitly report **Native browser is unavailable
+in cloud workspaces.** Codex's official browser runtime is not available for
+Linux VMs. Claude's Chrome integration requires a direct Claude login, not an
+API key or setup token. Neither provider's cloud chat sign-in grants browser or
+computer control. The shared provider/session UI and Browser settings explain
+these limits without offering installation on the user's Mac. Ordinary cloud
+chat, user MCP and workspace port previews retain their separate availability.
+
+The [browser capability contract](browser-service.md#organization-cloud-availability-and-compatibility)
+is an optional versioned diagnostic scoped to provider, runtime and credential
+kind. Older engines omitting it mean unavailable, never ready. It does not
+change the existing native execution profile or Local browser defaults, and
+does not constitute full cloud browser parity.
+
 ## Permissions
 
 Computer use setup is managed in Codex/ChatGPT and macOS System Settings.

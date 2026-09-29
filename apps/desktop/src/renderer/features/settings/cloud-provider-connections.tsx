@@ -1,138 +1,538 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentType,
+} from "react";
 import { Button, Input } from "../../shared/ui";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../shared/ui/primitives/select";
 import { Checkbox } from "../../shared/ui/primitives/checkbox";
 import { toast } from "../../shared/ui/primitives/elements";
-import { useTeams, type TeamStoreState } from "../team/team-store";
-import { getCloudWorkspaceRows, subscribeCloudWorkspaces, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
-import { selectActiveFolder, useWorkspaceStore } from "../../state/store";
-import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
-import { invalidateCloudAgentRegistry, useWorkspaceAgents, warmCloudAgentRegistry } from "../agent/workspace-agent-registry";
+import { useTeams } from "../team/team-store";
 import { modelsForAgent } from "../agent/model-catalog";
 import { AgentIcon } from "../agent/agent-icon";
+import { NativeBrowserAvailability } from "../agent/native-browser-availability";
+import { invalidateCloudOrganizationAgentRegistry } from "../agent/workspace-agent-registry";
 import { useCachedRead } from "../../state/use-cached-read";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
 import type { ConnectionMethod } from "./connection-methods";
-import { authorizeCloudProvider, cloudProviderAccessCache, cloudProviderCredentialsCache, disconnectCloudProvider,
-  readCloudProviderAccess, readCloudProviderCredentials, saveCloudProviderCredential, type CloudProviderCredential } from "./cloud-provider-connection";
+import {
+  readScopedSettingsSelection,
+  writeScopedSettingsSelection,
+  settingsOwnerKey,
+} from "./settings-scope";
+import { subscribeProviderSettingsTab } from "./settings-navigation";
+import { connectCloudProviderSignIn } from "./cloud-provider-sign-in";
+import { shellOpenUrl } from "../../platform/app";
+import type { CloudProviderAuthStatus } from "@zeros/protocol/provider-auth";
+import {
+  cloudOrganizationConnectionsCache,
+  readCloudOrganizationConnections,
+  removeCloudOrganizationCredential,
+  saveCloudProviderCredential,
+  selectCloudOrganizationCredential,
+  type CloudProviderCredential,
+} from "./cloud-provider-connection";
 
-type Tabs = ComponentType<{ providers: BridgeRegistryAgent[]; activeId: string; onSelect: (id: string) => void }>;
+// Authentication is available before any VM exists. Each workspace's registry
+// independently checks whether its runtime supports the connected provider.
+const PROVIDERS = [
+  { id: "claude", name: "Claude Code" },
+  { id: "codex", name: "Codex" },
+  { id: "cursor", name: "Cursor" },
+];
+type Provider = { id: string; name: string; beta?: boolean };
+type Tabs = ComponentType<{
+  providers: Provider[];
+  activeId: string;
+  onSelect: (id: string) => void;
+}>;
 
-export function CloudProviderConnections({ organizationId, surfaceActive, Tabs }: {
-  organizationId: string; surfaceActive: boolean; Tabs: Tabs;
+export function CloudProviderConnections({
+  organizationId,
+  surfaceActive,
+  Tabs,
+}: {
+  organizationId: string;
+  surfaceActive: boolean;
+  Tabs: Tabs;
 }) {
   const { me } = useTeams();
-  const rows = useSyncExternalStore(subscribeCloudWorkspaces, getCloudWorkspaceRows);
-  const activeFolder = useWorkspaceStore(selectActiveFolder);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [agentId, setAgentId] = useState("claude");
-  const workspaces = useMemo(() => rows.filter(row => row.organizationId === organizationId && row.archivedAt == null), [organizationId, rows]);
-  const folder = workspaces.find(row => row.path === selected)?.path ?? workspaces.find(row => row.path === activeFolder)?.path ?? workspaces[0]?.path ?? null;
-  const registry = useWorkspaceAgents(folder, surfaceActive);
-  const agents = folder ? (registry ?? []) : [];
-  const agent = agents.find(row => row.id === agentId) ?? agents[0];
-  return <div className="flex flex-col gap-8">
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-fg2 text-xs">Workspace</span>
-      <Select value={folder ?? ""} onValueChange={setSelected} disabled={!workspaces.length}>
-        <SelectTrigger aria-label="Cloud agent workspace"><SelectValue placeholder="Create a cloud workspace first" /></SelectTrigger>
-        <SelectContent>{workspaces.map(row => <SelectItem key={row.path} value={row.path}>{cloudWorkspaceDocument(parseCloudWorkspaceKey(row.path)!)?.name ?? row.branch}</SelectItem>)}</SelectContent>
-      </Select>
+  const owner = settingsOwnerKey(me?.user.id ?? "pending", organizationId);
+  const [agentId, setAgentId] = useState(() =>
+    readScopedSettingsSelection(owner, "provider", "claude"),
+  );
+  const agent = PROVIDERS.find((row) => row.id === agentId) ?? PROVIDERS[0]!;
+  useEffect(() => subscribeProviderSettingsTab(setAgentId, owner), [owner]);
+  return (
+    <div className="flex flex-col gap-8">
+      <Tabs
+        providers={PROVIDERS}
+        activeId={agent.id}
+        onSelect={(id) => {
+          setAgentId(id);
+          writeScopedSettingsSelection(owner, "provider", id);
+        }}
+      />
+      {me && (
+        <CloudProviderConnection
+          key={`${owner}:${agent.id}`}
+          organizationId={organizationId}
+          userId={me.user.id}
+          agent={agent}
+          surfaceActive={surfaceActive}
+        />
+      )}
     </div>
-    {!folder ? <p className="text-fg2 text-xs">Create a cloud workspace to connect its agents.</p>
-      : !agent ? <p className="text-fg2 text-xs">Start this workspace to load its agents.</p>
-        : <><Tabs providers={agents} activeId={agent.id} onSelect={setAgentId} />
-          {me && <CloudProviderConnection key={`${me.user.id}:${folder}:${agent.id}`} folder={folder} agent={agent} user={me.user} surfaceActive={surfaceActive} />}</>}
-  </div>;
+  );
 }
 
-function CloudProviderConnection({ folder, agent, user, surfaceActive }: {
-  folder: string; agent: BridgeRegistryAgent; user: NonNullable<TeamStoreState["me"]>["user"]; surfaceActive: boolean;
+function CloudProviderConnection({
+  organizationId,
+  userId,
+  agent,
+  surfaceActive,
+}: {
+  organizationId: string;
+  userId: string;
+  agent: Provider;
+  surfaceActive: boolean;
 }) {
-  const target = parseCloudWorkspaceKey(folder)!;
-  const key = JSON.stringify([user.id, target.organizationId, target.workspaceId]);
-  const credentials = useCachedRead(cloudProviderCredentialsCache, user.id, readCloudProviderCredentials, { enabled: surfaceActive, maxAgeMs: 30_000 });
-  const access = useCachedRead(cloudProviderAccessCache, key, () => readCloudProviderAccess(target.workspaceId), { enabled: surfaceActive, maxAgeMs: 15_000 });
+  const key = settingsOwnerKey(userId, organizationId);
+  const snapshot = useCachedRead(
+    cloudOrganizationConnectionsCache,
+    key,
+    () => readCloudOrganizationConnections(organizationId),
+    { enabled: surfaceActive, maxAgeMs: 30_000 },
+  );
+  const matching = (snapshot.data?.credentials ?? []).filter((row) =>
+    row.kind.startsWith(`${agent.id}-`),
+  );
+  const connection = snapshot.data?.connections.find(
+    (row) => row.provider === agent.id,
+  );
   const [open, setOpen] = useState(false);
-  const [method, setMethod] = useState<ConnectionMethod>("apiKey");
-  const [selected, setSelected] = useState("new");
+  const [selected, setSelected] = useState<CloudProviderCredential | null>(
+    null,
+  );
+  const [method, setMethod] = useState<ConnectionMethod>("account");
+  const [displayName, setDisplayName] = useState("");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
-  const inFlight = useRef(false);
-  const models = useMemo(() => modelsForAgent(agent.id, null).filter(row => row.value.length <= 256 && /^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/.test(row.value)), [agent.id]);
-  const [allowedModels, setAllowedModels] = useState(() => models.slice(0, 32).map(row => row.value));
-  const createIntent = useRef<{ token: string; method: ConnectionMethod; id: string; operationId: string } | null>(null);
-  const grantIntent = useRef<Parameters<typeof authorizeCloudProvider>[0] | null>(null);
-  const matching = (credentials.data ?? []).filter(row => !row.revoked && row.kind.startsWith(`${agent.id}-`));
-  const grants = (access.data?.delegations ?? []).filter(row => row.kind.startsWith(`${agent.id}-`) && Date.parse(row.expiresAt) > Date.now());
-  useEffect(() => { if (!surfaceActive) { setOpen(false); setToken(""); createIntent.current = null; } }, [surfaceActive]);
+  const inFlight = useRef(false),
+    mounted = useRef(true);
+  const signIn = useRef<AbortController | null>(null);
+  const [authStatus, setAuthStatus] = useState<CloudProviderAuthStatus | null>(
+    null,
+  );
+  const models = useMemo(
+    () =>
+      modelsForAgent(agent.id, null).filter(
+        (row) =>
+          row.value.length <= 256 &&
+          /^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/.test(row.value),
+      ),
+    [agent.id],
+  );
+  const [allowedModels, setAllowedModels] = useState(() =>
+    models.slice(0, 32).map((row) => row.value),
+  );
+  const createIntent = useRef<{
+    token: string;
+    displayName: string;
+    method: ConnectionMethod;
+    id: string;
+    operationId: string;
+  } | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      createIntent.current = null;
+      signIn.current?.abort();
+    };
+  }, []);
+  useEffect(() => {
+    if (!surfaceActive) {
+      setOpen(false);
+      setToken("");
+      createIntent.current = null;
+      signIn.current?.abort();
+      setAuthStatus(null);
+    }
+  }, [surfaceActive]);
   const refresh = async () => {
-    cloudProviderCredentialsCache.invalidate(user.id);
-    cloudProviderAccessCache.invalidate(key);
-    await Promise.all([credentials.refresh(), access.refresh()]);
-    invalidateCloudAgentRegistry(folder);
-    await warmCloudAgentRegistry(folder).catch(() => {});
+    cloudOrganizationConnectionsCache.invalidate(key);
+    invalidateCloudOrganizationAgentRegistry(organizationId);
+    if (mounted.current) await snapshot.refresh();
   };
-  const connect = async () => {
-    if (inFlight.current || !allowedModels.length || !access.data) return;
-    if (access.data.compute.trust !== "zeros-managed") { toast.error("Agent connection for this compute host is not available yet."); return; }
-    inFlight.current = true; setBusy(true);
-    try {
-      let chosen: CloudProviderCredential | undefined = matching.find(row => row.id === selected);
-      if (selected === "new") {
-        if (!token.trim()) return;
-        if (createIntent.current?.token !== token.trim() || createIntent.current.method !== method)
-          createIntent.current = { token: token.trim(), method, id: crypto.randomUUID(), operationId: crypto.randomUUID() };
-        chosen = (await saveCloudProviderCredential({ ...createIntent.current, displayName: `${agent.name} cloud connection`, agentId: agent.id, setupToken: method === "account" })).credential;
-        cloudProviderCredentialsCache.setData(user.id, [chosen, ...(credentials.data ?? []).filter(row => row.id !== chosen!.id)]);
-        setSelected(chosen.id); setToken(""); createIntent.current = null;
-      }
-      if (!chosen) throw new Error("Select a cloud credential.");
-      const fingerprint = access.data.compute;
-      if (!grantIntent.current || grantIntent.current.credentialId !== chosen.id || grantIntent.current.expectedRevision !== chosen.revision ||
-        JSON.stringify(grantIntent.current.models) !== JSON.stringify(allowedModels) || grantIntent.current.computeConsent.fingerprint !== fingerprint.fingerprint)
-        grantIntent.current = { id: crypto.randomUUID(), credentialId: chosen.id, expectedRevision: chosen.revision,
-          workspaceId: target.workspaceId, granteeUserId: user.id, models: allowedModels,
-          expiresAt: new Date(Date.now() + 7 * 24 * 3600_000).toISOString(), computeConsent: fingerprint };
-      await authorizeCloudProvider(grantIntent.current);
-      grantIntent.current = null;
-      await refresh(); setOpen(false); toast.success(`${agent.name} connected to this cloud workspace`);
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Cloud connection failed"); }
-    finally { inFlight.current = false; setBusy(false); }
-  };
-  const disconnect = async () => {
+  const run = async (action: () => Promise<void>) => {
     if (inFlight.current) return;
-    inFlight.current = true; setBusy(true);
+    inFlight.current = true;
+    setBusy(true);
     try {
-      for (const grant of grants.filter(row => row.ownerUserId === user.id)) await disconnectCloudProvider(grant.id);
-      await refresh(); toast.success("Disconnected from this workspace");
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Disconnect failed"); }
-    finally { inFlight.current = false; setBusy(false); }
+      await action();
+      await refresh();
+    } catch (error) {
+      if (
+        mounted.current &&
+        !(error instanceof DOMException && error.name === "AbortError")
+      )
+        toast.error(
+          error instanceof Error ? error.message : "Cloud connection failed",
+        );
+      await refresh().catch(() => {});
+    } finally {
+      inFlight.current = false;
+      if (mounted.current) setBusy(false);
+    }
   };
-  return <section className="flex flex-col gap-3">
-    <div className="flex items-center justify-between gap-4">
-      <div className="text-fg1 flex items-center gap-3 text-sm font-medium"><AgentIcon agentId={agent.id} iconUrl={null} className="size-5" />{agent.name}</div>
-      <Button variant="secondary" size="lg" onClick={() => setOpen(true)}>{grants.length ? "Connected" : "Connect"}</Button>
-    </div>
-    <p className="text-fg2 text-xs">Cloud credentials are authorized for your account in this workspace.</p>
-    {(access.error || credentials.error) && <p className="text-error text-xs" role="alert">{access.error?.message ?? credentials.error?.message}</p>}
-    <ProviderConnectionDialog provider={agent.id} name={agent.name} open={surfaceActive && open} onOpenChange={value => { setOpen(value); if (!value) { setToken(""); createIntent.current = null; } }}
-      method={method} onMethodChange={value => { setMethod(value); setToken(""); createIntent.current = null; }} connected={grants.length > 0} busy={busy}
-      methodOptions={[{ id: "apiKey", label: "API", description: "Connect a cloud API key." }, ...(agent.id === "claude" ? [{ id: "account" as const, label: "Setup token", description: "Paste a Claude setup token for cloud execution." }] : [])]}>
-      <Select value={selected} onValueChange={setSelected} disabled={busy}>
-        <SelectTrigger aria-label="Cloud credential"><SelectValue /></SelectTrigger>
-        <SelectContent><SelectItem value="new">New cloud credential</SelectItem>{matching.map(row => <SelectItem value={row.id} key={row.id}>{row.displayName}</SelectItem>)}</SelectContent>
-      </Select>
-      {selected === "new" && <Input type="password" autoComplete="off" aria-label={method === "account" ? "Cloud setup token" : "Cloud API key"} placeholder={method === "account" ? "Paste setup token" : "Paste API key"} value={token} onChange={event => setToken(event.target.value)} disabled={busy} />}
-      <p className="text-fg2 text-xs">Authorize these models for seven days. The credential is stored encrypted in cloud and used on Zeros Cloud.</p>
-      <div className="flex max-h-48 flex-col gap-2 overflow-y-auto">{models.map(model => <label key={model.value} className="text-fg1 flex items-center gap-2 text-xs">
-        <Checkbox checked={allowedModels.includes(model.value)} disabled={busy || (!allowedModels.includes(model.value) && allowedModels.length >= 32)} onChange={() => setAllowedModels(values => values.includes(model.value) ? values.filter(value => value !== model.value) : [...values, model.value])} />{model.label}
-      </label>)}</div>
-      <div className="flex justify-end gap-2">
-        {grants.some(row => row.ownerUserId === user.id) && <Button variant="secondary" disabled={busy} onClick={() => void disconnect()}>Disconnect workspace</Button>}
-        <Button disabled={busy || !access.data || allowedModels.length === 0 || (selected === "new" && !token.trim())} onClick={() => void connect()}>{busy ? "Connecting…" : "Authorize workspace"}</Button>
+  const connect = () =>
+    run(async () => {
+      if (!allowedModels.length || !snapshot.data) return;
+      let chosen = selected;
+      if (!chosen) {
+        const name =
+          displayName.trim() ||
+          `${agent.name} ${method === "apiKey" ? "API" : "account"}`;
+        if (
+          method === "account" &&
+          (agent.id === "codex" || agent.id === "cursor")
+        ) {
+          const abort = new AbortController();
+          signIn.current = abort;
+          chosen = await connectCloudProviderSignIn(
+            { organizationId, provider: agent.id, displayName: name },
+            abort.signal,
+            setAuthStatus,
+          );
+          abort.signal.throwIfAborted();
+        } else {
+          if (!token.trim()) return;
+          if (
+            createIntent.current?.token !== token.trim() ||
+            createIntent.current.method !== method ||
+            createIntent.current.displayName !== name
+          )
+            createIntent.current = {
+              token: token.trim(),
+              displayName: name,
+              method,
+              id: crypto.randomUUID(),
+              operationId: crypto.randomUUID(),
+            };
+          chosen = (
+            await saveCloudProviderCredential({
+              ...createIntent.current,
+              organizationId,
+              agentId: agent.id,
+              setupToken: method === "account",
+            })
+          ).credential;
+        }
+        if (mounted.current) {
+          setSelected(chosen);
+          setToken("");
+        }
+        createIntent.current = null;
+      }
+      await selectCloudOrganizationCredential(organizationId, agent.id, {
+        expectedRevision: connection?.revision ?? 0,
+        credentialId: chosen.id,
+        credentialRevision: chosen.revision,
+        models: allowedModels,
+        consent: "zeros-managed",
+      });
+      if (mounted.current) {
+        setOpen(false);
+        toast.success(`${agent.name} connected`);
+      }
+    });
+  const disconnect = () =>
+    run(async () => {
+      await selectCloudOrganizationCredential(organizationId, agent.id, {
+        expectedRevision: connection?.revision ?? 0,
+        credentialId: null,
+      });
+    });
+  const configure = (credential: CloudProviderCredential | null) => {
+    setSelected(credential);
+    setToken("");
+    setDisplayName("");
+    setAuthStatus(null);
+    createIntent.current = null;
+    setMethod(
+      !credential ||
+        credential.connectionMethod === "account" ||
+        credential.kind === "claude-setup-token" ||
+        credential.kind === "codex-chatgpt"
+        ? "account"
+        : "apiKey",
+    );
+    setAllowedModels(
+      credential &&
+        connection?.credentialId === credential.id &&
+        connection.models.length
+        ? connection.models
+        : models.slice(0, 32).map((row) => row.value),
+    );
+    setOpen(true);
+  };
+  return (
+    <section className="flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-4">
+        <div className="text-fg1 flex items-center gap-3 text-sm font-medium">
+          <AgentIcon agentId={agent.id} iconUrl={null} className="size-5" />
+          {agent.name}
+        </div>
+        <Button
+          variant="secondary"
+          onClick={() => configure(null)}
+          disabled={!snapshot.data || busy}
+        >
+          {matching.length ? "Add account" : "Connect"}
+        </Button>
       </div>
-    </ProviderConnectionDialog>
-  </section>;
+      <p className="text-fg2 text-xs">
+        Your accounts are private. Choose one for your sessions in this
+        organization.
+      </p>
+      <NativeBrowserAvailability provider={agent.id} />
+      {snapshot.error && (
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-error text-xs" role="alert">
+            {snapshot.error.message}
+          </p>
+          <Button variant="ghost" onClick={() => void snapshot.refresh()}>
+            Retry
+          </Button>
+        </div>
+      )}
+      {matching.map((credential) => {
+        const active =
+          connection?.connected && connection.credentialId === credential.id;
+        return (
+          <div
+            key={credential.id}
+            className="border-border1 flex items-center justify-between gap-3 border-b py-3"
+          >
+            <div className="min-w-0">
+              <div className="text-fg1 truncate text-sm">
+                {credential.displayName}
+              </div>
+              <div className="text-fg2 text-xs">
+                {active ? "Connected" : "Saved"} ·{" "}
+                {credential.connectionMethod === "account" ||
+                !credential.kind.endsWith("api-key")
+                  ? "Account"
+                  : "API"}
+              </div>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <Button
+                variant="ghost"
+                disabled={busy}
+                onClick={() => configure(credential)}
+              >
+                {active ? "Configure" : "Use account"}
+              </Button>
+              {active ? (
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => void disconnect()}
+                >
+                  Disconnect
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() =>
+                    void run(async () => {
+                      await removeCloudOrganizationCredential(
+                        organizationId,
+                        credential.id,
+                      );
+                    })
+                  }
+                >
+                  Remove
+                </Button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      <ProviderConnectionDialog
+        provider={agent.id}
+        name={agent.name}
+        open={surfaceActive && open}
+        onOpenChange={(value) => {
+          setOpen(value);
+          if (!value) {
+            setToken("");
+            createIntent.current = null;
+            signIn.current?.abort();
+            setAuthStatus(null);
+          }
+        }}
+        method={method}
+        onMethodChange={(value) => {
+          setMethod(value);
+          setSelected(null);
+          setToken("");
+          createIntent.current = null;
+        }}
+        connected={connection?.connected ?? false}
+        busy={busy}
+        methodOptions={[
+          {
+            id: "account",
+            label: "Account",
+            description: "Connect your subscription.",
+          },
+          {
+            id: "apiKey",
+            label: "API",
+            description: "Connect with an API key.",
+          },
+        ]}
+      >
+        {selected ? (
+          <p className="text-fg1 text-sm">{selected.displayName}</p>
+        ) : (
+          <>
+            <Input
+              aria-label="Account name"
+              placeholder="Account name"
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+              maxLength={80}
+              disabled={busy}
+            />
+            {method === "account" && agent.id === "claude" && (
+              <p className="text-fg2 text-xs">
+                Run <code>claude setup-token</code> and paste the token here.
+                Add another account to use a different subscription.
+              </p>
+            )}
+            {method === "account" && agent.id === "codex" && (
+              <p className="text-fg2 text-xs">
+                Enable device code authorization in ChatGPT Settings → Security.
+                Connect, then enter the code on the verification page.
+              </p>
+            )}
+            {method === "account" && agent.id === "cursor" && (
+              <p className="text-fg2 text-xs">
+                Continue with your Cursor account in your browser.
+              </p>
+            )}
+            {(method === "apiKey" || agent.id === "claude") && (
+              <Input
+                type="password"
+                autoComplete="off"
+                aria-label={
+                  method === "account" ? "Cloud setup token" : "Cloud API key"
+                }
+                placeholder={
+                  method === "account" ? "Paste setup token" : "Paste API key"
+                }
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+                disabled={busy}
+              />
+            )}
+          </>
+        )}
+        {authStatus?.deviceCode && (
+          <div className="bg-bg2 flex flex-col gap-3 rounded-md p-3">
+            <p className="text-fg2 text-xs">
+              Enter this code after signing in:
+            </p>
+            <div className="flex items-center justify-between gap-3">
+              <code className="text-fg1 text-sm">
+                {authStatus.deviceCode.userCode}
+              </code>
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  void navigator.clipboard
+                    .writeText(authStatus.deviceCode!.userCode)
+                    .catch(() => toast.error("Could not copy code"))
+                }
+              >
+                Copy code
+              </Button>
+            </div>
+            <Button
+              variant="secondary"
+              onClick={() =>
+                void shellOpenUrl(authStatus.deviceCode!.verificationUrl).catch(
+                  () => toast.error("Could not open verification page"),
+                )
+              }
+            >
+              Open verification page
+            </Button>
+          </div>
+        )}
+        <p className="text-fg2 text-xs">
+          Connecting stores this account encrypted in the cloud and authorizes
+          these models for your sessions on Zeros-managed computers in this
+          organization, until you disconnect.
+        </p>
+        <details>
+          <summary className="text-fg2 cursor-pointer text-xs">
+            Allowed models ({allowedModels.length})
+          </summary>
+          <div className="mt-3 flex max-h-48 flex-col gap-2 overflow-y-auto">
+            {models.map((model) => (
+              <label
+                key={model.value}
+                className="text-fg1 flex items-center gap-2 text-xs"
+              >
+                <Checkbox
+                  checked={allowedModels.includes(model.value)}
+                  disabled={
+                    busy ||
+                    (!allowedModels.includes(model.value) &&
+                      allowedModels.length >= 32)
+                  }
+                  onChange={() =>
+                    setAllowedModels((values) =>
+                      values.includes(model.value)
+                        ? values.filter((value) => value !== model.value)
+                        : [...values, model.value],
+                    )
+                  }
+                />
+                {model.label}
+              </label>
+            ))}
+          </div>
+        </details>
+        <div className="flex justify-end gap-2">
+          {busy && authStatus && (
+            <Button variant="secondary" onClick={() => signIn.current?.abort()}>
+              Cancel
+            </Button>
+          )}
+          <Button
+            disabled={
+              busy ||
+              !snapshot.data ||
+              !allowedModels.length ||
+              (!selected &&
+                !token.trim() &&
+                (method === "apiKey" || agent.id === "claude"))
+            }
+            onClick={() => void connect()}
+          >
+            {busy ? "Connecting…" : "Connect account"}
+          </Button>
+        </div>
+      </ProviderConnectionDialog>
+    </section>
+  );
 }

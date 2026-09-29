@@ -369,6 +369,7 @@ export function buildPtyEnv(opts?: {
   // A nested checkout resolves its own backend/auth profile and credentials.
   delete env.ZEROS_DEV_ENVIRONMENT;
   delete env.ZEROS_DEV_AUTH_PROFILE;
+  delete env.ZEROS_DEV_NODE_EXECUTABLE;
   delete env.ZEROS_ISOLATE;
   delete env.ZEROS_VITE_PORT;
   delete env.ZEROS_ENGINE_BASE_PORT;

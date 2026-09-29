@@ -483,6 +483,7 @@ export const ghAppConnect: CommandHandler = async (args) => {
     const flowKind = await beginGithubAppConnection(
       !workspaceDev && args.installFlow !== false,
       args.forceInstall === true,
+      args.preserveSelectedMethod === true,
     );
     return flowKind ? { flowKind } : null;
   } catch (error) {

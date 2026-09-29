@@ -113,3 +113,28 @@ describe("persistent development workspace ownership", () => {
     expect(env).toEqual({ PATH: "/bin", HOME: "/home/dev" });
   });
 });
+
+describe("hosted checkout binding", () => {
+  it("accepts a synced copy only when the canonical managed workspace UUID proves the same owner", () => {
+    const f = fixture(), id = "a602a47c-cef0-44b6-bef6-8e81aa700a5c";
+    const cloud = workspaceIdentity(f.repositoryRoot, { CONDUCTOR_WORKSPACE_ID: id, CONDUCTOR_WORKSPACE_PATH: f.repositoryRoot });
+    const mac = path.join(f.homeDir, "conductor/remote-workspace-sync/Zeros", id);
+    fs.mkdirSync(path.dirname(mac), { recursive: true }); fs.cpSync(f.repositoryRoot, mac, { recursive: true });
+    fs.chmodSync(path.join(mac, ".context/zeros-dev"), 0o700);
+    expect(workspaceIdentity(mac, {}).owner).toBe(cloud.owner);
+  });
+  it("retains its owner after moving a checkout and rejects a copied binding", () => {
+    const f = fixture();
+    const first = workspaceIdentity(f.repositoryRoot, {});
+    const moved = path.join(f.homeDir, "moved"); fs.renameSync(f.repositoryRoot, moved);
+    expect(workspaceIdentity(moved, {}).owner).toBe(first.owner);
+    const copied = path.join(f.homeDir, "copied"); fs.cpSync(moved, copied, { recursive: true });
+    expect(() => workspaceIdentity(copied, {})).toThrow(/copied|adopt|binding/);
+  });
+  it("does not silently switch a pinned owner to a new manager", () => {
+    const f = fixture();
+    const first = workspaceIdentity(f.repositoryRoot, {});
+    expect(() => workspaceIdentity(f.repositoryRoot, { CONDUCTOR_WORKSPACE_ID: "11111111-1111-4111-8111-111111111111", CONDUCTOR_WORKSPACE_PATH: f.repositoryRoot })).toThrow(/adopt/);
+    expect(workspaceIdentity(f.repositoryRoot, {}).owner).toBe(first.owner);
+  });
+});

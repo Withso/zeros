@@ -60,6 +60,8 @@ export interface AsyncCacheLoadOptions {
 
 export interface KeyedAsyncCacheOptions<T> {
   maxEntries?: number;
+  /** Reuse unchanged confirmed data only after the exact-key generation fence. */
+  reconcile?: (previous: T | undefined, next: T) => T;
   /** Optional, already-validated durable snapshot for an exact key. Read
    * synchronously on first access so reopening never paints a cold fallback.
    * The original timestamp preserves freshness across app restarts. */
@@ -93,6 +95,7 @@ export class KeyedAsyncCache<T> {
   private readonly maxWeight: number;
   private readonly weightOf: ((value: T) => number) | null;
   private readonly initialSnapshot: KeyedAsyncCacheOptions<T>["initialSnapshot"];
+  private readonly reconcile: KeyedAsyncCacheOptions<T>["reconcile"];
 
   public constructor(options: number | KeyedAsyncCacheOptions<T> = 64) {
     if (typeof options === "number") {
@@ -102,6 +105,7 @@ export class KeyedAsyncCache<T> {
       this.maxWeight = Number.POSITIVE_INFINITY;
       this.weightOf = null;
       this.initialSnapshot = undefined;
+      this.reconcile = undefined;
       return;
     }
     this.maxEntries = Number.isFinite(options.maxEntries)
@@ -112,6 +116,7 @@ export class KeyedAsyncCache<T> {
       : Number.POSITIVE_INFINITY;
     this.weightOf = options.weightOf ?? null;
     this.initialSnapshot = options.initialSnapshot;
+    this.reconcile = options.reconcile;
   }
 
   /** Return the stable snapshot for `key`, creating its initial record once. */
@@ -214,6 +219,7 @@ export class KeyedAsyncCache<T> {
       .then(fetcher)
       .then((data) => {
         if (entry.generation === generation) {
+          data = this.reconcile?.(entry.snapshot.data, data) ?? data;
           this.replaceSnapshot(key, entry, {
             data,
             loading: false,
@@ -258,6 +264,7 @@ export class KeyedAsyncCache<T> {
   /** Publish an authoritative local value and supersede older async reads. */
   public setData(key: string, data: T): void {
     const entry = this.getOrCreate(key);
+    data = this.reconcile?.(entry.snapshot.data, data) ?? data;
     entry.generation += 1;
     entry.stale = false;
     this.pending.delete(key);

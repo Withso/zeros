@@ -1,11 +1,14 @@
+import runtimeLayout from "./runtime-layout.json" with { type: "json" };
+
 /** Mount inputs are image-owned constants, never paths or commands from an
  * engine request. The host launcher verifies their physical ownership first.
  * Private broker authority, provider login homes and the host shadow/SSH files
  * have no mount in this view. */
 export function cloudEngineViewArguments(operation = "serve",version=2) {
-  if (!["serve", "qualify"].includes(operation))
+  if (!["serve", "qualify", "qualify-agent"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
   if(version!==2&&version!==3)throw new Error("Invalid cloud engine profile version");
+  if(operation==="qualify-agent"&&version!==3)throw new Error("Native agent qualification requires v3");
   const args = [
     "--die-with-parent",
     "--unshare-ipc",
@@ -63,8 +66,11 @@ export function cloudEngineViewArguments(operation = "serve",version=2) {
     "/etc/containers/registries.conf",
     "/etc/containers/registries.conf",
     "--bind",
-    "/srv/zeros/workspace",
-    "/srv/zeros/workspace",
+    // One mount permits atomic attachment publication from an engine-private
+    // sibling. The host parent contains only repository/staging and empty
+    // mount points; broker authority remains outside this projection.
+    runtimeLayout.engineFilesRoot,
+    "/srv/zeros",
     "--bind",
     "/srv/zeros/state",
     "/srv/zeros/state",
@@ -124,12 +130,13 @@ export function cloudEngineViewArguments(operation = "serve",version=2) {
     "--remount-ro",
     "/",
     "--chdir",
-    "/srv/zeros/workspace",
+    operation === "qualify-agent" ? "/opt/zeros" : "/srv/zeros/workspace",
     "--",
     "/opt/zeros-runtime/cloud-engine-namespace",
   );
   if(version===3)args.push("--v3");
   if (operation === "qualify") args.push("--qualify");
+  if (operation === "qualify-agent") args.push("--qualify-agent");
   return args;
 }
 
@@ -137,7 +144,7 @@ export function cloudEngineViewArguments(operation = "serve",version=2) {
  * listings. Every authority-bearing variable is selected explicitly from the
  * existing supervisor contract; ambient provider/loader variables are absent. */
 export function cloudEngineViewEnvironment(source, operation = "serve") {
-  if (!["serve", "qualify"].includes(operation))
+  if (!["serve", "qualify", "qualify-agent"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
   const environment = {
     PATH: "/opt/zeros-runtime/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -150,6 +157,7 @@ export function cloudEngineViewEnvironment(source, operation = "serve") {
     ZEROS_WORKSPACES_DIR: "/srv/zeros/state/workspaces",
     ZEROS_USER_SETTINGS_DIR: "/srv/zeros/managed-settings",
     ZEROS_REPO_DIR: "/srv/zeros/workspace",
+    ZEROS_ATTACHMENT_TEMP_DIR: "/srv/zeros/attachment-staging",
     ZEROS_PTY_HOST_RUNTIME: "/opt/zeros-runtime/bin/node",
     ZEROS_PTY_HOST_SCRIPT:
       "/opt/zeros/apps/desktop/src/engine/pty/pty-host.cjs",

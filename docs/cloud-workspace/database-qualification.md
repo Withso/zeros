@@ -216,3 +216,42 @@ before changing security-event cursor order (0075), draining workers before
 individual Pro and staff-pilot authority changes (0076), and draining funding
 workers before account-wide credit accounting (0079). Do not run old and new
 workers together or reinterpret historical payers, reservations or receipts.
+
+## History index rollout (0109)
+
+Migration `0109_cloud_history_reads.sql` is already applied in Dev. Its bytes
+and checksum must remain unchanged. A read-only Alpha measurement supplied by
+the rollout orchestrator at **2026-09-29 12:05 UTC** found
+`workspace_record_entities`: **0 rows, 16 KiB**; `cloud_agent_credentials`:
+**0 rows**; `cloud_agent_credential_delegations`: **0 rows**; and
+`cloud_workspaces`: **1 row**. Beta and Production have cloud execution off.
+This is a dated size measurement, not a populated-table timing or load test.
+At that measured size the ordinary index build is not a practical rollout
+blocker; recheck the size before deployment and accept that small write pause.
+
+Ordinary `CREATE INDEX` holds a write-conflicting lock until the enclosing
+migration transaction commits. For a populated deployment, drain durable-record
+writers before applying 0109, or explicitly accept the measured build duration
+and lock-wait disruption for that deployment's current size. A future large-table
+index needs its own reviewed migration and rollout procedure; adding
+`CONCURRENTLY` to this already-applied transactional migration is not an option.
+This change adds no nontransactional migration execution mode.
+
+## Lifecycle diagnostics rollout (0114)
+
+0114 takes `ACCESS EXCLUSIVE` on `cloud_workspaces`, then on
+`cloud_workspace_provider_operations`, before creating its foreign key or
+altering either table. This parent-first order avoids a lock-upgrade deadlock
+with a released backend's wake transaction (workspace lock, journal read,
+workspace update). Even one workspace can encounter that interleaving; the
+small 0109 index measurement does not qualify it away.
+
+Lock acquisition has a two-second `lock_timeout`. If an existing transaction
+does not finish in that window, PostgreSQL returns `55P03`; the whole migration
+rolls back and its ledger entry is not committed. Let the writer finish or drain
+lifecycle writers, then rerun the ordinary migration command. Do not extend the
+timeout indefinitely. The additive schema accepts old writers after commit;
+ready publication records a workspace-local recovery boundary, with incident
+updates deferred to a bounded background retry. The retained PostgreSQL 18
+regression runs the actual 0114 SQL against overlapping released-wake SQL and
+also verifies bounded rollback followed by a successful retry.

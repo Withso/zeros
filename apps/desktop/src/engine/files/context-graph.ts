@@ -30,6 +30,7 @@ import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { currentCloudFilePolicy } from "./cloud-file-policy";
 import { createAttachmentTemporaryDirectory } from "./attachment-temporary-directory";
 import { cleanupLegacyAttachmentStaging } from "./attachment-legacy-staging";
 import {
@@ -175,6 +176,9 @@ const scaffolds = new Map<string, Promise<ContextGraphScaffoldResult>>();
 export function ensureContextGraph(
   workspaceRoot: string,
 ): Promise<ContextGraphScaffoldResult> {
+  // Do not borrow another actor's in-flight scaffold: its authority can expire
+  // independently. Exclusive filesystem creation still makes this idempotent.
+  if (currentCloudFilePolicy()) return scaffoldContextGraph(path.resolve(workspaceRoot));
   const key = path.resolve(workspaceRoot);
   const pending = scaffolds.get(key);
   if (pending) return pending;
@@ -189,7 +193,9 @@ async function scaffoldContextGraph(
   workspaceRoot: string,
 ): Promise<ContextGraphScaffoldResult> {
   const root = graphRoot(workspaceRoot);
+  const policy = currentCloudFilePolicy();
   try {
+    currentCloudFilePolicy()?.assertAuthorized(true);
     await assertContextDirectory(root, workspaceRoot);
     if (!(await isConfined(root, workspaceRoot))) {
       return { ok: false, created: false, error: "graph escapes workspace" };
@@ -209,17 +215,22 @@ async function scaffoldContextGraph(
       if (!(await isConfined(dir, workspaceRoot))) {
         return { ok: false, created, error: "graph scope escapes workspace" };
       }
-      const made = await fs.mkdir(dir, { recursive: true });
-      if (made !== undefined) created = true;
+      if (policy) created = policy.createDirectory(path.relative(workspaceRoot, dir)) || created;
+      else {
+        const made = await fs.mkdir(dir, { recursive: true });
+        if (made !== undefined) created = true;
+      }
       if (!(await isConfined(dir, workspaceRoot))) {
         return { ok: false, created, error: "graph scope escapes workspace" };
       }
     }
     const ignorePath = path.join(root, ".gitignore");
+    currentCloudFilePolicy()?.assertPath(path.relative(workspaceRoot, ignorePath), true);
     try {
       // Exclusive creation preserves a user-edited file and closes the
       // access-then-write race without ever following a planted symlink.
-      await fs.writeFile(ignorePath, GITIGNORE_BODY, { flag: "wx" });
+      if (policy) policy.createFileExclusive(path.relative(workspaceRoot, ignorePath), GITIGNORE_BODY);
+      else await fs.writeFile(ignorePath, GITIGNORE_BODY, { flag: "wx" });
       created = true;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
@@ -227,7 +238,8 @@ async function scaffoldContextGraph(
     // A pre-existing .context/.gitignore may have arbitrary scratch rules.
     // Keep them intact while making the newly-created private scope safe.
     try {
-      await fs.writeFile(
+      if (policy) policy.createFileExclusive(`${CONTEXT_GRAPH_DIR}/${CONTEXT_GRAPH_LOCAL}/.gitignore`, "*\n");
+      else await fs.writeFile(
         path.join(root, CONTEXT_GRAPH_LOCAL, ".gitignore"),
         "*\n",
         { flag: "wx" },
@@ -262,7 +274,10 @@ function kindForName(name: string): ContextGraphKind {
 async function readPreview(absPath: string): Promise<string | undefined> {
   let handle: fs.FileHandle | null = null;
   try {
-    handle = await fs.open(absPath, "r");
+    const policy = currentCloudFilePolicy();
+    if (policy) policy.assertPath(path.relative(policy.root, absPath));
+    handle = await fs.open(absPath, policy ? fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK : "r");
+    policy?.assertDescriptor(handle.fd, absPath);
     const buf = Buffer.alloc(PREVIEW_READ_BYTES);
     const { bytesRead } = await handle.read(buf, 0, PREVIEW_READ_BYTES, 0);
     if (bytesRead === 0) return undefined;
@@ -290,6 +305,7 @@ async function collectFile(
   category: ContextGraphCategory,
   attachmentId?: string,
 ): Promise<void> {
+  if (currentCloudFilePolicy() && !currentCloudFilePolicy()!.allows(relPath)) return;
   if (state.items.length >= MAX_ITEMS) {
     state.truncated = true;
     return;
@@ -318,10 +334,12 @@ async function collectFile(
 }
 
 async function readDirBounded(absDir: string) {
+  const policy = currentCloudFilePolicy();
+  if (policy && !policy.allows(path.relative(policy.root, absDir))) return [];
   const entries = await fs
     .readdir(absDir, { withFileTypes: true })
     .catch(() => []);
-  return entries.slice(0, MAX_DIR_ENTRIES);
+  return entries.slice(0, MAX_DIR_ENTRIES).filter(entry => !policy || policy.allows(path.relative(policy.root, path.join(absDir, entry.name))));
 }
 
 /** Walk one scope subtree. Attachments (one folder per attachment under
@@ -728,9 +746,11 @@ export async function setContextGraphAttachmentShared(
     }
     const sourceStat = await fs.lstat(source).catch(() => null);
     const targetStat = await fs.lstat(target).catch(() => null);
-    const prepareShare = async (current: string) => {
+    const prepareMove = async (current: string) => {
       const entries = await fs.readdir(current, { recursive: true });
-      await exposeSharedContext(
+      const policy = currentCloudFilePolicy();
+      for (const entry of entries) policy?.assertPath(path.relative(workspaceRoot, path.join(current, entry)), true);
+      if (shared) await exposeSharedContext(
         workspaceRoot,
         [target, ...entries.map((entry) => path.join(target, entry))].map(
           (absolute) =>
@@ -748,15 +768,21 @@ export async function setContextGraphAttachmentShared(
           error: "attachment exists in both scopes — resolve on disk",
         };
       }
-      if (shared) await prepareShare(target);
+      if (shared || currentCloudFilePolicy()) await prepareMove(target);
       return { ok: true, moved: false };
     }
     if (!sourceStat || !sourceStat.isDirectory()) {
       return { ok: false, moved: false, error: "attachment not found" };
     }
-    if (shared) await prepareShare(source);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.rename(source, target);
+    if (shared || currentCloudFilePolicy()) await prepareMove(source);
+    currentCloudFilePolicy()?.assertPath(path.relative(workspaceRoot, source), true);
+    currentCloudFilePolicy()?.assertPath(path.relative(workspaceRoot, target), true);
+    const policy = currentCloudFilePolicy();
+    if (policy) policy.renameDirectory(path.relative(workspaceRoot, source), path.relative(workspaceRoot, target));
+    else {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.rename(source, target);
+    }
     return { ok: true, moved: true };
   } catch (err) {
     return {

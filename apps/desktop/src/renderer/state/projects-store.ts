@@ -34,6 +34,7 @@ import {
   bridgeProjectUpsert,
   bridgeProjectRemove,
   bridgeProjectBulkUpsert,
+  requestProjectList,
 } from "../platform/bridge/workspace-bridge";
 
 const STORAGE_KEY = "projects-v1";
@@ -46,6 +47,13 @@ const BACKUP_KEY = "projects-v1-backup";
 // Session-local generations prevent a background inspection from overwriting
 // a newer explicit Git setup. Entries are removed with their project owner.
 const gitRevisions = new Map<string, number>();
+// A native registry read must not undo a concurrent add/remove in this view.
+let projectMutationRevision = 0;
+let projectSync: {
+  bridge: NonNullable<ReturnType<typeof getActiveBridge>>;
+  revision: number;
+  request: Promise<boolean>;
+} | null = null;
 export function projectGitRevision(id: string): number {
   return gitRevisions.get(id) ?? 0;
 }
@@ -146,6 +154,7 @@ export function isKnownProjectRoot(cwd: string): boolean {
 }
 
 function saveProjects(projects: Project[]): void {
+  projectMutationRevision += 1;
   projects = projects.filter(project => !isCloudWorkspace(project.repoRoot));
   setSetting(STORAGE_KEY, projects);
   // Only update the backup when we have something worth keeping. An
@@ -182,23 +191,53 @@ function pushRemove(repoRoot: string): void {
   void bridgeProjectRemove(bridge, repoRoot).catch(() => {});
 }
 
-/** Push ALL local projects to the engine in one shot. Captures curated projects
- *  that predate write-through (and any added while the bridge was down). Called
- *  on bridge connect by useSyncProjectsToEngine(). Best-effort. */
-export function syncProjectsToEngine(): void {
+/** Reconcile the Local boot cache with the native registry on connection.
+ * Existing curated projects still use the established bulk write-through;
+ * an empty renderer cache can recover the native repository identities. */
+export function syncProjectsToEngine(): Promise<boolean> {
   const bridge = getActiveBridge();
-  if (!bridge) return;
+  if (!bridge || bridge.status !== "connected") return Promise.resolve(false);
+  const revision = projectMutationRevision;
+  if (projectSync?.bridge === bridge && projectSync.revision === revision) return projectSync.request;
   const projects = loadStoredProjects();
-  if (projects.length === 0) return;
-  void bridgeProjectBulkUpsert(
-    bridge,
-    projects.map((p) => ({
-      repoRoot: p.repoRoot,
-      repoSlug: p.repoSlug,
-      name: p.name,
-      originUrl: p.originUrl,
-    })),
-  ).catch(() => {});
+  const request = (async () => {
+    if (projects.length === 0) {
+      // The existing empty backup is an explicit last-repository removal.
+      // Do not resurrect it while the native removal is still in flight.
+      const backup = getSetting<Project[] | null>(BACKUP_KEY, null);
+      if (Array.isArray(backup) && backup.length === 0) return false;
+      // Renderer storage is origin-scoped in Dev and may be empty after a port
+      // change or cache reset. The native registry retains the Local repository
+      // identities and their workspace/chat ownership. Recover that cache only;
+      // organization repositories continue to come from the cloud catalog.
+      try {
+        const rows = await requestProjectList(bridge);
+        if (getActiveBridge() !== bridge || bridge.status !== "connected" ||
+            projectMutationRevision !== revision || loadStoredProjects().length) return false;
+        const local = normalizeProjectList(rows.filter(row => !isCloudWorkspace(row.repoRoot))).projects;
+        if (!local.length) return false;
+        saveProjects(local);
+        return true;
+      } catch {
+        // A failed native read is not an authoritative empty catalog.
+        return false;
+      }
+    }
+    await bridgeProjectBulkUpsert(
+      bridge,
+      projects.map((p) => ({
+        repoRoot: p.repoRoot,
+        repoSlug: p.repoSlug,
+        name: p.name,
+        originUrl: p.originUrl,
+      })),
+    ).catch(() => {});
+    return false;
+  })().finally(() => {
+    if (projectSync?.request === request) projectSync = null;
+  });
+  projectSync = { bridge, revision, request };
+  return request;
 }
 
 // ── Pure helpers ─────────────────────────────────────────

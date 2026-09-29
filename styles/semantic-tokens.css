@@ -31,6 +31,11 @@
      lightness by ten percentage points from the active theme's foreground. */
   --composer-tool-action-hover: hsl(from var(--blue-fg) h s calc(l + 10));
 
+  /* Chat notice text actions (Retry, Sign in) have no hover fill: the brown
+     label and icon pop instead — ten lightness points lighter on dark,
+     ten deeper in Light (override below), so hover always adds contrast. */
+  --agent-notice-action-hover: hsl(from var(--brown-fg) h s calc(l + 10));
+
   /* PR status island — open-PR (brown) states.
      Action button flips polarity per theme so its icon never vanishes:
      the light primary button in Dark, a solid --brown-fg in Light. */
@@ -137,6 +142,9 @@
 
 /* ── Light theme ── */
 [data-theme="light"] {
+  --agent-notice-action-hover: hsl(
+    from var(--brown-fg) h s calc(l - 10)
+  ); /* deeper mauve on the pink notice */
   --pr-status-surface: var(
     --brown-bg
   ); /* light-pink surface reads fine as-is */

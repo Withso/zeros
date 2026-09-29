@@ -17,6 +17,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import { getSettingMigrated, setSetting } from "../../platform/settings";
+import { pruneScopedSettingsSelections } from "../settings/settings-scope";
 import {
   CONTROL_PLANE_URL,
   ControlPlaneError,
@@ -161,6 +162,9 @@ export function acceptOrganizationSnapshot(
   const personal = organizations.find(
     (organization) => organization.isPersonal,
   );
+  // An empty mixed-version response does not prove owner deletion. A hierarchy
+  // snapshot containing Personal does, and may prune removed org navigation.
+  if (personal) pruneScopedSettingsSelections(me.user.id, organizations.filter(org => !org.isPersonal).map(org => org.id));
   // One-time flat-Team → hierarchy normalization. Legacy SQLite rows are
   // intentionally Personal/null-owned, so retaining a promoted collaborative
   // selection would make the entire existing workspace collection disappear.

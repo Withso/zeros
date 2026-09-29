@@ -8,15 +8,14 @@
 import { closeSync, constants, existsSync, fstatSync, openSync } from "node:fs";
 import {
   mkdir,
-  mkdtemp,
   readdir,
   realpath,
   rename,
   rm,
-  writeFile,
   lstat,
 } from "node:fs/promises";
 import path from "node:path";
+import { createGitTemporaryDirectory, writeGitTemporaryFile } from "./git-temporary";
 
 import { readBoundedUtf8DescriptorSync } from "../files/bounded-read-sync";
 import { GitError, isGitError } from "./errors";
@@ -3906,11 +3905,11 @@ export function recoverMissingWorkspace(
         // Build the admin entry outside worktrees/ and publish it atomically.
         // read-tree reconstructs the index only: deleted, untracked and ignored
         // working files remain byte-for-byte untouched, unlike a file overlay.
-        const prepared = await mkdtemp(path.join(common, "zeros-recovery-"));
+        const prepared = await createGitTemporaryDirectory(path.join(common, "zeros-recovery-"));
         try {
-          await writeFile(path.join(prepared, "commondir"), `${common}\n`);
-          await writeFile(path.join(prepared, "gitdir"), `${dotGit}\n`);
-          await writeFile(
+          await writeGitTemporaryFile(path.join(prepared, "commondir"), `${common}\n`);
+          await writeGitTemporaryFile(path.join(prepared, "gitdir"), `${dotGit}\n`);
+          await writeGitTemporaryFile(
             path.join(prepared, "HEAD"),
             `ref: refs/heads/${ws.branch}\n`,
           );

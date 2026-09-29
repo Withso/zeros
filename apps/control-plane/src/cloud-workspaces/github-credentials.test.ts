@@ -23,6 +23,23 @@ const config: GithubBackendConfig = {
 const NOW = Date.parse("2026-08-23T12:00:00.000Z");
 
 describe("GithubCloudWorkspaceCredentialBroker", () => {
+
+  it("supports repository PR, review and CI reads without granting writes", async () => {
+    const fetch = vi.fn(async () => Response.json({
+      token: "ghs_repository_reads",
+      expires_at: new Date(NOW + 60 * 60_000).toISOString(),
+    }, { status: 201 }));
+    const broker = new GithubCloudWorkspaceCredentialBroker(config, {
+      fetch: fetch as typeof globalThis.fetch,
+      now: () => NOW,
+    });
+    await broker.mint({ installationId: 987654, owner: "withso", repository: "zeros" });
+    const request = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
+    expect(request.repositories).toEqual(["zeros"]);
+    expect(request.permissions).toEqual({
+      contents: "read", pull_requests: "read", checks: "read", statuses: "read",
+    });
+  });
   it("mints only a read-only token scoped to the exact repository", async () => {
     const fetch = vi.fn(async () =>
       Response.json(
@@ -65,7 +82,7 @@ describe("GithubCloudWorkspaceCredentialBroker", () => {
     ).toMatch(/^Bearer eyJ/);
     expect(JSON.parse(String(init?.body))).toEqual({
       repositories: ["zeros"],
-      permissions: { contents: "read" },
+      permissions: { contents: "read", pull_requests: "read", checks: "read", statuses: "read" },
     });
   });
 
@@ -183,3 +200,4 @@ describe("GithubCloudWorkspaceCredentialBroker", () => {
     ).rejects.toThrow("unavailable");
   });
 });
+

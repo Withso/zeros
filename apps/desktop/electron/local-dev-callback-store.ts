@@ -24,7 +24,7 @@ export function localDevCallbackStore(home = os.homedir()) {
 function callbackStore(directory: string) {
   const file = path.join(directory, "secrets.json");
   const validate = (account: string) => {
-    if (account !== "auth-workos:dev-callbacks") throw new Error("Invalid Dev callback store account");
+    if (!["auth-workos:dev-callbacks", "github-app:dev-callbacks"].includes(account)) throw new Error("Invalid Dev callback store account");
     const stat = fs.lstatSync(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(directory) !== directory ||
         (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (stat.mode & 0o077) !== 0) {

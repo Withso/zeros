@@ -1,0 +1,6 @@
+# Example configuration for a separately protected operations service.
+# This file does not deploy or register the service.
+[deploy]
+startCommand = "node scripts/dev-environment/gc-cron.mjs"
+cronSchedule = "*/15 * * * *"
+restartPolicyType = "NEVER"

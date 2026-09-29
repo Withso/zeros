@@ -1,3 +1,4 @@
+import { subscribeChatSnapshots } from "./state/chat-snapshot-subscription";
 // ──────────────────────────────────────────────────────────
 // Zeros Mac App — App Sidebar + Two-Column Workspace Shell
 // ──────────────────────────────────────────────────────────
@@ -22,6 +23,7 @@
 
 import React, { useEffect, useRef } from "react";
 import { CloudWorkspaceLifecycle } from "./state/cloud-workspace-lifecycle";
+import { isCloudWorkspace } from "./platform/bridge/cloud-workspace-key";
 import {
   useChats,
   useActiveChatId,
@@ -36,6 +38,7 @@ import {
 import { resolveBootActiveChatId } from "./state/boot-active-chat";
 import { sanitizeChatDirectories } from "./state/chat-boot-cache";
 import {
+  canMirrorChat,
   reconcileChatSnapshot,
   samePersistedChat,
 } from "./state/chat-reconciliation";
@@ -113,7 +116,6 @@ import { useAuth } from "./features/auth";
 import { nativeListen } from "./platform/runtime";
 import { rememberProject } from "./platform/recent-projects";
 import {
-  dbChatSnapshot,
   dbReplaceAllChats,
   dbClearChatProviderIdentity,
   dbDeleteChat,
@@ -434,15 +436,19 @@ function ChatsPersistence() {
   const activeChatId = useActiveChatId();
   const dispatch = useWorkspaceDispatch();
   const bridge = useBridge();
-  const engineReady = useExtensionConnected();
   const engineRevalidated = React.useRef(false);
   const engineChatsRef = React.useRef<Map<string, ChatThread>>(new Map());
   const engineDeletedIdsRef = React.useRef<Set<string>>(new Set());
+  const confirmedCloudWorkspacesRef = React.useRef<Set<string>>(new Set());
+  const confirmedLocalChatsRef = React.useRef(false);
 
   /** Write only rows that are genuinely ahead of the last engine snapshot.
    * Optimistically advance the mirror so a React effect caused by the same
    * reconciliation cannot send a duplicate batch back to the engine. */
-  const pushRowsToEngine = React.useCallback((rows: ChatThread[]) => {
+  const pushRowsToEngine = React.useCallback((candidates: ChatThread[]) => {
+    const rows = candidates.filter((chat) =>
+      canMirrorChat(chat, confirmedCloudWorkspacesRef.current, confirmedLocalChatsRef.current),
+    );
     if (rows.length === 0) return;
     const engineRows = engineChatsRef.current;
     const previous = new Map<string, ChatThread | undefined>();
@@ -490,31 +496,28 @@ function ChatsPersistence() {
     });
   }, []);
 
-  // Pull only after the exact engine connection is live. A monotonic request
-  // id prevents an older DB_CHANGED response from landing after a newer one.
+  // Each backend confirms independently. A Local restart keeps the cloud
+  // subscription installed and closes only Local's read-before-write gate.
   useEffect(() => {
-    // Every engine session gets its own read-before-write gate. Otherwise a
-    // reconnect could push the renderer's prior snapshot into a newer engine
-    // before learning what changed while the socket was down.
     engineRevalidated.current = false;
     engineChatsRef.current = new Map();
     engineDeletedIdsRef.current = new Set();
-    if (!bridge || !engineReady) return;
-    let cancelled = false;
-    let pullId = 0;
-    let retryTimer: number | null = null;
-
-    const reconcile = async () => {
-      const id = ++pullId;
-      try {
-        const snapshot = await dbChatSnapshot();
-        if (cancelled || id !== pullId) return;
+    confirmedCloudWorkspacesRef.current = new Set();
+    confirmedLocalChatsRef.current = false;
+    if (!bridge) return;
+    return subscribeChatSnapshots({
+      bridge,
+      onLocalReadinessChange: () => { confirmedLocalChatsRef.current = false; },
+      onError: error => console.warn("[Zeros] Chat reconciliation failed:", error),
+      onSnapshot: snapshot => {
         const recovered = snapshot.chats.map(rowToThread);
         const before = useWorkspaceStore.getState();
         const reconciled = reconcileChatSnapshot(
           before.chats,
           recovered,
           snapshot.chatDeletions,
+          snapshot.confirmedCloudWorkspaces,
+          snapshot.confirmedLocalChats,
         );
 
         // This is now the exact last-confirmed boot snapshot. If it is empty,
@@ -532,20 +535,28 @@ function ChatsPersistence() {
           recovered.map((chat) => [chat.id, chat] as const),
         );
         engineDeletedIdsRef.current = new Set(snapshot.chatDeletions);
+        confirmedCloudWorkspacesRef.current = new Set(snapshot.confirmedCloudWorkspaces ?? []);
+        confirmedLocalChatsRef.current = snapshot.confirmedLocalChats !== false;
         engineRevalidated.current = true;
 
-        if (reconciled.chats !== before.chats) {
+        if (reconciled.chats !== before.chats ||
+            (before.pendingChatHydrationFolder && (isCloudWorkspace(before.pendingChatHydrationFolder) ? snapshot.confirmedCloudWorkspaces?.includes(before.pendingChatHydrationFolder) : snapshot.confirmedLocalChats !== false)) ||
+            (before.pendingWorkspaceValidationFolder && snapshot.confirmedCloudWorkspaces?.includes(before.pendingWorkspaceValidationFolder))) {
           const activeStillExists =
             before.activeChatId !== null &&
             reconciled.chats.some((chat) => chat.id === before.activeChatId);
           dispatch({
             type: "HYDRATE_CHATS",
             chats: reconciled.chats,
+            confirmedCloudWorkspaces: snapshot.confirmedCloudWorkspaces ?? [],
+            confirmedLocalChats: snapshot.confirmedLocalChats,
             activeChatId: activeStillExists
               ? before.activeChatId
               : resolveBootActiveChatId(reconciled.chats, before.activeChatId, {
                   lastWorkspaceFolder: before.lastWorkspaceFolder,
                   activeChatByFolder: before.activeChatByFolder,
+                  confirmedCloudWorkspaces: snapshot.confirmedCloudWorkspaces,
+                  confirmedLocalChats: snapshot.confirmedLocalChats,
                 }),
           });
         }
@@ -555,27 +566,9 @@ function ChatsPersistence() {
         // still present and keep theirs). Guarded inside pruneScrollPositions
         // against an empty list so a transient hiccup can't wipe the doc.
         pruneScrollPositions(new Set(reconciled.chats.map((chat) => chat.id)));
-      } catch (err) {
-        if (cancelled || id !== pullId) return;
-        console.warn("[Zeros] SQLite chat reconciliation failed:", err);
-        retryTimer = window.setTimeout(() => void reconcile(), 2_000);
-      }
-    };
-
-    const offChanged = bridge.on("DB_CHANGED", (raw) => {
-      const kinds = Array.isArray((raw as { kinds?: unknown }).kinds)
-        ? ((raw as { kinds: string[] }).kinds ?? [])
-        : [];
-      if (kinds.includes("chats")) void reconcile();
+      },
     });
-    void reconcile();
-    return () => {
-      cancelled = true;
-      pullId += 1;
-      offChanged();
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
-    };
-  }, [bridge, dispatch, engineReady, pushRowsToEngine]);
+  }, [bridge, dispatch, pushRowsToEngine]);
 
   // The renderer one-shot import of legacy transcripts was removed:
   // the engine now migrates the legacy zeros-agent-history.db itself, on startup,

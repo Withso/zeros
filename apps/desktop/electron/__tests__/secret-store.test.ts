@@ -17,6 +17,7 @@ vi.mock("electron", () => ({
 import { createSecretIfAbsent, getSecret, setSecret } from "../secret-store";
 import { localDevCallbackStore } from "../local-dev-callback-store";
 import { WorkOSDevCallbackRelay } from "../workos-dev-callback-relay";
+import { GithubDevCallbackRelay } from "../github-dev-callback-relay";
 
 const directories: string[] = [];
 const originalSharedDirectory = process.env.ZEROS_SHARED_SECRETS_DIR;
@@ -42,6 +43,18 @@ async function secretDirectory(): Promise<string> {
 }
 
 describe("encrypted secret store whole-file safety", () => {
+  it("relays GitHub without admitting account or provider credentials into the shared mailbox", async () => {
+    const home = await secretDirectory();
+    const nonce = "g".repeat(43);
+    const accepted = vi.fn(() => true);
+    const dispose = new GithubDevCallbackRelay(localDevCallbackStore(home)).register(nonce, Date.now() + 30_000, accepted);
+    try {
+      expect(new GithubDevCallbackRelay(localDevCallbackStore(home)).deliver({ nonce, accessToken: "discarded-private-field" })).toBe(true);
+      await vi.waitFor(() => expect(accepted).toHaveBeenCalledExactlyOnceWith({ nonce }));
+      for (const key of ["auth-session:tokens", "github-app-handoff:pending", "github-app"])
+        expect(() => localDevCallbackStore(home).read(key)).toThrow(/Invalid Dev callback/);
+    } finally { dispose(); }
+  });
   it("routes a callback between isolated Dev instances without sharing their sessions", async () => {
     const home = await secretDirectory();
     const a = path.join(home, "a/secrets.json"), b = path.join(home, "b/secrets.json");

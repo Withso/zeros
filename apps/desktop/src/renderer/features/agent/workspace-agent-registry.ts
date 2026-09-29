@@ -25,6 +25,11 @@ const cache = new KeyedAsyncCache<BridgeRegistryAgent[]>(32);
 export const clearCloudAgentRegistry = () => {
   for (const key of cache.keys()) cache.forget(key);
 };
+export function invalidateCloudOrganizationAgentRegistry(organizationId: string): void {
+  for (const key of cache.keys()) {
+    if (parseCloudWorkspaceKey(key)?.organizationId === organizationId) cache.invalidate(key);
+  }
+}
 export function invalidateCloudAgentRegistry(folder: string): void {
   const target = parseCloudWorkspaceKey(folder);
   if (target) cache.invalidate(cloudWorkspaceKey(target));

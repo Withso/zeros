@@ -1,3 +1,4 @@
+import { CloudRepositoryPicker, type CloudRepositorySelection } from "../../features/settings/cloud-repository-picker";
 // ──────────────────────────────────────────────────────────
 // Open GitHub project dialog
 // ──────────────────────────────────────────────────────────
@@ -32,7 +33,7 @@ import {
 } from "../../state/use-projects";
 import { upsertProject } from "../../state/projects-store";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
-import { getActiveOrganizationSnapshot, getOrganizationStoreGeneration, useActiveOrganization } from "../../features/team/team-store";
+import { getActiveOrganizationSnapshot, getOrganizationStoreGeneration, useActiveOrganization, useTeams } from "../../features/team/team-store";
 import { parseRemote } from "../pr/github-url";
 import { cloudWorkspaceCapability } from "../../platform/cloud-workspace-access";
 import { createCloudWorkspaceDocument, getCloudWorkspaceCreateOptions } from "../../platform/cloud-workspaces";
@@ -72,12 +73,22 @@ function previewDirName(url: string): string {
   return "";
 }
 
-export function OpenGithubProjectDialog({
+export function OpenGithubProjectDialog(props: OpenGithubProjectDialogProps) {
+  const organization = useActiveOrganization();
+  const { me } = useTeams();
+  return <ScopedOpenGithubProjectDialog key={JSON.stringify([me?.user.id, organization?.id])} {...props} />;
+}
+
+function ScopedOpenGithubProjectDialog({
   open,
   onOpenChange,
   onCloned,
 }: OpenGithubProjectDialogProps) {
   const [url, setUrl] = useState("");
+  const [repositories, setRepositories] = useState<CloudRepositorySelection[]>([]);
+  const { me } = useTeams();
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [parentFolder, setParentFolder] = useState(defaultParentFolder());
   const [busy, setBusy] = useState(false);
   const organization = useActiveOrganization();
@@ -88,6 +99,7 @@ export function OpenGithubProjectDialog({
   useEffect(() => {
     if (!open) return;
     setUrl("");
+    setRepositories([]);
     setParentFolder(defaultParentFolder());
     setBusy(false);
   }, [open]);
@@ -141,7 +153,7 @@ export function OpenGithubProjectDialog({
         }
         notifyProjectsChanged();
         notifyWorkspacesChanged();
-        onOpenChange(false);
+        if (mounted.current) onOpenChange(false);
         return;
       }
       const result = await workspaceClone({
@@ -157,6 +169,7 @@ export function OpenGithubProjectDialog({
       onCloned?.({ repoRoot: result.repoRoot });
       onOpenChange(false);
     } catch (err: unknown) {
+      if (!mounted.current) return;
       if (isGitErrorShape(err)) {
         toast.error(`Couldn't clone repository: ${err.message}`, {
           description: err.remediation ?? undefined,
@@ -169,7 +182,7 @@ export function OpenGithubProjectDialog({
         );
       }
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   };
 
@@ -196,6 +209,11 @@ export function OpenGithubProjectDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="gap-5">
+          {cloud && me && organization && <CloudRepositoryPicker userId={me.user.id} organizationId={organization.id}
+            active={open} disabled={busy} value={repositories} onManageConnections={() => onOpenChange(false)} onChange={selected => {
+              setRepositories(selected);
+              if (selected[0]) setUrl(`https://github.com/${selected[0].owner}/${selected[0].name}`);
+            }} />}
           {/* URL */}
           <div className="flex flex-col gap-1.5">
             <label htmlFor="og-url" className="text-fg1 text-sm font-medium">

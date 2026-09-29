@@ -258,12 +258,16 @@ function defaultModeTokenToClaudeMode(token: string): ClaudeMode | null {
       return "default";
     case "plan":
       return "plan";
+    case "accept-edits":
     case "acceptEdits":
       return "accept-edits";
     case "auto":
       return "auto";
+    case "bypass":
+    case "danger":
     case "bypassPermissions":
       return "bypass";
+    case "tool-approval":
     case "dontAsk":
       return "default";
     default:
@@ -1295,7 +1299,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       browserUse: opts.browserUse?.kind === "claude-agent-sdk",
       // Fresh chat → honour the user's configured default mode (settings.json
       // hierarchy); a persisted per-chat mode overrides via reconcile.
-      permissionMode: resolveDefaultPermissionMode(opts.cwd),
+      permissionMode: (opts.env?.ZEROS_PERMISSION_MODE ? defaultModeTokenToClaudeMode(opts.env.ZEROS_PERMISSION_MODE) : null) ?? resolveDefaultPermissionMode(opts.cwd),
       claudeSessionId: null,
       // Protocol-v8 builds persisted chats.session_id and can only reopen a
       // Claude session directory by this Zeros locator. Keep it as the
@@ -1432,6 +1436,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       state.pendingPermissions.size === 0 &&
       state.pendingQuestions.size === 0 &&
       state.input.pendingCount === 0 &&
+      !cloudProviderExecution(state.executionBoundary)?.background?.preservesNativeProcess &&
       !state.translator.hasProcessWork && state.pendingSteers.size === 0 && !state.cancelOperation,
     );
   }
@@ -2371,6 +2376,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         const actionFailure = pendingError ? providerErrorFailure(
           "claude", normalizeProviderError("claude", pendingError), "prompt",
         ) : null;
+        // Cloud retirement revokes the execution lease before disposing the
+        // adapter. A completed, idle provider can therefore exit with 137 while
+        // `disposed` is still false. Keep genuine unfinished/background work
+        // visible; only the expected idle shutdown loses its transport notice.
+        const retiredIdleCloud = !lostBackgroundWork && !actionFailure &&
+          cloudProviderExecution(state.executionBoundary)?.lease.signal.aborted === true;
         // A clean iterator return is still a disconnect when the current send
         // never received its result. Detach before settling so a continuation
         // cannot enqueue its next prompt into this spent query.
@@ -2388,7 +2399,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         state.translator.endActivity();
         this.clearCommandDiscovery(state);
         state.consumer = null;
-        if (!unfinished && !rejectedPrompt && !reportedStartupFailure && !state.cancelRequested && !state.disposed && !continuationFailure && (actionFailure || lostBackgroundWork || streamError)) {
+        if (!unfinished && !rejectedPrompt && !reportedStartupFailure && !state.cancelRequested && !state.disposed && !continuationFailure && !retiredIdleCloud && (actionFailure || lostBackgroundWork || streamError)) {
           if (actionFailure) {
             reportContinuation("claude-background-failed", actionFailure.message, false, actionFailure.failure.kind);
           } else {
@@ -2679,6 +2690,21 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     }
   }
 
+  backgroundWorkActive(sessionId:string):boolean{
+    const state=this.mustState(sessionId);
+    return !!state.query&&state.translator.hasProcessWork;
+  }
+
+  assertBackgroundReuse(opts:{sessionId:string;env:Record<string,string>;modeId?:string}):void{
+    const state=this.mustState(opts.sessionId);
+    if(!cloudProviderExecution(state.executionBoundary)?.background?.preservesNativeProcess)return;
+    const previous=state.env??{},mode=opts.modeId?normalizeModeId(opts.modeId):undefined;
+    if(state.pendingRestart||(mode&&(mode==="bypass")!==state.queryAllowsBypass)||
+      (previous.ZEROS_THINKING_EFFORT==="max")!==(opts.env.ZEROS_THINKING_EFFORT==="max")||
+      (opts.env.CLAUDE_MAX_TURNS!==undefined&&opts.env.CLAUDE_MAX_TURNS!==previous.CLAUDE_MAX_TURNS))
+      throw new Error("Stop background work before changing settings that restart Claude");
+  }
+
   async stopBackgroundTask(opts: {
     sessionId: string;
     taskId: string;
@@ -2788,6 +2814,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
 
   async setMode(opts: { sessionId: string; modeId: string }): Promise<void> {
     const state = this.mustState(opts.sessionId);
+    this.assertBackgroundReuse({...opts,env:state.env??{}});
     const requestedMode = normalizeModeId(opts.modeId);
     const mode = requestedMode;
     // The mode we report back to the renderer — normally the requested id,
@@ -2795,8 +2822,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     let appliedId =
       requestedMode && mode !== requestedMode ? mode : opts.modeId;
     if (mode) {
-      this.permissionModeRevisions.set(state,
-        (this.permissionModeRevisions.get(state) ?? 0) + 1);
+      const revision = (this.permissionModeRevisions.get(state) ?? 0) + 1;
+      this.permissionModeRevisions.set(state, revision);
+      const stillCurrent = () => this.sessions.get(opts.sessionId) === state && this.permissionModeRevisions.get(state) === revision;
       state.permissionMode = mode;
       // Apply live to an alive query (the SDK supports mid-session mode
       // changes — a per-turn-spawn adapter can't do this). This does NOT
@@ -2805,6 +2833,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       try {
         await state.query?.setPermissionMode(toSdkPermissionMode(mode));
       } catch {
+        if (!stillCurrent()) return;
         // A LIVE query can reject "auto": the classifier is MODEL-GATED
         // ("Cannot set permission mode to auto: auto mode unavailable for
         // this model" — e.g. Haiku, verified on CLI 2.1.170/2.1.186).
@@ -2818,6 +2847,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         if (mode === "auto" && state.query) {
           try {
             await state.query.setPermissionMode("acceptEdits");
+            if (!stillCurrent()) return;
             state.permissionMode = "accept-edits";
             appliedId = "accept-edits";
           } catch {
@@ -2825,6 +2855,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           }
         }
       }
+
+      if (!stillCurrent()) return;
 
       // Both bypass-only Options — allowDangerouslySkipPermissions AND the
       // ABSENCE of canUseTool (see buildOptions) — are creation-only, so a live
@@ -2951,6 +2983,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   }): Promise<void> {
     const state = this.sessions.get(opts.sessionId);
     if (!state) return;
+    this.assertBackgroundReuse(opts);
     const cloud=cloudProviderExecution(state.executionBoundary);
     if(cloud){
       cloud.lease.assertLive();
@@ -4144,8 +4177,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       ultracode,
       // Claude auto-memory is repo-scoped and live-mutable. Keep an explicit
       // boolean so turning it off (or back on) clears the prior query value.
-      autoMemoryEnabled: !cloud&&env?.[CLAUDE_AUTO_MEMORY_ENV_VAR] !== "0",
-      ...(cloud?{disableAllHooks:true}:{}),
+      autoMemoryEnabled: env?.[CLAUDE_AUTO_MEMORY_ENV_VAR] !== "0",
       permissions: {
         additionalDirectories:cloud?[]:additionalDirectories,
         allow:cloud?[]:allow,
@@ -4437,7 +4469,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // order (user override → staged Contents/Resources/claude → bundled
       // package → the user's own install).
       pathToClaudeCodeExecutable: cliPath,
-      ...(cloud?cloudClaudeTools(cloud,state.abort.signal):{}),
+      ...(cloud?cloudClaudeTools(cloud):{}),
     };
     // Verification breadcrumb: one line per query (re)creation echoing the
     // composer knobs actually sent to the SDK. Tail the engine log (main.log /

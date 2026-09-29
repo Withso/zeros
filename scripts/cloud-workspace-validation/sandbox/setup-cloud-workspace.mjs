@@ -1177,7 +1177,7 @@ async function restoreCloudWorkspaceCheckpointContents(material, repositoryDirec
       const { restoreCloudNativeCheckpoint } = await import(CHECKPOINT_HELPER_URL.href);
       await restoreCloudNativeCheckpoint({
         archive: native,
-        roots: { repository: repositoryDirectory, logicalRepository: TARGET_REPOSITORY, agentHome: runtimeLayout.agentHome, data: runtimeLayout.data },
+        roots: { repository: repositoryDirectory, logicalRepository: runtimeLayout.logicalRepository, agentHome: runtimeLayout.agentHome, data: runtimeLayout.data },
         identity: { uid: WORKER_UID, gid: WORKER_GID },
         privateIdentity,
         deadlineAtMs,
@@ -2246,7 +2246,7 @@ export function cloudWorkspaceImageAdmissionDiagnostic(report) {
     workload: qualification?.workload?.secure === true,
     capture: qualification?.capture?.secure === true,
     humanServices: qualification?.humanServices?.secure === true,
-    humanServicePhase: ["configuration", "worker-launch", "handshake", "identity", "exec-pty", "pty", "sftp", "namespace-retirement"].includes(qualification?.humanServices?.phase)
+    humanServicePhase: ["configuration", "worker-launch", "handshake", "identity", "attachment-publication", "exec-pty", "pty", "sftp", "namespace-retirement"].includes(qualification?.humanServices?.phase)
       ? qualification.humanServices.phase : null,
     setup: {
       secure: report?.setupQualification?.secure === true,
@@ -2266,6 +2266,31 @@ export function cloudWorkspaceImageAdmissionDiagnostic(report) {
       report?.helpers?.deploymentTrusted?.[name] === false).sort(),
     failedProbes: [...failedProbes].sort(),
   };
+}
+
+/** Diagnostic evidence only. This never changes the admission predicate. */
+export function cloudWorkspaceImageIdentityDiagnostic(build, observed) {
+  return {
+    metadata: build?.version === 2,
+    source: Boolean(observed?.source && build?.source?.commit === observed.source.commit && build?.source?.contractSha256 === observed.source.contractSha256),
+    engine: Boolean(observed?.artifacts && ["dist-engine/cli.js", "dist-engine/design-capture-worker.js", "binaries/zsr-supervisor.mjs"]
+      .every(file => typeof build?.artifacts?.[file] === "string" && build.artifacts[file] === observed.artifacts[file])),
+    ...(build?.baseOrigin?.kind === "native-linux" ? {
+      osRelease: Boolean(observed?.inventory && build.baseOrigin.osReleaseSha256 === observed.inventory.osReleaseSha256),
+      packageInventory: Boolean(observed?.inventory && build.baseOrigin.packageInventorySha256 === observed.inventory.packageInventorySha256),
+      node: Boolean(observed?.inventory && build.baseOrigin.nodeSha256 === observed.inventory.nodeSha256),
+    } : {}),
+  };
+}
+
+export function cloudWorkspaceImageDigests(build, observed) {
+  const result = {};
+  for (const [key, field] of [["osRelease", "osReleaseSha256"], ["packageInventory", "packageInventorySha256"], ["node", "nodeSha256"]]) {
+    const expected = build?.baseOrigin?.[field], actual = observed?.inventory?.[field];
+    if (typeof expected === "string" && SHA256_PATTERN.test(expected) && typeof actual === "string" && SHA256_PATTERN.test(actual))
+      result[key] = { expected, observed: actual };
+  }
+  return result;
 }
 
 async function attestImage(material, profile, recordChecks) {
@@ -2298,6 +2323,14 @@ async function attestImage(material, profile, recordChecks) {
   );
   recordChecks(checks, cloudWorkspaceImageAdmissionDiagnostic(report));
   if (!Object.values(checks).every((value) => value === true)) {
+    const observed = {};
+    try {
+      const inventory = await import("./image-build-contract.mjs");
+      try { observed.inventory = inventory.readCloudImageNativeInventory(); } catch { /* Unknown remains failed. */ }
+      try { observed.source = inventory.cloudImageSourceIdentity(runtimeLayout.engine); } catch { /* No raw error retained. */ }
+      try { observed.artifacts = inventory.cloudImageArtifactHashes(runtimeLayout.engine); } catch { /* Fixed artifacts only. */ }
+    } catch { /* Broken images may lack the diagnostic helper too. */ }
+    recordChecks({ ...checks, ...cloudWorkspaceImageIdentityDiagnostic(report?.metadata?.build, observed) }, undefined, cloudWorkspaceImageDigests(report?.metadata?.build, observed));
     throw failure("image_contract_invalid");
   }
 }
@@ -2443,13 +2476,14 @@ async function executeSetup(encoded) {
   let successful = false;
   let profile;
   let diagnostic = { version: 1, stage: "runtime", outcome: "running" };
-  const record = (stage, checks, runtime) => {
+  const record = (stage, checks, runtime, digests) => {
     diagnostic = {
       version: 1,
       stage,
       outcome: "running",
       ...(checks ? { checks } : {}),
       ...(runtime ? { runtime } : {}),
+      ...(digests ? { digests } : {}),
     };
     atomicWrite(
       path.join(profile.setupDirectory, "last-diagnostic.json"),
@@ -2468,8 +2502,8 @@ async function executeSetup(encoded) {
     // repository setup hook. Reattest below to mint a fresh launch proof after
     // potentially long hooks; that proof is intentionally short-lived.
     record("image-preflight");
-    await attestImage(material, profile, (checks, runtime) =>
-      record("image-preflight", checks, runtime),
+    await attestImage(material, profile, (checks, runtime, digests) =>
+      record("image-preflight", checks, runtime, digests),
     );
     record("repository");
     const commit = await prepareRepositoryAndSettings(material, profile);
@@ -2480,8 +2514,8 @@ async function executeSetup(encoded) {
       profile.engineUid,
     );
     record("image-launch");
-    await attestImage(material, profile, (checks, runtime) =>
-      record("image-launch", checks, runtime),
+    await attestImage(material, profile, (checks, runtime, digests) =>
+      record("image-launch", checks, runtime, digests),
     );
     record("engine-launch");
     await startEngine(material, session);
@@ -2490,6 +2524,22 @@ async function executeSetup(encoded) {
     record("complete");
     successful = true;
     return readyResult(material, commit, engine);
+  } catch (error) {
+    // Preserve v1 successes. Version 2 errors add only a closed, bounded
+    // envelope; older control planes safely treat them as helper failures.
+    const normalized = error instanceof SetupFailure ? error : failure("image_contract_invalid");
+    normalized.diagnostic = {
+      version: 1, phase: diagnostic.stage.replaceAll("-", "_"),
+      ...(diagnostic.checks ? { checks: diagnostic.checks } : {}),
+      ...(diagnostic.digests ? { digests: diagnostic.digests } : {}),
+      files: {
+        node: existsSync("/opt/zeros-runtime/bin/node"),
+        supervisor: existsSync("/opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs"),
+        setup: existsSync("/opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs"),
+        engine: existsSync(path.join(runtimeLayout.engine, "dist-engine/cli.js")),
+      },
+    };
+    throw normalized;
   } finally {
     if (profile) {
       try {
@@ -2593,11 +2643,12 @@ async function main() {
   } catch (error) {
     exitCode = 1;
     response = {
-      version: 1,
+      version: error instanceof SetupFailure && error.diagnostic ? 2 : 1,
       audience: CLOUD_WORKSPACE_SETUP_RESULT_AUDIENCE,
       outcome: "error",
       code:
         error instanceof SetupFailure ? error.code : "image_contract_invalid",
+      ...(error instanceof SetupFailure && error.diagnostic ? { diagnostic: error.diagnostic } : {}),
     };
   }
   process.stdout.write(JSON.stringify(response));

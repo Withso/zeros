@@ -136,8 +136,18 @@ export async function seedHostedFixture({ runtime, migration, withSystemTx, modu
   };
   await apply("manage-staff.js", "validateStaffRoleRequest", "manageStaffRole", {
     subjectUserId: row.user_id, expectedEmail: row.email, nextRole: "platform_owner" });
-  await apply("manage-cloud-workspace-quota.js", "validateCloudWorkspaceQuotaRequest", "manageCloudWorkspaceQuota", {
-    maxWorkspaces: "1", maxRunningWorkspaces: "1", maxCpuMillicores: "4000", maxMemoryMiB: "8192", maxStorageMiB: String(request.worker.storageMiB) });
+  // The fixture seeds an initial limit, not a recurring override of operator
+  // decisions. Reapplying one workspace after an audited increase can strand
+  // live usage and abort every subsequent Dev deployment. The append-only
+  // owner audit also recognizes generations seeded before this guard existed.
+  const quotaChange = (await migration.query(`SELECT reason, next_max_storage_mib
+    FROM cloud_workspace_quota_changes WHERE org_id=$1
+    ORDER BY created_at DESC, id DESC LIMIT 1`, [row.organization_id])).rows[0];
+  if (!quotaChange || quotaChange.reason === common.reason) {
+    await apply("manage-cloud-workspace-quota.js", "validateCloudWorkspaceQuotaRequest", "manageCloudWorkspaceQuota", {
+      maxWorkspaces: "1", maxRunningWorkspaces: "1", maxCpuMillicores: "4000", maxMemoryMiB: "8192",
+      maxStorageMiB: String(Math.max(request.worker.storageMiB, quotaChange?.next_max_storage_mib ?? 0)) });
+  }
   // New workspaces always use the creator's individual Pro authority. Staff
   // activation above supplies the normal audited complimentary entitlement;
   // the release issuer owns its period, receipt, price and retry semantics.

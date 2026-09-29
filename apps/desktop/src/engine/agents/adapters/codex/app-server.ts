@@ -57,7 +57,7 @@ import type { McpServerRegistration } from "../../types";
 import type { PreparedBoundary } from "../../containment/types";
 import {cloudProviderExecution,executionMcpServers} from "../../cloud-provider-execution";
 import {CloudCodexExecServer} from "./cloud-exec-server";
-import {cloudCodexRequest,cloudCodexToolCall,CLOUD_CODEX_CONFIG} from "./cloud-policy";
+import {cloudCodexRequest,cloudCodexToolCall,cloudCodexConfig,bindCloudCodexThread} from "./cloud-policy";
 import { hasKernelExecutionBoundary } from "../../containment/status";
 import {
   JSON_RPC_NO_RESPONSE,
@@ -600,7 +600,7 @@ export async function bootCodexAppServerRuntime(
     ? [process.execPath, [binarySource.path]]
     : [binarySource.path, []];
 
-  const mcpArgs = buildMcpServerOverrides((executionMcpServers(cloud, opts.mcpServers) ?? []).map((s) => s.transport === "stdio" && s.cwd ? { ...s, cwd: mcpWorkingDirectory(s.cwd, opts.cwd) } : s));
+  const mcpArgs = buildMcpServerOverrides((executionMcpServers(cloud, opts.mcpServers) ?? []).map((s) => s.transport === "stdio" && s.cwd ? { ...s, cwd: mcpWorkingDirectory(s.cwd, opts.cwd) } : s), cloud ? { cloudCwd: opts.cwd } : undefined);
 
   // Feature overrides (per-process `-c`, no ~/.codex/config.toml mutation):
   //   • default_mode_request_user_input — codex only puts the
@@ -617,7 +617,7 @@ export async function bootCodexAppServerRuntime(
   const featureArgs = codexAppServerFeatureArgs(
     hasKernelExecutionBoundary(opts.executionBoundary),
   );
-  if(cloud)for(const [name,value] of Object.entries(CLOUD_CODEX_CONFIG))featureArgs.push("-c",`${name}=${JSON.stringify(value)}`);
+  if(cloud)for(const [name,value] of Object.entries(cloudCodexConfig(cloud)))featureArgs.push("-c",`${name}=${JSON.stringify(value)}`);
 
   const proc = spawnStdioAgent({
     command,
@@ -1264,6 +1264,7 @@ export async function bootCodexAppServerRuntime(
         "thread/start",
         params,
       );
+      if(cloud)bindCloudCodexThread(cloud,result.thread.id);
       return {
         threadId: result.thread.id,
         providerSessionId: result.thread.sessionId,
@@ -1280,6 +1281,7 @@ export async function bootCodexAppServerRuntime(
         "thread/resume",
         params,
       );
+      if(cloud)bindCloudCodexThread(cloud,result.thread.id);
       return {
         threadId: result.thread.id,
         providerSessionId: result.thread.sessionId,
@@ -1532,8 +1534,14 @@ function compareSemver(a: string, b: string): number {
  *  config schema. */
 export function buildMcpServerOverrides(
   servers: readonly McpServerRegistration[],
+  cloud?: { cloudCwd: string },
 ): string[] {
   const args: string[] = [];
+  // Native tables merge recursively. Disable repository config loading, even
+  // when a config file is created after discovery. The cloud HOME/system config
+  // directories are immutable empty mounts; only these admitted overrides load.
+  // Use an inline table: Codex's dotted-key parser does not unquote path keys.
+  if (cloud) args.push("-c", `projects={ "${escapeTomlString(cloud.cloudCwd)}" = { trust_level = "untrusted" } }`);
   for (const s of servers) {
     // Names go into TOML keys; only allow alnum + underscore + dash to
     // avoid syntax injection. Skip silently rather than throw — a

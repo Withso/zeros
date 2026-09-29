@@ -48,7 +48,7 @@ import {
   type WorkspaceFileListing,
 } from "../../workspace-files-cache";
 import { prefetchWorkspaceFileRead } from "../../workspace-file-data-cache";
-import { isNativeRuntime, nativeInvoke } from "@/renderer/platform/runtime";
+import { canOpenPathLocally, revealInFinder } from "@/renderer/platform/app";
 import { cn } from "@/renderer/shared/ui/cn";
 import {
   FILE_ICON_PALETTE_CSS,
@@ -940,11 +940,9 @@ export const WorkspaceFileTree = React.forwardRef<
               ctx.close();
             }}
             onReveal={
-              cwd && isNativeRuntime() && isSafeRelPath(item.path)
+              cwd && canOpenPathLocally(cwd) && isSafeRelPath(item.path)
                 ? () => {
-                    void nativeInvoke("reveal_in_finder", {
-                      path: joinPath(cwd, item.path),
-                    }).catch(() => {});
+                    void revealInFinder(joinPath(cwd, item.path)).catch(() => {});
                     ctx.close();
                   }
                 : undefined

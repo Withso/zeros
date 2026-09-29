@@ -14,6 +14,71 @@ function fixture() {
   return { lease, events, services };
 }
 describe("hosted Dev lifecycle", () => {
+  it("verifies the existing deployment without stopping it after desktop-only source changes", async () => {
+    const f = fixture();
+    const source = { sourceSha256: "a".repeat(64), workerInputsSha256: "b".repeat(64), deploymentInputsSha256: "d".repeat(64), commit: "c".repeat(40) };
+    f.services.captureSource.mockResolvedValue(source);
+    await startHosted(f.lease, identity, profile, f.services);
+    const before = structuredClone(f.lease.state);
+    f.events.length = 0;
+    f.services.verify.mockClear();
+    f.services.captureSource.mockResolvedValue({ ...source, sourceSha256: "e".repeat(64), commit: "f".repeat(40) });
+    expect((await startHosted(f.lease, identity, profile, f.services)).reused).toBe(true);
+    expect(f.events).toEqual(["preflight", "verify"]);
+    expect(f.lease.state.generation).toBe(before.generation);
+    expect(f.lease.state.runId).toBe(before.runId);
+    expect(f.lease.state.source).toEqual(before.source);
+    expect(f.services.verify).toHaveBeenCalledWith(f.lease, expect.objectContaining({ sourceSha256: source.sourceSha256, commit: source.commit }));
+  });
+  it.each([undefined, "", "legacy", "D".repeat(64)])("redeploys desktop edits once when the deployment fingerprint is absent or invalid (%s)", async deploymentInputsSha256 => {
+    const f = fixture();
+    const source = { sourceSha256: "a".repeat(64), workerInputsSha256: "b".repeat(64), deploymentInputsSha256, commit: "c".repeat(40) };
+    f.services.captureSource.mockResolvedValue(source);
+    await startHosted(f.lease, identity, profile, f.services);
+    const generation = f.lease.state.generation;
+    const current = { ...source, sourceSha256: "e".repeat(64), commit: "f".repeat(40) };
+    f.services.captureSource.mockResolvedValue(current);
+    f.events.length = 0;
+    expect((await startHosted(f.lease, identity, profile, f.services)).reused).toBe(false);
+    expect(f.events).toContain("deployBackend");
+    expect(f.lease.state.generation).toBe(generation);
+    f.events.length = 0;
+    expect((await startHosted(f.lease, identity, profile, f.services)).reused).toBe(true);
+    expect(f.events).toEqual(["preflight", "verify"]);
+  });
+  it.each(["deploymentInputsSha256", "workerInputsSha256"])("redeploys changed %s while keeping the existing database generation", async field => {
+    const f = fixture();
+    const source = { sourceSha256: "a".repeat(64), workerInputsSha256: "b".repeat(64), deploymentInputsSha256: "d".repeat(64), commit: "c".repeat(40) };
+    f.services.captureSource.mockResolvedValue(source);
+    await startHosted(f.lease, identity, profile, f.services);
+    const generation = f.lease.state.generation;
+    f.services.captureSource.mockResolvedValue({ ...source, sourceSha256: "e".repeat(64), [field]: "f".repeat(64) });
+    f.events.length = 0;
+    expect((await startHosted(f.lease, identity, profile, f.services)).reused).toBe(false);
+    expect(f.events).toContain("deployBackend");
+    expect(f.lease.state.generation).toBe(generation);
+  });
+  it("repairs an unhealthy deployment after a desktop-only edit without replacing resources or reusing its stale receipt", async () => {
+    const f = fixture();
+    const source = { sourceSha256: "a".repeat(64), workerInputsSha256: "b".repeat(64), deploymentInputsSha256: "d".repeat(64), commit: "c".repeat(40) };
+    f.services.captureSource.mockResolvedValue(source);
+    await startHosted(f.lease, identity, profile, f.services);
+    f.lease.state.resources.planetscale = { name: "owned-dev-branch" };
+    f.lease.state.resources.railway = { id: "owned-dev-environment" };
+    const before = structuredClone(f.lease.state);
+    const current = { ...source, sourceSha256: "e".repeat(64), commit: "f".repeat(40) };
+    f.services.captureSource.mockResolvedValue(current);
+    f.services.verify.mockClear();
+    f.services.verify.mockRejectedValueOnce(new Error("backend stopped"));
+    expect((await startHosted(f.lease, identity, profile, f.services)).reused).toBe(false);
+    expect(f.services.verify).toHaveBeenNthCalledWith(1, f.lease, source);
+    expect(f.services.verify).toHaveBeenNthCalledWith(2, f.lease, current);
+    expect(f.lease.state.generation).toBe(before.generation);
+    expect(f.lease.state.resources).toEqual(before.resources);
+    expect(f.lease.state.keys).toEqual(before.keys);
+    expect(f.lease.state.source).toEqual(current);
+    expect(f.lease.state.runId).not.toBe(before.runId);
+  });
   it("reuses a ready generation, deletes immediately on archive and creates fresh keys on relaunch", async () => {
     const f = fixture();
     await startHosted(f.lease, identity, profile, f.services);
@@ -63,4 +128,12 @@ describe("hosted Dev lifecycle", () => {
     expect(f.lease.state.generation).toBe(generation); expect(f.lease.state.keys).toEqual(keys);
     expect(f.events).toContain("deployBackend"); expect(f.lease.state.status).toBe("ready");
   });
+});
+
+it("reserves account generation capacity before allocating any image or database", async () => {
+  const f = fixture(); let admitted = false;
+  f.services.reserveGeneration = vi.fn(async () => { admitted = true; });
+  f.services.ensureImage.mockImplementation(() => { expect(admitted).toBe(true); });
+  await startHosted(f.lease, identity, profile, f.services);
+  expect(f.services.reserveGeneration).toHaveBeenCalledOnce();
 });

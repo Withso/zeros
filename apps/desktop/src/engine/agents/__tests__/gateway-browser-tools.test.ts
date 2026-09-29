@@ -1,9 +1,12 @@
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentAdapter, AgentBrowserUse } from "../types";
+import type { CloudProviderExecution } from "../cloud-provider-execution";
+import type { PreparedBoundary } from "../containment/types";
 
 let fixtureRoot: string;
 beforeEach(() => {
@@ -15,7 +18,8 @@ afterEach(() => {
   rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
-const { acquire, enabled } = vi.hoisted(() => ({
+const { acquire, enabled, cloudLookup } = vi.hoisted(() => ({
+  cloudLookup: vi.fn<() => CloudProviderExecution | null>(() => null),
   acquire: vi.fn(),
   enabled: vi.fn(
     (
@@ -24,6 +28,11 @@ const { acquire, enabled } = vi.hoisted(() => ({
       _provider: "codex" | "claude" = "codex",
     ) => true,
   ),
+}));
+
+vi.mock("../cloud-provider-execution", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../cloud-provider-execution")>(),
+  cloudProviderExecution: cloudLookup,
 }));
 
 vi.mock("../../browser/browser-tool-client", () => ({
@@ -55,8 +64,42 @@ import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 describe("AgentGateway Zeros browser ownership", () => {
   beforeEach(() => {
     acquire.mockReset();
+    cloudLookup.mockReset();
+    cloudLookup.mockReturnValue(null);
     enabled.mockReset();
     enabled.mockReturnValue(true);
+  });
+
+  it.each(["new", "resume"])("keeps cloud Claude unavailable through a browser setting update after %s", async (stage) => {
+    const updateBrowserUse = vi.fn();
+    const prompt = vi.fn(async () => ({ response: { stopReason: "end_turn" } }));
+    const statusChanged = vi.fn();
+    const factory = { prepare: vi.fn(async ({ workload }: { workload: PreparedBoundary }) => {
+      cloudLookup.mockReturnValue({ lease: { validate: vi.fn(async () => {}), credentialKind: "claude-setup-token" } } as unknown as CloudProviderExecution);
+      return { boundary: workload, env: {}, authorityId: "a".repeat(64) };
+    }) };
+    const newSession = vi.fn(async (opts: { executionId: string }) => ({ session: { executionId: opts.executionId, sessionId: opts.executionId }, initialize: {} }));
+    const loadSession = vi.fn(async (opts: { executionId: string }) => ({ executionId: opts.executionId }));
+    const gateway = new AgentGateway({
+      projectRoot: fixtureRoot,
+      executionBoundary: { ...testExecutionBoundary(), backend: "cloud-worker" },
+      cloudAgentExecutionFactory: factory,
+      events: { onSessionUpdate() {}, onPermissionRequest() {}, onQuestionRequest() {}, onAgentStderr() {}, onAgentExit() {}, onBoundaryStatusChanged: statusChanged },
+    });
+    (gateway as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set("claude", { agentId: "claude", newSession, loadSession, updateBrowserUse, prompt, disposeSession: async () => {}, dispose: async () => {} } as unknown as AgentAdapter);
+    const options = { cwd: fixtureRoot, conversationId: "cloud-chat", cloudExecution: { delegationId: randomUUID(), model: "test-model", source: { kind: "session" as const, actorSessionId: randomUUID() } } };
+    try {
+      const session = stage === "new" ? await gateway.newSession("claude", options) : await gateway.loadSession("claude", "native-chat", options);
+      const executionId = session.executionId!;
+      enabled.mockReturnValue(true);
+      await gateway.prompt("claude", executionId, [{ type: "text", text: "Continue" }]);
+      expect(prompt).toHaveBeenCalledOnce();
+      expect(updateBrowserUse).toHaveBeenCalledWith({ sessionId: executionId });
+      expect(statusChanged).toHaveBeenCalledWith("claude", executionId, expect.objectContaining({ browser: expect.objectContaining({ state: "unavailable", credentialKind: "claude-setup-token", reason: "claude-direct-login-required" }) }));
+      expect(enabled).not.toHaveBeenCalled();
+      expect(acquire).not.toHaveBeenCalled();
+      expect((stage === "new" ? newSession : loadSession).mock.calls[0]?.[0]).not.toHaveProperty("browserUse");
+    } finally { await gateway.dispose(); }
   });
 
   it("binds Codex to the native app-server Browser host without exposing Zeros tools", async () => {

@@ -606,6 +606,12 @@ export interface AgentAdapter {
 
   /** Abort the current turn. */
   cancel(opts: { sessionId: string }): Promise<void>;
+  /** Exact process ownership, including provider-native ambient work. Cloud
+   * retention uses this in addition to the public active-task snapshot. */
+  backgroundWorkActive?(sessionId:string):boolean|Promise<boolean>;
+  /** Reject configuration requiring native process replacement before a
+   * retained cloud history owner is assigned to the next command. */
+  assertBackgroundReuse?(opts:{sessionId:string;env:Record<string,string>;modeId?:string}):void;
 
   /** Stop one provider-owned background task without interrupting the parent
    * turn or sibling work. Optional for providers with no background-task API. */

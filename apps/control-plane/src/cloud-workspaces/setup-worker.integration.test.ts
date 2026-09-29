@@ -1176,6 +1176,36 @@ d("cloud workspace setup worker", () => {
     });
   });
 
+  it("never admits a persistent image mismatch after the bounded retry budget", async () => {
+    const seeded = await seedSetup({ claimCount: 2, executionFence: 2 });
+    const executor = new FakeExecutor([
+      async () => { throw new CloudWorkspaceSetupError("setup_image_contract_invalid", "untrusted diagnostic", true); },
+    ]);
+    const subject = worker(executor, { maxClaims: 3 });
+    await expect(subject.runOnce()).resolves.toBe(true);
+    await expect(subject.runOnce()).resolves.toBe(false);
+    expect(executor.calls).toHaveLength(1);
+    const stored = await pool.query(
+      `SELECT cw.status, sr.state, sr.error_code, sr.claim_count, sr.log_excerpt,
+              (SELECT count(*) FROM cloud_workspace_setup_attestations sa
+               WHERE sa.setup_run_id = sr.id) AS attestation_count
+       FROM cloud_workspaces cw
+       JOIN cloud_workspace_setup_runs sr ON sr.workspace_id = cw.id
+       WHERE cw.id = $1`,
+      [seeded.workspaceId],
+    );
+    expect(stored.rows[0]).toEqual({ status: "failed", state: "failed",
+      error_code: "setup_image_contract_invalid", claim_count: 3, log_excerpt: "", attestation_count: "0" });
+  });
+  it("never wakes a quarantined recovery source when its replacement fails qualification", async () => {
+    const seeded = await seedReplacementSetup();
+    await pool.query("UPDATE cloud_workspace_generation_transitions SET operation='recover' WHERE id=$1", [seeded.transitionId]);
+    const executor = new FakeExecutor([async () => { throw new CloudWorkspaceSetupError("setup_image_contract_invalid", "untrusted", false); }]);
+    await worker(executor).runOnce();
+    expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE id=$1", [seeded.transitionId])).rows[0].state).toBe("rollback_failed");
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='wake'", [seeded.workspaceId])).rows[0].n).toBe(0);
+  });
+
   it("fails an execution whose crash lease exhausted the bounded claim budget", async () => {
     const seeded = await seedSetup({
       state: "running",

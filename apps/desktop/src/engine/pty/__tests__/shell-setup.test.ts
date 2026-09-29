@@ -150,6 +150,7 @@ describe("buildPtyEnv sheds the dev-instance identity", () => {
     ZEROS_INSTANCE_NAME: "zeros-coralline",
     ZEROS_VITE_PORT: "5261",
     ZEROS_ENGINE_BASE_PORT: "25293",
+    ZEROS_DEV_NODE_EXECUTABLE: "/parent/toolchain/node",
     ELECTRON_RENDERER_URL: "http://localhost:5261",
   };
 

@@ -26,6 +26,8 @@
 
 import type { Octokit as OctokitClass } from "@octokit/rest";
 import { createHash } from "node:crypto";
+import { githubWriteCredential } from "./github-write-context";
+import { githubWritePublication } from "./github-write-publication";
 import { ensureLocalSettingsIgnored } from "../settings/personal-repo";
 import { GitError, isGitError, type GitErrorCode } from "./errors";
 import { getWorkspace } from "./worktree";
@@ -115,11 +117,11 @@ let tokenStore: TokenStore = NOT_CONFIGURED_STORE;
 /** Factory is async so it can dynamic-import @octokit/rest (ESM-only).
  *  Default implementation lazily constructs a real Octokit; tests can
  *  swap in a sync mock by returning Promise.resolve(mock). */
-let octokitFactory: (token: string) => Promise<OctokitClass> = async (
-  token,
+let octokitFactory: (token: string, baseUrl?: string) => Promise<OctokitClass> = async (
+  token, baseUrl,
 ) => {
   const { Octokit } = await loadOctokit();
-  return new Octokit(token ? { auth: token } : undefined);
+  return new Octokit(token ? { auth: token, ...(baseUrl ? { baseUrl } : {}) } : undefined);
 };
 let cachedOctokit: OctokitClass | null = null;
 /** The token `cachedOctokit` was built with. The cached client is reused ONLY
@@ -235,15 +237,15 @@ function configureGitCredentialSource(store: TokenStore): void {
  *  The factory can be sync (return-an-instance) or async (return a
  *  promise). The override is wrapped to normalise into Promise<Octokit>. */
 export function setOctokitFactoryForTesting(
-  factory: ((token: string) => OctokitClass | Promise<OctokitClass>) | null,
+  factory: ((token: string, baseUrl?: string) => OctokitClass | Promise<OctokitClass>) | null,
 ): void {
   if (!factory) {
-    octokitFactory = async (token) => {
+    octokitFactory = async (token, baseUrl) => {
       const { Octokit } = await loadOctokit();
-      return new Octokit(token ? { auth: token } : undefined);
+      return new Octokit(token ? { auth: token, ...(baseUrl ? { baseUrl } : {}) } : undefined);
     };
   } else {
-    octokitFactory = async (token) => factory(token);
+    octokitFactory = async (token, baseUrl) => factory(token, baseUrl);
   }
   clearOctokitCache();
 }
@@ -523,6 +525,8 @@ export async function verifyGithubToken(
 /** Get the cached Octokit instance, or lazy-init from the persisted
  *  token. Throws NOT_AUTHENTICATED if no token is present. */
 async function getOctokit(): Promise<OctokitClass> {
+  const scoped = githubWriteCredential();
+  if (scoped) return octokitFactory(scoped.token, scoped.apiBaseUrl);
   // Consult the token store on EVERY call so a sign-out / token swap can never
   // be served by a stale cached client. The cache is reused only when the
   // current token still matches the one the client was built with.
@@ -548,6 +552,8 @@ async function getOctokit(): Promise<OctokitClass> {
  *  Unauthenticated clients are deliberately not put in the auth cache, whose
  *  token-identity invariant must remain exact. */
 async function getOptionalAuthOctokit(): Promise<OctokitClass> {
+  const scoped = githubWriteCredential();
+  if (scoped) return octokitFactory(scoped.token, scoped.apiBaseUrl);
   const token = await tokenStore.get();
   if (!token) {
     clearOctokitCache();
@@ -872,6 +878,10 @@ function wrapApiError(err: unknown, fallbackMessage: string): GitError {
 async function withAuthRetry<T>(
   fn: (octokit: OctokitClass) => Promise<T>,
 ): Promise<T> {
+  if (githubWriteCredential()) {
+    try { return await fn(await getOctokit()); }
+    catch (error) { throw wrapApiError(error, "GitHub API call failed"); }
+  }
   const oct = await getOctokit();
   const rejectedToken = cachedOctokitToken;
   try {
@@ -1026,6 +1036,7 @@ export function parseGitHubRemote(originUrl: string): {
         "Could not parse an owner and repository from the GitHub remote.",
     });
   }
+  githubWriteCredential({ owner, repository: repo });
   return { owner, repo };
 }
 
@@ -1166,6 +1177,7 @@ function githubRepositoryFor(
   workspaceId: string,
   repository?: { owner: string; repo: string },
 ): Promise<{ owner: string; repo: string }> {
+  if (repository) githubWriteCredential({ owner: repository.owner, repository: repository.repo });
   return repository
     ? Promise.resolve(repository)
     : workspaceRemote(workspaceId);
@@ -1340,6 +1352,7 @@ export async function createPr(
   }
 
   const wantDraft = opts.draft ?? true;
+  const publication = githubWriteCredential() ? await githubWritePublication(ws, "gh.prCreate") : ws;
   const createWith = (draft: boolean) =>
     withAuthRetry((oct) =>
       oct.pulls.create({
@@ -1347,7 +1360,7 @@ export async function createPr(
         repo,
         title: opts.title,
         body: opts.body,
-        head: ws.branch,
+        head: publication.branch,
         base: ws.baseBranch,
         draft,
       }),

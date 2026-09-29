@@ -6,16 +6,45 @@ import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 
 function fixture() {
   const service = { snapshot: vi.fn().mockResolvedValue({ revision: 0 }), mutate: vi.fn(),
-    claim: vi.fn(), settle: vi.fn(), stop: vi.fn(), read: vi.fn() };
+    claim: vi.fn(), settle: vi.fn(), stop: vi.fn(), read: vi.fn(),confirmGoal:vi.fn() };
   const app = createCloudCommandRoutes(service as unknown as DatabaseCloudWorkspaceCommandService);
   const scope = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 1, engineInstanceId: randomUUID() };
   const token = "zwh_" + "x".repeat(43);
-  const call = (request: unknown, authorization = `Bearer ${token}`) => app.request(CLOUD_COMMAND_PATH, {
-    method: "POST", headers: { "content-type": "application/json", authorization }, body: JSON.stringify({ ...scope, request }),
+  const call = (request: unknown, authorization = `Bearer ${token}`,native=true) => app.request(CLOUD_COMMAND_PATH, {
+    method: "POST", headers: { "content-type": "application/json", authorization,...(native?{"x-zeros-native-commands":"1"}:{}) }, body: JSON.stringify({ ...scope, request }),
   });
   return { service, scope, token, call };
 }
 describe("cloud command routes", () => {
+  it("keeps native receipts opaque and native claims disabled for older engines",async()=>{
+    const f=fixture();f.service.snapshot.mockResolvedValue({revision:1,nativeGoal:{version:1,conversationId:"chat",revision:1,goal:null},pending:[{payload:{operation:{kind:"goal"}}}],receipts:[{result:{version:1,goal:null},payload:null}]} as never);
+    const response=await f.call({kind:"snapshot",conversationId:"chat"},undefined,false);
+    expect(await response.json()).toEqual({result:{revision:1,pending:[{payload:null}],receipts:[{payload:null}]}});
+    await f.call({kind:"claim",conversationId:"chat",executionId:"worker"},undefined,false);
+    expect(f.service.claim).toHaveBeenCalledWith(expect.anything(),"chat","worker",undefined,false);
+  });
+  it("admits goal confirmations only through the engine native-command capability",async()=>{
+    const f=fixture(),request={kind:"confirm-goal",commandId:randomUUID(),claimId:randomUUID(),sequence:1,goal:null};
+    expect((await f.call(request,undefined,false)).status).toBe(422);
+    expect(f.service.confirmGoal).not.toHaveBeenCalled();
+    expect((await f.call(request)).status).toBe(200);
+    expect(f.service.confirmGoal).toHaveBeenCalledWith(expect.objectContaining(f.scope),request);
+    expect((await f.call({...request,sequence:0})).status).toBe(422);
+  });
+  it("carries an actor-fenced durable native fork and rejects a self-fork", async () => {
+    const f=fixture(),payload={agentId:"codex",userMessageId:randomUUID(),prompt:[{type:"text",text:""}],modeRevision:0,
+      model:"qualified-model",agentCredentialGrantId:randomUUID(),
+      operation:{version:1,kind:"fork",sourceConversationId:"source",strategy:"native"}};
+    const mutation={conversationId:"destination",operationId:randomUUID(),expectedRevision:0,action:{kind:"fork",commandId:randomUUID(),payload}};
+    expect((await f.call({kind:"mutate",mutation})).status).toBe(200);
+    expect(f.service.mutate).toHaveBeenCalledWith(expect.objectContaining(f.scope),mutation,null);
+    expect((await f.call({kind:"mutate",mutation:{...mutation,conversationId:"source"}})).status).toBe(422);
+  });
+  it("retains typed goal receipts for a reconnecting client", async () => {
+    const f=fixture(),result={commandId:randomUUID(),claimId:randomUUID(),state:"succeeded",resultCode:null,result:{version:1,goal:null}};
+    expect((await f.call({kind:"settle",result})).status).toBe(200);
+    expect(f.service.settle).toHaveBeenCalledWith(expect.objectContaining(f.scope),result);
+  });
   it("preserves the admitted effort and fast settings across the HTTP boundary",async()=>{
     const f=fixture(),payload={agentId:"codex",userMessageId:randomUUID(),prompt:[{type:"text",text:"test"}],modeRevision:0,
       model:"gpt-5.6-sol",agentCredentialGrantId:randomUUID(),effort:"high",fast:false};

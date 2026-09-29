@@ -106,6 +106,8 @@ export function backendEnvironment(workspace, profile, ports, runId) {
       CLOUD_WORKSPACE_CPU_MILLICORES: String(c.cpuMillicores ?? 4000),
       CLOUD_WORKSPACE_MEMORY_MIB: String(c.memoryMiB ?? 8192), CLOUD_WORKSPACE_STORAGE_MIB: String(c.storageMiB ?? 20480),
       CLOUD_WORKSPACE_SECRET_KEY_V1: key("settings"), CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1: key("provider"),
+      CLOUD_CODEX_REFRESH_FINGERPRINT_KEYS_JSON: JSON.stringify({ 1: key("agent") }),
+      CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION: "1",
       CLOUD_WORKSPACE_OBJECT_KEY_V1: key("objects"), CLOUD_WORKSPACE_OBJECT_STORE_KIND: "filesystem",
       CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: privateDirectory(workspace.directory, "objects"),
     });

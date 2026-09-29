@@ -89,6 +89,15 @@ function fixture() {
 }
 
 describe("Boat bootstrap transport", () => {
+  it("returns only fixed missing-file evidence after bootstrap fails", async () => {
+    const f = fixture();
+    f.request.mockResolvedValueOnce({ ok: true, success: false, exitCode: 1, stdout: "", stderr: "untrusted", timedOut: false });
+    f.request.mockResolvedValueOnce({ ok: true, success: true, exitCode: 0, stdout: "0100", stderr: "", timedOut: false });
+    await expect(f.runner.execute(f.input, new AbortController().signal)).rejects.toMatchObject({
+      code: "provider_bootstrap_unavailable", diagnostic: { files: { node: false, supervisor: true, setup: false, engine: false } },
+    });
+    expect(f.channel.execute).not.toHaveBeenCalled();
+  });
   it("sends admission only through a host-key-pinned SSH stdin channel", async () => {
     const f = fixture();
     await expect(
@@ -211,8 +220,9 @@ describe("Boat bootstrap transport", () => {
     });
     await expect(
       f.runner.execute(f.input, new AbortController().signal),
-    ).rejects.toMatchObject({ code: "provider_bootstrap_unavailable" });
-    expect(f.request).toHaveBeenCalledOnce();
+    ).rejects.toMatchObject({ code: "provider_bootstrap_unavailable", diagnostic: { version: 1, phase: "bootstrap", exit: "unknown" } });
+    expect(f.request).toHaveBeenCalledTimes(2);
+    expect(f.request.mock.calls[1]?.[1]).toMatchObject({ body: { timeoutSeconds: 5 } });
     expect(f.channel.execute).not.toHaveBeenCalled();
     expect(f.channel.dispose).toHaveBeenCalledOnce();
   });

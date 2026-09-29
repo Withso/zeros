@@ -5,11 +5,19 @@ import type { ChatThread } from "./store";
 
 const KEY = "cloud-chats:v1";
 let owner: string | null = null;
+let restored = false;
 
 /** One bounded device snapshot, released only after authentication confirms
  * its account. Durable cloud records remain authoritative on attachment. */
 export function setCloudChatCacheOwner(next: string | null): void {
   owner = next;
+  restored = false;
+}
+
+/** Call after the authorized boot rows have merged. Before then, a Local
+ * snapshot must not erase the cloud cache during a slow sign-in/reconnect. */
+export function completeCloudChatCacheRestore(expectedOwner: string): void {
+  if (owner === expectedOwner) restored = true;
 }
 export function loadCloudChatCache(): ChatThread[] {
   if (!owner) return [];
@@ -32,7 +40,7 @@ export function persistWorkspaceChatCache(
     key,
     chats.filter((row) => !isCloudWorkspace(row.folder)),
   );
-  if (owner)
+  if (owner && restored)
     setSetting(KEY, {
       owner,
       chats: chats.filter((row) => isCloudWorkspace(row.folder)).slice(-512),

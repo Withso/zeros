@@ -10,7 +10,7 @@
   "railway": {
     "projectId": "YOUR_EXISTING_ALPHA_PROJECT_ID",
     "serviceId": "YOUR_EXISTING_BACKEND_SERVICE_ID",
-    "protectedEnvironmentIds": ["YOUR_ALPHA_ENVIRONMENT_ID"],
+    "protectedEnvironmentIds": ["YOUR_ALPHA_ENVIRONMENT_ID", "YOUR_BETA_ENVIRONMENT_ID", "YOUR_PRODUCTION_ENVIRONMENT_ID"],
     "apiToken": "YOUR_RAILWAY_WORKSPACE_API_TOKEN"
   },
   "planetscale": {
@@ -19,6 +19,7 @@
     "protectedBranch": "main",
     "region": "YOUR_POSTGRES_REGION_SLUG",
     "clusterSize": "development",
+    "runtimeRoleVersion": "1",
     "tokenId": "YOUR_SERVICE_TOKEN_ID",
     "token": "YOUR_BRANCH_AND_ROLE_PROVISIONING_TOKEN"
   },
@@ -53,7 +54,25 @@
     "billingOrg": "YOUR_BOAT_BILLING_ORGANIZATION",
     "accountScope": "YOUR_QUALIFIED_BOAT_ACCOUNT_SCOPE",
     "baseSnapshot": "your-existing-qualified-snapshot",
+    "protectedSnapshots": ["your-release-snapshot"],
     "secondsPerDollar": "YOUR_VERIFIED_NUMERIC_BOAT_COMPUTE_CONVERSION_RATE",
     "builderBudgetHours": 1
+  },
+  "admission": {
+    "maxActiveGenerations": 4,
+    "maxGenerationsPerOwner": 1,
+    "maxBuilders": 1,
+    "maxBuildersPerOwner": 1,
+    "maxNamedSnapshots": 10,
+    "snapshotHeadroom": 1
+  },
+  "secretVersions": {
+    "github": "1",
+    "workos": "1",
+    "storage": "1"
+  },
+  "protectedResources": {
+    "railwayServices": ["YOUR_CONNECTIONS_SERVICE_ID", "YOUR_GC_SERVICE_ID"],
+    "buckets": ["YOUR_CONNECTIONS_BUCKET"]
   }
 }

@@ -16,3 +16,12 @@ describe("cloud model wire compatibility", () => {
       source: { kind: "session", actorSessionId: id } }).success).toBe(false);
   });
 });
+
+describe("cloud permission mode ownership", () => {
+  it.each([["codex","auto-edit"],["codex","ask"],["claude","accept-edits"],["claude","plan"],["cursor","auto"],["cursor","agent"]])("retains %s %s exactly", (agentId,permissionMode)=>{
+    expect(CloudQueuedPromptSchema.parse({agentId,permissionMode,userMessageId:"message",prompt:[{type:"text",text:"test"}],modeRevision:0}).permissionMode).toBe(permissionMode);
+  });
+  it.each([["codex","bypass"],["claude","full-access"],["cursor","ask"],["codex","unknown"]])("rejects %s foreign mode %s",(agentId,permissionMode)=>{
+    expect(CloudQueuedPromptSchema.safeParse({agentId,permissionMode,userMessageId:"message",prompt:[{type:"text",text:"test"}],modeRevision:0}).success).toBe(false);
+  });
+});

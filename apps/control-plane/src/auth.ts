@@ -1,3 +1,4 @@
+import { devConnectionRuntime } from "./dev-connections/runtime.js";
 // ──────────────────────────────────────────────────────────
 // Auth — verify provider-issued JWTs locally (JWKS) and JIT-mirror the user.
 //
@@ -318,6 +319,14 @@ export function createAuthMiddleware(
       },
     );
     c.set("user", user);
+    if (identity.provider === "workos" && identity.session && config.auth.provider === "workos") {
+      const connections = devConnectionRuntime(pool);
+      if (connections) {
+        try { await connections.signedIn({userId:user.id,issuer:config.auth.issuer,subject:identity.providerSubject,
+          token,expiresAt:identity.session.tokenExpiresAt}); }
+        catch { /* Sign-in remains available; new Dev grants fail closed. */ }
+      }
+    }
     await next();
   };
 }

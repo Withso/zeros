@@ -19,6 +19,7 @@ import type {
 // ──────────────────────────────────────────────────────────
 
 import type { RuntimeClient } from "./ws-client";
+import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type { BridgeMessage } from "./messages";
 import type {
   Workspace,
@@ -265,10 +266,27 @@ export async function bridgeWorkspaceList(
     withChanges?: boolean;
   } = {},
 ): Promise<Workspace[]> {
+  return (await bridgeWorkspaceListSnapshot(bridge, args)).workspaces;
+}
+
+export interface WorkspaceListSnapshot {
+  workspaces: Workspace[];
+  confirmedLocalWorkspaces: boolean;
+  confirmedCloudWorkspaces?: boolean;
+}
+
+export async function bridgeWorkspaceListSnapshot(
+  bridge: RuntimeClient,
+  args: Exclude<Parameters<typeof bridgeWorkspaceList>[1], undefined> = {},
+): Promise<WorkspaceListSnapshot> {
   const result = (await workspaceOp(bridge, "workspace.list", { ...args })) as
-    | { workspaces?: Workspace[] }
+    | { workspaces?: Workspace[]; confirmedLocalWorkspaces?: boolean; confirmedCloudWorkspaces?: boolean }
     | undefined;
-  return result?.workspaces ?? [];
+  return {
+    workspaces: result?.workspaces ?? [],
+    confirmedLocalWorkspaces: result?.confirmedLocalWorkspaces !== false,
+    ...(result?.confirmedCloudWorkspaces === undefined ? {} : { confirmedCloudWorkspaces: result.confirmedCloudWorkspaces }),
+  };
 }
 
 /** List the engine's projects (Repository panel repos) over the bridge — the
@@ -588,17 +606,29 @@ export interface ChatSnapshotWire {
   chats: ChatRowWire[];
   /** Complete engine tombstone set, used to reject stale boot-cache rows. */
   chatDeletions: string[];
+  confirmedCloudWorkspaces?: string[];
+  /** False for a partial cloud publication while Local is cold/reconnecting. */
+  confirmedLocalChats?: boolean;
 }
 
 /** Full chat snapshot plus deletion identities in one engine turn. */
 export async function bridgeChatSnapshot(
   bridge: RuntimeClient,
+  refresh?: ChatSnapshotRefresh,
 ): Promise<ChatSnapshotWire> {
-  const r = (await workspaceOp(bridge, "chats.list")) as
-    | { chats?: ChatRowWire[]; chatDeletions?: unknown }
+  const r = (await (refresh && bridge instanceof WorkspaceRuntimeClient
+    ? bridge.chatSnapshot(refresh) : workspaceOp(bridge, "chats.list"))) as
+    | { chats?: ChatRowWire[]; chatDeletions?: unknown; confirmedCloudWorkspaces?: unknown; confirmedLocalChats?: boolean }
     | undefined;
+  // Failure/malformed data cannot establish an empty workspace or authorize
+  // default-chat creation. Keep the last confirmed snapshot and retry later.
+  if (!Array.isArray(r?.chats)) throw new Error("Could not read the conversation list");
   return {
-    chats: Array.isArray(r?.chats) ? r.chats : [],
+    chats: r.chats,
+    ...(r.confirmedLocalChats === undefined ? {} : { confirmedLocalChats: r.confirmedLocalChats }),
+    confirmedCloudWorkspaces: Array.isArray(r?.confirmedCloudWorkspaces)
+      ? r.confirmedCloudWorkspaces.filter((folder): folder is string => typeof folder === "string")
+      : [],
     chatDeletions: Array.isArray(r?.chatDeletions)
       ? r.chatDeletions.filter(
           (id): id is string => typeof id === "string" && id.length > 0,
@@ -1628,6 +1658,7 @@ export async function bridgeGhPrComment(
 export async function bridgeGhPrList(
   bridge: RuntimeClient,
   args: {
+    workspaceId?: string;
     owner?: string;
     repo?: string;
     originUrl?: string;

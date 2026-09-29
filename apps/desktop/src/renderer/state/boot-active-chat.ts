@@ -2,15 +2,10 @@
 // boot-active-chat — which chat to select when the app starts
 // ──────────────────────────────────────────────────────────
 //
-// 2026-07-06 invariant fix: the app must NEVER boot into a "no chat
-// selected" Conversation pane — that pane renders nothing since the EmptyComposer
-// landing was deleted (conversation/chat-view.tsx returns null for a null
-// active chat). The old policy honored a persisted `"null"` active-chat
-// key as "user explicitly cleared → land on the EmptyComposer"; with that
-// surface gone, honoring it stranded the user on a dead black pane after
-// every restart that happened to persist a null (mid workspace-swap,
-// after a tab close, after an archive). The explicit-null case is
-// therefore retired: boot ALWAYS restores a chat when one exists.
+// Restore a chat within the remembered owner whenever one is available.
+// Legacy explicit-null selections no longer strand a warm workspace without
+// a chat, but a cold owner must wait for its own history instead of displaying
+// a different workspace or creating a default tab prematurely.
 //
 // Restore priority (first hit wins):
 //   1. the persisted active chat id, if that chat is still live
@@ -19,22 +14,36 @@
 //      "last opened chat", which `updatedAt` can't give us because merely
 //      viewing a chat never bumps it
 //   3. the most-recently-touched live chat in that workspace
-//   4. the most-recently-touched live chat anywhere
-//   5. null — only when there are no live chats at all; the tab strip's
-//      selection keeper then auto-spawns a default chat for whatever
-//      workspace comes into view.
+//   4. with no remembered workspace, the most-recent live Local chat
+//   5. null — preserve the remembered workspace while its list revalidates.
+// A saved cloud id can precede its authorized chat row. Preserve that identity
+// until the exact cloud snapshot proves deletion; Local's snapshot cannot.
 //
 // Pure and side-effect-free so the policy is unit-testable without the
 // app shell.
 // ──────────────────────────────────────────────────────────
 
 import type { ChatThread } from "./store";
+import { cloudWorkspaceKey, parseCloudScopedId, isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 
 export interface BootRestoreContext {
   /** Workspace folder the user left off in (persisted UI state). */
   lastWorkspaceFolder: string | null;
   /** Per-workspace last-viewed chat map (persisted UI state). */
   activeChatByFolder: Record<string, string>;
+  /** Only an exact cloud snapshot can prove a saved remote chat was deleted. */
+  confirmedCloudWorkspaces?: readonly string[];
+  confirmedLocalChats?: boolean;
+}
+
+/** Identity only: this does not authorize or release cached cloud content. */
+export function cloudFolderForChatId(id: string | null): string | null {
+  try {
+    const target = parseCloudScopedId(id);
+    return target ? cloudWorkspaceKey(target) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Most-recently-touched live chat matching `pred`, or null. */
@@ -62,6 +71,10 @@ export function resolveBootActiveChatId(
   if (persistedId) {
     const hit = chats.find((c) => c.id === persistedId && !c.archived);
     if (hit) return hit.id;
+    const cloudFolder = cloudFolderForChatId(persistedId);
+    if (!cloudFolder && ctx.confirmedLocalChats === false) return persistedId;
+    if (cloudFolder && !ctx.confirmedCloudWorkspaces?.includes(cloudFolder) &&
+        !chats.some((c) => c.id === persistedId && c.archived)) return persistedId;
   }
   // 2./3. Land in the workspace the user left, on the chat they were viewing.
   const folder = ctx.lastWorkspaceFolder;
@@ -72,10 +85,15 @@ export function resolveBootActiveChatId(
         (c) => c.id === remembered && !c.archived && c.folder === folder,
       );
       if (hit) return hit.id;
+      if (!isCloudWorkspace(folder) && ctx.confirmedLocalChats === false) return remembered;
+      if (cloudFolderForChatId(remembered) === folder &&
+          !ctx.confirmedCloudWorkspaces?.includes(folder) &&
+          !chats.some((c) => c.id === remembered && c.archived)) return remembered;
     }
     const inFolder = mostRecentLive(chats, (c) => c.folder === folder);
-    if (inFolder) return inFolder;
+    return inFolder;
   }
-  // 4./5. Anywhere, else nothing to restore.
-  return mostRecentLive(chats);
+  // A cold Local/cloud list is not evidence that a remembered owner is gone.
+  // With no remembered owner, only device-local history is a safe fallback.
+  return mostRecentLive(chats, (chat) => !isCloudWorkspace(chat.folder));
 }

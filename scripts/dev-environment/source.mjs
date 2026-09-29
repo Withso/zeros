@@ -25,6 +25,14 @@ export function workerSourcePath(file) {
     /^scripts\/(?:build-zsr-supervisor|codegen-codex(?:-lib)?|fix-node-pty-helper)\.(?:mjs|cjs)$/.test(file);
 }
 
+/** Desktop renderer/main files are served or rebuilt on the Mac. They are not
+ * inputs to the hosted API, authentication facade, or cloud worker image. All
+ * other deployable inputs stay conservative, including shared build scripts. */
+export function hostedSourcePath(file) {
+  return deployableSourcePath(file) && !file.startsWith("apps/desktop/src/renderer/") &&
+    !file.startsWith("apps/desktop/electron/");
+}
+
 function commitSnapshot(directory, env) {
   command(directory, "git", ["init", "--quiet", "--initial-branch=dev-snapshot"], env);
   // The launcher links installed dependencies after capture. A directory-only
@@ -69,7 +77,7 @@ export function captureDevelopmentSource(repositoryRoot, stateDirectory) {
   fs.chmodSync(directory, 0o700);
   const workerDirectory = fs.mkdtempSync(path.join(privateDirectory(parent, "sources"), "worker-"));
   fs.chmodSync(workerDirectory, 0o700);
-  const all = createHash("sha256"), backend = createHash("sha256"), workerInputs = createHash("sha256");
+  const all = createHash("sha256"), backend = createHash("sha256"), workerInputs = createHash("sha256"), hostedInputs = createHash("sha256");
   let size = 0;
   try {
     for (const file of files) {
@@ -84,6 +92,7 @@ export function captureDevelopmentSource(repositoryRoot, stateDirectory) {
       if (file !== "apps/control-plane/src/development-build.ts") {
         const row = `${file}\0${mode}\0${sha256(data)}\n`; all.update(row);
         if (file.startsWith("apps/control-plane/")) backend.update(row);
+        if (hostedSourcePath(file)) hostedInputs.update(row);
         if (workerSourcePath(file)) {
           workerInputs.update(row);
           const workerTarget = path.join(workerDirectory, file); fs.mkdirSync(path.dirname(workerTarget), { recursive: true, mode: 0o700 }); fs.writeFileSync(workerTarget, data, { mode });
@@ -101,7 +110,7 @@ export function captureDevelopmentSource(repositoryRoot, stateDirectory) {
     fs.chmodSync(archive, 0o600);
     const bytes = fs.readFileSync(archive);
     if (bytes.length > 32 * 1024 * 1024) throw new Error("Dev backend upload exceeds its size budget");
-    return { directory, commit, sourceSha256, workerInputsSha256,
+    return { directory, commit, sourceSha256, workerInputsSha256, deploymentInputsSha256: hostedInputs.digest("hex"),
       worker: { directory: workerDirectory, commit: workerCommit },
       backend: { archive, digest: sourceSha256, archiveSha256: sha256(bytes), inputSha256: backend.digest("hex") } };
   } catch (error) { fs.rmSync(directory, { recursive: true, force: true }); fs.rmSync(workerDirectory, { recursive: true, force: true }); throw error; }

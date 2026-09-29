@@ -1,3 +1,4 @@
+import { useOrganizationProjects } from "../../state/use-organization-projects";
 // ──────────────────────────────────────────────────────────
 // DispatcherPage — one entry point to create a workspace + dispatch
 // ──────────────────────────────────────────────────────────
@@ -46,7 +47,6 @@ import {
 import { toast } from "../../shared/ui/primitives/elements";
 
 import {
-  useProjects,
   notifyWorkspacesChanged,
   peekWorkspacesFor,
   reloadWorkspacesFor,
@@ -71,7 +71,7 @@ import { useCloudCreate } from "./cloud-create";
 import { registerCloudDesignCreation } from "../../state/cloud-creation-mode";
 import { createCloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { acceptCloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
-import { cloudWorkspaceKey, isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { spawnPreparedDefaultChat } from "../../state/spawn-default-chat";
 import { prepareProjectFolder } from "../project-folder-setup";
 import type { AddProjectOptions } from "../add-project-provider";
@@ -160,7 +160,7 @@ export function DispatcherPage({
   onOpenGithubProject,
   onQuickStart,
 }: DispatcherPageProps) {
-  const { projects } = useProjects();
+  const { projects } = useOrganizationProjects();
   const agents = useAgentsSnapshot();
   const sessions = useAgentSessions();
   const dispatch = useWorkspaceDispatch();
@@ -241,7 +241,7 @@ export function DispatcherPage({
   // never falls back to creating an organization workspace on this device.
   const placement = cloud.organization && !cloud.organization.isPersonal
     ? "cloud" : "local";
-  const placementReason = placement === "cloud" ? cloud.reason : selectedProject && isCloudWorkspace(selectedProject.repoRoot) ? "Open a local checkout of this repository to create a Local workspace." : null;
+  const placementReason = placement === "cloud" ? cloud.reason : null;
 
   const handleCreateCloud = async (payload?: DispatcherCreatePayload) => {
     const project = selectedProject;

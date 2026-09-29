@@ -1,5 +1,3 @@
-import { shell } from "electron";
-
 import { channel, schemeForChannel } from "../../../src/engine/runtime";
 import { appBaseUrl } from "../../app-base-url";
 import { devWorkOSConfigurationIssue, workspaceDevAuthProfile } from "../../dev-workos-auth-policy";
@@ -41,7 +39,10 @@ function workOSFlow(): WorkOSDesktopAuthorizationFlow {
     client: workOSDesktopClientForMain(),
     appOrigin: appBaseUrl(),
     deepLinkScheme: schemeForChannel(channel()),
-    openExternal: (url) => shell.openExternal(url),
+    openExternal: async (url) => {
+      const { openDesktopAuthBrowser } = await import("../../deep-link");
+      await openDesktopAuthBrowser(url);
+    },
     resolveAccountId: resolveWorkOSDesktopAccountId,
     persistSession: persistWorkOSSession,
     registerCallback: (state, expiresAt, accept) =>

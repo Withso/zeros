@@ -30,6 +30,25 @@ function fixture(headless?:{prepare(claim:CloudCommandClaim):Promise<void>;retir
   return { claim, snapshot, completion, dependencies, runtime, send, stop, read };
 }
 describe("engine-owned cloud command dispatch", () => {
+  it("claims a queued turn against the retained background execution",async()=>{
+    const prepare=vi.fn(async()=>{}),retire=vi.fn(async()=>{}),f=fixture({prepare,retire});
+    Object.assign(f.dependencies,{retainedExecution:()=>"execution"});
+    try {
+      await f.send();await vi.waitFor(()=>expect(prepare).toHaveBeenCalledOnce());
+      expect(f.claim.executionId).toBe("execution");
+      f.completion.resolve({state:"succeeded",resultCode:null});
+    } finally {f.runtime.close();}
+  });
+  it("runs an explicit goal operation while keeping the prompt queue paused",async()=>{
+    const f=fixture();
+    Object.assign(f.claim.payload,{agentId:"codex",model:"qualified-model",agentCredentialGrantId:randomUUID(),operation:{version:1,kind:"goal",action:"clear"}});
+    const request=f.dependencies.request.getMockImplementation()!;
+    f.dependencies.request.mockImplementation(async input=>input.kind==="mutate"?f.snapshot(3,true,true):request(input));
+    try {
+      await f.send();await vi.waitFor(()=>expect(f.dependencies.dispatch).toHaveBeenCalledOnce());
+      f.completion.resolve({state:"succeeded",resultCode:null});
+    } finally {f.runtime.close();}
+  });
   it("admits queued work without a live desktop session and retires before settlement",async()=>{
     const proof=deferred<void>();
     const prepare=vi.fn(async(claim:CloudCommandClaim)=>{f.dependencies.execution.mockReturnValue(claim.executionId);});
@@ -43,12 +62,16 @@ describe("engine-owned cloud command dispatch", () => {
       proof.resolve();await vi.waitFor(()=>expect(f.dependencies.request).toHaveBeenCalledWith({kind:"settle",result:expect.objectContaining({state:"succeeded"})}));
     } finally {proof.resolve();f.runtime.close();}
   });
-  it("honors Stop during headless admission without starting the prompt",async()=>{
+  it.each(["prompt","fork","goal"])("honors Stop during %s admission without dispatch",async operation=>{
     const ready=deferred<void>();
     const prepare=vi.fn(async(claim:CloudCommandClaim)=>{await ready.promise;f.dependencies.execution.mockReturnValue(claim.executionId);});
     const retire=vi.fn(async()=>{}),f=fixture({prepare,retire});
+    if(operation!=="prompt")Object.assign(f.claim.payload,{agentId:"codex",model:"qualified-model",agentCredentialGrantId:randomUUID(),
+      operation:operation==="fork"?{version:1,kind:"fork",sourceConversationId:"source",strategy:"native"}:{version:1,kind:"goal",action:"clear"}});
     try {
-      await f.send();await vi.waitFor(()=>expect(prepare).toHaveBeenCalledOnce());await f.stop();
+      if(operation==="fork")await f.runtime.handle({kind:"mutate",mutation:{conversationId:"chat",operationId:randomUUID(),expectedRevision:0,action:{kind:"fork",commandId:f.claim.commandId,payload:f.claim.payload}}});
+      else await f.send();
+      await vi.waitFor(()=>expect(prepare).toHaveBeenCalledOnce());await f.stop();
       expect(f.dependencies.cancel).toHaveBeenCalledOnce();ready.resolve();
       await vi.waitFor(()=>expect(f.dependencies.request).toHaveBeenCalledWith({kind:"settle",result:expect.objectContaining({state:"cancelled"})}));
       expect(f.dependencies.dispatch).not.toHaveBeenCalled();expect(retire).toHaveBeenCalledOnce();

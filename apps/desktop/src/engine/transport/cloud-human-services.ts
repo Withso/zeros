@@ -43,6 +43,8 @@ export function parseCloudSshIntro(source: string): Extract<CloudRuntimeServiceS
 export class CloudRuntimeHumanServices {
   private paused = false;
   private readonly workers = new Set<{ close(): void; retired: Promise<void> }>();
+  private readonly tunnels = new Set<Duplex>();
+  hasActiveWork(): boolean { return this.workers.size > 0 || this.tunnels.size > 0; }
   constructor(private readonly worker: CloudWorkerConfiguration, private readonly forbiddenPorts: () => readonly number[]) {}
 
   /** Kernel PID namespaces include detached descendants. Closing the worker
@@ -68,6 +70,8 @@ export class CloudRuntimeHumanServices {
     if (grant.kind !== 'tunnel' || !Number.isSafeInteger(grant.remotePort) || grant.remotePort! < 1024 || grant.remotePort! > 65535 ||
         grant.remotePort === 22222 || this.forbiddenPorts().includes(grant.remotePort!)) throw new Error('Cloud tunnel destination is unavailable');
     const stream = connect({ host: '127.0.0.1', port: grant.remotePort! });
+    this.tunnels.add(stream);
+    stream.once('close', () => this.tunnels.delete(stream));
     stream.on('error', () => {});
     try {
       await new Promise<void>((resolve, reject) => {

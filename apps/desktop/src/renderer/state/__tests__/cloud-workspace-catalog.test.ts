@@ -1,20 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
-const api = vi.hoisted(() => ({ list: vi.fn(), lifecycle: vi.fn() }));
+const api = vi.hoisted(() => ({ list: vi.fn(), lifecycle: vi.fn(), recover: vi.fn(), projects: vi.fn(() => [] as unknown[]) }));
 vi.mock("../../platform/cloud-workspaces", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../platform/cloud-workspaces")>()),
   listCloudWorkspaceDocuments: api.list,
   changeCloudWorkspaceLifecycle: api.lifecycle,
+  recoverCloudWorkspace: api.recover,
 }));
-vi.mock("../projects-store", () => ({ loadProjects: () => [] }));
+vi.mock("../projects-store", () => ({ loadProjects: api.projects }));
 import {
   acceptCloudWorkspaceDocument,
   clearCloudWorkspaceCatalog,
+  cloudCatalogNeedsFastRefresh,
   cloudWorkspaceDocument,
+  canReadCloudWorkspace,
   getCloudWorkspaceRows,
   getCloudProjects,
+  cloudProjectForFolder,
   manageCloudWorkspace,
+  cloudWorkspaceOperation,
   refreshCloudWorkspaceCatalog,
+  cloudWorkspaceDetails,
+  subscribeCloudWorkspaces,
+  subscribeCloudWorkspaceRows,
 } from "../cloud-workspace-catalog";
 const target = {
   organizationId: "11111111-1111-4111-8111-111111111111",
@@ -58,11 +66,72 @@ function doc(version: number, status = "ready"): CloudWorkspaceDocument {
 beforeEach(() => {
   clearCloudWorkspaceCatalog();
   vi.clearAllMocks();
+  api.projects.mockReturnValue([]);
 });
 describe("cloud workspace catalog ownership", () => {
+  it("sends recover to the generation recovery route with its exact checkpoint", async () => {
+    const recovery = { sourceGeneration: 1, checkpointId: "33333333-3333-4333-8333-333333333333" };
+    api.recover.mockResolvedValue(doc(2, "ready"));
+    api.lifecycle.mockResolvedValue(doc(2, "ready"));
+    await cloudWorkspaceOperation(target, "workspace.recover", { workspaceId: target.workspaceId, ...recovery });
+    expect(api.recover).toHaveBeenCalledWith(target, recovery, expect.any(String));
+    expect(api.lifecycle).not.toHaveBeenCalled();
+  });
+  it.each(["deleting", "deleted"])("retires %s workspaces before provider storage removal finishes", (status) => {
+    acceptCloudWorkspaceDocument(doc(1));
+    const second = { ...doc(1), id: "33333333-3333-4333-8333-333333333333" };
+    acceptCloudWorkspaceDocument(second);
+    acceptCloudWorkspaceDocument(doc(2, status));
+    expect(getCloudWorkspaceRows()).toHaveLength(1);
+    expect(getCloudProjects()[0].repoRoot).toContain(second.id);
+    expect(cloudProjectForFolder(`cloud://${target.organizationId}/${target.workspaceId}`)).toBeNull();
+    expect(canReadCloudWorkspace(cloudWorkspaceDocument(target))).toBe(false);
+  });
+  it.each(["ready", "busy", "stopped", "archived", "failed"])("allows %s history without requiring a running VM", status => {
+    expect(canReadCloudWorkspace(doc(1, status))).toBe(true);
+    expect(canReadCloudWorkspace({ ...doc(1, status), deletedAt: doc(1).updatedAt })).toBe(false);
+    expect(canReadCloudWorkspace(undefined)).toBe(false);
+  });
+  it("does not keep every workspace on fast polling while provider storage deletion is pending", () => {
+    expect(cloudCatalogNeedsFastRefresh()).toBe(false);
+    acceptCloudWorkspaceDocument(doc(1, "deleting"));
+    expect(cloudCatalogNeedsFastRefresh()).toBe(false);
+    acceptCloudWorkspaceDocument({ ...doc(1, "starting"), id: "33333333-3333-4333-8333-333333333333" });
+    expect(cloudCatalogNeedsFastRefresh()).toBe(true);
+    acceptCloudWorkspaceDocument({ ...doc(2, "ready"), id: "33333333-3333-4333-8333-333333333333" });
+    expect(cloudCatalogNeedsFastRefresh()).toBe(false);
+  });
+  it.each(["ready", "busy", "stopped", "archived", "failed", "error", "deleted"])("polls settled %s state at the normal cadence", status => {
+    acceptCloudWorkspaceDocument(doc(1, status));
+    expect(cloudCatalogNeedsFastRefresh()).toBe(false);
+  });
+  it("ignores tombstoned transitions and clears polling state on account replacement", () => {
+    acceptCloudWorkspaceDocument({ ...doc(1, "starting"), deletedAt: doc(1).updatedAt });
+    expect(cloudCatalogNeedsFastRefresh()).toBe(false);
+    acceptCloudWorkspaceDocument(doc(2, "starting"));
+    expect(cloudCatalogNeedsFastRefresh()).toBe(true);
+    clearCloudWorkspaceCatalog();
+    expect(cloudCatalogNeedsFastRefresh()).toBe(false);
+  });
+  it("keeps organization repository ownership separate from a matching local checkout", () => {
+    api.projects.mockReturnValue([{id:"local-project",name:"fixture",repoRoot:"/local/fixture",repoSlug:"fixture",originUrl:"https://github.com/example/fixture.git",addedAt:1}]);
+    acceptCloudWorkspaceDocument(doc(1));
+    expect(getCloudProjects()).toHaveLength(1);
+    const project = cloudProjectForFolder(`cloud://${target.organizationId}/${target.workspaceId}`);
+    expect(project?.repoRoot).toMatch(/^cloud:\/\//);
+    expect(project?.id).not.toBe("local-project");
+  });
   it.each(["failed", "error"])("projects %s setup as failed instead of indefinitely running", (status) => {
     acceptCloudWorkspaceDocument(doc(1, status));
     expect(getCloudWorkspaceRows()[0].setupState).toBe("failed");
+  });
+  it("treats an archived workspace as settled instead of keeping fast setup polling active", () => {
+    acceptCloudWorkspaceDocument(doc(1, "archived"));
+    expect(getCloudWorkspaceRows()[0]).toMatchObject({
+      setupState: "passed", archivedAt: Date.parse(doc(1, "archived").updatedAt),
+    });
+    acceptCloudWorkspaceDocument(doc(2, "starting"));
+    expect(getCloudWorkspaceRows()[0]).toMatchObject({ setupState: "running", archivedAt: null });
   });
   it("moves a cloud-only repository's entry point when its first workspace is deleted", () => {
     const second = { ...doc(1), id: "33333333-3333-4333-8333-333333333333" };
@@ -121,4 +190,24 @@ describe("cloud workspace catalog ownership", () => {
       api.lifecycle.mock.calls[1][2],
     );
   });
+});
+
+
+it("unchanged list polls retain details while status-only changes notify document observers", async () => {
+  const initial = doc(1);
+  acceptCloudWorkspaceDocument(initial);
+  const key = getCloudWorkspaceRows()[0].id;
+  const details = cloudWorkspaceDetails.peekSnapshot(key);
+  const detailListener = vi.fn(), documents = vi.fn(), rows = vi.fn();
+  const off = [cloudWorkspaceDetails.subscribe(key, detailListener), subscribeCloudWorkspaces(documents), subscribeCloudWorkspaceRows(rows)];
+  try {
+    api.list.mockResolvedValue([initial]);
+    await refreshCloudWorkspaceCatalog();
+    expect(cloudWorkspaceDetails.peekSnapshot(key)).toBe(details);
+    expect(detailListener).not.toHaveBeenCalled();
+    expect(documents).not.toHaveBeenCalled();
+    acceptCloudWorkspaceDocument(doc(2, "stopped"));
+    expect(documents).toHaveBeenCalledOnce();
+    expect(rows).not.toHaveBeenCalled();
+  } finally { off.forEach(stop => stop()); }
 });

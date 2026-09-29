@@ -159,3 +159,18 @@ describe("cloud runtime wire routing", () => {
     });
   });
 });
+
+it("scopes cloud workspace-change arrays for the shared Git/files invalidation consumer", () => {
+  for (const workspaceIds of [undefined, ["local-main"]]) {
+    expect(cloudIncoming(scope, { type: "DB_CHANGED", kinds: ["workspaces"], workspaceIds }))
+      .toMatchObject({ workspaceIds: [key], cloudWorkspace: key });
+  }
+});
+it("rejects a foreign cloud owner embedded in a typed incoming turn row", () => {
+  const other = { ...scope, workspaceId: "33333333-3333-4333-8333-333333333333" };
+  for (const identity of [{ chatId: cloudScopedId(other, "chat") }, { workspaceId: cloudWorkspaceKey(other) }, { folder: cloudWorkspaceKey(other) }]) {
+    expect(() => cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "turns.get", result: { turn: {
+      chatId: "chat", turnId: "turn", workspaceId: scope.engineWorkspaceId, folder: scope.root, ...identity,
+    } } })).toThrow(/changed/);
+  }
+});

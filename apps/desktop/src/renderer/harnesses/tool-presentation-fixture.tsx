@@ -40,6 +40,11 @@ const output = Array.from(
 const readProviders = ["Claude", "Codex", "Cursor"] as const;
 const readOutput = Array.from({ length: 415 }, (_, index) => `source line ${index + 1}`).join("\n") + "\n";
 const initial: AgentMessage[] = [
+  ...(["connected", "disconnected"] as const).map((state) => tool(`environment-${state}`, {
+    title: `Environment ${state}`,
+    toolKind: "other",
+    rawOutput: { environment: "zeros-fixture", state },
+  })),
   ...readProviders.map((provider) => tool(`read-${provider}`, {
     title: "Read",
     toolKind: "read",

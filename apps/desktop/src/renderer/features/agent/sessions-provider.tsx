@@ -1,3 +1,4 @@
+import { PermissionModeChanges } from "./permission-mode-change";
 import { awaitComposerMode } from "./composer-mode";
 // ──────────────────────────────────────────────────────────
 // AgentSessionsProvider — bridge-connected actions over the Zustand store
@@ -58,8 +59,10 @@ import type {
   AgentSafetyReviewRetriedMessage,
   AgentSteeredMessage,
 } from "../../platform/bridge/messages";
-import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
+import { useBridge } from "../../platform/bridge/use-bridge";
+import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
+import { chatChangeTargets } from "../../state/chat-change-targets";
 import { BackgroundTaskSnapshots, loadedBackgroundTaskState } from "./background-task-state";
 import { cloudSessionMetadata } from "./cloud-session-metadata";
 import {
@@ -122,6 +125,7 @@ import {
 import { legacyProviderBinding } from "@zeros/protocol/identities";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import { synthesizeReplayPrompt } from "./replay";
+import { startCloudSubmitSpan, finishCloudFirstText } from "../../state/cloud-workspace-latency";
 import { activeProviderTurnId } from "./turn-grouping";
 import {
   AuthPromptRecovery,
@@ -192,6 +196,7 @@ import {
   updatePersistedMessageRefs,
 } from "./message-persistence-tracker";
 import {
+  canApplyTranscriptRead,
   invalidateTranscriptRequest,
   isCurrentTranscriptRequest,
   releaseTranscriptRequest,
@@ -338,11 +343,11 @@ async function reconcilePermissionModeAtBind(
       },
       10_000,
     );
-    if (resp.type === "AGENT_ERROR" && bindStillOwnsSlot()) {
+    if (resp.type === "AGENT_ERROR" && bindStillOwnsSlot() && getStore().sessions[chatId]?.currentModeId === desired.id) {
       getStore().patchSession(chatId, { currentModeId });
     }
   } catch {
-    if (bindStillOwnsSlot()) {
+    if (bindStillOwnsSlot() && getStore().sessions[chatId]?.currentModeId === desired.id) {
       getStore().patchSession(chatId, { currentModeId });
     }
   }
@@ -452,7 +457,6 @@ export function AgentSessionsProvider({
   children: React.ReactNode;
 }) {
   const bridge = useBridge();
-  const bridgeStatus = useBridgeStatus();
 
   // Helper: snapshot the store. Used inside async actions to bypass
   // React's closure capture problem (state read pre-await is stale).
@@ -471,6 +475,7 @@ export function AgentSessionsProvider({
   // that exact chat/session dirty (bounded) and re-window once the turn settles;
   // replaying raw chunks would duplicate text already present in the DB window.
   const prebindDirtySessionsRef = useRef(new Map<string, string>());
+  const permissionModeChangesRef = useRef(new PermissionModeChanges());
   const prebindBackgroundTasksRef = useRef(new BackgroundTaskSnapshots());
   const prebindGoalSnapshotsRef = useRef(
     new Map<string, PrebindGoalSnapshot>(),
@@ -505,13 +510,21 @@ export function AgentSessionsProvider({
   // HMR swap) or the window RPC rejected. An empty read in that state is
   // indistinguishable from "no history", and treating it as authoritative
   // parks the chat on a permanently blank transcript while its tab stays
-  // visible. Parked ids re-hydrate on the next
-  // bridge "connected" edge — see the drain effect below hydrateChat.
-  const pendingHydratesRef = useRef(new Set<string>());
+  // visible. Parked ids follow their workspace's connection, independently
+  // of the Local engine and of other cloud workspaces.
+  const retryHydrateRef = useRef<(chatId: string, isCurrent: () => boolean) => Promise<void>>(async () => {});
+  const pendingHydratesRef = useRef(new TranscriptHydrationRetries(
+    (chatId, isCurrent) => retryHydrateRef.current(chatId, isCurrent),
+  ));
   // Intent prefetch and the retained ChatBody can request the same cold
   // transcript in one frame. Share that disk/DB window read per chat instead
   // of relying only on the post-await stale-write guard.
   const hydrateInFlightRef = useRef(new Map<string, Promise<void>>());
+  useEffect(() => {
+    const pending = pendingHydratesRef.current;
+    const inFlight = hydrateInFlightRef.current;
+    return () => { pending.clear(); inFlight.clear(); };
+  }, []);
   // Warm retained chats reconcile against durable history in the background.
   // Hover intent followed by selection must share that same window read.
   const reconcileInFlightRef = useRef(new Map<string, Promise<void>>());
@@ -948,6 +961,10 @@ export function AgentSessionsProvider({
       // no-ops after the first chunk and when no turn is armed, so it's one
       // event per turn. (Load-replay content events already returned above.)
       if (chatId) {
+        const slot = state.sessions[chatId];
+        if (slot?.status === "streaming" && (slot.executionId ?? slot.sessionId) === sourceExecution &&
+            msg.notification.update.sessionUpdate === "agent_message_chunk")
+          finishCloudFirstText(chatId, msg.notification.update);
         promptActivityRef.current.get(chatId)?.();
         const su = (msg.notification.update as { sessionUpdate?: string })
           .sessionUpdate;
@@ -2475,6 +2492,7 @@ export function AgentSessionsProvider({
         }
       }
       sendingChatsRef.current.add(chatId);
+      const cancelLatency = startCloudSubmitSpan(chatId);
       let sentUserMessageId: string | null = null;
       let promptDiagnostics: {
         promptId: string;
@@ -3580,6 +3598,7 @@ export function AgentSessionsProvider({
           });
         }
       } finally {
+        cancelLatency?.();
         const terminalSlot = getStore().sessions[chatId];
         const terminalPrompt =
           terminalSlot && lastUserPrompt(terminalSlot.messages);
@@ -4073,6 +4092,11 @@ export function AgentSessionsProvider({
       if (!current?.agentId || !current.sessionId) return;
       // Optimistic flip; engine echoes back via AGENT_MODE_CHANGED or AGENT_ERROR.
       const previousModeId = current.currentModeId;
+      const request = permissionModeChangesRef.current.begin(chatId, current.executionId ?? current.sessionId);
+      const stillOwnsMode = () => {
+        const slot = getStore().sessions[chatId];
+        return request.owns(slot?.executionId ?? slot?.sessionId) && slot?.currentModeId === modeId;
+      };
       getStore().patchSession(chatId, { currentModeId: modeId });
       // No timeline banner for the switch: a
       // "Switched mode X → Y" row per toggle was pure noise — the active
@@ -4092,17 +4116,19 @@ export function AgentSessionsProvider({
           },
           10_000,
         );
-        if (resp.type === "AGENT_ERROR") {
+        if (resp.type === "AGENT_ERROR" && stillOwnsMode()) {
           getStore().patchSession(chatId, {
             currentModeId: previousModeId,
             error: resp.message,
           });
         }
       } catch (err) {
-        getStore().patchSession(chatId, {
+        if (stillOwnsMode()) getStore().patchSession(chatId, {
           currentModeId: previousModeId,
           error: err instanceof Error ? err.message : String(err),
         });
+      } finally {
+        request.finish();
       }
     },
     [bridge, getStore],
@@ -4724,6 +4750,7 @@ export function AgentSessionsProvider({
       if (!chatId) return Promise.resolve();
       const existingRequest = reconcileInFlightRef.current.get(chatId);
       if (existingRequest) return existingRequest;
+      let retryAfterChange = false;
       // Assigned immediately after declaration; `let` is required because the
       // request's post-await race guard compares against its own identity.
       let request!: Promise<void>;
@@ -4770,7 +4797,10 @@ export function AgentSessionsProvider({
             });
             return;
           }
-          if (!fresh || fresh.status === "streaming") return; // re-check post-await
+          if (!fresh || !canApplyTranscriptRead(slot, fresh)) {
+            retryAfterChange = Boolean(fresh && fresh.transcriptState === "resident" && fresh.status !== "streaming");
+            return;
+          }
           const cur = fresh.messages;
           // Merge the engine's authoritative window into the local slot: keep
           // scrolled-up history, drop a remotely-truncated tail, and don't let a
@@ -4798,7 +4828,11 @@ export function AgentSessionsProvider({
           console.warn("[Zeros agent-history] message reconcile failed:", err);
         }
       })().finally(() => {
+        const current = isCurrentTranscriptRequest(reconcileInFlightRef.current, chatId, request);
         releaseTranscriptRequest(reconcileInFlightRef.current, chatId, request);
+        // A DB nudge during the stale read shared that in-flight request. Read
+        // once more after releasing it; a current live stream needs no retry.
+        if (current && retryAfterChange) void reconcileChatMessagesRef.current(chatId);
       });
       reconcileInFlightRef.current.set(chatId, request);
       return request;
@@ -4929,23 +4963,20 @@ export function AgentSessionsProvider({
     [bridge, getStore, reconcileChatMessages],
   );
 
-  // Drain parked hydrates when the bridge (re)connects. Only chats that still
-  // exist and whose slot is still empty re-fetch — a chat the user closed, or
-  // one a live stream populated meanwhile, is skipped. hydrateChat re-parks on
-  // failure, so a flapping socket converges instead of dropping the retry.
-  useEffect(() => {
-    if (bridgeStatus !== "connected") return;
-    if (pendingHydratesRef.current.size === 0) return;
-    const parked = [...pendingHydratesRef.current];
-    pendingHydratesRef.current.clear();
+  retryHydrateRef.current = async (chatId, isCurrent) => {
+    // A disconnect can reject the old request AFTER the replacement socket
+    // connected. Wait for that request's finally to release its dedupe entry;
+    // otherwise the retry would only adopt the already failed promise.
+    await hydrateInFlightRef.current.get(chatId);
+    if (!isCurrent()) return;
     const chats = useWorkspaceStore.getState().chats;
-    for (const id of parked) {
-      if (!chats.some((c) => c.id === id && !c.archived)) continue;
-      const slot = getStore().sessions[id];
-      if (slot?.transcriptState === "resident") continue;
-      void hydrateChat(id);
+    if (!chats.some((chat) => chat.id === chatId && !chat.archived) ||
+        getStore().sessions[chatId]?.transcriptState !== "loading") {
+      pendingHydratesRef.current.delete(chatId);
+      return;
     }
-  }, [bridgeStatus, hydrateChat, getStore]);
+    await hydrateChat(chatId);
+  };
 
   // Apply the engine's transcript-changed nudge. When a turn runs (or an edit
   // happens) on ANOTHER device, the engine broadcasts DB_CHANGED({kinds:
@@ -4956,13 +4987,11 @@ export function AgentSessionsProvider({
   useEffect(() => {
     if (!bridge) return;
     const unsub = bridge.on("DB_CHANGED", (raw) => {
-      const m = raw as { kinds?: unknown; chatIds?: unknown };
-      const kinds = Array.isArray(m.kinds) ? (m.kinds as string[]) : [];
-      if (!kinds.includes("messages")) return;
-      const ids = Array.isArray(m.chatIds) ? (m.chatIds as string[]) : [];
-      // chatIds is always set for "messages"; fall back to every open chat.
-      const targets = ids.length > 0 ? ids : Object.keys(getStore().sessions);
-      for (const id of targets) void reconcileChatMessages(id);
+      const targets = chatChangeTargets(raw, Object.keys(getStore().sessions));
+      for (const id of targets) {
+        if (parseCloudScopedId(id)) pendingHydratesRef.current.nudge(id);
+        void reconcileChatMessages(id);
+      }
     });
     return unsub;
   }, [bridge, getStore, reconcileChatMessages]);

@@ -17,6 +17,7 @@ function invoke(args: string[]) {
 describe("new-machine Dev entrypoint", () => {
   it("forwards no options safely under nounset, including macOS Bash 3.2", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dev-bootstrap-shell-")); homes.push(directory);
+    fs.writeFileSync(path.join(directory, "node"), '#!/bin/sh\n[ "$1" = -e ]\n', { mode: 0o755 });
     const mocks = path.join(directory, "tools.sh");
     fs.writeFileSync(mocks, `
 uname() { case "$1" in -s) echo Darwin ;; -m) echo arm64 ;; *) return 91 ;; esac; }
@@ -31,7 +32,7 @@ exec() {
   echo 'Forwarded zero setup options'
 }
 `, { mode: 0o600 });
-    const result = spawnSync("/bin/bash", [script], { cwd: root, env: { ...systemEnvironment(), BASH_ENV: mocks }, encoding: "utf8" });
+    const result = spawnSync("/bin/bash", [script], { cwd: root, env: { ...systemEnvironment(), PATH: `${directory}:${process.env.PATH}`, BASH_ENV: mocks }, encoding: "utf8" });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toBe("Forwarded zero setup options\n");
   });

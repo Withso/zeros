@@ -61,7 +61,7 @@ import { AgentIcon } from "../agent/agent-icon";
 import { InlineLoginTerminal } from "./inline-login-terminal";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
 import { CloudProviderConnections } from "./cloud-provider-connections";
-import { getActiveOrganizationIdSnapshot, useActiveOrganization } from "../team/team-store";
+import { getActiveOrganizationIdSnapshot, useActiveOrganization, useTeams } from "../team/team-store";
 import {
   connectionLabel,
   connectionMethod,
@@ -275,10 +275,11 @@ export function ProvidersPanel({
   surfaceActive?: boolean;
 }) {
   const organization = useActiveOrganization();
+  const { me } = useTeams();
   if (!organization && getActiveOrganizationIdSnapshot())
     return <p className="text-fg2 text-xs">Loading organization agent settings…</p>;
   return organization && !organization.isPersonal
-    ? <CloudProviderConnections key={organization.id} organizationId={organization.id} surfaceActive={surfaceActive} Tabs={ProviderTabs} />
+    ? <CloudProviderConnections key={`${me?.user.id ?? "pending"}:${organization.id}`} organizationId={organization.id} surfaceActive={surfaceActive} Tabs={ProviderTabs} />
     : <LocalProvidersPanel surfaceActive={surfaceActive} />;
 }
 
@@ -451,7 +452,7 @@ function ProviderTabs({
   activeId,
   onSelect,
 }: {
-  providers: BridgeRegistryAgent[];
+  providers: Pick<BridgeRegistryAgent, "id" | "name" | "beta">[];
   activeId: string;
   onSelect: (id: string) => void;
 }) {

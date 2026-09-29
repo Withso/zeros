@@ -45,11 +45,25 @@ unavailable with an inline explanation. Discovery uses the authorized paginated
 catalog. Cloud chat snapshots are bounded and account-scoped; they are excluded
 from the legacy local cache and restored only after access is confirmed. A
 worker chat snapshot and tombstones are read before mirroring device chat edits.
+That confirmation is required for each exact normalized cloud owner, including
+chats opened below its checkout root. An unconfirmed cached cloud row can remain
+visible while loading, but cannot be uploaded as an authoritative replacement.
+Local chat mirroring does not wait for cloud confirmation. Logically deleted or
+deleting owners are removed from discovery and read admission immediately;
+pending provider storage cleanup does not keep them navigable.
 
 The fixed cloud details button and details popover identify the execution host.
 Chat/tool transcripts, Files, Changes, Review and PR controls keep
 their existing renderers and receive the selected workspace's backend data.
 The popover displays configured capacities; no utilization or cost is inferred.
+
+PR creation preflight and composer PR suggestions carry the selected workspace
+identity through the same bridge. Remote discovery derives the repository from
+that registered checkout; caller-supplied origins cannot redirect its credentials.
+The Local create-from picker still accepts a repository origin before a worktree
+exists. Composer results are bounded exact-checkout/origin snapshots: a late
+response cannot populate another workspace, reconnect retains confirmed rows,
+hidden pickers do no background work, and account changes erase cloud results.
 
 Terminals use the same xterm view, primary tabs, sidebar and docked panel. A cloud
 icon identifies their workspace location, including while a Run action is busy.
@@ -67,9 +81,17 @@ and commands. Sending requires an existing, unexpired workspace/model credential
 delegation; local provider credentials and executable overrides are never read
 for cloud session admission. Command IDs derive from durable user-message IDs,
 so retrying an unknown acknowledgement does not duplicate a command. Stop uses
-the backend conversation queue. Ordered event replay retains native tool IDs and
+the backend conversation queue. Credential authorization, current conversation
+metadata and queue reads run concurrently; all must succeed before queue mutation.
+Cancellation or denied authorization cannot enqueue work. Ordered event replay retains native tool IDs and
 snapshot attachment restores pending permission/question controls and confirmed
 agent capabilities into the same session store, without starting provider work.
+Replacing a transport retains bounded conversation selections for that exact
+workspace and signed-in account. It does not retain execution IDs, credentials,
+pending command promises or permission authority. Fresh admission and snapshot
+reads restore those controls. A missing attachment rejects a prompt before it
+can fall through to the native session protocol; account reset and access
+revocation discard the retained selections.
 
 Organization provider settings select a cloud workspace and use the worker's
 agent registry plus the credential API. Saving a cloud API key or Claude setup
@@ -86,6 +108,35 @@ retaining the 256-character bound and rejecting arbitrary bracket syntax.
 The worker registers its primary checkout as the compatibility ID `local-main`,
 with its attested cloud UUID and Organization. Its target branch, view mode and
 PR metadata join the durable record projection and survive worker replacement.
+
+Saved conversation reads use the authenticated control-plane history endpoints
+(`/history/chats`, `/history/messages/:chat`, and `/history/search`) under the exact Organization and
+workspace. They read the normalized durable record projection without engine
+admission or compute, including while a worker is stopped or archived. Every
+page checks current actor access; multi-page chat metadata pins its projection
+revision. Message windows retain normalized tool payloads and the opening prompt
+of a turn where it fits the bounded window. Database indexes, row limits and byte
+limits bound reads before payloads reach the API process.
+
+The renderer uses the existing chat and transcript surfaces for these reads.
+Its bounded, account-scoped cache deduplicates exact workspace/window requests,
+retains confirmed metadata during refresh and rejects responses after account
+replacement or access withdrawal. Live database events invalidate the matching
+workspace; confirmed data nudges retry a failed cold transcript without requiring
+a VM connection. Execution, edits and terminal operations still use the worker.
+The durable projection can lag an active stream until synchronization completes;
+live streamed state remains authoritative in the open conversation.
+An already connected worker supplies its current normalized message window;
+history reads never connect or wake a stopped VM. Runtime and control-plane
+windows have separate cache identities. Before applying a delayed history read,
+compare the captured transcript and execution as well as the current status:
+a complete turn can occur while a read is pending. This race guard applies to
+both Local and cloud transcripts.
+Accepted cloud commands outlive desktop transports. Reopening subscribes and
+loads the same durable conversation; it does not resend its prompt. Retiring a
+completed or explicitly stopped per-command provider process is expected
+cleanup and must not report a lost conversation. Unexpected process failures
+and unproven retirement still use normal failure and authority-loss handling.
 Archive, wake and delete use control-plane lifecycle operations. The existing
 deployment, entitlement and provider qualification gates remain authoritative;
 desktop wiring is not evidence of live macOS/provider qualification.
@@ -140,8 +191,9 @@ Codex cache import and serialized subscription renewal are implemented; access
 material alone reaches a currently authorized execution. Desktop subscription
 files are never copied implicitly or shared between independent refresh writers.
 See [agent authentication](agent-authentication-and-language-tools.md). Deployed
-account-connection qualification, client UI and redistribution review remain
-separate release gates.
+account-connection qualification and redistribution review remain separate
+release gates. The [organization setup UI](organization-setup.md) connects
+private agent accounts and GitHub installations before allocating a VM.
 
 ## Commands and decisions
 
@@ -215,11 +267,27 @@ metadata bounds are independent of attachment/object storage limits.
 
 Queue changes emit a `DB_CHANGED` chat invalidation. Terminal prompt responses
 carry the command identity as `requestId` and broadcast to authorized devices.
+The desktop consumes those responses through ordered event replay and matches
+the command, conversation, provider and known execution before settling its
+prompt request. A matching terminal turn also clears the optimistic pending
+turn atomically with its status, so a completed answer cannot restart its live
+timer while retirement is pending. Durable command reads remain the fallback
+when the terminal frame is lost. Native completion and durable retirement are
+distinct facts: the UI can accept the next message immediately, while the server
+still serializes its execution behind proven cleanup and transcript durability.
 Receipts retry autonomously after temporary persistence failures. Transcript
 sync commits its captured revision even while newer tokens remain dirty; it
 does not require a quiet agent. A previously admitted, still authorized device
 retains reads and Stop during temporary record lag. New prompt claims wait for
 durability to recover.
+
+The engine retains one bounded record projection (at most 16,384 entities and
+32 MiB), keyed by backend origin, organization, workspace, generation and engine
+instance. Each sync authenticates a head read before reusing an identical
+revision. Exact append receipts advance that snapshot; lost acknowledgements,
+unconfirmed revision ranges and external revisions require reconciliation.
+This avoids downloading the same ten-entity pages after every short turn while
+preserving authority checks, remote deletions and the terminal durability gate.
 
 ### Durable approvals and steering
 
@@ -295,6 +363,10 @@ engine. `cloudEvents.request` accepts a conversation `snapshot` request or a
 bridge before requesting a snapshot. Buffer incoming frames, install the
 snapshot, discard buffered sequences at or below its cursor, then replay/apply
 later sequences in order. Never resubmit commands during this process.
+A live frame can open another gap while a replay page is pending; drain that
+gap before declaring catch-up complete, even if the older page reached its own
+head. A superseded engine's late replay result or error cannot reset the current
+engine cursor. Neither case may require another live frame to unblock output.
 
 The stream identity is the engine instance UUID. Mandatory agent updates,
 permission/question requests and settlements, terminal prompt receipts, and
@@ -350,6 +422,17 @@ durable state and reconnect. Revocation removes that device's authority while
 preserving other authorized devices' access.
 
 ## Recovery
+
+Worker file layout version 3 stores the host repository at
+`/srv/zeros/files/workspace` and projects the allowlisted `/srv/zeros/files`
+directory into the engine as `/srv/zeros`. The logical repository and persisted
+checkpoint path remain `/srv/zeros/workspace`. The engine-private sibling
+`attachment-staging` has mode 0700 and shares that mount, allowing atomic rename
+without exposing partial uploads to workspace commands. Linux temporary-directory
+selection checks both the device and mount ID: separate bind mounts can report
+the same device and still reject rename with `EXDEV`. Host setup uses the physical
+repository path before the engine view exists. Existing immutable worker images
+retain their layout until an explicit replacement or recovery operation.
 
 A versioned checkpoint names consistent repository content, safe Git/index state,
 chat/turn/mode records, command receipts, supported harness continuation files,

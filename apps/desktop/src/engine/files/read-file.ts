@@ -14,6 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import type { QualifiedCloudFilePolicy } from "./cloud-file-policy";
 
 const MAX_TEXT_BYTES = 2_000_000; // 2 MB
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // same boundary as composer images
@@ -153,12 +154,14 @@ export function isInside(target: string, root: string): boolean {
 export function readWorkspaceFile(
   cwd: string,
   relPath: string,
-  opts?: { remote?: boolean },
+  opts?: { remote?: boolean; cloudPolicy?: QualifiedCloudFilePolicy },
 ): ReadFileResult {
-  const remote = opts?.remote === true;
+  const remote = opts?.remote === true && !opts.cloudPolicy;
   const rel = relPath;
   if (!cwd) return fail(rel, "no workspace folder is open");
   if (!rel) return fail(rel, "missing path");
+  try { opts?.cloudPolicy?.assertPath(rel); }
+  catch { return fail(rel, "Cloud file access is outside the admitted repository policy"); }
 
   const root = path.resolve(cwd);
   const target = path.resolve(cwd, rel);
@@ -216,11 +219,31 @@ export function readWorkspaceFile(
   const ext = path.extname(target).toLowerCase();
   const imageMime = IMAGE_MIME[ext];
 
+  let descriptor: number | undefined;
   try {
+    if (opts?.cloudPolicy) {
+      const resolved = opts.cloudPolicy.assertPath(rel);
+      descriptor = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      opts.cloudPolicy.assertDescriptor(descriptor, resolved);
+      size = fs.fstatSync(descriptor).size;
+    }
+    const read = () => {
+      if (descriptor === undefined) return fs.readFileSync(target);
+      // Read the inspected generation with a fixed budget, even if it grows.
+      const buffer = Buffer.alloc(size);
+      let offset = 0;
+      while (offset < size) {
+        const count = fs.readSync(descriptor, buffer, offset, size - offset, null);
+        if (!count) throw new Error("File changed during read");
+        offset += count;
+      }
+      opts!.cloudPolicy!.assertDescriptor(descriptor, fs.realpathSync(target));
+      return buffer;
+    };
     if (imageMime) {
       if (size > MAX_IMAGE_BYTES)
         return { kind: "too-large", path: rel, bytes: size };
-      const buf = fs.readFileSync(target);
+      const buf = read();
       return {
         kind: "image",
         path: rel,
@@ -232,7 +255,7 @@ export function readWorkspaceFile(
     if (size > MAX_TEXT_BYTES)
       return { kind: "too-large", path: rel, bytes: size };
 
-    const buf = fs.readFileSync(target);
+    const buf = read();
     const head = buf.subarray(0, Math.min(buf.length, 8192));
     if (head.includes(0)) return { kind: "binary", path: rel, bytes: size };
 
@@ -245,5 +268,7 @@ export function readWorkspaceFile(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return fail(rel, `cannot read file (${code ?? "unknown error"})`);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
   }
 }

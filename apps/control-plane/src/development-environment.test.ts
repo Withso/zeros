@@ -78,3 +78,12 @@ describe("hosted development control-plane identity", () => {
     expect(() => hostedDevelopmentIdentity({ ...hosted, ...override }, build)).toThrow();
   });
 });
+
+it("enforces fixture admission expiry at each allocation while preserving release behavior", async () => {
+  const development = await import("./development-environment.js");
+  const now = Date.now(), hosted = { ZEROS_DEV_ENVIRONMENT: "hosted", ZEROS_DEV_ADMISSION_EXPIRES_AT: new Date(now + 100_000).toISOString() };
+  expect(() => (development as any).assertHostedDevAdmission(hosted, 60, now)).not.toThrow();
+  expect(() => (development as any).assertHostedDevAdmission(hosted, 60, now + 101_000)).toThrow(/expired/);
+  expect(() => (development as any).assertHostedDevAdmission(hosted, null, now)).toThrow(/bounded/);
+  expect(() => (development as any).assertHostedDevAdmission({ ...hosted, ZEROS_DEV_ENVIRONMENT: undefined }, null, now + 101_000)).not.toThrow();
+});

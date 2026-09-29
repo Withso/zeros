@@ -54,6 +54,24 @@ function request(actor: string): CloudAgentRuntimeChange {
   };
 }
 describe("runtime qualification evidence", () => {
+  it("requires distinct native workspace evidence instead of reusing credential-free tool proofs", () => {
+    const original = request(randomUUID()).evidence;
+    const native = { ...original, version: 2, executionProfile: "zeros-cloud-native-v1", credentials: [{
+      kind: "cursor-api-key", renewal: false, checks: {
+        privateProviderHome: true, engineAuthorityIsolation: true, nativeWorkspaceTools: true,
+        actorAdmission: true, stopAndRevocation: true, nativeTurn: true, nativeResume: true, authentication: true,
+      },
+    }] };
+    expect(CloudAgentRuntimeEvidenceSchema.safeParse(native).success).toBe(true);
+    for (const invalid of [
+      { ...native, version: 1 },
+      { ...native, executionProfile: undefined },
+      { ...native, credentials: original.credentials },
+      { ...original, executionProfile: "zeros-cloud-native-v1" },
+      { ...native, credentials: [{ ...native.credentials[0], checks: { ...native.credentials[0]!.checks, engineAuthorityIsolation: false } }] },
+    ]) expect(CloudAgentRuntimeEvidenceSchema.safeParse(invalid).success).toBe(false);
+  });
+
   it("rejects aliases, missing credential proofs, duplicate kinds and unqualified subscription renewal", () => {
     const original = request(randomUUID()).evidence;
     for (const changed of [

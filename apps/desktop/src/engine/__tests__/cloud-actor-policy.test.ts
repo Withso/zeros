@@ -20,6 +20,35 @@ function fixture(role:NonNullable<TransportClient["cloudActor"]>["role"]="viewer
   return {client,engine,send};
 }
 describe("actor roles at the worker message boundary",()=>{
+  it("admits cloud ignored/context/sparse reads and reserves file/context/sparse mutations for editors", async () => {
+    for (const role of ["viewer", "prompter", "developer", "manager", "owner"] as const) {
+      const f = fixture(role);
+      for (const op of ["file.ignored", "context.graph.list", "workspace.listWorkingDirectories"]) {
+        f.engine.handleWorkspaceMessage.mockClear();
+        await f.send({ type: "WORKSPACE_REQUEST", op, params: { workspaceId: "local-main" } });
+        expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledOnce();
+      }
+      for (const op of ["file.write", "context.graph.scaffold", "context.graph.setShared", "workspace.setWorkingDirectories"]) {
+        f.engine.handleWorkspaceMessage.mockClear();
+        await f.send({ type: "WORKSPACE_REQUEST", op, params: { workspaceId: "local-main", path: ".env" } });
+        expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledTimes(["developer", "manager", "owner"].includes(role) ? 1 : 0);
+      }
+      f.engine.handleWorkspaceMessage.mockClear(); f.client.authorized = () => false;
+      await f.send({ type: "WORKSPACE_REQUEST", op: "file.ignored", params: { workspaceId: "local-main" } });
+      expect(f.engine.handleWorkspaceMessage).not.toHaveBeenCalled();
+    }
+  });
+  it("allows branch continuation only with cloud edit authority", async () => {
+    for (const role of ["viewer", "prompter", "developer", "manager", "owner"] as const) {
+      const f = fixture(role);
+      await f.send({ type: "WORKSPACE_REQUEST", op: "workspace.continueOnNewBranch", params: { workspaceId: "local-main" } });
+      expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledTimes(["developer", "manager", "owner"].includes(role) ? 1 : 0);
+    }
+    const expired = fixture("owner");
+    expired.client.authorized = () => false;
+    await expired.send({ type: "WORKSPACE_REQUEST", op: "workspace.continueOnNewBranch", params: { workspaceId: "local-main" } });
+    expect(expired.engine.handleWorkspaceMessage).not.toHaveBeenCalled();
+  });
   it("admits Design inspection, editing and registration with separate roles",async()=>{
     for(const role of ["viewer","prompter","developer","manager","owner"] as const){
       const f=fixture(role);

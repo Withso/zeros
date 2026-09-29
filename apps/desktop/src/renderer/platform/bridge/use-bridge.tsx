@@ -20,6 +20,7 @@ import React, {
   useCallback,
   useSyncExternalStore,
 } from "react";
+import { prepareCloudGithubWrite } from "../cloud-github";
 import {
   RuntimeClient,
   invalidateEnginePort,
@@ -33,7 +34,8 @@ import { nativeListen, useNativeRuntime } from "../runtime";
 import { toast } from "../../shared/ui/primitives/elements";
 import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
 import { openCloudRuntime } from "./open-cloud-runtime";
-import { cloudWorkspaceDocument, cloudWorkspaceOperation, getCloudWorkspaceRows } from "../../state/cloud-workspace-catalog";
+import { readCloudWorkspaceHistory } from "../cloud-history";
+import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceOperation, getCloudWorkspaceRows } from "../../state/cloud-workspace-catalog";
 
 /** Stable toast key for the connection-rejected card: a re-rejection REPLACES
  *  the visible toast instead of stacking one per reconnect attempt. */
@@ -61,8 +63,12 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
       new WorkspaceRuntimeClient({
         open: openCloudRuntime,
         workspaces: () => getCloudWorkspaceRows() as unknown as Record<string, unknown>[],
-        canAccess: target => cloudWorkspaceDocument(target)?.deletedAt === null,
+        workspacesConfirmed: cloudWorkspaceCatalogConfirmed,
+        canAccess: target => canReadCloudWorkspace(cloudWorkspaceDocument(target)),
+        identity: target => `${cloudCatalogGeneration()}:${cloudWorkspaceDocument(target)?.generation.number ?? "unknown"}`,
         manage: cloudWorkspaceOperation,
+        readHistory: readCloudWorkspaceHistory,
+        prepareGithubWrite: prepareCloudGithubWrite,
       }),
   );
   const nativeRuntime = useNativeRuntime();

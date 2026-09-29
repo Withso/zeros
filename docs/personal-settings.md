@@ -1,6 +1,7 @@
 # Personal settings and customization
 
-Personal organization settings belong to the device, independently of sign-in.
+Personal organization settings are presented as **Local** and belong to the device, independently of sign-in.
+The Settings selector switches to separately owned [organization settings](cloud-workspace/organization-setup.md); organization forms do not write Local TOML or select Local agent/GitHub authentication methods.
 Settings resolve from user defaults through repository defaults to private workspace overrides:
 
 | Owner      | File                                         | Applies to                                     |

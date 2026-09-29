@@ -87,6 +87,11 @@ ${existingDescription ? "<key>NSAppleEventsUsageDescription</key><string>Old des
         /<key>NSAppleEventsUsageDescription<\/key>\s*<string>[^<]*Zeros[^<]*<\/string>/,
       );
       expect(patched).not.toContain("Old description");
+      // macOS cannot register the running Dev instance for OAuth returns
+      // without this declaration; it otherwise opens an older checkout.
+      expect(patched).toMatch(
+        /<key>CFBundleURLTypes<\/key>\s*<array>\s*<dict>\s*<key>CFBundleURLName<\/key>\s*<string>Zeros Dev<\/string>\s*<key>CFBundleURLSchemes<\/key>\s*<array>\s*<string>zeros-dev<\/string>\s*<\/array>\s*<\/dict>\s*<\/array>/,
+      );
       expect(
         patched.match(/<key>NSAppleEventsUsageDescription<\/key>/g),
       ).toHaveLength(1);
@@ -97,6 +102,45 @@ ${existingDescription ? "<key>NSAppleEventsUsageDescription</key><string>Old des
       expect(fs.readFileSync(clone, "utf8")).toBe(patched);
     },
   );
+});
+
+describe("dev callback scheme", () => {
+  it("fills an empty callback array and leaves malformed metadata untouched", () => {
+    const file = path.join(tmp(), "Info.plist");
+    const identity = { name: NAME, exec: NAME, bundleId: `com.zeros.dev.${SLUG}` };
+    const plist = (array: string) => `<plist><dict><key>CFBundleName</key><string>Electron</string><key>CFBundleURLTypes</key>${array}</dict></plist>`;
+    fs.writeFileSync(file, plist("<array/>"));
+    expect(patchPlist(file, identity)).toBe(true);
+    expect(fs.readFileSync(file, "utf8")).toContain("<string>zeros-dev</string>");
+    for (const invalid of ["<string>bad</string>", "<array><dict></dict>"]) {
+      const original = plist(invalid);
+      fs.writeFileSync(file, original);
+      expect(() => patchPlist(file, identity)).toThrow("Dev bundle callback declaration");
+      expect(fs.readFileSync(file, "utf8")).toBe(original);
+    }
+  });
+
+  it("replaces an inherited scheme without damaging nested or adjacent plist values", () => {
+    const file = path.join(tmp(), "Info.plist");
+    fs.writeFileSync(file, `<plist version="1.0"><dict>
+<key>CFBundleName</key><string>Electron</string>
+<key>CFBundleExecutable</key><string>Electron</string>
+<key>CFBundleIdentifier</key><string>com.github.Electron</string>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLSchemes</key><array><string>zeros-alpha</string><string>zeros</string></array>
+</dict><dict><key>CFBundleURLSchemes</key><array><string>old-dev</string></array></dict></array>
+<key>DocumentTypes</key><array><dict><key>Name</key><string>keep</string></dict></array>
+</dict></plist>`);
+    const identity = { name: NAME, exec: NAME, bundleId: `com.zeros.dev.${SLUG}` };
+    expect(patchPlist(file, identity)).toBe(true);
+    const patched = fs.readFileSync(file, "utf8");
+    expect(patched).not.toMatch(/<string>(?:zeros-alpha|zeros|old-dev)<\/string>/);
+    expect(patched.match(/<key>CFBundleURLTypes<\/key>/g)).toHaveLength(1);
+    expect(patched.match(/<string>zeros-dev<\/string>/g)).toHaveLength(1);
+    expect(patched).toContain('<key>DocumentTypes</key><array><dict><key>Name</key><string>keep</string></dict></array>');
+    expect(patched.match(/<array>/g)?.length).toBe(patched.match(/<\/array>/g)?.length);
+    expect(patchPlist(file, identity)).toBe(false);
+  });
 });
 
 describe("instanceBundleDir", () => {

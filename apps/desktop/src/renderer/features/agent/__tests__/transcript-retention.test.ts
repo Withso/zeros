@@ -7,7 +7,9 @@ import {
   isCurrentTranscriptRequest,
   releaseTranscriptRequest,
   shouldEvictTranscriptPayload,
+  canApplyTranscriptRead,
 } from "../transcript-retention";
+import { BLANK, useSessionsStore } from "../sessions-store";
 
 const pins = (
   over: Partial<Parameters<typeof shouldEvictTranscriptPayload>[0]> = {},
@@ -21,6 +23,24 @@ const pins = (
 });
 
 describe("transcript retention safety", () => {
+  it("rejects a read overtaken by a complete live turn, even when the chat is ready again", () => {
+    useSessionsStore.getState().clearAll();
+    const before = { ...BLANK, status: "ready" as const, transcriptState: "resident" as const,
+      executionId: "conversation:cloud-chat", sessionId: "conversation:cloud-chat" };
+    useSessionsStore.getState().setSession("chat", before);
+    const snapshot = useSessionsStore.getState().sessions.chat!;
+    useSessionsStore.getState().patchSession("chat", { status: "streaming" });
+    useSessionsStore.getState().patchSession("chat", { status: "ready", messages: [{
+      id: "new-answer", kind: "text", role: "agent", text: "Complete live answer", createdAt: 1,
+    }] });
+    expect(canApplyTranscriptRead(snapshot, useSessionsStore.getState().sessions.chat)).toBe(false);
+    expect(canApplyTranscriptRead(snapshot, { ...snapshot, error: null })).toBe(true);
+    expect(canApplyTranscriptRead(snapshot, { ...snapshot, executionId: "new-execution" })).toBe(false);
+    expect(canApplyTranscriptRead(snapshot, { ...snapshot, status: "streaming" })).toBe(false);
+    expect(canApplyTranscriptRead(snapshot, { ...snapshot, transcriptState: "cold" })).toBe(false);
+    expect(canApplyTranscriptRead(snapshot, undefined)).toBe(false);
+    useSessionsStore.getState().clearAll();
+  });
   it("never evicts one of the deck's retained chat payloads", () => {
     expect(shouldEvictTranscriptPayload(pins({ retained: true }))).toBe(false);
   });

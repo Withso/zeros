@@ -47,8 +47,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: true
+  # One destination across branches; never cancel an active schema cutover.
+  group: release-production
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -79,6 +80,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup pnpm
         # Reads pnpm version from package.json's `packageManager` field —
@@ -99,6 +102,11 @@ jobs:
         # both independent package graphs.
         working-directory: apps/control-plane
         run: pnpm install --frozen-lockfile
+
+      - name: Verify hosted release contracts
+        run: |
+          pnpm exec tsc -p scripts/release/tsconfig.json
+          pnpm exec vitest run --config scripts/release/vitest.config.ts --maxWorkers=2
 
       - name: Install contained-execution runtime
         # The suite below drives real bubblewrap/seccomp containment. Without
@@ -149,9 +157,24 @@ jobs:
           pnpm check:electron-hardening
           pnpm check:deep-link-schemes
 
+  hosted:
+    name: Hosted promotion (production)
+    needs: test
+    if: github.event.repository.fork == false
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/hosted-promotion.yml
+    with:
+      channel: production
+      source_sha: ${{ github.sha }}
+      branch: ${{ github.ref_name }}
+      before_sha: ${{ github.event.before || '' }}
+    secrets: inherit
+
   build:
     name: Build + sign + submit to notary (macOS arm64)
-    needs: test
+    needs: [test, hosted]
     # macos-latest (Apple Silicon): plentiful runners, no queue, native arm64
     # build. Notarization is submitted here (--no-wait) and AWAITED in the
     # separate `notarize` job so an Apple-side queue backlog never forces a
@@ -168,6 +191,7 @@ jobs:
       # Protected release capability, baked into both Electron main and the
       # packaged engine. Unset environments remain explicitly fail-closed.
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
+      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
 
     steps:
       - name: Require signing credentials
@@ -207,6 +231,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           # Full history + tags support generated notes and the early duplicate-tag
           # check. fetch-depth:0 alone does not reliably bring tags on checkout,
           # so request them explicitly.
@@ -435,8 +460,33 @@ jobs:
     # above the workflow-level `contents: read` default here and nowhere else.
     permissions:
       contents: write
+      actions: read
+    env:
+      RELEASE_CHANNEL: production
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
+      ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
+      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
 
     steps:
+      - name: Checkout publication guard at the original source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify channel state before notarization retry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pnpm exec tsx scripts/release/publication-cli.ts
+
       - name: Download signed build artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -557,9 +607,11 @@ jobs:
       - name: Publish GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
+          pnpm exec tsx scripts/release/publication-cli.ts
           TAG="v${VERSION}"
 
           # Auto-generated, PR-based notes grouped per .github/release.yml.

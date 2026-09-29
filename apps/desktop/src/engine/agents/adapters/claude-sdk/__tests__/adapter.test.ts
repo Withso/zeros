@@ -37,7 +37,43 @@ afterAll(() => {
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe("Claude private cloud coordinator policy",()=>{
-  it("keeps repository tools and caller MCP outside the credential view and fences model/config changes",async()=>{
+  it.each(["default", "accept-edits", "auto", "plan", "bypass"])("starts the persisted native %s mode before the first prompt", async mode => {
+    const {queryFn} = makeScriptedQuery([]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([],[]), {queryFn});
+    try {
+      const {session} = await adapter.newSession({cwd:"/tmp",env:{ZEROS_PERMISSION_MODE:mode}});
+      expect(session.modes?.currentModeId).toBe(mode);
+    } finally {await adapter.dispose();}
+  });
+
+  it.each([false, true])("reports an unexpected idle exit but not completed cloud retirement (retired=%s)", async retired => {
+    const boundary = { status: { actor: "agent-code", backend: "cloud-worker" } } as never;
+    const lease = new AbortController();
+    const execution = { lease: { signal: lease.signal, assertLive: vi.fn(), admission: { model: "claude-haiku-4-5" } },
+      tools: { call: vi.fn() }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution;
+    const original = cloudExecutions.cloudProviderExecution;
+    const authority = vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value));
+    const runtime = vi.spyOn(claudeRuntime, "resolveClaudeCli").mockReturnValue({ path: "/opt/zeros/node_modules/native/claude", source: "bundled" });
+    const emitted: SessionNotification[] = [];
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/srv/zeros/workspace", executionBoundary: boundary,
+        env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ANTHROPIC_API_KEY: "synthetic-provider-key" } });
+      const turn = adapter.prompt({ sessionId: session.executionId, prompt: [textBlock("Continue")] });
+      await tick();
+      live.push(initMsg("cloud-retirement"), assistantText("Done"), resultOk("cloud-retirement"));
+      await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
+      // The gateway revokes authority (and kills the process) before the
+      // asynchronous adapter disposal. That ordering must remain safe.
+      if (retired) lease.abort();
+      live.fail(new Error("Claude Code process exited with code 137"));
+      await tick();
+      expect(emitted.filter(event => event.update.sessionUpdate === "error_notice")).toHaveLength(retired ? 0 : 1);
+    } finally { await adapter.dispose(); runtime.mockRestore(); authority.mockRestore(); }
+  });
+
+  it("keeps native workspace tools and fences external credential/model overrides",async()=>{
     const boundary={status:{actor:"agent-code",backend:"zeros-srt"}} as never;
     const lease=new AbortController(),assertLive=vi.fn();
     const execution={lease:{signal:lease.signal,assertLive,admission:{model:"claude-haiku-4-5"}},tools:{call:vi.fn()},
@@ -52,10 +88,10 @@ describe("Claude private cloud coordinator policy",()=>{
         env:{ANTHROPIC_MODEL:"claude-haiku-4-5",ANTHROPIC_API_KEY:"synthetic-provider-key"},
         cliBinary:"/untrusted/claude",mcpServers:[{name:"untrusted",transport:"stdio",command:"/untrusted/program"}],browserUse:{kind:"claude-agent-sdk"} as never});
       await adapter.prompt({sessionId:session.executionId,prompt:[{type:"text",text:"Continue"}]});
-      expect(captured[0]).toMatchObject({tools:["AskUserQuestion","TodoWrite"],strictMcpConfig:true,settingSources:[],plugins:[],
-        settings:{disableAllHooks:true,autoMemoryEnabled:false,permissions:{additionalDirectories:[],allow:[],deny:[]}},pathToClaudeCodeExecutable:"/opt/zeros/node_modules/native/claude"});
-      expect(Object.keys(captured[0].mcpServers as object).sort()).toEqual(["zeros_design","zeros_workspace"]);
-      expect(captured[0].hooks).toBeUndefined();expect(captured[0].getOAuthToken).toBeUndefined();
+      expect(captured[0]).toMatchObject({tools:{type:"preset",preset:"claude_code"},strictMcpConfig:true,settingSources:[],
+        settings:{autoMemoryEnabled:true,permissions:{additionalDirectories:[],allow:[],deny:[]}},pathToClaudeCodeExecutable:"/opt/zeros/node_modules/native/claude"});
+      expect(Object.keys(captured[0].mcpServers as object).sort()).toEqual(["zeros_design"]);
+      expect(captured[0].plugins).toBeUndefined();expect(captured[0].getOAuthToken).toBeUndefined();
       expect(captured[0].extraArgs).toEqual({"thinking-display":"summarized"});
       await expect(adapter.setModel({sessionId:session.executionId,model:"unadmitted-model"})).rejects.toThrow(/admission/);
       await expect(adapter.updateConfig({sessionId:session.executionId,env:{ANTHROPIC_API_KEY:"replaced"}})).rejects.toThrow(/admission/);
@@ -4328,6 +4364,24 @@ describe("ClaudeSdkAdapter", () => {
     expect(captured[1].canUseTool).toBeDefined();
     expect(captured[1].resume).toBe("sdk-1"); // conversation preserved across rebuild
     await adapter.dispose();
+  });
+
+  it("does not let an older rejected Auto change overwrite a newer Plan selection", async () => {
+    const emitted:SessionNotification[]=[];
+    let reject!: (reason:Error)=>void;
+    const gate=new Promise<void>((_resolve,fail)=>{reject=fail;});
+    const live=makePushableQuery({setPermissionMode:async mode=>{if(mode === "auto") await gate;}});
+    const adapter=new ClaudeSdkAdapter(makeCtx(emitted,[]),{queryFn:live.queryFn});
+    const {session}=await adapter.newSession({cwd:"/tmp"});
+    const turn=adapter.prompt({sessionId:session.sessionId,prompt:[textBlock("A")]});
+    try {
+      await flushMicrotasks();
+      const old=adapter.setMode({sessionId:session.sessionId,modeId:"auto"});
+      await adapter.setMode({sessionId:session.sessionId,modeId:"plan"});
+      reject(new Error("Auto unavailable"));await old;
+      expect(live.control.modes).not.toContain("acceptEdits");
+      expect(emitted.filter(n=>n.update.sessionUpdate === "current_mode_update").at(-1)?.update).toMatchObject({currentModeId:"plan"});
+    } finally {reject(new Error("ended"));await adapter.cancel({sessionId:session.sessionId});await turn;await adapter.dispose();}
   });
 
   it("setMode('auto') rejected by a live query (model-gated) degrades to acceptEdits", async () => {

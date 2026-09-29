@@ -1310,6 +1310,7 @@ export function envForChatSettings(args: {
   fast?: boolean;
   additionalDirectories?: string[];
   permissionMode?: string;
+  lastModeId?: string | null;
 }): Record<string, string> {
   const env: Record<string, string> = {};
   const modelEnv = modelEnvVarForAgent(args.agentId, args.initialize);
@@ -1364,6 +1365,9 @@ export function envForChatSettings(args: {
   );
   if (dirs.length > 0) env[ADDITIONAL_DIRS_ENV_VAR] = JSON.stringify(dirs);
   if (args.permissionMode) env[PERMISSION_MODE_ENV_VAR] = args.permissionMode;
+  if (args.lastModeId && permissionMenuItems(args.agentId, null).some(item => item.modeId === args.lastModeId)) {
+    env[PERMISSION_MODE_ENV_VAR] = coerceModeIdForModel(args.agentId, model, args.lastModeId) ?? args.permissionMode ?? "auto";
+  }
   // Claude process lifetime and memory settings remain explicit, including
   // the 30-minute idle default. Model fallback and spend caps are retired.
   if (agentFamily(args.agentId) === "claude") {
@@ -1386,5 +1390,6 @@ export function envForChat(
     fast: chat.fast,
     additionalDirectories: chat.additionalDirectories,
     permissionMode: chat.permissionMode,
+    lastModeId: chat.lastModeId,
   });
 }

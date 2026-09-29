@@ -223,8 +223,10 @@ authenticated internal routes are mounted only with the setup gate. Redemption
 rechecks the live setup fence, tenant/member/repository authority, consumes the
 admission once, resolves the exact immutable settings snapshot, decrypts only
 its referenced secrets, and mints a one-hour GitHub App token restricted to the
-single repository with `contents:read`. Authority is checked again after the
-external mint; a raced token is revoked.
+single repository with `contents:read`, `pull_requests:read`, `checks:read`, and
+`statuses:read`. The engine uses that same credential for PR, review and CI
+reads; it does not grant publishing or other writes. Authority is checked again
+after the external mint; a raced token is revoked.
 
 The image-owned `setup-cloud-workspace.mjs` accepts only the canonical bounded
 envelope, exchanges it over HTTPS, clones through askpass without placing the

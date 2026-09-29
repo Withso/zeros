@@ -12,6 +12,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { BLANK, useSessionsStore } from "../sessions-store";
+import { agentActivity } from "../agent-activity";
+import type { SessionNotification } from "../../../platform/bridge/agent-events";
 
 const store = () => useSessionsStore.getState();
 
@@ -52,6 +54,45 @@ describe("pending local turn", () => {
     // re-render every open transcript.
     store().setPendingLocalTurn("chat-zzz", null);
     expect(store().pendingLocalTurns).toBe(before);
+  });
+
+  it.each(["completed", "failed", "cancelled"] as const)(
+    "ends activity atomically on the exact %s turn while its cloud receipt is pending",
+    (state) => {
+      store().setSession("chat-a", { ...BLANK, agentId: "claude",
+        sessionId: "conversation:chat-a", status: "streaming", activeTurnStartedAt: 1_000 });
+      store().setPendingLocalTurn("chat-a", "user-1");
+      store().setPendingLocalTurn("chat-b", "other-turn");
+      const observed: Array<ReturnType<typeof agentActivity>> = [];
+      const off = useSessionsStore.subscribe(s => {
+        observed.push(agentActivity(s.sessions["chat-a"], s.pendingLocalTurns["chat-a"]));
+      });
+      try {
+        store().applyBridgeUpdate({ sessionId: "conversation:chat-a", update: {
+          sessionUpdate: "turn_state", turnId: "user-1", state,
+          startedAt: 1_100, stopReason: state === "cancelled" ? "cancelled" : "end_turn",
+        } } as SessionNotification);
+      } finally { off(); }
+      expect(store().pendingLocalTurns).toEqual({ "chat-b": "other-turn" });
+      expect(store().sessions["chat-a"]).toMatchObject({ status: "ready", activeTurnStartedAt: null });
+      expect(observed).toEqual([null]);
+    },
+  );
+
+  it.each([
+    ["conversation:chat-a", "older-turn"],
+    ["retired-execution", "user-1"],
+  ])("retains the pending turn when completion belongs to %s / %s", (sessionId, turnId) => {
+    store().setSession("chat-a", { ...BLANK, agentId: "claude",
+      sessionId: "conversation:chat-a", status: "streaming" });
+    store().setPendingLocalTurn("chat-a", "user-1");
+    const before = store().pendingLocalTurns;
+    const sessionBefore = store().sessions["chat-a"];
+    store().applyBridgeUpdate({ chatId: "chat-a", sessionId, update: {
+      sessionUpdate: "turn_state", turnId, state: "completed", startedAt: 1_000,
+    } } as SessionNotification);
+    expect(store().pendingLocalTurns).toBe(before);
+    expect(store().sessions["chat-a"]).toBe(sessionBefore);
   });
 
   it("is dropped with the session on detach, removal, and clear", () => {

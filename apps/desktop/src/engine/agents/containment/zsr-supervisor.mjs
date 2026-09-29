@@ -17,9 +17,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { isCloudDeploymentOwner } from "./cloud-deployment-authority.mjs";
+import { assertOwnedCloudNativeHome, cloudNativeBwrapWrapper } from "./cloud-native-view.mjs";
 
 const POLICY_VERSION = 1;
 const COMMAND_VERSION = 6;
+const NATIVE_CLOUD_COMMAND_VERSION = 7;
 const INTERNAL_ENV_PREFIX = "ZEROS_ZSR_";
 const GIT_DISPATCH_CONFIG_ENV = "ZEROS_ZSR_GIT_DISPATCH_CONFIG";
 const MAX_DESCRIPTOR_BYTES = 32 * 1024 * 1024;
@@ -268,13 +270,14 @@ function validateCloudContainerWorker(command, policy, policyPath) {
 }
 
 function validateCommand(command, policy, policyPath, commandPath) {
-  if (command.version !== COMMAND_VERSION) {
+  if (command.version !== (command.cloudNativeHome === undefined ? COMMAND_VERSION : NATIVE_CLOUD_COMMAND_VERSION)) {
     throw new Error("unsupported command version");
   }
   const allowedKeys = new Set([
     "args",
     "command",
     "containerWorker",
+    "cloudNativeHome",
     "cwd",
     "deniedContainerSockets",
     "env",
@@ -356,6 +359,11 @@ function validateCommand(command, policy, policyPath, commandPath) {
     throw new Error("container socket subtraction is invalid");
   }
   validateCloudContainerWorker(command, policy, policyPath);
+  if (command.cloudNativeHome !== undefined) {
+    if (process.platform !== "linux" || process.geteuid?.() !== 0 || !policy.runtime.cloudWorker)
+      throw new Error("Native cloud homes require a privileged worker supervisor");
+    assertOwnedCloudNativeHome(command.cloudNativeHome, policy.runtime.cloudWorker);
+  }
 }
 
 function executableOnPath(name) {
@@ -394,7 +402,7 @@ function trustedRootExecutable(file, label) {
   return canonical;
 }
 
-function linuxHelpers(policyRoot, cloudWorker) {
+function linuxHelpers(policyRoot, cloudWorker, nativeHome) {
   if (process.platform !== "linux") return {};
   const bwrap = process.env.ZEROS_ZSR_BWRAP_PATH || executableOnPath("bwrap");
   if (!bwrap || !path.isAbsolute(bwrap)) {
@@ -403,8 +411,15 @@ function linuxHelpers(policyRoot, cloudWorker) {
   if (cloudWorker) {
     const setpriv =
       process.env.ZEROS_ZSR_SETPRIV_PATH || executableOnPath("setpriv");
+    let bwrapPath = trustedRootExecutable(bwrap, "cloud-worker bwrap");
+    if (nativeHome) {
+      assertOwnedCloudNativeHome(nativeHome, cloudWorker);
+      const wrapper = path.join(policyRoot, `native-provider-bwrap-${randomUUID()}`);
+      writeFileSync(wrapper, cloudNativeBwrapWrapper(bwrapPath, nativeHome), { encoding: "utf8", mode: 0o700, flag: "wx" });
+      bwrapPath = wrapper;
+    }
     return {
-      bwrapPath: trustedRootExecutable(bwrap, "cloud-worker bwrap"),
+      bwrapPath,
       linuxPrivilegedWorker: {
         uid: cloudWorker.uid,
         gid: cloudWorker.gid,
@@ -482,7 +497,7 @@ function completeConfig(policy, policyPath, commandPath, command) {
     // host-parity Seatbelt profile. Do not add a nested sandbox-exec here:
     // hosted macOS rejects applying it after the outer profile is active.
     allowAppleEvents: false,
-    ...linuxHelpers(path.dirname(policyPath), policy.runtime.cloudWorker),
+    ...linuxHelpers(path.dirname(policyPath), policy.runtime.cloudWorker, command.cloudNativeHome),
   };
 }
 

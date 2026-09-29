@@ -47,7 +47,13 @@ describe("Codex cloud native authority",()=>{
     const result=cloudCodexRequest(context(),"current-workload",method,{threadId:"thread",model:"qualified-model",cwd:"/private",environments:[],
       sandboxPolicy:{type:"workspaceWrite",writableRoots:["/private"]},config:{"features.multi_agent":true},dynamicTools:[{}]});
     expect(result).toMatchObject({model:"qualified-model",cwd:"/srv/zeros/workspace",environments:[{environmentId:"current-workload",cwd:"/srv/zeros/workspace",runtimeWorkspaceRoots:["/srv/zeros/workspace"]}]});
-    if(method==="thread/start")expect(result).toMatchObject({config:CLOUD_CODEX_CONFIG,dynamicTools:[{type:"function",name:"zeros_workspace",inputSchema:{type:"object"}}]});
+    if(method==="thread/start"){
+      expect(result).toMatchObject({config:CLOUD_CODEX_CONFIG});
+      expect(result).not.toHaveProperty("dynamicTools");
+      expect((result as {config:Record<string,unknown>}).config["features.multi_agent"]).toBe(false);
+      for(const feature of ["features.apps","features.hooks","features.js_repl","features.memories"])
+        expect((result as {config:Record<string,unknown>}).config).not.toHaveProperty(feature);
+    }
   });
   it("does not claim unsupported resume environment selection; every subsequent turn pins it",()=>{
     expect(cloudCodexRequest(context(),"env","thread/resume",{threadId:"native"})).toMatchObject({threadId:"native",environments:undefined,config:CLOUD_CODEX_CONFIG});
@@ -56,4 +62,14 @@ describe("Codex cloud native authority",()=>{
   it.each(["process/spawn","fs/readFile","account/login/start","config/batchWrite","thread/fork","review/start","thread/goal/set"])("rejects unqualified host mutation %s",method=>{
     expect(()=>cloudCodexRequest(context(),"env",method,{})).toThrow(/not admitted/);
   });
+});
+
+it.each(["untrusted", "on-request", "never"])("preserves selected Codex approval policy %s on cloud start and resume", approvalPolicy => {
+  for (const method of ["thread/start", "thread/resume", "turn/start"]) {
+    expect(cloudCodexRequest(context(), "env", method, {approvalPolicy, sandbox:"workspace-write", sandboxPolicy:{type:"workspaceWrite"}})).toMatchObject({approvalPolicy});
+  }
+});
+it("preserves read-only cloud execution and prevents caller-added writable roots", () => {
+  expect(cloudCodexRequest(context(), "env", "thread/start", {sandbox:"read-only",approvalPolicy:"on-request"})).toMatchObject({sandbox:"read-only"});
+  expect(cloudCodexRequest(context(), "env", "turn/start", {sandboxPolicy:{type:"readOnly",networkAccess:false},approvalPolicy:"on-request"})).toMatchObject({sandboxPolicy:{type:"readOnly",networkAccess:false}});
 });

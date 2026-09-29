@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { sha256 } from "./state.mjs";
 import { hostedName } from "./hosted-state.mjs";
-import { DevProviderError, providerJson, pollProvider } from "./provider-http.mjs";
+import { DevProviderError, providerJson, pollProvider, dispatchDevCreate, devCreateNotDispatched, acknowledgeDevCreate } from "./provider-http.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const API = "https://backboard.railway.com";
@@ -34,7 +34,7 @@ export function railwayDevClient(config, fetchImpl = fetch) {
       headers: { authorization: `Bearer ${config.apiToken}`, "content-type": "application/json" },
       body: JSON.stringify({ query, variables }),
     }, fetchImpl);
-    if (response.status !== 200 || response.body?.errors?.length || !response.body?.data) throw new DevProviderError("Railway", response.status === 200 ? "GraphQL rejected the operation" : response.status);
+    if (response.status !== 200 || response.body?.errors?.length || !response.body?.data) throw new DevProviderError("Railway", response.status === 200 ? "GraphQL rejected the operation" : response.status, response.requestId);
     return response.body.data;
   };
 }
@@ -71,10 +71,11 @@ export async function inspectRailwayEnvironment(lease, config, request) {
   return matches[0] ?? null;
 }
 
-export async function ensureRailwayEnvironment(lease, config, request = railwayDevClient(config)) {
-  if (!["provisioning", "ready"].includes(lease.state.status)) throw new Error("Dev archive blocks Railway provisioning");
+export async function ensureRailwayEnvironment(lease, config, request = railwayDevClient(config), { reconcileOnly = false } = {}) {
+  if (!reconcileOnly && !["provisioning", "ready"].includes(lease.state.status)) throw new Error("Dev archive blocks Railway provisioning");
   let receipt = lease.state.resources.railway;
-  if (!receipt) {
+  if (!receipt || devCreateNotDispatched(receipt)) {
+    if (reconcileOnly) return receipt;
     const environments = await listRailwayEnvironments(config, request);
     for (const id of config.protectedEnvironmentIds) {
       if (!environments.some(e => e.id === id)) throw new Error("The protected Railway environment is not visible in this project");
@@ -84,9 +85,9 @@ export async function ensureRailwayEnvironment(lease, config, request = railwayD
     receipt = lease.state.resources.railway = { name, projectId: config.projectId, serviceId: config.serviceId,
       requestedAt: new Date().toISOString(), id: null };
     await lease.save(); await lease.fence();
-    const data = await request(`mutation CreateDevEnvironment($input: EnvironmentCreateInput!) {
+    const data = await dispatchDevCreate(lease, receipt, "Railway", () => request(`mutation CreateDevEnvironment($input: EnvironmentCreateInput!) {
       environmentCreate(input: $input) { id name projectId createdAt }
-    }`, { input: { projectId: config.projectId, name, ephemeral: false, skipInitialDeploys: true } }, lease.signal);
+    }`, { input: { projectId: config.projectId, name, ephemeral: false, skipInitialDeploys: true } }, lease.signal));
     assertEnvironment(data.environmentCreate, receipt, lease.state, config);
     receipt.id = data.environmentCreate.id; await lease.save();
   }
@@ -97,6 +98,7 @@ export async function ensureRailwayEnvironment(lease, config, request = railwayD
     if (!Number.isFinite(createdAt) || createdAt < requestedAt - 5000) throw new Error("Cannot prove the pending Railway creation belongs to this request");
     receipt.id = environment.id; await lease.save();
   }
+  await acknowledgeDevCreate(lease, receipt);
   return receipt;
 }
 
@@ -124,12 +126,14 @@ export async function configureRailwayBackend(lease, config, variables, request 
     // Updating settings on an empty environment does not create an instance.
     // Materialize only this service, without copying another environment or
     // starting a deployment before variables and limits have been configured.
-    await request(`mutation PrepareDevService($environmentId: String!, $patch: EnvironmentConfig!) {
+    const service = lease.state.resources.railway.service ??= {};
+    await dispatchDevCreate(lease, service, "Railway", () => request(`mutation PrepareDevService($environmentId: String!, $patch: EnvironmentConfig!) {
       environmentPatchCommit(environmentId: $environmentId, patch: $patch, skipDeploys: true)
     }`, { environmentId: target.environmentId,
-      patch: { services: { [target.serviceId]: { isCreated: true, source: { repo: null, image: null } } } } }, lease.signal);
+      patch: { services: { [target.serviceId]: { isCreated: true, source: { repo: null, image: null } } } } }, lease.signal));
     await pollProvider("Railway Dev service creation", hasInstance, { signal: lease.signal });
   }
+  if (lease.state.resources.railway.service) await acknowledgeDevCreate(lease, lease.state.resources.railway.service);
   await lease.fence();
   await request(`mutation DevVariables($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }`,
     { input: { ...target, projectId: config.projectId, variables, replace: true, skipDeploys: true } }, lease.signal);
@@ -153,20 +157,27 @@ export async function deployRailwayBackend(lease, config, artifact, request = ra
   if (lease.state.status === "archiving") throw new Error("Cannot upload a backend while archiving");
   const body = fs.readFileSync(artifact.archive);
   if (body.length > 32 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(artifact.digest) || sha256(body) !== artifact.archiveSha256) throw new Error("Invalid backend deployment artifact");
-  if (receipt.uploadPending && !receipt.deploymentId) throw new Error("Railway upload response is unconfirmed; reconcile the pending deployment before another upload");
+  if (receipt.uploadPending && !receipt.deploymentId && !["planned", "rejected"].includes(receipt.uploadCreate?.phase)) throw new Error("Railway upload response is unconfirmed; reconcile the pending deployment before another upload");
   if (receipt.deploymentId && receipt.digest === artifact.digest) {
     const { deployment } = await request(`query DevDeployment($id: String!) { deployment(id: $id) { id projectId environmentId serviceId status deploymentStopped } }`, { id: receipt.deploymentId }, lease.signal);
     if (deployment?.projectId !== config.projectId || deployment.environmentId !== target.environmentId || deployment.serviceId !== config.serviceId) throw new Error("Railway deployment ownership changed");
-    if (deployment.deploymentStopped || ["FAILED", "CRASHED", "REMOVED", "SKIPPED"].includes(deployment.status)) { delete receipt.deploymentId; await lease.save(); }
+    if (deployment.deploymentStopped || ["FAILED", "CRASHED", "REMOVED", "SKIPPED"].includes(deployment.status)) { delete receipt.deploymentId; delete receipt.uploadCreate; await lease.save(); }
   }
-  if (receipt.digest !== artifact.digest || !receipt.deploymentId) {
+  if (receipt.digest !== artifact.digest || !receipt.deploymentId || receipt.deploymentRunId !== lease.state.runId) {
+    // A new lifecycle run can change secrets/roles without changing the tar.
+    // Keep uncertain previous dispatches; only a confirmed deployment or a
+    // documented rejection authorizes another source upload.
+    if (receipt.deploymentId) delete receipt.uploadCreate;
     receipt.uploadPending = true; lease.state.backendEverDeployed = true; receipt.digest = artifact.digest; delete receipt.deploymentId; await lease.save(); await lease.fence();
     const url = new URL(`${API}/project/${config.projectId}/environment/${target.environmentId}/up`);
     url.searchParams.set("serviceId", config.serviceId); url.searchParams.set("message", `zeros-dev:${lease.state.generation}:${artifact.digest}`);
-    const response = await providerJson("Railway source upload", url, { method: "POST", signal: lease.signal, body,
-      headers: { authorization: `Bearer ${config.apiToken}`, "content-type": "application/gzip" } }, fetchImpl);
-    if (response.status !== 200 || !UUID.test(response.body?.deploymentId ?? "")) throw new DevProviderError("Railway source upload", response.status);
-    receipt.deploymentId = response.body.deploymentId; receipt.uploadPending = false; await lease.save();
+    await dispatchDevCreate(lease, receipt, "Railway source upload", async () => {
+      const response = await providerJson("Railway source upload", url, { method: "POST", signal: lease.signal, body,
+        headers: { authorization: `Bearer ${config.apiToken}`, "content-type": "application/gzip" } }, fetchImpl);
+      if (response.status !== 200 || !UUID.test(response.body?.deploymentId ?? "")) throw new DevProviderError("Railway source upload", response.status, response.requestId);
+      receipt.deploymentId = response.body.deploymentId; receipt.deploymentRunId = lease.state.runId;
+      receipt.uploadPending = false; await lease.save();
+    }, { key: "uploadCreate" });
   }
   await pollProvider("Railway Dev deployment", async () => {
     const { deployment } = await request(`query DevDeployment($id: String!) { deployment(id: $id) { id projectId environmentId serviceId status } }`, { id: receipt.deploymentId }, lease.signal);
@@ -176,7 +187,7 @@ export async function deployRailwayBackend(lease, config, artifact, request = ra
   }, { signal: lease.signal, timeout: 600_000, ...polling });
 }
 
-export async function ensureRailwayDevDomain(lease, profile, ensureDns, request = railwayDevClient(profile.railway)) {
+export async function ensureRailwayDevDomain(lease, profile, ensureDns, request = railwayDevClient(profile.railway), { reconcileOnly = false } = {}) {
   const config = profile.railway, target = await mutationFence(lease, config, request);
   const domain = `api-dev-${lease.state.owner}.${profile.cloudflare.domain}`;
   const fields = `id domain projectId environmentId serviceId status { verificationToken verificationDnsHost dnsRecords { hostlabel requiredValue } }`;
@@ -188,13 +199,20 @@ export async function ensureRailwayDevDomain(lease, profile, ensureDns, request 
   let receipt = lease.state.resources.railway.domain, value = matches[0];
   if (!receipt) {
     if (value) throw new Error("Dev API domain exists without its ownership receipt");
-    receipt = lease.state.resources.railway.domain = { name: domain }; await lease.save();
-    value = (await request(`mutation DevDomain($input: CustomDomainCreateInput!) { customDomainCreate(input: $input) { ${fields} } }`,
-      { input: { projectId: config.projectId, ...target, domain, targetPort: 3000 } }, lease.signal)).customDomainCreate;
+    if (reconcileOnly) return;
+    receipt = lease.state.resources.railway.domain = { name: domain, create: { version: 1, phase: "planned", attempt: 1 } }; await lease.save();
+  }
+  if (receipt.name !== domain) throw new Error("Dev API domain receipt changed");
+  if (!value) {
+    if (reconcileOnly && devCreateNotDispatched(receipt)) return;
+    if (!devCreateNotDispatched(receipt)) throw new Error("Dev API domain creation remains unconfirmed");
+    value = (await dispatchDevCreate(lease, receipt, "Railway", () => request(`mutation DevDomain($input: CustomDomainCreateInput!) { customDomainCreate(input: $input) { ${fields} } }`,
+      { input: { projectId: config.projectId, ...target, domain, targetPort: 3000 } }, lease.signal))).customDomainCreate;
   }
   if (!value || value.domain !== domain || value.environmentId !== target.environmentId || value.serviceId !== target.serviceId ||
       value.projectId !== config.projectId || (receipt.id && value.id !== receipt.id)) throw new Error("Dev API domain creation is unconfirmed or belongs to another environment");
   receipt.id = value.id; await lease.save();
+  await acknowledgeDevCreate(lease, receipt);
   const routing = value.status?.dnsRecords?.filter(r => /^[a-z0-9.-]+\.up\.railway\.app$/.test(r.requiredValue ?? ""));
   if (routing?.length !== 1) throw new Error("Railway did not return one Dev API CNAME target");
   await ensureDns({ type: "CNAME", name: domain, content: routing[0].requiredValue });
@@ -210,25 +228,32 @@ export async function stopRailwayBackend(lease, config, request = railwayDevClie
   const receipt = lease.state.resources.railway;
   if (!receipt || receipt.deleted) return;
   if (!await inspectRailwayEnvironment(lease, config, request)) {
-    if (!receipt.id) throw new Error("An unconfirmed Railway creation must be reconciled before cleanup");
+    if (!receipt.id && !devCreateNotDispatched(receipt)) throw new Error("An unconfirmed Railway creation must be reconciled before cleanup");
     return;
   }
   const target = await mutationFence(lease, config, request);
-  const instances = async () => (await request(`query DevInstances($id: String!) {
+  const instances = async () => {
+    const list = (await request(`query DevInstances($id: String!) {
     environment(id: $id) { serviceInstances { edges { node { serviceId activeDeployments { id status deploymentStopped }
       latestDeployment { id status deploymentStopped } } } } }
   }`, { id: target.environmentId }, lease.signal)).environment.serviceInstances.edges.map(e => e.node);
+    if (list.some(i => i.serviceId !== config.serviceId)) throw new Error("Unexpected service in the owned Dev environment; cleanup stopped");
+    return list;
+  };
   const list = await instances();
-  if (list.some(i => i.serviceId !== config.serviceId)) throw new Error("Unexpected service in the owned Dev environment; cleanup stopped");
+  // Remove is Railway's durable shutdown operation. deploymentStop can leave
+  // SUCCESS and live instances unchanged; a stop flag is not removal evidence.
+  // A crashed deployment may restart automatically, so remove it as well.
+  const terminal = deployment => ["REMOVED", "FAILED", "SKIPPED"].includes(deployment.status);
   const stopped = new Set();
   for (const instance of list) for (const deployment of [...instance.activeDeployments, instance.latestDeployment].filter(Boolean)) {
-    if (stopped.has(deployment.id) || deployment.deploymentStopped || ["REMOVED", "FAILED", "CRASHED", "SKIPPED"].includes(deployment.status)) continue;
+    if (stopped.has(deployment.id) || terminal(deployment) || deployment.status === "REMOVING") continue;
     await lease.fence();
-    const mutation = ["BUILDING", "INITIALIZING", "QUEUED", "WAITING"].includes(deployment.status) ? "deploymentCancel" : "deploymentStop";
+    const mutation = ["BUILDING", "INITIALIZING", "QUEUED", "WAITING"].includes(deployment.status) ? "deploymentCancel" : "deploymentRemove";
     await request(`mutation StopDevDeployment($id: String!) { ${mutation}(id: $id) }`, { id: deployment.id }, lease.signal); stopped.add(deployment.id);
   }
   await pollProvider("Railway Dev backend shutdown", async () => (await instances()).every(i =>
-    [...i.activeDeployments, i.latestDeployment].filter(Boolean).every(d => d.deploymentStopped || ["REMOVED", "FAILED", "CRASHED", "SKIPPED"].includes(d.status))),
+    [...i.activeDeployments, i.latestDeployment].filter(Boolean).every(terminal)),
   { signal: lease.signal, ...polling });
   receipt.stopped = true; await lease.save();
 }
@@ -238,7 +263,7 @@ export async function deleteRailwayEnvironment(lease, config, request = railwayD
   if (!receipt || receipt.deleted) return;
   if (lease.state.status !== "archiving" || !lease.state.steps.backendStopped) throw new Error("Confirm owned backend shutdown before deleting the Dev environment");
   const environment = await inspectRailwayEnvironment(lease, config, request);
-  if (!environment && !receipt.id) throw new Error("Railway create request remains unconfirmed");
+  if (!environment && !receipt.id && !devCreateNotDispatched(receipt)) throw new Error("Railway create request remains unconfirmed");
   if (environment) {
     if (!receipt.id) { receipt.id = environment.id; await lease.save(); }
     receipt.deleteRequested = true; await lease.save(); await lease.fence();

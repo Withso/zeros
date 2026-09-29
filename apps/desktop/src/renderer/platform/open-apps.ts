@@ -26,7 +26,7 @@ import { useEffect, useState } from "react";
 
 import { getSetting, setSetting } from "./settings";
 import { isNativeRuntime, nativeInvoke } from "./runtime";
-import { openInTerminal, revealInFinder } from "./app";
+import { canOpenPathLocally, openInTerminal, revealInFinder } from "./app";
 
 export type OpenAppKind = "system" | "ide" | "cli";
 
@@ -183,6 +183,7 @@ export async function openPathWithApp(
   appId: string,
   path: string,
 ): Promise<void> {
+  if (!canOpenPathLocally(path)) return;
   if (appId === FINDER_APP_ID) return revealInFinder(path);
   if (appId === TERMINAL_APP_ID) return openInTerminal(path);
   if (!isNativeRuntime()) return;

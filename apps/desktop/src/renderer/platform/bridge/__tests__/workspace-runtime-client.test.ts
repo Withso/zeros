@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RuntimeClient } from "../ws-client";
+import { CloudAgentConnection } from "../cloud-agent-connection";
 import {
   WorkspaceRuntimeClient,
   type CloudPeer,
@@ -10,6 +11,7 @@ import {
   type CloudWorkspaceTarget,
 } from "../cloud-workspace-key";
 import type { BridgeMessage } from "../messages";
+import { bridgeGhPrList, bridgeGhRepoAccess } from "../workspace-bridge";
 import {
   bridgePtyCreate,
   bridgePtyTerminals,
@@ -86,6 +88,402 @@ function fakePeer(target: CloudWorkspaceTarget) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("workspace runtime routing", () => {
+  it("authorizes the exact translated PR request without changing shared UI operations", async () => {
+    const peer = fakePeer(a), prepareGithubWrite = vi.fn(async () => "test-write-grant");
+    const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, workspaces: () => [], prepareGithubWrite });
+    await client.request({ type: "WORKSPACE_REQUEST", op: "gh.prComment", params: { workspaceId: cloudScopedId(a, "local-main"), number: 12, body: "A review comment" } } as never);
+    expect(prepareGithubWrite).toHaveBeenCalledWith(a, "gh.prComment", { workspaceId: "local-main", number: 12, body: "A review comment" });
+    expect(peer.request).toHaveBeenCalledWith(expect.objectContaining({ op: "gh.prComment", params: { workspaceId: "local-main", number: 12, body: "A review comment", $cloudGithubWriteGrant: "test-write-grant" } }), expect.anything());
+    client.dispose();
+  });
+  it.each(["account", "retirement", "abort"])("does not dispatch a write after %s changes during GitHub authorization", async cause => {
+    const peer = fakePeer(a), grant = deferred<string>(), preparing = deferred<void>(), abort = new AbortController();
+    const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, workspaces: () => [], prepareGithubWrite: async () => { preparing.resolve(); return grant.promise; } });
+    peer.peer.runtimeId = "old-engine";
+    const pending = client.request({ type: "WORKSPACE_REQUEST", op: "git.push", params: { workspaceId: cloudScopedId(a, "local-main") } } as never, { signal: abort.signal });
+    const rejected = expect(pending).rejects.toThrow();
+    await preparing.promise;
+    if (cause === "account") client.clearCloudConnections();
+    else if (cause === "retirement") client.retireCloudRuntime("old-engine");
+    else abort.abort();
+    grant.resolve("test-write-grant"); await rejected;
+    expect(peer.request.mock.calls.some(([message]) => message.op === "git.push")).toBe(false);
+    client.dispose();
+  });
+  it.each(["disconnected", "retired", "account-reset", "access-pruned"])("keeps command routes within their admitted workspace owner after %s", async cause => {
+    const chat = "44444444-4444-4444-8444-444444444444";
+    const old = fakePeer(a), replacement = fakePeer(a);
+    const authorize = vi.fn(async () => "55555555-5555-4555-8555-555555555555");
+    for (const peer of [old, replacement]) {
+      peer.peer.agents = new CloudAgentConnection(peer.peer.client, "local-main", authorize);
+      peer.release.mockImplementation(() => peer.peer.agents!.dispose());
+      peer.request.mockImplementation(async message => {
+        if (message.type !== "WORKSPACE_REQUEST") throw new Error("Native cloud prompt bypassed its command adapter");
+        const request = (message.params as Record<string, unknown>)?.request as Record<string, unknown> | undefined;
+        const result = message.op === "chats.list" ? { chats: [], chatDeletions: [] }
+          : message.op === "cloudCommands.conversation" || message.op === "cloudCommands.createConversation"
+            ? { conversationId: chat, agentId: "codex", modeRevision: 0 }
+            : request?.kind === "snapshot"
+              ? { version: 1, conversationId: chat, revision: 0, paused: false, pending: [], receipts: [] }
+              : request?.kind === "read"
+                ? { commandId: request.commandId, conversationId: chat, position: 1, state: "succeeded", payload: null,
+                    executionId: "replacement-execution", generation: 2, resultCode: null,
+                    createdAt: "2026-09-28T00:00:00Z", updatedAt: "2026-09-28T00:00:00Z" }
+                : {};
+        return { type: "WORKSPACE_RESPONSE", op: message.op, result };
+      });
+    }
+    old.peer.runtimeId = "retired-conversation-owner";
+    const open = vi.fn().mockResolvedValueOnce(old.peer).mockResolvedValueOnce(replacement.peer);
+    let allowed = true;
+    const client = new WorkspaceRuntimeClient({ open, canAccess: () => allowed, workspaces: () => [] });
+    const sessionId = cloudScopedId(a, `conversation:${chat}`);
+    try {
+      await client.request({ type: "AGENT_NEW_SESSION", chatId: cloudScopedId(a, chat), agentId: "codex",
+        cwd: cloudWorkspaceKey(a), env: { OPENAI_MODEL: "gpt-5.6" } } as never);
+      client.send({ type: "AGENT_UPDATE_CONFIG", sessionId, agentId: "codex",
+        env: { OPENAI_MODEL: "gpt-5.6-luna", ZEROS_THINKING_EFFORT: "high" } } as never);
+      old.peer.agents!.incoming({ type: "AGENT_SESSION_CREATED", agentId: "codex", chatId: chat,
+        session: { sessionId: "old-execution", executionId: "old-execution" } });
+      if (cause === "account-reset") client.clearCloudConnections();
+      else if (cause === "access-pruned") {
+        allowed = false; client.pruneCloudConnections(); allowed = true;
+      } else if (cause === "retired") client.retireCloudRuntime(old.peer.runtimeId!);
+      else Object.assign(old.peer.client, { status: "disconnected" });
+      const pending = client.request({ type: "AGENT_PROMPT", sessionId, agentId: "codex",
+        userMessageId: "after-reconnect", prompt: [{ type: "text", text: "continue" }] } as never);
+      if (cause === "account-reset" || cause === "access-pruned") {
+        await expect(pending).rejects.toThrow(/conversation.*reconnect/i);
+        expect(authorize).not.toHaveBeenCalled();
+        expect(replacement.request.mock.calls.every(([m]) => m.op === "chats.list")).toBe(true);
+        return;
+      }
+      const response = await pending;
+      expect(response).toMatchObject({ type: "AGENT_PROMPT_COMPLETE", sessionId });
+      expect(authorize).toHaveBeenCalledWith("codex", "gpt-5.6-luna");
+      const enqueue = replacement.request.mock.calls.find(([m]) =>
+        (m.params as { request?: { kind: string } } | undefined)?.request?.kind === "mutate")?.[0];
+      expect(enqueue).toMatchObject({ op: "cloudCommands.request", params: { request: { mutation: { action: {
+        kind: "enqueue", payload: { agentId: "codex", model: "gpt-5.6-luna", effort: "high" },
+      } } } } });
+      expect(replacement.request.mock.calls.every(([m]) => m.type === "WORKSPACE_REQUEST")).toBe(true);
+      expect(replacement.request.mock.calls.some(([m]) => m.op === "cloudCommands.createConversation")).toBe(false);
+      expect(old.release).toHaveBeenCalledOnce();
+    } finally { client.dispose(); }
+  });
+
+  it("reads the attached worker's current transcript without replacing it with a lagging cloud projection", async () => {
+    const peer = fakePeer(a);
+    const remote = { messages: [{ msgId: "reply", kind: "text", payload: "old", createdAt: 1 }] };
+    const live = { messages: [{ ...remote.messages[0], payload: "complete" }] };
+    const readHistory = vi.fn(async (_target, op) => op === "chats.list"
+      ? { chats: [], chatDeletions: [], revision: 1 } : remote);
+    const open = vi.fn(async () => peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, readHistory, workspaces: () => [] });
+    const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.window", params: { chatId: cloudScopedId(a, "chat"), limit: 100 } };
+    try {
+      expect(await client.request(request)).toMatchObject({ result: remote });
+      expect(open).not.toHaveBeenCalled(); // Cold/stopped history never wakes a VM.
+      await client.warmWorkspace(a);
+      peer.request.mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", result: live });
+      expect(await client.request(request)).toMatchObject({ result: live });
+      expect(peer.request).toHaveBeenLastCalledWith(expect.objectContaining({
+        op: "messages.window", params: { chatId: "chat", limit: 100 },
+      }));
+      Object.defineProperty(peer.peer.client, "status", { value: "disconnected" });
+      expect(await client.request(request)).toMatchObject({ result: remote });
+      expect(open).toHaveBeenCalledOnce();
+    } finally { client.dispose(); }
+  });
+
+  it("rejects an attached history response after its workspace connection is retired", async () => {
+    const peer = fakePeer(a), pending = deferred<Record<string, unknown>>();
+    const readHistory = vi.fn(async () => ({ chats: [], chatDeletions: [], revision: 1 }));
+    const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, readHistory, workspaces: () => [] });
+    try {
+      await client.warmWorkspace(a);
+      peer.request.mockReturnValueOnce(pending.promise);
+      const result = client.request({ type: "WORKSPACE_REQUEST", op: "messages.window", params: { chatId: cloudScopedId(a, "chat") } });
+      const rejected = expect(result).rejects.toThrow(/changed|retired/i);
+      client.clearCloudConnections();
+      pending.resolve({ type: "WORKSPACE_RESPONSE", result: { messages: [] } });
+      await rejected;
+    } finally { client.dispose(); }
+  });
+  it("publishes cloud history once and keeps unchanged polls quiet without invalidating files or Local", async () => {
+    let now = 1_000, revision = 1;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const open = vi.fn();
+    const readHistory = vi.fn(async (target: CloudWorkspaceTarget) => ({
+      revision, chats: [{ id: cloudScopedId(target, "saved"), folder: cloudWorkspaceKey(target) }], chatDeletions: [],
+    }));
+    const client = new WorkspaceRuntimeClient({ open, readHistory, workspaces: () => [] });
+    const changed = vi.fn();
+    client.on("DB_CHANGED", changed);
+    try {
+      await Promise.all([client.warmHistoryWorkspace(a), client.warmHistoryWorkspace(a)]);
+      expect(readHistory).toHaveBeenCalledOnce();
+      expect(changed).toHaveBeenCalledExactlyOnceWith({
+        type: "DB_CHANGED", kinds: ["chats", "messages"],
+        workspaceId: cloudWorkspaceKey(a), workspaceIds: [cloudWorkspaceKey(a)], cloudWorkspace: cloudWorkspaceKey(a),
+      });
+      const request = { type: "WORKSPACE_REQUEST" as const, op: "chats.list", params: { workspaceId: cloudWorkspaceKey(a) } };
+      const first = await client.request(request);
+      await client.warmHistoryWorkspace(b);
+      changed.mockClear();
+      now += 2_000;
+      await Promise.all([client.warmHistoryWorkspace(a), client.warmHistoryWorkspace(a)]);
+      expect(readHistory).toHaveBeenCalledTimes(3);
+      expect(changed).not.toHaveBeenCalled();
+      expect((await client.request(request) as unknown as { result: unknown }).result)
+        .toBe((first as unknown as { result: unknown }).result);
+      revision++;
+      now += 2_000;
+      await client.warmHistoryWorkspace(a);
+      expect(changed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: cloudWorkspaceKey(a) }));
+      expect(open).not.toHaveBeenCalled();
+      changed.mockClear();
+      now += 2_000;
+      readHistory.mockRejectedValueOnce(new Error("offline"));
+      await expect(client.warmHistoryWorkspace(a)).rejects.toThrow("offline");
+      expect(changed).not.toHaveBeenCalled();
+      expect(client.hasChatSnapshot(cloudWorkspaceKey(a))).toBe(true);
+    } finally { client.dispose(); }
+  });
+
+  it("fences a late history warm after account replacement without disturbing its replacement read", async () => {
+    const old = deferred<Record<string, unknown>>(), next = deferred<Record<string, unknown>>();
+    const readHistory = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(next.promise);
+    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, workspaces: () => [] });
+    const changed = vi.fn();
+    client.on("DB_CHANGED", changed);
+    try {
+      const rejected = expect(client.warmHistoryWorkspace(a)).rejects.toThrow(/access changed/i);
+      await vi.waitFor(() => expect(readHistory).toHaveBeenCalledOnce());
+      client.clearCloudConnections();
+      const replacement = client.warmHistoryWorkspace(a);
+      await vi.waitFor(() => expect(readHistory).toHaveBeenCalledTimes(2));
+      old.resolve({ revision: 1, chats: [{ id: "old-account" }], chatDeletions: [] });
+      await rejected;
+      expect(changed).not.toHaveBeenCalled();
+      expect(client.hasChatSnapshot(cloudWorkspaceKey(a))).toBe(false);
+      const shared = client.warmHistoryWorkspace(a);
+      next.resolve({ revision: 2, chats: [{ id: "current-account" }], chatDeletions: [] });
+      await Promise.all([replacement, shared]);
+      expect(readHistory).toHaveBeenCalledTimes(2);
+      expect(changed).toHaveBeenCalledOnce();
+    } finally { client.dispose(); }
+  });
+
+  it("loads a stopped workspace's chat list and tools without opening its VM", async () => {
+    const open = vi.fn();
+    vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue({
+      type: "WORKSPACE_RESPONSE", result: { chats: [{ id: "local-chat" }], chatDeletions: [] },
+    } as unknown as BridgeMessage);
+    const readHistory = vi.fn(async (_target: CloudWorkspaceTarget, op: string) => op === "chats.list"
+      ? { chats: [{ id: cloudScopedId(a, "saved"), folder: cloudWorkspaceKey(a) }], chatDeletions: [] }
+      : { messages: [{ msgId: "tool", kind: "tool_call", payload: '{"status":"completed"}', createdAt: 1 }] });
+    const client = new WorkspaceRuntimeClient({ open, readHistory, workspaces: () => [] });
+    try {
+      await client.warmHistoryWorkspace(a);
+      expect(client.hasChatSnapshot(cloudWorkspaceKey(a))).toBe(true);
+      const result = await client.request({ type: "WORKSPACE_REQUEST", op: "messages.window", params: { chatId: cloudScopedId(a, "saved"), limit: 100 } });
+      expect(result).toMatchObject({ result: { messages: [{ msgId: "tool" }] } });
+      expect(await client.request({ type: "WORKSPACE_REQUEST", op: "chats.list" })).toMatchObject({ result: {
+        chats: [{ id: "local-chat" }, { id: cloudScopedId(a, "saved") }], confirmedCloudWorkspaces: [cloudWorkspaceKey(a)],
+      } });
+      expect(open).not.toHaveBeenCalled();
+      expect(client.statusForWorkspace(cloudWorkspaceKey(a))).toBe("disconnected");
+    } finally { client.dispose(); }
+  });
+
+  it("shares history reads by workspace and fences account replacement", async () => {
+    const pending = deferred<Record<string, unknown>>();
+    const readHistory = vi.fn(() => pending.promise);
+    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, workspaces: () => [] });
+    const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.window", params: { chatId: cloudScopedId(a, "saved"), limit: 100 } };
+    const first = client.request(request), second = client.request(request);
+    const rejected = Promise.allSettled([first, second]);
+    await vi.waitFor(() => expect(readHistory).toHaveBeenCalledOnce());
+    client.clearCloudConnections();
+    pending.resolve({ messages: [{ msgId: "old-account" }] });
+    expect((await rejected).every(result => result.status === "rejected")).toBe(true);
+    expect(client.hasChatSnapshot(cloudWorkspaceKey(a))).toBe(false);
+    client.dispose();
+  });
+
+  it("denies cloud history after access is revoked without returning its warm cache", async () => {
+    let allowed = true;
+    const client = new WorkspaceRuntimeClient({ open: vi.fn(), workspaces: () => [], canAccess: () => allowed,
+      readHistory: async () => ({ messages: [{ msgId: "saved" }] }) });
+    const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.window", params: { chatId: cloudScopedId(a, "saved"), limit: 100 } };
+    await client.request(request);
+    allowed = false;
+    await expect(client.request(request)).rejects.toThrow(/access/i);
+    client.dispose();
+  });
+
+  it("refreshes exact workspace metadata on database changes without rereading Local", async () => {
+    const local = vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue({
+      type: "WORKSPACE_RESPONSE", result: { chats: [], chatDeletions: [] },
+    } as unknown as BridgeMessage);
+    const peer = fakePeer(a);
+    let version = 1, allowed = true;
+    const readHistory = vi.fn(async (target: CloudWorkspaceTarget) => ({ chats: [{ id: cloudScopedId(target, `chat-${version}`) }], chatDeletions: [] }));
+    const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, readHistory, workspaces: () => [], canAccess: () => allowed });
+    client.on("DB_CHANGED", () => {});
+    try {
+      await client.warmHistoryWorkspace(b);
+      await client.warmWorkspace(a);
+      version = 2;
+      peer.emit("DB_CHANGED", { kinds: ["chats"] });
+      await vi.waitFor(() => expect(readHistory).toHaveBeenCalledTimes(3));
+      await vi.waitFor(async () => expect(await client.request({ type: "WORKSPACE_REQUEST", op: "chats.list" })).toMatchObject({ result: {
+        chats: [{ id: cloudScopedId(a, "chat-2") }, { id: cloudScopedId(b, "chat-1") }],
+      } }));
+      expect(peer.request).not.toHaveBeenCalled();
+      expect(local.mock.calls.every(([message]) => message.type === "WORKSPACE_REQUEST" && message.op === "chats.list")).toBe(true);
+      client.retireCloudRuntime(peer.peer.runtimeId ?? "none");
+      allowed = false;
+      expect(await client.request({ type: "WORKSPACE_REQUEST", op: "chats.list" })).toMatchObject({ result: { chats: [], confirmedCloudWorkspaces: [] } });
+    } finally { client.dispose(); }
+  });
+
+  it.each(["disconnected", "connecting"])("reopens only the %s workspace and retains its history while reconnecting", async status => {
+    const local = vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue({
+      type: "WORKSPACE_RESPONSE", result: { chats: [], chatDeletions: [] },
+    } as unknown as BridgeMessage);
+    const old = fakePeer(a), other = fakePeer(b), replacement = fakePeer(a);
+    old.peer.runtimeId = "retired-for-reconnect";
+    old.request.mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: {
+      chats: [{ id: "saved", folder: "/workspace/repo" }], chatDeletions: [],
+    } });
+    const opening = deferred<CloudPeer>();
+    let first = true;
+    const open = vi.fn(async (target: CloudWorkspaceTarget) => {
+      if (target.workspaceId === b.workspaceId) return other.peer;
+      if (first) { first = false; return old.peer; }
+      return opening.promise;
+    });
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    try {
+      await Promise.all([client.warmWorkspace(a), client.warmWorkspace(b)]);
+      Object.assign(old.peer.client, { status });
+      const warming = client.warmWorkspace(a);
+      const write = client.request({ type: "WORKSPACE_REQUEST", op: "file.write", params: {
+        workspaceId: cloudWorkspaceKey(a), path: "saved.ts", content: "new",
+      } });
+      void warming.catch(() => {});
+      void write.catch(() => {});
+      expect(old.release).toHaveBeenCalledOnce();
+      expect(other.release).not.toHaveBeenCalled();
+      expect(open).toHaveBeenCalledTimes(3);
+      expect(replacement.request).not.toHaveBeenCalled();
+      // Native close acknowledges the old transport after replacement began.
+      client.retireCloudRuntime("retired-for-reconnect");
+      const history = await client.request({ type: "WORKSPACE_REQUEST", op: "chats.list", params: {} });
+      expect(history).toMatchObject({ result: {
+        confirmedCloudWorkspaces: [cloudWorkspaceKey(a), cloudWorkspaceKey(b)],
+        chats: [{ id: cloudScopedId(a, "saved"), folder: cloudWorkspaceKey(a) }],
+      } });
+      expect(local.mock.calls.every(([message]) => message.type === "WORKSPACE_REQUEST" && message.op === "chats.list")).toBe(true);
+      opening.resolve(replacement.peer);
+      await Promise.all([warming, write]);
+      expect(replacement.request.mock.calls.map(([message]) => message.op)).toEqual(["chats.list", "file.write"]);
+      expect(other.release).not.toHaveBeenCalled();
+    } finally { client.dispose(); }
+  });
+
+  it("keeps confirmed history after reconnect hydration fails and fences late old responses", async () => {
+    vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue({
+      type: "WORKSPACE_RESPONSE", result: { chats: [], chatDeletions: [] },
+    } as unknown as BridgeMessage);
+    const old = fakePeer(a), failed = fakePeer(a), fresh = fakePeer(a);
+    old.request.mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: {
+      chats: [{ id: "saved", folder: "/workspace/repo" }], chatDeletions: [],
+    } });
+    const open = vi.fn().mockResolvedValueOnce(old.peer).mockResolvedValueOnce(failed.peer).mockResolvedValueOnce(fresh.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    try {
+      await client.warmWorkspace(a);
+      const late = deferred<Record<string, unknown>>();
+      old.request.mockImplementationOnce(() => late.promise);
+      const stale = client.request({ type: "WORKSPACE_REQUEST", op: "file.read", params: {
+        workspaceId: cloudWorkspaceKey(a), path: "saved.ts",
+      } });
+      const rejected = expect(stale).rejects.toThrow(/connection changed/);
+      await vi.waitFor(() => expect(old.request).toHaveBeenCalledTimes(2));
+      Object.assign(old.peer.client, { status: "disconnected" });
+      failed.request.mockRejectedValue(new Error("disconnected while loading history"));
+      const reconnection = client.warmWorkspace(a);
+      const reconnectRejected = expect(reconnection).rejects.toThrow(/loading history/);
+      late.resolve({ type: "WORKSPACE_RESPONSE", result: { content: "stale" } });
+      await Promise.all([rejected, reconnectRejected]);
+      expect(failed.release).toHaveBeenCalledOnce();
+      expect(await client.request({ type: "WORKSPACE_REQUEST", op: "chats.list", params: {} })).toMatchObject({ result: {
+        confirmedCloudWorkspaces: [cloudWorkspaceKey(a)],
+        chats: [{ id: cloudScopedId(a, "saved"), folder: cloudWorkspaceKey(a) }],
+      } });
+      await client.warmWorkspace(a);
+      expect(open).toHaveBeenCalledTimes(3);
+      expect(old.release).toHaveBeenCalledOnce();
+      expect(failed.release).toHaveBeenCalledOnce();
+    } finally { client.dispose(); }
+  });
+
+  it("keeps PR suggestions and create preflight on the selected cloud workspace", async () => {
+    const local = vi.spyOn(RuntimeClient.prototype, "request");
+    const pa = fakePeer(a), pb = fakePeer(b);
+    const client = new WorkspaceRuntimeClient({ open: async target => target.workspaceId === a.workspaceId ? pa.peer : pb.peer, workspaces: () => [] });
+    try {
+      for (const target of [a, b]) {
+        const workspaceId = cloudWorkspaceKey(target);
+        await bridgeGhPrList(client, { workspaceId, originUrl: "https://github.com/example/project.git", state: "open" });
+        await bridgeGhRepoAccess(client, workspaceId);
+      }
+      for (const peer of [pa, pb]) {
+        expect(peer.request).toHaveBeenCalledWith(expect.objectContaining({ op: "gh.prList", params: {
+          workspaceId: "local-main", originUrl: "https://github.com/example/project.git", state: "open",
+        } }), expect.any(Number));
+        expect(peer.request).toHaveBeenCalledWith(expect.objectContaining({ op: "gh.repoAccess", params: { workspaceId: "local-main" } }), expect.any(Number));
+      }
+      expect(local).not.toHaveBeenCalled();
+    } finally { client.dispose(); }
+  });
+  it.each([undefined, {}, { chats: null }, { chats: "invalid" }])("does not confirm a malformed first cloud chat snapshot (%j)", async result => {
+    const pa = fakePeer(a);
+    pa.request.mockResolvedValue({ type: "WORKSPACE_RESPONSE", result });
+    const client = new WorkspaceRuntimeClient({ open: async () => pa.peer, workspaces: () => [] });
+    await expect(client.warmWorkspace(a)).rejects.toThrow(/cloud conversations/);
+    expect(client.hasChatSnapshot(cloudWorkspaceKey(a))).toBe(false);
+    expect(pa.release).toHaveBeenCalledOnce();
+    client.dispose();
+  });
+  it("retains confirmed cloud history when a later response is malformed", async () => {
+    vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: { chats: [], chatDeletions: [] } } as unknown as BridgeMessage);
+    const pa = fakePeer(a);
+    pa.request.mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: { chats: [{ id: "saved", folder: "/workspace/repo" }], chatDeletions: [] } });
+    const client = new WorkspaceRuntimeClient({ open: async () => pa.peer, workspaces: () => [] });
+    await client.warmWorkspace(a);
+    pa.request.mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: {} });
+    expect(await client.request({ type: "WORKSPACE_REQUEST", op: "chats.list", params: {} })).toMatchObject({ result: {
+      confirmedCloudWorkspaces: [cloudWorkspaceKey(a)],
+      chats: [{ id: cloudScopedId(a, "saved"), folder: cloudWorkspaceKey(a) }],
+    } });
+    client.dispose();
+  });
+  it("identifies which cloud chat snapshots can validate a saved selection", async () => {
+    vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: { chats: [], chatDeletions: [] } } as unknown as BridgeMessage);
+    const pa = fakePeer(a);
+    const client = new WorkspaceRuntimeClient({ open: async () => pa.peer, workspaces: () => [] });
+    const message = { type: "WORKSPACE_REQUEST", op: "chats.list", params: {} } as const;
+    expect(await client.request(message)).toMatchObject({ result: { confirmedCloudWorkspaces: [] } });
+    await client.warmWorkspace(a);
+    expect(await client.request(message)).toMatchObject({ result: { confirmedCloudWorkspaces: [cloudWorkspaceKey(a)] } });
+    client.clearCloudConnections();
+    expect(await client.request(message)).toMatchObject({ result: { confirmedCloudWorkspaces: [] } });
+    client.dispose();
+  });
   it("isolates terminal discovery, shells, input, output, resize and close across identical cloud roots", async () => {
     const local = vi.spyOn(RuntimeClient.prototype, "request");
     const pa = fakePeer(a),

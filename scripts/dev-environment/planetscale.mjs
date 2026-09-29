@@ -1,5 +1,5 @@
 import { hostedName } from "./hosted-state.mjs";
-import { DevProviderError, providerJson, pollProvider } from "./provider-http.mjs";
+import { DevProviderError, providerJson, pollProvider, dispatchDevCreate, devCreateNotDispatched, acknowledgeDevCreate } from "./provider-http.mjs";
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -15,7 +15,7 @@ export function planetScaleDevClient(config, fetchImpl = fetch) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }, fetchImpl);
     if (absent && response.status === 404) return null;
-    if (response.status < 200 || response.status >= 300) throw new DevProviderError("PlanetScale", response.status);
+    if (response.status < 200 || response.status >= 300) throw new DevProviderError("PlanetScale", response.status, response.requestId);
     return response.body;
   };
 }
@@ -44,7 +44,7 @@ function assertBranch(branch, receipt, state, config) {
 }
 
 export async function ensurePlanetScaleBranch(lease, config, request = planetScaleDevClient(config), polling = {}) {
-  if (!["provisioning", "ready"].includes(lease.state.status)) throw new Error("Dev archive blocks branch provisioning");
+  if (!polling.reconcileOnly && !["provisioning", "ready"].includes(lease.state.status)) throw new Error("Dev archive blocks branch provisioning");
   // Empty PostgreSQL branches default to PS-DEV. Supplying even a small
   // ordinary SKU (PS-5) creates a production-class branch, which the restricted
   // Dev token cannot manage. Never promote a disposable branch implicitly.
@@ -52,14 +52,15 @@ export async function ensurePlanetScaleBranch(lease, config, request = planetSca
   const database = await databaseIdentity(lease, config, request);
   let receipt = lease.state.resources.planetscale;
   const name = hostedName(lease.state), route = `/branches/${name}`;
-  if (!receipt) {
+  if (!receipt || devCreateNotDispatched(receipt)) {
+    if (polling.reconcileOnly) return receipt;
     if (await request(route, { absent: true })) throw new Error("Dev branch name already exists without an ownership receipt");
     receipt = lease.state.resources.planetscale = { name, databaseId: database.id, database: config.database,
       organization: config.organization, creatorTokenId: config.tokenId, requestedAt: new Date().toISOString(), id: null };
     await lease.save(); await lease.fence();
-    const branch = await request("/branches", { method: "POST", signal: lease.signal,
+    const branch = await dispatchDevCreate(lease, receipt, "PlanetScale", () => request("/branches", { method: "POST", signal: lease.signal,
       body: { name, parent_branch: config.protectedBranch, deletion_protected: false,
-        major_version: "18", ...(config.region ? { region: config.region } : {}) } });
+        major_version: "18", ...(config.region ? { region: config.region } : {}) } }));
     // The successful create response is the original ownership receipt.
     if (!ID.test(branch?.id ?? "")) throw new Error("PlanetScale did not return a Dev branch ID");
     receipt.id = branch.id; await lease.save(); assertBranch(branch, receipt, lease.state, config);
@@ -69,6 +70,7 @@ export async function ensurePlanetScaleBranch(lease, config, request = planetSca
     if (!branch) throw new Error("Pending Dev branch creation is unconfirmed; preserve the receipt and retry, do not recreate it");
     assertBranch(branch, receipt, lease.state, config);
     if (!receipt.id) { receipt.id = branch.id; await lease.save(); }
+    await acknowledgeDevCreate(lease, receipt);
     return branch.ready === true;
   }, { signal: lease.signal, ...polling });
   return receipt;
@@ -81,10 +83,11 @@ export async function deletePlanetScaleBranch(lease, config, request = planetSca
   await databaseIdentity(lease, config, request);
   const route = `/branches/${receipt.name}`;
   let branch = await request(route, { absent: true });
-  if (!branch && !receipt.id) throw new Error("A branch create request remains unconfirmed; cleanup cannot discard its ownership receipt");
+  if (!branch && !receipt.id && !devCreateNotDispatched(receipt)) throw new Error("A branch create request remains unconfirmed; cleanup cannot discard its ownership receipt");
   if (branch) {
     assertBranch(branch, receipt, lease.state, config);
     if (!receipt.id) { receipt.id = branch.id; await lease.save(); }
+    await acknowledgeDevCreate(lease, receipt);
     receipt.deleteRequested = true; await lease.save(); await lease.fence();
     await request(route, { method: "DELETE", absent: true, signal: lease.signal });
   }
@@ -128,20 +131,27 @@ export async function ensurePlanetScaleRoles(lease, config, request = planetScal
       const role = await request(`${branchRoute}/roles/${saved.id}`, { absent: true });
       if (kind === "migration" && (!role || role.expired || role.disabled_at || role.deleted_at)) {
         await deletePlanetScaleMigrationRole(lease, config, request);
+      } else if (kind === "runtime" && (!role || role.expired || role.disabled_at || role.deleted_at ||
+          config.runtimeRoleVersion !== undefined && saved.version !== config.runtimeRoleVersion)) {
+        if (role && (role.id !== saved.id || role.username !== saved.username || role.branch?.id !== receipt.id || role.branch?.name !== receipt.name)) throw new Error("Dev runtime role ownership changed");
+        receipt.retiredRuntimeRoles ??= [];
+        receipt.retiredRuntimeRoles.push(saved);
+        delete receipt.roles.runtime; await lease.save();
       } else {
         assertRole(role, saved); await ready(saved);
         continue;
       }
     }
-    const name = `zeros-dev-${kind}-${lease.state.generation}`;
+    const name = `zeros-dev-${kind}-${lease.state.generation}${kind === "runtime" && receipt.retiredRuntimeRoles?.length ? `-r${receipt.retiredRuntimeRoles.length}` : ""}`;
     // Credentials are returned once. After a lost response, leave the role for
     // reconciliation instead of silently minting an untracked second owner.
-    if (receipt.roles[kind]) throw new Error("Dev role creation lost its response; inspect the recorded role name before retrying");
-    receipt.roles[kind] = { name, requested: true }; await lease.save(); await lease.fence();
-    const role = await request(`${branchRoute}/roles`, { method: "POST", signal: lease.signal,
-      body: { name, inherited_roles: kind === "migration" ? ["postgres"] : [], with_replication: false, ...(kind === "migration" ? { ttl: 3600 } : {}) } });
+    if (receipt.roles[kind] && !devCreateNotDispatched(receipt.roles[kind])) throw new Error("Dev role creation lost its response; inspect the recorded role name before retrying");
+    receipt.roles[kind] = { name, requested: true, creatorTokenId: config.tokenId, create: receipt.roles[kind]?.create }; await lease.save(); await lease.fence();
+    const role = await dispatchDevCreate(lease, receipt.roles[kind], "PlanetScale", () => request(`${branchRoute}/roles`, { method: "POST", signal: lease.signal,
+      body: { name, inherited_roles: kind === "migration" ? ["postgres"] : [], with_replication: false, ...(kind === "migration" ? { ttl: 3600 } : {}) } }));
     const url = planetScaleRoleUrl(role);
-    receipt.roles[kind] = { name, id: role.id, username: role.username, baseUsername: role.base_username, url };
+    receipt.roles[kind] = { ...receipt.roles[kind], name, id: role.id, username: role.username, baseUsername: role.base_username, url,
+      ...(kind === "runtime" ? { version: config.runtimeRoleVersion ?? "1" } : {}) };
     await lease.save();
     assertRole(role, receipt.roles[kind]); await ready(receipt.roles[kind]);
   }
@@ -163,4 +173,62 @@ export async function deletePlanetScaleMigrationRole(lease, config, request = pl
   if (role) { await lease.fence(); await request(route, { method: "DELETE", absent: true, signal: lease.signal }); }
   await pollProvider("Dev migration credential retirement", async () => !await request(route, { absent: true }), { signal: lease.signal, ...polling });
   delete receipt.roles.migration; await lease.save();
+}
+
+/** Retire the old login only after its replacement deployment is verified. */
+export async function retirePlanetScaleRuntimeRoles(lease, config, request = planetScaleDevClient(config), polling = {}) {
+  const receipt = lease.state.resources.planetscale;
+  for (const saved of receipt?.retiredRuntimeRoles ?? []) {
+    if (saved.deleted) continue;
+    if (!saved.id || saved.id === receipt.roles?.runtime?.id) throw new Error("Invalid runtime role retirement");
+    await databaseIdentity(lease, config, request);
+    const branchRoute = `/branches/${receipt.name}`;
+    assertBranch(await request(branchRoute), receipt, lease.state, config);
+    const route = `${branchRoute}/roles/${saved.id}`, role = await request(route, { absent: true });
+    if (role && (role.id !== saved.id || role.username !== saved.username || role.branch?.id !== receipt.id || role.branch?.name !== receipt.name)) throw new Error("Retiring Dev role ownership changed");
+    if (role) { await lease.fence(); await request(route, { method: "DELETE", absent: true, signal: lease.signal }); }
+    await pollProvider("Dev runtime credential retirement", async () => !await request(route, { absent: true }), { signal: lease.signal, ...polling });
+    saved.deleted = true; delete saved.url; await lease.save();
+  }
+}
+
+export async function verifyPlanetScaleRuntimeRole(lease, config, request = planetScaleDevClient(config)) {
+  const receipt = lease.state.resources.planetscale, saved = receipt?.roles?.runtime;
+  if (!saved?.id || !saved.url) throw new Error("Dev runtime role is missing");
+  await databaseIdentity(lease, config, request);
+  const branch = `/branches/${receipt.name}`;
+  assertBranch(await request(branch), receipt, lease.state, config);
+  const role = await request(`${branch}/roles/${saved.id}`, { absent: true });
+  if (!role || role.id !== saved.id || role.username !== saved.username || role.branch?.id !== receipt.id || role.branch?.name !== receipt.name || role.expired || role.disabled_at || role.deleted_at) throw new Error("Dev runtime role needs rotation");
+}
+
+/** One-time passwords cannot be recovered. Identify and retire only a role
+ * with the exact recorded name/actor in the owned branch, then allow retry. */
+export async function reconcilePlanetScaleRoles(lease, config, request = planetScaleDevClient(config)) {
+  const receipt = lease.state.resources.planetscale;
+  if (!receipt?.id || receipt.deleted) return;
+  await databaseIdentity(lease, config, request);
+  const branch = `/branches/${receipt.name}`;
+  assertBranch(await request(branch), receipt, lease.state, config);
+  for (const saved of Object.values(receipt.roles ?? {})) {
+    if (saved.url || devCreateNotDispatched(saved)) continue;
+    const roles = []; let page = 1;
+    for (;;) {
+      const result = await request(`${branch}/roles?per_page=100&page=${page}`);
+      if (!Array.isArray(result?.data) || result.data.length > 100 || page > 100) throw new Error("Incomplete Dev role inventory");
+      roles.push(...result.data);
+      if (result.data.length < 100) break;
+      page++;
+    }
+    const matches = roles.filter(role => role.name === saved.name || saved.id && role.id === saved.id);
+    if (matches.length !== 1) throw new Error("Unconfirmed Dev role create remains quarantined");
+    const role = matches[0];
+    if (!ID.test(role.id ?? "") || role.name !== saved.name || role.branch?.id !== receipt.id || role.branch?.name !== receipt.name ||
+        !saved.id && (!saved.creatorTokenId || role.actor?.id !== saved.creatorTokenId)) throw new Error("Dev role create ownership is unconfirmed");
+    saved.id = role.id; saved.username = role.username; await lease.save(); await lease.fence();
+    await request(`${branch}/roles/${role.id}`, { method: "DELETE", signal: lease.signal });
+    if (await request(`${branch}/roles/${role.id}`, { absent: true })) throw new Error("Dev role retirement is unconfirmed");
+    saved.create = { ...saved.create, version: 1, phase: "rejected", evidence: "identified-role-retired", reconciledAt: new Date().toISOString() };
+    await lease.save();
+  }
 }

@@ -17,7 +17,7 @@ function setup(rows: any[] = []) {
     "cloud-workspaces/pro-allowance.js": { DatabaseProMonthlyAllowance: allowance },
   };
   const query = vi.fn(async () => ({ rows }));
-  const f = { runtime: {}, migration: {}, withSystemTx: vi.fn(async (pool, fn) => fn({ query })), module: vi.fn(async name => modules[name]),
+  const f = { runtime: {}, migration: { query: vi.fn(async () => ({ rows: [] as any[] })) }, withSystemTx: vi.fn(async (pool, fn) => fn({ query })), module: vi.fn(async name => modules[name]),
     request: { ...state, fixture: bindFixture(state, fixture), roles: { runtime: { url: "postgresql://runtime@localhost/postgres" },
       migration: { url: "postgresql://owner@localhost/postgres" } }, worker: { storageMiB: 20480 }, boat: { secondsPerDollar: 100_000 } } };
   return { ...f, manage, credit, allowance, query, state };
@@ -93,6 +93,20 @@ describe("explicit hosted Dev fixture", () => {
     await expect(seedHostedFixture(f)).rejects.toThrow(/organization.*credit.*Pro.*archive/i);
     expect(f.manage).not.toHaveBeenCalled();
     expect(f.credit).not.toHaveBeenCalled();
+  });
+  it("preserves an operator's quota when reseeding a Dev environment with additional workspaces", async () => {
+    const f = setup([{ user_id: userId, organization_id: orgId, email: fixture.expectedEmail, slug: fixture.expectedOrganizationSlug }]);
+    f.migration.query.mockResolvedValue({ rows: [{ reason: "Temporary second workspace for parity verification", next_max_storage_mib: 140446 }] });
+    await expect(seedHostedFixture(f)).resolves.toEqual({ seeded: true });
+    expect(f.manage).toHaveBeenCalledTimes(2); // Staff authority only; do not reset the owner's quota.
+    expect(f.module).not.toHaveBeenCalledWith("manage-cloud-workspace-quota.js");
+    expect(f.credit).toHaveBeenCalledWith(userId);
+  });
+  it("never shrinks its own existing storage quota after rebuilding a smaller image", async () => {
+    const f = setup([{ user_id: userId, organization_id: orgId, email: fixture.expectedEmail, slug: fixture.expectedOrganizationSlug }]);
+    f.migration.query.mockResolvedValue({ rows: [{ reason: `Disposable development fixture ${f.state.owner}/${f.state.generation}`, next_max_storage_mib: 80000 }] });
+    await seedHostedFixture(f);
+    expect(f.manage.mock.calls[2][1].next.maxStorageMiB).toBe(80000);
   });
   it("reports allowance conflicts without claiming a successful seed", async () => {
     const f = setup([{ user_id: userId, organization_id: orgId, email: fixture.expectedEmail, slug: fixture.expectedOrganizationSlug }]);

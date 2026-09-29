@@ -21,7 +21,7 @@ const GITHUB_CREDENTIAL_RE =
   /\b(?:ghs_\d+_[A-Za-z0-9._-]{40,}|ghs_[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]{8,})+|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,})\b/g;
 const GITHUB_REFRESH_BINDING_RE =
   /\bzghrb_v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
-const CLOUD_CAPABILITY_RE = /\b(?:zws|zwh|zwb|zwp|zsh)_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g;
+const CLOUD_CAPABILITY_RE = /\b(?:zws|zwh|zwb|zwp|zsh|zgw|zgp|zgn|zwa)_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g;
 const CLOUD_PROTOCOL_CREDENTIAL_RE = /\bzeros-cloud-token\.[A-Za-z0-9_-]{63}(?![A-Za-z0-9_-])/g;
 
 /** Redact absolute filesystem paths and obvious secrets from a free-form

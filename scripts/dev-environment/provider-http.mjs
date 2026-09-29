@@ -1,9 +1,50 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { randomUUID } from "node:crypto";
 
 export class DevProviderError extends Error {
-  constructor(provider, status) {
+  constructor(provider, status, requestId) {
     super(`${provider} request failed (${status}); the Dev receipt was preserved for retry`);
     this.status = status;
+    this.provider = provider;
+    this.requestId = /^[A-Za-z0-9_-]{1,100}$/.test(requestId ?? "") ? requestId : undefined;
+  }
+}
+
+export const devCreateNotDispatched = receipt => ["planned", "rejected"].includes(receipt?.create?.phase);
+
+/** Only an authenticated API's 401/403 denial is classified as not applied
+ * (RFC 9110 sections 15.5.2/15.5.4). Conflicts, quota/validation errors, generic
+ * GraphQL errors, timeouts and lost bodies remain uncertain, never age out. */
+export async function dispatchDevCreate(lease, receipt, provider, dispatch, { key = "create", idempotentReplay = false } = {}) {
+  let journal = receipt[key];
+  const replay = idempotentReplay && (!journal || !["planned", "rejected"].includes(journal.phase));
+  if (journal && !["planned", "rejected"].includes(journal.phase) && !idempotentReplay) throw new Error("Dev create is unconfirmed; use dev:reconcile before redispatch");
+  if (!journal || journal.phase === "rejected") {
+    journal = receipt[key] = { version: 1, id: randomUUID(), phase: replay ? "uncertain" : "planned", attempt: (journal?.attempt ?? 0) + 1, plannedAt: new Date().toISOString() };
+    await lease.save();
+  }
+  await lease.fence();
+  // A replay's denial says nothing about the original dispatch. Preserve its
+  // outcome/time/key and record replay evidence separately, including crashes.
+  const attempt = replay ? (journal.replay = { attempt: (journal.replay?.attempt ?? 0) + 1 }) : journal;
+  attempt.phase = "dispatching"; attempt.dispatchedAt = new Date().toISOString(); await lease.save();
+  try {
+    const value = await dispatch();
+    attempt.phase = "acknowledged"; attempt.acknowledgedAt = new Date().toISOString();
+    journal.phase = "acknowledged"; journal.acknowledgedAt = attempt.acknowledgedAt; await lease.save();
+    return value;
+  } catch (error) {
+    attempt.phase = error instanceof DevProviderError && error.provider === provider && [401, 403].includes(error.status) ? "rejected" : "uncertain";
+    attempt.outcome = typeof error?.status === "number" ? error.status : "unavailable";
+    if (error?.requestId) attempt.requestId = error.requestId;
+    if (replay && journal.phase !== "acknowledged") journal.phase = "uncertain";
+    await lease.save(); throw error;
+  }
+}
+
+export async function acknowledgeDevCreate(lease, receipt, key = "create") {
+  if (receipt[key] && receipt[key].phase !== "acknowledged") {
+    receipt[key].phase = "acknowledged"; receipt[key].reconciledAt = new Date().toISOString(); await lease.save();
   }
 }
 
@@ -25,7 +66,8 @@ export async function providerJson(provider, url, options = {}, fetchImpl = fetc
     }
     let body = null;
     if (size) { try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new DevProviderError(provider, "invalid response"); } }
-    return { status: response.status, body };
+    const requestId = response.headers.get("x-request-id") ?? response.headers.get("cf-ray");
+    return { status: response.status, body, ...(/^[A-Za-z0-9_-]{1,100}$/.test(requestId ?? "") ? { requestId } : {}) };
   } catch (error) { throw error instanceof DevProviderError ? error : new DevProviderError(provider, "response unavailable"); }
   finally { await reader?.cancel().catch(() => {}); }
 }

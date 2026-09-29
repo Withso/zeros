@@ -1,11 +1,15 @@
+import { CloudComputerPanel } from "./cloud-computer-panel";
+import { prefetchCloudComputer } from "./cloud-computer-client";
+import { CloudMcpPanel, CloudSkillsPanel } from "./cloud-customization-panel";
+import { prefetchCloudCustomization } from "./cloud-customization-client";
+import { CloudGithubSection } from "./cloud-github-section";
 // ──────────────────────────────────────────────────────────
 // Settings page — sidebar + per-section panel
 // ──────────────────────────────────────────────────────────
 //
 // Sidebar + detail pane: ONE sidebar with grouped
-// sections (Personal / Agents / Workspace). Organization administration is
-// browser-owned at app.zeros.build; this page remains device configuration.
-// owns the USER scope only; repository settings live on each repository page
+// sections scoped to Local or the selected organization. Membership and billing
+// administration remain browser-owned; repository settings live on each repository page
 // (Home rail → repository → Settings tab).
 // Settings is its own page: this section nav takes the app sidebar's place
 // (the sidebar is hidden while here), with a Back row (→ Dashboard) under a
@@ -38,6 +42,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -105,13 +110,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../shared/ui/primitives/select";
-import { getSetting, setSetting } from "../../platform/settings";
 import { useAppearance } from "../../shared/theme/provider";
 import { type ThemeMode } from "../../shared/theme/prefs";
 import { codeThemesForVariant } from "../../shared/theme/code-themes";
 import { useThemeVariant } from "../../shared/theme/use-theme-variant";
 import { CodeThemePreview } from "./code-theme-preview";
-import { useProjects } from "../../state/use-projects";
+import { useOrganizationProjects } from "../../state/use-organization-projects";
 import { ProvidersPanel } from "./providers-panel";
 import { BrowserUsePanel } from "./browser-use-panel";
 import { TerminalAgentsSection } from "./terminal-agents-section";
@@ -132,6 +136,9 @@ import { OpenSettingsFileButton } from "../../shared/ui/open-settings-file-butto
 import { GitHubSection } from "./github-section";
 import { prefetchGithubAuthSnapshot } from "./github-auth-prefetch";
 import { JoinTeamDialog } from "../team/join-team-dialog";
+import { OrganizationSwitcher } from "../team/organization-switcher";
+import { getActiveOrganizationIdSnapshot, useActiveOrganization, useTeams } from "../team/team-store";
+import { readScopedSettingsSelection, writeScopedSettingsSelection, settingsOwnerKey } from "./settings-scope";
 import { retainedDialogOpen } from "./retained-surface";
 import {
   consumePendingInviteToken,
@@ -191,6 +198,9 @@ type SectionId =
   | "environment"
   | "git"
   | "repos"
+  | "cloud-computer"
+  | "cloud-mcp"
+  | "cloud-skills"
   | "integrations"
   | "account"
   | "experimental"
@@ -236,6 +246,9 @@ const SECTIONS: SectionDef[] = [
     icon: Box,
     Panel: ModelsPanel,
   },
+  { id: "cloud-computer", label: "Cloud Computer", icon: Box, Panel: CloudComputerPanel },
+  { id: "cloud-mcp", label: "MCP servers", icon: Blocks, Panel: CloudMcpPanel },
+  { id: "cloud-skills", label: "Skills", icon: Blocks, Panel: CloudSkillsPanel },
   {
     id: "providers",
     label: "Agents",
@@ -326,9 +339,9 @@ const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
   },
   {
     label: "Agents",
-    ids: ["models", "providers", "browser-use", "terminal-agents"],
+    ids: ["models", "providers", "cloud-mcp", "cloud-skills", "browser-use", "terminal-agents"],
   },
-  { label: "Workspace", ids: ["environment", "git"] },
+  { label: "Workspace", ids: ["cloud-computer", "environment", "git"] },
 ];
 
 // ── Active-selection encoding ───────────────────────────
@@ -421,7 +434,6 @@ const PAGE_HEADING_CLS = "m-0 text-lg font-medium leading-tight text-fg1";
 
 const HINT_CLS = "text-sm text-fg2";
 
-const SETTINGS_SECTION_KEY = "settings:active-section";
 // Derived from SECTIONS so a newly-registered section is automatically a
 // valid persisted target. A hardcoded list silently dropped any new section:
 // parseSelection rejected its id and fell back to "general", so the sidebar
@@ -434,13 +446,13 @@ const USER_SETTINGS_SEED = `# Zeros user settings (this Mac).
 # Values you set in Settings are saved here.
 `;
 
-function loadInitialSection(): string {
+function loadInitialSection(owner: string): string {
   // Normalize to the canonical encoding so legacy values (bare `general`,
   // `repo:<id>` without a section) migrate forward on first read. A
   // `repo:<id>:<section>` value passes through; its repo id is re-validated
   // against the project list in the mount-time effect once projects hydrate.
   const sel = parseSelection(
-    getSetting<string>(SETTINGS_SECTION_KEY, "user:general"),
+    readScopedSettingsSelection(owner, "section", owner === "local" ? "user:general" : "user:providers"),
   );
   return sel.scope === "user"
     ? userSelection(sel.section)
@@ -481,6 +493,19 @@ const SETTINGS_GROUP_HEADER_CLS =
   "select-none px-2.5 pb-1.5 pt-5 text-xs font-normal text-muted-fg";
 
 export function SettingsPage() {
+  const organization = useActiveOrganization();
+  const { me } = useTeams();
+  const organizationId = organization?.isPersonal ? null : organization?.id ?? getActiveOrganizationIdSnapshot();
+  const owner = settingsOwnerKey(me?.user.id ?? "pending", organizationId);
+  // Switch the complete form tree in the same render as its owner. Retained
+  // sections, dialogs, secrets and unsaved drafts must never cross this boundary.
+  return <ScopedSettingsPage key={owner} owner={owner} />;
+}
+
+function ScopedSettingsPage({ owner }: { owner: string }) {
+  const local = owner === "local";
+  const organization = useActiveOrganization();
+  const { me } = useTeams();
   const pageSurfaceRef = useRef<HTMLDivElement | null>(null);
   // Settings takes the app sidebar's place, so its nav owns the macOS
   // traffic-light band, which drags the window like the sidebar's.
@@ -488,18 +513,18 @@ export function SettingsPage() {
   useCustomWindowDrag(titleBandRef);
   const dispatch = useWorkspaceDispatch();
   const pageActive = useActivePage() === "settings";
-  const { projects } = useProjects();
+  const { projects } = useOrganizationProjects();
   // Persisted across reloads via native settings — Cmd+R on Providers
   // lands you back on Providers, not General. Type-guarded on read so
   // a stale value from a renamed section can never crash mount; repo
   // ids are re-validated below once `projects` hydrates.
-  const [active, setActiveState] = useState<string>(loadInitialSection);
-  const setActive = (next: string) => {
+  const [active, setActiveState] = useState<string>(() => loadInitialSection(owner));
+  const setActive = useCallback((next: string) => {
     setActiveState(next);
-    setSetting(SETTINGS_SECTION_KEY, next);
-  };
+    writeScopedSettingsSelection(owner, "section", next);
+  }, [owner]);
   const selection = parseSelection(active);
-  useInstantViewSwitch(`settings:${active}`, pageSurfaceRef);
+  useInstantViewSwitch(`settings:${owner}:${active}`, pageSurfaceRef);
 
   // Deep links from action-error toasts must update this retained page as well
   // as persistence; otherwise reopening an already-mounted Settings surface
@@ -510,8 +535,8 @@ export function SettingsPage() {
         if (isStaticSection(section)) {
           setActiveState(userSelection(section));
         }
-      }),
-    [],
+      }, owner),
+    [owner],
   );
 
   // Invite handoff remains desktop-readable for existing email links; all
@@ -538,8 +563,8 @@ export function SettingsPage() {
   // on the engine side, so calling on every settings open is safe.
   const bridge = useBridge();
   useEffect(() => {
-    void ensureSettingsTomlMigrated(bridge);
-  }, [bridge]);
+    if (local) void ensureSettingsTomlMigrated(bridge);
+  }, [bridge, local]);
 
   // Legacy repository-selection redirect: repository settings moved to the repository page
   // (one Workspaces/section toggle), so a persisted / deep-linked
@@ -552,7 +577,7 @@ export function SettingsPage() {
     const prevLen = prevProjectsLenRef.current;
     prevProjectsLenRef.current = projects.length;
     const sel = parseSelection(active);
-    if (sel.scope !== "repo") return;
+    if (sel.scope !== "repo" || !local) return;
     if (projects.length === 0 && prevLen === 0) return;
     const project = projects.find((p) => p.id === sel.repoId);
     if (project) {
@@ -563,7 +588,7 @@ export function SettingsPage() {
       });
     }
     setActive(userSelection("general"));
-  }, [projects, active, dispatch]);
+  }, [projects, active, dispatch, local, setActive]);
 
   // MCP left Settings for the Customize page (2026-07-22). A persisted or
   // deep-linked `user:mcp` (or legacy bare `mcp`) selection re-routes there;
@@ -578,7 +603,7 @@ export function SettingsPage() {
     setActive(userSelection("general"));
     dispatch({ type: "SET_ACTIVE_PAGE", page: "customize" });
     // setActive is stable for the component's lifetime (state setter + setSetting).
-  }, [active, dispatch]);
+  }, [active, dispatch, setActive]);
   // Experimental gating: the Terminal Agents tab is hidden — and not
   // resolvable as an active section — until opted in from Experimental.
   // `availableSections` drops the gated entries when their flag is off,
@@ -596,16 +621,17 @@ export function SettingsPage() {
     () =>
       SECTIONS.filter(
         (s) =>
+          (local ? !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id) : ["providers", "integrations", "cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id)) &&
           (s.id !== "terminal-agents" || terminalAgentsEnabled) &&
           (s.id !== "internal" || internalUser),
       ),
-    [terminalAgentsEnabled, internalUser],
+    [terminalAgentsEnabled, internalUser, local],
   );
   const activeSection: SectionDef | null =
     selection.scope === "user"
       ? (availableSections.find((s) => s.id === selection.section) ??
         availableSections[0])
-      : null;
+      : local ? null : availableSections[0];
   // Normalize a selection whose section a gate just dropped (an
   // experimental/internal flag flipping
   // off): the fallback panel above already renders, but without this
@@ -613,12 +639,12 @@ export function SettingsPage() {
   // selection lies in wait, spontaneously reactivating if its gate ever
   // reopens.
   useEffect(() => {
-    if (selection.scope !== "user") return;
-    if (availableSections.some((s) => s.id === selection.section)) return;
+    if (selection.scope !== "user" && local) return;
+    if (selection.scope === "user" && availableSections.some((s) => s.id === selection.section)) return;
     const fallback = availableSections[0]?.id;
     if (fallback) setActive(userSelection(fallback));
     // setActive is stable for the component's lifetime (state setter + setSetting).
-  }, [availableSections, selection.scope, selection.section]);
+  }, [availableSections, selection.scope, selection.section, local, setActive]);
   // Visited form panels remain mounted so local drafts, scroll-adjacent DOM,
   // provider state, and resolved settings do not restart on every sidebar click.
   const availableSectionIds = useMemo(
@@ -637,7 +663,7 @@ export function SettingsPage() {
   // remembered offset: switching back lands exactly where the user left,
   // switching to an unvisited section starts at the top.
   const detailScrollRef = useScrollMemoryRef(
-    activeSection ? `settings:${activeSection.id}` : null,
+    activeSection ? `settings:${owner}:${activeSection.id}` : null,
   );
 
   // Back returns to the Home tab (Dashboard); Settings is its own page now,
@@ -649,14 +675,14 @@ export function SettingsPage() {
   // File-scope control — "Open settings.toml" reveals the user file in Finder
   // (the same affordance as the repo page). Floats at the content's top-right.
   // Self-hides when the native Finder integration is unavailable.
-  const fileScopeControls = (
+  const fileScopeControls = local ? (
     <OpenSettingsFileButton
       layer="user"
       label="Open settings.toml"
       tooltip="~/.zeros/settings.toml — reveal in Finder"
       seed={USER_SETTINGS_SEED}
     />
-  );
+  ) : null;
 
   return (
     <div
@@ -683,6 +709,7 @@ export function SettingsPage() {
             role="tablist"
             aria-label="Settings sections"
           >
+            <OrganizationSwitcher />
             <Tooltip label="Back to home">
               <Button
                 variant="ghost"
@@ -707,7 +734,7 @@ export function SettingsPage() {
                       groupIndex === 0 && "pt-1",
                     )}
                   >
-                    {group.label}
+                    {group.label === "Personal" ? local ? "Local" : "Organization" : group.label}
                   </div>
                   <div className="flex flex-col gap-1">
                     {sections.map((section) => (
@@ -724,6 +751,10 @@ export function SettingsPage() {
                         onIntent={
                           section.id === "integrations"
                             ? prefetchGithubAuthSnapshot
+                            : section.id === "cloud-computer" && organization && me
+                              ? () => prefetchCloudComputer(me.user.id, organization.id)
+                            : (section.id === "cloud-mcp" || section.id === "cloud-skills") && organization && me
+                              ? () => prefetchCloudCustomization(me.user.id, organization.id)
                             : undefined
                         }
                       />
@@ -1075,16 +1106,14 @@ function PrivacyGroup() {
 // checks), not a "general" toggle. Any future third-party integration joins
 // this list.
 
-function IntegrationsPanel({
-  surfaceActive = true,
-}: {
-  surfaceActive?: boolean;
-}) {
-  return (
-    <div className="flex flex-col gap-8">
-      <GitHubSection surfaceActive={surfaceActive} />
-    </div>
-  );
+function IntegrationsPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+  const organization = useActiveOrganization();
+  const { me } = useTeams();
+  const organizationId = organization?.isPersonal ? null : organization?.id ?? getActiveOrganizationIdSnapshot();
+  return <div className="flex flex-col gap-8">
+    {organizationId ? me && <CloudGithubSection key={`${me.user.id}:${organizationId}`} userId={me.user.id} organizationId={organizationId} surfaceActive={surfaceActive} />
+      : <GitHubSection surfaceActive={surfaceActive} />}
+  </div>;
 }
 
 // Every section in SECTIONS renders a real control. Reintroducing a
