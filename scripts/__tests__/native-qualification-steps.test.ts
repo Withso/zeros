@@ -43,11 +43,12 @@ describe("raw secret observation", () => {
 describe("failure signature", () => {
   it("keeps only fixed-format error codes and class names", () => {
     const erofs = Object.assign(new Error("EROFS: read-only file system, open '/srv/zeros/home/agent/.codex/x'"), { code: "EROFS" });
-    expect(failureSignature(erofs)).toEqual({ code: "EROFS", name: "Error" });
+    expect(failureSignature(erofs)).toMatchObject({ code: "EROFS", name: "Error" });
     expect(failureSignature(Object.assign(new TypeError("private text"), { cause: { code: "ERR_STREAM_PREMATURE_CLOSE" } })))
-      .toEqual({ code: "ERR_STREAM_PREMATURE_CLOSE", name: "TypeError" });
+      .toMatchObject({ code: "ERR_STREAM_PREMATURE_CLOSE", name: "TypeError" });
     // Free text, lowercase or oversized values never pass through.
-    expect(failureSignature(Object.assign(new Error("x"), { code: "sk-live secret value", name: "Error: with a message" }))).toEqual({});
+    const rejected = failureSignature(Object.assign(new Error("x"), { code: "sk-live secret value", name: "Error: with a message" }));
+    expect(rejected).not.toHaveProperty("code"); expect(rejected).not.toHaveProperty("name");
     expect(failureSignature("a string")).toEqual({});
   });
 });
@@ -56,7 +57,19 @@ describe("failure classification", () => {
   it("keeps an agent failure's fixed kind, stage and exit code", () => {
     const error = Object.assign(new Error("codex app-server exited before initialize"), {
       kind: "subprocess-exited", stage: "startup", failure: { kind: "subprocess-exited", stage: "startup", message: "private", exit: { code: 101, stderrTail: "private" } } });
-    expect(failureSignature(error)).toEqual({ name: "Error", kind: "subprocess-exited", stage: "startup", exitCode: 101 });
-    expect(failureSignature(Object.assign(new Error("x"), { failure: { kind: "Has Spaces", stage: "x".repeat(80), exit: { code: "1; rm" } } }))).toEqual({ name: "Error" });
+    expect(failureSignature(error)).toMatchObject({ name: "Error", kind: "subprocess-exited", stage: "startup", exitCode: 101 });
+    const invalid = failureSignature(Object.assign(new Error("x"), { failure: { kind: "Has Spaces", stage: "x".repeat(80), exit: { code: "1; rm" } } }));
+    for (const key of ["kind", "stage", "exitCode"]) expect(invalid).not.toHaveProperty(key);
+  });
+});
+
+describe("failure message digest", () => {
+  it("identifies an engine message by a truncated digest, never by its text", async () => {
+    const { createHash } = await import("node:crypto");
+    const message = "Cloud Codex requires the pinned native executable";
+    const signature = failureSignature(new Error(message));
+    expect(signature.messageSha256).toBe(createHash("sha256").update(message).digest("hex").slice(0, 16));
+    expect(JSON.stringify(signature)).not.toContain("pinned");
+    expect(failureSignature(new Error("x".repeat(600))).messageSha256).toBeUndefined();
   });
 });

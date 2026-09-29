@@ -381,6 +381,7 @@ main().catch(error => {
     ...(failureDetail.code ? { failureCode: failureDetail.code } : {}), ...(failureDetail.name ? { failureName: failureDetail.name } : {}),
     ...(failureDetail.kind ? { failureKind: failureDetail.kind } : {}), ...(failureDetail.stage ? { failureStage: failureDetail.stage } : {}),
     ...(failureDetail.exitCode !== undefined ? { failureExitCode: failureDetail.exitCode } : {}),
+    ...(failureDetail.messageSha256 ? { failureMessageSha256: failureDetail.messageSha256 } : {}),
     qualifiedAt: new Date().toISOString(), authority: "isolated-image-canary" }) + "\n");
   process.exitCode = failed ? 1 : 0;
 });
