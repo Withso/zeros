@@ -169,3 +169,18 @@ describe("automatic hosted Dev agent enablement", () => {
     expect(f.deps.enable).toHaveBeenCalledOnce();
   });
 });
+
+describe("native agent qualification deadline", () => {
+  it("lets an extended native run finish, then retires an overdue one with an explicit deadline failure", async () => {
+    // Codex's extended checks (goals, forks, review, multi-agent, apps) run
+    // past twelve minutes; its canary machine must also outlive that run.
+    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
+    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
+    now += 20 * 60_000;
+    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
+    expect(f.deps.retire).not.toHaveBeenCalled();
+    now += 25 * 60_000;
+    await advanceHostedAgents(f.lease, f.profile, f.deps);
+    expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", retired: true, failure: { stage: "deadline" } });
+  });
+});

@@ -4,6 +4,9 @@ import { sha256 } from "./state.mjs";
 const CHECKS = ["privateProviderHome", "engineAuthorityIsolation", "nativeWorkspaceTools", "actorAdmission",
   "stopAndRevocation", "nativeTurn", "nativeResume", "authentication", "nativeMcp"];
 const NATIVE_EXTENSIONS=["nativeGoals","nativeFork","transcriptFork","nativeReview","nativeApps","nativeMultiAgent"];
+/** Codex's extended native checks (goals, forks, review, multi-agent, apps)
+ * take longer than the core set; every step is still individually bounded. */
+export const QUALIFICATION_DEADLINE_MS = 40 * 60_000;
 const digest = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const signature = (image, connection) => sha256(JSON.stringify([image.snapshotId, image.buildSha256,
   connection.credentialId, connection.credentialRevision, connection.connectionRevision, connection.kind, connection.model,
@@ -55,7 +58,9 @@ export async function advanceHostedAgents(lease, profile, deps, { retry = false 
   // Retire stale work before considering sign-in, a new selection or image.
   for (const job of jobs.filter(row => !row.retired && row.phase !== "enabled")) {
     const current = candidates.some(({ image, connection }) => signature(image, connection) === job.signature);
-    if (job.phase === "failed" || !current || now - job.startedAt > 12 * 60_000) {
+    const overdue = now - job.startedAt > QUALIFICATION_DEADLINE_MS;
+    if (job.phase === "failed" || !current || overdue) {
+      if (overdue && job.phase !== "failed") job.failure ??= { stage: "deadline" };
       job.phase = "failed"; await lease.save();
       await deps.retire(job); job.retired = true; await lease.save();
     }
