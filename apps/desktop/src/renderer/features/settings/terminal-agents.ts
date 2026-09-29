@@ -174,7 +174,7 @@ export const BUILTIN_TERMINAL_AGENTS: TerminalAgent[] = [
     id: "codex",
     name: "codex",
     description: "OpenAI Codex CLI.",
-    icon: "https://unpkg.com/@lobehub/icons-static-svg@latest/icons/openai.svg",
+    icon: "https://unpkg.com/@lobehub/icons-static-svg@latest/icons/codex.svg",
     binary: "codex",
     launchCommand: "codex",
     promptTransport: "prompt-arg",

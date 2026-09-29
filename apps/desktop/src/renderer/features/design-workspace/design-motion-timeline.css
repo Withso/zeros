@@ -1,0 +1,486 @@
+/* Motion owns its container and lane geometry. The shared Design recipes own
+ * fields, icon buttons, and the portaled settings surface. */
+.zd-motion-timeline {
+  container: motion-timeline / inline-size;
+  height: var(--zeros-design-motion-height, 240px);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.zd-motion-resize-handle {
+  position: absolute;
+  z-index: var(--z-panel);
+  inset: -3px 0 auto;
+  height: 6px;
+  cursor: row-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.zd-motion-resize-handle::after {
+  position: absolute;
+  inset: 2px 0 auto;
+  height: 2px;
+  content: "";
+}
+
+.zd-motion-resize-handle:hover::after,
+.zd-motion-resize-handle:focus-visible::after,
+[data-design-motion-resizing] .zd-motion-resize-handle::after {
+  background: var(--design-selection-stroke);
+}
+
+[data-design-motion-resizing] > [aria-label="Canvas tools"] {
+  transition: none;
+}
+
+.zd-motion-header {
+  display: flex;
+  height: 40px;
+  min-width: 0;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding-inline: 12px;
+  border-bottom: 1px solid var(--border1);
+}
+
+.zd-motion-heading {
+  position: relative;
+  display: flex;
+  min-width: 74px;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.zd-motion-title,
+.zd-motion-save-target {
+  flex-shrink: 0;
+}
+
+.zd-motion-accent {
+  color: var(--design-selection-stroke);
+}
+
+.zd-motion-unsaved {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--design-selection-stroke);
+}
+
+.zd-motion-owner {
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  color: var(--fg2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zd-motion-transport,
+.zd-motion-header-timing {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.zd-motion-play[aria-pressed="true"] {
+  background: var(--design-selection-soft);
+  color: var(--design-selection-stroke);
+}
+
+.zd-motion-time-field {
+  width: 56px;
+  flex-shrink: 0;
+}
+
+.zd-motion-time-field input {
+  appearance: textfield;
+}
+
+.zd-motion-time-field input::-webkit-inner-spin-button,
+.zd-motion-time-field input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.zd-motion-total {
+  color: var(--muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.zd-motion-preset {
+  width: 100px;
+  flex-shrink: 0;
+}
+
+.zd-motion-preset-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.zd-motion-preset-icon {
+  display: none;
+}
+
+.zd-motion-easing-field {
+  width: 152px;
+}
+
+.zd-motion-easing-field > input {
+  text-overflow: ellipsis;
+}
+
+.zd-motion-easing-trigger {
+  margin-right: 2px;
+}
+
+.zd-motion-easing-menu [role="menuitemradio"] {
+  min-height: 28px;
+  font-size: 13px;
+}
+
+.zd-motion-control-label {
+  padding-left: 8px;
+}
+
+.zd-motion-duration-field {
+  width: 84px;
+}
+
+.zd-motion-save-target {
+  display: inline-flex;
+}
+
+.zd-motion-save {
+  height: 28px;
+}
+
+.zd-motion-setting {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.zd-motion-setting .zd-field {
+  width: 100%;
+}
+
+.zd-motion-scroll {
+  isolation: isolate;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+/* All rows (including the sticky ruler) inherit these exact columns. Keeping
+ * the ruler in the same scroll surface also accounts for a vertical scrollbar. */
+.zd-motion-grid {
+  display: grid;
+  min-height: 100%;
+  grid-template-columns: clamp(160px, 24cqw, 220px) minmax(0, 1fr);
+  grid-template-rows: var(--motion-rows);
+}
+
+.zd-motion-ruler-row,
+.zd-motion-layer-row,
+.zd-motion-property-row,
+.zd-motion-empty-lanes {
+  display: grid;
+  min-width: 0;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+}
+
+.zd-motion-ruler-row {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-dropdown);
+  background: var(--bg1);
+  box-shadow: 0 1px 0 var(--border1);
+}
+
+.zd-motion-property-control,
+.zd-motion-layer-name,
+.zd-motion-property-name {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  border-right: 1px solid var(--border1);
+}
+
+.zd-motion-property-control {
+  gap: 4px;
+  padding-inline: 8px;
+}
+
+.zd-motion-property-control > input {
+  flex: 1 1 auto;
+  background: transparent;
+}
+
+.zd-motion-layer-name {
+  gap: 4px;
+  padding-right: 12px;
+  padding-left: 8px;
+}
+
+.zd-motion-property-name {
+  position: relative;
+  gap: 4px;
+  padding-right: 8px;
+  padding-left: 40px;
+}
+
+.zd-motion-property-name[aria-invalid="true"] {
+  box-shadow: inset 0 0 0 1px var(--red-primary);
+}
+
+.zd-motion-track-actions {
+  display: flex;
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.zd-motion-property-row:hover .zd-motion-track-actions,
+.zd-motion-property-row:focus-within .zd-motion-track-actions {
+  opacity: 1;
+}
+
+.zd-motion-property-row[data-selected="true"] {
+  background: var(--design-selection-soft);
+}
+
+.zd-motion-lane-cell {
+  min-width: 0;
+  padding-inline: 12px;
+}
+
+.zd-motion-lane {
+  position: relative;
+  height: 100%;
+  cursor: ew-resize;
+}
+
+.zd-motion-ruler-mark {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--muted-fg);
+  font-size: 11px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.zd-motion-ruler-mark[data-edge="start"] {
+  transform: translate(0, -50%);
+}
+
+.zd-motion-ruler-mark[data-edge="end"] {
+  transform: translate(-100%, -50%);
+}
+
+.zd-motion-grid-line,
+.zd-motion-playhead {
+  position: absolute;
+  inset-block: 0;
+  width: 1px;
+  pointer-events: none;
+}
+
+.zd-motion-grid-line {
+  background: color-mix(in srgb, var(--border1) 60%, transparent);
+}
+
+.zd-motion-playhead {
+  z-index: var(--z-panel);
+  background: var(--design-selection-stroke);
+}
+
+.zd-motion-playhead-handle {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: var(--design-selection-stroke);
+  transform: translateX(-50%);
+}
+
+.zd-motion-clip {
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  height: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--design-selection-soft);
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--design-selection-stroke) 45%, transparent);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.zd-motion-connector {
+  position: absolute;
+  top: 50%;
+  height: 1px;
+  background: var(--design-selection-stroke);
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+.zd-motion-keyframe {
+  position: absolute;
+  top: 50%;
+  z-index: var(--z-chrome);
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--design-selection-stroke);
+  transform: translate(-50%, -50%) rotate(45deg);
+  cursor: ew-resize;
+}
+
+.zd-motion-keyframe:focus-visible {
+  outline: 1px solid var(--fg1);
+  outline-offset: 4px;
+}
+
+.zd-motion-empty-label {
+  border-right: 1px solid var(--border1);
+}
+
+.zd-motion-empty-lanes .zd-motion-lane {
+  cursor: default;
+}
+
+.zd-motion-keyframe-bar {
+  display: flex;
+  height: 40px;
+  min-width: 0;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding-inline: 12px;
+  border-top: 1px solid var(--border1);
+}
+
+.zd-motion-selected-property {
+  display: flex;
+  min-width: 0;
+  max-width: 160px;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg2);
+}
+
+.zd-motion-keyframe-time {
+  width: 84px;
+}
+
+.zd-motion-keyframe-value {
+  width: 0;
+  flex: 1 1 auto;
+}
+
+@container motion-timeline (max-width: 900px) {
+  .zd-motion-control-label,
+  .zd-motion-save-label {
+    display: none;
+  }
+
+  .zd-motion-easing-field {
+    width: 108px;
+  }
+
+  .zd-motion-save {
+    width: 28px;
+    padding-inline: 0;
+  }
+}
+
+@container motion-timeline (max-width: 800px) {
+  .zd-motion-owner {
+    display: none;
+  }
+}
+
+@container motion-timeline (max-width: 720px) {
+  .zd-motion-header-timing {
+    display: none;
+  }
+}
+
+@container motion-timeline (max-width: 560px) {
+  .zd-motion-header,
+  .zd-motion-transport {
+    gap: 4px;
+  }
+
+  .zd-motion-total {
+    display: none;
+  }
+
+  .zd-motion-time-field {
+    width: 48px;
+  }
+
+  .zd-motion-keyframe-time {
+    width: 80px;
+  }
+
+  .zd-motion-selected-property {
+    max-width: 104px;
+  }
+}
+
+@container motion-timeline (max-width: 360px) {
+  .zd-motion-title {
+    display: none;
+  }
+
+  .zd-motion-heading {
+    min-width: 14px;
+  }
+
+  .zd-motion-unsaved {
+    position: absolute;
+    top: 0;
+    left: 16px;
+  }
+}
+
+@container motion-timeline (max-width: 440px) {
+  .zd-motion-header {
+    padding-inline: 8px;
+  }
+
+  .zd-motion-preset {
+    width: 28px;
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .zd-motion-preset-label,
+  .zd-motion-preset > svg:last-child {
+    display: none;
+  }
+
+  .zd-motion-preset-icon {
+    display: block;
+  }
+
+  .zd-motion-property-name {
+    padding-left: 16px;
+  }
+}

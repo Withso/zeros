@@ -71,6 +71,24 @@ describe("Design workspace boot cache", () => {
     ]);
   });
 
+  it("keeps a valid layer count and drops one that cannot be true", async () => {
+    const cache = await import("../state/design-workspace-boot-cache");
+    const withLayers = (layerCount: unknown) => {
+      const value = snapshot("layers.html");
+      return {
+        ...value,
+        frames: [{ ...value.frames[0]!, layerCount }],
+      } as unknown as DesignWorkspaceSnapshotWire;
+    };
+    expect(
+      cache.safeDesignWorkspaceBootSnapshot(withLayers(0))?.frames[0],
+    ).toMatchObject({ nodeCount: 1, layerCount: 0 });
+    for (const invalid of [-1, 2, 0.5, "0", null])
+      expect(
+        cache.safeDesignWorkspaceBootSnapshot(withLayers(invalid))?.frames[0],
+      ).not.toHaveProperty("layerCount");
+  });
+
   it("cancels an idle flush only through the scheduler that created it", async () => {
     let flush: (() => void) | undefined;
     const cancelIdleCallback = vi.fn();

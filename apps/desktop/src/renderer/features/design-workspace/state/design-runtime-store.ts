@@ -77,6 +77,11 @@ interface DesignRuntimeStore {
     snapshot: DesignRuntimeSnapshot,
     details: DesignRuntimeNodeDetails[],
     treeUnchanged?: boolean,
+    options?: {
+      /** A layout-affecting change can move any box it did not re-measure;
+       * those are dropped and read again rather than relabelled current. */
+      dropUnrefreshed?: boolean;
+    },
   ): boolean;
   setHoveredNode(
     workspaceId: string,
@@ -446,6 +451,7 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
     snapshot,
     details,
     treeUnchanged = false,
+    options = {},
   ) {
     if (
       snapshot.sourceVersion !== nextSourceVersion ||
@@ -467,13 +473,22 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
         workspace.folder,
         frame,
         (ownedFrame, now) => {
-          const rebasedDetails = Object.fromEntries(
-            Object.entries(ownedFrame.detailsByNode).map(([nodeId, value]) => [
-              nodeId,
-              { ...value, sourceVersion: nextSourceVersion },
-            ]),
-          );
-          let detailOrder = ownedFrame.detailOrder;
+          const rebasedDetails: Record<string, DesignRuntimeNodeDetails> =
+            options.dropUnrefreshed
+              ? {}
+              : Object.fromEntries(
+                  Object.entries(ownedFrame.detailsByNode).map(
+                    ([nodeId, value]) => [
+                      nodeId,
+                      { ...value, sourceVersion: nextSourceVersion },
+                    ],
+                  ),
+                );
+          let detailOrder = options.dropUnrefreshed
+            ? ownedFrame.detailOrder.filter((nodeId) =>
+                details.some((value) => value.oid === nodeId),
+              )
+            : ownedFrame.detailOrder;
           for (const value of details) {
             rebasedDetails[value.oid] = value;
             detailOrder = touchOrder(

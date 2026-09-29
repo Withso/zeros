@@ -6,6 +6,7 @@ import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
 
 import { runDesignLayoutGesturesSmoke } from "./ui-smoke-design-layout-gestures.mjs";
 import { runDesignInspectorRacesSmoke } from "./ui-smoke-design-inspector-races.mjs";
+import { runDesignInspectorEditsSmoke } from "./ui-smoke-design-inspector-edits.mjs";
 import { runDesignAutoLayoutSmoke } from "./ui-smoke-design-auto-layout.mjs";
 import { runDesignLayoutSmoke } from "./ui-smoke-design-layout.mjs";
 import { runDesignFrameRecoverySmoke } from "./ui-smoke-design-frame-recovery.mjs";
@@ -16,6 +17,8 @@ import { runDesignLoadingEditsSmoke } from "./ui-smoke-design-loading-edits.mjs"
 import { runDesignGitMenuSmoke } from "./ui-smoke-design-git-menu.mjs";
 import { runDesignSelectionSmoke } from "./ui-smoke-design-selection.mjs";
 import { runDesignSpacingSmoke } from "./ui-smoke-design-spacing.mjs";
+import { runDesignInlineToolsSmoke } from "./ui-smoke-design-inline-tools.mjs";
+import { runDesignCameraSmoke } from "./ui-smoke-design-camera.mjs";
 
 export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignWorkbenchSmoke({ page, check });
@@ -25,12 +28,15 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignSpacingSmoke({ page, check });
   await runDesignLayoutGesturesSmoke({ page, check });
   await runDesignInspectorRacesSmoke({ page, check });
+  await runDesignInspectorEditsSmoke({ page, check });
   await runDesignLayoutSmoke({ page, waitFor, check });
   await runDesignLayoutChildrenSmoke({ page, waitFor, check });
   await runDesignFrameChildrenSmoke({ page, waitFor, check });
   await runDesignAuthoredFrameSmoke({ page, waitFor, check });
   await runDesignLoadingEditsSmoke({ page, waitFor, check });
   await runDesignFrameRecoverySmoke({ page, check });
+  await runDesignInlineToolsSmoke({ page, waitFor, check });
+  await runDesignCameraSmoke({ page, waitFor, check });
   // The harness uses a sandboxed runtime and production Radix primitives;
   // bridge-backed writes are covered by the engine suites.
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -201,11 +207,12 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     JSON.stringify(homeLayoutIcons),
   );
   check(
-    "Layers icons honor the 12px size supplied by their rows",
+    "Layers type icons are 14px beside 12px disclosure chevrons",
     [frameRowMetrics, parentRowMetrics, headingRowMetrics].every(
       (row) =>
         row?.iconWidths.length > 0 &&
-        row.iconWidths.every((width) => width === 12),
+        row.iconWidths.at(-1) === 14 &&
+        row.iconWidths.slice(0, -1).every((width) => width === 12),
     ),
   );
   check(
@@ -213,8 +220,8 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     !!frameRowMetrics &&
       !!parentRowMetrics &&
       !!headingRowMetrics &&
-      parentRowMetrics.iconLeft - frameRowMetrics.iconLeft === 12 &&
-      headingRowMetrics.iconLeft - parentRowMetrics.iconLeft === 12,
+      parentRowMetrics.iconLeft - frameRowMetrics.iconLeft === 16 &&
+      headingRowMetrics.iconLeft - parentRowMetrics.iconLeft === 16,
   );
   check(
     "every Layers row fills the panel width so a block can stay continuous",
@@ -233,7 +240,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       !!heroRowMetrics &&
       !headingRowMetrics.discloses &&
       heroRowMetrics.discloses &&
-      headingRowMetrics.iconLeft - heroRowMetrics.iconLeft === 12,
+      headingRowMetrics.iconLeft - heroRowMetrics.iconLeft === 16,
   );
   check(
     "Layers rows repaint their fill without a transition",
@@ -967,7 +974,9 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   check(
     "empty selection exposes Page color and opacity on a solid --bg2 canvas",
     (await pageBackgroundEditor.isVisible()) &&
-      (await pageBackgroundEditor.textContent())?.includes("100 %") &&
+      (await pageBackgroundEditor
+        .getByLabel("Canvas background opacity", { exact: true })
+        .inputValue()) === "100" &&
       canvasSurface.backgroundImage === "none" &&
       canvasSurface.backgroundColor === canvasSurface.bg2,
     JSON.stringify(canvasSurface),
@@ -1008,42 +1017,42 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   const inspectorScrollViewport = inspector
     .locator("[data-radix-scroll-area-viewport]")
     .first();
-  const stylePanelFooter = inspector.locator(
-    "[data-design-style-panel-footer]",
-  );
-  const cssModeButton = stylePanelFooter.getByRole("button", {
+  const cssModeButton = stylePanelHeader.getByRole("button", {
     name: "CSS",
     exact: true,
   });
   const styleHeaderTopBeforeScroll = (await stylePanelHeader.boundingBox())?.y;
-  const styleFooterTopBeforeScroll = (await stylePanelFooter.boundingBox())?.y;
   await inspectorScrollViewport.evaluate((element) => {
     element.scrollTop = 320;
   });
   const styleHeaderTopAfterScroll = (await stylePanelHeader.boundingBox())?.y;
-  const styleFooterTopAfterScroll = (await stylePanelFooter.boundingBox())?.y;
+  const inspectorScrolled = await inspectorScrollViewport.evaluate(
+    (element) =>
+      element.scrollTop > 0 || element.scrollHeight <= element.clientHeight,
+  );
   check(
-    "Style header and CSS footer stay fixed while inspector contents scroll",
-    (await inspectorScrollViewport.evaluate((element) => element.scrollTop)) >
-      0 &&
+    "Style header stays fixed while inspector contents scroll",
+    inspectorScrolled &&
+      (await stylePanelHeader.evaluate(
+        (header) => !header.closest("[data-radix-scroll-area-viewport]"),
+      )) &&
       styleHeaderTopBeforeScroll !== undefined &&
       styleHeaderTopAfterScroll !== undefined &&
-      styleFooterTopBeforeScroll !== undefined &&
-      styleFooterTopAfterScroll !== undefined &&
-      Math.abs(styleHeaderTopAfterScroll - styleHeaderTopBeforeScroll) < 0.5 &&
-      Math.abs(styleFooterTopAfterScroll - styleFooterTopBeforeScroll) < 0.5,
+      Math.abs(styleHeaderTopAfterScroll - styleHeaderTopBeforeScroll) < 0.5,
   );
   await inspectorScrollViewport.evaluate((element) => {
     element.scrollTop = 0;
   });
-  const styleFooterButtonCount = await stylePanelFooter
-    .locator("button")
-    .count();
   const initialCssPressed = await cssModeButton.getAttribute("aria-pressed");
   check(
-    "Style footer contains only the CSS toggle",
-    styleFooterButtonCount === 1 && initialCssPressed === "false",
-    JSON.stringify({ styleFooterButtonCount, initialCssPressed }),
+    "the Style | CSS toggle lives in the header and the panel has no footer",
+    initialCssPressed === "false" &&
+      (await stylePanelHeader
+        .getByRole("button", { name: "Style", exact: true })
+        .getAttribute("aria-pressed")) === "true" &&
+      (await inspector.locator("[data-design-style-panel-footer]").count()) ===
+        0,
+    JSON.stringify({ initialCssPressed }),
   );
   await cssModeButton.click();
   const computedCssEditor = page.getByLabel("Computed CSS declarations");
@@ -1182,7 +1191,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         .count()) === 0 &&
       (await inspector
         .getByRole("button", { name: "Collapse Appearance", exact: true })
-        .count()) === 1 &&
+        .count()) === 0 &&
       (await inspector.getByText("Frame position & size").count()) === 0,
     JSON.stringify(frameStyleGeometry),
   );
@@ -1338,7 +1347,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     '[data-design-style-property="word-spacing"]',
   );
   await inspector
-    .getByRole("button", { name: "Text details", exact: true })
+    .getByRole("button", { name: "Type settings", exact: true })
     .click();
   check(
     "margin is omitted from the design inspector",
@@ -1742,9 +1751,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   const inlinePaddingHandles = homeFrame.locator(
     '[data-design-inline-spacing^="padding-"]',
   );
-  const inlineGapHandle = homeFrame.locator(
-    '[data-design-inline-spacing="gap"]',
-  );
+  const inlineGapHandle = homeFrame.locator("[data-design-inline-gap-region]");
   check(
     "auto-layout selections expose four padding lines on canvas",
     (await inlinePaddingHandles.count()) === 4 &&
@@ -1786,8 +1793,12 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     '[data-design-element-overlay="home-main"]',
   );
   const selectedMainBox = await selectedMainOverlay.boundingBox();
+  // Inside the content, clear of every padding band: ticks only.
   if (selectedMainBox) {
-    await page.mouse.move(selectedMainBox.x + 12, selectedMainBox.y + 12);
+    await page.mouse.move(
+      selectedMainBox.x + selectedMainBox.width / 2,
+      selectedMainBox.y + selectedMainBox.height * 0.12,
+    );
   }
   check(
     "hovering inside the selected layout reveals spacing lines without labels or hatching",
@@ -1816,6 +1827,34 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
           ),
         )),
   );
+  // Anywhere in a padding band, not only on its tick, owns that side.
+  if (selectedMainBox) {
+    await page.mouse.move(
+      selectedMainBox.x + 8,
+      selectedMainBox.y + selectedMainBox.height / 2,
+    );
+  }
+  check(
+    "hovering a padding band reveals only that side's hatch and value",
+    await waitFor(
+      () =>
+        homeFrame
+          .locator('[data-design-inline-spacing-highlight^="padding-"]')
+          .evaluateAll((highlights) =>
+            highlights.every(
+              (highlight) =>
+                getComputedStyle(highlight).opacity ===
+                (highlight.getAttribute(
+                  "data-design-inline-spacing-highlight",
+                ) === "padding-left"
+                  ? "1"
+                  : "0"),
+            ),
+          )
+          .catch(() => false),
+      "design-padding-band-hover",
+    ),
+  );
   const inlinePaddingLeft = homeFrame.locator(
     '[data-design-inline-spacing="padding-left"]',
   );
@@ -1836,7 +1875,12 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       const rootBox = root.getBoundingClientRect();
       const highlightBox = highlight.getBoundingClientRect();
       const handleCenter = handleBox.left + handleBox.width / 2;
-      const bandCenter = rootBox.left + highlightBox.width / 2;
+      // Centered in the band, or just clear of the resize strip when the band
+      // is thinner than the tick's target on screen.
+      const bandCenter = Math.max(
+        rootBox.left + highlightBox.width / 2,
+        rootBox.left + 12,
+      );
       return Math.abs(handleCenter - bandCenter) < 1;
     }),
   );
@@ -2000,9 +2044,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     check("Escape restores both inline spacing value and line geometry", false);
   }
   const distributedGapHandle = homeFrame
-    .locator(
-      '[data-design-inline-gap-region][data-design-inline-spacing="gap"]',
-    )
+    .locator("[data-design-inline-gap-region]")
     .first();
   const distributedGapBox = await distributedGapHandle.boundingBox();
   const distributedGapValue = await distributedGapHandle.textContent();
@@ -2306,14 +2348,12 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         .catch(() => false),
     "design-inline-gap-selection",
   );
-  const heroGapHandles = homeFrame.locator(
-    '[data-design-inline-gap-region][data-design-inline-spacing="gap"]',
-  );
+  const heroGapHandles = homeFrame.locator("[data-design-inline-gap-region]");
   const heroPaddingHandles = homeFrame.locator(
     '[data-design-inline-spacing^="padding-"]',
   );
   check(
-    "zero-padding layouts keep one addressable control on every element edge",
+    "zero-padding layouts keep one addressable control just inside every edge",
     (await heroPaddingHandles.count()) === 4 &&
       (await heroPaddingHandles.evaluateAll((handles) => {
         const root = handles[0]?.closest("[data-design-inline-spacing-root]");
@@ -2328,11 +2368,13 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
             ];
           }),
         );
+        // A zero padding keeps its tick just inside the edge, clear of the
+        // four-pixel resize strip, so it never steals a resize.
         return (
-          Math.abs(centers["padding-top"].y - rootBox.top) < 1 &&
-          Math.abs(centers["padding-right"].x - rootBox.right) < 1 &&
-          Math.abs(centers["padding-bottom"].y - rootBox.bottom) < 1 &&
-          Math.abs(centers["padding-left"].x - rootBox.left) < 1
+          Math.abs(centers["padding-top"].y - (rootBox.top + 12)) < 1.5 &&
+          Math.abs(centers["padding-right"].x - (rootBox.right - 12)) < 1.5 &&
+          Math.abs(centers["padding-bottom"].y - (rootBox.bottom - 12)) < 1.5 &&
+          Math.abs(centers["padding-left"].x - (rootBox.left + 12)) < 1.5
         );
       })),
   );
@@ -2536,9 +2578,13 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       (await page.locator(".bg-scrim").count()) === 0,
   );
   const themeStartBox = await themeDialog.boundingBox();
-  await expect(themeDialog.locator('[data-slot="dialog-header"]')).toHaveCSS("padding", "12px 16px 0px");
-  await expect(themeDialog.locator('[data-slot="dialog-body"]')).toHaveCSS("padding", "24px 16px");
-  await expect(themeDialog.locator('[data-slot="dialog-footer"]')).toHaveCSS("padding", "10px");
+  await expect(themeDialog.locator('[data-design-theme-titlebar]')).toHaveCSS("height", "40px");
+  await expect(themeDialog.locator('h2')).toHaveCSS("font-size", "13px");
+  await expect(themeDialog.locator('[data-design-theme-type-filter]')).toHaveCSS("width", "168px");
+  await expect(themeDialog.locator('[data-design-theme-toolbar]')).toHaveCSS("height", "40px");
+  await expect(themeDialog.locator('[data-slot="dialog-footer"]')).toHaveCount(0);
+  await expect(themeDialog.getByRole("button", { name: "Done", exact: true })).toHaveCount(0);
+  await expect(themeDialog.locator('[data-design-theme-row]').first()).toHaveCSS("height", "36px");
   const themeClose = themeDialog.getByRole("button", { name: "Close theme editor", exact: true });
   await expect(themeClose).toHaveCSS("width", "20px");
   await expect(themeClose).toHaveCSS("height", "20px");
@@ -2550,9 +2596,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     await themeDialog.evaluate((element) => {
       const close = element.querySelector('button[aria-label="Close theme editor"]');
       const closeBox = close.getBoundingClientRect();
-      const headerBox = close.parentElement.getBoundingClientRect();
+      const header = close.closest('[data-design-theme-titlebar]');
+      const headerBox = header.getBoundingClientRect();
+      const inset = parseFloat(getComputedStyle(header).paddingRight);
       const titleBox = element.querySelector("h2").getBoundingClientRect();
-      return titleBox.right < closeBox.left && Math.abs(closeBox.right - headerBox.right) < 1;
+      return titleBox.right < closeBox.left && Math.abs(closeBox.right + inset - headerBox.right) < 1;
     }),
   );
   const themeDragHandle = themeDialog.getByRole("button", {
@@ -2582,6 +2630,16 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       themeMovedBox.y >= 0 &&
       themeMovedBox.x + themeMovedBox.width <= 1440 &&
       themeMovedBox.y + themeMovedBox.height <= 900,
+  );
+  await themeDragHandle.focus();
+  await themeDragHandle.press("ArrowRight");
+  await themeDragHandle.press("Shift+ArrowDown");
+  const themeKeyboardBox = await themeDialog.boundingBox();
+  check(
+    "theme window supports keyboard movement from its title bar",
+    !!themeKeyboardBox && !!themeMovedBox &&
+      themeKeyboardBox.x === themeMovedBox.x + 4 &&
+      themeKeyboardBox.y === themeMovedBox.y + 16,
   );
   check(
     "inspector remains interactive while the theme editor stays open",
@@ -2646,17 +2704,46 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       (await inheritedThemeValue.first().inputValue()) === "" &&
       (
         await inheritedThemeValue.first().getAttribute("placeholder")
-      )?.startsWith("Inherited:") === true &&
+      ) === "4px" &&
       (await inheritedThemeValue
         .first()
         .evaluate((element) => getComputedStyle(element).backgroundColor)) ===
         "rgba(0, 0, 0, 0)",
   );
   const themeValue = themeDialog.locator("[data-design-theme-value]").first();
+  const themeOverride = themeDialog.getByRole("textbox", { name: /^--accent dark (inherited )?value$/ });
+  const themeOverrideBefore = await themeOverride.inputValue();
+  await themeOverride.fill("");
+  await expect(themeOverride).not.toHaveAttribute("data-design-theme-inherited", "true");
+  await themeOverride.press("Tab");
+  await expect(themeOverride).toHaveValue(themeOverrideBefore);
+  await expect(themeOverride).not.toHaveAttribute("data-design-theme-inherited", "true");
+  check("clearing a theme override restores it on blur instead of implying deletion", true);
+  const themeAccentName = themeDialog.getByText("--accent", { exact: true });
+  const themeAccentBase = themeDialog.getByRole("textbox", { name: "--accent base value", exact: true });
+  await themeAccentName.focus();
+  await themeAccentName.press("Tab");
+  await expect(themeAccentBase).toBeFocused();
+  await themeAccentBase.press("Tab");
+  await expect(themeOverride).toBeFocused();
+  const themeReset = themeOverride.locator("..").getByRole("button", { name: "Reset to Base", exact: true });
+  await expect(themeReset).toHaveCSS("width", "24px");
+  await expect(themeReset).toHaveCSS("height", "24px");
+  await expect(themeReset).toHaveCSS("opacity", "1");
+  await expect(themeOverride).toHaveAttribute("aria-keyshortcuts", /Alt\+Enter/);
+  await themeOverride.press("Shift+Tab");
+  await expect(themeAccentBase).toBeFocused();
+  await themeAccentBase.press("Shift+Tab");
+  await expect(themeAccentName).toBeFocused();
+  check("Tab traverses variable name, Base, and mode values in both directions", true);
+  await inheritedThemeValue.first().focus();
+  await expect(page.getByRole("tooltip", { name: "Inherits Base", exact: true })).toBeVisible();
+  await expect(inheritedThemeValue.first().locator("..").getByRole("button", { name: "Reset to Base", exact: true })).toHaveCount(0);
+  check("inherited cells expose Inherits Base without a reset action", true);
   const themeValueVisual =
     (await themeValue.count()) > 0
       ? await themeValue.evaluate((element) => {
-          const style = getComputedStyle(element);
+          const style = getComputedStyle(element.closest(".zd-field"));
           return {
             background: style.backgroundColor,
             borderWidth: style.borderWidth,
@@ -2718,7 +2805,66 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       .isVisible()
       .catch(() => false),
   );
-  await themeDialog.getByRole("button", { name: "Done" }).click();
+  await themeDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  const themeFilters = themeDialog.locator('[data-design-theme-type-filter]');
+  await themeFilters.getByRole("button", { name: "Color", exact: true }).click();
+  check(
+    "theme type rail filters the matrix without hiding mode controls",
+    (await themeDialog.locator('[data-design-theme-row]').count()) === 1 &&
+      (await themeDialog.getByRole("button", { name: "dark", exact: true }).isVisible()),
+  );
+  await themeFilters.getByRole("button", { name: "All", exact: true }).click();
+  const themeSearch = themeDialog.getByRole("textbox", { name: "Search theme variables" });
+  await themeSearch.fill("space-20");
+  check(
+    "theme search filters variable names",
+    (await themeDialog.locator('[data-design-theme-row]').count()) === 1 &&
+      (await themeDialog.getByText("--space-20", { exact: true }).isVisible()),
+  );
+  await themeSearch.fill("");
+  const themeSizeValue = themeDialog.getByRole("textbox", { name: "--space-1 base value", exact: true });
+  await themeSizeValue.focus();
+  await themeSizeValue.press("ArrowUp");
+  await expect(themeSizeValue).toHaveValue("5px");
+  await themeSizeValue.press("Shift+ArrowDown");
+  await expect(themeSizeValue).toHaveValue("-5px");
+  await themeSizeValue.press("Escape");
+  check(
+    "theme numeric drafts step in ones and tens and Escape restores the value",
+    (await themeSizeValue.inputValue()) === "4px" && (await themeDialog.isVisible()),
+  );
+  await themeDialog.getByRole("button", { name: "Add theme", exact: true }).click();
+  const newThemeName = themeDialog.getByRole("textbox", { name: "New theme name" });
+  await expect(newThemeName).toBeFocused();
+  await newThemeName.fill("contrast");
+  const themeScrollLeftBefore = await themeScrollViewport.evaluate((element) => element.scrollLeft);
+  const themeNameHeadingLeft = await themeDialog.getByRole("columnheader", { name: "Name", exact: true }).evaluate((element) => element.getBoundingClientRect().left);
+  const worldBeforeHorizontalThemeScroll = await canvasWorld.getAttribute("style");
+  await themeScrollViewport.hover();
+  await page.mouse.wheel(240, 0);
+  check(
+    "wide theme matrices scroll horizontally while Name stays pinned and the canvas stays still",
+    (await waitFor(
+      () => themeScrollViewport.evaluate((element, before) => element.scrollLeft > before, themeScrollLeftBefore),
+      "design-theme-horizontal-scroll",
+    )) &&
+      (await themeDialog.getByRole("columnheader", { name: "Name", exact: true }).evaluate((element) => element.getBoundingClientRect().left)) === themeNameHeadingLeft &&
+      (await canvasWorld.getAttribute("style")) === worldBeforeHorizontalThemeScroll,
+  );
+  await newThemeName.press("Escape");
+  check(
+    "Escape cancels an inline theme draft without closing the tool window",
+    (await newThemeName.count()) === 0 && (await themeDialog.isVisible()),
+  );
+  await themeDialog.getByRole("button", { name: "New variable", exact: true }).click();
+  const newVariableName = themeDialog.getByRole("textbox", { name: "Variable name" });
+  await expect(newVariableName).toBeFocused();
+  await newVariableName.press("Escape");
+  check(
+    "Escape cancels an inline variable draft without closing the tool window",
+    (await newVariableName.count()) === 0 && (await themeDialog.isVisible()),
+  );
+  await themeDialog.getByRole("button", { name: "Close theme editor", exact: true }).click();
   await waitFor(
     async () => !(await themeDialog.isVisible().catch(() => false)),
     "design-theme-close",
@@ -2784,13 +2930,14 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     textColorWrites === 1,
     `writes=${textColorWrites}`,
   );
-  // Done takes focus from the field, so the value arrives once by blur and once
-  // by click; the same interaction must still be one write.
+  // Closing by an outside click takes focus from the field, so the value
+  // arrives once by blur and once by the close flush; the same interaction must
+  // still be one write.
   const beforeDoneCommit = await page.evaluate(
     () => window.__zerosHarnessStyleMutationSources?.length ?? 0,
   );
   await textColorInput.fill("rgb(10, 11, 12)");
-  await page.getByRole("button", { name: "Done" }).click();
+  await inspectorHeader.click();
   await waitFor(
     async () =>
       (await page.evaluate(
@@ -2804,7 +2951,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       () => window.__zerosHarnessStyleMutationSources?.length ?? 0,
     )) - beforeDoneCommit;
   check(
-    "closing a colour popover with Done writes the source exactly once",
+    "closing a colour popover by clicking outside writes the source exactly once",
     doneWrites === 1,
     `writes=${doneWrites}`,
   );
@@ -3170,6 +3317,146 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     "motion opens as a persistent canvas timeline",
     await motionTimeline.isVisible(),
   );
+  check(
+    "motion starts with a readable Add property control and no empty footer",
+    (await motionTimeline
+      .getByLabel("Motion property")
+      .getAttribute("placeholder")) === "Add property" &&
+      (await motionTimeline.getByLabel("Motion property").inputValue()) ===
+        "" &&
+      (await motionTimeline
+        .getByText(/No motion on this layer|Inspector diamonds|tokens\.css/)
+        .count()) === 0 &&
+      (await motionTimeline.getByLabel("Selected keyframe time").count()) === 0,
+  );
+  check(
+    "motion uses a 240px panel, 28px fields, and a single aligned lane grid",
+    await motionTimeline.evaluate((element) => {
+      const time = element.querySelector('[aria-label="Motion current time"]');
+      const ruler = element.querySelector('[aria-label="Motion time ruler"]');
+      const lane = element.querySelector("[data-motion-track]");
+      if (!time || !ruler || !lane) return false;
+      const timeStyle = getComputedStyle(time);
+      return (
+        element.getBoundingClientRect().height === 240 &&
+        time.getBoundingClientRect().height === 28 &&
+        ruler.getBoundingClientRect().height === 28 &&
+        lane.getBoundingClientRect().height === 32 &&
+        timeStyle.fontSize === "13px" &&
+        !timeStyle.fontFamily.toLowerCase().includes("mono") &&
+        Math.abs(
+          ruler.getBoundingClientRect().left -
+            lane.getBoundingClientRect().left,
+        ) < 1 &&
+        Math.abs(
+          ruler.getBoundingClientRect().width -
+            lane.getBoundingClientRect().width,
+        ) < 1 &&
+        element.scrollWidth === element.clientWidth
+      );
+    }),
+  );
+  await motionTimeline.getByLabel("Motion property").fill("not a property");
+  await motionTimeline.getByLabel("Motion property").press("Enter");
+  check(
+    "invalid motion properties show an inline error without a toast",
+    (await motionTimeline
+      .getByLabel("Motion property")
+      .getAttribute("aria-invalid")) === "true" &&
+      (await page
+        .locator("[data-sonner-toast]")
+        .filter({ hasText: "Enter a valid CSS property." })
+        .count()) === 0 &&
+      (await motionTimeline.locator(".zd-design-motion-keyframe").count()) ===
+        0,
+  );
+  await motionTimeline.getByLabel("Motion property").fill("");
+  const motionResizeHandle = motionTimeline.getByRole("separator", {
+    name: "Resize motion timeline",
+  });
+  await motionResizeHandle.press("ArrowUp");
+  await motionResizeHandle.press("Shift+ArrowUp");
+  check(
+    "motion height supports 8px and 32px keyboard increments",
+    (await motionResizeHandle.getAttribute("aria-valuenow")) === "280" &&
+      (await motionResizeHandle.getAttribute("aria-orientation")) ===
+        "horizontal" &&
+      (await motionResizeHandle.boundingBox()).height === 6,
+  );
+  await motionResizeHandle.press("ArrowDown");
+  await motionResizeHandle.press("Shift+ArrowDown");
+  const motionResizeBounds = await motionResizeHandle.boundingBox();
+  await page.mouse.move(
+    motionResizeBounds.x + motionResizeBounds.width / 2,
+    motionResizeBounds.y + 3,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    motionResizeBounds.x + motionResizeBounds.width / 2,
+    motionResizeBounds.y - 85,
+    { steps: 4 },
+  );
+  check(
+    "dragging motion height moves the toolbar immediately through the canvas variable",
+    await motionTimeline.evaluate((element) => {
+      const root = element.offsetParent;
+      const toolbar = root.querySelector('[aria-label="Canvas tools"]');
+      return (
+        element.getBoundingClientRect().height === 328 &&
+        root.style.getPropertyValue("--zeros-design-motion-height") ===
+          "328px" &&
+        root.hasAttribute("data-design-motion-resizing") &&
+        getComputedStyle(toolbar).transitionProperty === "none" &&
+        Math.abs(
+          element.getBoundingClientRect().top -
+            toolbar.getBoundingClientRect().bottom -
+            16,
+        ) < 1
+      );
+    }),
+  );
+  await page.mouse.up();
+  await motionTimeline.getByLabel("Close motion timeline").click();
+  await page.getByRole("button", { name: "Toggle motion timeline" }).click();
+  check(
+    "motion height persists across closing and reopening",
+    (await motionResizeHandle.getAttribute("aria-valuenow")) === "328" &&
+      (await page.evaluate(() =>
+        localStorage.getItem("zeros.design.motion-timeline-height"),
+      )) === "328",
+  );
+  const restoredMotionResizeBounds = await motionResizeHandle.boundingBox();
+  await page.mouse.move(
+    restoredMotionResizeBounds.x + restoredMotionResizeBounds.width / 2,
+    restoredMotionResizeBounds.y + 3,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    restoredMotionResizeBounds.x + restoredMotionResizeBounds.width / 2,
+    -1000,
+  );
+  check(
+    "motion height is capped at 480px or 60 percent of the canvas",
+    await motionTimeline.evaluate(
+      (element) =>
+        element.getBoundingClientRect().height ===
+        Math.min(480, Math.floor(element.offsetParent.clientHeight * 0.6)),
+    ),
+  );
+  await page.mouse.move(
+    restoredMotionResizeBounds.x + restoredMotionResizeBounds.width / 2,
+    2000,
+  );
+  await page.mouse.up();
+  check(
+    "motion height has a 160px floor and restores toolbar transitions after dragging",
+    (await motionResizeHandle.getAttribute("aria-valuenow")) === "160" &&
+      (await page.locator("[data-design-motion-resizing]").count()) === 0,
+  );
+  await motionResizeHandle.press("Shift+ArrowUp");
+  await motionResizeHandle.press("Shift+ArrowUp");
+  await motionResizeHandle.press("ArrowUp");
+  await motionResizeHandle.press("ArrowUp");
   await motionTimeline.getByLabel("More motion settings").click();
   check(
     "secondary motion controls remain available in a focused settings popover",
@@ -3191,12 +3478,12 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     "a new layer starts with no inherited or placeholder keyframes",
     (await motionTimeline.locator(".zd-design-motion-keyframe").count()) ===
       0 &&
-      (await motionTimeline.getByText(/No motion on this layer/).isVisible()) &&
+      (await motionTimeline.getByPlaceholder("Add property").isVisible()) &&
       (await motionTimeline
         .getByRole("button", { name: "Play motion preview" })
         .isDisabled()) &&
       (await motionTimeline.getByLabel("Animation duration").inputValue()) ===
-        "300ms",
+        "300",
   );
   await page.getByRole("button", { name: /^Animate opacity$/i }).click();
   check(
@@ -3277,7 +3564,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     "motion ruler uses effect-local millisecond timing",
     (
       await motionTimeline.getByLabel("Motion time ruler").textContent()
-    )?.includes("300ms"),
+    )?.includes("300 ms"),
   );
   const motionDurationBeforeHotCommit =
     motionTimeline.getByLabel("Animation duration");
@@ -3297,7 +3584,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     await waitFor(
       async () =>
         (await motionTimeline.getByLabel("Animation duration").inputValue()) ===
-        "450ms",
+        "450",
       "design-motion-draft-selection-round-trip",
     ),
   );
@@ -3407,7 +3694,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     hotGenerationStable &&
       hotGenerationDiagnostic.frameIdentity &&
       hotGenerationDiagnostic.selectionIdentity &&
-      (await motionDurationBeforeHotCommit.inputValue()) === "450ms",
+      (await motionDurationBeforeHotCommit.inputValue()) === "450",
     JSON.stringify(hotGenerationDiagnostic),
   );
   await page.evaluate(() => {
@@ -3584,7 +3871,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       structuralGenerationDiagnostic.maxDocumentBuffers === 2 &&
       structuralGenerationDiagnostic.outgoingStayedConnectedUntilReady &&
       !structuralGenerationDiagnostic.sawRasterCover &&
-      (await motionDurationBeforeHotCommit.inputValue()) === "450ms",
+      (await motionDurationBeforeHotCommit.inputValue()) === "450",
     JSON.stringify(structuralGenerationDiagnostic),
   );
   await page.getByRole("button", { name: "Animate W", exact: true }).click();
@@ -3637,15 +3924,34 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       .getByRole("button", { name: /transform keyframe at/ })
       .count()) === 3 &&
       (await motionTimeline.getByLabel("Animation duration").inputValue()) ===
-        "600ms" &&
+        "600" &&
       (await motionPreset.textContent())?.includes("Pulse"),
   );
   const animationEasing = motionTimeline.getByLabel("Animation easing");
+  for (const label of [
+    "Linear",
+    "Ease",
+    "Ease in",
+    "Ease out",
+    "Ease in out",
+    "Spring-ish",
+    "Smooth",
+    "Steps",
+  ]) {
+    await motionTimeline.getByLabel("Choose easing curve").click();
+    await page.getByRole("menuitemradio", { name: label, exact: true }).click();
+    check(
+      `motion easing selects ${label} with a friendly field value`,
+      (await animationEasing.inputValue()) === label &&
+        (await animationEasing.getAttribute("aria-invalid")) === "false" &&
+        (await motionPreset.textContent())?.includes("Preset"),
+    );
+  }
   await animationEasing.fill("steps(5, end)");
   check(
     "motion easing accepts editable CSS timing functions and marks a preset customized",
     (await animationEasing.inputValue()) === "steps(5, end)" &&
-      (await motionPreset.textContent())?.includes("Custom"),
+      (await motionPreset.textContent())?.includes("Preset"),
   );
   await animationEasing.fill("spring(1, 100, 10)");
   check(
@@ -3656,10 +3962,86 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         .isDisabled()),
   );
   await animationEasing.fill("steps(5, end)");
+  await page.setViewportSize({ width: 900, height: 700 });
+  await motionTimeline.getByLabel("More motion settings").click();
+  const compactMotionSettings = page.locator("[data-design-motion-settings]");
+  check(
+    "narrow motion canvases move editable timing into settings",
+    (await compactMotionSettings
+      .getByLabel("Animation duration")
+      .inputValue()) === "600" &&
+      (await compactMotionSettings
+        .getByLabel("Animation easing")
+        .inputValue()) === "steps(5, end)" &&
+      (await motionTimeline.getByLabel("Animation duration").count()) === 0,
+  );
+  await compactMotionSettings.getByLabel("Choose easing curve").click();
+  await page
+    .getByRole("menuitemradio", { name: "Ease out", exact: true })
+    .click();
+  check(
+    "choosing a curve inside compact settings preserves the open popover",
+    (await compactMotionSettings.isVisible()) &&
+      (await compactMotionSettings
+        .getByLabel("Animation easing")
+        .inputValue()) === "Ease out",
+  );
+  await compactMotionSettings
+    .getByLabel("Animation easing")
+    .fill("steps(5, end)");
+  await page.keyboard.press("Escape");
+  await motionTimeline
+    .getByRole("button", { name: /transform keyframe at 50%/ })
+    .click();
+  check(
+    "narrow motion headers and selected keyframes fit without horizontal scrolling",
+    await motionTimeline.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      const ruler = element
+        .querySelector('[aria-label="Motion time ruler"]')
+        ?.getBoundingClientRect();
+      const controls = [...element.querySelectorAll("input, button")].filter(
+        (control) => control.getBoundingClientRect().width > 0,
+      );
+      return (
+        element.scrollWidth === element.clientWidth &&
+        !!ruler &&
+        controls.every((control) => {
+          const rect = control.getBoundingClientRect();
+          return rect.left >= bounds.left && rect.right <= bounds.right;
+        }) &&
+        [...element.querySelectorAll("[data-motion-track]")].every((lane) => {
+          const rect = lane.getBoundingClientRect();
+          return (
+            Math.abs(rect.left - ruler.left) < 1 &&
+            Math.abs(rect.width - ruler.width) < 1
+          );
+        })
+      );
+    }),
+  );
+  for (const width of [1120, 1241, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    check(
+      `motion controls fit between responsive breakpoints at ${width}px`,
+      await motionTimeline.evaluate((element) => {
+        const header = element.querySelector(".zd-motion-header");
+        return (
+          element.scrollWidth === element.clientWidth &&
+          header.scrollWidth === header.clientWidth
+        );
+      }),
+    );
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  check(
+    "expanding the canvas restores timing controls with the same draft",
+    (await motionTimeline.getByLabel("Animation duration").inputValue()) ===
+      "600" && (await animationEasing.inputValue()) === "steps(5, end)",
+  );
   await motionTimeline
     .getByRole("button", { name: "Close motion timeline" })
     .click();
-
   await page.getByRole("button", { name: "Text tool" }).click();
   check(
     "Text tool enters insertion mode with a crosshair cursor",
@@ -4336,6 +4718,14 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     nestedDescended,
     JSON.stringify(await nestedDoubleClickState()),
   );
+  check(
+    "entering a child text layer selects it before editing",
+    !(await inlineText.isVisible().catch(() => false)),
+  );
+  await page.mouse.dblclick(
+    nestedHeadingBox.x + nestedHeadingBox.width / 2,
+    nestedHeadingBox.y + nestedHeadingBox.height / 2,
+  );
   const nestedEditorReady = await waitFor(
     () => inlineText.isVisible().catch(() => false),
     "design-nested-inline-text-ready",
@@ -4450,6 +4840,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   check(
     "multi-selection is explicit in the inspector",
     await page.getByText("2 layers", { exact: true }).last().isVisible(),
+  );
+  check(
+    "multi-selection labels only the group's size, not its primary layer's",
+    (await homeFrame.locator("[data-design-group-size]").count()) === 1 &&
+      (await homeFrame.locator("[data-design-selection-size]").count()) === 0,
   );
 
   const selectedCopy = homeRuntime.locator('[data-oid="home-copy"]');
@@ -5148,54 +5543,18 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       return Math.abs(matrix.b) > 0.02;
     }),
   );
+  // Constraints describe CSS positioning. A flow child is placed by its
+  // parent's layout — turned or not — so it draws no pin runs at all.
   check(
-    "constraint guides stay screen-aligned while the element is turned",
-    await homeFrame
+    "a turned flow child draws no constraint runs",
+    (await homeFrame
       .locator("[data-design-parent-guides] [data-design-parent-guide]")
-      .evaluateAll(
-        (guides) =>
-          guides.length > 0 &&
-          guides.every((guide) => {
-            const matrix = new DOMMatrixReadOnly(
-              getComputedStyle(guide).transform,
-            );
-            const box = guide.getBoundingClientRect();
-            return (
-              Math.abs(matrix.b) < 0.001 &&
-              Math.abs(matrix.c) < 0.001 &&
-              (box.width < 1.5 || box.height < 1.5)
-            );
-          }),
-      ),
+      .count()) === 0,
   );
   // Return the harness to an upright heading so later checks measure the same
   // geometry they always have.
-  await page.getByRole("button", { name: "Edit transform" }).click();
-  const resetTransformInput = page.getByLabel("Transform CSS value");
-  await resetTransformInput.press("ControlOrMeta+A");
-  await resetTransformInput.press("Backspace");
-  await resetTransformInput.pressSequentially("none");
-  await resetTransformInput.press("Enter");
-  check(
-    "an inspector transform reset returns the box upright",
-    await waitFor(
-      () =>
-        headingOverlay
-          .evaluate((element) => {
-            const { transform } = getComputedStyle(element);
-            if (transform === "none") return true;
-            const matrix = new DOMMatrixReadOnly(transform);
-            return Math.abs(matrix.b) < 0.001 && Math.abs(matrix.c) < 0.001;
-          })
-          .catch(() => false),
-      "design-rotation-reset",
-    ),
-  );
   await zoomAboutSelection(originZoomAnchor, 40, originZoomSteps);
 
-  // A constraint reaches only the parent edges the element's CSS pins it to. A
-  // static box in flow is pinned to the start edges, and the run measures the
-  // real distance there — nothing at all on an edge it already sits against.
   await layersPanel.locator('[data-design-layer-id="home-copy"]').click();
   await waitFor(
     () =>
@@ -5204,31 +5563,13 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         .catch(() => false),
     "design-constraint-copy-selection",
   );
-  const readConstraintRuns = () =>
+  const constraintRunCount = () =>
     homeFrame
       .locator("[data-design-parent-guides] [data-design-parent-guide]")
-      .evaluateAll((guides) =>
-        guides.map((guide) => ({
-          side: guide.getAttribute("data-design-parent-guide"),
-          hidden: getComputedStyle(guide).display === "none",
-          width: guide.getBoundingClientRect().width,
-          height: guide.getBoundingClientRect().height,
-        })),
-      );
-  await waitFor(async () => {
-    const runs = await readConstraintRuns();
-    return runs.length === 2 && runs.some((run) => !run.hidden);
-  }, "design-constraint-runs");
-  const constraintRuns = await readConstraintRuns();
+      .count();
   check(
-    "constraint runs measure the pinned edges a static box flows from",
-    constraintRuns.map((run) => run.side).join(",") === "left,top" &&
-      constraintRuns.every((run) => run.width < 1.5 || run.height < 1.5) &&
-      // Flush against the parent's left edge, a real gap below its top.
-      constraintRuns.find((run) => run.side === "left")?.hidden === true &&
-      constraintRuns.find((run) => run.side === "top")?.hidden === false &&
-      (constraintRuns.find((run) => run.side === "top")?.height ?? 0) > 4,
-    JSON.stringify(constraintRuns),
+    "an in-flow child of an auto-layout parent draws no constraint runs",
+    (await constraintRunCount()) === 0,
   );
   // An in-flow child stays under its parent's alignment until it crosses a
   // sibling insertion point; a small drag must not author a positional offset.
@@ -5236,8 +5577,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     .locator('[data-design-element-overlay="home-copy"]')
     .boundingBox();
   if (!copyOverlayBox) throw new Error("copy overlay has no geometry");
-  const restingTopRun =
-    constraintRuns.find((run) => run.side === "top")?.height ?? 0;
+  const restingCopyBox = await runtimeCopyForPeerSelection.boundingBox();
   await page.mouse.move(
     copyOverlayBox.x + copyOverlayBox.width / 2,
     copyOverlayBox.y + copyOverlayBox.height / 2,
@@ -5249,28 +5589,22 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     { steps: 4 },
   );
   check(
-    "flow drag distance guides follow the child's rendered layout position",
-    await waitFor(async () => {
-      const runs = await readConstraintRuns();
-      const top = runs.find((run) => run.side === "top")?.height ?? 0;
-      const child = await runtimeCopyForPeerSelection.boundingBox();
-      const parent = await homeRuntime
-        .locator('[data-oid="home-hero"]')
-        .boundingBox();
-      return (
-        child && parent && Math.abs(top - Math.abs(child.y - parent.y)) < 1.5
-      );
-    }, "design-constraint-live-run"),
+    "a flow drag never paints pin runs for the child it carries",
+    (await constraintRunCount()) === 0,
   );
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
   await page.mouse.up();
   check(
-    "a cancelled move restores the resting constraint distance",
+    "a cancelled flow move restores the child's rendered position",
     await waitFor(async () => {
-      const runs = await readConstraintRuns();
-      const top = runs.find((run) => run.side === "top")?.height ?? 0;
-      return Math.abs(top - restingTopRun) < 1.5;
-    }, "design-constraint-restored-run"),
+      const box = await runtimeCopyForPeerSelection.boundingBox();
+      return (
+        !!box &&
+        !!restingCopyBox &&
+        Math.abs(box.x - restingCopyBox.x) < 1 &&
+        Math.abs(box.y - restingCopyBox.y) < 1
+      );
+    }, "design-constraint-restored-flow"),
   );
   await layersPanel.locator('[data-design-layer-id="home-heading"]').click();
   await waitFor(

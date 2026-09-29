@@ -49,7 +49,6 @@ import {
   Columns2,
   Copy,
   Ellipsis,
-  MessageCircleQuestionMark,
   Pencil,
   Rows2,
   Terminal as TerminalIcon,
@@ -77,11 +76,17 @@ import { useWorkspaceDispatch, type ChatThread } from "../../state/store";
 import { useNativeRuntime } from "../../platform/runtime";
 import { OpenInSubmenu } from "./conversation-header";
 import { AgentIcon } from "../../features/agent/agent-icon";
+import {
+  AGENT_AWAITING_LABEL,
+  AgentAwaitingIndicator,
+} from "../../features/agent/agent-awaiting-indicator";
+import { ChatUnreadDot } from "../../features/agent/chat-unread-dot";
+import { useChatUnread } from "../../features/agent/chat-unread";
 import { ComposerDraftIndicator } from "../../features/agent/composer-draft-indicator";
 import { useChatHasDraft } from "../../state/composer-draft-presence";
 import {
   useChatAwaitingKind,
-  useChatAgentActivity,
+  useChatWorkingActivity,
 } from "../../features/agent/sessions-store";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { useTerminalBusy } from "../terminal/terminal-activity";
@@ -180,8 +185,9 @@ const TAB_LABEL_CLS = "min-w-0 truncate text-xs font-medium leading-none";
  *  gradient matches the tab's bg2 fill so long titles fade behind it. */
 const TAB_HOVER_OVERLAY_CLS =
   "pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-bg2 from-50% to-transparent pr-1.5 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
-// A drafted tab already has a trailing slot. Cover its pencil in place, with
-// the same 20px close target, without reserving another column or fading text.
+// A drafted or awaiting tab already has a trailing slot. Cover its mark in
+// place, with the same 20px close target, without reserving another column or
+// fading text.
 const TAB_DRAFT_ACTION_OVERLAY_CLS =
   "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-sm bg-bg2 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
 
@@ -711,14 +717,36 @@ function TabRow({
   const inputRef = useRef<HTMLInputElement | null>(null);
   // While the chat's agent is mid-turn, swap the static AgentIcon for the
   // ZerosSpinner so the tab head signals activity. See the original
-  // single-strip notes for the terminal/awaiting variants.
+  // single-strip notes for the terminal variant; awaiting marks ride the
+  // trailing slot (awaitingMark below).
   const isTerminal = chat.kind === "terminal";
   const hasDraft = useChatHasDraft(chat.id) && !isTerminal;
   // isActive is this pane's displayed chat, including an unfocused split.
   const showDraft = hasDraft && !isActive;
-  const activity = useChatAgentActivity(chat.id);
+  // At rest while the turn waits on the user (see parkedOnUser).
+  const activity = useChatWorkingActivity(chat.id);
   const awaitingKind = useChatAwaitingKind(chat.id);
   const isTerminalBusy = useTerminalBusy(chat.id, isTerminal);
+  // Asking the user: a plan to review, a question or permission to answer.
+  // The agent may keep working beside an optional ask, so the mark takes the
+  // tab's trailing slot, outranking the draft pencil there, and the leading
+  // icon keeps showing the agent, or its loader while it works.
+  const awaitingMark = readOnly || isTerminal ? null : awaitingKind;
+  const trailingMark = awaitingMark ?? (showDraft ? "draft" : null);
+  // The agent finished while this tab wasn't on screen: a dot takes the agent
+  // logo's place until the chat is shown (chat-unread.ts).
+  const unread = useChatUnread(chat.id) && !readOnly && !isTerminal;
+  const tabLabel =
+    hasDraft || awaitingMark || unread
+      ? [
+          chat.title || "Untitled chat",
+          awaitingMark && AGENT_AWAITING_LABEL[awaitingMark].toLowerCase(),
+          unread && "unread",
+          hasDraft && "unsent draft",
+        ]
+          .filter(Boolean)
+          .join(", ")
+      : undefined;
 
   // Sync draft state when the chat title changes externally.
   useEffect(() => {
@@ -810,7 +838,7 @@ function TabRow({
   const closeAction = !readOnly && !renaming && (
     <span
       className={
-        showDraft ? TAB_DRAFT_ACTION_OVERLAY_CLS : TAB_HOVER_OVERLAY_CLS
+        trailingMark ? TAB_DRAFT_ACTION_OVERLAY_CLS : TAB_HOVER_OVERLAY_CLS
       }
     >
       <Tooltip label="Close chat">
@@ -835,9 +863,7 @@ function TabRow({
           aria-selected={isActive}
           tabIndex={isActive ? 0 : -1}
           className={TAB_BASE_CLS}
-          aria-label={
-            hasDraft ? `${chat.title || "Untitled chat"}, unsent draft` : undefined
-          }
+          aria-label={tabLabel}
           draggable={!readOnly && !renaming}
           onPointerEnter={() => onPrefetch(chat.id)}
           onFocus={() => onPrefetch(chat.id)}
@@ -877,20 +903,14 @@ function TabRow({
                 aria-hidden="true"
               />
             )
-          ) : !readOnly && awaitingKind === "plan" ? (
-            <ClipboardList
-              size={14}
-              className="text-fg2 shrink-0"
-              aria-label="Plan ready for review"
-            />
-          ) : !readOnly && awaitingKind === "input" ? (
-            <MessageCircleQuestionMark
-              size={14}
-              className="text-fg2 shrink-0"
-              aria-label="Agent awaiting your input"
-            />
           ) : !readOnly && activity ? (
-            <AgentActivityIndicator activity={activity} className="shrink-0" />
+            <AgentActivityIndicator
+              activity={activity}
+              agentId={chat.agentId}
+              className="shrink-0"
+            />
+          ) : unread ? (
+            <ChatUnreadDot />
           ) : (
             <AgentIcon
               agentId={chat.agentId}
@@ -928,9 +948,13 @@ function TabRow({
               {chat.title || "Untitled chat"}
             </span>
           )}
-          {showDraft ? (
+          {trailingMark ? (
             <span className="relative inline-flex size-3 shrink-0 items-center justify-center">
-              <ComposerDraftIndicator />
+              {trailingMark === "draft" ? (
+                <ComposerDraftIndicator />
+              ) : (
+                <AgentAwaitingIndicator kind={trailingMark} />
+              )}
               {closeAction}
             </span>
           ) : (

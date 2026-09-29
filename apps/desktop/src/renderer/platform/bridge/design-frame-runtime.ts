@@ -127,6 +127,8 @@ export interface DesignFrameRuntimeConnection {
     targetSourceVersion: string,
     commit: boolean,
     signal?: AbortSignal,
+    /** Extra boxes to measure at the restored generation (the selection). */
+    measure?: readonly string[],
   ): Promise<DesignRuntimeStyleCommit>;
   previewText(
     nodeId: string,
@@ -738,19 +740,17 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     targetSourceVersion: string,
     commit: boolean,
     signal?: AbortSignal,
+    measure?: readonly string[],
   ): Promise<DesignRuntimeStyleCommit> {
+    const args = {
+      targetSourceVersion,
+      commit,
+      ...(measure?.length ? { measure: [...measure] } : {}),
+    };
     const restore = async () => {
       const result = await (commit
-        ? this.sendRequest(
-            "restoreGeneration",
-            { targetSourceVersion, commit },
-            signal,
-          )
-        : this.request(
-            "restoreGeneration",
-            { targetSourceVersion, commit },
-            signal,
-          ));
+        ? this.sendRequest("restoreGeneration", args, signal)
+        : this.request("restoreGeneration", args, signal));
       const expected = commit
         ? targetSourceVersion
         : this.expectedSourceVersion;

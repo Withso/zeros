@@ -1535,6 +1535,7 @@ function ExperimentalPanel() {
   const [hideArchived, setHideArchived] = useExperimentalFeature(
     "hideArchivedWorkspacesAfter15Days",
   );
+  const [gibberishThinking, setGibberishThinking] = useExperimentalFeature("gibberishAgentThinking");
   // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
   return (
     <div className="flex flex-col gap-6">
@@ -1561,6 +1562,16 @@ function ExperimentalPanel() {
             checked={hideArchived}
             onCheckedChange={setHideArchived}
             aria-label="Hide archived workspaces after 15 days"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Gibberish agent thinking"
+          hint="While the agent works, a shimmering, misspelled word like “Thenkeng” sits beside its timer."
+        >
+          <Switch
+            checked={gibberishThinking}
+            onCheckedChange={setGibberishThinking}
+            aria-label="Show gibberish agent thinking"
           />
         </SettingsRow>
       </SettingsGroup>

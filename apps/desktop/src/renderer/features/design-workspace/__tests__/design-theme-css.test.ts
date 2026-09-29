@@ -4,6 +4,7 @@ import {
   designTokenGroup,
   inferDesignTokenType,
   parseDesignCssVariables,
+  designThemeVariableNameIssue,
 } from "../design-theme-css";
 
 describe("design theme CSS import", () => {
@@ -69,5 +70,14 @@ describe("design theme CSS import", () => {
     );
     expect(designTokenGroup("--color-accent-primary")).toBe("color");
     expect(designTokenGroup("--radius")).toBe("Other");
+  });
+
+  it("never lets Create variable overwrite an existing token", () => {
+    const tokens = [{ name: "--surface" }, { name: "--radius-md" }];
+    expect(designThemeVariableNameIssue("--surface", tokens)).toBe("taken");
+    expect(designThemeVariableNameIssue(" --surface ", tokens)).toBe("taken");
+    expect(designThemeVariableNameIssue("surface", tokens)).toBe("invalid");
+    expect(designThemeVariableNameIssue("--new-token", tokens)).toBeNull();
+    expect(designThemeVariableNameIssue("", tokens)).toBeNull();
   });
 });

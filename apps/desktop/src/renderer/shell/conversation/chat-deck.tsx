@@ -26,6 +26,7 @@ import { usePanePortalsStore } from "./pane-portal-store";
 import { useRetainedViewKeySet } from "../use-retained-view-keys";
 import { usePreparedChatId } from "./chat-intent";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
+import { setChatsInView } from "../../features/agent/chat-unread";
 import type { Workspace } from "../../platform/git";
 import {
   useArchivedWorkspaces,
@@ -36,6 +37,7 @@ import { readOnlyWorkspaceForFolder } from "../../state/workspace-history";
 import { WorkspaceHistoryBar } from "../workspace-history-bar";
 
 const MAX_RETAINED_CHAT_VIEWS = 12;
+const NO_CHATS: readonly string[] = [];
 
 export function ChatDeck({
   workspace = null,
@@ -105,6 +107,14 @@ export function ChatDeck({
     layoutsByFolder,
     paneSlots,
   ]);
+  // The chats actually on screen read at once; an agent finishing in any
+  // other chat marks it unread (chat-unread.ts). Off the workspace page
+  // nothing is on screen.
+  const chatsInView = activePage === "workspace" ? displayedChatIds : NO_CHATS;
+  useEffect(() => {
+    setChatsInView(chatsInView);
+  }, [chatsInView]);
+  useEffect(() => () => setChatsInView(NO_CHATS), []);
   const queuedChatIds = useMemo(
     () => Object.keys(pendingAutoSend).filter((id) => !historyOwners.get(id)),
     [pendingAutoSend, historyOwners],

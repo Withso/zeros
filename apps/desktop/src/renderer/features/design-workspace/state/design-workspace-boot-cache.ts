@@ -121,6 +121,7 @@ export function safeDesignWorkspaceBootSnapshot(
     ) {
       return null;
     }
+    const layerCount = finiteNumber(frame?.layerCount);
     frames.push({
       file,
       title,
@@ -131,6 +132,13 @@ export function safeDesignWorkspaceBootSnapshot(
       y,
       z,
       nodeCount,
+      // Optional: a boot record from an older engine answers from nodeCount.
+      ...(layerCount !== null &&
+      Number.isSafeInteger(layerCount) &&
+      layerCount >= 0 &&
+      layerCount <= nodeCount
+        ? { layerCount }
+        : {}),
       modifiedAt,
       sourceVersion,
     });

@@ -16,17 +16,39 @@
 // duck-typed approach as pane-focus.ts / its test.
 // ──────────────────────────────────────────────────────────
 
+/** How the composer shares its dock with a card waiting on the user. Every
+ *  card (a permission gate, a question, a plan review) sits ABOVE the
+ *  composer and never replaces it: the agent may still be working, and the
+ *  user can steer it by sending a message. Only a chat that isn't interactive
+ *  conceals the composer. A blocking card (a permission gate or a blocking
+ *  question) does hold the keyboard: the composer stops pulling focus to
+ *  itself so the card's shortcuts reach it, while a click into the composer
+ *  still types there. */
+export function composerCardDock(params: {
+  interactive: boolean;
+  permissionCardActive: boolean;
+  blockingQuestionActive: boolean;
+}): { concealed: boolean; cardHoldsKeyboard: boolean } {
+  return {
+    concealed: !params.interactive,
+    cardHoldsKeyboard:
+      params.permissionCardActive || params.blockingQuestionActive,
+  };
+}
+
 /** True when THIS chat owns the composer focus: it is the single global active
- *  chat AND its composer is actually on screen (not concealed by a permission /
- *  question card, and not a hidden/parked retained layer). `composerConcealed`
- *  already folds in `!surfaceActive`, so this is the complete on-screen test. */
+ *  chat, its composer is actually on screen (not a hidden/parked retained
+ *  layer), and no blocking card above it holds the keyboard.
+ *  `composerConcealed` already folds in `!surfaceActive`, so this is the
+ *  complete on-screen test. */
 export function composerOwnsFocus(params: {
   chatId: string | null | undefined;
   activeChatId: string | null;
   composerConcealed: boolean;
+  cardHoldsKeyboard?: boolean;
 }): boolean {
-  const { chatId, activeChatId, composerConcealed } = params;
-  if (composerConcealed) return false;
+  const { chatId, activeChatId, composerConcealed, cardHoldsKeyboard } = params;
+  if (composerConcealed || cardHoldsKeyboard) return false;
   // No chatId → a standalone AgentChat (picker / beta / tests) that isn't part
   // of the split-pane tree. Keep the pre-split "focus when the composer is on
   // screen" behavior rather than gating on a global selection it never joins.

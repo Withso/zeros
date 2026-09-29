@@ -88,7 +88,7 @@ function designCssEditorTheme(dark: boolean): Extension {
         padding: "12px 0 24px",
         caretColor: "var(--fg1)",
       },
-      ".cm-line": { padding: "0 14px" },
+      ".cm-line": { padding: "0 12px" },
       ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--fg1)" },
       ".cm-activeLine": {
         backgroundColor: "color-mix(in srgb, var(--fg1) 4%, transparent)",
@@ -479,7 +479,7 @@ export function DesignComputedCssEditor({
       {error ? (
         <div
           role="alert"
-          className="border-border1 text-red-primary shrink-0 border-t px-3 py-2 text-[11px] leading-4"
+          className="border-border1 text-red-primary text-3xxs shrink-0 border-t px-3 py-2 leading-4"
         >
           {error}
         </div>

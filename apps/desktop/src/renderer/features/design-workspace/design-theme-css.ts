@@ -157,3 +157,16 @@ export function designTokenGroup(name: string): string {
   const pieces = name.replace(/^--/, "").split("-").filter(Boolean);
   return pieces.length > 1 ? pieces[0]!.toLowerCase() : "Other";
 }
+
+/** Why a new variable name cannot be created, or null when it can. An
+ * existing name is "taken": token.set updates declarations in place, so
+ * creating it again would silently overwrite that variable's base value. */
+export function designThemeVariableNameIssue(
+  name: string,
+  tokens: readonly { name: string }[],
+): "invalid" | "taken" | null {
+  const candidate = name.trim();
+  if (!candidate) return null;
+  if (!/^--[A-Za-z0-9_-]{1,128}$/.test(candidate)) return "invalid";
+  return tokens.some((token) => token.name === candidate) ? "taken" : null;
+}

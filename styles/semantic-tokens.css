@@ -62,22 +62,22 @@
     --inverted-fg
   ); /* dark label on the light-violet button in dark themes */
 
-  /* Loader (ZerosSpinner — the Orbit/Agent shimmer, apps/desktop/src/renderer/shared/ui/loading/
-     zeros-spinner.tsx). The app's DEFAULT loader colors: the lit piece
-     dots and the faint resting grid behind them. Both aliases resolve to
-     primitives that already flip per theme, so no [data-theme="light"]
-     override is needed.
+  /* Loader (ZerosSpinner — the Orbit loader and the agent Puzzle,
+     apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx). The
+     app's DEFAULT loader colors: --loader-active paints the Orbit's snake
+     and the Puzzle's tiles, --loader-rest the Orbit's faint track. Both
+     aliases resolve to primitives that already flip per theme, so no
+     [data-theme="light"] override is needed.
        --loader-active/-rest            → default surfaces (chrome, dialogs,
                                           secondary/ghost buttons)
        --loader-active/-rest-inverted   → inverted fills (primary buttons):
-                                          the piece must paint in the
-                                          on-inverted foreground or it
-                                          vanishes against the near-white
+                                          the tiles must paint in the
+                                          on-inverted foreground or they
+                                          vanish against the near-white
                                           (dark themes) / near-black (Light) fill.
                                           Rest shares the same color — the
-                                          spinner's own 70%/40% opacity
-                                          split keeps the two layers
-                                          distinct.
+                                          track's own lower opacity keeps
+                                          the two apart.
      Buttons with bespoke fills (green Merge, red destructive, the PR
      island's theme-flipping actions) use the spinner's `tone="inherit"`
      (currentColor) instead — the button's own text color already carries

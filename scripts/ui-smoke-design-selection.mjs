@@ -1,6 +1,69 @@
+import { expect } from "@playwright/test";
+
+export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  const open = async (query = "") => {
+    await page.goto(
+      `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html${query}`,
+      { waitUntil: "networkidle" },
+    );
+    await page
+      .locator(
+        '[data-design-frame="home.html"] iframe[data-design-document-ready]',
+      )
+      .waitFor();
+  };
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open();
+  const selected = (id) =>
+    page.locator(
+      `#design-layers-panel [data-design-layer-id="${id}"][aria-selected="true"]`,
+    );
+  const editor = page.locator("[data-design-inline-text-editor]");
+  const heading = page
+    .frameLocator(
+      '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]',
+    )
+    .locator('[data-oid="home-heading"]');
+  await page.locator('[data-design-frame-row="home.html"]').click();
+  const box = await heading.boundingBox();
+  const doubleClick = () =>
+    page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+  await doubleClick();
+  await expect(selected("home-hero")).toBeVisible();
+  await expect(editor).toHaveCount(0);
+  await doubleClick();
+  await expect(selected("home-heading")).toBeVisible();
+  await expect(editor).toHaveCount(0);
+  await doubleClick();
+  await expect(editor).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(editor).toHaveCount(0);
+  check(
+    "double-click descends through auto-layout containers before editing the selected text layer",
+    true,
+  );
+
+  await open("?layoutGestures");
+  await page
+    .locator('#design-layers-panel [data-design-layer-id="home-heading"]')
+    .click();
+  const empty = await heading.boundingBox();
+  await page.mouse.dblclick(
+    empty.x + empty.width / 2,
+    empty.y + empty.height / 2,
+  );
+  await expect(selected("home-heading")).toBeVisible();
+  await expect(editor).toHaveCount(0);
+  await page.keyboard.press("Enter");
+  await expect(editor).toHaveCount(0);
+  check("double-click and Enter preserve an empty frame as a frame", true);
+}
+
 // Exercise frame identity through real pointer events and the production
 // inspector, including the empty frame that has no selectable child layers.
 export async function runDesignSelectionSmoke({ page, waitFor, check }) {
+  await runDesignDoubleClickSelectionSmoke({ page, check });
   const origin = new URL(page.url()).origin;
   const open = async (query) => {
     await page.goto(
@@ -278,6 +341,14 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   const headingBox = await runtime
     .locator('[data-oid="home-heading"]')
     .boundingBox();
+  for (const child of ["home-hero", "home-heading"]) {
+    await page.mouse.dblclick(
+      headingBox.x + headingBox.width / 2,
+      headingBox.y + headingBox.height * 0.4,
+    );
+    await expect.poll(() => selectedNode(child)).toBe(true);
+    await expect(editor).toHaveCount(0);
+  }
   await page.mouse.dblclick(
     headingBox.x + headingBox.width / 2,
     headingBox.y + headingBox.height * 0.4,
@@ -383,8 +454,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   await runtime.locator('[data-oid="home-main"]').evaluate((root) => {
     let parent = root;
     for (let depth = 1; depth <= 35; depth += 1) {
-      // Empty divs are editable text. End on a shape to exercise container
-      // descent, without the deliberate double-click shortcut into text.
+      // Use a non-text leaf to exercise bounded container descent.
       const child = root.ownerDocument.createElement(
         depth === 35 ? "canvas" : "div",
       );

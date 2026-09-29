@@ -10,7 +10,7 @@
 
 // --- IMPORTS ---
 import React, { useCallback, useEffect, useState } from "react";
-import { Book } from "lucide-react";
+import { Book, StickyNotes } from "lucide-react";
 
 import {
   setContextGraphShared,
@@ -154,7 +154,14 @@ export const ContextSurface = React.memo(function ContextSurface({
       subtitle="The engine couldn't list this workspace's .context folder. It retries automatically on the next refresh."
     />
   ) : !data || data.items.length === 0 ? (
-    <EmptyState icon={Book} title="No context added" />
+    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center">
+      <StickyNotes
+        className="text-muted-fg size-10"
+        strokeWidth={1}
+        aria-hidden
+      />
+      <p className="text-fg2 m-0 max-w-sm text-xs">No context added</p>
+    </div>
   ) : (
     <>
       <ContextGraphCanvas

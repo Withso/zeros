@@ -95,7 +95,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
               {running ? (
                 <ZerosSpinner
                   size={14}
-                  variant="agent"
+                  variant="glass"
                   label="Agent working"
                   className="shrink-0"
                 />

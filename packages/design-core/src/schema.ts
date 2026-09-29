@@ -77,6 +77,35 @@ export const designNodeIdSchema = designIdSchema;
 /** Document-scoped target for body styles and appending top-level content.
  * This is an API identity, never an authored data-oid or a selectable layer. */
 export const DESIGN_DOCUMENT_BODY_ID = "::zeros-document-body";
+/** Frame bounds canvas metadata can store. Wider operation input is rejected
+ * by the adapter so storage never has to normalize a committed revision. */
+export const DESIGN_FRAME_MAX_SIZE = 16_384;
+export const DESIGN_FRAME_COORDINATE_LIMIT = 1_000_000;
+export const DESIGN_FRAME_MAX_LAYER = 256;
+
+export function designFrameGeometryError(geometry: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  z: number;
+}): string | null {
+  const within = (value: number, min: number, max: number) =>
+    Number.isFinite(value) && value >= min && value <= max;
+  if (
+    !within(geometry.width, 1, DESIGN_FRAME_MAX_SIZE) ||
+    !within(geometry.height, 1, DESIGN_FRAME_MAX_SIZE)
+  )
+    return "Frame size must be between 1 and 16,384 px.";
+  if (
+    !within(geometry.x, -DESIGN_FRAME_COORDINATE_LIMIT, DESIGN_FRAME_COORDINATE_LIMIT) ||
+    !within(geometry.y, -DESIGN_FRAME_COORDINATE_LIMIT, DESIGN_FRAME_COORDINATE_LIMIT)
+  )
+    return "Frame position must be within ±1,000,000 px.";
+  if (!Number.isInteger(geometry.z) || !within(geometry.z, 0, DESIGN_FRAME_MAX_LAYER))
+    return "Frame layer must be between 0 and 256.";
+  return null;
+}
 export const designDocumentIdSchema = designPortableIdSchema;
 export const designRevisionSchema = z
   .string()

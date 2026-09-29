@@ -17,7 +17,7 @@ import { isNativeRuntime } from "../../platform/runtime";
 import { subscribeContextGraphChanged } from "../../platform/context-graph";
 import { Button, Tooltip } from "../../shared/ui/primitives";
 import { DynamicIcon } from "../../shared/ui/icon-registry";
-import { RunWave } from "../../shared/ui/loading";
+import { RunStream } from "../../shared/ui/loading";
 import { cn } from "../../shared/ui/cn";
 import { useRunControl } from "../terminal/use-run-control";
 import { useRunStatuses } from "../terminal/use-run-status";
@@ -195,7 +195,7 @@ export function SummaryContents({
                   }}
                 >
                   {running && active ? (
-                    <RunWave size={16} />
+                    <RunStream size={16} />
                   ) : (
                     <DynamicIcon name={action.icon} className="size-4" />
                   )}

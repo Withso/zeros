@@ -10,7 +10,7 @@
 // at most once per session.
 // ──────────────────────────────────────────────────────────
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
 import { Bot } from "lucide-react";
 import DOMPurify from "dompurify";
 import { brandColor } from "./agent-brands";
@@ -28,6 +28,22 @@ function recolor(raw: string, color: string | null): string {
     .replace(/stroke="currentColor"/gi, `stroke="${color}"`)
     .replace(/fill:\s*currentColor/gi, `fill:${color}`)
     .replace(/stroke:\s*currentColor/gi, `stroke:${color}`);
+}
+
+/** Inlined marks share one document, so any id a mark defines (the Codex
+ *  mark's gradient) is suffixed per instance: the first definition of a
+ *  duplicated id wins, and one inside a hidden retained surface would leave
+ *  the rest unpainted. */
+function scopeSvgIds(raw: string, scope: string): string {
+  let scoped = raw;
+  for (const [, id] of raw.matchAll(/(?:^|\s)id="([^"]+)"/g)) {
+    scoped = scoped
+      .split(`id="${id}"`)
+      .join(`id="${id}-${scope}"`)
+      .split(`url(#${id})`)
+      .join(`url(#${id}-${scope})`);
+  }
+  return scoped;
 }
 
 async function fetchSvg(url: string): Promise<string> {
@@ -86,7 +102,8 @@ export function AgentIcon({
   // friction, no engine-restart dependency. The URL fetch path stays
   // as a fallback for agents we haven't vendored locally yet (e.g.
   // future additions whose mark hasn't been added to apps/desktop/src/assets/agents/).
-  const bundled = bundledAgentSvg(agentId ?? null);
+  const bundled = bundledAgentSvg(agentId ?? null, { monochrome });
+  const idScope = useId().replace(/[^\w-]/g, "");
   const [svg, setSvg] = useState<string | null>(() => {
     if (bundled) return bundled;
     return iconUrl ? (svgCache.get(iconUrl) ?? null) : null;
@@ -160,7 +177,7 @@ export function AgentIcon({
     return <span className={className} style={style} aria-hidden="true" />;
   }
 
-  const colored = recolor(svg, color);
+  const colored = scopeSvgIds(recolor(svg, color), idScope);
   return (
     <span
       className={className}

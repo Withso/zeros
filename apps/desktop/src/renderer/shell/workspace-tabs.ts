@@ -96,7 +96,7 @@ export function resolveRepoWorkspaceDestination(args: {
  * below — "there is more of this than the tab can say". */
 export const CHANGE_COUNT_OVERFLOW_LABEL = "N";
 /** A tab caps at 180px and the branch name has to survive beside the ± pair
- * (and the run wave, when both are showing), so a total gets at most two
+ * (and the run stream, when both are showing), so a total gets at most two
  * integer digits and one decimal. 99,950 already rounds to "100.0k" at that
  * precision, which is where the label takes over. */
 const CHANGE_COUNT_OVERFLOW_AT = 99_950;
@@ -128,10 +128,13 @@ export function workspaceTabDescription(args: {
   runActionRunning: boolean;
   changeLines: ChangeLineCounts;
   hasDraft?: boolean;
+  /** An agent finished in one of its chats while that chat was off screen. */
+  unread?: boolean;
 }): string {
   const { additions, deletions } = args.changeLines;
   const lines = (count: number) => `${count} line${count === 1 ? "" : "s"}`;
   const parts = [`Open workspace ${args.label}`];
+  if (args.unread) parts.push("unread");
   if (args.hasDraft) parts.push("unsent draft");
   if (args.runActionRunning) parts.push("run action running");
   if (additions > 0) parts.push(`${lines(additions)} added`);

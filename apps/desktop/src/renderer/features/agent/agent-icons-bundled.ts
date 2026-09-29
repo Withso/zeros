@@ -16,15 +16,23 @@
 // ──────────────────────────────────────────────────────────
 
 import claudeSvg from "../../../assets/agents/claude.svg?raw";
+import codexColorSvg from "../../../assets/agents/codex-color.svg?raw";
 import codexSvg from "../../../assets/agents/codex.svg?raw";
 import cursorSvg from "../../../assets/agents/cursor.svg?raw";
 import opencodeSvg from "../../../assets/agents/opencode.svg?raw";
 
 const BUNDLED_AGENT_SVG: Record<string, string> = {
   claude: claudeSvg,
-  codex: codexSvg,
+  // The Codex app mark carries its own colours (gradient, white prompt).
+  codex: codexColorSvg,
   cursor: cursorSvg,
   opencode: opencodeSvg,
+};
+
+/** Single-colour twins for marks that carry their own colours, for surfaces
+ *  that ask for monochrome. Marks drawn in currentColor need none. */
+const BUNDLED_AGENT_MONO_SVG: Record<string, string> = {
+  codex: codexSvg,
 };
 
 /** Resolve the bundled SVG body for a given agent id, or null if we
@@ -33,7 +41,12 @@ const BUNDLED_AGENT_SVG: Record<string, string> = {
  *  no flicker, no offline failure, no CSP edge cases. */
 export function bundledAgentSvg(
   agentId: string | null | undefined,
+  options: { monochrome?: boolean } = {},
 ): string | null {
   if (!agentId) return null;
+  if (options.monochrome) {
+    const mono = BUNDLED_AGENT_MONO_SVG[agentId];
+    if (mono) return mono;
+  }
   return BUNDLED_AGENT_SVG[agentId] ?? null;
 }

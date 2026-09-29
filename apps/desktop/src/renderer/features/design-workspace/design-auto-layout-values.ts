@@ -1,3 +1,4 @@
+import { DESIGN_FRAME_MAX_SIZE } from "@zeros/design-core";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import {
   borderSize,
@@ -139,11 +140,58 @@ export function designHugFrameSize(
 ): { width: number; height: number } {
   // Match the Design API's supported canvas dimension range.
   const size = (axis: DesignLayoutAxis) =>
-    Math.max(1, Math.min(16_384, Math.ceil(borderSize(node, axis))));
+    Math.max(
+      1,
+      Math.min(DESIGN_FRAME_MAX_SIZE, Math.ceil(borderSize(node, axis))),
+    );
   return {
     width: intrinsicSize(node, "x") ? size("x") : frame.width,
     height: intrinsicSize(node, "y") ? size("y") : frame.height,
   };
+}
+
+const boxEdges = (node: DesignRuntimeNodeDetails, axis: DesignLayoutAxis) =>
+  (axis === "x"
+    ? ["padding-left", "padding-right", "border-left-width", "border-right-width"]
+    : ["padding-top", "padding-bottom", "border-top-width", "border-bottom-width"]
+  ).reduce((sum, edge) => sum + (Number.parseFloat(style(node, edge)) || 0), 0);
+
+/** A Fixed canvas frame's root follows the frame viewport on each fixed axis
+ * (`100%` / `100vh`), so its border box must be the frame. A content-box root
+ * with padding or borders there subtracts them on that axis alone; the box
+ * model and the other axis stay exactly as authored. */
+export function designFrameRootFixedStyles(
+  root: DesignRuntimeNodeDetails,
+  axes: { width?: boolean; height?: boolean },
+): Styles {
+  const size = (axis: DesignLayoutAxis) => {
+    const viewport = axis === "x" ? "100%" : "100vh";
+    const edges =
+      style(root, "box-sizing") === "content-box" ? boxEdges(root, axis) : 0;
+    return edges > 0
+      ? `calc(${viewport} - ${Math.round(edges * 100) / 100}px)`
+      : viewport;
+  };
+  const styles: Styles = {};
+  if (axes.width) styles.width = size("x");
+  if (axes.height) styles.height = size("y");
+  return styles;
+}
+
+/** A manual frame resize fixes each Hug axis it changes, as in Figma; the
+ * root then follows the frame viewport like any Fixed canvas frame. Without
+ * this the next layout edit re-hugs the frame back to its content. */
+export function designFrameResizeRootStyles(
+  root: DesignRuntimeNodeDetails | null | undefined,
+  start: { w: number; h: number },
+  next: { w: number; h: number },
+): Styles | null {
+  if (!root) return null;
+  const width = next.w !== start.w && intrinsicSize(root, "x");
+  const height = next.h !== start.h && intrinsicSize(root, "y");
+  return width || height
+    ? designFrameRootFixedStyles(root, { width, height })
+    : null;
 }
 
 export function designAutoLayoutFlow(

@@ -52,6 +52,7 @@ import {
   pruneRetiredProviders,
 } from "./features/settings/migrate-legacy";
 import { AgentSessionsProvider } from "./features/agent/sessions-provider";
+import { startChatUnreadTracking } from "./features/agent/chat-unread";
 import { useAgentSessions } from "./features/agent/sessions-hooks";
 import {
   getAgentsSnapshot,
@@ -427,6 +428,13 @@ function rowToThread(r: ChatRowWire): ChatThread {
  * or teleport the active selection. Engine writes are gated until that first
  * pull settles, preventing a stale boot cache from overwriting newer rows.
  */
+/** Marks chats unread when their agent finishes off screen, for the whole
+ *  app session (chat-unread.ts). */
+function ChatUnreadTracking() {
+  useEffect(() => startChatUnreadTracking(), []);
+  return null;
+}
+
 function ChatsPersistence() {
   const chats = useChats();
   const activeChatId = useActiveChatId();
@@ -1249,6 +1257,7 @@ export function AppShellBody() {
           <PreWarmAgents />
           <ReloadOnProjectChange />
           <ChatsPersistence />
+          <ChatUnreadTracking />
           <BrowserConfirmationController />
           <ShellRouter />
         </AgentSessionsProvider>

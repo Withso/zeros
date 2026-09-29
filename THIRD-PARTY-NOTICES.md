@@ -125,9 +125,10 @@ NOTICE also records code derived from Ratatui under MIT.
 - **Marketing path:** `apps/marketing/public/agents/*.svg`
 - **Lobe Icons source:** The desktop set and the marketing Claude and Codex
   files come from `@lobehub/icons-static-svg@1.94.0`, published by
-  [Lobe Icons](https://github.com/lobehub/lobe-icons). The desktop
-  `codex.svg` uses upstream `openai.svg`; marketing uses upstream
-  `claude-color.svg` and `codex.svg`.
+  [Lobe Icons](https://github.com/lobehub/lobe-icons). The desktop and
+  marketing `codex.svg` use upstream `codex.svg`, and the desktop
+  `codex-color.svg` fills that same upstream path with the Codex app mark's
+  gradient; marketing uses upstream `claude-color.svg` for Claude.
 - **Lobe Icons license:** MIT. The exact license is preserved at
   [`third_party/lobe-icons/LICENSE`](third_party/lobe-icons/LICENSE).
 - **Cursor marketing source:** `apps/marketing/public/agents/cursor.svg` is

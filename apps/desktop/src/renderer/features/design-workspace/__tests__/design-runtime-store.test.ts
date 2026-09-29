@@ -395,4 +395,61 @@ describe("design runtime store", () => {
       designRuntimeFrameState("workspace-a", "home.html")?.snapshot?.tree,
     ).toBe(retainedTree);
   });
+
+  it("drops unrefreshed details after a layout change instead of relabeling them current", () => {
+    const store = useDesignRuntimeStore.getState();
+    const heading = details();
+    const copy = { ...details(), oid: "copy", name: "Copy" };
+    store.publishSnapshot(
+      "workspace-a",
+      "/design/a",
+      "home.html",
+      {
+        sourceVersion: SOURCE_VERSION,
+        revision: 1,
+        tree: [],
+        frame: { ...heading, oid: "" },
+        warnings: [],
+        viewport: { width: 100, height: 80, scrollX: 0, scrollY: 0 },
+      },
+      SOURCE_VERSION,
+    );
+    for (const value of [heading, copy]) {
+      store.publishNodeDetails(
+        "workspace-a",
+        "/design/a",
+        "home.html",
+        value,
+        SOURCE_VERSION,
+      );
+    }
+    // The heading's padding changed; the copy it contains moved, but only the
+    // heading was measured in the new generation.
+    const measured = {
+      ...heading,
+      sourceVersion: NEXT_SOURCE_VERSION,
+      styles: { ...heading.styles, paddingTop: "60px" },
+    };
+    store.adoptFrameGeneration(
+      "workspace-a",
+      "home.html",
+      SOURCE_VERSION,
+      NEXT_SOURCE_VERSION,
+      {
+        sourceVersion: NEXT_SOURCE_VERSION,
+        revision: 2,
+        tree: [],
+        frame: { ...measured, oid: "" },
+        warnings: [],
+        viewport: { width: 100, height: 80, scrollX: 0, scrollY: 0 },
+      },
+      [measured],
+      true,
+      { dropUnrefreshed: true },
+    );
+    const frame = designRuntimeFrameState("workspace-a", "home.html");
+    expect(frame?.detailsByNode.heading?.styles.paddingTop).toBe("60px");
+    // A stale box must be read again, never presented as new geometry.
+    expect(frame?.detailsByNode.copy).toBeUndefined();
+  });
 });

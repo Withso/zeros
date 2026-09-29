@@ -8,6 +8,7 @@ import React, {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -16,13 +17,14 @@ import {
   Box,
   ChevronDown,
   ChevronRight,
-  Clock3,
   Diamond,
+  Minus,
   Pause,
   Play,
   Plus,
   Save,
-  SlidersHorizontal,
+  Settings,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 
@@ -32,6 +34,11 @@ import type { DesignAuthoredKeyframes } from "@zeros/design-web";
 import { cn } from "../../shared/ui/cn";
 import {
   Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
   Input,
   Popover,
   PopoverContent,
@@ -66,6 +73,274 @@ import {
   type DesignMotionKeyframe,
   type DesignMotionPresetId,
 } from "./design-motion-values";
+import "./design-motion-timeline.css";
+
+const MOTION_HEIGHT_KEY = "zeros.design.motion-timeline-height";
+const MOTION_HEIGHT_VAR = "--zeros-design-motion-height";
+const MOTION_HEIGHT_DEFAULT = 240;
+const MOTION_HEIGHT_MIN = 160;
+const MOTION_HEIGHT_MAX = 480;
+
+function boundedMotionHeight(value: number, maximum = MOTION_HEIGHT_MAX) {
+  return Math.round(
+    Math.min(
+      maximum,
+      Math.max(
+        MOTION_HEIGHT_MIN,
+        Number.isFinite(value) ? value : MOTION_HEIGHT_DEFAULT,
+      ),
+    ),
+  );
+}
+
+function readMotionHeight() {
+  try {
+    const raw = window.localStorage.getItem(MOTION_HEIGHT_KEY);
+    if (raw?.trim()) return boundedMotionHeight(Number(raw));
+  } catch {
+    // Storage is best-effort; private windows keep the default height.
+  }
+  return MOTION_HEIGHT_DEFAULT;
+}
+
+const MotionTimelineResizeHandle = React.memo(
+  function MotionTimelineResizeHandle() {
+    const handleRef = useRef<HTMLDivElement>(null);
+    const rootRef = useRef<HTMLElement | null>(null);
+    const cleanupRef = useRef<(() => void) | null>(null);
+    const [height, setHeight] = useState(readMotionHeight);
+    const [maximum, setMaximum] = useState(MOTION_HEIGHT_MAX);
+    const heightRef = useRef(height);
+    const preferredHeightRef = useRef(height);
+    const maximumRef = useRef(maximum);
+
+    // The canvas and its floating toolbar share this variable. Pointer moves
+    // publish directly to the DOM; only a committed size enters React state.
+    const publish = useCallback((value: number) => {
+      const next = boundedMotionHeight(value, maximumRef.current);
+      heightRef.current = next;
+      rootRef.current?.style.setProperty(MOTION_HEIGHT_VAR, `${next}px`);
+      handleRef.current?.setAttribute("aria-valuenow", String(next));
+      handleRef.current?.setAttribute("aria-valuetext", `${next} pixels`);
+      return next;
+    }, []);
+
+    const commit = useCallback(
+      (value: number) => {
+        const next = publish(value);
+        preferredHeightRef.current = next;
+        setHeight(next);
+        try {
+          window.localStorage.setItem(MOTION_HEIGHT_KEY, String(next));
+        } catch {
+          // The current canvas still keeps its committed size if storage fails.
+        }
+        window.dispatchEvent(
+          new CustomEvent(MOTION_HEIGHT_KEY, { detail: next }),
+        );
+      },
+      [publish],
+    );
+
+    useLayoutEffect(() => {
+      const timeline = handleRef.current?.parentElement;
+      const root = timeline?.offsetParent ?? timeline?.parentElement;
+      if (!(root instanceof HTMLElement)) return;
+      rootRef.current = root;
+      const measure = () => {
+        // Retain the requested pixel size when a smaller canvas temporarily
+        // caps it. Extremely short canvases keep the 160px control surface.
+        const cap = Math.max(
+          MOTION_HEIGHT_MIN,
+          Math.min(MOTION_HEIGHT_MAX, Math.floor(root.clientHeight * 0.6)),
+        );
+        maximumRef.current = cap;
+        setMaximum(cap);
+        setHeight(publish(preferredHeightRef.current));
+      };
+      measure();
+      const observer = new ResizeObserver(measure);
+      observer.observe(root);
+      const synchronize = (event: Event) => {
+        if (cleanupRef.current) return;
+        if (
+          event instanceof StorageEvent &&
+          event.key !== MOTION_HEIGHT_KEY &&
+          event.key !== null
+        )
+          return;
+        const next =
+          event instanceof CustomEvent
+            ? boundedMotionHeight(event.detail)
+            : readMotionHeight();
+        preferredHeightRef.current = next;
+        setHeight(publish(next));
+      };
+      window.addEventListener("storage", synchronize);
+      window.addEventListener(MOTION_HEIGHT_KEY, synchronize);
+      return () => {
+        cleanupRef.current?.();
+        observer.disconnect();
+        window.removeEventListener("storage", synchronize);
+        window.removeEventListener(MOTION_HEIGHT_KEY, synchronize);
+        root.style.removeProperty(MOTION_HEIGHT_VAR);
+        rootRef.current = null;
+      };
+    }, [publish]);
+
+    return (
+      <div
+        ref={handleRef}
+        role="separator"
+        tabIndex={0}
+        aria-label="Resize motion timeline"
+        aria-orientation="horizontal"
+        aria-valuemin={MOTION_HEIGHT_MIN}
+        aria-valuemax={maximum}
+        aria-valuenow={height}
+        aria-valuetext={`${height} pixels`}
+        className="zd-motion-resize-handle"
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+          event.preventDefault();
+          event.stopPropagation();
+          const step = event.shiftKey ? 32 : 8;
+          commit(heightRef.current + (event.key === "ArrowUp" ? step : -step));
+        }}
+        onPointerDown={(event) => {
+          if (event.button !== 0 || !rootRef.current) return;
+          event.preventDefault();
+          event.stopPropagation();
+          cleanupRef.current?.();
+          const handle = event.currentTarget;
+          const root = rootRef.current;
+          const pointerId = event.pointerId;
+          const startY = event.clientY;
+          const startHeight = heightRef.current;
+          const cursor = document.body.style.cursor;
+          const userSelect = document.body.style.userSelect;
+          handle.focus({ preventScroll: true });
+          handle.setPointerCapture(pointerId);
+          root.dataset.designMotionResizing = "true";
+          document.body.style.cursor = "row-resize";
+          document.body.style.userSelect = "none";
+          const move = (next: PointerEvent) => {
+            if (next.pointerId === pointerId)
+              publish(startHeight + startY - next.clientY);
+          };
+          const cleanup = () => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", finish);
+            window.removeEventListener("pointercancel", cancel);
+            window.removeEventListener("blur", cancel);
+            if (handle.hasPointerCapture(pointerId))
+              handle.releasePointerCapture(pointerId);
+            delete root.dataset.designMotionResizing;
+            document.body.style.cursor = cursor;
+            document.body.style.userSelect = userSelect;
+            cleanupRef.current = null;
+          };
+          const finish = (next: PointerEvent) => {
+            if (next.pointerId !== pointerId) return;
+            cleanup();
+            commit(heightRef.current);
+          };
+          const cancel = () => {
+            cleanup();
+            setHeight(publish(startHeight));
+          };
+          cleanupRef.current = cleanup;
+          window.addEventListener("pointermove", move);
+          window.addEventListener("pointerup", finish);
+          window.addEventListener("pointercancel", cancel);
+          window.addEventListener("blur", cancel);
+        }}
+      />
+    );
+  },
+);
+
+const MOTION_EASINGS = [
+  { label: "Linear", value: "linear" },
+  { label: "Ease", value: "ease" },
+  { label: "Ease in", value: "ease-in" },
+  { label: "Ease out", value: "ease-out" },
+  { label: "Ease in out", value: "ease-in-out" },
+  { label: "Spring-ish", value: "cubic-bezier(0.34, 1.56, 0.64, 1)" },
+  { label: "Smooth", value: "cubic-bezier(0.22, 1, 0.36, 1)" },
+  { label: "Steps", value: "steps(4, end)" },
+];
+
+function MotionEasingField({
+  value,
+  disabled,
+  compact,
+  onChange,
+}: {
+  value: string;
+  disabled: boolean;
+  compact: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const preset = MOTION_EASINGS.find(
+    (easing) =>
+      easing.value.replace(/\s/g, "") ===
+      value.replace(/\s/g, "").toLowerCase(),
+  );
+  return (
+    <span className="zd-field zd-motion-easing-field">
+      {!compact ? (
+        <span className="zd-field-label zd-motion-control-label">Easing</span>
+      ) : null}
+      <Input
+        value={editing ? value : (preset?.label ?? value)}
+        aria-label="Animation easing"
+        aria-invalid={!designMotionEasingIsValid(value)}
+        className="px-2"
+        disabled={disabled}
+        onBlur={() => setEditing(false)}
+        onChange={(event) => {
+          setEditing(true);
+          onChange(event.currentTarget.value);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+        }}
+      />
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="zd-icon-button zd-motion-easing-trigger"
+            aria-label="Choose easing curve"
+            disabled={disabled}
+          >
+            <ChevronDown />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          side="top"
+          className="zd-motion-easing-menu"
+        >
+          <DropdownMenuRadioGroup
+            value={preset?.value ?? value}
+            onValueChange={onChange}
+          >
+            {MOTION_EASINGS.map((easing) => (
+              <DropdownMenuRadioItem key={easing.value} value={easing.value}>
+                {easing.label}
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </span>
+  );
+}
 
 export interface DesignMotionTimelineDraft {
   file: string;
@@ -151,6 +426,7 @@ function MotionTimeField({
   duration,
   className,
   disabled,
+  suffix,
   onOffsetChange,
 }: {
   label: string;
@@ -158,6 +434,7 @@ function MotionTimeField({
   duration: number;
   className?: string;
   disabled?: boolean;
+  suffix?: string;
   onOffsetChange: (offset: number) => void;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -182,31 +459,34 @@ function MotionTimeField({
   };
 
   return (
-    <Input
-      ref={inputRef}
-      type="number"
-      min={0}
-      max={duration}
-      step={1}
-      value={draft}
-      aria-label={label}
-      className={className}
-      disabled={disabled}
-      onFocus={() => setDraft(String(time))}
-      onChange={(event) => setDraft(event.currentTarget.value)}
-      onBlur={commit}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          event.currentTarget.blur();
-        } else if (event.key === "Escape") {
-          event.preventDefault();
-          cancelRef.current = true;
-          setDraft(String(time));
-          event.currentTarget.blur();
-        }
-      }}
-    />
+    <span className={cn("zd-field zd-motion-time-field", className)}>
+      <Input
+        ref={inputRef}
+        type="number"
+        min={0}
+        max={duration}
+        step={1}
+        value={draft}
+        aria-label={label}
+        className="px-2 text-right"
+        disabled={disabled}
+        onFocus={() => setDraft(String(time))}
+        onChange={(event) => setDraft(event.currentTarget.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            event.currentTarget.blur();
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            cancelRef.current = true;
+            setDraft(String(time));
+            event.currentTarget.blur();
+          }
+        }}
+      />
+      {suffix ? <span className="zd-field-suffix">{suffix}</span> : null}
+    </span>
   );
 }
 
@@ -495,7 +775,21 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   onPlayheadChange,
 }: DesignMotionTimelineProps) {
   const motionPropertiesListId = useId();
-  const motionEasingsListId = useId();
+  const timelineRef = useRef<HTMLElement | null>(null);
+  const [compactTiming, setCompactTiming] = useState(false);
+  useLayoutEffect(() => {
+    const timeline = timelineRef.current;
+    if (!open || !timeline) return;
+    // The settings surface is portaled, so mirror the timeline's container
+    // breakpoint there. Container queries handle the header before this read.
+    const update = (width: number) => setCompactTiming(width <= 720);
+    update(timeline.getBoundingClientRect().width);
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) update(entry.contentRect.width);
+    });
+    observer.observe(timeline);
+    return () => observer.disconnect();
+  }, [open]);
   const detailsOwner = details?.oid ?? "";
   const motionOwner = `${ownerKey}\u0000${detailsOwner}`;
   const definitionsSignature = useMemo(
@@ -530,8 +824,9 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     cachedSession?.layerExpanded ?? true,
   );
   const [propertyDraft, setPropertyDraft] = useState(
-    cachedSession?.propertyDraft ?? "opacity",
+    cachedSession?.propertyDraft ?? "",
   );
+  const [propertyInvalid, setPropertyInvalid] = useState(false);
   const [dirty, setDirty] = useState(cachedSession !== null);
   const [persistedMotion, setPersistedMotion] = useState(
     () =>
@@ -813,7 +1108,6 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         propertyRequest.value,
       ),
     }));
-    setPropertyDraft(property);
     setPlayhead(offset);
     setSelectedPoint({ property, offset });
     setSelectedProperty(property);
@@ -840,9 +1134,10 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     if (!details || !draft) return;
     const property = propertyDraft.trim().toLowerCase();
     if (!/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property)) {
-      toast.error("Enter a valid CSS property.");
+      setPropertyInvalid(true);
       return;
     }
+    setPropertyInvalid(false);
     mutateDraft((current) => ({
       ...current,
       keyframes: setDesignMotionPoint(
@@ -859,6 +1154,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     }));
     setSelectedPoint({ property, offset: 0 });
     setSelectedProperty(property);
+    setPropertyDraft("");
   }, [details, draft, mutateDraft, propertyDraft]);
 
   const addPoint = useCallback(
@@ -1071,9 +1367,6 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       motionDraftCache.delete(sessionOwnerKey);
       setDirty(false);
       setPersistedMotion(true);
-      toast.success("Motion saved", {
-        description: `${draft.name} · ${draft.keyframes.length} keyframes`,
-      });
     } catch (error) {
       toast.error("Couldn't save the motion", {
         description:
@@ -1101,7 +1394,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       setPresetId(null);
       setDirty(false);
       setPersistedMotion(false);
-      toast.success(persistedMotion ? "Motion removed" : "Motion cleared");
+      setPropertyDraft("");
     } catch (error) {
       toast.error("Couldn't remove the motion", {
         description:
@@ -1127,26 +1420,29 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   if (!details || !draft) {
     return (
       <section
+        ref={timelineRef}
         data-design-controls
-        className="border-border1 bg-bg1 absolute inset-x-0 bottom-0 z-40 flex h-52 flex-col border-t shadow-lg"
+        className="zd-motion-timeline border-border1 bg-bg1 absolute inset-x-0 bottom-0 z-40 flex min-w-0 flex-col border-t shadow-lg"
         aria-label="Motion timeline"
+        onPointerDown={(event) => event.stopPropagation()}
       >
-        <div className="flex h-10 items-center gap-2 px-3">
-          <Diamond className="text-highlighted-bright size-3.5" />
+        <MotionTimelineResizeHandle />
+        <div className="zd-motion-header">
+          <Diamond className="zd-motion-accent size-3.5 fill-current" />
           <span className="text-fg1 text-xs font-medium">Motion</span>
-          <span className="text-muted-fg text-[11px]">
-            Select an element to animate.
-          </span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="ml-auto"
-            aria-label="Close motion timeline"
-            onClick={() => onOpenChange(false)}
-          >
-            <ChevronDown />
-          </Button>
+          <Tooltip label="Close motion timeline">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="zd-icon-button ml-auto"
+              data-size="row"
+              aria-label="Close motion timeline"
+              onClick={() => onOpenChange(false)}
+            >
+              <ChevronDown />
+            </Button>
+          </Tooltip>
         </div>
       </section>
     );
@@ -1160,38 +1456,87 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       )?.value
     : null;
   const draftIssue = motionDraftIssue(draft);
+  const durationUnit = /ms$/i.test(draft.duration)
+    ? "ms"
+    : /s$/i.test(draft.duration)
+      ? "s"
+      : "ms";
+  const durationField = (
+    <span className="zd-field zd-motion-duration-field">
+      <Input
+        value={draft.duration.replace(/(?:ms|s)$/i, "")}
+        aria-label="Animation duration"
+        aria-invalid={designDurationMs(draft.duration, 0) <= 0}
+        className="px-2"
+        disabled={disabled}
+        onChange={(event) => {
+          const value = event.currentTarget.value;
+          const duration = /^-?(?:\d*(?:\.\d*)?)$/.test(value)
+            ? `${value}${durationUnit}`
+            : value;
+          mutateDraft((current) => ({ ...current, duration }));
+        }}
+      />
+      <span className="zd-field-suffix">{durationUnit}</span>
+    </span>
+  );
+  const easingField = (
+    <MotionEasingField
+      value={draft.easing}
+      compact={compactTiming}
+      disabled={disabled}
+      onChange={(easing) => mutateDraft((current) => ({ ...current, easing }))}
+    />
+  );
+  const laneGuides = (
+    <>
+      {rulerMarks.map((mark) => (
+        <span
+          key={mark.time}
+          className="zd-motion-grid-line"
+          style={{ left: `${mark.offset}%` }}
+        />
+      ))}
+      <span className="zd-motion-playhead" style={{ left: `${playhead}%` }} />
+    </>
+  );
 
   return (
     <section
+      ref={timelineRef}
       data-design-controls
-      className="zd-design-motion-timeline border-border1 bg-bg1 absolute inset-x-0 bottom-0 z-40 flex h-80 min-w-0 flex-col border-t shadow-lg"
+      className="zd-motion-timeline border-border1 bg-bg1 absolute inset-x-0 bottom-0 z-40 flex min-w-0 flex-col border-t shadow-lg"
       aria-label="Motion timeline"
+      onPointerDown={(event) => event.stopPropagation()}
     >
-      <div className="zd-design-motion-header border-border1 flex h-10 shrink-0 items-center gap-1 border-b px-3">
-        <span className="zd-design-motion-accent mr-1 flex size-5 items-center justify-center rounded-sm">
-          <Diamond className="size-3 fill-current" />
-        </span>
-        <span className="text-fg1 text-xs font-semibold">Motion</span>
-        {dirty ? (
-          <span
-            className="bg-highlighted-bright size-1.5 shrink-0 rounded-full"
-            aria-label="Unsaved motion changes"
-            title="Unsaved motion changes"
-          />
-        ) : null}
-        <span className="zd-design-motion-owner bg-bg2 text-fg2 ml-1 max-w-44 truncate rounded px-1.5 py-0.5 text-[10px]">
-          {details.name}
-        </span>
-        <span className="zd-design-motion-owner text-muted-fg font-mono text-[9px] uppercase">
-          {details.tag}
-        </span>
-        <div className="border-border1 ml-2 flex items-center gap-0.5 border-l pl-2">
+      <MotionTimelineResizeHandle />
+      <div className="zd-motion-header">
+        <div className="zd-motion-heading">
+          <Diamond className="zd-motion-accent size-3.5 shrink-0 fill-current" />
+          <span className="zd-motion-title text-fg1 text-xs font-medium">
+            Motion
+          </span>
+          {dirty ? (
+            <Tooltip label="Unsaved motion changes">
+              <span
+                className="zd-motion-unsaved"
+                aria-label="Unsaved motion changes"
+              />
+            </Tooltip>
+          ) : null}
+          <Tooltip label={details.name}>
+            <span className="zd-motion-owner">{details.name}</span>
+          </Tooltip>
+        </div>
+        <div className="zd-motion-transport">
           <Tooltip label={playing ? "Pause preview" : "Play preview"}>
             <Button
               type="button"
-              variant={playing ? "secondary-on" : "ghost"}
+              variant="ghost"
               size="icon-sm"
-              className={playing ? "zd-design-state-active" : undefined}
+              className="zd-icon-button zd-motion-play"
+              data-size="row"
+              aria-pressed={playing}
               aria-label={
                 playing ? "Pause motion preview" : "Play motion preview"
               }
@@ -1210,25 +1555,200 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
               {playing ? <Pause /> : <Play />}
             </Button>
           </Tooltip>
-          <Clock3 className="text-muted-fg ml-1 size-3" />
           <MotionTimeField
             label="Motion current time"
             time={designMotionTimeAtOffset(playhead, durationMs)}
             duration={durationMs}
-            className="zd-design-control-quiet h-6 w-16 shrink-0 text-right font-mono text-[10px]"
             disabled={disabled}
             onOffsetChange={(offset) => {
               setPlaying(false);
               setPlayhead(offset);
             }}
           />
-          <span className="text-muted-fg shrink-0 font-mono text-[9px]">
-            ms / {durationMs}ms
-          </span>
+          <span className="zd-motion-total">/ {durationMs} ms</span>
         </div>
-        <span className="zd-design-motion-hint text-muted-fg ml-auto shrink-0 text-[9px]">
-          Inspector diamonds add keys at the playhead
-        </span>
+        <Select
+          value={presetId ?? ""}
+          disabled={disabled}
+          onValueChange={applyPreset}
+        >
+          <Tooltip label="Motion preset">
+            <SelectTrigger
+              size="sm"
+              className="zd-field zd-motion-preset"
+              aria-label="Motion preset"
+            >
+              <Sparkles className="zd-motion-preset-icon size-3.5" />
+              <span className="zd-motion-preset-label">
+                <SelectValue placeholder="Preset" />
+              </span>
+            </SelectTrigger>
+          </Tooltip>
+          <SelectContent>
+            {MOTION_PRESETS.map((preset) => (
+              <SelectItem key={preset.id} value={preset.id}>
+                {preset.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <div className="zd-motion-header-timing">
+          {!compactTiming ? (
+            <>
+              {easingField}
+              {durationField}
+            </>
+          ) : null}
+        </div>
+        <Popover>
+          <Tooltip label="More motion settings">
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="zd-icon-button"
+                data-size="row"
+                aria-label="More motion settings"
+                disabled={disabled}
+              >
+                <Settings />
+              </Button>
+            </PopoverTrigger>
+          </Tooltip>
+          <PopoverContent
+            data-design-motion-settings
+            align="end"
+            side="top"
+            sideOffset={8}
+            className="zd-popover zd-motion-settings-popover"
+          >
+            <div className="zd-popover-header">
+              <span className="zd-popover-title">Motion settings</span>
+            </div>
+            <label className="zd-motion-setting">
+              <span className="zd-row-label">Name</span>
+              <Input
+                value={draft.name}
+                aria-label="Animation name"
+                aria-invalid={
+                  !/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(draft.name)
+                }
+                className="zd-field px-2"
+                disabled={disabled}
+                onChange={(event) => {
+                  const name = event.currentTarget.value;
+                  mutateDraft((current) => ({ ...current, name }));
+                }}
+              />
+            </label>
+            {compactTiming ? (
+              <>
+                <label className="zd-motion-setting">
+                  <span className="zd-row-label">Easing</span>
+                  {easingField}
+                </label>
+                <label className="zd-motion-setting">
+                  <span className="zd-row-label">Duration</span>
+                  {durationField}
+                </label>
+              </>
+            ) : null}
+            <label className="zd-motion-setting">
+              <span className="zd-row-label">Delay</span>
+              <Input
+                value={draft.delay}
+                aria-label="Animation delay"
+                aria-invalid={
+                  !/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:ms|s)$/i.test(
+                    draft.delay.trim(),
+                  )
+                }
+                className="zd-field px-2"
+                disabled={disabled}
+                onChange={(event) => {
+                  const delay = event.currentTarget.value;
+                  mutateDraft((current) => ({ ...current, delay }));
+                }}
+              />
+            </label>
+            <label className="zd-motion-setting">
+              <span className="zd-row-label">Loop</span>
+              <Input
+                value={draft.iterations}
+                aria-label="Animation iterations"
+                aria-invalid={
+                  designMotionIterationCount(draft.iterations) === null ||
+                  (designMotionIterationCount(draft.iterations) ?? 0) <= 0
+                }
+                className="zd-field px-2"
+                disabled={disabled}
+                onChange={(event) => {
+                  const iterations = event.currentTarget.value;
+                  mutateDraft((current) => ({ ...current, iterations }));
+                }}
+              />
+            </label>
+            <label className="zd-motion-setting">
+              <span className="zd-row-label">Direction</span>
+              <Select
+                value={draft.direction}
+                disabled={disabled}
+                onValueChange={(direction) =>
+                  mutateDraft((current) => ({
+                    ...current,
+                    direction: designMotionDirection(direction),
+                  }))
+                }
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="zd-field w-full"
+                  aria-label="Animation direction"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {["normal", "reverse", "alternate", "alternate-reverse"].map(
+                    (direction) => (
+                      <SelectItem key={direction} value={direction}>
+                        {direction}
+                      </SelectItem>
+                    ),
+                  )}
+                </SelectContent>
+              </Select>
+            </label>
+            <label className="zd-motion-setting">
+              <span className="zd-row-label">Fill</span>
+              <Select
+                value={draft.fillMode}
+                disabled={disabled}
+                onValueChange={(fillMode) =>
+                  mutateDraft((current) => ({
+                    ...current,
+                    fillMode: designMotionFill(fillMode),
+                  }))
+                }
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="zd-field w-full"
+                  aria-label="Animation fill mode"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {["none", "forwards", "backwards", "both"].map((fill) => (
+                    <SelectItem key={fill} value={fill}>
+                      {fill}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+          </PopoverContent>
+        </Popover>
         {persistedMotion || draft.keyframes.length > 0 ? (
           <Tooltip
             label={persistedMotion ? "Delete motion" : "Clear motion draft"}
@@ -1237,6 +1757,8 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
               type="button"
               variant="ghost"
               size="icon-sm"
+              className="zd-icon-button"
+              data-size="row"
               aria-label={
                 persistedMotion ? "Delete motion" : "Clear motion draft"
               }
@@ -1248,569 +1770,386 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
           </Tooltip>
         ) : null}
         <Tooltip
-          label={dirty ? (draftIssue ?? "Save keyframes") : "Motion is saved"}
+          label={draftIssue ?? (dirty ? "Save keyframes" : "Motion is saved")}
         >
-          <Button
-            type="button"
-            variant={dirty ? "default" : "ghost"}
-            size="sm"
-            disabled={disabled || saving || !dirty || draftIssue !== null}
-            onClick={() => void save()}
-          >
-            <Save />
-            <span className="zd-design-motion-save-label">
-              {saving ? "Saving…" : "Save"}
-            </span>
-          </Button>
-        </Tooltip>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Close motion timeline"
-          onClick={() => onOpenChange(false)}
-        >
-          <ChevronDown />
-        </Button>
-      </div>
-
-      <div className="zd-design-motion-settings border-border1 flex h-9 min-w-0 shrink-0 items-center gap-1.5 border-b px-3">
-        <span className="zd-design-motion-setting-label text-muted-fg text-[9px] uppercase">
-          Preset
-        </span>
-        <Select
-          value={presetId ?? ""}
-          disabled={disabled}
-          onValueChange={applyPreset}
-        >
-          <SelectTrigger
-            size="sm"
-            className="zd-design-control-quiet h-6 w-24 shrink-0 text-[10px]"
-            aria-label="Motion preset"
-          >
-            <SelectValue placeholder="Custom" />
-          </SelectTrigger>
-          <SelectContent>
-            {MOTION_PRESETS.map((preset) => (
-              <SelectItem key={preset.id} value={preset.id}>
-                {preset.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <span className="bg-border1 mx-0.5 h-4 w-px shrink-0" />
-        <span className="zd-design-motion-setting-label text-muted-fg text-[9px] uppercase">
-          Duration
-        </span>
-        <Input
-          value={draft.duration}
-          aria-label="Animation duration"
-          aria-invalid={designDurationMs(draft.duration, 0) <= 0}
-          className="zd-design-control-applied h-6 w-16 shrink-0 font-mono text-[10px]"
-          disabled={disabled}
-          onChange={(event) => {
-            const duration = event.currentTarget.value;
-            mutateDraft((current) => ({ ...current, duration }));
-          }}
-        />
-        <span className="zd-design-motion-setting-label text-muted-fg text-[9px] uppercase">
-          Ease
-        </span>
-        <Input
-          list={motionEasingsListId}
-          value={draft.easing}
-          aria-label="Animation easing"
-          aria-invalid={!designMotionEasingIsValid(draft.easing)}
-          className="zd-design-control-applied h-6 min-w-24 flex-1 font-mono text-[10px]"
-          disabled={disabled}
-          onChange={(event) => {
-            const easing = event.currentTarget.value;
-            mutateDraft((current) => ({ ...current, easing }));
-          }}
-        />
-        <datalist id={motionEasingsListId}>
-          <option value="linear" />
-          <option value="ease" />
-          <option value="ease-in" />
-          <option value="ease-out" />
-          <option value="ease-in-out" />
-          <option value="cubic-bezier(0.22, 1, 0.36, 1)" />
-          <option value="cubic-bezier(0.34, 1.56, 0.64, 1)" />
-          <option value="steps(4, end)" />
-        </datalist>
-        <Popover>
-          <PopoverTrigger asChild>
+          <span className="zd-motion-save-target">
             <Button
               type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="shrink-0"
-              aria-label="More motion settings"
-              disabled={disabled}
+              variant={dirty ? "default" : "ghost"}
+              size="sm"
+              className="zd-motion-save"
+              aria-label={saving ? "Saving…" : "Save"}
+              disabled={disabled || saving || !dirty || draftIssue !== null}
+              onClick={() => void save()}
             >
-              <SlidersHorizontal />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent
-            data-design-motion-settings
-            align="end"
-            sideOffset={6}
-            className="w-72 p-3"
-          >
-            <div className="flex flex-col gap-3">
-              <div className="flex flex-col gap-0.5">
-                <span className="text-fg1 text-xs font-medium">
-                  Motion settings
-                </span>
-                <span className="text-muted-fg text-[10px]">
-                  Naming, delay, looping, and playback behavior
-                </span>
-              </div>
-              <label className="flex flex-col gap-1">
-                <span className="text-muted-fg text-[10px]">Name</span>
-                <Input
-                  value={draft.name}
-                  aria-label="Animation name"
-                  aria-invalid={
-                    !/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(draft.name)
-                  }
-                  className="zd-design-control-applied h-7 font-mono text-[10px]"
-                  disabled={disabled}
-                  onChange={(event) => {
-                    const name = event.currentTarget.value;
-                    mutateDraft((current) => ({ ...current, name }));
-                  }}
-                />
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                <label className="flex min-w-0 flex-col gap-1">
-                  <span className="text-muted-fg text-[10px]">Delay</span>
-                  <Input
-                    value={draft.delay}
-                    aria-label="Animation delay"
-                    aria-invalid={
-                      !/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:ms|s)$/i.test(
-                        draft.delay.trim(),
-                      )
-                    }
-                    className="zd-design-control-applied h-7 font-mono text-[10px]"
-                    disabled={disabled}
-                    onChange={(event) => {
-                      const delay = event.currentTarget.value;
-                      mutateDraft((current) => ({ ...current, delay }));
-                    }}
-                  />
-                </label>
-                <label className="flex min-w-0 flex-col gap-1">
-                  <span className="text-muted-fg text-[10px]">Loop</span>
-                  <Input
-                    value={draft.iterations}
-                    aria-label="Animation iterations"
-                    aria-invalid={
-                      designMotionIterationCount(draft.iterations) === null ||
-                      (designMotionIterationCount(draft.iterations) ?? 0) <= 0
-                    }
-                    className="zd-design-control-applied h-7 font-mono text-[10px]"
-                    disabled={disabled}
-                    onChange={(event) => {
-                      const iterations = event.currentTarget.value;
-                      mutateDraft((current) => ({ ...current, iterations }));
-                    }}
-                  />
-                </label>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <label className="flex min-w-0 flex-col gap-1">
-                  <span className="text-muted-fg text-[10px]">Direction</span>
-                  <Select
-                    value={draft.direction}
-                    disabled={disabled}
-                    onValueChange={(direction) =>
-                      mutateDraft((current) => ({
-                        ...current,
-                        direction: designMotionDirection(direction),
-                      }))
-                    }
-                  >
-                    <SelectTrigger
-                      size="sm"
-                      className="zd-design-control-applied h-7 w-full text-[10px]"
-                      aria-label="Animation direction"
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {[
-                        "normal",
-                        "reverse",
-                        "alternate",
-                        "alternate-reverse",
-                      ].map((direction) => (
-                        <SelectItem key={direction} value={direction}>
-                          {direction}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </label>
-                <label className="flex min-w-0 flex-col gap-1">
-                  <span className="text-muted-fg text-[10px]">Fill</span>
-                  <Select
-                    value={draft.fillMode}
-                    disabled={disabled}
-                    onValueChange={(fillMode) =>
-                      mutateDraft((current) => ({
-                        ...current,
-                        fillMode: designMotionFill(fillMode),
-                      }))
-                    }
-                  >
-                    <SelectTrigger
-                      size="sm"
-                      className="zd-design-control-applied h-7 w-full text-[10px]"
-                      aria-label="Animation fill mode"
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {["none", "forwards", "backwards", "both"].map((fill) => (
-                        <SelectItem key={fill} value={fill}>
-                          {fill}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </label>
-              </div>
-              <span className="text-muted-fg truncate font-mono text-[9px]">
-                {draft.file}
+              <Save />
+              <span className="zd-motion-save-label">
+                {saving ? "Saving…" : "Save"}
               </span>
-            </div>
-          </PopoverContent>
-        </Popover>
-      </div>
-
-      <div className="zd-design-motion-grid border-border1 grid h-7 shrink-0 border-b">
-        <div className="border-border1 flex items-center gap-1 border-r px-2">
-          <Input
-            list={motionPropertiesListId}
-            value={propertyDraft}
-            aria-label="Motion property"
-            className="zd-design-control-quiet h-6 min-w-0 flex-1 font-mono text-[10px]"
-            onChange={(event) => setPropertyDraft(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                addProperty();
-              }
-            }}
-          />
-          <datalist id={motionPropertiesListId}>
-            {MOTION_PROPERTY_OPTIONS.map((property) => (
-              <option key={property} value={property} />
-            ))}
-          </datalist>
+            </Button>
+          </span>
+        </Tooltip>
+        <Tooltip label="Close motion timeline">
           <Button
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label="Add animated property"
-            disabled={disabled}
-            onClick={addProperty}
+            className="zd-icon-button"
+            data-size="row"
+            aria-label="Close motion timeline"
+            onClick={() => onOpenChange(false)}
           >
-            <Plus />
+            <ChevronDown />
           </Button>
-        </div>
+        </Tooltip>
+      </div>
+
+      <div className="zd-motion-scroll">
         <div
-          className="relative cursor-ew-resize"
-          aria-label="Motion time ruler"
-          onPointerDown={startTimelineScrub}
+          className="zd-motion-grid"
+          style={
+            {
+              "--motion-rows": `28px 32px ${layerExpanded && properties.length ? `repeat(${properties.length}, 28px)` : ""} minmax(0, 1fr)`,
+            } as React.CSSProperties
+          }
         >
-          {rulerMarks.map((mark) => (
-            <span
-              key={mark.time}
-              className={cn(
-                "text-muted-fg pointer-events-none absolute top-1/2 -translate-y-1/2 font-mono text-[9px]",
-                mark.offset === 0
-                  ? "translate-x-0"
-                  : mark.offset === 100
-                    ? "-translate-x-full"
-                    : "-translate-x-1/2",
-              )}
-              style={{ left: `${mark.offset}%` }}
-            >
-              {mark.time}ms
-            </span>
-          ))}
-          <span
-            className="zd-design-motion-playhead pointer-events-none absolute inset-y-0 z-20 w-px"
-            style={{ left: `${playhead}%` }}
-          >
-            <span className="absolute top-0 left-1/2 size-1.5 -translate-x-1/2 rotate-45" />
-          </span>
-        </div>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-auto">
-        <div className="zd-design-motion-grid grid h-8">
-          <div className="border-border1 flex min-w-0 items-center gap-1 border-r px-1.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="size-5 shrink-0"
-              aria-label={
-                layerExpanded ? "Collapse motion layer" : "Expand motion layer"
-              }
-              aria-expanded={layerExpanded}
-              onClick={() => setLayerExpanded((current) => !current)}
-            >
-              {layerExpanded ? <ChevronDown /> : <ChevronRight />}
-            </Button>
-            <Box className="text-muted-fg size-3 shrink-0" />
-            <span className="text-fg1 min-w-0 flex-1 truncate text-[10px] font-medium">
-              {details.name}
-            </span>
-            <span className="text-muted-fg font-mono text-[9px]">
-              {properties.length}
-            </span>
-          </div>
-          <div
-            className="relative cursor-ew-resize"
-            data-motion-track
-            onPointerDown={startTimelineScrub}
-          >
-            {rulerMarks.map((mark) => (
-              <span
-                key={mark.time}
-                className="bg-border1 pointer-events-none absolute inset-y-0 w-px opacity-50"
-                style={{ left: `${mark.offset}%` }}
-              />
-            ))}
-            <span className="zd-design-motion-range pointer-events-none absolute top-1/2 right-1.5 left-1.5 h-3 -translate-y-1/2 rounded-sm border">
-              <span className="absolute inset-y-0 left-0 w-1 rounded-l-sm" />
-              <span className="absolute inset-y-0 right-0 w-1 rounded-r-sm" />
-            </span>
-            <span
-              className="zd-design-motion-playhead pointer-events-none absolute inset-y-0 z-20 w-px"
-              style={{ left: `${playhead}%` }}
-            />
-          </div>
-        </div>
-        {layerExpanded
-          ? properties.map((property) => {
-              const propertyPoints = points.filter(
-                (point) => point.property === property,
-              );
-              const propertySelected = selectedProperty === property;
-              return (
-                <div
-                  key={property}
-                  data-design-motion-track-row=""
-                  data-selected={propertySelected ? "true" : undefined}
-                  className={cn(
-                    "zd-design-motion-grid group/track grid h-8",
-                    propertySelected && "zd-design-motion-track-selected",
-                  )}
+          <div className="zd-motion-ruler-row">
+            <div className="zd-motion-property-control">
+              <Tooltip
+                label={
+                  propertyInvalid
+                    ? "Enter a valid CSS property."
+                    : "Add property"
+                }
+              >
+                <Input
+                  list={motionPropertiesListId}
+                  value={propertyDraft}
+                  placeholder="Add property"
+                  aria-label="Motion property"
+                  aria-invalid={propertyInvalid}
+                  className="zd-field px-2"
+                  disabled={disabled}
+                  onChange={(event) => {
+                    setPropertyDraft(event.currentTarget.value);
+                    setPropertyInvalid(false);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addProperty();
+                    }
+                  }}
+                />
+              </Tooltip>
+              <datalist id={motionPropertiesListId}>
+                {MOTION_PROPERTY_OPTIONS.map((property) => (
+                  <option key={property} value={property} />
+                ))}
+              </datalist>
+              <Tooltip label="Add animated property">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="zd-icon-button"
+                  data-size="row"
+                  aria-label="Add animated property"
+                  disabled={disabled || !propertyDraft.trim()}
+                  onClick={addProperty}
                 >
-                  <div
-                    className="border-border1 group flex min-w-0 items-center border-r pr-1 pl-8"
-                    onClick={() => setSelectedProperty(property)}
+                  <Plus />
+                </Button>
+              </Tooltip>
+            </div>
+            <div className="zd-motion-lane-cell">
+              <div
+                className="zd-motion-lane zd-motion-ruler"
+                aria-label="Motion time ruler"
+                onPointerDown={startTimelineScrub}
+              >
+                {rulerMarks.map((mark) => (
+                  <span
+                    key={mark.time}
+                    className="zd-motion-ruler-mark"
+                    data-edge={
+                      mark.offset === 0
+                        ? "start"
+                        : mark.offset === 100
+                          ? "end"
+                          : undefined
+                    }
+                    style={{ left: `${mark.offset}%` }}
                   >
-                    <Diamond
-                      className={cn(
-                        "mr-1 size-2.5 shrink-0",
-                        propertySelected
-                          ? "zd-design-motion-keyframe-icon fill-current"
-                          : "text-muted-fg",
-                      )}
-                    />
-                    <span className="text-fg2 min-w-0 flex-1 truncate font-mono text-[10px]">
-                      {property}
-                    </span>
-                    <span className="text-muted-fg mr-0.5 font-mono text-[8px]">
-                      {propertyPoints.length}
-                    </span>
-                    <Tooltip
-                      label={`Add ${property} keyframe at ${designMotionTimeAtOffset(playhead, durationMs)}ms`}
+                    {mark.time}
+                    {mark.offset === 100 ? " ms" : ""}
+                  </span>
+                ))}
+                <span
+                  className="zd-motion-playhead"
+                  style={{ left: `${playhead}%` }}
+                >
+                  <span className="zd-motion-playhead-handle" />
+                </span>
+              </div>
+            </div>
+          </div>
+          <div className="zd-motion-layer-row">
+            <div className="zd-motion-layer-name">
+              <Tooltip
+                label={
+                  layerExpanded
+                    ? "Collapse motion layer"
+                    : "Expand motion layer"
+                }
+              >
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="zd-icon-button"
+                  aria-label={
+                    layerExpanded
+                      ? "Collapse motion layer"
+                      : "Expand motion layer"
+                  }
+                  aria-expanded={layerExpanded}
+                  onClick={() => setLayerExpanded((current) => !current)}
+                >
+                  {layerExpanded ? <ChevronDown /> : <ChevronRight />}
+                </Button>
+              </Tooltip>
+              <Box className="text-fg2 size-3.5 shrink-0" />
+              <span className="text-fg1 min-w-0 flex-1 truncate text-xs">
+                {details.name}
+              </span>
+              <span className="text-muted-fg text-3xxs tabular-nums">
+                {properties.length}
+              </span>
+            </div>
+            <div className="zd-motion-lane-cell">
+              <div
+                className="zd-motion-lane"
+                data-motion-track
+                onPointerDown={startTimelineScrub}
+              >
+                {laneGuides}
+                <span className="zd-motion-clip" />
+              </div>
+            </div>
+          </div>
+          {layerExpanded
+            ? properties.map((property) => {
+                const propertyPoints = points.filter(
+                  (point) => point.property === property,
+                );
+                const propertySelected = selectedProperty === property;
+                const firstOffset = propertyPoints[0]?.offset ?? 0;
+                const lastOffset = propertyPoints.at(-1)?.offset ?? firstOffset;
+                return (
+                  <div
+                    key={property}
+                    data-design-motion-track-row=""
+                    data-selected={propertySelected ? "true" : undefined}
+                    className="zd-motion-property-row"
+                  >
+                    <div
+                      className="zd-motion-property-name"
+                      aria-invalid={dirty && propertyPoints.length < 2}
+                      onClick={() => setSelectedProperty(property)}
                     >
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                        aria-label={`Add ${property} keyframe`}
-                        disabled={disabled}
-                        onClick={() => addPoint(property)}
+                      <Tooltip label={property}>
+                        <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
+                          {property}
+                        </span>
+                      </Tooltip>
+                      <div className="zd-motion-track-actions">
+                        <Tooltip
+                          label={`Add ${property} keyframe at ${designMotionTimeAtOffset(playhead, durationMs)}ms`}
+                        >
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="zd-icon-button"
+                            aria-label={`Add ${property} keyframe`}
+                            disabled={disabled}
+                            onClick={() => addPoint(property)}
+                          >
+                            <Diamond />
+                          </Button>
+                        </Tooltip>
+                        <Tooltip label={`Remove ${property} track`}>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="zd-icon-button"
+                            aria-label={`Remove ${property} track`}
+                            disabled={disabled}
+                            onClick={() => removeProperty(property)}
+                          >
+                            <Minus />
+                          </Button>
+                        </Tooltip>
+                      </div>
+                    </div>
+                    <div className="zd-motion-lane-cell">
+                      <div
+                        data-motion-track
+                        className="zd-motion-lane zd-motion-property-lane"
+                        onPointerDown={(event) => {
+                          if (event.target !== event.currentTarget) return;
+                          setSelectedProperty(property);
+                          startTimelineScrub(event);
+                        }}
+                        onDoubleClick={(event) => {
+                          if (event.target !== event.currentTarget) return;
+                          addPoint(property);
+                        }}
                       >
-                        <Diamond />
-                      </Button>
-                    </Tooltip>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                      aria-label={`Remove ${property} track`}
-                      disabled={disabled}
-                      onClick={() => removeProperty(property)}
-                    >
-                      <Trash2 />
-                    </Button>
-                  </div>
-                  <div
-                    data-motion-track
-                    className="hover:bg-bg1-hover relative cursor-ew-resize"
-                    onPointerDown={(event) => {
-                      if (event.target !== event.currentTarget) return;
-                      setSelectedProperty(property);
-                      startTimelineScrub(event);
-                    }}
-                    onDoubleClick={(event) => {
-                      if (event.target !== event.currentTarget) return;
-                      addPoint(property);
-                    }}
-                  >
-                    <span className="bg-border2 pointer-events-none absolute top-1/2 right-0 left-0 h-px opacity-70" />
-                    {rulerMarks.map((mark) => (
-                      <span
-                        key={mark.time}
-                        className="bg-border1 pointer-events-none absolute inset-y-0 w-px opacity-60"
-                        style={{ left: `${mark.offset}%` }}
-                      />
-                    ))}
-                    {propertyPoints.map((point) => {
-                      const selected =
-                        selectedPoint?.property === property &&
-                        selectedPoint.offset === point.offset;
-                      return (
-                        <button
-                          key={point.offset}
-                          type="button"
-                          className={cn(
-                            "zd-design-motion-keyframe absolute top-1/2 z-10 size-3 -translate-x-1/2 -translate-y-1/2 rotate-45 border",
-                            selected && "zd-design-motion-keyframe-selected",
-                          )}
+                        {laneGuides}
+                        <span
+                          className="zd-motion-connector"
                           style={{
-                            left:
-                              point.offset === 0
-                                ? 6
-                                : point.offset === 100
-                                  ? "calc(100% - 6px)"
-                                  : `${point.offset}%`,
+                            left: `${firstOffset}%`,
+                            width: `${lastOffset - firstOffset}%`,
                           }}
-                          aria-label={`${property} keyframe at ${point.offset}% (${designMotionTimeAtOffset(point.offset, durationMs)}ms)`}
-                          aria-keyshortcuts="ArrowLeft ArrowRight Home End Delete Backspace"
-                          disabled={disabled}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            if (pointDragMovedRef.current) {
-                              pointDragMovedRef.current = false;
-                              return;
-                            }
-                            setPlaying(false);
-                            setPlayhead(point.offset);
-                            setSelectedPoint({
-                              property,
-                              offset: point.offset,
-                            });
-                            setSelectedProperty(property);
-                          }}
-                          onKeyDown={(event) => {
-                            if (
-                              event.key === "Delete" ||
-                              event.key === "Backspace"
-                            ) {
-                              event.preventDefault();
-                              event.stopPropagation();
-                              removePoint(property, point.offset);
-                              return;
-                            }
-                            let nextOffset: number | null = null;
-                            if (event.key === "ArrowLeft") {
-                              nextOffset = designMotionNudgedOffset(
-                                point.offset,
-                                -1,
-                                event.shiftKey,
-                              );
-                            } else if (event.key === "ArrowRight") {
-                              nextOffset = designMotionNudgedOffset(
-                                point.offset,
-                                1,
-                                event.shiftKey,
-                              );
-                            } else if (event.key === "Home") {
-                              nextOffset = 0;
-                            } else if (event.key === "End") {
-                              nextOffset = 100;
-                            }
-                            if (nextOffset === null) return;
-                            event.preventDefault();
-                            event.stopPropagation();
-                            setPlaying(false);
-                            retimePoint(property, point.offset, nextOffset);
-                          }}
-                          onPointerDown={(event) =>
-                            startPointDrag(event, property, point.offset)
-                          }
                         />
-                      );
-                    })}
-                    <span
-                      className="zd-design-motion-playhead pointer-events-none absolute inset-y-0 z-20 w-px"
-                      style={{ left: `${playhead}%` }}
-                    />
+                        {propertyPoints.map((point) => {
+                          const selected =
+                            selectedPoint?.property === property &&
+                            selectedPoint.offset === point.offset;
+                          return (
+                            <button
+                              key={point.offset}
+                              type="button"
+                              className={cn(
+                                "zd-design-motion-keyframe zd-motion-keyframe",
+                                selected &&
+                                  "zd-design-motion-keyframe-selected",
+                              )}
+                              style={{ left: `${point.offset}%` }}
+                              aria-label={`${property} keyframe at ${point.offset}% (${designMotionTimeAtOffset(point.offset, durationMs)}ms)`}
+                              aria-keyshortcuts="ArrowLeft ArrowRight Home End Delete Backspace"
+                              aria-pressed={selected}
+                              disabled={disabled}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                if (pointDragMovedRef.current) {
+                                  pointDragMovedRef.current = false;
+                                  return;
+                                }
+                                setPlaying(false);
+                                setPlayhead(point.offset);
+                                setSelectedPoint({
+                                  property,
+                                  offset: point.offset,
+                                });
+                                setSelectedProperty(property);
+                              }}
+                              onKeyDown={(event) => {
+                                if (
+                                  event.key === "Delete" ||
+                                  event.key === "Backspace"
+                                ) {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  removePoint(property, point.offset);
+                                  return;
+                                }
+                                let nextOffset: number | null = null;
+                                if (event.key === "ArrowLeft") {
+                                  nextOffset = designMotionNudgedOffset(
+                                    point.offset,
+                                    -1,
+                                    event.shiftKey,
+                                  );
+                                } else if (event.key === "ArrowRight") {
+                                  nextOffset = designMotionNudgedOffset(
+                                    point.offset,
+                                    1,
+                                    event.shiftKey,
+                                  );
+                                } else if (event.key === "Home") {
+                                  nextOffset = 0;
+                                } else if (event.key === "End") {
+                                  nextOffset = 100;
+                                }
+                                if (nextOffset === null) return;
+                                event.preventDefault();
+                                event.stopPropagation();
+                                setPlaying(false);
+                                retimePoint(property, point.offset, nextOffset);
+                              }}
+                              onPointerDown={(event) =>
+                                startPointDrag(event, property, point.offset)
+                              }
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              );
-            })
-          : null}
+                );
+              })
+            : null}
+          <div className="zd-motion-empty-lanes" aria-hidden="true">
+            <div className="zd-motion-empty-label" />
+            <div className="zd-motion-lane-cell">
+              <div className="zd-motion-lane">{laneGuides}</div>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div className="border-border1 flex h-10 shrink-0 items-center gap-2 border-t px-3">
-        {selectedPoint && selectedValue != null ? (
-          <>
-            <Diamond className="zd-design-motion-keyframe-icon size-3 fill-current" />
-            <span className="text-fg2 max-w-28 truncate font-mono text-[10px]">
-              {selectedPoint.property}
-            </span>
-            <MotionTimeField
-              label="Selected keyframe time"
-              time={designMotionTimeAtOffset(selectedPoint.offset, durationMs)}
-              duration={durationMs}
-              className="zd-design-control-applied h-7 w-16 shrink-0 text-right font-mono text-[10px]"
-              disabled={disabled}
-              onOffsetChange={(nextOffset) =>
-                retimePoint(
+      {selectedPoint && selectedValue != null ? (
+        <div className="zd-motion-keyframe-bar">
+          <span className="zd-motion-selected-property">
+            <Diamond className="zd-motion-accent size-3.5 shrink-0 fill-current" />
+            <span className="truncate">{selectedPoint.property}</span>
+          </span>
+          <MotionTimeField
+            label="Selected keyframe time"
+            time={designMotionTimeAtOffset(selectedPoint.offset, durationMs)}
+            duration={durationMs}
+            className="zd-motion-keyframe-time"
+            suffix="ms"
+            disabled={disabled}
+            onOffsetChange={(nextOffset) =>
+              retimePoint(
+                selectedPoint.property,
+                selectedPoint.offset,
+                nextOffset,
+              )
+            }
+          />
+          <Input
+            value={selectedValue}
+            aria-label={`${selectedPoint.property} keyframe value`}
+            aria-invalid={!selectedValue.trim()}
+            className="zd-field zd-motion-keyframe-value px-2"
+            disabled={disabled}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              mutateDraft((current) => ({
+                ...current,
+                keyframes: setDesignMotionPoint(
+                  current.keyframes,
                   selectedPoint.property,
                   selectedPoint.offset,
-                  nextOffset,
-                )
-              }
-            />
-            <span className="text-muted-fg font-mono text-[9px]">ms</span>
-            <Input
-              value={selectedValue}
-              aria-label={`${selectedPoint.property} keyframe value`}
-              className="zd-design-control-applied h-7 min-w-40 flex-1 font-mono text-[11px]"
-              disabled={disabled}
-              onChange={(event) => {
-                const value = event.currentTarget.value;
-                mutateDraft((current) => ({
-                  ...current,
-                  keyframes: setDesignMotionPoint(
-                    current.keyframes,
-                    selectedPoint.property,
-                    selectedPoint.offset,
-                    value,
-                  ),
-                }));
-              }}
-            />
+                  value,
+                ),
+              }));
+            }}
+          />
+          <Tooltip label="Delete selected keyframe">
             <Button
               type="button"
               variant="ghost"
               size="icon-sm"
+              className="zd-icon-button"
+              data-size="row"
               aria-label="Delete selected keyframe"
               disabled={disabled}
               onClick={() =>
@@ -1819,33 +2158,9 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             >
               <Trash2 />
             </Button>
-          </>
-        ) : (
-          <>
-            <span className="text-muted-fg min-w-0 truncate text-[10px]">
-              {properties.length === 0
-                ? "No motion on this layer · add a property or choose a preset"
-                : "Click to scrub · double-click a track to add · drag a diamond to retime"}
-            </span>
-            <span className="zd-design-motion-accent-soft rounded px-1.5 py-0.5 text-[9px]">
-              {properties.length} {properties.length === 1 ? "track" : "tracks"}
-            </span>
-          </>
-        )}
-        {dirty && draftIssue ? (
-          <span
-            className="text-red-primary min-w-0 truncate text-[10px]"
-            title={draftIssue}
-            role="status"
-          >
-            {draftIssue}
-          </span>
-        ) : null}
-        <span className="zd-design-motion-footer-meta text-muted-fg ml-auto shrink-0 font-mono text-[9px]">
-          {draft.file} · delay {signedTimeMs(draft.delay)}ms ·{" "}
-          {draft.iterations}× · {draft.direction} · {draft.fillMode}
-        </span>
-      </div>
+          </Tooltip>
+        </div>
+      ) : null}
     </section>
   );
 });

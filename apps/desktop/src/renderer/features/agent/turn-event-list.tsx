@@ -18,6 +18,7 @@
 import { memo, useMemo, type ReactNode } from "react";
 
 import { ActivityShimmer } from "@/renderer/shared/ui/loading";
+import { useExperimentalFeature } from "../settings/experimental-features";
 import { pickStartedAt } from "./activity-hud";
 import { EventStripe } from "./renderers/event-stripe";
 import { MessageView } from "./renderers";
@@ -104,6 +105,7 @@ export const TurnEventList = memo(function TurnEventList({
     (ctx.hasBlockingQuestion ?? ctx.pendingQuestionToolCallIds.size > 0) || !!ctx.pendingPermission;
   const tail = tailIndicators({ live, showActivity, awaitingUserInput });
   const showShimmer = tail.shimmer && surfaceActive;
+  const [gibberish] = useExperimentalFeature("gibberishAgentThinking");
   const showBackgroundWaiting = isActive && showActivity && !live && !awaitingUserInput && !!backgroundTasks?.length;
   const workflowRow =
     tail.workflow && workflow && onStopWorkflow
@@ -153,10 +155,14 @@ export const TurnEventList = memo(function TurnEventList({
       {/* Shimmer + live timer at the tail of the active turn while streaming.
           pickStartedAt anchors it to the turn's own start, so it counts
           monotonically for the whole turn; per-tool elapsed belongs to each
-          tool row's own DurationChip, not to this one. */}
+          tool row's own DurationChip, not to this one. Under earlier rows it
+          sits a little lower, so it reads as the turn's rail, not one more
+          row. */}
       {showShimmer && (
         <ActivityShimmer
           startedAt={pickStartedAt(activityEvents ?? events, activityStartedAt)}
+          className={sequence.length > 0 || workflowRow ? "mt-2" : undefined}
+          gibberish={gibberish}
         />
       )}
       {/* Per-turn footer, in-lane so it hugs the answer (see prop doc). */}

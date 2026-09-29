@@ -7,7 +7,11 @@ import {
   readSafeDesignText,
   safeLocalReference,
 } from "./assets";
-import { designNodeRecords, isDesignNodeElement } from "./node-identities";
+import {
+  designLayerCount,
+  designNodeRecords,
+  isDesignNodeElement,
+} from "./node-identities";
 import {
   DesignRenderBudgetError,
   MAX_DESIGN_TEXT_BYTES,
@@ -456,6 +460,7 @@ async function mutationResultUnlocked(
       y: geometry.y,
       z: geometry.z,
       nodeCount: designNodeRecords(document).length,
+      layerCount: designLayerCount(document),
       modifiedAt: info.mtimeMs,
       sourceVersion: composed.sourceVersion,
       source,

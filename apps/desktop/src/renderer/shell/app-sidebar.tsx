@@ -858,6 +858,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     ) : (
       <PendingSidebarWorkspaceRow
         key={item.key}
+        branch={item.pending.branch ?? undefined}
         kind={item.pending.kind}
         project={item.project}
         mixedRepositories={!groupedList}

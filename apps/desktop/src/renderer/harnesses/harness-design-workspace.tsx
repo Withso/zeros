@@ -13,6 +13,7 @@ import {
   DESIGN_RUNTIME_SOURCE,
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
 } from "@zeros/protocol/design-runtime";
+import { designFrameGeometryError } from "@zeros/design-core";
 import type { DesignFoundationOpenWire } from "../platform/git";
 
 const HOME_SOURCE_VERSION = "aaaaaaaaaaaaaaaaaaaaaaaa";
@@ -509,6 +510,7 @@ async function main() {
   let currentHomeSource = homeSource;
   let styleGenerationCounter = 0;
   let textTransactionCounter = 0;
+  let htmlFrameCounter = 0;
   let looseTextFrameCounter = 0;
   let appendedTextCounter = 0;
   const frameDeletionUndo: Array<
@@ -571,11 +573,18 @@ async function main() {
         const params = message.params!;
         designShortcutOperations.push("canvas:waiting");
         await new Promise((resolve) => window.setTimeout(resolve, 700));
+        // Record the request, then clamp exactly like the engine route.
+        const requests = ((window as typeof window & {
+          __zerosHarnessCanvasUpdates?: unknown[];
+        }).__zerosHarnessCanvasUpdates ??= []);
+        requests.push({ ...params });
+        const size = (value: unknown) =>
+          Math.min(16_384, Math.max(1, Number(value)));
         const geometry = {
           x: Number(params.x),
           y: Number(params.y),
-          w: Number(params.w),
-          h: Number(params.h),
+          w: size(params.w),
+          h: size(params.h),
           z: Number(params.z),
         };
         currentWorkspaceSnapshot = {
@@ -863,6 +872,14 @@ async function main() {
               }>;
             }
           | undefined;
+        // Mirror the adapter: storage cannot hold out-of-range frame geometry.
+        for (const operation of transaction?.operations ?? []) {
+          const invalid =
+            operation.type === "frame.set-geometry" && operation.geometry
+              ? designFrameGeometryError(operation.geometry)
+              : null;
+          if (invalid) throw new Error(invalid);
+        }
         const textOperation = transaction?.operations?.find(
           (operation) => operation.type === "node.set-text",
         );
@@ -1286,6 +1303,53 @@ async function main() {
               keyframes: [],
             },
           } as never,
+        );
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: { frame, snapshot: currentWorkspaceSnapshot },
+        };
+      }
+      if (
+        message.op === "design.frame.create" &&
+        message.params?.kind !== "text"
+      ) {
+        // Mirrors the engine seed: one border-box frame root, placed where the
+        // canvas drew it or in the next three-column slot.
+        htmlFrameCounter += 1;
+        const file = `frame-${htmlFrameCounter}.html`;
+        const sourceVersion = htmlFrameCounter
+          .toString(16)
+          .padStart(24, "f")
+          .slice(-24);
+        const index = currentWorkspaceSnapshot.frames.length;
+        const drawn = message.params?.w !== undefined;
+        const frame = {
+          file,
+          title: String(message.params?.title ?? "Frame"),
+          kind: "frame" as const,
+          width: drawn ? Number(message.params!.w) : 1440,
+          height: drawn ? Number(message.params!.h) : 900,
+          x: drawn ? Number(message.params!.x) : (index % 3) * 1560,
+          y: drawn ? Number(message.params!.y) : Math.floor(index / 3) * 1020,
+          z: drawn ? Number(message.params!.z) : index,
+          nodeCount: 1,
+          layerCount: 0,
+          modifiedAt: Date.now(),
+          sourceVersion,
+        };
+        const source = `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0}</style></head><body><main data-oid="f-${htmlFrameCounter}-main" data-zeros-frame-root style="display:block; position:relative; width:100%; height:100vh; box-sizing:border-box; background-color:white; opacity:1;"></main></body></html>`;
+        currentWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: [...currentWorkspaceSnapshot.frames, frame],
+        };
+        designFrameDocumentCache.setData(
+          designFrameDocumentKey(workspaceId, file, sourceVersion),
+          {
+            ...frame,
+            source,
+            srcDoc: withDesignRuntime(source, sourceVersion),
+            tree: [],
+          },
         );
         return {
           type: "WORKSPACE_RESPONSE",

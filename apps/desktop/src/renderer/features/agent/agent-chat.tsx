@@ -65,6 +65,7 @@ import { agentActivity } from "./agent-activity";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
 import { PermissionCard } from "./permission-card";
+import { useComposerCardFocus } from "./use-composer-card-focus";
 import {
   browserConfirmationShouldTakeComposer,
   browserConfirmationToPermissionRequest,
@@ -124,6 +125,7 @@ import {
 import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
+  composerCardDock,
   composerOwnsFocus,
   isFocusHeldElsewhere,
   nextComposerFocusAction,
@@ -201,6 +203,7 @@ import {
   composerShowsStopControl,
   QUEUED_FIRST_TURN_MAX_WAIT_MS,
   queuedFirstTurnAction,
+  sendPastPermission,
   sendSessionRecoveryMode,
   unreadableTranscriptSendAction,
 } from "./session-reload-lifecycle";
@@ -406,6 +409,7 @@ export function AgentChat({
   const submitRef = useRef<(recordActivity?: boolean) => void>(() => {});
   const updateLiveDraftRef = useRef<() => void>(() => {});
   const composerFocusRef = useRef<() => void>(() => {});
+  const composerCardRef = useRef<HTMLDivElement>(null);
   // Stable ctx object for MessageView memoization. Without useMemo, every
   // parent re-render hands a new ref to every message and the per-message
   // memo can never short-circuit.
@@ -1790,10 +1794,10 @@ export function AgentChat({
   // resends to rebuild the session. A read-only editor silently defeated that:
   // the failed chat became a dead end (can't type → composerEmpty → can't
   // send), recoverable only by switching tabs and back (which re-fires
-  // ChatBody's spawn effect and flips status off `failed`). The composer is
-  // display:none'd — not disabled — when a permission/question card takes its
-  // slot (composerConcealed), so there is no remaining state that wants a
-  // read-only editor. Saved workspace history is the exception: its composer
+  // ChatBody's spawn effect and flips status off `failed`). Permission and
+  // question cards dock above the composer without disabling it, and a
+  // non-interactive chat display:none's it (composerConcealed), so there is no
+  // remaining state that wants a read-only editor. Saved workspace history is the exception: its composer
   // is absent and must never accept or submit a parked draft.
   useEffect(() => {
     composerEditor?.setEditable(!readOnly);
@@ -3014,9 +3018,9 @@ export function AgentChat({
     interactive,
   ]);
   // ── Plan review (Claude's ExitPlanMode) ─────────────────────────────────
-  // Plan review is NOT a permission gate. A regular Allow/Deny REPLACES the
-  // composer (see <PermissionCard>); a pending plan keeps the composer LIVE so
-  // the user can Approve, Copy, or type a follow-up to refine it. Detection
+  // Plan review is NOT a permission gate. A regular Allow/Deny holds the turn
+  // until it's answered (see <PermissionCard>); a pending plan lets the user
+  // Approve, Copy, or type a follow-up below to refine it. Detection
   // lives in isPlanReviewRequest (plan-body.ts) — shared with the sidebar/tab
   // awaiting-kind selectors: ExitPlanMode title or a `plan` body, NOT kind
   // (Claude sends kind="other"; Codex's bodiless "Expand permissions"
@@ -3097,8 +3101,8 @@ export function AgentChat({
   const supportsCompactNow =
     gaugeFamily === "claude" || gaugeFamily === "codex";
 
-  // ONE permission card takes the composer's slot for a pending Allow/Deny —
-  // EXCEPT Claude's plan review, which keeps the composer live (planReview →
+  // ONE permission card docks above the composer for a pending Allow/Deny —
+  // EXCEPT Claude's plan review, which isn't a gate (planReview →
   // <PlanReviewCard>). Codex's bodiless switch_mode escalation is a real gate,
   // so it still routes here.
   const browserPermissionCardActive = browserConfirmationShouldTakeComposer({
@@ -3143,26 +3147,37 @@ export function AgentChat({
     [browserConfirmation, browserPermissionCardActive, session],
   );
 
-  // Permissions take priority over questions. A blocking ask takes the
-  // composer slot; an optional ask sits above the usable composer.
+  // Permissions take priority over questions. Every card sits above the
+  // still-usable composer: the agent may be working meanwhile, and a message
+  // typed below queues behind the turn (Send now steers it in). A blocking
+  // card holds the keyboard, so its shortcuts work until the user clicks into
+  // the composer (see composerCardDock).
   const pendingQuestion = session.pendingQuestions?.[0] ?? null;
   const questionCardActive = !!pendingQuestion && !permissionCardActive;
   const blockingQuestionActive = questionCardActive && pendingQuestion?.request.blocking === true;
-
-  // While either card holds the composer's slot, the composer card below is
-  // display:none — NOT unmounted, so the typed draft + inline attachment
-  // pills survive the interruption. Everything anchored to the concealed
-  // composer must close: popover content portals to <body>, so once the
-  // trigger loses its layout box Radix's popper has a zero-rect anchor and
+  const { concealed: composerConcealed, cardHoldsKeyboard } = composerCardDock({
+    interactive,
+    permissionCardActive,
+    blockingQuestionActive,
+  });
+  // A non-interactive chat's composer is display:none — NOT unmounted, so the
+  // typed draft + inline attachment pills survive. Everything anchored to the
+  // concealed composer must close: popover content portals to <body>, so once
+  // the trigger loses its layout box Radix's popper has a zero-rect anchor and
   // re-parks the still-open popover at the viewport's top-left corner. The
   // local ComposerAttachmentMenu and ModelPill both derive closed from this
   // value in the same render.
-  const composerConcealed =
-    !interactive || permissionCardActive || blockingQuestionActive;
-  // Live mirror for the always-focus guardian's document listener, so it can
-  // read the current concealment without re-subscribing on every card toggle.
+  // Live mirrors for the always-focus guardian's document listener, so it can
+  // read the current concealment and card without re-subscribing on every
+  // card toggle.
   const composerConcealedRef = useRef(composerConcealed);
   composerConcealedRef.current = composerConcealed;
+  const cardHoldsKeyboardRef = useRef(cardHoldsKeyboard);
+  cardHoldsKeyboardRef.current = cardHoldsKeyboard;
+  useComposerCardFocus(
+    composerCardRef,
+    cardHoldsKeyboard && interactive && (!chatId || activeChatId === chatId),
+  );
 
   // Auto-focus this chat's composer whenever it becomes the single active
   // ("focused") chat window. Creating a new tab, switching tabs, clicking into
@@ -3170,8 +3185,8 @@ export function AgentChat({
   // the global activeChatId, so one effect covers every "the composer should be
   // focused" case the product asks for. It also SUBSUMES the old "hand focus
   // back when a permission/question card resolves" behavior — composerOwnsFocus
-  // folds in !composerConcealed, so answering a card that returns the composer
-  // re-focuses too. Gated on activeChatId===chatId so exactly ONE composer ever
+  // folds in the blocking card, so answering one hands the keyboard back to the
+  // composer too. Gated on activeChatId===chatId so exactly ONE composer ever
   // pulls focus: a split mounts several AgentChats that are all interactive at
   // once, but only the focused window's chat is the global active chat. The
   // held-elsewhere guard means a pane/tab click (focus lands on <body> or a tab
@@ -3183,7 +3198,12 @@ export function AgentChat({
   const acquiredComposerFocusRef = useRef(false);
   useEffect(() => {
     const action = nextComposerFocusAction({
-      owns: composerOwnsFocus({ chatId, activeChatId, composerConcealed }),
+      owns: composerOwnsFocus({
+        chatId,
+        activeChatId,
+        composerConcealed,
+        cardHoldsKeyboard,
+      }),
       hasAcquired: acquiredComposerFocusRef.current,
       editorReady: !!composerEditor,
     });
@@ -3214,7 +3234,7 @@ export function AgentChat({
         return;
       composerFocusRef.current();
     });
-  }, [chatId, activeChatId, composerConcealed, composerEditor]);
+  }, [chatId, activeChatId, composerConcealed, cardHoldsKeyboard, composerEditor]);
 
   // ── "Composer always focused in the chat column" guardian ────────────────
   // The rising-edge effect above focuses the composer when this chat BECOMES
@@ -3265,6 +3285,7 @@ export function AgentChat({
               chatId,
               activeChatId: useWorkspaceStore.getState().activeChatId,
               composerConcealed: composerConcealedRef.current,
+              cardHoldsKeyboard: cardHoldsKeyboardRef.current,
             }),
             interactionInsidePane,
             composerHasFocus: composerDom.contains(document.activeElement),
@@ -3297,8 +3318,6 @@ export function AgentChat({
   const canSend =
     session.transcriptState === "resident" &&
     !composerStreaming &&
-    !permissionCardActive &&
-    !blockingQuestionActive &&
     !composerEmpty;
 
   // Attach-time staging has normally completed already. Await the final
@@ -3477,15 +3496,19 @@ export function AgentChat({
     ];
     const rawText = override ?? snapshot?.displayText ?? "";
     const displayText = rawText.trim();
-    if (session.pendingPermission) {
-      // A non-plan permission is a hard gate — nothing sends until it's
-      // answered on the card. Plan review is different: a typed follow-up means
-      // "revise the plan," so deny the gate (Claude keeps planning) and fall
-      // through — the send below rides as the next prompt. denyPlanReview
-      // clears pendingPermission synchronously, so this stays in sync.
-      if (!planReview) return;
-      denyPlanReview();
-    }
+    // A hard permission gate holds the turn, but the composer below its card
+    // stays usable: the send falls through to sendPrompt, which queues it
+    // behind the gated turn. A typed follow-up during plan review means
+    // "revise the plan," so deny the review (Claude keeps planning) and send
+    // it as the next prompt. denyPlanReview clears pendingPermission
+    // synchronously, so this stays in sync.
+    const permissionSend = sendPastPermission({
+      permissionPending: !!session.pendingPermission,
+      planReview: !!planReview,
+      status: session.status,
+    });
+    if (permissionSend === "hold") return;
+    if (permissionSend === "revise-plan") denyPlanReview();
     // Inline slash-command actions: a bare `/plan`, `/fast`, `/ultracode` or
     // `/compact` runs the action instead of being sent as a prompt; a terminal
     // command (`/mcp`, `/login`, …) opens the embedded terminal. (The picker
@@ -4737,7 +4760,7 @@ export function AgentChat({
 
       {/* Permission surface consolidated 2026-07-02: the old global
           PermissionBar (fallback) and the inline cluster are gone. There is
-          now ONE permission card, rendered in the composer's slot below (see
+          now ONE permission card, docked above the composer below (see
           <PermissionCard>). */}
 
       {/* The ActivityHUD pill is gone. The shimmer now
@@ -4814,10 +4837,11 @@ export function AgentChat({
             could sit stuck at all-pending. Rather than show an inconsistent
             card we don't surface it at all. */}
           {/* Queued messages (2026-07-06 redesign): sends typed mid-turn dock
-            here as a card tucked under the NEXT composer-slot surface (the composer, or the permission/question card that replaces it) — NOT greyed
-            transcript bubbles. Rows offer Edit (loads into the composer
-            below), Delete, and Send now (steers the running turn on
-            Claude/Codex/Cursor). ↑ from the composer walks the list. */}
+            here as a card tucked above the permission/question card, or the
+            composer when no card is pending — NOT greyed transcript bubbles.
+            Rows offer Edit (loads into the composer below), Delete, and Send
+            now (steers the running turn on Claude/Codex/Cursor). ↑ from the
+            composer walks the list. */}
           <QueuedMessagesCard
             messages={queuedMessages}
             selectedId={queueSelectedId}
@@ -4836,10 +4860,10 @@ export function AgentChat({
             agentName={steeringAgentName}
           />
           {/* Permission card (2026-07-02): the ONE permission gate. While a
-            decision is pending it REPLACES the composer (hidden below) — no
-            inline card, no fallback bar. Claude's plan review is the ONE
-            exception (planReview → <PlanReviewCard>): it's not a gate, so it
-            keeps the composer live for follow-ups instead of routing here. */}
+            decision is pending it docks above the composer, which stays usable
+            for steering — no inline card, no fallback bar. Claude's plan
+            review is the ONE exception (planReview → <PlanReviewCard>): it's
+            not a gate, so a follow-up typed below refines the plan instead. */}
           {permissionCardActive && permissionRequest && (
             <PermissionCard
               request={permissionRequest}
@@ -4890,6 +4914,7 @@ export function AgentChat({
             origin once this card goes display:none. */}
           <ComposerConcealedContext.Provider value={composerConcealed}>
             <div
+              ref={composerCardRef}
               className={cn(
                 "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col border px-3.5 py-3 shadow-xs transition-[border-color,background,box-shadow] duration-150 ease-out",
                 COMPOSER_SURFACE_RADIUS,
@@ -4902,9 +4927,9 @@ export function AgentChat({
                 // solid border; the SVG dotted frame below provides the visible
                 // edge (spaced round dots, --border4).
                 composerGuarded && !dragActive && "!border-transparent",
-                // Hidden while the permission OR question card takes the
-                // composer's slot — one interactive surface at a time. hidden
-                // (not unmount) so the typed draft + attachments survive.
+                // Hidden only while the chat isn't interactive; cards dock
+                // above it instead. hidden (not unmount) so the typed draft +
+                // attachments survive.
                 composerConcealed && "hidden",
               )}
               {...(dragHandlers ?? {})}

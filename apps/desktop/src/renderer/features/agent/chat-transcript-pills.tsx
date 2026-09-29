@@ -151,8 +151,8 @@ function useDelayedPending(pending: boolean): boolean {
  *      `size` is literally the ink height. 14 (the chat TAB's size, on a 28px
  *      row where the logo is the thing you aim at) is 1.5× the cap-height
  *      here, and even 12 is still 1.29×.
- *    - ZerosSpinner reserves 25% of its box as padding (innerRatio 0.75), so
- *      its ink is 0.75 × size.
+ *    - ZerosSpinner reserves 25% of its box as padding, so its ink is
+ *      0.75 × size, snapped to whole device pixels.
  *
  *  Hence a fixed 14px SLOT with two different glyph sizes inside it, landing
  *  both on ~10px of ink. The slot is what keeps the pill from resizing under
@@ -165,11 +165,11 @@ function useDelayedPending(pending: boolean): boolean {
  *  attributes, so inside a Button the mark renders 16px no matter what `size`
  *  says. Lowering `size` just shrank a span around an unchanged glyph.
  *  LOGO_CLASS is what actually moves the ink; the two must stay in step.
- *  (ZerosSpinner is exempt — it draws divs, not svg — which is why its size
- *  prop always worked.) */
+ *  (ZerosSpinner is exempt — it pins its own svg's size inline, and inline
+ *  style beats the class — which is why its size prop always works.) */
 const LOGO_PX = 10; // full-bleed → 10px of ink
 const LOGO_CLASS = "[&_svg]:size-2.5"; // 10px — twMerge drops Button's size-4
-const SPINNER_PX = 14; // × 0.75 innerRatio → 10.5px of ink
+const SPINNER_PX = 14; // × 0.75, snapped → a 10px square of ink
 
 /** One chat = one pill.
  *

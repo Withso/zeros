@@ -29,7 +29,7 @@ import {
   terminalTabIconName,
   type TerminalTabIndicator,
 } from "../terminal/terminal-tab-indicators";
-import { RunWave } from "../../shared/ui/loading";
+import { RunStream } from "../../shared/ui/loading";
 import { cn } from "../../shared/ui/cn";
 import { DynamicIcon } from "../../shared/ui/icon-registry";
 import { CircleStop, MousePointer2, X } from "lucide-react";
@@ -299,7 +299,7 @@ function TabPill({
     >
       {tab.type === "terminal" ? (
         terminalIndicator?.running ? (
-          <RunWave
+          <RunStream
             size={12}
             className={cn("shrink-0", active ? "text-fg1" : "text-fg2")}
           />

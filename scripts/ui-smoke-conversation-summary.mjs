@@ -259,7 +259,7 @@ export async function runConversationSummarySmoke({
       await run.click();
       await expect(page.getByTestId("destination")).toHaveText("terminal");
       await expect(page.getByTestId("workbench")).toHaveCount(0);
-      await expect(island.locator("[data-run-wave]")).toHaveCount(1);
+      await expect(island.locator("[data-run-stream]")).toHaveCount(1);
       await expect
         .poll(() =>
           page.evaluate(() =>
@@ -286,7 +286,7 @@ export async function runConversationSummarySmoke({
       await popup
         .getByRole("button", { name: "Stop Dev server", exact: true })
         .click();
-      await expect(popup.locator("[data-run-wave]")).toHaveCount(0);
+      await expect(popup.locator("[data-run-stream]")).toHaveCount(0);
       await expect(
         popup.getByRole("button", { name: "Run Dev server", exact: true }),
       ).toBeVisible();
@@ -390,7 +390,7 @@ export async function runConversationSummarySmoke({
       await island
         .getByRole("button", { name: "Stop Dev server", exact: true })
         .click();
-      await expect(island.locator("[data-run-wave]")).toHaveCount(0);
+      await expect(island.locator("[data-run-stream]")).toHaveCount(0);
     },
   );
 

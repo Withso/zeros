@@ -283,6 +283,75 @@ describe("design workspace cache", () => {
       );
     });
 
+    it("builds a queued edit from the geometry the preceding edit confirmed", async () => {
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      const widened = {
+        ...current,
+        frames: [{ ...frame, width: 1_600, sourceVersion: "a".repeat(24) }],
+      };
+      platformMocks.foundationOpen.mockResolvedValue(
+        opened("document:home", "home:2"),
+      );
+      let finishFirst!: () => void;
+      platformMocks.applyTransaction
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishFirst = () => resolve({ result: null, snapshot: widened });
+            }),
+        )
+        .mockResolvedValueOnce({ result: null, snapshot: widened });
+      // W and H commit back to back, before the first save replies. Each edit
+      // merges only its own axis into the frame the lane has confirmed.
+      const resize = (key: "width" | "height", value: number) => () => {
+        const latest = designWorkspaceSnapshotCache
+          .peekSnapshot(workspaceId)
+          .data!.frames.find((candidate) => candidate.file === frame.file)!;
+        return {
+          ...draft(),
+          operations: [
+            {
+              operationId: `geometry:${key}`,
+              type: "frame.set-geometry" as const,
+              frame: frame.file,
+              geometry: {
+                x: latest.x,
+                y: latest.y,
+                z: latest.z,
+                width: latest.width,
+                height: latest.height,
+                [key]: value,
+              },
+            },
+          ],
+        };
+      };
+      const first = applyDesignEditCached(
+        workspaceId,
+        frame,
+        resize("width", 1_600),
+      );
+      const second = applyDesignEditCached(
+        workspaceId,
+        frame,
+        resize("height", 1_000),
+      );
+      await vi.waitFor(() =>
+        expect(platformMocks.applyTransaction).toHaveBeenCalledTimes(1),
+      );
+      finishFirst();
+      await Promise.all([first, second]);
+      expect(
+        platformMocks.applyTransaction.mock.calls[1]![2].operations[0].geometry,
+      ).toMatchObject({ width: 1_600, height: 1_000 });
+    });
+
     it("keeps a metadata wait ahead of Undo in the workspace mutation lane", async () => {
       const current = snapshot();
       const frame = current.frames[0]!;

@@ -1,0 +1,400 @@
+/* Theme's floating window owns its layout; shared zd-field recipes own controls. */
+.zd-theme-editor {
+  position: fixed;
+  z-index: var(--z-dropdown);
+  display: grid;
+  width: min(760px, calc(100vw - 48px));
+  height: min(560px, calc(100vh - 48px));
+  grid-template-rows: 40px minmax(0, 1fr);
+  overflow: hidden;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border2);
+  border-radius: calc(var(--radius-lg) * 1.5);
+  background: var(--bg1);
+  box-shadow: var(--shadow-dropdown);
+  outline: none;
+}
+
+.zd-theme-titlebar {
+  display: flex;
+  height: 40px;
+  align-items: center;
+  gap: 8px;
+  padding-inline: 12px;
+  border-bottom: 1px solid var(--border1);
+}
+
+.zd-theme-drag-handle {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg1);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.zd-theme-drag-handle:active {
+  cursor: grabbing;
+}
+
+.zd-theme-drag-handle:focus-visible,
+.zd-theme-filter:focus-visible,
+.zd-theme-mode:focus-visible,
+.zd-theme-token-name:focus-visible,
+.zd-theme-add-mode-trigger:focus-visible {
+  border-radius: var(--radius-md);
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-theme-title {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Informational tips must not intercept adjacent controls after draft focus returns. */
+.zd-theme-tooltip,
+[data-radix-popper-content-wrapper]:has(> .zd-theme-tooltip) {
+  pointer-events: none;
+}
+
+.zd-theme-body {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: 168px minmax(0, 1fr);
+}
+
+.zd-theme-rail {
+  display: flex;
+  width: 168px;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px;
+  border-right: 1px solid var(--border1);
+}
+
+.zd-theme-filter {
+  display: flex;
+  height: 28px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-inline: 8px;
+  border-radius: var(--radius-md);
+  color: var(--fg2);
+  font-size: 13px;
+}
+
+.zd-theme-filter:hover {
+  background: var(--bg1-hover);
+  color: var(--fg1);
+}
+
+.zd-theme-filter[aria-pressed="true"] {
+  background: var(--bg2-hover);
+  color: var(--fg1);
+}
+
+.zd-theme-filter-count {
+  color: var(--muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.zd-theme-main {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.zd-theme-toolbar {
+  display: flex;
+  height: 40px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding-inline: 12px;
+  border-bottom: 1px solid var(--border1);
+}
+
+.zd-theme-search {
+  flex: 1;
+  padding-left: 8px;
+}
+
+.zd-theme-preview {
+  width: 112px;
+  flex-shrink: 0;
+}
+
+.zd-theme-preview [data-slot="select-value"] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.zd-field .zd-theme-input {
+  width: 100%;
+  padding: 0 8px;
+}
+
+.zd-theme-value-field {
+  position: relative;
+  width: 100%;
+}
+
+.zd-theme-value-field:has(.zd-theme-reset) .zd-theme-input {
+  padding-right: 28px;
+}
+
+.zd-theme-value-field > .zd-theme-reset {
+  position: absolute;
+  right: 2px;
+  width: 24px;
+  height: 24px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.zd-theme-value-field:hover > .zd-theme-reset,
+.zd-theme-value-field:focus-within > .zd-theme-reset {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.zd-theme-swatch-anchor {
+  display: flex;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.zd-theme-swatch-button {
+  width: 24px;
+  height: 24px;
+}
+
+.zd-theme-swatch-button:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--highlighted-bright);
+  outline: none;
+}
+
+.zd-theme-swatch-anchor + .zd-theme-input {
+  padding-left: 2px;
+}
+
+.zd-theme-paste {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 12px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg1-highlight);
+}
+
+.zd-theme-css-input {
+  height: 112px;
+  min-height: 64px;
+  max-height: 160px;
+  resize: vertical;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--bg2);
+  padding: 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  box-shadow: none;
+}
+
+.zd-theme-css-input:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--highlighted-bright);
+}
+
+.zd-theme-css-input[aria-invalid="true"] {
+  box-shadow: inset 0 0 0 1px var(--red-primary);
+}
+
+.zd-theme-paste-actions,
+.zd-theme-empty-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.zd-theme-parse-status {
+  min-width: 0;
+  flex: 1;
+  color: var(--fg3);
+  font-size: 12px;
+}
+
+.zd-theme-parse-status.text-red-primary {
+  color: var(--red-primary);
+}
+
+.zd-theme-scroll {
+  min-height: 0;
+  flex: 1;
+}
+
+.zd-theme-scroll [data-radix-scroll-area-viewport] {
+  overscroll-behavior: contain;
+}
+
+.zd-theme-table {
+  width: 100%;
+  padding-bottom: 8px;
+}
+
+.zd-theme-table-header,
+.zd-theme-row,
+.zd-theme-new-variable {
+  display: grid;
+  grid-template-columns: var(--theme-columns);
+  align-items: center;
+}
+
+.zd-theme-table-header {
+  position: sticky;
+  top: 0;
+  z-index: 2; /* check:ui ignore-line (local table header above sticky name cells) */
+  height: 32px;
+  border-bottom: 1px solid var(--border1);
+  background: var(--bg1);
+}
+
+.zd-theme-name-heading,
+.zd-theme-name-cell,
+.zd-theme-new-name {
+  position: sticky;
+  left: 0;
+  z-index: 1; /* check:ui ignore-line (local sticky name column above scrolling values) */
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  gap: 8px;
+  padding-inline: 12px;
+  background: var(--bg1);
+}
+
+.zd-theme-name-heading {
+  color: var(--fg3);
+  font-size: 12px;
+}
+
+.zd-theme-mode-heading {
+  min-width: 0;
+  padding-inline: 8px;
+}
+
+.zd-theme-mode {
+  display: block;
+  max-width: 100%;
+  height: 24px;
+  overflow: hidden;
+  padding-inline: 8px;
+  border-radius: var(--radius-sm);
+  color: var(--fg2);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zd-theme-mode:hover:not([aria-pressed="true"]) {
+  background: var(--bg1-hover);
+  color: var(--fg1);
+}
+
+.zd-theme-mode[aria-pressed="true"] {
+  background: var(--design-selection-soft);
+  color: var(--design-selection-stroke);
+}
+
+.zd-theme-add-mode {
+  position: sticky;
+  right: 0;
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 6px;
+  background: var(--bg1);
+}
+
+.zd-theme-add-mode-trigger {
+  display: inline-flex;
+}
+
+.zd-theme-group {
+  display: flex;
+  height: 28px;
+  align-items: center;
+  background: var(--bg1-highlight);
+  color: var(--fg3);
+  font-size: 12px;
+}
+
+.zd-theme-group > span {
+  position: sticky;
+  left: 0;
+  padding-inline: 12px;
+}
+
+.zd-theme-row,
+.zd-theme-new-variable {
+  height: 36px;
+}
+
+.zd-theme-row:hover,
+.zd-theme-row:hover .zd-theme-name-cell {
+  background: var(--bg1-hover);
+}
+
+.zd-theme-token-name {
+  overflow: hidden;
+  color: var(--fg1);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zd-theme-value-cell {
+  min-width: 0;
+  padding-inline: 8px;
+}
+
+.zd-theme-new-name > .zd-field {
+  width: 100%;
+}
+
+.zd-theme-new-actions {
+  display: flex;
+  grid-column: 3 / -1;
+  align-items: center;
+  gap: 4px;
+  padding-inline: 8px;
+}
+
+.zd-theme-empty {
+  display: flex;
+  min-height: 200px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--fg2);
+  font-size: 13px;
+}

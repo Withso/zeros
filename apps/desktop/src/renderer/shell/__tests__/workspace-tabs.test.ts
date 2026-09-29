@@ -774,6 +774,18 @@ describe("workspace tab accessible name", () => {
     ).toBe("Open workspace viola-6157, run action running, 12 lines added");
   });
 
+  it("says when an agent finished there while its chat was off screen", () => {
+    expect(
+      workspaceTabDescription({
+        label,
+        runActionRunning: false,
+        changeLines: { additions: 0, deletions: 0 },
+        hasDraft: true,
+        unread: true,
+      }),
+    ).toBe("Open workspace viola-6157, unread, unsent draft");
+  });
+
   it("does not read a single line back as plural", () => {
     expect(
       workspaceTabDescription({

@@ -49,6 +49,7 @@ import {
   designLayerAncestorIds,
   designFrameLayerChildren,
   designLayerBlockEdges,
+  designFrameRowDiscloses,
   designLayerRevealWindow,
   designLayerRovingTabStop,
   designLayerSelectionSubtreeIds,
@@ -127,9 +128,11 @@ const EMPTY_LAYER_TREE: readonly DesignRuntimeTreeNode[] = Object.freeze([]);
 const EMPTY_SELECTED_NODE_IDS: readonly string[] = Object.freeze([]);
 const EMPTY_FRAMES: readonly DesignCanvasFrameWire[] = Object.freeze([]);
 const DESIGN_LAYER_ROW_HEIGHT = 28;
-const DESIGN_LAYER_INDENT = 12;
-/** Matches the frame row's own `px-1`, so depth 0 lines up one step in. */
-const DESIGN_LAYER_ROW_PADDING = 4;
+/** One level is the chevron plus its gap, so a child's chevron sits exactly
+ * under its parent's type icon. */
+const DESIGN_LAYER_INDENT = 16;
+/** Matches the frame row's own `px-2`, so depth 0 lines up one step in. */
+const DESIGN_LAYER_ROW_PADDING = 8;
 /** A childless row reserves the chevron's exact 12px footprint, so every
  * type icon in the tree keeps one shared left edge per depth. */
 const DESIGN_LAYER_DISCLOSURE_SPACER = "size-3 shrink-0";
@@ -207,6 +210,10 @@ function layerRowPadding(depth: number): number {
     DESIGN_LAYER_ROW_PADDING + Math.min(depth + 1, 16) * DESIGN_LAYER_INDENT
   );
 }
+
+/** The chevron glyph inside every disclosure, sized independently of the
+ * 14px type icons beside it. */
+const DISCLOSURE_ICON = "size-3 text-muted-fg";
 
 // --- RENDER ---
 
@@ -395,9 +402,7 @@ function OwnedDesignWorkspaceSidebarPanels({
         key: frameRowKey(frame.file),
         frame,
         expanded: disclosure.treeExpanded,
-        // A frame with a live tree answers from it; one whose runtime has not
-        // reported yet answers from the engine's authored node count.
-        discloses: tree ? tree.length > 0 : frame.nodeCount > 0,
+        discloses: designFrameRowDiscloses(tree, frame),
       });
       if (!disclosure.treeExpanded) continue;
       if (!tree) {
@@ -791,15 +796,15 @@ function OwnedDesignWorkspaceSidebarPanels({
     <section
       id={panelId}
       data-design-sidebar-panel=""
-      className="bg-bg1 text-3xxs flex min-h-0 flex-1 flex-col overflow-hidden"
+      className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden text-xs"
       aria-labelledby={headingId}
     >
-      <div className="flex h-10 shrink-0 items-center gap-2 px-3">
-        <h2 id={headingId} className="text-fg1 text-3xxs font-medium">
+      <div className="flex h-9 shrink-0 items-center gap-2 pr-2 pl-3">
+        <h2 id={headingId} className="text-fg1 text-xs font-medium">
           Layers
         </h2>
         {selectedNodeIds.length > 1 ? (
-          <span className="zd-design-layer-selection-count text-3xxs rounded px-1.5 py-0.5 font-medium">
+          <span className="zd-design-layer-selection-count rounded-sm px-1.5 text-xs tabular-nums">
             {selectedNodeIds.length} selected
           </span>
         ) : null}
@@ -808,7 +813,7 @@ function OwnedDesignWorkspaceSidebarPanels({
             type="button"
             variant="ghost"
             size="icon-sm"
-            className="ml-auto"
+            className="ml-auto size-6"
             aria-label="Collapse all layers"
             // Anything open anywhere counts, including containers inside a frame
             // the user has since folded — one click closes the whole workspace.
@@ -826,11 +831,12 @@ function OwnedDesignWorkspaceSidebarPanels({
       {/* Rows sit flush: a selection and everything it owns must read as one
           uninterrupted fill, so no gap may cut through the block. */}
       <ScrollArea ref={scrollAreaRef} className="min-h-0 min-w-0 flex-1">
-        <div className="flex min-w-0 flex-col px-1 py-1">
+        <div className="flex min-w-0 flex-col px-1.5 pb-2">
           <div
             ref={treeRef}
             role="tree"
             aria-label="Design layers"
+            aria-multiselectable="true"
             className={cn(
               "min-w-0",
               virtualizedLayers ? "relative" : "flex flex-col",
@@ -870,8 +876,8 @@ function OwnedDesignWorkspaceSidebarPanels({
                       className="flex h-7 min-w-0 items-center"
                       style={{ paddingLeft: layerRowPadding(0) }}
                     >
-                      <span className="text-muted-fg text-3xxs truncate">
-                        Connecting to {frameLabel}…
+                      <span className="text-muted-fg truncate">
+                        Loading {frameLabel.toLocaleLowerCase()}…
                       </span>
                     </div>
                   );
@@ -901,7 +907,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                         data-design-frame-row={frame.file}
                         data-design-panel-row={row.key}
                         className={cn(
-                          "zd-design-layer-row text-3xxs h-7 w-full min-w-0 shrink-0 justify-start px-1 [&_svg]:size-3",
+                          "zd-design-layer-row h-7 w-full min-w-0 shrink-0 justify-start gap-1 px-2 text-xs font-normal [&>svg]:size-3.5",
                           blockRadius,
                           frameRowSelected && "zd-design-layer-selected",
                         )}
@@ -925,11 +931,20 @@ function OwnedDesignWorkspaceSidebarPanels({
                         onKeyDown={(event) => handleRowKeyDown(event, rowIndex)}
                       >
                         {row.discloses ? (
-                          <span data-layer-disclosure="">
+                          <span
+                            data-layer-disclosure=""
+                            className="zd-layer-disclosure"
+                          >
                             {row.expanded ? (
-                              <ChevronDown aria-hidden="true" />
+                              <ChevronDown
+                                aria-hidden="true"
+                                className={DISCLOSURE_ICON}
+                              />
                             ) : (
-                              <ChevronRight aria-hidden="true" />
+                              <ChevronRight
+                                aria-hidden="true"
+                                className={DISCLOSURE_ICON}
+                              />
                             )}
                           </span>
                         ) : (
@@ -1005,7 +1020,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                         variant="ghost"
                         size="sm"
                         className={cn(
-                          "zd-design-layer-row text-3xxs relative z-[1] h-7 min-w-0 flex-1 justify-start px-1 pr-6 [&_svg]:size-3",
+                          "zd-design-layer-row relative z-[1] h-7 min-w-0 flex-1 justify-start gap-1 px-2 pr-7 text-xs font-normal [&>svg]:size-3.5",
                           blockRadius,
                           selectedLayer && "zd-design-layer-selected",
                           inSelectionSubtree && "zd-design-layer-in-selection",
@@ -1042,11 +1057,20 @@ function OwnedDesignWorkspaceSidebarPanels({
                         onKeyDown={(event) => handleRowKeyDown(event, rowIndex)}
                       >
                         {layer.hasChildren ? (
-                          <span data-layer-disclosure="">
+                          <span
+                            data-layer-disclosure=""
+                            className="zd-layer-disclosure"
+                          >
                             {row.expanded ? (
-                              <ChevronDown aria-hidden="true" />
+                              <ChevronDown
+                                aria-hidden="true"
+                                className={DISCLOSURE_ICON}
+                              />
                             ) : (
-                              <ChevronRight aria-hidden="true" />
+                              <ChevronRight
+                                aria-hidden="true"
+                                className={DISCLOSURE_ICON}
+                              />
                             )}
                           </span>
                         ) : (
@@ -1074,7 +1098,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                         variant="ghost"
                         size="icon-sm"
                         className={cn(
-                          "absolute top-1/2 right-0.5 z-[2] size-6 -translate-y-1/2",
+                          "absolute top-1/2 right-1 z-[2] size-6 -translate-y-1/2 [&_svg]:size-3.5",
                           layer.node.visible
                             ? "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100"
                             : "text-muted-fg",
@@ -1092,20 +1116,15 @@ function OwnedDesignWorkspaceSidebarPanels({
             </div>
           </div>
           {!snapshot.data && snapshot.loading ? (
-            <span className="text-muted-fg text-3xxs px-2 py-2">
-              Loading layers…
-            </span>
+            <span className="text-muted-fg px-2 py-2">Loading layers…</span>
           ) : null}
           {!snapshot.data && snapshot.error ? (
             <div className="flex flex-col items-start gap-2 px-2 py-2">
-              <span className="text-muted-fg text-3xxs">
-                Couldn’t load layers.
-              </span>
+              <span className="text-muted-fg">Couldn’t load layers</span>
               <Button
                 type="button"
                 variant="secondary"
                 size="sm"
-                className="text-3xxs"
                 onClick={snapshot.refresh}
               >
                 Retry
@@ -1113,9 +1132,7 @@ function OwnedDesignWorkspaceSidebarPanels({
             </div>
           ) : null}
           {snapshot.data?.frames.length === 0 ? (
-            <span className="text-muted-fg text-3xxs px-2 py-2">
-              Create a frame from the canvas toolbar to start designing.
-            </span>
+            <span className="text-muted-fg px-2 py-2">No layers</span>
           ) : null}
         </div>
       </ScrollArea>

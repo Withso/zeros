@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 // Source-string pins for the empty-chat provenance block, in the same idiom as
-// shell/__tests__/run-wave-placement.test.ts. These are all EXPLICIT founder
+// shell/__tests__/run-stream-placement.test.ts. These are all EXPLICIT founder
 // directions from 2026-07-29 rather than defaults, so each one is a value
 // someone would otherwise "tidy up" back to the primitive's default without
 // knowing it was chosen. The renderer has no DOM test harness (vitest runs in

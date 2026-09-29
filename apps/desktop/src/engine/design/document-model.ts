@@ -91,6 +91,8 @@ export interface DesignFrameSummary {
   y: number;
   z: number;
   nodeCount: number;
+  /** Nodes listed under the frame's row (excludes a seeded frame root). */
+  layerCount: number;
   modifiedAt: number;
 }
 

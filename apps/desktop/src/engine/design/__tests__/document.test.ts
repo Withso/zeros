@@ -190,7 +190,13 @@ describe("design document", () => {
       height: 360,
       z: 7,
       nodeCount: 1,
+      // The seeded root is the frame itself: Layers lists nothing under it.
+      layerCount: 0,
     });
+    const listed = (await readDesignWorkspaceSnapshot(root)).frames.find(
+      (frame) => frame.file === created.file,
+    );
+    expect(listed).toMatchObject({ nodeCount: 1, layerCount: 0 });
     const source = await readFile(
       path.join(root, DESIGN_DIRECTORY_NAME, created.file),
       "utf8",
@@ -260,6 +266,7 @@ describe("design document", () => {
       width: 180,
       height: 32,
       nodeCount: 1,
+      layerCount: 1,
     });
     expect(source).not.toContain("zeros-frame");
     expect(source).toContain('data-oid="text-loose-1"');
