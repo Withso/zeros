@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import { DatabaseCloudIdleStop } from "./idle-stop.js";
@@ -33,7 +33,7 @@ suite("automatic Boat checkpoint recovery", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 5 }); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public"); await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     // This fixture isolates recovery admission from the separately tested
     // managed lease coordinator; it never contacts or qualifies a provider.

@@ -107,3 +107,16 @@ describe("immutable development candidates", () => {
     expect(deployableSourcePath(file)).toBe(false);
   });
 });
+
+describe("worker source closure", () => {
+  it("captures every repository module the Boat image kit imports", async () => {
+    const { workerSourcePath } = await import("../dev-environment/source.mjs");
+    const kit = "scripts/cloud-workspace-validation/boat-image/boat-image.ts";
+    const imports = [...fs.readFileSync(kit, "utf8").matchAll(/from\s+"(\.{1,2}\/[^"]+)"/g)].map(match => {
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(kit), match[1]));
+      return [resolved, `${resolved}.ts`, `${resolved}.mjs`, `${resolved}.js`].find(file => fs.existsSync(file)) ?? resolved;
+    });
+    expect(imports.length).toBeGreaterThan(0);
+    expect(imports.filter(file => !workerSourcePath(file))).toEqual([]);
+  });
+});

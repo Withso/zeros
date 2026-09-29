@@ -117,6 +117,15 @@ describe("cloud engine credential admission",()=>{
     expect(engine.conversationExecution.get("conversation")).toBe(claim.executionId);
     expect(engine.cloudCommandSessions.size).toBe(0);
   });
+  it.each(["missing", "empty"])("retires an admitted execution when background inspection is %s",async inspection=>{
+    const {claim,engine}=fixture();await methods.prepareCloudCommand.call(engine,claim);
+    if(inspection==="empty")Object.assign(engine.agents,{completeCloudForeground:vi.fn(async()=>false)});
+    await methods.retireCloudCommand.call(engine,claim);
+    expect(engine.agents.endSession).toHaveBeenCalledTimes(1);
+    expect(engine.agents.endSession).toHaveBeenCalledWith("cursor",claim.executionId,{failClosed:true});
+    expect(engine.conversationExecution.has("conversation")).toBe(false);
+    expect(engine.cloudCommandSessions.size).toBe(0);
+  });
   it("reuses the retained execution for an authorized next turn without releasing native history",async()=>{
     const {claim,engine}=fixture();
     engine.conversationExecution.set("conversation",claim.executionId);engine.sessionAgent.set(claim.executionId,"cursor");

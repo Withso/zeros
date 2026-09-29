@@ -30,6 +30,13 @@ function validateLedger(ledger, { legacy = false } = {}) {
   }
 }
 
+// Legacy receipts can hold retired qualification canaries recorded before
+// agentQualificationId existed. They never hold capacity (see imageReservation),
+// so lookups skip them instead of failing the whole admission change.
+function knownImageIdentity(image) {
+  try { return imageIdentity(image); } catch { return undefined; }
+}
+
 function imageIdentity(image) {
   if (image.purpose === "native-agent-qualification" && uuid.test(image.agentQualificationId ?? "") && image.snapshotId === undefined) return `canary:${image.agentQualificationId}`;
   if (typeof image.snapshotId === "string") return `snapshot:${image.snapshotId}`;
@@ -136,10 +143,13 @@ export async function releaseHostedAdmission(store, lease, profile) {
   const state = lease.state;
   return changeAdmission(store, profile, ledger => {
     for (const row of ledger.reservations.filter(row => row.owner === state.owner && row.generation === state.generation)) {
-      const image = row.kind === "builder" && state.resources.images?.find(image => imageIdentity(image) === row.computeId);
-      const stopped = image && (image.builder ? image.builder.deleted || image.builder.retiredAt : ["planned", "rejected"].includes(image.builderCreate?.phase));
+      const image = row.kind === "builder" && state.resources.images?.find(image => knownImageIdentity(image) === row.computeId);
+      // Builder intents and snapshot requests are saved before any provider
+      // dispatch, so a reservation with no record or no intent never allocated.
+      const neverStarted = row.kind === "builder" && (!image || !image.builder && (!image.builderIntent || ["planned", "rejected"].includes(image.builderCreate?.phase)));
+      const stopped = neverStarted || image && (image.builder ? image.builder.deleted || image.builder.retiredAt : ["planned", "rejected"].includes(image.builderCreate?.phase));
       if (state.status === "archived" || row.kind === "builder" && stopped) row.releasedAt ??= new Date().toISOString();
-      if (row.kind === "builder" && (state.status === "archived" || !row.snapshotName || image?.snapshotDeleted || stopped && (!image.snapshotRequested || ["planned", "rejected"].includes(image.snapshotCreate?.phase)))) row.snapshotReleasedAt ??= new Date().toISOString();
+      if (row.kind === "builder" && (state.status === "archived" || !row.snapshotName || image?.snapshotDeleted || stopped && (!image?.snapshotRequested || ["planned", "rejected"].includes(image?.snapshotCreate?.phase)))) row.snapshotReleasedAt ??= new Date().toISOString();
     }
     // Keep terminal evidence in generation receipts, bound the account object.
     ledger.reservations = ledger.reservations.filter(row => !row.releasedAt || row.kind === "builder" && !row.snapshotReleasedAt);

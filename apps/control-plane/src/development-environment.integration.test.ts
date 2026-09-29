@@ -15,22 +15,37 @@ const database = url ? describe : describe.skip;
 
 database("hosted Dev database ownership", () => {
   it("migrates with the marker present and confines the runtime to its own readonly generation marker", async () => {
-    const admin = new pg.Pool({ connectionString: url, max: 1 });
-    const role = `pscale_api_dev_test_${randomBytes(6).toString("hex")}`;
+    const cluster = new pg.Pool({ connectionString: url, max: 1 });
+    const suffix = randomBytes(6).toString("hex");
+    const databaseName = `zeros_dev_test_${suffix}`, role = `pscale_api_dev_test_${suffix}`;
+    const password = randomBytes(24).toString("hex");
+    const migrationUrl = new URL(url!); migrationUrl.pathname = `/${databaseName}`;
+    const admin = new pg.Pool({ connectionString: migrationUrl.toString(), max: 1 });
     const identity = { owner: "a".repeat(24), generation: "11111111-1111-4111-8111-111111111111",
       runId: "22222222-2222-4222-8222-222222222222", sourceSha256: "a".repeat(64), workerInputsSha256: "b".repeat(64) };
     let runtime: pg.Pool | undefined;
+    let databaseCreated = false, roleCreated = false;
     try {
-      await admin.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+      // Global setup already migrated the shared database. This test needs an
+      // empty branch with its marker present before migrations, not that baseline.
+      const baselineSql = "SELECT 'public'::regnamespace::oid AS public_oid, count(*)::int AS migrations FROM public.schema_migrations";
+      const baseline = (await cluster.query(baselineSql)).rows;
+      expect(baseline[0].migrations).toBeGreaterThan(0);
+      await cluster.query(`CREATE DATABASE ${pg.escapeIdentifier(databaseName)} TEMPLATE template0`);
+      databaseCreated = true;
       await admin.query("CREATE TABLE zeros_development_identity(owner text PRIMARY KEY,generation uuid NOT NULL)");
       await admin.query("INSERT INTO zeros_development_identity VALUES($1,$2)", [identity.owner, identity.generation]);
       await runMigrations(admin);
-      await admin.query(`CREATE ROLE ${role} LOGIN NOINHERIT NOBYPASSRLS`);
+      // CI uses password authentication; a passwordless test login only worked
+      // with a local trust-authenticated server.
+      await admin.query(`CREATE ROLE ${role} LOGIN NOINHERIT NOBYPASSRLS PASSWORD ${pg.escapeLiteral(password)}`);
+      roleCreated = true;
       await grantHostedRuntimeAuthority(admin, role);
       await admin.query(`REVOKE zeros_app FROM ${role}`);
       await repairHostedRuntimeAuthority(admin, { ...identity, backendStopped: true, roles: { runtime: { baseUsername: role } } });
-      const connection = new URL(url!); connection.username = role; connection.password = "";
+      const connection = new URL(migrationUrl); connection.username = role; connection.password = password;
       runtime = createPool(connection.toString(), { maxConnections: 1 });
+      expect((await runtime.query("SELECT current_user AS role")).rows).toEqual([{ role }]);
       await expect(assertHostedDatabaseOwnership(runtime, identity)).resolves.toBeUndefined();
       await expect(assertHostedDatabaseOwnership(runtime, { ...identity, owner: "b".repeat(24) })).rejects.toThrow(/ownership/);
       await expect(runtime.query("DELETE FROM zeros_development_identity")).rejects.toMatchObject({ code: "42501" });
@@ -51,7 +66,7 @@ database("hosted Dev database ownership", () => {
       const fixtureProof = { userId: fixture.workosUserId, email: fixture.expectedEmail, organizationId: fixture.workosOrganizationId,
         externalId: organizationId, name: "Dev fixture", membershipId: "om_devfixture", membershipUpdatedAt: new Date().toISOString(), verifiedAt: Date.now() };
       const input = { runtime, migration: admin, withSystemTx, module: name => modules[name as keyof typeof modules](),
-        request: { ...identity, fixture, fixtureProof, roles: { runtime: { url: connection.toString() }, migration: { url } }, worker: { storageMiB: 20480 }, boat: { secondsPerDollar: 100_000 } } };
+        request: { ...identity, fixture, fixtureProof, roles: { runtime: { url: connection.toString() }, migration: { url: migrationUrl.toString() } }, worker: { storageMiB: 20480 }, boat: { secondsPerDollar: 100_000 } } };
       await expect(seedHostedFixture(input)).resolves.toEqual({ seeded: true });
       await expect(seedHostedFixture(input)).resolves.toEqual({ seeded: true });
       const credit = await admin.query("SELECT amount_micro_usd,source_kind FROM managed_compute_funding_receipts");
@@ -70,11 +85,16 @@ database("hosted Dev database ownership", () => {
       expect((await admin.query("SELECT count(*)::int AS n FROM teams WHERE org_id=$1", [organizationId])).rows).toEqual([{ n: 1 }]);
       await admin.query("UPDATE organizations SET slug='changed-fixture' WHERE id=$1", [organizationId]);
       await expect(seedHostedFixture(input)).rejects.toThrow(/conflicts/);
+      expect((await cluster.query(baselineSql)).rows).toEqual(baseline);
     } finally {
       await runtime?.end();
-      await admin.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-      await admin.query(`DROP OWNED BY ${role}; DROP ROLE ${role}`).catch(() => {});
       await admin.end();
+      try {
+        if (databaseCreated) await cluster.query(`DROP DATABASE ${pg.escapeIdentifier(databaseName)} WITH (FORCE)`);
+      } finally {
+        try { if (roleCreated) await cluster.query(`DROP ROLE ${role}`); }
+        finally { await cluster.end(); }
+      }
     }
   });
 });

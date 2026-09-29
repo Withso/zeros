@@ -349,15 +349,33 @@ d("cloud workspace content durability", () => {
     expect((await pool.query("SELECT state FROM workspace_blobs WHERE org_id=$1", [fixture.organizationId])).rows[0].state).toBe("pending_upload");
   });
 
-  it.each(["failed", "stopped", "expired engine"])("replaces a %s allocation from a selected durable checkpoint without asking the dead engine to checkpoint", async status => {
+  it.each((["failed", "stopped", "expired engine"] as const).flatMap(status =>
+    (["periodic", "before_stop"] as const).map(reason => ({ status, reason })),
+  ))("replaces a $status allocation from a selected $reason durable checkpoint without asking the dead engine to checkpoint", async ({ status, reason }) => {
     await pool.query(`INSERT INTO cloud_workspace_quotas(org_id,max_workspaces,max_running_workspaces,max_cpu_millicores,max_memory_mib,max_storage_mib)
       VALUES($1,1,1,4000,8192,40960)`, [fixture.organizationId]);
     const file = await blobs.put({ ...engineAuthority(), bytes: Buffer.from("durable") });
     const manifest = await blobs.put({ ...engineAuthority(), bytes: Buffer.from("{}") });
     const appended = await content.append({ ...engineAuthority(), expectedRevision: 0, idempotencyKey: randomUUID(), gitBaseCommit: "a".repeat(40), gitHeadRef: null,
       mutations: [{ path: "file.txt", operation: "upsert", entryType: "file", mode: 33188, blobId: file.id, contentSha256: file.plaintextSha256, sizeBytes: 7 }] });
-    const checkpoint = await content.commitCheckpoint({ ...engineAuthority(), idempotencyKey: randomUUID(), contentRevision: appended.revision,
-      reason: "periodic", manifestBlobId: manifest.id, artifactBlobId: null, inclusionPolicy: {}, fileCount: 1, totalBytes: 7, integritySha256: manifest.plaintextSha256 });
+    const finalRequest = reason === "before_stop" ? await withSystemTx(pool, async tx => {
+      const intentId = randomUUID();
+      await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256)
+        VALUES($1,$2,1,$3,$4,'stop',$5,$6)`, [intentId, fixture.workspaceId, fixture.organizationId, fixture.userId, randomUUID(), Buffer.alloc(32)]);
+      return enqueueWorkspaceCheckpointRequest(tx, { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
+        generation: 1, requestedBy: fixture.userId, lifecycleIntentId: intentId, reason, idempotencyKey: randomUUID() });
+    }) : null;
+    const checkpoint = await content.commitCheckpoint({ ...engineAuthority(), ...(finalRequest ? { requestId: finalRequest.id } : {}),
+      idempotencyKey: randomUUID(), contentRevision: appended.revision,
+      reason, manifestBlobId: manifest.id, artifactBlobId: null, inclusionPolicy: {}, fileCount: 1, totalBytes: 7, integritySha256: manifest.plaintextSha256 });
+    if (finalRequest) {
+      await pool.query(`UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now()
+        WHERE id=(SELECT lifecycle_intent_id FROM workspace_checkpoint_requests WHERE id=$1)`, [finalRequest.id]);
+      await expect(blobs.authorizeUpload(fixture.heartbeatToken)).rejects.toMatchObject({ code: "engine_authority_rejected" });
+    } else {
+      // A periodic snapshot does not close this engine's write authority.
+      await expect(blobs.authorizeUpload(fixture.heartbeatToken)).resolves.toBeUndefined();
+    }
     const config: CloudWorkspaceBackendConfig = { provider: "daytona", apiKey: "fixture", apiUrl: "https://api.example.test", target: "eu", snapshotId: "recovery-image", imageRef: "recovery-image",
       architecture: "linux/amd64", cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480, sourceCommit: "b".repeat(40), operationTimeoutSeconds: 30,
       autoArchiveMinutes: 10080, reconcileIntervalMs: 1000, providerCredentialKeys: {}, settingsSecretEncryptionKeys: {}, currentSettingsSecretEncryptionKeyVersion: null,
@@ -377,11 +395,22 @@ d("cloud workspace content durability", () => {
     }
     expect((await send({ ...body, sourceGeneration: 2 })).status).toBe(409);
     expect((await send({ ...body, checkpointId: randomUUID() })).status).toBe(404);
-    const key = randomUUID(); const accepted = await send(body, key);
+    if (!finalRequest) {
+      const unacknowledged = await send(body);
+      expect(unacknowledged.status,
+        "A periodic checkpoint leaves write authority open; a later failure, stop, or lease expiry cannot rule out newer local work",
+      ).toBe(409);
+      expect(await unacknowledged.json()).toEqual({ error: { code: "recovery_acknowledgement_required" } });
+    }
+    // Completed final capture fences the old engine without a later admission;
+    // it proves this recovery lossless and must not need acknowledgement.
+    const recoveryBody = finalRequest ? body : { ...body, allowDataLoss: true };
+    const key = randomUUID(); const accepted = await send(recoveryBody, key);
     expect(accepted.status, await accepted.clone().text()).toBe(202);
-    expect((await send(body, key)).status).toBe(200);
-    expect((await send({ ...body, checkpointId: randomUUID() }, key)).status).toBe(409);
-    expect((await pool.query("SELECT count(*)::integer AS count FROM workspace_checkpoint_requests WHERE workspace_id=$1", [fixture.workspaceId])).rows).toEqual([{ count: 0 }]);
+    expect((await send(recoveryBody, key)).status).toBe(200);
+    expect((await send({ ...recoveryBody, checkpointId: randomUUID() }, key)).status).toBe(409);
+    expect((await pool.query("SELECT state,checkpoint_id FROM workspace_checkpoint_requests WHERE workspace_id=$1", [fixture.workspaceId])).rows)
+      .toEqual(finalRequest ? [{ state: "succeeded", checkpoint_id: checkpoint.checkpointId }] : []);
     expect((await pool.query("SELECT recovery_checkpoint_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows).toEqual([{ recovery_checkpoint_id: checkpoint.checkpointId }]);
     expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0]?.state).not.toBe("ready");
     let stops = 0, creates = 0;

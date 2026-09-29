@@ -30,6 +30,25 @@ async function fixture(){
   return {lease,background,request,callbacks,domain,admission,task,servers,advance:async(ms:number)=>{now+=ms;await vi.advanceTimersByTimeAsync(ms);}};
 }
 describe("leased native background execution",()=>{
+  it.each([false,true])("declines retention without live native work or servers (empty snapshot: %s)",async observed=>{
+    const f=await fixture();
+    try{
+      if(observed)f.background.observe({sessionUpdate:"background_tasks_update",tasks:[],waiting:false,activity:null});
+      expect(await f.background.complete(f.callbacks)).toBe(false);
+      expect(f.callbacks.nativeWork).toHaveBeenCalledOnce();expect(f.servers).toHaveBeenCalledOnce();
+      expect(f.request.mock.calls.filter(([request])=>request.kind==="background")).toEqual([]);
+      expect(f.background.retained).toBe(false);
+    }finally{await f.lease.close();}
+  });
+  it("retains a confirmed native child when no server is listening",async()=>{
+    const f=await fixture();
+    try{
+      f.background.observe({sessionUpdate:"background_tasks_update",tasks:[f.task],waiting:true});
+      expect(await f.background.complete(f.callbacks)).toBe(true);
+      expect(f.request).toHaveBeenCalledWith(expect.objectContaining({kind:"background",operation:expect.objectContaining({kind:"retain"})}),f.lease.signal);
+      expect(f.domain.stopAndProve).not.toHaveBeenCalled();
+    }finally{await f.lease.close();}
+  });
   it.each(["一","\u0000","😀"])("bounds encoded snapshot bytes without retiring valid native work (%s)",async character=>{
     const f=await fixture(),original=f.request.getMockImplementation()!;const sizes:number[]=[];
     f.request.mockImplementation(async input=>{

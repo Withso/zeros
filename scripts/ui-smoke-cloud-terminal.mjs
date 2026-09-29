@@ -157,7 +157,7 @@ export async function runCloudTerminalSmoke({ page, check, harnessBase }) {
   await expect(
     selected.getByLabel("Cloud terminal", { exact: true }),
   ).toBeVisible();
-  await expect(selected.locator("[data-run-wave]")).toBeVisible();
+  await expect(selected.locator("[data-run-stream]")).toBeVisible();
   const run = await page.evaluate(() => {
     const api = window.__zerosTerminalSmoke;
     return { id: api.runIdFor("test"), folder: api.folders.a };

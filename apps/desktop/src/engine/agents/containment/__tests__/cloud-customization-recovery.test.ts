@@ -5,7 +5,7 @@ import {expect,it} from 'vitest';
 import {acquireCloudNativeHistory,copyCloudNativeForkHistory,deleteCloudNativeHistory} from '../cloud-native-history';
 import {prepareHistoryCustomization} from '../cloud-customization-history';
 const a={owner:'a'.repeat(64),currentKeyVersion:1,keys:{'1':randomBytes(32).toString('base64url')}},b={...a,owner:'b'.repeat(64)};
-const secret='v7b-synthetic-historical-secret';
+const secret='v7b-synthetic-historical-secret'; // gitleaks:allow — deterministic synthetic redaction fixture
 const parent=(root:string,id:string)=>path.join(root,createHash('sha256').update(id).digest('hex'));
 
 it.each(['claude','cursor','codex'] as const)('interrupted reset before purge retries safely for %s',async provider=>{

@@ -87,7 +87,7 @@ interface TestEngineInternals {
   cloudWorker: CloudWorkerConfiguration | null;
   retireCloudCommand(claim: CloudCommandClaim): Promise<void>;
   cancelCloudCommandConversation(conversationId: string): Promise<void>;
-  cloudCommandSessions: Map<string, { claim: CloudCommandClaim; controller: AbortController; preparation: Promise<void>; receiver: TransportClient }>;
+  cloudCommandSessions: Map<string, { claim: CloudCommandClaim; controller: AbortController; preparation: Promise<void>; receiver: TransportClient; ownsExecution?: boolean }>;
   pendingPermissionRequests: Map<
     string,
     { agentId: string; request: RequestPermissionRequest }
@@ -764,14 +764,23 @@ describe("agent session continuity across a local renderer reload", () => {
       state.agents.events.onBoundaryStatusChanged(agentId, "completed-execution", boundary);
       state.agents.events.onAgentExit(agentId, 137, "SIGKILL", "completed-execution");
     });
-    await state.retireCloudCommand({
+    const claim = {
       commandId: randomUUID(), claimId: randomUUID(), conversationId: "completed-chat",
       executionId: "completed-execution", dispatchAllowed: true,
       payload: { agentId, agentCredentialGrantId: randomUUID(), model: "test-model", userMessageId: randomUUID(), modeRevision: 0,
         prompt: [{ type: "text", text: "test" }] },
-    } as CloudCommandClaim);
+    } as CloudCommandClaim;
+    // A completed command has acquired this execution during admission. A
+    // route alone also exists before admission and cannot grant retirement.
+    state.cloudCommandSessions.set(claim.commandId, {
+      claim, controller: new AbortController(), preparation: Promise.resolve(),
+      receiver: client, ownsExecution: true,
+    });
+    await state.retireCloudCommand(claim);
     expect(messages.filter(message => ["AGENT_AGENT_EXITED", "AGENT_BOUNDARY_STATUS_CHANGED"].includes(message.type))).toEqual([]);
     expect(endSession).toHaveBeenCalledTimes(1);
+    expect(endSession).toHaveBeenCalledWith(agentId, "completed-execution", { failClosed: true });
+    expect(state.cloudCommandSessions.has(claim.commandId)).toBe(false);
     expect(state.conversationExecution.has("completed-chat")).toBe(false);
     expect(state.router.ownerOf("completed-execution")).toBeUndefined();
   });

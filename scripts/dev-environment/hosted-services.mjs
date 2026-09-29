@@ -169,6 +169,9 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
       if (!existing) {
         if (!registry) throw new Error("Dev builder allocation requires the account admission registry");
         const inventory = await inventoryHostedProviders(profile);
+        // An earlier interrupted attempt can leave a never-started builder
+        // reservation; release it before competing for the owner's slot.
+        await releaseHostedAdmission(registry, lease, profile);
         await reserveHostedAdmission(registry, lease.state, profile, { kind: "builder", inventory,
           snapshotName: `dev-${lease.state.owner}-${lease.state.generation.slice(0, 8)}-${build.workerInputsSha256.slice(0, 16)}` });
       }

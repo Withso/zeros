@@ -18,7 +18,8 @@ import type { Context, GenerationRegistration } from "./types.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("persistent Dev connection authority (real PostgreSQL)", () => {
-  let pool: pg.Pool, store: DevConnectionStore;
+  let pool: pg.Pool, admin: pg.Pool, store: DevConnectionStore;
+  const databaseName = `dev_connections_${randomUUID().replaceAll("-", "")}`;
   const keys = {
     currentKeyVersion: 1,
     keys: { 1: randomBytes(32).toString("base64url") },
@@ -46,14 +47,27 @@ suite("persistent Dev connection authority (real PostgreSQL)", () => {
     source: "hosted-dev",
   });
   beforeAll(async () => {
-    pool = new pg.Pool({
+    admin = new pg.Pool({
       connectionString: process.env.TEST_DATABASE_URL,
-      max: 8,
+      max: 1,
     });
+    // Global setup migrates the product database; the broker requires its own.
+    await admin.query(`CREATE DATABASE "${databaseName}"`);
+    const connectionString = new URL(process.env.TEST_DATABASE_URL!);
+    connectionString.pathname = `/${databaseName}`;
+    pool = new pg.Pool({ connectionString: connectionString.href, max: 8 });
     await migrateDevConnections(pool);
   });
   afterAll(async () => {
-    await pool?.end();
+    try {
+      await pool?.end();
+    } finally {
+      try {
+        await admin?.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+      } finally {
+        await admin?.end();
+      }
+    }
   });
   beforeEach(async () => {
     await pool.query(

@@ -21,6 +21,9 @@ export function workerSourcePath(file) {
   if (!file.includes("/")) return true;
   if (/^(?:packages|catalogs|styles|third_party|patches|types)\//.test(file)) return true;
   if (file === "apps/desktop/src/cli.ts" || file.startsWith("apps/desktop/src/engine/") || file.startsWith("apps/desktop/src/assets/")) return true;
+  // The release image kit shares its sanitation/attestation scripts with the
+  // organization image builder; the standalone control plane owns that module.
+  if (file === "apps/control-plane/src/cloud-workspaces/computer-image-scripts.ts") return true;
   return file.startsWith("scripts/cloud-workspace-validation/") || file.startsWith("scripts/zsr-qualification/") ||
     /^scripts\/(?:build-zsr-supervisor|codegen-codex(?:-lib)?|fix-node-pty-helper)\.(?:mjs|cjs)$/.test(file);
 }

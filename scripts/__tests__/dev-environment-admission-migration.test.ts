@@ -151,3 +151,48 @@ it("V4-04 retires a known initial canary rejection without allocating again or r
   expect(state.resources.images[0].deleted).toBe(true);
   expect((await store.readAdmission()).state.reservations.some(row => row.kind === "builder")).toBe(false);
 });
+
+it("skips retired pre-agentQualificationId canary records when releasing a live generation's builders", async () => {
+  // Shape observed in a live Dev registry: qualification canaries recorded
+  // before agentQualificationId existed, with retired builders and no snapshot.
+  const state: any = generation("c"); state.status = "ready";
+  const snapshotId = name(state, "worker");
+  state.resources.images = [
+    { inputsSha256: "2".repeat(64), sourceCommit: "a".repeat(40), purpose: "native-agent-qualification", sourceImage: snapshotId,
+      maxUsedHours: 1, builderIntent: { id: "intent" }, builder: { id: "bx_legacy_canary", retiredAt: "2026-09-28T04:33:21.884Z", deleteRequested: true } },
+    { inputsSha256: "1".repeat(64), sourceCommit: "a".repeat(40), snapshotId, qualified: true, snapshotRequested: true,
+      builder: { id: "bx_worker", retiredAt: "2026-09-28T03:00:00.000Z", deleteRequested: true } },
+  ];
+  const store = registry([state]);
+  await reserveHostedAdmission(store, state, profile);
+  await expect(releaseHostedAdmission(store, leaseFor(state), profile)).resolves.toBeUndefined();
+  const rows = (await store.readAdmission()).state.reservations;
+  expect(rows.some(row => String(row.computeId ?? "").includes("bx_legacy_canary"))).toBe(false);
+});
+
+it("releases a builder reservation whose build was interrupted before any builder intent", async () => {
+  const state: any = generation("d"); state.status = "ready";
+  const planned = name(state, "planned");
+  // The image record exists (snapshot name planned) but no builder intent was
+  // journaled because the build failed before dispatch.
+  state.resources.images = [{ inputsSha256: "3".repeat(64), sourceCommit: "a".repeat(40), snapshotId: planned }];
+  const store = registry([state]);
+  await reserveHostedAdmission(store, state, profile);
+  await reserveHostedAdmission(store, state, profile, { kind: "builder", snapshotName: planned, inventory: [{ provider: "boat", id: "base" }] });
+  await releaseHostedAdmission(store, leaseFor(state), profile);
+  const retry = name(state, "retry");
+  state.resources.images.push({ inputsSha256: "4".repeat(64), sourceCommit: "a".repeat(40), snapshotId: retry });
+  await expect(reserveHostedAdmission(store, state, profile, { kind: "builder", snapshotName: retry, inventory: [{ provider: "boat", id: "base" }] })).resolves.toBeDefined();
+});
+
+it("keeps capacity for a dispatched builder whose outcome is uncertain", async () => {
+  const state: any = generation("e"); state.status = "ready";
+  const pending = name(state, "pending");
+  state.resources.images = [{ inputsSha256: "5".repeat(64), sourceCommit: "a".repeat(40), snapshotId: pending,
+    builderIntent: { id: "intent" }, builderCreate: { phase: "uncertain" } }];
+  const store = registry([state]);
+  await reserveHostedAdmission(store, state, profile);
+  await reserveHostedAdmission(store, state, profile, { kind: "builder", snapshotName: pending, inventory: [{ provider: "boat", id: "base" }] });
+  await releaseHostedAdmission(store, leaseFor(state), profile);
+  await expect(reserveHostedAdmission(store, state, profile, { kind: "builder", snapshotName: name(state, "other"), inventory: [{ provider: "boat", id: "base" }] })).rejects.toThrow(/cap/);
+});
