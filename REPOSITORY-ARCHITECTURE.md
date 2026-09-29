@@ -288,7 +288,9 @@ Coordinate-era source names were replaced with semantics. Examples include:
 - `column3-tab-manager.ts` → `workbench/tab-model.ts`
 - `column3-tabs.tsx` → `workbench/tab-content.tsx`
 - `changes-row1-tab.tsx` → `changes-surface.tsx`
-- `context-row1-tab.tsx` → `context-surface.tsx`
+- `context-row1-tab.tsx` / `context-surface.tsx` are retired with the Context
+  canvas; `.context` storage and attachment APIs remain (see
+  [context storage](docs/context-storage.md)).
 - `review-row1-tab.tsx` → `review-surface.tsx`
 - `row1-editor-state.ts` → `editor-state.ts`
 - `customize-helpers.ts` → `customize-model.ts`

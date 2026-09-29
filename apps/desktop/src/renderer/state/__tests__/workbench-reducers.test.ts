@@ -179,12 +179,10 @@ describe("workbench default slice", () => {
       ["design", "Design"],
       ["changes", "Changes"],
       ["review", "Review"],
-      ["context", "Context"],
       ["terminal", "Setup"],
     ]);
     expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
       false,
-      true,
       true,
       true,
       true,
@@ -210,7 +208,6 @@ describe("workbench default slice", () => {
       "Design",
       "Changes",
       "Review",
-      "Context",
       "Setup",
     ]);
     expect(slice().activeId).toBe(slice().tabs[0].id);
@@ -356,7 +353,6 @@ describe("ADD_WORKBENCH_TAB", () => {
       "design",
       "changes",
       "review",
-      "context",
       "terminal",
       "files",
     ]);
@@ -397,7 +393,6 @@ describe("ADD_WORKBENCH_TAB", () => {
         { type: "design" },
         { type: "changes" },
         { type: "review" },
-        { type: "context" },
         { type: "terminal", terminalId: "setup" },
         { id: fileA.id, fileTreeVisible: false },
       ],
@@ -528,14 +523,13 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
     ).toBe(true);
   });
 
-  it("protects Design/Changes/Review/Context and the fixed home; extras close fully", () => {
+  it("protects Design/Changes/Review and the fixed home; extras close fully", () => {
     freshScope();
     const initial = slice().tabs;
     const home = initial.find((tab) => tab.type === "files")!;
     const design = initial.find((tab) => tab.type === "design")!;
     const changes = initial.find((tab) => tab.type === "changes")!;
     const review = initial.find((tab) => tab.type === "review")!;
-    const context = initial.find((tab) => tab.type === "context")!;
 
     dispatch({
       type: "UPDATE_WORKBENCH_TAB",
@@ -546,10 +540,8 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
     dispatch({ type: "REMOVE_WORKBENCH_TAB", id: design.id });
     expect(slice().tabs.some((tab) => tab.id === design.id)).toBe(true);
     dispatch({ type: "REMOVE_WORKBENCH_TAB", id: review.id });
-    dispatch({ type: "REMOVE_WORKBENCH_TAB", id: context.id });
     expect(slice().tabs.some((tab) => tab.id === changes.id)).toBe(true);
     expect(slice().tabs.some((tab) => tab.id === review.id)).toBe(true);
-    expect(slice().tabs.some((tab) => tab.id === context.id)).toBe(true);
     expect(slice().tabs.find((tab) => tab.id === changes.id)?.pinned).toBe(
       true,
     );
@@ -571,7 +563,6 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
       "design",
       "changes",
       "review",
-      "context",
       "terminal",
     ]);
   });
@@ -1001,13 +992,11 @@ describe("REORDER_WORKBENCH_TABS", () => {
 
     // The fixed home owns the leading slot no matter where the caller put it;
     // the other closable tabs keep the requested relative order.
-    const context = slice().tabs.find((tab) => tab.type === "context")!;
     expect(slice().tabs.map((tab) => tab.id)).toEqual([
       initialBlank.id,
       slice().tabs.find((tab) => tab.type === "design")!.id,
       changes.id,
       review.id,
-      context.id,
       browser.id,
       second.id,
       first.id,

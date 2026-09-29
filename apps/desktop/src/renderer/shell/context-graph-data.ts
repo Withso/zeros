@@ -1,12 +1,12 @@
 // ──────────────────────────────────────────────────────────
-// Context graph data — keyed server-state cache for the Context tab
+// Context graph data — keyed server-state cache for workspace summaries
 // ──────────────────────────────────────────────────────────
 //
 // The graph listing is a bridge read keyed by the workspace folder, so it
 // follows the same contract as workspace-file-data-cache.ts: bounded
 // KeyedAsyncCache, request dedup, and retention of the last confirmed
 // exact-key snapshot while a refresh is in flight (a refresh must
-// never blank an already-rendered canvas).
+// never blank an already-rendered summary).
 //
 // Opening or refreshing this surface is read-only. Attachment and explicit
 // context writes own directory creation and legacy migration.
@@ -30,7 +30,7 @@ const graphCache = new KeyedAsyncCache<ContextGraphData>(32);
 const refreshGenerations = new Map<string, number>();
 
 // Cache invalidation outlives visible consumers. An attachment can land while
-// both Context and Summary are closed; mark only its key stale, with no I/O.
+// Summary is closed; mark only its key stale, with no I/O.
 subscribeContextGraphChanged((cwd) =>
   graphCache.invalidate(contextGraphKey(cwd)),
 );
@@ -66,11 +66,11 @@ export function useContextGraphSnapshot(
  *
  *  A forced load INVALIDATES first — the invalidate-before-load contract the
  *  other refresh-bus caches follow. Force alone is not enough here: the
- *  attach-time write signal fires while the tab's activation listing can
+ *  attach-time write signal fires while the summary's initial listing can
  *  still be in flight, and KeyedAsyncCache dedups a forced load into a
  *  non-stale pending request. Without the invalidation the PRE-write listing
  *  both satisfies the forced reload and publishes as fresh — the just-staged
- *  attachment stays off the canvas until the next unrelated refresh. The
+ *  attachment stays out of the summary until the next unrelated refresh. The
  *  generation bump inside invalidate() also stops that stale in-flight
  *  response from publishing at all. */
 export function loadContextGraph(
@@ -86,7 +86,7 @@ export function loadContextGraph(
   });
 }
 
-/** Multiple visible summaries/canvases share one refresh generation. Reopening
+/** Multiple visible summaries share one refresh generation. Reopening
  * a surface is not a mutation, even when the refresh bus is already nonzero. */
 export function loadContextGraphForRefresh(cwd: string, generation: number) {
   const key = contextGraphKey(cwd);

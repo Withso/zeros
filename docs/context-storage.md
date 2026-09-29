@@ -17,15 +17,23 @@ format and upload-size policy is separate from this delivery contract.
 See [Composer attachments](composer-attachments.md) for the 500 MB file policy
 and chunked transfer / path delivery contract.
 
-The Context tab uses `.context/local/` for private material and
+Workspace context uses `.context/local/` for private material and
 `.context/shared/` for material selected for sharing. Composer attachments use
 `<scope>/attachments/<attachmentId>/<filename>`; other files inside either
-scope are context documents. The tab's book icon and empty message, “No context
-added”, do not affect storage or attachment identity.
+scope are context documents. The workbench Context tab and its canvas are
+retired; `.context` storage, attachment staging, sharing APIs and archive
+recovery remain available. The conversation summary retains its recent context
+list and opens items in the Files viewer. The shared renderer cache lives in
+`apps/desktop/src/renderer/shell/context-graph-data.ts`.
+
+Persisted `context` tabs are removed during workbench normalization. A selected
+retired tab falls back to the Files home in that same workspace. Other tabs,
+including open `.context` files, keep their identities and saved choices; the
+workbench storage key does not change.
 
 Existing `.context/` scratch files and the older
 `.context/attachments/<chat>/<file>` transcript layout remain in place. The
-Context canvas lists the two explicit scopes, not arbitrary scratch files.
+context listing covers the two explicit scopes, not arbitrary scratch files.
 Fresh scaffolds ignore other root contents, including their own `.gitignore`.
 A private-scope `.gitignore` protects new attachments even when an existing
 root ignore file has unrelated rules. Existing ignore text is preserved; legacy
@@ -34,7 +42,7 @@ generated files.
 
 ## Migration and compatibility
 
-Workspace creation and Context-tab reads leave storage untouched. Attachment
+Workspace creation and context reads leave storage untouched. Attachment
 staging, share actions and explicit scaffold operations prepare the directory
 on demand. Preparation merges `.context-graph/` into
 `.context/`, including when the destination already exists. Read-only listing
@@ -55,8 +63,8 @@ recursively deleted. Symlinked roots, scope directories and migration entries
 are refused. Unsupported filesystem operations fail without overwriting data.
 
 Private recovery and archive provenance live in
-`.context/local/.zeros-context-migration/`, which is excluded from Context
-cards. Recovery records contain a versioned original relative path and any
+`.context/local/.zeros-context-migration/`, which is excluded from context
+listings. Recovery records contain a versioned original relative path and any
 captured file; preparation resumes interrupted removals before scanning the
 legacy directory. Paths are validated and metadata reads refuse symlinks.
 Conflicting versions remain on disk with an error naming their locations.
@@ -65,7 +73,7 @@ archivable while migration reports the conflict.
 
 Preparation calls for the same workspace share an in-flight promise. Failed
 preparation retries on the next write. Attachment-stage and share failures
-retain their error messages while Context-tab reads keep legacy/current files
+retain their error messages while context reads keep legacy/current files
 visible without attempting a migration or adding generated directories.
 
 Attachment copy buffers and their cleanup records live in private storage
