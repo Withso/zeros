@@ -9,7 +9,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   seedProviderLossAttestation,
   seedReadyCloudWorkspace,
@@ -107,8 +107,7 @@ suite("managed compute lifecycle admission", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     f = await seedReadyCloudWorkspace(pool);
     await pool.query(
       "UPDATE managed_compute_provider_requirements SET require_credit=true WHERE provider='daytona'",

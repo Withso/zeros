@@ -7,7 +7,7 @@ import {afterAll,beforeAll,beforeEach,describe,expect,it} from "vitest";
 import {createAuthMiddleware,ensureUser,type AuthedUser} from "../auth.js";
 import {loadConfig} from "../config.js";
 import {HttpError} from "../authz.js";
-import {runMigrations} from "../migrate.js";
+import {resetMigratedTestDatabase} from "../test-database.js";
 import {createCloudWorkspaceCollaborationRoutes} from "./collaboration-routes.js";
 import {openWorkspaceInvitation} from "./invitation-envelope.js";
 import {seedReadyCloudWorkspace} from "./test-fixtures.js";
@@ -20,7 +20,7 @@ d("cloud workspace collaboration HTTP",()=>{
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:5});});
   afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture=await seedReadyCloudWorkspace(pool);owner=await current(fixture.userId);
     const guestFixture=await seedReadyCloudWorkspace(pool);guest=await current(guestFixture.userId);actor=owner;
     secret=randomBytes(32).toString("base64url");app=new Hono();

@@ -5,7 +5,7 @@ import pg from "pg";
 import { ensureUser, type AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
 import { withSystemTx } from "./db.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import { createRoutes } from "./routes.js";
 import { createDeletionLifecycleRoutes } from "./deletion-lifecycle.js";
 import type { WorkOSInvitationRecord } from "./workos-provider.js";
@@ -52,8 +52,7 @@ d("organization routes", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     owner = { ...(await signup("Ada")), staffRole: "platform_owner" };
     member = await signup("Grace");
     actor = owner;

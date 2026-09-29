@@ -1,7 +1,7 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import pg from "pg";
 import { beforeAll, afterAll, beforeEach, describe, it, expect } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx, withUserTx } from "../db.js";
 import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
 import type { CloudCommandEngineScope } from "./commands.js";
@@ -14,8 +14,7 @@ suite("durable cloud decision and steering receipts", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool); fixture = await seedReadyCloudWorkspace(pool);
+    await resetMigratedTestDatabase(pool); fixture = await seedReadyCloudWorkspace(pool);
     scope = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
       engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
     service = new DatabaseCloudWorkspaceActionService({ pool });

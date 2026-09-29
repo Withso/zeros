@@ -1,7 +1,7 @@
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { DatabaseCloudWorkspaceHealthService } from "./health.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 
@@ -18,8 +18,7 @@ d("cloud workspace operational health", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   it("exposes configuration posture and bounded reason codes without tenant data", async () => {

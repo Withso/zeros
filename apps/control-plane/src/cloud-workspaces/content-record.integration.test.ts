@@ -4,7 +4,7 @@ import pg from "pg";
 import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx } from "../db.js";
 import { lockWorkspaceObjectStorage } from "./storage-lock.js";
 import { HttpError } from "../authz.js";
@@ -99,8 +99,7 @@ d("cloud workspace content durability", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     objectStore = new InspectableObjectStore();
     blobs = new DatabaseCloudWorkspaceBlobService({

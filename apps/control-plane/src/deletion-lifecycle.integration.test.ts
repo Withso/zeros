@@ -15,7 +15,7 @@ import {
   DeletionLifecycleProcessor,
 } from "./deletion-lifecycle.js";
 import { seedProviderLossAttestation } from "./cloud-workspaces/test-fixtures.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import { createOpsRoutes } from "./ops.js";
 import {
   MAX_ACCOUNT_WORKOS_ERASURE_SUBJECTS,
@@ -227,8 +227,7 @@ d("account, organization, and operator deletion lifecycle", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     actor = await signup("Bootstrap");
 
     app = new Hono();

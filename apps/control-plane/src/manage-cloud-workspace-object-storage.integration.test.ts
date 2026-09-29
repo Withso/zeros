@@ -9,7 +9,7 @@ import {
   manageCloudWorkspaceObjectStorage,
   validateCloudWorkspaceObjectStorageRequest,
 } from "./manage-cloud-workspace-object-storage.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
@@ -19,8 +19,7 @@ d("owner-managed cloud-workspace object storage", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 3 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   afterAll(async () => {

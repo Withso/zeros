@@ -8,7 +8,7 @@ import {
   manageCloudWorkspaceObjectRotationRetry,
   validateCloudWorkspaceObjectRotationRetry,
 } from "./manage-cloud-workspace-object-rotation.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
@@ -67,8 +67,7 @@ d("owner-managed cloud-workspace object-rotation retry", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   afterAll(async () => {

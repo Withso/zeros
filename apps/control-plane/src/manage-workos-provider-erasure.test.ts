@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import {
   inspectWorkOSProviderErasureReadiness,
   manageWorkOSProviderErasureEvidence,
@@ -63,8 +63,7 @@ d("WorkOS provider-erasure operator reconciliation", () => {
   });
   afterAll(async () => pool.end());
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     actorUserId = randomUUID();
     requestId = randomUUID();
     await pool.query(

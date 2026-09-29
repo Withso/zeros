@@ -16,7 +16,7 @@ import type { AuthedUser } from "../auth.js";
 import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { DatabaseCloudWorkspaceManagementService } from "./management.js";
 import { selectCloudProviderConnectionForNewGeneration } from "./provider-connections.js";
 import { DaytonaProviderConnectionQualifier } from "./provider-qualification.js";
@@ -85,8 +85,7 @@ d("cloud workspace Phase 5 management", () => {
 
   beforeEach(async () => {
     currentApiKey.mockClear();
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     actor = await ensureUser(pool, {
       provider: "auth0",
       providerSubject: randomUUID(),

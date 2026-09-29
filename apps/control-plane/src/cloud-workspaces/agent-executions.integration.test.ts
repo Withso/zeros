@@ -1,7 +1,7 @@
 import {createHash,generateKeyPairSync,randomBytes,randomUUID,sign} from "node:crypto";
 import pg from "pg";
 import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from "vitest";
-import {runMigrations} from "../migrate.js";
+import {resetMigratedTestDatabase} from "../test-database.js";
 import {ensureUser} from "../auth.js";
 import {ensureCloudPilotUser,seedReadyCloudWorkspace} from "./test-fixtures.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
@@ -37,7 +37,7 @@ d("private provider execution leases",()=>{
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:6});});
   afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await runMigrations(pool);fixture=await seedReadyCloudWorkspace(pool);
+    await resetMigratedTestDatabase(pool);fixture=await seedReadyCloudWorkspace(pool);
     await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,
       actorUserId:fixture.userId,sharingMode:"organization",expectedRevision:1});
     owner=await ensureUser(pool,{provider:"workos",providerSubject:`workos|${fixture.userId}`,email:`durable-${fixture.userId}@example.test`,displayName:"Owner",

@@ -1,7 +1,7 @@
 import {randomBytes,randomUUID} from "node:crypto";
 import pg from "pg";
 import {afterAll,beforeAll,describe,expect,it} from "vitest";
-import {runMigrations} from "../migrate.js";
+import {resetMigratedTestDatabase} from "../test-database.js";
 import {seedReadyCloudWorkspace} from "./test-fixtures.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
@@ -13,7 +13,7 @@ d("bounded cloud management history plans",()=>{
   let pool:pg.Pool,fixture:Awaited<ReturnType<typeof seedReadyCloudWorkspace>>;
   beforeAll(async()=>{
     pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:3});
-    await pool.query("DROP SCHEMA public CASCADE;CREATE SCHEMA public");await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture=await seedReadyCloudWorkspace(pool);const other=await seedReadyCloudWorkspace(pool);
     for(const f of [fixture,other]){
       const device=randomUUID(),blob=randomUUID(),digest=randomBytes(32);

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ensureUser } from "./auth.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import {
   resolveWorkOSProviderLockKeys,
   workOSUserProviderLockKey,
@@ -16,8 +16,7 @@ database("runtime credentials without RLS bypass", () => {
   let runtime: pg.Pool;
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: url, max: 2 });
-    await admin.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-    await runMigrations(admin);
+    await resetMigratedTestDatabase(admin);
     // Startup SET ROLE models the production unprivileged login even when
     // the disposable test database authenticates its admin using trust.
     runtime = new pg.Pool({

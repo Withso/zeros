@@ -13,7 +13,7 @@ import {
   createDeletionLifecycleRoutes,
   DeletionLifecycleProcessor,
 } from "./deletion-lifecycle.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import { applyWorkOSIdentityEvent } from "./workos-events.js";
 import {
   workOSProviderSubjectHash,
@@ -61,8 +61,7 @@ d("reviewed WorkOS account recovery", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   afterAll(async () => {

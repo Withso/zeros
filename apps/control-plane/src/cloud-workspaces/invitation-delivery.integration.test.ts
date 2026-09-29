@@ -1,7 +1,7 @@
 import {randomBytes,randomUUID} from "node:crypto";
 import pg from "pg";
 import {afterAll,beforeAll,beforeEach,describe,expect,it} from "vitest";
-import {runMigrations} from "../migrate.js";
+import {resetMigratedTestDatabase} from "../test-database.js";
 import {EmailDeliveryError} from "../email.js";
 import {DatabaseCloudWorkspaceCollaborationService,type WorkspaceInvitationDeliveryConfig} from "./actors.js";
 import {CloudWorkspaceInvitationDeliveryWorker,type WorkspaceInvitationSender} from "./invitation-delivery.js";
@@ -13,7 +13,7 @@ d("durable encrypted workspace invitations",()=>{
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:6});});
   afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture=await seedReadyCloudWorkspace(pool);
     config={keys:{1:randomBytes(32).toString("base64url")},currentKeyVersion:1,webOrigin:"https://app.example.test"};
     service=new DatabaseCloudWorkspaceCollaborationService(pool,config);

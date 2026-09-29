@@ -1,7 +1,7 @@
 import {randomUUID} from "node:crypto";
 import pg from "pg";
 import {afterAll,beforeAll,describe,expect,it} from "vitest";
-import {runMigrations} from "./migrate.js";
+import {resetMigratedTestDatabase} from "./test-database.js";
 
 const suite=process.env.TEST_DATABASE_URL?describe:describe.skip;
 type Plan={"Node Type":string;"Actual Rows":number;"Rows Removed by Filter"?:number;Plans?:Plan[]};
@@ -11,7 +11,7 @@ suite("browser session authentication query plans",()=>{
   const prefix=randomUUID();
   beforeAll(async()=>{
     pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:2});
-    await pool.query("DROP SCHEMA public CASCADE;CREATE SCHEMA public");await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     await pool.query(`INSERT INTO workos_browser_sessions(credential_hash,kind,sealed_session,provider_session_id,provider_sub,
       email,access_token_expires_at,expires_at,revision)
       SELECT digest($1||n::text,'sha256'),'session','encrypted-fixture',$1||n::text,'subject-'||n,

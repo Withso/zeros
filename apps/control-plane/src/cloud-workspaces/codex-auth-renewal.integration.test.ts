@@ -1,7 +1,7 @@
 import {randomBytes,randomUUID} from "node:crypto";
 import pg from "pg";
 import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from "vitest";
-import {runMigrations} from "../migrate.js";
+import {resetMigratedTestDatabase} from "../test-database.js";
 import {withSystemTx} from "../db.js";
 import {seedReadyCloudWorkspace} from "./test-fixtures.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
@@ -14,7 +14,7 @@ d("durable native Codex authentication renewal",()=>{
   const keys={keys:{1:randomBytes(32).toString("base64url")},currentKeyVersion:1,refreshFingerprints:{keys:{1:randomBytes(32).toString("base64url")},currentKeyVersion:1}};
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:6});});afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{
-    await pool.query("DROP SCHEMA public CASCADE;CREATE SCHEMA public");await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     const f=await seedReadyCloudWorkspace(pool);credentials=new DatabaseCloudAgentCredentialService(pool,keys);
     input={ownerUserId:f.userId,credentialId:randomUUID(),operationId:randomUUID(),expectedRevision:0,displayName:"Codex",nativeCache:syntheticCodexCache()};
     await credentials.importCodex(input);

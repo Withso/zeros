@@ -1,7 +1,7 @@
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { withUserTx } from "../db.js";
 import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
 import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
@@ -20,8 +20,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
   beforeAll(() => { pool = new pg.Pool({ connectionString: databaseUrl, max: 4 }); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool); fixture = await seedReadyCloudWorkspace(pool);
+    await resetMigratedTestDatabase(pool); fixture = await seedReadyCloudWorkspace(pool);
     endpoint.mockReset().mockImplementation(async () => ({ url: "https://runtime.example.test/" }));
     resolve.mockClear();
     service = new DatabaseCloudRuntimeServiceAccess({ pool, providerResolver: { resolve } as unknown as CloudWorkspaceProviderResolver,
