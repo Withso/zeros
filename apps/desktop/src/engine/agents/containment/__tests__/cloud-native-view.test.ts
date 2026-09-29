@@ -62,3 +62,20 @@ it("makes native Codex user and system configuration immutable while preserving 
   expect(triples[0]).toEqual(["--bind", `${home.directory}/home`, "/srv/zeros/home/agent"]);
   expect(() => cloudNativeHomeMounts({ ...home, codexConfig: true })).toThrow();
 });
+
+it("keeps the pinned Codex CLI's own startup state writable without a writable configuration source", () => {
+  const codex = { ...home, codexConfig: true, skills: true, history: { provider: "codex", directory: home.history.directory.replace(/claude$/, "codex") } };
+  const mounts = cloudNativeHomeMounts(codex), text = mounts.join("\n");
+  // Codex 0.154 opens installation_id read-write at startup and locks thread
+  // writers at thread/start; either on the read-only view kills the process.
+  expect(text).toContain(`--bind\n${home.directory}/codex-installation-id\n/srv/zeros/home/agent/.codex/installation_id`);
+  for (const name of ["thread-writer-locks", ".tmp"]) expect(text).toContain(`--tmpfs\n/srv/zeros/home/agent/.codex/${name}`);
+  // Codex replaces its bundled system skills under skills/, so that tree is
+  // private; organization skills stay read-only through ~/.agents/skills.
+  expect(text).toContain("--tmpfs\n/srv/zeros/home/agent/.codex/skills");
+  expect(text).toContain(`--ro-bind\n${home.directory}/skills\n/srv/zeros/home/agent/.agents/skills`);
+  expect(text).not.toContain(`--ro-bind\n${home.directory}/skills\n/srv/zeros/home/agent/.codex/skills`);
+  const writable = mounts.flatMap((arg, i) => arg === "--bind" ? [mounts[i + 2]] : arg === "--tmpfs" ? [mounts[i + 1]] : []);
+  expect(writable.filter(target => target?.startsWith("/etc/codex") || /\/\.codex\/(config\.toml|managed_config\.toml|requirements\.toml|rules|plugins)$/.test(target ?? ""))).toEqual([]);
+  expect(writable.filter(target => target === "/srv/zeros/home/agent/.codex")).toEqual([]);
+});

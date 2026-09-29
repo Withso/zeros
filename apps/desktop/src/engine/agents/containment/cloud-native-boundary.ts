@@ -1,12 +1,12 @@
 import type { ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, chown, lstat, mkdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import type { CloudAgentAccessMaterial } from "@zeros/protocol/cloud-agent-execution";
 import type { CloudAgentLease } from "../cloud-agent-lease";
 import { attestCloudCoordinator } from "./cloud-coordinator-attestation";
 import { cloudCoordinatorEnvironment, CLOUD_COORDINATOR_HOME } from "./cloud-coordinator-view.mjs";
 import { acquireCloudNativeHistory, CLOUD_NATIVE_HISTORY_ROOT } from "./cloud-native-history";
-import { CLOUD_NATIVE_HOME, type CloudNativeHomeView } from "./cloud-native-view.mjs";
+import { CLOUD_CODEX_STATE_DIRECTORIES, CLOUD_NATIVE_HOME, type CloudNativeHomeView } from "./cloud-native-view.mjs";
 import { loadCloudWorkerConfiguration } from "./cloud-worker-config";
 import type { BoundaryLaunchSpec, BoundaryProcess, BoundarySpawnRequest, PortRequest, PreparedBoundary } from "./types";
 import {hasCloudBackgroundServers} from "./cloud-background-processes";
@@ -30,6 +30,19 @@ process.stdout.write('zeros-native-provider-v1');`;
  * boundary. Only the active connection enters this private, disposable HOME;
  * engine authority and all other conversations remain outside its view.
  * Native tools share the active provider's trust, as on a local machine. */
+/** Immutable empty native user/system config namespaces. Mutable repository
+ * config is disabled by the pinned process CLI override. The directory itself
+ * is bound, so a child cannot rename its parent and replace config.toml
+ * between native start/resume requests. Entries below are mount points only;
+ * the pinned CLI's writable state is private per process (cloud-native-view). */
+export async function prepareCloudCodexConfigView(directory: string): Promise<void> {
+  for (const name of ["", "/sessions", ...CLOUD_CODEX_STATE_DIRECTORIES.map(name => `/${name}`)]) {
+    await mkdir(`${directory}/codex-config${name}`, { mode: 0o755 }); await chmod(`${directory}/codex-config${name}`, 0o755);
+  }
+  await writeFile(`${directory}/codex-config/installation_id`, "", { flag: "wx", mode: 0o444 });
+  await writeFile(`${directory}/codex-installation-id`, randomUUID(), { flag: "wx", mode: 0o600 });
+}
+
 export class CloudNativeBoundary implements PreparedBoundary {
   readonly generation;
   readonly status;
@@ -90,19 +103,11 @@ export class CloudNativeBoundary implements PreparedBoundary {
       const providerHome = `${directory}/home/.${lease.admission.provider}`;
       await mkdir(providerHome, { mode: 0o700 });
       await chown(providerHome, configuration.uid, configuration.gid);
-      if (lease.admission.provider === "codex") {
-        // Immutable empty native user/system config namespaces. Mutable
-        // repository config is disabled by the pinned process CLI override.
-        // Bind the directory itself so a child cannot rename its parent and
-        // replace config.toml between native start/resume requests.
-        await mkdir(`${directory}/codex-config`, { mode: 0o755 });
-        await chmod(`${directory}/codex-config`, 0o755);
-        for (const name of ["sessions", "skills", "tmp", "log", "shell_snapshots"]) {
-          await mkdir(`${directory}/codex-config/${name}`, { mode: 0o755 });
-          await chmod(`${directory}/codex-config/${name}`, 0o755);
-        }
-      }
       if (lease.customization) await materializeCloudSkills(directory, lease.customization.skills);
+      if (lease.admission.provider === "codex") {
+        await prepareCloudCodexConfigView(directory);
+        await chown(`${directory}/codex-installation-id`, configuration.uid, configuration.gid);
+      }
       const original = cloudCoordinatorEnvironment(lease.takeMaterial(), lease.admission.model, settings);
       const env = Object.fromEntries(Object.entries(original).map(([name, value]) =>
         [name, value === CLOUD_COORDINATOR_HOME || value.startsWith(`${CLOUD_COORDINATOR_HOME}/`)
