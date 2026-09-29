@@ -17,6 +17,7 @@ import { readCloudAgentRuntimeAttestation } from "../../../apps/desktop/src/engi
 import { NativeToolEvidence } from "../lib/native-tool-evidence";
 import { parseNativeQualificationInput, nativeQualificationPermission } from "../lib/native-qualification-input";
 import { nativeMcpCanarySource } from "../lib/native-mcp-canary";
+import { forkDestinationBinding, qualificationPhrase } from "../lib/native-qualification-steps";
 import { cloudMcpDigest } from "../../../apps/desktop/src/engine/agents/cloud-mcp";
 
 const inputFile = "/srv/zeros/state/.zeros-live-qualification.json";
@@ -30,8 +31,8 @@ const files = { challenge: `${prefix}.challenge`, edited: `${prefix}.edited`, ex
 const marker = `QUALIFIED_${randomUUID().replaceAll("-", "")}`;
 const mcpFiles = { server: `${prefix}.mcp.cjs`, proof: `${prefix}.mcp-proof` };
 const mcpMarker = `MCP_${randomUUID().replaceAll("-", "")}`;
-const mcpSecret = `SYNTHETIC_MCP_${randomBytes(24).toString("hex")}`;
-const rotatedMcpSecret = `SYNTHETIC_ROTATION_${randomBytes(24).toString("hex")}`;
+const mcpSecret = qualificationPhrase();
+const rotatedMcpSecret = qualificationPhrase();
 let rawHistoricalSecretObservations = 0;
 let wroteMcpConfig = false;
 const checks: string[] = [];
@@ -274,11 +275,12 @@ try{
   // a new thread; only that thread's post-turn binding is resumable.
   const handoffProbe=await bounded(gateway.newSession(provider,{...options,conversationId:handoffConversationId}));
   await bounded(gateway.endSession(provider,handoffProbe.sessionId,{failClosed:true}),20_000);
+  binding=undefined;
   const handoff=await bounded(gateway.newSession(provider,{...options,conversationId:handoffConversationId}));
   reply="";
   await bounded(gateway.prompt(provider,handoff.sessionId,[{type:"text",text:`This is an explicit transcript handoff from another conversation. The user marker was ${marker}. Reply with that marker and use no tools.`}]));
-  assert(reply.includes(marker));assert(binding);assert.notEqual(binding.resumeId,sourceBinding.resumeId);
-  const handoffBinding=binding;
+  const handoffBinding=forkDestinationBinding(binding,handoff.providerBinding);
+  assert(reply.includes(marker));assert(handoffBinding);assert.notEqual(handoffBinding.resumeId,sourceBinding.resumeId);
   await bounded(gateway.endSession(provider,handoff.sessionId,{failClosed:true}),20_000);
   const handoffReload=await bounded(gateway.loadSession(provider,handoffBinding,{...options,conversationId:handoffConversationId}));
   reply="";
