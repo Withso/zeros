@@ -164,13 +164,47 @@ export async function configureRailwayBackend(lease, config, variables, request 
     { input: { ...target, vCPUs: config.vCPUs ?? 1, memoryGB: config.memoryGB ?? 1 } }, lease.signal);
 }
 
+/** Resolves an unconfirmed source upload from provider evidence. This
+ * generation exclusively owns its environment, so a deployment created since
+ * the dispatch is that upload's result. Absence proves non-creation only once
+ * the request cannot still be in flight: a received 4xx, or ten minutes. */
+export async function reconcileRailwayUpload(lease, config, request = railwayDevClient(config), { now = Date.now() } = {}) {
+  const receipt = lease.state.resources.railway, journal = receipt?.uploadCreate;
+  if (!receipt || receipt.deleted || !receipt.uploadPending || receipt.deploymentId || !journal || ["planned", "rejected", "acknowledged"].includes(journal.phase)) return true;
+  const dispatchedAt = Date.parse(journal.dispatchedAt ?? "");
+  if (!Number.isFinite(dispatchedAt)) return false;
+  const target = await mutationFence(lease, config, request);
+  const data = await request(`query DevUploadEvidence($projectId: String!, $environmentId: String!, $serviceId: String!) {
+    deployments(first: 20, input: { projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId }) { edges { node { id createdAt } } }
+  }`, { projectId: config.projectId, ...target }, lease.signal);
+  const rows = data?.deployments?.edges?.map(edge => edge?.node);
+  if (!Array.isArray(rows) || rows.some(row => !UUID.test(row?.id ?? "") || !Number.isFinite(Date.parse(row?.createdAt)))) throw new Error("Invalid Railway deployment evidence");
+  // Tolerate clock skew between this machine and the provider.
+  const since = rows.filter(row => Date.parse(row.createdAt) >= dispatchedAt - 60_000);
+  const at = new Date(now).toISOString();
+  if (since.length === 1) {
+    // Adopt it without claiming this run's variables, so the caller redeploys.
+    Object.assign(receipt, { deploymentId: since[0].id, deploymentRunId: null, uploadPending: false });
+    Object.assign(journal, { phase: "acknowledged", reconciledAt: at }); await lease.save(); return true;
+  }
+  const settled = Number.isInteger(journal.outcome) && journal.outcome >= 400 && journal.outcome < 500 || now - dispatchedAt >= 10 * 60_000;
+  // Newest-first and either short or reaching past the window: nothing was missed.
+  const ordered = rows.every((row, index) => !index || Date.parse(rows[index - 1].createdAt) >= Date.parse(row.createdAt));
+  const complete = ordered && (rows.length < 20 || Date.parse(rows.at(-1).createdAt) < dispatchedAt - 60_000);
+  if (!since.length && settled && complete) {
+    Object.assign(journal, { phase: "rejected", reconciledAt: at, evidence: "no-deployment" }); await lease.save(); return true;
+  }
+  return false;
+}
+
 export async function deployRailwayBackend(lease, config, artifact, request = railwayDevClient(config), fetchImpl = fetch, polling = {}) {
   const target = await mutationFence(lease, config, request);
   const receipt = lease.state.resources.railway;
   if (lease.state.status === "archiving") throw new Error("Cannot upload a backend while archiving");
   const body = fs.readFileSync(artifact.archive);
   if (body.length > 32 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(artifact.digest) || sha256(body) !== artifact.archiveSha256) throw new Error("Invalid backend deployment artifact");
-  if (receipt.uploadPending && !receipt.deploymentId && !["planned", "rejected"].includes(receipt.uploadCreate?.phase)) throw new Error("Railway upload response is unconfirmed; reconcile the pending deployment before another upload");
+  if (receipt.uploadPending && !receipt.deploymentId && !["planned", "rejected"].includes(receipt.uploadCreate?.phase) &&
+      !await reconcileRailwayUpload(lease, config, request)) throw new Error("Railway upload response is unconfirmed; reconcile the pending deployment before another upload");
   if (receipt.deploymentId && receipt.digest === artifact.digest) {
     const { deployment } = await request(`query DevDeployment($id: String!) { deployment(id: $id) { id projectId environmentId serviceId status deploymentStopped } }`, { id: receipt.deploymentId }, lease.signal);
     if (deployment?.projectId !== config.projectId || deployment.environmentId !== target.environmentId || deployment.serviceId !== config.serviceId) throw new Error("Railway deployment ownership changed");

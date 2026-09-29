@@ -1,6 +1,6 @@
 import { bindHostedProfile } from "./hosted-state.mjs";
 import { ensurePlanetScaleBranch, reconcilePlanetScaleRoles } from "./planetscale.mjs";
-import { ensureRailwayEnvironment, ensureRailwayDevDomain } from "./railway.mjs";
+import { ensureRailwayEnvironment, ensureRailwayDevDomain, reconcileRailwayUpload } from "./railway.mjs";
 import { ensureDevPages, ensureDevDns, ensureDevPagesDomain } from "./hosted-cloudflare.mjs";
 import { ensureHostedWebhook } from "./hosted-workos.mjs";
 import { reconcileDevImageCreates } from "./hosted-image.mjs";
@@ -24,9 +24,8 @@ export async function reconcileHosted(lease, profile, requests = {}) {
     ["railway-domain", () => lease.state.resources.railway?.domain && !lease.state.resources.railway.deleted && ensureRailwayDevDomain(lease, profile,
       desired => ensureDevDns(lease, profile.cloudflare, desired, requests.cf, { reconcileOnly: true }), requests.railway, { reconcileOnly: true })],
     ["pages-domain", () => lease.state.resources.pages?.domain && !lease.state.resources.pages.deleted && ensureDevPagesDomain(lease, profile, requests.cf, { reconcileOnly: true })],
-    ["railway-upload", () => {
-      const receipt = lease.state.resources.railway;
-      if (receipt && !receipt.deleted && receipt.uploadPending && !receipt.deploymentId && !["planned", "rejected"].includes(receipt.uploadCreate?.phase)) throw new Error("Unconfirmed Railway upload needs provider evidence or whole-environment archive");
+    ["railway-upload", async () => {
+      if (!await reconcileRailwayUpload(lease, profile.railway, requests.railway)) throw new Error("Unconfirmed Railway upload needs provider evidence or whole-environment archive");
     }],
     ...(lease.state.resources.dns ?? []).filter(record => !record.deleted).map((record, index) => [`dns:${index}`, () => ensureDevDns(lease, profile.cloudflare,
       { name: record.name, type: record.type, content: record.content }, requests.cf, { reconcileOnly: true })]),
