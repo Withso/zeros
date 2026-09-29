@@ -72,8 +72,10 @@ export async function advanceHostedAgents(lease, profile, deps, { retry = false 
   for (const job of jobs.filter(row => !row.retired && row.phase !== "enabled")) {
     const current = candidates.some(({ image, connection }) => signature(image, connection) === job.signature);
     const overdue = now - job.startedAt > QUALIFICATION_DEADLINE_MS;
-    if (job.phase === "failed" || !current || overdue) {
-      if (overdue && job.phase !== "failed") job.failure ??= { stage: "deadline" };
+    // The budget guard deletes its canary; retrying that machine only fails.
+    const budget = state.resources.images?.some(row => row.agentQualificationId === job.id && row.budgetExceeded === true);
+    if (job.phase === "failed" || !current || overdue || budget) {
+      if (job.phase !== "failed" && (overdue || budget)) job.failure ??= { stage: budget ? "budget" : "deadline" };
       job.phase = "failed"; await lease.save();
       await deps.retire(job); job.retired = true; await lease.save();
     }

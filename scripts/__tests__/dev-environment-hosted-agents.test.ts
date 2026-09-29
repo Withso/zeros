@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { advanceHostedAgents, nativeRuntimeEvidence, retireUnfinishedHostedAgents } from "../dev-environment/hosted-agents.mjs";
-import { hostedAgentRequest } from "../dev-environment/hosted-agent-canary.mjs";
+import { advanceHostedAgents, nativeRuntimeEvidence, retireUnfinishedHostedAgents, QUALIFICATION_DEADLINE_MS } from "../dev-environment/hosted-agents.mjs";
+import { hostedAgentRequest, canaryBudgetHours } from "../dev-environment/hosted-agent-canary.mjs";
 
 function fixture() {
   const image = { qualified: true, inputsSha256: "a".repeat(64), snapshotId: "dev-test-image", sourceCommit: "b".repeat(40), buildSha256: "c".repeat(64) };
@@ -217,4 +217,20 @@ it("retires unfinished checks of a replaced image so the new build can take the 
     { id: "enabled", phase: "enabled", retired: true },
   ]);
   expect(await retireUnfinishedHostedAgents(f.lease, f.deps)).toBe(0);
+});
+
+it("fails a check at once when its canary exceeded the builder budget, instead of retrying a deleted machine", async () => {
+  // The budget guard deletes the canary; polling it again can only fail.
+  const f = fixture();
+  await advanceHostedAgents(f.lease, f.profile, f.deps);
+  const job = f.state.agentQualifications[0];
+  f.state.resources.images.push({ purpose: "native-agent-qualification", agentQualificationId: job.id, budgetExceeded: true });
+  f.deps.allocate.mockRejectedValue(new Error("Dev agent canary provider identity changed"));
+  await advanceHostedAgents(f.lease, f.profile, f.deps);
+  expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", retired: true, failure: { stage: "budget" } });
+});
+
+it("sizes a canary's usage allowance to its qualification window within the owner's builder budget", () => {
+  expect(canaryBudgetHours({ builderBudgetHours: 2 })).toBeCloseTo(QUALIFICATION_DEADLINE_MS / 3_600_000 + 0.25);
+  expect(canaryBudgetHours({ builderBudgetHours: 0.5 })).toBe(0.5);
 });
