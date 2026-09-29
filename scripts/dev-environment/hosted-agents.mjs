@@ -122,7 +122,9 @@ export async function advanceHostedAgents(lease, profile, deps, { retry = false 
         qualified: result.report?.qualified === true,
         completedChecks: [...knownChecks].filter(check => Array.isArray(result.report?.checks) && result.report.checks.includes(check)),
         ...(phases.includes(result.report?.phase) ? { nativePhase: result.report.phase } : {}),
-        ...(["timeout", "assertion", "runtime"].includes(result.report?.failure) ? { category: result.report.failure } : {}) };
+        ...(["timeout", "assertion", "runtime"].includes(result.report?.failure) ? { category: result.report.failure } : {}),
+        ...(/^[A-Z][A-Z0-9_]{1,63}$/.test(result.report?.failureCode ?? "") ? { errorCode: result.report.failureCode } : {}),
+        ...(/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(result.report?.failureName ?? "") ? { errorName: result.report.failureName } : {}) };
       job.phase = "failed";
     }
     await lease.save();

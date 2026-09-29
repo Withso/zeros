@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { forkDestinationBinding, qualificationPhrase, rawSecretObserver } from "../cloud-workspace-validation/lib/native-qualification-steps";
+import { failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver } from "../cloud-workspace-validation/lib/native-qualification-steps";
 
 describe("native qualification steps", () => {
   it("uses unique values a model will repeat verbatim", () => {
@@ -37,5 +37,17 @@ describe("raw secret observation", () => {
     const phrase = "cedar-lagoon-willow-raven-mint-sage-7", observer = rawSecretObserver(phrase);
     expect(observer.observe({ update: { sessionUpdate: "tool_call_update", rawOutput: `probe\n${phrase}` } })).toBe(true);
     expect(observer.observe({ update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "cedar-lagoon" } } })).toBe(false);
+  });
+});
+
+describe("failure signature", () => {
+  it("keeps only fixed-format error codes and class names", () => {
+    const erofs = Object.assign(new Error("EROFS: read-only file system, open '/srv/zeros/home/agent/.codex/x'"), { code: "EROFS" });
+    expect(failureSignature(erofs)).toEqual({ code: "EROFS", name: "Error" });
+    expect(failureSignature(Object.assign(new TypeError("private text"), { cause: { code: "ERR_STREAM_PREMATURE_CLOSE" } })))
+      .toEqual({ code: "ERR_STREAM_PREMATURE_CLOSE", name: "TypeError" });
+    // Free text, lowercase or oversized values never pass through.
+    expect(failureSignature(Object.assign(new Error("x"), { code: "sk-live secret value", name: "Error: with a message" }))).toEqual({});
+    expect(failureSignature("a string")).toEqual({});
   });
 });

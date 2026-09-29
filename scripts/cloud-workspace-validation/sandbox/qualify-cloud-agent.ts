@@ -17,7 +17,7 @@ import { readCloudAgentRuntimeAttestation } from "../../../apps/desktop/src/engi
 import { NativeToolEvidence } from "../lib/native-tool-evidence";
 import { parseNativeQualificationInput, nativeQualificationPermission } from "../lib/native-qualification-input";
 import { nativeMcpCanarySource } from "../lib/native-mcp-canary";
-import { forkDestinationBinding, qualificationPhrase, rawSecretObserver } from "../lib/native-qualification-steps";
+import { failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver } from "../lib/native-qualification-steps";
 import { cloudMcpDigest } from "../../../apps/desktop/src/engine/agents/cloud-mcp";
 
 const inputFile = "/srv/zeros/state/.zeros-live-qualification.json";
@@ -39,7 +39,7 @@ let wroteMcpConfig = false;
 const checks: string[] = [];
 const activity = { permissions: 0, rejectedPermissions: 0, questions: 0, messageChunks: 0, toolEvents: 0 };
 let toolEvidence: ReturnType<NativeToolEvidence["summary"]> | undefined;
-let failure: "timeout" | "assertion" | "runtime" | undefined;
+let failure: "timeout" | "assertion" | "runtime" | undefined, failureDetail: ReturnType<typeof failureSignature> = {};
 let phase = "input", gateway: AgentGateway | undefined, failed = false;
 let identity: { sourceCommit: string; buildSha256: string; contractSha256: string; kind: string; model: string } | undefined;
 const active = new Set<CloudProviderExecution>();
@@ -365,6 +365,7 @@ console.log = console.warn = console.error = () => {};
 main().catch(error => {
   failed = true;
   failure = error?.name === "QualificationDeadline" ? "timeout" : error?.name === "AssertionError" ? "assertion" : "runtime";
+  failureDetail = failureSignature(error);
 }).finally(async () => {
   try {
     await bounded(Promise.all([...active].map(execution => execution.lease.close())), 20_000);
@@ -377,6 +378,7 @@ main().catch(error => {
   } catch { failed = true; }
   process.stdout.write(JSON.stringify({ version: 3, executionProfile: "zeros-cloud-native-v1", qualified: !failed, phase, identity, checks,
     activity, toolEvidence, ...(failure ? { failure } : {}),
+    ...(failureDetail.code ? { failureCode: failureDetail.code } : {}), ...(failureDetail.name ? { failureName: failureDetail.name } : {}),
     qualifiedAt: new Date().toISOString(), authority: "isolated-image-canary" }) + "\n");
   process.exitCode = failed ? 1 : 0;
 });

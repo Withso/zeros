@@ -41,3 +41,18 @@ export function rawSecretObserver(secret: string) {
     reset() { text = ""; seen = false; },
   };
 }
+
+/** A failed run reports fixed-format identifiers only: an error code such as
+ * EROFS (from the error or its causes) and the error's class name. Messages
+ * and stacks can carry prompt or provider text and are never included. */
+export function failureSignature(error: unknown): { code?: string; name?: string } {
+  const signature: { code?: string; name?: string } = {};
+  for (let current: unknown = error, depth = 0; current && typeof current === "object" && depth < 4 && !signature.code; depth++) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(code)) signature.code = code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  const name = (error as { name?: unknown } | null)?.name;
+  if (typeof name === "string" && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(name)) signature.name = name;
+  return signature;
+}

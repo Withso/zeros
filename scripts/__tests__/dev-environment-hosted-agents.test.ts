@@ -184,3 +184,18 @@ describe("native agent qualification deadline", () => {
     expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", retired: true, failure: { stage: "deadline" } });
   });
 });
+
+it("reports a failed native run's fixed-format error code and class name, never free text", async () => {
+  const f = fixture();
+  await advanceHostedAgents(f.lease, f.profile, f.deps);
+  f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false, phase: "native-start", checks: ["actorAdmission"], failure: "runtime",
+    failureCode: "EROFS", failureName: "Error" } });
+  await advanceHostedAgents(f.lease, f.profile, f.deps);
+  expect(f.state.agentQualifications[0].failure).toMatchObject({ nativePhase: "native-start", category: "runtime", errorCode: "EROFS", errorName: "Error" });
+  const g = fixture();
+  await advanceHostedAgents(g.lease, g.profile, g.deps);
+  g.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false, phase: "native-start", failure: "runtime", failureCode: "read-only: /srv", failureName: "Error: text" } });
+  await advanceHostedAgents(g.lease, g.profile, g.deps);
+  expect(g.state.agentQualifications[0].failure).not.toHaveProperty("errorCode");
+  expect(g.state.agentQualifications[0].failure).not.toHaveProperty("errorName");
+});
