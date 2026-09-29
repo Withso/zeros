@@ -321,18 +321,20 @@ async function deleteDevSnapshot(lease, record, request, polling) {
 /** A live generation keeps its deployed worker image and the newest other
  * qualified image for rollback. Each older one only consumes the account's
  * named-snapshot capacity, so a long-lived checkout would eventually block
- * every build. Only images whose builders are confirmed deleted are retired;
+ * every build. Only images whose builders are stopped are retired;
  * a name that cannot be confirmed stays for archive or reconcile. */
 export async function retireSupersededDevImages(lease, profile, { keepInputs = [], request = devBoatClient(profile.boat, lease.signal), polling = {} } = {}) {
   const owned = `dev-${lease.state.owner}-${lease.state.generation.slice(0, 8)}-`;
+  // Qualified images predating the create journal have no snapshotCreate.
   const live = (lease.state.resources.images ?? []).filter(record => !record.deleted && record.qualified && !record.snapshotDeleted &&
-    record.snapshotRequested && record.snapshotCreate?.phase === "acknowledged" && record.snapshotId?.startsWith(owned));
+    record.snapshotRequested && !["planned", "rejected"].includes(record.snapshotCreate?.phase) && record.snapshotId?.startsWith(owned));
   const keep = new Set(live.filter(record => keepInputs.includes(record.inputsSha256)));
   const newest = [...live].reverse().find(record => !keep.has(record));
   if (newest) keep.add(newest);
   const retired = [];
   for (const record of live) {
-    if (keep.has(record) || record.builder?.deleted !== true) continue;
+    // Deferred-storage retirement records retiredAt rather than deleted.
+    if (keep.has(record) || !(record.builder?.deleted === true || record.builder?.retiredAt)) continue;
     try { await deleteDevSnapshot(lease, record, request, polling); }
     catch (error) { if (lease.signal?.aborted) throw error; continue; }
     record.snapshotRetirementReason = "superseded"; await lease.save();

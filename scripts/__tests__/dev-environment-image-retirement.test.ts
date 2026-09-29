@@ -44,3 +44,13 @@ it("keeps everything when only the deployed image and one other exist", async ()
   expect(await retireSupersededDevImages(t.lease, profile, { keepInputs: ["4".repeat(64)], request: t.request })).toEqual([]);
   expect(t.request).not.toHaveBeenCalled();
 });
+
+it("retires legacy images saved before the create journal whose builders were retired with deferred storage", async () => {
+  const t = generation();
+  for (const record of t.state.resources.images.filter((r: any) => r.snapshotId)) {
+    delete record.snapshotCreate;
+    record.builder = { id: record.builder.id, retiredAt: new Date().toISOString(), deletionOperationId: `bdop_${"0".repeat(32)}` };
+  }
+  expect(await retireSupersededDevImages(t.lease, profile, { keepInputs: ["2".repeat(64)], request: t.request })).toEqual([t.name(1), t.name(3), t.name(4)]);
+  expect([...t.snapshots.keys()]).toEqual([t.name(2), t.name(5)]);
+});
