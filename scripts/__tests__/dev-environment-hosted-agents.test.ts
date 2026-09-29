@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { advanceHostedAgents, nativeRuntimeEvidence } from "../dev-environment/hosted-agents.mjs";
+import { advanceHostedAgents, nativeRuntimeEvidence, retireUnfinishedHostedAgents } from "../dev-environment/hosted-agents.mjs";
 import { hostedAgentRequest } from "../dev-environment/hosted-agent-canary.mjs";
 
 function fixture() {
@@ -198,4 +198,23 @@ it("reports a failed native run's fixed-format error code and class name, never 
   await advanceHostedAgents(g.lease, g.profile, g.deps);
   expect(g.state.agentQualifications[0].failure).not.toHaveProperty("errorCode");
   expect(g.state.agentQualifications[0].failure).not.toHaveProperty("errorName");
+});
+
+it("retires unfinished checks of a replaced image so the new build can take the owner's builder slot", async () => {
+  // A canary holds the owner's builder reservation, and only a ready
+  // environment advances it; a relaunch with new worker source must not wait.
+  const f = fixture();
+  f.state.agentQualifications = [
+    { id: "running", phase: "running", retired: false },
+    { id: "failed", phase: "failed", retired: false, failure: { stage: "native" } },
+    { id: "enabled", phase: "enabled", retired: true },
+  ];
+  expect(await retireUnfinishedHostedAgents(f.lease, f.deps)).toBe(2);
+  expect(f.deps.retire.mock.calls.map(([job]: any) => job.id)).toEqual(["running", "failed"]);
+  expect(f.state.agentQualifications).toMatchObject([
+    { id: "running", phase: "failed", retired: true, failure: { stage: "superseded" } },
+    { id: "failed", phase: "failed", retired: true, failure: { stage: "native" } },
+    { id: "enabled", phase: "enabled", retired: true },
+  ]);
+  expect(await retireUnfinishedHostedAgents(f.lease, f.deps)).toBe(0);
 });

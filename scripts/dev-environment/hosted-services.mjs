@@ -22,7 +22,7 @@ import { endpoints, workosClient } from "./workos.mjs";
 import { packDevOperator, unpackDevOperator } from "./operator-artifact.mjs";
 import { assertCurrentFixtureFunding, bindFixture, verifyFixtureMembership } from "./hosted-fixtures.mjs";
 import { bindHostedProfile } from "./hosted-state.mjs";
-import { advanceHostedAgents } from "./hosted-agents.mjs";
+import { advanceHostedAgents, retireUnfinishedHostedAgents } from "./hosted-agents.mjs";
 import { hostedAgentCanary, hostedAgentRequest } from "./hosted-agent-canary.mjs";
 import { startHostedAgentOverSsh, retireHostedAgentSsh } from "./hosted-agent-ssh.mjs";
 import { inventoryHostedProviders } from "./hosted-inventory.mjs";
@@ -168,8 +168,14 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
       progress(existing ? "Verifying the existing cloud worker image" : "Building and qualifying the changed cloud worker image; this can take several minutes");
       if (!existing) {
         if (!registry) throw new Error("Dev builder allocation requires the account admission registry");
-        // Free this generation's superseded images before measuring capacity;
-        // the deployed image and the newest other one stay for rollback.
+        // Unfinished checks qualify the image being replaced and hold the
+        // owner's builder slot; retire them, then free superseded images.
+        if ((lease.state.agentQualifications ?? []).some(job => !job.retired))
+          await retireUnfinishedHostedAgents(lease, hostedAgentCanary(lease, profile, undefined, {
+            reserve: () => { throw new Error("A replaced image's checks cannot allocate"); },
+            release: () => releaseHostedAdmission(registry, lease, profile),
+          }));
+        // The deployed image and the newest other one stay for rollback.
         await retireSupersededDevImages(lease, profile, { keepInputs: [lease.state.source?.workerInputsSha256].filter(Boolean) });
         const inventory = await inventoryHostedProviders(profile);
         // An earlier interrupted attempt can leave a never-started builder

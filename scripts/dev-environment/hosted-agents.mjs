@@ -42,6 +42,19 @@ export function nativeRuntimeEvidence(image, connection, outcome, startedAt, now
 /** One bounded advancement per lease. A native turn runs on the disposable VM
  * after this returns, allowing Archive to acquire the lease immediately. Lost
  * dispatch acknowledgements are polled, never blindly sent a second time. */
+/** A new worker build replaces the image these checks qualify. Each canary
+ * holds the owner's builder reservation, and only a ready environment
+ * advances it, so a relaunch with changed worker source retires unfinished
+ * checks before its build competes for that capacity. */
+export async function retireUnfinishedHostedAgents(lease, deps) {
+  let retired = 0;
+  for (const job of (lease.state.agentQualifications ?? []).filter(row => !row.retired)) {
+    if (job.phase !== "failed" && job.phase !== "enabled") { job.phase = "failed"; job.failure ??= { stage: "superseded" }; await lease.save(); }
+    await deps.retire(job); job.retired = true; await lease.save(); retired++;
+  }
+  return retired;
+}
+
 export async function advanceHostedAgents(lease, profile, deps, { retry = false } = {}) {
   const { state } = lease, now = deps.now?.() ?? Date.now();
   if (state.status !== "ready" || !profile.fixture) return { state: "inactive" };
