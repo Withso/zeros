@@ -69,15 +69,18 @@ export async function advanceHostedAgents(lease, profile, deps, { retry = false 
     .flatMap(({ image, connections }) => connections.map(connection => ({ image, connection })));
   const jobs = state.agentQualifications ??= [];
   // Retire stale work before considering sign-in, a new selection or image.
-  for (const job of jobs.filter(row => !row.retired && row.phase !== "enabled")) {
+  // A retired "passed" check still awaits enable, and counts as stale only
+  // once its image or connection is no longer current.
+  for (const job of jobs.filter(row => row.phase !== "enabled" && (!row.retired || row.phase === "passed"))) {
     const current = candidates.some(({ image, connection }) => signature(image, connection) === job.signature);
-    const overdue = now - job.startedAt > QUALIFICATION_DEADLINE_MS;
+    const pending = job.phase !== "passed" && job.phase !== "failed";
+    const overdue = pending && now - job.startedAt > QUALIFICATION_DEADLINE_MS;
     // The budget guard deletes its canary; retrying that machine only fails.
-    const budget = state.resources.images?.some(row => row.agentQualificationId === job.id && row.budgetExceeded === true);
+    const budget = pending && state.resources.images?.some(row => row.agentQualificationId === job.id && row.budgetExceeded === true);
     if (job.phase === "failed" || !current || overdue || budget) {
-      if (job.phase !== "failed" && (overdue || budget)) job.failure ??= { stage: budget ? "budget" : "deadline" };
+      if (job.phase !== "failed") job.failure ??= { stage: !current ? "superseded" : budget ? "budget" : "deadline" };
       job.phase = "failed"; await lease.save();
-      await deps.retire(job); job.retired = true; await lease.save();
+      if (!job.retired) { await deps.retire(job); job.retired = true; await lease.save(); }
     }
   }
   if (status.needsSignIn) return { state: "sign-in" };

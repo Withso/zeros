@@ -245,3 +245,15 @@ it("checks a report's completion time against the time it was read, not the star
   f.deps.poll.mockImplementation(async () => ({ ...result, report: { ...result.report, qualifiedAt: new Date(clock - 1000).toISOString() } }));
   expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("enabled");
 });
+
+it("supersedes a passed check of a replaced image instead of treating it as the active canary", async () => {
+  // A relaunch between a check's pass and its enable leaves it "passed"; once
+  // the worker image changes it must not block the new image's checks.
+  const f = fixture();
+  f.state.agentQualifications = [{ id: "old", signature: "0".repeat(64), phase: "passed", retired: true, startedAt: Date.now() - 60_000,
+    connection: f.connection, image: { snapshotId: "dev-previous-image" } }];
+  expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
+  expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", failure: { stage: "superseded" } });
+  expect(f.state.agentQualifications).toHaveLength(2);
+  expect(f.deps.allocate).toHaveBeenCalledOnce();
+});
