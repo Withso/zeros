@@ -124,7 +124,9 @@ export async function advanceHostedAgents(lease, profile, deps, { retry = false 
   if (["starting", "running"].includes(job.phase)) {
     const result = await deps.poll(job);
     if (result.running) return { state: "testing", provider: connection.provider };
-    try { job.evidence = nativeRuntimeEvidence({ ...job.image, contractSha256: job.runtimeContractSha256 }, job.connection, result, job.startedAt, now); job.phase = "passed"; }
+    // Judge completion against when the report was read: inspection earlier
+    // in this advance can outlast the run's final seconds.
+    try { job.evidence = nativeRuntimeEvidence({ ...job.image, contractSha256: job.runtimeContractSha256 }, job.connection, result, job.startedAt, deps.now?.() ?? Date.now()); job.phase = "passed"; }
     catch {
       const code = value => Number.isInteger(value) && value >= -256 && value <= 256 ? value : null;
       const knownChecks = new Set([...CHECKS,...NATIVE_EXTENSIONS, "nativePermissionSelection", "nativeAccessRefresh", "nativeGitAuthor",

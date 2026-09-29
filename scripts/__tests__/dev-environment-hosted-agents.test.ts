@@ -234,3 +234,14 @@ it("sizes a canary's usage allowance to its qualification window within the owne
   expect(canaryBudgetHours({ builderBudgetHours: 2 })).toBeCloseTo(QUALIFICATION_DEADLINE_MS / 3_600_000 + 0.25);
   expect(canaryBudgetHours({ builderBudgetHours: 0.5 })).toBe(0.5);
 });
+
+it("checks a report's completion time against the time it was read, not the start of a slow advance", async () => {
+  // Inspection runs an operator build and a database call; a run finishing
+  // meanwhile reports a qualifiedAt after the advance began.
+  const f = fixture(); let clock = Date.now(); f.deps.now = () => clock;
+  await advanceHostedAgents(f.lease, f.profile, f.deps);
+  const result = outcome(f);
+  f.deps.inspect.mockImplementation(async () => { clock += 20_000; return f.status; });
+  f.deps.poll.mockImplementation(async () => ({ ...result, report: { ...result.report, qualifiedAt: new Date(clock - 1000).toISOString() } }));
+  expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("enabled");
+});
