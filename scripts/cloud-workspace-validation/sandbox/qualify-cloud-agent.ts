@@ -17,7 +17,7 @@ import { readCloudAgentRuntimeAttestation } from "../../../apps/desktop/src/engi
 import { NativeToolEvidence } from "../lib/native-tool-evidence";
 import { parseNativeQualificationInput, nativeQualificationPermission } from "../lib/native-qualification-input";
 import { nativeMcpCanarySource } from "../lib/native-mcp-canary";
-import { forkDestinationBinding, qualificationPhrase } from "../lib/native-qualification-steps";
+import { forkDestinationBinding, qualificationPhrase, rawSecretObserver } from "../lib/native-qualification-steps";
 import { cloudMcpDigest } from "../../../apps/desktop/src/engine/agents/cloud-mcp";
 
 const inputFile = "/srv/zeros/state/.zeros-live-qualification.json";
@@ -34,6 +34,7 @@ const mcpMarker = `MCP_${randomUUID().replaceAll("-", "")}`;
 const mcpSecret = qualificationPhrase();
 const rotatedMcpSecret = qualificationPhrase();
 let rawHistoricalSecretObservations = 0;
+const historicalSecret = rawSecretObserver(mcpSecret);
 let wroteMcpConfig = false;
 const checks: string[] = [];
 const activity = { permissions: 0, rejectedPermissions: 0, questions: 0, messageChunks: 0, toolEvents: 0 };
@@ -134,7 +135,7 @@ async function main() {
       const redactor = execution.redactor!;
       const redact = redactor.notification.bind(redactor);
       redactor.notification = notification => {
-        if (JSON.stringify(notification).includes(mcpSecret)) rawHistoricalSecretObservations++;
+        if (historicalSecret.observe(notification)) rawHistoricalSecretObservations++;
         return redact(notification);
       };
       return prepared;
@@ -304,7 +305,7 @@ try{
   await bounded(gateway.prompt(provider, second.executionId, [{ type: "text", text: "Reply with the exact unique marker from our previous turn. Use only your conversation history and do not call any tools." }]));
   assert(reply.includes(marker)); tools.assertNoTools(); checks.push("nativeResume");
   phase = "native-mcp-rotation";
-  const beforeRotationReplay = rawHistoricalSecretObservations;
+  const beforeRotationReplay = rawHistoricalSecretObservations; historicalSecret.reset();
   await bounded(gateway.prompt(provider, second.executionId, [{type:"text",text:"Repeat verbatim the entire result of the first zeros-qualification MCP probe from our conversation history, including its second line. Do not use tools."}]));
   assert(rawHistoricalSecretObservations > beforeRotationReplay); checks.push("nativeMcpRotation");
   if(provider==="codex") {
@@ -333,7 +334,7 @@ try{
   phase = "native-mcp-removal";
   await writeFile(path.join(workspace, ".mcp.json"), mcpConfig());
   const removed = await bounded(gateway.loadSession(provider, sourceBinding, options));
-  const beforeRemovalReplay = rawHistoricalSecretObservations;
+  const beforeRemovalReplay = rawHistoricalSecretObservations; historicalSecret.reset();
   await bounded(gateway.prompt(provider, removed.executionId!, [{type:"text",text:"Repeat verbatim the entire result of the first zeros-qualification MCP probe, including its second line. Use only conversation history and no tools."}]));
   assert(rawHistoricalSecretObservations > beforeRemovalReplay); checks.push("nativeMcpRemoval");
   await bounded(gateway.endSession(provider, removed.executionId!, {failClosed:true}), 20_000);

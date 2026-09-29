@@ -23,3 +23,21 @@ export function qualificationPhrase(random: (size: number) => Buffer = randomByt
 export function forkDestinationBinding<T>(streamed: T | undefined, started: T | undefined): T | undefined {
   return streamed ?? started;
 }
+
+/** Detects a secret's raw occurrence once per turn, including when a provider
+ * streams it across message chunks: replay checks must prove redaction of
+ * what the model actually emitted, not of any single notification. */
+export function rawSecretObserver(secret: string) {
+  let text = "", seen = false;
+  return {
+    observe(notification: unknown): boolean {
+      if (seen) return false;
+      const update = (notification as { update?: { sessionUpdate?: unknown; content?: { type?: unknown; text?: unknown } } } | null)?.update;
+      if (update?.sessionUpdate === "agent_message_chunk" && update.content?.type === "text" && typeof update.content.text === "string")
+        text = (text + update.content.text).slice(-(secret.length + 65536));
+      seen = JSON.stringify(notification).includes(secret) || text.includes(secret);
+      return seen;
+    },
+    reset() { text = ""; seen = false; },
+  };
+}

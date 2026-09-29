@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { forkDestinationBinding, qualificationPhrase } from "../cloud-workspace-validation/lib/native-qualification-steps";
+import { forkDestinationBinding, qualificationPhrase, rawSecretObserver } from "../cloud-workspace-validation/lib/native-qualification-steps";
 
 describe("native qualification steps", () => {
   it("uses unique values a model will repeat verbatim", () => {
@@ -20,5 +20,22 @@ describe("native qualification steps", () => {
     expect(forkDestinationBinding(streamed, { providerId: "claude", resumeId: "provisional" })).toBe(streamed);
     expect(forkDestinationBinding(undefined, undefined)).toBeUndefined();
     expect(forkDestinationBinding(undefined, started)?.resumeId).not.toBe(source.resumeId);
+  });
+});
+
+describe("raw secret observation", () => {
+  const chunk = (text: string) => ({ sessionId: "s", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
+  it("observes a secret streamed across message chunks, once per turn", () => {
+    const phrase = "amber-harbor-velvet-copper-meadow-ivory-4821", observer = rawSecretObserver(phrase);
+    // Providers stream replies token by token, so no single chunk holds the value.
+    expect(["The result was: amber-har", "bor-velvet-copper-mea", "dow-ivory-4821", " again amber-harbor-velvet-copper-meadow-ivory-4821"].map(text => observer.observe(chunk(text))))
+      .toEqual([false, false, true, false]);
+    observer.reset();
+    expect(observer.observe(chunk(phrase))).toBe(true);
+  });
+  it("observes a complete value in any other notification", () => {
+    const phrase = "cedar-lagoon-willow-raven-mint-sage-7", observer = rawSecretObserver(phrase);
+    expect(observer.observe({ update: { sessionUpdate: "tool_call_update", rawOutput: `probe\n${phrase}` } })).toBe(true);
+    expect(observer.observe({ update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "cedar-lagoon" } } })).toBe(false);
   });
 });
