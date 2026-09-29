@@ -379,6 +379,8 @@ main().catch(error => {
   process.stdout.write(JSON.stringify({ version: 3, executionProfile: "zeros-cloud-native-v1", qualified: !failed, phase, identity, checks,
     activity, toolEvidence, ...(failure ? { failure } : {}),
     ...(failureDetail.code ? { failureCode: failureDetail.code } : {}), ...(failureDetail.name ? { failureName: failureDetail.name } : {}),
+    ...(failureDetail.kind ? { failureKind: failureDetail.kind } : {}), ...(failureDetail.stage ? { failureStage: failureDetail.stage } : {}),
+    ...(failureDetail.exitCode !== undefined ? { failureExitCode: failureDetail.exitCode } : {}),
     qualifiedAt: new Date().toISOString(), authority: "isolated-image-canary" }) + "\n");
   process.exitCode = failed ? 1 : 0;
 });

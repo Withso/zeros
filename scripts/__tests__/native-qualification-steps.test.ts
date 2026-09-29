@@ -51,3 +51,12 @@ describe("failure signature", () => {
     expect(failureSignature("a string")).toEqual({});
   });
 });
+
+describe("failure classification", () => {
+  it("keeps an agent failure's fixed kind, stage and exit code", () => {
+    const error = Object.assign(new Error("codex app-server exited before initialize"), {
+      kind: "subprocess-exited", stage: "startup", failure: { kind: "subprocess-exited", stage: "startup", message: "private", exit: { code: 101, stderrTail: "private" } } });
+    expect(failureSignature(error)).toEqual({ name: "Error", kind: "subprocess-exited", stage: "startup", exitCode: 101 });
+    expect(failureSignature(Object.assign(new Error("x"), { failure: { kind: "Has Spaces", stage: "x".repeat(80), exit: { code: "1; rm" } } }))).toEqual({ name: "Error" });
+  });
+});

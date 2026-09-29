@@ -43,16 +43,23 @@ export function rawSecretObserver(secret: string) {
 }
 
 /** A failed run reports fixed-format identifiers only: an error code such as
- * EROFS (from the error or its causes) and the error's class name. Messages
- * and stacks can carry prompt or provider text and are never included. */
-export function failureSignature(error: unknown): { code?: string; name?: string } {
-  const signature: { code?: string; name?: string } = {};
+ * EROFS (from the error or its causes), the error's class name, and an agent
+ * failure's kind, stage and exit code. Messages, stacks and stderr can carry
+ * prompt or provider text and are never included. */
+export function failureSignature(error: unknown): { code?: string; name?: string; kind?: string; stage?: string; exitCode?: number } {
+  const signature: { code?: string; name?: string; kind?: string; stage?: string; exitCode?: number } = {};
   for (let current: unknown = error, depth = 0; current && typeof current === "object" && depth < 4 && !signature.code; depth++) {
     const code = (current as { code?: unknown }).code;
     if (typeof code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(code)) signature.code = code;
     current = (current as { cause?: unknown }).cause;
   }
-  const name = (error as { name?: unknown } | null)?.name;
-  if (typeof name === "string" && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(name)) signature.name = name;
+  const value = error as { name?: unknown; kind?: unknown; stage?: unknown; failure?: { kind?: unknown; stage?: unknown; exit?: { code?: unknown } } } | null;
+  if (typeof value?.name === "string" && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(value.name)) signature.name = value.name;
+  const label = (candidate: unknown) => typeof candidate === "string" && /^[a-z][a-z0-9-]{1,40}$/.test(candidate) ? candidate : undefined;
+  const kind = label(value?.failure?.kind) ?? label(value?.kind), stage = label(value?.failure?.stage) ?? label(value?.stage);
+  if (kind) signature.kind = kind;
+  if (stage) signature.stage = stage;
+  const exit = value?.failure?.exit?.code;
+  if (Number.isInteger(exit) && (exit as number) >= -256 && (exit as number) <= 256) signature.exitCode = exit as number;
   return signature;
 }
