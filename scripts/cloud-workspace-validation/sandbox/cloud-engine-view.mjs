@@ -98,6 +98,10 @@ export function cloudEngineViewArguments(operation = "serve",version=2) {
     "alternatives",
   ])
     args.push("--ro-bind", `/etc/${name}`, `/etc/${name}`);
+  // Empty mount point for the native provider view's Codex system
+  // configuration. That view's root is this read-only one, so it cannot
+  // create the directory itself.
+  args.push("--dir", "/etc/codex");
   args.push("--cap-drop", "ALL");
   for (const capability of [
     "CAP_SETUID",
@@ -118,6 +122,7 @@ export function cloudEngineViewArguments(operation = "serve",version=2) {
     "/srv/zeros/home",
     "/run",
     "/etc",
+    "/etc/codex",
     "/etc/containers",
     "/sys",
     "/sys/fs",

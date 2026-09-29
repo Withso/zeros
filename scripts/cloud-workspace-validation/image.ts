@@ -145,7 +145,7 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): Image {
         `find ${workspaceDirectory} -type d -exec setfacl -m u:zeros-agent:rwx,d:u:zeros-agent:rwx,d:m:rwx {} +`,
         `find ${workspaceDirectory} -type f -exec setfacl -m u:zeros-agent:rw- {} +`,
         `cd ${engineDirectory} && node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs`,
-        `mkdir -p ${SANDBOX_DATA_DIR}/workspaces /srv/zeros/log /etc/zeros /etc/codex`,
+        `mkdir -p ${SANDBOX_DATA_DIR}/workspaces /srv/zeros/log /etc/zeros`,
         `chown -R 10003:10003 ${SANDBOX_DATA_DIR}`,
         `chmod 0700 ${SANDBOX_DATA_DIR} ${SANDBOX_DATA_DIR}/workspaces`,
         "chown root:10001 /srv/zeros/log && chmod 0750 /srv/zeros/log",

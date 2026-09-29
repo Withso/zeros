@@ -15,9 +15,6 @@ chmod 0555 /opt/zeros-runtime/cloud-process-supervisor
 pnpm rebuild better-sqlite3 node-pty
 node -e 'require("better-sqlite3")();require("node-pty");console.log("native bindings verified")'
 install -d -o root -g root -m 0755 /opt/zeros-runtime/lib/zeros /opt/zeros-runtime/bin
-# Empty mount point for the native provider view's Codex system configuration;
-# that view's root is read-only, so the sandbox cannot create it.
-install -d -o root -g root -m 0755 /etc/codex
 for name in runtime-layout.json cgroup-resources.mjs cloud-resource-admission.mjs image-build-contract.mjs cloud-runtime-profile.mjs cloud-engine-cgroup.mjs cloud-setup-process.mjs cloud-engine-view.mjs cloud-engine-launcher.mjs write-image-build-metadata.mjs attest-cloud-worker.mjs consume-cloud-admission.mjs install-cloud-preview-links.mjs install-cloud-github-credential.mjs cloud-github-refresh-request.mjs cloud-git-askpass.mjs cloud-worker-supervisor.mjs ensure-cloud-worker-supervisor.mjs setup-cloud-workspace.mjs; do
  install -o root -g root -m 0555 "scripts/cloud-workspace-validation/sandbox/$name" "/opt/zeros-runtime/lib/zeros/$name"
 done
