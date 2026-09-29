@@ -91,7 +91,7 @@ RUN pnpm install --frozen-lockfile \
       -m u:zeros-agent:rwx,d:u:zeros-agent:rwx,d:m:rwx {} + \
  && find /srv/zeros/files/workspace -type f -exec setfacl -m u:zeros-agent:rw- {} + \
  && node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs \
- && mkdir -p /srv/zeros/state/workspaces /srv/zeros/log /etc/zeros \
+ && mkdir -p /srv/zeros/state/workspaces /srv/zeros/log /etc/zeros /etc/codex \
  && chown -R 10003:10003 /srv/zeros/state \
  && chmod 0700 /srv/zeros/state /srv/zeros/state/workspaces \
  && chown root:10001 /srv/zeros/log \

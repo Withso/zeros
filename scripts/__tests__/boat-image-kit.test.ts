@@ -127,16 +127,21 @@ function heredocBody(script: string) {
 }
 
 describe("Boat image kit", () => {
-  it("preserves the qualified build recipe apart from the explicit file-layout migration", () => {
+  it("preserves the qualified build recipe apart from explicit layout additions", () => {
     const script = fillTemplate("build.sh", {
       SOURCE_COMMIT: "aa11196c97a69ec4d1ef430dc1c6d0b36256f41d",
       IMAGE_CONTRACT_SHA256: "4b8ae9a31462b29cd502d3a0274edea1daf0058d758e3ab19ede1d2f32d8e2ed",
     });
     const migration = "node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs\n";
+    // The native provider view binds its empty Codex system configuration
+    // here; that view's root is read-only, so the image must provide it.
+    const codexView = "# Empty mount point for the native provider view's Codex system configuration;\n" +
+      "# that view's root is read-only, so the sandbox cannot create it.\ninstall -d -o root -g root -m 0755 /etc/codex\n";
     expect(script).toContain(migration);
+    expect(script).toContain(codexView);
     // Historical recipe compatibility, not qualification of the new image.
     // The new layout/source still requires fresh immutable-image attestation.
-    expect(sha256(script.replace(migration, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
+    expect(sha256(script.replace(migration, "").replace(codexView, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
   });
 
   it("keeps templates free of build identities and private paths", () => {
