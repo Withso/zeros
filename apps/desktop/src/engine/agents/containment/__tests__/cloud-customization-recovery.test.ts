@@ -1,12 +1,15 @@
 import {createHash,randomBytes} from 'node:crypto';
 import {mkdtemp,writeFile,readFile,readdir,rm} from 'node:fs/promises';
 import path from 'node:path';
-import {expect,it} from 'vitest';
+import {describe,expect,it} from 'vitest';
 import {acquireCloudNativeHistory,copyCloudNativeForkHistory,deleteCloudNativeHistory} from '../cloud-native-history';
 import {prepareHistoryCustomization} from '../cloud-customization-history';
 const a={owner:'a'.repeat(64),currentKeyVersion:1,keys:{'1':randomBytes(32).toString('base64url')}},b={...a,owner:'b'.repeat(64)};
 const secret='v7b-synthetic-historical-secret'; // gitleaks:allow — deterministic synthetic redaction fixture
 const parent=(root:string,id:string)=>path.join(root,createHash('sha256').update(id).digest('hex'));
+
+// Native history ownership needs Linux flock and a non-aliased root, as on the cloud worker.
+describe.runIf(process.platform==='linux')('native customization recovery',()=>{
 
 it.each(['claude','cursor','codex'] as const)('interrupted reset before purge retries safely for %s',async provider=>{
  const root=await mkdtemp('/tmp/v7b-history-'),input={root,conversationId:'c',provider,uid:process.getuid!(),gid:process.getgid!()};
@@ -81,4 +84,5 @@ it('fails closed for absent authority, missing encryption keys and a tampered en
   envelope.context='other';await writeFile(file,JSON.stringify(envelope));
   await expect(acquireCloudNativeHistory({...input,customization:{authority:a,secrets:[]}})).rejects.toThrow(/protection/);
  }finally{await rm(root,{recursive:true,force:true});}
+});
 });

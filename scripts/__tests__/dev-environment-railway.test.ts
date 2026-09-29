@@ -88,6 +88,57 @@ describe("Railway disposable Dev environments", () => {
     await expect(railwayDevClient(config, rejected, pause)("query DevRead { ok }")).rejects.toThrow(/GraphQL rejected/);
     expect(rejected).toHaveBeenCalledTimes(1);
   });
+  describe("unconfirmed source uploads", () => {
+    const setup = async (journal: Record<string, unknown>, deployments: { id: string; createdAt: string }[]) => {
+      const f = fixture(), directory = fs.mkdtempSync(path.join(os.tmpdir(), "dev-upload-evidence-"));
+      await ensureRailwayEnvironment(f.lease, f.config, f.request);
+      const archive = path.join(directory, "backend.tar.gz"), body = Buffer.from("synthetic source"); fs.writeFileSync(archive, body);
+      const artifact = { archive, digest: sha256(body), archiveSha256: sha256(body) };
+      Object.assign(f.state.resources.railway, { digest: artifact.digest, uploadPending: true, uploadCreate: { version: 1, id: "journal", attempt: 1, ...journal } });
+      const uploaded = "55555555-5555-4555-8555-555555555555";
+      const request = vi.fn(async (query: string, variables: any) => {
+        if (query.includes("query DevUploadEvidence")) return { deployments: { edges: deployments.map(node => ({ node })) } };
+        if (query.includes("query DevDeployment")) return { deployment: { id: variables.id, projectId, environmentId: devId, serviceId, status: "SUCCESS" } };
+        return f.request(query, variables);
+      });
+      const upload = vi.fn(async () => new Response(JSON.stringify({ deploymentId: uploaded }), { status: 200 }));
+      return { f, directory, artifact, request, upload, uploaded };
+    };
+    const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+    it("adopts the deployment a lost upload response created, then redeploys for this run", async () => {
+      const lost = "66666666-6666-4666-8666-666666666666";
+      const t = await setup({ phase: "uncertain", dispatchedAt: ago(120_000), outcome: "unavailable" },
+        [{ id: lost, createdAt: ago(110_000) }, { id: alphaId, createdAt: ago(3_600_000) }]);
+      try {
+        await deployRailwayBackend(t.f.lease, t.f.config, t.artifact, t.request, t.upload);
+        expect(t.upload).toHaveBeenCalledOnce();
+        expect(t.f.state.resources.railway).toMatchObject({ deploymentId: t.uploaded, uploadPending: false });
+      } finally { fs.rmSync(t.directory, { recursive: true, force: true }); }
+    });
+    it("uploads again after a rejected upload created no deployment", async () => {
+      const t = await setup({ phase: "uncertain", dispatchedAt: ago(30_000), outcome: 400 }, [{ id: alphaId, createdAt: ago(3_600_000) }]);
+      try {
+        await deployRailwayBackend(t.f.lease, t.f.config, t.artifact, t.request, t.upload);
+        expect(t.upload).toHaveBeenCalledOnce();
+        expect(t.f.state.resources.railway.deploymentId).toBe(t.uploaded);
+      } finally { fs.rmSync(t.directory, { recursive: true, force: true }); }
+    });
+    it("keeps a timed-out upload unconfirmed while it could still be in flight", async () => {
+      const t = await setup({ phase: "uncertain", dispatchedAt: ago(60_000), outcome: "unavailable" }, [{ id: alphaId, createdAt: ago(3_600_000) }]);
+      try {
+        await expect(deployRailwayBackend(t.f.lease, t.f.config, t.artifact, t.request, t.upload)).rejects.toThrow(/unconfirmed/);
+        expect(t.upload).not.toHaveBeenCalled();
+      } finally { fs.rmSync(t.directory, { recursive: true, force: true }); }
+    });
+    it("keeps an upload unconfirmed when more than one deployment could be its result", async () => {
+      const t = await setup({ phase: "uncertain", dispatchedAt: ago(900_000), outcome: 502 },
+        [{ id: "77777777-7777-4777-8777-777777777777", createdAt: ago(800_000) }, { id: "88888888-8888-4888-8888-888888888888", createdAt: ago(850_000) }]);
+      try {
+        await expect(deployRailwayBackend(t.f.lease, t.f.config, t.artifact, t.request, t.upload)).rejects.toThrow(/unconfirmed/);
+        expect(t.upload).not.toHaveBeenCalled();
+      } finally { fs.rmSync(t.directory, { recursive: true, force: true }); }
+    });
+  });
   it("keeps waiting for a slow deployment instead of abandoning it after ten minutes", async () => {
     const f = fixture(), directory = fs.mkdtempSync(path.join(os.tmpdir(), "dev-slow-deploy-"));
     try {
