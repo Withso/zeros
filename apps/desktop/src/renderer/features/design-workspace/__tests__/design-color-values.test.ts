@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  designColorValueText,
   formatDesignColor,
   formatDesignColorNotation,
   hsvaToRgba,
@@ -71,5 +72,21 @@ describe("design color values", () => {
       // check:ui ignore-next -- formatter assertion intentionally verifies CSS hsl output.
       "hsl(320 100% 50% / 0.5)",
     );
+  });
+
+  it("shows the value field in its notation, with opacity kept separate", () => {
+    const white = { r: 255, g: 255, b: 255, a: 1 };
+    const translucentRed = { r: 255, g: 0, b: 0, a: 0.5 };
+    expect(designColorValueText(white, "hex")).toBe("FFFFFF");
+    expect(designColorValueText(translucentRed, "hex")).toBe("FF0000");
+    // Functional notations keep alpha, so editing their text cannot drop it.
+    expect(designColorValueText(translucentRed, "rgb")).toBe(
+      // check:ui ignore-next -- formatter assertion intentionally verifies CSS rgb output.
+      "rgb(255 0 0 / 0.5)",
+    );
+    // check:ui ignore-next -- formatter assertion intentionally verifies CSS rgb output.
+    expect(designColorValueText(white, "rgb")).toBe("rgb(255 255 255)");
+    // check:ui ignore-next -- formatter assertion intentionally verifies CSS hsl output.
+    expect(designColorValueText(white, "hsl")).toBe("hsl(0 0% 100%)");
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  clampDesignStyleFieldValue,
   designStyleUnitOptions,
   designStylePropertyAffectsLayout,
   designStyleFieldValue,
@@ -172,6 +173,76 @@ describe("design style values", () => {
     expect(resolveDesignNumericExpression("*2", "24px")).toBe("48px");
     expect(resolveDesignNumericExpression("(x / 2) + 6", "24px")).toBe("18px");
     expect(resolveDesignNumericExpression("18px", "24px")).toBe("18px");
+  });
+
+  it("settles values CSS rejects as negative on zero instead of persisting them", () => {
+    // The engine writes declarations verbatim; the browser then ignores
+    // `padding-top:-10px`, so the field would silently snap back.
+    for (const property of [
+      "padding-top",
+      "padding-left",
+      "row-gap",
+      "column-gap",
+      "gap",
+      "width",
+      "min-height",
+      "border-top-width",
+      "border-radius",
+      "font-size",
+      "flex-grow",
+      "transition-duration",
+    ])
+      expect(normalizeDesignStyleFieldInput(property, "-10", "8px")).toMatch(
+        /^0(px|ms)?$/,
+      );
+    expect(normalizeDesignStyleFieldInput("padding-top", "x-30", "20px")).toBe(
+      "0px",
+    );
+    expect(normalizeDesignStyleFieldInput("width", "-4%", "50%")).toBe("0%");
+    // Negative values stay meaningful where CSS allows them.
+    for (const property of [
+      "margin-top",
+      "left",
+      "letter-spacing",
+      "outline-offset",
+      "text-indent",
+      "transition-delay",
+      "z-index",
+      "rotate",
+    ])
+      expect(
+        normalizeDesignStyleFieldInput(property, "-10", "0px"),
+      ).toMatch(/^-10/);
+    expect(clampDesignStyleFieldValue("padding-left", "-3px")).toBe("0px");
+    expect(clampDesignStyleFieldValue("margin-left", "-3px")).toBe("-3px");
+    expect(clampDesignStyleFieldValue("gap", "12px 8px")).toBe("12px 8px");
+    // Each numeric component of a shorthand settles on zero on its own.
+    expect(clampDesignStyleFieldValue("border-radius", "-5px 10px")).toBe(
+      "0px 10px",
+    );
+    expect(
+      clampDesignStyleFieldValue("border-radius", "4px -2px / -1px 3px"),
+    ).toBe("4px 0px / 0px 3px");
+    expect(clampDesignStyleFieldValue("border-radius", "-5px/10px")).toBe(
+      "0px / 10px",
+    );
+    expect(clampDesignStyleFieldValue("border-radius", "5px/10px")).toBe(
+      "5px/10px",
+    );
+    expect(normalizeDesignStyleFieldInput("padding", "-4px 8px", "0px")).toBe(
+      "0px 8px",
+    );
+    expect(normalizeDesignStyleFieldInput("gap", "8px   -2px", "0px")).toBe(
+      "8px 0px",
+    );
+    // Anything that is not plain numbers is left for CSS to judge.
+    expect(
+      clampDesignStyleFieldValue("width", "calc(100% - 20px)"),
+    ).toBe("calc(100% - 20px)");
+    expect(clampDesignStyleFieldValue("padding", "-4px auto")).toBe(
+      "-4px auto",
+    );
+    expect(clampDesignStyleFieldValue("margin", "-4px 8px")).toBe("-4px 8px");
   });
 
   it("normalizes design-tool numeric input with property-aware CSS units", () => {

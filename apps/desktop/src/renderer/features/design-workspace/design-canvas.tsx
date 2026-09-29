@@ -22,6 +22,7 @@ import {
   Code2,
   Diamond,
   Frame,
+  Image as ImageIcon,
   MousePointer2,
   Palette,
   Type,
@@ -36,7 +37,11 @@ import React, {
 } from "react";
 import { useShallow } from "zustand/react/shallow";
 
-import { type DesignOperation } from "@zeros/design-core";
+import {
+  DESIGN_FRAME_COORDINATE_LIMIT,
+  DESIGN_FRAME_MAX_SIZE,
+  type DesignOperation,
+} from "@zeros/design-core";
 import type { DesignAuthoredKeyframes } from "@zeros/design-web";
 import type {
   DesignRuntimeNodeDetails,
@@ -50,10 +55,7 @@ import {
   type DesignFrameGeometryWire,
 } from "../../platform/git";
 import { cn } from "../../shared/ui/cn";
-import {
-  createMenuAnchor,
-  type MenuAnchor,
-} from "../../shared/ui/menu-anchor";
+import { createMenuAnchor, type MenuAnchor } from "../../shared/ui/menu-anchor";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -62,32 +64,37 @@ import {
   ContextMenuSeparator,
 } from "../../shared/ui/primitives/context-menu";
 import {
-  Button,
   CodeBlock,
   Input,
   ScrollArea,
   Toolbar,
-  Tooltip,
   toast,
 } from "../../shared/ui/primitives";
 import { isEditableHotkeyTarget } from "../../shell/editable-target";
 import { hasDesignAssetDrag, readDesignAssetDrag } from "./design-assets";
-import { designSizingStyles } from "./design-auto-layout-values";
 import {
+  canFillDesignContainer,
+  canHugDesignContents,
+  designFrameResizeRootStyles,
+  designSizingMode,
+  designSizingStyles,
+} from "./design-auto-layout-values";
+import {
+  clampDesignRectPosition,
+  clampDesignResizeRect,
   designAuthoredResizeAxis,
   designCanvasPointFromClient,
   designCanvasRectFromPoints,
   designConstraintSides,
   designCssSizeAfterResize,
   designHighResolutionViewportTile,
-  designInlineGapDistributionStyles,
-  designInlineSpacingValue,
   designLocalDelta,
   designOriginFraction,
   designPointerRotation,
   designResizeAnchor,
   designResizeLayoutOffset,
   designResizeStyleAxes,
+  designRevealRectViewport,
   designRotatedResizeOrigin,
   designRotationCursor,
   designSelectionBox,
@@ -95,6 +102,7 @@ import {
   designSelectionClickIntent,
   designSelectionOverlayFrame,
   designSelectionPivot,
+  designViewportShowsAnyRect,
   designWheelDeltaPixels,
   designWheelZoomFactor,
   fitDesignRects,
@@ -139,6 +147,19 @@ import {
   flattenDesignLayerTree,
 } from "./design-layer-tree";
 import { startDesignLayoutDrag } from "./design-layout-drag-gesture";
+import {
+  DESIGN_SPACING_DRAG_THRESHOLD,
+  designConstraintGuidesApply,
+  designConstraintReferenceRect,
+  designGapValue,
+  designLocalAxisCursor,
+  designLocalAxisDelta,
+  designSizeBadgeText,
+  designSpacingDragValue,
+  designSpacingModifiers,
+  type DesignGapProperty,
+  type DesignSizeBadgeMode,
+} from "./design-layout-tools";
 import { transferDesignLayerOnCanvas } from "./design-layout-transfer";
 import {
   designLayoutTransform,
@@ -157,12 +178,20 @@ import {
   createDesignTextNodeId,
 } from "./design-text-editing";
 import { DesignThemeEditor } from "./design-theme-editor";
+import { DesignToolbarButton } from "./design-inspector-kit";
+import { designRuntimeLayerLabel } from "./design-layer-label";
 import { useDesignWorkspaceDisclosure } from "./state/design-layer-disclosure";
 import {
   designLivePreviewValue,
   publishDesignGestureLivePreview,
 } from "./state/design-live-preview";
 import { publishDesignMotionPlayhead } from "./state/design-motion-playhead";
+import { commitDesignLayoutOwnerStyles } from "./state/design-layout-owner-commit";
+import {
+  designLayoutToolsKey,
+  publishDesignLayoutToolsLive,
+  releaseDesignLayoutToolsLive,
+} from "./state/design-layout-tools-live";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import {
   clearDesignNodeStylePreviewTransient,
@@ -183,6 +212,7 @@ import {
   selectDesignNodes,
   toggleDesignNodeSelection,
 } from "./state/design-selection";
+import { createDesignSerialQueue } from "./state/design-serial-queue";
 import {
   appendDesignNodeHtmlCached,
   applyDesignEditCached,
@@ -241,7 +271,6 @@ import {
   type DesignCanvasZoomActions,
 } from "./design-workspace-types";
 
-
 type FrameGestureMode = "move" | DesignResizeHandle;
 type DesignCanvasTool = "select" | "frame" | "text";
 
@@ -277,6 +306,49 @@ export const EMPTY_NODE_IDS: readonly string[] = Object.freeze([]);
 const DESIGN_ORIGIN_HANDLE_MINIMUM = 108;
 /** Snap distance, in screen pixels, from a dragged origin to a box anchor. */
 const DESIGN_ORIGIN_SNAP_DISTANCE = 6;
+
+type DesignSizeBadgeModes = {
+  x?: DesignSizeBadgeMode;
+  y?: DesignSizeBadgeMode;
+};
+
+/** Sizing intent after each dimension of the selection badge. Older runtimes
+ * without layout metadata show plain numbers rather than a guessed mode. */
+function designSizeBadgeModes(
+  details: DesignRuntimeNodeDetails,
+): DesignSizeBadgeModes | undefined {
+  if (!details.layout) return undefined;
+  const mode = (axis: "x" | "y") => {
+    const resolved = designSizingMode(details, axis);
+    return resolved === "hug" || resolved === "fill" ? resolved : undefined;
+  };
+  const x = mode("x");
+  const y = mode("y");
+  return x || y ? { x, y } : undefined;
+}
+
+/** A canvas frame hugs only where its root explicitly sizes to content. */
+function designFrameSizeModeValues(
+  root: DesignRuntimeNodeDetails | null,
+): DesignSizeBadgeModes | undefined {
+  if (!root?.layout) return undefined;
+  const hug = (value: string | undefined) =>
+    ["max-content", "min-content", "fit-content"].includes(value ?? "")
+      ? ("hug" as const)
+      : undefined;
+  const x = hug(root.layout.widthValue);
+  const y = hug(root.layout.heightValue);
+  return x || y ? { x, y } : undefined;
+}
+
+function designFrameSizeModes(
+  root: DesignRuntimeNodeDetails | null,
+): string | null {
+  const modes = designFrameSizeModeValues(root);
+  return modes ? `${modes.x ?? "fixed"},${modes.y ?? "fixed"}` : null;
+}
+
+const frameRootPreviewQueue = createDesignSerialQueue();
 
 function blocksDesignCanvasDoubleClick(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
@@ -360,6 +432,27 @@ export function DesignCanvas({
       ] ?? null
     );
   });
+  // A selected canvas frame edits its root: the seeded frame root element or
+  // the document body. This is the same target the inspector resolves.
+  const selectedFrameRootDetails = useDesignRuntimeStore((state) => {
+    if (!workspaceId || !selectedFrame) return null;
+    const root =
+      state.byWorkspace[workspaceId]?.frames[selectedFrame.file]?.snapshot
+        ?.frame ?? null;
+    return root?.oid ? root : null;
+  });
+  const frameLayoutOwnerDetails =
+    view.frameSelected && !view.selectedNodeId
+      ? selectedFrameRootDetails
+      : null;
+  /** The one auto-layout owner whose padding and gaps the canvas edits: a
+   * single selected layer, or the selected frame's root. A multi-selection
+   * has none — editing its primary alone would surprise. */
+  const layoutOwnerDetails =
+    view.selectedNodeIds.length > 1
+      ? null
+      : (selectedNodeDetails ?? frameLayoutOwnerDetails);
+  const layoutOwnerId = layoutOwnerDetails?.oid ?? null;
   const selectedNodeDetailsList = useDesignRuntimeStore(
     useShallow((state) => {
       if (!workspaceId || !selectedFrame || view.selectedNodeIds.length === 0) {
@@ -445,7 +538,7 @@ export function DesignCanvas({
     peerGeometryState.selectionOwner === peerGeometrySelectionOwner
       ? peerGeometryState.details
       : EMPTY_NODE_DETAILS;
-  const childGeometrySelectionOwner = `${selectedFrame?.file ?? ""}\u0000${view.selectedNodeId ?? ""}\u0000${view.activeTheme ?? ""}`;
+  const childGeometrySelectionOwner = `${selectedFrame?.file ?? ""}\u0000${layoutOwnerId ?? ""}\u0000${view.activeTheme ?? ""}`;
   const childGeometryOwner = `${childGeometrySelectionOwner}\u0000${selectedFrame?.sourceVersion ?? ""}`;
   const [childGeometryState, setChildGeometryState] = useState<{
     owner: string;
@@ -502,13 +595,13 @@ export function DesignCanvas({
   // child boxes. This avoids a per-layer waterfall and lets gap hit targets sit
   // in actual rendered spaces, including wrapped rows and grid columns.
   useEffect(() => {
-    const display = selectedNodeDetails?.styles.display;
+    const display = layoutOwnerDetails?.styles.display;
     if (
       !active ||
       !workspaceId ||
       !selectedFrame ||
-      !view.selectedNodeId ||
-      !selectedNodeDetails ||
+      !layoutOwnerId ||
+      !layoutOwnerDetails ||
       !["flex", "inline-flex", "grid", "inline-grid"].includes(display ?? "")
     ) {
       return;
@@ -518,7 +611,7 @@ export function DesignCanvas({
     void previewDesignNodeGeometry({
       workspaceId,
       frame: selectedFrame,
-      nodeId: view.selectedNodeId,
+      nodeId: layoutOwnerId,
       children: true,
     })
       .then((geometry) => {
@@ -545,10 +638,10 @@ export function DesignCanvas({
     active,
     childGeometryOwner,
     childGeometrySelectionOwner,
+    layoutOwnerDetails,
+    layoutOwnerId,
     selectedFrame,
-    selectedNodeDetails,
     selectedRuntimeRevision,
-    view.selectedNodeId,
     workspaceId,
   ]);
 
@@ -651,6 +744,9 @@ export function DesignCanvas({
   const horizontalGuideRef = useRef<HTMLDivElement | null>(null);
   // Space state is mirrored in a ref so pointer handlers read the current key.
   const spacePressedRef = useRef(false);
+  /** A captured spacing edit freezes the camera: its coordinate system and
+   * feedback must not move under the pointer mid-drag. */
+  const spacingGestureRef = useRef(false);
   // Drives the grab cursor without publishing transient state globally.
   const [spacePressed, setSpacePressed] = useState(false);
   // Option/Alt reveals exact sibling spacing without permanently cluttering
@@ -1084,6 +1180,63 @@ export function DesignCanvas({
     [cancelPendingWheelGesture, setViewport, view, workspaceId],
   );
 
+  // A canvas must never open onto empty space while it has frames: a camera
+  // parked around a deleted or distant frame showed nothing, not even newly
+  // created frames. Fit once per owner when none is visible; afterwards the
+  // camera is the user's.
+  const openFitOwnerRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (!active || !workspaceId || !snapshot) return;
+    if (viewportSize.width <= 0 || viewportSize.height <= 0) return;
+    if (openFitOwnerRef.current === liveFrameOwner) return;
+    openFitOwnerRef.current = liveFrameOwner;
+    const rects = snapshot.frames.map((frame) => ({
+      x: frame.x,
+      y: frame.y,
+      width: frame.width,
+      height: frame.height,
+    }));
+    if (!designViewportShowsAnyRect(view, viewportSize, rects))
+      fitFrames(snapshot.frames);
+  }, [
+    active,
+    fitFrames,
+    liveFrameOwner,
+    snapshot,
+    view,
+    viewportSize,
+    workspaceId,
+  ]);
+
+  // Selecting a frame the user cannot see (from Layers, keyboard navigation or
+  // history) brings it into view. A frame already on screen never moves.
+  const revealedFrameRef = useRef<{
+    owner: string;
+    file: string | null;
+  } | null>(null);
+  useLayoutEffect(() => {
+    const file = selectedFrame?.file ?? null;
+    const previous = revealedFrameRef.current;
+    revealedFrameRef.current = { owner: liveFrameOwner, file };
+    // The selection an owner opens with restores a session; it does not ask
+    // the camera to move.
+    if (!previous || previous.owner !== liveFrameOwner) return;
+    if (!active || !workspaceId || !selectedFrame || previous.file === file)
+      return;
+    const next = designRevealRectViewport(view, viewportSize, {
+      x: selectedFrame.x,
+      y: selectedFrame.y,
+      width: selectedFrame.width,
+      height: selectedFrame.height,
+    });
+    if (!next) return;
+    cancelPendingWheelGesture();
+    paintDesignCanvasCamera(worldRef.current, next, false);
+    setViewport(workspaceId, next);
+    // Only a change of frame reveals; the camera and size are read at it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, liveFrameOwner, selectedFrame?.file, workspaceId]);
+
   useLayoutEffect(() => {
     if (!active) return;
     const actions: DesignCanvasZoomActions = {
@@ -1132,8 +1285,13 @@ export function DesignCanvas({
   );
 
   /** Title edits are surgical source splices; filenames remain Git-stable. */
+  /** Enter and blur both finish a rename; Escape cancels it. One gesture is
+   * one write however many of those events reach the field. */
+  const renameSettledRef = useRef(false);
   const commitRename = useCallback(
     async (frame: DesignCanvasFrameWire) => {
+      if (renameSettledRef.current) return;
+      renameSettledRef.current = true;
       const title = renameDraft.trim();
       setRenamingFrame(null);
       if (!workspaceId || !title || title === frame.title) return;
@@ -1706,15 +1864,7 @@ export function DesignCanvas({
             // The replacement iframe's ready snapshot retries the semantic
             // selection after it owns the duplicate source generation.
           });
-          toast.success(
-            nodeIds.length === 1
-              ? duplicateMode === "copy"
-                ? "Element copied"
-                : "Element duplicated"
-              : duplicateMode === "copy"
-                ? "Elements copied"
-                : "Elements duplicated",
-          );
+          // The selected duplicate on canvas is the confirmation; no toast.
         } else {
           const currentFrame =
             result.snapshot?.frames.find(
@@ -1777,9 +1927,6 @@ export function DesignCanvas({
         if (duplicate) {
           await selectDesignFrame(workspaceId, duplicate, { selected: true });
         }
-        toast.success(
-          duplicateMode === "copy" ? "Frame copied" : "Frame duplicated",
-        );
       } catch (error) {
         toast.error(
           duplicateMode === "copy"
@@ -2200,6 +2347,69 @@ export function DesignCanvas({
       const startY = event.clientY;
       let latest = start;
       let moved = false;
+      // Resizing a Hug frame fixes the axes it changes. The root previews that
+      // intent while dragging so release commits exactly what is on screen.
+      const runtimeFrame =
+        useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
+          frame.file
+        ];
+      const rootId = runtimeFrame?.snapshot?.frame?.oid;
+      const resizeRoot =
+        mode === "move" || !rootId
+          ? null
+          : (runtimeFrame?.detailsByNode[rootId] ??
+            runtimeFrame?.snapshot?.frame ??
+            null);
+      const rootModes = designFrameSizeModeValues(resizeRoot);
+      const badge = element.querySelector<HTMLElement>(
+        "[data-design-frame-size-badge]",
+      );
+      let rootPreviewKeys = "";
+      const rootPreviewLane = resizeRoot
+        ? `${workspaceId}\0${frame.file}\0${resizeRoot.oid}`
+        : "";
+      const queueRootPreview = (styles: Record<string, string> | null) => {
+        if (!resizeRoot) return;
+        const nodeId = resizeRoot.oid;
+        const cleared = rootPreviewKeys !== "";
+        rootPreviewKeys = Object.keys(styles ?? {}).sort().join(",");
+        // One lane per root across gestures: a cancelled drag's restore runs
+        // before the next drag's preview, never after it.
+        void frameRootPreviewQueue.run(rootPreviewLane, async () => {
+          // Restore the source first so a narrower intent drops the axis that
+          // is no longer being fixed.
+          if (cleared)
+            await clearDesignNodeStylePreviewTransient({
+              workspaceId,
+              frame: frame.file,
+              sourceVersion: frame.sourceVersion,
+              nodeId,
+            });
+          if (styles)
+            await previewDesignNodeGeometry({
+              workspaceId,
+              frame,
+              nodeId,
+              styles,
+            });
+        });
+      };
+      const previewRootSizing = (geometry: DesignFrameGeometryWire) => {
+        const fixed = designFrameResizeRootStyles(resizeRoot, start, geometry);
+        paintDesignLabelText(
+          badge,
+          designSizeBadgeText(geometry.w, geometry.h, {
+            x: fixed?.width ? undefined : rootModes?.x,
+            y: fixed?.height ? undefined : rootModes?.y,
+          }),
+        );
+        const keys = Object.keys(fixed ?? {}).sort().join(",");
+        if (keys !== rootPreviewKeys)
+          queueRootPreview(fixed as Record<string, string> | null);
+      };
+      const clearRootPreview = () => {
+        if (rootPreviewKeys) queueRootPreview(null);
+      };
       const peers =
         snapshot?.frames
           .filter((candidate) => candidate.file !== frame.file)
@@ -2249,21 +2459,32 @@ export function DesignCanvas({
                     ? { rect: moving, guides: {} }
                     : snapDesignRect(moving, peers, 6 / zoom);
                 paintGuides(snapped.guides);
+                const position = clampDesignRectPosition(
+                  snapped.rect,
+                  DESIGN_FRAME_COORDINATE_LIMIT,
+                );
                 return {
                   ...start,
-                  x: Math.round(snapped.rect.x),
-                  y: Math.round(snapped.rect.y),
+                  x: Math.round(position.x),
+                  y: Math.round(position.y),
                 };
               })()
             : (() => {
+                // Canvas metadata stores frames up to 16,384 px. The dragged
+                // edge stops there instead of snapping back on release.
+                const limits = {
+                  minWidth: MIN_FRAME_WIDTH,
+                  minHeight: MIN_FRAME_HEIGHT,
+                  maxWidth: DESIGN_FRAME_MAX_SIZE,
+                  maxHeight: DESIGN_FRAME_MAX_SIZE,
+                };
                 const resized = resizeDesignRect(
                   { x: start.x, y: start.y, width: start.w, height: start.h },
                   dx,
                   dy,
                   mode,
                   {
-                    minWidth: MIN_FRAME_WIDTH,
-                    minHeight: MIN_FRAME_HEIGHT,
+                    ...limits,
                     keepAspect: pointerEvent.shiftKey,
                     fromCenter: pointerEvent.altKey,
                   },
@@ -2275,8 +2496,20 @@ export function DesignCanvas({
                   pointerEvent.altKey
                     ? { rect: resized, guides: {} }
                     : snapDesignResizeRect(resized, mode, peers, 6 / zoom);
-                paintGuides(snapped.guides);
-                const rect = snapped.rect;
+                const rect = clampDesignRectPosition(
+                  clampDesignResizeRect(snapped.rect, mode, limits),
+                  DESIGN_FRAME_COORDINATE_LIMIT,
+                );
+                paintGuides({
+                  x:
+                    rect.width === snapped.rect.width
+                      ? snapped.guides.x
+                      : undefined,
+                  y:
+                    rect.height === snapped.rect.height
+                      ? snapped.guides.y
+                      : undefined,
+                });
                 return {
                   ...start,
                   x: Math.round(rect.x),
@@ -2288,6 +2521,7 @@ export function DesignCanvas({
         preview.geometry = latest;
         frameGeometryPreviewsRef.current.set(previewKey, preview);
         paintFrameGeometry(element, latest);
+        if (mode !== "move") previewRootSizing(latest);
       };
 
       const finish = () => {
@@ -2340,6 +2574,47 @@ export function DesignCanvas({
               presentation?.remove();
             }
           }
+          const rootStyles = designFrameResizeRootStyles(
+            resizeRoot,
+            start,
+            latest,
+          );
+          if (resizeRoot && rootStyles) {
+            // A quick release must not let the drag's preview land after the
+            // committed generation.
+            await frameRootPreviewQueue.idle(rootPreviewLane);
+            await applyDesignEditCached(workspaceId, frame, {
+              schemaVersion: 1,
+              transactionId: `desktop:${crypto.randomUUID()}`,
+              actor: { kind: "human", id: "desktop" },
+              intent: "Resize canvas frame",
+              createdAt: Date.now(),
+              operations: [
+                {
+                  operationId: `layout:${crypto.randomUUID()}`,
+                  type: "node.set-styles",
+                  nodeId: resizeRoot.oid,
+                  styles: rootStyles,
+                  scope: "auto",
+                  responsiveContext: "base",
+                  stateContext: "default",
+                },
+                {
+                  operationId: `layout:${crypto.randomUUID()}`,
+                  type: "frame.set-geometry",
+                  frame: frame.file,
+                  geometry: {
+                    x: latest.x,
+                    y: latest.y,
+                    width: latest.w,
+                    height: latest.h,
+                    z: latest.z,
+                  },
+                },
+              ],
+            });
+            return latest;
+          }
           return updateDesignFrameGeometryCached(
             workspaceId,
             frame.file,
@@ -2360,7 +2635,13 @@ export function DesignCanvas({
             const confirmed = designWorkspaceSnapshotCache
               .peekSnapshot(workspaceId)
               .data?.frames.find((candidate) => candidate.file === frame.file);
-            settle(confirmed ? frameGeometry(confirmed) : start);
+            const restored = confirmed ? frameGeometry(confirmed) : start;
+            settle(restored);
+            clearRootPreview();
+            paintDesignLabelText(
+              badge,
+              designSizeBadgeText(restored.w, restored.h, rootModes),
+            );
             toast.error("Couldn't update the frame geometry", {
               description: errorMessage(geometryError),
             });
@@ -2372,7 +2653,15 @@ export function DesignCanvas({
           if (previousPreview && !previousPreview.settled)
             frameGeometryPreviewsRef.current.set(previewKey, previousPreview);
           else frameGeometryPreviewsRef.current.delete(previewKey);
-          paintFrameGeometry(element, previousPreview?.geometry ?? start);
+          const restored = previousPreview?.geometry ?? start;
+          paintFrameGeometry(element, restored);
+          if (mode !== "move") {
+            clearRootPreview();
+            paintDesignLabelText(
+              badge,
+              designSizeBadgeText(restored.w, restored.h, rootModes),
+            );
+          }
         }
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", finish);
@@ -2805,10 +3094,12 @@ export function DesignCanvas({
     [active, workspaceId],
   );
 
-  /** Direct canvas padding/gap editing. Pointer moves paint the active line,
-   * hatch, and value immediately. Sandboxed layout previews stay coalesced to
-   * one in-flight request; gap regions reconcile from one aggregate child-box
-   * read and pointer release creates a single source transaction. */
+  /** Direct canvas padding/gap editing. A press that moves under three screen
+   * pixels is a click and opens numeric entry; past that it is a drag along
+   * the owner's own (possibly turned) axis. Previews stay coalesced to one
+   * in-flight request whose measurement repaints the tools island, and one
+   * release is one source transaction — none at all when the drag ends where
+   * it began. */
   const startInlineSpacingGesture = useCallback(
     (
       event: React.PointerEvent<HTMLButtonElement>,
@@ -2819,159 +3110,118 @@ export function DesignCanvas({
       if (!workspaceId || !active || !event.isPrimary || event.button !== 0) {
         return;
       }
+      // Space-drag pans the canvas, even over spacing chrome.
+      if (spacePressedRef.current) return;
       event.preventDefault();
       event.stopPropagation();
       const pointerOwner = event.currentTarget;
       const pointerId = event.pointerId;
-      pointerOwner.setPointerCapture?.(pointerId);
+      // Capture on the owner, which outlives any one tick: a gap whose space
+      // reflow removes mid-drag unmounts its button, not the gesture.
+      const captureOwner =
+        pointerOwner.closest<HTMLElement>("[data-design-layout-owner]") ??
+        pointerOwner;
+      captureOwner.setPointerCapture?.(pointerId);
       const frameElement = pointerOwner.closest<HTMLElement>(
         "[data-design-frame]",
       );
-      const startCoordinate =
-        control.axis === "x" ? event.clientX : event.clientY;
+      const ownerKey = designLayoutToolsKey(
+        workspaceId,
+        frame.file,
+        details.oid,
+      );
+      const controlKey = control.regionKey ?? control.property;
+      const padding = control.kind === "padding";
+      const start = { x: event.clientX, y: event.clientY };
       const previewInput = {
         workspaceId,
         frame: frame.file,
         sourceVersion: frame.sourceVersion,
         nodeId: details.oid,
       };
-      const paddingOriginalValues: Record<string, number> = {
+      const paddingSides = [
+        "padding-top",
+        "padding-right",
+        "padding-bottom",
+        "padding-left",
+      ] as const;
+      const paddingOriginal: Record<string, number> = {
         "padding-top": designPixelValue(details.styles.paddingTop),
         "padding-right": designPixelValue(details.styles.paddingRight),
         "padding-bottom": designPixelValue(details.styles.paddingBottom),
         "padding-left": designPixelValue(details.styles.paddingLeft),
       };
-      let originalGeometry: DesignPaintedNode = details;
-      let originalChildren = childGeometryDetails;
-      const fixedGapDistributionStyles = control.property.includes("gap")
-        ? designInlineGapDistributionStyles({
-            display: details.styles.display,
-            flexDirection: details.styles.flexDirection,
-            flexWrap: details.styles.flexWrap,
-            axis: control.axis,
-            justifyContent: details.styles.justifyContent,
-            alignContent: details.styles.alignContent,
-          })
-        : {};
-      let latestValue = control.value;
-      let latestCommitStyles: Record<string, string> = {
-        [control.property]: `${control.value}px`,
+      // What the drag builds on. Recomputed from the gesture's own baseline
+      // read below, so a fast second drag cannot start from a stale render.
+      let baseline = control.value;
+      let originalGeometry: DesignPaintedNode & {
+        box?: DesignRuntimeNodeDetails["box"];
+      } = details;
+      let dragging = false;
+      /** Set once the gesture ends: a late reply must have no effect. */
+      let ended = false;
+      spacingGestureRef.current = true;
+      let pointer = {
+        x: event.clientX,
+        y: event.clientY,
+        altKey: event.altKey,
+        shiftKey: event.shiftKey,
       };
-      let latestPreviewStyles = { ...latestCommitStyles };
-      let latestMirrorMode: "none" | "opposite" | "all" = "none";
-      let moved = false;
-      /** The clamp base for the padding hatch. Both paint paths have to use one
-       * source: clamping the sync path against the pre-gesture rect while the
-       * async path clamped against the measured one made the hatch alternate
-       * between two depths at exactly the round-trip frequency. */
-      let measuredRect = details.rect;
+      let latest: {
+        value: number;
+        mirror: "none" | "opposite" | "all";
+        commit: Record<string, string>;
+      } = { value: baseline, mirror: "none", commit: {} };
 
-      const currentOverlay = () =>
+      const currentOwner = () =>
         frameElement?.querySelector<HTMLElement>(
-          `[data-design-element-overlay="${CSS.escape(details.oid)}"]`,
+          `[data-design-layout-owner="${CSS.escape(details.oid)}"]`,
         ) ?? null;
-      const currentSpacingRoot = () =>
-        currentOverlay()?.querySelector<HTMLElement>(
-          "[data-design-inline-spacing-root]",
-        ) ?? null;
-      const paintOverlayGeometry = (geometry: DesignPaintedNode | null) => {
-        const overlay = currentOverlay();
-        if (!overlay || !geometry) return;
+      const paintOwnerGeometry = (
+        geometry:
+          | (DesignPaintedNode & { box?: DesignRuntimeNodeDetails["box"] })
+          | null,
+      ) => {
+        const owner = currentOwner();
+        if (!owner || !geometry) return;
         paintDesignNodeOverlayGeometry(
-          overlay,
+          owner,
           designSelectionOverlayFrame(designSelectionBox(geometry)),
         );
       };
-      const currentControl = () => {
-        const selector = control.regionKey
-          ? `[data-design-inline-gap-region="${CSS.escape(control.regionKey)}"]`
-          : `[data-design-inline-spacing="${CSS.escape(control.property)}"]`;
-        return (
-          currentSpacingRoot()?.querySelector<HTMLButtonElement>(selector) ??
-          null
-        );
-      };
-      const paintPropertyLabel = (property: string, value: number) => {
-        const root = currentSpacingRoot();
-        if (!root) return;
-        const handles =
-          property === control.property && control.regionKey
-            ? root.querySelectorAll<HTMLElement>(
-                `[data-design-inline-gap-region="${CSS.escape(control.regionKey)}"]`,
-              )
-            : root.querySelectorAll<HTMLElement>(
-                `[data-design-inline-spacing="${CSS.escape(property)}"]`,
-              );
-        for (const handle of handles) {
-          paintDesignLabelText(
-            handle.querySelector<HTMLElement>(
-              `[data-design-inline-spacing-value="${CSS.escape(property)}"]`,
-            ),
-            `${Math.round(value)}`,
-          );
-        }
-      };
-      const paintPaddingStyles = (
-        styles: Record<string, string>,
-        geometry = measuredRect,
+      const mirroredSides = (mirror: "none" | "opposite" | "all") =>
+        !padding
+          ? []
+          : mirror === "all"
+            ? paddingSides.filter((side) => side !== control.property)
+            : mirror === "opposite" && control.opposite
+              ? [control.opposite]
+              : [];
+      const stylesFor = (
+        value: number,
+        mirror: "none" | "opposite" | "all",
       ) => {
-        const root = currentSpacingRoot();
-        if (!root) return;
-        for (const [property, rawValue] of Object.entries(styles)) {
-          if (!property.startsWith("padding-")) continue;
-          const value = designPixelValue(rawValue);
-          const maximum =
-            property === "padding-left" || property === "padding-right"
-              ? geometry.width / 2
-              : geometry.height / 2;
-          root.style.setProperty(
-            `--design-inline-${property}`,
-            `${Math.min(maximum, value)}px`,
-          );
-          root.style.setProperty(
-            `--design-inline-${property}-center`,
-            `${Math.min(maximum, value) / 2}px`,
-          );
-          paintPropertyLabel(property, value);
-        }
-      };
-      const paintGapGeometry = (
-        containerDetails: DesignPaintedNode,
-        childDetails: readonly DesignPaintedChild[],
-      ) => {
-        const root = currentSpacingRoot();
-        if (!root) return;
-        paintDesignInlineGapHandles(
-          root,
-          containerDetails,
-          childDetails,
-          liveDesignZoom(),
-        );
-      };
-      const paintGestureState = (mirroredProperties: readonly string[]) => {
-        const root = currentSpacingRoot();
-        if (!root) return;
-        for (const handle of root.querySelectorAll<HTMLElement>(
-          "[data-design-inline-spacing]",
-        )) {
-          handle.removeAttribute("data-dragging");
-          handle.removeAttribute("data-mirrored");
-        }
-        currentControl()?.setAttribute("data-dragging", "true");
-        for (const property of mirroredProperties) {
-          root
-            .querySelector<HTMLElement>(
-              `[data-design-inline-spacing="${CSS.escape(property)}"]`,
+        const css = `${value}px`;
+        const commit: Record<string, string> = { [control.property]: css };
+        // Padding previews name all four sides, so releasing a modifier
+        // restores the side it had borrowed.
+        const preview: Record<string, string> = padding
+          ? Object.fromEntries(
+              paddingSides.map((side) => [side, `${paddingOriginal[side]}px`]),
             )
-            ?.setAttribute("data-mirrored", "true");
+          : {};
+        preview[control.property] = css;
+        for (const side of mirroredSides(mirror)) {
+          commit[side] = css;
+          preview[side] = css;
         }
+        if (!padding && control.automatic && control.reset) {
+          Object.assign(commit, control.reset);
+          Object.assign(preview, control.reset);
+        }
+        return { commit, preview };
       };
 
-      /** Spacing has no honest prediction: only the flex or grid algorithm knows
-       * where the children land once a gap or a padding changes. So layout stays
-       * the single authority here, and the whole fix is latency — one lean round
-       * trip per frame, measured in the same task as the write, instead of two
-       * that waited for an animation frame each. */
       const loop = createDesignGestureLoop<DesignRuntimeNodeGeometry>({
         request: (styles) => {
           publishDesignGestureLivePreview(
@@ -2989,135 +3239,178 @@ export function DesignCanvas({
           });
         },
         measured: (geometry) => {
-          measuredRect = geometry.rect;
-          paintOverlayGeometry(geometry);
-          paintPaddingStyles(latestPreviewStyles, geometry.rect);
-          paintGapGeometry(geometry, geometry.children);
-          paintPropertyLabel(control.property, latestValue);
+          if (ended) return;
+          paintOwnerGeometry(geometry);
+          publishDesignLayoutToolsLive(ownerKey, {
+            geometry: {
+              rect: geometry.rect,
+              box: geometry.box,
+              styles: geometry.styles,
+              children: geometry.children,
+            },
+            pinned: true,
+          });
         },
       });
-      const move = (pointerEvent: PointerEvent) => {
-        if (pointerEvent.pointerId !== pointerId) return;
-        const coordinate =
-          control.axis === "x" ? pointerEvent.clientX : pointerEvent.clientY;
-        const delta = (coordinate - startCoordinate) / liveDesignZoom();
-        const value = designInlineSpacingValue(
-          control.value,
-          delta,
-          control.direction,
-          pointerEvent.shiftKey ? 10 : 1,
-        );
-        const mirrorMode = pointerEvent.altKey
-          ? pointerEvent.shiftKey
-            ? "all"
-            : "opposite"
-          : "none";
-        if (!moved && value === control.value) return;
-        if (moved && value === latestValue && mirrorMode === latestMirrorMode) {
+
+      const update = () => {
+        const dx = pointer.x - start.x;
+        const dy = pointer.y - start.y;
+        if (!dragging) {
+          if (Math.hypot(dx, dy) < DESIGN_SPACING_DRAG_THRESHOLD) return;
+          dragging = true;
+          document.body.style.cursor = designLocalAxisCursor(
+            control.axis,
+            control.rotation,
+          );
+        }
+        const { mirror, step } = designSpacingModifiers(pointer, padding);
+        const value = designSpacingDragValue({
+          start: baseline,
+          delta: designLocalAxisDelta({
+            dx,
+            dy,
+            axis: control.axis,
+            rotation: control.rotation,
+            zoom: liveDesignZoom(),
+            scale: control.scale,
+          }),
+          direction: control.direction,
+          step,
+        });
+        if (
+          latest.commit[control.property] !== undefined &&
+          value === latest.value &&
+          mirror === latest.mirror
+        ) {
           return;
         }
-        moved = true;
-        latestValue = value;
-        latestMirrorMode = mirrorMode;
-        latestCommitStyles = { [control.property]: `${value}px` };
-        latestPreviewStyles = { ...latestCommitStyles };
-        const mirroredProperties: string[] = [];
-        if (control.property.startsWith("padding-")) {
-          latestPreviewStyles = Object.fromEntries(
-            Object.entries(paddingOriginalValues).map(
-              ([property, original]) => [property, `${original}px`],
-            ),
-          );
-          latestPreviewStyles[control.property] = `${value}px`;
-          if (mirrorMode === "all") {
-            for (const property of Object.keys(paddingOriginalValues)) {
-              latestCommitStyles[property] = `${value}px`;
-              latestPreviewStyles[property] = `${value}px`;
-              if (property !== control.property)
-                mirroredProperties.push(property);
-            }
-          } else if (mirrorMode === "opposite" && control.oppositeProperty) {
-            latestCommitStyles[control.oppositeProperty] = `${value}px`;
-            latestPreviewStyles[control.oppositeProperty] = `${value}px`;
-            mirroredProperties.push(control.oppositeProperty);
-          }
-        }
-        Object.assign(latestCommitStyles, fixedGapDistributionStyles);
-        Object.assign(latestPreviewStyles, fixedGapDistributionStyles);
-        paintPropertyLabel(control.property, value);
-        paintPaddingStyles(latestPreviewStyles);
-        paintGestureState(mirroredProperties);
-        loop.author(latestPreviewStyles);
+        const { commit, preview } = stylesFor(value, mirror);
+        latest = { value, mirror, commit };
+        const mirrored = mirroredSides(mirror);
+        publishDesignLayoutToolsLive(ownerKey, {
+          interaction: {
+            active: controlKey,
+            property: control.property,
+            anchor: control.anchor,
+            mirrored,
+            values: Object.fromEntries([
+              [controlKey, value],
+              ...mirrored.map((side) => [side, value]),
+            ]),
+          },
+          pinned: true,
+        });
+        loop.author(preview);
+      };
+      const move = (pointerEvent: PointerEvent) => {
+        if (pointerEvent.pointerId !== pointerId) return;
+        pointer = {
+          x: pointerEvent.clientX,
+          y: pointerEvent.clientY,
+          altKey: pointerEvent.altKey,
+          shiftKey: pointerEvent.shiftKey,
+        };
+        update();
+      };
+      // Modifiers change a drag's scope even while the pointer rests.
+      const modifiers = (keyEvent: KeyboardEvent) => {
+        if (keyEvent.key !== "Alt" && keyEvent.key !== "Shift") return;
+        pointer = {
+          ...pointer,
+          altKey: keyEvent.altKey,
+          shiftKey: keyEvent.shiftKey,
+        };
+        if (dragging) update();
       };
       const cleanup = () => {
+        ended = true;
+        spacingGestureRef.current = false;
         loop.stop();
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", finish);
         window.removeEventListener("pointercancel", cancel);
         window.removeEventListener("blur", cancel);
-        if (pointerOwner.hasPointerCapture?.(pointerId)) {
-          pointerOwner.releasePointerCapture(pointerId);
-        }
-        for (const handle of currentSpacingRoot()?.querySelectorAll<HTMLElement>(
-          "[data-design-inline-spacing]",
-        ) ?? []) {
-          handle.removeAttribute("data-dragging");
-          handle.removeAttribute("data-mirrored");
+        window.removeEventListener("keydown", modifiers, true);
+        window.removeEventListener("keyup", modifiers, true);
+        if (captureOwner.hasPointerCapture?.(pointerId)) {
+          captureOwner.releasePointerCapture(pointerId);
         }
         document.body.style.cursor = "";
         document.body.style.userSelect = "";
         gestureCancelRef.current = null;
       };
       const restore = () => {
-        paintOverlayGeometry(originalGeometry);
-        paintPaddingStyles(
-          Object.fromEntries(
-            Object.entries(paddingOriginalValues).map(([property, value]) => [
-              property,
-              `${value}px`,
-            ]),
-          ),
-          originalGeometry.rect,
-        );
-        paintGapGeometry(originalGeometry, originalChildren);
-        paintPropertyLabel(control.property, control.value);
+        paintOwnerGeometry(originalGeometry);
+        releaseDesignLayoutToolsLive(ownerKey);
         void clearDesignNodeStylePreviewTransient(previewInput).catch(() => {});
       };
       const finish = (pointerEvent?: PointerEvent) => {
         if (pointerEvent && pointerEvent.pointerId !== pointerId) return;
+        if (pointerEvent) {
+          pointer = {
+            ...pointer,
+            altKey: pointerEvent.altKey,
+            shiftKey: pointerEvent.shiftKey,
+          };
+          if (dragging) update();
+        }
         cleanup();
-        if (!moved) {
-          // A modifier-click selects through spacing chrome. Keep modifier
-          // drags on the existing spacing path, including their preview/undo.
-          if (!(event.metaKey || event.ctrlKey) || !folder || !frameElement)
+        if (!dragging) {
+          releaseDesignLayoutToolsLive(ownerKey);
+          // A modifier-click selects through spacing chrome.
+          if (event.metaKey || event.ctrlKey) {
+            if (!folder || !frameElement) return;
+            const bounds = frameElement.getBoundingClientRect();
+            if (bounds.width <= 0 || bounds.height <= 0) return;
+            viewportRef.current?.focus({ preventScroll: true });
+            void selectDesignFrameBodyAtLocation({
+              workspaceId,
+              folder,
+              frame,
+              x: ((event.clientX - bounds.left) * frame.width) / bounds.width,
+              y: ((event.clientY - bounds.top) * frame.height) / bounds.height,
+              intent: "deepest",
+              additive: event.shiftKey,
+            }).catch(() => {});
             return;
-          const bounds = frameElement.getBoundingClientRect();
-          if (bounds.width <= 0 || bounds.height <= 0) return;
-          viewportRef.current?.focus({ preventScroll: true });
-          void selectDesignFrameBodyAtLocation({
-            workspaceId,
-            folder,
-            frame,
-            x: ((event.clientX - bounds.left) * frame.width) / bounds.width,
-            y: ((event.clientY - bounds.top) * frame.height) / bounds.height,
-            intent: "deepest",
-            additive: event.shiftKey,
-          }).catch(() => {});
+          }
+          control.openEntry(
+            padding && event.altKey
+              ? event.shiftKey
+                ? "all"
+                : "opposite"
+              : "none",
+          );
+          return;
+        }
+        // A drag that ends where it began changes nothing: no write, no
+        // history, and authored units and expressions stay untouched.
+        const changed = Object.entries(latest.commit).some(([property, css]) =>
+          property.startsWith("padding-")
+            ? designPixelValue(css) !== paddingOriginal[property]
+            : property === control.property
+              ? latest.value !== baseline
+              : false,
+        );
+        if (!changed) {
+          restore();
           return;
         }
         publishDesignGestureLivePreview(
           workspaceId,
           frame.file,
           details.oid,
-          latestCommitStyles,
+          latest.commit,
           { settle: true },
         );
-        void updateDesignNodeStylesCached(workspaceId, {
-          frame: frame.file,
+        releaseDesignLayoutToolsLive(ownerKey, { keepGeometry: true });
+        void commitDesignLayoutOwnerStyles({
+          workspaceId,
+          frame,
           nodeId: details.oid,
-          sourceVersion: frame.sourceVersion,
-          styles: latestCommitStyles,
-        }).catch((spacingError) => {
+          styles: latest.commit,
+        }).catch((spacingError: unknown) => {
           restore();
           toast.error("Couldn't update canvas spacing", {
             description: errorMessage(spacingError),
@@ -3139,7 +3432,6 @@ export function DesignCanvas({
       // Inspector reads may have observed the preceding gesture's preview.
       // After canceling it, capture this gesture's baseline on the same runtime
       // port before any preview writes; its reply precedes their measurements.
-      // Cancellation then paints synchronously from the actual starting boxes.
       void previewDesignNodeGeometry({
         workspaceId,
         frame,
@@ -3147,28 +3439,111 @@ export function DesignCanvas({
         children: true,
       })
         .then((geometry) => {
+          if (ended) return;
           originalGeometry = geometry;
-          originalChildren = geometry.children;
-          Object.assign(paddingOriginalValues, {
-            "padding-top": designPixelValue(geometry.styles.paddingTop),
-            "padding-right": designPixelValue(geometry.styles.paddingRight),
-            "padding-bottom": designPixelValue(geometry.styles.paddingBottom),
-            "padding-left": designPixelValue(geometry.styles.paddingLeft),
-          });
+          for (const side of paddingSides) {
+            paddingOriginal[side] = designPixelValue(
+              geometry.styles[
+                side === "padding-top"
+                  ? "paddingTop"
+                  : side === "padding-right"
+                    ? "paddingRight"
+                    : side === "padding-bottom"
+                      ? "paddingBottom"
+                      : "paddingLeft"
+              ],
+            );
+          }
+          if (padding) {
+            baseline = paddingOriginal[control.property] ?? baseline;
+          } else if (!control.automatic) {
+            const authored = designGapValue(
+              geometry.styles,
+              control.property as DesignGapProperty,
+            );
+            if (authored !== null) baseline = authored;
+          }
+          if (dragging) update();
         })
         .catch(() => {});
       gestureCancelRef.current = cancel;
-      paintPropertyLabel(control.property, latestValue);
-      paintGestureState([]);
-      document.body.style.cursor =
-        control.axis === "x" ? "ew-resize" : "ns-resize";
       document.body.style.userSelect = "none";
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", finish);
       window.addEventListener("pointercancel", cancel);
       window.addEventListener("blur", cancel);
+      window.addEventListener("keydown", modifiers, true);
+      window.addEventListener("keyup", modifiers, true);
     },
-    [active, childGeometryDetails, folder, liveDesignZoom, workspaceId],
+    [active, folder, liveDesignZoom, workspaceId],
+  );
+
+  /** Figma's edge shortcut: double-click a vertical edge to Hug width, a
+   * horizontal one to Hug height; Option asks for Fill where the inspector
+   * would offer it. */
+  const sizeEdgeToContent = useCallback(
+    (
+      frame: DesignCanvasFrameWire,
+      details: DesignRuntimeNodeDetails,
+      handle: DesignResizeHandle,
+      fill: boolean,
+    ) => {
+      if (!workspaceId || !active) return;
+      const axis = handle === "e" || handle === "w" ? "x" : "y";
+      if (
+        fill ? !canFillDesignContainer(details) : !canHugDesignContents(details)
+      )
+        return;
+      const styles = designSizingStyles(details, axis, fill ? "fill" : "hug");
+      void commitDesignLayoutOwnerStyles({
+        workspaceId,
+        frame,
+        nodeId: details.oid,
+        styles,
+      }).catch((sizingError: unknown) => {
+        toast.error("Couldn't resize to content", {
+          description: errorMessage(sizingError),
+        });
+      });
+    },
+    [active, workspaceId],
+  );
+
+  /** Typed values and key steps from the canvas tools: one write each. */
+  const commitInlineSpacing = useCallback(
+    (
+      frame: DesignCanvasFrameWire,
+      details: DesignRuntimeNodeDetails,
+      styles: Record<string, string>,
+    ) => {
+      if (!workspaceId || !active) return Promise.resolve();
+      publishDesignGestureLivePreview(
+        workspaceId,
+        frame.file,
+        details.oid,
+        styles,
+        {
+          settle: true,
+        },
+      );
+      return commitDesignLayoutOwnerStyles({
+        workspaceId,
+        frame,
+        nodeId: details.oid,
+        styles,
+      }).catch((spacingError: unknown) => {
+        void clearDesignNodeStylePreviewTransient({
+          workspaceId,
+          frame: frame.file,
+          sourceVersion: frame.sourceVersion,
+          nodeId: details.oid,
+        }).catch(() => {});
+        toast.error("Couldn't update canvas spacing", {
+          description: errorMessage(spacingError),
+        });
+      });
+    },
+    [active, workspaceId],
   );
 
   const startNodeGroupMove = useCallback(
@@ -4870,19 +5245,13 @@ export function DesignCanvas({
         x: ((clientX - bounds.left) * frame.width) / bounds.width,
         y: ((clientY - bounds.top) * frame.height) / bounds.height,
         intent: "descend",
-        preferText: true,
-        onLocalSelection: (details) => {
-          if (canEditDesignNodeText(details) && details.text !== null) {
-            finishInlineTextTool(frame, details);
-          }
-        },
       }).catch((selectionError) => {
         toast.error("Couldn't inspect that nested element", {
           description: errorMessage(selectionError),
         });
       });
     },
-    [active, activeTool, finishInlineTextTool, folder, workspaceId],
+    [active, activeTool, folder, workspaceId],
   );
 
   const scheduleCanvasHover = useCallback(
@@ -5182,6 +5551,9 @@ export function DesignCanvas({
       const owner = snapshot?.frames.find(
         (frame) => frame.file === ownerFile && frame.kind !== "text",
       );
+      // A top-level frame stops at the storable size; a child frame is a
+      // layer and has no such limit.
+      const frameSizeLimit = owner ? undefined : DESIGN_FRAME_MAX_SIZE;
       const pointerId = event.pointerId;
       let latest = start;
       let moved = false;
@@ -5206,7 +5578,7 @@ export function DesignCanvas({
         }
         moved = true;
         paintCreationDraft(
-          designCanvasRectFromPoints(start, latest),
+          designCanvasRectFromPoints(start, latest, frameSizeLimit),
           "frame",
           gestureViewport.zoom,
         );
@@ -5226,7 +5598,7 @@ export function DesignCanvas({
       };
       const finish = () => {
         const rect = moved
-          ? designCanvasRectFromPoints(start, latest)
+          ? designCanvasRectFromPoints(start, latest, frameSizeLimit)
           : { x: start.x, y: start.y, width: 100, height: 100 };
         const geometry = {
           x: rect.x,
@@ -5841,13 +6213,15 @@ export function DesignCanvas({
       hitStackGenerationRef.current += 1;
       setHitStackMenu(null);
       viewportRef.current?.focus({ preventScroll: true });
+      // Space or middle-button drag is the hand tool everywhere on the canvas,
+      // including over selection chrome that would otherwise take the press.
+      if (startPan(event)) return;
       if (
         event.target instanceof Element &&
         event.target.closest("[data-design-controls]")
       ) {
         return;
       }
-      if (startPan(event)) return;
       if (startFrameCreation(event)) return;
       if (
         event.target === event.currentTarget &&
@@ -5872,6 +6246,7 @@ export function DesignCanvas({
     (event: React.WheelEvent<HTMLDivElement>) => {
       if (!active || !workspaceId) return;
       event.preventDefault();
+      if (spacingGestureRef.current) return;
       const bounds = event.currentTarget.getBoundingClientRect();
       const current = wheelViewportRef.current ?? view;
       let latest: DesignViewport;
@@ -6186,13 +6561,14 @@ export function DesignCanvas({
                         aria-label={`Rename ${frame.title}`}
                         onChange={(event) => setRenameDraft(event.target.value)}
                         onPointerDown={(event) => event.stopPropagation()}
-                        onBlur={() => setRenamingFrame(null)}
+                        onBlur={() => void commitRename(frame)}
                         onKeyDown={(event) => {
                           if (event.key === "Enter") {
                             event.preventDefault();
                             void commitRename(frame);
                           } else if (event.key === "Escape") {
                             event.preventDefault();
+                            renameSettledRef.current = true;
                             setRenamingFrame(null);
                           }
                         }}
@@ -6206,13 +6582,14 @@ export function DesignCanvas({
                           "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
                           frameSelectedOnly
                             ? "text-[var(--design-selection-stroke)]"
-                            : "text-muted-fg",
+                            : "text-muted-fg hover:text-fg2",
                         )}
                         onPointerDown={(event) =>
                           startFrameGesture(event, frame, "move")
                         }
                         onDoubleClick={(event) => {
                           event.stopPropagation();
+                          renameSettledRef.current = false;
                           setRenameDraft(frame.title);
                           setRenamingFrame(frame.file);
                         }}
@@ -6271,7 +6648,7 @@ export function DesignCanvas({
                   >
                     <span
                       data-design-group-size=""
-                      className="zd-design-selection-label absolute top-full left-1/2 rounded-sm px-1.5 py-0.5 font-mono text-[10px] whitespace-nowrap"
+                      className="zd-design-selection-label text-2xxs absolute top-full left-1/2 rounded-sm px-1.5 py-0.5 leading-4 font-medium whitespace-nowrap tabular-nums"
                       style={{
                         marginTop: designCanvasScreenPixels(4),
                         transform: `translateX(-50%) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
@@ -6327,6 +6704,18 @@ export function DesignCanvas({
 
                 {parentGuideRect &&
                 selectedElement &&
+                selectedElements.length === 1 &&
+                designConstraintGuidesApply({
+                  hasParent: true,
+                  position: selectedElement.styles.position,
+                  // A fixed box is positioned against the viewport unless an
+                  // ancestor creates its containing block (transform, filter…).
+                  parentIsContainingBlock:
+                    selectedElement.styles.position === "fixed"
+                      ? selectedElement.layout?.fixedContainingBlock !==
+                        "ancestor"
+                      : selectedElement.layout?.isContainingBlock,
+                }) &&
                 (!measurePressed || gestureCancelRef.current !== null) &&
                 inlineTextEdit?.frame !== frame.file ? (
                   <DesignConstraintGuides
@@ -6334,7 +6723,28 @@ export function DesignCanvas({
                     bounds={designSelectionBoxBounds(
                       designSelectionBox(selectedElement),
                     )}
-                    parentRect={parentGuideRect}
+                    parentRect={
+                      selectedElement.styles.position === "fixed" &&
+                      selectedElement.layout?.fixedContainingBlock !== "parent"
+                        ? {
+                            x: 0,
+                            y: 0,
+                            width: frame.width,
+                            height: frame.height,
+                          }
+                        : designConstraintReferenceRect(
+                            parentGuideRect,
+                            parentElement?.styles,
+                          )
+                    }
+                    outlineRect={
+                      parentElement &&
+                      (selectedElement.styles.position !== "fixed" ||
+                        selectedElement.layout?.fixedContainingBlock ===
+                          "parent")
+                        ? parentGuideRect
+                        : undefined
+                    }
                     sides={designConstraintSides({
                       position: selectedElement.styles.position,
                       authored: selectedElement.authoredStyleProperties,
@@ -6365,6 +6775,7 @@ export function DesignCanvas({
                     <div
                       key={details.oid}
                       data-design-element-overlay={details.oid}
+                      data-design-layout-owner={details.oid}
                       data-design-overlay-source-version={details.sourceVersion}
                       data-design-selected-element={
                         primarySelection ? "" : undefined
@@ -6459,24 +6870,39 @@ export function DesignCanvas({
                             />
                           ) : null}
                           <DesignSelectionMeasurements
+                            ownerKey={designLayoutToolsKey(
+                              workspaceId ?? "",
+                              frame.file,
+                              details.oid,
+                            )}
                             details={details}
-                            overlay={overlayFrame}
                             children={childGeometryDetails}
                             zoom={view.zoom}
-                            onSpacingPointerDown={(event, control) =>
-                              startInlineSpacingGesture(
-                                event,
-                                frame,
-                                details,
-                                control,
-                              )
+                            showSize={selectedElements.length === 1}
+                            sizeModes={designSizeBadgeModes(details)}
+                            sizeWidth={overlayFrame.width}
+                            sizeHeight={overlayFrame.height}
+                            onSpacingPointerDown={
+                              selectedElements.length === 1 &&
+                              activeTool === "select"
+                                ? (event, control) =>
+                                    startInlineSpacingGesture(
+                                      event,
+                                      frame,
+                                      details,
+                                      control,
+                                    )
+                                : undefined
+                            }
+                            onSpacingCommit={(_control, styles) =>
+                              commitInlineSpacing(frame, details, styles)
                             }
                           />
                           {selectedElements.length === 1 ? (
                             <>
                               <span
                                 data-design-rotation-feedback=""
-                                className="bg-inverted-bg text-inverted-fg pointer-events-none absolute top-full right-full hidden rounded-sm px-1.5 py-0.5 font-mono text-[10px] whitespace-nowrap"
+                                className="bg-inverted-bg text-inverted-fg text-2xxs pointer-events-none absolute top-full right-full hidden rounded-sm px-1.5 py-0.5 leading-4 font-medium whitespace-nowrap tabular-nums"
                                 style={{
                                   marginTop: designCanvasScreenPixels(4),
                                   marginRight: designCanvasScreenPixels(4),
@@ -6492,6 +6918,14 @@ export function DesignCanvas({
                                     frame,
                                     details,
                                     handle,
+                                  )
+                                }
+                                onEdgeDoubleClick={(handle, fill) =>
+                                  sizeEdgeToContent(
+                                    frame,
+                                    details,
+                                    handle,
+                                    fill,
                                   )
                                 }
                               />
@@ -6553,12 +6987,100 @@ export function DesignCanvas({
                   />
                 ) : null}
 
+                {frameSelectedOnly &&
+                frameLayoutOwnerDetails &&
+                workspaceId &&
+                activeTool === "select" &&
+                inlineTextEdit?.frame !== frame.file &&
+                ["flex", "inline-flex", "grid", "inline-grid"].includes(
+                  frameLayoutOwnerDetails.styles.display ?? "",
+                ) ? (
+                  <div
+                    data-design-layout-owner={frameLayoutOwnerDetails.oid}
+                    data-design-frame-layout-owner=""
+                    className="pointer-events-none absolute"
+                    style={{
+                      ...designSelectionOverlayStyle(
+                        designSelectionOverlayFrame(
+                          designSelectionBox(frameLayoutOwnerDetails),
+                        ),
+                      ),
+                      zIndex: 2,
+                    }}
+                  >
+                    <span
+                      data-design-spacing-hover-zone=""
+                      className="pointer-events-auto absolute inset-0"
+                      aria-hidden="true"
+                    />
+                    <DesignSelectionMeasurements
+                      ownerKey={designLayoutToolsKey(
+                        workspaceId,
+                        frame.file,
+                        frameLayoutOwnerDetails.oid,
+                      )}
+                      details={frameLayoutOwnerDetails}
+                      children={childGeometryDetails}
+                      zoom={view.zoom}
+                      showSize={false}
+                      sizeWidth={frameLayoutOwnerDetails.rect.width}
+                      sizeHeight={frameLayoutOwnerDetails.rect.height}
+                      onSpacingPointerDown={(event, control) =>
+                        startInlineSpacingGesture(
+                          event,
+                          frame,
+                          frameLayoutOwnerDetails,
+                          control,
+                        )
+                      }
+                      onSpacingCommit={(_control, styles) =>
+                        commitInlineSpacing(
+                          frame,
+                          frameLayoutOwnerDetails,
+                          styles,
+                        )
+                      }
+                    />
+                  </div>
+                ) : null}
+
+                {frameSelectedOnly ? (
+                  <span
+                    data-design-frame-size-badge=""
+                    data-design-size-modes={
+                      designFrameSizeModes(frameLayoutOwnerDetails) ?? undefined
+                    }
+                    className="zd-design-selection-label text-2xxs pointer-events-none absolute top-full left-1/2 z-[3] rounded-sm px-1.5 py-0.5 leading-4 font-medium whitespace-nowrap tabular-nums"
+                    style={{
+                      marginTop: designCanvasScreenPixels(4),
+                      transform: `translateX(-50%) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
+                      transformOrigin: "top center",
+                    }}
+                  >
+                    {designSizeBadgeText(
+                      paintedFrame?.w ?? frame.width,
+                      paintedFrame?.h ?? frame.height,
+                      designFrameSizeModeValues(frameLayoutOwnerDetails),
+                    )}
+                  </span>
+                ) : null}
+
                 {frameSelectedOnly ? (
                   <DesignResizeHandles
                     label={frame.title}
                     onPointerDown={(event, handle) =>
                       startFrameGesture(event, frame, handle)
                     }
+                    onEdgeDoubleClick={(handle) => {
+                      // A canvas frame hugs its root; it has no parent to fill.
+                      if (frameLayoutOwnerDetails)
+                        sizeEdgeToContent(
+                          frame,
+                          frameLayoutOwnerDetails,
+                          handle,
+                          false,
+                        );
+                    }}
                   />
                 ) : null}
               </article>
@@ -6584,7 +7106,7 @@ export function DesignCanvas({
           >
             <span
               data-design-creation-size=""
-              className="zd-design-selection-label absolute bottom-full left-0 origin-bottom-left rounded-sm px-1.5 py-0.5 font-mono text-[10px] whitespace-nowrap"
+              className="zd-design-selection-label text-2xxs absolute bottom-full left-0 origin-bottom-left rounded-sm px-1.5 py-0.5 leading-4 font-medium whitespace-nowrap tabular-nums"
             />
           </div>
           <div
@@ -6663,58 +7185,63 @@ export function DesignCanvas({
             <ContextMenuContent
               data-design-controls
               aria-label="Layers under pointer"
-              className="bg-bg1 w-52 rounded-md px-0 py-1"
+              className="w-60"
               onPointerDown={(event) => event.stopPropagation()}
               onEntryFocus={(event) => {
                 // This pointer-driven picker has always focused its deepest
                 // layer first. Keep that origin for subsequent arrow keys.
                 event.preventDefault();
                 if (event.target instanceof HTMLElement) {
-                  event.target.querySelector<HTMLElement>('[role="menuitem"]')
+                  event.target
+                    .querySelector<HTMLElement>('[role="menuitem"]')
                     ?.focus({ preventScroll: true });
                 }
               }}
               loop
             >
-              <ContextMenuLabel className="text-muted-fg flex h-6 items-center px-2 text-[9px] font-medium tracking-wide uppercase">
+              <ContextMenuLabel className="text-muted-fg text-3xxs">
                 Select layer
               </ContextMenuLabel>
-              {hitStackMenu.layers.map((layer, index) => (
-                <ContextMenuItem
-                  key={layer.oid}
-                  className={cn(
-                    "hover:bg-bg2 focus:bg-bg2 flex h-7 w-full min-w-0 items-center gap-2 rounded-none px-2 text-left",
-                    view.selectedNodeId === layer.oid && "bg-highlighted-bg",
-                  )}
-                  onSelect={() => {
-                    setHitStackMenu(null);
-                    if (!workspaceId || !folder) return;
-                    void selectDesignNode({
-                      workspaceId,
-                      folder,
-                      frame: hitStackMenu.frame,
-                      nodeId: layer.oid,
-                    }).catch((selectionError) => {
-                      toast.error("Couldn't select that design layer", {
-                        description: errorMessage(selectionError),
+              {hitStackMenu.layers.map((layer, index) => {
+                const kind = designRuntimeLayerLabel({ tag: layer.tag });
+                const Glyph =
+                  kind === "Text" ? Type : kind === "Image" ? ImageIcon : Frame;
+                return (
+                  <ContextMenuItem
+                    key={layer.oid}
+                    className={cn(
+                      "min-w-0",
+                      view.selectedNodeId === layer.oid && "text-fg1",
+                    )}
+                    onSelect={() => {
+                      setHitStackMenu(null);
+                      if (!workspaceId || !folder) return;
+                      void selectDesignNode({
+                        workspaceId,
+                        folder,
+                        frame: hitStackMenu.frame,
+                        nodeId: layer.oid,
+                      }).catch((selectionError) => {
+                        toast.error("Couldn't select that design layer", {
+                          description: errorMessage(selectionError),
+                        });
                       });
-                    });
-                  }}
-                >
-                  <span className="text-muted-fg border-border2 shrink-0 rounded-sm border px-1 font-mono text-[8px] uppercase">
-                    {layer.tag}
-                  </span>
-                  <span className="text-fg1 min-w-0 flex-1 truncate text-[11px]">
-                    {layer.name}
-                  </span>
-                  <span className="text-muted-fg font-mono text-[9px]">
-                    {index === 0 ? "deep" : `↑${index}`}
-                  </span>
-                </ContextMenuItem>
-              ))}
-              <ContextMenuSeparator className="bg-border1 mx-0 my-1" />
+                    }}
+                  >
+                    <Glyph />
+                    <span className="min-w-0 flex-1 truncate">
+                      {layer.name}
+                    </span>
+                    {index > 0 ? (
+                      <span className="text-muted-fg text-3xxs tabular-nums">
+                        ↑{index}
+                      </span>
+                    ) : null}
+                  </ContextMenuItem>
+                );
+              })}
+              <ContextMenuSeparator />
               <ContextMenuItem
-                className="hover:bg-bg2 focus:bg-bg2 flex h-7 w-full items-center gap-2 rounded-none px-2 text-left"
                 onSelect={() => {
                   setHitStackMenu(null);
                   void selectDesignFrame(workspaceId!, hitStackMenu.frame, {
@@ -6722,8 +7249,8 @@ export function DesignCanvas({
                   });
                 }}
               >
-                <Frame className="text-muted-fg size-3.5" />
-                <span className="text-fg1 truncate text-[11px]">
+                <Frame />
+                <span className="min-w-0 flex-1 truncate">
                   {hitStackMenu.frame.title}
                 </span>
               </ContextMenuItem>
@@ -6761,105 +7288,86 @@ export function DesignCanvas({
           role="toolbar"
           aria-label="Canvas tools"
           className={cn(
-            "zd-design-floating-toolbar absolute left-1/2 -translate-x-1/2 transition-[bottom]",
-            motionTimelineOpen ? "bottom-[336px]" : "bottom-4",
+            "zd-design-floating-toolbar zd-canvas-toolbar absolute left-1/2 -translate-x-1/2 transition-[bottom]",
+            motionTimelineOpen
+              ? "bottom-[calc(var(--zeros-design-motion-height,240px)+16px)]"
+              : "bottom-4",
           )}
         >
-          <Tooltip label="Select" shortcut="V">
-            <Button
-              type="button"
-              variant={activeTool === "select" ? "secondary-on" : "ghost"}
-              size="icon-lg"
-              aria-label="Select"
-              aria-pressed={activeTool === "select"}
-              aria-keyshortcuts="V"
-              onClick={() => activateTool("select")}
-            >
-              <MousePointer2 />
-            </Button>
-          </Tooltip>
-          <Tooltip
-            label={creatingFrame ? "Creating frame…" : "Frame"}
+          <DesignToolbarButton
+            label="Select"
+            tooltip="Move"
+            shortcut="V"
+            tool
+            pressed={activeTool === "select"}
+            aria-keyshortcuts="V"
+            onClick={() => activateTool("select")}
+          >
+            <MousePointer2 />
+          </DesignToolbarButton>
+          <DesignToolbarButton
+            label="Frame tool"
+            tooltip={creatingFrame ? "Creating frame…" : "Frame"}
             shortcut="F"
+            tool
+            pressed={activeTool === "frame"}
+            disabled={!workspaceId || creatingFrame}
+            aria-keyshortcuts="F"
+            onClick={() => activateTool("frame")}
           >
-            <Button
-              type="button"
-              variant={activeTool === "frame" ? "secondary-on" : "ghost"}
-              size="icon-lg"
-              disabled={!workspaceId || creatingFrame}
-              aria-label="Frame tool"
-              aria-pressed={activeTool === "frame"}
-              aria-keyshortcuts="F"
-              onClick={() => activateTool("frame")}
-            >
-              <Frame />
-            </Button>
-          </Tooltip>
-          <Tooltip label="Text" shortcut="T">
-            <Button
-              type="button"
-              variant={activeTool === "text" ? "secondary-on" : "ghost"}
-              size="icon-lg"
-              disabled={!workspaceId}
-              aria-label="Text tool"
-              aria-pressed={activeTool === "text"}
-              aria-keyshortcuts="T"
-              onClick={() => activateTool("text")}
-            >
-              <Type />
-            </Button>
-          </Tooltip>
-          <Tooltip label="Read source">
-            <Button
-              type="button"
-              variant={view.codeView ? "secondary-on" : "ghost"}
-              size="icon-lg"
-              disabled={!workspaceId || !selectedFrame}
-              aria-label="Toggle frame source"
-              aria-pressed={view.codeView}
-              onPointerEnter={warmSelectedFrameDocument}
-              onFocus={warmSelectedFrameDocument}
-              onClick={() => {
-                if (workspaceId) setCodeView(workspaceId, !view.codeView);
-              }}
-            >
-              <Code2 />
-            </Button>
-          </Tooltip>
-          <Tooltip
-            label={`Themes · ${view.activeTheme ?? "Base"}`}
+            <Frame />
+          </DesignToolbarButton>
+          <DesignToolbarButton
+            label="Text tool"
+            tooltip="Text"
+            shortcut="T"
+            tool
+            pressed={activeTool === "text"}
+            disabled={!workspaceId}
+            aria-keyshortcuts="T"
+            onClick={() => activateTool("text")}
+          >
+            <Type />
+          </DesignToolbarButton>
+          <span className="zd-canvas-toolbar-divider" aria-hidden="true" />
+          <DesignToolbarButton
+            label="Toggle frame source"
+            tooltip="Source"
+            pressed={view.codeView}
+            disabled={!workspaceId || !selectedFrame}
+            onPointerEnter={warmSelectedFrameDocument}
+            onFocus={warmSelectedFrameDocument}
+            onClick={() => {
+              if (workspaceId) setCodeView(workspaceId, !view.codeView);
+            }}
+          >
+            <Code2 />
+          </DesignToolbarButton>
+          <DesignToolbarButton
+            ref={themeEditorTriggerRef}
+            data-design-theme-trigger
+            label="Open theme editor"
+            tooltip={`Themes · ${view.activeTheme ?? "Base"}`}
             shortcut="⌥T"
+            disabled={!workspaceId || !selectedFrame}
+            aria-haspopup="dialog"
+            aria-expanded={themeEditorOpen}
+            aria-keyshortcuts="Alt+T"
+            onClick={() => setThemeEditorOpen((current) => !current)}
           >
-            <Button
-              ref={themeEditorTriggerRef}
-              data-design-theme-trigger
-              type="button"
-              variant={themeEditorOpen ? "secondary-on" : "ghost"}
-              size="icon-lg"
-              disabled={!workspaceId || !selectedFrame}
-              aria-label="Open theme editor"
-              aria-haspopup="dialog"
-              aria-expanded={themeEditorOpen}
-              aria-keyshortcuts="Alt+T"
-              onClick={() => setThemeEditorOpen((current) => !current)}
-            >
-              <Palette />
-            </Button>
-          </Tooltip>
-          <Tooltip label="Motion timeline" shortcut="⇧A">
-            <Button
-              type="button"
-              variant={motionTimelineOpen ? "secondary-on" : "ghost"}
-              size="icon-lg"
-              disabled={!workspaceId || !selectedFrame || !view.selectedNodeId}
-              aria-label="Toggle motion timeline"
-              aria-pressed={motionTimelineOpen}
-              aria-keyshortcuts="Shift+A"
-              onClick={() => onMotionTimelineOpenChange(!motionTimelineOpen)}
-            >
-              <Diamond />
-            </Button>
-          </Tooltip>
+            <Palette />
+          </DesignToolbarButton>
+          <DesignToolbarButton
+            label="Toggle motion timeline"
+            tooltip="Motion"
+            shortcut="⇧A"
+            pressed={motionTimelineOpen}
+            disabled={!workspaceId || !selectedFrame || !view.selectedNodeId}
+            aria-keyshortcuts="Shift+A"
+            onClick={() => onMotionTimelineOpenChange(!motionTimelineOpen)}
+          >
+            <Diamond />
+          </DesignToolbarButton>
         </Toolbar>
 
         <DesignThemeEditor

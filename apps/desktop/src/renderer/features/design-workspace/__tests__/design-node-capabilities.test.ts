@@ -25,4 +25,28 @@ describe("design node capabilities", () => {
     expect(canEditDesignNodeText(details(false))).toBe(false);
     expect(canEditDesignNodeText(details(undefined))).toBe(false);
   });
+
+  it("keeps empty frames and auto-layout boxes out of text editing", () => {
+    for (const display of [
+      "block",
+      "flex",
+      "inline-flex",
+      "grid",
+      "inline-grid",
+    ]) {
+      expect(
+        canEditDesignNodeText({
+          ...details(true),
+          text: "",
+          styles: { display },
+        }),
+      ).toBe(false);
+    }
+    expect(canEditDesignNodeText({ ...details(true), text: "   " })).toBe(
+      false,
+    );
+    expect(
+      canEditDesignNodeText({ ...details(true), tag: "h1", text: "" }),
+    ).toBe(true);
+  });
 });

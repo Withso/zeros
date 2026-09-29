@@ -1894,6 +1894,11 @@ describe("design runtime protocol", () => {
       expect(result.geometry.children[0]?.rect.x).toBeGreaterThan(0);
       expect(Object.keys(result.geometry.children[0]?.styles ?? {})).toEqual([
         "position",
+        "order",
+        "marginTop",
+        "marginRight",
+        "marginBottom",
+        "marginLeft",
       ]);
       // A gesture frame carries a fraction of the inspector payload.
       expect(result.geometryStyleKeys.length).toBeLessThan(20);
@@ -1901,6 +1906,104 @@ describe("design runtime protocol", () => {
       // And it shares previewStyles' bookkeeping, so one clear restores both
       // the width this call authored and the height the other one did.
       expect(result.restoredWidth).toBe(600 + 16 + 16);
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
+  it("records only the sides an inset shorthand pins, inline or in a stylesheet", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const result = await page.evaluate(
+        ({ source }) =>
+          new Promise<Record<string, string[]>>((resolve, reject) => {
+            const sourceVersion = "c".repeat(24);
+            document.head.innerHTML = `<style>
+              body { margin: 0 }
+              .pinned { position: absolute; inset: auto 30px 40px auto; width: 100px; height: 80px; }
+              .cascade { position: absolute; width: 100px; height: 80px; inset: 10px; }
+              .cascade.won { inset: auto 30px 40px auto; }
+              .unpinned { position: absolute; inset: auto; width: 10px; height: 10px; }
+            </style>`;
+            document.body.innerHTML = `<main data-oid="root" style="position:relative;width:600px;height:300px">
+                <div data-oid="sheet" class="pinned"></div>
+                <div data-oid="inline" style="position:absolute;inset:10px auto auto 20px;width:50px;height:50px"></div>
+                <div data-oid="cascade" class="cascade won"></div>
+                <div data-oid="unpinned" class="unpinned"></div>
+              </main>`;
+            (
+              window as Window & { __zerosDesignSourceVersion?: string }
+            ).__zerosDesignSourceVersion = sourceVersion;
+            const channel = new MessageChannel();
+            const pins: Record<string, string[]> = {};
+            const timeout = window.setTimeout(
+              () => reject(new Error("inset details timed out")),
+              3_000,
+            );
+            const send = (requestId: string, nodeId: string) =>
+              channel.port1.postMessage({
+                protocol: "zeros-design-runtime",
+                version: 2,
+                type: "request",
+                sourceVersion,
+                requestId,
+                method: "getNodeDetails",
+                args: { nodeId },
+              });
+            channel.port1.onmessage = (event) => {
+              const message = event.data as {
+                type?: string;
+                event?: string;
+                requestId?: string;
+                ok?: boolean;
+                result?: { authoredStyleProperties?: string[] };
+                error?: { message?: string };
+              };
+              if (message.type === "event" && message.event === "ready") {
+                for (const id of ["sheet", "inline", "cascade", "unpinned"])
+                  send(id, id);
+                return;
+              }
+              if (message.type !== "response" || !message.requestId) return;
+              if (!message.ok) {
+                window.clearTimeout(timeout);
+                reject(new Error(message.error?.message ?? "runtime failed"));
+                return;
+              }
+              pins[message.requestId] = (
+                message.result?.authoredStyleProperties ?? []
+              ).filter((property) =>
+                ["top", "right", "bottom", "left"].includes(property),
+              );
+              if (pins.sheet && pins.inline && pins.cascade && pins.unpinned) {
+                window.clearTimeout(timeout);
+                resolve(pins);
+              }
+            };
+            channel.port1.start();
+            new Function(source)();
+            window.postMessage(
+              {
+                protocol: "zeros-design-runtime",
+                version: 2,
+                type: "handshake",
+                sourceVersion,
+              },
+              "*",
+              [channel.port2],
+            );
+          }),
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
+      // An auto inset computes to its used length on a positioned box, so the
+      // pins have to come from the declaration itself.
+      expect([...result.sheet!].sort()).toEqual(["bottom", "right"]);
+      expect([...result.inline!].sort()).toEqual(["left", "top"]);
+      // The winning rule decides; a losing rule's pins do not survive it.
+      expect([...result.cascade!].sort()).toEqual(["bottom", "right"]);
+      // An all-auto inset pins nothing.
+      expect(result.unpinned).toEqual([]);
     } finally {
       await browser.close();
     }

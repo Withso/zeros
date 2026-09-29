@@ -286,6 +286,18 @@ export function resolveDesignFrameBodyTarget(input: {
   return { kind: "node", nodeId: clamp(depthIndex) };
 }
 
+/** Whether a frame row offers a disclosure. A live tree answers exactly; until
+ * its runtime reports, the engine's layer count does (it excludes a seeded
+ * frame root, which the row itself represents). Older engines send only the
+ * authored node count. */
+export function designFrameRowDiscloses(
+  tree: readonly DesignRuntimeTreeNode[] | undefined,
+  frame: { nodeCount: number; layerCount?: number },
+): boolean {
+  if (tree) return tree.length > 0;
+  return (frame.layerCount ?? frame.nodeCount) > 0;
+}
+
 export function flattenDesignLayerTree(
   nodes: readonly DesignRuntimeTreeNode[],
   options: FlattenDesignLayerTreeOptions = {},

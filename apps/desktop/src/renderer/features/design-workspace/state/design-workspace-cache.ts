@@ -47,6 +47,7 @@ import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
 import { classifyRpcError } from "../../../platform/bridge/failure";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
+import { designStylePropertyAffectsLayout } from "../design-style-values";
 import { DesignHistoryPreview } from "./design-history-preview";
 import { clearCommittedDesignLivePreviewStyles } from "./design-live-preview";
 import {
@@ -692,6 +693,7 @@ function sameFrame(
     left.y === right.y &&
     left.z === right.z &&
     left.nodeCount === right.nodeCount &&
+    left.layerCount === right.layerCount &&
     left.modifiedAt === right.modifiedAt &&
     left.sourceVersion === right.sourceVersion
   );
@@ -1545,17 +1547,21 @@ export async function updateDesignFrameGeometryCached(
   });
 }
 
+type DesignEditIntent = Omit<DesignTransaction, "documentId" | "baseRevision">;
+
 /** Capture an edit's owner/operations immediately, then join its exact document
  * read inside the mutation lane. A ready runtime does not imply the inspector's
  * Foundation hook has rendered yet; loading metadata must neither reject the
- * edit nor let later writes or Undo overtake it. */
+ * edit nor let later writes or Undo overtake it. An intent built from current
+ * state (frame geometry that an earlier queued edit may still change) passes a
+ * function, evaluated in the lane once every earlier edit has confirmed. */
 export function applyDesignEditCached(
   workspaceId: string,
   {
     file,
     sourceVersion,
   }: Pick<DesignFrameDocumentWire, "file" | "sourceVersion">,
-  intent: Omit<DesignTransaction, "documentId" | "baseRevision">,
+  intent: DesignEditIntent | (() => DesignEditIntent),
 ): Promise<DesignApiMutationReplyWire> {
   return applyPreparedDesignTransactionCached(workspaceId, file, async () => {
     const key = designFoundationKey(
@@ -1569,7 +1575,7 @@ export function applyDesignEditCached(
       { maxAgeMs: Number.POSITIVE_INFINITY },
     );
     return {
-      ...intent,
+      ...(typeof intent === "function" ? intent() : intent),
       documentId: foundation.summary.documentId,
       baseRevision: foundation.summary.revision,
     };
@@ -1814,6 +1820,19 @@ async function adoptDesignStyleGeneration(
         .map((details) => details.layout?.parentId)
         .filter(Boolean),
     );
+    // A layout change (padding, a gap, a size) can move boxes it never
+    // touched: children, siblings, the whole flow after it. Only what is
+    // measured again below is promoted; every other cached box is dropped and
+    // read again on demand, never relabelled as the new generation's geometry.
+    const layoutChanged =
+      Boolean(patch) ||
+      updates.some((update) =>
+        Object.keys(update.styles).some(designStylePropertyAffectsLayout),
+      );
+    const selectedNodeIds = new Set(
+      useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]
+        ?.selectedNodeIds ?? [],
+    );
     // Container geometry can stay identical while its children's constraints
     // change. Refresh those retained aggregates before promoting the generation;
     // rebasing their old values would make them look like confirmed new data.
@@ -1823,6 +1842,7 @@ async function adoptDesignStyleGeneration(
           !updatedNodeIds.has(nodeId) &&
           (patch ||
             affectedParents.has(nodeId) ||
+            (layoutChanged && selectedNodeIds.has(nodeId)) ||
             cachedFrame?.detailsByNode[nodeId]?.childrenLayout?.nodeIds.some(
               (childId) => updatedNodeIds.has(childId),
             )),
@@ -1843,6 +1863,7 @@ async function adoptDesignStyleGeneration(
       adopted.snapshot,
       [...adopted.details, ...refreshedDetails],
       adopted.treeUnchanged,
+      { dropUnrefreshed: layoutChanged },
     );
     const folder = runtimeStore.byWorkspace[workspaceId]?.folder;
     if (promoted && folder) {
@@ -1928,7 +1949,18 @@ export async function applyDesignHistoryCached(
         if (runtime?.supports("restoreGeneration")) {
           const previous = runtime.sourceVersion;
           try {
-            const restored = await runtime.restoreGeneration(target, true);
+            // History can move any box. The selection is measured in the
+            // same restore; every other cached box is read again on demand
+            // rather than relabelled as the restored generation's geometry.
+            const restored = await runtime.restoreGeneration(
+              target,
+              true,
+              undefined,
+              (
+                useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]
+                  ?.selectedNodeIds ?? []
+              ).slice(0, 64),
+            );
             useDesignRuntimeStore
               .getState()
               .adoptFrameGeneration(
@@ -1939,6 +1971,7 @@ export async function applyDesignHistoryCached(
                 restored.snapshot,
                 restored.details,
                 restored.treeUnchanged,
+                { dropUnrefreshed: true },
               );
             const pendingTarget = historyPreview.pendingTarget(
               workspaceId,

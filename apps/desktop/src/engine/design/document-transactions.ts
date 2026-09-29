@@ -37,7 +37,10 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import { migrateDesignFoundationManifest } from "@zeros/design-core";
+import {
+  designFrameGeometryError,
+  migrateDesignFoundationManifest,
+} from "@zeros/design-core";
 import {
   createDesignWebDocumentState,
   DESIGN_WEB_MAX_FILES,
@@ -915,6 +918,10 @@ export async function commitDesignWebDocumentState(
     const geometry = normalized.frames[file];
     if (!geometry)
       throw new Error(`Design transaction removed frame geometry: ${file}`);
+    // Canvas metadata clamps what it cannot store, and the journal's derived
+    // revision would then disagree. Refuse before admitting a journal.
+    const geometryError = designFrameGeometryError(geometry);
+    if (geometryError) throw new Error(geometryError);
     const componentFiles = new Set(
       normalized.manifest.components.map((component) => component.file),
     );

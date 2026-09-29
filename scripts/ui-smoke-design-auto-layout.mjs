@@ -326,7 +326,9 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     "canvas frame sizing updates its viewport and authored root together",
     true,
   );
-  await layout.getByText("Wrap", { exact: true }).click();
+  await layout
+    .getByRole("button", { name: "Wrap children", exact: true })
+    .click();
   const crossGap = layout.getByLabel("Column gap", { exact: true });
   await expect(crossGap).toBeVisible();
   const fixedGap = layout

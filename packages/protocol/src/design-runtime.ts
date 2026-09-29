@@ -123,6 +123,9 @@ export interface DesignRuntimeNodeLayout {
   widthValue?: string;
   heightValue?: string;
   isContainingBlock: boolean;
+  /** For `position: fixed`: the parent, a further ancestor, or the viewport
+   * positions the box. Omitted by older runtimes and for other positions. */
+  fixedContainingBlock?: "parent" | "ancestor" | "viewport";
 }
 
 export interface DesignRuntimeChildrenLayout {
@@ -169,6 +172,13 @@ export interface DesignRuntimeNodeDetails {
 export interface DesignRuntimeChildGeometry {
   oid: string;
   rect: DesignRuntimeRect;
+  /** Untransformed border box in the container's padding-box coordinates.
+   * Sent only while the container is turned or scaled, where the frame-space
+   * `rect` is a bounding box rather than the child's own box. */
+  local?: DesignRuntimeRect;
+  /** `visibility: hidden` keeps an item's layout slot without painting it; it
+   * still separates its neighbors, so it stays in the geometry. */
+  hidden?: boolean;
   /** Same layer name the tree and details report, so an affordance drawn
    * between two children can still say which two. */
   name: string;
@@ -832,8 +842,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var GEOMETRY_STYLE_PROPERTIES = [
     "display", "position", "flexDirection", "flexWrap",
     "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
-    "gap", "rowGap", "columnGap", "transformOrigin",
-    "gridTemplateColumns", "gridTemplateRows"
+    "rowGap", "columnGap", "transformOrigin",
+    "gridTemplateColumns", "gridTemplateRows",
+    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+    "justifyContent", "alignContent"
   ];
   var GEOMETRY_CHILD_LIMIT = 64;
 
@@ -1393,6 +1405,60 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return metadata;
   }
 
+  /** Record exactly the physical sides a box's insets pin. The computed value
+   * of an auto inset on a positioned box is its used length, and neither a
+   * shorthand nor a losing rule says which side won, so constraint readers
+   * get the cascade's answer: the typed computed value keeps \`auto\`. */
+  function recordInsetPins(element, authored) {
+    var sides = ["top", "right", "bottom", "left"];
+    if (typeof element.computedStyleMap === "function") {
+      try {
+        var map = element.computedStyleMap();
+        sides.forEach(function (side) {
+          var value = map.get(side);
+          if (!value) return;
+          if (String(value) === "auto") authored.delete(side);
+          else authored.add(side);
+        });
+        // Shorthands are resolved into the sides above; logical longhands stay
+        // as the provenance they are.
+        ["inset", "inset-inline", "inset-block"].forEach(function (shorthand) {
+          authored.delete(shorthand);
+        });
+        return;
+      } catch (_error) {
+        // Fall back to the inline declaration below.
+      }
+    }
+    if (!authored.has("inset")) return;
+    sides.forEach(function (side) {
+      var value = element.style.getPropertyValue(side).trim();
+      if (value && value !== "auto") authored.add(side);
+    });
+  }
+
+  /** Where a fixed box is positioned from: the nearest ancestor that creates a
+   * containing block for fixed descendants (transform, filter, perspective,
+   * containment), or the viewport when none does. */
+  function fixedContainingBlockOf(element) {
+    for (var current = element.parentElement; current && current !== document.documentElement; current = current.parentElement) {
+      var style = getComputedStyle(current);
+      var contain = style.contain || "";
+      var willChange = style.willChange || "";
+      if (
+        (style.transform && style.transform !== "none") ||
+        (style.filter && style.filter !== "none") ||
+        (style.perspective && style.perspective !== "none") ||
+        (style.backdropFilter && style.backdropFilter !== "none") ||
+        /paint|layout|strict|content/.test(contain) ||
+        /transform|filter|perspective/.test(willChange)
+      ) {
+        return current === element.parentElement ? "parent" : "ancestor";
+      }
+    }
+    return "viewport";
+  }
+
   function authoredStylePropertiesOf(element) {
     var cached = authoredStylePropertiesCache.get(element);
     if (cached && cached.inline === element.style.cssText) return cached.properties.slice();
@@ -1407,7 +1473,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       for (var propertyIndex = 0; propertyIndex < rule.declarations.length; propertyIndex += 1) {
         authored.add(rule.declarations[propertyIndex]);
       }
+
     }
+    recordInsetPins(element, authored);
     var result = Array.from(authored).slice(0, 128);
     authoredStylePropertiesCache.set(element, { inline: element.style.cssText, properties: result });
     return result.slice();
@@ -1525,7 +1593,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       parentJustifyItems: parentComputed ? parentComputed.justifyItems : "normal",
       widthValue: typedSizingValue(element, "width"),
       heightValue: typedSizingValue(element, "height"),
-      isContainingBlock: !!parent && (element.offsetParent === parent || parentComputed.position !== "static")
+      isContainingBlock: !!parent && (element.offsetParent === parent || parentComputed.position !== "static"),
+      fixedContainingBlock: computed.position === "fixed" ? fixedContainingBlockOf(element) : undefined
     };
   }
 
@@ -2126,28 +2195,57 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!oid) throw new Error("The selected element has no stable data-oid.");
     var computed = getComputedStyle(element);
     var rect = rectOf(element);
+    var box = boxOf(element, computed, rect);
+    var transformed = box.rotation !== 0 || box.scaleX !== 1 || box.scaleY !== 1;
     var children = [];
     if (includeChildren) {
       for (var index = 0; index < element.children.length; index += 1) {
         if (children.length >= GEOMETRY_CHILD_LIMIT || index >= ${DESIGN_LAYOUT_CHILD_LIMIT}) break;
         var child = element.children[index];
         var childOid = oidOf(child);
-        if (!childOid || !visibleOf(child)) continue;
+        if (!childOid || child.hidden) continue;
+        var childComputed = getComputedStyle(child);
+        // Layout participation, not paint: a visibility:hidden item still holds
+        // its slot, while display:none and display:contents boxes hold none.
+        if (childComputed.display === "none" || childComputed.display === "contents") continue;
         var childRect = rectOf(child);
-        if (childRect.width <= 0 || childRect.height <= 0) continue;
-        children.push({
+        if (childRect.width <= 0 && childRect.height <= 0) continue;
+        var entry = {
           oid: childOid,
           rect: childRect,
           name: nameOf(child),
-          styles: { position: getComputedStyle(child).position || "" }
-        });
+          // Margins are part of the space between two boxes but not the gap.
+          styles: {
+            position: childComputed.position || "",
+            order: childComputed.order || "",
+            marginTop: childComputed.marginTop || "",
+            marginRight: childComputed.marginRight || "",
+            marginBottom: childComputed.marginBottom || "",
+            marginLeft: childComputed.marginLeft || ""
+          }
+        };
+        if (childComputed.visibility === "hidden" || childComputed.visibility === "collapse") {
+          entry.hidden = true;
+        }
+        if (transformed) {
+          var childLayout = layoutOf(child, childComputed);
+          var childSize = borderBoxSizeOf(childComputed);
+          // Layout offsets ignore scrolling; the painted box does not.
+          entry.local = {
+            x: childLayout.x - (element.scrollLeft || 0),
+            y: childLayout.y - (element.scrollTop || 0),
+            width: childSize ? childSize.width : childRect.width,
+            height: childSize ? childSize.height : childRect.height
+          };
+        }
+        children.push(entry);
       }
     }
     return {
       sourceVersion: SOURCE_VERSION,
       oid: oid,
       rect: rect,
-      box: boxOf(element, computed, rect),
+      box: box,
       styles: geometryStylesOf(computed),
       children: children
     };
@@ -2676,7 +2774,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return measured.map(function (element) { return geometryOf(element, args.children !== false); });
   }
 
-  function restoreGeneration(target, commit) {
+  function restoreGeneration(target, commit, measure) {
     if (!/^[a-f0-9]{24}$/.test(target)) throw new Error("Invalid history generation.");
     var versions = generationHistory.length ? [generationHistory[0].from].concat(generationHistory.map(function (entry) { return entry.to; })) : [SOURCE_VERSION];
     var touched = new Set();
@@ -2722,9 +2820,24 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     revision += 1;
     var nextSnapshot = treeUnchanged ? styleOnlySnapshot() : snapshot();
+    var details = Array.from(touched).slice(0, 256).map(function (oid) { return detailsOf(elementForOid(oid)); });
+    // History can move boxes it never touched (the selection among them). The
+    // host names those it shows so they are measured in this same round trip;
+    // a box the restored generation no longer contains is simply omitted.
+    (Array.isArray(measure) ? measure.slice(0, 64) : []).forEach(function (oid) {
+      if (typeof oid !== "string" || !oid || touched.has(oid)) return;
+      touched.add(oid);
+      ensureElementMap();
+      var element = elementsByOid.get(oid);
+      if (!element) {
+        refreshElementMap();
+        element = elementsByOid.get(oid);
+      }
+      if (element && element.isConnected) details.push(detailsOf(element));
+    });
     return { sourceVersion: SOURCE_VERSION, treeUnchanged: treeUnchanged,
       snapshot: treeUnchanged ? Object.assign({}, nextSnapshot, { tree: [] }) : nextSnapshot,
-      details: Array.from(touched).slice(0, 256).map(function (oid) { return detailsOf(elementForOid(oid)); }) };
+      details: details };
   }
 
   function commitStyles(updates, nextSourceVersion, patch) {
@@ -3335,7 +3448,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "previewLayout":
         return previewLayout(args);
       case "restoreGeneration":
-        return restoreGeneration(args.targetSourceVersion, args.commit === true);
+        return restoreGeneration(args.targetSourceVersion, args.commit === true, args.measure);
       case "previewGeometry":
         return previewGeometry(args.nodeId, args.styles, args.children);
       case "commitStyles":

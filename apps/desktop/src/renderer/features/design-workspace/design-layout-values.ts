@@ -31,14 +31,41 @@ export type DesignLayoutAction =
   | { type: "position"; axis: DesignLayoutAxis; value: number }
   | { type: "size"; axis: DesignLayoutAxis; value: number };
 
+/** In-field glyphs the inspector kit draws (design-inspector-kit.tsx). */
+export type InspectorGlyphName =
+  | "opacity"
+  | "radius"
+  | "corners"
+  | "padding-x"
+  | "padding-y"
+  | "padding-top"
+  | "padding-right"
+  | "padding-bottom"
+  | "padding-left"
+  | "gap"
+  | "gap-y"
+  | "rotation"
+  | "line-height"
+  | "letter-spacing"
+  | "stroke-weight"
+  | "radius-tl"
+  | "radius-tr"
+  | "radius-br"
+  | "radius-bl"
+  | "font-size";
+
 export interface DesignLayoutFieldOptions {
   whole?: boolean;
   compact?: boolean;
   geometry?: boolean;
   linkedProperties?: readonly string[];
   percentage?: boolean;
-  icon?: "padding-x" | "padding-y" | "gap" | "opacity";
+  /** In-field glyph shown instead of a text label (also the scrub handle). */
+  icon?: InspectorGlyphName;
   shortLabel?: string;
+  /** Static trailing text for unit-less presentations. */
+  suffix?: string;
+  placeholder?: string;
   sizing?: "hug" | "fill";
 }
 

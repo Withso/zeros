@@ -1,7 +1,7 @@
-import React, { useMemo } from "react";
+import React from "react";
 
-import { DesignColorPicker, DesignColorSwatch } from "./design-color-picker";
-import { designCanvasBackgroundPresentation } from "./design-canvas-background";
+import { DesignColorField } from "./design-color-picker";
+import { InspectorSection } from "./design-inspector-kit";
 
 interface DesignCanvasBackgroundEditorProps {
   value: string;
@@ -11,6 +11,8 @@ interface DesignCanvasBackgroundEditorProps {
   onCommit: (value: string) => void;
 }
 
+/** With nothing selected the inspector edits the canvas itself: one Figma
+ * "Page" color row (swatch, hex and opacity). */
 export function DesignCanvasBackgroundEditor({
   value,
   disabled = false,
@@ -18,38 +20,16 @@ export function DesignCanvasBackgroundEditor({
   onCancelPreview,
   onCommit,
 }: DesignCanvasBackgroundEditorProps) {
-  const presentation = useMemo(
-    () => designCanvasBackgroundPresentation(value),
-    [value],
-  );
-
   return (
-    <section
-      data-design-canvas-background=""
-      className="border-border1 border-b p-3"
-    >
-      <DesignColorPicker
+    <InspectorSection title="Background" data-design-canvas-background="">
+      <DesignColorField
         value={value}
         label="Canvas background"
         disabled={disabled}
-        side="left"
-        align="start"
-        className="bg-bg2 hover:bg-bg2-hover h-9 w-full justify-start gap-2 px-2"
-        trigger={
-          <>
-            <DesignColorSwatch value={value} className="size-5" />
-            <span className="text-fg1 min-w-0 flex-1 text-left font-mono text-xs tabular-nums">
-              {presentation.hex}
-            </span>
-            <span className="text-fg2 font-mono text-xs tabular-nums">
-              {presentation.opacity} %
-            </span>
-          </>
-        }
         onPreview={onPreview}
         onCancelPreview={onCancelPreview}
         onCommit={onCommit}
       />
-    </section>
+    </InspectorSection>
   );
 }

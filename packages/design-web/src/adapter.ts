@@ -2,6 +2,7 @@ import {
   canonicalDesignJson,
   designComponentDefinitionSchema,
   designFoundationManifestSchema,
+  designFrameGeometryError,
   designParameterDocumentId,
   designParameterSchema,
   designVariantSchema,
@@ -463,6 +464,8 @@ function applyOperation(
       throw new Error(`Frame geometry not found: ${operation.frame}`);
     }
     const geometry = operation.geometry;
+    const invalid = designFrameGeometryError(geometry);
+    if (invalid) throw new Error(invalid);
     const frames = {
       ...state.frames,
       [operation.frame]: {

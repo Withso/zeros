@@ -79,7 +79,7 @@ describe("design workspace inspector toolbar", () => {
 
     expect(inspector).toBeDefined();
     expect(inspector).toContain('data-design-style-panel-header=""');
-    expect(inspector).toMatch(/>\s*Style\s*<\/span>/);
+    expect(inspector).toMatch(/>\s*Style\s*<\/button>/);
     expect(inspector).toContain("<DropdownMenuTrigger asChild>");
     expect(inspector).toContain("Zoom in");
     expect(inspector).toContain("Zoom out");
@@ -96,21 +96,22 @@ describe("design workspace inspector toolbar", () => {
     expect(styleEditorSource).not.toContain("propertyQuery");
   });
 
-  it("switches to computed CSS from one fixed bottom toggle", () => {
+  it("switches to computed CSS from the header's Style | CSS toggle", () => {
     const inspector = source.match(
       /<aside[\s\S]*?data-design-inspector=""[\s\S]*?<\/aside>/,
     )?.[0];
 
     expect(inspector).toBeDefined();
-    expect(inspector).toContain('data-design-style-panel-footer=""');
+    expect(inspector).not.toContain("data-design-style-panel-footer");
     expect(inspector).toContain("<DesignComputedCssEditor");
     expect(inspector).toContain("aria-pressed={cssMode}");
     expect(inspector).toContain("setCssMode((current) => !current)");
+    expect(inspector).toContain("aria-pressed={!cssMode}");
     expect(source).toContain('data-design-inspector-header=""');
     expect(inspector).toContain("{inspectorSelectionHeader}");
-    expect(
-      inspector!.indexOf("data-design-style-panel-footer"),
-    ).toBeGreaterThan(inspector!.lastIndexOf("<ScrollArea"));
+    expect(inspector!.indexOf('aria-label="CSS"')).toBeLessThan(
+      inspector!.indexOf("<ScrollArea"),
+    );
     expect(styleEditorSource).not.toContain("Element CSS declarations");
     expect(styleEditorSource).not.toContain("Apply CSS");
   });

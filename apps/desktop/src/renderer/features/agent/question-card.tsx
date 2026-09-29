@@ -72,7 +72,7 @@ function isMulti(q: QuestionSpec): boolean {
 const SKIP_COUNTDOWN_WINDOW_MS = 5 * 60_000;
 
 /** Ignore card shortcuts for a beat after mount — long enough to absorb a
- *  keystroke already in flight when the card replaces the composer, short
+ *  keystroke already in flight when the card lands above the composer, short
  *  enough to be imperceptible to a user reading the question. Matches
  *  PermissionCard. */
 const KEYBOARD_ARM_MS = 250;
@@ -300,8 +300,10 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
   // control, not this card — without the guard a stray Enter/Escape anywhere
   // in the app would submit/dismiss the question (same guards as
   // PermissionCard: outside-target, auto-repeat, and a short arming delay
-  // that absorbs the keystroke already in flight when the card replaces the
-  // composer mid-typing). The card's OWN textarea is exempt: Enter submits
+  // that absorbs the keystroke already in flight when the card lands above
+  // the composer mid-typing). Keys typed into the composer stay the
+  // composer's: that is how the user steers while the card waits. The card's
+  // OWN textarea is exempt: Enter submits
   // and Esc dismisses from inside it, while digits and arrows still
   // type/move the caret there. Bound once.
   const rootRef = useRef<HTMLDivElement | null>(null);

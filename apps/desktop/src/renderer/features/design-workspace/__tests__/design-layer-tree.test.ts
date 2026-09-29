@@ -15,6 +15,7 @@ import {
   designLayerTopLevelSelectionIds,
   designLayerVirtualWindow,
   designFrameLayerChildren,
+  designFrameRowDiscloses,
   flattenDesignLayerTree,
   resolveDesignFrameBodyTarget,
   resolveDesignLayerHit,
@@ -590,5 +591,15 @@ describe("design layer tree", () => {
         frameRootId: "::zeros-document-body",
       }),
     ).toEqual({ kind: "node", nodeId: "hero" });
+  });
+
+  it("discloses a frame row only when it has layers under it", () => {
+    // A new frame's only node is its seeded root, which the row itself is.
+    expect(designFrameRowDiscloses(undefined, { nodeCount: 1, layerCount: 0 })).toBe(false);
+    expect(designFrameRowDiscloses(undefined, { nodeCount: 3, layerCount: 2 })).toBe(true);
+    // Older engines send only nodeCount; a live tree always wins.
+    expect(designFrameRowDiscloses(undefined, { nodeCount: 1 })).toBe(true);
+    expect(designFrameRowDiscloses([], { nodeCount: 4, layerCount: 3 })).toBe(false);
+    expect(designFrameRowDiscloses(tree, { nodeCount: 1, layerCount: 0 })).toBe(true);
   });
 });

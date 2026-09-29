@@ -376,6 +376,24 @@ export function cancelledQueuedMessageAction(
   return presentation === "active-turn" ? "preserve-as-turn" : "preserve-in-queue";
 }
 
+/** What a composer send does while the provider holds a permission request.
+ * A plan review is not a gate: a typed follow-up means "revise the plan", so
+ * the review is declined and the message sends as the next prompt. Any other
+ * permission is a hard gate on the running turn. The permission card docks
+ * above the still-usable composer, so a message typed meanwhile joins the
+ * ordinary queue behind that turn (Send now steers it in), and nothing
+ * dispatches past the gate. Outside a streaming turn there is no queue to
+ * join, so the send holds and the draft stays in the composer. */
+export function sendPastPermission(input: {
+  permissionPending: boolean;
+  planReview: boolean;
+  status: SessionStatus;
+}): "send" | "revise-plan" | "hold" {
+  if (!input.permissionPending) return "send";
+  if (input.planReview) return "revise-plan";
+  return input.status === "streaming" ? "send" : "hold";
+}
+
 /** The first prompt is already a live user turn while its execution boundary
  * and provider route are being admitted. Give that turn the same Stop control
  * as a dispatched prompt; a bare warming session opened by focus/prewarm has no

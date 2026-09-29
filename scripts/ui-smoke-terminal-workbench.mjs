@@ -640,19 +640,19 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
   await expectTokenColor(
     tabs
       .getByRole("tab", { name: "Test", exact: true })
-      .locator("[data-run-wave]"),
+      .locator("[data-run-stream]"),
     "--fg1",
   );
   await expectTokenColor(
     sidebar()
       .getByRole("tab", { name: "Test", exact: true })
-      .locator("[data-run-wave]"),
+      .locator("[data-run-stream]"),
     "--fg1",
   );
   await expect(
     tabs
       .getByRole("tab", { name: "Test", exact: true })
-      .locator("[data-run-wave]"),
+      .locator("[data-run-stream]"),
   ).toBeVisible();
   check(
     "running commands keep their activity indicator in the main tab strip",
@@ -750,21 +750,21 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
   await expect(
     panel
       .getByRole("tab", { name: "Test", exact: true })
-      .locator("[data-run-wave]"),
+      .locator("[data-run-stream]"),
   ).toBeVisible();
-  const panelRunWave = panel
+  const panelRunStream = panel
     .getByRole("tab", { name: "Test", exact: true })
-    .locator("[data-run-wave]");
-  await expect(panelRunWave).toHaveAttribute("data-animated", "true");
-  await expectTokenColor(panelRunWave, "--fg1");
+    .locator("[data-run-stream]");
+  await expect(panelRunStream).toHaveAttribute("data-animated", "true");
+  await expectTokenColor(panelRunStream, "--fg1");
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await expect(panelRunWave.locator("animateTransform")).toHaveCount(0);
+  await expect(panelRunStream).not.toHaveAttribute("data-animated", "true");
   await page.emulateMedia({ reducedMotion: "no-preference" });
-  await expect(panelRunWave).toHaveAttribute("data-animated", "true");
+  await expect(panelRunStream).toHaveAttribute("data-animated", "true");
   await expectTokenColor(
     sidebar()
       .getByRole("tab", { name: "Test", exact: true })
-      .locator("[data-run-wave]"),
+      .locator("[data-run-stream]"),
     "--fg3",
   );
   const panelGlobe = panel.getByRole("button", {
@@ -799,12 +799,12 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
     true,
   );
   await panel.getByRole("button", { name: "Collapse panel" }).click();
-  await expect(panelRunWave).toBeVisible();
+  await expect(panelRunStream).toBeVisible();
   await expect(
     panel.getByRole("button", { name: "Stop Test", exact: true }),
   ).toHaveCount(0);
   await panel.getByRole("tab", { name: "Setup", exact: true }).click();
-  await expectTokenColor(panelRunWave, "--fg2");
+  await expectTokenColor(panelRunStream, "--fg2");
   await expect(
     panel.getByRole("button", { name: "Stop Test", exact: true }),
   ).toHaveCount(0);

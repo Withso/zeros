@@ -10,7 +10,8 @@ import {
 // Toggled from Settings → Experimental. Off by default ("Expect
 // breaking changes"); flipping one on reveals that feature's surface
 // elsewhere in the app — e.g. `terminalAgents` shows the Terminal
-// Agents tab in the settings sidebar.
+// Agents tab in the settings sidebar, and `gibberishAgentThinking` a
+// shimmering, misspelled phrase ("Thenkeng") on the active turn's rail.
 //
 // Module-level store + useSyncExternalStore (mirrors enabled-agents.ts)
 // so a toggle in the Experimental panel propagates to an
@@ -27,7 +28,8 @@ import { useCallback, useSyncExternalStore } from "react";
 /** The set of experimental feature flags. */
 export type ExperimentalFeature =
   | "terminalAgents"
-  | "hideArchivedWorkspacesAfter15Days";
+  | "hideArchivedWorkspacesAfter15Days"
+  | "gibberishAgentThinking";
 
 const STORAGE_KEY = "zeros.experimentalFeatures";
 

@@ -55,20 +55,55 @@
   }
 }
 
-/* ZerosSpinner (apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx) — resting-grid fade.
- * The faint --muted-fg dots behind the orbit fade one-directionally on a
- * TL→BR diagonal sweep: each rests at --zeros-grid-fade-peak (--muted-fg @
- * 40%), fades to --zeros-grid-fade-trough (0) by mid-cycle and HOLDS
- * there, then snaps back only at the loop boundary — it never fades
- * back in mid-loop. Per-dot animation-delays (set inline, ∝ x+y) make
- * the sweep travel TL → BR; the period is synced to the orbit lap. */
-@keyframes zeros-grid-fade {
-  0% {
-    opacity: var(--zeros-grid-fade-peak);
+/* ZerosSpinner "orbit" (apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx)
+ * — one lap of the ring. Every comet layer's dash ends at the snake's head
+ * (orbitDashArray in orbit-motion.ts), so one shared offset moves the whole
+ * snake: 12 → 0 laps the 12-tile ring once. */
+@keyframes zeros-orbit-lap {
+  from {
+    stroke-dashoffset: 12;
   }
-  50%,
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* RunStream (apps/desktop/src/renderer/shared/ui/loading/run-stream.tsx) — one
+ * row's cycle: four one-tile slides to the right, one per quarter, each
+ * RUN_STREAM_MOVE_MS (140ms) of the RUN_STREAM_CYCLE_MS (1520ms) cycle, i.e.
+ * 9.21%. A row path carries two copies of its pattern, so +4 tiles looks
+ * identical to 0 and the loop is seamless. Rows run it one beat apart. */
+@keyframes zeros-run-stream {
+  0% {
+    transform: translateX(0px);
+    animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1);
+  }
+  9.21% {
+    transform: translateX(1px);
+  }
+  25% {
+    transform: translateX(1px);
+    animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1);
+  }
+  34.21% {
+    transform: translateX(2px);
+  }
+  50% {
+    transform: translateX(2px);
+    animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1);
+  }
+  59.21% {
+    transform: translateX(3px);
+  }
+  75% {
+    transform: translateX(3px);
+    animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1);
+  }
+  84.21% {
+    transform: translateX(4px);
+  }
   100% {
-    opacity: var(--zeros-grid-fade-trough);
+    transform: translateX(4px);
   }
 }
 
@@ -97,14 +132,51 @@
   animation: zeros-browser-tab-shimmer 1.45s linear infinite;
 }
 
-/* Reduced motion: freeze the fade — the resting dots hold at their
- * static --muted-fg @ 40% (inline `opacity` on each dot) and the orbit
- * rests on the Z tetromino. */
+/* Gibberish agent thinking (Settings → Experimental; ActivityShimmer in
+ * apps/desktop/src/renderer/shared/ui/loading/activity-shimmer.tsx): the
+ * turn's misspelled phrase ("Thenkeng") in --fg3, with a brighter band
+ * sweeping through it left to right, like the browser tab's working label.
+ * One sweep per phrase: the cycle is the phrase's 3s (GIBBERISH_THINKING_MS),
+ * and the component locks their phases with an animation-delay. */
+@keyframes zeros-gibberish-thinking {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -20% 0;
+  }
+}
+
+.zeros-gibberish-thinking {
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    var(--fg3) 0%,
+    var(--fg3) 40%,
+    var(--fg1) 50%,
+    var(--fg3) 60%,
+    var(--fg3) 100%
+  );
+  background-size: 250% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: zeros-gibberish-thinking 3s linear infinite;
+}
+
+/* Reduced motion: the loaders hold still. Their components also drop the
+ * animation and pick a resting pose; this covers the frame before React
+ * hears the media query flip. */
 @media (prefers-reduced-motion: reduce) {
-  .zeros-spinner span {
+  [data-zeros-loader] path,
+  [data-run-stream] path {
     animation: none !important;
   }
   .zeros-browser-tab-working {
+    animation: none !important;
+    color: var(--fg2);
+    background: none;
+  }
+  .zeros-gibberish-thinking {
     animation: none !important;
     color: var(--fg2);
     background: none;

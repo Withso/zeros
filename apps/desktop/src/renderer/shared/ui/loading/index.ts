@@ -15,9 +15,12 @@ export {
   type ZerosSpinnerVariant,
   type ZerosSpinnerTone,
 } from "./zeros-spinner";
-export { LiveDuration, DurationChip, formatElapsed } from "./live-duration";
 export {
-  RunHorseShimmer,
-  type RunHorseShimmerProps,
-} from "./run-horse-shimmer";
-export { RunWave, type RunWaveProps } from "./run-wave";
+  LiveDuration,
+  DurationChip,
+  WorkingDuration,
+  formatElapsed,
+  formatWorkingElapsed,
+} from "./live-duration";
+export { PuzzleSquare, type PuzzleSquareProps } from "./puzzle-square";
+export { RunStream, type RunStreamProps } from "./run-stream";

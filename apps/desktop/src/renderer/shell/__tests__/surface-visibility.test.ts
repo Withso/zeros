@@ -21,8 +21,7 @@ describe("retained-surface visibility guards", () => {
   it("routes every retained tick, poll, animation, and tokenizer through the guard", () => {
     const sources = [
       "apps/desktop/src/renderer/shared/ui/loading/live-duration.tsx",
-      "apps/desktop/src/renderer/shared/ui/loading/run-horse-shimmer.tsx",
-      "apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx",
+      "apps/desktop/src/renderer/shared/ui/loading/loader-loop.ts",
       "apps/desktop/src/renderer/shell/worktree-missing-panel.tsx",
       "apps/desktop/src/renderer/shell/workbench/tabs/code-editor/shiki-highlight.ts",
     ];

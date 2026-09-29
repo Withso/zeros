@@ -111,15 +111,22 @@ export function designCanvasPointFromClient(
 }
 
 /** Normalize either drag direction into one exact positive-size canvas box. */
+/** A drag rectangle from its first corner. `maxSize` stops each axis at that
+ * extent from the first corner, so a drawn frame never outgrows storage. */
 export function designCanvasRectFromPoints(
   start: { x: number; y: number },
   end: { x: number; y: number },
+  maxSize = Number.POSITIVE_INFINITY,
 ): DesignCanvasRect {
+  const reach = (from: number, to: number) =>
+    Math.max(from - maxSize, Math.min(from + maxSize, to));
+  const x = reach(start.x, end.x);
+  const y = reach(start.y, end.y);
   return {
-    x: Math.min(start.x, end.x),
-    y: Math.min(start.y, end.y),
-    width: Math.abs(end.x - start.x),
-    height: Math.abs(end.y - start.y),
+    x: Math.min(start.x, x),
+    y: Math.min(start.y, y),
+    width: Math.abs(x - start.x),
+    height: Math.abs(y - start.y),
   };
 }
 
@@ -144,349 +151,6 @@ export interface DesignMeasureExtension {
 export interface DesignMeasureSpacing {
   lines: DesignSpacingMeasurement[];
   extensions: DesignMeasureExtension[];
-}
-
-export interface DesignGridTrackSegment {
-  start: number;
-  end: number;
-  label: string;
-}
-
-export type DesignInlineGapProperty = "gap" | "row-gap" | "column-gap";
-
-export interface DesignInlineGapChild {
-  id: string;
-  rect: DesignCanvasRect;
-  position?: string;
-}
-
-export interface DesignInlineGapRegion extends DesignCanvasRect {
-  key: string;
-  property: DesignInlineGapProperty;
-  axis: "x" | "y";
-  leadingId: string;
-  trailingId: string;
-}
-
-/** Resolve a one-axis direct-manipulation gesture into a CSS spacing value.
- * The direction flips right/bottom handles, and an optional step supports the
- * familiar Shift-to-snap workflow without letting spacing become negative. */
-export function designInlineSpacingValue(
-  initialValue: number,
-  pointerDelta: number,
-  direction: 1 | -1,
-  step = 1,
-): number {
-  const safeStep = Number.isFinite(step) ? Math.max(0.1, step) : 1;
-  const raw = Math.max(0, initialValue + pointerDelta * direction);
-  const snapped = Math.round(raw / safeStep) * safeStep;
-  return Math.round(snapped * 10) / 10;
-}
-
-/** Keep a forgiving pointer target around thin and zero-size gaps without
- * inflating the visible spacing highlight. `visualRect` is local to the hit
- * target so the same geometry can be painted by React and live gestures. */
-export function designInlineGapGeometry(
-  region: DesignInlineGapRegion,
-  zoom: number,
-): {
-  hitRect: DesignCanvasRect;
-  visualRect: DesignCanvasRect;
-} {
-  const safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
-  const minimumHit = 18 / safeZoom;
-  const width = Math.max(region.width, minimumHit);
-  const height = Math.max(region.height, minimumHit);
-  const hitRect = {
-    x: region.x + (region.width - width) / 2,
-    y: region.y + (region.height - height) / 2,
-    width,
-    height,
-  };
-  return {
-    hitRect,
-    visualRect: {
-      x: region.x - hitRect.x,
-      y: region.y - hitRect.y,
-      width: region.width,
-      height: region.height,
-    },
-  };
-}
-
-const INLINE_GAP_GEOMETRY_EPSILON = 0.5;
-
-function finiteGapChild(child: DesignInlineGapChild): boolean {
-  const { x, y, width, height } = child.rect;
-  return (
-    child.position !== "absolute" &&
-    child.position !== "fixed" &&
-    Number.isFinite(x) &&
-    Number.isFinite(y) &&
-    Number.isFinite(width) &&
-    Number.isFinite(height) &&
-    width > 0 &&
-    height > 0
-  );
-}
-
-function roundedGapCoordinate(value: number): number {
-  return Math.round(value * 10) / 10;
-}
-
-function designInlineGapRegionsForAxis(
-  container: DesignCanvasRect,
-  children: readonly DesignInlineGapChild[],
-  axis: "x" | "y",
-  property: DesignInlineGapProperty,
-  fullCrossSpan = false,
-): DesignInlineGapRegion[] {
-  const horizontal = axis === "x";
-  const mainStart = (child: DesignInlineGapChild) =>
-    horizontal ? child.rect.x : child.rect.y;
-  const mainEnd = (child: DesignInlineGapChild) =>
-    mainStart(child) + (horizontal ? child.rect.width : child.rect.height);
-  const crossStart = (child: DesignInlineGapChild) =>
-    horizontal ? child.rect.y : child.rect.x;
-  const crossEnd = (child: DesignInlineGapChild) =>
-    crossStart(child) + (horizontal ? child.rect.height : child.rect.width);
-  const sorted = children
-    .filter(finiteGapChild)
-    .slice(0, 64)
-    .sort(
-      (left, right) =>
-        mainStart(left) - mainStart(right) ||
-        mainEnd(left) - mainEnd(right) ||
-        left.id.localeCompare(right.id),
-    );
-  const containerMainStart = horizontal ? container.x : container.y;
-  const containerMainEnd =
-    containerMainStart + (horizontal ? container.width : container.height);
-  const containerCrossStart = horizontal ? container.y : container.x;
-  const containerCrossEnd =
-    containerCrossStart + (horizontal ? container.height : container.width);
-  // A non-wrapping flex line has one shared cross-axis lane. Its gap affordance
-  // should therefore span the complete rendered content envelope, even when
-  // one adjacent child is very narrow or centered. Wrapped flex and grid keep
-  // their local overlap logic below so controls do not bridge separate lanes.
-  const contentCrossStart = Math.max(
-    containerCrossStart,
-    Math.min(...sorted.map(crossStart)),
-  );
-  const contentCrossEnd = Math.min(
-    containerCrossEnd,
-    Math.max(...sorted.map(crossEnd)),
-  );
-  const regions: DesignInlineGapRegion[] = [];
-  const seen = new Set<string>();
-
-  for (const leading of sorted) {
-    let trailing: DesignInlineGapChild | null = null;
-    let trailingCrossStart = 0;
-    let trailingCrossEnd = 0;
-    for (const candidate of sorted) {
-      if (candidate === leading) continue;
-      if (
-        mainStart(candidate) <
-        mainEnd(leading) - INLINE_GAP_GEOMETRY_EPSILON
-      ) {
-        continue;
-      }
-      const overlapStart = fullCrossSpan
-        ? contentCrossStart
-        : Math.max(
-            containerCrossStart,
-            crossStart(leading),
-            crossStart(candidate),
-          );
-      const overlapEnd = fullCrossSpan
-        ? contentCrossEnd
-        : Math.min(containerCrossEnd, crossEnd(leading), crossEnd(candidate));
-      if (overlapEnd - overlapStart <= INLINE_GAP_GEOMETRY_EPSILON) continue;
-      if (
-        !trailing ||
-        mainStart(candidate) < mainStart(trailing) ||
-        (mainStart(candidate) === mainStart(trailing) &&
-          candidate.id.localeCompare(trailing.id) < 0)
-      ) {
-        trailing = candidate;
-        trailingCrossStart = overlapStart;
-        trailingCrossEnd = overlapEnd;
-      }
-    }
-    if (!trailing) continue;
-    const key = `${axis}:${leading.id}:${trailing.id}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const gapStart = Math.max(containerMainStart, mainEnd(leading));
-    const gapEnd = Math.min(containerMainEnd, mainStart(trailing));
-    if (gapEnd < gapStart - INLINE_GAP_GEOMETRY_EPSILON) continue;
-    const localMain = roundedGapCoordinate(gapStart - containerMainStart);
-    const localCross = roundedGapCoordinate(
-      trailingCrossStart - containerCrossStart,
-    );
-    const mainLength = roundedGapCoordinate(Math.max(0, gapEnd - gapStart));
-    const crossLength = roundedGapCoordinate(
-      trailingCrossEnd - trailingCrossStart,
-    );
-    regions.push({
-      key,
-      property,
-      axis,
-      x: horizontal ? localMain : localCross,
-      y: horizontal ? localCross : localMain,
-      width: horizontal ? mainLength : crossLength,
-      height: horizontal ? crossLength : mainLength,
-      leadingId: leading.id,
-      trailingId: trailing.id,
-    });
-  }
-  return regions;
-}
-
-/** A CSS `space-between` distribution is the web equivalent of an Auto gap:
- * changing the minimum `gap` does not move children while distributable free
- * space remains. Dragging a concrete gap line is an explicit request for fixed
- * spacing, so only the distribution on that dragged flex axis is reset. */
-export function designInlineGapDistributionStyles(input: {
-  display: string | undefined;
-  flexDirection?: string;
-  flexWrap?: string;
-  axis: "x" | "y";
-  justifyContent?: string;
-  alignContent?: string;
-}): Record<string, string> {
-  if (input.display !== "flex" && input.display !== "inline-flex") return {};
-  const mainAxis = (input.flexDirection ?? "row").startsWith("row") ? "x" : "y";
-  if (
-    input.axis === mainAxis &&
-    ["space-between", "space-around", "space-evenly"].includes(
-      input.justifyContent ?? "",
-    )
-  ) {
-    return { "justify-content": "flex-start" };
-  }
-  if (
-    input.axis !== mainAxis &&
-    (input.flexWrap ?? "nowrap") !== "nowrap" &&
-    ["space-between", "space-around", "space-evenly"].includes(
-      input.alignContent ?? "",
-    )
-  ) {
-    return { "align-content": "flex-start" };
-  }
-  return {};
-}
-
-/** Build bounded hit regions from the rendered boxes of a layout container's
- * direct children. Controls therefore live in actual inter-item space instead
- * of an arbitrary container center, and wrapped/grid layouts expose their two
- * independent CSS gap axes. */
-export function designInlineGapRegions(input: {
-  container: DesignCanvasRect;
-  children: readonly DesignInlineGapChild[];
-  display: string | undefined;
-  flexDirection?: string;
-  flexWrap?: string;
-}): DesignInlineGapRegion[] {
-  const display = input.display?.trim() ?? "";
-  if (display === "grid" || display === "inline-grid") {
-    return [
-      ...designInlineGapRegionsForAxis(
-        input.container,
-        input.children,
-        "x",
-        "column-gap",
-      ),
-      ...designInlineGapRegionsForAxis(
-        input.container,
-        input.children,
-        "y",
-        "row-gap",
-      ),
-    ];
-  }
-  if (display !== "flex" && display !== "inline-flex") return [];
-  const rowDirection = (input.flexDirection ?? "row").startsWith("row");
-  const wraps = (input.flexWrap ?? "nowrap") !== "nowrap";
-  if (wraps) {
-    return [
-      ...designInlineGapRegionsForAxis(
-        input.container,
-        input.children,
-        "x",
-        "column-gap",
-      ),
-      ...designInlineGapRegionsForAxis(
-        input.container,
-        input.children,
-        "y",
-        "row-gap",
-      ),
-    ];
-  }
-  return designInlineGapRegionsForAxis(
-    input.container,
-    input.children,
-    rowDirection ? "x" : "y",
-    "gap",
-    true,
-  );
-}
-
-function topLevelTrackTokens(value: string): string[] {
-  const tokens: string[] = [];
-  let depth = 0;
-  let start = 0;
-  for (let index = 0; index <= value.length; index += 1) {
-    const character = value[index];
-    if (character === "(") depth += 1;
-    else if (character === ")") depth = Math.max(0, depth - 1);
-    const boundary =
-      index === value.length || (/\s/.test(character ?? "") && depth === 0);
-    if (!boundary) continue;
-    const token = value.slice(start, index).trim();
-    if (token) tokens.push(token);
-    start = index + 1;
-  }
-  return tokens.slice(0, 64);
-}
-
-/** Convert authored or computed grid tracks into percentage spans for a
- * scale-independent canvas overlay. Browsers usually return px tracks, while
- * source-cold previews may still expose a simple repeat() expression. */
-export function designGridTrackSegments(
-  value: string | undefined,
-  availableSize: number,
-): DesignGridTrackSegment[] {
-  const source = value?.trim() ?? "";
-  if (!source || source === "none" || availableSize <= 0) return [];
-  const repeated = /^repeat\(\s*(\d+)\s*,\s*(.+)\)$/i.exec(source);
-  const repeatedCount = repeated?.[1] ? Number(repeated[1]) : 0;
-  const tokens =
-    repeated && repeatedCount > 0 && repeatedCount <= 64 && repeated[2]
-      ? Array.from({ length: repeatedCount }, () => repeated[2]!.trim())
-      : topLevelTrackTokens(source);
-  if (tokens.length === 0) return [];
-  const numeric = tokens.map((token) => {
-    const match = /^(\d+(?:\.\d+)?)(px|fr|%)$/i.exec(token);
-    return match?.[1] ? Number(match[1]) : Number.NaN;
-  });
-  const allNumeric = numeric.every(
-    (candidate) => Number.isFinite(candidate) && candidate >= 0,
-  );
-  const total = allNumeric
-    ? numeric.reduce((sum, candidate) => sum + candidate, 0)
-    : tokens.length;
-  if (total <= 0) return [];
-  let cursor = 0;
-  return tokens.map((label, index) => {
-    const start = Math.round(cursor * 10) / 10;
-    cursor += ((allNumeric ? numeric[index]! : 1) / total) * 100;
-    const end =
-      index === tokens.length - 1 ? 100 : Math.round(cursor * 10) / 10;
-    return { start, end, label };
-  });
 }
 
 export type DesignSelectionClickIntent =
@@ -661,11 +325,79 @@ export function designResizeStyleAxes(handle: DesignResizeHandle): {
   };
 }
 
-interface DesignResizeOptions {
+interface DesignResizeLimits {
   minWidth?: number;
   minHeight?: number;
+  maxWidth?: number;
+  maxHeight?: number;
+}
+
+interface DesignResizeOptions extends DesignResizeLimits {
   keepAspect?: boolean;
   fromCenter?: boolean;
+}
+
+/** Keep a resized rectangle within size limits. The dragged edge absorbs the
+ * clamp, so the anchored edge (or the center, from-center) stays put. */
+export function clampDesignResizeRect(
+  rect: DesignCanvasRect,
+  handle: DesignResizeHandle,
+  options: DesignResizeLimits & { fromCenter?: boolean } = {},
+): DesignCanvasRect {
+  const axis = (
+    start: number,
+    size: number,
+    min: number,
+    max: number,
+    before: boolean,
+    after: boolean,
+  ): [number, number] => {
+    const bounded = Math.min(Math.max(size, min), Math.max(min, max));
+    if (bounded === size) return [start, size];
+    if (options.fromCenter || before === after)
+      return [start + (size - bounded) / 2, bounded];
+    return before ? [start + size - bounded, bounded] : [start, bounded];
+  };
+  const [x, width] = axis(
+    rect.x,
+    rect.width,
+    Math.max(1, options.minWidth ?? 1),
+    options.maxWidth ?? Number.POSITIVE_INFINITY,
+    handle.includes("w"),
+    handle.includes("e"),
+  );
+  const [y, height] = axis(
+    rect.y,
+    rect.height,
+    Math.max(1, options.minHeight ?? 1),
+    options.maxHeight ?? Number.POSITIVE_INFINITY,
+    handle.includes("n"),
+    handle.includes("s"),
+  );
+  return { x, y, width, height };
+}
+
+/** Keep a frame's origin within ±`limit` canvas px. Past the negative limit
+ * the far (right/bottom) edge stays put and the size absorbs the difference;
+ * past the positive limit the origin stops and the size is kept. */
+export function clampDesignRectPosition(
+  rect: DesignCanvasRect,
+  limit: number,
+): DesignCanvasRect {
+  const axis = (start: number, size: number): [number, number] =>
+    start < -limit
+      ? [-limit, Math.max(1, size - (-limit - start))]
+      : start > limit
+        ? [limit, size]
+        : [start, size];
+  const [x, width] = axis(rect.x, rect.width);
+  const [y, height] = axis(rect.y, rect.height);
+  return x === rect.x &&
+    y === rect.y &&
+    width === rect.width &&
+    height === rect.height
+    ? rect
+    : { x, y, width, height };
 }
 
 /** Pure direct-manipulation geometry shared by frame and element handles.
@@ -714,6 +446,13 @@ export function resizeDesignRect(
     } else {
       width = height * ratio;
     }
+    const maximumScale = Math.min(
+      1,
+      (options.maxWidth ?? Number.POSITIVE_INFINITY) / width,
+      (options.maxHeight ?? Number.POSITIVE_INFINITY) / height,
+    );
+    width *= maximumScale;
+    height *= maximumScale;
     const minimumScale = Math.max(1, minWidth / width, minHeight / height);
     width *= minimumScale;
     height *= minimumScale;
@@ -765,12 +504,15 @@ export function resizeDesignRect(
     }
   }
 
-  return {
-    x: left,
-    y: top,
-    width: right - left,
-    height: bottom - top,
-  };
+  return clampDesignResizeRect(
+    { x: left, y: top, width: right - left, height: bottom - top },
+    handle,
+    {
+      maxWidth: options.maxWidth,
+      maxHeight: options.maxHeight,
+      fromCenter: options.fromCenter,
+    },
+  );
 }
 
 /** Project one child rectangle from an original multi-selection box into its
@@ -1165,7 +907,20 @@ export type DesignConstraintSide = "left" | "right" | "top" | "bottom";
 export interface DesignConstraintSides {
   horizontal: readonly DesignConstraintSide[];
   vertical: readonly DesignConstraintSide[];
+  /** An explicit Center constraint on an axis, drawn as a short marker. */
+  center?: { x: boolean; y: boolean };
 }
+
+/** The physical sides an authored inset shorthand sets (left-to-right). */
+const INSET_SHORTHAND_SIDES: Record<string, readonly DesignConstraintSide[]> = {
+  inset: ["left", "right", "top", "bottom"],
+  "inset-inline": ["left", "right"],
+  "inset-block": ["top", "bottom"],
+  "inset-inline-start": ["left"],
+  "inset-inline-end": ["right"],
+  "inset-block-start": ["top"],
+  "inset-block-end": ["bottom"],
+};
 
 export function designConstraintSides(input: {
   position: string | undefined;
@@ -1182,11 +937,29 @@ export function designConstraintSides(input: {
     return { horizontal: ["left"], vertical: ["top"] };
   }
   const authored = input.authored ? new Set(input.authored) : null;
+  // Runtimes record the sides an inset shorthand really pins as longhands;
+  // only without them does the shorthand stand in for every side it covers.
+  const physicalPins =
+    authored !== null &&
+    (["left", "right", "top", "bottom"] as const).some((side) =>
+      authored.has(side),
+    );
+  const authoredSide = (side: DesignConstraintSide) =>
+    authored !== null &&
+    (authored.has(side) ||
+      (!physicalPins &&
+        Object.entries(INSET_SHORTHAND_SIDES).some(
+          ([shorthand, sides]) =>
+            authored.has(shorthand) && sides.includes(side),
+        )));
   const pinned = (side: DesignConstraintSide) => {
     const value = input.styles?.[side]?.trim();
-    if (authored) return authored.has(side) && value !== "auto";
+    if (authored) return authoredSide(side) && value !== "auto";
     return value !== undefined && value !== "auto" && value !== "";
   };
+  // A positioned box with no inset on an axis sits at its static position:
+  // nothing pins it there, so no run is drawn.
+  const outOfFlow = position === "absolute" || position === "fixed";
   const axis = (
     start: DesignConstraintSide,
     end: DesignConstraintSide,
@@ -1195,7 +968,8 @@ export function designConstraintSides(input: {
     const hasEnd = pinned(end);
     if (hasStart && hasEnd) return [start, end];
     if (hasEnd) return [end];
-    return [start];
+    if (hasStart || !outOfFlow) return [start];
+    return [];
   };
   const markedAxis = (
     name: "x" | "y",
@@ -1209,9 +983,12 @@ export function designConstraintSides(input: {
     if (marker === "stretch") return [start, end];
     return axis(start, end);
   };
+  const centerX = input.styles?.["--zeros-layout-x"] === "center";
+  const centerY = input.styles?.["--zeros-layout-y"] === "center";
   return {
     horizontal: markedAxis("x", "left", "right"),
     vertical: markedAxis("y", "top", "bottom"),
+    ...(centerX || centerY ? { center: { x: centerX, y: centerY } } : {}),
   };
 }
 
@@ -1660,6 +1437,75 @@ export function fitDesignRects(
     zoom,
     panX: (viewport.width - contentWidth * zoom) / 2 - left * zoom,
     panY: (viewport.height - contentHeight * zoom) / 2 - top * zoom,
+  };
+}
+
+/** Screen size below which a frame does not count as visible to the user. */
+const DESIGN_MIN_VISIBLE_SCREEN_SIZE = 4;
+/** Screen size below which a revealed frame is fitted rather than centered. */
+const DESIGN_MIN_REVEALED_SCREEN_SIZE = 24;
+
+function designRectScreenOverlap(
+  view: DesignViewport,
+  viewport: DesignViewportSize,
+  rect: DesignCanvasRect,
+): { width: number; height: number } {
+  const left = Math.max(0, rect.x * view.zoom + view.panX);
+  const top = Math.max(0, rect.y * view.zoom + view.panY);
+  const right = Math.min(
+    viewport.width,
+    (rect.x + rect.width) * view.zoom + view.panX,
+  );
+  const bottom = Math.min(
+    viewport.height,
+    (rect.y + rect.height) * view.zoom + view.panY,
+  );
+  return {
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top),
+  };
+}
+
+/** Whether the camera shows any of `rects` at a size a person can see. An
+ * empty canvas counts as shown: there is nothing to bring into view. */
+export function designViewportShowsAnyRect(
+  view: DesignViewport,
+  viewport: DesignViewportSize,
+  rects: readonly DesignCanvasRect[],
+): boolean {
+  if (rects.length === 0) return true;
+  return rects.some((rect) => {
+    const overlap = designRectScreenOverlap(view, viewport, rect);
+    return (
+      overlap.width >= DESIGN_MIN_VISIBLE_SCREEN_SIZE &&
+      overlap.height >= DESIGN_MIN_VISIBLE_SCREEN_SIZE
+    );
+  });
+}
+
+/** The camera that brings a rect the user cannot see into view: centered at
+ * the current zoom when it reads well there, otherwise fitted. Null while any
+ * visible part of it is already on screen, so the camera never moves under a
+ * frame the user is looking at. */
+export function designRevealRectViewport(
+  view: DesignViewport,
+  viewport: DesignViewportSize,
+  rect: DesignCanvasRect,
+  padding = 64,
+): DesignViewport | null {
+  if (viewport.width <= 0 || viewport.height <= 0) return null;
+  if (designViewportShowsAnyRect(view, viewport, [rect])) return null;
+  const width = rect.width * view.zoom;
+  const height = rect.height * view.zoom;
+  const readable =
+    Math.max(width, height) >= DESIGN_MIN_REVEALED_SCREEN_SIZE &&
+    width <= viewport.width - padding * 2 &&
+    height <= viewport.height - padding * 2;
+  if (!readable) return fitDesignRects([rect], viewport, padding);
+  return {
+    zoom: view.zoom,
+    panX: viewport.width / 2 - (rect.x + rect.width / 2) * view.zoom,
+    panY: viewport.height / 2 - (rect.y + rect.height / 2) * view.zoom,
   };
 }
 

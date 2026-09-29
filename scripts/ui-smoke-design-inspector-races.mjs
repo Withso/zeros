@@ -9,7 +9,9 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
   await page
     .locator('#design-layers-panel [data-design-layer-id="home-heading"]')
     .click();
-  await page.getByRole("button", { name: "Text details", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Type settings", exact: true })
+    .click();
   const field = page.locator('[data-design-style-property="word-spacing"]');
   const input = field.locator("input");
   const heading = page
@@ -81,7 +83,7 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
       .locator('#design-layers-panel [data-design-layer-id="home-heading"]')
       .click();
     await page
-      .getByRole("button", { name: "Text details", exact: true })
+      .getByRole("button", { name: "Type settings", exact: true })
       .click();
     await page.evaluate(() => {
       const descriptor = Object.getOwnPropertyDescriptor(
@@ -149,19 +151,9 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
         .toBe(3);
       await expect(input).toHaveValue("0");
       const persistedSpacing = await page.evaluate(async () => {
-        const {
-          designWorkspaceSnapshotCache,
-          designFrameDocumentCache,
-          designFrameDocumentKey,
-        } =
-          await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
-        const workspaceId = "ws_design_harness";
-        const frame = designWorkspaceSnapshotCache
-          .getSnapshot(workspaceId)
-          .data.frames.find((item) => item.file === "home.html");
-        const source = designFrameDocumentCache.peekSnapshot(
-          designFrameDocumentKey(workspaceId, frame.file, frame.sourceVersion),
-        ).data.source;
+        const { designFrame } =
+          await import("/apps/desktop/src/renderer/platform/git.ts");
+        const { source } = await designFrame("ws_design_harness", "home.html");
         return new DOMParser()
           .parseFromString(source, "text/html")
           .querySelector('[data-oid="home-heading"]').style.wordSpacing;
@@ -175,4 +167,74 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
     "incoming inspector values preserve the next focused edit and removal",
     true,
   );
+
+  // The colour panel's value field follows its notation control: Hex is bare
+  // (opacity has its own field), a chosen notation survives the commit it
+  // makes, a bare hex is valid input, and unparseable text writes nothing.
+  await page.goto(
+    `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
+    { waitUntil: "networkidle" },
+  );
+  await page
+    .locator('#design-layers-panel [data-design-layer-id="home-heading"]')
+    .click();
+  await page.getByRole("button", { name: "Edit fill", exact: true }).click();
+  const colorValue = page.getByRole("textbox", {
+    name: "Fill value",
+    exact: true,
+  });
+  const notation = page.getByRole("combobox", { name: "Color notation" });
+  const headingColor = () =>
+    heading.evaluate((node) => node.style.getPropertyValue("color"));
+  const styleWrites = () =>
+    page.evaluate(
+      () =>
+        (window.__zerosHarnessDesignShortcutOperations ?? []).filter(
+          (op) => op === "style:end",
+        ).length,
+    );
+  await expect(notation).toHaveText("Hex");
+  await expect(colorValue).toHaveValue(/^[0-9A-F]{6}$/);
+  check("a Hex colour value reads as bare hex", true);
+
+  await notation.click();
+  await page.getByRole("option", { name: "RGB", exact: true }).click();
+  await expect(colorValue).toHaveValue(/^rgb\(/);
+  await colorValue.fill("#102030");
+  await colorValue.press("Enter");
+  await expect.poll(headingColor).toBe("rgb(16, 32, 48)");
+  await expect.poll(styleWrites).toBe(1);
+  await expect(notation).toHaveText("RGB");
+  await expect(colorValue).toHaveValue("rgb(16 32 48)");
+  check("a committed colour keeps the chosen notation", true);
+
+  await notation.click();
+  await page.getByRole("option", { name: "Hex", exact: true }).click();
+  await colorValue.fill("203040");
+  await colorValue.press("Enter");
+  await expect.poll(headingColor).toBe("rgb(32, 48, 64)");
+  await expect.poll(styleWrites).toBe(2);
+  await expect(colorValue).toHaveValue("203040");
+  check("a bare hex commits as a valid colour", true);
+
+  await colorValue.fill("not a colour");
+  await colorValue.press("Enter");
+  await expect(colorValue).toHaveValue("203040");
+  await page.waitForTimeout(300);
+  expect(await styleWrites()).toBe(2);
+  expect(await headingColor()).toBe("rgb(32, 48, 64)");
+  check("unparseable colour text reverts without writing", true);
+
+  // The opacity input keeps its width beside a long functional value.
+  await notation.click();
+  await page.getByRole("option", { name: "RGB", exact: true }).click();
+  const opacityValue = page.getByRole("textbox", {
+    name: "Fill opacity value",
+    exact: true,
+  });
+  const opacityWidth = await opacityValue.evaluate(
+    (node) => node.getBoundingClientRect().width,
+  );
+  expect(opacityWidth).toBeGreaterThanOrEqual(35);
+  check("the colour opacity input keeps its width", true, `${opacityWidth}px`);
 }

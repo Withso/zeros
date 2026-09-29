@@ -8,9 +8,454 @@
 
 [data-design-workspace-surface],
 [data-design-theme-editor],
-[data-design-motion-settings] {
+[data-design-motion-settings],
+[data-design-popover] {
   font-family: var(--font-sans);
   font-size: 13px;
+}
+
+/* ── Design UI standard v1 ───────────────────────────────────────────────
+ * One geometry for every Design surface (inspector, Layers, Motion, Theme,
+ * property popovers): 28px controls, 6px radii, 13px values, 12px in-field
+ * labels, soft bg2 fills without resting borders, an inset focus ring. */
+
+.zd-field {
+  display: flex;
+  min-width: 0;
+  height: 28px;
+  align-items: center;
+  border: 0;
+  border-radius: var(--radius-md);
+  background-color: var(--bg2);
+  color: var(--fg1);
+  box-shadow: none;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  transition:
+    background-color 120ms ease-out,
+    box-shadow 120ms ease-out;
+}
+
+.zd-field:hover {
+  background-color: var(--bg2-hover);
+}
+
+.zd-field:focus-within,
+.zd-field:focus-visible,
+.zd-field[data-state="open"] {
+  background-color: var(--bg2);
+  box-shadow: inset 0 0 0 1px var(--highlighted-bright);
+  outline: 0;
+}
+
+.zd-field[aria-invalid="true"],
+.zd-field:has([aria-invalid="true"]) {
+  box-shadow: inset 0 0 0 1px var(--red-primary);
+}
+
+.zd-field:has(:disabled),
+.zd-field:disabled {
+  opacity: 0.5;
+}
+
+.zd-field input,
+.zd-field textarea {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  outline: 0;
+}
+
+.zd-field input::placeholder {
+  color: var(--fg3);
+}
+
+/* A companion input (opacity beside a color) keeps its width. */
+.zd-field input.zd-field-fixed {
+  flex: none;
+}
+
+/* In-field label or glyph. It doubles as the scrub handle for numbers. */
+.zd-field-label {
+  display: inline-flex;
+  height: 100%;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-fg);
+  font-size: 12px;
+  font-weight: var(--weight-medium);
+}
+
+.zd-field-label svg {
+  width: 14px;
+  height: 14px;
+}
+
+.zd-field-suffix {
+  flex-shrink: 0;
+  padding-right: 8px;
+  color: var(--muted-fg);
+  font-size: 12px;
+}
+
+/* Segmented control: a 28px bg2 track with 24px segments. */
+.zd-segmented {
+  display: grid;
+  min-width: 0;
+  height: 28px;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background-color: var(--bg2);
+}
+
+.zd-segment {
+  display: inline-flex;
+  min-width: 0;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding-inline: 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg2);
+  font-size: 13px;
+  white-space: nowrap;
+  transition:
+    background-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+.zd-segment svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.zd-segment:hover:not(:disabled) {
+  color: var(--fg1);
+}
+
+.zd-segment[aria-pressed="true"],
+.zd-segment[aria-checked="true"],
+.zd-segment[data-state="active"],
+.zd-segment[data-state="on"] {
+  background-color: var(--bg1);
+  box-shadow: inset 0 0 0 1px var(--border3);
+  color: var(--fg1);
+}
+
+.zd-segment:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-segment:disabled {
+  opacity: 0.4;
+}
+
+/* Quiet icon buttons for section headers, row actions and toolbars. */
+.zd-icon-button {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg2);
+  transition:
+    background-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+.zd-icon-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.zd-icon-button[data-size="row"] {
+  width: 28px;
+  height: 28px;
+}
+
+.zd-icon-button:hover:not(:disabled),
+.zd-icon-button[data-state="open"],
+.zd-icon-button[aria-expanded="true"],
+.zd-icon-button[aria-pressed="true"] {
+  background-color: var(--bg2-hover);
+  color: var(--fg1);
+}
+
+.zd-icon-button:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-icon-button:disabled {
+  opacity: 0.4;
+}
+
+/* Inspector sections: a 36px header and 8px-rhythm rows, hairline between. */
+.zd-section {
+  border-bottom: 1px solid var(--border1);
+}
+
+.zd-section-header {
+  display: flex;
+  height: 36px;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding-inline: 12px 8px;
+}
+
+.zd-section-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--fg1);
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zd-section[data-empty="true"] .zd-section-title {
+  color: var(--fg2);
+}
+
+.zd-section-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+/* Property popovers (Fill, Stroke, Effects, Type settings, …). */
+.zd-popover {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.zd-popover-header {
+  display: flex;
+  height: 28px;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.zd-popover-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--fg1);
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zd-row-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Panel header tabs (Style | CSS) share the workbench's chrome tabs. */
+.zd-panel-tab {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  padding-inline: 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg2);
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.zd-panel-tab:hover:not(:disabled) {
+  color: var(--fg1);
+}
+
+.zd-panel-tab[aria-pressed="true"] {
+  background-color: var(--bg2);
+  color: var(--fg1);
+}
+
+.zd-panel-tab:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-panel-tab:disabled {
+  opacity: 0.5;
+}
+
+/* W/H carry their resizing menu inside the field's trailing edge; in Motion
+ * mode the keyframe diamond sits just before it. */
+.zd-size-control [data-design-inspector-field] input {
+  padding-right: 24px;
+}
+
+.zd-size-control .zd-field-motion {
+  right: 24px;
+}
+
+.zd-size-trigger {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted-fg);
+}
+
+.zd-size-trigger svg {
+  width: 12px;
+  height: 12px;
+}
+
+.zd-size-trigger:hover:not(:disabled),
+.zd-size-trigger[data-state="open"] {
+  background-color: var(--bg2-hover);
+  color: var(--fg1);
+}
+
+.zd-size-trigger:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+/* A sizing limit's remove action floats over its field's trailing edge on
+ * intent, over a fill-coloured fade, without reserving space at rest. */
+.zd-limit-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  opacity: 0;
+  background-image: linear-gradient(
+    to right,
+    transparent,
+    var(--bg2-hover) 6px
+  );
+}
+
+.zd-limit-field:hover .zd-limit-remove,
+.zd-limit-remove:focus-visible {
+  opacity: 1;
+}
+
+/* The popover edge anchor sits on the panel's content edge (12px left of a
+ * row inside a 12px-padded section or popover), so popovers open beside it. */
+.zd-popover-edge-anchor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -12px;
+  width: 0;
+  pointer-events: none;
+}
+
+/* Child alignment pad: nine targets on one bg2 tile. */
+.zd-alignment-pad {
+  background-color: var(--bg2);
+}
+
+.zd-alignment-point {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg2);
+}
+
+.zd-alignment-point:hover:not(:disabled) {
+  background-color: var(--bg2-hover);
+}
+
+.zd-alignment-point:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-alignment-point:disabled {
+  cursor: default;
+}
+
+/* Constraint pad: the parent box with a pin on every side and the center. */
+.zd-constraint-pad {
+  background-color: var(--bg2);
+}
+
+.zd-constraint-box {
+  box-shadow: inset 0 0 0 1px var(--border3);
+}
+
+.zd-constraint-pin {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted-fg);
+}
+
+.zd-constraint-pin:hover:not(:disabled) {
+  color: var(--fg1);
+}
+
+.zd-constraint-pin[aria-pressed="true"],
+.zd-constraint-pin-on {
+  color: var(--design-selection-stroke);
+}
+
+.zd-constraint-pin:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zd-field,
+  .zd-segment,
+  .zd-icon-button,
+  .zd-field-motion {
+    transition: none;
+  }
 }
 
 [data-design-workspace-surface] {
@@ -32,34 +477,11 @@
   min-width: 0 !important;
 }
 
-.zd-design-control-quiet {
-  border-width: 0;
-  background-color: transparent;
-  box-shadow: none;
-}
+/* Legacy control recipes still used by editors that have not moved onto
+ * .zd-field. Both resolve to the same soft field surface. */
 
-/* Geometry has a consistent surface even when its value is inherited. This
- * recipe belongs only to Layout; the other editor sections retain their tiers. */
-.zd-design-layout-field {
-  background-color: var(--bg2);
-  border-radius: var(--radius-md);
-}
-
-.zd-design-layout-field:hover {
-  background-color: var(--bg2-hover);
-}
-
-.zd-design-layout-field:focus-within {
-  outline: 1px solid var(--highlighted-bright);
-  outline-offset: -1px;
-}
-
-.zd-design-layout-field input {
-  font-family: var(--font-sans);
-}
-
-/* The style inspector shares the desktop control scale. Values have a steady
- * tonal surface, tabular digits and the same type as labels and menus. */
+/* The inspector column is a size container: geometry reflows from three
+ * columns to two below 256px so values and sizing menus stay readable. */
 [data-design-style-editor] {
   container: design-style / inline-size;
 }
@@ -76,50 +498,6 @@
     grid-column: 2;
     grid-row: 3;
   }
-}
-
-[data-design-style-editor] [data-design-inspector-field],
-[data-design-style-editor] .zd-design-control-quiet,
-.zd-design-layout-select,
-.zd-design-size-control,
-.zd-design-layout-flow,
-.zd-design-alignment-grid {
-  border-width: 0;
-  border-radius: var(--radius-md);
-  background-color: var(--bg2);
-  box-shadow: none;
-}
-
-[data-design-style-editor] [data-design-inspector-field] input {
-  font-family: var(--font-sans);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-
-[data-design-style-editor] [data-design-inspector-field] label {
-  font-size: var(--text-xs);
-}
-
-[data-design-style-editor] [data-design-inspector-field]:hover,
-.zd-design-layout-select:hover,
-.zd-design-size-control:hover {
-  background-color: var(--bg2-hover);
-}
-
-.zd-design-layout-select:focus-visible,
-.zd-design-size-control:focus-within {
-  outline: 1px solid var(--highlighted-bright);
-  outline-offset: -1px;
-}
-
-.zd-design-size-control [data-design-inspector-field] {
-  border-radius: var(--radius-md) 0 0 var(--radius-md);
-}
-
-.zd-design-layout-flow .zd-design-segment[aria-pressed="true"] {
-  background-color: var(--bg1-highlight);
-  outline: 1px solid var(--border3);
-  outline-offset: -1px;
 }
 
 .zd-design-alignment-point[aria-pressed="true"] {
@@ -142,142 +520,142 @@
     0 4px currentColor;
 }
 
-.zd-design-control-quiet:hover {
-  border-color: transparent;
-  background-color: var(--bg1-hover);
-}
-
-.zd-design-control-quiet:focus-visible,
-.zd-design-control-quiet:focus-within,
-.zd-design-control-quiet[data-state="open"] {
-  border-color: transparent;
-  background-color: var(--bg2-hover);
-  outline: 1px solid var(--highlighted-bright);
-  outline-offset: -1px;
-}
-
-.zd-design-control-applied {
-  border-width: 0;
-  background-color: var(--bg1-hover);
-  box-shadow: none;
-}
-
-.zd-design-control-applied:hover,
-.zd-design-control-applied[data-state="open"] {
-  border-color: transparent;
-  background-color: var(--bg2-hover);
-}
-
-.zd-design-control-applied:focus-visible,
-.zd-design-control-applied:focus-within {
-  border-color: transparent;
-  outline: 1px solid var(--highlighted-bright);
-  outline-offset: -1px;
-}
-
+/* A unit reads as a quiet suffix; it is still a menu on click. */
 .zd-design-unit-trigger {
   color: var(--muted-fg);
+  font-size: 12px;
 }
 
 .zd-design-unit-trigger:hover,
 .zd-design-unit-trigger[data-state="open"] {
-  background-color: var(--bg2-hover);
+  background-color: transparent;
   color: var(--fg1);
 }
 
-/* Keyframe and reset actions float over the value only on intent. They no
- * longer reserve half of a compact field while remaining visually hidden. */
-.zd-design-field-actions {
+/* Motion mode puts a keyframe diamond at a field's trailing edge. It fades in
+ * on intent over a fill-coloured fade, and stays for an animated property. */
+.zd-field-motion {
   opacity: 0;
-  pointer-events: none;
-  background-color: inherit;
+  background-image: linear-gradient(
+    to right,
+    transparent,
+    var(--bg2-hover) 10px
+  );
   transition: opacity 120ms ease-out;
 }
 
-.zd-design-field-actions[data-has-unit="true"] {
-  right: 2.75rem;
-}
-
-.zd-design-field-actions[data-has-hint="true"] {
-  right: 0.625rem;
-}
-
-.zd-design-field-actions[data-has-unit="true"][data-has-hint="true"] {
-  right: 3.375rem;
-}
-
-[data-design-inspector-field]:hover > .zd-design-field-actions,
-.zd-design-field-actions:focus-within,
-.zd-design-field-actions-visible {
+.zd-inspector-field:hover .zd-field-motion,
+.zd-inspector-field:focus-within .zd-field-motion,
+.zd-field-motion:focus-within {
   opacity: 1;
-  pointer-events: auto;
 }
 
-.zd-design-state-active {
-  border-width: 0;
-  border-color: transparent;
-  background-color: var(--bg2-hover);
-  box-shadow: none;
-  color: var(--fg1);
+/* An animated property keeps its value fully visible; its in-field label
+ * takes the Motion accent instead of a permanent diamond. */
+[data-design-motion-tracked] > .zd-field-label {
+  color: var(--design-selection-stroke);
 }
 
-.zd-design-segment-group {
-  gap: 2px;
-  overflow: visible;
-  border-width: 0;
-  background-color: transparent;
-}
-
-.zd-design-segment {
-  border-width: 0;
+.zd-field-keyframe {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
   border-radius: var(--radius-sm);
-  background-color: transparent;
-  box-shadow: none;
+  background: transparent;
+  color: var(--fg2);
 }
 
-.zd-design-segment:hover {
-  background-color: var(--bg1-hover);
+.zd-field-keyframe:hover,
+.zd-field-motion-active .zd-field-keyframe {
+  color: var(--design-selection-stroke);
 }
 
-.zd-design-segment[aria-pressed="true"],
-.zd-design-segment[data-state="active"] {
-  background-color: var(--bg2-hover);
+.zd-field-keyframe:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+/* Scrub handles brighten under the pointer to advertise the drag. */
+.zd-field-scrub:hover:not(:disabled) {
   color: var(--fg1);
 }
 
-.zd-design-segment:focus-visible {
-  outline: 1px solid var(--highlighted-bright);
-  outline-offset: -1px;
-}
-
-.zd-design-search {
-  border-width: 0;
-  background-color: var(--bg1-hover);
-  box-shadow: none;
-}
-
-.zd-design-search:focus-within,
-.zd-design-search:focus-visible {
-  border-color: transparent;
-  background-color: var(--bg2-hover);
-  outline: 1px solid var(--highlighted-bright);
-  outline-offset: -1px;
-}
-
+/* The canvas toolbar: a 40px floating bar of 32px tools. The active modal
+ * tool (move, frame, text) wears the design accent, as on the canvas; panel
+ * toggles stay neutral. */
 .zd-design-floating-toolbar {
   background-color: var(--bg1-highlight);
   box-shadow: var(--shadow-dropdown);
 }
 
-.zd-design-floating-toolbar button {
-  border-width: 0;
-  border-color: transparent;
-  box-shadow: none;
+.zd-canvas-toolbar {
+  height: 40px;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 12px;
 }
 
-.zd-design-floating-toolbar button[aria-pressed="true"],
-.zd-design-floating-toolbar button[aria-expanded="true"] {
+.zd-canvas-toolbar-divider {
+  width: 1px;
+  height: 20px;
+  margin-inline: 4px;
+  background-color: var(--border2);
+}
+
+.zd-canvas-tool {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--fg2);
+  transition:
+    background-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+.zd-canvas-tool svg {
+  width: 16px;
+  height: 16px;
+}
+
+.zd-canvas-tool:hover:not(:disabled) {
   background-color: var(--bg2-hover);
+  color: var(--fg1);
+}
+
+.zd-canvas-tool[aria-pressed="true"],
+.zd-canvas-tool[aria-expanded="true"] {
+  background-color: var(--bg2-hover);
+  color: var(--fg1);
+}
+
+.zd-canvas-tool[data-tool][aria-pressed="true"],
+.zd-canvas-tool[data-tool][aria-pressed="true"]:hover {
+  background-color: var(--design-selection-stroke);
+  color: var(--design-selection-label-fg);
+}
+
+.zd-canvas-tool:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-canvas-tool:disabled {
+  opacity: 0.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zd-canvas-tool {
+    transition: none;
+  }
 }
 
 /* Canvas selection geometry consumes the synchronously painted inverse-camera
@@ -333,10 +711,20 @@
   border-color: var(--design-selection-stroke);
 }
 
-/* Resting dashed guides from a selected element's top/left centers to its
- * parent's edges. Softer than the selection stroke so they read as hints. */
+/* Constraint runs from a pinned element to its parent's edges, and the
+ * dotted parent they are measured against. Softer than the selection stroke
+ * so they read as hints, never as selection. */
 .zd-design-parent-guide {
   border-color: color-mix(
+    in srgb,
+    var(--design-selection-stroke) 72%,
+    transparent
+  );
+}
+
+.zd-design-constraint-parent {
+  outline-style: dotted;
+  outline-color: color-mix(
     in srgb,
     var(--design-selection-stroke) 72%,
     transparent
@@ -396,16 +784,6 @@
   cursor: crosshair !important;
 }
 
-.zd-design-motion-accent,
-.zd-design-motion-accent-soft {
-  background-color: var(--design-selection-soft);
-  color: var(--design-selection-stroke);
-}
-
-.zd-design-motion-keyframe-icon {
-  color: var(--design-selection-stroke);
-}
-
 .zd-design-motion-keyframe {
   border-color: var(--design-selection-stroke);
   background-color: var(--bg1);
@@ -423,89 +801,6 @@
     0 0 0 3px var(--design-selection-stroke);
 }
 
-.zd-design-motion-playhead {
-  background-color: var(--design-selection-stroke);
-}
-
-.zd-design-motion-playhead > span {
-  background-color: var(--design-selection-stroke);
-}
-
-.zd-design-motion-range {
-  border-color: color-mix(
-    in srgb,
-    var(--design-selection-stroke) 55%,
-    transparent
-  );
-  background-color: var(--design-selection-soft);
-}
-
-.zd-design-motion-range > span {
-  background-color: var(--design-selection-stroke);
-}
-
-.zd-design-motion-track-selected {
-  background-color: var(--design-selection-soft);
-}
-
-.zd-design-motion-timeline {
-  container-type: inline-size;
-}
-
-.zd-design-motion-header {
-  overflow: hidden;
-}
-
-.zd-design-motion-hint {
-  width: 0;
-  overflow: hidden;
-}
-
-.zd-design-control-applied[aria-invalid="true"] {
-  outline: 1px solid var(--red-primary);
-  outline-offset: -1px;
-}
-
-/* The layer column contracts with compact canvases while the timing lane keeps
- * enough room for scrubbing and keyframes. A fixed 528px minimum made the
- * header and rows drift into separate horizontal scroll positions. */
-.zd-design-motion-grid {
-  grid-template-columns: clamp(156px, 24cqw, 208px) minmax(240px, 1fr);
-  min-width: 396px;
-}
-
-@container (min-width: 1000px) {
-  .zd-design-motion-hint {
-    width: auto;
-    overflow: visible;
-  }
-}
-
-@container (max-width: 720px) {
-  .zd-design-motion-owner,
-  .zd-design-motion-footer-meta {
-    display: none;
-  }
-
-  .zd-design-motion-header {
-    padding-inline: 0.5rem;
-  }
-
-  .zd-design-motion-settings {
-    padding-inline: 0.5rem;
-  }
-
-  .zd-design-motion-setting-label {
-    display: none;
-  }
-}
-
-@container (max-width: 520px) {
-  .zd-design-motion-save-label {
-    display: none;
-  }
-}
-
 .zd-design-inline-spacing-handle,
 .zd-design-inline-gap-handle {
   border: 0;
@@ -515,12 +810,15 @@
   outline: 0;
 }
 
+/* Ticks: a short pill across the drag axis, bordered so it reads on any fill. */
 .zd-design-inline-spacing-line {
   opacity: 0;
   border-color: var(--design-spacing-line-border);
   background-color: var(--design-padding-stroke);
-  box-shadow: 0 0 0 1px
-    color-mix(in srgb, var(--design-padding-stroke) 36%, transparent);
+}
+
+.zd-design-inline-gap-handle .zd-design-inline-spacing-line {
+  background-color: var(--design-gap-stroke);
 }
 
 .zd-design-inline-spacing-value {
@@ -528,36 +826,26 @@
   opacity: 0;
   background-color: var(--design-padding-stroke);
   color: var(--design-selection-label-fg);
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--bg1) 38%, transparent);
+  text-align: center;
 }
 
+.zd-design-inline-gap-handle .zd-design-inline-spacing-value {
+  background-color: var(--design-gap-stroke);
+}
+
+/* Hovered or edited space: one solid shade of its stroke color, strong
+ * enough to read over any fill while the content beneath stays visible. */
 .zd-design-inline-spacing-highlight {
   opacity: 0;
-  background-color: var(--design-padding-soft);
-  background-image: repeating-linear-gradient(
-    135deg,
-    transparent 0 5px,
-    color-mix(in srgb, var(--design-padding-stroke) 58%, transparent) 5px 7px
+  background-color: color-mix(
+    in oklab,
+    var(--design-padding-stroke) 30%,
+    transparent
   );
-}
-
-.zd-design-inline-gap-handle > .zd-design-inline-spacing-line {
-  background-color: var(--design-gap-stroke);
-  box-shadow: 0 0 0 1px
-    color-mix(in srgb, var(--design-gap-stroke) 36%, transparent);
-}
-
-.zd-design-inline-gap-handle > .zd-design-inline-spacing-value {
-  background-color: var(--design-gap-stroke);
 }
 
 .zd-design-inline-gap-handle > .zd-design-inline-spacing-highlight {
-  background-color: var(--design-gap-soft);
-  background-image: repeating-linear-gradient(
-    135deg,
-    transparent 0 5px,
-    color-mix(in srgb, var(--design-gap-stroke) 62%, transparent) 5px 7px
-  );
+  background-color: color-mix(in oklab, var(--design-gap-stroke) 30%, transparent);
 }
 
 /* Camera movement owns the whole frame budget. Padding, gap, grid, and
@@ -570,70 +858,103 @@
   pointer-events: none;
 }
 
-/* Spacing ticks reveal while the pointer is inside the selection's own box.
-   The zone is a full-bleed child rather than the overlay itself, because the
-   resize squares, the rotation corners and the size label all sit outside that
-   box — and reading the overlay's rect on every pointer event, which is what
-   this replaces, forced a host layout mid-drag. */
-[data-design-element-overlay]:has([data-design-spacing-hover-zone]:hover)
+/* Option belongs to a spacing edit while one runs (it mirrors sides), so the
+ * Option distance measurement steps aside until the drag or entry ends. */
+[data-design-frame]:has(
+    [data-design-spacing-dragging],
+    [data-design-inline-spacing-input]
+  )
+  [data-design-measure-overlay] {
+  display: none;
+}
+
+/* Ticks reveal while the pointer is inside the owner's own box — over its
+ * hover zone, a padding band or a tick itself — never over the resize squares
+ * and rotation corners that sit outside it. Reading the overlay's rect on each
+ * pointer event, which this replaces, forced a host layout mid-drag. */
+[data-design-layout-owner]:has(
+    [data-design-spacing-hover-zone]:hover,
+    .zd-design-padding-band:hover,
+    .zd-design-inline-spacing-handle:hover,
+    .zd-design-inline-gap-handle:hover
+  )
   .zd-design-inline-spacing-line,
-[data-design-spacing-hover] .zd-design-inline-spacing-line {
+[data-design-spacing-hover] .zd-design-inline-spacing-line,
+[data-design-spacing-dragging] .zd-design-inline-spacing-line,
+[data-design-spacing-active] .zd-design-inline-spacing-line {
   opacity: 1;
 }
 
-.zd-design-inline-padding-control:has(
-    .zd-design-inline-spacing-handle:hover,
-    .zd-design-inline-spacing-handle:focus-visible,
-    .zd-design-inline-spacing-handle[data-dragging="true"],
-    .zd-design-inline-spacing-handle[data-mirrored="true"]
-  )
+/* One active space at a time — hovered, focused, dragged or typed into — plus
+ * the sides a modifier links to it. */
+.zd-design-inline-padding-control[data-active]
   > .zd-design-inline-spacing-highlight,
-.zd-design-inline-gap-handle:hover > .zd-design-inline-spacing-highlight,
-.zd-design-inline-gap-handle:focus-visible
-  > .zd-design-inline-spacing-highlight,
-.zd-design-inline-gap-handle[data-dragging="true"]
+.zd-design-inline-gap-handle[data-active]
   > .zd-design-inline-spacing-highlight {
   opacity: 1;
 }
 
-.zd-design-inline-spacing-handle:hover > .zd-design-inline-spacing-value,
-.zd-design-inline-gap-handle:hover > .zd-design-inline-spacing-value,
-.zd-design-inline-spacing-handle:focus-visible
-  > .zd-design-inline-spacing-value,
-.zd-design-inline-gap-handle:focus-visible > .zd-design-inline-spacing-value,
-.zd-design-inline-spacing-handle[data-dragging="true"]
-  > .zd-design-inline-spacing-value,
-.zd-design-inline-spacing-handle[data-mirrored="true"]
-  > .zd-design-inline-spacing-value,
-.zd-design-inline-gap-handle[data-dragging="true"]
-  > .zd-design-inline-spacing-value {
+.zd-design-inline-padding-control[data-primary] .zd-design-inline-spacing-value,
+.zd-design-inline-gap-handle[data-primary] .zd-design-inline-spacing-value {
   visibility: visible;
   opacity: 1;
 }
 
-.zd-design-inline-spacing-handle:hover > .zd-design-inline-spacing-line,
-.zd-design-inline-gap-handle:hover > .zd-design-inline-spacing-line,
-.zd-design-inline-spacing-handle:focus-visible > .zd-design-inline-spacing-line,
-.zd-design-inline-gap-handle:focus-visible > .zd-design-inline-spacing-line,
-.zd-design-inline-spacing-handle[data-dragging="true"]
-  > .zd-design-inline-spacing-line,
-.zd-design-inline-spacing-handle[data-mirrored="true"]
-  > .zd-design-inline-spacing-line,
-.zd-design-inline-gap-handle[data-dragging="true"]
-  > .zd-design-inline-spacing-line {
+.zd-design-inline-padding-control[data-active] .zd-design-inline-spacing-line,
+.zd-design-inline-gap-handle[data-active] .zd-design-inline-spacing-line {
   opacity: 1;
-  box-shadow:
-    0 0 0 1px var(--design-spacing-line-border),
-    0 0 0 2px var(--design-padding-stroke);
+  box-shadow: 0 0 0 1px var(--design-padding-stroke);
 }
 
-.zd-design-inline-gap-handle:hover > .zd-design-inline-spacing-line,
-.zd-design-inline-gap-handle:focus-visible > .zd-design-inline-spacing-line,
-.zd-design-inline-gap-handle[data-dragging="true"]
-  > .zd-design-inline-spacing-line {
-  box-shadow:
-    0 0 0 1px var(--design-spacing-line-border),
-    0 0 0 2px var(--design-gap-stroke);
+.zd-design-inline-gap-handle[data-active] .zd-design-inline-spacing-line {
+  box-shadow: 0 0 0 1px var(--design-gap-stroke);
+}
+
+/* The readout of a gap drag whose spaces reflow has removed for the moment. */
+.zd-design-inline-spacing-floating {
+  visibility: visible;
+  opacity: 1;
+  background-color: var(--design-gap-stroke);
+}
+
+/* Typing replaces the readout in place. */
+[data-entry] .zd-design-inline-spacing-value,
+[data-entry] .zd-design-inline-spacing-value {
+  visibility: hidden;
+}
+
+.zd-design-inline-spacing-handle:focus-visible > .zd-design-inline-spacing-line,
+.zd-design-inline-gap-handle:focus-visible .zd-design-inline-spacing-line {
+  outline: 1px solid var(--design-spacing-line-border);
+}
+
+/* Typing happens in the readout itself: the same pill, now editable. */
+.zd-design-inline-spacing-input {
+  border-style: solid;
+  border-color: var(--design-spacing-line-border);
+  background-color: var(--design-padding-stroke);
+  color: var(--design-selection-label-fg);
+  caret-color: var(--design-selection-label-fg);
+  text-align: center;
+  font-weight: var(--weight-medium);
+  outline: 0;
+}
+
+.zd-design-inline-spacing-input[aria-invalid="true"] {
+  border-color: var(--red-primary);
+}
+
+.zd-design-inline-spacing-input::selection {
+  background-color: color-mix(
+    in srgb,
+    var(--design-selection-label-fg) 35%,
+    transparent
+  );
+}
+
+[data-design-inline-spacing-input="row-gap"],
+[data-design-inline-spacing-input="column-gap"] {
+  background-color: var(--design-gap-stroke);
 }
 
 .zd-design-grid-line {
@@ -642,6 +963,24 @@
     var(--design-selection-stroke) 72%,
     transparent
   );
+}
+
+/* Track sizes read on demand, with the ticks: while the pointer is in the
+ * grid or one of its spaces is active. */
+.zd-design-grid-track-label {
+  opacity: 0;
+}
+
+[data-design-layout-owner]:has(
+    [data-design-spacing-hover-zone]:hover,
+    .zd-design-padding-band:hover,
+    .zd-design-inline-spacing-handle:hover,
+    .zd-design-inline-gap-handle:hover
+  )
+  .zd-design-grid-track-label,
+[data-design-spacing-active] .zd-design-grid-track-label,
+[data-design-spacing-dragging] .zd-design-grid-track-label {
+  opacity: 1;
 }
 
 .zd-design-grid-track-label {
@@ -672,7 +1011,7 @@
 .zd-design-layer-row:hover {
   border-color: transparent;
   background-color: var(--bg1-hover);
-  color: var(--fg2);
+  color: var(--fg1);
 }
 
 .zd-design-layer-row:focus-visible {
@@ -689,7 +1028,7 @@
   border-width: 0;
   background-color: var(--bg2-hover);
   box-shadow: none;
-  color: var(--fg2);
+  color: var(--fg1);
 }
 
 /* Rows owned by the current selection (a selected container's descendants). */
@@ -704,7 +1043,21 @@
 /* Canvas hover mirrors the row's own pointer hover exactly. */
 .zd-design-layer-hovered {
   background-color: var(--bg1-hover);
-  color: var(--fg2);
+  color: var(--fg1);
+}
+
+/* The disclosure is its own 12px target inside the row. */
+.zd-layer-disclosure {
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+.zd-layer-disclosure:hover svg {
+  color: var(--fg1);
 }
 
 /* Hidden layers (and everything they own) fade their own label and icons. The
@@ -721,16 +1074,6 @@
 .zd-design-layer-selection-count {
   background-color: var(--bg2-hover);
   color: var(--fg2);
-}
-
-.zd-design-theme-filter {
-  background-color: transparent;
-  color: var(--muted-fg);
-}
-
-.zd-design-theme-filter:hover {
-  background-color: var(--bg1-hover);
-  color: var(--fg1);
 }
 
 .zd-design-theme-mode-active {
@@ -775,9 +1118,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .zd-design-control-quiet,
-  .zd-design-control-applied,
-  .zd-design-segment,
   .zd-design-floating-toolbar button {
     transition: none;
   }

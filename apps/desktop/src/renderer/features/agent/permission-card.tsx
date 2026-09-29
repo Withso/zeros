@@ -20,7 +20,7 @@
 //   └─────────────────────────────────────────────────────────┘
 //
 // Card chrome matches the composer's frame (bg2 + border1 + rounded-lg)
-// since it takes the composer's slot. Buttons are full-width stacked
+// since it docks directly above the composer. Buttons are full-width stacked
 // rows with a keyboard-shortcut hint. Shortcuts: Enter = Yes,
 // ⌘/Ctrl+Enter = don't-ask-again, Backspace/Delete = No.
 //
@@ -52,7 +52,7 @@ import { isInFocusedPane } from "./pane-focus";
 import { newPolicyId, type PolicyRule } from "./policies";
 
 /** Ignore card shortcuts for a beat after mount / request swap — long enough
- *  to absorb a keystroke already in flight when the card replaces the
+ *  to absorb a keystroke already in flight when the card lands above the
  *  composer, short enough to be imperceptible to a user reading the prompt. */
 const KEYBOARD_ARM_MS = 250;
 

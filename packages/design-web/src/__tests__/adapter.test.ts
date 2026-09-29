@@ -536,6 +536,45 @@ describe("web transaction adapter", () => {
         ]),
       ),
     ).toThrow("Frame geometry not found");
+    // Canvas metadata stores 1–16,384 px sizes within ±1,000,000 px. Geometry
+    // outside that range must fail here with a clear reason, not reach the
+    // storage commit, which would normalize it and reject the revision.
+    for (const [operationId, geometry] of [
+      ["too-tall", { x: 0, y: 0, width: 100, height: 16_385, z: 0 }],
+      ["too-wide", { x: 0, y: 0, width: 20_000, height: 100, z: 0 }],
+      ["too-small", { x: 0, y: 0, width: 0.5, height: 100, z: 0 }],
+      ["too-far", { x: 1_000_001, y: 0, width: 100, height: 100, z: 0 }],
+      ["too-deep", { x: 0, y: 0, width: 100, height: 100, z: 257 }],
+    ] as const)
+      expect(() =>
+        session.apply(
+          webTransaction(initial, operationId, [
+            {
+              operationId,
+              type: "frame.set-geometry",
+              frame: "index.html",
+              geometry,
+            },
+          ]),
+        ),
+      ).toThrow(
+        /Frame (size must be between 1 and 16,384 px|position must be within ±1,000,000 px|layer must be between 0 and 256)/,
+      );
+    expect(
+      new DesignTransactionSession(
+        initial,
+        designWebTransactionAdapter,
+      ).apply(
+        webTransaction(initial, "largest-frame", [
+          {
+            operationId: "largest-frame",
+            type: "frame.set-geometry",
+            frame: "index.html",
+            geometry: { x: 0, y: 0, width: 16_384, height: 16_384, z: 0 },
+          },
+        ]),
+      ).state.frames["index.html"],
+    ).toMatchObject({ width: 16_384, height: 16_384 });
     expect(() =>
       session.apply(
         webTransaction(initial, "unidentified-component", [

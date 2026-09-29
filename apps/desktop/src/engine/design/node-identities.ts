@@ -52,6 +52,30 @@ export function designNodeRecords(
   );
 }
 
+/** Layers a frame lists under its own row. Like the runtime's frame element,
+ * only a sole identified child of body marked `data-zeros-frame-root` (a
+ * seeded frame shell) is the row itself; unmarked roots stay real layers. */
+export function designLayerCount(
+  document: DefaultTreeAdapterTypes.Document,
+): number {
+  const records = designNodeRecords(document);
+  const body = elementRecords(document).find(
+    ({ element }) => element.tagName === "body",
+  )?.element;
+  const roots = (body?.childNodes ?? []).filter(
+    (node): node is DefaultTreeAdapterTypes.Element =>
+      "tagName" in node &&
+      node.attrs.some((attribute) => attribute.name === "data-oid"),
+  );
+  const seededShell =
+    roots.length === 1 &&
+    roots[0]!.attrs.some(
+      (attribute) => attribute.name === "data-zeros-frame-root",
+    ) &&
+    isDesignNodeElement(roots[0]!);
+  return seededShell ? records.length - 1 : records.length;
+}
+
 /** Legacy frames may carry data-oid on html/head/style/body. Strip those ids
  * from the composed render only: authored source remains intact, while an old
  * broad `[data-oid]` reset can no longer reveal head content or expose

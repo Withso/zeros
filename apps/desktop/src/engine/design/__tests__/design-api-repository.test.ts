@@ -3,7 +3,10 @@ import {
   applyDesignTransaction,
   type DesignOperation,
 } from "@zeros/design-core";
-import { designWebTransactionAdapter } from "@zeros/design-web";
+import {
+  createDesignWebDocumentState,
+  designWebTransactionAdapter,
+} from "@zeros/design-web";
 import {
   mkdir,
   mkdtemp,
@@ -627,6 +630,29 @@ describe("filesystem Design API repository", () => {
         "utf8",
       ),
     ).toContain("Shared");
+  });
+
+  it("rejects frame geometry storage would normalize before admitting a journal", async () => {
+    const frame = await createDesignFrame(root, { title: "Oversized" });
+    const current = await readDesignWebDocumentState(root, frame.file);
+    const geometry = current.frames[frame.file]!;
+    const next = createDesignWebDocumentState({
+      documentId: current.documentId,
+      entryFile: current.entryFile,
+      files: current.files,
+      manifest: current.manifest,
+      frames: { [frame.file]: { ...geometry, height: 20_000 } },
+    });
+
+    await expect(
+      commitDesignWebDocumentState(root, frame.file, current.revision, next),
+    ).rejects.toThrow("Frame size must be between 1 and 16,384 px.");
+    await expect(
+      readDesignWebDocumentState(root, frame.file),
+    ).resolves.toMatchObject({ revision: current.revision });
+    await expect(
+      readdir(designTransactionRecoveryDirectory(root)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("quarantines a forged journal without applying it or wedging later reads", async () => {

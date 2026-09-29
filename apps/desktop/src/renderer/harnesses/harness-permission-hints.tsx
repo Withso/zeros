@@ -2,11 +2,12 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import type { RequestPermissionRequest } from "../platform/bridge/agent-events";
 import { PermissionCard } from "../features/agent/permission-card";
+import { useComposerCardFocus } from "../features/agent/use-composer-card-focus";
 import { permissionPolicyOption } from "../features/agent/policies";
 
 type Scenario = {
@@ -14,6 +15,8 @@ type Scenario = {
   explicit?: boolean;
   focused?: boolean;
   hidden?: boolean;
+  composer?: boolean;
+  gate?: boolean;
 };
 declare global {
   interface Window {
@@ -26,6 +29,7 @@ window.permissionResponses = [];
 window.permissionPolicies = 0;
 
 function Harness() {
+  const composerRef = useRef<HTMLDivElement>(null);
   const [scenario, setScenario] = useState<Scenario>({
     id: "initial",
     explicit: true,
@@ -36,6 +40,10 @@ function Harness() {
       window.permissionPolicies = 0;
       setScenario(next);
     });
+  useComposerCardFocus(
+    composerRef,
+    scenario.gate !== false && scenario.focused !== false && !scenario.hidden,
+  );
   const request: RequestPermissionRequest = {
     sessionId: "fixture",
     nativeRequestId: scenario.id,
@@ -86,19 +94,30 @@ function Harness() {
         aria-hidden={scenario.hidden || undefined}
         className="max-w-3xl"
       >
-        <PermissionCard
-          request={request}
-          chatId="fixture"
-          onRecordPolicy={() => {
-            window.permissionPolicies++;
-          }}
-          onRespond={(response) => {
-            if (response.outcome.outcome === "selected")
-              window.permissionResponses.push(
-                `${scenario.id}:${response.outcome.optionId}`,
-              );
-          }}
-        />
+        {scenario.gate !== false && (
+          <PermissionCard
+            request={request}
+            chatId="fixture"
+            onRecordPolicy={() => {
+              window.permissionPolicies++;
+            }}
+            onRespond={(response) => {
+              if (response.outcome.outcome === "selected")
+                window.permissionResponses.push(
+                  `${scenario.id}:${response.outcome.optionId}`,
+                );
+            }}
+          />
+        )}
+        {scenario.composer && (
+          <div
+            ref={composerRef}
+            contentEditable
+            suppressContentEditableWarning
+            role="textbox"
+            aria-label="Chat composer"
+          />
+        )}
       </section>
       <output data-saved-policy="">
         {saved?.optionId ?? "requires decision"}

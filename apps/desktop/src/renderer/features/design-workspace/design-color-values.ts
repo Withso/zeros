@@ -234,6 +234,17 @@ function rounded(value: number, precision = 2): string {
   return String(Number(value.toFixed(precision)));
 }
 
+/** The picker's value-field text. Hex is bare, as in the fill row, and leaves
+ * opacity to its own field; functional notations keep alpha so editing their
+ * text cannot silently drop it. */
+export function designColorValueText(
+  color: DesignRgbaColor,
+  notation: DesignColorNotation,
+): string {
+  if (notation === "hex") return formatDesignColor({ ...color, a: 1 }).slice(1);
+  return formatDesignColorNotation(color, notation);
+}
+
 /** Format one parsed color in the notation selected by the editor. Keeping
  * this pure prevents the notation control from becoming cosmetic UI. */
 export function formatDesignColorNotation(
