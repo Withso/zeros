@@ -210,8 +210,16 @@ pnpm test:control-plane
 ```
 
 `TEST_DATABASE_URL` must point to a disposable database. Database-backed suites
-drop and recreate the `public` schema and intentionally skip when that variable
-is absent. CI supplies PostgreSQL and verifies that those suites did not skip.
+intentionally skip when that variable is absent. The Vitest global setup drops,
+recreates and migrates the `public` schema once per run. Between tests,
+`resetMigratedTestDatabase()` restores the migrated rows and sequences, and
+replays the ladder only after a test changed the schema, a privilege or a
+trigger. `src/migrations.test.ts` still replays the ladder itself.
+
+CI skips the database suites when none of their inputs changed
+(`scripts/ci/control-plane-scope.mjs`). Otherwise it splits them across four
+PostgreSQL services with Vitest `--shard`, and the required `control plane`
+check rejects any skipped database-backed test.
 
 ### Clean authentication cutover reset
 
