@@ -107,10 +107,12 @@ export async function advanceHostedAgents(lease, profile, deps, { retry = false 
     try { job.evidence = nativeRuntimeEvidence({ ...job.image, contractSha256: job.runtimeContractSha256 }, job.connection, result, job.startedAt, now); job.phase = "passed"; }
     catch {
       const code = value => Number.isInteger(value) && value >= -256 && value <= 256 ? value : null;
-      const knownChecks = new Set([...CHECKS,...NATIVE_EXTENSIONS, "nativePermissionSelection", "nativeAccessRefresh", "nativeGitAuthor"]);
+      const knownChecks = new Set([...CHECKS,...NATIVE_EXTENSIONS, "nativePermissionSelection", "nativeAccessRefresh", "nativeGitAuthor",
+        "nativeMcpRotation", "nativeMcpRemoval", "nativeMcpOwnerHandoff", "stopAndRevocation"]);
       const phases = ["input", "actor-admission", "native-start", "provider-home-isolation", "native-git-author",
         "native-turn", "native-tool-evidence", "native-mcp", "access-refresh", "native-resume", "permission-selection", "stop", "revocation",
-        "native-goal-set","native-goal-reload","native-fork","transcript-fork","native-review","native-apps","native-multi-agent"];
+        "native-goal-set","native-goal-reload","native-fork","transcript-fork","native-review","native-apps","native-multi-agent",
+        "native-mcp-rotation","native-mcp-removal","native-mcp-owner-handoff"];
       job.failure = { stage: "native", exitCode: code(result.code), retirementCode: code(result.retirement),
         qualified: result.report?.qualified === true,
         completedChecks: [...knownChecks].filter(check => Array.isArray(result.report?.checks) && result.report.checks.includes(check)),
