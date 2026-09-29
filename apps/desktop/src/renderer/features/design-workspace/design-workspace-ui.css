@@ -583,7 +583,42 @@
   color: var(--fg1);
 }
 
-/* The canvas toolbar: a 40px floating bar of 32px tools. The active modal
+/* ── Floating canvas chrome ─────────────────────────────────────────────
+ * The canvas is full bleed. Three raised islands float over it, 8px from its
+ * edges: the directory pill (top left), the tool rail (left, centred), and
+ * the Layers + Inspector panel (right, full height). The Motion timeline
+ * floats along the bottom, ending beside the panel. */
+
+/* The panel's resolved width, and the distance from the surface's right edge
+ * to the panel's left edge, shared with the chrome that must end beside it.
+ * Percentages resolve against the full-bleed Design surface. */
+[data-design-workspace-surface] {
+  --zd-design-panel-width: clamp(
+    min(220px, 45%),
+    var(--zeros-design-style-width, 280px),
+    min(640px, 50%)
+  );
+  --zd-design-panel-inset: 0px;
+}
+
+[data-design-workspace-surface][data-design-panel="open"] {
+  --zd-design-panel-inset: calc(var(--zd-design-panel-width) + 8px);
+}
+
+/* Source covers the canvas, but its scroll viewport clears the floating
+ * chrome. Keep the wrapper full width so the shared percentage cap resolves
+ * against the same surface as the panel, including during a width drag. */
+.zd-design-source-view {
+  /* A 40px pill/rail, with an 8px gutter on each side. */
+  padding: calc(40px + 16px) calc(var(--zd-design-panel-inset) + 8px) 8px
+    calc(40px + 16px);
+}
+
+.zd-design-source-view[data-motion-open] {
+  padding-bottom: calc(var(--zeros-design-motion-height, 240px) + 16px);
+}
+
+/* The canvas tools: a 40px floating bar of 32px tools. The active modal
  * tool (move, frame, text) wears the design accent, as on the canvas; panel
  * toggles stay neutral. */
 .zd-design-floating-toolbar {
@@ -603,6 +638,164 @@
   height: 20px;
   margin-inline: 4px;
   background-color: var(--border2);
+}
+
+/* Vertical at the canvas's left edge: 40px wide, as tall as its tools. */
+.zd-canvas-toolbar[aria-orientation="vertical"] {
+  width: 40px;
+  height: auto;
+}
+
+.zd-canvas-toolbar[aria-orientation="vertical"] .zd-canvas-toolbar-divider {
+  width: 20px;
+  height: 1px;
+  margin-block: 4px;
+  margin-inline: 0;
+}
+
+/* The rail spans the canvas height minus the directory pill and an open
+ * Motion timeline. Its two flexible spacers centre the tools; the upper one
+ * never shrinks below the pill, so a short canvas cannot stack them. */
+.zd-design-tools-rail {
+  top: 8px;
+  bottom: 8px;
+  flex-direction: column;
+  transition: bottom 160ms ease-out;
+}
+
+.zd-design-tools-rail::before,
+.zd-design-tools-rail::after {
+  flex: 1 1 0;
+  content: "";
+}
+
+.zd-design-tools-rail::before {
+  min-height: 48px;
+}
+
+.zd-design-tools-rail[data-motion-open] {
+  bottom: calc(var(--zeros-design-motion-height, 240px) + 16px);
+}
+
+/* The directory pill: the Design directory switcher and the panel toggle. It
+ * never reaches under the floating panel; a long name truncates instead. */
+.zd-design-directory-pill {
+  top: 8px;
+  left: 8px;
+  max-width: calc(100% - var(--zd-design-panel-inset) - 24px);
+  height: 40px;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 12px;
+}
+
+.zd-design-directory-trigger {
+  display: inline-flex;
+  min-width: 0;
+  height: 32px;
+  align-items: center;
+  gap: 6px;
+  padding-inline: 8px;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--fg1);
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+  transition:
+    background-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+.zd-design-directory-trigger > svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--fg2);
+}
+
+.zd-design-directory-trigger > svg:last-child {
+  width: 12px;
+  height: 12px;
+}
+
+/* Its Tooltip and menu both write data-state; the menu's open state is the
+ * trigger's aria-expanded. */
+.zd-design-directory-trigger:hover:not(:disabled),
+.zd-design-directory-trigger[aria-expanded="true"] {
+  background-color: var(--bg2-hover);
+}
+
+.zd-design-directory-trigger:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-design-directory-trigger:disabled {
+  opacity: 0.4;
+}
+
+/* The Layers + Inspector panel: one raised column at the right edge. */
+.zd-design-floating-panel {
+  top: 8px;
+  right: 8px;
+  bottom: 8px;
+  width: var(--zd-design-panel-width);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  box-shadow: var(--shadow-dropdown);
+}
+
+/* Layers owns the top of the panel at a height the user drags, bounded so
+ * the inspector below always keeps its header and a section in view. */
+.zd-design-layers-slot {
+  height: clamp(
+    96px,
+    var(--zeros-design-layers-height, 240px),
+    max(96px, calc(100% - 200px))
+  );
+}
+
+.zd-design-layers-slot[data-collapsed] {
+  height: auto;
+}
+
+/* The Layers/Inspector seam: a hairline with a grab bar that brightens on
+ * intent, like the split it moves. */
+.zd-design-layers-split {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  outline: 0;
+}
+
+.zd-design-layers-split::before {
+  width: 32px;
+  height: 4px;
+  /* Half the bar's height or more rounds it into a pill. */
+  border-radius: var(--radius-sm);
+  background-color: var(--border2);
+  content: "";
+  transition: background-color 120ms ease-out;
+}
+
+.zd-design-layers-split:hover::before,
+.zd-design-layers-split:focus-visible::before,
+.zd-design-layers-split[data-dragging]::before {
+  background-color: var(--border4);
+}
+
+.zd-design-layers-split:focus-visible::before {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zd-design-tools-rail,
+  .zd-design-directory-trigger,
+  .zd-design-layers-split::before {
+    transition: none;
+  }
 }
 
 .zd-canvas-tool {
@@ -1069,6 +1262,30 @@
 
 .zd-design-layer-dimmed:hover {
   color: color-mix(in srgb, var(--fg2) 45%, transparent);
+}
+
+/* The Layers title folds the tree down to its header row. */
+.zd-design-layers-fold {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  gap: 4px;
+  margin-inline: -4px;
+  padding-inline: 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.zd-design-layers-fold:hover {
+  background-color: var(--bg1-hover);
+}
+
+.zd-design-layers-fold:focus-visible {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
 }
 
 .zd-design-layer-selection-count {

@@ -5,7 +5,7 @@ export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?authoredFrame`,
     { waitUntil: "networkidle" },
   );
-  const layers = page.locator("#design-layers-panel");
+  const layers = page.locator("[data-design-sidebar-panel]");
   const frame = page.locator('[data-design-frame="home.html"]');
   const label = frame.locator("[data-design-frame-label]");
   const layout = page.locator("[data-design-layout-section]");

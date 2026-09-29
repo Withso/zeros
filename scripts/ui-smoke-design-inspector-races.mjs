@@ -7,7 +7,9 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
     { waitUntil: "networkidle" },
   );
   await page
-    .locator('#design-layers-panel [data-design-layer-id="home-heading"]')
+    .locator(
+      '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
+    )
     .click();
   await page
     .getByRole("button", { name: "Type settings", exact: true })
@@ -80,7 +82,9 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
       { waitUntil: "networkidle" },
     );
     await page
-      .locator('#design-layers-panel [data-design-layer-id="home-heading"]')
+      .locator(
+        '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
+      )
       .click();
     await page
       .getByRole("button", { name: "Type settings", exact: true })
@@ -176,7 +180,9 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
     { waitUntil: "networkidle" },
   );
   await page
-    .locator('#design-layers-panel [data-design-layer-id="home-heading"]')
+    .locator(
+      '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
+    )
     .click();
   await page.getByRole("button", { name: "Edit fill", exact: true }).click();
   const colorValue = page.getByRole("textbox", {

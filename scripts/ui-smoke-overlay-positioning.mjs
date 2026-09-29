@@ -1,3 +1,4 @@
+import { designCanvasPoint } from "./ui-smoke-design-helpers.mjs";
 import { expect } from "@playwright/test";
 
 export async function runOverlayPositioningSmoke({ page, check, harnessBase }) {
@@ -260,7 +261,9 @@ export async function runDesignContextMenuPositioningSmoke({
     waitUntil: "networkidle",
   });
   const frame = page.locator('[data-design-frame="pricing.html"]');
-  await frame.click({ button: "right", position: { x: 250, y: 90 } });
+  await frame.locator("iframe[data-design-document-ready]").waitFor();
+  const point = await designCanvasPoint(page, { selector: '[data-design-frame="pricing.html"]' });
+  await page.mouse.click(point.x, point.y, { button: "right" });
   const menu = page.getByRole("menu", { name: "Layers under pointer" });
   await expect(menu).toBeVisible();
   await expect(menu.getByRole("menuitem").first()).toBeFocused();

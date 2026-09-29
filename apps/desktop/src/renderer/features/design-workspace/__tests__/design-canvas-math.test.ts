@@ -25,6 +25,7 @@ import {
   designSelectionPivot,
   designHighResolutionViewportTile,
   designRevealRectViewport,
+  designSafeViewportRect,
   designViewportShowsAnyRect,
   designSelectionClickIntent,
   designMeasureSpacing,
@@ -561,6 +562,73 @@ describe("design canvas viewport math", () => {
     ).toEqual(
       fitDesignRects([{ x: 0, y: 0, width: 400, height: 300 }], viewport),
     );
+  });
+
+  it("fits, reveals, and judges visibility inside the canvas the chrome leaves", () => {
+    // A 1200×800 canvas with the floating Layers + Inspector panel covering
+    // its right 300px and the directory pill / tool rail along top and left.
+    const viewport = { width: 1_200, height: 800 };
+    const insets = { top: 48, right: 300, bottom: 0, left: 48 };
+    expect(designSafeViewportRect(viewport, insets)).toEqual({
+      x: 48,
+      y: 48,
+      width: 852,
+      height: 752,
+    });
+
+    // Fitting centres the content in the uncovered area, not under the panel.
+    const fit = fitDesignRects(
+      [{ x: 0, y: 0, width: 1_440, height: 900 }],
+      viewport,
+      64,
+      insets,
+    )!;
+    const left = fit.panX;
+    const right = 1_440 * fit.zoom + fit.panX;
+    expect(left).toBeGreaterThanOrEqual(48 + 64 - 0.001);
+    expect(right).toBeLessThanOrEqual(900 - 64 + 0.001);
+    expect((left + right) / 2).toBeCloseTo(48 + 852 / 2);
+    // Without insets the old full-viewport fit is unchanged.
+    expect(fitDesignRects([{ x: 0, y: 0, width: 1_440, height: 900 }], viewport)).toEqual(
+      fitDesignRects(
+        [{ x: 0, y: 0, width: 1_440, height: 900 }],
+        viewport,
+        64,
+        { top: 0, right: 0, bottom: 0, left: 0 },
+      ),
+    );
+
+    // A frame parked entirely behind the panel is not "shown" to the user...
+    const view = { zoom: 1, panX: 0, panY: 0 };
+    const hidden = { x: 950, y: 100, width: 200, height: 200 };
+    expect(designViewportShowsAnyRect(view, viewport, [hidden])).toBe(true);
+    expect(designViewportShowsAnyRect(view, viewport, [hidden], insets)).toBe(
+      false,
+    );
+    // ...so revealing it centres it in the visible canvas at the same zoom.
+    expect(designRevealRectViewport(view, viewport, hidden, 64, insets)).toEqual({
+      zoom: 1,
+      panX: 48 + 852 / 2 - 1_050,
+      panY: 48 + 752 / 2 - 200,
+    });
+  });
+
+  it("ignores chrome that would leave only a sliver of canvas", () => {
+    // A narrow window: the panel covers nearly all of the width. Fitting
+    // into the remaining 60px would be useless, so the axis uses it all.
+    expect(
+      designSafeViewportRect(
+        { width: 400, height: 600 },
+        { top: 48, right: 340, bottom: 0, left: 0 },
+      ),
+    ).toEqual({ x: 0, y: 48, width: 400, height: 552 });
+    // Corrupt measurements never produce negative or NaN geometry.
+    expect(
+      designSafeViewportRect(
+        { width: 400, height: 600 },
+        { top: Number.NaN, right: -20, bottom: 10_000, left: 0 },
+      ),
+    ).toEqual({ x: 0, y: 0, width: 400, height: 600 });
   });
 
   it("projects every selected child through a group resize", () => {

@@ -1,7 +1,8 @@
 // ============================================
 // COMPONENT: DesignWorkspaceColumn
-// PURPOSE: Live HTML/CSS canvas and structured design inspector
-// USED IN: MainShellBody in place of the code workspace's Workbench
+// PURPOSE: Full-bleed live HTML/CSS canvas with its floating chrome: the
+//          directory pill, the tool rail, and the Layers + Inspector panel
+// USED IN: DesignWorkbenchSurface (the workbench's Design tab)
 // ============================================
 
 // --- IMPORTS ---
@@ -33,8 +34,11 @@ import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
 import { useDesignLifecycleFeedback } from "./state/use-design-lifecycle-feedback";
 
 import { DesignCanvas, EMPTY_NODE_IDS } from "./design-canvas";
+import { DesignDirectoryPill } from "./design-directory-pill";
+import { DesignFloatingPanel } from "./design-floating-panel";
 import { DesignInspector } from "./design-inspector";
 import { errorMessage } from "./design-workspace-error";
+import { DesignWorkspaceSidebarPanels } from "./design-workspace-sidebar-panels";
 import {
   type DesignCanvasZoomActions,
   type DesignWorkspaceColumnProps,
@@ -44,7 +48,19 @@ import {
 // --- CONSTANTS ---
 
 const DESIGN_COLUMN_CLS =
-  "border-border1 relative flex min-h-0 min-w-0 flex-1 overflow-hidden border-l bg-bg1";
+  "relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-bg1";
+
+/** ⌘\ / Ctrl+\ puts the floating panel away and brings it back. */
+function isDesignPanelToggleShortcut(event: KeyboardEvent): boolean {
+  return (
+    event.key === "\\" &&
+    (event.metaKey || event.ctrlKey) &&
+    !event.altKey &&
+    !event.shiftKey &&
+    !event.isComposing &&
+    !event.repeat
+  );
+}
 
 // ============================================
 // COMPONENT: DesignWorkspaceColumn
@@ -58,7 +74,6 @@ export function DesignWorkspaceColumn({
   workspace,
   folder,
   surfaceActive,
-  inspectorVisible = true,
 }: DesignWorkspaceColumnProps) {
   const [motionTimelineOpen, setMotionTimelineOpen] = useState(false);
   const [motionPropertyRequest, setMotionPropertyRequest] =
@@ -68,7 +83,21 @@ export function DesignWorkspaceColumn({
   const deletingFrameFilesRef = useRef(new Set<string>());
   const motionPropertyRequestIdRef = useRef(0);
   const zoomActionsRef = useRef<DesignCanvasZoomActions | null>(null);
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
   const workspaceId = workspace?.id ?? null;
+  // Serialized names predate the floating panel: `inspectorVisible` now puts
+  // the whole Layers + Inspector panel away, `layersVisible` folds its Layers.
+  const panelVisible = useDesignWorkspaceUiStore((state) =>
+    workspaceId
+      ? (state.byWorkspace[workspaceId]?.inspectorVisible ?? true)
+      : true,
+  );
+  const layersExpanded = useDesignWorkspaceUiStore((state) =>
+    workspaceId
+      ? (state.byWorkspace[workspaceId]?.layersVisible ?? true)
+      : true,
+  );
   const snapshot = useDesignWorkspaceSnapshot(
     workspaceId,
     folder,
@@ -195,6 +224,52 @@ export function DesignWorkspaceColumn({
     [],
   );
 
+  const togglePanel = useCallback(() => {
+    if (!workspaceId) return;
+    const store = useDesignWorkspaceUiStore.getState();
+    const visible = store.byWorkspace[workspaceId]?.inspectorVisible ?? true;
+    // Focus never stays behind in a panel that is being put away: it returns
+    // to the canvas, where the keyboard keeps working.
+    if (visible && panelRef.current?.contains(document.activeElement)) {
+      sectionRef.current
+        ?.querySelector<HTMLElement>("[data-design-canvas-viewport]")
+        ?.focus({ preventScroll: true });
+    }
+    store.setPanels(workspaceId, { inspectorVisible: !visible });
+  }, [workspaceId]);
+
+  const setLayersExpanded = useCallback(
+    (expanded: boolean) => {
+      if (!workspaceId) return;
+      useDesignWorkspaceUiStore
+        .getState()
+        .setPanels(workspaceId, { layersVisible: expanded });
+    },
+    [workspaceId],
+  );
+
+  // A visible Design surface owns the panel shortcut wherever its own focus
+  // is (canvas, panel, pill) or when nothing holds focus; the conversation
+  // column and other surfaces keep the chord.
+  useEffect(() => {
+    if (!surfaceActive || !workspaceId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!isDesignPanelToggleShortcut(event)) return;
+      const focused = document.activeElement;
+      if (
+        focused &&
+        focused !== document.body &&
+        !sectionRef.current?.contains(focused)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      togglePanel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [surfaceActive, togglePanel, workspaceId]);
+
   const publishMotionProperties = useCallback(
     (properties: readonly string[]) => {
       setMotionProperties((current) =>
@@ -211,9 +286,11 @@ export function DesignWorkspaceColumn({
 
   return (
     <section
+      ref={sectionRef}
       {...(!surfaceActive ? { inert: "" } : {})}
       data-design-workspace-surface=""
       data-design-workspace-id={workspaceId ?? undefined}
+      data-design-panel={panelVisible ? "open" : "closed"}
       className={DESIGN_COLUMN_CLS}
       aria-label="Design workspace"
     >
@@ -238,23 +315,53 @@ export function DesignWorkspaceColumn({
         onDeleteFrame={deleteFrame}
         zoomActionsRef={zoomActionsRef}
       />
-      {inspectorVisible && <DesignInspector
+      {workspace ? (
+        <DesignDirectoryPill
+          workspace={workspace}
+          active={surfaceActive}
+          panelVisible={panelVisible}
+          onTogglePanel={togglePanel}
+        />
+      ) : null}
+      <DesignFloatingPanel
+        ref={panelRef}
         workspaceId={workspaceId}
-        folder={folder}
-        frame={selectedFrame}
-        frameSelected={frameSelected}
-        details={selectedDetails}
-        selectedNodeId={selectedNodeId}
-        selectedNodeIds={selectedNodeIds}
-        lint={snapshot.data?.lint ?? null}
-        active={surfaceActive}
-        canvasBackground={canvasBackground}
-        onCanvasBackgroundChange={commitCanvasBackground}
-        motionTimelineOpen={motionTimelineOpen}
-        motionProperties={motionProperties}
-        onOpenMotionTimeline={openMotionTimeline}
-        zoomActionsRef={zoomActionsRef}
-      />}
+        visible={panelVisible}
+        layersExpanded={layersExpanded}
+        layers={
+          <DesignWorkspaceSidebarPanels
+            surfaceActive={surfaceActive && panelVisible}
+            workspace={workspace}
+            folder={folder}
+            panelId={
+              workspaceId
+                ? `design-layers-panel-${workspaceId}`
+                : "design-layers-panel"
+            }
+            expanded={layersExpanded}
+            onExpandedChange={setLayersExpanded}
+          />
+        }
+        inspector={
+          <DesignInspector
+            workspaceId={workspaceId}
+            folder={folder}
+            frame={selectedFrame}
+            frameSelected={frameSelected}
+            details={selectedDetails}
+            selectedNodeId={selectedNodeId}
+            selectedNodeIds={selectedNodeIds}
+            lint={snapshot.data?.lint ?? null}
+            active={surfaceActive}
+            canvasBackground={canvasBackground}
+            onCanvasBackgroundChange={commitCanvasBackground}
+            motionTimelineOpen={motionTimelineOpen}
+            motionProperties={motionProperties}
+            onOpenMotionTimeline={openMotionTimeline}
+            zoomActionsRef={zoomActionsRef}
+          />
+        }
+      />
     </section>
   );
 }

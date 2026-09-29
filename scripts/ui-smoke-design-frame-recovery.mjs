@@ -164,7 +164,7 @@ export async function runDesignFrameRecoverySmoke({ page, check }) {
         (await page.locator(frameSelector).getAttribute("sandbox")) ===
           "allow-scripts",
     );
-    const layers = page.locator("#design-layers-panel");
+    const layers = page.locator("[data-design-sidebar-panel]");
     const row = layers.locator('[data-design-layer-row="home-heading"]');
     await row.getByRole("button", { name: /^Hide / }).click();
     await row.getByRole("button", { name: /^Show / }).click();

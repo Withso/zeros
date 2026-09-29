@@ -12,10 +12,10 @@ const styleEditorSource = readFileSync(
   ),
   "utf8",
 );
-const sidebarSource = readFileSync(
+const floatingPanelSource = readFileSync(
   resolve(
     process.cwd(),
-    "apps/desktop/src/renderer/features/design-workspace/design-workspace-sidebar.tsx",
+    "apps/desktop/src/renderer/features/design-workspace/design-floating-panel.tsx",
   ),
   "utf8",
 );
@@ -138,13 +138,22 @@ describe("design workspace inspector toolbar", () => {
     );
   });
 
-  it("gives both side panels responsive resize seams", () => {
-    expect(source).toContain('edge="left"');
-    expect(source).toContain('ariaLabel="Resize Style panel"');
-    expect(source).toContain("DESIGN_WORKSPACE_STYLE_WIDTH_DEFAULT");
-    expect(sidebarSource).toContain('edge="right"');
-    expect(sidebarSource).toContain('ariaLabel="Resize Layers panel"');
-    expect(sidebarSource).toContain("DESIGN_WORKSPACE_LAYERS_WIDTH_DEFAULT");
+  it("gives the floating panel a width seam and a Layers height seam", () => {
+    // One panel, one width: the Style width preference sizes Layers and the
+    // inspector together; the split between them is its own height.
+    expect(floatingPanelSource).toContain('edge="left"');
+    expect(floatingPanelSource).toContain('ariaLabel="Resize Style panel"');
+    expect(floatingPanelSource).toContain("DESIGN_WORKSPACE_STYLE_WIDTH_DEFAULT");
+    expect(floatingPanelSource).toContain('edge="bottom"');
+    expect(floatingPanelSource).toContain('ariaLabel="Resize Layers panel"');
+    expect(floatingPanelSource).toContain(
+      "DESIGN_WORKSPACE_LAYERS_HEIGHT_DEFAULT",
+    );
+    // The inspector no longer sizes itself beside the canvas.
+    expect(source).not.toContain("readPersistedDesignWorkspaceStyleWidth");
+    expect(floatingPanelSource.indexOf("{layers}")).toBeLessThan(
+      floatingPanelSource.indexOf("{inspector}"),
+    );
   });
 
   it("registers shortcuts only while the retained Design surface is active", () => {

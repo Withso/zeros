@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesignTransaction } from "@zeros/design-core";
+import {
+  EMPTY_DESIGN_FRAME_DISCLOSURE,
+  designFrameDisclosure,
+  requestDesignLayerReveal,
+  settleDesignLayerReveal,
+  toggleDesignFrameTreeExpanded,
+  useDesignLayerDisclosureStore,
+} from "../state/design-layer-disclosure";
 
 const platformMocks = vi.hoisted(() => ({
   applyTransaction: vi.fn(),
@@ -735,6 +743,58 @@ describe("design workspace cache", () => {
       designWorkspaceSnapshotCache.getSnapshot(workspaceId).data?.frames[0]
         ?.sourceVersion,
     ).toBe("b".repeat(24));
+  });
+
+  it("starts a replacement directory's Layers folded, without the old directory's pending reveal", () => {
+    const workspaceId = "ws_replaced_directory_layers";
+    const current = { ...snapshot(), directoryId: "design_original" };
+    observeDesignDirectory(workspaceId, current);
+    toggleDesignFrameTreeExpanded(workspaceId, "same.html");
+    requestDesignLayerReveal({
+      workspaceId,
+      frame: "same.html",
+      nodeIds: ["same-child"],
+      tree: undefined,
+    });
+    // A rename keeps the stable ID, so nothing is forgotten.
+    observeDesignDirectory(workspaceId, current);
+    expect(designFrameDisclosure(workspaceId, "same.html").treeExpanded).toBe(
+      true,
+    );
+
+    observeDesignDirectory(workspaceId, {
+      ...current,
+      directoryId: "design_replacement",
+    });
+    expect(designFrameDisclosure(workspaceId, "same.html")).toBe(
+      EMPTY_DESIGN_FRAME_DISCLOSURE,
+    );
+    expect(
+      useDesignLayerDisclosureStore.getState().revealByWorkspace[workspaceId],
+    ).toBeUndefined();
+    // A colliding tree in the new directory opens nothing on its own.
+    settleDesignLayerReveal(workspaceId, "same.html", [
+      {
+        oid: "new-parent",
+        tag: "div",
+        name: "new-parent",
+        text: null,
+        visible: true,
+        children: [
+          {
+            oid: "same-child",
+            tag: "div",
+            name: "same-child",
+            text: null,
+            visible: true,
+            children: [],
+          },
+        ],
+      },
+    ]);
+    expect(designFrameDisclosure(workspaceId, "same.html")).toBe(
+      EMPTY_DESIGN_FRAME_DISCLOSURE,
+    );
   });
 
   it("does not retarget a queued edit when a different directory has identical frame source", async () => {

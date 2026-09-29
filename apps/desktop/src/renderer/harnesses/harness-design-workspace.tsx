@@ -1,9 +1,11 @@
 // Standalone development harness — NOT part of the shipped app.
 //
-// Serves the real DesignWorkspaceColumn with a warm aggregate snapshot so
-// browser QA can inspect layout and local interactions without an Electron
-// preload or engine. An in-memory bridge persists fixture mutations while
-// rendering, selection, and editing use the production components.
+// Serves the real DesignWorkspaceColumn — the full-bleed canvas with its
+// floating directory pill, tool rail, and Layers + Inspector panel — with a
+// warm aggregate snapshot so browser QA can inspect layout and local
+// interactions without an Electron preload or engine. An in-memory bridge
+// persists fixture mutations while rendering, selection, and editing use the
+// production components.
 
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
@@ -162,8 +164,6 @@ async function main() {
   const { Toaster } = await import("../shared/ui/primitives/elements/toast");
   const { DesignWorkspaceColumn } =
     await import("../features/design-workspace/design-workspace");
-  const { DesignWorkspaceSidebar } =
-    await import("../features/design-workspace/design-workspace-sidebar");
   const {
     applyDesignWorkspaceRefreshVersion,
     designFoundationCache,
@@ -1650,7 +1650,6 @@ async function main() {
       <TooltipProvider delayDuration={300} skipDelayDuration={0}>
         <main className="bg-bg1 flex h-screen min-h-0 overflow-hidden">
           {WorkbenchPane && ConversationPane ? <><ConversationPane workspace={workspace} /><WorkbenchPane surfaceActive onToggleWorkbench={() => {}} /></> : <>
-          <DesignWorkspaceSidebar surfaceActive />
           <DesignWorkspaceColumn
             workspace={workspace}
             folder={workspacePath}

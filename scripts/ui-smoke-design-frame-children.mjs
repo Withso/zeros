@@ -6,7 +6,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?emptyFrame`,
     { waitUntil: "networkidle" },
   );
-  const layers = page.locator("#design-layers-panel");
+  const layers = page.locator("[data-design-sidebar-panel]");
   const layout = page.locator("[data-design-layout-section]");
   const frame = page.locator('[data-design-frame="home.html"]');
   const runtime = () =>

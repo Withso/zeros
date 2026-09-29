@@ -17,7 +17,7 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
   await open();
   const selected = (id) =>
     page.locator(
-      `#design-layers-panel [data-design-layer-id="${id}"][aria-selected="true"]`,
+      `[data-design-sidebar-panel] [data-design-layer-id="${id}"][aria-selected="true"]`,
     );
   const editor = page.locator("[data-design-inline-text-editor]");
   const heading = page
@@ -46,7 +46,9 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
 
   await open("?layoutGestures");
   await page
-    .locator('#design-layers-panel [data-design-layer-id="home-heading"]')
+    .locator(
+      '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
+    )
     .click();
   const empty = await heading.boundingBox();
   await page.mouse.dblclick(
@@ -445,9 +447,25 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   await page.keyboard.down("ControlOrMeta");
   await page.mouse.click(paddingPoint.x, paddingPoint.y);
   await page.keyboard.up("ControlOrMeta");
+  const paddingSelected = await waitFor(
+    () => selectedNode("home-heading"),
+    "padding-deep-selection",
+  );
   check(
     "deep selection passes through padding controls to the authored layer underneath",
-    await waitFor(() => selectedNode("home-heading"), "padding-deep-selection"),
+    paddingSelected,
+    paddingSelected
+      ? ""
+      : JSON.stringify(
+          await page.evaluate(() => ({
+            selected: [
+              ...document.querySelectorAll("[data-design-selected-element]"),
+            ].map((element) =>
+              element.getAttribute("data-design-element-overlay"),
+            ),
+            focused: document.activeElement?.getAttribute("aria-label"),
+          })),
+        ),
   );
 
   await open("?emptyFrame");

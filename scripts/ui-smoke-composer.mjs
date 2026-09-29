@@ -31,8 +31,8 @@
 //      support keyboard focus, and never attach themselves to Read rows.
 //   9. File/diff reading surfaces wrap long lines, keep 450×350 hover geometry,
 //      and never expose horizontal scrolling.
-//  10. Design workspaces keep their native canvas/sidebar contract and never
-//      mount a coding-agent chat.
+//  10. Design keeps its full-bleed canvas and floating chrome in the shared
+//      workbench beside the existing agent conversation.
 //  11. File Edit mode hangs soft-wrapped continuation rows at the line's own
 //      indentation instead of dropping them to column 0.
 //  12. The Files-tab tree keeps its indent guides visible without hover and
@@ -1682,8 +1682,8 @@ try {
   const finalMenuClosed = await closeModelMenuWithEscape("final-escape");
   check("Escape closes the menu", finalMenuClosed);
 
-  // The design surface owns a separate harness contract and deliberately has
-  // no coding-agent chat mounted.
+  // Design covers both its standalone canvas fixture and the production
+  // workbench composition alongside the agent conversation.
   await runDesignWorkspaceSmoke({ page, waitFor, check });
   await runFilePrefetchSmoke({ page, check });
 

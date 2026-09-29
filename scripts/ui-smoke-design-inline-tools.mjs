@@ -187,7 +187,7 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
     const row = page.locator(
       id === "home.html"
         ? '[data-design-frame-row="home.html"]'
-        : `#design-layers-panel [data-design-layer-id="${id}"]`,
+        : `[data-design-sidebar-panel] [data-design-layer-id="${id}"]`,
     );
     await row.click({ timeout: 3_000, ...options });
     await page

@@ -1,18 +1,42 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
+
 import {
   EMPTY_DESIGN_FRAME_DISCLOSURE,
   collapseAllDesignLayers,
   designFrameDisclosure,
   designWorkspaceHasExpandedLayers,
   forgetDesignLayerDisclosure,
+  requestDesignLayerReveal,
   resetDesignLayerDisclosureForTests,
   revealDesignLayerPath,
   setDesignFrameTreeExpanded,
+  settleDesignLayerReveal,
   toggleDesignFrameTreeExpanded,
   toggleDesignLayerExpanded,
   useDesignLayerDisclosureStore,
 } from "../state/design-layer-disclosure";
+
+function node(
+  oid: string,
+  children: DesignRuntimeTreeNode[] = [],
+): DesignRuntimeTreeNode {
+  return { oid, tag: "div", name: oid, text: null, visible: true, children };
+}
+
+/** body > main > (hero > heading, footer) */
+const TREE = [
+  node("body", [
+    node("main", [node("hero", [node("heading")]), node("footer")]),
+  ]),
+];
+
+function revealRequest(workspaceId: string) {
+  return useDesignLayerDisclosureStore.getState().revealByWorkspace[
+    workspaceId
+  ];
+}
 
 function workspaceDisclosures(workspaceId: string) {
   return (
@@ -210,5 +234,191 @@ describe("design layer disclosure", () => {
     expect(designFrameDisclosure("workspace-a", "home.html")).toBe(
       EMPTY_DESIGN_FRAME_DISCLOSURE,
     );
+  });
+
+  it("opens a revealed layer's frame and path and asks for its row in one update", () => {
+    const updates: unknown[] = [];
+    const unsubscribe = useDesignLayerDisclosureStore.subscribe((state) =>
+      updates.push(state),
+    );
+    requestDesignLayerReveal({
+      workspaceId: "workspace-a",
+      frame: "home.html",
+      nodeIds: ["heading"],
+      tree: TREE,
+    });
+    unsubscribe();
+    // One store publication: the panel never paints the row folded away.
+    expect(updates).toHaveLength(1);
+    expect(designFrameDisclosure("workspace-a", "home.html")).toEqual({
+      treeExpanded: true,
+      expandedNodeIds: ["body", "main", "hero"],
+    });
+    const first = revealRequest("workspace-a");
+    expect(first).toMatchObject({
+      frame: "home.html",
+      nodeIds: ["heading"],
+      pendingNodeIds: [],
+    });
+
+    // Asking again for the same row is a fresh request, so the panel scrolls
+    // to it again even though nothing had to open.
+    requestDesignLayerReveal({
+      workspaceId: "workspace-a",
+      frame: "home.html",
+      nodeIds: ["heading"],
+      tree: TREE,
+    });
+    expect(revealRequest("workspace-a")!.nonce).toBeGreaterThan(first!.nonce);
+  });
+
+  it("scrolls to the frame row for the frame or its root without unfolding it", () => {
+    requestDesignLayerReveal({
+      workspaceId: "workspace-a",
+      frame: "home.html",
+      nodeIds: [],
+      tree: TREE,
+    });
+    requestDesignLayerReveal({
+      workspaceId: "workspace-a",
+      frame: "home.html",
+      nodeIds: ["body"],
+      tree: TREE,
+      frameRowNodeId: "body",
+    });
+    expect(designFrameDisclosure("workspace-a", "home.html")).toBe(
+      EMPTY_DESIGN_FRAME_DISCLOSURE,
+    );
+    expect(revealRequest("workspace-a")).toMatchObject({ nodeIds: ["body"] });
+  });
+
+  it("keeps an unknown layer pending until a tree holds it, then opens it once", () => {
+    requestDesignLayerReveal({
+      workspaceId: "workspace-a",
+      frame: "home.html",
+      nodeIds: ["heading", "fresh"],
+      tree: TREE,
+    });
+    const pending = revealRequest("workspace-a");
+    expect(pending?.pendingNodeIds).toEqual(["fresh"]);
+
+    // A tree for another frame, or one that still lacks the node, waits.
+    settleDesignLayerReveal("workspace-a", "pricing.html", [
+      node("body", [node("fresh")]),
+    ]);
+    settleDesignLayerReveal("workspace-a", "home.html", TREE);
+    expect(revealRequest("workspace-a")).toBe(pending);
+
+    settleDesignLayerReveal("workspace-a", "home.html", [
+      node("body", [
+        node("main", [
+          node("hero", [node("heading")]),
+          node("footer", [node("fresh")]),
+        ]),
+      ]),
+    ]);
+    expect(
+      designFrameDisclosure("workspace-a", "home.html").expandedNodeIds,
+    ).toEqual(["body", "main", "hero", "footer"]);
+    // The same request completes; it never scrolls a second time.
+    expect(revealRequest("workspace-a")).toMatchObject({
+      nonce: pending!.nonce,
+      pendingNodeIds: [],
+    });
+  });
+
+  it("lets the user's fold and Collapse all win over a path still pending", () => {
+    requestDesignLayerReveal({
+      workspaceId: "workspace-a",
+      frame: "home.html",
+      nodeIds: ["fresh"],
+      tree: undefined,
+    });
+    // No tree yet: the frame opens at once; the path waits.
+    expect(designFrameDisclosure("workspace-a", "home.html").treeExpanded).toBe(
+      true,
+    );
+    toggleDesignFrameTreeExpanded("workspace-a", "home.html");
+    expect(revealRequest("workspace-a")?.pendingNodeIds).toEqual([]);
+    settleDesignLayerReveal("workspace-a", "home.html", [node("fresh")]);
+    expect(designFrameDisclosure("workspace-a", "home.html").treeExpanded).toBe(
+      false,
+    );
+
+    requestDesignLayerReveal({
+      workspaceId: "workspace-a",
+      frame: "home.html",
+      nodeIds: ["later"],
+      tree: undefined,
+    });
+    collapseAllDesignLayers("workspace-a");
+    expect(revealRequest("workspace-a")?.pendingNodeIds).toEqual([]);
+    settleDesignLayerReveal("workspace-a", "home.html", [node("later")]);
+    expect(designFrameDisclosure("workspace-a", "home.html")).toBe(
+      EMPTY_DESIGN_FRAME_DISCLOSURE,
+    );
+  });
+
+  it("lets a container folded while its tree loads stay folded", () => {
+    toggleDesignFrameTreeExpanded("workspace-a", "home.html");
+    toggleDesignLayerExpanded("workspace-a", "home.html", "parent");
+    requestDesignLayerReveal({
+      workspaceId: "workspace-a",
+      frame: "home.html",
+      nodeIds: ["fresh"],
+      tree: [node("parent")],
+    });
+    expect(revealRequest("workspace-a")?.pendingNodeIds).toEqual(["fresh"]);
+    // The user folds the container before the tree holding `fresh` arrives.
+    toggleDesignLayerExpanded("workspace-a", "home.html", "parent");
+    expect(revealRequest("workspace-a")?.pendingNodeIds).toEqual([]);
+    settleDesignLayerReveal("workspace-a", "home.html", [
+      node("parent", [node("fresh")]),
+    ]);
+    expect(
+      designFrameDisclosure("workspace-a", "home.html").expandedNodeIds,
+    ).toEqual([]);
+    // Opening a container never cancels a pending path.
+    requestDesignLayerReveal({
+      workspaceId: "workspace-a",
+      frame: "home.html",
+      nodeIds: ["later"],
+      tree: [node("parent")],
+    });
+    toggleDesignLayerExpanded("workspace-a", "home.html", "other");
+    expect(revealRequest("workspace-a")?.pendingNodeIds).toEqual(["later"]);
+  });
+
+  it("keeps reveal requests owner-scoped, bounded, and pruned with their workspace", () => {
+    requestDesignLayerReveal({
+      workspaceId: "workspace-a",
+      frame: "home.html",
+      nodeIds: ["heading"],
+      tree: TREE,
+    });
+    const owned = revealRequest("workspace-a");
+    // Another workspace's reveal leaves this one's request untouched.
+    requestDesignLayerReveal({
+      workspaceId: "workspace-b",
+      frame: "home.html",
+      nodeIds: ["heading"],
+      tree: TREE,
+    });
+    expect(revealRequest("workspace-a")).toBe(owned);
+
+    for (let index = 0; index < 12; index += 1) {
+      requestDesignLayerReveal({
+        workspaceId: `workspace-${index}`,
+        frame: "home.html",
+        nodeIds: [],
+        tree: undefined,
+      });
+    }
+    expect(
+      Object.keys(useDesignLayerDisclosureStore.getState().revealByWorkspace),
+    ).toHaveLength(8);
+
+    forgetDesignLayerDisclosure("workspace-11");
+    expect(revealRequest("workspace-11")).toBeUndefined();
   });
 });

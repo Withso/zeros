@@ -1,12 +1,20 @@
 // Design-workspace panel sizing. Pixel defaults speak the same layout language
 // as design tools: a compact Layers rail and a slightly wider Style inspector.
 // CSS percentage caps keep both responsive when the window is narrow.
+//
+// The floating Design panel stacks Layers above the inspector. Its width keeps
+// the Style width preference and its Layers split owns a separate height. The
+// Layers width preference predates the floating panel; its key and helpers stay
+// readable so an older build sharing this profile keeps its value.
 
 export const DESIGN_WORKSPACE_LAYERS_WIDTH_VAR = "--zeros-design-layers-width";
 export const DESIGN_WORKSPACE_STYLE_WIDTH_VAR = "--zeros-design-style-width";
+export const DESIGN_WORKSPACE_LAYERS_HEIGHT_VAR =
+  "--zeros-design-layers-height";
 
 export const DESIGN_WORKSPACE_LAYERS_WIDTH_KEY = "zeros.design.layers.width";
 export const DESIGN_WORKSPACE_STYLE_WIDTH_KEY = "zeros.design.style.width";
+export const DESIGN_WORKSPACE_LAYERS_HEIGHT_KEY = "zeros.design.layers.height";
 export const LEGACY_DESIGN_WORKSPACE_SIDEBAR_RATIO_KEY =
   "zeros.design.column2.ratio";
 
@@ -16,6 +24,12 @@ export const DESIGN_WORKSPACE_LAYERS_WIDTH_MAX = 720;
 export const DESIGN_WORKSPACE_STYLE_WIDTH_DEFAULT = 280;
 export const DESIGN_WORKSPACE_STYLE_WIDTH_MIN = 220;
 export const DESIGN_WORKSPACE_STYLE_WIDTH_MAX = 640;
+export const DESIGN_WORKSPACE_LAYERS_HEIGHT_DEFAULT = 240;
+/** The Layers header plus two rows; a shorter tree cannot be navigated. */
+export const DESIGN_WORKSPACE_LAYERS_HEIGHT_MIN = 96;
+export const DESIGN_WORKSPACE_LAYERS_HEIGHT_MAX = 960;
+/** The inspector keeps its header, selection name, and one section in view. */
+export const DESIGN_WORKSPACE_INSPECTOR_HEIGHT_MIN = 200;
 
 // These mirror the responsive CSS floors on the Design column and canvas.
 export const DESIGN_WORKSPACE_COLUMN_MIN_PX = 456;
@@ -89,6 +103,37 @@ export function clampDesignWorkspaceStyleWidth(
   return Math.round(Math.min(maximum, Math.max(minimum, raw)));
 }
 
+export function sanitizeDesignWorkspaceLayersHeight(value: number): number {
+  return sanitizePanelWidth(
+    value,
+    DESIGN_WORKSPACE_LAYERS_HEIGHT_DEFAULT,
+    DESIGN_WORKSPACE_LAYERS_HEIGHT_MIN,
+    DESIGN_WORKSPACE_LAYERS_HEIGHT_MAX,
+  );
+}
+
+/** Mirror the Layers split's CSS `clamp(96px, height, max(96px, 100% - 200px))`
+ * while dragging, so the inspector below always keeps a usable height. */
+export function clampDesignWorkspaceLayersHeight(
+  raw: number,
+  panelHeight: number,
+): number {
+  if (!Number.isFinite(raw)) return DESIGN_WORKSPACE_LAYERS_HEIGHT_DEFAULT;
+  if (!Number.isFinite(panelHeight) || panelHeight <= 0) {
+    return sanitizeDesignWorkspaceLayersHeight(raw);
+  }
+  const maximum = Math.max(
+    DESIGN_WORKSPACE_LAYERS_HEIGHT_MIN,
+    Math.min(
+      DESIGN_WORKSPACE_LAYERS_HEIGHT_MAX,
+      panelHeight - DESIGN_WORKSPACE_INSPECTOR_HEIGHT_MIN,
+    ),
+  );
+  return Math.round(
+    Math.min(maximum, Math.max(DESIGN_WORKSPACE_LAYERS_HEIGHT_MIN, raw)),
+  );
+}
+
 function readPersistedWidth(
   key: string,
   fallback: number,
@@ -150,6 +195,14 @@ export function readPersistedDesignWorkspaceStyleWidth(): number {
   );
 }
 
+export function readPersistedDesignWorkspaceLayersHeight(): number {
+  return readPersistedWidth(
+    DESIGN_WORKSPACE_LAYERS_HEIGHT_KEY,
+    DESIGN_WORKSPACE_LAYERS_HEIGHT_DEFAULT,
+    sanitizeDesignWorkspaceLayersHeight,
+  );
+}
+
 function persistWidth(
   key: string,
   value: number,
@@ -177,5 +230,13 @@ export function persistDesignWorkspaceStyleWidth(next: number): number {
     DESIGN_WORKSPACE_STYLE_WIDTH_KEY,
     next,
     sanitizeDesignWorkspaceStyleWidth,
+  );
+}
+
+export function persistDesignWorkspaceLayersHeight(next: number): number {
+  return persistWidth(
+    DESIGN_WORKSPACE_LAYERS_HEIGHT_KEY,
+    next,
+    sanitizeDesignWorkspaceLayersHeight,
   );
 }

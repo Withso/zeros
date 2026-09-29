@@ -443,6 +443,8 @@ interface DesignToolbarButtonProps extends React.ButtonHTMLAttributes<HTMLButton
   /** A modal canvas tool paints its active state in the design accent;
    * panel toggles (source, themes, motion) stay neutral. */
   tool?: boolean;
+  /** The vertical tool rail opens its tooltips beside it, not over a tool. */
+  tooltipSide?: "top" | "right" | "bottom" | "left";
 }
 
 export const DesignToolbarButton = React.forwardRef<
@@ -455,6 +457,7 @@ export const DesignToolbarButton = React.forwardRef<
     shortcut,
     pressed,
     tool = false,
+    tooltipSide,
     className,
     children,
     ...props
@@ -462,7 +465,7 @@ export const DesignToolbarButton = React.forwardRef<
   ref,
 ) {
   return (
-    <Tooltip label={tooltip ?? label} shortcut={shortcut}>
+    <Tooltip label={tooltip ?? label} shortcut={shortcut} side={tooltipSide}>
       <button
         ref={ref}
         type="button"

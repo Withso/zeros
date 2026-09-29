@@ -19,6 +19,8 @@ import {
 } from "../conversation/pane-sizing";
 import { TERMINAL_PANEL_HEIGHT_VAR } from "../terminal/terminal-panel-layout";
 import {
+  DESIGN_WORKSPACE_LAYERS_HEIGHT_KEY,
+  DESIGN_WORKSPACE_LAYERS_HEIGHT_VAR,
   DESIGN_WORKSPACE_LAYERS_WIDTH_KEY,
   DESIGN_WORKSPACE_LAYERS_WIDTH_VAR,
   DESIGN_WORKSPACE_STYLE_WIDTH_KEY,
@@ -106,6 +108,20 @@ describe("applyBootLayoutVars", () => {
     expect(declared.get(CONVERSATION_RATIO_VAR)).toBe("0.6");
     expect(declared.get(DESIGN_WORKSPACE_LAYERS_WIDTH_VAR)).toBe("360px");
     expect(declared.get(DESIGN_WORKSPACE_STYLE_WIDTH_VAR)).toBe("420px");
+  });
+
+  it("publishes the floating Design panel's Layers height, bounded", () => {
+    // The Layers split reads this variable on first paint; a stored value
+    // outside the supported range settles on the nearest bound.
+    store.set(DESIGN_WORKSPACE_LAYERS_HEIGHT_KEY, "320");
+    applyBootLayoutVars();
+    expect(declared.get(DESIGN_WORKSPACE_LAYERS_HEIGHT_VAR)).toBe("320px");
+    store.set(DESIGN_WORKSPACE_LAYERS_HEIGHT_KEY, "12");
+    applyBootLayoutVars();
+    expect(declared.get(DESIGN_WORKSPACE_LAYERS_HEIGHT_VAR)).toBe("96px");
+    store.delete(DESIGN_WORKSPACE_LAYERS_HEIGHT_KEY);
+    applyBootLayoutVars();
+    expect(declared.get(DESIGN_WORKSPACE_LAYERS_HEIGHT_VAR)).toBe("240px");
   });
 
   it("agrees with what the column hook reads a moment later", () => {

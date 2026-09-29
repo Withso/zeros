@@ -95,6 +95,7 @@ import {
   designResizeLayoutOffset,
   designResizeStyleAxes,
   designRevealRectViewport,
+  designSafeViewportRect,
   designRotatedResizeOrigin,
   designRotationCursor,
   designSelectionBox,
@@ -113,9 +114,11 @@ import {
   snapDesignRect,
   snapDesignResizeRect,
   zoomDesignViewportAtPoint,
+  DESIGN_VIEWPORT_NO_INSETS,
   type DesignHighResolutionViewportTile,
   type DesignResizeHandle,
   type DesignViewport,
+  type DesignViewportInsets,
 } from "./design-canvas-math";
 import { createDesignDragPresentation } from "./design-drag-presentation";
 import {
@@ -349,6 +352,45 @@ function designFrameSizeModes(
 }
 
 const frameRootPreviewQueue = createDesignSerialQueue();
+
+/** Rendered bounds of floating chrome, or null while it is put away
+ * (`display: none` leaves an element without client rects). */
+function visibleChromeRect(element: Element | null | undefined): DOMRect | null {
+  if (!element || element.getClientRects().length === 0) return null;
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0 ? rect : null;
+}
+
+/** The canvas edges floating chrome covers, read only when the camera moves
+ * on purpose (fit, reveal, zoom about the centre): the directory pill along
+ * the top, the tool rail on the left, the Layers + Inspector panel on the
+ * right and an open Motion timeline along the bottom. */
+function measureDesignCanvasInsets(
+  viewport: HTMLElement | null,
+): DesignViewportInsets {
+  if (!viewport) return DESIGN_VIEWPORT_NO_INSETS;
+  const bounds = viewport.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return DESIGN_VIEWPORT_NO_INSETS;
+  const surface = viewport.closest("[data-design-workspace-surface]");
+  const pill = visibleChromeRect(
+    surface?.querySelector("[data-design-directory-header]"),
+  );
+  const tools = visibleChromeRect(
+    viewport.querySelector('[data-design-canvas-tools-rail] [role="toolbar"]'),
+  );
+  const panel = visibleChromeRect(
+    surface?.querySelector("[data-design-floating-panel]"),
+  );
+  const timeline = visibleChromeRect(
+    viewport.querySelector("[data-design-motion-timeline]"),
+  );
+  return {
+    top: pill ? Math.max(0, pill.bottom - bounds.top) : 0,
+    left: tools ? Math.max(0, tools.right - bounds.left) : 0,
+    right: panel ? Math.max(0, bounds.right - panel.left) : 0,
+    bottom: timeline ? Math.max(0, bounds.bottom - timeline.top) : 0,
+  };
+}
 
 function blocksDesignCanvasDoubleClick(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
@@ -1080,7 +1122,10 @@ export function DesignCanvas({
    * target (label click, hit-stack, Escape) — the only paths that show frame
    * chrome. Everything else is activation, the "nothing selected" state. */
   const publishSelection = useCallback(
-    (frame: DesignCanvasFrameWire | null, options?: { selected?: boolean }) => {
+    (
+      frame: DesignCanvasFrameWire | null,
+      options?: { selected?: boolean; reveal?: boolean },
+    ) => {
       if (!workspaceId) return;
       void selectDesignFrame(workspaceId, frame, options).catch(
         (selectionError) => {
@@ -1145,6 +1190,8 @@ export function DesignCanvas({
           height: frame.height,
         })),
         { width: bounds.width, height: bounds.height },
+        undefined,
+        measureDesignCanvasInsets(viewportRef.current),
       );
       if (!next) return;
       // Toolbar intent wins over any wheel burst that has painted but not yet
@@ -1165,10 +1212,15 @@ export function DesignCanvas({
       if (!workspaceId) return;
       const bounds = viewportRef.current?.getBoundingClientRect();
       if (!bounds) return;
-      const anchor = point ?? {
-        x: bounds.width / 2,
-        y: bounds.height / 2,
-      };
+      // Menu and keyboard zoom keep the centre of the visible canvas still.
+      let anchor = point;
+      if (!anchor) {
+        const safe = designSafeViewportRect(
+          { width: bounds.width, height: bounds.height },
+          measureDesignCanvasInsets(viewportRef.current),
+        );
+        anchor = { x: safe.x + safe.width / 2, y: safe.y + safe.height / 2 };
+      }
       const current = wheelViewportRef.current ?? view;
       const targetZoom =
         typeof nextZoom === "function" ? nextZoom(current.zoom) : nextZoom;
@@ -1196,7 +1248,14 @@ export function DesignCanvas({
       width: frame.width,
       height: frame.height,
     }));
-    if (!designViewportShowsAnyRect(view, viewportSize, rects))
+    if (
+      !designViewportShowsAnyRect(
+        view,
+        viewportSize,
+        rects,
+        measureDesignCanvasInsets(viewportRef.current),
+      )
+    )
       fitFrames(snapshot.frames);
   }, [
     active,
@@ -1223,12 +1282,18 @@ export function DesignCanvas({
     if (!previous || previous.owner !== liveFrameOwner) return;
     if (!active || !workspaceId || !selectedFrame || previous.file === file)
       return;
-    const next = designRevealRectViewport(view, viewportSize, {
-      x: selectedFrame.x,
-      y: selectedFrame.y,
-      width: selectedFrame.width,
-      height: selectedFrame.height,
-    });
+    const next = designRevealRectViewport(
+      view,
+      viewportSize,
+      {
+        x: selectedFrame.x,
+        y: selectedFrame.y,
+        width: selectedFrame.width,
+        height: selectedFrame.height,
+      },
+      undefined,
+      measureDesignCanvasInsets(viewportRef.current),
+    );
     if (!next) return;
     cancelPendingWheelGesture();
     paintDesignCanvasCamera(worldRef.current, next, false);
@@ -1267,7 +1332,7 @@ export function DesignCanvas({
           (frame) => frame.file === result.frame.file,
         );
         if (created) {
-          publishSelection(created, { selected: true });
+          publishSelection(created, { selected: true, reveal: true });
           if (!geometry) fitFrames([created]);
         }
         return created ?? null;
@@ -1925,7 +1990,10 @@ export function DesignCanvas({
           (candidate) => candidate.file === result.frame.file,
         );
         if (duplicate) {
-          await selectDesignFrame(workspaceId, duplicate, { selected: true });
+          await selectDesignFrame(workspaceId, duplicate, {
+            selected: true,
+            reveal: true,
+          });
         }
       } catch (error) {
         toast.error(
@@ -2334,7 +2402,7 @@ export function DesignCanvas({
       event.stopPropagation();
       // Labels move the whole frame; body drags retain scoped marquee.
       viewportRef.current?.focus({ preventScroll: true });
-      publishSelection(frame, { selected: true });
+      publishSelection(frame, { selected: true, reveal: true });
       const element = event.currentTarget.closest<HTMLElement>(
         "[data-design-frame]",
       );
@@ -4985,6 +5053,7 @@ export function DesignCanvas({
         else {
           void selectDesignFrame(workspaceId!, selectedFrame, {
             selected: true,
+            reveal: true,
           });
         }
         return;
@@ -5018,6 +5087,7 @@ export function DesignCanvas({
           else if (selectedFrame) {
             void selectDesignFrame(workspaceId!, selectedFrame, {
               selected: true,
+              reveal: true,
             });
           }
           return;
@@ -6245,6 +6315,16 @@ export function DesignCanvas({
   const handleWheel = useCallback(
     (event: React.WheelEvent<HTMLDivElement>) => {
       if (!active || !workspaceId) return;
+      // Chrome inside the viewport owns its wheel: the tool rail never pans
+      // the canvas, and the Motion timeline and source view scroll themselves.
+      if (
+        event.target instanceof Element &&
+        event.target.closest(
+          "[data-design-canvas-tools-rail], [data-design-motion-timeline], [data-design-source-view]",
+        )
+      ) {
+        return;
+      }
       event.preventDefault();
       if (spacingGestureRef.current) return;
       const bounds = event.currentTarget.getBoundingClientRect();
@@ -6295,7 +6375,10 @@ export function DesignCanvas({
   // --- RENDER ---
 
   return (
-    <div className="relative min-h-0 min-w-[min(320px,50%)] flex-1 overflow-hidden">
+    // Full bleed under the floating directory pill and Layers + Inspector
+    // panel. `isolate` keeps every canvas layer (overlays, guides, Motion)
+    // beneath that chrome without a global z-index.
+    <div className="relative isolate min-h-0 min-w-0 flex-1 overflow-hidden">
       <div
         ref={viewportRef}
         data-design-canvas-viewport=""
@@ -7145,7 +7228,9 @@ export function DesignCanvas({
         (selectedFrameDocument.data || selectedFrameDocument.error) ? (
           <div
             data-design-controls
-            className="bg-bg1 absolute inset-0 overflow-hidden p-4"
+            data-design-source-view=""
+            data-motion-open={motionTimelineOpen ? "" : undefined}
+            className="zd-design-source-view bg-bg1 absolute inset-0 overflow-hidden"
           >
             <ScrollArea className="h-full">
               <CodeBlock
@@ -7246,6 +7331,7 @@ export function DesignCanvas({
                   setHitStackMenu(null);
                   void selectDesignFrame(workspaceId!, hitStackMenu.frame, {
                     selected: true,
+                    reveal: true,
                   });
                 }}
               >
@@ -7283,92 +7369,106 @@ export function DesignCanvas({
           onPlayheadChange={publishMotionPlayhead}
         />
 
-        <Toolbar
-          data-design-controls
-          role="toolbar"
-          aria-label="Canvas tools"
-          className={cn(
-            "zd-design-floating-toolbar zd-canvas-toolbar absolute left-1/2 -translate-x-1/2 transition-[bottom]",
-            motionTimelineOpen
-              ? "bottom-[calc(var(--zeros-design-motion-height,240px)+16px)]"
-              : "bottom-4",
-          )}
+        {/* The tool rail floats at the canvas's left edge, centred in the
+            space between the directory pill and the Motion timeline. Its
+            track ignores the pointer, so only the tools themselves are
+            chrome and the canvas beside them stays directly editable. It
+            shares the timeline's layer and follows it, so a canvas too short
+            for both keeps every tool on top and reachable. */}
+        <div
+          data-design-canvas-tools-rail=""
+          data-motion-open={motionTimelineOpen ? "" : undefined}
+          className="zd-design-tools-rail pointer-events-none absolute left-2 z-40 flex items-center"
         >
-          <DesignToolbarButton
-            label="Select"
-            tooltip="Move"
-            shortcut="V"
-            tool
-            pressed={activeTool === "select"}
-            aria-keyshortcuts="V"
-            onClick={() => activateTool("select")}
+          <Toolbar
+            data-design-controls
+            role="toolbar"
+            aria-label="Canvas tools"
+            aria-orientation="vertical"
+            className="zd-design-floating-toolbar zd-canvas-toolbar pointer-events-auto flex-col"
           >
-            <MousePointer2 />
-          </DesignToolbarButton>
-          <DesignToolbarButton
-            label="Frame tool"
-            tooltip={creatingFrame ? "Creating frame…" : "Frame"}
-            shortcut="F"
-            tool
-            pressed={activeTool === "frame"}
-            disabled={!workspaceId || creatingFrame}
-            aria-keyshortcuts="F"
-            onClick={() => activateTool("frame")}
-          >
-            <Frame />
-          </DesignToolbarButton>
-          <DesignToolbarButton
-            label="Text tool"
-            tooltip="Text"
-            shortcut="T"
-            tool
-            pressed={activeTool === "text"}
-            disabled={!workspaceId}
-            aria-keyshortcuts="T"
-            onClick={() => activateTool("text")}
-          >
-            <Type />
-          </DesignToolbarButton>
-          <span className="zd-canvas-toolbar-divider" aria-hidden="true" />
-          <DesignToolbarButton
-            label="Toggle frame source"
-            tooltip="Source"
-            pressed={view.codeView}
-            disabled={!workspaceId || !selectedFrame}
-            onPointerEnter={warmSelectedFrameDocument}
-            onFocus={warmSelectedFrameDocument}
-            onClick={() => {
-              if (workspaceId) setCodeView(workspaceId, !view.codeView);
-            }}
-          >
-            <Code2 />
-          </DesignToolbarButton>
-          <DesignToolbarButton
-            ref={themeEditorTriggerRef}
-            data-design-theme-trigger
-            label="Open theme editor"
-            tooltip={`Themes · ${view.activeTheme ?? "Base"}`}
-            shortcut="⌥T"
-            disabled={!workspaceId || !selectedFrame}
-            aria-haspopup="dialog"
-            aria-expanded={themeEditorOpen}
-            aria-keyshortcuts="Alt+T"
-            onClick={() => setThemeEditorOpen((current) => !current)}
-          >
-            <Palette />
-          </DesignToolbarButton>
-          <DesignToolbarButton
-            label="Toggle motion timeline"
-            tooltip="Motion"
-            shortcut="⇧A"
-            pressed={motionTimelineOpen}
-            disabled={!workspaceId || !selectedFrame || !view.selectedNodeId}
-            aria-keyshortcuts="Shift+A"
-            onClick={() => onMotionTimelineOpenChange(!motionTimelineOpen)}
-          >
-            <Diamond />
-          </DesignToolbarButton>
-        </Toolbar>
+            <DesignToolbarButton
+              label="Select"
+              tooltip="Move"
+              shortcut="V"
+              tooltipSide="right"
+              tool
+              pressed={activeTool === "select"}
+              aria-keyshortcuts="V"
+              onClick={() => activateTool("select")}
+            >
+              <MousePointer2 />
+            </DesignToolbarButton>
+            <DesignToolbarButton
+              label="Frame tool"
+              tooltip={creatingFrame ? "Creating frame…" : "Frame"}
+              shortcut="F"
+              tooltipSide="right"
+              tool
+              pressed={activeTool === "frame"}
+              disabled={!workspaceId || creatingFrame}
+              aria-keyshortcuts="F"
+              onClick={() => activateTool("frame")}
+            >
+              <Frame />
+            </DesignToolbarButton>
+            <DesignToolbarButton
+              label="Text tool"
+              tooltip="Text"
+              shortcut="T"
+              tooltipSide="right"
+              tool
+              pressed={activeTool === "text"}
+              disabled={!workspaceId}
+              aria-keyshortcuts="T"
+              onClick={() => activateTool("text")}
+            >
+              <Type />
+            </DesignToolbarButton>
+            <span className="zd-canvas-toolbar-divider" aria-hidden="true" />
+            <DesignToolbarButton
+              label="Toggle frame source"
+              tooltip="Source"
+              tooltipSide="right"
+              pressed={view.codeView}
+              disabled={!workspaceId || !selectedFrame}
+              onPointerEnter={warmSelectedFrameDocument}
+              onFocus={warmSelectedFrameDocument}
+              onClick={() => {
+                if (workspaceId) setCodeView(workspaceId, !view.codeView);
+              }}
+            >
+              <Code2 />
+            </DesignToolbarButton>
+            <DesignToolbarButton
+              ref={themeEditorTriggerRef}
+              data-design-theme-trigger
+              label="Open theme editor"
+              tooltip={`Themes · ${view.activeTheme ?? "Base"}`}
+              shortcut="⌥T"
+              tooltipSide="right"
+              disabled={!workspaceId || !selectedFrame}
+              aria-haspopup="dialog"
+              aria-expanded={themeEditorOpen}
+              aria-keyshortcuts="Alt+T"
+              onClick={() => setThemeEditorOpen((current) => !current)}
+            >
+              <Palette />
+            </DesignToolbarButton>
+            <DesignToolbarButton
+              label="Toggle motion timeline"
+              tooltip="Motion"
+              shortcut="⇧A"
+              tooltipSide="right"
+              pressed={motionTimelineOpen}
+              disabled={!workspaceId || !selectedFrame || !view.selectedNodeId}
+              aria-keyshortcuts="Shift+A"
+              onClick={() => onMotionTimelineOpenChange(!motionTimelineOpen)}
+            >
+              <Diamond />
+            </DesignToolbarButton>
+          </Toolbar>
+        </div>
 
         <DesignThemeEditor
           workspaceId={workspaceId}

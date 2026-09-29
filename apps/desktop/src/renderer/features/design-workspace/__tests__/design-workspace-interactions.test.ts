@@ -98,7 +98,14 @@ describe("design workspace interaction wiring", () => {
   });
 
   it("shares frame selection between body, label, and keyboard navigation", () => {
-    expect(source).toContain("publishSelection(frame, { selected: true });");
+    // A label click is a user gesture: it also brings the frame's Layers row
+    // into view, while the resting activation never scrolls the list.
+    expect(source).toContain(
+      "publishSelection(frame, { selected: true, reveal: true });",
+    );
+    expect(source).toContain(
+      "publishSelection(selectedFrame, { selected: view.frameSelected });",
+    );
     expect(source).toContain(
       "selected && view.frameSelected && !selectedElement;",
     );
