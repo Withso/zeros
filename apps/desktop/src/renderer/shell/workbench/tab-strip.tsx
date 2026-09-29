@@ -119,7 +119,7 @@ export function WorkbenchTabStrip({
     if (
       tab.type === "changes" ||
       tab.type === "review" ||
-      tab.type === "context" || tab.type === "design"
+      tab.type === "design"
     )
       return;
     if (tab.type === "browser") {
