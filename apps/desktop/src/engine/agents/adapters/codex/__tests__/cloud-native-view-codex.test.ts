@@ -31,6 +31,9 @@ describe.runIf(namespaces)("pinned Codex inside the native cloud provider view",
       const script: string[] = ["set -e"];
       for (let i = 0; i < mounts.length;) {
         const flag = mounts[i]!;
+        // Namespace root owns every mount here, so the worker's permissions are
+        // covered by the root fixture (cloud-native-view-codex-worker.test.ts).
+        if (flag === "--perms") { i += 2; continue; }
         // Like bwrap, create a missing directory mount point; that fails inside a
         // read-only mount, so the view must already provide it there.
         if (flag === "--tmpfs") { const target = relocate(mounts[i + 1]!); script.push(`[ -e '${target}' ] || mkdir -p '${target}'`, `mount -t tmpfs tmpfs '${target}'`); i += 2; continue; }

@@ -6,7 +6,7 @@ import type { CloudAgentLease } from "../cloud-agent-lease";
 import { attestCloudCoordinator } from "./cloud-coordinator-attestation";
 import { cloudCoordinatorEnvironment, CLOUD_COORDINATOR_HOME } from "./cloud-coordinator-view.mjs";
 import { acquireCloudNativeHistory, CLOUD_NATIVE_HISTORY_ROOT } from "./cloud-native-history";
-import { CLOUD_CODEX_STATE_DIRECTORIES, CLOUD_NATIVE_HOME, type CloudNativeHomeView } from "./cloud-native-view.mjs";
+import { CLOUD_CODEX_STATE_DIRECTORIES, CLOUD_NATIVE_HOME, CLOUD_NATIVE_SKILL_HOMES, type CloudNativeHomeView } from "./cloud-native-view.mjs";
 import { loadCloudWorkerConfiguration } from "./cloud-worker-config";
 import type { BoundaryLaunchSpec, BoundaryProcess, BoundarySpawnRequest, PortRequest, PreparedBoundary } from "./types";
 import {hasCloudBackgroundServers} from "./cloud-background-processes";
@@ -41,6 +41,15 @@ export async function prepareCloudCodexConfigView(directory: string): Promise<vo
   }
   await writeFile(`${directory}/codex-config/installation_id`, "", { flag: "wx", mode: 0o444 });
   await writeFile(`${directory}/codex-installation-id`, randomUUID(), { flag: "wx", mode: 0o600 });
+}
+
+/** Each provider home that receives the organization's skills belongs to the
+ * worker, like the active provider's own home, so the skills stay readable. */
+export async function prepareCloudSkillHomes(directory: string, provider: string, uid: number, gid: number): Promise<void> {
+  for (const home of CLOUD_NATIVE_SKILL_HOMES) {
+    if (home === `.${provider}`) continue;
+    await mkdir(`${directory}/home/${home}`, { mode: 0o700 }); await chown(`${directory}/home/${home}`, uid, gid);
+  }
 }
 
 export class CloudNativeBoundary implements PreparedBoundary {
@@ -103,7 +112,10 @@ export class CloudNativeBoundary implements PreparedBoundary {
       const providerHome = `${directory}/home/.${lease.admission.provider}`;
       await mkdir(providerHome, { mode: 0o700 });
       await chown(providerHome, configuration.uid, configuration.gid);
-      if (lease.customization) await materializeCloudSkills(directory, lease.customization.skills);
+      if (lease.customization) {
+        await materializeCloudSkills(directory, lease.customization.skills);
+        await prepareCloudSkillHomes(directory, lease.admission.provider, configuration.uid, configuration.gid);
+      }
       if (lease.admission.provider === "codex") {
         await prepareCloudCodexConfigView(directory);
         await chown(`${directory}/codex-installation-id`, configuration.uid, configuration.gid);
