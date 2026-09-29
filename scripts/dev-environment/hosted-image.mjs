@@ -296,6 +296,51 @@ export async function reconcileDevImageCreates(lease, profile, request = devBoat
   }
 }
 
+/** Deletes one owned named snapshot and waits until its name is gone. */
+async function deleteDevSnapshot(lease, record, request, polling) {
+  const route = `/named-snapshots/${record.snapshotId}`, response = await request("GET", route), s = response.body?.snapshot;
+  if (response.status === 404 && !record.snapshotDeleteRequested) throw new Error("An unconfirmed Dev snapshot save needs reconciliation");
+  if (response.status !== 404) {
+    if (response.status !== 200 || s?.name !== record.snapshotId || s.sourceSandboxId !== record.builder?.id || !record.snapshotId.startsWith(`dev-${lease.state.owner}-${lease.state.generation.slice(0, 8)}-`)) throw new Error("Dev snapshot ownership changed");
+    if (!["ready", "failed", "error"].includes(s.status)) throw new Error("Dev snapshot save is still running; retry archive when it settles");
+    record.snapshotDeleteRequested = true; await lease.save(); await lease.fence();
+    const deleted = await request("DELETE", route);
+    if (deleted.status !== 404 && (deleted.status !== 200 || deleted.body?.type !== "snapshot.named.deleted" ||
+        deleted.body.name !== record.snapshotId || deleted.body.status !== "deleted")) throw new DevProviderError("Boat Dev snapshot deletion", deleted.status);
+  }
+  await pollProvider("Dev named snapshot deletion", async () => {
+    const r = await request("GET", route); if (r.status !== 200 && r.status !== 404) throw new DevProviderError("Boat Dev snapshot inventory", r.status); return r.status === 404;
+  }, { signal: lease.signal, ...polling });
+  record.snapshotDeleted = true;
+  // The provider removes the name immediately but retains backing data for
+  // at least six hours to expire signed upload URLs. Do not label absence
+  // of the name as physical storage deletion or hold the DB for that GC.
+  record.snapshotRetiredAt = new Date().toISOString(); await lease.save();
+}
+
+/** A live generation keeps its deployed worker image and the newest other
+ * qualified image for rollback. Each older one only consumes the account's
+ * named-snapshot capacity, so a long-lived checkout would eventually block
+ * every build. Only images whose builders are confirmed deleted are retired;
+ * a name that cannot be confirmed stays for archive or reconcile. */
+export async function retireSupersededDevImages(lease, profile, { keepInputs = [], request = devBoatClient(profile.boat, lease.signal), polling = {} } = {}) {
+  const owned = `dev-${lease.state.owner}-${lease.state.generation.slice(0, 8)}-`;
+  const live = (lease.state.resources.images ?? []).filter(record => !record.deleted && record.qualified && !record.snapshotDeleted &&
+    record.snapshotRequested && record.snapshotCreate?.phase === "acknowledged" && record.snapshotId?.startsWith(owned));
+  const keep = new Set(live.filter(record => keepInputs.includes(record.inputsSha256)));
+  const newest = [...live].reverse().find(record => !keep.has(record));
+  if (newest) keep.add(newest);
+  const retired = [];
+  for (const record of live) {
+    if (keep.has(record) || record.builder?.deleted !== true) continue;
+    try { await deleteDevSnapshot(lease, record, request, polling); }
+    catch (error) { if (lease.signal?.aborted) throw error; continue; }
+    record.snapshotRetirementReason = "superseded"; await lease.save();
+    retired.push(record.snapshotId);
+  }
+  return retired;
+}
+
 export async function deleteDevImages(lease, profile, request = devBoatClient(profile.boat, lease.signal), polling = {}) {
   for (const record of lease.state.resources.images ?? []) {
     if (record.deleted) continue;
@@ -307,26 +352,8 @@ export async function deleteDevImages(lease, profile, request = devBoatClient(pr
       if (r.status >= 300 || !/^bx_[a-z0-9]+$/.test(r.body?.sandbox?.id ?? "")) throw new Error("Dev builder allocation still needs reconciliation");
       record.builder = { id: r.body.sandbox.id }; await lease.save();
     }
-    if (record.snapshotRequested && !record.snapshotDeleted && !["planned", "rejected"].includes(record.snapshotCreate?.phase)) {
-      const route = `/named-snapshots/${record.snapshotId}`, response = await request("GET", route), s = response.body?.snapshot;
-      if (response.status === 404 && !record.snapshotDeleteRequested) throw new Error("An unconfirmed Dev snapshot save needs reconciliation");
-      if (response.status !== 404) {
-        if (response.status !== 200 || s?.name !== record.snapshotId || s.sourceSandboxId !== record.builder?.id || !record.snapshotId.startsWith(`dev-${lease.state.owner}-${lease.state.generation.slice(0, 8)}-`)) throw new Error("Dev snapshot ownership changed");
-        if (!["ready", "failed", "error"].includes(s.status)) throw new Error("Dev snapshot save is still running; retry archive when it settles");
-        record.snapshotDeleteRequested = true; await lease.save(); await lease.fence();
-        const deleted = await request("DELETE", route);
-        if (deleted.status !== 404 && (deleted.status !== 200 || deleted.body?.type !== "snapshot.named.deleted" ||
-            deleted.body.name !== record.snapshotId || deleted.body.status !== "deleted")) throw new DevProviderError("Boat Dev snapshot deletion", deleted.status);
-      }
-      await pollProvider("Dev named snapshot deletion", async () => {
-        const r = await request("GET", route); if (r.status !== 200 && r.status !== 404) throw new DevProviderError("Boat Dev snapshot inventory", r.status); return r.status === 404;
-      }, { signal: lease.signal, ...polling });
-      record.snapshotDeleted = true;
-      // The provider removes the name immediately but retains backing data for
-      // at least six hours to expire signed upload URLs. Do not label absence
-      // of the name as physical storage deletion or hold the DB for that GC.
-      record.snapshotRetiredAt = new Date().toISOString(); await lease.save();
-    }
+    if (record.snapshotRequested && !record.snapshotDeleted && !["planned", "rejected"].includes(record.snapshotCreate?.phase))
+      await deleteDevSnapshot(lease, record, request, polling);
     if (record.builder) await confirmBoatDeletion(lease, record.builder, request, { ...polling, allowDeferredStorage: true });
     record.retired = true; record.deleted = !record.builder || record.builder.deleted === true;
     delete record.files; await lease.save();

@@ -13,7 +13,7 @@ import { ensureRailwayEnvironment, stopRailwayBackend, configureRailwayBackend, 
 import { hostedCloudflareClient, ensureDevPages, ensureDevPagesDomain, ensureDevDns, verifyDevZone, deleteDevPagesAndDns } from "./hosted-cloudflare.mjs";
 import { ensureHostedWebhook, deleteHostedWebhook } from "./hosted-workos.mjs";
 import { hostedBackendEnvironment, hostedWebEnvironment, hostedPublicProfile } from "./hosted-profile.mjs";
-import { ensureDevImage, deleteDevImages, reconcileRetiredBuilders, verifyDevImage, devBoatClient } from "./hosted-image.mjs";
+import { ensureDevImage, deleteDevImages, reconcileRetiredBuilders, retireSupersededDevImages, verifyDevImage, devBoatClient } from "./hosted-image.mjs";
 import { devObjectStorage } from "./hosted-storage.mjs";
 import { run, waitForHttp, waitForDevSignIn } from "./processes.mjs";
 import { pollProvider } from "./provider-http.mjs";
@@ -168,6 +168,9 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
       progress(existing ? "Verifying the existing cloud worker image" : "Building and qualifying the changed cloud worker image; this can take several minutes");
       if (!existing) {
         if (!registry) throw new Error("Dev builder allocation requires the account admission registry");
+        // Free this generation's superseded images before measuring capacity;
+        // the deployed image and the newest other one stay for rollback.
+        await retireSupersededDevImages(lease, profile, { keepInputs: [lease.state.source?.workerInputsSha256].filter(Boolean) });
         const inventory = await inventoryHostedProviders(profile);
         // An earlier interrupted attempt can leave a never-started builder
         // reservation; release it before competing for the owner's slot.
