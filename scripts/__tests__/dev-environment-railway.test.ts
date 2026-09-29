@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { sha256 } from "../dev-environment/state.mjs";
 import { newHostedGeneration, hostedName } from "../dev-environment/hosted-state.mjs";
-import { ensureRailwayEnvironment, deleteRailwayEnvironment, listRailwayEnvironments, deployRailwayBackend, configureRailwayBackend, railwayEnvironmentName, stopRailwayBackend, ensureRailwayDevDomain } from "../dev-environment/railway.mjs";
+import { ensureRailwayEnvironment, deleteRailwayEnvironment, listRailwayEnvironments, deployRailwayBackend, configureRailwayBackend, railwayEnvironmentName, stopRailwayBackend, ensureRailwayDevDomain, railwayDevClient } from "../dev-environment/railway.mjs";
 
 const projectId = "11111111-1111-4111-8111-111111111111", serviceId = "22222222-2222-4222-8222-222222222222";
 const alphaId = "33333333-3333-4333-8333-333333333333", devId = "44444444-4444-4444-8444-444444444444";
@@ -63,6 +63,46 @@ describe("Railway disposable Dev environments", () => {
       expect(f.state.resources.railway.deploymentRunId).toBe("rotated-run");
       expect(f.state.resources.railway.uploadCreate.phase).toBe("acknowledged");
       await deployRailwayBackend(f.lease, f.config, artifact, request, upload);
+      expect(upload).toHaveBeenCalledOnce();
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+  it("retries a transient failure of an idempotent read but never replays a mutation", async () => {
+    const config = { projectId, serviceId, protectedEnvironmentIds: [alphaId], apiToken: "synthetic-token" };
+    let calls = 0;
+    const flaky = vi.fn(async () => {
+      if (++calls % 3) throw new TypeError("fetch failed");
+      return new Response(JSON.stringify({ data: { ok: true } }), { status: 200 });
+    });
+    const pause = vi.fn(async () => {});
+    const request = railwayDevClient(config, flaky, pause);
+    await expect(request("query DevRead { ok }")).resolves.toEqual({ ok: true });
+    expect(flaky).toHaveBeenCalledTimes(3);
+    calls = 0; flaky.mockClear();
+    await expect(request("mutation DevWrite { ok }")).rejects.toThrow(/unavailable/);
+    expect(flaky).toHaveBeenCalledTimes(1);
+    // An edge error page is not JSON; a read retries it like a lost response.
+    const edge = vi.fn(async () => edge.mock.calls.length < 2 ? new Response("<html>502</html>", { status: 502 }) : new Response(JSON.stringify({ data: { ok: true } }), { status: 200 }));
+    await expect(railwayDevClient(config, edge, pause)("query DevRead { ok }")).resolves.toEqual({ ok: true });
+    expect(edge).toHaveBeenCalledTimes(2);
+    const rejected = vi.fn(async () => new Response(JSON.stringify({ errors: [{ message: "denied" }] }), { status: 200 }));
+    await expect(railwayDevClient(config, rejected, pause)("query DevRead { ok }")).rejects.toThrow(/GraphQL rejected/);
+    expect(rejected).toHaveBeenCalledTimes(1);
+  });
+  it("keeps waiting for a slow deployment instead of abandoning it after ten minutes", async () => {
+    const f = fixture(), directory = fs.mkdtempSync(path.join(os.tmpdir(), "dev-slow-deploy-"));
+    try {
+      await ensureRailwayEnvironment(f.lease, f.config, f.request);
+      const archive = path.join(directory, "backend.tar.gz"), body = Buffer.from("synthetic source"); fs.writeFileSync(archive, body);
+      const artifact = { archive, digest: sha256(body), archiveSha256: sha256(body) };
+      let clock = 0;
+      // A degraded provider can build for twenty minutes. A retry cancels the
+      // in-flight build, so abandoning it early never converges.
+      const request = vi.fn(async (query, variables) => query.includes("query DevDeployment")
+        ? { deployment: { id: variables.id, projectId, environmentId: devId, serviceId, status: clock >= 20 * 60_000 ? "SUCCESS" : "BUILDING" } }
+        : f.request(query, variables));
+      const upload = vi.fn(async () => new Response(JSON.stringify({ deploymentId: alphaId }), { status: 200 }));
+      await deployRailwayBackend(f.lease, f.config, artifact, request, upload, { now: () => clock, delay: async (ms: number) => { clock += ms; } });
+      expect(clock).toBeGreaterThanOrEqual(20 * 60_000);
       expect(upload).toHaveBeenCalledOnce();
     } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   });

@@ -3,6 +3,7 @@ import {
   DevProviderError,
   dispatchDevCreate,
   providerJson,
+  DEPLOYMENT_TIMEOUT_MS,
 } from "./provider-http.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -574,7 +575,7 @@ export async function deployPersistentDevConnections(lease,config,artifact,reque
     if(['FAILED','CRASHED','REMOVED','SKIPPED'].includes(value.status))throw new Error('Persistent deployment failed; retain and reconcile its receipt');
     return value.status==='SUCCESS';
   };
-  const wait=id=>pollProvider('Dev connection deployment',()=>deployment(id,resources.serviceId),{signal:lease.signal,timeout:600000});
+  const wait=id=>pollProvider('Dev connection deployment',()=>deployment(id,resources.serviceId),{signal:lease.signal,timeout:DEPLOYMENT_TIMEOUT_MS});
   const database=state.resources.database;
   if(!database.deploymentId){
     await dispatchDevCreate(lease,database,'Railway',async()=>{
@@ -584,7 +585,7 @@ export async function deployPersistentDevConnections(lease,config,artifact,reque
       database.deploymentId=result.serviceInstanceDeployV2;await lease.save();return result;
     },{key:'deploymentCreate'});
   }
-  await pollProvider('Persistent Dev database',()=>deployment(database.deploymentId,resources.databaseId),{signal:lease.signal,timeout:600000});
+  await pollProvider('Persistent Dev database',()=>deployment(database.deploymentId,resources.databaseId),{signal:lease.signal,timeout:DEPLOYMENT_TIMEOUT_MS});
   if(!state.origin){
     const domains=(await request('query ConnectionDomains($projectId:String!,$environmentId:String!,$serviceId:String!){domains(projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId){serviceDomains{id domain}}}',
       {projectId:config.projectId,...target},lease.signal)).domains?.serviceDomains;

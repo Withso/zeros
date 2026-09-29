@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import { sha256 } from "./state.mjs";
 import { hostedName } from "./hosted-state.mjs";
-import { DevProviderError, providerJson, pollProvider, dispatchDevCreate, devCreateNotDispatched, acknowledgeDevCreate } from "./provider-http.mjs";
+import { DevProviderError, providerJson, pollProvider, dispatchDevCreate, devCreateNotDispatched, acknowledgeDevCreate, DEPLOYMENT_TIMEOUT_MS } from "./provider-http.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const API = "https://backboard.railway.com";
@@ -23,19 +24,31 @@ export function isRailwayOwnerName(name, state) {
   return typeof name === "string" && (name.startsWith(`dev-${state.owner}-`) || name.startsWith(`dev-${state.owner.slice(0, 12)}-`));
 }
 
-export function railwayDevClient(config, fetchImpl = fetch) {
+export function railwayDevClient(config, fetchImpl = fetch, pause = sleep) {
   if (!UUID.test(config?.projectId ?? "") || !UUID.test(config.serviceId ?? "") ||
       !Array.isArray(config.protectedEnvironmentIds) || !config.protectedEnvironmentIds.length ||
       config.protectedEnvironmentIds.some(id => !UUID.test(id)) || !config.apiToken) {
     throw new Error("Configure Railway project/service IDs, protected Alpha environment ID and a workspace API token");
   }
   return async (query, variables = {}, signal) => {
-    const response = await providerJson("Railway", `${API}/graphql/v2`, { method: "POST", signal,
-      headers: { authorization: `Bearer ${config.apiToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ query, variables }),
-    }, fetchImpl);
-    if (response.status !== 200 || response.body?.errors?.length || !response.body?.data) throw new DevProviderError("Railway", response.status === 200 ? "GraphQL rejected the operation" : response.status, response.requestId);
-    return response.body.data;
+    // Reads are idempotent, so a transient provider failure is retried. Callers
+    // journal every mutation; one is never replayed here.
+    const attempts = /^\s*query\b/.test(query) ? 3 : 1;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const response = await providerJson("Railway", `${API}/graphql/v2`, { method: "POST", signal,
+          headers: { authorization: `Bearer ${config.apiToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ query, variables }),
+        }, fetchImpl);
+        if (response.status !== 200 || response.body?.errors?.length || !response.body?.data) throw new DevProviderError("Railway", response.status === 200 ? "GraphQL rejected the operation" : response.status, response.requestId);
+        return response.body.data;
+      } catch (error) {
+        const transient = error instanceof DevProviderError &&
+          (["unavailable", "response unavailable", "invalid response"].includes(error.status) || [408, 429, 500, 502, 503, 504].includes(error.status));
+        if (!transient || attempt >= attempts || signal?.aborted) throw error;
+        await pause(2000 * attempt, undefined, { signal });
+      }
+    }
   };
 }
 
@@ -184,7 +197,7 @@ export async function deployRailwayBackend(lease, config, artifact, request = ra
     if (deployment?.projectId !== config.projectId || deployment.environmentId !== target.environmentId || deployment.serviceId !== config.serviceId) throw new Error("Railway deployment ownership changed");
     if (["FAILED", "CRASHED", "REMOVED", "SKIPPED"].includes(deployment.status)) throw new Error("Railway Dev deployment failed; inspect its provider logs with secret redaction before retrying");
     return deployment.status === "SUCCESS";
-  }, { signal: lease.signal, timeout: 600_000, ...polling });
+  }, { signal: lease.signal, timeout: DEPLOYMENT_TIMEOUT_MS, ...polling });
 }
 
 export async function ensureRailwayDevDomain(lease, profile, ensureDns, request = railwayDevClient(profile.railway), { reconcileOnly = false } = {}) {

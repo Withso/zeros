@@ -72,6 +72,11 @@ export async function providerJson(provider, url, options = {}, fetchImpl = fetc
   finally { await reader?.cancel().catch(() => {}); }
 }
 
+/** Provider builds normally finish in minutes, but degraded periods can take
+ * far longer. A retry cancels the in-flight build, so waiting is the only way
+ * a slow deployment converges. */
+export const DEPLOYMENT_TIMEOUT_MS = 30 * 60_000;
+
 export async function pollProvider(label, check, { signal, timeout = 180_000, interval = 1500, now = Date.now, delay = sleep } = {}) {
   const deadline = now() + timeout;
   for (;;) {
