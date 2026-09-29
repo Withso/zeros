@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import pg from 'pg';
 import {afterAll,beforeAll,beforeEach,describe,expect,it} from 'vitest';
 import {withSystemTx,withUserTx} from '../db.js';
-import {runMigrations} from '../migrate.js';
+import {resetMigratedTestDatabase} from '../test-database.js';
 import {seedReadyCloudWorkspace,type ReadyCloudWorkspaceFixture} from './test-fixtures.js';
 import {DatabaseManagedComputeCreditLedger} from './compute-credits.js';
 import {DatabaseComputeUserFunding,lockComputeUserFunding,prepareComputeUserPeriods,allocateComputeUserFunding} from './compute-funding.js';
@@ -14,7 +14,7 @@ d('individual Pro compute conservation',()=>{
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:8});});
   afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{
-    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     a=await seedReadyCloudWorkspace(pool);b=await seedReadyCloudWorkspace(pool,{ownerUserId:a.userId});
     await pool.query("UPDATE users SET staff_role='platform_owner' WHERE id=$1",[a.userId]);
     await pool.query("UPDATE organization_entitlements SET plan='pro',seat_limit=NULL WHERE org_id=ANY($1::uuid[])",[[a.organizationId,b.organizationId]]);

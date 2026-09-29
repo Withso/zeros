@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import pg from 'pg';
 import {afterAll,beforeAll,beforeEach,describe,expect,it} from 'vitest';
-import {runMigrations} from './migrate.js';
+import {resetMigratedTestDatabase} from './test-database.js';
 import {withSystemTx} from './db.js';
 import {manageAccountPro,type AccountProChange} from './manage-account-pro.js';
 import {Hono} from 'hono';
@@ -14,7 +14,7 @@ d('explicit individual Pro operator authority',()=>{
  beforeAll(()=>{pool=new pg.Pool({connectionString:url,max:4});});
  afterAll(async()=>{await pool.end();});
  beforeEach(async()=>{
-  await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');await runMigrations(pool);
+  await resetMigratedTestDatabase(pool);
   actor=randomUUID();subject=randomUUID();
   await pool.query("INSERT INTO users(id,email,display_name,staff_role) VALUES($1,$2,'Owner','platform_owner'),($3,$4,'Pro member',NULL)",[actor,actor+'@example.test',subject,subject+'@example.test']);
   input={operationId:randomUUID(),channel:'development',actorUserId:actor,subjectUserId:subject,expectedEmail:subject+'@example.test',enabled:true,validFrom:new Date(Date.now()-60000).toISOString(),validUntil:new Date(Date.now()+3600000).toISOString(),reason:'Explicit individual Pro pilot qualification allowance'};
@@ -117,7 +117,7 @@ d('explicit individual Pro operator authority',()=>{
 d('individual Pro revocation and mutation permissions',()=>{
  let pool:pg.Pool;beforeAll(()=>{pool=new pg.Pool({connectionString:url,max:3});});afterAll(async()=>{await pool.end();});
  it('denies direct app entitlement writes and publishes a revision for inactive-account revocation',async()=>{
-  await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');await runMigrations(pool);
+  await resetMigratedTestDatabase(pool);
   const actor=randomUUID(),subject=randomUUID();
   await pool.query("INSERT INTO users(id,email,staff_role) VALUES($1,$2,'platform_owner'),($3,$4,'developer')",[actor,actor+'@example.test',subject,subject+'@example.test']);
   for(const privilege of ['INSERT','UPDATE','DELETE','TRUNCATE'])expect((await pool.query("SELECT has_table_privilege('zeros_app','account_entitlements',$1) AS allowed",[privilege])).rows[0].allowed).toBe(false);

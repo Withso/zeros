@@ -99,6 +99,36 @@ export async function runPermissionHintsSmoke({ page, harnessBase }) {
   await page.keyboard.press("Control+Enter");
   expect(await responses()).toEqual(["ordinary-chat:chat"]);
   expect(await page.evaluate(() => window.permissionPolicies)).toBe(1);
+
+  for (const explicit of [false, true]) {
+    await scenario(`composer-${explicit}`, {
+      composer: true,
+      gate: false,
+      explicit,
+    });
+    const composer = page.getByRole("textbox", { name: "Chat composer" });
+    await composer.focus();
+    await page.evaluate(
+      (explicit) =>
+        window.setPermissionFixture({
+          id: `composer-${explicit}`,
+          composer: true,
+          gate: true,
+          explicit,
+        }),
+      explicit,
+    );
+    await page.waitForTimeout(300);
+    await expect(composer).not.toBeFocused();
+    await page.keyboard.press("Enter");
+    expect(await responses()).toEqual([
+      `composer-${explicit}:${explicit ? "no" : "yes"}`,
+    ]);
+    // An intentional click back into the composer still owns typing.
+    await composer.click();
+    await composer.fill("Follow up");
+    await expect(composer).toHaveText("Follow up");
+  }
   console.log(
     "  [ok] explicit Yes/No approval focus, keys, policy isolation, queue swaps and ordinary approvals",
   );

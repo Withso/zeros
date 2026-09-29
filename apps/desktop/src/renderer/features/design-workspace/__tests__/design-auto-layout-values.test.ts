@@ -10,6 +10,8 @@ import {
   designAutoLayoutFlowStyles,
   designGridTrackCount,
   designAutoLayoutUpdates,
+  designFrameResizeRootStyles,
+  designFrameRootFixedStyles,
 } from "../design-auto-layout-values";
 
 const node = (
@@ -176,6 +178,95 @@ describe("auto layout intent", () => {
       width: "max-content",
       "flex-grow": "0",
     });
+  });
+
+  it("fixes only the Hug axes a manual frame resize changes", () => {
+    const root = (widthValue: string, heightValue: string) => ({
+      ...node(),
+      layout: { ...node().layout!, widthValue, heightValue },
+    });
+    const start = { w: 800, h: 600 };
+    // Taller Hug frame: height becomes the frame viewport; width untouched.
+    expect(
+      designFrameResizeRootStyles(root("max-content", "max-content"), start, {
+        w: 800,
+        h: 900,
+      }),
+    ).toEqual({ height: "100vh" });
+    expect(
+      designFrameResizeRootStyles(root("fit-content", "320px"), start, {
+        w: 1_000,
+        h: 700,
+      }),
+    ).toEqual({ width: "100%" });
+    // Fixed roots already follow the viewport; an unchanged axis stays Hug.
+    expect(
+      designFrameResizeRootStyles(root("100%", "100vh"), start, {
+        w: 900,
+        h: 900,
+      }),
+    ).toBeNull();
+    expect(
+      designFrameResizeRootStyles(root("max-content", "max-content"), start, start),
+    ).toBeNull();
+    expect(designFrameResizeRootStyles(null, start, { w: 1, h: 1 })).toBeNull();
+  });
+
+  it("keeps a content-box root inside the frame it now follows", () => {
+    // A body root with 20px padding and content-box sizing: `height:100vh`
+    // alone would make its border box 40px taller than the frame.
+    const root = {
+      ...node({
+        boxSizing: "content-box",
+        paddingTop: "20px",
+        paddingBottom: "20px",
+        paddingLeft: "10px",
+        paddingRight: "10px",
+        width: "300px",
+      }),
+      box: {
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 140,
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        originX: 0.5,
+        originY: 0.5,
+      },
+      layout: {
+        ...node().layout!,
+        widthValue: "300px",
+        heightValue: "max-content",
+      },
+    };
+    // Only the edited axis changes: its border box becomes the frame, and the
+    // other axis (and the box model) are left exactly as authored, so queued
+    // W and H edits can never overwrite each other's root style.
+    expect(
+      designFrameResizeRootStyles(root, { w: 320, h: 140 }, { w: 320, h: 240 }),
+    ).toEqual({ height: "calc(100vh - 40px)" });
+    expect(designFrameRootFixedStyles(root, { width: true })).toEqual({
+      width: "calc(100% - 20px)",
+    });
+    // Border-box roots and roots without edges on the fixed axis stay as-is.
+    expect(
+      designFrameResizeRootStyles(
+        { ...root, styles: { ...root.styles, boxSizing: "border-box" } },
+        { w: 320, h: 140 },
+        { w: 320, h: 240 },
+      ),
+    ).toEqual({ height: "100vh" });
+    expect(
+      designFrameRootFixedStyles(
+        {
+          ...root,
+          styles: { ...root.styles, paddingTop: "0px", paddingBottom: "0px" },
+        },
+        { height: true },
+      ),
+    ).toEqual({ height: "100vh" });
   });
 
   it("reads intrinsic sizing from the exact snapshot instead of computed pixels", () => {

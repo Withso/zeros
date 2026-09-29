@@ -1103,7 +1103,6 @@ describe("design selection workflows", () => {
       x: 20,
       y: 20,
       intent: "descend",
-      preferText: true,
       onLocalSelection,
     }).then((result) => {
       settled = true;

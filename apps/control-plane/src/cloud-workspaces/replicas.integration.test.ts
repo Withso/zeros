@@ -12,7 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {withSystemTx} from "../db.js";
 
 import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { DatabaseCloudWorkspaceContentService } from "./content-record.js";
 import {
   DatabaseCloudWorkspaceBlobService,
@@ -64,8 +64,7 @@ d("cloud workspace receive-only replicas", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     objectStore = new MemoryCloudWorkspaceObjectStore();
     blobs = new DatabaseCloudWorkspaceBlobService({

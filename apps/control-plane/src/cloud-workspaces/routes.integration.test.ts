@@ -17,7 +17,7 @@ import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, withUserTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import type { CloudWorkspaceAccessService } from "./access.js";
 import type { CloudWorkspaceRepositoryResolver } from "./github-repositories.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
@@ -323,8 +323,7 @@ d("cloud workspace API contracts", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     owner = await signup("Owner");
     outsider = await signup("Outsider");
     actor = owner;

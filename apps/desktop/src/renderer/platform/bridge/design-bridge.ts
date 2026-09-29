@@ -50,6 +50,9 @@ export interface DesignFrameSummaryWire {
   y: number;
   z: number;
   nodeCount: number;
+  /** Nodes Layers lists under the frame row (a seeded frame root is the row
+   * itself). Omitted by older engines, which report only `nodeCount`. */
+  layerCount?: number;
   modifiedAt: number;
 }
 

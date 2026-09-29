@@ -2,7 +2,7 @@ import {randomBytes,randomUUID} from "node:crypto";
 import pg from "pg";
 import {afterAll,beforeAll,beforeEach,describe,expect,it} from "vitest";
 import {withSystemTx} from "../db.js";
-import {runMigrations} from "../migrate.js";
+import {resetMigratedTestDatabase} from "../test-database.js";
 import {seedReadyCloudWorkspace} from "./test-fixtures.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {openCloudAgentCredential} from "./agent-credential-envelope.js";
@@ -15,7 +15,7 @@ d("explicit personal agent credential authority",()=>{
   const key=randomBytes(32).toString("base64url"),secret="synthetic-cursor-key-never-public";
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:5});});
   afterAll(async()=>{await pool.end();});
-  beforeEach(async()=>{await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await runMigrations(pool);
+  beforeEach(async()=>{await resetMigratedTestDatabase(pool);
     fixture=await seedReadyCloudWorkspace(pool);service=new DatabaseCloudAgentCredentialService(pool,{keys:{1:key},currentKeyVersion:1});});
   const input=()=>({ownerUserId:fixture.userId,credentialId:randomUUID(),operationId:randomUUID(),expectedRevision:0,displayName:"My Cursor",
     material:{kind:"cursor-api-key" as const,apiKey:secret}});

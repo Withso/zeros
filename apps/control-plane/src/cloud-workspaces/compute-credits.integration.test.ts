@@ -10,7 +10,7 @@ import {
   vi,
 } from "vitest";
 import { withSystemTx, withUserTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   seedReadyCloudWorkspace,
   type ReadyCloudWorkspaceFixture,
@@ -34,8 +34,7 @@ suite("managed compute credit ledger", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     f = await seedReadyCloudWorkspace(pool);
     now = Date.now();
     ledger = new DatabaseManagedComputeCreditLedger({

@@ -29,7 +29,7 @@ import {
   terminalTabIconName,
   type TerminalTabIndicator,
 } from "../terminal/terminal-tab-indicators";
-import { RunWave } from "../../shared/ui/loading";
+import { RunStream } from "../../shared/ui/loading";
 import { CloudTerminalIndicator } from "../terminal/cloud-terminal-indicator";
 import { cn } from "../../shared/ui/cn";
 import { DynamicIcon } from "../../shared/ui/icon-registry";
@@ -120,7 +120,7 @@ export function WorkbenchTabStrip({
     if (
       tab.type === "changes" ||
       tab.type === "review" ||
-      tab.type === "context" || tab.type === "design"
+      tab.type === "design"
     )
       return;
     if (tab.type === "browser") {
@@ -304,7 +304,7 @@ function TabPill({
       {tab.type === "terminal" && <CloudTerminalIndicator folder={folderKey} />}
       {tab.type === "terminal" ? (
         terminalIndicator?.running ? (
-          <RunWave
+          <RunStream
             size={12}
             className={cn("shrink-0", active ? "text-fg1" : "text-fg2")}
           />

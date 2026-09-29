@@ -288,6 +288,31 @@ export function isDesignRuntimeStylePropertyAuthored(
     : inferAuthoredStyleFromComputed(inspectedProperty, computedValue);
 }
 
+/** Removing paint clears actual authored declarations, including shorthands.
+ * Older runtimes without provenance need explicit empty values instead.
+ * Keep unrelated geometry (especially border radii) intact. */
+export function designPaintRemovalStyles(
+  kind: "border" | "outline" | "fill",
+  authoredProperties: readonly string[] = [],
+): Record<string, string | null> {
+  const matches =
+    kind === "border"
+      ? /^border(?:-(?:top|right|bottom|left|block(?:-start|-end)?|inline(?:-start|-end)?))?(?:-(?:width|style|color))?$/
+      : kind === "outline"
+        ? /^outline(?:-(?:width|style|color|offset))?$/
+        : /^background(?:-(?:color|image))?$/;
+  const removed = Object.fromEntries(
+    authoredProperties
+      .map(cssStyleProperty)
+      .filter((property) => matches.test(property))
+      .map((property) => [property, null]),
+  );
+  if (Object.keys(removed).length > 0) return removed;
+  return kind === "fill"
+    ? { "background-color": "transparent", "background-image": "none" }
+    : { [`${kind}-style`]: "none" };
+}
+
 export function designStyleFieldValue(
   properties: readonly string[] | undefined,
   property: string,
@@ -607,6 +632,83 @@ const DESIGN_LAYOUT_PROPERTIES = new Set([
 /** Design tools treat a bare spatial value as pixels and a bare timing value
  * as milliseconds. CSS itself rejects values such as `width: 320`, so apply
  * the editor convention before both speculative preview and source commit. */
+/** Properties whose negative values CSS rejects. The engine writes
+ * declarations verbatim, so a negative draft would persist a declaration the
+ * browser ignores and the field would appear to snap back. */
+const DESIGN_NON_NEGATIVE_PROPERTIES = new Set([
+  "width",
+  "height",
+  "min-width",
+  "min-height",
+  "max-width",
+  "max-height",
+  "padding",
+  "padding-top",
+  "padding-right",
+  "padding-bottom",
+  "padding-left",
+  "padding-block",
+  "padding-block-start",
+  "padding-block-end",
+  "padding-inline",
+  "padding-inline-start",
+  "padding-inline-end",
+  "gap",
+  "row-gap",
+  "column-gap",
+  "flex-grow",
+  "flex-shrink",
+  "flex-basis",
+  "border-width",
+  "border-top-width",
+  "border-right-width",
+  "border-bottom-width",
+  "border-left-width",
+  "border-radius",
+  "border-top-left-radius",
+  "border-top-right-radius",
+  "border-bottom-right-radius",
+  "border-bottom-left-radius",
+  "outline-width",
+  "font-size",
+  "line-height",
+  "perspective",
+  "stroke-width",
+  "transition-duration",
+  "animation-duration",
+  "animation-iteration-count",
+]);
+
+/** Numeric components below zero settle on zero for a property that cannot
+ * be negative, one at a time in a shorthand (`-5px 10px` → `0px 10px`, with
+ * border-radius's `/`). A value that is not plain numbers is returned as-is. */
+export function clampDesignStyleFieldValue(
+  property: string,
+  value: string,
+): string {
+  if (!DESIGN_NON_NEGATIVE_PROPERTIES.has(cssStyleProperty(property)))
+    return value;
+  const tokens = value
+    .trim()
+    .split(/\s*(\/)\s*|\s+/)
+    .filter((token) => token !== undefined && token !== "");
+  const parts = tokens.map((token) =>
+    token === "/" ? token : parseDesignNumericValue(token),
+  );
+  if (
+    parts.some((part) => part === null) ||
+    !parts.some((part) => typeof part === "object" && part!.number < 0)
+  )
+    return value;
+  return parts
+    .map((part, index) =>
+      typeof part === "object" && part!.number < 0
+        ? `0${part!.unit}`
+        : tokens[index],
+    )
+    .join(" ");
+}
+
 export function normalizeDesignStyleFieldInput(
   property: string,
   input: string,
@@ -615,16 +717,21 @@ export function normalizeDesignStyleFieldInput(
   const normalizedProperty = cssStyleProperty(property);
   const resolved = resolveDesignNumericExpression(input, baseline);
   const parsed = parseDesignNumericValue(resolved);
-  if (!parsed || parsed.unit) return resolved;
-  if (normalizedProperty === "rotate")
-    return `${formatDesignNumber(parsed.number)}deg`;
+  if (!parsed || parsed.unit)
+    return clampDesignStyleFieldValue(normalizedProperty, resolved);
+  const number = formatDesignNumber(
+    DESIGN_NON_NEGATIVE_PROPERTIES.has(normalizedProperty)
+      ? Math.max(0, parsed.number)
+      : parsed.number,
+  );
+  if (normalizedProperty === "rotate") return `${number}deg`;
   if (DESIGN_PX_DEFAULT_PROPERTIES.has(normalizedProperty)) {
-    return `${formatDesignNumber(parsed.number)}px`;
+    return `${number}px`;
   }
   if (DESIGN_MS_DEFAULT_PROPERTIES.has(normalizedProperty)) {
-    return `${formatDesignNumber(parsed.number)}ms`;
+    return `${number}ms`;
   }
-  return resolved;
+  return clampDesignStyleFieldValue(normalizedProperty, resolved);
 }
 
 /** Whether a preview needs browser layout readback to keep the selected box,

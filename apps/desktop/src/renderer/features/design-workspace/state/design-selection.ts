@@ -52,7 +52,6 @@ import {
   resolveDesignFrameBodyTarget,
   type DesignFrameBodyIntent,
 } from "../design-layer-tree";
-import { canEditDesignNodeText } from "../design-node-capabilities";
 
 /** Open the Layers path down to a selection in the same transition that
  * publishes it, so a canvas click can never leave its row folded away. The
@@ -686,8 +685,6 @@ export async function selectDesignFrameBodyAtLocation(
     y: number;
     intent: DesignFrameBodyIntent;
     additive?: boolean;
-    /** Double-click retains direct entry into editable text. */
-    preferText?: boolean;
     /** Single-node entry can open its editor before selection persistence. */
     onLocalSelection?: (details: DesignRuntimeNodeDetails) => void;
   },
@@ -767,10 +764,7 @@ export async function selectDesignFrameBodyAtLocation(
         candidate.tag === "body" ||
         candidate.tag === "html");
     if (isFrameOwner(details)) return selectFrame();
-    const intent =
-      input.preferText && canEditDesignNodeText(details)
-        ? "deepest"
-        : input.intent;
+    const intent = input.intent;
     const target = exactSnapshot
       ? resolveDesignFrameBodyTarget({
           nodes: exactSnapshot.tree,

@@ -488,7 +488,7 @@ export function WorkbenchPane({
           </>
         ) : (
           <>
-            {/* Primary File / Changes / Review / Context / Browser / Terminal tabs. */}
+            {/* Primary File / Design / Changes / Review / Browser / Terminal tabs. */}
             <div className={WORKBENCH_CONTENT_CLS}>
               <div
                 ref={headerRef}

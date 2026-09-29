@@ -21,8 +21,10 @@ name: Preflight
 #             the existing ruleset enforce all three jobs.
 #   secret-scan — gitleaks over every commit the PR adds, not just its net diff,
 #             so a credential added and then removed within the PR is still caught.
-#   control-plane — typecheck + vitest for apps/control-plane (its own pnpm
-#             workspace and lockfile) against a real Postgres service container.
+#   control-plane — typecheck + audit for apps/control-plane (its own pnpm
+#             workspace and lockfile) on every change, plus its vitest suite
+#             sharded across Postgres service containers whenever one of that
+#             suite's inputs changed. One aggregate job owns the required check.
 #   ui-smoke — the Playwright-driven renderer smoke pass (real browser, real CSS).
 #
 # Heavier/secret macOS work (full electron-builder pack, native ABI rebuild, live
@@ -613,28 +615,39 @@ jobs:
           done
           exit "$failed"
 
-  control-plane:
-    name: control plane
+  # The required `control plane` check is the aggregate at the end of this
+  # group. Typecheck and audit run on every change. The database suites run
+  # only when one of their inputs changed (scripts/ci/control-plane-scope.mjs),
+  # split across shards that each own a Postgres service.
+  control-plane-scope:
+    name: control-plane scope
     runs-on: ubuntu-latest
-    # The DB suite requires real Postgres; otherwise integration tests self-skip.
-    # Exercise migrations before the guarded deployment step. Hosted boot only
-    # verifies the migration ledger. This database is ephemeral per job, so
-    # the tests are free to DROP SCHEMA.
-    services:
-      postgres:
-        # Match the managed database's qualified major version.
-        image: postgres:18
+    outputs:
+      database: ${{ steps.scope.outputs.database }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the scope can diff against this change's merge base.
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Decide whether the database suites run
+        id: scope
+        # Routed through `env:`: a `${{ github.event.* }}` value spliced into
+        # `run:` is a shell-injection sink.
         env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        # Without a health gate the steps start before Postgres accepts
-        # connections and the suite fails on a race, not a real defect.
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: node scripts/ci/control-plane-scope.mjs >> "$GITHUB_OUTPUT"
+
+  control-plane-static:
+    name: control-plane typecheck + audit
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -664,43 +677,115 @@ jobs:
         # transport message can never mask a real advisory in the same output.
         working-directory: apps/control-plane
         run: node ../../scripts/check-audit.mjs
+
+  control-plane-database:
+    name: control-plane database
+    needs: control-plane-scope
+    if: needs.control-plane-scope.outputs.database == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # Every shard reports, so one failure never hides another.
+      fail-fast: false
+      matrix:
+        # Keep in step with DATABASE_SHARDS in the `control-plane` job.
+        shard: [1, 2, 3, 4]
+    # The DB suite requires real Postgres; otherwise integration tests self-skip.
+    # Exercise migrations before the guarded deployment step. Hosted boot only
+    # verifies the migration ledger. Each shard owns an ephemeral database, so
+    # its tests are free to DROP SCHEMA without touching another shard.
+    services:
+      postgres:
+        # Match the managed database's qualified major version.
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        # Without a health gate the steps start before Postgres accepts
+        # connections and the suite fails on a race, not a real defect.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/control-plane/pnpm-lock.yaml
+      - name: Install control-plane dependencies
+        working-directory: apps/control-plane
+        run: pnpm install --frozen-lockfile
       - name: Install runtime contract dependencies
         # Admission tests import the actual desktop registration/client and
         # protocol schemas. Keep the service's standalone type/audit checks
-        # above independent of this separate workspace graph.
+        # independent of this separate workspace graph.
         run: pnpm install --frozen-lockfile
       - name: Control-plane tests (migrations + auth/invite contracts)
         working-directory: apps/control-plane
         env:
           # Presence of this is what un-skips the DB suites. If it is ever
           # unset here, the migration tests go quiet rather than red — so the
-          # guard step below asserts they actually ran.
+          # `control-plane` job rejects a report with a skipped DB test.
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: pnpm test
-      - name: Assert the DB suites actually ran (skip-guard)
-        # The failure mode this exists for: TEST_DATABASE_URL goes missing and
-        # `pnpm test` still exits 0 with everything skipped — a green check
-        # that proves nothing. Re-run just the migration file and require a
-        # non-zero pass count.
-        working-directory: apps/control-plane
+          SHARD: ${{ matrix.shard }}
+        run: >-
+          pnpm exec vitest run --shard="${SHARD}/4"
+          --reporter=default --reporter=json
+          --outputFile.json="${RUNNER_TEMP}/control-plane-report/shard-${SHARD}.json"
+      - name: Upload the shard's test report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: control-plane-database-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/control-plane-report/
+          # A missing report is reported by the `control-plane` job instead.
+          if-no-files-found: warn
+          retention-days: 7
+
+  # The repository ruleset requires `control plane`. `always()` ensures a failed
+  # dependency produces a red required check rather than a skipped one. The
+  # database shards' JSON reports replace the old skip-guard re-run: they must
+  # cover every test file once, with no failed or skipped DB-backed test.
+  control-plane:
+    name: control plane
+    if: always()
+    needs:
+      - control-plane-scope
+      - control-plane-static
+      - control-plane-database
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Download database shard reports
+        if: needs.control-plane-scope.outputs.database == 'true'
+        # A missing report fails the next step with the shard that lost it.
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: control-plane-database-report-*
+          path: ${{ runner.temp }}/control-plane-reports
+          merge-multiple: true
+      - name: Enforce control-plane results
         env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: |
-          set -euo pipefail
-          npx vitest run src/migrations.test.ts --reporter=json --outputFile=/tmp/mig.json
-          # readFileSync, not require(): apps/control-plane/ is "type": "module", and a
-          # missing file must read as 0 rather than throwing past the check.
-          passed=$(node -e '
-            const fs = require("node:fs");
-            let n = 0;
-            try { n = JSON.parse(fs.readFileSync("/tmp/mig.json", "utf8")).numPassedTests ?? 0; } catch {}
-            process.stdout.write(String(n));
-          ')
-          echo "migration tests passed: $passed"
-          if [ "$passed" -lt 1 ]; then
-            echo "::error::migration tests did not run — TEST_DATABASE_URL is not reaching the suite, so the DB suites skipped and this job was green without testing anything"
-            exit 1
-          fi
+          SCOPE_RESULT: ${{ needs.control-plane-scope.result }}
+          DATABASE_SCOPE: ${{ needs.control-plane-scope.outputs.database }}
+          STATIC_RESULT: ${{ needs.control-plane-static.result }}
+          DATABASE_RESULT: ${{ needs.control-plane-database.result }}
+          DATABASE_SHARDS: 4
+        run: node scripts/ci/control-plane-results.mjs "$RUNNER_TEMP/control-plane-reports"
 
   ui-smoke:
     name: ui-smoke (composer)

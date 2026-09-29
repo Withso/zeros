@@ -32,7 +32,14 @@ import { turnRowCache, turnRowKey } from "@/renderer/state/read-caches";
 //
 // ──────────────────────────────────────────────────────────
 
-import { agentActivity, chatAgentActivity, combinedAgentActivity, type AgentActivity } from "./agent-activity";
+import {
+  agentActivity,
+  chatAgentActivity,
+  chatWorkingActivity,
+  combinedAgentActivity,
+  workingActivity,
+  type AgentActivity,
+} from "./agent-activity";
 import { create } from "zustand";
 import type {
   AvailableCommand,
@@ -1720,6 +1727,18 @@ export function useAnyChatAgentActivity(chatIds: readonly string[]): AgentActivi
   return useSessionsStore((state) => combinedAgentActivity(chatIds.map((id) => agentActivity(state.sessions[id], state.pendingLocalTurns[id]))));
 }
 
+/** A chat tab's loader: its agent activity, at rest while the turn is parked
+ *  on the user (see parkedOnUser). */
+export function useChatWorkingActivity(chatId: string | null | undefined): AgentActivity {
+  return useSessionsStore((state) => chatId ? chatWorkingActivity(state.sessions[chatId], state.pendingLocalTurns[chatId]) : null);
+}
+
+/** A workspace square's motion: any of its chats working, where a chat parked
+ *  on the user counts as resting. */
+export function useAnyChatWorkingActivity(chatIds: readonly string[]): AgentActivity {
+  return useSessionsStore((state) => combinedAgentActivity(chatIds.map((id) => workingActivity(state.sessions[id], state.pendingLocalTurns[id]))));
+}
+
 /** True if ANY chat in the given id list currently has an in-flight
  *  turn (status === "streaming"). Used by Repository panel's WorkspaceRow to
  *  swap the GitBranch icon for the ZerosSpinner whenever any agent
@@ -1824,21 +1843,25 @@ export function useChatStreaming(chatId: string | null | undefined): boolean {
   });
 }
 
-/** How a chat's agent is PARKED ON THE USER, if at all:
+/** What a chat's agent is ASKING the user, if anything:
  *    • "plan"  — Claude's plan review pends (ExitPlanMode gate)
- *    • "input" — a blocking question or a regular permission gate pends
- *    • null    — not parked
- *  Repository panel rows and chat tabs swap the working spinner for the matching
- *  glyph (clipboard for plan review, message-circle-question-mark for input)
- *  while this holds. Primitive string|null so the subscription stays stable
- *  across token-chunk churn. */
+ *    • "input" — a question or a regular permission gate pends
+ *    • null    — nothing asked
+ *  Sidebar workspace rows and chat tabs show the matching glyph (clipboard for
+ *  plan review, message-circle-question-mark for input) in a slot of its own
+ *  while this holds, beside the workspace square or agent icon rather than
+ *  instead of it (see agent-awaiting-indicator.tsx). Whether the agent keeps
+ *  working meanwhile is parkedOnUser's call (agent-activity.ts): a blocking
+ *  ask rests the square, an optional one leaves it moving. Primitive
+ *  string|null so the subscription stays stable across token-chunk churn. */
 export type ChatAwaitingKind = "plan" | "input" | null;
 
-function awaitingKindOfSlot(slot: AgentSessionState): ChatAwaitingKind {
+export function awaitingKindOfSlot(slot: AgentSessionState): ChatAwaitingKind {
   if (slot.pendingQuestions?.some((entry) => entry.request.blocking)) return "input";
   const p = slot.pendingPermission;
-  if (!p) return null;
-  return isPlanReviewRequest(p.request) ? "plan" : "input";
+  if (p) return isPlanReviewRequest(p.request) ? "plan" : "input";
+  // Codex's async questions wait beside a turn that keeps working.
+  return slot.pendingQuestions?.length ? "input" : null;
 }
 
 export function useChatAwaitingKind(
@@ -1852,8 +1875,8 @@ export function useChatAwaitingKind(
   });
 }
 
-/** Any-chat variant of {@link useChatAwaitingKind} for Repository panel's
- *  WorkspaceRow (a workspace hosts several chats). "input" wins over "plan"
+/** Any-chat variant of {@link useChatAwaitingKind} for the sidebar's
+ *  workspace rows (a workspace hosts several chats). "input" wins over "plan"
  *  when different chats pend different kinds — the generic marker covers
  *  both, while a clipboard would hide the harder question/permission block. */
 export function useAnyChatAwaitingKind(

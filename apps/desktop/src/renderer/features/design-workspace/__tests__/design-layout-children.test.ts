@@ -3,6 +3,7 @@ import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import {
   designLayoutChildUpdates,
   designLayoutChildrenSummary,
+  designLayoutResizedFrame,
 } from "../design-layout-children";
 
 function layer(
@@ -69,6 +70,16 @@ function container() {
 }
 
 describe("layout controls for a container's children", () => {
+  it("fits a frame to its content within the storable frame size", () => {
+    const parent = container();
+    expect(
+      designLayoutResizedFrame(parent, { width: "640px", height: "480px" }),
+    ).toEqual({ width: 640, height: 480 });
+    expect(
+      designLayoutResizedFrame(parent, { width: "0px", height: "20000px" }),
+    ).toEqual({ width: 1, height: 16_384 });
+  });
+
   it("aligns direct visible children without moving the selected container or grandchildren", () => {
     const hidden = layer("hidden", "parent");
     hidden.visible = false;

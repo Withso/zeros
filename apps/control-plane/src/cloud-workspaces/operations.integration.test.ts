@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   DatabaseCloudWorkspaceBlobService,
   MemoryCloudWorkspaceObjectStore,
@@ -29,8 +29,7 @@ d("cloud workspace production operations", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   function blobs(store = new MemoryCloudWorkspaceObjectStore()) {

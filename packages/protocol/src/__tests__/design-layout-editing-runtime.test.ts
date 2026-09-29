@@ -182,6 +182,26 @@ describe("layout runtime editing", () => {
     });
   });
 
+  it("measures requested boxes in the history restore that moved them", async () => {
+    const result = await page.evaluate(async () => {
+      await window.layoutRequest("commitStyles", {
+        updates: [{ nodeId: "a", styles: { width: "140px" } }],
+        nextSourceVersion: "c".repeat(24),
+      });
+      const restored = await window.layoutRequest("restoreGeneration", {
+        targetSourceVersion: "b".repeat(24),
+        commit: true,
+        // "b" moved without being touched; "missing" no longer exists.
+        measure: ["b", "a", "missing"],
+      });
+      return restored.details.map(
+        (details: { oid: string; rect: { x: number } }) =>
+          `${details.oid}@${details.rect.x}`,
+      );
+    });
+    expect(result).toEqual(["a@0", "b@110"]);
+  });
+
   it("suppresses transferred pixels without changing authored styles or measuring descendants", async () => {
     const result = await page.evaluate(async () => {
       const root = document.querySelector<HTMLElement>('[data-oid="root"]')!;

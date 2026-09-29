@@ -4,7 +4,7 @@ import pg from "pg";
 
 import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import { withSystemTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   CloudProviderError,
   type CloudProviderCreateInput,
@@ -181,8 +181,7 @@ d("cloud workspace reconciliation", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     const sub = randomUUID();
     const owner = await ensureUser(pool, {
       provider: "auth0",

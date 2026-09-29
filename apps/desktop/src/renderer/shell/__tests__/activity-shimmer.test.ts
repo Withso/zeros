@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
@@ -22,13 +24,25 @@ vi.mock("../../shared/ui/loading/zeros-spinner", () => ({
 }));
 
 describe("ActivityShimmer", () => {
-  it("uses the 16px agent shimmer for an active turn", () => {
+  it("uses the 16px glass square for an active turn", () => {
     const markup = renderToStaticMarkup(
       createElement(ActivityShimmer, { startedAt: Date.now() }),
     );
 
     expect(markup).toContain('data-agent-loader="Agent working"');
     expect(markup).toContain('data-agent-loader-size="16"');
-    expect(markup).toContain('data-agent-loader-variant="agent"');
+    expect(markup).toContain('data-agent-loader-variant="glass"');
+  });
+});
+
+describe("the turn rail's place in the turn", () => {
+  it("sits a little lower under the rows above it", () => {
+    const list = readFileSync(
+      resolve(process.cwd(), "apps/desktop/src/renderer/features/agent/turn-event-list.tsx"),
+      "utf8",
+    );
+    expect(list).toMatch(
+      /<ActivityShimmer[\s\S]*?className=\{sequence\.length > 0 \|\| workflowRow \? "mt-2" : undefined\}/,
+    );
   });
 });

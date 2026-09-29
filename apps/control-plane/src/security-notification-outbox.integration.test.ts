@@ -3,7 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ensureUser } from "./auth.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import {
   SecurityNotificationDeliveryError,
   SecurityNotificationProcessor,
@@ -28,8 +28,7 @@ d("security notification outbox", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     workosSubject = `user_${randomUUID()}`;
     const user = await ensureUser(pool, {
       provider: "workos",

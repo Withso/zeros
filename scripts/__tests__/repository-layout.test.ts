@@ -426,7 +426,6 @@ describe("repository layout contracts", () => {
 
   it("keeps development harness entries with their renderer code", () => {
     for (const name of [
-      "context-canvas",
       "design-workspace",
       "diff-preview",
       "github-settings",

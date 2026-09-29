@@ -82,7 +82,7 @@ is rejected so recovery metadata cannot add files to the repository. Imports no 
 remove an old empty staging scaffold or its exact generated ignore file;
 unknown files, edited ignore rules and links remain untouched.
 
-Workspace creation and opening/refreshing the Context tab do not create
+Workspace creation and read-only context listings do not create
 `.context/`. An attachment or explicit context write prepares storage on demand.
 Existing context files and ignore rules retain their compatibility behavior;
 viewing legacy context never migrates it.

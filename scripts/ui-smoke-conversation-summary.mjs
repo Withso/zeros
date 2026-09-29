@@ -96,7 +96,6 @@ export async function runConversationSummarySmoke({
         "Implementation plan.md",
         "Latest screenshot with a very long name that should truncate.png",
         "Design reference.png",
-        "Show all",
       ]);
       await expect(
         island.getByRole("button", { name: "Files", exact: true }),
@@ -128,7 +127,7 @@ export async function runConversationSummarySmoke({
   );
 
   await verify(
-    "Environment and Context use the requested type; empty Context has no heading or Show all",
+    "Environment and Context use the requested type; the retired canvas has no entry point",
     async () => {
       for (const name of ["Environment", "Context"]) {
         const label = island.getByText(name, { exact: true });
@@ -163,7 +162,7 @@ export async function runConversationSummarySmoke({
       await expect(island.getByText("Context", { exact: true })).toBeVisible();
       await expect(
         island.getByRole("button", { name: "Show all" }),
-      ).toBeVisible();
+      ).toHaveCount(0);
     },
   );
 
@@ -182,7 +181,7 @@ export async function runConversationSummarySmoke({
       await page.emulateMedia({ reducedMotion: "reduce" });
       await island.getByRole("button", { name: "Expand summary" }).click();
       await expect(
-        island.getByRole("button", { name: "Show all" }),
+        island.getByRole("button", { name: "Implementation plan.md" }),
       ).toBeVisible();
       expect(
         await contents.evaluate(
@@ -215,7 +214,7 @@ export async function runConversationSummarySmoke({
   );
 
   await verify(
-    "every tool and Show all reveal the correct destination and reuse existing tabs",
+    "every tool reveals the correct destination and reuses existing tabs",
     async () => {
       for (const [name, type] of [
         ["Changes", "changes"],
@@ -223,7 +222,6 @@ export async function runConversationSummarySmoke({
         ["Browser", "browser"],
         ["Terminal", "terminal"],
         ["Files", "files"],
-        ["Show all", "context"],
       ]) {
         await island.getByRole("button", { name, exact: true }).click();
         await expect(page.getByTestId("workbench")).toBeVisible();
@@ -246,6 +244,28 @@ export async function runConversationSummarySmoke({
   );
 
   await verify(
+    "context attachments open their exact file and reuse it without recreating the retired tab",
+    async () => {
+      const name = "Implementation plan.md";
+      await island.getByRole("button", { name, exact: true }).click();
+      await expect(page.getByTestId("workbench")).toBeVisible();
+      await expect(page.getByTestId("destination")).toHaveText("files");
+      const first = await page.evaluate(() => window.__summaryHarness.state());
+      expect(first.tabs.find((tab) => tab.id === first.activeId)).toMatchObject({
+        type: "files",
+        filePath: ".context/local/attachments/3/Implementation plan.md",
+      });
+      expect(first.tabs.some((tab) => tab.type === "context")).toBe(false);
+      await trigger.click();
+      await popup.getByRole("button", { name, exact: true }).click();
+      await expect(popup).toHaveCount(0);
+      const reopened = await page.evaluate(() => window.__summaryHarness.state());
+      expect(reopened.activeId).toBe(first.activeId);
+      expect(reopened.tabs).toHaveLength(first.tabs.length);
+    },
+  );
+
+  await verify(
     "Run stays visible, animates its leading icon, opens its preview in Browser, and stops",
     async () => {
       const run = island.getByRole("button", {
@@ -259,7 +279,7 @@ export async function runConversationSummarySmoke({
       await run.click();
       await expect(page.getByTestId("destination")).toHaveText("terminal");
       await expect(page.getByTestId("workbench")).toHaveCount(0);
-      await expect(island.locator("[data-run-wave]")).toHaveCount(1);
+      await expect(island.locator("[data-run-stream]")).toHaveCount(1);
       await expect
         .poll(() =>
           page.evaluate(() =>
@@ -286,7 +306,7 @@ export async function runConversationSummarySmoke({
       await popup
         .getByRole("button", { name: "Stop Dev server", exact: true })
         .click();
-      await expect(popup.locator("[data-run-wave]")).toHaveCount(0);
+      await expect(popup.locator("[data-run-stream]")).toHaveCount(0);
       await expect(
         popup.getByRole("button", { name: "Run Dev server", exact: true }),
       ).toBeVisible();
@@ -390,7 +410,7 @@ export async function runConversationSummarySmoke({
       await island
         .getByRole("button", { name: "Stop Dev server", exact: true })
         .click();
-      await expect(island.locator("[data-run-wave]")).toHaveCount(0);
+      await expect(island.locator("[data-run-stream]")).toHaveCount(0);
     },
   );
 
@@ -432,8 +452,8 @@ export async function runConversationSummarySmoke({
       await expect.poll(fitsColumn).toBe(true);
       await page.setViewportSize({ width: 420, height: 320 });
       await expect.poll(fitsColumn).toBe(true);
-      await popup.getByRole("button", { name: "Show all" }).click();
-      await expect(page.getByTestId("destination")).toHaveText("context");
+      await popup.getByRole("button", { name: "Implementation plan.md" }).click();
+      await expect(page.getByTestId("destination")).toHaveText("files");
     },
   );
 
@@ -443,8 +463,8 @@ export async function runConversationSummarySmoke({
       await page.setViewportSize({ width: 1280, height: 360 });
       const card = await island.boundingBox();
       expect(card.y + card.height).toBeLessThanOrEqual(360);
-      await island.getByRole("button", { name: "Show all" }).click();
-      await expect(page.getByTestId("destination")).toHaveText("context");
+      await island.getByRole("button", { name: "Implementation plan.md" }).click();
+      await expect(page.getByTestId("destination")).toHaveText("files");
     },
   );
 
@@ -538,7 +558,7 @@ export async function runConversationSummarySmoke({
         .getByRole("button", { name: "Run Test suite 39", exact: true })
         .scrollIntoViewIfNeeded();
       await expect(
-        island.getByRole("button", { name: "Show all" }),
+        island.getByRole("button", { name: "Implementation plan.md" }),
       ).toBeVisible();
       await page.evaluate(() => window.__summaryHarness.hide());
       await expect(island).toHaveCount(0);

@@ -13,7 +13,6 @@ import {
   Globe,
   File as FileIcon,
   GitPullRequestArrow,
-  Book,
   Terminal,
   PenTool,
   type LucideIcon,
@@ -23,7 +22,6 @@ export type WorkbenchTabType =
   | "design"
   | "changes"
   | "review"
-  | "context"
   | "browser"
   | "terminal"
   | "files";
@@ -349,7 +347,7 @@ export type WorkbenchOpenPlan =
 
 /** Keep expensive File surfaces lazy unless they are active or own an unsaved
  * draft. Browsers preserve iframe state; the pinned home views preserve
- * their resolved lists, PR state, and canvas viewport + decoded images. The
+ * their resolved lists and PR state. The
  * shared terminal deck owns its retained views across both placements. Clean,
  * inactive File tabs remain the only lazy surface. */
 export function shouldMountWorkbenchTab(
@@ -361,7 +359,6 @@ export function shouldMountWorkbenchTab(
     tab.type === "browser" ||
     tab.type === "changes" ||
     tab.type === "review" ||
-    tab.type === "context" ||
     tab.id === activeId ||
     dirtyEditorIds.has(tab.id)
   );
@@ -464,17 +461,6 @@ export function workbenchTabIconPath(tab: WorkbenchTab): string | null {
   return path ? path : null;
 }
 
-/** Build THE Context tab — the pinned canvas over the workspace's
- *  `.context/` (composer attachments + shared docs, auto-laid-out,
- *  pan/zoom only). One per worktree, can't be closed. */
-export function createContextTab(): WorkbenchTab {
-  return {
-    id: nextId("context"),
-    type: "context",
-    title: "Context",
-  };
-}
-
 export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
   design: { label: "Design", icon: PenTool },
   terminal: { label: "Terminal", icon: Terminal },
@@ -485,10 +471,6 @@ export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
   review: {
     label: "Review",
     icon: GitPullRequestArrow,
-  },
-  context: {
-    label: "Context",
-    icon: Book,
   },
   browser: {
     label: "Browser",
@@ -519,13 +501,14 @@ const LEGACY_KEY_ACTIVE = "column3-active-tab-id";
  *  the PR surface is the pinned "review" home tab now, a DIFFERENT type so a
  *  stale persisted "pr" entry still drops cleanly. Old generic Terminal tabs
  *  without a session identity are dropped during normalization below. */
-const REMOVED_TAB_TYPES = new Set(["git", "env", "todo", "pr"]);
+// Retire the Context presentation only; `.context` storage and attachment
+// references remain valid. migrateScopes also repairs a selected retired tab.
+const REMOVED_TAB_TYPES = new Set(["git", "env", "todo", "pr", "context"]);
 const CURRENT_TAB_TYPES = new Set<WorkbenchTabType>([
   "design",
   "terminal",
   "changes",
   "review",
-  "context",
   "browser",
   "files",
 ]);
@@ -559,17 +542,16 @@ function validViewerMode(raw: unknown): ViewerMode | undefined {
 }
 
 /** Canonical workbench order: the FIXED Files home (falling back to the first File
- *  tab in lists that predate the flag), then the pinned Changes, Review, and
- *  Context homes, followed by all other closable File/Browser tabs in their
+ *  tab in lists that predate the flag), then the pinned Design, Changes, and
+ *  Review homes, followed by all other closable File/Browser tabs in their
  *  relative order. The leading slot is stable: extra File tabs never migrate
  *  into it while the home exists. */
 export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
   const design = tabs.find((t) => t.type === "design");
   const changes = tabs.find((t) => t.type === "changes");
   const review = tabs.find((t) => t.type === "review");
-  const context = tabs.find((t) => t.type === "context");
   const systemIds = new Set(
-    [design?.id, changes?.id, review?.id, context?.id].filter((id): id is string =>
+    [design?.id, changes?.id, review?.id].filter((id): id is string =>
       Boolean(id),
     ),
   );
@@ -590,20 +572,17 @@ export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
     ...(design ? [{ ...design, pinned: true }] : []),
     ...(changes ? [{ ...changes, pinned: true }] : []),
     ...(review ? [{ ...review, pinned: true }] : []),
-    ...(context ? [{ ...context, pinned: true }] : []),
     ...rest,
   ];
 }
 
 /** Enforce the workbench invariants on a persisted tab list:
- *   • legacy types (git/…/pr) are dropped;
+ *   • retired types (git/…/pr/context) are dropped;
  *   • exactly ONE Design tab, restoring an older Design tab's identity;
  *   • exactly ONE Changes tab — the first persisted one becomes THE pinned
  *     Changes tab (its sidebar selection survives), or one is seeded;
  *   • exactly ONE Review tab — the first persisted one is promoted, or one is
  *     seeded (always visible; its body renders an empty state without a PR);
- *   • exactly ONE Context tab — promoted or seeded the same way (pre-Context
- *     persisted slices gain it here, no storage-key bump needed);
  *   • exactly ONE fixed Files home — the first persisted `fixed` File tab
  *     keeps the flag, else the first File tab is promoted (pre-flag slices),
  *     else a blank home is seeded: the Files surface is permanent now, so its
@@ -614,7 +593,7 @@ export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
  *     stripped), enabling the multi-browser policy;
  *   • Terminal tabs with a valid destination keep their placement; the retired
  *     generic Terminal tabs without a session identity are removed;
- *   • order is [fixed Files home, Changes, Review, Context, ...other closable
+ *   • order is [fixed Files home, Design, Changes, Review, ...other closable
  *     tabs].
  *  Result never becomes empty because the home tabs remain. */
 export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
@@ -690,19 +669,6 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         fileTreeVisible: undefined,
       }
     : { ...createReviewTab(), pinned: true };
-  const firstContext = tabs.find((t) => t.type === "context");
-  const homeContext: WorkbenchTab = firstContext
-    ? {
-        ...firstContext,
-        title: "Context",
-        pinned: true,
-        filePath: undefined,
-        reviewSubtab: undefined,
-        changesView: undefined,
-        browserConversationId: undefined,
-        viewerMode: undefined,
-      }
-    : { ...createContextTab(), pinned: true };
   const seenTerminalIds = new Set<string>();
   const closable: WorkbenchTab[] = tabs
     .filter((t) => {
@@ -814,7 +780,6 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
     homeDesign,
     { ...homeChanges, fixed: undefined },
     { ...homeReview, fixed: undefined },
-    { ...homeContext, fixed: undefined },
     ...withHome,
   ]);
 }
@@ -860,7 +825,7 @@ export function migrateDesignPresentation(
 export type WorkbenchScopeMap = Record<string, WorkbenchScopeState>;
 
 /** The default slice for a fresh worktree: the fixed blank Files home first,
- *  then pinned Changes/Review/Context and a closable Setup terminal tab. */
+ *  then pinned Design/Changes/Review and a closable Setup terminal tab. */
 export function defaultTabs(): WorkbenchScopeState {
   const tabs = normalizeWorkbenchTabs([
     createEmptyFilesTab(),
@@ -976,7 +941,7 @@ export function migrateScopes(parsed: WorkbenchScopeMap): WorkbenchScopeMap {
       tabs.push(createTerminalWorkbenchTab("setup", "Setup"));
     }
     // A persisted activeId that no longer names a tab (including the removed
-    // legacy workbench PR tab or a docked terminal) falls back to the first File,
+    // Context/legacy PR tab or a docked terminal) falls back to the first File,
     // then Changes.
     const activeId =
       slice.activeId &&

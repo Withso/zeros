@@ -7,6 +7,7 @@ import {
   useDesignCheckoutStatus,
 } from "./design-checkout-state";
 import React, { useCallback, useState } from "react";
+import { Frame } from "lucide-react";
 import type {
   Workspace,
   DesignWorkspaceSnapshotWire,
@@ -149,6 +150,43 @@ export function DesignWorkbenchSurface({
       </div>
     );
   }
+  if (!localMain && target.data?.exists === false) {
+    return (
+      <div
+        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+        data-design-tab-empty=""
+      >
+        <Frame className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={!active || creating}
+          onClick={() => void initialize()}
+        >
+          {creating ? "Creating…" : "Create design directory"}
+        </Button>
+        <p className="text-fg2 max-w-sm text-xs">Start designing</p>
+        {(failure || target.error || checkout.error) && (
+          <p role="alert" className="text-red-fg max-w-lg text-xs">
+            {failure ?? errorMessage(target.error ?? checkout.error)}
+          </p>
+        )}
+        {(target.error || checkout.error) && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!active}
+            onClick={() => {
+              checkout.refresh();
+              target.refresh();
+            }}
+          >
+            Retry
+          </Button>
+        )}
+      </div>
+    );
+  }
   return (
     <div
       className="text-fg2 flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-sm"
@@ -157,24 +195,14 @@ export function DesignWorkbenchSurface({
       <p>
         {localMain
           ? "Open a workspace to edit Design."
-          : target.data?.exists === false
-            ? `Create ${target.data.directory} to start designing in this workspace.`
-            : target.loading || checkout.loading
-              ? "Checking Design directory…"
-              : "Choose a Design directory in repository settings."}
+          : target.loading || checkout.loading
+            ? "Checking Design directory…"
+            : "Choose a Design directory in repository settings."}
       </p>
       {(failure || target.error || checkout.error) && (
         <p role="alert" className="text-red-fg max-w-lg">
           {failure ?? errorMessage(target.error ?? checkout.error)}
         </p>
-      )}
-      {!localMain && target.data?.exists === false && (
-        <Button
-          disabled={!active || creating}
-          onClick={() => void initialize()}
-        >
-          {creating ? "Creating…" : "Create design directory"}
-        </Button>
       )}
       {project && target.data?.exists !== false && (
         <Button

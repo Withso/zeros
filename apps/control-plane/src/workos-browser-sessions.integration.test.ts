@@ -8,7 +8,7 @@ import {
   createDeletionLifecycleRoutes,
   DeletionLifecycleProcessor,
 } from "./deletion-lifecycle.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import {
   PostgresWorkOSBrowserSessionRepository,
   WorkOSBrowserSessions,
@@ -32,8 +32,7 @@ d("Postgres WorkOS browser sessions", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 4 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   afterAll(async () => {

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   DESIGN_ROTATION_CORNERS,
+  clampDesignRectPosition,
+  clampDesignResizeRect,
   designAuthoredResizeAxis,
   designCanvasPointFromClient,
   designCanvasRectFromPoints,
@@ -21,12 +23,9 @@ import {
   designSelectionBoxCorners,
   designSelectionOverlayFrame,
   designSelectionPivot,
-  designGridTrackSegments,
   designHighResolutionViewportTile,
-  designInlineGapDistributionStyles,
-  designInlineGapGeometry,
-  designInlineGapRegions,
-  designInlineSpacingValue,
+  designRevealRectViewport,
+  designViewportShowsAnyRect,
   designSelectionClickIntent,
   designMeasureSpacing,
   designPointerRotation,
@@ -42,22 +41,6 @@ import {
   settleDesignFrameGesture,
   zoomDesignViewportAtPoint,
 } from "../design-canvas-math";
-
-it("releases all automatic gap distributions when scrubbing a concrete gap", () => {
-  for (const justifyContent of [
-    "space-between",
-    "space-around",
-    "space-evenly",
-  ])
-    expect(
-      designInlineGapDistributionStyles({
-        display: "flex",
-        flexDirection: "row",
-        axis: "x",
-        justifyContent,
-      }),
-    ).toEqual({ "justify-content": "flex-start" });
-});
 
 describe("design canvas viewport math", () => {
   it("rebases extreme zoom into one bounded device-resolution viewport tile", () => {
@@ -131,6 +114,15 @@ describe("design canvas viewport math", () => {
     expect(
       designCanvasRectFromPoints({ x: 420, y: 300 }, { x: 120, y: 90 }),
     ).toEqual({ x: 120, y: 90, width: 300, height: 210 });
+  });
+
+  it("stops a drawn frame at the largest storable size from its first corner", () => {
+    expect(
+      designCanvasRectFromPoints({ x: 100, y: 50 }, { x: 30_000, y: 400 }, 16_384),
+    ).toEqual({ x: 100, y: 50, width: 16_384, height: 350 });
+    expect(
+      designCanvasRectFromPoints({ x: 0, y: 0 }, { x: -20_000, y: -20_000 }, 16_384),
+    ).toEqual({ x: -16_384, y: -16_384, width: 16_384, height: 16_384 });
   });
 
   it("delays selected-layer click semantics until a group drag is ruled out", () => {
@@ -445,6 +437,132 @@ describe("design canvas viewport math", () => {
     ).toEqual({ x: 86, y: 20, width: 24, height: 80 });
   });
 
+  it("stops a resize at the largest storable size without moving the anchor", () => {
+    const limits = { maxWidth: 16_384, maxHeight: 16_384 };
+    const tall = { x: 0, y: 0, width: 100, height: 16_000 };
+
+    expect(resizeDesignRect(tall, 0, 1_000, "s", limits)).toEqual({
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 16_384,
+    });
+    expect(resizeDesignRect(tall, 0, -1_000, "n", limits)).toEqual({
+      x: 0,
+      y: -384,
+      width: 100,
+      height: 16_384,
+    });
+    expect(
+      resizeDesignRect(tall, 0, 1_000, "s", { ...limits, fromCenter: true }),
+    ).toEqual({ x: 0, y: -192, width: 100, height: 16_384 });
+    expect(
+      resizeDesignRect(
+        { x: 0, y: 0, width: 8_000, height: 16_000 },
+        0,
+        1_000,
+        "se",
+        { ...limits, keepAspect: true },
+      ),
+    ).toEqual({ x: 0, y: 0, width: 8_192, height: 16_384 });
+    // Snapping runs after the pointer math and must not push past the limit.
+    expect(
+      clampDesignResizeRect(
+        { x: -10, y: 0, width: 16_400, height: 100 },
+        "w",
+        limits,
+      ),
+    ).toEqual({ x: 6, y: 0, width: 16_384, height: 100 });
+    expect(
+      clampDesignResizeRect(
+        { x: 0, y: 0, width: 100, height: 16_390 },
+        "s",
+        limits,
+      ),
+    ).toEqual({ x: 0, y: 0, width: 100, height: 16_384 });
+  });
+
+  it("keeps a resized frame's origin within the storable coordinates", () => {
+    // A west resize past -1,000,000 stops there and keeps the right edge.
+    expect(
+      clampDesignRectPosition(
+        { x: -1_000_050, y: 10, width: 200, height: 100 },
+        1_000_000,
+      ),
+    ).toEqual({ x: -1_000_000, y: 10, width: 150, height: 100 });
+    expect(
+      clampDesignRectPosition(
+        { x: 1_000_020, y: -1_000_001, width: 50, height: 40 },
+        1_000_000,
+      ),
+    ).toEqual({ x: 1_000_000, y: -1_000_000, width: 50, height: 39 });
+    const inside = { x: 5, y: 6, width: 7, height: 8 };
+    expect(clampDesignRectPosition(inside, 1_000_000)).toBe(inside);
+  });
+
+  it("knows when the camera shows none of a canvas's frames", () => {
+    const viewport = { width: 800, height: 600 };
+    const frames = [
+      { x: 0, y: 0, width: 1_440, height: 900 },
+      { x: 1_560, y: 0, width: 1_440, height: 900 },
+    ];
+    expect(
+      designViewportShowsAnyRect({ zoom: 0.5, panX: 0, panY: 0 }, viewport, frames),
+    ).toBe(true);
+    // Parked far away, e.g. after zooming around a 16,384 px frame.
+    expect(
+      designViewportShowsAnyRect(
+        { zoom: 0.05, panX: -40_000, panY: -30_000 },
+        viewport,
+        frames,
+      ),
+    ).toBe(false);
+    // In view but only a couple of pixels on screen is not "shown".
+    expect(
+      designViewportShowsAnyRect(
+        { zoom: 0.02, panX: 0, panY: 0 },
+        viewport,
+        [{ x: 0, y: 0, width: 100, height: 100 }],
+      ),
+    ).toBe(false);
+    expect(designViewportShowsAnyRect({ zoom: 1, panX: 0, panY: 0 }, viewport, [])).toBe(
+      true,
+    );
+  });
+
+  it("reveals an off-screen frame without moving one already in view", () => {
+    const viewport = { width: 800, height: 600 };
+    const view = { zoom: 0.5, panX: 0, panY: 0 };
+    // Visible (even partly): the camera stays.
+    expect(
+      designRevealRectViewport(view, viewport, {
+        x: 1_500,
+        y: 1_100,
+        width: 400,
+        height: 300,
+      }),
+    ).toBeNull();
+    // Off to the right at a size that fits: centered at the same zoom.
+    expect(
+      designRevealRectViewport(view, viewport, {
+        x: 4_000,
+        y: 0,
+        width: 400,
+        height: 300,
+      }),
+    ).toEqual({ zoom: 0.5, panX: -1_700, panY: 225 });
+    // Too large (or too small) to read at this zoom: fitted instead.
+    expect(
+      designRevealRectViewport(
+        { zoom: 0.02, panX: -5_000, panY: 0 },
+        viewport,
+        { x: 0, y: 0, width: 400, height: 300 },
+      ),
+    ).toEqual(
+      fitDesignRects([{ x: 0, y: 0, width: 400, height: 300 }], viewport),
+    );
+  });
+
   it("projects every selected child through a group resize", () => {
     const source = { x: 100, y: 80, width: 300, height: 200 };
     const resized = { x: 40, y: 50, width: 600, height: 100 };
@@ -661,228 +779,6 @@ describe("design canvas viewport math", () => {
       ],
       extensions: [],
     });
-  });
-
-  it("converts direct padding and gap drags into clamped, snapped values", () => {
-    expect(designInlineSpacingValue(16, 5.2, 1)).toBe(21);
-    expect(designInlineSpacingValue(16, 5.2, -1)).toBe(11);
-    expect(designInlineSpacingValue(2, 20, -1)).toBe(0);
-    expect(designInlineSpacingValue(16, 5.2, 1, 8)).toBe(24);
-  });
-
-  it("places flex gap controls only inside real spaces between direct children", () => {
-    expect(
-      designInlineGapRegions({
-        container: { x: 100, y: 200, width: 300, height: 400 },
-        children: [
-          {
-            id: "first",
-            rect: { x: 120, y: 220, width: 100, height: 40 },
-          },
-          {
-            id: "ignored-absolute",
-            position: "absolute",
-            rect: { x: 120, y: 265, width: 100, height: 10 },
-          },
-          {
-            id: "second",
-            rect: { x: 120, y: 280, width: 100, height: 40 },
-          },
-          {
-            id: "third",
-            rect: { x: 120, y: 360, width: 100, height: 40 },
-          },
-        ],
-        display: "flex",
-        flexDirection: "column",
-        flexWrap: "nowrap",
-      }),
-    ).toEqual([
-      {
-        key: "y:first:second",
-        property: "gap",
-        axis: "y",
-        x: 20,
-        y: 60,
-        width: 100,
-        height: 20,
-        leadingId: "first",
-        trailingId: "second",
-      },
-      {
-        key: "y:second:third",
-        property: "gap",
-        axis: "y",
-        x: 20,
-        y: 120,
-        width: 100,
-        height: 40,
-        leadingId: "second",
-        trailingId: "third",
-      },
-    ]);
-  });
-
-  it("spans the complete content cross-axis for non-wrapping flex gaps", () => {
-    expect(
-      designInlineGapRegions({
-        container: { x: 100, y: 200, width: 360, height: 400 },
-        children: [
-          { id: "wide", rect: { x: 120, y: 220, width: 220, height: 40 } },
-          { id: "narrow", rect: { x: 210, y: 300, width: 24, height: 20 } },
-          { id: "medium", rect: { x: 150, y: 360, width: 140, height: 40 } },
-        ],
-        display: "flex",
-        flexDirection: "column",
-        flexWrap: "nowrap",
-      }),
-    ).toMatchObject([
-      { key: "y:wide:narrow", x: 20, width: 220 },
-      { key: "y:narrow:medium", x: 20, width: 220 },
-    ]);
-  });
-
-  it("exposes both row and column gaps for wrapped and grid layouts", () => {
-    const children = [
-      { id: "a", rect: { x: 0, y: 0, width: 50, height: 40 } },
-      { id: "b", rect: { x: 70, y: 0, width: 50, height: 40 } },
-      { id: "c", rect: { x: 0, y: 60, width: 50, height: 40 } },
-      { id: "d", rect: { x: 70, y: 60, width: 50, height: 40 } },
-    ];
-
-    const wrapped = designInlineGapRegions({
-      container: { x: 0, y: 0, width: 120, height: 100 },
-      children,
-      display: "flex",
-      flexDirection: "row",
-      flexWrap: "wrap",
-    });
-    expect(wrapped.map(({ key, property }) => ({ key, property }))).toEqual([
-      { key: "x:a:b", property: "column-gap" },
-      { key: "x:c:d", property: "column-gap" },
-      { key: "y:a:c", property: "row-gap" },
-      { key: "y:b:d", property: "row-gap" },
-    ]);
-
-    const grid = designInlineGapRegions({
-      container: { x: 0, y: 0, width: 120, height: 100 },
-      children,
-      display: "grid",
-    });
-    expect(grid.map(({ key, property }) => ({ key, property }))).toEqual(
-      wrapped.map(({ key, property }) => ({ key, property })),
-    );
-  });
-
-  it("retains a zero-width gap boundary so zero spacing stays discoverable", () => {
-    expect(
-      designInlineGapRegions({
-        container: { x: 0, y: 0, width: 100, height: 40 },
-        children: [
-          { id: "a", rect: { x: 0, y: 0, width: 50, height: 40 } },
-          { id: "b", rect: { x: 50, y: 0, width: 50, height: 40 } },
-        ],
-        display: "flex",
-        flexDirection: "row",
-      }),
-    ).toMatchObject([
-      {
-        key: "x:a:b",
-        property: "gap",
-        axis: "x",
-        x: 50,
-        width: 0,
-      },
-    ]);
-  });
-
-  it("separates a forgiving gap hit target from the exact visible gap", () => {
-    expect(
-      designInlineGapGeometry(
-        {
-          key: "x:a:b",
-          property: "gap",
-          axis: "x",
-          x: 50,
-          y: 8,
-          width: 0,
-          height: 24,
-          leadingId: "a",
-          trailingId: "b",
-        },
-        1,
-      ),
-    ).toEqual({
-      hitRect: { x: 41, y: 8, width: 18, height: 24 },
-      visualRect: { x: 9, y: 0, width: 0, height: 24 },
-    });
-
-    expect(
-      designInlineGapGeometry(
-        {
-          key: "y:a:b",
-          property: "row-gap",
-          axis: "y",
-          x: 12,
-          y: 40,
-          width: 80,
-          height: 6,
-          leadingId: "a",
-          trailingId: "b",
-        },
-        2,
-      ),
-    ).toEqual({
-      hitRect: { x: 12, y: 38.5, width: 80, height: 9 },
-      visualRect: { x: 0, y: 1.5, width: 80, height: 6 },
-    });
-  });
-
-  it("converts Auto-distributed flex space to fixed spacing on the dragged axis", () => {
-    expect(
-      designInlineGapDistributionStyles({
-        display: "flex",
-        flexDirection: "row",
-        flexWrap: "nowrap",
-        axis: "x",
-        justifyContent: "space-between",
-        alignContent: "normal",
-      }),
-    ).toEqual({ "justify-content": "flex-start" });
-    expect(
-      designInlineGapDistributionStyles({
-        display: "flex",
-        flexDirection: "row",
-        flexWrap: "wrap",
-        axis: "y",
-        justifyContent: "flex-start",
-        alignContent: "space-between",
-      }),
-    ).toEqual({ "align-content": "flex-start" });
-    expect(
-      designInlineGapDistributionStyles({
-        display: "grid",
-        flexDirection: "row",
-        flexWrap: "nowrap",
-        axis: "x",
-        justifyContent: "space-between",
-        alignContent: "space-between",
-      }),
-    ).toEqual({});
-  });
-
-  it("projects computed grid tracks into canvas segment geometry", () => {
-    expect(designGridTrackSegments("100px 200px 100px", 400)).toEqual([
-      { start: 0, end: 25, label: "100px" },
-      { start: 25, end: 75, label: "200px" },
-      { start: 75, end: 100, label: "100px" },
-    ]);
-    expect(designGridTrackSegments("repeat(3, 1fr)", 300)).toEqual([
-      { start: 0, end: 33.3, label: "1fr" },
-      { start: 33.3, end: 66.7, label: "1fr" },
-      { start: 66.7, end: 100, label: "1fr" },
-    ]);
-    expect(designGridTrackSegments("none", 300)).toEqual([]);
   });
 
   it("normalizes pointer rotation across the angle seam and supports snapping", () => {
@@ -1187,13 +1083,30 @@ describe("design rotated selection geometry", () => {
         authored: ["left", "right", "bottom"],
       }),
     ).toEqual({ horizontal: ["left", "right"], vertical: ["bottom"] });
-    // Without authored provenance, a resolved offset still reads as a pin.
+    // Without authored provenance, a resolved offset still reads as a pin, and
+    // an axis with no inset stays at its static position with no run.
     expect(
       designConstraintSides({
         position: "absolute",
         styles: { left: "auto", right: "12px", top: "auto", bottom: "auto" },
       }),
-    ).toEqual({ horizontal: ["right"], vertical: ["top"] });
+    ).toEqual({ horizontal: ["right"], vertical: [] });
+    // An authored inset shorthand pins the sides it sets: the runtime reports
+    // them as longhands, since an auto inset computes to its used length.
+    expect(
+      designConstraintSides({
+        position: "absolute",
+        authored: ["inset", "right", "bottom"],
+        styles: { left: "470px", right: "30px", top: "180px", bottom: "40px" },
+      }),
+    ).toEqual({ horizontal: ["right"], vertical: ["bottom"] });
+    expect(
+      designConstraintSides({
+        position: "absolute",
+        authored: ["inset"],
+        styles: { left: "40px", right: "30px", top: "50px", bottom: "40px" },
+      }),
+    ).toEqual({ horizontal: ["left", "right"], vertical: ["top", "bottom"] });
   });
 
   it("measures constraint runs to the pinned parent edges only", () => {
@@ -1240,7 +1153,12 @@ describe("design rotated selection geometry", () => {
         position: "absolute",
         styles: { "--zeros-layout-x": "center", "--zeros-layout-y": "end" },
       }),
-    ).toEqual({ horizontal: [], vertical: ["bottom"] });
+    ).toEqual({
+      horizontal: [],
+      vertical: ["bottom"],
+      // A Center pin has no edge run; the canvas marks its axis instead.
+      center: { x: true, y: false },
+    });
   });
 
   it("bakes a quantized angle into the rotation cursor", () => {

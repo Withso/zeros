@@ -11,7 +11,7 @@ import {
 } from "vitest";
 import pg from "pg";
 
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH,
   CloudWorkspaceEngineClientAdmissionError,
@@ -67,8 +67,7 @@ d("cloud workspace engine client admission", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     service = new DatabaseCloudWorkspaceEngineClientAdmissionService({
       pool,

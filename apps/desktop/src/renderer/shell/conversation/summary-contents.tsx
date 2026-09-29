@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 import {
   ArrowUpRight,
-  Book,
   FileText,
   Image,
   Plus,
@@ -17,12 +16,14 @@ import { isNativeRuntime } from "../../platform/runtime";
 import { subscribeContextGraphChanged } from "../../platform/context-graph";
 import { Button, Tooltip } from "../../shared/ui/primitives";
 import { DynamicIcon } from "../../shared/ui/icon-registry";
-import { RunWave } from "../../shared/ui/loading";
+import { RunStream } from "../../shared/ui/loading";
 import { cn } from "../../shared/ui/cn";
 import { useRunControl } from "../terminal/use-run-control";
 import { useRunStatuses } from "../terminal/use-run-status";
 import { useRunPreviewUrls } from "../terminal/use-run-preview-urls";
 import { useOpenBrowserInWorkbench } from "../workbench/use-open-browser";
+import { buildDirectFileOpenAction } from "../workbench/direct-file-open";
+import { warmChatFileInWorkbench } from "../workbench/use-open-file";
 import { useWorkspaceChangeLines } from "../use-workspace-change-lines";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 import { warmWorkspaceFiles } from "../workspace-files-cache";
@@ -46,7 +47,7 @@ import {
   loadContextGraph,
   loadContextGraphForRefresh,
   useContextGraphSnapshot,
-} from "../workbench/tabs/context-graph-data";
+} from "../context-graph-data";
 import { recentSummaryContext, summaryDestinationTab } from "./summary-model";
 import { isWorkspaceReviewAvailable } from "../workbench/tab-capabilities";
 
@@ -112,9 +113,7 @@ export function SummaryContents({
 
   const warm = useCallback(
     (type: WorkbenchTabType) => {
-      if (type === "context") {
-        void loadContextGraph(folder).catch(() => {});
-      } else if (type === "files" || type === "changes") {
+      if (type === "files" || type === "changes") {
         warmWorkspaceFiles(folder);
         warmIgnoredRoots(folder);
       } else if (type === "review" && workspace?.prNumber) {
@@ -131,6 +130,19 @@ export function SummaryContents({
     },
     [folder, workspace, project?.originUrl],
   );
+
+  const openContextFile = (path: string) => {
+    const store = useWorkspaceStore.getState();
+    const scope = workbenchScopeForFolder(folder);
+    const current = store.workbenchByScope[scope] ?? defaultScopeFor(scope);
+    store.dispatch(
+      buildDirectFileOpenAction(current.tabs, path, {
+        preferredExistingTabId: current.activeId,
+        scope,
+      }),
+    );
+    onNavigate();
+  };
 
   const navigate = (type: WorkbenchTabType) => {
     const store = useWorkspaceStore.getState();
@@ -195,7 +207,7 @@ export function SummaryContents({
                   }}
                 >
                   {running && active ? (
-                    <RunWave size={16} />
+                    <RunStream size={16} />
                   ) : (
                     <DynamicIcon name={action.icon} className="size-4" />
                   )}
@@ -339,9 +351,11 @@ export function SummaryContents({
               key={item.relPath}
               variant="ghost"
               className={ROW}
-              onPointerEnter={() => warm("context")}
-              onFocus={() => warm("context")}
-              onClick={() => navigate("context")}
+              onPointerEnter={() =>
+                warmChatFileInWorkbench(folder, item.relPath)
+              }
+              onFocus={() => warmChatFileInWorkbench(folder, item.relPath)}
+              onClick={() => openContextFile(item.relPath)}
             >
               <Icon className="text-muted-fg size-4" aria-hidden="true" />
               <Tooltip label={item.name} side="left">
@@ -360,18 +374,6 @@ export function SummaryContents({
                   ? "Loading context…"
                   : "No context added yet"}
           </p>
-        )}
-        {recent.length > 0 && (
-          <Button
-            variant="ghost"
-            className={ROW}
-            onPointerEnter={() => warm("context")}
-            onFocus={() => warm("context")}
-            onClick={() => navigate("context")}
-          >
-            <Book className="text-muted-fg size-4" aria-hidden="true" />
-            Show all
-          </Button>
         )}
       </section>
     </div>

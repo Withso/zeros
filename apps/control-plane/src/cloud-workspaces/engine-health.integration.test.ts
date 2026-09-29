@@ -8,7 +8,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
 import { stopUnavailableCloudEngine } from "./engine-health.js";
 import {
@@ -34,8 +34,7 @@ suite("cloud engine liveness and compute convergence", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     f = await seedReadyCloudWorkspace(pool);
   });
   it("retains a distinct expired-engine reason and incident reference", async () => {

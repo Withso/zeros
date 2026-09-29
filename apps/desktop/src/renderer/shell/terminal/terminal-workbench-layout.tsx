@@ -3,7 +3,7 @@ import { ListTree, PanelBottom, Plus, Settings2, X } from "lucide-react";
 import { Button, Separator, Tooltip } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import { DynamicIcon } from "../../shared/ui/icon-registry";
-import { RunWave } from "../../shared/ui/loading";
+import { RunStream } from "../../shared/ui/loading";
 import { type WorkbenchTab } from "../workbench/tab-model";
 import {
   WORKBENCH_TITLE_ACTION_CLS,
@@ -272,7 +272,7 @@ export function TerminalWorkbenchLayout({
                       >
                         <CloudTerminalIndicator folder={folder} />
                         {entry.running ? (
-                          <RunWave
+                          <RunStream
                             size={12}
                             className={cn(
                               "shrink-0",

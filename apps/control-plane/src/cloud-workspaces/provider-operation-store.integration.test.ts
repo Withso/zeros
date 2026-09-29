@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { withSystemTx, withUserTx, type Tx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { DatabaseCloudProviderOperationStore } from "./provider-operation-store.js";
 import {
   seedProviderLossAttestation,
@@ -23,8 +23,7 @@ d("provider operation journal", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     store = new DatabaseCloudProviderOperationStore(
       pool,

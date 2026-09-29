@@ -53,7 +53,7 @@ import { useRetainedViewKeySet } from "../../use-retained-view-keys";
 import { cn } from "../../../shared/ui/cn";
 import { Button } from "../../../shared/ui";
 import { Badge, Tooltip } from "../../../shared/ui/primitives";
-import { RunWave } from "../../../shared/ui/loading";
+import { RunStream } from "../../../shared/ui/loading";
 import { DynamicIcon } from "../../../shared/ui/icon-registry";
 import { useWorkspaceStore } from "../../../state/store";
 import { useActiveWorkspace } from "../../../state/use-active-workspace";
@@ -387,7 +387,7 @@ export function TerminalPanel({
     //     merely because its action list is temporarily empty.
     //   • runStatusesReady: the status map reads {} both before the first
     //     workspace.runInfo lands and when nothing is running. Publishing the
-    //     first as if it were the second blanks the live wave on this
+    //     first as if it were the second blanks the live stream on this
     //     workspace's own top-bar tab for a round-trip, every cold open.
     if (!actionsReady || !runStatusesReady) return;
     publishRunActivity(folderKey, anyRunActionRunning);
@@ -1529,7 +1529,7 @@ function SubTab({
       )}
     >
       <CloudTerminalIndicator folder={folderKey} className="mr-1.5" />
-      {running && <RunWave size={12} className="mr-1.5" />}
+      {running && <RunStream size={12} className="mr-1.5" />}
       <span className="max-w-[140px] truncate">
         {label}
         {exited && <span className="ml-1 opacity-70">(exited)</span>}

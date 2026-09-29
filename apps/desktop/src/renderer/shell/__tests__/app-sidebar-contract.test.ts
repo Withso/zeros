@@ -132,7 +132,8 @@ describe("sidebar workspace list presentations", () => {
     );
     expect(row).toContain("<WorkspaceProjectIcon project={project} />");
     expect(row).toContain("trailingAgentState");
-    expect(row).toContain("useAnyChatAgentActivity");
+    // Any chat's activity, where a turn parked on the user rests.
+    expect(row).toContain("useAnyChatWorkingActivity");
     expect(SIDEBAR).toContain("mixedRepositories={!groupedList}");
   });
 
@@ -174,10 +175,12 @@ describe("sidebar workspace rows", () => {
       "export function SidebarWorkspaceRow(",
       "/** Placeholder row",
     );
+    // The slot holds the pencil, or a flat row's awaiting mark, which
+    // outranks it (awaiting-mark-placement.test.ts).
     expect(row).toMatch(
-      /<RunWave[\s\S]*?\{showDraft && \([\s\S]*?<ComposerDraftIndicator \/>\s*\{rowAction\}/,
+      /<RunStream[\s\S]*?\{trailingMark && \([\s\S]*?<ComposerDraftIndicator \/>[\s\S]*?\{rowAction\}\s*<\/span>/,
     );
-    expect(row).toContain("{!showDraft && rowAction}");
+    expect(row).toContain("{!trailingMark && rowAction}");
     expect(classConstant(ROW, "SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS")).toMatch(
       /group-hover\/workspace:opacity-100/,
     );

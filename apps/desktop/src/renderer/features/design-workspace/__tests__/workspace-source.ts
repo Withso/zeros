@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 export function readDesignWorkspaceSource(): string {
   return ["design-workspace.tsx", "design-canvas.tsx", "design-workspace-overlays.tsx",
     "design-frame-render-surface.tsx", "design-inspector.tsx", "design-workspace-types.ts",
-    "design-workspace-error.ts", "design-inline-text-editor.tsx", "design-canvas-camera.ts"]
+    "design-workspace-error.ts", "design-inline-text-editor.tsx", "design-canvas-camera.ts",
+    "design-layout-tools-overlay.tsx"]
     .map(file => readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace", file), "utf8")).join("\n");
 }

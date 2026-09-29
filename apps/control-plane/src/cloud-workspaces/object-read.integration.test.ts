@@ -1,7 +1,7 @@
 import {randomBytes} from "node:crypto";
 import pg from "pg";
 import {afterAll,beforeAll,beforeEach,describe,expect,it} from "vitest";
-import {runMigrations} from "../migrate.js";
+import {resetMigratedTestDatabase} from "../test-database.js";
 import {withSystemTx} from "../db.js";
 import {seedReadyCloudWorkspace} from "./test-fixtures.js";
 import {DatabaseCloudWorkspaceBlobService,MemoryCloudWorkspaceObjectStore} from "./object-store.js";
@@ -13,7 +13,7 @@ d("object reads across external storage latency",()=>{
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:4});});
   afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{
-    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture=await seedReadyCloudWorkspace(pool);store=new MemoryCloudWorkspaceObjectStore();
     blobs=new DatabaseCloudWorkspaceBlobService({pool,objectStore:store,encryptionKeyV1:randomBytes(32).toString('base64url'),workosEnabled:false});
     blobId=(await blobs.putCoordinator({organizationId:fixture.organizationId,workspaceId:fixture.workspaceId,bytes:Buffer.from('private fixture bytes')})).id;

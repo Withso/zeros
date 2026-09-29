@@ -39,6 +39,17 @@ describe("experimental feature flags", () => {
     });
   });
 
+  it("keeps Gibberish agent thinking off for new users until they opt in", async () => {
+    const backing = installLocalStorageStub();
+    const store = await freshStore();
+    expect(store.isExperimentalEnabled("gibberishAgentThinking")).toBe(false);
+    store.setExperimentalEnabled("gibberishAgentThinking", true);
+    expect(store.isExperimentalEnabled("gibberishAgentThinking")).toBe(true);
+    expect(JSON.parse(backing.get("zeros.experimentalFeatures")!)).toEqual({
+      gibberishAgentThinking: true,
+    });
+  });
+
   it("defaults every flag off, flips on, and persists to localStorage", async () => {
     const backing = installLocalStorageStub();
     const store = await freshStore();

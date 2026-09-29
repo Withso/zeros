@@ -7,7 +7,17 @@ import { DesignReviewDialog } from "./design-review-dialog";
 
 // --- IMPORTS ---
 
-import { AlertTriangle, Diamond, Download, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Diamond,
+  Download,
+  File,
+  Frame as FrameIcon,
+  Image as ImageIcon,
+  Layers,
+  Spline,
+  Type,
+} from "lucide-react";
 import React, {
   useCallback,
   useEffect,
@@ -19,6 +29,8 @@ import React, {
 } from "react";
 
 import {
+  DESIGN_FRAME_COORDINATE_LIMIT,
+  DESIGN_FRAME_MAX_SIZE,
   DESIGN_TRANSACTION_MAX_OPERATIONS,
   type DesignOperation,
 } from "@zeros/design-core";
@@ -50,6 +62,7 @@ import {
 import { isEditableHotkeyTarget } from "../../shell/editable-target";
 import {
   designAutoLayoutUpdates,
+  designFrameRootFixedStyles,
   designHugFrameSize,
   designSizingMode,
   designSizingStyles,
@@ -58,6 +71,11 @@ import {
 import { normalizeDesignCanvasBackground } from "./design-canvas-background";
 import { DesignCanvasBackgroundEditor } from "./design-canvas-background-editor";
 import { DesignComputedCssEditor } from "./design-computed-css-editor";
+import {
+  InspectorGlyph,
+  InspectorSection,
+  InspectorSelect,
+} from "./design-inspector-kit";
 import {
   designFrameLayerLabel,
   designRuntimeLayerLabel,
@@ -80,6 +98,7 @@ import { blockingDesignLintReason } from "./design-lint-summary";
 import { DesignPanelResizeHandle } from "./design-panel-resize-handle";
 import { DesignStyleEditor } from "./design-style-editor";
 import {
+  clampDesignStyleFieldValue,
   designStyleFieldValue,
   designStylePropertyAffectsLayout,
   designStyleUnitOptions,
@@ -144,6 +163,17 @@ import {
 import { type DesignInspectorProps } from "./design-workspace-types";
 
 
+/** What canvas metadata can store; frame fields settle inside it. */
+const DESIGN_FRAME_SIZE_RANGE = { min: 1, max: DESIGN_FRAME_MAX_SIZE };
+const DESIGN_FRAME_POSITION_RANGE = {
+  min: -DESIGN_FRAME_COORDINATE_LIMIT,
+  max: DESIGN_FRAME_COORDINATE_LIMIT,
+};
+
+function designFrameSizeValue(value: number): number {
+  return Math.min(DESIGN_FRAME_MAX_SIZE, Math.max(1, Math.round(value)));
+}
+
 interface InspectorProvenanceState {
   ownerKey: string;
   property: string;
@@ -156,6 +186,8 @@ interface InspectorEditFieldProps {
   numericValue?: string;
   icon?: DesignLayoutFieldOptions["icon"];
   shortLabel?: string;
+  /** Static trailing unit text for unit-less presentations ("°", "%", "ms"). */
+  suffix?: string;
   percentage?: boolean;
   label: string;
   value: string | number;
@@ -165,6 +197,9 @@ interface InspectorEditFieldProps {
   placeholder?: string;
   styleProperty?: string;
   whole?: boolean;
+  /** Bounds a plain numeric value: typed, stepped or scrubbed input settles
+   * on the nearest allowed value instead of failing on commit. */
+  range?: { min: number; max: number };
   compact?: boolean;
   motion?: {
     modeActive: boolean;
@@ -214,6 +249,7 @@ function InspectorEditField({
   numericValue,
   icon,
   shortLabel,
+  suffix: fieldSuffix,
   percentage,
   label,
   value,
@@ -223,6 +259,7 @@ function InspectorEditField({
   placeholder,
   styleProperty,
   whole = false,
+  range,
   compact = false,
   motion,
   onInspect,
@@ -234,6 +271,8 @@ function InspectorEditField({
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const baselineRef = useRef(String(value));
+  /** The value shown when this field took focus. */
+  const focusValueRef = useRef(String(value));
   const skipCommitRef = useRef(false);
   const unitMenuOpenRef = useRef(false);
   const commitIntentRef = useRef(0);
@@ -267,11 +306,18 @@ function InspectorEditField({
     ? designStyleUnitOptions(styleProperty ?? "", presentation.unit)
     : [];
 
+  const withinRange = (next: string) => {
+    if (styleProperty) next = clampDesignStyleFieldValue(styleProperty, next);
+    const number = Number(next);
+    if (!range || next.trim() === "" || !Number.isFinite(number)) return next;
+    const bounded = Math.min(range.max, Math.max(range.min, number));
+    return bounded === number ? next : String(bounded);
+  };
   const resolveDraft = (next: string, baseline: string) => {
     const resolved = styleProperty
       ? normalizeDesignStyleFieldInput(styleProperty, next, baseline)
       : resolveDesignNumericExpression(next, baseline);
-    return whole ? roundDesignLayoutValue(resolved) : resolved;
+    return withinRange(whole ? roundDesignLayoutValue(resolved) : resolved);
   };
 
   // Finish an unfocused incoming value in this commit. A passive state update
@@ -328,6 +374,18 @@ function InspectorEditField({
     });
   };
 
+  /** A value published while this field was focused but untouched is held
+   * back so it cannot disturb focus or the selected text. Adopt it once the
+   * field settles; otherwise a later untouched blur would write the stale
+   * draft back over it. */
+  const adoptIncomingValue = () => {
+    const latest = String(value);
+    if (latest === focusValueRef.current) return;
+    focusValueRef.current = latest;
+    baselineRef.current = latest;
+    setPresentedDraft(latest);
+  };
+
   const commit = async (requestedDraft = draftRef.current) => {
     if (skipCommitRef.current) {
       skipCommitRef.current = false;
@@ -337,12 +395,14 @@ function InspectorEditField({
     const baseline = baselineRef.current;
     if (requestedDraft === baseline) {
       cancelPreview();
+      adoptIncomingValue();
       return;
     }
     const resolvedDraft = resolveDraft(requestedDraft, baseline);
     if (resolvedDraft !== requestedDraft) setPresentedDraft(resolvedDraft);
     if (resolvedDraft === baseline) {
       cancelPreview();
+      adoptIncomingValue();
       return;
     }
     // A committed preview belongs to the save, not to a later editable draft.
@@ -370,6 +430,22 @@ function InspectorEditField({
     }
   };
 
+  const glyph =
+    icon ?? (compact && label === "Rotation" ? ("rotation" as const) : null);
+  const labelText = glyph ? null : (shortLabel ?? label);
+  // Letters and glyphs sit in one square slot so values start on one line;
+  // words size to their text instead of wrapping inside a compact field.
+  const letterLabel = glyph !== null || (labelText?.length ?? 0) <= 2;
+  const suffix =
+    fieldSuffix ??
+    (compact && styleProperty === "rotate"
+      ? "°"
+      : compact && percentage
+        ? "%"
+        : null);
+  const showUnit = !compact && Boolean(presentation.unit) && unitOptions.length > 0;
+  const motionPersistent = Boolean(motion?.trackActive);
+
   return (
     <div ref={fieldRef} className="group/design-field relative min-w-0">
       <div
@@ -377,31 +453,18 @@ function InspectorEditField({
         data-design-applied={applied ? "" : undefined}
         data-design-style-property={styleProperty}
         data-design-layout-field={compact ? "" : undefined}
-        className={cn(
-          "flex h-7 min-w-0 items-center overflow-hidden rounded-sm transition-colors",
-          compact
-            ? "zd-design-layout-field"
-            : applied
-              ? "zd-design-control-applied"
-              : "zd-design-control-quiet",
-        )}
+        data-design-motion-field={motion ? "" : undefined}
+        data-design-motion-tracked={motionPersistent ? "" : undefined}
+        className="zd-field zd-inspector-field relative overflow-hidden"
       >
         <button
           type="button"
           disabled={disabled}
+          tabIndex={-1}
           className={cn(
-            "text-muted-fg hover:text-fg1 flex h-full shrink-0 cursor-ew-resize items-center justify-center text-[10px] font-medium focus-visible:outline-none disabled:cursor-default",
-            compact
-              ? "w-5"
-              : label.length > 4
-                ? "max-w-16 min-w-10 px-1.5"
-                : "w-7",
+            "zd-field-label zd-field-scrub cursor-ew-resize focus-visible:outline-none disabled:cursor-default",
+            letterLabel ? "w-6" : "pr-1.5 pl-2 whitespace-nowrap",
           )}
-          title={
-            whole
-              ? `Drag to scrub ${label}. Shift for larger steps.`
-              : `Drag to scrub ${label}. Option for decimals; Shift for larger steps.`
-          }
           aria-label={`Scrub ${label}`}
           onPointerDown={(event) => {
             const startValue = numericValue ?? baselineRef.current;
@@ -432,7 +495,9 @@ function InspectorEditField({
               scrub.distance,
             );
             if (next === null) return;
-            const resolved = whole ? roundDesignLayoutValue(next) : next;
+            const resolved = withinRange(
+              whole ? roundDesignLayoutValue(next) : next,
+            );
             if (resolved === scrub.latestValue) return;
             scrub.latestValue = resolved;
             setPresentedDraft(resolved);
@@ -453,49 +518,8 @@ function InspectorEditField({
             cancelPreview();
           }}
         >
-          <Label
-            htmlFor={id}
-            className={cn(
-              "pointer-events-none",
-              compact ? "text-xs" : "text-[10px]",
-            )}
-          >
-            {icon ? (
-              <svg
-                viewBox="0 0 16 16"
-                className="size-3.5"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.25"
-                aria-hidden="true"
-              >
-                {icon === "padding-x" ? (
-                  <path d="M3 2v12M13 2v12M6 5v6M10 5v6" />
-                ) : icon === "padding-y" ? (
-                  <path d="M2 3h12M2 13h12M5 6h6M5 10h6" />
-                ) : icon === "gap" ? (
-                  <path d="M3 2v12M13 2v12M5 8h6M6 6 4 8l2 2M10 6l2 2-2 2" />
-                ) : (
-                  <>
-                    <rect x="2" y="2" width="12" height="12" rx="2" />
-                    <path d="M5 8h1m1-3h1m-1 6h1m2-3h1" />
-                  </>
-                )}
-              </svg>
-            ) : compact && label === "Rotation" ? (
-              <svg
-                viewBox="0 0 16 16"
-                className="size-3.5"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.25"
-                aria-hidden="true"
-              >
-                <path d="M2 12h12M3 12l7-9M7 12a4 4 0 0 0-1.5-3" />
-              </svg>
-            ) : (
-              (shortLabel ?? label)
-            )}
+          <Label htmlFor={id} className="pointer-events-none text-inherit">
+            {glyph ? <InspectorGlyph name={glyph} /> : labelText}
           </Label>
         </button>
         <Input
@@ -505,13 +529,16 @@ function InspectorEditField({
           value={presentation.text}
           placeholder={placeholder}
           disabled={disabled}
-          title={hint}
+          spellCheck={false}
+          autoComplete="off"
           className={cn(
-            "h-full min-w-0 flex-1 rounded-none border-0 bg-transparent px-1.5 py-0 shadow-none focus-visible:border-transparent",
-            compact ? "px-0.5 font-sans text-xs" : "font-mono text-[11px]",
+            "h-full min-w-0 flex-1 rounded-none border-0 bg-transparent py-0 pl-0 font-sans text-xs shadow-none focus-visible:border-transparent",
+            applied ? "text-fg1" : "text-fg2",
+            suffix || showUnit || hint ? "pr-1" : "pr-2",
           )}
           onFocus={() => {
             baselineRef.current = String(value);
+            focusValueRef.current = String(value);
             onInspect?.();
           }}
           onChange={(event) => {
@@ -569,7 +596,7 @@ function InspectorEditField({
               );
               if (next !== null) {
                 event.preventDefault();
-                setPresentedDraft(next);
+                setPresentedDraft(withinRange(next));
               }
             } else if (event.key === "Escape") {
               event.preventDefault();
@@ -589,15 +616,10 @@ function InspectorEditField({
             }
           }}
         />
-        {compact && styleProperty === "rotate" ? (
-          <span className="text-muted-fg pr-2 text-xs">°</span>
-        ) : null}
-        {compact && percentage ? (
-          <span className="text-muted-fg pr-2 text-xs">%</span>
-        ) : null}
-        {!compact && presentation.unit && unitOptions.length > 0 ? (
+        {suffix ? <span className="zd-field-suffix">{suffix}</span> : null}
+        {showUnit ? (
           <Select
-            value={presentation.unit}
+            value={presentation.unit!}
             disabled={disabled}
             onOpenChange={(open) => {
               if (open) {
@@ -621,7 +643,7 @@ function InspectorEditField({
           >
             <SelectTrigger
               size="sm"
-              className="zd-design-unit-trigger h-full w-11 shrink-0 gap-0 rounded-none border-0 bg-transparent px-1 text-[10px] shadow-none [&>svg]:size-2.5"
+              className="zd-design-unit-trigger h-full w-auto shrink-0 gap-0 rounded-none border-0 bg-transparent py-0 pr-2 pl-1 text-[12px] shadow-none [&>svg]:hidden"
               aria-label={`Unit for ${label}`}
               onPointerDown={() => {
                 unitMenuOpenRef.current = true;
@@ -647,77 +669,50 @@ function InspectorEditField({
             </SelectContent>
           </Select>
         ) : null}
-        {motion || (!compact && applied) ? (
+        {hint ? (
+          <Tooltip label={hint}>
+            <span
+              className="bg-highlighted-bright mr-2 size-1.5 shrink-0 rounded-full"
+              aria-label={hint}
+              role="img"
+            />
+          </Tooltip>
+        ) : null}
+        {motion ? (
           <div
             className={cn(
-              "zd-design-field-actions absolute top-0 right-0 flex h-full items-center rounded-r-sm",
-              (motion?.modeActive || motion?.trackActive) &&
-                "zd-design-field-actions-visible",
+              "zd-field-motion absolute inset-y-0 right-0 flex items-center pr-0.5 pl-3",
+              motionPersistent && "zd-field-motion-active",
             )}
-            data-has-unit={presentation.unit && !compact ? "true" : undefined}
-            data-has-hint={hint ? "true" : undefined}
           >
-            {motion ? (
-              <Tooltip
-                label={
+            <Tooltip
+              label={
+                motion.trackActive
+                  ? `Add ${label} keyframe at the playhead`
+                  : `Animate ${label}`
+              }
+            >
+              <button
+                type="button"
+                disabled={disabled}
+                className="zd-field-keyframe"
+                aria-label={
                   motion.trackActive
                     ? `Add ${label} keyframe at the playhead`
                     : `Animate ${label}`
                 }
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={motion.onAddKeyframe}
               >
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
+                <Diamond
                   className={cn(
-                    "size-6 shrink-0",
-                    motion.trackActive &&
-                      "text-[var(--design-selection-stroke)]",
+                    "size-3",
+                    motion.trackActive && "fill-current",
                   )}
-                  aria-label={
-                    motion.trackActive
-                      ? `Add ${label} keyframe at the playhead`
-                      : `Animate ${label}`
-                  }
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={motion.onAddKeyframe}
-                >
-                  <Diamond
-                    className={motion.trackActive ? "fill-current" : undefined}
-                  />
-                </Button>
-              </Tooltip>
-            ) : null}
-            {applied ? (
-              <Tooltip label={`Remove authored ${label}`}>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="size-6 shrink-0"
-                  aria-label={`Remove authored ${label}`}
-                  disabled={disabled}
-                  onPointerDown={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                  }}
-                  onClick={() => {
-                    setPresentedDraft("");
-                    void commit("");
-                  }}
-                >
-                  <X />
-                </Button>
-              </Tooltip>
-            ) : null}
+                />
+              </button>
+            </Tooltip>
           </div>
-        ) : null}
-        {hint ? (
-          <span
-            className="bg-highlighted-bright mr-1 size-1.5 shrink-0 rounded-full"
-            title={hint}
-            aria-label={hint}
-          />
         ) : null}
       </div>
     </div>
@@ -847,13 +842,14 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       value={displayedValue}
       icon={options?.icon}
       shortLabel={options?.shortLabel}
+      suffix={options?.suffix}
       percentage={options?.percentage}
       numericValue={
         options?.sizing && details
           ? designLayoutFieldValue(details, property)
           : undefined
       }
-      placeholder="-"
+      placeholder={options?.placeholder ?? "–"}
       styleProperty={property}
       whole={options?.whole}
       compact={options?.compact}
@@ -927,6 +923,7 @@ export function DesignInspector({
   );
   const zoomPercentage = Math.round(zoom * 100);
   const [frameAction, setFrameAction] = useState<"export" | null>(null);
+  const [exportScale, setExportScale] = useState(1);
   const [pendingHistoryActions, setPendingHistoryActions] = useState(0);
   const [cssMode, setCssMode] = useState(false);
   const [provenance, setProvenance] = useState<InspectorProvenanceState | null>(
@@ -1173,26 +1170,30 @@ export function DesignInspector({
   const exportPng = async () => {
     if (!workspaceId || !folder || !frame || frameAction) return;
     setFrameAction("export");
+    // A selected layer exports on its own, at the chosen scale; the frame
+    // itself (or its authored root) exports the whole frame.
+    const exportNodeId =
+      selectedNodeId && selectedNodeId !== layoutRootId ? selectedNodeId : null;
     try {
       const screenshot = await captureDesignRuntimeScreenshot(
         workspaceId,
         folder,
         frame.file,
         frame.sourceVersion,
-        null,
-        1,
+        exportNodeId,
+        exportScale,
       );
       if (!screenshot) {
         throw new Error("The selected frame is not ready to export yet.");
       }
-      const result = await exportDesignPng(screenshot.dataUrl, frame.title);
-      if (result.saved) {
-        toast.success("Design PNG exported", {
-          ...(result.path ? { description: result.path } : {}),
-        });
-      }
+      await exportDesignPng(
+        screenshot.dataUrl,
+        exportNodeId && elementDetails
+          ? `${frame.title} ${designRuntimeLayerLabel(elementDetails)}`
+          : frame.title,
+      );
     } catch (exportError) {
-      toast.error("Couldn't export the design frame", {
+      toast.error("Couldn't export the design", {
         description: errorMessage(exportError),
       });
     } finally {
@@ -1629,17 +1630,36 @@ export function DesignInspector({
         const rootStyles = context.layoutRootId
           ? updates.get(context.layoutRootId)
           : undefined;
-        if (rootStyles && action.type === "sizing" && action.mode === "fixed") {
-          rootStyles[action.axis === "x" ? "width" : "height"] =
-            action.axis === "x" ? "100%" : "100vh";
+        const rootDetails = details.find(
+          (node) => node.oid === context.layoutRootId,
+        );
+        if (
+          rootStyles &&
+          rootDetails &&
+          action.type === "sizing" &&
+          action.mode === "fixed"
+        ) {
+          Object.assign(
+            rootStyles,
+            designFrameRootFixedStyles(rootDetails, {
+              width: action.axis === "x",
+              height: action.axis === "y",
+            }),
+          );
         }
         if (
           rootStyles &&
+          rootDetails &&
           action.type === "auto-layout" &&
           action.flow === "none"
         ) {
-          rootStyles.width = "100%";
-          rootStyles.height = "100vh";
+          Object.assign(
+            rootStyles,
+            designFrameRootFixedStyles(rootDetails, {
+              width: true,
+              height: true,
+            }),
+          );
         }
         if (updates.size === 0) return;
         const currentFrame = { ...frame, sourceVersion: runtime.sourceVersion };
@@ -1855,6 +1875,11 @@ export function DesignInspector({
           }
           numericValue={options?.sizing ? String(geometryValue) : undefined}
           whole={options?.whole}
+          range={
+            geometryKey === "w" || geometryKey === "h"
+              ? DESIGN_FRAME_SIZE_RANGE
+              : DESIGN_FRAME_POSITION_RANGE
+          }
           compact={options?.compact}
           disabled={pendingHistoryActions > 0}
           applied
@@ -1888,12 +1913,22 @@ export function DesignInspector({
               (geometryKey === "w" || geometryKey === "h") &&
               elementDetails
             ) {
-              if (number < 1)
-                throw new Error("Enter a frame size of at least one pixel.");
-              await applyDesignEditCached(
-                styleContext.workspaceId,
-                styleContext.frame,
-                {
+              const size = designFrameSizeValue(number);
+              const { workspaceId: owner, frame: target } = styleContext;
+              const rootStyles = designFrameRootFixedStyles(elementDetails, {
+                width: geometryKey === "w",
+                height: geometryKey === "h",
+              });
+              // Built in the mutation lane: W then H typed before the first
+              // save replies must each keep the other's confirmed axis.
+              await applyDesignEditCached(owner, target, () => {
+                const latest =
+                  designWorkspaceSnapshotCache
+                    .peekSnapshot(owner)
+                    .data?.frames.find(
+                      (candidate) => candidate.file === target.file,
+                    ) ?? target;
+                return {
                   schemaVersion: 1,
                   transactionId: `desktop:${crypto.randomUUID()}`,
                   actor: { kind: "human", id: "desktop" },
@@ -1904,10 +1939,7 @@ export function DesignInspector({
                       operationId: `layout:${crypto.randomUUID()}`,
                       type: "node.set-styles",
                       nodeId: elementDetails.oid,
-                      styles: {
-                        [geometryKey === "w" ? "width" : "height"]:
-                          geometryKey === "w" ? "100%" : "100vh",
-                      },
+                      styles: rootStyles,
                       scope: "auto",
                       responsiveContext: "base",
                       stateContext: "default",
@@ -1915,24 +1947,18 @@ export function DesignInspector({
                     {
                       operationId: `layout:${crypto.randomUUID()}`,
                       type: "frame.set-geometry",
-                      frame: styleContext.frame.file,
+                      frame: target.file,
                       geometry: {
-                        x: styleContext.frame.x,
-                        y: styleContext.frame.y,
-                        width:
-                          geometryKey === "w"
-                            ? Math.round(number)
-                            : styleContext.frame.width,
-                        height:
-                          geometryKey === "h"
-                            ? Math.round(number)
-                            : styleContext.frame.height,
-                        z: styleContext.frame.z,
+                        x: latest.x,
+                        y: latest.y,
+                        width: geometryKey === "w" ? size : latest.width,
+                        height: geometryKey === "h" ? size : latest.height,
+                        z: latest.z,
                       },
                     },
                   ],
-                },
-              );
+                };
+              });
               return;
             }
             await updateDesignFrameGeometryCached(
@@ -1991,40 +2017,70 @@ export function DesignInspector({
     );
   };
 
+  const selectionName =
+    styleNodeIds.length > 1
+      ? `${styleNodeIds.length} layers`
+      : elementDetails
+        ? designRuntimeLayerLabel(elementDetails)
+        : frameSelected && frame
+          ? designFrameLayerLabel(frame.kind)
+          : selectedNodeId
+            ? "Nothing selected"
+            : "Page";
+  const SelectionGlyph =
+    styleNodeIds.length > 1
+      ? Layers
+      : selectionName === "Text"
+        ? Type
+        : selectionName === "Image"
+          ? ImageIcon
+          : selectionName === "Vector Path"
+            ? Spline
+            : selectionName === "Page"
+              ? File
+              : FrameIcon;
+
   const inspectorSelectionHeader = (
     <section className="border-border1 shrink-0 border-b">
       <div
         data-design-inspector-header=""
-        className="flex h-10 min-w-0 items-center gap-1 px-3"
+        className="flex h-10 min-w-0 items-center gap-2 px-3"
       >
+        <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
         <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">
-          {styleNodeIds.length > 1
-            ? `${styleNodeIds.length} layers`
-            : elementDetails
-              ? designRuntimeLayerLabel(elementDetails)
-              : frameSelected && frame
-                ? designFrameLayerLabel(frame.kind)
-                : selectedNodeId
-                  ? "Nothing selected"
-                  : "Page"}
+          {selectionName}
         </span>
-        {frameSelected || selectedNodeId ? (
-          <Tooltip label="Export PNG">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              disabled={!frame || !folder || frameAction !== null}
-              aria-label="Export PNG"
-              onClick={() => void exportPng()}
-            >
-              <Download />
-            </Button>
-          </Tooltip>
-        ) : null}
       </div>
     </section>
   );
+  const exportSection =
+    frame && folder && (frameSelected || selectedNodeId) ? (
+      <InspectorSection title="Export" data-design-export-section="">
+        <div className="grid grid-cols-[76px_minmax(0,1fr)] gap-2">
+          <InspectorSelect
+            label="Export scale"
+            value={String(exportScale)}
+            options={[
+              { value: "0.5", label: "0.5x" },
+              { value: "1", label: "1x" },
+              { value: "2", label: "2x" },
+            ]}
+            onChange={(value) => setExportScale(Number(value))}
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            className="w-full"
+            disabled={frameAction !== null}
+            aria-label="Export PNG"
+            onClick={() => void exportPng()}
+          >
+            <Download />
+            {frameAction === "export" ? "Exporting…" : "Export PNG"}
+          </Button>
+        </div>
+      </InspectorSection>
+    ) : null;
 
   return (
     <aside
@@ -2048,12 +2104,33 @@ export function DesignInspector({
       />
       <div
         data-design-style-panel-header=""
-        className="border-border1 bg-bg1 flex h-10 shrink-0 items-center justify-between border-b px-2"
+        className="border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b px-2"
       >
-        <span className="bg-bg2 text-fg1 flex h-7 items-center rounded-md px-2.5 text-xs font-medium">
-          Style
-        </span>
-        <div className="flex items-center gap-1">
+        <div
+          role="group"
+          aria-label="Inspector view"
+          className="flex items-center gap-0.5"
+        >
+          <button
+            type="button"
+            className="zd-panel-tab"
+            aria-pressed={!cssMode}
+            onClick={() => setCssMode(false)}
+          >
+            Style
+          </button>
+          <button
+            type="button"
+            className="zd-panel-tab"
+            disabled={!styleContext && !cssMode}
+            aria-label="CSS"
+            aria-pressed={cssMode}
+            onClick={() => setCssMode((current) => !current)}
+          >
+            CSS
+          </button>
+        </div>
+        <div className="ml-auto flex items-center gap-0.5">
           {workspaceId ? <DesignReviewDialog key={workspaceId} workspaceId={workspaceId} folder={folder} active={active} queueAction={queueInspectorAction} /> : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -2061,7 +2138,7 @@ export function DesignInspector({
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="h-7 min-w-14 px-2 font-mono text-xs tabular-nums"
+                className="text-fg2 h-7 min-w-12 px-2 text-xs tabular-nums"
                 disabled={!active || !workspaceId}
                 aria-label={`Canvas zoom ${zoomPercentage}%`}
               >
@@ -2110,19 +2187,18 @@ export function DesignInspector({
         </div>
       ) : (
         <ScrollArea className="min-h-0 flex-1">
-          <div className="flex flex-col">
+          <div className="flex flex-col pb-6">
             {inspectorSelectionHeader}
 
             {styleTargetNodeId && errors.length > 0 ? (
-              <section className="text-red-primary flex min-h-8 items-center gap-2 px-3 py-1.5">
-                <AlertTriangle className="size-3.5 shrink-0" />
-                <span
-                  className="min-w-0 flex-1 truncate text-[10px]"
-                  title={`${firstBlockingReason}: ${errors[0]?.message}`}
-                >
-                  {errors.length} blocking · {firstBlockingReason}
-                </span>
-              </section>
+              <Tooltip label={`${firstBlockingReason}: ${errors[0]?.message}`}>
+                <section className="text-red-primary border-border1 flex h-9 items-center gap-2 border-b px-3">
+                  <AlertTriangle className="size-3.5 shrink-0" />
+                  <span className="text-3xxs min-w-0 flex-1 truncate">
+                    {firstBlockingReason}
+                  </span>
+                </section>
+              </Tooltip>
             ) : null}
 
             {styleContext && elementDetails ? (
@@ -2161,10 +2237,7 @@ export function DesignInspector({
                 onCommit={commitCanvasBackground}
               />
             ) : frame && workspaceId ? (
-              <section className="border-border1 flex flex-col gap-3 border-b p-3">
-                <span className="text-fg2 text-xs font-medium">
-                  Frame position &amp; size
-                </span>
+              <InspectorSection title="Frame">
                 <div className="grid grid-cols-2 gap-2">
                   {(
                     [
@@ -2178,6 +2251,14 @@ export function DesignInspector({
                       key={key}
                       label={label}
                       value={value}
+                      compact
+                      whole
+                      range={
+                        key === "w" || key === "h"
+                          ? DESIGN_FRAME_SIZE_RANGE
+                          : DESIGN_FRAME_POSITION_RANGE
+                      }
+                      applied
                       onPreview={(next) => {
                         const number = Number(next);
                         if (!Number.isFinite(number)) return;
@@ -2214,27 +2295,12 @@ export function DesignInspector({
                     />
                   ))}
                 </div>
-              </section>
+              </InspectorSection>
             ) : null}
+            {exportSection}
           </div>
         </ScrollArea>
       )}
-      <div
-        data-design-style-panel-footer=""
-        className="border-border1 bg-bg1 flex h-12 shrink-0 items-center justify-end border-t px-2"
-      >
-        <Button
-          type="button"
-          variant={cssMode ? "default" : "ghost"}
-          size="sm"
-          disabled={!styleContext && !cssMode}
-          aria-label="CSS"
-          aria-pressed={cssMode}
-          onClick={() => setCssMode((current) => !current)}
-        >
-          CSS
-        </Button>
-      </div>
     </aside>
   );
 }

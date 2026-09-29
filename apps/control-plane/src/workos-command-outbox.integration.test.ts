@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ensureUser } from "./auth.js";
 import { withSystemTx } from "./db.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import {
   enqueueWorkOSCommand,
   WorkOSCommandProcessor,
@@ -506,8 +506,7 @@ d("WorkOS command outbox", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 4 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   afterAll(async () => pool.end());

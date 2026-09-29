@@ -13,7 +13,7 @@ export function summaryHasSplitColumns(node: PaneNode): boolean {
   );
 }
 
-/** Sort a copy: the Context canvas owns the shared snapshot's ordering. */
+/** Sort a copy so the shared context snapshot keeps its original ordering. */
 export function recentSummaryContext(
   items: readonly ContextGraphItemWire[],
 ): ContextGraphItemWire[] {

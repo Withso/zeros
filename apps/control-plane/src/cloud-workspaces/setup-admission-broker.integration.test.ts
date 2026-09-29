@@ -4,7 +4,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { withSystemTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { consumeCloudWorkspaceGrant } from "./grants.js";
 import { DatabaseCloudWorkspaceSetupAdmissionBroker } from "./setup-admission-broker.js";
 import {
@@ -30,8 +30,7 @@ d("cloud workspace setup admission broker", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     const userId = randomUUID();
     await pool.query(`INSERT INTO users(id,email,display_name,staff_role)
       VALUES ($1,$2,'Setup Admission Owner','developer')`, [userId, `setup-admission-${userId}@example.test`]);

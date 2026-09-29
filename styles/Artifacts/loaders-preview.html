@@ -14,15 +14,17 @@
        while Light uses bg1). */
     :root {
       color-scheme: dark;
-      --bg1: hsl(0 0% 8%);
+      --bg1: hsl(0 0% 7%);
       --bg1-hover: hsl(0 0% 12%);
       --bg2: hsl(0 0% 13%);
       --bg2-hover: hsl(0 0% 15%);
-      --bg3: hsl(0 0% 10%);        /* = --sidebar-bg */
+      --bg3: hsl(0 0% 9%);         /* = --sidebar-bg */
       --bg3-hover: hsl(0 0% 15%);  /* = --sidebar-bg-hover */
-      --fg1: hsl(0 0% 92%);
-      --fg2: hsl(0 0% 66%);
-      --fg3: hsl(0 0% 44%);
+      --sidebar-bg: hsl(0 0% 9%);
+      --sidebar-bg-hover: hsl(0 0% 15%);
+      --fg1: hsl(0 0% 94%);
+      --fg2: hsl(0 0% 72%);
+      --fg3: hsl(0 0% 63%);        /* middle tier, one step below fg2 */
       --muted-fg: hsl(0 0% 44%);
       --border1: hsl(0 0% 14%);
       --border2: hsl(0 0% 18%);
@@ -38,19 +40,24 @@
       --yellow-primary: hsl(37 75% 60%);
       --red-secondary: hsl(7 83% 39%);
       --red-secondary-fg: hsl(0 0% 100%);
+      /* PR-status identities the workspace glyph wears (workspace-glyph.tsx). */
+      --brown-fg: hsl(10 80% 72%);
+      --violet-fg: hsl(265 66% 77%);
+      --red-fg: hsl(20 97% 72%);
+      --red-primary: hsl(0 91% 71%);
       --radius: 0.625rem;
-      --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-sans: "Geist Variable", "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 
       /* ── Semantic loader tokens — mirrored from styles/semantic-tokens.css ──
          The ZerosSpinner's dot colors. Aliases resolve to primitives that
          already flip per theme, so the light block below needs no override.
-           default  → --loader-active/-rest (fg2 / fg3)
+           default  → --loader-active/-rest (fg2 / muted-fg)
            inverted → --loader-active/-rest-inverted (the on-inverted fg,
                       for primary-button fills)
            inherit  → currentColor (bespoke fills: green Merge, destructive,
                       the PR island's theme-flipping actions) */
       --loader-active: var(--fg2);
-      --loader-rest: var(--fg3);
+      --loader-rest: var(--muted-fg);
       --loader-active-inverted: var(--primary-button-fg);
       --loader-rest-inverted: var(--primary-button-fg);
     }
@@ -63,10 +70,12 @@
       --bg2-hover: hsl(60 4% 91%);
       --bg3: hsl(0 0% 100%);        /* = --bg1 */
       --bg3-hover: hsl(0 4% 95%);   /* = --bg1-hover */
+      --sidebar-bg: hsl(60 9% 98%);
+      --sidebar-bg-hover: hsl(60 2% 92%);
       --fg1: hsl(20 7% 16%);
       --fg2: hsl(20 4% 37%);
-      --fg3: hsl(20 4% 56%);
-      --muted-fg: hsl(20 4% 68%);
+      --fg3: hsl(20 4% 44%);
+      --muted-fg: hsl(20 4% 56%);
       --border1: hsl(30 9% 91%);
       --border2: hsl(30 9% 88%);
       --border3: hsl(60 3% 85%);
@@ -77,6 +86,10 @@
       --green-primary: hsl(142 75% 36%);
       --yellow-primary: hsl(37 90% 60%);
       --red-secondary: hsl(0 72% 50%);
+      --brown-fg: hsl(0 20% 40%);
+      --violet-fg: hsl(263 61% 46%);
+      --red-fg: hsl(18 89% 40%);
+      --red-primary: hsl(0 72% 51%);
     }
 
     *, *::before, *::after { box-sizing: border-box; }
@@ -227,51 +240,10 @@
       letter-spacing: 0.05em;
     }
 
-    /* ── Keyframes from styles/globals.css ── */
-    @keyframes zeros-spinner-wave {
-      0%, 42%, 100% { opacity: var(--zeros-dot-base); }
-      16%           { opacity: var(--zeros-dot-peak); }
-    }
-
-    /* Grid fade — a diagonal sweep (top-left → bottom-right) over the INACTIVE
-       resting dots. One-directional per loop: each dot fades from full down to
-       the trough (0 = fully out) by mid-loop and then HOLDS there — it never
-       fades back in within the loop, it only snaps back at the loop boundary.
-       Runs on the resting dots only, so the active orbit is never touched. */
-    @keyframes zeros-grid-fade {
-      0%        { opacity: var(--zeros-grid-fade-peak); }
-      50%, 100% { opacity: var(--zeros-grid-fade-trough); }
-    }
-
+    /* ── Keyframes mirrored from styles/global/animations.css ── */
     @keyframes ocAgentLiveDurationPulse {
       0%, 100% { opacity: 0.65; }
       50%      { opacity: 1; }
-    }
-
-    /* ── ZerosSpinner — dot-matrix tetromino morph ── */
-    .zeros-spinner {
-      position: relative;
-      display: inline-grid;
-      box-sizing: border-box;
-      /* Middle, not the default baseline: in inline flow baseline seats the
-         box ON the text baseline — visually low next to a label. Flex
-         parents ignore it. Mirrors `align-middle` on the production root. */
-      vertical-align: middle;
-      color: var(--loader-active, var(--fg2));
-    }
-
-    .zeros-spinner .cell {
-      position: relative;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .zeros-spinner .dot {
-      border-radius: 50%;
-      background-color: currentColor;
-      display: inline-block;
-      will-change: opacity;
     }
 
     /* ── Demo buttons — minimal mirrors of the app's Button recipes
@@ -332,36 +304,6 @@
       color: var(--fg2);
     }
 
-    /* ── Composed active-turn row ── */
-    .activity-shimmer {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 0;
-      font-size: 12px;
-      color: var(--fg2);
-    }
-
-    .activity-agent-spinner {
-      display: inline-flex;
-      flex: 0 0 auto;
-    }
-
-    /* ── Run loader study — a pure-vector audio wave ── */
-    .run-wave-stage {
-      min-height: 132px;
-      gap: 32px;
-      flex-wrap: wrap;
-    }
-
-    /* Each wave sizes itself to the <svg> the renderer injects
-       (width/height = data-wave-size); --fg2 keeps it visually quiet. */
-    .run-wave-loader {
-      display: inline-flex;
-      flex: 0 0 auto;
-      color: var(--fg2);
-    }
-
     .run-control-preview {
       display: inline-flex;
       align-items: center;
@@ -385,16 +327,652 @@
       stroke-linejoin: round;
     }
 
+    /* ══ Square loaders — Orbit, the agent Puzzle and the Run Stream ══
+       One 4 × 4 grid of clean vector squares on whole device pixels (after
+       the square plates at jack.art/credits). Colour is CSS, so tones and the
+       workspace glyph's PR states below need no script. */
+    .pixel-plate {
+      position: relative;
+      display: inline-block;
+      flex: 0 0 auto;
+      vertical-align: middle;
+      color: var(--loader-active, var(--fg2));
+    }
+    .pixel-plate svg {
+      position: absolute;
+      display: block;
+    }
+    .pixel-plate rect {
+      fill: currentColor;
+    }
+    .pixel-plate[data-tone="inverted"] {
+      color: var(--loader-active-inverted, var(--primary-button-fg));
+    }
+    .pixel-plate[data-tone="inherit"],
+    .pixel-plate.run-plate {
+      color: inherit;
+    }
+    .pixel-plate.run-plate path { fill: currentColor; }
+    /* Orbit: one continuous band for the track, one for the snake; the tail's
+       layers compound into a smooth ramp, so there are no grey blocks. */
+    .orbit-plate .orbit-comet { stroke: currentColor; }
+    .orbit-plate .orbit-track {
+      stroke: var(--loader-rest, var(--muted-fg));
+      opacity: 0.4;
+    }
+    .orbit-plate[data-tone="inverted"] .orbit-track {
+      stroke: var(--loader-rest-inverted, var(--primary-button-fg));
+      opacity: 0.22;
+    }
+    .orbit-plate[data-tone="inherit"] .orbit-track {
+      stroke: currentColor;
+      opacity: 0.3;
+    }
+    /* Loader slots: each mounts one Orbit or Run plate. */
+    [data-plate],
+    [data-run] {
+      display: inline-flex;
+    }
+    /* Run rides currentColor: --fg2 in the study, --blue-primary in rows. */
+    .plate-stage [data-run] { color: var(--fg2); }
+
+    /* ── Puzzle glyph: a 4 × 4 sliding-tile square in clean vector tiles.
+       The four corner tiles are anchors, so the silhouette always reads as a
+       square; ten tiles and six holes share the plus-shaped channel between
+       them. Idle it sits quietly (--fg3 at 25%: #3A3A3A on the dark sidebar);
+       while the agent works the tiles slide in --fg2. A PR colours it in both
+       states (shell/workspace-glyph.tsx). ── */
+    .puzzle-glyph {
+      --glyph: var(--fg3);
+      --glyph-opacity: 0.25;
+    }
+    .puzzle-glyph[data-working] { --glyph: var(--fg2); --glyph-opacity: 1; }
+    .puzzle-glyph[data-pr] { --glyph-opacity: 1; }
+    .puzzle-glyph[data-pr="open"] { --glyph: var(--brown-fg); }
+    .puzzle-glyph[data-pr="ready"] { --glyph: var(--green-primary); }
+    .puzzle-glyph[data-pr="merged"] { --glyph: var(--violet-fg); }
+    .puzzle-glyph[data-pr="closed"],
+    .puzzle-glyph[data-pr="conflicts"] { --glyph: var(--red-fg); }
+    /* Option: in Dark --red-fg sits next to --brown-fg; --red-primary separates better. */
+    [data-pr-red="primary"] .puzzle-glyph[data-pr="closed"],
+    [data-pr-red="primary"] .puzzle-glyph[data-pr="conflicts"] { --glyph: var(--red-primary); }
+    .puzzle-glyph .puzzle-tiles {
+      fill: var(--glyph);
+      opacity: var(--glyph-opacity);
+      transition: fill 240ms ease, opacity 240ms ease;
+    }
+    .puzzle-glyph .puzzle-tiles rect {
+      fill: inherit;
+      transition: transform var(--puzzle-move, 220ms) cubic-bezier(0.55, 0, 0.25, 1), opacity 200ms ease-out;
+    }
+    /* Workspace glyph depth (PUZZLE_TILE_SHADES in puzzle-square.tsx): while it
+       works, the channel tiles take three close tones of the square's colour;
+       the corners stay full. The Agent loader stays one flat colour. */
+    .puzzle-glyph[data-shaded][data-working] rect[data-shade="1"] { opacity: 0.86; }
+    .puzzle-glyph[data-shaded][data-working] rect[data-shade="2"] { opacity: 0.72; }
+
+    /* Magnified + real-size pairs */
+    .plate-stage {
+      min-height: 132px;
+      gap: 28px;
+      flex-wrap: wrap;
+    }
+    .plate-sizes {
+      display: flex;
+      align-items: flex-end;
+      gap: 18px;
+    }
+    .plate-size {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      color: var(--muted-fg);
+      font-variant-numeric: tabular-nums;
+    }
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* Segmented control — preview-only chrome */
+    .seg {
+      display: inline-flex;
+      padding: 2px;
+      gap: 2px;
+      background: var(--bg1);
+      border: 1px solid var(--border2);
+      border-radius: 6px;
+    }
+    .seg button {
+      height: 22px;
+      padding: 0 9px;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--fg2);
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .seg button:hover { color: var(--fg1); }
+    .seg button[aria-pressed="true"] {
+      background: var(--bg2-hover);
+      color: var(--fg1);
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 16px;
+      font-size: 11px;
+      color: var(--muted-fg);
+    }
+    .controls label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* In-context rows (tool row, activity tail) */
+    .context-rows {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--fg2);
+    }
+    .context-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 20px;
+    }
+    .context-row .muted { color: var(--muted-fg); }
+
+    /* ── Sidebar mock — geometry measured from the real AppSidebar harness:
+       256px column, 8px list inset, 30px rows 2px apart, 16px glyph box at
+       24px, 8px gap, 13px label, 11px counts. ── */
+    .sb-layout {
+      display: grid;
+      grid-template-columns: 256px minmax(0, 1fr);
+      gap: 24px;
+      align-items: start;
+    }
+    .sb-mock {
+      width: 256px;
+      padding: 10px 0;
+      background: var(--sidebar-bg);
+      border: 1px solid var(--border1);
+      border-radius: 8px;
+      font-family: var(--font-sans);
+      overflow: hidden;
+    }
+    .sb-heading {
+      display: flex;
+      align-items: center;
+      height: 26px;
+      padding: 0 18px;
+      font-size: 12px;
+      color: var(--fg2);
+    }
+    .sb-list {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 0 8px;
+    }
+    .sb-repo,
+    .sb-row {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 30px;
+      min-width: 0;
+      border-radius: 6px;
+      color: var(--fg2);
+      font-size: 13px;
+      user-select: none;
+    }
+    .sb-repo {
+      padding: 0 4px 0 8px;
+      font-weight: 450;
+    }
+    .sb-repo + .sb-row { margin-top: 0; }
+    .sb-row + .sb-repo { margin-top: 2px; }
+    .sb-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+      border-radius: 4px;
+      background: var(--bg2-hover);
+      font-size: 10px;
+      font-weight: 450;
+      color: var(--fg2);
+    }
+    .sb-plus {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      margin-left: auto;
+      color: var(--fg2);
+    }
+    .sb-row {
+      padding: 0 8px 0 24px;
+      cursor: pointer;
+      outline: none;
+    }
+    .sb-row:hover,
+    .sb-row:focus-visible,
+    .sb-row[data-active="true"] {
+      background: var(--sidebar-bg-hover);
+    }
+    .sb-row[data-active="true"] .sb-name { color: var(--fg1); }
+    .sb-glyph {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+      color: var(--fg2);
+    }
+    .sb-icon {
+      width: 14px;
+      height: 14px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.25;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .sb-name {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .sb-trailing {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
+    .sb-counts {
+      font-size: 11px;
+      color: var(--fg2);
+      font-variant-numeric: tabular-nums;
+    }
+    .sb-row[data-active="true"] .sb-add { color: var(--green-primary); }
+    .sb-row[data-active="true"] .sb-del { color: var(--red-primary); }
+    .sb-run { display: inline-flex; color: var(--blue-primary); }
+
+    .legend {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 10px 12px;
+      align-items: center;
+      margin: 0;
+      font-size: 12px;
+      color: var(--fg2);
+    }
+    .legend dt {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+    }
+    .legend dd { margin: 0; }
+    .legend code,
+    .matrix code,
+    .controls code,
+    .sb-notes code,
+    .demo-note code {
+      font-family: ui-monospace, "Geist Mono Variable", monospace;
+      font-size: 11px;
+      color: var(--fg3);
+    }
+    .sb-notes {
+      margin: 16px 0 0;
+      padding: 12px 0 0;
+      border-top: 1px solid var(--border1);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--muted-fg);
+    }
+    .sb-notes p { margin: 0; }
+
+    /* PR status × agent state */
+    .matrix {
+      display: grid;
+      grid-template-columns: 64px repeat(6, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--border1);
+      border: 1px solid var(--border1);
+      border-radius: calc(var(--radius) * 0.8);
+      overflow: hidden;
+      font-size: 11px;
+    }
+    .matrix > div {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 14px 6px;
+      background: var(--bg1);
+      text-align: center;
+      color: var(--fg2);
+    }
+    .matrix .mx-head {
+      padding: 8px 6px;
+      color: var(--fg1);
+      font-weight: 500;
+      background: var(--bg2);
+    }
+    .matrix .mx-side {
+      align-items: flex-start;
+      color: var(--fg1);
+      font-weight: 500;
+      background: var(--bg2);
+    }
+    .matrix .mx-pair {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    /* Glyph explorer + sheet */
+    .explorer {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 24px;
+    }
+    .explorer input {
+      width: 200px;
+      height: 28px;
+      padding: 0 10px;
+      border: 1px solid var(--border2);
+      border-radius: 4px;
+      background: var(--bg1);
+      color: var(--fg1);
+      font: inherit;
+      font-size: 12px;
+      outline: none;
+    }
+    .explorer input:focus { border-color: var(--border3); }
+    .explorer-fields {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .explorer-bits {
+      margin: 0;
+      font-family: ui-monospace, "Geist Mono Variable", monospace;
+      font-size: 11px;
+      line-height: 1.35;
+      letter-spacing: 0.12em;
+      color: var(--fg3);
+    }
+    .explorer-meta {
+      font-size: 11px;
+      color: var(--muted-fg);
+    }
+    .glyph-sheet {
+      display: grid;
+      grid-template-columns: repeat(8, minmax(0, 1fr));
+      gap: 18px 8px;
+    }
+    .glyph-sheet-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      font-size: 10px;
+      color: var(--muted-fg);
+      cursor: default;
+    }
+    .glyph-sheet-item span:last-child {
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .era-divider {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 56px 0 32px;
+      color: var(--muted-fg);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .era-divider::before,
+    .era-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border1);
+    }
+
+    .matrix-wrap { overflow-x: auto; }
+    .matrix { min-width: 720px; }
+
+    @media (max-width: 720px) {
+      .sb-layout { grid-template-columns: 1fr; }
+    }
+
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
         animation-duration: 0.01ms !important;
         animation-iteration-count: 1 !important;
       }
+      /* A working puzzle holds still in its working colour. */
+      .puzzle-glyph .puzzle-tiles rect {
+        transition: none;
+      }
     }
+
+    /* ══ Chat tab loader in each agent's colours (agent-brands.ts tones) ══
+       Chat tabs only: the turn rail, tool rows and workspace squares keep
+       their own colours. Idle, a tab shows its agent's logo; while it runs,
+       the Puzzle takes three subtle tones of that logo. Tones are defined on
+       anything carrying data-agent (glyphs, swatches, tabs). ── */
+    [data-agent="claude"] {
+      --tone-a: color-mix(in oklab, #D97757 84%, white);
+      --tone-b: #D97757;
+      --tone-c: color-mix(in oklab, #D97757 86%, black);
+    }
+    [data-agent="codex"] {
+      --tone-a: #B1A7FF;
+      --tone-b: #7A9DFF;
+      --tone-c: color-mix(in oklab, #7A9DFF 62%, #3941FF);
+    }
+    [data-theme="light"] [data-agent="codex"] {
+      --tone-a: #7A9DFF;
+      --tone-b: color-mix(in oklab, #7A9DFF 50%, #3941FF);
+      --tone-c: #3941FF;
+    }
+    [data-agent="cursor"] {
+      --tone-a: hsl(0 0% 97%);
+      --tone-b: hsl(0 0% 84%);
+      --tone-c: hsl(0 0% 70%);
+    }
+    [data-theme="light"] [data-agent="cursor"] {
+      --tone-a: hsl(0 0% 42%);
+      --tone-b: hsl(0 0% 24%);
+      --tone-c: hsl(0 0% 9%);
+    }
+    .puzzle-glyph[data-agent] { --glyph-opacity: 1; }
+    .puzzle-glyph[data-agent] .puzzle-tiles rect {
+      transition: transform var(--puzzle-move, 220ms) cubic-bezier(0.55, 0, 0.25, 1), fill 240ms ease;
+    }
+    /* Lit from the top, like Codex's gradient and the faces of Cursor's
+       cube. A tile takes the tone of the row it slides into, so the light
+       stays put while the tiles move through it. */
+    .puzzle-glyph[data-agent] rect[data-row="0"] { fill: var(--tone-a); }
+    .puzzle-glyph[data-agent] rect[data-row="1"] { fill: color-mix(in oklab, var(--tone-a) 35%, var(--tone-b)); }
+    .puzzle-glyph[data-agent] rect[data-row="2"] { fill: color-mix(in oklab, var(--tone-b) 65%, var(--tone-c)); }
+    .puzzle-glyph[data-agent] rect[data-row="3"] { fill: var(--tone-c); }
+
+    /* Chat tab strip mock: the app's 28px pills (chat-tabs.tsx). Inactive
+       logos are monochrome; the active tab shows the brand mark. */
+    .ct-strip {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px;
+      border-radius: 10px;
+      background: var(--bg1);
+      overflow-x: auto;
+    }
+    .ct-tab {
+      display: flex;
+      flex: none;
+      align-items: center;
+      gap: 8px;
+      height: 28px;
+      min-width: 70px;
+      max-width: 160px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--fg2);
+      font: 500 12px/1 var(--font-sans, inherit);
+      cursor: pointer;
+      user-select: none;
+    }
+    .ct-tab:hover { background: var(--bg2); }
+    .ct-tab[data-active] { background: var(--bg2); color: var(--fg1); }
+    .ct-lead { display: inline-flex; flex: none; width: 16px; height: 16px; align-items: center; justify-content: center; }
+    .ct-logo { width: 14px; height: 14px; display: block; }
+    .ct-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ct-tab[data-agent="claude"][data-active] .ct-logo { color: #D97757; }
+    .ct-tab[data-agent="cursor"][data-active] .ct-logo { color: var(--fg1); }
+    .agent-matrix {
+      display: grid;
+      grid-template-columns: 120px repeat(3, minmax(0, 1fr));
+      border: 1px solid var(--border2);
+      border-radius: 10px;
+      overflow: hidden;
+      font-size: 12px;
+    }
+    .agent-matrix > div {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      min-height: 96px;
+      padding: 12px;
+      border-top: 1px solid var(--border1);
+      border-left: 1px solid var(--border1);
+    }
+    .agent-matrix > .am-head { min-height: 36px; color: var(--fg2); font-weight: 500; background: var(--bg2); border-top: 0; }
+    .agent-matrix > .am-side { justify-content: flex-start; color: var(--fg1); font-weight: 500; border-left: 0; }
+    .agent-matrix .ct-logo.big { width: 36px; height: 36px; }
+    .tone-chips { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+    .tone-chip { display: flex; align-items: center; gap: 8px; color: var(--fg2); font: 11px/1 var(--font-mono, monospace); }
+    .tone-chip i { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+    .tone-note { max-width: 240px; color: var(--muted-fg); font-size: 11px; line-height: 1.4; }
+
+    /* The glass square's combos: a swatch per combo. */
+    .combo-field { display: inline-block; width: 32px; height: 32px; border-radius: 4px; }
+    /* The glass square: its motions side by side, and the in-context rows.
+       The turn rail sits 8px lower, as in the app. */
+    .flow-variants { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+    .flow-variant { display: flex; flex-direction: column; gap: 8px; }
+    .flow-variant .flow-name { color: var(--fg1); font-size: 13px; font-weight: 500; }
+    .flow-variant .flow-stage { gap: 28px; min-height: 124px; }
+    [data-flow-slot] { display: inline-flex; }
+    .flow-rows .context-row.turn-rail { margin-top: 8px; gap: 12px; }
+    .turn-rail .rail-words { display: inline-flex; align-items: center; gap: 8px; }
+    /* Gibberish agent thinking (Settings → Experimental), mirrored from
+       styles/global/animations.css. */
+    @keyframes zeros-gibberish-thinking {
+      from { background-position: 120% 0; }
+      to { background-position: -20% 0; }
+    }
+    .zeros-gibberish-thinking {
+      color: transparent;
+      background-image: linear-gradient(90deg, var(--fg3) 0%, var(--fg3) 40%, var(--fg1) 50%, var(--fg3) 60%, var(--fg3) 100%);
+      background-size: 250% 100%;
+      background-clip: text;
+      -webkit-background-clip: text;
+      animation: zeros-gibberish-thinking 3s linear infinite;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .zeros-gibberish-thinking { animation: none !important; color: var(--fg2); background: none; }
+    }
+    .gibberish-sheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px 16px; }
+    .gibberish-sheet .gibberish-item { display: flex; flex-direction: column; gap: 2px; padding: 6px 0; border-bottom: 1px solid var(--border1); }
+    .gibberish-sheet .gibberish-item .muted { color: var(--muted-fg); font-size: 11px; }
+    .combo-sheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
+    .combo-card { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--border1); border-radius: 8px; color: var(--fg2); font-size: 12px; }
+    .combo-card .combo-swatches { display: flex; gap: 4px; }
 
 </style>
 </head>
 <body style="margin:0">
+  <!-- Lucide path (ISC) for the sidebar mock's + action; the agent logos the
+       app bundles (apps/desktop/src/assets/agents) and the Codex app mark for
+       the chat-tab exploration. -->
+  <svg aria-hidden="true" width="0" height="0" style="position:absolute">
+    <defs>
+      <linearGradient id="codex-app-gradient" x1="6.99989" x2="6.99989" y1="0.000258995" y2="14.0003" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#B1A7FF"></stop><stop offset="0.5" stop-color="#7A9DFF"></stop><stop offset="1" stop-color="#3941FF"></stop>
+      </linearGradient>
+    </defs>
+    <!-- The glass square: the light from the top and the sheen are the same
+         on every square, so they are shared here. -->
+    <linearGradient id="combo-light" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" style="stop-color: light-dark(rgb(255 255 255 / 0.12), rgb(255 255 255 / 0.4))"></stop>
+      <stop offset="0.5" style="stop-color: rgb(255 255 255 / 0)"></stop>
+      <stop offset="1" style="stop-color: light-dark(rgb(0 0 0 / 0.18), rgb(0 0 0 / 0.1))"></stop>
+    </linearGradient>
+    <linearGradient id="combo-sheen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" style="stop-color: rgb(255 255 255 / 0)"></stop>
+      <stop offset="0.22" style="stop-color: light-dark(rgb(255 255 255 / 0.2), rgb(255 255 255 / 0.34))"></stop>
+      <stop offset="0.4" style="stop-color: rgb(255 255 255 / 0)"></stop>
+      <stop offset="0.6" style="stop-color: rgb(255 255 255 / 0)"></stop>
+      <stop offset="0.7" style="stop-color: light-dark(rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.14))"></stop>
+      <stop offset="0.8" style="stop-color: rgb(255 255 255 / 0)"></stop>
+    </linearGradient>
+    <!-- The glint that crosses a glass square as its next combo arrives. -->
+    <linearGradient id="glass-glint" x1="0" y1="0" x2="1" y2="0.6">
+      <stop offset="0" style="stop-color: rgb(255 255 255 / 0)"></stop>
+      <stop offset="0.38" style="stop-color: rgb(255 255 255 / 0)"></stop>
+      <stop offset="0.5" style="stop-color: light-dark(rgb(255 255 255 / 0.45), rgb(255 255 255 / 0.75))"></stop>
+      <stop offset="0.62" style="stop-color: rgb(255 255 255 / 0)"></stop>
+      <stop offset="1" style="stop-color: rgb(255 255 255 / 0)"></stop>
+    </linearGradient>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14" /><path d="M12 5v14" /></symbol>
+    <symbol id="i-claude" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" /></symbol>
+    <symbol id="i-cursor" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z" /></symbol>
+    <symbol id="i-codex-app" viewBox="0 0 14 14"><ellipse cx="7.00001" cy="6.99999" rx="5.44447" ry="3.88891" fill="white"></ellipse><path fill="url(#codex-app-gradient)" d="M4.71632 0.267816C5.27832 0.0365915 5.89014 -0.0469485 6.49356 0.025148C7.27134 0.114593 7.96434 0.44515 8.57257 1.01682C8.58035 1.0246 8.59123 1.03004 8.60134 1.03315C8.61233 1.03586 8.62381 1.03586 8.63479 1.03315C9.42552 0.828953 10.2625 0.904521 11.0039 1.24704L11.0405 1.26415L11.1307 1.30849C11.9067 1.70182 12.5121 2.36551 12.8325 3.17439C12.995 3.57105 13.0759 3.98406 13.0775 4.41495C13.0892 4.7354 13.0541 5.05585 12.9733 5.36618C12.9693 5.38184 12.9693 5.39826 12.9734 5.4139C12.9775 5.42954 12.9855 5.4439 12.9966 5.45562C13.4586 5.92773 13.765 6.49007 13.9167 7.14341C14.1415 8.25175 13.9113 9.25119 13.2268 10.141L13.121 10.2701C12.6677 10.789 12.0727 11.1642 11.4091 11.3496C11.3947 11.3539 11.3815 11.3614 11.3706 11.3717C11.3596 11.382 11.3513 11.3947 11.3461 11.4088C11.1976 11.8373 11.0482 12.2044 10.7706 12.5708C10.0706 13.494 9.04235 14.0066 7.88423 14.0003C6.961 13.9957 6.14278 13.6581 5.42877 12.9877C5.41803 12.9776 5.40481 12.9706 5.39046 12.9673C5.37611 12.964 5.36115 12.9646 5.34711 12.969C5.04533 13.0662 4.74044 13.0802 4.41066 13.0763C3.8854 13.0721 3.36801 12.9482 2.89787 12.7139C2.4054 12.4698 1.97664 12.1143 1.64564 11.6755C1.52742 11.5184 1.40997 11.3706 1.32364 11.1956C1.20578 10.9555 1.10948 10.7054 1.03586 10.4482C0.880462 9.86302 0.876715 9.24789 1.02497 8.66086C1.02985 8.64689 1.03145 8.63199 1.02964 8.6173C1.02698 8.60287 1.01959 8.58974 1.00864 8.57997C0.649358 8.21631 0.374753 7.77784 0.204413 7.29585C0.0911297 6.99896 0.0252503 6.6861 0.00918992 6.36874C-0.0190662 5.95074 0.0179327 5.5309 0.118857 5.12429C0.38097 4.25939 0.882639 3.58039 1.62231 3.08805C1.7872 2.97838 1.94353 2.89283 2.08976 2.83138C2.25698 2.76216 2.4242 2.70383 2.5922 2.65483C2.60421 2.6511 2.61511 2.64447 2.62393 2.63551C2.63275 2.62656 2.63922 2.61556 2.64276 2.60349C2.77033 2.14541 2.9897 1.71805 3.28754 1.34738C3.663 0.870603 4.15512 0.498766 4.71632 0.267816ZM7.42456 8.48508C7.29816 8.49217 7.17927 8.54738 7.0923 8.63937C7.00533 8.73136 6.95686 8.85315 6.95686 8.97975C6.95686 9.10635 7.00533 9.22814 7.0923 9.32013C7.17927 9.41212 7.29816 9.46733 7.42456 9.47442H10.2526C10.3199 9.47819 10.3872 9.4682 10.4505 9.44504C10.5138 9.42189 10.5717 9.38607 10.6207 9.33976C10.6697 9.29346 10.7087 9.23764 10.7354 9.17574C10.762 9.11384 10.7758 9.04715 10.7758 8.97975C10.7758 8.91235 10.762 8.84566 10.7354 8.78376C10.7087 8.72185 10.6697 8.66604 10.6207 8.61974C10.5717 8.57343 10.5138 8.53761 10.4505 8.51445C10.3872 8.4913 10.3199 8.4813 10.2526 8.48508H7.42456ZM4.2481 4.84584C4.18079 4.73621 4.07348 4.65706 3.94887 4.62513C3.82425 4.5932 3.6921 4.61099 3.58037 4.67473C3.46863 4.73848 3.38607 4.84319 3.35015 4.96671C3.31422 5.09024 3.32775 5.22289 3.38787 5.33662L4.37721 7.06641L3.39254 8.72775C3.3594 8.78367 3.33759 8.84557 3.32837 8.90992C3.31915 8.97427 3.32269 9.0398 3.3388 9.10278C3.3549 9.16576 3.38326 9.22495 3.42224 9.27697C3.46122 9.32899 3.51006 9.37283 3.56599 9.40597C3.62191 9.43912 3.68381 9.46092 3.74816 9.47014C3.81251 9.47937 3.87804 9.47582 3.94102 9.45972C4.004 9.44361 4.06319 9.41526 4.11521 9.37628C4.16723 9.3373 4.21107 9.28845 4.24421 9.23253L5.37511 7.32307C5.41969 7.24785 5.44354 7.16215 5.44423 7.07471C5.44491 6.98727 5.4224 6.9012 5.379 6.82529L4.2481 4.84584Z"></path></symbol>
+    <!-- Inactive tabs are monochrome: the same mark in currentColor, its
+         prompt cut out to the tab behind it. -->
+    <symbol id="i-codex-app-mono" viewBox="0 0 14 14"><path fill="currentColor" d="M4.71632 0.267816C5.27832 0.0365915 5.89014 -0.0469485 6.49356 0.025148C7.27134 0.114593 7.96434 0.44515 8.57257 1.01682C8.58035 1.0246 8.59123 1.03004 8.60134 1.03315C8.61233 1.03586 8.62381 1.03586 8.63479 1.03315C9.42552 0.828953 10.2625 0.904521 11.0039 1.24704L11.0405 1.26415L11.1307 1.30849C11.9067 1.70182 12.5121 2.36551 12.8325 3.17439C12.995 3.57105 13.0759 3.98406 13.0775 4.41495C13.0892 4.7354 13.0541 5.05585 12.9733 5.36618C12.9693 5.38184 12.9693 5.39826 12.9734 5.4139C12.9775 5.42954 12.9855 5.4439 12.9966 5.45562C13.4586 5.92773 13.765 6.49007 13.9167 7.14341C14.1415 8.25175 13.9113 9.25119 13.2268 10.141L13.121 10.2701C12.6677 10.789 12.0727 11.1642 11.4091 11.3496C11.3947 11.3539 11.3815 11.3614 11.3706 11.3717C11.3596 11.382 11.3513 11.3947 11.3461 11.4088C11.1976 11.8373 11.0482 12.2044 10.7706 12.5708C10.0706 13.494 9.04235 14.0066 7.88423 14.0003C6.961 13.9957 6.14278 13.6581 5.42877 12.9877C5.41803 12.9776 5.40481 12.9706 5.39046 12.9673C5.37611 12.964 5.36115 12.9646 5.34711 12.969C5.04533 13.0662 4.74044 13.0802 4.41066 13.0763C3.8854 13.0721 3.36801 12.9482 2.89787 12.7139C2.4054 12.4698 1.97664 12.1143 1.64564 11.6755C1.52742 11.5184 1.40997 11.3706 1.32364 11.1956C1.20578 10.9555 1.10948 10.7054 1.03586 10.4482C0.880462 9.86302 0.876715 9.24789 1.02497 8.66086C1.02985 8.64689 1.03145 8.63199 1.02964 8.6173C1.02698 8.60287 1.01959 8.58974 1.00864 8.57997C0.649358 8.21631 0.374753 7.77784 0.204413 7.29585C0.0911297 6.99896 0.0252503 6.6861 0.00918992 6.36874C-0.0190662 5.95074 0.0179327 5.5309 0.118857 5.12429C0.38097 4.25939 0.882639 3.58039 1.62231 3.08805C1.7872 2.97838 1.94353 2.89283 2.08976 2.83138C2.25698 2.76216 2.4242 2.70383 2.5922 2.65483C2.60421 2.6511 2.61511 2.64447 2.62393 2.63551C2.63275 2.62656 2.63922 2.61556 2.64276 2.60349C2.77033 2.14541 2.9897 1.71805 3.28754 1.34738C3.663 0.870603 4.15512 0.498766 4.71632 0.267816ZM7.42456 8.48508C7.29816 8.49217 7.17927 8.54738 7.0923 8.63937C7.00533 8.73136 6.95686 8.85315 6.95686 8.97975C6.95686 9.10635 7.00533 9.22814 7.0923 9.32013C7.17927 9.41212 7.29816 9.46733 7.42456 9.47442H10.2526C10.3199 9.47819 10.3872 9.4682 10.4505 9.44504C10.5138 9.42189 10.5717 9.38607 10.6207 9.33976C10.6697 9.29346 10.7087 9.23764 10.7354 9.17574C10.762 9.11384 10.7758 9.04715 10.7758 8.97975C10.7758 8.91235 10.762 8.84566 10.7354 8.78376C10.7087 8.72185 10.6697 8.66604 10.6207 8.61974C10.5717 8.57343 10.5138 8.53761 10.4505 8.51445C10.3872 8.4913 10.3199 8.4813 10.2526 8.48508H7.42456ZM4.2481 4.84584C4.18079 4.73621 4.07348 4.65706 3.94887 4.62513C3.82425 4.5932 3.6921 4.61099 3.58037 4.67473C3.46863 4.73848 3.38607 4.84319 3.35015 4.96671C3.31422 5.09024 3.32775 5.22289 3.38787 5.33662L4.37721 7.06641L3.39254 8.72775C3.3594 8.78367 3.33759 8.84557 3.32837 8.90992C3.31915 8.97427 3.32269 9.0398 3.3388 9.10278C3.3549 9.16576 3.38326 9.22495 3.42224 9.27697C3.46122 9.32899 3.51006 9.37283 3.56599 9.40597C3.62191 9.43912 3.68381 9.46092 3.74816 9.47014C3.81251 9.47937 3.87804 9.47582 3.94102 9.45972C4.004 9.44361 4.06319 9.41526 4.11521 9.37628C4.16723 9.3373 4.21107 9.28845 4.24421 9.23253L5.37511 7.32307C5.41969 7.24785 5.44354 7.16215 5.44423 7.07471C5.44491 6.98727 5.4224 6.9012 5.379 6.82529L4.2481 4.84584Z"></path></symbol>
+  </svg>
   <noscript>
     <p style="padding:24px;font-family:sans-serif;color:#fff">JavaScript is required to mount the loader demos. Enable JS and reload.</p>
   </noscript>
@@ -403,201 +981,134 @@
   <div class="page">
     <header>
       <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Cycle theme">☾ Dark</button>
-      <h1>Zeros Loaders &amp; Shimmers</h1>
+      <h1>Zeros Loaders</h1>
       <p style="margin:0 0 12px;padding:10px 12px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;font-size:12px;color:var(--fg1)">
         <strong>Preview tip:</strong> Open <code>styles/Artifacts/loaders-preview.html</code> from the file
         tree in your system browser (no build step or server). Or visit
         <code>http://localhost:5193/Loaders/loaders-preview.html</code> with <code>pnpm dev</code> running.
       </p>
       <p>
-        Current Zeros loading animations plus focused Run-loader studies,
-        rendered as standalone HTML.
-        The Orbit shimmer is the app-wide DEFAULT loader (the Lucide
-        Loader2 Spinner is retired); the Agent shimmer marks
-        agent-working states. Open this file directly in a browser;
-        no build step required.
+        The app's loaders, rendered as standalone HTML from mirrors of the
+        production components in <code>apps/desktop/src/renderer/shared/ui/loading/</code>.
+        All three share one 4 × 4 grid of square tiles: <strong>Orbit</strong> is the
+        default loader, the <strong>Puzzle</strong> marks an agent at work, and
+        <strong>Stream</strong> marks a running Run action. At the end, the
+        <strong>workspace glyph</strong>: each sidebar workspace wears its own Puzzle square
+        in place of the Git branch icon, animating while its agent works and tinted by its PR
+        (<code>apps/desktop/src/renderer/shell/workspace-glyph.tsx</code>). Open this file
+        directly in a browser; no build step required.
+      </p>
+      <p style="margin-top:8px">
+        Chat tabs show their running loader in their agent's own colours, and Codex uses
+        its app mark (the last section).
+      </p>
+      <p style="margin-top:8px">
+        The active turn's rail and running tool rows show the <strong>glass square</strong>:
+        the same square in soft glass colour combos, running like Stream in one of three
+        motions picked at random (the last section).
       </p>
     </header>
 
-    <!-- ── 1. ActivityShimmer ── -->
+    <!-- ── N1. Agent shimmer replacement — Puzzle ── -->
     <section>
-      <h2>ActivityShimmer — active agent turn</h2>
-      <p class="source">apps/desktop/src/renderer/shared/ui/loading/activity-shimmer.tsx · apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx · apps/desktop/src/renderer/shared/ui/loading/live-duration.tsx</p>
+      <h2>Agent — Puzzle</h2>
+      <p class="source">apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx (variant="agent") · puzzle-motion.ts · a 4 × 4 sliding-tile square · four corner anchors hold the square while three hands slide tiles through the channel at once · <code>--loader-active</code></p>
       <div class="demo-grid">
         <div class="demo-card wide">
-          <h3>ActivityShimmer — active agent turn tail</h3>
-          <div class="demo-stage left">
-            <div class="activity-shimmer" role="status" aria-live="polite">
-              <span class="activity-agent-spinner" id="activity-agent-spinner"></span>
-              <span class="live-duration zeros-agent-live-duration" id="activity-duration">0s</span>
+          <h3>Magnified &amp; real size</h3>
+          <div class="demo-stage plate-stage">
+            <span data-puzzle data-size="96" data-label="Agent working"></span>
+            <div class="plate-sizes">
+              <div class="plate-size"><span data-puzzle data-size="12"></span>12</div>
+              <div class="plate-size"><span data-puzzle data-size="14"></span>14</div>
+              <div class="plate-size"><span data-puzzle data-size="16"></span>16</div>
+              <div class="plate-size"><span data-puzzle data-size="24"></span>24</div>
             </div>
           </div>
-          <p class="demo-note"><code>&lt;ZerosSpinner size={16} variant="agent" /&gt;</code> + LiveDuration.</p>
-        </div>
-      </div>
-    </section>
-
-    <!-- ── 2. Run loader replacement study — animated audio wave ── -->
-    <section>
-      <h2>Run loader — Audio Wave</h2>
-      <p class="source">Exploration only · pure-vector SVG · five rounded strokes · rolling audio-wave motion · 1.5s seamless pass · <code>--fg2</code></p>
-      <p class="source">styles/Artifacts/run-wave/run-wave.js</p>
-      <div class="demo-grid">
-        <div class="demo-card">
-          <h3>14px — inline run rows</h3>
-          <div class="demo-stage run-wave-stage">
-            <span class="run-wave-loader" data-run-wave data-wave-size="96" role="img" aria-label="Animated audio wave, Run loader"></span>
-            <span class="run-wave-loader" data-run-wave data-wave-size="14" aria-hidden="true"></span>
-          </div>
-          <p class="demo-note">The five lower endpoints stay fixed while one rounded crest rolls across five distinct top phases. At 14px, each round-capped stroke remains exactly 1px.</p>
-        </div>
-        <div class="demo-card">
-          <h3>16px — live signal &amp; static Stop</h3>
-          <div class="demo-stage run-wave-stage">
-            <span class="run-wave-loader" data-run-wave data-wave-size="96" role="img" aria-label="Animated audio wave, Run loader"></span>
-            <span class="run-wave-loader" data-run-wave data-wave-size="16" aria-hidden="true"></span>
-            <div class="run-control-preview">
-              <svg class="run-stop-icon" viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2.5" width="7" height="7"></rect></svg>
-              <span>Stop</span>
-            </div>
-          </div>
-          <p class="demo-note">Periodic splines keep every height change and the final loop seam smooth. The live signal remains 1.2px at 16px; Stop itself is a static square and label.</p>
-        </div>
-      </div>
-    </section>
-
-    <!-- ── 3. ZerosSpinner — Orbit (the DEFAULT loader) ── -->
-    <section>
-      <h2>ZerosSpinner — Orbit Shimmer (default loader)</h2>
-      <p class="source">apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx · styles/globals.css · styles/semantic-tokens.css (--loader-*)</p>
-      <div class="demo-grid">
-        <div class="demo-card">
-          <h3>12px — small raw controls</h3>
-          <div class="demo-stage" id="spinner-12"></div>
-          <p class="demo-note">e.g. the browser fork control, the green Merge button.</p>
-        </div>
-        <div class="demo-card">
-          <h3>14px — inline rows</h3>
-          <div class="demo-stage" id="spinner-14"></div>
-          <p class="demo-note">"Running…" headers, PR island actions, dashboard card actions.</p>
-        </div>
-        <div class="demo-card">
-          <h3>16px — buttons &amp; centered states</h3>
-          <div class="demo-stage" id="spinner-16"></div>
-          <p class="demo-note">All &lt;Button&gt; slots (icons are 16px there) + "Starting…" / "Scanning…" covers.</p>
-        </div>
-        <div class="demo-card">
-          <h3>24px — default size</h3>
-          <div class="demo-stage" id="spinner-24"></div>
-          <p class="demo-note">Bare &lt;ZerosSpinner /&gt;. Auth gate uses 20px.</p>
-        </div>
-      </div>
-    </section>
-
-    <!-- ── 3b. ZerosSpinner — Agent Shimmer ── -->
-    <section>
-      <h2>ZerosSpinner — Agent Shimmer</h2>
-      <p class="source">apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx · styles/globals.css</p>
-      <div class="demo-grid">
-        <div class="demo-card">
-          <h3>14px — tool rows (subagent / task)</h3>
-          <div class="demo-stage" id="agent-spinner-14"></div>
-        </div>
-        <div class="demo-card">
-          <h3>16px — top bar / chat tabs</h3>
-          <div class="demo-stage" id="agent-spinner-16"></div>
-        </div>
-        <div class="demo-card">
-          <h3>12px — scale check</h3>
-          <div class="demo-stage" id="agent-spinner-12"></div>
-        </div>
-        <div class="demo-card">
-          <h3>24px — scale check</h3>
-          <div class="demo-stage" id="agent-spinner-24"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ── 4. Orbit in production — buttons, tones, disabled ── -->
-    <section>
-      <h2>Orbit in buttons — tones</h2>
-      <p class="source">tone="default" | "inverted" | "inherit" · semantic tokens in styles/semantic-tokens.css</p>
-      <p class="source">The old Lucide-Loader2 Spinner is RETIRED (apps/desktop/src/renderer/shared/ui/loading/spinner.tsx deleted) — Orbit is the app-wide default loader.</p>
-      <div class="demo-grid">
-        <div class="demo-card">
-          <h3>Primary button — tone="inverted"</h3>
-          <div class="demo-stage">
-            <button class="demo-btn primary" type="button">
-              <span id="btn-primary-spinner"></span>
-              Add project
-            </button>
-          </div>
-          <p class="demo-note">--loader-active/-rest-inverted → the on-inverted fg, so the piece never vanishes on the near-white (Dark) or near-black (Light) fill.</p>
-        </div>
-        <div class="demo-card">
-          <h3>Primary + disabled while loading</h3>
-          <div class="demo-stage">
-            <button class="demo-btn primary disabled" type="button" disabled>
-              <span id="btn-primary-disabled-spinner"></span>
-              Cloning…
-            </button>
-          </div>
-          <p class="demo-note">The Button recipe's <code>disabled:opacity-50</code> dims the whole button — the spinner dims with it; no extra handling.</p>
-        </div>
-        <div class="demo-card">
-          <h3>Secondary button — tone="default"</h3>
-          <div class="demo-stage">
-            <button class="demo-btn secondary" type="button">
-              <span id="btn-secondary-spinner"></span>
-              Comment
-            </button>
-          </div>
-          <p class="demo-note">Transparent fill: the default fg2/fg3 tokens read correctly as-is.</p>
-        </div>
-        <div class="demo-card">
-          <h3>Green Merge — tone="inherit"</h3>
-          <div class="demo-stage">
-            <button class="demo-btn merge" type="button">
-              <span id="btn-merge-spinner"></span>
-              Merge
-            </button>
-          </div>
-          <p class="demo-note">currentColor rides the button's own text color — the same trick the retired Loader2 used.</p>
-        </div>
-        <div class="demo-card">
-          <h3>Destructive — tone="inherit"</h3>
-          <div class="demo-stage">
-            <button class="demo-btn destructive" type="button">
-              <span id="btn-destructive-spinner"></span>
-              Remove
-            </button>
-          </div>
-          <p class="demo-note">White label on the red fill in both themes; the spinner inherits it.</p>
-        </div>
-        <div class="demo-card">
-          <h3>Status color — tone="inherit"</h3>
-          <div class="demo-stage">
-            <span id="status-yellow-spinner" style="color: var(--yellow-primary); display: inline-flex;"></span>
-          </div>
-          <p class="demo-note">Review-check "running" glyph: inherit + <code>text-yellow-primary</code>.</p>
+          <p class="demo-note">A self-solving puzzle worked by three hands at once, each on its own loose clock (a move every 300–460ms), so two or three tiles are usually gliding. A hand pulls the neighbouring tile into its hole, or now and then pushes two in a line like a real 15-puzzle, in short runs that never step straight back. Cells under a move in flight are reserved until it lands, so tiles never cross. Six holes keep the square airy; the corners never move, so it never loses its outline. Tiles sit on whole device pixels: 2.5px at 12–14px, 3px at 16px, 4.5px at 24px.</p>
         </div>
         <div class="demo-card wide">
-          <h3>In context — standalone loading rows</h3>
-          <div class="demo-stage left" style="flex-direction: column; align-items: stretch; gap: 12px; font-size: 12px; color: var(--fg2);">
-            <div style="display:flex;align-items:center;gap:8px;">
-              <span id="row-spinner-1" style="display:inline-flex;"></span>
-              <span>Running command…</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px;">
-              <span id="row-spinner-2" style="display:inline-flex;"></span>
-              <span>Scanning…</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px;font-size:13px;">
-              <span id="row-spinner-3" style="display:inline-flex;"></span>
-              <span>Reconnecting…</span>
+          <h3>Where it shows</h3>
+          <p class="demo-note">Chat tabs (in each agent's colours) and sidebar workspace rows. Every mount starts from its own random square and runs its own random hands, so no two show the same shape or march in step; hidden retained surfaces pause their hands until they are visible again. The transcript (the active turn's rail and running tool and subagent rows) shows the glass square instead: the last section.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── N2. Loading replacement — Orbit (final) ── -->
+    <section>
+      <h2>Loading — Orbit</h2>
+      <p class="source">apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx (the default variant) · orbit-motion.ts · a snake lapping the 4 × 4 ring over its faint track in 1200ms, drawn as one continuous band · <code>--loader-active</code> / <code>--loader-rest</code> and the tones</p>
+      <div class="demo-grid">
+        <div class="demo-card wide">
+          <h3>Magnified &amp; real size</h3>
+          <div class="demo-stage plate-stage">
+            <span data-plate="orbit" data-size="96"></span>
+            <div class="plate-sizes">
+              <div class="plate-size"><span data-plate="orbit" data-size="12"></span>12</div>
+              <div class="plate-size"><span data-plate="orbit" data-size="14"></span>14</div>
+              <div class="plate-size"><span data-plate="orbit" data-size="16"></span>16</div>
+              <div class="plate-size"><span data-plate="orbit" data-size="24"></span>24</div>
             </div>
           </div>
-          <p class="demo-note">Terminal headers, MCP scanning, reconnect banners — all Orbit, default tone.</p>
+          <p class="demo-note">The track is one continuous ring and the snake one continuous band that glides at an even speed: a solid head of three and a half tiles with a tail that fades smoothly over the next three, so the loop never breaks into grey blocks. Pure CSS on the shared <code>zeros-orbit-lap</code> keyframe. The ring sits on whole device pixels (2.5px at 12–14px, 3px at 16px, 4.5px at 24px), so its edges stay crisp.</p>
+        </div>
+        <div class="demo-card wide">
+          <h3>In buttons — tones</h3>
+          <div class="demo-stage" style="gap:12px;flex-wrap:wrap;min-height:88px">
+            <button class="demo-btn primary" type="button"><span data-loop-slot data-size="16" data-tone="inverted"></span>Add project</button>
+            <button class="demo-btn primary disabled" type="button" disabled><span data-loop-slot data-size="16" data-tone="inverted"></span>Cloning…</button>
+            <button class="demo-btn secondary" type="button"><span data-loop-slot data-size="16" data-tone="default"></span>Comment</button>
+            <button class="demo-btn merge" type="button"><span data-loop-slot data-size="12" data-tone="inherit"></span>Merge</button>
+            <button class="demo-btn destructive" type="button"><span data-loop-slot data-size="16" data-tone="inherit"></span>Remove</button>
+            <span data-loop-slot data-size="14" data-tone="inherit" style="color: var(--yellow-primary); display: inline-flex;"></span>
+          </div>
+          <div class="demo-stage left" style="flex-direction:column;align-items:stretch;gap:12px;font-size:12px;color:var(--fg2)">
+            <div style="display:flex;align-items:center;gap:8px"><span data-loop-slot data-size="14" data-tone="default" style="display:inline-flex"></span><span>Running command…</span></div>
+            <div style="display:flex;align-items:center;gap:8px"><span data-loop-slot data-size="16" data-tone="default" style="display:inline-flex"></span><span>Scanning…</span></div>
+            <div style="display:flex;align-items:center;gap:8px;font-size:13px"><span data-loop-slot data-size="16" data-tone="default" style="display:inline-flex"></span><span>Reconnecting…</span></div>
+          </div>
+          <p class="demo-note">The app's tones: <code>tone="inverted"</code> on primary fills, <code>tone="inherit"</code> on Merge / destructive / the yellow review glyph, default elsewhere. The track takes the rest tone; disabled buttons dim it with the rest of the button.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── N2b. Run replacement — Stream (final) ── -->
+    <section>
+      <h2>Run — Stream</h2>
+      <p class="source">apps/desktop/src/renderer/shared/ui/loading/run-stream.tsx · an irregular 4 × 4 square of tiles whose rows slide right one after another and wrap round · a row every 95ms · the one motion the puzzle never makes, so "running" never reads as "agent working"</p>
+      <div class="demo-grid">
+        <div class="demo-card wide">
+          <h3>Magnified &amp; real size</h3>
+          <div class="demo-stage plate-stage" data-run-stage>
+            <span data-run data-size="96" data-label="Running"></span>
+            <div class="plate-sizes">
+              <div class="plate-size"><span data-run data-size="12"></span>12</div>
+              <div class="plate-size"><span data-run data-size="14"></span>14</div>
+              <div class="plate-size"><span data-run data-size="16"></span>16</div>
+              <div class="plate-size"><span data-run data-size="24"></span>24</div>
+            </div>
+          </div>
+          <p class="demo-note">Same tiles and square as the workspace glyphs, opposite motion. The puzzle shuffles at random; Run only ever moves forward: every 95ms the next row, top to bottom, slides one tile right in 140ms and wraps round at the edge, so the whole square streams left to right, one full pass every 1.5s. Rows are drawn as single shapes, so tiles side by side never show a seam.</p>
+        </div>
+        <div class="demo-card wide">
+          <h3>In context — sidebar row &amp; Run control</h3>
+          <div class="demo-stage left context-rows">
+            <div class="context-row">
+              <span class="run-context-glyph" data-puzzle-idle="zeros/zeros/atlanta"></span>
+              <span style="font-size:13px">atlanta</span>
+              <span class="sb-counts" style="margin-left:auto">+12 −3</span>
+              <span class="sb-run" style="display:inline-flex"><span data-run data-size="12"></span></span>
+            </div>
+            <div class="context-row" style="gap:10px">
+              <span style="display:inline-flex;color:var(--fg2)"><span data-run data-size="16" data-label="Running"></span></span>
+              <span>Running · <span class="muted">pnpm dev</span></span>
+              <div class="run-control-preview" style="margin-left:8px">
+                <svg class="run-stop-icon" viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2.5" width="7" height="7"></rect></svg>
+                <span>Stop</span>
+              </div>
+            </div>
+          </div>
+          <p class="demo-note">In the sidebar the Run signal keeps its <code>--blue-primary</code> and sits after the change counts; tab and panel pills pass their own <code>--fg1</code> / <code>--fg2</code> / <code>--fg3</code>. The row's leading square is its workspace glyph at rest.</p>
         </div>
       </div>
     </section>
@@ -610,7 +1121,7 @@
         <div class="demo-card">
           <h3>LiveDuration — ticking counter</h3>
           <div class="demo-stage">
-            <span class="live-duration zeros-agent-live-duration" id="live-duration-demo">4s</span>
+            <span class="live-duration zeros-agent-live-duration" data-live-duration>4s</span>
           </div>
           <p class="demo-note">Updates at 1 Hz and pulses only while work is pending or in progress.</p>
         </div>
@@ -624,390 +1135,1603 @@
       </div>
     </section>
 
+    <div class="era-divider">Workspace glyph</div>
+
+    <!-- ── N3. Workspace glyphs — sidebar ── -->
+    <section>
+      <h2>Workspace glyph — sidebar</h2>
+      <p class="source">apps/desktop/src/renderer/shell/workspace-glyph.tsx · replaces the Git branch and PR icons · the workspace's repository/branch seeds where the six holes of its 4 × 4 square start · idle: <code>--fg3</code> at 25% · agent working: the same square slides in <code>--fg2</code> · a PR colours it in both</p>
+      <div class="demo-grid">
+        <div class="demo-card wide">
+          <h3>Sidebar — click a row to start or stop its agent</h3>
+          <div class="sb-layout">
+            <div class="sb-mock" id="sb-mock">
+              <div class="sb-heading">Workspaces</div>
+              <div class="sb-list">
+                <div class="sb-repo"><span class="sb-chip">Z</span><span class="sb-name">Zeros</span><span class="sb-plus"><svg class="sb-icon"><use href="#i-plus"></use></svg></span></div>
+                <div class="sb-row" data-ws="palembang" data-seed="zeros/zeros/palembang" data-pr="open" data-working data-active="true" role="button" tabindex="0"><span class="sb-glyph"></span><span class="sb-name">palembang</span><span class="sb-trailing"><span class="sb-counts"><span class="sb-add">+214</span> <span class="sb-del">−38</span></span></span></div>
+                <div class="sb-row" data-ws="boston" data-seed="zeros/zeros/boston" data-working role="button" tabindex="0"><span class="sb-glyph"></span><span class="sb-name">boston</span><span class="sb-trailing"><span class="sb-counts">+12 −3</span><span class="sb-run" data-sb-run aria-hidden="true"></span></span></div>
+                <div class="sb-row" data-ws="atlanta" data-seed="zeros/zeros/atlanta" role="button" tabindex="0"><span class="sb-glyph"></span><span class="sb-name">atlanta</span><span class="sb-trailing"><span class="sb-counts">+87</span></span></div>
+                <div class="sb-row" data-ws="seville" data-seed="zeros/zeros/seville" data-pr="ready" role="button" tabindex="0"><span class="sb-glyph"></span><span class="sb-name">seville</span><span class="sb-trailing"><span class="sb-counts">+41 −9</span></span></div>
+                <div class="sb-repo"><span class="sb-chip">O</span><span class="sb-name">0kit</span><span class="sb-plus"><svg class="sb-icon"><use href="#i-plus"></use></svg></span></div>
+                <div class="sb-row" data-ws="paris-mumbai-city-docs" data-seed="okit/zeros/paris-mumbai-city-docs" data-pr="merged" role="button" tabindex="0"><span class="sb-glyph"></span><span class="sb-name">paris-mumbai-city-docs</span></div>
+                <div class="sb-row" data-ws="new-york" data-seed="okit/zeros/new-york" data-pr="conflicts" data-working role="button" tabindex="0"><span class="sb-glyph"></span><span class="sb-name">new-york</span><span class="sb-trailing"><span class="sb-counts">+6 −2</span></span></div>
+                <div class="sb-row" data-ws="lisbon" data-seed="okit/zeros/lisbon" data-pr="closed" role="button" tabindex="0"><span class="sb-glyph"></span><span class="sb-name">lisbon</span></div>
+                <div class="sb-repo"><span class="sb-chip">T</span><span class="sb-name">To-do app</span><span class="sb-plus"><svg class="sb-icon"><use href="#i-plus"></use></svg></span></div>
+                <div class="sb-row" data-ws="kyoto" data-seed="todo-app/zeros/kyoto" role="button" tabindex="0"><span class="sb-glyph"></span><span class="sb-name">kyoto</span></div>
+              </div>
+            </div>
+            <div>
+              <dl class="legend" id="sb-legend">
+                <dt data-legend="idle"></dt><dd>Idle · a quiet square, <code>--fg3</code> at 25%</dd>
+                <dt data-legend="working"></dt><dd>Agent working · the tiles slide in <code>--fg2</code>, in three close tones for a little depth; no separate spinner</dd>
+                <dt data-legend="open"></dt><dd>PR open · <code>--brown-fg</code></dd>
+                <dt data-legend="ready"></dt><dd>Ready to merge · <code>--green-primary</code></dd>
+                <dt data-legend="merged"></dt><dd>Merged · <code>--violet-fg</code></dd>
+                <dt data-legend="closed"></dt><dd>Closed · merge conflicts · <code>--red-fg</code></dd>
+              </dl>
+              <div class="sb-notes">
+                <p>Colour carries the PR, motion carries the agent, and the square stays the workspace's mark, all in one 16px slot: a working agent no longer hides the PR state.</p>
+                <p>At rest the glyph is the workspace's own square in <code>--fg3</code> at 25%. While its agent works the same square runs the Puzzle in <code>--fg2</code>; when the turn ends it stops where it is and resumes from there on the next run, so a workspace comes back from each run in a new shape. It keeps that shape while its row briefly shows something else.</p>
+                <p>Colour check: closed and conflicts share one red, and in Dark <code>--red-fg</code> sits right next to the open brown (new-york and lisbon vs palembang). The toggle under PR status × agent state compares <code>--red-primary</code>.</p>
+                <p>A plan to review or a question to answer never replaces the square: the mark sits in the row's inset gutter, left of it (flat rows use the pencil's slot, as chat tabs do). While the turn waits on the answer the square rests; beside a question the agent keeps working through (Codex's optional asks), it keeps moving.</p>
+                <p>Unchanged: the design pen, plain folders (the agent Puzzle while they work), archiving (Orbit), and Ungrouped rows, which lead with the repository icon and keep a trailing agent loader.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── N4. PR status × agent state ── -->
+    <section>
+      <h2>PR status × agent state</h2>
+      <p class="source">One workspace (palembang) in every state · 36px magnified + 16px real size · colours are the former PR icons' tokens · a PR keeps its colour whether the puzzle rests or slides</p>
+      <div class="controls" style="margin:0 0 12px">
+        <label>Closed / conflicts <span class="seg" id="pr-red" role="group" aria-label="Closed and conflicts colour">
+          <button type="button" data-red="fg" aria-pressed="true">--red-fg · shipped</button>
+          <button type="button" data-red="primary" aria-pressed="false">--red-primary</button>
+        </span></label>
+        <span>In Dark, <code>--brown-fg</code> (open) and <code>--red-fg</code> are both salmon at 12px. The former icon shapes told them apart; the square only has its colour. Applies to the sidebar too.</span>
+      </div>
+      <div class="matrix-wrap"><div class="matrix" id="pr-matrix"></div></div>
+    </section>
+
+    <!-- ── N5. Glyph per workspace ── -->
+    <section>
+      <h2>Every workspace starts from its own square</h2>
+      <p class="source">repository/branch → cyrb128 → sfc32 → seeded shuffle of the twelve channel cells → the first six are holes · 924 starting squares · corners always filled · the same seed draws the same square as the app</p>
+      <div class="demo-grid">
+        <div class="demo-card wide">
+          <h3>Try a repository/branch</h3>
+          <div class="demo-stage left" style="padding:16px">
+            <div class="explorer">
+              <span id="explorer-big"></span>
+              <div class="explorer-fields">
+                <input id="explorer-input" type="text" value="zeros/zeros/palembang" spellcheck="false" autocomplete="off" aria-label="Workspace seed: repository/branch" />
+                <div class="context-row"><span id="explorer-small"></span><span id="explorer-name" style="font-size:13px;color:var(--fg2)">palembang</span></div>
+                <span class="explorer-meta" id="explorer-meta"></span>
+              </div>
+              <pre class="explorer-bits" id="explorer-bits" aria-label="Square cells"></pre>
+            </div>
+          </div>
+        </div>
+        <div class="demo-card wide">
+          <div class="card-head"><h3>Sheet — hover a square to see it work</h3><button type="button" class="theme-toggle" id="sheet-shuffle" style="position:static">Shuffle ids</button></div>
+          <div class="demo-stage" style="padding:20px 16px">
+            <div class="glyph-sheet" id="glyph-sheet" style="width:100%"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="era-divider">Chat tabs — agent colours</div>
+
+    <!-- ── N6. Chat tab loader in each agent's colours ── -->
+    <section id="agent-tones" data-agent-tones="row">
+      <h2>Chat tabs — the loader in each agent's colours</h2>
+      <p class="source">apps/desktop/src/renderer/features/agent/agent-brands.ts (tones) · puzzleRowFills in shared/ui/loading/puzzle-square.tsx · chat tabs only (not the turn rail, tool rows or workspace squares) · idle: the agent's logo · running: the Puzzle lit from the top in three subtle tones of that logo · Claude's terracotta · Codex's lavender-to-blue gradient · Cursor's black-and-white cube</p>
+      <p class="source" style="margin-top:-4px">The top of the square catches the light, like Codex's gradient and the faces of Cursor's cube, and a tile takes the tone of the row it slides into.</p>
+      <div class="demo-grid">
+        <div class="demo-card wide">
+          <h3>Chat tabs — click a tab to start or stop its agent</h3>
+          <div class="demo-stage left" style="padding:12px">
+            <div class="ct-strip" id="ct-strip"></div>
+          </div>
+          <p class="demo-note">Idle, a tab shows its agent's logo: monochrome unless it's the active tab, as today, with Codex on its app mark. Running, the logo becomes the Puzzle in that agent's tones, active tab or not.</p>
+        </div>
+      </div>
+      <div class="agent-matrix" id="agent-matrix"></div>
+    </section>
+
+    <div class="era-divider">Agent turn &amp; tool rows — the glass square</div>
+
+    <!-- ── N7. The glass square: the transcript's agent loader ── -->
+    <section id="glass-study">
+      <h2>Agent turn &amp; tool rows — the glass square</h2>
+      <p class="source">apps/desktop/src/renderer/shared/ui/loading/glass-square.tsx · glass-motion.ts · glass-combos.ts · ZerosSpinner variant="glass" (ActivityShimmer, tool.tsx, tool-subagent.tsx) · the transcript only: the workspace square and chat tab keep the Puzzle, Run keeps Stream · Stream's running feel, three ways, and every square picks one at random when it mounts · the tiles never stop travelling · soft glass combos (lighter than pastel, lit from the top, a sheen and a faint glow) hold still while the tiles run through them, so nothing reads as a block · every ~5s the next combo comes in with the running tiles and a glint crosses the square</p>
+      <div class="demo-grid">
+        <div class="demo-card wide">
+          <h3>Three motions — magnified &amp; real size</h3>
+          <div class="flow-variants" id="flow-variants"></div>
+        </div>
+        <div class="demo-card wide">
+          <div class="card-head">
+            <h3>In context — tool rows, then the turn rail</h3>
+            <div class="controls">
+              <div class="seg" id="gibberish-toggle" role="group" aria-label="Gibberish agent thinking">
+                <button type="button" data-gibberish="off" aria-pressed="true">Gibberish off</button>
+                <button type="button" data-gibberish="on" aria-pressed="false">On</button>
+              </div>
+              <div class="seg" id="flow-picker" role="group" aria-label="Motion"></div>
+            </div>
+          </div>
+          <div class="demo-stage left context-rows flow-rows">
+            <div class="context-row">
+              <span data-flow-slot data-size="14"></span>
+              <span>Explore</span><span class="muted">Map every sidebar glyph slot</span>
+            </div>
+            <div class="context-row">
+              <span data-flow-slot data-size="14"></span>
+              <span>Read</span><span class="muted">59 lines · ai-ui-kit-foundation.md</span>
+            </div>
+            <div class="context-row turn-rail" role="status" aria-live="polite">
+              <span data-flow-slot data-size="16" data-label="Agent working"></span>
+              <span class="rail-words">
+                <span class="zeros-gibberish-thinking" data-gibberish-word aria-hidden="true" hidden></span>
+                <span class="live-duration" data-live-duration="working" aria-live="off">0.0s</span>
+              </span>
+            </div>
+          </div>
+          <p class="demo-note">As in the app, every square picks its own motion and combo when it mounts (Random); pick a motion to see it on every row. The turn rail sits a little lower under the last row (8px more room above it), and its working timer, 12px from the square, counts in tenths of a second (57.5s · 1m, 27.3s · 103m, 57.5s) at 12px in plain --fg2, with no pulse (WorkingDuration, live-duration.tsx).</p>
+        </div>
+        <div class="demo-card wide">
+          <h3>Gibberish agent thinking — the phrases</h3>
+          <div class="gibberish-sheet" id="gibberish-sheet"></div>
+          <p class="demo-note">Settings → Experimental → Gibberish agent thinking (off by default) puts these on the turn rail, between the square and the timer, at 13px, a new one every 3 seconds, each shimmering once as it shows (apps/desktop/src/renderer/shared/ui/loading/gibberish-thinking.ts). A hundred agent-at-work phrases of up to three words, misspelled so they still read, and sound, like themselves: every word keeps its first consonant and about its length while the vowels wander. A turn goes through all hundred in its own order, shuffled from its start time, before any comes round again. Screen readers skip it.</p>
+        </div>
+        <div class="demo-card wide">
+          <h3>The combos</h3>
+          <div class="combo-sheet" id="combo-sheet"></div>
+          <p class="demo-note">Four to six colours per combo, each kept to a breath of its hue. Each swatch is a combo's field running diagonally; a live combo runs it along either diagonal, left or right, at random, and the square shows it through its tiles, sheen and glow included.</p>
+        </div>
+      </div>
+    </section>
+
+
   </div>
 
-  <!-- Audio-wave Run-loader study: one dependency-free SVG renderer. -->
-  <script src="./run-wave/run-wave.js"></script>
   <script>
+// ══ Square study — replacement for both shimmers + workspace glyphs ══
+//
+// Two primitives on the same 4 × 4 grid, drawn as clean vector squares on
+// whole device pixels:
+//
+//   • Puzzle glyph — a sliding-tile square. The four corner tiles are
+//     anchors, so the silhouette always reads as a square (after the plates
+//     at jack.art/credits); ten tiles and six holes share the plus-shaped
+//     channel between them. Idle it rests quietly; while the agent works
+//     three hands slide tiles into the holes, so the square keeps re-forming
+//     new shapes. It is both the Agent loader and the sidebar workspace
+//     glyph; a repository/branch picks where its holes start, and a PR
+//     colours it.
+//   • Loading "Orbit" — a four-block snake laps a 4 × 4 ring over its track.
+//
+// ?slow=10 stretches every duration tenfold for frame-by-frame review.
 (function () {
-  // Polyfill for browsers without Element.replaceChildren (Safari < 14, etc.)
-  if (!Element.prototype.replaceChildren) {
-    Element.prototype.replaceChildren = function (...nodes) {
-      while (this.firstChild) this.removeChild(this.firstChild);
-      this.append(...nodes);
-    };
-  }
-
-  function clearBootBanner() {
-    const boot = document.getElementById("loaders-boot");
-    if (boot) boot.remove();
-  }
+  "use strict";
 
   try {
-    const reducedMotion = window.matchMedia
-      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const reducedMotion = !!(window.matchMedia
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const DPR = Math.max(1, Math.round(window.devicePixelRatio || 1));
+    const SLOW = Number(new URLSearchParams(location.search).get("slow")) || 1;
+    const T = (ms) => ms * SLOW;
 
-    // ── ZerosSpinner — mirrors apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx ──
-    //
-    // 4×4 dot-matrix tetromino orbit + wave. The full board stays faintly
-    // visible as a --fg3 grid; the active piece lights up on top in --fg1.
-    // Shape order is choreographed so the piece's centroid glides clockwise
-    // around the board — the morph itself reads as a wave lapping the grid.
-    // Joining dots fade in fast, leaving dots fade out slow (comet trail).
-    // A diagonal wave pulse flows continuously through the lit dots (nested
-    // opacities multiply).
-    const HOLD_MS = 45;
-    const FADE_IN_MS = 65;
-    const FADE_OUT_MS = 145;
-    // Shared loop length. BOTH the active shape cycle and the inactive grid-fade
-    // run for exactly this long in EVERY variant, so they stay in lock-step no
-    // matter how many shapes a variant has. 1320ms = the orbit's natural 12-stop
-    // lap (12 × 110ms); a variant with fewer stops just holds each stop longer to
-    // fill the same 1320ms (agent: 10 stops → 132ms each).
-    const LAP_MS = 12 * (HOLD_MS + FADE_IN_MS);   // = 1320ms
-    const STAGGER_MS = 7;
-    const LIT = 0.7;                   // lit active-dot opacity: --fg2 @ 70%
-    const MAX_DIAG = 6;
-    const WAVE_PERIOD_MS = 730;
-    const WAVE_STEP_MS = 85;
-    const WAVE_PEAK = 1;
-    // The faint --fg3 background grid. REST_OPACITY is the inactive dots'
-    // opacity — --fg3 at 40%: the fade peaks here and dissolves to the trough,
-    // and it's also the static value when reduced-motion disables the fade.
-    const REST_OPACITY = 0.4;         // inactive-dot opacity: --fg3 @ 40%
-    // Grid fade — one diagonal sweep (top-left → bottom-right) that fades the
-    // INACTIVE dots only, 0 → full → 0, staggered by (x + y). It lives on the
-    // resting dots, NOT the cell, so the active orbit above is never dimmed and
-    // its animation stays visible throughout the sweep.
-    // The cycle is LAP_MS — the SAME shared loop length as the active shape cycle
-    // (see stepMs / gridFadePeriod in createZerosSpinner) — so exactly one fade
-    // sweep runs per active lap and the inactive fade and the active loop are
-    // always the same 1320ms duration in every variant, phase-locked, no drift.
-    const GRID_FADE_STEP_MS = 100;    // per-diagonal stagger → smaller = wider fade spread
-    const GRID_FADE_TROUGH = 0;       // inactive dots fade fully out (to 0)
+    // ── Hash → seed ────────────────────────────────────────────────────────
+    // cyrb128 → sfc32: a small, fast, well-mixed pair. Same id, same square.
+    function hash128(str) {
+      let h1 = 1779033703, h2 = 3144134277, h3 = 1013904242, h4 = 2773480762;
+      for (let i = 0, k; i < str.length; i++) {
+        k = str.charCodeAt(i);
+        h1 = h2 ^ Math.imul(h1 ^ k, 597399067);
+        h2 = h3 ^ Math.imul(h2 ^ k, 2869860233);
+        h3 = h4 ^ Math.imul(h3 ^ k, 951274213);
+        h4 = h1 ^ Math.imul(h4 ^ k, 2716044179);
+      }
+      h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067);
+      h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233);
+      h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213);
+      h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179);
+      h1 ^= h2 ^ h3 ^ h4;
+      h2 ^= h1;
+      h3 ^= h1;
+      h4 ^= h1;
+      return [h1 >>> 0, h2 >>> 0, h3 >>> 0, h4 >>> 0];
+    }
 
-    // Uniform proportions — every size is a pure scale of the 24px look, so the
-    // dot size, gaps, and frame padding read identically at 12 / 14 / 16 / 24px.
-    // (No size branching; litFade / waveBase are gone with the gradient + wave.)
-    function tuningFor() {
-      return {
-        innerRatio: 0.75,  // inner 4×4 grid = 75% of the box; the rest is padding
-        dotRatio: 0.66,    // dot diameter = 66% of the cell (the airy 24px gaps)
-        minDotPx: 1,       // tiny safety floor — low enough to never distort scaling
+    function makeRng(seed) {
+      let [a, b, c, d] = hash128(String(seed));
+      return function () {
+        a |= 0; b |= 0; c |= 0; d |= 0;
+        const t = (((a + b) | 0) + d) | 0;
+        d = (d + 1) | 0;
+        a = b ^ (b >>> 9);
+        b = (c + (c << 3)) | 0;
+        c = (c << 21) | (c >>> 11);
+        c = (c + t) | 0;
+        return (t >>> 0) / 4294967296;
       };
     }
 
-    const toSets = (arr) => arr.map((cells) => new Set(cells));
+    // ── Geometry ───────────────────────────────────────────────────────────
+    // Cells snap to whole device pixels, so resting edges stay crisp.
+    const N = 4;
+    function cellFor(size) {
+      return Math.max(1, Math.round(((size * 0.75) / N) * DPR)) / DPR;
+    }
 
-    // ── Variant A: ORBIT — twelve stops per clockwise lap ──
-    const ORBIT_SHAPES = toSets([
-      ["0,0", "1,0", "0,1", "1,1"], // O — top-left corner
-      ["1,0", "2,0", "0,1", "1,1"], // S — sliding right along the top
-      ["1,0", "2,0", "3,0", "2,1"], // T — pointing down, top edge
-      ["2,0", "3,0", "2,1", "3,1"], // O — top-right corner
-      ["3,0", "3,1", "2,1", "2,2"], // S — vertical, turning down the right
-      ["3,1", "3,2", "3,3", "2,3"], // J — down the right edge
-      ["2,2", "3,2", "2,3", "3,3"], // O — bottom-right corner
-      ["2,2", "3,2", "1,3", "2,3"], // S — sliding left along the bottom
-      ["1,2", "0,3", "1,3", "2,3"], // T — pointing up, bottom edge
-      ["0,2", "1,2", "0,3", "1,3"], // O — bottom-left corner
-      ["0,1", "0,2", "0,3", "1,3"], // L — up the left edge
-      ["1,1", "1,2", "0,2", "0,3"], // Z — the Zeros piece, closes the lap
-    ]);
+    function plateSvg(size) {
+      const cell = cellFor(size);
+      const width = cell * N;
+      const offset = Math.round(((size - width) / 2) * DPR) / DPR;
+      const svg = document.createElementNS(SVG_NS, "svg");
+      // User units are CSS px, so a tile's translate() is plain pixels.
+      svg.setAttribute("viewBox", `0 0 ${width} ${width}`);
+      svg.setAttribute("width", String(width));
+      svg.setAttribute("height", String(width));
+      svg.setAttribute("aria-hidden", "true");
+      svg.style.left = `${offset}px`;
+      svg.style.top = `${offset}px`;
+      return { svg, cell };
+    }
 
-    // ── Variant B: AGENT — a diagonal WAVE crest. A compact four-dot cluster
-    // rolls and tumbles along the main diagonal, top-left → bottom-right, like a
-    // wave washing across the grid. The engine's fast-in / slow-out trail gives
-    // each pose a curl, and at the loop the crest dissolves at the bottom-right
-    // as the next wave surges in at the top-left — "the agent is working." Every
-    // pose echoes the three reference frames (S-piece, square, step). Change
-    // ONLY these active dots to retune the agent motion; the orbit is untouched.
-    // ── Variant B: AGENT — a diagonal WAVE crest. A compact four-dot cluster
-    // rolls and tumbles along the main diagonal, top-left → bottom-right, like a
-    // wave washing across the grid. The engine's fast-in / slow-out trail gives
-    // each pose a curl, and at the loop the crest dissolves at the bottom-right
-    // as the next wave surges in at the top-left — "the agent is working." Every
-    // pose echoes the three reference frames (S-piece, square, step). Change
-    // ONLY these active dots to retune the agent motion; the orbit is untouched.
-    const AGENT_SHAPES = toSets([
-      ["0,0", "0,1", "1,1", "1,2"], // crest rises, top-left        (S-piece)
-      ["0,0", "1,0", "1,1", "2,1"], // rolls right into the trough
-      ["1,0", "2,0", "1,1", "2,1"], // square — the crest peaks     (□)
-      ["2,0", "1,1", "2,1", "1,2"], // curls forward, spilling down
-      ["2,0", "3,0", "2,1", "3,1"], // square, sliding up the right
-      ["3,0", "2,1", "3,1", "2,2"], // curls down the right flank
-      ["2,1", "3,1", "2,2", "3,2"], // square, mid-descent          (rest pose)
-      ["3,1", "2,2", "3,2", "2,3"], // curls toward the floor
-      ["1,2", "2,2", "2,3", "3,3"], // step — breaking on the shore (⌐)
-      ["2,2", "3,2", "2,3", "3,3"], // square, lands bottom-right → loops
-    ]);
-
-    const VARIANTS = {
-      orbit: { shapes: ORBIT_SHAPES, restIndex: 11 },
-      // sync: lock the shape loop to the grid-fade's OWN clock (see the rAF
-      // scheduler in createZerosSpinner) so both loops restart on the same frame.
-      agent: { shapes: AGENT_SHAPES, restIndex: 6, sync: true },
-    };
-
-    // Tone → dot colors, mirroring TONE_COLORS in apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx
-    // (semantic --loader-* tokens with primitive fallbacks; "inherit" rides
-    // currentColor for buttons with bespoke fills).
-    const TONES = {
-      default: {
-        active: "var(--loader-active, var(--fg2))",
-        rest: "var(--loader-rest, var(--fg3))",
-      },
-      inverted: {
-        active: "var(--loader-active-inverted, var(--primary-button-fg))",
-        rest: "var(--loader-rest-inverted, var(--primary-button-fg))",
-      },
-      inherit: { active: "inherit", rest: "inherit" },
-    };
-
-    function createZerosSpinner(size, label, variantKey, toneKey) {
-      const { shapes: SHAPES, restIndex: Z_SHAPE_INDEX, sync: SYNC } = VARIANTS[variantKey || "orbit"];
-      const toneColors = TONES[toneKey || "default"];
-      // Every variant fills the SAME lap (LAP_MS). Each shape holds for a slice
-      // of it, so a variant with fewer shapes holds each one longer: orbit
-      // 1320/12 = 110ms, agent 1320/10 = 132ms. The grid-fade runs exactly one
-      // sweep per lap, so the active cycle and the inactive fade are the same
-      // 1320ms — both loops synced, in every variant.
-      const stepMs = LAP_MS / SHAPES.length;
-      const gridFadePeriod = LAP_MS;
-      // Per-instance phase jitter — mirrors phaseOffsetMs in
-      // apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx. One random entry point into the lap per
-      // spinner, applied to the grid-fade delay AND the synced shape loop's
-      // elapsed time (the same amount to both, so they stay phase-locked).
-      // Spinners mounted on the same frame would otherwise march in lockstep.
-      const phaseOffsetMs = Math.random() * LAP_MS;
-      const startIndex = Math.floor((phaseOffsetMs / LAP_MS) * SHAPES.length) % SHAPES.length;
-      const { innerRatio, dotRatio, minDotPx } = tuningFor();
-      const innerPx = size * innerRatio;
-      const padPx = (size - innerPx) / 2;
-      const cellPx = innerPx / 4;
-      const dotPx = Math.max(cellPx * dotRatio, minDotPx);
-
-      const root = document.createElement("div");
-      root.setAttribute("role", "status");
-      root.setAttribute("aria-label", label || "Loading");
-      root.className = "zeros-spinner";
-      root.style.cssText = `
-        width: ${size}px;
-        height: ${size}px;
-        padding: ${padPx}px;
-        grid-template-columns: repeat(4, ${cellPx}px);
-        grid-template-rows: repeat(4, ${cellPx}px);
-        color: ${toneColors.active};
-      `;
-
-      const layers = [];
-      let refRestDot = null;   // (0,0) resting dot — its CSS-animation clock drives the synced loop
-      for (let y = 0; y < 4; y++) {
-        for (let x = 0; x < 4; x++) {
-          const cell = document.createElement("span");
-          cell.className = "cell";
-          cell.setAttribute("aria-hidden", "true");
-          cell.style.cssText = `
-            grid-column-start: ${x + 1};
-            grid-row-start: ${y + 1};
-          `;
-
-          const diag = (x + y) / MAX_DIAG;
-          const waveDelay = (x + y) * WAVE_STEP_MS - WAVE_PERIOD_MS;
-
-          // Resting layer — the faint --fg3 background grid, and the ONLY thing
-          // the diagonal fade touches. Each resting dot fades its opacity
-          // 0 → full → 0, staggered by (x + y) so the sweep travels top-left →
-          // bottom-right. The active shape layer above is a separate sibling and
-          // is left untouched, so the orbit's animation stays fully visible
-          // right through the sweep.
-          const gridFadeDelay = (x + y) * GRID_FADE_STEP_MS - gridFadePeriod - phaseOffsetMs;
-          const restDot = document.createElement("span");
-          restDot.className = "dot";
-          restDot.style.cssText = `
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: ${dotPx}px;
-            height: ${dotPx}px;
-            color: ${toneColors.rest};
-            --zeros-grid-fade-peak: ${REST_OPACITY};
-            --zeros-grid-fade-trough: ${GRID_FADE_TROUGH};
-            opacity: ${REST_OPACITY};
-            ${reducedMotion ? "" : `animation: zeros-grid-fade ${gridFadePeriod}ms ease-in-out infinite; animation-delay: ${gridFadeDelay}ms;`}
-          `;
-
-          // Outer layer — shape membership (morph crossfade). Lifted above
-          // the resting dot so the lit --fg2 orbit reads on top. Only its
-          // membership (lit / unlit) animates; a lit dot is solid --fg2.
-          const shapeLayer = document.createElement("span");
-          shapeLayer.style.cssText = `
-            position: relative;
-            z-index: 1;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            opacity: 0;
-            ${reducedMotion ? "" : `transition: opacity ${FADE_IN_MS}ms ease-in-out ${(x + y) * STAGGER_MS}ms;`}
-          `;
-
-          // Inner dot — solid --fg2, no wave / no opacity variation.
-          const dot = document.createElement("span");
-          dot.className = "dot";
-          dot.style.cssText = `
-            width: ${dotPx}px;
-            height: ${dotPx}px;
-          `;
-
-          shapeLayer.appendChild(dot);
-          cell.appendChild(restDot);
-          if (x === 0 && y === 0) refRestDot = restDot;   // sweep origin = the fade's phase 0
-          cell.appendChild(shapeLayer);
-          root.appendChild(cell);
-          layers.push({ key: `${x},${y}`, el: shapeLayer, diag });
-        }
+    function plateHost(size, className, label) {
+      const host = document.createElement("span");
+      host.className = className;
+      host.style.width = `${size}px`;
+      host.style.height = `${size}px`;
+      if (label) {
+        host.setAttribute("role", "status");
+        host.setAttribute("aria-label", label);
+      } else {
+        host.setAttribute("aria-hidden", "true");
       }
+      return host;
+    }
 
-      function applyShape(index) {
-        const shape = SHAPES[index];
-        layers.forEach(({ key, el }) => {
-          const lit = shape.has(key);
-          // Joining dots fade in fast; leaving dots trail out slowly.
-          if (!reducedMotion) {
-            el.style.transitionDuration = `${lit ? FADE_IN_MS : FADE_OUT_MS}ms`;
-          }
-          // Lit dots are solid --fg2 (opacity 1) — no gradient, no wave.
-          el.style.opacity = lit ? LIT : 0;
+    function square(cell, x, y) {
+      const rect = document.createElementNS(SVG_NS, "rect");
+      rect.setAttribute("width", String(cell));
+      rect.setAttribute("height", String(cell));
+      rect.style.transform = `translate(${x * cell}px, ${y * cell}px)`;
+      return rect;
+    }
+
+    // ── One shared ticker: rAF, and hosts scrolled out of view are skipped ─
+    const tickers = new Set();
+    let rafId = 0;
+    function frame(now) {
+      rafId = 0;
+      tickers.forEach((t) => {
+        if (t.host.__plateVisible !== false && now >= (t.next || 0)) t.tick(now);
+      });
+      if (tickers.size) rafId = window.requestAnimationFrame(frame);
+    }
+    const viewport = "IntersectionObserver" in window
+      ? new IntersectionObserver((entries) => {
+          entries.forEach((e) => { e.target.__plateVisible = e.isIntersecting; });
+        })
+      : null;
+    function startTicker(ticker) {
+      if (viewport) viewport.observe(ticker.host);
+      tickers.add(ticker);
+      if (!rafId) rafId = window.requestAnimationFrame(frame);
+    }
+    function stopTicker(ticker) {
+      if (!ticker) return;
+      tickers.delete(ticker);
+      if (viewport) viewport.unobserve(ticker.host);
+    }
+
+    // ── Puzzle glyph ───────────────────────────────────────────────────────
+    const CORNERS = [0, 3, 12, 15];
+    const CHANNEL = Array.from({ length: N * N }, (_, i) => i).filter((i) => !CORNERS.includes(i));
+    // Six of the twelve channel cells start empty: an airy square that still
+    // reads as one, and enough room for several tiles to move at once.
+    const HOLES = 6;
+    const DIRECTIONS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    // Three "hands" work the puzzle at once, each on its own loose clock,
+    // so two or three tiles are usually in motion. Cells under a move in
+    // flight are reserved until it lands, so tiles never cross or collide.
+    // Mirrors apps/desktop/src/renderer/shared/ui/loading/puzzle-motion.ts.
+    const SLIDE = { hands: 3, moveMs: 240, beatMs: [300, 460], pushTwo: 0.3 };
+
+    // ── Glass combos (the glass square: active turn tail + tool rows) ─────
+    // Each combo is a soft mesh of four to six colours: one gradient runs the
+    // colours a random way and a second crosses it with them reversed, so
+    // they blend in both directions. Everything is kept lighter than pastel,
+    // lit a touch from the top, and finished like glass: a still sheen the
+    // tiles run through, and the faintest glow in the combo's colours.
+    // Mirrors apps/desktop/src/renderer/shared/ui/loading/glass-combos.ts.
+    const COMBOS = [
+      { name: "Opal", colors: ["#F27BC4", "#A78BF0", "#4FB3E6", "#5ED6A8", "#F2D14B"] },
+      { name: "Aurora", colors: ["#5ED6A8", "#1FA89A", "#4FB3E6", "#8A55D8", "#EB6FB6"] },
+      { name: "Sunrise", colors: ["#F07A5A", "#F6B37A", "#F2D14B", "#EB6FB6"] },
+      { name: "Lagoon", colors: ["#56CFE1", "#4FB3E6", "#7B8CF0", "#5ED6A8"] },
+      { name: "Prism", colors: ["#E8413C", "#F07F3C", "#F2D14B", "#47A35A", "#3C6BE0", "#8A55D8"] },
+      { name: "Sorbet", colors: ["#F27BC4", "#F07A5A", "#F6B37A", "#F2D14B"] },
+      { name: "Nebula", colors: ["#8A55D8", "#D6418F", "#4FB3E6", "#1FA89A"] },
+      { name: "Meadow", colors: ["#B9E25A", "#5ED6A8", "#4FB3E6", "#F2D14B"] },
+      { name: "Dusk", colors: ["#7B8CF0", "#8A55D8", "#EB6FB6", "#F6B37A"] },
+      { name: "Sea glass", colors: ["#56CFE1", "#5ED6A8", "#B9E25A", "#4FB3E6"] },
+      { name: "Candy", colors: ["#4FB3E6", "#F27BC4", "#F2D14B", "#A78BF0"] },
+      { name: "Tropic", colors: ["#1FA89A", "#B9E25A", "#F2D14B", "#F07A5A"] },
+      { name: "Iris", colors: ["#3C6BE0", "#8A55D8", "#F27BC4", "#56CFE1"] },
+      { name: "Pearl", colors: ["#F2D14B", "#F6B37A", "#F27BC4", "#A78BF0", "#4FB3E6"] },
+    ];
+    /** How long a combo shows before the square brings in the next. */
+    const COMBO_MS = 5000;
+    /** Directions a combo's colours can run, as bounding-box end points, each
+     *  with the direction the reversed gradient crosses it. */
+    const COMBO_FLOWS = [
+      { run: [0, 0, 1, 1], cross: [1, 0, 0, 1], angle: "135deg", crossAngle: "225deg" },
+      { run: [1, 0, 0, 1], cross: [0, 0, 1, 1], angle: "225deg", crossAngle: "135deg" },
+      { run: [0, 0.5, 1, 0.5], cross: [0.5, 0, 0.5, 1], angle: "90deg", crossAngle: "180deg" },
+      { run: [1, 0.5, 0, 0.5], cross: [0.5, 1, 0.5, 0], angle: "270deg", crossAngle: "0deg" },
+    ];
+    /** Lighter than pastel: each colour is mostly white on dark and mostly a
+     *  dark grey on light, keeping only a breath of its hue. */
+    const comboTint = (color) => `color-mix(in oklab, ${color} 30%, light-dark(#3b3b3b, #ffffff))`;
+    /** The crossing gradient sits at half strength over the first. */
+    const COMBO_CROSS_OPACITY = 0.5;
+    /** The same field as a CSS background, for the legend and the sheet: the
+     *  glass sheen and the light from the top (the page's shared gradients,
+     *  #combo-sheen and #combo-light) over the two crossing gradients. */
+    function comboCss(combo, flow) {
+      const { angle, crossAngle } = COMBO_FLOWS[flow];
+      const tints = combo.colors.map(comboTint);
+      const cross = [...tints].reverse().map((tint) => `color-mix(in oklab, ${tint} ${COMBO_CROSS_OPACITY * 100}%, transparent)`);
+      return [
+        "linear-gradient(135deg, rgb(255 255 255 / 0) 0%, light-dark(rgb(255 255 255 / 0.2), rgb(255 255 255 / 0.34)) 22%, rgb(255 255 255 / 0) 40%, rgb(255 255 255 / 0) 60%, light-dark(rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.14)) 70%, rgb(255 255 255 / 0) 80%)",
+        "linear-gradient(180deg, light-dark(rgb(255 255 255 / 0.12), rgb(255 255 255 / 0.4)) 0%, rgb(255 255 255 / 0) 50%, light-dark(rgb(0 0 0 / 0.18), rgb(0 0 0 / 0.1)) 100%)",
+        `linear-gradient(${crossAngle}, ${cross.join(", ")})`,
+        `linear-gradient(${angle}, ${tints.join(", ")})`,
+      ].join(", ");
+    }
+    function pickCombo(previous, rng) {
+      const pool = COMBOS.filter((combo) => combo !== previous);
+      return pool[Math.floor(rng() * pool.length)];
+    }
+
+    function stepFrom(i, [dx, dy]) {
+      const x = (i % N) + dx;
+      const y = Math.floor(i / N) + dy;
+      return x < 0 || y < 0 || x >= N || y >= N ? null : y * N + x;
+    }
+
+    // Seeded like workspaceGlyphSeed(repoSlug, branch) → seededRandom in
+    // puzzle-motion.ts, so the same seed draws the same square as the app.
+    function startingHoles(seed) {
+      const rng = makeRng(seed);
+      const cells = CHANNEL.slice();
+      for (let i = cells.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [cells[i], cells[j]] = [cells[j], cells[i]];
+      }
+      return cells.slice(0, HOLES);
+    }
+
+    function createPuzzleGlyph(size, seed, o) {
+      o = o || {};
+      const host = plateHost(size, "pixel-plate puzzle-glyph", o.label);
+      const { svg, cell } = plateSvg(size);
+      const group = document.createElementNS(SVG_NS, "g");
+      group.setAttribute("class", "puzzle-tiles");
+      svg.appendChild(group);
+      host.appendChild(svg);
+
+      const holes = new Set(startingHoles(seed));
+      const tiles = new Map();   // cell → rect
+      if (o.shaded) host.setAttribute("data-shaded", "");
+      if (o.agent) host.dataset.agent = o.agent;
+      let channelTile = 0;
+      for (let i = 0; i < N * N; i++) {
+        if (holes.has(i)) continue;
+        const rect = square(cell, i % N, Math.floor(i / N));
+        // Tones ride with their tile as it slides; corners stay full.
+        if (o.shaded && !CORNERS.includes(i)) rect.dataset.shade = String(channelTile++ % 3);
+        // Agent tones light the square by row (puzzleRowFills in production).
+        if (o.agent) rect.dataset.row = String(Math.floor(i / N));
+        group.appendChild(rect);
+        tiles.set(i, rect);
+      }
+      const rng = makeRng(Math.random());
+      const between = ([lo, hi]) => lo + rng() * (hi - lo);
+
+      // A reservation outlives its move a little: the transition starts at the
+      // next style pass (after this frame's timestamp) and eases in slowly.
+      const busyUntil = new Map();   // cell → when the move through it has landed
+      const isBusy = (c, now) => (busyUntil.get(c) || 0) > now;
+      const reserve = (cells, now, ms) => cells.forEach((c) => busyUntil.set(c, now + ms + T(80)));
+      const movable = (c, now) => c !== null && tiles.has(c) && !CORNERS.includes(c) && !isBusy(c, now);
+
+      // Move tiles from `froms[k]` to `tos[k]` together (a pull or a push).
+      function relocate(froms, tos) {
+        const rects = froms.map((c) => tiles.get(c));
+        froms.forEach((c) => tiles.delete(c));
+        rects.forEach((rect, k) => {
+          const to = tos[k];
+          tiles.set(to, rect);
+          rect.style.transform = `translate(${(to % N) * cell}px, ${Math.floor(to / N) * cell}px)`;
+          if (rect.dataset.row !== undefined) rect.dataset.row = String(Math.floor(to / N));
         });
       }
 
-      // Boot pose rides the jitter too (reduced motion still pins the Z / rest pose).
-      applyShape(reducedMotion ? Z_SHAPE_INDEX : startIndex);
-
-      // The synced variant (agent) locks its shape loop to the grid-fade's OWN
-      // clock. It reads the phase straight off the sweep-origin resting dot's CSS
-      // animation timeline (document.timeline), so the wave lap and the fade sweep
-      // share ONE clock — they restart on the exact same frame (pose 0 ↔ fade
-      // phase 0) and can never drift. Every other variant (orbit) keeps the plain
-      // setInterval cadence, unchanged.
-      const canSyncClock = SYNC && !reducedMotion && refRestDot
-        && document.timeline && typeof refRestDot.getAnimations === "function";
-
-      if (canSyncClock) {
-        let refAnim = null, lastIdx = -1;
-        const tick = () => {
-          if (!refAnim) refAnim = refRestDot.getAnimations()[0] || null;
-          if (refAnim && refAnim.startTime != null) {
-            const elapsed = document.timeline.currentTime - refAnim.startTime + phaseOffsetMs;
-            const phase = (((elapsed % gridFadePeriod) + gridFadePeriod) % gridFadePeriod) / gridFadePeriod;
-            const idx = Math.floor(phase * SHAPES.length) % SHAPES.length;
-            if (idx !== lastIdx) { applyShape(idx); lastIdx = idx; }
+      // Slide: a hand owns one hole and walks it in short runs (2–4 moves),
+      // pulling the neighbouring tile in, or now and then pushing two in a
+      // line like a real 15-puzzle, and never straight back the way it came.
+      function slideStep(hand, hands, now, moveMs, pushTwo) {
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const ownedElsewhere = (h) => hands.some((other) => other !== hand && other.hole === h);
+          if (hand.hole === null || hand.left <= 0 || !holes.has(hand.hole) || isBusy(hand.hole, now)) {
+            const free = Array.from(holes).filter((h) => !isBusy(h, now) && !ownedElsewhere(h));
+            if (!free.length) return;
+            hand.hole = free[Math.floor(rng() * free.length)];
+            hand.left = 2 + Math.floor(rng() * 3);
           }
-          window.requestAnimationFrame(tick);
+          const lines = [];
+          DIRECTIONS.forEach((d) => {
+            const first = stepFrom(hand.hole, d);
+            if (!movable(first, now)) return;
+            // The undo of this hand's last move, keyed by its hole so it holds
+            // however the hand re-picks.
+            if (hand.back && hand.back.hole === hand.hole && hand.back.cell === first) return;
+            const second = stepFrom(first, d);
+            lines.push(movable(second, now) && rng() < pushTwo ? [first, second] : [first]);
+          });
+          if (!lines.length) {
+            hand.left = 0;
+            continue;
+          }
+          const line = lines[Math.floor(rng() * lines.length)];
+          const tos = [hand.hole, ...line.slice(0, -1)];
+          reserve([hand.hole, ...line], now, moveMs);
+          relocate(line, tos);
+          holes.delete(hand.hole);
+          holes.add(line[line.length - 1]);
+          hand.hole = line[line.length - 1];
+          hand.back = { hole: hand.hole, cell: tos[tos.length - 1] };
+          hand.left -= 1;
+          return;
+        }
+      }
+
+      let ticker = null;
+      const glyph = {
+        host,
+        setWorking(on) {
+          on = !!on;
+          host.toggleAttribute("data-working", on);
+          stopTicker(ticker);
+          ticker = null;
+          if (!on || reducedMotion) return;
+          const start = performance.now();
+          // Staggered first moves, so the hands never fall into lockstep.
+          const hands = Array.from({ length: SLIDE.hands }, (_, i) => ({
+            hole: null,
+            left: 0,
+            back: null,
+            next: start + T(60 + i * 130 + rng() * 90),
+          }));
+          const moveMs = T(SLIDE.moveMs);
+          host.style.setProperty("--puzzle-move", `${moveMs}ms`);
+          ticker = {
+            host,
+            tick(now) {
+              hands.forEach((hand) => {
+                if (now < hand.next) return;
+                slideStep(hand, hands, now, moveMs, SLIDE.pushTwo);
+                hand.next = now + T(between(SLIDE.beatMs));
+              });
+            },
+          };
+          startTicker(ticker);
+        },
+        setPr(kind) {
+          if (kind) host.dataset.pr = kind;
+          else delete host.dataset.pr;
+        },
+        destroy() {
+          stopTicker(ticker);
+          host.remove();
+        },
+      };
+      glyph.setPr(o.pr || null);
+      glyph.setWorking(!!o.working);
+      return glyph;
+    }
+
+    // ── Loading: Orbit ─────────────────────────────────────────────────────
+    // The original Orbit (a four-block snake lapping the 4 × 4 ring over its
+    // faint track), redrawn so nothing reads as pixels: the ring is one
+    // continuous band, and the snake is a solid head plus a tail of stacked
+    // dashes whose opacities compound into a smooth ramp. Every layer shares
+    // one clock, so head, tail and track move as a single piece.
+    // Mirrors apps/desktop/src/renderer/shared/ui/loading/orbit-motion.ts.
+    const ORBIT = { lapMs: 1200, head: 3.5, tail: 2.75, steps: 12 };
+    const RING_PATH = "M0.5 0.5H3.5V3.5H0.5Z";   // centre line of the ring, 12 cells long
+    // Tail layers, longest first; each opacity is solved so the stack ramps
+    // evenly from the head down to nothing.
+    const ORBIT_LAYERS = (() => {
+      const { head, tail, steps } = ORBIT;
+      const layers = [];
+      let below = 1;   // how much the longer layers still let through
+      for (let i = steps - 1; i >= 0; i--) {
+        const level = 1 - (i + 1) / (steps + 1);
+        const alpha = Math.max(0, 1 - (1 - level) / below);
+        below *= 1 - alpha;
+        layers.push({ length: head + ((i + 1) * tail) / steps, alpha });
+      }
+      layers.push({ length: head, alpha: 1 });
+      return layers;
+    })();
+
+    // ── The glass square: the transcript's agent loader ────────────────────
+    // Mirrors glass-square.tsx and glass-motion.ts. Stream's running feel:
+    // the tiles never stop travelling forward, in the combos' glass. The
+    // colours hold still and the tiles run through them (each layer is the
+    // whole square's field, seen only through the tiles in its mask), so
+    // nothing reads as a block.
+    //   • Weave — Stream's ripple, but neighbouring rows run opposite ways,
+    //     so the square knits past itself. A new combo comes in through the
+    //     edges: a tile that wraps round re-enters in it.
+    //   • Cascade — rows run right and columns run down, taking turns down
+    //     the diagonal, so the square tumbles down and to the right,
+    //     re-forming as it goes.
+    //   • Circuit — trains of tiles run single file along one winding track
+    //     through all sixteen cells, each stepping into the gap ahead, front
+    //     to back, like a current through a circuit.
+    // Every square picks one of the three at random when it mounts. Every ~5s
+    // a glint crosses the square as the next combo comes in.
+    const FLOW = {
+      weave: { beatMs: 100, moveMs: 150 },
+      cascade: { beatMs: 100, moveMs: 150 },
+      circuit: { beatMs: 100, moveMs: 150 },
+      glintMs: 700,
+      ease: "cubic-bezier(0.55, 0, 0.25, 1)",
+    };
+    // The circuit's track, one loop through every cell: right along the top,
+    // back along the second row, right along the third, left along the
+    // bottom, then up the left side.
+    const CIRCUIT = [
+      [0, 0], [1, 0], [2, 0], [3, 0], [3, 1], [2, 1], [1, 1], [1, 2],
+      [2, 2], [3, 2], [3, 3], [2, 3], [1, 3], [0, 3], [0, 2], [0, 1],
+    ].map(([x, y]) => y * N + x);
+
+    // Ten tiles with the corners filled, like the combos' square, and every
+    // row and column holding one to three, so every line visibly moves.
+    function flowPattern(rng) {
+      const fits = (cells) => [...Array(N).keys()].every((i) => [
+        cells.filter((c) => Math.floor(c / N) === i).length,
+        cells.filter((c) => c % N === i).length,
+      ].every((n) => n >= 1 && n <= N - 1));
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const cells = [...CORNERS, ...[...CHANNEL].sort(() => rng() - 0.5).slice(0, N * N - CORNERS.length - HOLES)];
+        if (fits(cells)) return cells;
+      }
+      return [0, 3, 12, 15, 1, 6, 9, 14, 4, 11];
+    }
+
+    // The circuit's tiles: ten along the track in three to five trains of at
+    // most four, so a step moves a few tiles, like a row of Stream.
+    function circuitTrains(positions) {
+      const L = CIRCUIT.length;
+      const on = new Set(positions);
+      const hole = [...Array(L).keys()].find((i) => !on.has(i));
+      const trains = [];
+      let train = null;
+      for (let k = 1; k <= L; k++) {
+        const i = (hole + k) % L;
+        if (!on.has(i)) { train = null; continue; }
+        if (!train) trains.push((train = []));
+        train.push(i);
+      }
+      return trains;   // front to back round the loop, each tail first
+    }
+    function circuitPattern(rng) {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const positions = [...CIRCUIT.keys()].sort(() => rng() - 0.5).slice(0, N * N - HOLES);
+        const trains = circuitTrains(positions);
+        if (trains.length >= 3 && trains.length <= 5 && trains.every((t) => t.length <= 4)) return positions.map((i) => CIRCUIT[i]);
+      }
+      return [0, 1, 2, 4, 5, 8, 9, 10, 12, 13].map((i) => CIRCUIT[i]);
+    }
+
+    const flowGlyphs = new Set();
+    new MutationObserver(() => flowGlyphs.forEach((glyph) => glyph.theme()))
+      .observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+    function createFlowGlyph(size, variant, o) {
+      o = o || {};
+      const host = plateHost(size, "pixel-plate flow-glyph", o.label);
+      host.dataset.flow = variant;
+      const { svg, cell } = plateSvg(size);
+      svg.style.overflow = "visible";
+      host.appendChild(svg);
+      const W = cell * N;
+      const uid = `flow-${Math.random().toString(36).slice(2, 9)}`;
+      const rng = makeRng(Math.random());
+      const make = (name, attrs = {}) => {
+        const node = document.createElementNS(SVG_NS, name);
+        Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, String(value)));
+        return node;
+      };
+      const defs = make("defs");
+      svg.appendChild(defs);
+
+      // The glow in the square's own units (a share of its side), so tiles
+      // wrapping out of sight never change it. Barely there on light.
+      const glow = make("filter", {
+        id: `${uid}-glow`, filterUnits: "userSpaceOnUse", primitiveUnits: "userSpaceOnUse",
+        x: -0.3 * W, y: -0.3 * W, width: 1.6 * W, height: 1.6 * W, "color-interpolation-filters": "sRGB",
+      });
+      const blur = make("feGaussianBlur", { in: "SourceGraphic", result: "blur" });
+      const soft = make("feComponentTransfer", { in: "blur", result: "soft" });
+      const strength = make("feFuncA", { type: "linear" });
+      soft.appendChild(strength);
+      const merge = make("feMerge");
+      merge.append(make("feMergeNode", { in: "soft" }), make("feMergeNode", { in: "SourceGraphic" }));
+      glow.append(blur, soft, merge);
+      defs.appendChild(glow);
+      const theme = () => {
+        const light = document.documentElement.dataset.theme === "light";
+        blur.setAttribute("stdDeviation", String((light ? 0.04 : 0.05) * W));
+        strength.setAttribute("slope", String(light ? 0.22 : 0.5));
+      };
+      theme();
+
+      // Two layers take turns showing a combo: the two crossing gradients,
+      // the light from the top, the sheen, and the glint that crosses on a
+      // change, each over the whole square and seen through that layer's
+      // tiles.
+      const masks = [0, 1].map((k) => {
+        const mask = make("mask", { id: `${uid}-mask-${k}`, maskUnits: "userSpaceOnUse", x: 0, y: 0, width: W, height: W });
+        defs.appendChild(mask);
+        return mask;
+      });
+      const glass = make("g", { class: "flow-glass", filter: `url(#${uid}-glow)` });
+      svg.appendChild(glass);
+      const glints = [];
+      const layers = [0, 1].map((k) => {
+        const run = make("linearGradient", { id: `${uid}-run-${k}`, gradientUnits: "userSpaceOnUse" });
+        const cross = make("linearGradient", { id: `${uid}-cross-${k}`, gradientUnits: "userSpaceOnUse" });
+        defs.append(run, cross);
+        const group = make("g", { mask: `url(#${uid}-mask-${k})` });
+        [[`${uid}-run-${k}`, 1], [`${uid}-cross-${k}`, COMBO_CROSS_OPACITY], ["combo-light", 1], ["combo-sheen", 1]].forEach(([id, opacity]) => {
+          const rect = make("rect", { width: W, height: W });
+          rect.style.fill = `url(#${id})`;
+          rect.style.opacity = String(opacity);
+          group.appendChild(rect);
+        });
+        const glint = make("rect", { width: W, height: W });
+        glint.style.fill = "url(#glass-glint)";
+        glint.style.transform = `translateX(${-W}px)`;
+        group.appendChild(glint);
+        glints.push(glint);
+        glass.appendChild(group);
+        return { run, cross, combo: null };
+      });
+      function paintLayer(k, combo) {
+        const flow = COMBO_FLOWS[Math.floor(rng() * COMBO_FLOWS.length)];
+        const tints = combo.colors.map(comboTint);
+        const paint = (gradient, ends, colors) => {
+          ["x1", "y1", "x2", "y2"].forEach((axis, i) => gradient.setAttribute(axis, String(ends[i] * W)));
+          gradient.replaceChildren(...colors.map((color, i) => {
+            const stop = make("stop", { offset: i / (colors.length - 1) });
+            stop.style.stopColor = color;
+            return stop;
+          }));
         };
-        window.requestAnimationFrame(tick);
-      } else if (!reducedMotion) {
-        let i = startIndex;
-        window.setInterval(() => {
-          i = (i + 1) % SHAPES.length;
-          applyShape(i);
-        }, stepMs);
+        paint(layers[k].run, flow.run, tints);
+        paint(layers[k].cross, flow.cross, [...tints].reverse());
+        layers[k].combo = combo;
       }
 
-      return root;
-    }
-
-    // Mount spinners (default = Orbit variant)
-    ["spinner-12", "spinner-14", "spinner-16", "spinner-24"].forEach((id) => {
-      const el = document.getElementById(id);
-      if (!el) return;
-      const size = id.includes("12") ? 12
-        : id.includes("14") ? 14
-        : id.includes("16") ? 16
-        : 24;
-      el.appendChild(createZerosSpinner(size, "Loading"));
-    });
-
-    // Mount agent-shimmer spinners (Agent variant — diagonal wave crest)
-    ["agent-spinner-12", "agent-spinner-14", "agent-spinner-16", "agent-spinner-24"].forEach((id) => {
-      const el = document.getElementById(id);
-      if (!el) return;
-      const size = id.includes("12") ? 12
-        : id.includes("14") ? 14
-        : id.includes("16") ? 16
-        : 24;
-      el.appendChild(createZerosSpinner(size, "Loading", "agent"));
-    });
-    {
-      const el = document.getElementById("activity-agent-spinner");
-      if (el) {
-        el.appendChild(createZerosSpinner(16, "Agent working", "agent"));
+      // Each tile is a square in both masks, shown in the one for its layer.
+      // It carries a ghost one square away: when the tile runs off an edge
+      // the ghost, waiting on the far side, slides in as it slides out, and
+      // on landing the tile takes the ghost's place (and its layer).
+      function place(tile) {
+        tile.nodes.forEach(({ group }) => { group.style.transform = `translate(${tile.x * cell}px, ${tile.y * cell}px)`; });
       }
+      // While a tile moves it reaches half a device pixel further along its
+      // way, so tiles moving side by side never show a seam; at rest it is
+      // exactly one cell, on whole pixels.
+      const REACH = 0.5 / DPR;
+      function shape(tile, dx, dy) {
+        const ox = dx ? REACH : 0, oy = dy ? REACH : 0;
+        tile.nodes.forEach(({ main, ghost }) => {
+          [[main, 0, 0], [ghost, tile.gx, tile.gy]].forEach(([rect, x, y]) => {
+            rect.setAttribute("x", String(x - ox));
+            rect.setAttribute("y", String(y - oy));
+            rect.setAttribute("width", String(cell + 2 * ox));
+            rect.setAttribute("height", String(cell + 2 * oy));
+          });
+        });
+      }
+      function paint(tile) {
+        tile.nodes.forEach(({ main, ghost }, k) => {
+          main.style.opacity = tile.layer === k ? "1" : "0";
+          ghost.style.opacity = tile.ghostLayer === k ? "1" : "0";
+        });
+      }
+      const tiles = (variant === "circuit" ? circuitPattern(rng) : flowPattern(rng)).map((c) => {
+        const nodes = masks.map((mask) => {
+          const group = make("g");
+          const main = make("rect", { width: cell, height: cell });
+          const ghost = make("rect", { width: cell, height: cell, x: -W });
+          main.style.fill = "white";
+          ghost.style.fill = "white";
+          group.append(main, ghost);
+          mask.appendChild(group);
+          return { group, main, ghost };
+        });
+        const tile = { x: c % N, y: Math.floor(c / N), gx: -W, gy: 0, layer: 0, ghostLayer: 0, nodes, moving: false, runs: [] };
+        place(tile);
+        paint(tile);
+        return tile;
+      });
+
+      let live = 0;
+      paintLayer(0, pickCombo(null, rng));
+      paintLayer(1, pickCombo(layers[0].combo, rng));
+      if (o.onCombo) o.onCombo(layers[0].combo);
+      function nextCombo() {
+        const showing = layers[live].combo;
+        live = 1 - live;
+        paintLayer(live, pickCombo(showing, rng));
+        glints.forEach((glint) => glint.animate(
+          [{ transform: `translateX(${-W}px)` }, { transform: `translateX(${W}px)` }],
+          { duration: T(FLOW.glintMs), easing: "cubic-bezier(0.45, 0, 0.25, 1)" },
+        ));
+        if (o.onCombo) o.onCombo(layers[live].combo);
+      }
+
+      // One tile's step, in cells. `feed` is how a new combo comes in:
+      // "edge" as the tile wraps round, "move" whenever it moves.
+      function step(tile, dx, dy, ms, feed) {
+        const fx = tile.x, fy = tile.y;
+        const tx = fx + dx, ty = fy + dy;
+        if (tx < 0 || ty < 0 || tx >= N || ty >= N) {
+          tile.gx = -dx * W;
+          tile.gy = -dy * W;
+          tile.ghostLayer = feed === "edge" ? live : tile.layer;
+        }
+        if (feed === "move") tile.layer = tile.ghostLayer = live;
+        shape(tile, dx, dy);
+        paint(tile);
+        tile.x = (tx + N) % N;
+        tile.y = (ty + N) % N;
+        tile.moving = true;
+        const frames = [
+          { transform: `translate(${fx * cell}px, ${fy * cell}px)` },
+          { transform: `translate(${tx * cell}px, ${ty * cell}px)` },
+        ];
+        tile.runs = tile.nodes.map(({ group }) => group.animate(frames, { duration: ms, easing: FLOW.ease, fill: "forwards" }));
+        tile.runs[0].onfinish = () => {
+          place(tile);
+          shape(tile, 0, 0);
+          tile.layer = tile.ghostLayer;
+          paint(tile);
+          tile.runs.forEach((run) => run.cancel());
+          tile.runs = [];
+          tile.moving = false;
+        };
+      }
+
+      const move = T(FLOW[variant].moveMs);
+      let schedule;
+      if (variant === "weave") {
+        // The ripple walks down the rows like Stream's, each row running the
+        // other way from the one above.
+        const way = rng() < 0.5 ? 1 : -1;
+        let row = 0;
+        schedule = () => {
+          const line = tiles.filter((tile) => tile.y === row);
+          if (line.some((tile) => tile.moving)) return false;
+          line.forEach((tile) => step(tile, row % 2 === 0 ? way : -way, 0, move, "edge"));
+          row = (row + 1) % N;
+          return true;
+        };
+      } else if (variant === "cascade") {
+        // Row 0 runs right, then column 0 runs down, then row 1, column 1…
+        // A line that is empty or full would show no change, so it passes.
+        let turn = 0;
+        schedule = () => {
+          for (let tries = 0; tries < 2 * N; tries++) {
+            const index = Math.floor(turn / 2);
+            const across = turn % 2 === 0;
+            const line = tiles.filter((tile) => (across ? tile.y : tile.x) === index);
+            if (line.length > 0 && line.length < N) {
+              if (line.some((tile) => tile.moving)) return false;
+              line.forEach((tile) => step(tile, across ? 1 : 0, across ? 0 : 1, move, "move"));
+              turn = (turn + 1) % (2 * N);
+              return true;
+            }
+            turn = (turn + 1) % (2 * N);
+          }
+          return false;
+        };
+      } else {
+        // Each run of tiles along the track is a train. The front train
+        // steps into the gap ahead as one piece (bending round the track's
+        // turns), then the train behind it, and so on back round the loop,
+        // so the trains run single file and never close up.
+        const L = CIRCUIT.length;
+        const indexOf = new Map(CIRCUIT.map((c, i) => [c, i]));
+        const along = (tile) => indexOf.get(tile.y * N + tile.x);
+        const trains = circuitTrains(tiles.map(along)).map((train) => train.map((i) => tiles.find((tile) => along(tile) === i)));
+        let turn = Math.floor(rng() * trains.length);
+        schedule = () => {
+          for (let tries = 0; tries < trains.length; tries++) {
+            const train = trains[turn];
+            if (train.some((tile) => tile.moving)) return false;
+            const ahead = (along(train[train.length - 1]) + 1) % L;
+            turn = (turn - 1 + trains.length) % trains.length;
+            if (tiles.some((tile) => along(tile) === ahead)) continue;
+            const ways = train.map((tile) => {
+              const next = CIRCUIT[(along(tile) + 1) % L];
+              return [(next % N) - tile.x, Math.floor(next / N) - tile.y];
+            });
+            // Where the train bends, the tile turning the corner and the one
+            // following it into the corner move different ways; a joint holds
+            // the corner cell until the follower lands, so the train flows
+            // round the turn instead of opening a notch.
+            train.forEach((tile, k) => {
+              if (k === 0 || (ways[k][0] === ways[k - 1][0] && ways[k][1] === ways[k - 1][1])) return;
+              const joint = make("rect", { x: tile.x * cell, y: tile.y * cell, width: cell, height: cell });
+              joint.style.fill = "white";
+              masks[live].appendChild(joint);
+              setTimeout(() => joint.remove(), move);
+            });
+            train.forEach((tile, k) => step(tile, ways[k][0], ways[k][1], move, "move"));
+            return true;
+          }
+          return false;
+        };
+      }
+
+      let ticker = null;
+      const glyph = {
+        host,
+        theme,
+        setWorking(on) {
+          stopTicker(ticker);
+          ticker = null;
+          if (!on || reducedMotion) return;
+          const beat = T(FLOW[variant].beatMs);
+          const start = performance.now();
+          let swapAt = start + T(COMBO_MS * (0.5 + rng() * 0.5));
+          ticker = {
+            host,
+            next: start + T(20),
+            tick(now) {
+              // A new combo waits until every tile shows the last one.
+              if (now >= swapAt && tiles.every((tile) => tile.layer === live && tile.ghostLayer === live)) {
+                nextCombo();
+                swapAt = now + T(COMBO_MS);
+              }
+              // Scheduled from the last beat, not this frame, so the cadence
+              // holds; a blocked step retries next frame.
+              if (schedule()) this.next = Math.max(this.next + beat, now - beat);
+            },
+          };
+          startTicker(ticker);
+        },
+        nextCombo,
+        destroy() {
+          stopTicker(ticker);
+          ticker = null;
+          flowGlyphs.delete(glyph);
+          tiles.forEach((tile) => tile.runs.forEach((run) => run.cancel()));
+          host.remove();
+        },
+      };
+      flowGlyphs.add(glyph);
+      glyph.setWorking(o.working !== false);
+      return glyph;
     }
 
-    // Mount the tone demos — Orbit inside button recipes (mirrors the
-    // production `tone` prop: inverted on primary fills, inherit on
-    // bespoke fills, default elsewhere).
-    [
-      ["btn-primary-spinner", 16, "inverted"],
-      ["btn-primary-disabled-spinner", 16, "inverted"],
-      ["btn-secondary-spinner", 16, "default"],
-      ["btn-merge-spinner", 12, "inherit"],
-      ["btn-destructive-spinner", 16, "inherit"],
-      ["status-yellow-spinner", 14, "inherit"],
-      ["row-spinner-1", 14, "default"],
-      ["row-spinner-2", 16, "default"],
-      ["row-spinner-3", 16, "default"],
-    ].forEach(([id, size, tone]) => {
-      const el = document.getElementById(id);
-      if (el) el.appendChild(createZerosSpinner(size, "Loading", "orbit", tone));
+    function unitSvg(size) {
+      const cell = cellFor(size);
+      const width = cell * N;
+      const offset = Math.round(((size - width) / 2) * DPR) / DPR;
+      const svg = document.createElementNS(SVG_NS, "svg");
+      // Cell units: 1 = one tile, so strokes, dashes and shifts read in tiles.
+      svg.setAttribute("viewBox", `0 0 ${N} ${N}`);
+      svg.setAttribute("width", String(width));
+      svg.setAttribute("height", String(width));
+      svg.setAttribute("aria-hidden", "true");
+      svg.style.left = `${offset}px`;
+      svg.style.top = `${offset}px`;
+      return svg;
+    }
+
+    function ringBand(className) {
+      const path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", RING_PATH);
+      path.setAttribute("class", className);
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke-width", "1");
+      path.setAttribute("stroke-linejoin", "miter");
+      path.setAttribute("pathLength", "12");
+      return path;
+    }
+
+    function createOrbit(size, o) {
+      o = o || {};
+      const host = plateHost(size, "pixel-plate orbit-plate", o.label);
+      if (o.tone) host.dataset.tone = o.tone;
+      const svg = unitSvg(size);
+      host.appendChild(svg);
+      svg.appendChild(ringBand("orbit-track"));
+      const lap = T(ORBIT.lapMs);
+      // A random entry point per instance, like the current spinner's jitter.
+      const phase = Math.random() * lap;
+      const animations = [];
+      ORBIT_LAYERS.forEach(({ length, alpha }) => {
+        const band = ringBand("orbit-comet");
+        band.setAttribute("stroke-dasharray", `${length} ${12 - length}`);
+        band.style.opacity = String(alpha);
+        svg.appendChild(band);
+        if (reducedMotion) {
+          band.style.strokeDashoffset = String(length - 3);
+          return;
+        }
+        animations.push(band.animate(
+          [{ strokeDashoffset: length }, { strokeDashoffset: length - 12 }],
+          { duration: lap, iterations: Infinity, delay: -phase },
+        ));
+      });
+      return { host, stop: () => animations.forEach((a) => a.cancel()) };
+    }
+
+    // ── Run: Stream ────────────────────────────────────────────────────────
+    // An irregular 4 × 4 square of tiles, like the workspace glyphs, but with
+    // the one motion the puzzle never makes: every 95ms the next row, top to
+    // bottom, slides a tile to the right and wraps round, so the square
+    // streams steadily forward like a ticker.
+    const RUN = {
+      beatMs: 95,
+      moveMs: 140,
+      pattern: [[1, 1, 0, 1], [0, 1, 1, 0], [1, 0, 1, 1], [1, 1, 0, 0]],
+    };
+
+    function createRun(size, o) {
+      o = o || {};
+      const host = plateHost(size, "pixel-plate run-plate", o.label);
+      const svg = unitSvg(size);
+      svg.style.overflow = "hidden";   // tiles wrap round at the square's edge
+      host.appendChild(svg);
+      const rows = RUN.pattern.map((pattern, y) => {
+        // One path per row (both copies), so tiles side by side never seam.
+        let d = "";
+        [-N, 0].forEach((copy) => {
+          pattern.forEach((on, x) => { if (on) d += `M${x + copy} ${y}h1v1h-1z`; });
+        });
+        const path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("d", d);
+        svg.appendChild(path);
+        return { path, shift: 0 };
+      });
+      const plate = { host, stop() {} };
+      if (reducedMotion) return plate;
+      let next = 0;
+      const ticker = {
+        host,
+        next: performance.now() + Math.random() * T(RUN.beatMs * N),
+        tick(now) {
+          const row = rows[next];
+          next = (next + 1) % N;
+          if (row.shift === N) {
+            // A full lap looks identical to none: snap back unseen.
+            row.path.style.transition = "none";
+            row.path.style.transform = "translateX(0px)";
+            row.path.getBoundingClientRect();
+            row.shift = 0;
+          }
+          row.shift += 1;
+          row.path.style.transition = `transform ${T(RUN.moveMs)}ms cubic-bezier(0.55, 0, 0.25, 1)`;
+          row.path.style.transform = `translateX(${row.shift}px)`;
+          // Schedule from the last target, not this frame, so the cadence
+          // holds at 95ms instead of drifting up to the next frame each beat.
+          this.next = Math.max(this.next + T(RUN.beatMs), now - T(RUN.beatMs));
+        },
+      };
+      startTicker(ticker);
+      plate.stop = () => stopTicker(ticker);
+      return plate;
+    }
+
+    // ══ Mounting ═══════════════════════════════════════════════════════════
+
+    // Remountable slots, so the Orbit and Run pickers can swap variants live.
+    const slots = { orbit: [], run: [] };
+    function mountSlot(kind, slot, make) {
+      const entry = { slot, make, plate: null };
+      slots[kind].push(entry);
+      remount(entry);
+      return entry;
+    }
+    function remount(entry) {
+      if (entry.plate) {
+        entry.plate.stop();
+        entry.plate.host.remove();
+      }
+      entry.plate = entry.make();
+      entry.slot.appendChild(entry.plate.host);
+    }
+
+    // Declarative hosts: <span data-plate="orbit"> and <span data-run> for the
+    // loaders, <span data-puzzle> for always-working agent puzzles.
+    document.querySelectorAll("[data-plate]").forEach((slot) => {
+      const size = Number(slot.dataset.size) || 16;
+      mountSlot("orbit", slot, () => createOrbit(size, { label: size >= 96 ? "Loading" : null }));
+    });
+    document.querySelectorAll("[data-run]").forEach((slot) => {
+      const size = Number(slot.dataset.size) || 16;
+      mountSlot("run", slot, () => createRun(size, { label: slot.dataset.label || null }));
+    });
+    document.querySelectorAll("[data-puzzle]").forEach((host) => {
+      const size = Number(host.dataset.size) || 16;
+      // No seed: like the shipped loader, every mount starts from its own random square.
+      host.replaceWith(createPuzzleGlyph(size, host.dataset.seed || Math.random().toString(36).slice(2), {
+        label: host.dataset.label || null,
+        working: true,
+      }).host);
+    });
+    document.querySelectorAll("[data-loop-slot]").forEach((slot) => {
+      const size = Number(slot.dataset.size) || 16;
+      mountSlot("orbit", slot, () => createOrbit(size, { tone: slot.dataset.tone, label: "Loading" }));
     });
 
-    // Live duration tickers
-    function formatElapsed(ms) {
-      if (ms < 1000) return "0s";
-      const totalSec = Math.floor(ms / 1000);
-      if (totalSec < 60) return `${totalSec}s`;
-      const m = Math.floor(totalSec / 60);
-      const s = totalSec % 60;
-      if (m < 60) return `${m}m ${s}s`;
-      const h = Math.floor(m / 60);
-      return `${h}h ${m % 60}m`;
-    }
-
-    const startedAt = Date.now() - 4500;
-    const durationEls = [
-      document.getElementById("activity-duration"),
-      document.getElementById("live-duration-demo"),
-    ].filter(Boolean);
-
-    setInterval(() => {
-      const text = formatElapsed(Math.max(0, Date.now() - startedAt));
-      durationEls.forEach((el) => { el.textContent = text; });
-    }, 1000);
-
-    // ── Dark / Light theme toggle ──
-    // CSS-driven loaders and demo buttons re-theme for free — the spinning disc
-    // included: its marks ride currentColor, so a flip needs no JS here.
-    const themeToggle = document.getElementById("theme-toggle");
-    function applyTheme(theme) {
-      document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
-      if (themeToggle) {
-        themeToggle.textContent = theme === "light" ? "☀ Light" : "☾ Dark";
-      }
-    }
-    if (themeToggle) {
-      themeToggle.addEventListener("click", () => {
-        const current = document.documentElement.dataset.theme === "light" ? "light" : "dark";
-        applyTheme(current === "dark" ? "light" : "dark");
+    function wireSegmented(group, attr, onChange) {
+      if (!group) return;
+      group.addEventListener("click", (event) => {
+        const button = event.target.closest("button[" + attr + "]");
+        if (!button) return;
+        group.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === button)));
+        onChange(button.getAttribute(attr));
       });
     }
 
-    clearBootBanner();
+    document.querySelectorAll("[data-puzzle-idle]").forEach((host) => {
+      host.replaceWith(createPuzzleGlyph(16, host.dataset.puzzleIdle, { shaded: true }).host);
+    });
 
+    // In-context LiveDuration: whole seconds, once a second (tool rows).
+    const durationStart = Date.now() - 12400;
+    const durationEls = document.querySelectorAll("[data-live-duration]:not([data-live-duration=working])");
+    const tickDuration = () => {
+      const s = Math.floor((Date.now() - durationStart) / 1000);
+      durationEls.forEach((el) => { el.textContent = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; });
+    };
+    tickDuration();
+    window.setInterval(tickDuration, 1000);
+    // The turn rail's working timer: tenths, every frame it changes
+    // (formatWorkingElapsed in live-duration.tsx).
+    const workingEls = document.querySelectorAll("[data-live-duration=working]");
+    const formatWorking = (ms) => {
+      const tenths = Math.floor(Math.max(0, ms) / 100);
+      const minutes = Math.floor(tenths / 600);
+      const rest = tenths % 600;
+      const seconds = `${Math.floor(rest / 10)}.${rest % 10}s`;
+      return minutes ? `${minutes}m, ${seconds}` : seconds;
+    };
+    const tickWorking = () => {
+      const text = formatWorking(Date.now() - durationStart);
+      workingEls.forEach((el) => { if (el.textContent !== text) el.textContent = text; });
+      if (workingEls.length) window.requestAnimationFrame(tickWorking);
+    };
+    tickWorking();
+
+    // ── Sidebar mock ──
+    const sbRows = Array.from(document.querySelectorAll("#sb-mock .sb-row")).map((el) => ({
+      el,
+      slot: el.querySelector(".sb-glyph"),
+      seed: el.dataset.seed || el.dataset.ws,
+      pr: el.dataset.pr || null,
+      glyph: null,
+    }));
+
+    // Mirrors SidebarWorkspaceRow: a working agent animates the row's own
+    // square and its PR colour stays. The Run signal is the shipped RunStream.
+    const sbRunSlots = Array.from(document.querySelectorAll("#sb-mock [data-sb-run]"));
+    function renderRunSlots() {
+      sbRunSlots.forEach((slot) => slot.replaceChildren(createRun(12).host));
+    }
+
+    function renderRow(row) {
+      row.glyph = createPuzzleGlyph(16, row.seed, { pr: row.pr, working: row.el.hasAttribute("data-working"), shaded: true });
+      row.slot.replaceChildren(row.glyph.host);
+    }
+
+    function toggleRow(row) {
+      const working = !row.el.hasAttribute("data-working");
+      row.el.toggleAttribute("data-working", working);
+      row.glyph.setWorking(working);
+    }
+
+    sbRows.forEach((row) => {
+      renderRow(row);
+      row.el.addEventListener("click", () => toggleRow(row));
+      row.el.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          toggleRow(row);
+        }
+      });
+    });
+    renderRunSlots();
+
+    // Legend swatches
+    document.querySelectorAll("#sb-legend [data-legend]").forEach((dt) => {
+      const kind = dt.dataset.legend;
+      dt.appendChild(createPuzzleGlyph(16, "zeros/zeros/palembang", {
+        shaded: true,
+        pr: kind === "idle" || kind === "working" ? null : kind,
+        working: kind === "working",
+      }).host);
+    });
+
+    // ── PR status × agent state ──
+    const matrix = document.getElementById("pr-matrix");
+    if (matrix) {
+      const STATES = [
+        ["No PR", null, null],
+        ["Open", "open", "--brown-fg"],
+        ["Ready to merge", "ready", "--green-primary"],
+        ["Merged", "merged", "--violet-fg"],
+        ["Closed", "closed", "--red-fg"],
+        ["Conflicts", "conflicts", "--red-fg"],
+      ];
+      const cell = (cls, content) => {
+        const div = document.createElement("div");
+        if (cls) div.className = cls;
+        if (typeof content === "string") div.textContent = content;
+        matrix.appendChild(div);
+        return div;
+      };
+      cell("mx-head", "");
+      STATES.forEach(([title]) => cell("mx-head", title));
+      [["Idle", false], ["Working", true]].forEach(([title, working]) => {
+        cell("mx-side", title);
+        STATES.forEach(([, pr, token]) => {
+          const div = cell(null, null);
+          const pair = document.createElement("div");
+          pair.className = "mx-pair";
+          pair.appendChild(createPuzzleGlyph(48, "zeros/zeros/palembang", { pr, working, shaded: true }).host);
+          pair.appendChild(createPuzzleGlyph(16, "zeros/zeros/palembang", { pr, working, shaded: true }).host);
+          div.appendChild(pair);
+          const code = document.createElement("code");
+          code.textContent = token || (working ? "--fg2" : "--fg3 · 25%");
+          if (token === "--red-fg") code.dataset.redLabel = "";
+          div.appendChild(code);
+        });
+      });
+    }
+    wireSegmented(document.getElementById("pr-red"), "data-red", (red) => {
+      if (red === "primary") document.documentElement.dataset.prRed = "primary";
+      else delete document.documentElement.dataset.prRed;
+      document.querySelectorAll("[data-red-label]").forEach((el) => {
+        el.textContent = red === "primary" ? "--red-primary" : "--red-fg";
+      });
+    });
+
+    // ── Explorer ──
+    const explorerInput = document.getElementById("explorer-input");
+    const explorerBig = document.getElementById("explorer-big");
+    const explorerSmall = document.getElementById("explorer-small");
+    let explorerGlyphs = [];
+    function renderExplorer() {
+      const id = explorerInput.value.trim() || "zeros/zeros/palembang";
+      explorerGlyphs.forEach((g) => g.destroy());
+      explorerGlyphs = [createPuzzleGlyph(96, id, { shaded: true }), createPuzzleGlyph(16, id, { shaded: true })];
+      explorerBig.replaceChildren(explorerGlyphs[0].host);
+      explorerSmall.replaceChildren(explorerGlyphs[1].host);
+      document.getElementById("explorer-name").textContent = id.split("/").pop() || id;
+      const holes = new Set(startingHoles(id));
+      let text = "";
+      for (let y = 0; y < N; y++) {
+        for (let x = 0; x < N; x++) text += holes.has(y * N + x) ? "□ " : "■ ";
+        text = text.trimEnd() + (y < N - 1 ? "\n" : "");
+      }
+      document.getElementById("explorer-bits").textContent = text;
+      document.getElementById("explorer-meta").textContent = `seed "${id}" · hover to see it work`;
+    }
+    if (explorerInput) {
+      explorerInput.addEventListener("input", renderExplorer);
+      const explorer = explorerInput.closest(".explorer");
+      explorer.addEventListener("pointerenter", () => explorerGlyphs.forEach((g) => g.setWorking(true)));
+      explorer.addEventListener("pointerleave", () => explorerGlyphs.forEach((g) => g.setWorking(false)));
+      renderExplorer();
+    }
+
+    // ── Sheet ──
+    const SHEET_IDS = [
+      "palembang", "okit", "boston", "atlanta", "seville", "lisbon", "kyoto", "new-york",
+      "oslo", "lagos", "lima", "hanoi", "dakar", "quito", "tbilisi", "porto",
+      "busan", "cusco", "medan", "accra", "bergen", "izmir", "recife", "malmo",
+    ];
+    const sheet = document.getElementById("glyph-sheet");
+    let sheetGlyphs = [];
+    function renderSheet(ids) {
+      sheetGlyphs.forEach((g) => g.destroy());
+      sheetGlyphs = [];
+      sheet.replaceChildren();
+      ids.forEach((id) => {
+        const item = document.createElement("div");
+        item.className = "glyph-sheet-item";
+        const big = createPuzzleGlyph(32, `zeros/zeros/${id}`, { shaded: true });
+        const small = createPuzzleGlyph(16, `zeros/zeros/${id}`, { shaded: true });
+        sheetGlyphs.push(big, small);
+        const label = document.createElement("span");
+        label.textContent = id;
+        item.append(big.host, small.host, label);
+        item.addEventListener("pointerenter", () => { big.setWorking(true); small.setWorking(true); });
+        item.addEventListener("pointerleave", () => { big.setWorking(false); small.setWorking(false); });
+        sheet.appendChild(item);
+      });
+    }
+    if (sheet) {
+      renderSheet(SHEET_IDS);
+      const shuffle = document.getElementById("sheet-shuffle");
+      if (shuffle) {
+        shuffle.addEventListener("click", () => {
+          renderSheet(SHEET_IDS.map(() => Math.random().toString(36).slice(2, 10)));
+        });
+      }
+    }
+    // ── Dark / Light theme toggle ──
+    // ── Chat tab loader in each agent's colours ──
+    const AGENTS = [
+      { id: "claude", name: "Claude", note: "Terracotta #D97757, a touch lighter and deeper." },
+      { id: "codex", name: "Codex", note: "The mark's gradient, #B1A7FF → #7A9DFF → #3941FF: its lighter half in Dark, its deeper half in Light." },
+      { id: "cursor", name: "Cursor", note: "The cube's faces: white to grey in Dark, grey to black in Light." },
+    ];
+    const TONE_ROLES = ["top · lightest", "middle", "bottom · deepest"];
+    function agentLogo(agent, active, big) {
+      const svg = document.createElementNS(SVG_NS, "svg");
+      svg.setAttribute("class", big ? "ct-logo big" : "ct-logo");
+      svg.setAttribute("aria-hidden", "true");
+      const use = document.createElementNS(SVG_NS, "use");
+      const symbol = agent === "codex" ? (active ? "i-codex-app" : "i-codex-app-mono") : `i-${agent}`;
+      use.setAttribute("href", `#${symbol}`);
+      svg.appendChild(use);
+      return svg;
+    }
+    const ctStrip = document.getElementById("ct-strip");
+    if (ctStrip) {
+      const CT_TABS = [
+        { agent: "claude", title: "Untitled", running: true },
+        { agent: "cursor", title: "Casual greeting", running: false },
+        { agent: "codex", title: "Refactor the sidebar", running: true, active: true },
+        { agent: "cursor", title: "Urgent next steps", running: true },
+        { agent: "codex", title: "Release notes", running: false },
+        { agent: "claude", title: "Plan review", running: false },
+      ];
+      CT_TABS.forEach((tab) => {
+        const el = document.createElement("button");
+        el.type = "button";
+        el.className = "ct-tab";
+        el.dataset.agent = tab.agent;
+        if (tab.active) el.dataset.active = "";
+        const lead = document.createElement("span");
+        lead.className = "ct-lead";
+        const title = document.createElement("span");
+        title.className = "ct-title";
+        title.textContent = tab.title;
+        el.append(lead, title);
+        let glyph = null;
+        const render = () => {
+          if (glyph) glyph.destroy();
+          glyph = null;
+          lead.replaceChildren();
+          if (tab.running) {
+            glyph = createPuzzleGlyph(16, Math.random().toString(36).slice(2), { agent: tab.agent, working: true, label: `${tab.title}: agent working` });
+            lead.appendChild(glyph.host);
+          } else {
+            lead.appendChild(agentLogo(tab.agent, !!tab.active));
+          }
+        };
+        el.addEventListener("click", () => {
+          tab.running = !tab.running;
+          render();
+        });
+        render();
+        ctStrip.appendChild(el);
+      });
+    }
+    const agentMatrix = document.getElementById("agent-matrix");
+    if (agentMatrix) {
+      const cellEl = (cls, content) => {
+        const div = document.createElement("div");
+        if (cls) div.className = cls;
+        if (typeof content === "string") div.textContent = content;
+        agentMatrix.appendChild(div);
+        return div;
+      };
+      ["", "Idle · logo (active, inactive)", "Running · 48px + 16px", "Tones"].forEach((t) => cellEl("am-head", t));
+      AGENTS.forEach((agent) => {
+        cellEl("am-side", agent.name);
+        const idle = cellEl(null, null);
+        idle.style.color = "var(--fg2)";
+        const activeLogo = agentLogo(agent.id, true, true);
+        if (agent.id === "claude") activeLogo.style.color = "#D97757";
+        if (agent.id === "cursor") activeLogo.style.color = "var(--fg1)";
+        idle.append(activeLogo, agentLogo(agent.id, false, true));
+        const running = cellEl(null, null);
+        const seed = `zeros/zeros/${agent.id}`;
+        running.append(
+          createPuzzleGlyph(48, seed, { agent: agent.id, working: true }).host,
+          createPuzzleGlyph(16, seed, { agent: agent.id, working: true }).host,
+        );
+        const tones = cellEl(null, null);
+        const chips = document.createElement("div");
+        chips.className = "tone-chips";
+        chips.dataset.agent = agent.id;
+        ["a", "b", "c"].forEach((tone, k) => {
+          const chip = document.createElement("span");
+          chip.className = "tone-chip";
+          const swatch = document.createElement("i");
+          swatch.style.background = `var(--tone-${tone})`;
+          chip.append(swatch, document.createTextNode(TONE_ROLES[k]));
+          chips.appendChild(chip);
+        });
+        const note = document.createElement("span");
+        note.className = "tone-note";
+        note.textContent = agent.note;
+        chips.appendChild(note);
+        tones.appendChild(chips);
+      });
+    }
+    // ── The glass square's combos ──
+    const comboSwatches = (combo, flow) => {
+      const swatch = document.createElement("span");
+      swatch.className = "combo-field";
+      swatch.style.background = comboCss(combo, flow);
+      return [swatch];
+    };
+    const comboSheet = document.getElementById("combo-sheet");
+    if (comboSheet) {
+      COMBOS.forEach((combo) => {
+        const card = document.createElement("div");
+        card.className = "combo-card";
+        const swatches = document.createElement("div");
+        swatches.className = "combo-swatches";
+        swatches.append(...comboSwatches(combo, 0));
+        card.append(document.createTextNode(combo.name), swatches);
+        comboSheet.appendChild(card);
+      });
+    }
+
+    // ── Gibberish agent thinking (mirrors gibberish-thinking.ts) ──
+    const GIBBERISH_THINKING = [
+      ["Thinking", "Thenkeng"],
+      ["Working too hard", "Wurkong tuu herd"],
+      ["Planning", "Plunneng"],
+      ["Pondering", "Pundereng"],
+      ["Reasoning", "Reezuneng"],
+      ["Cooking", "Cuukeng"],
+      ["Brewing ideas", "Bruweng eydeaz"],
+      ["Crunching numbers", "Crunchong numbahs"],
+      ["Connecting dots", "Conneckteng duts"],
+      ["Figuring it out", "Figgereng et oot"],
+      ["Mulling it over", "Mulleng et uvah"],
+      ["Digging deeper", "Deggeng deepah"],
+      ["Reading the code", "Reedeng thu cude"],
+      ["Writing code", "Wryteng cude"],
+      ["Refactoring", "Reefucturang"],
+      ["Debugging", "Deebuggeng"],
+      ["Tracing bugs", "Treceng bugz"],
+      ["Squashing bugs", "Squushang bugz"],
+      ["Tinkering", "Tenkereng"],
+      ["Noodling", "Nuudleng"],
+      ["Scheming", "Skeemeng"],
+      ["Plotting", "Pluttong"],
+      ["Strategizing", "Stratejyzeng"],
+      ["Calculating", "Calkyulateng"],
+      ["Computing", "Compyooteng"],
+      ["Processing", "Prucesseng"],
+      ["Analyzing", "Anelyzeng"],
+      ["Researching", "Reesurcheng"],
+      ["Exploring", "Explureng"],
+      ["Investigating", "Envestegateng"],
+      ["Searching", "Surcheng"],
+      ["Scanning files", "Scunneng fylez"],
+      ["Sifting through", "Seftong thruu"],
+      ["Untangling", "Untungleng"],
+      ["Weaving logic", "Weeveng lojik"],
+      ["Sketching ideas", "Sketcheng eydeaz"],
+      ["Drafting", "Druffteng"],
+      ["Polishing", "Pulesheng"],
+      ["Tidying up", "Tydeeng ap"],
+      ["Organizing", "Orgunyzeng"],
+      ["Assembling", "Asembleng"],
+      ["Crafting", "Cruffteng"],
+      ["Forging ahead", "Furjeng uhed"],
+      ["Hammering away", "Hummereng uwey"],
+      ["Hustling", "Hussleng"],
+      ["Juggling tasks", "Juggleng tasx"],
+      ["Multitasking", "Multeetaskeng"],
+      ["Deep in thought", "Deap en thawt"],
+      ["Lost in thought", "Lawst en thawt"],
+      ["Daydreaming", "Deydreemeng"],
+      ["Contemplating", "Contimplateng"],
+      ["Deliberating", "Deleberateng"],
+      ["Musing", "Myuzeng"],
+      ["Brainstorming", "Braynstormeng"],
+      ["Cogitating", "Cogetateng"],
+      ["Ruminating", "Ruumenateng"],
+      ["Churning", "Chorneng"],
+      ["Whirring", "Whurreng"],
+      ["Humming along", "Hummeng ulong"],
+      ["Buzzing", "Buzzeng"],
+      ["Spinning up", "Spenneng ap"],
+      ["Warming up", "Wurmeng ap"],
+      ["Getting there", "Gettong thur"],
+      ["Almost there", "Olmust thur"],
+      ["Hold tight", "Huld tyte"],
+      ["On it", "Un et"],
+      ["Making magic", "Mukeng mujic"],
+      ["Conjuring", "Conjerong"],
+      ["Wizarding", "Wezzurdeng"],
+      ["Casting spells", "Casteng spulls"],
+      ["Summoning", "Sammuneng"],
+      ["Decoding", "Deecudeng"],
+      ["Deciphering", "Deseffereng"],
+      ["Solving puzzles", "Sulveng puzzulz"],
+      ["Cracking it", "Crakkeng et"],
+      ["Piecing together", "Peeceng tugethah"],
+      ["Mapping it out", "Muppeng et oot"],
+      ["Navigating", "Nuvegateng"],
+      ["Optimizing", "Uptemyzeng"],
+      ["Tweaking", "Tweekeng"],
+      ["Fine-tuning", "Fyne-tyuneng"],
+      ["Double-checking", "Dubble-checkeng"],
+      ["Verifying", "Vereefyeng"],
+      ["Reviewing", "Reevyueng"],
+      ["Proofreading", "Pruufreedeng"],
+      ["Summarizing", "Summuryzeng"],
+      ["Wrapping up", "Wruppeng ap"],
+      ["Finishing touches", "Fenishong tachez"],
+      ["Percolating", "Purculateng"],
+      ["Simmering", "Semmereng"],
+      ["Marinating", "Murenateng"],
+      ["Hatching plans", "Hetcheng plunz"],
+      ["Vibing", "Vybeng"],
+      ["Pushing pixels", "Pusheng pexulz"],
+      ["Reticulating splines", "Retekyulateng splynz"],
+      ["Rubber ducking", "Rubbah dukkeng"],
+      ["Consulting the oracle", "Consaltong thu orukle"],
+      ["Channeling genius", "Chunneleng geenius"],
+      ["Flipping bits", "Fleppeng betz"],
+      ["Gathering context", "Gethereng contixt"],
+    ];
+    const gibberishSheet = document.getElementById("gibberish-sheet");
+    if (gibberishSheet) {
+      GIBBERISH_THINKING.forEach(([phrase, gibberish]) => {
+        const item = document.createElement("div");
+        item.className = "gibberish-item";
+        const word = document.createElement("span");
+        word.className = "zeros-gibberish-thinking";
+        word.textContent = gibberish;
+        const plain = document.createElement("span");
+        plain.className = "muted";
+        plain.textContent = phrase;
+        item.append(word, plain);
+        gibberishSheet.appendChild(item);
+      });
+    }
+    // A new phrase every 3s (GIBBERISH_THINKING_MS), in a shuffled order that
+    // goes through all hundred; the sweep is locked to each phrase's 3s.
+    const gibberishWords = [...document.querySelectorAll("[data-gibberish-word]")];
+    const gibberishOrder = GIBBERISH_THINKING.map((_, i) => i).sort(() => Math.random() - 0.5);
+    const gibberishStart = performance.now();
+    let gibberishStep = -1;
+    const turnGibberish = (now) => {
+      // A frame's timestamp can fall just before the start.
+      const step = Math.max(0, Math.floor((now - gibberishStart) / 3000));
+      if (step !== gibberishStep) {
+        gibberishStep = step;
+        const phrase = GIBBERISH_THINKING[gibberishOrder[step % gibberishOrder.length]][1];
+        gibberishWords.forEach((el) => { el.textContent = phrase; });
+      }
+      window.requestAnimationFrame(turnGibberish);
+    };
+    gibberishWords.forEach((el) => { el.style.animationDelay = "0ms"; });
+    turnGibberish(gibberishStart);
+    wireSegmented(document.getElementById("gibberish-toggle"), "data-gibberish", (value) => {
+      gibberishWords.forEach((el) => { el.hidden = value !== "on"; });
+    });
+
+    // ── The glass square: its three motions ──
+    const FLOW_VARIANTS = [
+      { key: "weave", name: "Weave", line: "Stream's ripple, but neighbouring rows run opposite ways, so the square knits past itself. A new combo comes in through the edges: each tile that wraps round re-enters in it." },
+      { key: "cascade", name: "Cascade", line: "Rows run right and columns run down, taking turns down the diagonal, so the square tumbles down and to the right, re-forming as it goes." },
+      { key: "circuit", name: "Circuit", line: "Short trains of tiles run single file along one winding track through all sixteen cells, bending round its turns, each stepping into the gap ahead, front to back, like a current through a circuit." },
+    ];
+    // "random": what the app does, a motion per square picked when it mounts.
+    const makeFlow = (key, size, o) => createFlowGlyph(
+      size,
+      key === "random" ? FLOW_VARIANTS[Math.floor(Math.random() * FLOW_VARIANTS.length)].key : key,
+      o,
+    );
+    const flowVariants = document.getElementById("flow-variants");
+    if (flowVariants) {
+      FLOW_VARIANTS.forEach(({ key, name, line }) => {
+        const card = document.createElement("div");
+        card.className = "flow-variant";
+        const title = document.createElement("div");
+        title.className = "flow-name";
+        title.textContent = name;
+        const note = document.createElement("p");
+        note.className = "demo-note";
+        note.textContent = line;
+        const stage = document.createElement("div");
+        stage.className = "demo-stage flow-stage";
+        stage.appendChild(makeFlow(key, 80, { label: `${name} — agent working` }).host);
+        const sizes = document.createElement("div");
+        sizes.className = "plate-sizes";
+        [12, 14, 16, 24].forEach((size) => {
+          const cellEl = document.createElement("div");
+          cellEl.className = "plate-size";
+          cellEl.append(makeFlow(key, size).host, document.createTextNode(String(size)));
+          sizes.appendChild(cellEl);
+        });
+        stage.appendChild(sizes);
+        card.append(title, stage, note);
+        flowVariants.appendChild(card);
+      });
+    }
+    const flowSlots = [...document.querySelectorAll("[data-flow-slot]")].map((slot) => ({ slot, glyph: null }));
+    const showFlow = (key) => flowSlots.forEach((entry) => {
+      if (entry.glyph) entry.glyph.destroy();
+      entry.glyph = makeFlow(key, Number(entry.slot.dataset.size) || 16, { label: entry.slot.dataset.label || null });
+      entry.slot.appendChild(entry.glyph.host);
+    });
+    const flowPicker = document.getElementById("flow-picker");
+    if (flowPicker) {
+      [{ key: "random", name: "Random" }, ...FLOW_VARIANTS].forEach(({ key, name }, i) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.flow = key;
+        button.setAttribute("aria-pressed", String(i === 0));
+        button.textContent = name;
+        flowPicker.appendChild(button);
+      });
+      wireSegmented(flowPicker, "data-flow", showFlow);
+    }
+    showFlow("random");
+
+    const themeToggle = document.getElementById("theme-toggle");
+    const applyTheme = (theme) => {
+      document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
+      if (themeToggle) themeToggle.textContent = theme === "light" ? "☀ Light" : "☾ Dark";
+    };
+    if (themeToggle) {
+      themeToggle.addEventListener("click", () => {
+        applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+      });
+    }
+
+    const boot = document.getElementById("loaders-boot");
+    if (boot) boot.remove();
   } catch (err) {
-    clearBootBanner();
+    const boot = document.getElementById("loaders-boot");
+    if (boot) boot.remove();
     const box = document.getElementById("loaders-error");
     if (box) {
       box.hidden = false;
@@ -1016,7 +2740,6 @@
     console.error(err);
   }
 })();
-
-</script>
+  </script>
 </body>
 </html>

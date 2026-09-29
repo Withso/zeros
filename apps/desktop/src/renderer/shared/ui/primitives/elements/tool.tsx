@@ -53,7 +53,7 @@ export interface ToolHeaderProps extends Omit<
 
 function StatusIcon({ status }: { status: ToolStatus }) {
   if (status === "running" || status === "input-streaming") {
-    return <ZerosSpinner size={12} variant="agent" label="Running" />;
+    return <ZerosSpinner size={12} variant="glass" label="Running" />;
   }
   if (status === "error" || status === "output-error") {
     return <CircleX aria-label="Error" className="text-red-primary size-3" />;

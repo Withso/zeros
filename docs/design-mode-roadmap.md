@@ -343,6 +343,12 @@ portable case folding. Unregistered HTML remains source, not an implicit frame.
 The format admits one page, at most 256 frames, dimensions 1–16384 and positions
 within ±1,000,000. Unsupported versions/kinds, duplicate references, unsafe
 paths and missing referenced sources produce errors instead of being rewritten.
+`frame.set-geometry` rejects geometry outside those bounds (and a `z` outside
+0–256) with a plain reason before any journal is admitted, so storage never
+normalizes a committed revision. Canvas move/resize, a newly drawn
+top-level frame and Resize to fit stop at the limits, frame W/H/X/Y fields
+settle inside them, and automatic placement widens its three-column grid
+rather than placing a frame past ±1,000,000.
 
 Canvas/page titles and existing Foundation metadata are portable authored
 content. Page membership normally determines stacking order; optional `z`
@@ -723,10 +729,13 @@ Escape restores the exact baseline.
   and hit regions retain screen size at every supported zoom. Normal click
   first selects the outer frame from its body, including empty space. Once a
   child is selected, normal clicks preserve useful nesting depth. Double-click
-  descends once, the platform modifier deep-selects, and Enter/Escape traverse
-  the same visible child/parent hierarchy as Layers. Document wrappers and the
-  explicit frame root share the outer frame's identity; unmarked authored roots
-  remain real children, even when they fill the viewport. Frame bodies and labels
+  descends once and selects the child without skipping containers to edit a
+  deeper text node. A further double-click on the selected text layer enters
+  editing; empty frame layers remain frames. The platform modifier deep-selects,
+  and Enter/Escape traverse the same visible child/parent hierarchy as Layers.
+  Document wrappers and the explicit frame root share the outer frame's identity;
+  unmarked authored roots remain real children, even when they fill the viewport.
+  Frame bodies and labels
   use the ordinary selection cursor; label dragging and resize handles retain
   their gestures. Clicking a restored root-layer overlay also selects its frame.
   Modifier-clicks pass through padding and gap controls to deep-select beneath
@@ -742,7 +751,12 @@ Escape restores the exact baseline.
 - **Camera:** pinch follows Chromium's synthesized pinch scale, Cmd-wheel uses
   the flatter scroll curve, ordinary wheel pans, and every zoom preserves its
   focal point. Imperative camera state updates the world transform and inverse
-  scale together, then settles one bounded store update.
+  scale together, then settles one bounded store update. A canvas never opens
+  onto empty space while it has frames: when no frame is at least 4 screen px
+  in view, the first display for that owner fits them all (afterwards the
+  camera is the user's). Selecting a frame nobody can see (from Layers,
+  keyboard or history) centers it at the current zoom, or fits it when it
+  would be unreadable there; a frame with any visible part never moves.
 - **Creation:** `F`/`A` creates frames and `T` creates text from one inverse
   pan/zoom transform. Click uses the documented default geometry; drag uses the
   exact world-space rectangle. A host-side draft paints synchronously and one
@@ -757,12 +771,16 @@ Escape restores the exact baseline.
   text node without broad React publication. Paste strips markup but preserves
   line breaks; blur or Cmd/Ctrl+Enter commits once; Escape restores the exact
   text. Blur during IME composition waits for `compositionend`.
-- **Layers:** frames fold independently in one virtualized row list. Keyboard,
-  visibility, hover, and selection are frame-keyed. Uncached hover reads
+- **Layers:** frames fold independently in one virtualized row list (13px
+  names, 14px type glyphs, 16px indent per level). Keyboard, visibility,
+  hover, and selection are frame-keyed. Uncached hover reads
   coalesce to active plus latest instead of forming a queue.
   Only a sole direct child explicitly marked `data-zeros-frame-root` by frame
   creation shares the canvas row. Existing unmarked `main`/`div` roots remain
   real child layers, even when they fill the viewport or have no descendants.
+  Until a frame's runtime reports its tree, its disclosure follows the engine's
+  `layerCount` (the same rule, so a new frame shows no chevron); older engines
+  send only `nodeCount`.
   Their canvas frame targets `body` independently. The document-scoped API ID
   `::zeros-document-body` supports body styles and appending top-level content;
   it is never added as a `data-oid`, selectable layer, or source identity. Generic
@@ -774,14 +792,79 @@ Escape restores the exact baseline.
 - **Style inspector:** typed values remain local drafts until Enter/blur;
   Escape restores the focus-time value. Scrubs, sliders, and color gestures
   preview live and commit once. Authored-versus-computed state, shorthands,
-  logical properties, priority, and source target remain explicit.
+  logical properties, priority, and source target remain explicit; an
+  unauthored (computed) value renders one text tier quieter than an authored
+  one.
+- **Inspector UI:** one geometry for every Design surface — 28px fields on
+  quiet `bg2` fills, 36px section headers, 13px values, 12px in-field labels,
+  14px glyphs (`design-workspace-ui.css`, "Design UI standard v1", and
+  `design-inspector-kit.tsx`). The header toggles **Style | CSS**; there is no
+  footer. Sections (Layout, Appearance, Fill, Stroke, Effects, Typography,
+  Transform, Transition, Motion, Export) never collapse: one with nothing
+  authored is its header plus an add action. Fill, Stroke and shadow colors
+  are one swatch · hex · opacity row; the picker's value field follows its
+  notation (Hex is bare, opacity separate), and typed text is authored only
+  when it reads as a color. Stroke maps Figma positions onto CSS —
+  **Inside** is the border (per-side widths in Stroke settings), **Outside**
+  the outline (offset in settings) — and moving between them rewrites the
+  stroke in one transaction. Effects list every shadow (drop/inner on the
+  box; on a text layer the drop shadow is `text-shadow`), a single-`blur()`
+  filter as Layer blur and backdrop filter as Background blur; shadows or
+  filters the rows cannot round-trip stay raw CSS rows. Long-tail type
+  properties live in the Type settings popover. Property popovers open beside
+  the inspector, level with their row, never over it; Escape in a popover
+  field reverts that field before a second Escape dismisses the popover.
+  Collapsing independent padding changes only the view (unequal sides show
+  Mixed). Export captures the selected layer (or frame) at 0.5×/1×/2×.
+  Routine success toasts are not shown; failed writes still toast.
 - **Layout:** padding, gap, grid, constraints, and distance tooling use
   browser-rendered child geometry. Guides paint synchronously, remain
   screen-sized, and perform bounded readback once per gesture rather than per
   raw pointer event.
+- **Canvas layout tools:** one selected auto-layout owner (flex or grid) — a
+  single layer, or a selected canvas frame's root (`data-zeros-frame-root` or
+  the document body) — shows padding and gap tools; a multi-selection shows
+  none. Geometry lives in the owner's own turned/scaled box
+  (`design-layout-tools.ts`): padding bands start inside the border at their
+  full depth, flex gaps follow line membership, grid gutters follow the used
+  track sizes and distribution, and gap handles edit the `row-gap` /
+  `column-gap` longhand of their axis. Hovering the box reveals the ticks;
+  hovering a band or gutter shows its solid shade and whole-pixel readout. A drag
+  starts after 3 screen px along the local axis: Shift is the 10px nudge,
+  Option sets the opposite side, Shift+Option all four sides (1px steps), and
+  modifier changes apply while the pointer rests. A click, Enter, or
+  Option/Shift+Option click opens an in-place value entry; arrow keys on a
+  focused tick step the value. An Auto (distributed) gap reads `Auto · N` and
+  converts to a fixed gap from the rendered space (less child margins) on its
+  first real edit. A drag that ends where it began writes nothing; typed text
+  that is not a non-negative length stays open and invalid. A gap's target is
+  its real space plus one tick that slides along its strip away from padding
+  ticks; gap targets take precedence where they overlap. Padding ticks keep
+  their targets clear of the resize strip, Space-drag pans over all of them,
+  wheel and pinch wait until a spacing drag ends, and the tools step aside on
+  boxes smaller than 48 screen px. After a layout-affecting commit or history
+  restore, only re-measured boxes (always including the selection) are
+  promoted; other cached details are read again rather than relabelled. A
+  history restore measures the selection inside the runtime's own
+  `restoreGeneration` round trip (`measure`), so Undo adds no extra requests.
+  The selection badge names Hug/Fill (`600 × 300 Hug`); double-clicking an
+  edge hugs that axis (Option: Fill).
+  Resizing a Hug canvas frame by hand makes each changed axis Fixed (the root
+  follows the frame at `100%` / `100vh`) in the same transaction as the new
+  geometry, previewed during the drag, so a later layout edit never re-hugs it.
+  A content-box root with padding or borders on a fixed axis subtracts them on
+  that axis alone (`calc(100vh - 40px)`), leaving its box model and other axis
+  as authored; Zeros-seeded roots are border-box. Successive resize previews
+  of one root share one ordered lane, so a cancelled drag's restore cannot land
+  after the next.
+  Constraint runs appear only for absolute/fixed boxes positioned in their
+  parent, measured from its padding edge, with a dotted parent outline and a
+  short marker on a Center axis; flow children and top-level frames have none.
 - **Theme:** the Base/named-mode token editor is persistent, draggable, and
   non-modal. It neither traps focus nor blocks canvas, Layers, or inspector.
-  Theme state belongs to the workspace, not an element.
+  Theme state belongs to the workspace, not an element. A mode override resets
+  to Base in place; a new variable name that is invalid or already taken keeps
+  Create disabled with the reason in its tooltip.
 - **Layout inspector:** the fixed Layout section presents whole-pixel parent-local
   positions and border-box dimensions, clockwise quarter turns, independent flips,
   alignment, constraint pins, and Clip content. Viewing or cancelling a rounded
@@ -789,6 +872,17 @@ Escape restores the exact baseline.
   an opaque white fill, and explicit dimensions. Opacity is displayed as a
   percentage. Text layers keep text semantics: Fill edits `color`, and the
   inspector does not offer conversion into a layout container or a background.
+  Numeric fields settle on what can be stored instead of failing on commit:
+  frame W/H stay within 1–16,384 and X/Y within ±1,000,000, and a negative
+  size, padding, gap, radius, border width, font size or duration becomes 0
+  (the engine writes declarations verbatim, so `padding-top:-10px` would
+  persist a declaration the browser ignores); each component of a shorthand
+  settles on its own (`-5px 10px` → `0px 10px`). Margins, insets, letter
+  spacing, offsets and delays keep negative values. Frame W/H edits are built
+  in the mutation lane from the confirmed frame, so W then H typed before the
+  first save replies keep both. A value saved elsewhere while a field is
+  focused but untouched is adopted when the field settles, never written back
+  over.
   The CSS editor continues to accept the full supported CSS vocabulary.
   Layout exposes None, vertical/horizontal flex, and Grid. Padding, gap, and
   the child-alignment pad appear only on automatic layouts. Free-layout
@@ -841,7 +935,11 @@ Escape restores the exact baseline.
 - **Motion:** node-local keyframe tracks, preview, playback, and paths exist only
   in explicit Motion mode. Draft identity is workspace + frame + node, not
   source revision. Playback updates a small scalar owner store rather than the
-  full canvas at 60 Hz.
+  full canvas at 60 Hz. The bottom timeline is resizable (default 240px,
+  persisted app-wide); the canvas toolbar follows its live height. In Motion
+  mode an inspector field shows its keyframe diamond on hover and an animated
+  property's in-field label takes the Motion accent, so values are never
+  covered at rest.
 
 #### Continuous rendering and state
 

@@ -4,7 +4,7 @@ import pg from "pg";
 
 import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import { withSystemTx, withUserTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   CloudWorkspaceGrantError,
   consumeCloudWorkspaceGrant,
@@ -36,8 +36,7 @@ d("cloud workspace endpoint grants", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     const subject = randomUUID();
     const owner = await ensureUser(pool, {
       provider: "auth0",

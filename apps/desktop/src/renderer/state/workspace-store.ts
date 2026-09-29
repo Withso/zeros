@@ -1775,14 +1775,14 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "ADD_WORKBENCH_TAB": {
       const scope = action.scope ?? workbenchScopeKey(state);
       const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
-      // Changes + Review + Context are singletons. A duplicate add
+      // Design + Changes + Review are singletons. A duplicate add
       // activates the existing home tab instead of creating duplicate
       // persistent surfaces. File and Browser tabs are both multi-instance and
       // closable; ADD strips legacy/caller pins below.
       if (
         action.tab.type === "changes" ||
         action.tab.type === "review" ||
-        action.tab.type === "context" || action.tab.type === "design"
+        action.tab.type === "design"
       ) {
         const existing = cur.tabs.find((t) => t.type === action.tab.type);
         if (existing) {
@@ -1806,7 +1806,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const tab =
         action.tab.type === "changes" ||
         action.tab.type === "review" ||
-        action.tab.type === "context" || action.tab.type === "design"
+        action.tab.type === "design"
           ? { ...action.tab, pinned: true }
           : action.tab.pinned || action.tab.fixed
             ? { ...action.tab, pinned: false, fixed: undefined }
@@ -1842,14 +1842,14 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "REMOVE_WORKBENCH_TAB": {
       const scope = action.scope ?? workbenchScopeKey(state);
       const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
-      // The pinned Changes/Review/Context homes are permanent; extra File and
+      // The pinned Design/Changes/Review homes are permanent; extra File and
       // Browser tabs close normally, including blank ones.
       const target = cur.tabs.find((t) => t.id === action.id);
       if (!target) return state;
       if (
         target.type === "changes" ||
         target.type === "review" ||
-        target.type === "context" || target.type === "design"
+        target.type === "design"
       )
         return state;
       // The FIXED Files home is permanent too, but its ✕ means "close the
@@ -2034,7 +2034,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         pinned:
           target.type === "changes" ||
           target.type === "review" ||
-          target.type === "context" || target.type === "design",
+          target.type === "design",
         // Permanence is born with the slice (defaultTabs/normalizeWorkbenchTabs):
         // updates can neither demote the fixed Files home nor mint a new one.
         fixed: target.fixed,

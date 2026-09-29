@@ -28,6 +28,7 @@ import {
 } from "./github.js";
 import { runMigrations } from "./migrate.js";
 import { withSystemTx } from "./db.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 
 // An environment with no GitHub App registered used to get the router's generic
 // 404 "Not found", which the desktop surfaced as
@@ -404,8 +405,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 3 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     userA = await ensureUser(pool, {
       provider: "auth0",
       providerSubject: randomUUID(),

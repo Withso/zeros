@@ -7,7 +7,6 @@
 import React, {
   useCallback,
   useEffect,
-  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -17,10 +16,14 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { publishNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 import {
   ClipboardPaste,
-  GripHorizontal,
+  Clock3,
+  Hash,
   Palette,
   Plus,
+  RotateCcw,
+  Ruler,
   Search,
+  TriangleRight,
   Variable,
 } from "lucide-react";
 
@@ -33,18 +36,16 @@ import type {
 import {
   Button,
   DialogCloseButton,
-  DialogHeader,
-  DialogBody,
-  DialogFooter,
   Input,
-  Label,
   ScrollArea,
+  ScrollBar,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
   Textarea,
+  Tooltip,
   toast,
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
@@ -59,8 +60,11 @@ import {
   parseDesignCssVariables,
   type DesignCssVariableImport,
   type DesignTokenValueType,
+  designThemeVariableNameIssue,
 } from "./design-theme-css";
-import { DesignColorPicker } from "./design-color-picker";
+import { DesignColorPicker, DesignColorSwatch } from "./design-color-picker";
+import { scrubDesignNumericValue } from "./design-style-values";
+import "./design-theme-editor.css";
 
 interface DesignThemeEditorProps {
   workspaceId: string | null;
@@ -90,6 +94,23 @@ const THEME_TOKEN_TYPES = [
   "angle",
   "other",
 ] as const satisfies readonly DesignTokenValueType[];
+const THEME_TYPE_LABELS = {
+  all: "All",
+  color: "Color",
+  length: "Size",
+  number: "Number",
+  time: "Time",
+  angle: "Angle",
+  other: "Other",
+} as const;
+const THEME_TYPE_ICONS = {
+  color: Palette,
+  length: Ruler,
+  number: Hash,
+  time: Clock3,
+  angle: TriangleRight,
+  other: Variable,
+} as const;
 
 function clampThemeEditorPosition(
   position: ThemeEditorPosition,
@@ -122,6 +143,7 @@ function ThemeValueField({
   inheritedValue,
   disabled,
   onCommit,
+  onReset,
 }: {
   token: DesignTokenWire;
   theme: string | null;
@@ -129,15 +151,19 @@ function ThemeValueField({
   inheritedValue?: string;
   disabled: boolean;
   onCommit: (value: string) => Promise<void>;
+  onReset?: () => Promise<void>;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const swatchRef = useRef<HTMLSpanElement | null>(null);
   const [draft, setDraft] = useState(value);
   const [saving, setSaving] = useState(false);
   const baselineRef = useRef(value);
   const skipCommitRef = useRef(false);
-  const effectiveValue = draft || inheritedValue || value;
+  const savingRef = useRef(false);
+  const effectiveValue = draft.trim() ? draft : value || inheritedValue || "";
   const type = inferDesignTokenType(token.name, effectiveValue, token.syntax);
-  const inherited = Boolean(theme && !draft && inheritedValue);
+  // Inheritance reflects the saved declaration, never an unfinished draft.
+  const inherited = Boolean(theme && !value);
 
   useEffect(() => {
     if (document.activeElement === inputRef.current) return;
@@ -147,17 +173,24 @@ function ThemeValueField({
 
   const commitValue = async (rawValue: string) => {
     const next = rawValue.trim();
-    if (!next || next === baselineRef.current || saving) return;
+    if (savingRef.current) return;
+    if (!next || next === baselineRef.current) {
+      setDraft(baselineRef.current);
+      return;
+    }
+    savingRef.current = true;
     setSaving(true);
     try {
       await onCommit(next);
       baselineRef.current = next;
+      setDraft(next);
     } catch (error) {
       setDraft(baselineRef.current);
       toast.error(`Couldn't update ${token.name}`, {
         description: errorMessage(error),
       });
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
@@ -170,57 +203,165 @@ function ThemeValueField({
     await commitValue(draft);
   };
 
+  const resetToBase = async () => {
+    if (!onReset || disabled || savingRef.current) return;
+    const nameFocusTarget = inputRef.current
+      ?.closest("[data-design-theme-row]")
+      ?.querySelector<HTMLElement>(".zd-theme-token-name");
+    // Reset supersedes any local draft; disabling the focused input may blur it.
+    skipCommitRef.current = true;
+    savingRef.current = true;
+    setDraft(baselineRef.current);
+    setSaving(true);
+    try {
+      await onReset();
+      baselineRef.current = "";
+      setDraft("");
+    } catch (error) {
+      toast.error(`Couldn't reset ${token.name}`, {
+        description: errorMessage(error),
+      });
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+      window.requestAnimationFrame(() => {
+        // A mode's final override can remove its column from the snapshot.
+        const target = inputRef.current ?? nameFocusTarget;
+        if (target?.isConnected) target.focus();
+      });
+    }
+  };
+
   return (
-    <div className="flex min-w-40 items-center gap-2">
-      {type === "color" ? (
-        <DesignColorPicker
-          value={effectiveValue}
-          label={`${token.name} ${theme ?? "base"}`}
+    <Tooltip
+      className="zd-theme-tooltip"
+      label={inherited ? "Inherits Base" : undefined}
+    >
+      <div className="zd-field zd-theme-value-field">
+        {type === "color" ? (
+          <Tooltip
+            className="zd-theme-tooltip"
+            label={`Edit ${token.name} ${theme ?? "base"} color`}
+            shortcut="Alt+↓"
+          >
+            <span ref={swatchRef} className="zd-theme-swatch-anchor">
+              <DesignColorPicker
+                value={effectiveValue}
+                label={`${token.name} ${theme ?? "base"}`}
+                disabled={disabled || saving}
+                side="right"
+                className="zd-theme-swatch-button"
+                trigger={
+                  <DesignColorSwatch
+                    value={effectiveValue}
+                    className="size-3.5"
+                  />
+                }
+                onCommit={async (next) => {
+                  setDraft(next);
+                  await commitValue(next);
+                }}
+              />
+            </span>
+          </Tooltip>
+        ) : null}
+        <Input
+          ref={inputRef}
+          data-design-theme-value=""
+          data-design-theme-inherited={inherited ? "true" : undefined}
+          value={draft}
+          placeholder={inherited ? inheritedValue : undefined}
           disabled={disabled || saving}
-          side="right"
-          className="size-6 shrink-0"
-          onCommit={async (next) => {
-            setDraft(next);
-            await commitValue(next);
+          className="zd-theme-input"
+          aria-label={`${token.name} ${theme ?? "base"} ${inherited ? "inherited " : ""}value`}
+          aria-keyshortcuts={
+            [
+              type === "color" ? "Alt+ArrowDown" : "",
+              onReset ? "Alt+Enter" : "",
+            ]
+              .filter(Boolean)
+              .join(" ") || undefined
+          }
+          onFocus={() => {
+            skipCommitRef.current = false;
+            baselineRef.current = value;
+          }}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={() => void commit()}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return;
+            if (event.altKey && event.key === "Enter" && onReset) {
+              event.preventDefault();
+              event.stopPropagation();
+              void resetToBase();
+            } else if (
+              event.altKey &&
+              event.key === "ArrowDown" &&
+              type === "color"
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+              swatchRef.current?.querySelector("button")?.click();
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              event.currentTarget.blur();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              skipCommitRef.current = true;
+              setDraft(baselineRef.current);
+              event.currentTarget.blur();
+            } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+              const direction = event.key === "ArrowUp" ? 1 : -1;
+              const next = scrubDesignNumericValue(
+                effectiveValue,
+                direction * (event.shiftKey ? 10 : 1),
+              );
+              if (next === null) return;
+              event.preventDefault();
+              setDraft(next);
+            }
           }}
         />
-      ) : null}
-      <Input
-        ref={inputRef}
-        data-design-theme-value=""
-        data-design-theme-inherited={inherited ? "true" : undefined}
-        value={draft}
-        placeholder={
-          theme && inheritedValue ? `Inherited: ${inheritedValue}` : undefined
-        }
-        disabled={disabled || saving}
-        className={cn(
-          "h-7 min-w-0 flex-1 font-mono text-xs",
-          inherited
-            ? "zd-design-control-quiet text-muted-fg"
-            : "zd-design-control-applied",
-        )}
-        aria-label={`${token.name} ${theme ?? "base"} ${inherited ? "inherited " : ""}value`}
-        onFocus={() => {
-          skipCommitRef.current = false;
-          baselineRef.current = value;
-        }}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={() => void commit()}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            event.currentTarget.blur();
-          } else if (event.key === "Escape") {
-            event.preventDefault();
-            skipCommitRef.current = true;
-            setDraft(baselineRef.current);
-            event.currentTarget.blur();
-          }
-        }}
-      />
-    </div>
+        {onReset ? (
+          <Tooltip
+            className="zd-theme-tooltip"
+            label="Reset to Base"
+            shortcut="Alt+Enter"
+          >
+            <button
+              type="button"
+              tabIndex={-1}
+              className="zd-icon-button zd-theme-reset"
+              aria-label="Reset to Base"
+              aria-keyshortcuts="Alt+Enter"
+              disabled={disabled || saving}
+              onPointerDown={(event) => event.preventDefault()}
+              onClick={() => void resetToBase()}
+            >
+              <RotateCcw aria-hidden="true" className="size-3.5" />
+            </button>
+          </Tooltip>
+        ) : null}
+      </div>
+    </Tooltip>
   );
+}
+
+/** Keep the row's primary values in Tab order; cell actions also have shortcuts. */
+function moveThemeRowFocus(event: React.KeyboardEvent<HTMLDivElement>) {
+  if (event.key !== "Tab" || event.defaultPrevented) return;
+  const stops = Array.from(
+    event.currentTarget.querySelectorAll<HTMLElement>(
+      ".zd-theme-token-name, [data-design-theme-value]:not(:disabled)",
+    ),
+  );
+  const target = event.target as HTMLElement;
+  const current = stops.indexOf(target);
+  if (current === -1) return;
+  const next = stops[current + (event.shiftKey ? -1 : 1)];
+  if (!next) return;
+  event.preventDefault();
+  next.focus();
 }
 
 function importSummary(imports: readonly DesignCssVariableImport[]): string {
@@ -246,9 +387,9 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   onOpenChange,
   onActiveThemeChange,
 }: DesignThemeEditorProps) {
-  const newVariableId = useId();
-  const newVariableNameId = `${newVariableId}-name`;
-  const newVariableValueId = `${newVariableId}-value`;
+  const newVariableTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const newThemeTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const pasteTriggerRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const positionInitializedRef = useRef(false);
   const dragRef = useRef<{
@@ -274,8 +415,9 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
     ':root {\n  --brand: rebeccapurple;\n}\n\n[data-theme="dark"] {\n  --brand: mediumpurple;\n}',
   );
   const [newVariableOpen, setNewVariableOpen] = useState(false);
-  const [newVariableName, setNewVariableName] = useState("--new-token");
+  const [newVariableName, setNewVariableName] = useState("");
   const [newVariableValue, setNewVariableValue] = useState("");
+  const [newThemeOpen, setNewThemeOpen] = useState(false);
   const [newTheme, setNewTheme] = useState("");
   const [action, setAction] = useState<string | null>(null);
 
@@ -309,11 +451,15 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
     const normalizedQuery = query.trim().toLocaleLowerCase();
     const groups = new Map<string, DesignTokenWire[]>();
     for (const token of tokens) {
-      const type = inferDesignTokenType(token.name, token.value, token.syntax);
+      const type = inferDesignTokenType(
+        token.name,
+        token.value || token.initialValue,
+        token.syntax,
+      );
       if (typeFilter !== "all" && type !== typeFilter) continue;
       if (
         normalizedQuery &&
-        !`${token.name} ${type} ${designTokenGroup(token.name)}`
+        !`${token.name} ${type} ${THEME_TYPE_LABELS[type]} ${designTokenGroup(token.name)}`
           .toLocaleLowerCase()
           .includes(normalizedQuery)
       ) {
@@ -378,9 +524,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
         parsedImport.imports.map(tokenOperation),
       );
       setPasteOpen(false);
-      toast.success("CSS variables imported", {
-        description: importSummary(parsedImport.imports),
-      });
+      pasteTriggerRef.current?.focus();
     } catch (error) {
       toast.error("Couldn't import CSS variables", {
         description: errorMessage(error),
@@ -391,15 +535,15 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   const addVariable = async () => {
     const name = newVariableName.trim();
     const value = newVariableValue.trim();
-    if (!name || !value) return;
+    if (!name || !value || variableNameInvalid || !canCreate) return;
     try {
       await applyOperations("variable", `Create ${name}`, [
         tokenOperation({ name, theme: null, value }, 0),
       ]);
       setNewVariableOpen(false);
-      setNewVariableName("--new-token");
+      setNewVariableName("");
       setNewVariableValue("");
-      toast.success("Theme variable created");
+      newVariableTriggerRef.current?.focus();
     } catch (error) {
       toast.error("Couldn't create the theme variable", {
         description: errorMessage(error),
@@ -409,15 +553,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
 
   const addTheme = async () => {
     const theme = newTheme.trim().toLocaleLowerCase();
-    if (!theme) return;
-    if (tokens.length === 0) {
-      toast.info("Create or import a variable before adding a theme.");
-      return;
-    }
-    if (tokens.length > 256) {
-      toast.error("This theme has too many variables for one atomic edit.");
-      return;
-    }
+    if (!theme || themeNameInvalid || !canAddTheme) return;
     try {
       await applyOperations(
         `theme:${theme}`,
@@ -430,8 +566,9 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
         ),
       );
       setNewTheme("");
+      setNewThemeOpen(false);
       onActiveThemeChange(theme);
-      toast.success(`${theme} theme created`);
+      window.requestAnimationFrame(() => newThemeTriggerRef.current?.focus());
     } catch (error) {
       toast.error("Couldn't create the theme", {
         description: errorMessage(error),
@@ -442,6 +579,40 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   const canEdit = Boolean(
     workspaceId && frame && tokenSourceVersion && action === null,
   );
+  const canCreate = Boolean(
+    workspaceId && frame && foundation.data && action === null,
+  );
+  const canAddTheme = canCreate && tokens.length > 0 && tokens.length <= 256;
+  const addThemeLabel =
+    tokens.length === 0
+      ? "Add a variable first"
+      : tokens.length > 256
+        ? "Themes support up to 256 variables"
+        : "Add theme";
+  const variableNameIssue = designThemeVariableNameIssue(
+    newVariableName,
+    tokens,
+  );
+  const variableNameInvalid = variableNameIssue !== null;
+  const themeNameInvalid =
+    Boolean(newTheme.trim()) &&
+    (!/^[a-z][a-z0-9_-]{0,63}$/.test(newTheme.trim().toLocaleLowerCase()) ||
+      themes.includes(newTheme.trim().toLocaleLowerCase()));
+
+  const togglePaste = () => {
+    setPasteOpen((current) => !current);
+    setNewVariableOpen(false);
+  };
+  const toggleNewVariable = () => {
+    setNewVariableOpen((current) => !current);
+    setPasteOpen(false);
+  };
+  const cancelNewVariable = () => {
+    setNewVariableOpen(false);
+    setNewVariableName("");
+    setNewVariableValue("");
+    newVariableTriggerRef.current?.focus();
+  };
 
   const constrainPosition = useCallback((next: ThemeEditorPosition) => {
     const bounds = panelRef.current?.getBoundingClientRect();
@@ -514,7 +685,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
           ref={panelRef}
           data-design-theme-editor=""
           aria-modal="false"
-          className="border-border2 bg-bg1 fixed z-50 grid h-[min(680px,calc(100vh-48px))] w-[min(760px,calc(100vw-48px))] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden overscroll-contain rounded-lg border shadow-[var(--shadow-dropdown)] outline-none"
+          className="zd-theme-editor"
           style={{
             left: position.x,
             top: position.y,
@@ -530,6 +701,15 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
             // live but never dismisses an in-progress token edit.
             event.preventDefault();
           }}
+          onEscapeKeyDown={(event) => {
+            // Draft fields own Escape; it cancels their edit before the window.
+            if (
+              event.target instanceof HTMLInputElement ||
+              event.target instanceof HTMLTextAreaElement
+            ) {
+              event.preventDefault();
+            }
+          }}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             window.requestAnimationFrame(() => {
@@ -538,434 +718,537 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
             });
           }}
         >
-          <DialogHeader className="gap-1">
-            <div className="flex min-w-0 items-center gap-2">
-              <div
-                data-design-theme-drag-handle=""
-                role="button"
-                tabIndex={0}
-                aria-label="Move theme editor"
-                className="text-fg1 focus-visible:outline-highlighted-bright flex min-w-0 flex-1 cursor-grab touch-none items-center gap-2 rounded-sm py-1 outline-none select-none focus-visible:outline focus-visible:outline-1 active:cursor-grabbing"
-                onPointerDown={(event) => {
-                  if (event.button !== 0 || !event.isPrimary) return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  event.currentTarget.setPointerCapture(event.pointerId);
-                  dragRef.current = {
-                    pointerId: event.pointerId,
-                    startX: event.clientX,
-                    startY: event.clientY,
-                    origin: position,
-                  };
-                }}
-                onPointerMove={(event) => {
-                  const drag = dragRef.current;
-                  if (!drag || drag.pointerId !== event.pointerId) return;
-                  setPosition(
-                    constrainPosition({
-                      x: drag.origin.x + event.clientX - drag.startX,
-                      y: drag.origin.y + event.clientY - drag.startY,
-                    }),
-                  );
-                }}
-                onPointerUp={(event) => {
-                  if (dragRef.current?.pointerId !== event.pointerId) return;
-                  dragRef.current = null;
-                  event.currentTarget.releasePointerCapture(event.pointerId);
-                }}
-                onPointerCancel={(event) => {
-                  if (dragRef.current?.pointerId !== event.pointerId) return;
-                  dragRef.current = null;
-                }}
-                onKeyDown={moveThemeEditorByKeyboard}
-              >
-                <GripHorizontal className="text-muted-fg size-4 shrink-0" />
-                <Palette className="size-4 shrink-0" />
-                <DialogPrimitive.Title className="text-dialog-title truncate font-medium">
-                  Theme editor
-                </DialogPrimitive.Title>
-              </div>
+          <div data-design-theme-titlebar="" className="zd-theme-titlebar">
+            <div
+              data-design-theme-drag-handle=""
+              role="button"
+              tabIndex={0}
+              aria-label="Move theme editor"
+              className="zd-theme-drag-handle"
+              onPointerDown={(event) => {
+                if (event.button !== 0 || !event.isPrimary) return;
+                event.preventDefault();
+                event.stopPropagation();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                dragRef.current = {
+                  pointerId: event.pointerId,
+                  startX: event.clientX,
+                  startY: event.clientY,
+                  origin: position,
+                };
+              }}
+              onPointerMove={(event) => {
+                const drag = dragRef.current;
+                if (!drag || drag.pointerId !== event.pointerId) return;
+                setPosition(
+                  constrainPosition({
+                    x: drag.origin.x + event.clientX - drag.startX,
+                    y: drag.origin.y + event.clientY - drag.startY,
+                  }),
+                );
+              }}
+              onPointerUp={(event) => {
+                if (dragRef.current?.pointerId !== event.pointerId) return;
+                dragRef.current = null;
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }}
+              onPointerCancel={(event) => {
+                if (dragRef.current?.pointerId !== event.pointerId) return;
+                dragRef.current = null;
+              }}
+              onKeyDown={moveThemeEditorByKeyboard}
+            >
+              <Palette aria-hidden="true" className="size-3.5 shrink-0" />
+              <DialogPrimitive.Title className="zd-theme-title">
+                Theme editor
+              </DialogPrimitive.Title>
+            </div>
+            <Tooltip className="zd-theme-tooltip" label="Close theme editor">
               <DialogCloseButton aria-label="Close theme editor" />
-            </div>
-            <DialogPrimitive.Description className="text-muted-fg text-xs">
-              Edit CSS variables as a mode matrix. Values stay in tokens.css and
-              preview immediately on every live canvas frame.
+            </Tooltip>
+            <DialogPrimitive.Description className="sr-only">
+              Edit CSS variables and preview themes on the canvas.
             </DialogPrimitive.Description>
-          </DialogHeader>
+          </div>
 
-          <DialogBody className="grid grid-rows-[auto_minmax(0,1fr)] gap-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="relative min-w-48 flex-1">
-                <Search className="text-muted-fg pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2" />
-                <Input
-                  value={query}
-                  className="zd-design-search h-8 pl-7 text-xs"
-                  aria-label="Search theme variables"
-                  placeholder="Search variables"
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-              </div>
-              <Select
-                value={activeTheme ?? "__base__"}
-                onValueChange={(value) =>
-                  onActiveThemeChange(value === "__base__" ? null : value)
-                }
-              >
-                <SelectTrigger
-                  size="sm"
-                  className="zd-design-control-applied h-8 w-40"
-                  aria-label="Preview theme"
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__base__">Base</SelectItem>
-                  {themes.map((theme) => (
-                    <SelectItem key={theme} value={theme}>
-                      {theme}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button
-                type="button"
-                variant={pasteOpen ? "secondary-on" : "secondary"}
-                size="sm"
-                className={cn(
-                  "zd-design-control-quiet",
-                  pasteOpen && "zd-design-state-active",
-                )}
-                onClick={() => {
-                  setPasteOpen((current) => !current);
-                  setNewVariableOpen(false);
-                }}
-              >
-                <ClipboardPaste />
-                Paste CSS
-              </Button>
-              <Button
-                type="button"
-                variant={newVariableOpen ? "secondary-on" : "secondary"}
-                size="sm"
-                className={cn(
-                  "zd-design-control-quiet",
-                  newVariableOpen && "zd-design-state-active",
-                )}
-                onClick={() => {
-                  setNewVariableOpen((current) => !current);
-                  setPasteOpen(false);
-                }}
-              >
-                <Plus />
-                Variable
-              </Button>
-              <div
-                data-design-theme-type-filter=""
-                role="group"
-                aria-label="Filter variables by type"
-                className="flex basis-full items-center gap-1 overflow-x-auto pt-0.5"
-              >
-                {(["all", ...THEME_TOKEN_TYPES] as const).map((type) => {
-                  const count =
-                    type === "all"
-                      ? tokens.length
-                      : (tokenTypeCounts.get(type) ?? 0);
-                  if (type !== "all" && count === 0) return null;
-                  return (
-                    <button
-                      key={type}
-                      type="button"
-                      aria-pressed={typeFilter === type}
-                      className={cn(
-                        "zd-design-theme-filter shrink-0 rounded-sm px-2 py-1 text-[10px] capitalize",
-                        typeFilter === type && "zd-design-theme-mode-active",
-                      )}
-                      onClick={() => setTypeFilter(type)}
-                    >
-                      {type} <span className="font-mono opacity-70">{count}</span>
-                    </button>
-                  );
-                })}
-              </div>
+          <div className="zd-theme-body">
+            <div
+              data-design-theme-type-filter=""
+              role="group"
+              aria-label="Filter variables by type"
+              className="zd-theme-rail"
+            >
+              {(["all", ...THEME_TOKEN_TYPES] as const).map((type) => {
+                const count =
+                  type === "all"
+                    ? tokens.length
+                    : (tokenTypeCounts.get(type) ?? 0);
+                if (type !== "all" && count === 0) return null;
+                return (
+                  <button
+                    key={type}
+                    type="button"
+                    aria-label={THEME_TYPE_LABELS[type]}
+                    aria-pressed={typeFilter === type}
+                    className="zd-theme-filter"
+                    onClick={() => setTypeFilter(type)}
+                  >
+                    <span>{THEME_TYPE_LABELS[type]}</span>
+                    <span className="zd-theme-filter-count">{count}</span>
+                  </button>
+                );
+              })}
             </div>
 
-            <div className="flex min-h-0 flex-col overflow-hidden">
+            <div className="zd-theme-main">
+              <div data-design-theme-toolbar="" className="zd-theme-toolbar">
+                <div className="zd-field zd-theme-search">
+                  <Search
+                    aria-hidden="true"
+                    className="text-muted-fg size-3.5 shrink-0"
+                  />
+                  <Input
+                    value={query}
+                    className="zd-theme-input"
+                    aria-label="Search theme variables"
+                    placeholder="Search"
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </div>
+                <Select
+                  value={activeTheme ?? "__base__"}
+                  onValueChange={(value) =>
+                    onActiveThemeChange(value === "__base__" ? null : value)
+                  }
+                >
+                  <SelectTrigger
+                    className="zd-field zd-theme-preview"
+                    aria-label="Preview theme"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__base__">Base</SelectItem>
+                    {themes.map((theme) => (
+                      <SelectItem key={theme} value={theme}>
+                        {theme}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Tooltip className="zd-theme-tooltip" label="Paste CSS">
+                  <Button
+                    ref={pasteTriggerRef}
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="zd-icon-button"
+                    data-size="row"
+                    aria-label="Paste CSS"
+                    aria-expanded={pasteOpen}
+                    onClick={togglePaste}
+                  >
+                    <ClipboardPaste />
+                  </Button>
+                </Tooltip>
+                <Tooltip className="zd-theme-tooltip" label="New variable">
+                  <Button
+                    ref={newVariableTriggerRef}
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="zd-icon-button"
+                    data-size="row"
+                    aria-label="New variable"
+                    aria-expanded={newVariableOpen}
+                    onClick={toggleNewVariable}
+                  >
+                    <Plus />
+                  </Button>
+                </Tooltip>
+              </div>
+
               {pasteOpen ? (
-                <div className="bg-bg1-highlight mx-4 mb-3 flex flex-col gap-3 rounded-lg p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex min-w-0 flex-col">
-                      <span className="text-fg1 text-xs font-medium">
-                        Paste CSS variables
-                      </span>
-                      <span className="text-muted-fg text-xs">
-                        Supports :root, html, :host, [data-theme],
-                        [data-zd-theme], .dark, and .theme-name blocks.
-                      </span>
-                    </div>
-                    <span
-                      className={cn(
-                        "shrink-0 text-xs",
-                        parsedImport.error ? "text-red-primary" : "text-muted-fg",
-                      )}
-                    >
-                      {parsedImport.error ?? importSummary(parsedImport.imports)}
-                    </span>
-                  </div>
+                <div
+                  className="zd-theme-paste"
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setPasteOpen(false);
+                    pasteTriggerRef.current?.focus();
+                  }}
+                >
                   <Textarea
+                    autoFocus
                     value={cssDraft}
-                    className="zd-design-control-applied min-h-36 resize-y font-mono text-xs"
+                    className="zd-theme-css-input"
                     aria-label="CSS variables to import"
+                    aria-invalid={Boolean(parsedImport.error)}
                     spellCheck={false}
                     onChange={(event) => setCssDraft(event.target.value)}
                   />
-                  <div className="flex justify-end gap-2">
+                  <div className="zd-theme-paste-actions">
+                    <span
+                      role="status"
+                      className={cn(
+                        "zd-theme-parse-status",
+                        parsedImport.error && "text-red-primary",
+                      )}
+                    >
+                      {parsedImport.error ??
+                        importSummary(parsedImport.imports)}
+                    </span>
                     <Button
                       type="button"
                       variant="ghost"
-                      size="sm"
-                      onClick={() => setPasteOpen(false)}
+                      onClick={() => {
+                        setPasteOpen(false);
+                        pasteTriggerRef.current?.focus();
+                      }}
                     >
                       Cancel
                     </Button>
                     <Button
                       type="button"
-                      size="sm"
                       disabled={
-                        !foundation.data ||
+                        !canCreate ||
                         !!parsedImport.error ||
-                        action !== null
+                        parsedImport.imports.length === 0
                       }
                       onClick={() => void importCss()}
                     >
-                      {action === "import" ? "Importing…" : "Import variables"}
+                      {action === "import" ? "Importing…" : "Import"}
                     </Button>
                   </div>
                 </div>
               ) : null}
 
-              {newVariableOpen ? (
-                <div className="bg-bg1-highlight mx-4 mb-3 grid grid-cols-[minmax(160px,1fr)_minmax(160px,2fr)_auto] items-end gap-3 rounded-lg p-4">
-                  <div className="flex flex-col gap-1">
-                    <Label
-                      className="text-muted-fg text-xs"
-                      htmlFor={newVariableNameId}
-                    >
-                      Variable
-                    </Label>
-                    <Input
-                      id={newVariableNameId}
-                      value={newVariableName}
-                      className="zd-design-control-applied h-8 font-mono text-xs"
-                      onChange={(event) => setNewVariableName(event.target.value)}
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <Label
-                      className="text-muted-fg text-xs"
-                      htmlFor={newVariableValueId}
-                    >
-                      Base value
-                    </Label>
-                    <Input
-                      id={newVariableValueId}
-                      value={newVariableValue}
-                      className="zd-design-control-applied h-8 font-mono text-xs"
-                      placeholder="rebeccapurple, 16px, 0.2s…"
-                      onChange={(event) =>
-                        setNewVariableValue(event.target.value)
-                      }
-                    />
-                  </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={
-                      !newVariableName.trim() ||
-                      !newVariableValue.trim() ||
-                      !foundation.data ||
-                      action !== null
-                    }
-                    onClick={() => void addVariable()}
-                  >
-                    {action === "variable" ? "Creating…" : "Create"}
-                  </Button>
-                </div>
-              ) : null}
-
-              <ScrollArea data-design-theme-scroll="" className="min-h-0 flex-1">
-                <div className="min-w-max pb-3">
-                  <div
-                    className="border-border1 bg-bg1 sticky top-0 z-20 grid border-b"
-                    style={{
-                      gridTemplateColumns: `minmax(260px, 1.35fr) repeat(${themes.length + 1}, minmax(190px, 1fr))`,
-                    }}
-                  >
-                    <div className="text-muted-fg bg-bg1 sticky left-0 z-30 px-4 py-2 text-xs font-medium">
-                      Variable
+              <ScrollArea
+                data-design-theme-scroll=""
+                className="zd-theme-scroll"
+              >
+                <div
+                  role="table"
+                  aria-label="Theme variables"
+                  className="zd-theme-table"
+                  style={
+                    {
+                      "--theme-columns": `minmax(200px, 1.3fr) repeat(${themes.length + 1}, minmax(156px, 1fr)) ${newThemeOpen ? "168px" : newVariableOpen && themes.length === 0 ? "144px" : "40px"}`,
+                      minWidth:
+                        200 +
+                        (themes.length + 1) * 156 +
+                        (newThemeOpen
+                          ? 168
+                          : newVariableOpen && themes.length === 0
+                            ? 144
+                            : 40),
+                    } as React.CSSProperties
+                  }
+                >
+                  <div role="row" className="zd-theme-table-header">
+                    <div role="columnheader" className="zd-theme-name-heading">
+                      Name
                     </div>
-                    <button
-                      type="button"
-                      className={cn(
-                        "text-fg2 m-1 w-fit rounded-sm px-3 py-1 text-xs font-medium",
-                        activeTheme === null && "zd-design-theme-mode-active",
-                      )}
-                      aria-pressed={activeTheme === null}
-                      onClick={() => onActiveThemeChange(null)}
-                    >
-                      Base
-                    </button>
-                    {themes.map((theme) => (
-                      <button
-                        key={theme}
-                        type="button"
-                        className={cn(
-                          "m-1 w-fit rounded-sm px-3 py-1 text-left text-xs font-medium",
-                          activeTheme === theme
-                            ? "zd-design-theme-mode-active"
-                            : "text-fg2",
-                        )}
-                        aria-pressed={activeTheme === theme}
-                        onClick={() => onActiveThemeChange(theme)}
+                    {[null, ...themes].map((theme) => (
+                      <div
+                        key={theme ?? "__base__"}
+                        role="columnheader"
+                        className="zd-theme-mode-heading"
                       >
-                        {theme}
-                      </button>
+                        <button
+                          type="button"
+                          className={cn(
+                            "zd-theme-mode",
+                            activeTheme === theme &&
+                              "zd-design-theme-mode-active",
+                          )}
+                          aria-pressed={activeTheme === theme}
+                          onClick={() => onActiveThemeChange(theme)}
+                        >
+                          {theme ?? "Base"}
+                        </button>
+                      </div>
                     ))}
+                    <div role="columnheader" className="zd-theme-add-mode">
+                      {newThemeOpen ? (
+                        <div className="zd-field">
+                          <Input
+                            autoFocus
+                            value={newTheme}
+                            className="zd-theme-input"
+                            placeholder="Theme name"
+                            aria-label="New theme name"
+                            aria-invalid={themeNameInvalid}
+                            disabled={!canAddTheme}
+                            onChange={(event) =>
+                              setNewTheme(event.target.value)
+                            }
+                            onKeyDown={(event) => {
+                              if (event.nativeEvent.isComposing) return;
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void addTheme();
+                              } else if (event.key === "Escape") {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                setNewThemeOpen(false);
+                                setNewTheme("");
+                                window.requestAnimationFrame(() =>
+                                  newThemeTriggerRef.current?.focus(),
+                                );
+                              }
+                            }}
+                          />
+                        </div>
+                      ) : (
+                        <Tooltip
+                          className="zd-theme-tooltip"
+                          label={addThemeLabel}
+                          side="bottom"
+                        >
+                          <span
+                            className="zd-theme-add-mode-trigger"
+                            tabIndex={!canAddTheme ? 0 : undefined}
+                          >
+                            <Button
+                              ref={newThemeTriggerRef}
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="zd-icon-button"
+                              data-size="row"
+                              aria-label="Add theme"
+                              disabled={!canAddTheme}
+                              onClick={() => setNewThemeOpen(true)}
+                            >
+                              <Plus />
+                            </Button>
+                          </span>
+                        </Tooltip>
+                      )}
+                    </div>
                   </div>
+
+                  {newVariableOpen ? (
+                    <div
+                      role="row"
+                      className="zd-theme-new-variable"
+                      onKeyDown={(event) => {
+                        if (event.nativeEvent.isComposing) return;
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          cancelNewVariable();
+                        } else if (event.key === "Enter") {
+                          event.preventDefault();
+                          void addVariable();
+                        }
+                      }}
+                    >
+                      <div role="cell" className="zd-theme-new-name">
+                        <div className="zd-field">
+                          <Input
+                            autoFocus
+                            value={newVariableName}
+                            className="zd-theme-input"
+                            aria-label="Variable name"
+                            aria-invalid={variableNameInvalid}
+                            placeholder="--name"
+                            disabled={action === "variable"}
+                            onChange={(event) =>
+                              setNewVariableName(event.target.value)
+                            }
+                          />
+                        </div>
+                      </div>
+                      <div role="cell" className="zd-theme-value-cell">
+                        <div className="zd-field">
+                          <Input
+                            value={newVariableValue}
+                            className="zd-theme-input"
+                            aria-label="Base value"
+                            placeholder="Value"
+                            disabled={action === "variable"}
+                            onChange={(event) =>
+                              setNewVariableValue(event.target.value)
+                            }
+                          />
+                        </div>
+                      </div>
+                      <div role="cell" className="zd-theme-new-actions">
+                        <Tooltip
+                          className="zd-theme-tooltip"
+                          label={
+                            variableNameIssue === "taken"
+                              ? `${newVariableName.trim()} already exists`
+                              : variableNameIssue === "invalid"
+                                ? "Names start with --"
+                                : undefined
+                          }
+                        >
+                          <span className="inline-flex">
+                            <Button
+                              type="button"
+                              disabled={
+                                !newVariableName.trim() ||
+                                variableNameInvalid ||
+                                !newVariableValue.trim() ||
+                                !canCreate
+                              }
+                              onClick={() => void addVariable()}
+                            >
+                              {action === "variable" ? "Creating…" : "Create"}
+                            </Button>
+                          </span>
+                        </Tooltip>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          onClick={cancelNewVariable}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
 
                   {groupedTokens.map(([group, rows]) => (
                     <React.Fragment key={group}>
-                      <div className="bg-bg1-highlight text-muted-fg sticky left-0 z-10 px-4 py-1.5 text-[10px] font-medium tracking-wide uppercase">
-                        {group}
+                      <div role="row" className="zd-theme-group">
+                        <span role="cell" aria-colspan={themes.length + 3}>
+                          {group.charAt(0).toLocaleUpperCase() + group.slice(1)}
+                        </span>
                       </div>
                       {rows.map((token) => {
+                        const value = token.value || token.initialValue;
                         const type = inferDesignTokenType(
                           token.name,
-                          token.value,
+                          value,
                           token.syntax,
                         );
+                        const Icon = THEME_TYPE_ICONS[type];
                         return (
                           <div
                             key={token.name}
-                            className="group/token hover:bg-bg1-hover grid min-h-11 items-center"
-                            style={{
-                              gridTemplateColumns: `minmax(260px, 1.35fr) repeat(${themes.length + 1}, minmax(190px, 1fr))`,
-                            }}
+                            role="row"
+                            data-design-theme-row=""
+                            className="zd-theme-row"
+                            onKeyDown={moveThemeRowFocus}
                           >
-                            <div className="bg-bg1 group-hover/token:bg-bg1-hover sticky left-0 z-10 flex min-w-0 items-center gap-2 px-4 py-2">
-                              <Variable className="text-muted-fg size-3.5 shrink-0" />
-                              <div className="flex min-w-0 flex-1 flex-col">
-                                <code className="text-fg1 truncate text-xs">
+                            <div role="cell" className="zd-theme-name-cell">
+                              {type === "color" ? (
+                                <DesignColorSwatch
+                                  value={value}
+                                  className="size-3.5"
+                                />
+                              ) : (
+                                <Icon
+                                  aria-hidden="true"
+                                  className="text-fg3 size-3.5 shrink-0"
+                                />
+                              )}
+                              <Tooltip
+                                className="zd-theme-tooltip"
+                                label={`${token.name} · ${token.usageCount} ${token.usageCount === 1 ? "use" : "uses"}`}
+                              >
+                                <span
+                                  tabIndex={0}
+                                  className="zd-theme-token-name"
+                                >
                                   {token.name}
-                                </code>
-                                <span className="text-muted-fg truncate text-[10px]">
-                                  {type} · {token.usageCount} uses
                                 </span>
-                              </div>
+                              </Tooltip>
                             </div>
-                            <div className="px-3 py-2">
-                              <ThemeValueField
-                                token={token}
-                                theme={null}
-                                value={token.value || token.initialValue}
-                                disabled={!canEdit}
-                                onCommit={async (value) => {
-                                  await updateDesignTokenCached(workspaceId!, {
-                                    frame: frame!.file,
-                                    name: token.name,
-                                    theme: null,
-                                    value,
-                                    sourceVersion: tokenSourceVersion!,
-                                  });
-                                }}
-                              />
-                            </div>
-                            {themes.map((theme) => (
-                              <div key={theme} className="px-3 py-2">
+                            {[null, ...themes].map((theme) => (
+                              <div
+                                key={theme ?? "__base__"}
+                                role="cell"
+                                className="zd-theme-value-cell"
+                              >
                                 <ThemeValueField
                                   token={token}
                                   theme={theme}
-                                  value={token.themeValues[theme] ?? ""}
+                                  value={
+                                    theme === null
+                                      ? value
+                                      : (token.themeValues[theme] ?? "")
+                                  }
                                   inheritedValue={
-                                    token.value || token.initialValue
+                                    theme === null ? undefined : value
                                   }
                                   disabled={!canEdit}
-                                  onCommit={async (value) => {
-                                    await updateDesignTokenCached(workspaceId!, {
-                                      frame: frame!.file,
-                                      name: token.name,
-                                      theme,
-                                      value,
-                                      sourceVersion: tokenSourceVersion!,
-                                    });
+                                  onCommit={async (next) => {
+                                    await updateDesignTokenCached(
+                                      workspaceId!,
+                                      {
+                                        frame: frame!.file,
+                                        name: token.name,
+                                        theme,
+                                        value: next,
+                                        sourceVersion: tokenSourceVersion!,
+                                      },
+                                    );
                                   }}
+                                  onReset={
+                                    theme !== null &&
+                                    token.themeValues[theme] !== undefined &&
+                                    foundation.data
+                                      ? () =>
+                                          applyOperations(
+                                            `reset:${theme}:${token.name}`,
+                                            `Reset ${token.name} in ${theme} to Base`,
+                                            [
+                                              {
+                                                operationId: `theme-reset-${crypto.randomUUID()}`,
+                                                type: "token.set",
+                                                file: "tokens.css",
+                                                name: token.name,
+                                                theme,
+                                                value: null,
+                                              },
+                                            ],
+                                          )
+                                      : undefined
+                                  }
                                 />
                               </div>
                             ))}
+                            <div role="cell" />
                           </div>
                         );
                       })}
                     </React.Fragment>
                   ))}
-
-                  {tokens.length === 0 ? (
-                    <div className="text-muted-fg flex min-h-52 flex-col items-center justify-center gap-2 px-6 text-center text-xs">
-                      <Palette className="size-6" />
-                      <span>No theme variables yet.</span>
-                      <span>
-                        Paste CSS variables or create the first variable above.
-                      </span>
-                    </div>
-                  ) : groupedTokens.length === 0 ? (
-                    <div className="text-muted-fg flex min-h-40 items-center justify-center px-6 text-xs">
-                      No variables match “{query}”.
-                    </div>
-                  ) : null}
                 </div>
+                {groupedTokens.length === 0 ? (
+                  <div className="zd-theme-empty">
+                    <Palette aria-hidden="true" className="size-3.5" />
+                    <span>No variables</span>
+                    {tokens.length === 0 ? (
+                      <div className="zd-theme-empty-actions">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          onClick={togglePaste}
+                        >
+                          Paste CSS
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          onClick={toggleNewVariable}
+                        >
+                          New variable
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                <ScrollBar orientation="horizontal" />
               </ScrollArea>
             </div>
-          </DialogBody>
-          <DialogFooter className="justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-2">
-              <Input
-                value={newTheme}
-                className="zd-design-control-applied h-8 w-40 text-xs"
-                placeholder="New theme name"
-                aria-label="New theme name"
-                onChange={(event) => setNewTheme(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void addTheme();
-                  }
-                }}
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                className="zd-design-control-quiet"
-                disabled={
-                  !newTheme.trim() || !foundation.data || action !== null
-                }
-                onClick={() => void addTheme()}
-              >
-                <Plus />
-                {action?.startsWith("theme:") ? "Adding…" : "Add theme"}
-              </Button>
-            </div>
-            <div className="text-muted-fg flex items-center gap-3 text-xs">
-              <span>
-                {tokens.length} variables · {themes.length + 1} modes
-              </span>
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => onOpenChange(false)}
-              >
-                Done
-              </Button>
-            </div>
-          </DialogFooter>
+          </div>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>

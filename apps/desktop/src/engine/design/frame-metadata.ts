@@ -10,14 +10,13 @@ const DEFAULT_FRAME_WIDTH = 1_440;
 const DEFAULT_FRAME_HEIGHT = 900;
 const FRAME_GRID_GAP = 120;
 const FRAME_GRID_COLUMNS = 3;
+const FRAME_COORDINATE_LIMIT = 1_000_000;
 
 export function nextFrameGeometry(
   existing: DesignFrameGeometry[],
   meta: { width: number; height: number },
 ): DesignFrameGeometry {
   const index = existing.length;
-  const column = index % FRAME_GRID_COLUMNS;
-  const row = Math.floor(index / FRAME_GRID_COLUMNS);
   const widest = Math.max(
     meta.width,
     ...existing.map((geometry) => geometry.w),
@@ -26,9 +25,15 @@ export function nextFrameGeometry(
     meta.height,
     ...existing.map((geometry) => geometry.h),
   );
+  // Three columns until the rows would pass the storable coordinate range;
+  // very tall canvases then widen the grid instead of leaving it.
+  const rows = Math.floor(FRAME_COORDINATE_LIMIT / (tallest + FRAME_GRID_GAP)) + 1;
+  const columns = Math.max(FRAME_GRID_COLUMNS, Math.ceil((index + 1) / rows));
+  const column = index % columns;
+  const row = Math.floor(index / columns);
   return {
-    x: column * (widest + FRAME_GRID_GAP),
-    y: row * (tallest + FRAME_GRID_GAP),
+    x: Math.min(FRAME_COORDINATE_LIMIT, column * (widest + FRAME_GRID_GAP)),
+    y: Math.min(FRAME_COORDINATE_LIMIT, row * (tallest + FRAME_GRID_GAP)),
     w: meta.width,
     h: meta.height,
     z: index,

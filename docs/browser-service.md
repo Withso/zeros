@@ -348,8 +348,8 @@ record), so a hidden page cannot retain device or network activity without a
 confirmation surface. Missing renderer, queue overflow, timeout, malformed
 response, and session teardown all fail closed.
 
-Codex MCP approvals use the same inline composer slot as other blocking input,
-but render as direct one-click decisions instead of a selectable question plus
+Codex MCP approvals use the same card dock above the composer as other
+blocking input, but render as direct one-click decisions instead of a selectable question plus
 a second Submit action. The card preserves the provider's exact `accept`,
 `persist: session`, `persist: always`, decline, and cancel response semantics;
 only the presentation labels are adapted (for example, Browser origin access
@@ -364,8 +364,8 @@ confirmation path.
 
 Confirmation requests carry their durable workspace and conversation owners.
 The renderer places them in the exact conversation's existing
-`PermissionCard`, replacing that chat's composer; there is no browser popup or
-window-global dialog. A provider-native permission already at that chat's queue
+`PermissionCard`, docked above that chat's still-usable composer; there is no
+browser popup or window-global dialog. A provider-native permission already at that chat's queue
 head wins, then the browser request appears. The native page stays visibly
 attached beside the chat, while Electron's input lock prevents it from
 intercepting the trusted Allow/Deny interaction. Subscribe-then-snapshot

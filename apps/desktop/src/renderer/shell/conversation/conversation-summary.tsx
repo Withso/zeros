@@ -22,7 +22,7 @@ import {
   Tooltip,
 } from "../../shared/ui/primitives";
 import { prefetchSettingsForRepo } from "../../features/settings/use-settings";
-import { loadContextGraph } from "../workbench/tabs/context-graph-data";
+import { loadContextGraph } from "../context-graph-data";
 import { SummaryContents } from "./summary-contents";
 import { summaryHasSplitColumns } from "./summary-model";
 import "./conversation-summary.css";

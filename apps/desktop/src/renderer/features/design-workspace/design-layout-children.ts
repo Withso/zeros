@@ -3,7 +3,10 @@ import {
   type DesignRuntimeChildrenLayout,
   type DesignRuntimeNodeDetails,
 } from "@zeros/protocol/design-runtime";
-import { DESIGN_TRANSACTION_MAX_OPERATIONS } from "@zeros/design-core";
+import {
+  DESIGN_FRAME_MAX_SIZE,
+  DESIGN_TRANSACTION_MAX_OPERATIONS,
+} from "@zeros/design-core";
 import {
   borderSize,
   cssSize,
@@ -276,22 +279,19 @@ export function designLayoutResizedFrame(
   parent: DesignRuntimeNodeDetails,
   styles: Styles,
 ) {
+  // Canvas metadata stores frames up to DESIGN_FRAME_MAX_SIZE on each axis.
+  const size = (value: number) =>
+    Math.min(DESIGN_FRAME_MAX_SIZE, Math.max(1, Math.round(value)));
   return {
-    width: Math.max(
-      1,
-      Math.round(
-        Number.parseFloat(styles.width!) +
-          borderSize(parent, "x") -
-          number(parent, "width"),
-      ),
+    width: size(
+      Number.parseFloat(styles.width!) +
+        borderSize(parent, "x") -
+        number(parent, "width"),
     ),
-    height: Math.max(
-      1,
-      Math.round(
-        Number.parseFloat(styles.height!) +
-          borderSize(parent, "y") -
-          number(parent, "height"),
-      ),
+    height: size(
+      Number.parseFloat(styles.height!) +
+        borderSize(parent, "y") -
+        number(parent, "height"),
     ),
   };
 }

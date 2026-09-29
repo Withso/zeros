@@ -9,7 +9,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import { withSystemTx } from "./db.js";
 import {
   CloudAgentRuntimeEvidenceSchema,
@@ -113,8 +113,7 @@ d("owner-only runtime qualification changes", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     actor = randomUUID();
     await pool.query(
       "INSERT INTO users(id,email,display_name,staff_role) VALUES ($1,$2,'Qualification Owner','platform_owner')",

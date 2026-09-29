@@ -1,6 +1,10 @@
 import { escapeText, insertDesignHeadMarkup } from "./source";
 import { FRAME_SEED, TEXT_FRAME_SEED } from "./document-seeds";
-import { designNodeRecords, healDesignOids } from "./node-identities";
+import {
+  designLayerCount,
+  designNodeRecords,
+  healDesignOids,
+} from "./node-identities";
 import {
   DesignRenderBudgetError,
   MAX_DESIGN_TEXT_BYTES,
@@ -156,6 +160,7 @@ export async function createDesignFrame(
       y: geometry.y,
       z: geometry.z,
       nodeCount: 1,
+      layerCount: textSeed ? 1 : 0,
       modifiedAt: info.mtimeMs,
     };
   });
@@ -247,6 +252,7 @@ export async function listDesignFramesUnlocked(
       y: geometry.y,
       z: geometry.z,
       nodeCount: designNodeRecords(document).length,
+      layerCount: designLayerCount(document),
       modifiedAt: info.mtimeMs,
     });
   }
@@ -452,6 +458,7 @@ export async function duplicateDesignFrame(
       },
     ]);
     const info = await stat(path.join(directory, file));
+    const duplicated = parse(source);
     return {
       file,
       title,
@@ -461,7 +468,8 @@ export async function duplicateDesignFrame(
       x: geometry.x,
       y: geometry.y,
       z: geometry.z,
-      nodeCount: designNodeRecords(parse(source)).length,
+      nodeCount: designNodeRecords(duplicated).length,
+      layerCount: designLayerCount(duplicated),
       modifiedAt: info.mtimeMs,
     };
   });
@@ -620,6 +628,7 @@ export async function restoreDesignFrame(
       y: geometry.y,
       z: geometry.z,
       nodeCount: designNodeRecords(document).length,
+      layerCount: designLayerCount(document),
       modifiedAt: info.mtimeMs,
     };
   });
@@ -950,6 +959,7 @@ export async function replaceDesignFrameFromHistory(
       y: geometry.y,
       z: geometry.z,
       nodeCount: designNodeRecords(document).length,
+      layerCount: designLayerCount(document),
       modifiedAt: info.mtimeMs,
     };
   });

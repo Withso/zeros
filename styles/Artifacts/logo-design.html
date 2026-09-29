@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zeros — logo explorations, square &amp; puzzle</title>
+<!--
+  Logo explorations for Zeros in the loaders' language: a 4 × 4 grid of flush
+  square tiles (styles/Artifacts/loaders-preview.html). Every mark is inline
+  SVG, drawn by the small script at the bottom from a list of cells, so a
+  variant is a few lines to add. Open this file directly in a browser; no
+  build step. A design reference only: nothing here ships.
+-->
+<style>
+  :root {
+    color-scheme: dark;
+    --bg1: hsl(0 0% 7%);
+    --bg2: hsl(0 0% 10%);
+    --bg3: hsl(0 0% 14%);
+    --fg1: hsl(0 0% 94%);
+    --fg2: hsl(0 0% 70%);
+    --fg3: hsl(0 0% 50%);
+    --border1: hsl(0 0% 16%);
+    --border2: hsl(0 0% 22%);
+    /* The two stages every mark sits on: the app's dark and light surfaces. */
+    --stage-dark: hsl(5 7% 6%);
+    --ink-dark: hsl(30 8% 95%);
+    --stage-light: hsl(40 12% 97%);
+    --ink-light: hsl(20 7% 11%);
+  }
+  [data-theme="light"] {
+    color-scheme: light;
+    --bg1: hsl(0 0% 100%);
+    --bg2: hsl(60 4% 96%);
+    --bg3: hsl(60 4% 92%);
+    --fg1: hsl(20 7% 16%);
+    --fg2: hsl(20 4% 37%);
+    --fg3: hsl(20 4% 50%);
+    --border1: hsl(60 4% 88%);
+    --border2: hsl(60 4% 82%);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg1);
+    color: var(--fg1);
+    font: 14px/1.55 "Geist Variable", "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .page { max-width: 1320px; margin: 0 auto; padding: 36px 40px 96px; }
+  header { display: flex; gap: 24px; align-items: flex-start; justify-content: space-between; margin-bottom: 28px; }
+  h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: -0.015em; }
+  .intro { margin: 0; max-width: 78ch; color: var(--fg2); }
+  .intro + .intro { margin-top: 8px; }
+  .intro b { color: var(--fg1); font-weight: 600; }
+  .theme-toggle, .copy {
+    font: inherit; font-size: 12px; color: var(--fg1); cursor: pointer;
+    background: var(--bg2); border: 1px solid var(--border2); border-radius: 7px; padding: 5px 11px;
+  }
+  .theme-toggle:hover, .copy:hover { background: var(--bg3); }
+  nav { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0 0 30px; font-size: 13px; }
+  nav a { color: var(--fg2); text-decoration: none; }
+  nav a:hover { color: var(--fg1); }
+  section { margin: 0 0 44px; scroll-margin-top: 20px; }
+  h2 { margin: 0 0 4px; font-size: 16px; letter-spacing: -0.005em; display: flex; align-items: baseline; gap: 10px; }
+  h2 .n { color: var(--fg3); font: 12px ui-monospace, "Geist Mono", Menlo, monospace; }
+  .why { margin: 0 0 16px; color: var(--fg3); font-size: 13px; max-width: 90ch; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+  .card {
+    display: flex; flex-direction: column; margin: 0;
+    background: var(--bg2); border: 1px solid var(--border1); border-radius: 12px; overflow: hidden;
+  }
+  .card.wide { grid-column: span 2; }
+  @media (max-width: 720px) { .card.wide { grid-column: auto; } }
+  .stages { display: grid; grid-template-columns: 1fr 1fr; }
+  .stage {
+    position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; min-height: 196px; padding: 22px 12px 14px;
+  }
+  .stage.dark { background: var(--stage-dark); color: var(--ink-dark); color-scheme: dark; --stage-bg: var(--stage-dark); }
+  .stage.light { background: var(--stage-light); color: var(--ink-light); color-scheme: light; --stage-bg: var(--stage-light); }
+  .stage .big svg { display: block; width: 112px; height: 112px; overflow: visible; }
+  .card.icon .stage .big svg { width: 124px; height: 124px; }
+  .card.wide .stage .big { width: 100%; display: flex; justify-content: center; }
+  .card.wide .stage .big svg { width: auto; max-width: 92%; height: 76px; }
+  .sizes { display: flex; align-items: flex-end; gap: 12px; }
+  .sizes svg { display: block; overflow: visible; }
+  .card.wide .sizes svg { width: auto !important; }
+  figcaption { display: flex; flex-direction: column; gap: 3px; padding: 12px 14px 14px; border-top: 1px solid var(--border1); }
+  figcaption .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  figcaption strong { font-size: 13.5px; font-weight: 600; }
+  figcaption .note { color: var(--fg3); font-size: 12.5px; }
+  .copy { padding: 3px 9px; font-size: 11.5px; }
+
+  /* Today's mark, for reference. */
+  .today { display: grid; grid-template-columns: 1fr 1fr 1.4fr; gap: 14px; margin-bottom: 36px; }
+  .today .stage { min-height: 170px; border-radius: 12px; border: 1px solid var(--border1); }
+  .today .stage svg { width: 88px; height: 88px; }
+  .today .stage.name svg { width: 240px; height: auto; }
+  .today .label { position: absolute; left: 12px; top: 10px; font-size: 11px; opacity: 0.6; }
+
+  /* Sketch your own. */
+  .sketch { display: grid; grid-template-columns: auto 1fr; gap: 24px; align-items: start; background: var(--bg2); border: 1px solid var(--border1); border-radius: 12px; padding: 18px; }
+  .editor { display: grid; gap: 4px; }
+  .editor button { width: 34px; height: 34px; border-radius: 5px; border: 1px solid var(--border2); background: var(--bg1); cursor: pointer; padding: 0; }
+  .editor button[aria-pressed="true"] { background: var(--fg1); border-color: var(--fg1); }
+  .sketch .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .sketch .out { display: grid; grid-template-columns: 1fr 1fr; border-radius: 10px; overflow: hidden; border: 1px solid var(--border1); }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div>
+      <h1>Zeros — logo explorations</h1>
+      <p class="intro">The app's loaders now speak one language: a <b>4 × 4 grid of flush square tiles</b>. The agent Puzzle keeps its corners and slides tiles through six holes, Orbit laps the ring, Stream runs its rows, and the transcript's square runs in soft glass. These are options for a mark and wordmark in that language.</p>
+      <p class="intro">The Puzzle Z is literally one of the agent puzzle's own squares: ten tiles, six holes, every corner filled. When the agent works, it's the logo that shuffles. On a four-by-four grid its diagonal is only two steps, so small it can read as 工; the Tall, Slim and Sheared Zs and the tiled versions read as a Z at every size. Each card shows a mark on the dark and light surfaces at 112px, then 48, 32, 24 and 16px. <b>Copy SVG</b> copies the mark.</p>
+    </div>
+    <button type="button" class="theme-toggle" id="theme-toggle">☾ Dark page</button>
+  </header>
+
+  <div class="today">
+    <div class="stage dark"><span class="label">Today · mark</span><span id="today-dark"></span></div>
+    <div class="stage light"><span class="label">Today · mark</span><span id="today-light"></span></div>
+    <div class="stage dark name"><span class="label">Today · four shapes + ZEROS</span><span id="today-name"></span></div>
+  </div>
+
+  <nav id="nav"></nav>
+  <div id="sections"></div>
+
+  <section id="sketch">
+    <h2><span class="n">09</span> Sketch your own</h2>
+    <p class="why">Click cells to draw on a 5 × 5 grid. The mark is drawn live on both surfaces and at every size. Tiles merge into one shape, so flush tiles never show a seam.</p>
+    <div class="sketch">
+      <div>
+        <div class="editor" id="editor"></div>
+        <div class="controls">
+          <button type="button" class="copy" data-sketch="flush">Flush</button>
+          <button type="button" class="copy" data-sketch="tiles">Tiles</button>
+          <button type="button" class="copy" data-sketch="soft">Soft</button>
+          <button type="button" class="copy" data-sketch="z">Load the Puzzle Z</button>
+          <button type="button" class="copy" data-sketch="clear">Clear</button>
+          <button type="button" class="copy" data-sketch="copy">Copy SVG</button>
+        </div>
+      </div>
+      <div class="out">
+        <div class="stage dark"><div class="big" id="sketch-dark"></div><div class="sizes" id="sketch-dark-sizes"></div></div>
+        <div class="stage light"><div class="big" id="sketch-light"></div><div class="sizes" id="sketch-light-sizes"></div></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const NS = "http://www.w3.org/2000/svg";
+  const reducedMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  let uidCount = 0;
+  const uid = (p) => `${p}${(++uidCount).toString(36)}`;
+  const f = (n) => +(+n).toFixed(4);
+
+  // ── Cells ──────────────────────────────────────────────────────────────
+  // [x, y] or [x, y, w, h] on a grid of unit cells.
+  const Z4 = [[0, 0], [1, 0], [2, 0], [3, 0], [2, 1], [1, 2], [0, 3], [1, 3], [2, 3], [3, 3]];
+  const HOLES4 = [[0, 1], [1, 1], [3, 1], [0, 2], [2, 2], [3, 2]];
+  const RING4 = [[0, 0], [1, 0], [2, 0], [3, 0], [3, 1], [3, 2], [3, 3], [2, 3], [1, 3], [0, 3], [0, 2], [0, 1]];
+  const TALL_Z = [[0, 0], [1, 0], [2, 0], [2, 1], [1, 2], [0, 3], [0, 4], [1, 4], [2, 4]];
+  const Z5 = [[0, 0], [1, 0], [2, 0], [3, 0], [4, 0], [3, 1], [2, 2], [1, 3], [0, 4], [1, 4], [2, 4], [3, 4], [4, 4]];
+  const FOUR = [[0, 0, 4, 1], [2, 1], [1, 2], [0, 3, 4, 1]];
+  const TETRO = [[0, 0], [1, 0], [1, 1], [2, 1]];
+  const PINWHEEL = [[0, 0, 2, 1], [2, 0, 1, 2], [1, 2, 2, 1], [0, 1, 1, 2]];
+  const shift = (cells, dx, dy) => cells.map(([x, y, w = 1, h = 1]) => [x + dx, y + dy, w, h]);
+
+  // ── Drawing ────────────────────────────────────────────────────────────
+  /** A square mark: `n` cells a side, padded. */
+  const mark = (n, body, pad = 0.5, extraDefs = "") =>
+    `<svg xmlns="${NS}" viewBox="${f(-pad)} ${f(-pad)} ${f(n + 2 * pad)} ${f(n + 2 * pad)}">${extraDefs}${body}</svg>`;
+  /** Any box. */
+  const box = (x, y, w, h, body) => `<svg xmlns="${NS}" viewBox="${f(x)} ${f(y)} ${f(w)} ${f(h)}">${body}</svg>`;
+  /** Flush tiles as one shape, so neighbours never show a seam. */
+  const solid = (cells, attrs = "", fill = "currentColor") =>
+    `<path fill="${fill}" ${attrs} d="${cells.map(([x, y, w = 1, h = 1]) => `M${f(x)} ${f(y)}h${f(w)}v${f(h)}h${f(-w)}z`).join("")}"/>`;
+  /** Separate tiles with a gap and a corner radius. */
+  const spaced = (cells, gap = 0.16, r = 0.06, attrs = "") =>
+    cells.map(([x, y, w = 1, h = 1]) =>
+      `<rect x="${f(x + gap / 2)}" y="${f(y + gap / 2)}" width="${f(w - gap)}" height="${f(h - gap)}" rx="${f(Math.min(r, (Math.min(w, h) - gap) / 2))}" fill="currentColor" ${attrs}/>`).join("");
+  const dots = (cells, r = 0.42) =>
+    cells.map(([x, y]) => `<circle cx="${f(x + 0.5)}" cy="${f(y + 0.5)}" r="${r}" fill="currentColor"/>`).join("");
+
+  // ── Glass (the transcript square's combos) ──────────────────────────────
+  const COMBOS = {
+    Opal: ["#F27BC4", "#A78BF0", "#4FB3E6", "#5ED6A8", "#F2D14B"],
+    Aurora: ["#5ED6A8", "#1FA89A", "#4FB3E6", "#8A55D8", "#EB6FB6"],
+    Prism: ["#E8413C", "#F07F3C", "#F2D14B", "#47A35A", "#3C6BE0", "#8A55D8"],
+    Dusk: ["#7B8CF0", "#8A55D8", "#EB6FB6", "#F6B37A"],
+  };
+  // Lighter than pastel on dark (mostly white); on light, a deeper jewel
+  // tone (mostly the colour, a little graphite), so it keeps its contrast.
+  const tint = (c, strength) =>
+    `light-dark(color-mix(in oklab, ${c} ${Math.min(90, strength + 30)}%, #262626), color-mix(in oklab, ${c} ${strength}%, #ffffff))`;
+  const stops = (colors) => colors.map((c, i) => `<stop offset="${f(i / (colors.length - 1))}" style="stop-color:${c}"/>`).join("");
+  /** The glass field over a square of side `n`, seen through `shape` (SVG
+   *  markup drawn in white as the mask): two crossing gradients, light from
+   *  the top, a sheen, and a faint glow in the combo's own colours. */
+  function glass(n, shape, combo = "Opal", strength = 45, { glint = false } = {}) {
+    const id = uid("g");
+    const colors = COMBOS[combo].map((c) => tint(c, strength));
+    const defs = `<defs>
+      <linearGradient id="${id}r" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${n}" y2="${n}">${stops(colors)}</linearGradient>
+      <linearGradient id="${id}c" gradientUnits="userSpaceOnUse" x1="${n}" y1="0" x2="0" y2="${n}">${stops([...colors].reverse())}</linearGradient>
+      <linearGradient id="${id}l" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="${n}">
+        <stop offset="0" style="stop-color:light-dark(rgb(255 255 255 / .14), rgb(255 255 255 / .45))"/>
+        <stop offset=".5" style="stop-color:rgb(255 255 255 / 0)"/>
+        <stop offset="1" style="stop-color:light-dark(rgb(0 0 0 / .2), rgb(0 0 0 / .1))"/>
+      </linearGradient>
+      <linearGradient id="${id}s" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${n}" y2="${n}">
+        <stop offset="0" style="stop-color:rgb(255 255 255 / 0)"/>
+        <stop offset=".22" style="stop-color:light-dark(rgb(255 255 255 / .22), rgb(255 255 255 / .38))"/>
+        <stop offset=".4" style="stop-color:rgb(255 255 255 / 0)"/>
+        <stop offset=".62" style="stop-color:rgb(255 255 255 / 0)"/>
+        <stop offset=".72" style="stop-color:light-dark(rgb(255 255 255 / .08), rgb(255 255 255 / .16))"/>
+        <stop offset=".82" style="stop-color:rgb(255 255 255 / 0)"/>
+      </linearGradient>
+      <linearGradient id="${id}t" x1="0" y1="0" x2="1" y2=".6">
+        <stop offset="0" style="stop-color:rgb(255 255 255 / 0)"/>
+        <stop offset=".4" style="stop-color:rgb(255 255 255 / 0)"/>
+        <stop offset=".5" style="stop-color:light-dark(rgb(255 255 255 / .5), rgb(255 255 255 / .8))"/>
+        <stop offset=".6" style="stop-color:rgb(255 255 255 / 0)"/>
+        <stop offset="1" style="stop-color:rgb(255 255 255 / 0)"/>
+      </linearGradient>
+      <mask id="${id}m" maskUnits="userSpaceOnUse" x="0" y="0" width="${n}" height="${n}"><g fill="white" style="color:white">${shape}</g></mask>
+      <filter id="${id}f" filterUnits="userSpaceOnUse" primitiveUnits="userSpaceOnUse" x="${-0.3 * n}" y="${-0.3 * n}" width="${1.6 * n}" height="${1.6 * n}" color-interpolation-filters="sRGB">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="${f(0.05 * n)}" result="b"/>
+        <feComponentTransfer in="b" result="s"><feFuncA type="linear" slope=".5"/></feComponentTransfer>
+        <feMerge><feMergeNode in="s"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>`;
+    const body = `<g filter="url(#${id}f)"><g mask="url(#${id}m)">
+      <rect width="${n}" height="${n}" fill="url(#${id}r)"/>
+      <rect width="${n}" height="${n}" fill="url(#${id}c)" opacity=".5"/>
+      <rect width="${n}" height="${n}" fill="url(#${id}l)"/>
+      <rect width="${n}" height="${n}" fill="url(#${id}s)"/>
+      ${glint ? `<rect class="glint" width="${n}" height="${n}" fill="url(#${id}t)" style="transform:translateX(${-n}px)"/>` : ""}
+    </g></g>`;
+    return defs + body;
+  }
+
+  // ── Jigsaw ─────────────────────────────────────────────────────────────
+  /** One edge from p to q, with a knob (+1 out, -1 in) at its middle. */
+  function edge([x1, y1], [x2, y2], k) {
+    if (!k) return `L${f(x2)} ${f(y2)}`;
+    const a = [x1 + (x2 - x1) * 0.35, y1 + (y2 - y1) * 0.35];
+    const b = [x1 + (x2 - x1) * 0.65, y1 + (y2 - y1) * 0.65];
+    return `L${f(a[0])} ${f(a[1])}A0.15 0.15 0 0 ${k > 0 ? 1 : 0} ${f(b[0])} ${f(b[1])}L${f(x2)} ${f(y2)}`;
+  }
+  /** Unit cells cut like a jigsaw: each shared edge gets a knob on one
+   *  side and the matching socket on the other; seams in the surface's
+   *  colour. */
+  function jigsaw(cells) {
+    const has = new Set(cells.map(([x, y]) => `${x},${y}`));
+    const at = (x, y) => has.has(`${x},${y}`);
+    const out = (x, y) => ((x + y) % 2 === 0 ? 1 : -1);
+    return cells.map(([x, y]) => {
+      const top = at(x, y - 1) ? out(x, y - 1) : 0;
+      const right = at(x + 1, y) ? out(x, y) : 0;
+      const bottom = at(x, y + 1) ? -out(x, y) : 0;
+      const left = at(x - 1, y) ? -out(x - 1, y) : 0;
+      const d = `M${x} ${y}` + edge([x, y], [x + 1, y], top) + edge([x + 1, y], [x + 1, y + 1], right)
+        + edge([x + 1, y + 1], [x, y + 1], bottom) + edge([x, y + 1], [x, y], left) + "Z";
+      return `<path d="${d}" fill="currentColor" stroke="var(--stage-bg, #111)" stroke-width="0.07" stroke-linejoin="round"/>`;
+    }).join("");
+  }
+
+  // ── Isometric ──────────────────────────────────────────────────────────
+  const C30 = Math.cos(Math.PI / 6), S30 = 0.5;
+  const iso = (x, y, z) => [(x - y) * C30, (x + y) * S30 - z];
+  const poly = (pts, fill) => `<polygon points="${pts.map((p) => p.map(f).join(",")).join(" ")}" fill="${fill}"/>`;
+  /** Cubes (cells with a height) on the ground, drawn back to front. */
+  function cubes(cells, height = 1, flats = []) {
+    const side = (k) => `color-mix(in oklab, currentColor ${k}%, var(--stage-bg, #111))`;
+    const parts = [];
+    for (const [x, y] of flats) parts.push({ key: x + y - 0.5, svg: poly([iso(x, y, 0), iso(x + 1, y, 0), iso(x + 1, y + 1, 0), iso(x, y + 1, 0)], side(22)) });
+    for (const [x, y] of cells) {
+      const h = height;
+      const top = poly([iso(x, y, h), iso(x + 1, y, h), iso(x + 1, y + 1, h), iso(x, y + 1, h)], "currentColor");
+      const right = poly([iso(x + 1, y, h), iso(x + 1, y + 1, h), iso(x + 1, y + 1, 0), iso(x + 1, y, 0)], side(58));
+      const left = poly([iso(x, y + 1, h), iso(x + 1, y + 1, h), iso(x + 1, y + 1, 0), iso(x, y + 1, 0)], side(78));
+      parts.push({ key: x + y, svg: top + right + left });
+    }
+    return parts.sort((a, b) => a.key - b.key).map((p) => p.svg).join("");
+  }
+
+  // ── Tile type (3 × 5) ──────────────────────────────────────────────────
+  const GLYPHS = {
+    Z: ["111", "001", "010", "100", "111"],
+    E: ["111", "100", "110", "100", "111"],
+    R: ["110", "101", "110", "101", "101"],
+    O: ["111", "101", "101", "101", "111"],
+    S: ["011", "100", "010", "001", "110"],
+  };
+  function word(text, tracking = 1) {
+    const cells = [];
+    [...text].forEach((ch, i) => {
+      GLYPHS[ch].forEach((row, y) => [...row].forEach((on, x) => { if (on === "1") cells.push([i * (3 + tracking) + x, y]); }));
+    });
+    return { cells, width: text.length * 3 + (text.length - 1) * tracking, height: 5 };
+  }
+
+  // ── App icon ───────────────────────────────────────────────────────────
+  /** A macOS-style tile (100 × 100, 22.5% corners) around a mark drawn in
+   *  a `n`-cell square, scaled to `scale` of the tile. */
+  function appIcon(n, body, { bg = "graphite", scale = 0.52, ink = null } = {}) {
+    const id = uid("i");
+    const backgrounds = {
+      graphite: [`<stop offset="0" stop-color="#303030"/><stop offset="1" stop-color="#121212"/>`, "#f4f3f2"],
+      paper: [`<stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#e9e7e4"/>`, "#171514"],
+      pastel: [stops(COMBOS.Opal.map((c) => `color-mix(in oklab, ${c} 42%, #ffffff)`)), "#161514"],
+      aurora: [stops(COMBOS.Aurora.map((c) => `color-mix(in oklab, ${c} 70%, #1a1a1a)`)), "#ffffff"],
+    };
+    const [grad, defaultInk] = backgrounds[bg];
+    const size = 100 * scale;
+    const unit = size / n;
+    const offset = (100 - size) / 2;
+    return `<svg xmlns="${NS}" viewBox="0 0 100 100">
+      <defs><linearGradient id="${id}" x1="0" y1="0" x2="${bg === "pastel" || bg === "aurora" ? 1 : 0}" y2="1">${grad}</linearGradient></defs>
+      <rect x="0" y="0" width="100" height="100" rx="22.5" fill="url(#${id})"/>
+      <rect x="0.5" y="0.5" width="99" height="99" rx="22" fill="none" stroke="${bg === "paper" || bg === "pastel" ? "rgb(0 0 0 / .08)" : "rgb(255 255 255 / .09)"}"/>
+      <g transform="translate(${f(offset)} ${f(offset)}) scale(${f(unit)})" style="color:${ink || defaultInk}">${body}</g>
+    </svg>`;
+  }
+
+  // ── The variants ───────────────────────────────────────────────────────
+  const SECTIONS = [
+    {
+      id: "grid", title: "The Z on the grid",
+      why: "Monograms built from the loaders' tiles. The first is the brand's anchor: the agent puzzle at rest.",
+      items: [
+        { name: "Puzzle Z", note: "Ten flush tiles, six holes, every corner filled: one of the agent puzzle's own squares. While the agent works, this is the square that shuffles.", svg: () => mark(4, solid(Z4)) },
+        { name: "Puzzle Z · tiles", note: "The same square with the tiles pulled apart, so you can count them. Reads like a sliding puzzle.", svg: () => mark(4, spaced(Z4, 0.16, 0.06)) },
+        { name: "Puzzle Z · soft", note: "Rounder tiles: a bridge from today's soft shapes to the grid.", svg: () => mark(4, spaced(Z4, 0.2, 0.3)) },
+        { name: "Tall Z", note: "Three wide, five tall: the pixel-font Z, with room for a real diagonal. The clearest Z at 16px, so a favicon and menu-bar candidate.", svg: () => box(-1.5, -0.5, 6, 6, solid(TALL_Z)) },
+        { name: "Sheared Z", note: "The top row slid half a tile right and the bottom row half a tile left, like two rows of Stream. The lean makes the diagonal unmistakable.", svg: () => mark(4, solid([[0.5, 0, 4, 1], [2, 1], [1, 2], [-0.5, 3, 4, 1]]), 0.75) },
+        { name: "Slim Z", note: "Five by five with a three-step diagonal. Lighter, more typographic, better above 32px.", svg: () => mark(5, solid(Z5), 0.6) },
+        { name: "Anchors", note: "The four corners that never move and the diagonal between them are solid; the rest of the Z is a ghost that's free to slide.", svg: () => mark(4, solid(Z4.filter(([x, y]) => !((y === 0 || y === 3) && (x === 1 || x === 2))), "") + solid([[1, 0], [2, 0], [1, 3], [2, 3]], 'opacity=".22"')) },
+        { name: "The other six", note: "The puzzle's six holes, drawn as tiles in a thin frame. The Z is the empty path they leave: made of zeros.", svg: () => mark(4, `<rect x="0.04" y="0.04" width="3.92" height="3.92" fill="none" stroke="currentColor" stroke-width="0.08" opacity=".5"/>` + solid(HOLES4)) },
+        { name: "Mid-slide", note: "One diagonal tile caught halfway to the next hole, where it came from still faintly there. The mark is always about to move.", svg: () => mark(4, solid(Z4.filter(([x, y]) => !(x === 1 && y === 2))) + solid([[1, 2]], 'opacity=".16"') + solid([[0.5, 2]])) },
+        { name: "Dots", note: "Today's roundness set on the new grid: the Puzzle Z in circles.", svg: () => mark(4, dots(Z4, 0.43)) },
+      ],
+    },
+    {
+      id: "four", title: "Four pieces",
+      why: "Today's mark is four soft shapes. These keep four pieces but snap them into the Z.",
+      items: [
+        { name: "Four pieces", note: "Top bar, two diagonal tiles, bottom bar: four shapes, one Z.", svg: () => mark(4, spaced(FOUR, 0.18, 0.06)) },
+        { name: "Four pieces · soft", note: "The same four pieces fully rounded into two pills and two dots. The closest to today's mark, and it's a Z.", svg: () => mark(4, spaced(FOUR, 0.2, 0.5)) },
+        { name: "Tetromino", note: "Four squares snapped into the Tetris Z: the smallest Z the grid can make.", svg: () => box(-0.5, -1, 4, 4, spaced(TETRO, 0.14, 0.05)) },
+        { name: "Tetromino · soft", note: "The Tetris Z in rounded squares, soft like today's shapes.", svg: () => box(-0.5, -1, 4, 4, spaced(TETRO, 0.16, 0.3)) },
+        { name: "Pinwheel", note: "Four bricks turning around an empty centre, a zero at the heart, arranged like today's four shapes.", svg: () => mark(3, spaced(PINWHEEL, 0.16, 0.06), 0.42) },
+        { name: "Two halves", note: "The Z as two interlocking pieces that only touch at one corner: the top half solid, the bottom half a step softer.", svg: () => mark(4, solid(Z4.slice(0, 5)) + solid(Z4.slice(5), 'opacity=".55"')) },
+      ],
+    },
+    {
+      id: "zero", title: "Zero",
+      why: "Zeros is also a count of zeros. The ring is Orbit's track, and a slashed zero hides a Z.",
+      items: [
+        { name: "Ring", note: "Twelve tiles round the edge: a square zero, and Orbit's track at rest.", svg: () => mark(4, solid(RING4)) },
+        { name: "Ring, one open", note: "The ring with one tile missing: a zero with room to move.", svg: () => mark(4, solid(RING4.filter(([x, y]) => !(x === 3 && y === 1)))) },
+        { name: "Slashed zero", note: "A code-font zero, Ø: the ring is a 0, and its slash with the top and bottom rows is a Z. Zeros in one mark.", svg: () => mark(4, solid([...RING4, [2, 1], [1, 2]])) },
+        { name: "Slashed zero · tiles", note: "The slashed zero pulled into tiles: the Z's tiles solid, the rest of the ring lighter.", svg: () => mark(4, spaced([[0, 1], [0, 2], [3, 1], [3, 2]], 0.16, 0.06, 'opacity=".35"') + spaced(Z4, 0.16, 0.06)) },
+        { name: "Z0", note: "A Z and a zero side by side: a compact monogram for tight spaces.", svg: () => box(-0.5, -2.5, 10, 9, solid([...Z4, ...shift(RING4, 5, 0)])) },
+      ],
+    },
+    {
+      id: "puzzle", title: "Puzzling",
+      why: "Pushing the puzzle idea further: jigsaw cuts, the tray, cubes.",
+      items: [
+        { name: "Jigsaw Z", note: "Every tile of the Puzzle Z cut like a jigsaw piece, locked to its neighbours by knobs.", svg: () => mark(4, jigsaw(Z4), 0.6) },
+        { name: "Jigsaw halves", note: "Four pieces: each bar holds its diagonal tile by one jigsaw joint.", svg: () => mark(4, [
+          "M0 0H4V1H2.65A0.15 0.15 0 0 1 2.35 1H0Z",
+          "M2 1H2.35A0.15 0.15 0 0 0 2.65 1H3V2H2Z",
+          "M1 2H2V3H1.65A0.15 0.15 0 0 1 1.35 3H1Z",
+          "M0 3H1.35A0.15 0.15 0 0 0 1.65 3H4V4H0Z",
+        ].map((d) => `<path d="${d}" fill="currentColor" stroke="var(--stage-bg, #111)" stroke-width="0.07"/>`).join(""), 0.6) },
+        { name: "Tray", note: "The sliding puzzle in its tray, holes and all: tiles, six empty slots, and the frame they slide in.", svg: () => mark(4, `<rect x="-0.32" y="-0.32" width="4.64" height="4.64" rx="0.5" fill="none" stroke="currentColor" stroke-width="0.12"/>` + spaced(HOLES4, 0.16, 0.06, 'opacity=".13"') + spaced(Z4, 0.16, 0.06), 0.75) },
+        { name: "Cubes", note: "The tall Z in isometric cubes, like a puzzle you could pick up.", svg: () => box(-4.9, -1.4, 7.9, 7.9, cubes(TALL_Z, 0.9)) },
+        { name: "Raised board", note: "The whole four-by-four board in isometric view: the Z's tiles raised, the six holes flat.", svg: () => box(-4.1, -0.9, 8.2, 6.4, cubes(Z4, 0.55, HOLES4)) },
+      ],
+    },
+    {
+      id: "motion", title: "In motion",
+      why: "The mark behaves like the loaders. Animated SVG: splash screens, the About window, the website.",
+      items: [
+        { name: "Assemble", note: "Tiles glide in from all over and lock into the Z, hold, drift apart, and come back.", svg: () => mark(4, spaced(Z4, 0.16, 0.06, 'class="t"')), animate: assemble },
+        { name: "Shuffle", note: "The agent puzzle's own motion: the Z shuffles through its holes like the loader, then solves itself back.", svg: () => mark(4, spaced(Z4, 0.16, 0.06, 'class="t"')), animate: shuffle },
+        { name: "Stream", note: "Run's motion: each row slides a full lap to the right, one after another, and the Z comes back whole.", svg: () => streamSvg(), animate: stream },
+        { name: "Glint", note: "The glass Z with a glint crossing it every few seconds.", svg: () => mark(4, glass(4, solid(Z4), "Aurora", 45, { glint: true })), animate: glintLoop },
+      ],
+    },
+    {
+      id: "colour", title: "Colour",
+      why: "Mono first. When there's colour, it's the transcript square's glass: lighter than pastel, lit from the top, with a sheen and a faint glow.",
+      items: [
+        { name: "Glass · Opal", note: "The Puzzle Z in the Opal combo.", svg: () => mark(4, glass(4, solid(Z4), "Opal", 45)) },
+        { name: "Glass · Aurora", note: "The Puzzle Z in Aurora.", svg: () => mark(4, glass(4, solid(Z4), "Aurora", 45)) },
+        { name: "Glass · Prism", note: "The Puzzle Z in Prism, the fullest spectrum.", svg: () => mark(4, glass(4, solid(Z4), "Prism", 45)) },
+        { name: "Glass tiles · Dusk", note: "Spaced tiles in Dusk: separate glass pieces with the field running through them.", svg: () => mark(4, glass(4, spaced(Z4, 0.16, 0.06), "Dusk", 50)) },
+        { name: "Lit from the top", note: "Row by row from bright to deep, like the chat tabs' agent colours.", svg: () => mark(4, [0, 1, 2, 3].map((row) => solid(Z4.filter(([, y]) => y === row), "", `color-mix(in oklab, currentColor ${[100, 84, 70, 58][row]}%, var(--stage-bg, #111))`)).join("")) },
+        { name: "Shaded", note: "The workspace glyph's depth: the channel tiles take three close shades and the corners stay full.", svg: () => mark(4, Z4.map(([x, y], i) => solid([[x, y]], ((x === 0 || x === 3) && (y === 0 || y === 3)) ? "" : `opacity="${[1, 0.84, 0.68][i % 3]}"`)).join("")) },
+        { name: "Tones", note: "The PR tones as a family: brown, green, violet and red.", svg: () => box(-0.6, -0.6, 10.2, 10.2, [["hsl(10 80% 72%)", 0, 0], ["hsl(142 60% 58%)", 5, 0], ["hsl(265 66% 72%)", 0, 5], ["hsl(0 80% 64%)", 5, 5]].map(([c, dx, dy]) => `<g style="color:${c}">${solid(shift(Z4, dx, dy))}</g>`).join("")) },
+      ],
+    },
+    {
+      id: "icons", title: "App icon",
+      why: "On the dock at 124px, and small. Graphite is today's dark tile.",
+      icon: true,
+      items: [
+        { name: "Graphite · Puzzle Z", note: "Today's dark tile with the Puzzle Z in white.", svg: () => appIcon(4, solid(Z4)) },
+        { name: "Graphite · four pieces", note: "The soft four pieces: the most familiar next to today's icon.", svg: () => appIcon(4, spaced(FOUR, 0.2, 0.5)) },
+        { name: "Graphite · glass", note: "The Puzzle Z in glass on graphite, glowing faintly.", svg: () => appIcon(4, glass(4, solid(Z4), "Aurora", 55)) },
+        { name: "Graphite · tray", note: "The whole sliding puzzle: tiles, holes and frame.", svg: () => appIcon(4, `<rect x="-0.32" y="-0.32" width="4.64" height="4.64" rx="0.5" fill="none" stroke="currentColor" stroke-width="0.12"/>` + spaced(HOLES4, 0.16, 0.06, 'opacity=".14"') + spaced(Z4, 0.16, 0.06), { scale: 0.5 }) },
+        { name: "Graphite · slashed zero", note: "The Ø that holds a Z.", svg: () => appIcon(4, solid([...RING4, [2, 1], [1, 2]])) },
+        { name: "Paper", note: "Light tile, dark Z: for light docks and the website.", svg: () => appIcon(4, solid(Z4), { bg: "paper" }) },
+        { name: "Pastel", note: "An Opal gradient tile under a dark Z.", svg: () => appIcon(4, solid(Z4), { bg: "pastel" }) },
+        { name: "Aurora", note: "A deeper Aurora gradient under a white Z: the loudest option.", svg: () => appIcon(4, spaced(Z4, 0.16, 0.06), { bg: "aurora" }) },
+      ],
+    },
+    {
+      id: "wordmarks", title: "Wordmarks & lockups",
+      why: "ZEROS in tile type, and the mark beside the name.",
+      wide: true,
+      items: [
+        { name: "Tile type", note: "ZEROS on a 3 × 5 grid with the same diagonal as the Puzzle Z (and an S to match).", svg: () => { const w = word("ZEROS"); return box(-0.5, -0.5, w.width + 1, w.height + 1, solid(w.cells)); } },
+        { name: "Tile type · tiles", note: "The same type pulled into tiles.", svg: () => { const w = word("ZEROS"); return box(-0.5, -0.5, w.width + 1, w.height + 1, spaced(w.cells, 0.16, 0.06)); } },
+        { name: "Mark + name", note: "The Puzzle Z beside Zeros set in Geist Semibold.", svg: () => box(-0.5, -0.5, 19, 5, solid(Z4) + `<text x="5.4" y="3.25" font-family="Geist Variable, Geist, ui-sans-serif, system-ui, sans-serif" font-weight="600" font-size="3.9" letter-spacing="-0.12" fill="currentColor">Zeros</text>`) },
+        { name: "Mark + name · four pieces", note: "The soft four pieces beside the name.", svg: () => box(-0.5, -0.5, 19, 5, spaced(FOUR, 0.2, 0.5) + `<text x="5.4" y="3.25" font-family="Geist Variable, Geist, ui-sans-serif, system-ui, sans-serif" font-weight="600" font-size="3.9" letter-spacing="-0.12" fill="currentColor">Zeros</text>`) },
+        { name: "Tile Z + eros", note: "The slim tile Z standing in for the first letter.", svg: () => box(-0.5, -0.5, 18, 6, solid(Z5) + `<text x="5.45" y="4.95" font-family="Geist Variable, Geist, ui-sans-serif, system-ui, sans-serif" font-weight="600" font-size="6.6" letter-spacing="-0.25" fill="currentColor">eros</text>`) },
+        { name: "Stacked", note: "The mark above the name, for splash screens and square spaces.", svg: () => box(-5.5, -0.8, 15, 9.6, solid(Z4) + `<text x="2" y="7.9" text-anchor="middle" font-family="Geist Variable, Geist, ui-sans-serif, system-ui, sans-serif" font-weight="600" font-size="2.7" letter-spacing="-0.06" fill="currentColor">Zeros</text>`) },
+      ],
+    },
+  ];
+
+  // ── Motion ─────────────────────────────────────────────────────────────
+  // Each takes one rendered svg and returns a stop function.
+  const EASE = "cubic-bezier(0.55, 0, 0.25, 1)";
+  function assemble(svg) {
+    const tiles = [...svg.querySelectorAll(".t")];
+    // (A keyframe's easing shapes the stretch that follows it.)
+    const runs = tiles.map((tile, i) => {
+      const dx = (Math.random() - 0.5) * 5, dy = (Math.random() - 0.5) * 5;
+      return tile.animate([
+        { transform: `translate(${dx}px, ${dy}px)`, opacity: 0, offset: 0 },
+        { transform: `translate(${dx}px, ${dy}px)`, opacity: 0, offset: 0.04 + i * 0.012, easing: EASE },
+        { transform: "translate(0px, 0px)", opacity: 1, offset: 0.3 + i * 0.012 },
+        { transform: "translate(0px, 0px)", opacity: 1, offset: 0.78, easing: "ease-in" },
+        { transform: `translate(${-dx * 0.6}px, ${-dy * 0.6}px)`, opacity: 0, offset: 1 },
+      ], { duration: 4200, iterations: Infinity });
+    });
+    return () => runs.forEach((run) => run.cancel());
+  }
+
+  function shuffle(svg) {
+    const tiles = [...svg.querySelectorAll(".t")];
+    const cellOf = Z4.map(([x, y]) => y * 4 + x);
+    const corners = [0, 3, 12, 15];
+    let holes = HOLES4.map(([x, y]) => y * 4 + x);
+    let timer = 0;
+    const place = (i, animate) => {
+      const home = Z4[i];
+      const c = cellOf[i];
+      const to = `translate(${(c % 4) - home[0]}px, ${Math.floor(c / 4) - home[1]}px)`;
+      tiles[i].style.transition = animate ? `transform 240ms ${EASE}` : "none";
+      tiles[i].style.transform = to;
+    };
+    // A run of moves into holes (never undoing the last), then the same
+    // moves backwards, so the square always solves back into the Z.
+    const plan = () => {
+      const moves = [];
+      const cells = cellOf.slice();
+      let free = holes.slice();
+      let last = -1;
+      for (let k = 0; k < 10; k++) {
+        const options = [];
+        free.forEach((hole) => [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dx, dy]) => {
+          const x = (hole % 4) + dx, y = Math.floor(hole / 4) + dy;
+          if (x < 0 || y < 0 || x > 3 || y > 3) return;
+          const from = y * 4 + x;
+          const tile = cells.indexOf(from);
+          if (tile < 0 || corners.includes(from) || tile === last) return;
+          options.push({ tile, from, to: hole });
+        }));
+        const move = options[Math.floor(Math.random() * options.length)];
+        if (!move) break;
+        cells[move.tile] = move.to;
+        free = free.map((h) => (h === move.to ? move.from : h));
+        last = move.tile;
+        moves.push(move);
+      }
+      return [...moves, ...moves.slice().reverse().map(({ tile, from, to }) => ({ tile, from: to, to: from }))];
+    };
+    let queue = [];
+    const step = () => {
+      if (!queue.length) {
+        queue = plan();
+        timer = window.setTimeout(step, 900);
+        return;
+      }
+      const move = queue.shift();
+      cellOf[move.tile] = move.to;
+      holes = holes.map((h) => (h === move.to ? move.from : h));
+      place(move.tile, true);
+      timer = window.setTimeout(step, queue.length ? 300 : 1200);
+    };
+    tiles.forEach((_, i) => place(i, false));
+    timer = window.setTimeout(step, 600);
+    return () => window.clearTimeout(timer);
+  }
+
+  function streamSvg() {
+    const id = uid("s");
+    const rows = [0, 1, 2, 3].map((row) => {
+      const cells = Z4.filter(([, y]) => y === row);
+      return `<g class="row">${solid([...cells, ...shift(cells, -4, 0)])}</g>`;
+    }).join("");
+    return mark(4, `<defs><clipPath id="${id}"><rect width="4" height="4"/></clipPath></defs><g clip-path="url(#${id})">${rows}</g>`);
+  }
+  function stream(svg) {
+    const rows = [...svg.querySelectorAll(".row")];
+    // A lap per row, one row after another, then a rest with the Z whole.
+    const runs = rows.map((row, r) => row.animate([
+      { transform: "translateX(0px)", offset: 0 },
+      { transform: "translateX(0px)", offset: 0.04 + r * 0.14, easing: EASE },
+      ...[1, 2, 3, 4].map((k) => ({ transform: `translateX(${k}px)`, offset: 0.04 + r * 0.14 + k * 0.035, easing: k < 4 ? EASE : "linear" })),
+      { transform: "translateX(4px)", offset: 1 },
+    ], { duration: 4000, iterations: Infinity }));
+    return () => runs.forEach((run) => run.cancel());
+  }
+
+  function glintLoop(svg) {
+    const glints = [...svg.querySelectorAll(".glint")];
+    const runs = glints.map((glint) => glint.animate([
+      { transform: "translateX(-4px)", offset: 0 },
+      { transform: "translateX(-4px)", offset: 0.55, easing: "cubic-bezier(0.45, 0, 0.25, 1)" },
+      { transform: "translateX(4px)", offset: 0.85 },
+      { transform: "translateX(4px)", offset: 1 },
+    ], { duration: 3400, iterations: Infinity }));
+    return () => runs.forEach((run) => run.cancel());
+  }
+
+  // ── Rendering ──────────────────────────────────────────────────────────
+  const SIZES = [48, 32, 24, 16];
+  const toNode = (markup) => {
+    const holder = document.createElement("span");
+    holder.innerHTML = markup.trim();
+    return holder.firstElementChild;
+  };
+  function stageFor(theme, item, section) {
+    const stage = document.createElement("div");
+    stage.className = `stage ${theme}`;
+    const big = document.createElement("div");
+    big.className = "big";
+    const svg = toNode(item.svg());
+    big.appendChild(svg);
+    stage.appendChild(big);
+    if (item.animate && !reducedMotion) item.animate(svg);
+    const sizes = document.createElement("div");
+    sizes.className = "sizes";
+    for (const size of section.wide ? [28, 20, 14] : SIZES) {
+      const small = toNode(item.svg());
+      if (section.wide) small.style.height = `${size}px`;
+      else { small.style.width = `${size}px`; small.style.height = `${size}px`; }
+      sizes.appendChild(small);
+      if (item.animate && !reducedMotion) item.animate(small);
+    }
+    stage.appendChild(sizes);
+    return { stage, svg };
+  }
+
+  const nav = document.getElementById("nav");
+  const host = document.getElementById("sections");
+  SECTIONS.forEach((section, index) => {
+    const el = document.createElement("section");
+    el.id = section.id;
+    el.innerHTML = `<h2><span class="n">${String(index + 1).padStart(2, "0")}</span>${section.title}</h2><p class="why">${section.why}</p>`;
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    section.items.forEach((item) => {
+      const card = document.createElement("figure");
+      card.className = `card${section.icon ? " icon" : ""}${section.wide ? " wide" : ""}`;
+      const stages = document.createElement("div");
+      stages.className = "stages";
+      const dark = stageFor("dark", item, section);
+      stages.appendChild(dark.stage);
+      stages.appendChild(stageFor("light", item, section).stage);
+      card.appendChild(stages);
+      const caption = document.createElement("figcaption");
+      caption.innerHTML = `<div class="row"><strong>${item.name}</strong><button type="button" class="copy">Copy SVG</button></div><span class="note">${item.note}</span>`;
+      caption.querySelector(".copy").addEventListener("click", async (event) => {
+        const button = event.currentTarget;
+        const markup = item.svg().replace(/\s{2,}/g, " ");
+        try {
+          await navigator.clipboard.writeText(markup);
+          button.textContent = "Copied";
+        } catch {
+          button.textContent = "Couldn't copy";
+        }
+        window.setTimeout(() => { button.textContent = "Copy SVG"; }, 1400);
+      });
+      card.appendChild(caption);
+      grid.appendChild(card);
+    });
+    el.appendChild(grid);
+    host.appendChild(el);
+    const link = document.createElement("a");
+    link.href = `#${section.id}`;
+    link.textContent = section.title;
+    nav.appendChild(link);
+  });
+  const sketchLink = document.createElement("a");
+  sketchLink.href = "#sketch";
+  sketchLink.textContent = "Sketch your own";
+  nav.appendChild(sketchLink);
+
+  // ── Today's mark (apps/marketing/public/zeros-logo.svg) ────────────────
+  const TODAY = `<svg xmlns="${NS}" viewBox="0 0 128 128" fill="currentColor"><path d="M62.349 29.2203C62.349 39.8354 53.8386 48.4407 43.3405 48.4407C32.8424 48.4407 24.332 39.8354 24.332 29.2203C24.332 18.6052 32.8424 10 43.3405 10C53.8386 10 62.349 18.6052 62.349 29.2203Z"/><path d="M67.78 98.7797C67.78 109.395 76.2904 118 86.7885 118C97.2866 118 105.797 109.395 105.797 98.7797C105.797 88.1646 97.2866 79.5593 86.7885 79.5593C76.2904 79.5593 67.78 88.1646 67.78 98.7797Z"/><path d="M24.332 70.4068C28.77 61.4319 37.9427 55.7627 47.8663 55.7627C55.0025 55.7627 59.8098 65.0843 58.0282 72.0715C56.312 78.8024 55.9589 87.1165 59.6335 96.0339C63.9396 106.484 56.3466 118 45.1508 118H41.5361C35.3331 118 29.5092 114.817 26.4869 109.339C25.3671 107.31 24.2662 105.202 23.4268 103.356C23.0519 102.531 22.6594 101.584 22.2614 100.565C18.4418 90.7796 19.6794 79.8158 24.332 70.4068Z"/><path d="M102.156 24.2292C97.6668 15.9522 89.2616 10.6133 79.9387 10.1172C78.4733 10.0392 77.0039 10.0823 75.5454 10.2462L74.3441 10.3812C69.0388 10.9772 66.1362 18.0033 68.0898 23.0263C70.7538 29.8759 72.2593 39.4012 67.78 50.2712C63.474 60.7209 71.067 72.2373 82.2627 72.2373H85.0478C92.1313 72.2373 98.52 67.9307 101.244 61.3192L104.634 53.0947C108.229 44.3685 107.706 34.4624 103.21 26.1735L102.156 24.2292Z"/></svg>`;
+  document.getElementById("today-dark").appendChild(toNode(TODAY));
+  document.getElementById("today-light").appendChild(toNode(TODAY));
+  const todayName = toNode(TODAY.replace('viewBox="0 0 128 128"', 'viewBox="0 0 560 128"').replace("</svg>", `<text x="150" y="92" font-family="Geist Variable, Geist, ui-sans-serif, system-ui, sans-serif" font-weight="700" font-size="84" letter-spacing="2">ZEROS</text></svg>`));
+  document.getElementById("today-name").appendChild(todayName);
+
+  // ── Sketch your own ────────────────────────────────────────────────────
+  const N = 5;
+  const on = new Set();
+  let style = "flush";
+  const editor = document.getElementById("editor");
+  editor.style.gridTemplateColumns = `repeat(${N}, 34px)`;
+  const buttons = [];
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.setAttribute("aria-label", `Cell ${x + 1}, ${y + 1}`);
+      button.setAttribute("aria-pressed", "false");
+      button.addEventListener("click", () => {
+        const key = `${x},${y}`;
+        if (on.has(key)) on.delete(key); else on.add(key);
+        drawSketch();
+      });
+      editor.appendChild(button);
+      buttons.push({ button, key: `${x},${y}` });
+    }
+  }
+  const sketchSvg = () => {
+    const cells = [...on].map((key) => key.split(",").map(Number));
+    const body = style === "flush" ? solid(cells) : style === "tiles" ? spaced(cells, 0.16, 0.06) : spaced(cells, 0.2, 0.3);
+    return mark(N, body, 0.5);
+  };
+  function drawSketch() {
+    buttons.forEach(({ button, key }) => button.setAttribute("aria-pressed", String(on.has(key))));
+    ["dark", "light"].forEach((theme) => {
+      const big = document.getElementById(`sketch-${theme}`);
+      big.replaceChildren(toNode(sketchSvg()));
+      const sizes = document.getElementById(`sketch-${theme}-sizes`);
+      sizes.replaceChildren(...SIZES.map((size) => {
+        const small = toNode(sketchSvg());
+        small.style.width = `${size}px`;
+        small.style.height = `${size}px`;
+        return small;
+      }));
+    });
+  }
+  document.querySelectorAll("[data-sketch]").forEach((button) => button.addEventListener("click", async () => {
+    const action = button.dataset.sketch;
+    if (action === "flush" || action === "tiles" || action === "soft") style = action;
+    if (action === "clear") on.clear();
+    if (action === "z") { on.clear(); Z4.forEach(([x, y]) => on.add(`${x},${y}`)); }
+    if (action === "copy") {
+      try { await navigator.clipboard.writeText(sketchSvg()); button.textContent = "Copied"; } catch { button.textContent = "Couldn't copy"; }
+      window.setTimeout(() => { button.textContent = "Copy SVG"; }, 1400);
+    }
+    drawSketch();
+  }));
+  Z4.forEach(([x, y]) => on.add(`${x},${y}`));
+  drawSketch();
+
+  // ── Page theme ─────────────────────────────────────────────────────────
+  const toggle = document.getElementById("theme-toggle");
+  toggle.addEventListener("click", () => {
+    const light = document.documentElement.dataset.theme !== "light";
+    document.documentElement.dataset.theme = light ? "light" : "dark";
+    toggle.textContent = light ? "☀ Light page" : "☾ Dark page";
+  });
+})();
+</script>
+</body>
+</html>

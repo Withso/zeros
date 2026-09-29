@@ -23,9 +23,6 @@ import { cn } from "../../shared/ui/cn";
 import {
   DESIGN_ROTATION_CORNERS,
   designConstraintGuides,
-  designGridTrackSegments,
-  designInlineGapGeometry,
-  designInlineGapRegions,
   designMeasureSpacing,
   designOriginTranslationShift,
   designRotationCursor,
@@ -34,7 +31,6 @@ import {
   type DesignCanvasRect,
   type DesignConstraintSide,
   type DesignConstraintSides,
-  type DesignInlineGapRegion,
   type DesignResizeHandle,
   type DesignRotationCorner,
   type DesignSelectionBox,
@@ -47,19 +43,32 @@ import {
 import { type DesignMotionTimelineDraft } from "./design-motion-timeline";
 import {
   designDurationMs,
-  designMotionProperties,
   designMotionTimeAtOffset,
   designMotionTranslationAtOffset,
   designMotionTranslationPoints,
 } from "./design-motion-values";
+import {
+  DesignLayoutTools,
+  type DesignLayoutSpacingControl,
+  type DesignLayoutToolsProps,
+} from "./design-layout-tools-overlay";
+import {
+  designSizeBadgeText,
+  type DesignSizeBadgeMode,
+} from "./design-layout-tools";
 import { designBackgroundWork } from "./state/design-background-work";
+import {
+  publishDesignLayoutToolsLive,
+  readDesignLayoutToolsLive,
+  type DesignLayoutToolsLiveGeometry,
+} from "./state/design-layout-tools-live";
 import { designLivePreviewValue } from "./state/design-live-preview";
 import { useDesignMotionPlayhead } from "./state/design-motion-playhead";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 
-
-
-export function frameGeometry(frame: DesignCanvasFrameWire): DesignFrameGeometryWire {
+export function frameGeometry(
+  frame: DesignCanvasFrameWire,
+): DesignFrameGeometryWire {
   return {
     x: frame.x,
     y: frame.y,
@@ -107,7 +116,10 @@ export function designSelectionOverlayStyle(
  * `replaceChildren` and `textContent` both detach the text node React's fiber
  * points at; React's next update then writes into a node that is no longer in
  * the document, and the label silently freezes at its last painted value. */
-export function paintDesignLabelText(element: HTMLElement | null, text: string): void {
+export function paintDesignLabelText(
+  element: HTMLElement | null,
+  text: string,
+): void {
   if (!element) return;
   const first = element.firstChild;
   if (first && first.nodeType === Node.TEXT_NODE && !first.nextSibling) {
@@ -115,6 +127,17 @@ export function paintDesignLabelText(element: HTMLElement | null, text: string):
     return;
   }
   element.textContent = text;
+}
+
+/** The sizing modes a badge was rendered with (`fixed,hug`), so a gesture
+ * repaint keeps its Hug/Fill words. */
+function designSizeBadgeModesOf(
+  element: HTMLElement | null,
+): { x?: DesignSizeBadgeMode; y?: DesignSizeBadgeMode } | undefined {
+  const value = element?.dataset.designSizeModes;
+  if (!value) return undefined;
+  const [x, y] = value.split(",") as DesignSizeBadgeMode[];
+  return { x, y };
 }
 
 export function paintDesignNodeOverlayGeometry(
@@ -131,9 +154,16 @@ export function paintDesignNodeOverlayGeometry(
   element.style.transformOrigin = overlay.rotation
     ? `${overlay.pivotX}px ${overlay.pivotY}px`
     : "";
+  const size = element.querySelector<HTMLElement>(
+    "[data-design-selection-size]",
+  );
   paintDesignLabelText(
-    element.querySelector<HTMLElement>("[data-design-selection-size]"),
-    `${Math.round(overlay.width)} × ${Math.round(overlay.height)}`,
+    size,
+    designSizeBadgeText(
+      overlay.width,
+      overlay.height,
+      designSizeBadgeModesOf(size),
+    ),
   );
   // The pivot rides the box it turns about, and both it and the angle readout
   // counter-rotate to stay upright. React renders them from the same overlay
@@ -160,22 +190,30 @@ export function paintDesignNodeOverlayGeometry(
 }
 
 /** Dashed runs from the selection to the parent edges its CSS pins it to — the
- * constraint, in the properties HTML actually has. They live in frame space
- * rather than inside the rotated overlay, because a constraint describes where
- * the box is anchored, not which way the element faces. The spans render even
- * at zero length (hidden) so gesture paints can reveal them. */
+ * constraint, in the properties HTML actually has — plus a short marker on a
+ * Center axis and a dotted outline of the parent they are measured against.
+ * They live in frame space rather than inside the rotated overlay, because a
+ * constraint describes where the box is anchored, not which way the element
+ * faces. The run spans render even at zero length (hidden) so gesture paints
+ * can reveal them. */
 export function DesignConstraintGuides({
   nodeId,
   bounds,
   parentRect,
+  outlineRect,
   sides,
 }: {
   nodeId: string;
   bounds: DesignCanvasRect;
+  /** The reference box insets are measured from (the parent's padding box). */
   parentRect: DesignCanvasRect;
+  /** The parent's own box, outlined while its child is pinned to it. */
+  outlineRect?: DesignCanvasRect;
   sides: DesignConstraintSides;
 }) {
   const guides = designConstraintGuides(bounds, parentRect, sides);
+  const centerX = bounds.x + bounds.width / 2;
+  const centerY = bounds.y + bounds.height / 2;
   return (
     <span
       data-design-parent-guides={nodeId}
@@ -187,6 +225,19 @@ export function DesignConstraintGuides({
       className="pointer-events-none absolute inset-0 z-[1]"
       aria-hidden="true"
     >
+      {outlineRect ? (
+        <span
+          data-design-constraint-parent=""
+          className="zd-design-constraint-parent absolute"
+          style={{
+            left: outlineRect.x,
+            top: outlineRect.y,
+            width: outlineRect.width,
+            height: outlineRect.height,
+            outlineWidth: designCanvasScreenPixels(1),
+          }}
+        />
+      ) : null}
       {guides.map((guide) => (
         <span
           key={guide.side}
@@ -212,6 +263,32 @@ export function DesignConstraintGuides({
           }}
         />
       ))}
+      {sides.center?.x ? (
+        <span
+          data-design-parent-guide="center-x"
+          className="zd-design-parent-guide absolute border-t border-dashed"
+          style={{
+            left: `calc(${centerX}px - ${designCanvasScreenPixels(6)})`,
+            top: centerY,
+            width: designCanvasScreenPixels(12),
+            height: 0,
+            borderTopWidth: designCanvasScreenPixels(1),
+          }}
+        />
+      ) : null}
+      {sides.center?.y ? (
+        <span
+          data-design-parent-guide="center-y"
+          className="zd-design-parent-guide absolute border-l border-dashed"
+          style={{
+            left: centerX,
+            top: `calc(${centerY}px - ${designCanvasScreenPixels(6)})`,
+            width: 0,
+            height: designCanvasScreenPixels(12),
+            borderLeftWidth: designCanvasScreenPixels(1),
+          }}
+        />
+      ) : null}
     </span>
   );
 }
@@ -247,6 +324,22 @@ export function paintDesignConstraintGuides(
     if (guide.axis === "vertical") element.style.height = `${guide.length}px`;
     else element.style.width = `${guide.length}px`;
     element.style.display = guide.length > 0.5 ? "" : "none";
+  }
+  const centerX = bounds.x + bounds.width / 2;
+  const centerY = bounds.y + bounds.height / 2;
+  const markX = guides.querySelector<HTMLElement>(
+    '[data-design-parent-guide="center-x"]',
+  );
+  if (markX) {
+    markX.style.left = `calc(${centerX}px - ${designCanvasScreenPixels(6)})`;
+    markX.style.top = `${centerY}px`;
+  }
+  const markY = guides.querySelector<HTMLElement>(
+    '[data-design-parent-guide="center-y"]',
+  );
+  if (markY) {
+    markY.style.left = `${centerX}px`;
+    markY.style.top = `calc(${centerY}px - ${designCanvasScreenPixels(6)})`;
   }
 }
 
@@ -350,7 +443,7 @@ export const DesignMeasureOverlay = React.memo(function DesignMeasureOverlay({
             }}
           >
             <span
-              className="bg-red-primary absolute rounded-sm px-1 font-mono text-[9px] leading-4 whitespace-nowrap text-[var(--design-selection-label-fg)]"
+              className="bg-red-primary text-2xxs absolute rounded-sm px-1 leading-4 font-medium whitespace-nowrap text-[var(--design-selection-label-fg)] tabular-nums"
               style={{
                 left: horizontal ? "50%" : 0,
                 top: horizontal ? 0 : "50%",
@@ -392,12 +485,15 @@ const DESIGN_EDGE_RESIZE_HANDLES = DESIGN_RESIZE_HANDLES.filter(
 export function DesignResizeHandles({
   label,
   onPointerDown,
+  onEdgeDoubleClick,
 }: {
   label: string;
   onPointerDown: (
     event: React.PointerEvent<HTMLButtonElement>,
     handle: DesignResizeHandle,
   ) => void;
+  /** Double-clicking an edge sizes its axis to Hug (Option: Fill). */
+  onEdgeDoubleClick?: (handle: DesignResizeHandle, fill: boolean) => void;
 }) {
   const size = designCanvasScreenPixels(8);
   // Keep a crisp four-screen-pixel resize strip inside the outline. Wider
@@ -440,6 +536,12 @@ export function DesignResizeHandles({
               event.preventDefault();
               event.stopPropagation();
               onPointerDown(event, handle);
+            }}
+            onDoubleClick={(event) => {
+              if (!onEdgeDoubleClick) return;
+              event.preventDefault();
+              event.stopPropagation();
+              onEdgeDoubleClick(handle, event.altKey);
             }}
           />
         );
@@ -688,6 +790,9 @@ export type DesignPaintedNode = {
 export type DesignPaintedChild = DesignPaintedNode & {
   oid: string;
   name: string;
+  /** Untransformed box in the parent's padding box (turned parents only). */
+  local?: DesignCanvasRect;
+  hidden?: boolean;
 };
 
 export function designPixelValue(value: string | undefined): number {
@@ -728,101 +833,54 @@ export function designGesturePixelBase(
   );
 }
 
-export interface DesignInlineSpacingControl {
-  property:
-    | "padding-top"
-    | "padding-right"
-    | "padding-bottom"
-    | "padding-left"
-    | "gap"
-    | "row-gap"
-    | "column-gap";
-  oppositeProperty?:
-    | "padding-top"
-    | "padding-right"
-    | "padding-bottom"
-    | "padding-left";
-  axis: "x" | "y";
-  direction: 1 | -1;
-  value: number;
-  regionKey?: string;
-}
+/** One canvas spacing value; see `DesignLayoutSpacingControl`. */
+export type DesignInlineSpacingControl = DesignLayoutSpacingControl;
 
 export interface DesignMotionOverlayState {
   owner: string;
   draft: DesignMotionTimelineDraft | null;
 }
 
-function paintDesignInlineGapHandle(
-  handle: HTMLElement,
-  region: DesignInlineGapRegion,
-  zoom: number,
-): void {
-  const { hitRect, visualRect } = designInlineGapGeometry(region, zoom);
-  handle.style.visibility = "visible";
-  handle.style.left = `${hitRect.x}px`;
-  handle.style.top = `${hitRect.y}px`;
-  handle.style.width = `${hitRect.width}px`;
-  handle.style.height = `${hitRect.height}px`;
-  const visual = handle.querySelector<HTMLElement>(
-    "[data-design-inline-gap-visual]",
-  );
-  if (!visual) return;
-  visual.style.left = `${visualRect.x}px`;
-  visual.style.top = `${visualRect.y}px`;
-  visual.style.width = `${visualRect.width}px`;
-  visual.style.height = `${visualRect.height}px`;
+/** The live-store key a mounted layout-tools island reads from. */
+function layoutToolsKeyOf(root: HTMLElement | null): string | null {
+  return root?.dataset.designLayoutToolsKey ?? null;
 }
 
+function liveGeometryOf(
+  details: DesignPaintedNode & { box?: DesignSelectionBox },
+): DesignLayoutToolsLiveGeometry {
+  return { rect: details.rect, box: details.box, styles: details.styles };
+}
+
+/** Repaint an owner's gap tools from a measurement of it and its children. */
 export function paintDesignInlineGapHandles(
-  root: HTMLElement,
-  containerDetails: DesignPaintedNode,
+  root: HTMLElement | null,
+  containerDetails: DesignPaintedNode & { box?: DesignSelectionBox },
   childDetails: readonly DesignPaintedChild[],
-  zoom: number,
+  _zoom?: number,
 ): void {
-  const regions = designInlineGapRegions({
-    container: containerDetails.rect,
-    children: childDetails.map((child) => ({
-      id: child.oid,
-      rect: child.rect,
-      position: child.styles.position,
-    })),
-    display: containerDetails.styles.display,
-    flexDirection: containerDetails.styles.flexDirection,
-    flexWrap: containerDetails.styles.flexWrap,
+  const key = layoutToolsKeyOf(root);
+  if (!key) return;
+  publishDesignLayoutToolsLive(key, {
+    geometry: { ...liveGeometryOf(containerDetails), children: childDetails },
   });
-  const regionsByKey = new Map(regions.map((region) => [region.key, region]));
-  for (const handle of root.querySelectorAll<HTMLElement>(
-    "[data-design-inline-gap-region]",
-  )) {
-    const key = handle.dataset.designInlineGapRegion;
-    const region = key ? regionsByKey.get(key) : null;
-    if (!region) {
-      handle.style.visibility = "hidden";
-      continue;
-    }
-    paintDesignInlineGapHandle(handle, region, zoom);
-  }
 }
 
+/** Repaint an owner's padding bands (and the tools' size) from a measurement
+ * of the owner alone; its children keep their last measurement. */
 export function paintDesignInlinePaddingGeometry(
-  root: HTMLElement,
-  details: DesignPaintedNode,
+  root: HTMLElement | null,
+  details: DesignPaintedNode & { box?: DesignSelectionBox },
 ): void {
-  const sides = [
-    ["top", details.styles.paddingTop, details.rect.height / 2],
-    ["right", details.styles.paddingRight, details.rect.width / 2],
-    ["bottom", details.styles.paddingBottom, details.rect.height / 2],
-    ["left", details.styles.paddingLeft, details.rect.width / 2],
-  ] as const;
-  for (const [side, rawValue, maximum] of sides) {
-    const value = Math.min(maximum, designPixelValue(rawValue));
-    root.style.setProperty(`--design-inline-padding-${side}`, `${value}px`);
-    root.style.setProperty(
-      `--design-inline-padding-${side}-center`,
-      `${value / 2}px`,
-    );
-  }
+  const key = layoutToolsKeyOf(root);
+  if (!key) return;
+  const children = readDesignLayoutToolsLive(key)?.geometry?.children;
+  publishDesignLayoutToolsLive(key, {
+    geometry: {
+      ...liveGeometryOf(details),
+      ...(children ? { children } : {}),
+    },
+  });
 }
 
 export function designInspectorPreviewOverlay(
@@ -836,9 +894,11 @@ export function designInspectorPreviewOverlay(
   const frameElement = surface?.querySelector<HTMLElement>(
     `[data-design-frame="${CSS.escape(frame)}"]`,
   );
+  // Element overlays and the frame's own layout owner both carry the owner
+  // attribute, so inspector previews repaint a selected frame root as well.
   return (
     frameElement?.querySelector<HTMLElement>(
-      `[data-design-element-overlay="${CSS.escape(nodeId)}"]`,
+      `[data-design-layout-owner="${CSS.escape(nodeId)}"]`,
     ) ?? null
   );
 }
@@ -860,11 +920,12 @@ export function paintDesignFrameGeometryPreview(
   frameElement.style.width = `${geometry.w}px`;
   frameElement.style.height = `${geometry.h}px`;
   const size = frameElement.querySelector<HTMLElement>(
-    "[data-design-frame-size]",
+    "[data-design-frame-size-badge]",
   );
-  if (size) {
-    size.textContent = `${Math.round(geometry.w)} × ${Math.round(geometry.h)}`;
-  }
+  paintDesignLabelText(
+    size,
+    designSizeBadgeText(geometry.w, geometry.h, designSizeBadgeModesOf(size)),
+  );
 }
 
 export function paintedDesignFrameGeometry(
@@ -917,439 +978,109 @@ export function paintDesignInspectorPreviewDetails(
   return spacingRoot;
 }
 
+/** The selected owner's canvas layout tools and its size badge. */
 export function DesignSelectionMeasurements({
+  ownerKey,
   details,
-  overlay,
   children,
   zoom,
+  showSize = true,
+  sizeModes,
+  sizeWidth,
+  sizeHeight,
   onSpacingPointerDown,
+  onSpacingCommit,
 }: {
-  details: DesignRuntimeNodeDetails;
-  /** Painted geometry of the owning overlay. Padding, tracks, and the size
-   * label all describe the element's own box, which a rotation grows a larger
-   * bounding box around. */
-  overlay: DesignSelectionOverlayFrame;
+  ownerKey: string;
+  details: DesignPaintedNode & { box?: DesignSelectionBox };
   children: readonly DesignPaintedChild[];
   zoom: number;
-  onSpacingPointerDown?: (
-    event: React.PointerEvent<HTMLButtonElement>,
-    control: DesignInlineSpacingControl,
-  ) => void;
+  /** A multi-selection labels only its group bounds. */
+  showSize?: boolean;
+  sizeModes?: { x?: DesignSizeBadgeMode; y?: DesignSizeBadgeMode };
+  /** Painted border-box size the badge reads. */
+  sizeWidth: number;
+  sizeHeight: number;
+  onSpacingPointerDown?: DesignLayoutToolsProps["onSpacingPointerDown"];
+  onSpacingCommit?: DesignLayoutToolsProps["onSpacingCommit"];
 }) {
-  const paddingTop = designPixelValue(details.styles.paddingTop);
-  const paddingRight = designPixelValue(details.styles.paddingRight);
-  const paddingBottom = designPixelValue(details.styles.paddingBottom);
-  const paddingLeft = designPixelValue(details.styles.paddingLeft);
-  const top = Math.min(overlay.height / 2, paddingTop);
-  const right = Math.min(overlay.width / 2, paddingRight);
-  const bottom = Math.min(overlay.height / 2, paddingBottom);
-  const left = Math.min(overlay.width / 2, paddingLeft);
-  const display = details.styles.display;
-  const rowGap =
-    designPixelValue(details.styles.rowGap) ||
-    designPixelValue(details.styles.gap);
-  const columnGap =
-    designPixelValue(details.styles.columnGap) ||
-    designPixelValue(details.styles.gap);
-  const layoutToolsActive =
-    Boolean(onSpacingPointerDown) &&
-    ["flex", "inline-flex", "grid", "inline-grid"].includes(display);
-  const gapRegions = layoutToolsActive
-    ? designInlineGapRegions({
-        container: details.rect,
-        children: children.map((child) => ({
-          id: child.oid,
-          rect: child.rect,
-          position: child.styles.position,
-        })),
-        display,
-        flexDirection: details.styles.flexDirection,
-        flexWrap: details.styles.flexWrap,
-      })
-    : [];
-  const gridColumns =
-    display === "grid"
-      ? designGridTrackSegments(
-          details.styles.gridTemplateColumns,
-          Math.max(1, overlay.width - left - right),
-        )
-      : [];
-  const gridRows =
-    display === "grid"
-      ? designGridTrackSegments(
-          details.styles.gridTemplateRows,
-          Math.max(1, overlay.height - top - bottom),
-        )
-      : [];
-  const paddingControls = [
-    {
-      property: "padding-top" as const,
-      oppositeProperty: "padding-bottom" as const,
-      axis: "y" as const,
-      direction: 1 as const,
-      value: paddingTop,
-      left: "50%",
-      top: "var(--design-inline-padding-top-center)",
-      highlight: {
-        top: 0,
-        right: 0,
-        left: 0,
-        height: "var(--design-inline-padding-top)",
-      },
-      cursor: "ns-resize",
-    },
-    {
-      property: "padding-right" as const,
-      oppositeProperty: "padding-left" as const,
-      axis: "x" as const,
-      direction: -1 as const,
-      value: paddingRight,
-      left: "calc(100% - var(--design-inline-padding-right-center))",
-      top: "50%",
-      highlight: {
-        top: 0,
-        right: 0,
-        bottom: 0,
-        width: "var(--design-inline-padding-right)",
-      },
-      cursor: "ew-resize",
-    },
-    {
-      property: "padding-bottom" as const,
-      oppositeProperty: "padding-top" as const,
-      axis: "y" as const,
-      direction: -1 as const,
-      value: paddingBottom,
-      left: "50%",
-      top: "calc(100% - var(--design-inline-padding-bottom-center))",
-      highlight: {
-        right: 0,
-        bottom: 0,
-        left: 0,
-        height: "var(--design-inline-padding-bottom)",
-      },
-      cursor: "ns-resize",
-    },
-    {
-      property: "padding-left" as const,
-      oppositeProperty: "padding-right" as const,
-      axis: "x" as const,
-      direction: 1 as const,
-      value: paddingLeft,
-      left: "var(--design-inline-padding-left-center)",
-      top: "50%",
-      highlight: {
-        top: 0,
-        bottom: 0,
-        left: 0,
-        width: "var(--design-inline-padding-left)",
-      },
-      cursor: "ew-resize",
-    },
-  ];
-  const spacingRootStyle = {
-    "--design-inline-padding-top": `${top}px`,
-    "--design-inline-padding-right": `${right}px`,
-    "--design-inline-padding-bottom": `${bottom}px`,
-    "--design-inline-padding-left": `${left}px`,
-    "--design-inline-padding-top-center": `${top / 2}px`,
-    "--design-inline-padding-right-center": `${right / 2}px`,
-    "--design-inline-padding-bottom-center": `${bottom / 2}px`,
-    "--design-inline-padding-left-center": `${left / 2}px`,
-  } as React.CSSProperties;
-  const gapValue = (region: DesignInlineGapRegion) => {
-    const automatic = [
-      "space-between",
-      "space-around",
-      "space-evenly",
-    ].includes(details.styles.justifyContent ?? "");
-    const main = (details.styles.flexDirection ?? "row").startsWith("column")
-      ? "y"
-      : "x";
-    if (automatic && region.axis === main)
-      return region.axis === "x" ? region.width : region.height;
-    return region.axis === "x" ? columnGap : rowGap;
-  };
   return (
     <>
-      {layoutToolsActive ? (
+      {onSpacingPointerDown ? (
+        <DesignLayoutTools
+          ownerKey={ownerKey}
+          details={details}
+          children={children}
+          zoom={zoom}
+          onSpacingPointerDown={onSpacingPointerDown}
+          onSpacingCommit={onSpacingCommit}
+        />
+      ) : null}
+      {showSize ? (
         <span
-          data-design-inline-spacing-root=""
-          className="pointer-events-none absolute inset-0"
-          style={spacingRootStyle}
+          data-design-selection-size=""
+          data-design-size-modes={
+            sizeModes
+              ? `${sizeModes.x ?? "fixed"},${sizeModes.y ?? "fixed"}`
+              : undefined
+          }
+          className="zd-design-selection-label text-2xxs pointer-events-none absolute top-full left-1/2 -translate-x-1/2 rounded-sm px-1.5 py-0.5 leading-4 font-medium whitespace-nowrap tabular-nums"
+          style={{
+            marginTop: designCanvasScreenPixels(4),
+            transform: `translateX(-50%) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
+            transformOrigin: "top center",
+          }}
         >
-          {gridColumns.map((segment, index) =>
-            segment.end < 100 ? (
-              <span
-                key={`column:${index}`}
-                data-design-grid-track="column"
-                className="zd-design-grid-line pointer-events-none absolute top-0 bottom-0 border-l border-dashed"
-                style={{
-                  left:
-                    left + ((overlay.width - left - right) * segment.end) / 100,
-                  borderWidth: 1 / zoom,
-                }}
-              />
-            ) : null,
-          )}
-          {gridColumns.length <= 12
-            ? gridColumns.map((segment, index) => (
-                <span
-                  key={`column-label:${index}`}
-                  data-design-grid-track-label="column"
-                  className="zd-design-grid-track-label pointer-events-none absolute z-20 rounded-sm border px-1 font-mono whitespace-nowrap"
-                  style={{
-                    left:
-                      left +
-                      ((overlay.width - left - right) *
-                        ((segment.start + segment.end) / 2)) /
-                        100,
-                    top,
-                    borderWidth: 1 / zoom,
-                    fontSize: 9 / zoom,
-                    lineHeight: `${14 / zoom}px`,
-                    transform: "translate(-50%, -50%)",
-                  }}
-                >
-                  {segment.label.replace(/(\.\d{1})\d+(px)$/i, "$1$2")}
-                </span>
-              ))
-            : null}
-          {gridRows.map((segment, index) =>
-            segment.end < 100 ? (
-              <span
-                key={`row:${index}`}
-                data-design-grid-track="row"
-                className="zd-design-grid-line pointer-events-none absolute right-0 left-0 border-t border-dashed"
-                style={{
-                  top:
-                    top + ((overlay.height - top - bottom) * segment.end) / 100,
-                  borderWidth: 1 / zoom,
-                }}
-              />
-            ) : null,
-          )}
-          {gridRows.length <= 12
-            ? gridRows.map((segment, index) => (
-                <span
-                  key={`row-label:${index}`}
-                  data-design-grid-track-label="row"
-                  className="zd-design-grid-track-label pointer-events-none absolute z-20 rounded-sm border px-1 font-mono whitespace-nowrap"
-                  style={{
-                    left,
-                    top:
-                      top +
-                      ((overlay.height - top - bottom) *
-                        ((segment.start + segment.end) / 2)) /
-                        100,
-                    borderWidth: 1 / zoom,
-                    fontSize: 9 / zoom,
-                    lineHeight: `${14 / zoom}px`,
-                    transform: "translate(-50%, -50%) rotate(-90deg)",
-                  }}
-                >
-                  {segment.label.replace(/(\.\d{1})\d+(px)$/i, "$1$2")}
-                </span>
-              ))
-            : null}
-          {paddingControls.map((control) => (
-            <span
-              key={control.property}
-              data-design-inline-padding-control={control.property}
-              className="zd-design-inline-padding-control pointer-events-none absolute inset-0"
-            >
-              <span
-                data-design-inline-spacing-highlight={control.property}
-                className="zd-design-inline-spacing-highlight pointer-events-none absolute"
-                style={control.highlight}
-                aria-hidden="true"
-              />
-              <button
-                data-design-controls
-                data-design-inline-spacing={control.property}
-                data-design-inline-spacing-axis={control.axis}
-                type="button"
-                className="zd-design-inline-spacing-handle pointer-events-auto absolute z-30 flex items-center justify-center"
-                style={{
-                  left: control.left,
-                  top: control.top,
-                  width: 28 / zoom,
-                  height: 20 / zoom,
-                  transform: "translate(-50%, -50%)",
-                  cursor: control.cursor,
-                }}
-                aria-label={`Adjust ${control.property}`}
-                title={`Drag to adjust ${control.property}. Shift snaps to 10px; Option mirrors the opposite side.`}
-                onPointerDown={(event) =>
-                  onSpacingPointerDown?.(event, control)
-                }
-              >
-                <span
-                  data-design-inline-spacing-line=""
-                  className="zd-design-inline-spacing-line pointer-events-none absolute box-border border"
-                  style={{
-                    width: (control.axis === "y" ? 14 : 3) / zoom,
-                    height: (control.axis === "x" ? 14 : 3) / zoom,
-                    borderWidth: 1 / zoom,
-                  }}
-                  aria-hidden="true"
-                />
-                <span
-                  data-design-inline-spacing-value={control.property}
-                  className="zd-design-inline-spacing-value pointer-events-none absolute left-1/2 rounded-sm font-mono font-medium whitespace-nowrap"
-                  style={{
-                    bottom: `calc(50% + ${5 / zoom}px)`,
-                    paddingInline: 4 / zoom,
-                    fontSize: 9 / zoom,
-                    lineHeight: `${16 / zoom}px`,
-                    transform: "translateX(-50%)",
-                  }}
-                >
-                  {Math.round(control.value)}
-                </span>
-              </button>
-            </span>
-          ))}
-          {gapRegions.map((region) => {
-            const value = gapValue(region);
-            const { hitRect, visualRect } = designInlineGapGeometry(
-              region,
-              zoom,
-            );
-            const childNames = children
-              .filter(
-                (child) =>
-                  child.oid === region.leadingId ||
-                  child.oid === region.trailingId,
-              )
-              .map((child) => child.name);
-            return (
-              <button
-                key={region.key}
-                data-design-controls
-                data-design-inline-spacing={region.property}
-                data-design-inline-spacing-axis={region.axis}
-                data-design-inline-gap-region={region.key}
-                type="button"
-                className="zd-design-inline-gap-handle pointer-events-auto absolute z-20 flex items-center justify-center"
-                style={{
-                  left: hitRect.x,
-                  top: hitRect.y,
-                  width: hitRect.width,
-                  height: hitRect.height,
-                  // A gesture paint may hide a region that momentarily has no
-                  // space; naming it here is what lets React reveal it again.
-                  visibility: "visible",
-                  cursor: region.axis === "x" ? "ew-resize" : "ns-resize",
-                }}
-                aria-label={`Adjust ${region.property} between ${childNames.join(" and ")}`}
-                title="Drag to adjust gap. Shift snaps to 10px."
-                onPointerDown={(event) =>
-                  onSpacingPointerDown?.(event, {
-                    property: region.property,
-                    axis: region.axis,
-                    direction: 1,
-                    value,
-                    regionKey: region.key,
-                  })
-                }
-              >
-                <span
-                  data-design-inline-gap-visual=""
-                  data-design-inline-spacing-highlight={region.key}
-                  className="zd-design-inline-spacing-highlight pointer-events-none absolute"
-                  style={{
-                    left: visualRect.x,
-                    top: visualRect.y,
-                    width: visualRect.width,
-                    height: visualRect.height,
-                  }}
-                  aria-hidden="true"
-                />
-                <span
-                  data-design-inline-spacing-line=""
-                  className="zd-design-inline-spacing-line pointer-events-none absolute box-border border"
-                  style={{
-                    width: (region.axis === "y" ? 14 : 3) / zoom,
-                    height: (region.axis === "x" ? 14 : 3) / zoom,
-                    borderWidth: 1 / zoom,
-                  }}
-                  aria-hidden="true"
-                />
-                <span
-                  data-design-inline-spacing-value={region.property}
-                  className="zd-design-inline-spacing-value pointer-events-none absolute left-1/2 rounded-sm font-mono font-medium whitespace-nowrap"
-                  style={{
-                    bottom: `calc(50% + ${5 / zoom}px)`,
-                    paddingInline: 4 / zoom,
-                    fontSize: 9 / zoom,
-                    lineHeight: `${16 / zoom}px`,
-                    transform: "translateX(-50%)",
-                  }}
-                >
-                  {Math.round(value)}
-                </span>
-              </button>
-            );
-          })}
+          {designSizeBadgeText(sizeWidth, sizeHeight, sizeModes)}
         </span>
       ) : null}
-      <span
-        data-design-selection-size=""
-        className="zd-design-selection-label pointer-events-none absolute top-full left-1/2 -translate-x-1/2 rounded-sm px-1.5 py-0.5 font-mono text-[10px] whitespace-nowrap"
-        style={{
-          marginTop: designCanvasScreenPixels(4),
-          transform: `translateX(-50%) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
-          transformOrigin: "top center",
-        }}
-      >
-        {`${Math.round(overlay.width)} × ${Math.round(overlay.height)}`}
-      </span>
     </>
   );
 }
 
-export const DesignLayerHoverOverlay = React.memo(function DesignLayerHoverOverlay({
-  workspaceId,
-  frame,
-  sourceVersion,
-  selectedNodeIds,
-}: {
-  workspaceId: string;
-  frame: string;
-  sourceVersion: string;
-  selectedNodeIds: readonly string[];
-}) {
-  const details = useDesignRuntimeStore((state) => {
-    const workspace = state.byWorkspace[workspaceId];
-    if (workspace?.hoveredFrame !== frame || !workspace.hoveredNodeId) {
-      return null;
-    }
-    const hovered =
-      workspace.frames[frame]?.detailsByNode[workspace.hoveredNodeId] ?? null;
-    if (
-      !hovered ||
-      hovered.sourceVersion !== sourceVersion ||
-      selectedNodeIds.includes(hovered.oid)
-    ) {
-      return null;
-    }
-    return hovered;
-  });
-  if (!details) return null;
-  return (
-    <div
-      data-design-element-overlay={details.oid}
-      className="zd-design-hover-outline pointer-events-none absolute z-[1] outline"
-      style={{
-        ...designSelectionOverlayStyle(
-          designSelectionOverlayFrame(designSelectionBox(details)),
-        ),
-        outlineWidth: designCanvasScreenPixels(1),
-      }}
-    />
-  );
-});
+export const DesignLayerHoverOverlay = React.memo(
+  function DesignLayerHoverOverlay({
+    workspaceId,
+    frame,
+    sourceVersion,
+    selectedNodeIds,
+  }: {
+    workspaceId: string;
+    frame: string;
+    sourceVersion: string;
+    selectedNodeIds: readonly string[];
+  }) {
+    const details = useDesignRuntimeStore((state) => {
+      const workspace = state.byWorkspace[workspaceId];
+      if (workspace?.hoveredFrame !== frame || !workspace.hoveredNodeId) {
+        return null;
+      }
+      const hovered =
+        workspace.frames[frame]?.detailsByNode[workspace.hoveredNodeId] ?? null;
+      if (
+        !hovered ||
+        hovered.sourceVersion !== sourceVersion ||
+        selectedNodeIds.includes(hovered.oid)
+      ) {
+        return null;
+      }
+      return hovered;
+    });
+    if (!details) return null;
+    return (
+      <div
+        data-design-element-overlay={details.oid}
+        className="zd-design-hover-outline pointer-events-none absolute z-[1] outline"
+        style={{
+          ...designSelectionOverlayStyle(
+            designSelectionOverlayFrame(designSelectionBox(details)),
+          ),
+          outlineWidth: designCanvasScreenPixels(1),
+        }}
+      />
+    );
+  },
+);
 
 export const DesignMotionCanvasOverlay = React.memo(
   function DesignMotionCanvasOverlay({
@@ -1371,10 +1102,6 @@ export const DesignMotionCanvasOverlay = React.memo(
     const currentTranslation = designMotionTranslationAtOffset(
       draft.keyframes,
       playhead,
-    );
-    const properties = useMemo(
-      () => designMotionProperties(draft.keyframes),
-      [draft.keyframes],
     );
     const duration = useMemo(
       () => designDurationMs(draft.duration),
@@ -1400,11 +1127,8 @@ export const DesignMotionCanvasOverlay = React.memo(
           }}
         >
           <Diamond className="size-2.5 fill-current" />
-          <span className="text-[9px] font-medium whitespace-nowrap">
-            {properties.length} {properties.length === 1 ? "track" : "tracks"}
-          </span>
-          <span className="font-mono text-[9px] opacity-75">
-            {designMotionTimeAtOffset(playhead, duration)}ms
+          <span className="text-2xxs font-medium whitespace-nowrap tabular-nums">
+            {designMotionTimeAtOffset(playhead, duration)} ms
           </span>
         </div>
         {pathPoints.length > 1 ? (

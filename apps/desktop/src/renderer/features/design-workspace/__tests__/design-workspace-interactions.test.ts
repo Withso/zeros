@@ -51,6 +51,18 @@ const styleEditorSource = readFileSync(
   ),
   "utf8",
 );
+const readSection = (file: string) =>
+  readFileSync(
+    resolve(
+      process.cwd(),
+      `apps/desktop/src/renderer/features/design-workspace/${file}`,
+    ),
+    "utf8",
+  );
+const inspectorKitSource = readSection("design-inspector-kit.tsx");
+const typographySource = readSection("design-typography-editor.tsx");
+const effectSource = readSection("design-effect-editor.tsx");
+const strokeSource = readSection("design-stroke-editor.tsx");
 const motionTimelineSource = readFileSync(
   resolve(
     process.cwd(),
@@ -193,9 +205,9 @@ describe("design workspace interaction wiring", () => {
     expect(source).not.toMatch(/\/ view\.zoom;/);
     expect(source).not.toMatch(/< 3 \/ view\.zoom\)/);
     expect(source).not.toMatch(/, 6 \/ view\.zoom\)/);
-    expect(source).toContain(
-      "const delta = (coordinate - startCoordinate) / liveDesignZoom();",
-    );
+    // Spacing travel is projected onto the owner's own axis at that zoom.
+    expect(source).toContain("zoom: liveDesignZoom(),");
+    expect(source).toContain("delta: designLocalAxisDelta({");
   });
 
   /** A second drag can begin before the first one's commit has been adopted,
@@ -365,7 +377,10 @@ describe("design workspace interaction wiring", () => {
     );
     expect(source).toContain('data-design-frame-name=""');
     expect(source).toContain('"--design-frame-label-max-width"');
+    // The frame's dimensions sit in the size badge below it, never beside
+    // the name competing for the label's width.
     expect(source).not.toContain('data-design-frame-size=""');
+    expect(source).toContain('data-design-frame-size-badge=""');
   });
 
   it("keeps stale world-anchored tiles painted until the decoded replacement lands", () => {
@@ -526,7 +541,9 @@ describe("design workspace interaction wiring", () => {
   });
 
   it("paints exact gap strips independently from their larger pointer targets", () => {
-    expect(source).toContain("designInlineGapGeometry(");
+    // The strip keeps its real size; only a dedicated tick target grows.
+    expect(source).toContain("Math.max(gap.width, tickThick)");
+    expect(source).toContain('data-design-inline-gap-tick=""');
     expect(source).toContain('data-design-inline-gap-visual=""');
     expect(source).not.toContain(
       'className="zd-design-inline-spacing-highlight pointer-events-none absolute inset-0"',
@@ -625,21 +642,27 @@ describe("design workspace interaction wiring", () => {
     expect(layersSource).not.toContain("Search layers");
     expect(layersSource).not.toContain("InputGroup");
     expect(layersSource).not.toContain("totalLayerCount");
-    // The panel has one 12px type scale for headings, layer names, status
-    // messages, and selection metadata.
+    // The panel has the code workspace's one 13px type scale for headings,
+    // layer names, status messages, and selection metadata.
     expect(layersSource).toContain(
-      'className="bg-bg1 text-3xxs flex min-h-0 flex-1 flex-col overflow-hidden"',
+      'className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden text-xs"',
     );
     expect(layersSource).not.toMatch(
-      /\btext-(?:xxs|2xxs|xs|sm|base|lg|xl)\b|\btext-\[\d+px\]/,
+      /\btext-(?:xxs|2xxs|3xxs|sm|base|lg|xl)\b|\btext-\[\d+px\]/,
     );
-    // Rows indent from the frame row that owns them, and a row with nothing to
-    // disclose reserves the chevron's footprint instead of drawing one.
+    // Rows indent from the frame row that owns them, one chevron-plus-gap per
+    // level, and a row with nothing to disclose reserves the chevron's
+    // footprint instead of drawing one.
     expect(layersSource).toContain("Math.min(depth + 1, 16)");
+    expect(layersSource).toContain("const DESIGN_LAYER_INDENT = 16;");
     expect(layersSource).toContain("DESIGN_LAYER_DISCLOSURE_SPACER");
-    expect(layersSource).toContain("discloses: tree ? tree.length > 0 :");
+    // Disclosure follows the live tree, else the engine's layer count (which
+    // excludes a seeded frame root); see designFrameRowDiscloses.
+    expect(layersSource).toContain(
+      "discloses: designFrameRowDiscloses(tree, frame)",
+    );
     const layerRulesStart = uiSource.indexOf(".zd-design-layer-row {");
-    const layerRulesEnd = uiSource.indexOf(".zd-design-theme-filter {");
+    const layerRulesEnd = uiSource.indexOf(".zd-design-theme-mode-active {");
     expect(layerRulesStart).toBeGreaterThan(-1);
     expect(layerRulesEnd).toBeGreaterThan(layerRulesStart);
     const layerRules = uiSource.slice(layerRulesStart, layerRulesEnd);
@@ -730,12 +753,18 @@ describe("design workspace interaction wiring", () => {
   it("groups common style controls while retaining independent and advanced CSS properties", () => {
     expect(styleEditorSource).toContain('title="Layout"');
     expect(styleEditorSource).toContain('title="Appearance"');
-    expect(styleEditorSource).toContain('title="Typography"');
+    expect(typographySource).toContain('title="Typography"');
+    expect(strokeSource).toContain('title="Stroke"');
+    expect(effectSource).toContain('title="Effects"');
+    // Independent corners stay one toggle away; the long tail of text and
+    // transform properties lives in popovers instead of inline disclosures.
     expect(styleEditorSource).toContain('"border-top-left-radius"');
-    expect(styleEditorSource).toContain('"overflow-wrap"');
-    expect(styleEditorSource).toContain('"perspective-origin"');
-    expect(styleEditorSource).toContain("showAdvancedAppearance");
-    expect(styleEditorSource).toContain("showAdvancedTypography");
+    expect(styleEditorSource).toContain('label="Independent corners"');
+    expect(typographySource).toContain('label="Type settings"');
+    expect(typographySource).toContain('"overflow-wrap"');
+    expect(effectSource).toContain('"perspective-origin"');
+    expect(styleEditorSource).not.toContain("showAdvancedAppearance");
+    expect(styleEditorSource).not.toContain("showAdvancedTypography");
   });
 
   it("exposes style keyframe actions only while Motion mode is active", () => {
@@ -748,12 +777,21 @@ describe("design workspace interaction wiring", () => {
     );
   });
 
-  it("keeps the style inspector hierarchy compact without overriding every child", () => {
-    expect(uiSource.match(/font-size:\s*13px/g)).toHaveLength(1);
-    expect(uiSource).toContain(".zd-design-field-actions");
+  it("keeps one Design control geometry for every inspector section", () => {
+    // 28px fields, 36px section headers and one 13px value size, applied by
+    // shared recipes rather than by overriding every child control.
+    expect(uiSource).toContain(".zd-field {");
+    expect(uiSource).toMatch(/\.zd-field \{[^}]*height: 28px;/);
+    expect(uiSource).toMatch(/\.zd-section-header \{[^}]*height: 36px;/);
+    expect(uiSource).not.toContain(".zd-design-field-actions");
     expect(source).toContain("aria-label={`Unit for ${label}`}");
-    expect(styleEditorSource).toContain('<StyleSection title="Layout" fixed>');
+    expect(styleEditorSource).toContain(
+      '<InspectorSection title="Layout" data-design-layout-section="">',
+    );
     expect(styleEditorSource).not.toContain('label="Box sizing"');
+    // Sections never collapse; empty ones are a header with its add action.
+    expect(inspectorKitSource).not.toContain("Collapsible");
+    expect(inspectorKitSource).toContain('data-empty={empty ? "true" : undefined}');
   });
 
   it("keeps one Style inspector with PNG export and no Data or PR surface", () => {
@@ -772,16 +810,23 @@ describe("design workspace interaction wiring", () => {
   });
 
   it("programmatically names style selects and segmented control groups", () => {
-    expect(styleEditorSource).toContain("aria-label={label}");
-    expect(styleEditorSource).toContain('role="group"');
-    expect(styleEditorSource).toContain(
-      "aria-label={option.title ?? `${label}: ${option.label}`}",
+    expect(inspectorKitSource).toContain("aria-label={label}");
+    expect(inspectorKitSource).toContain('role="group"');
+    expect(inspectorKitSource).toContain(
+      "qualifiedNames ? `${label}: ${option.label}` : option.label",
     );
   });
 
   it("keeps the motion timeline usable at its minimum canvas width", () => {
-    expect(motionTimelineSource).toContain("zd-design-motion-grid");
-    expect(uiSource).toContain(".zd-design-motion-grid");
+    const motionStyles = readFileSync(
+      resolve(
+        process.cwd(),
+        "apps/desktop/src/renderer/features/design-workspace/design-motion-timeline.css",
+      ),
+      "utf8",
+    );
+    expect(motionTimelineSource).toContain("zd-motion-grid");
+    expect(motionStyles).toContain("grid-template-columns: subgrid");
     expect(motionTimelineSource).toContain("designMotionPlaybackStartOffset(");
     expect(motionTimelineSource).toContain('aria-label="More motion settings"');
   });

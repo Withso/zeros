@@ -1,50 +1,52 @@
 // ============================================
 // COMPONENT: DesignStyleEditor
-// PURPOSE: Dense, progressive element styling, effects, motion, and CSS tools
+// PURPOSE: Figma-grade element styling over authored CSS: Layout,
+//          Appearance, Fill, Stroke, Effects, Typography, Transform,
+//          Transition and Motion as always-visible sections
 // USED IN: DesignInspector for the exact selected data-oid
 // ============================================
 
 import React, { useState } from "react";
-import {
-  ChevronDown,
-  Diamond,
-  Play,
-  RotateCw,
-  Sparkles,
-  Square,
-  Type,
-} from "lucide-react";
+import { Blend, Diamond, Minus, Plus } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 
 import {
-  Button,
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-  Label,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-  Tooltip,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
   toast,
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
-import { DesignColorPicker } from "./design-color-picker";
+import { DesignColorField } from "./design-color-picker";
 import {
-  DesignShadowControl,
-  DesignTransformControl,
+  DesignEffectsSection,
+  DesignTransformSection,
 } from "./design-effect-editor";
 import { DesignAutoLayoutControls } from "./design-auto-layout-controls";
+import { designFillIsEmpty, DesignFillEditor } from "./design-fill-editor";
+import {
+  InspectorGlyph,
+  InspectorIconButton,
+  InspectorSection,
+  InspectorSelect,
+} from "./design-inspector-kit";
 import { designRuntimeLayerLabel } from "./design-layer-label";
 import {
   type DesignLayoutAction,
   type DesignLayoutFieldOptions,
 } from "./design-layout-values";
-import { DesignFillEditor } from "./design-fill-editor";
-import { readDesignComputedStyle } from "./design-style-values";
+import { DesignStrokeSection } from "./design-stroke-editor";
+import {
+  designPaintRemovalStyles,
+  isDesignRuntimeStylePropertyAuthored,
+  readDesignComputedStyle,
+} from "./design-style-values";
+import { DesignTypographySection } from "./design-typography-editor";
 import { useDesignLivePreviewValue } from "./state/design-live-preview";
 
 interface DesignLivePreviewOwner {
@@ -74,37 +76,54 @@ interface DesignStyleEditorProps {
   disabled?: boolean;
 }
 
-function LiveDesignTransformControl({
-  owner,
-  value,
-  disabled,
-  onPreview,
-  onCancelPreview,
-  onCommit,
-}: {
-  owner?: DesignLivePreviewOwner;
-  value: string;
-  disabled: boolean;
-  onPreview: (value: string) => void;
-  onCancelPreview: () => void;
-  onCommit: (value: string) => void;
-}) {
-  const liveValue = useDesignLivePreviewValue(
-    owner?.workspaceId ?? "",
-    owner?.frame ?? "",
-    owner?.nodeId ?? "",
-    "transform",
-  );
-  return (
-    <DesignTransformControl
-      value={owner && liveValue !== undefined ? (liveValue ?? "none") : value}
-      disabled={disabled}
-      onPreview={onPreview}
-      onCancelPreview={onCancelPreview}
-      onCommit={onCommit}
-    />
-  );
-}
+const BLEND_MODES = [
+  ["normal", "Normal"],
+  ["darken", "Darken"],
+  ["multiply", "Multiply"],
+  ["color-burn", "Color burn"],
+  ["lighten", "Lighten"],
+  ["screen", "Screen"],
+  ["color-dodge", "Color dodge"],
+  ["overlay", "Overlay"],
+  ["soft-light", "Soft light"],
+  ["hard-light", "Hard light"],
+  ["difference", "Difference"],
+  ["exclusion", "Exclusion"],
+  ["hue", "Hue"],
+  ["saturation", "Saturation"],
+  ["color", "Color"],
+  ["luminosity", "Luminosity"],
+] as const;
+
+/** Menu groups mirror Figma's: normal, darken, lighten, contrast, compare,
+ * component. A divider precedes each group's first mode. */
+const BLEND_GROUP_STARTS = new Set([
+  "darken",
+  "lighten",
+  "overlay",
+  "difference",
+  "hue",
+]);
+
+const EASINGS = [
+  { value: "linear", label: "Linear" },
+  { value: "ease", label: "Ease" },
+  { value: "ease-in", label: "Ease in" },
+  { value: "ease-out", label: "Ease out" },
+  { value: "ease-in-out", label: "Ease in out" },
+] as const;
+
+const OBJECT_FIT_TAGS = new Set(["img", "video", "canvas", "svg", "iframe"]);
+
+/** A new frame fill starts white, as in Figma. Authored CSS, not chrome. */
+const NEW_FILL_COLOR = "#FFFFFF"; // check:ui ignore-line -- authored CSS default
+
+const CORNERS = [
+  ["Top left", "border-top-left-radius", "radius-tl"],
+  ["Top right", "border-top-right-radius", "radius-tr"],
+  ["Bottom left", "border-bottom-left-radius", "radius-bl"],
+  ["Bottom right", "border-bottom-right-radius", "radius-br"],
+] as const;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error
@@ -112,153 +131,12 @@ function errorMessage(error: unknown): string {
     : "The style could not be updated.";
 }
 
-function StyleSection({
-  title,
-  icon,
-  defaultOpen = false,
-  summary,
-  fixed = false,
-  children,
-}: {
-  title: string;
-  icon?: React.ReactNode;
-  fixed?: boolean;
-  defaultOpen?: boolean;
-  summary?: string;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  if (fixed)
-    return (
-      <section
-        data-design-layout-section={title === "Layout" ? "" : undefined}
-        className="border-border1 border-b"
-      >
-        <h3 className="text-fg1 flex h-9 items-center px-3 text-xs font-medium">
-          {title}
-        </h3>
-        <div className="flex flex-col gap-2 px-3 pb-3">{children}</div>
-      </section>
-    );
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <section className="border-border1 border-b">
-        <CollapsibleTrigger asChild>
-          <button
-            type="button"
-            className="hover:bg-bg1-hover flex h-9 w-full items-center gap-2 px-3 text-left"
-            aria-label={`${open ? "Collapse" : "Expand"} ${title}`}
-          >
-            <span className="text-muted-fg [&>svg]:size-3.5">{icon}</span>
-            <span className="text-fg1 text-xs font-medium">{title}</span>
-            {summary ? (
-              <span className="text-muted-fg ml-auto max-w-32 truncate text-[10px]">
-                {summary}
-              </span>
-            ) : null}
-            <ChevronDown
-              className={cn(
-                "text-muted-fg size-3.5 transition-transform",
-                open ? "rotate-0" : "-rotate-90",
-              )}
-            />
-          </button>
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          <div className="flex flex-col gap-1.5 px-3 pb-3">{children}</div>
-        </CollapsibleContent>
-      </section>
-    </Collapsible>
-  );
-}
-
-function PropertySelect({
-  label,
-  value,
-  options,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: readonly { value: string; label: string }[];
-  disabled?: boolean;
-  onChange: (value: string) => void;
-}) {
-  const choices = options.some((option) => option.value === value)
-    ? options
-    : [{ value, label: value }, ...options];
-  return (
-    <div className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] items-center gap-2">
-      <span className="text-muted-fg truncate text-[10px]" title={label}>
-        {label}
-      </span>
-      <Select value={value} disabled={disabled} onValueChange={onChange}>
-        <SelectTrigger
-          size="sm"
-          className="zd-design-control-quiet h-7 w-full min-w-0 px-2 text-[11px]"
-          aria-label={label}
-        >
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {choices.map((option) => (
-            <SelectItem key={option.value} value={option.value}>
-              {option.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
-}
-
-function ChoiceGroup({
-  label,
-  value,
-  options,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: readonly { value: string; label: string; title?: string }[];
-  disabled?: boolean;
-  onChange: (value: string) => void;
-}) {
-  const choices = options.some((option) => option.value === value)
-    ? options
-    : [{ value, label: value, title: value }, ...options];
-  return (
-    <div className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] items-center gap-2">
-      <Label className="text-muted-fg truncate text-[10px]" title={label}>
-        {label}
-      </Label>
-      <div
-        className="zd-design-segment-group grid h-7 grid-flow-col rounded-sm"
-        role="group"
-        aria-label={label}
-      >
-        {choices.map((option) => (
-          <Tooltip key={option.value} label={option.title ?? option.label}>
-            <button
-              type="button"
-              disabled={disabled}
-              aria-label={option.title ?? `${label}: ${option.label}`}
-              aria-pressed={value === option.value}
-              className={cn(
-                "zd-design-segment text-fg2 min-w-0 px-1 text-[10px] disabled:opacity-50",
-                value === option.value && "text-fg1",
-              )}
-              onClick={() => onChange(option.value)}
-            >
-              {option.label}
-            </button>
-          </Tooltip>
-        ))}
-      </div>
-    </div>
-  );
+function styleValue(
+  details: DesignRuntimeNodeDetails,
+  property: string,
+  fallback = "",
+): string {
+  return readDesignComputedStyle(details.styles, property) || fallback;
 }
 
 function MotionPropertyAction({
@@ -281,74 +159,41 @@ function MotionPropertyAction({
   if (!timelineOpen) return null;
 
   return (
-    <Tooltip
+    <InspectorIconButton
       label={
         active ? `Add ${label} keyframe at the playhead` : `Animate ${label}`
       }
+      className={active ? "zd-design-motion-property-active" : undefined}
+      disabled={disabled}
+      onClick={() => onRequest(property, value)}
     >
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        className={cn(
-          "size-7 shrink-0 transition-opacity",
-          active ? "zd-design-motion-property-active" : "opacity-100",
-        )}
-        aria-label={
-          active ? `Add ${label} keyframe at the playhead` : `Animate ${label}`
-        }
-        disabled={disabled}
-        onClick={() => onRequest(property, value)}
-      >
-        <Diamond className={cn("size-3", active && "fill-current")} />
-      </Button>
-    </Tooltip>
+      <Diamond className={cn("size-3", active && "fill-current")} />
+    </InspectorIconButton>
   );
 }
 
-function ColorField({
-  label,
-  property,
-  value,
-  disabled,
-  renderField,
-  onPreview,
-  onCancelPreview,
-  onCommit,
-}: {
-  label: string;
-  property: string;
-  value: string;
-  disabled?: boolean;
-  renderField: DesignStyleEditorProps["renderField"];
-  onPreview?: (value: string) => void;
-  onCancelPreview?: () => void;
-  onCommit: (value: string) => void;
-}) {
+function LiveTransformSection(
+  props: Omit<React.ComponentProps<typeof DesignTransformSection>, "value"> & {
+    owner?: DesignLivePreviewOwner;
+    confirmed: string;
+  },
+) {
+  const { owner, confirmed, ...rest } = props;
+  const liveValue = useDesignLivePreviewValue(
+    owner?.workspaceId ?? "",
+    owner?.frame ?? "",
+    owner?.nodeId ?? "",
+    "transform",
+  );
   return (
-    <div className="grid grid-cols-[28px_minmax(0,1fr)] items-end gap-2">
-      <DesignColorPicker
-        value={value}
-        label={label}
-        disabled={disabled}
-        onPreview={onPreview}
-        onCancelPreview={onCancelPreview}
-        onCommit={onCommit}
-      />
-      {renderField(label, property, value)}
-    </div>
+    <DesignTransformSection
+      {...rest}
+      value={
+        owner && liveValue !== undefined ? (liveValue ?? "none") : confirmed
+      }
+    />
   );
 }
-
-function styleValue(
-  details: DesignRuntimeNodeDetails,
-  property: string,
-  fallback = "",
-): string {
-  return readDesignComputedStyle(details.styles, property) || fallback;
-}
-
-const OBJECT_FIT_TAGS = new Set(["img", "video", "canvas", "svg", "iframe"]);
 
 export function DesignStyleEditor({
   details,
@@ -365,28 +210,70 @@ export function DesignStyleEditor({
   onOpenMotionTimeline,
   disabled = false,
 }: DesignStyleEditorProps) {
-  const [appearanceAdvancedOpen, setAppearanceAdvancedOpen] = useState(false);
-  const [typographyAdvancedOpen, setTypographyAdvancedOpen] = useState(false);
-
   const commit = (styles: Record<string, string | null>, label: string) => {
     // Selects and segmented controls do not emit a separate drag/change
     // preview. Mirror their choice into the mounted runtime immediately while
     // the ordered source mutation persists in the background.
     void onPreviewStyles?.(styles).catch(() => {});
-    void onCommitStyles(styles).catch((error) => {
+    const task = onCommitStyles(styles);
+    void task.catch((error) => {
       toast.error(`Couldn't update ${label.toLocaleLowerCase()}`, {
         description: errorMessage(error),
       });
     });
+    return task;
+  };
+  const preview = (styles: Record<string, string | null>) =>
+    void onPreviewStyles?.(styles).catch(() => {});
+  const cancelPreview = () => void onCancelStylePreview?.().catch(() => {});
+  const isAuthored = (property: string) =>
+    isDesignRuntimeStylePropertyAuthored(
+      details.authoredStyleProperties,
+      property,
+      styleValue(details, property),
+    );
+  const motion = {
+    timelineOpen: motionTimelineOpen,
+    properties: motionProperties,
+    onRequest: onOpenMotionTimeline,
   };
 
   const textLayer = designRuntimeLayerLabel(details) === "Text";
-  const showAdvancedAppearance = appearanceAdvancedOpen;
-  const showAdvancedTypography = typographyAdvancedOpen;
+  const radii = CORNERS.map(([, property]) =>
+    styleValue(details, property, "0px"),
+  );
+  const [cornersOpen, setCornersOpen] = useState(false);
+  const cornersDiffer = radii.some((radius) => radius !== radii[0]);
+  const independentCorners = cornersOpen || cornersDiffer;
+  const blendMode = styleValue(details, "mix-blend-mode", "normal");
+
+  const fillProperty = textLayer ? "color" : "background-color";
+  const fillColor = styleValue(
+    details,
+    fillProperty,
+    textLayer ? "currentColor" : "transparent",
+  );
+  const fillImage = styleValue(details, "background-image", "none");
+  // A fill the user authored stays a row even at 0% (so a popover editing it
+  // stays open); only an unauthored, fully transparent background is empty.
+  const fillEmpty =
+    !textLayer &&
+    designFillIsEmpty(fillColor, fillImage) &&
+    !isAuthored("background-color") &&
+    !isAuthored("background-image");
+
+  const transitionDuration = styleValue(details, "transition-duration", "0s");
+  const transitionActive =
+    isAuthored("transition-property") ||
+    isAuthored("transition-duration") ||
+    transitionDuration
+      .split(",")
+      .some((duration) => (Number.parseFloat(duration) || 0) > 0);
+  const animationName = styleValue(details, "animation-name", "none");
 
   return (
     <div data-design-style-editor className="flex flex-col">
-      <StyleSection title="Layout" fixed>
+      <InspectorSection title="Layout" data-design-layout-section="">
         <DesignAutoLayoutControls
           details={details}
           livePreviewOwner={livePreviewOwner}
@@ -404,15 +291,15 @@ export function DesignStyleEditor({
           }}
         />
         {OBJECT_FIT_TAGS.has(details.tag) ? (
-          <>
-            <PropertySelect
+          <div className="grid grid-cols-2 gap-2">
+            <InspectorSelect
               label="Fit"
               value={styleValue(details, "object-fit", "fill")}
               disabled={disabled}
               options={[
-                { value: "fill", label: "Fill" },
+                { value: "fill", label: "Stretch" },
                 { value: "contain", label: "Fit" },
-                { value: "cover", label: "Cover" },
+                { value: "cover", label: "Fill" },
                 { value: "none", label: "None" },
                 { value: "scale-down", label: "Scale down" },
               ]}
@@ -425,617 +312,330 @@ export function DesignStyleEditor({
               "object-position",
               styleValue(details, "object-position", "50% 50%"),
             )}
-          </>
+          </div>
         ) : null}
-      </StyleSection>
+      </InspectorSection>
 
-      <StyleSection
+      <InspectorSection
         title="Appearance"
-        icon={<Square />}
-        defaultOpen
-        summary={textLayer ? "Text" : undefined}
+        data-design-appearance-section=""
+        actions={
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <InspectorIconButton
+                label="Blend mode"
+                tooltip={`Blend · ${
+                  BLEND_MODES.find(([value]) => value === blendMode)?.[1] ??
+                  blendMode
+                }`}
+                pressed={blendMode !== "normal"}
+                disabled={disabled}
+              >
+                <Blend />
+              </InspectorIconButton>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-44">
+              <DropdownMenuLabel>Blend mode</DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={blendMode}
+                onValueChange={(value) =>
+                  commit({ "mix-blend-mode": value }, "blend mode")
+                }
+              >
+                {BLEND_MODES.map(([value, label]) => (
+                  <React.Fragment key={value}>
+                    {BLEND_GROUP_STARTS.has(value) ? (
+                      <DropdownMenuSeparator />
+                    ) : null}
+                    <DropdownMenuRadioItem value={value}>
+                      {label}
+                    </DropdownMenuRadioItem>
+                  </React.Fragment>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        }
       >
-        <div className="grid grid-cols-2 gap-2">
+        <div
+          className={cn(
+            "grid items-center gap-2",
+            textLayer
+              ? "grid-cols-2"
+              : "grid-cols-[minmax(0,1fr)_minmax(0,1fr)_28px]",
+          )}
+        >
           {renderField(
             "Opacity",
             "opacity",
             styleValue(details, "opacity", "1"),
             { percentage: true, compact: true, icon: "opacity" },
           )}
-          {!textLayer &&
-            renderField(
-              "Radius",
-              "border-radius",
-              styleValue(details, "border-radius", "0px"),
-              { compact: true, shortLabel: "R" },
-            )}
+          {!textLayer
+            ? renderField(
+                "Radius",
+                "border-radius",
+                cornersDiffer
+                  ? ""
+                  : styleValue(details, "border-radius", "0px"),
+                {
+                  compact: true,
+                  icon: "radius",
+                  whole: true,
+                  placeholder: cornersDiffer ? "Mixed" : undefined,
+                },
+              )
+            : null}
+          {!textLayer ? (
+            <InspectorIconButton
+              label="Independent corners"
+              size="row"
+              pressed={independentCorners}
+              disabled={disabled}
+              onClick={() => {
+                if (cornersDiffer) {
+                  commit({ "border-radius": radii[0] ?? "0px" }, "radius");
+                  setCornersOpen(false);
+                  return;
+                }
+                setCornersOpen((current) => !current);
+              }}
+            >
+              <InspectorGlyph name="corners" />
+            </InspectorIconButton>
+          ) : null}
         </div>
-        <PropertySelect
-          label="Blend"
-          value={styleValue(details, "mix-blend-mode", "normal")}
-          disabled={disabled}
-          options={[
-            { value: "normal", label: "Normal" },
-            { value: "multiply", label: "Multiply" },
-            { value: "screen", label: "Screen" },
-            { value: "overlay", label: "Overlay" },
-            { value: "difference", label: "Difference" },
-          ]}
-          onChange={(value) =>
-            commit({ "mix-blend-mode": value }, "blend mode")
-          }
-        />
-      </StyleSection>
-      <StyleSection title="Fill" defaultOpen>
-        <div className="group/motion flex min-w-0 items-center gap-1">
-          <div className="min-w-0 flex-1">
-            {textLayer ? (
-              <ColorField
-                label="Fill"
-                property="color"
-                value={styleValue(details, "color", "currentColor")}
-                disabled={disabled}
-                renderField={renderField}
-                onPreview={(color) => void onPreviewStyles?.({ color })}
-                onCancelPreview={() => void onCancelStylePreview?.()}
-                onCommit={(color) => commit({ color }, "text fill")}
-              />
-            ) : (
-              <DesignFillEditor
-                color={styleValue(details, "background-color", "transparent")}
-                image={styleValue(details, "background-image", "none")}
-                position={styleValue(details, "background-position", "0% 0%")}
-                size={styleValue(details, "background-size", "auto")}
-                repeat={styleValue(details, "background-repeat", "repeat")}
-                disabled={disabled}
-                onPreview={(styles) => void onPreviewStyles?.(styles)}
-                onCancelPreview={() => void onCancelStylePreview?.()}
-                onCommit={(styles) => commit(styles, "fill")}
-              />
-            )}
+        {!textLayer && independentCorners ? (
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_28px] gap-2">
+            {CORNERS.slice(0, 2).map(([label, property, glyph]) => (
+              <React.Fragment key={property}>
+                {renderField(
+                  label,
+                  property,
+                  styleValue(details, property, "0px"),
+                  {
+                    compact: true,
+                    whole: true,
+                    icon: glyph,
+                  },
+                )}
+              </React.Fragment>
+            ))}
+            <span />
+            {CORNERS.slice(2).map(([label, property, glyph]) => (
+              <React.Fragment key={property}>
+                {renderField(
+                  label,
+                  property,
+                  styleValue(details, property, "0px"),
+                  {
+                    compact: true,
+                    whole: true,
+                    icon: glyph,
+                  },
+                )}
+              </React.Fragment>
+            ))}
           </div>
-          <MotionPropertyAction
-            label="fill"
-            property={textLayer ? "color" : "background-color"}
-            value={styleValue(
-              details,
-              textLayer ? "color" : "background-color",
-              "transparent",
-            )}
-            active={motionProperties.includes(
-              textLayer ? "color" : "background-color",
-            )}
-            timelineOpen={motionTimelineOpen}
-            disabled={disabled}
-            onRequest={onOpenMotionTimeline}
-          />
+        ) : null}
+      </InspectorSection>
+
+      <InspectorSection
+        title="Fill"
+        empty={fillEmpty}
+        data-design-fill-section=""
+        actions={
+          fillEmpty ? (
+            <>
+              <MotionPropertyAction
+                label="fill"
+                property={fillProperty}
+                value={fillColor}
+                active={motionProperties.includes(fillProperty)}
+                timelineOpen={motionTimelineOpen}
+                disabled={disabled}
+                onRequest={onOpenMotionTimeline}
+              />
+              <InspectorIconButton
+                label="Add fill"
+                disabled={disabled}
+                onClick={() =>
+                  commit(
+                    {
+                      "background-color": NEW_FILL_COLOR,
+                      "background-image": "none",
+                    },
+                    "fill",
+                  )
+                }
+              >
+                <Plus />
+              </InspectorIconButton>
+            </>
+          ) : null
+        }
+      >
+        <div
+          className={cn(
+            "grid min-w-0 items-center gap-1",
+            textLayer
+              ? "grid-cols-[minmax(0,1fr)_auto]"
+              : "grid-cols-[minmax(0,1fr)_auto]",
+          )}
+        >
+          {textLayer ? (
+            <DesignColorField
+              value={fillColor}
+              label="Fill"
+              property="color"
+              disabled={disabled}
+              onPreview={(color) => preview({ color })}
+              onCancelPreview={cancelPreview}
+              onCommit={(color) => commit({ color }, "text fill")}
+            />
+          ) : (
+            <DesignFillEditor
+              color={fillColor}
+              image={fillImage}
+              position={styleValue(details, "background-position", "0% 0%")}
+              size={styleValue(details, "background-size", "auto")}
+              repeat={styleValue(details, "background-repeat", "repeat")}
+              disabled={disabled}
+              onPreview={preview}
+              onCancelPreview={cancelPreview}
+              onCommit={(styles) => commit(styles, "fill")}
+            />
+          )}
+          <div className="flex items-center">
+            <MotionPropertyAction
+              label="fill"
+              property={fillProperty}
+              value={fillColor}
+              active={motionProperties.includes(fillProperty)}
+              timelineOpen={motionTimelineOpen}
+              disabled={disabled}
+              onRequest={onOpenMotionTimeline}
+            />
+            {!textLayer ? (
+              <InspectorIconButton
+                label="Remove fill"
+                disabled={disabled}
+                onClick={() =>
+                  commit(
+                    designPaintRemovalStyles(
+                      "fill",
+                      details.authoredStyleProperties,
+                    ),
+                    "fill",
+                  )
+                }
+              >
+                <Minus />
+              </InspectorIconButton>
+            ) : null}
+          </div>
         </div>
         {!textLayer &&
-          styleValue(details, "background-blend-mode", "normal") !==
-            "normal" && (
-            <PropertySelect
-              label="Fill mode"
-              value={styleValue(details, "background-blend-mode", "normal")}
-              disabled={disabled}
-              options={[
-                { value: "normal", label: "Normal" },
-                { value: "multiply", label: "Multiply" },
-                { value: "screen", label: "Screen" },
-                { value: "overlay", label: "Overlay" },
-                { value: "soft-light", label: "Soft light" },
-              ]}
-              onChange={(value) =>
-                commit({ "background-blend-mode": value }, "blend")
-              }
-            />
-          )}
-      </StyleSection>
-      <StyleSection title="Stroke">
-        <div className="grid grid-cols-2 gap-2">
-          {renderField(
-            "Width",
-            "border-width",
-            styleValue(details, "border-width", "0px"),
-          )}
-          <PropertySelect
-            label="Style"
-            value={styleValue(details, "border-style", "none")}
+        styleValue(details, "background-blend-mode", "normal") !== "normal" ? (
+          <InspectorSelect
+            label="Fill blend"
+            value={styleValue(details, "background-blend-mode", "normal")}
             disabled={disabled}
-            options={[
-              { value: "none", label: "None" },
-              { value: "solid", label: "Solid" },
-              { value: "dashed", label: "Dashed" },
-              { value: "dotted", label: "Dotted" },
-              { value: "double", label: "Double" },
-            ]}
+            options={BLEND_MODES.map(([value, label]) => ({ value, label }))}
             onChange={(value) =>
-              commit({ "border-style": value }, "border style")
+              commit({ "background-blend-mode": value }, "fill blend")
             }
           />
-        </div>
-        <ColorField
-          label="Border color"
-          property="border-color"
-          value={styleValue(details, "border-color", "transparent")}
-          disabled={disabled}
-          renderField={renderField}
-          onPreview={(value) =>
-            void onPreviewStyles?.({ "border-color": value })
-          }
-          onCancelPreview={() => void onCancelStylePreview?.()}
-          onCommit={(value) =>
-            commit({ "border-color": value }, "border color")
-          }
-        />
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="text-muted-fg h-7 justify-start px-1.5 text-[10px]"
-          aria-expanded={showAdvancedAppearance}
-          onClick={() => setAppearanceAdvancedOpen((open) => !open)}
-        >
-          <ChevronDown
-            className={cn(
-              "size-3 transition-transform",
-              showAdvancedAppearance ? "rotate-0" : "-rotate-90",
-            )}
-          />
-          {showAdvancedAppearance
-            ? "Hide independent sides"
-            : "Independent sides"}
-        </Button>
-        {showAdvancedAppearance ? (
-          <>
-            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-              Border width
-            </span>
-            <div className="grid grid-cols-2 gap-2">
-              {renderField(
-                "Top",
-                "border-top-width",
-                styleValue(details, "border-top-width", "0px"),
-              )}
-              {renderField(
-                "Right",
-                "border-right-width",
-                styleValue(details, "border-right-width", "0px"),
-              )}
-              {renderField(
-                "Bottom",
-                "border-bottom-width",
-                styleValue(details, "border-bottom-width", "0px"),
-              )}
-              {renderField(
-                "Left",
-                "border-left-width",
-                styleValue(details, "border-left-width", "0px"),
-              )}
-            </div>
-            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-              Corner radius
-            </span>
-            <div className="grid grid-cols-2 gap-2">
-              {renderField(
-                "Top L",
-                "border-top-left-radius",
-                styleValue(details, "border-top-left-radius", "0px"),
-              )}
-              {renderField(
-                "Top R",
-                "border-top-right-radius",
-                styleValue(details, "border-top-right-radius", "0px"),
-              )}
-              {renderField(
-                "Bottom R",
-                "border-bottom-right-radius",
-                styleValue(details, "border-bottom-right-radius", "0px"),
-              )}
-              {renderField(
-                "Bottom L",
-                "border-bottom-left-radius",
-                styleValue(details, "border-bottom-left-radius", "0px"),
-              )}
-            </div>
-          </>
         ) : null}
-        <span className="text-muted-fg mt-1 text-[10px] font-medium tracking-wide uppercase">
-          Outline
-        </span>
-        <div className="grid grid-cols-2 gap-2">
-          {renderField(
-            "Width",
-            "outline-width",
-            styleValue(details, "outline-width", "0px"),
-          )}
-          {renderField(
-            "Offset",
-            "outline-offset",
-            styleValue(details, "outline-offset", "0px"),
-          )}
-        </div>
-        <PropertySelect
-          label="Style"
-          value={styleValue(details, "outline-style", "none")}
-          disabled={disabled}
-          options={[
-            { value: "none", label: "None" },
-            { value: "solid", label: "Solid" },
-            { value: "dashed", label: "Dashed" },
-            { value: "dotted", label: "Dotted" },
-            { value: "double", label: "Double" },
-          ]}
-          onChange={(value) =>
-            commit({ "outline-style": value }, "outline style")
-          }
-        />
-        <ColorField
-          label="Outline color"
-          property="outline-color"
-          value={styleValue(details, "outline-color", "currentColor")}
-          disabled={disabled}
-          renderField={renderField}
-          onPreview={(value) =>
-            void onPreviewStyles?.({ "outline-color": value })
-          }
-          onCancelPreview={() => void onCancelStylePreview?.()}
-          onCommit={(value) =>
-            commit({ "outline-color": value }, "outline color")
-          }
-        />
-      </StyleSection>
+      </InspectorSection>
 
-      <StyleSection
-        title="Typography"
-        icon={<Type />}
-        defaultOpen={Boolean(details.text)}
-        summary={styleValue(details, "font-size")}
-      >
-        {renderField("Font", "font-family", styleValue(details, "font-family"))}
-        <div className="grid grid-cols-2 gap-2">
-          {renderField("Size", "font-size", styleValue(details, "font-size"))}
-          {renderField(
-            "Weight",
-            "font-weight",
-            styleValue(details, "font-weight"),
-          )}
-          {renderField(
-            "Line",
-            "line-height",
-            styleValue(details, "line-height"),
-          )}
-          {renderField(
-            "Tracking",
-            "letter-spacing",
-            styleValue(details, "letter-spacing"),
-          )}
-        </div>
-        <PropertySelect
-          label="Style"
-          value={styleValue(details, "font-style", "normal")}
-          disabled={disabled}
-          options={[
-            { value: "normal", label: "Normal" },
-            { value: "italic", label: "Italic" },
-            { value: "oblique", label: "Oblique" },
-          ]}
-          onChange={(value) => commit({ "font-style": value }, "font style")}
-        />
-        {!textLayer && (
-          <ColorField
-            label="Text color"
-            property="color"
-            value={styleValue(details, "color", "currentColor")}
-            disabled={disabled}
-            renderField={renderField}
-            onPreview={(value) => void onPreviewStyles?.({ color: value })}
-            onCancelPreview={() => void onCancelStylePreview?.()}
-            onCommit={(value) => commit({ color: value }, "text color")}
-          />
-        )}
-        <ChoiceGroup
-          label="Align"
-          value={styleValue(details, "text-align", "start")}
-          disabled={disabled}
-          options={[
-            { value: "start", label: "L", title: "Start" },
-            { value: "center", label: "C", title: "Center" },
-            { value: "end", label: "R", title: "End" },
-            { value: "justify", label: "J", title: "Justify" },
-          ]}
-          onChange={(value) => commit({ "text-align": value }, "text align")}
-        />
-        <PropertySelect
-          label="Case"
-          value={styleValue(details, "text-transform", "none")}
-          disabled={disabled}
-          options={[
-            { value: "none", label: "Original" },
-            { value: "uppercase", label: "Uppercase" },
-            { value: "lowercase", label: "Lowercase" },
-            { value: "capitalize", label: "Capitalize" },
-          ]}
-          onChange={(value) => commit({ "text-transform": value }, "case")}
-        />
-        <PropertySelect
-          label="Decorate"
-          value={styleValue(details, "text-decoration", "none")}
-          disabled={disabled}
-          options={[
-            { value: "none", label: "None" },
-            { value: "underline", label: "Underline" },
-            { value: "line-through", label: "Strike through" },
-            { value: "overline", label: "Overline" },
-          ]}
-          onChange={(value) =>
-            commit({ "text-decoration": value }, "decoration")
-          }
-        />
-        <PropertySelect
-          label="White space"
-          value={styleValue(details, "white-space", "normal")}
-          disabled={disabled}
-          options={[
-            { value: "normal", label: "Normal" },
-            { value: "nowrap", label: "No wrap" },
-            { value: "pre-wrap", label: "Preserve" },
-            { value: "break-spaces", label: "Break spaces" },
-          ]}
-          onChange={(value) => commit({ "white-space": value }, "wrap")}
-        />
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="text-muted-fg h-7 justify-start px-1.5 text-[10px]"
-          aria-expanded={showAdvancedTypography}
-          onClick={() => setTypographyAdvancedOpen((open) => !open)}
-        >
-          <ChevronDown
-            className={cn(
-              "size-3 transition-transform",
-              showAdvancedTypography ? "rotate-0" : "-rotate-90",
-            )}
-          />
-          {showAdvancedTypography ? "Hide text details" : "Text details"}
-        </Button>
-        {showAdvancedTypography ? (
-          <>
-            <div className="grid grid-cols-2 gap-2">
-              {renderField(
-                "Stretch",
-                "font-stretch",
-                styleValue(details, "font-stretch", "100%"),
-              )}
-              {renderField(
-                "Word gap",
-                "word-spacing",
-                styleValue(details, "word-spacing", "0px"),
-              )}
-              {renderField(
-                "Indent",
-                "text-indent",
-                styleValue(details, "text-indent", "0px"),
-              )}
-            </div>
-            <PropertySelect
-              label="Line wrap"
-              value={styleValue(details, "text-wrap", "wrap")}
-              disabled={disabled}
-              options={[
-                { value: "wrap", label: "Wrap" },
-                { value: "nowrap", label: "No wrap" },
-                { value: "balance", label: "Balance" },
-                { value: "pretty", label: "Pretty" },
-                { value: "stable", label: "Stable" },
-              ]}
-              onChange={(value) => commit({ "text-wrap": value }, "line wrap")}
-            />
-            <PropertySelect
-              label="Overflow"
-              value={styleValue(details, "text-overflow", "clip")}
-              disabled={disabled}
-              options={[
-                { value: "clip", label: "Clip" },
-                { value: "ellipsis", label: "Ellipsis" },
-              ]}
-              onChange={(value) =>
-                commit({ "text-overflow": value }, "text overflow")
-              }
-            />
-            <PropertySelect
-              label="Word break"
-              value={styleValue(details, "word-break", "normal")}
-              disabled={disabled}
-              options={[
-                { value: "normal", label: "Normal" },
-                { value: "break-all", label: "Break all" },
-                { value: "keep-all", label: "Keep all" },
-                { value: "break-word", label: "Break word" },
-              ]}
-              onChange={(value) =>
-                commit({ "word-break": value }, "word break")
-              }
-            />
-            <PropertySelect
-              label="Long words"
-              value={styleValue(details, "overflow-wrap", "normal")}
-              disabled={disabled}
-              options={[
-                { value: "normal", label: "Normal" },
-                { value: "break-word", label: "Break word" },
-                { value: "anywhere", label: "Anywhere" },
-              ]}
-              onChange={(value) =>
-                commit({ "overflow-wrap": value }, "long word wrapping")
-              }
-            />
-            <PropertySelect
-              label="Vertical"
-              value={styleValue(details, "vertical-align", "baseline")}
-              disabled={disabled}
-              options={[
-                { value: "baseline", label: "Baseline" },
-                { value: "middle", label: "Middle" },
-                { value: "top", label: "Top" },
-                { value: "bottom", label: "Bottom" },
-                { value: "text-top", label: "Text top" },
-                { value: "text-bottom", label: "Text bottom" },
-                { value: "sub", label: "Subscript" },
-                { value: "super", label: "Superscript" },
-              ]}
-              onChange={(value) =>
-                commit({ "vertical-align": value }, "vertical alignment")
-              }
-            />
-            <PropertySelect
-              label="Writing"
-              value={styleValue(details, "writing-mode", "horizontal-tb")}
-              disabled={disabled}
-              options={[
-                { value: "horizontal-tb", label: "Horizontal" },
-                { value: "vertical-rl", label: "Vertical right" },
-                { value: "vertical-lr", label: "Vertical left" },
-              ]}
-              onChange={(value) =>
-                commit({ "writing-mode": value }, "writing mode")
-              }
-            />
-            <PropertySelect
-              label="Hyphens"
-              value={styleValue(details, "hyphens", "manual")}
-              disabled={disabled}
-              options={[
-                { value: "none", label: "None" },
-                { value: "manual", label: "Manual" },
-                { value: "auto", label: "Auto" },
-              ]}
-              onChange={(value) => commit({ hyphens: value }, "hyphens")}
-            />
-          </>
-        ) : null}
-      </StyleSection>
+      <DesignStrokeSection
+        details={details}
+        disabled={disabled}
+        renderField={renderField}
+        onPreview={preview}
+        onCancelPreview={cancelPreview}
+        onCommit={commit}
+      />
 
-      <StyleSection
-        title="Effects"
-        icon={<Sparkles />}
-        summary={styleValue(details, "box-shadow", "none")}
-      >
-        <div className="group/motion flex min-w-0 items-center gap-1">
-          <div className="min-w-0 flex-1">
-            <DesignShadowControl
-              label="Box shadow"
-              value={styleValue(details, "box-shadow", "none")}
-              disabled={disabled}
-              onPreview={(value) =>
-                void onPreviewStyles?.({ "box-shadow": value })
-              }
-              onCancelPreview={() => void onCancelStylePreview?.()}
-              onCommit={(value) =>
-                commit({ "box-shadow": value }, "box shadow")
-              }
-            />
-          </div>
-          <MotionPropertyAction
-            label="box shadow"
-            property="box-shadow"
-            value={styleValue(details, "box-shadow", "none")}
-            active={motionProperties.includes("box-shadow")}
-            timelineOpen={motionTimelineOpen}
-            disabled={disabled}
-            onRequest={onOpenMotionTimeline}
-          />
-        </div>
-        <div className="group/motion flex min-w-0 items-center gap-1">
-          <div className="min-w-0 flex-1">
-            <DesignShadowControl
-              label="Text shadow"
-              value={styleValue(details, "text-shadow", "none")}
-              textShadow
-              disabled={disabled}
-              onPreview={(value) =>
-                void onPreviewStyles?.({ "text-shadow": value })
-              }
-              onCancelPreview={() => void onCancelStylePreview?.()}
-              onCommit={(value) =>
-                commit({ "text-shadow": value }, "text shadow")
-              }
-            />
-          </div>
-          <MotionPropertyAction
-            label="text shadow"
-            property="text-shadow"
-            value={styleValue(details, "text-shadow", "none")}
-            active={motionProperties.includes("text-shadow")}
-            timelineOpen={motionTimelineOpen}
-            disabled={disabled}
-            onRequest={onOpenMotionTimeline}
-          />
-        </div>
-        {renderField("Filter", "filter", styleValue(details, "filter", "none"))}
-        {renderField(
-          "Backdrop",
-          "backdrop-filter",
-          styleValue(details, "backdrop-filter", "none"),
-        )}
-        {renderField(
-          "Clip path",
-          "clip-path",
-          styleValue(details, "clip-path", "none"),
-        )}
-      </StyleSection>
+      <DesignEffectsSection
+        details={details}
+        textLayer={textLayer}
+        disabled={disabled}
+        isAuthored={isAuthored}
+        renderField={renderField}
+        motion={motion}
+        onPreview={preview}
+        onCancelPreview={cancelPreview}
+        onCommit={commit}
+      />
 
-      <StyleSection
-        title="Transform"
-        icon={<RotateCw />}
-        summary={styleValue(details, "transform", "none")}
-      >
-        <div className="group/motion flex min-w-0 items-center gap-1">
-          <div className="min-w-0 flex-1">
-            <LiveDesignTransformControl
-              owner={livePreviewOwner}
-              value={styleValue(details, "transform", "none")}
-              disabled={disabled}
-              onPreview={(value) =>
-                void onPreviewStyles?.({ transform: value })
-              }
-              onCancelPreview={() => void onCancelStylePreview?.()}
-              onCommit={(value) => commit({ transform: value }, "transform")}
-            />
-          </div>
-          <MotionPropertyAction
-            label="transform"
-            property="transform"
-            value={styleValue(details, "transform", "none")}
-            active={motionProperties.includes("transform")}
-            timelineOpen={motionTimelineOpen}
-            disabled={disabled}
-            onRequest={onOpenMotionTimeline}
-          />
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          {renderField(
-            "Origin",
-            "transform-origin",
-            styleValue(details, "transform-origin", "50% 50%"),
-          )}
-          {renderField(
-            "Perspective",
-            "perspective",
-            styleValue(details, "perspective", "none"),
-          )}
-        </div>
-        {renderField(
-          "Perspective origin",
-          "perspective-origin",
-          styleValue(details, "perspective-origin", "50% 50%"),
-        )}
-      </StyleSection>
+      <DesignTypographySection
+        details={details}
+        textLayer={textLayer}
+        disabled={disabled}
+        isAuthored={isAuthored}
+        renderField={renderField}
+        onPreview={preview}
+        onCancelPreview={cancelPreview}
+        onCommit={commit}
+      />
 
-      <StyleSection
+      <LiveTransformSection
+        owner={livePreviewOwner}
+        confirmed={styleValue(details, "transform", "none")}
+        details={details}
+        disabled={disabled}
+        isAuthored={isAuthored}
+        renderField={renderField}
+        motion={motion}
+        onPreview={preview}
+        onCancelPreview={cancelPreview}
+        onCommit={commit}
+      />
+
+      <InspectorSection
         title="Transition"
-        icon={<Play />}
-        summary={styleValue(details, "transition-duration", "0s")}
+        empty={!transitionActive}
+        data-design-transition-section=""
+        actions={
+          transitionActive ? (
+            <InspectorIconButton
+              label="Remove transition"
+              disabled={disabled}
+              onClick={() =>
+                commit(
+                  {
+                    "transition-property": null,
+                    "transition-duration": null,
+                    "transition-delay": null,
+                    "transition-timing-function": null,
+                  },
+                  "transition",
+                )
+              }
+            >
+              <Minus />
+            </InspectorIconButton>
+          ) : (
+            <InspectorIconButton
+              label="Add transition"
+              disabled={disabled}
+              onClick={() =>
+                commit(
+                  {
+                    "transition-property": "all",
+                    "transition-duration": "200ms",
+                    "transition-timing-function": "ease-out",
+                  },
+                  "transition",
+                )
+              }
+            >
+              <Plus />
+            </InspectorIconButton>
+          )
+        }
       >
         {renderField(
           "Property",
@@ -1043,55 +643,58 @@ export function DesignStyleEditor({
           styleValue(details, "transition-property", "all"),
         )}
         <div className="grid grid-cols-2 gap-2">
-          {renderField(
-            "Duration",
-            "transition-duration",
-            styleValue(details, "transition-duration", "0s"),
-          )}
+          {renderField("Duration", "transition-duration", transitionDuration)}
           {renderField(
             "Delay",
             "transition-delay",
             styleValue(details, "transition-delay", "0s"),
           )}
         </div>
-        <PropertySelect
+        <InspectorSelect
           label="Easing"
           value={styleValue(details, "transition-timing-function", "ease")}
           disabled={disabled}
-          options={[
-            { value: "linear", label: "Linear" },
-            { value: "ease", label: "Ease" },
-            { value: "ease-in", label: "Ease in" },
-            { value: "ease-out", label: "Ease out" },
-            { value: "ease-in-out", label: "Ease in out" },
-          ]}
+          options={EASINGS}
           onChange={(value) =>
             commit({ "transition-timing-function": value }, "easing")
           }
         />
-      </StyleSection>
+      </InspectorSection>
 
-      <StyleSection
+      <InspectorSection
         title="Motion"
-        icon={<Diamond />}
-        summary={styleValue(details, "animation-name", "none")}
+        empty={animationName === "none"}
+        data-design-motion-section=""
+        actions={
+          <InspectorIconButton
+            label="Open motion timeline"
+            shortcut="⇧A"
+            pressed={motionTimelineOpen}
+            disabled={disabled}
+            onClick={() => onOpenMotionTimeline()}
+          >
+            <Diamond />
+          </InspectorIconButton>
+        }
       >
-        <p className="text-muted-fg text-[11px] leading-4">
-          Edit property tracks, keyframes, timing, and playback in the canvas
-          timeline.
-        </p>
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          className="zd-design-control-applied"
-          disabled={disabled}
-          onClick={() => onOpenMotionTimeline()}
-        >
-          <Diamond />
-          Open motion timeline
-        </Button>
-      </StyleSection>
+        {animationName !== "none" ? (
+          <button
+            type="button"
+            disabled={disabled}
+            className="zd-field w-full min-w-0 gap-2 px-2 text-left disabled:opacity-50"
+            aria-label={`Edit motion ${animationName}`}
+            onClick={() => onOpenMotionTimeline()}
+          >
+            <Diamond className="size-3.5 shrink-0 fill-current text-[var(--design-selection-stroke)]" />
+            <span className="text-fg1 min-w-0 flex-1 truncate">
+              {animationName}
+            </span>
+            <span className="text-muted-fg text-3xxs shrink-0 tabular-nums">
+              {styleValue(details, "animation-duration", "0s")}
+            </span>
+          </button>
+        ) : null}
+      </InspectorSection>
     </div>
   );
 }

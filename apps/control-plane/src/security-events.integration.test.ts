@@ -3,7 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ensureUser } from "./auth.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import { getSecuritySnapshot, listSecurityEvents, publishPendingSecurityEvents } from "./security-events.js";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -14,8 +14,7 @@ d("security snapshot and durable targeted replay", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   afterAll(async () => pool.end());

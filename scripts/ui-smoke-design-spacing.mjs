@@ -70,12 +70,14 @@ export async function runDesignSpacingSmoke({ page, check }) {
 
   for (const [property, label, axis] of [
     ["padding-left", "72", "x"],
-    ["gap", "228", "y"],
+    // A column's items are separated by row-gap; this one is distributed.
+    ["row-gap", "Auto · 228", "y"],
   ]) {
     const handle = frame
       .locator(`[data-design-inline-spacing="${property}"]`)
       .first();
-    await expect(handle).toHaveText(label);
+    const readout = handle.locator("[data-design-inline-spacing-value]");
+    await expect(readout).toHaveText(label);
     const before = await handle.boundingBox();
     expect(before).not.toBeNull();
     const x = before.x + before.width / 2;
@@ -89,10 +91,10 @@ export async function runDesignSpacingSmoke({ page, check }) {
         steps: 4,
       },
     );
-    await expect(handle).not.toHaveText(label);
+    await expect(readout).not.toHaveText(label);
     await page.keyboard.press("Escape");
     await page.mouse.up();
-    await expect(handle).toHaveText(label);
+    await expect(readout).toHaveText(label);
     await expect.poll(spacing).toEqual({ padding: "72.25px", gap: 228.25 });
     await expect.poll(() => handle.boundingBox()).toEqual(before);
     check(

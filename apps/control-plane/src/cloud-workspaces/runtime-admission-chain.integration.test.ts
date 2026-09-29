@@ -9,7 +9,7 @@ import {
 import pg from "pg";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx } from "../db.js";
 import { ensureUser } from "../auth.js";
 import { HttpError } from "../authz.js";
@@ -99,8 +99,7 @@ d("normal shared cloud runtime admission chain", () => {
     await pool.end();
   });
   it("creates, reconciles, registers the real client and admits two devices and an exact delegated execution without SQL runtime patches", async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     const owner = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_${randomUUID()}`,
