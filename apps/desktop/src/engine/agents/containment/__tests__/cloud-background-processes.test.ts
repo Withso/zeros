@@ -4,7 +4,8 @@ import {describe,expect,it} from "vitest";
 import {hasCloudBackgroundServers} from "../cloud-background-processes";
 
 describe("execution-owned server observation",()=>{
-  it("finds a real child listener, excludes another execution, and observes its exit",async()=>{
+  // Real process inspection reads Linux /proc, as on the cloud worker.
+  it.runIf(process.platform==="linux")("finds a real child listener, excludes another execution, and observes its exit",async()=>{
     const server=spawn(process.execPath,["-e","require('node:http').createServer((_,r)=>r.end('ok')).listen(0,'127.0.0.1',()=>process.stdout.write('ready'))"],{stdio:["ignore","pipe","pipe"]});
     const idle=spawn(process.execPath,["-e","process.stdout.write('ready');setInterval(()=>{},1000)"],{stdio:["ignore","pipe","pipe"]});
     const serverReady=once(server.stdout,"data"),idleReady=once(idle.stdout,"data");
