@@ -96,5 +96,6 @@ database("hosted Dev database ownership", () => {
         finally { await cluster.end(); }
       }
     }
-  });
+    // A fresh database replays the full migration ladder, as in hosted Dev.
+  }, 60_000);
 });
