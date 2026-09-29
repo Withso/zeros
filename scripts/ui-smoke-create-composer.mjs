@@ -276,6 +276,9 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
   const popup = await dialog.boundingBox();
   expect(popup.x).toBeGreaterThanOrEqual(0);
   expect(popup.x + popup.width).toBeLessThanOrEqual(780);
+  // Dismiss only once the popover owns focus; an earlier key can reach the
+  // page before its dismissable layer is listening.
+  await expect(dialog.getByRole("searchbox", { name: "Search sources" })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(source).toBeFocused();
   check(
