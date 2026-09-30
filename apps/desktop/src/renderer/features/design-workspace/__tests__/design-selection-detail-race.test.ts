@@ -42,9 +42,11 @@ vi.mock("../design-style-editor", () => ({
 }));
 
 import { DesignInspector } from "../design-inspector";
+import { canEditDesignNodeText } from "../design-node-capabilities";
 import {
   resetDesignSelectionWorkflowsForTests,
   reconcileDesignRuntimeSnapshot,
+  selectDesignFrameBodyAtLocation,
   selectDesignNode,
   settleDesignSelectionDetails,
 } from "../state/design-selection";
@@ -55,6 +57,7 @@ import {
 } from "../state/design-runtime-store";
 import {
   designWorkspaceSnapshotCache,
+  observeDesignDirectory,
   primeDesignWorkspaceSnapshot,
   resetDesignWorkspaceCacheForTests,
   updateDesignNodeStylesCached,
@@ -196,6 +199,122 @@ describe("selected-detail convergence after hot adoption", () => {
     resetDesignLayerDisclosureForTests();
     vi.clearAllMocks();
   });
+
+  it("refreshes cached exact-version text capabilities before selected runtime readiness settles", async () => {
+    const cachedDetails = {
+      ...nodeDetails("heading", INITIAL_VERSION),
+      tag: "h1",
+      text: "Heading",
+    };
+    const currentDetails = { ...cachedDetails, textEditable: true };
+    const runtime = {
+      sourceVersion: INITIAL_VERSION,
+      isActive: () => true,
+      getNodeDetails: vi.fn(async () => currentDetails),
+    };
+    mocks.designFrameRuntime.mockReturnValue(runtime);
+    designWorkspaceSnapshotCache.setData(
+      WORKSPACE,
+      workspaceSnapshot(INITIAL_VERSION),
+    );
+    const snapshot = runtimeSnapshot(INITIAL_VERSION);
+    useDesignRuntimeStore
+      .getState()
+      .publishSnapshot(
+        WORKSPACE,
+        FOLDER,
+        FRAME.file,
+        snapshot,
+        INITIAL_VERSION,
+      );
+    useDesignRuntimeStore
+      .getState()
+      .publishNodeDetails(
+        WORKSPACE,
+        FOLDER,
+        FRAME.file,
+        cachedDetails,
+        INITIAL_VERSION,
+      );
+    useDesignWorkspaceUiStore
+      .getState()
+      .setSelection(WORKSPACE, FRAME.file, "heading");
+    expect(canEditDesignNodeText(cachedDetails)).toBe(false);
+
+    reconcileDesignRuntimeSnapshot({
+      workspaceId: WORKSPACE,
+      folder: FOLDER,
+      frame: FRAME,
+      snapshot,
+    });
+    await settleDesignSelectionDetails(WORKSPACE, FRAME.file, INITIAL_VERSION);
+
+    expect(runtime.getNodeDetails).toHaveBeenCalledTimes(1);
+    const selectedDetails = designRuntimeFrameState(WORKSPACE, FRAME.file)
+      ?.detailsByNode.heading;
+    expect(selectedDetails).toEqual(currentDetails);
+    expect(canEditDesignNodeText(selectedDetails)).toBe(true);
+    expect(mocks.designSetSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["snapshot publication", "directory observation"])(
+    "does not let %s pre-empt a pending text double-click with restored detail recovery",
+    async (notification) => {
+      const hitRead = deferred<DesignRuntimeNodeDetails>();
+      const backgroundRead = deferred<DesignRuntimeNodeDetails>();
+      const textDetails = {
+        ...nodeDetails("heading", INITIAL_VERSION),
+        tag: "h1",
+        text: "Heading",
+        textEditable: true,
+      };
+      const runtime = {
+        sourceVersion: INITIAL_VERSION,
+        isActive: () => true,
+        getElementAtLoc: vi.fn(() => hitRead.promise),
+        getNodeDetails: vi.fn(() => backgroundRead.promise),
+      };
+      mocks.designFrameRuntime.mockReturnValue(runtime);
+      const snapshot = workspaceSnapshot(INITIAL_VERSION);
+      designWorkspaceSnapshotCache.setData(WORKSPACE, snapshot);
+      useDesignRuntimeStore
+        .getState()
+        .publishSnapshot(
+          WORKSPACE,
+          FOLDER,
+          FRAME.file,
+          runtimeSnapshot(INITIAL_VERSION),
+          INITIAL_VERSION,
+        );
+      useDesignWorkspaceUiStore
+        .getState()
+        .setSelection(WORKSPACE, FRAME.file, "heading");
+      const onLocalSelection = vi.fn();
+      const selecting = selectDesignFrameBodyAtLocation({
+        workspaceId: WORKSPACE,
+        folder: FOLDER,
+        frame: FRAME,
+        x: 20,
+        y: 30,
+        intent: "descend",
+        onLocalSelection,
+      });
+      if (notification === "snapshot publication") {
+        primeDesignWorkspaceSnapshot(WORKSPACE, snapshot);
+      } else {
+        observeDesignDirectory(WORKSPACE, snapshot);
+      }
+      expect(runtime.getNodeDetails).toHaveBeenCalledTimes(1);
+      hitRead.resolve(textDetails);
+
+      expect(await selecting).toEqual(textDetails);
+      expect(onLocalSelection).toHaveBeenCalledExactlyOnceWith(textDetails);
+      backgroundRead.resolve(textDetails);
+      await Promise.resolve();
+      expect(mocks.designSetSelection).toHaveBeenCalledTimes(1);
+      expect(designWorkspaceView(WORKSPACE).selectedNodeId).toBe("heading");
+    },
+  );
 
   it("keeps manual Layers folds and scroll demand unchanged when promotion retries a pending selection", async () => {
     const oldRead = deferred<DesignRuntimeNodeDetails>();
