@@ -66,20 +66,22 @@ describe("repository layout contracts", () => {
     );
   });
 
-  it("keeps required source-sync red until every ZSR runtime architecture qualifies", () => {
+  it("keeps required source-sync red until the shipping macOS workload qualifies", () => {
     const preflight = read(".github/workflows/preflight.yml");
 
     expect(preflight).toContain("  source-sync-workload:");
     expect(preflight).toMatch(
-      /  source-sync:\n(?:.|\n)*?    name: source-sync \(macOS\)\n(?:.|\n)*?    needs:\n(?:.|\n)*?      - source-sync-workload\n(?:.|\n)*?      - zsr-macos-intel\n(?:.|\n)*?      - zsr-linux-arm64/,
+      /  source-sync:\n(?:.|\n)*?    name: source-sync \(macOS\)\n(?:.|\n)*?    if: always\(\)\n    needs:\n      - source-sync-workload\n    runs-on:/,
     );
     expect(preflight).toContain("SOURCE_SYNC_RESULT:");
-    expect(preflight).toContain("ZSR_MACOS_INTEL_RESULT:");
-    expect(preflight).toContain("ZSR_LINUX_ARM64_RESULT:");
-    // The broad test job already owns every source-level ZSR contract. These
-    // architecture jobs must exercise only the real target kernel/runtime so a
+    // Only shipped targets gate a pull request: the Mac app is Apple Silicon
+    // only and cloud workers run on Linux amd64, so no Intel Mac or arm64
+    // Linux job.
+    expect(preflight).not.toMatch(/macos-\d+-intel|ubuntu-[\d.]+-arm|zsr-macos-intel|zsr-linux-arm64/);
+    // The broad test job already owns every source-level ZSR contract. The
+    // macOS workload job exercises only the real shipping kernel/runtime so a
     // host-specific unit fixture cannot mask or duplicate that evidence.
-    expect(preflight.match(/pnpm check:zsr:runtime/g)).toHaveLength(3);
+    expect(preflight.match(/pnpm check:zsr:runtime/g)).toHaveLength(1);
     expect(preflight).not.toMatch(/run: .*pnpm check:zsr$/m);
   });
 
