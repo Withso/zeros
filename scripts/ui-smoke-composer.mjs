@@ -143,7 +143,7 @@ const port = await freePort();
 // passed" (observed here and it would hang the CI job the same way).
 const vite = spawn(
   "pnpm",
-  ["exec", "vite", "--port", String(port), "--strictPort"],
+  ["exec", "vite", "--mode", "ui-smoke", "--port", String(port), "--strictPort"],
   {
     cwd: ROOT,
     stdio: ["ignore", "pipe", "pipe"],

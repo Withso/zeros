@@ -158,6 +158,7 @@ export default defineConfig(({ command, mode }) => ({
   // changed" line that diagnosed the problem in the first place.
   clearScreen: false,
   server: {
+    hmr: mode === "ui-smoke" ? false : undefined,
     // Pinned desktop-renderer port. Distinct from the marketing site (3000)
     // and the Wrangler web hub (8788), so Electron's Vite never collides
     // with `pnpm dev` in apps/marketing/ — which used to silently
@@ -287,7 +288,13 @@ export default defineConfig(({ command, mode }) => ({
     // the scan is async and a config restart mid-crawl aborts it. The
     // Mac-app deps are all reachable from index.html, so scoping the
     // scan here is both correct and far cheaper.
-    entries: ["index.html"],
+    entries:
+      mode === "ui-smoke"
+        ? [
+            "index.html",
+            "apps/desktop/src/renderer/harnesses/harness-*.html",
+          ]
+        : ["index.html"],
     include: [
       "@xterm/xterm",
       "@xterm/addon-fit",
