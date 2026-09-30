@@ -14,10 +14,7 @@ import React, {
   useState,
 } from "react";
 
-import {
-  DESIGN_SELECTION_NODE_LIMIT,
-  type DesignRuntimeSnapshot,
-} from "@zeros/protocol/design-runtime";
+import type { DesignRuntimeSnapshot } from "@zeros/protocol/design-runtime";
 
 import type { DesignCanvasFrameWire } from "../../platform/git";
 import { useNativeRuntime } from "../../platform/runtime";
@@ -31,12 +28,12 @@ import { Button } from "../../shared/ui/primitives/button";
 import {
   captureDesignRuntimeScreenshot,
   reconcileDesignRuntimeSnapshot,
+  settleDesignSelectionDetails,
 } from "./state/design-selection";
 import {
   reconcileDesignWorkspaceRuntimeAudit,
   refreshDesignWorkspaceSnapshot,
 } from "./state/design-workspace-cache";
-import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 // --- TYPES ---
@@ -269,42 +266,15 @@ function DesignFrameDocumentBuffer({
             finishReady();
             return;
           }
-          const reconcileSelectedNodes = async () => {
-            const latest = latestRef.current;
-            if (!latest.selected || latest.selectedNodeIds.length === 0) return;
-            const details = (
-              await Promise.all(
-                latest.selectedNodeIds
-                  .slice(0, DESIGN_SELECTION_NODE_LIMIT)
-                  .map((nodeId) =>
-                    connection.getNodeDetails(nodeId).catch(() => null),
-                  ),
-              )
-            ).filter((candidate) => candidate !== null);
-            if (
-              connectionRef.current !== connection ||
-              connection.sourceVersion !== latestRef.current.frame.sourceVersion
-            ) {
-              return;
-            }
-            const current = latestRef.current;
-            for (const candidate of details) {
-              useDesignRuntimeStore
-                .getState()
-                .publishNodeDetails(
-                  workspaceId,
-                  current.folder,
-                  current.frame.file,
-                  candidate,
-                  current.frame.sourceVersion,
-                );
-            }
-          };
           void connection
             .setTheme(latestRef.current.theme)
             .then(async (themedSnapshot) => {
               onSnapshot(themedSnapshot);
-              await reconcileSelectedNodes();
+              await settleDesignSelectionDetails(
+                workspaceId,
+                frame.file,
+                themedSnapshot.sourceVersion,
+              );
               finishReady();
             })
             .catch(() => {

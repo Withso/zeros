@@ -45,7 +45,16 @@ import { invalidateDesignManifestDiscovery } from "../design/metadata";
 
 import { lstatSync, type Dirent } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
+
 import chokidar, { type ChokidarOptions, type FSWatcher } from "chokidar";
 
 import { DESIGN_CANVAS_FILE } from "../design/directory-registry";
@@ -53,6 +62,7 @@ import { isDesignMetadataRepoPath } from "../design/metadata";
 
 const POLL_INTERVAL_MS = 1_000;
 const WORKTREE_DEBOUNCE_MS = 75;
+const POLLING_DIRECTORY_SETTLE_PASSES = 3;
 
 /** Per-worktree git-dir files that change on a terminal/agent git op. */
 const GIT_STATE_FILES = ["HEAD", "index", "logs/HEAD"] as const;
@@ -67,6 +77,12 @@ const COMMON_GIT_STATE_FILES = ["FETCH_HEAD", "packed-refs"] as const;
  *  the per-tick directory walk. */
 const COMMON_GIT_STATE_DIRS = ["refs/heads", "refs/remotes"] as const;
 const MAX_COMMON_GIT_STATE_PATHS = 4_096;
+const WORKTREE_IGNORED_PATHS = [
+  /(?:^|[\\/])\.git(?:[\\/]|$)/,
+  /(?:^|[\\/])\.zeros[\\/](?!(?:design-dir\.toml$|design(?:[\\/]|$)))[^\\/]+/,
+  /(?:^|[\\/])node_modules(?:[\\/]|$)/,
+  /\.zeros-tmp$/,
+];
 
 /**
  * Agent tools may place linked Git worktrees below the checkout they came
@@ -340,6 +356,19 @@ function makeChange(
   };
 }
 
+function isDesignRecognitionChange(
+  filePath: string,
+  directory: boolean,
+): boolean {
+  return (
+    directory ||
+    basename(filePath) === "design.toml" ||
+    basename(filePath) === DESIGN_CANVAS_FILE ||
+    /(?:^|[\\/])\.zeros[\\/](?:design-dir\.toml|design[\\/])/.test(filePath) ||
+    isDesignMetadataRepoPath(filePath)
+  );
+}
+
 /** Watch every known working tree plus its git-dir state. `targets` is
  * re-evaluated each poll so newly created/removed worktrees are subscribed
  * without an engine restart. */
@@ -378,10 +407,7 @@ export function startGitWatcher(
     // source, and Git status must invalidate for every tracked path. Dependency
     // and Zeros-owned metadata trees retain their established exclusions.
     ignored: [
-      /(?:^|[\\/])\.git(?:[\\/]|$)/,
-      /(?:^|[\\/])\.zeros[\\/](?!(?:design-dir\.toml$|design(?:[\\/]|$)))[^\\/]+/,
-      /(?:^|[\\/])node_modules(?:[\\/]|$)/,
-      /\.zeros-tmp$/,
+      ...WORKTREE_IGNORED_PATHS,
       (candidatePath: string) =>
         isInsideNestedToolWorktree(watchedRoot, candidatePath),
     ],
@@ -458,16 +484,194 @@ export function startGitWatcher(
       () => retiredWatchers.delete(retirement),
     );
   };
+  type SettlingDirectory = {
+    signature: FileSig | null | undefined;
+    children: Map<string, boolean>;
+    passesRemaining: number;
+  };
   type RootWatcher = {
     watcher: FSWatcher;
     target: GitWatchTarget;
     polling: boolean;
+    settlingDirectories: Map<string, SettlingDirectory>;
+    reconcileReady: boolean;
+    reconcileTimer: ReturnType<typeof setInterval> | null;
+    reconcileInFlight: Promise<void> | null;
   };
   // One Chokidar instance per semantic root is intentional. `unwatch(root)` on
   // a shared macOS FSEvents stream can keep following the inode after an atomic
   // rename. Closing the exact root's FSWatcher is the only authoritative
   // teardown before archive/delete recursively cleans the renamed checkout.
   const rootWatchers = new Map<string, RootWatcher>();
+  const stopReconcileTimer = (entry: RootWatcher): void => {
+    if (entry.reconcileTimer) clearInterval(entry.reconcileTimer);
+    entry.reconcileTimer = null;
+  };
+  const closeRootWatcher = async (entry: RootWatcher): Promise<void> => {
+    entry.reconcileReady = false;
+    stopReconcileTimer(entry);
+    if (entry.reconcileInFlight) await entry.reconcileInFlight;
+    entry.settlingDirectories.clear();
+    await entry.watcher.close();
+  };
+  const rootWatcherIsCurrent = (entry: RootWatcher) =>
+    !stopped &&
+    rootWatchers.get(rootKey(entry.target.root)) === entry &&
+    !isSuspended(entry.target.root);
+  const observedPollingPath = (entry: RootWatcher, filePath: string) =>
+    isPathInsideRoot(filePath, entry.target.root) &&
+    !WORKTREE_IGNORED_PATHS.some((pattern) => pattern.test(filePath)) &&
+    !isInsideNestedToolWorktree(entry.target.root, filePath) &&
+    !isInsideSuspendedRoot(filePath);
+  const ensureReconcileTimer = (entry: RootWatcher): void => {
+    if (
+      !entry.reconcileReady ||
+      entry.reconcileTimer ||
+      entry.settlingDirectories.size === 0 ||
+      !rootWatcherIsCurrent(entry)
+    )
+      return;
+    entry.reconcileTimer = setInterval(() => {
+      void reconcilePollingDirectories(entry);
+    }, options.worktreePollIntervalMs ?? 750);
+    entry.reconcileTimer.unref?.();
+  };
+  const settlePollingDirectory = (
+    entry: RootWatcher,
+    filePath: string,
+  ): void => {
+    const directory = resolve(filePath);
+    if (!rootWatcherIsCurrent(entry) || !observedPollingPath(entry, directory))
+      return;
+    const previous = entry.settlingDirectories.get(directory);
+    entry.settlingDirectories.set(directory, {
+      signature: previous?.signature,
+      children: previous?.children ?? new Map(),
+      passesRemaining: POLLING_DIRECTORY_SETTLE_PASSES,
+    });
+    ensureReconcileTimer(entry);
+  };
+  const removeSettlingDirectory = (
+    entry: RootWatcher,
+    filePath: string,
+  ): void => {
+    for (const directory of entry.settlingDirectories.keys()) {
+      if (isPathInsideRoot(directory, filePath))
+        entry.settlingDirectories.delete(directory);
+    }
+    if (entry.settlingDirectories.size === 0) stopReconcileTimer(entry);
+  };
+  const reconcilePollingDirectories = (
+    entry: RootWatcher,
+    initialPass = false,
+  ): Promise<void> => {
+    if (entry.reconcileInFlight) return entry.reconcileInFlight;
+    const reconcile = async () => {
+      if (!rootWatcherIsCurrent(entry)) return;
+      const directories = [...entry.settlingDirectories.keys()];
+      for (
+        let offset = 0;
+        offset < directories.length && rootWatcherIsCurrent(entry);
+        offset += 32
+      ) {
+        await Promise.all(
+          directories.slice(offset, offset + 32).map(async (directory) => {
+            const settling = entry.settlingDirectories.get(directory);
+            if (!settling) return;
+            if (!observedPollingPath(entry, directory)) {
+              entry.settlingDirectories.delete(directory);
+              return;
+            }
+            try {
+              const current = await signature(directory);
+              if (
+                !rootWatcherIsCurrent(entry) ||
+                entry.settlingDirectories.get(directory) !== settling ||
+                !observedPollingPath(entry, directory)
+              )
+                return;
+              if (
+                settling.signature !== undefined &&
+                sigEqual(settling.signature, current)
+              )
+                return;
+              let children: Dirent[];
+              try {
+                children = await readdir(directory, { withFileTypes: true });
+              } catch {
+                return;
+              }
+              if (
+                !rootWatcherIsCurrent(entry) ||
+                entry.settlingDirectories.get(directory) !== settling ||
+                !observedPollingPath(entry, directory)
+              )
+                return;
+              const previousChildren = new Map(
+                [...settling.children].filter(([name]) =>
+                  observedPollingPath(entry, join(directory, name)),
+                ),
+              );
+              const currentChildren = new Map(
+                children
+                  .filter((child) =>
+                    observedPollingPath(entry, join(directory, child.name)),
+                  )
+                  .map((child) => [child.name, child.isDirectory()]),
+              );
+              const changed = new Map<string, boolean>();
+              const additions: string[] = [];
+              for (const [name, childDirectory] of currentChildren) {
+                if (!previousChildren.has(name)) {
+                  const filePath = join(directory, name);
+                  changed.set(filePath, childDirectory);
+                  additions.push(filePath);
+                }
+              }
+              for (const [name, childDirectory] of previousChildren) {
+                if (!currentChildren.has(name)) {
+                  const filePath = join(directory, name);
+                  changed.set(filePath, childDirectory);
+                  if (childDirectory) removeSettlingDirectory(entry, filePath);
+                }
+              }
+              settling.signature = current;
+              settling.children = currentChildren;
+              for (const filePath of additions) {
+                if (changed.get(filePath))
+                  settlePollingDirectory(entry, filePath);
+              }
+              if (additions.length > 0) entry.watcher.add(additions);
+              for (const [filePath, directoryChanged] of changed) {
+                const target =
+                  changedTargetForPath(filePath, targetsByRoot) ?? entry.target;
+                scheduleWorktreeChange(
+                  target,
+                  isDesignRecognitionChange(filePath, directoryChanged),
+                );
+              }
+            } finally {
+              if (
+                !initialPass &&
+                entry.settlingDirectories.get(directory) === settling
+              ) {
+                settling.passesRemaining -= 1;
+                if (settling.passesRemaining === 0)
+                  entry.settlingDirectories.delete(directory);
+              }
+            }
+          }),
+        );
+      }
+    };
+    entry.reconcileInFlight = reconcile()
+      .catch(() => {})
+      .finally(() => {
+        entry.reconcileInFlight = null;
+        if (entry.settlingDirectories.size === 0) stopReconcileTimer(entry);
+      });
+    return entry.reconcileInFlight;
+  };
   const installRootWatcher = (
     target: GitWatchTarget,
     polling = options.usePolling ?? false,
@@ -478,17 +682,50 @@ export function startGitWatcher(
       target.root,
       watcherOptions(target.root, polling),
     );
-    const entry: RootWatcher = { watcher: native, target, polling };
+    const entry: RootWatcher = {
+      watcher: native,
+      target,
+      polling,
+      settlingDirectories: new Map(),
+      reconcileReady: false,
+      reconcileTimer: null,
+      reconcileInFlight: null,
+    };
     rootWatchers.set(key, entry);
     const becameReady = new Promise<void>((resolveRootReady) => {
       native.once("ready", () => {
-        resolveRootReady();
-        // A file can change after a native watcher fails but before its polling
-        // replacement finishes its initial scan. Force one exact refresh at
-        // the end of that handoff.
-        if (invalidateWhenReady && rootWatchers.get(key) === entry) {
-          scheduleWorktreeChange(entry.target);
-        }
+        void (async () => {
+          if (polling && rootWatcherIsCurrent(entry)) {
+            const watched = native.getWatched();
+            for (const [directory, children] of Object.entries(watched)) {
+              if (!observedPollingPath(entry, directory)) continue;
+              entry.settlingDirectories.set(directory, {
+                signature: undefined,
+                children: new Map(
+                  children
+                    .filter((name) =>
+                      observedPollingPath(entry, join(directory, name)),
+                    )
+                    .map((name) => [
+                      name,
+                      watched[join(directory, name)] !== undefined,
+                    ]),
+                ),
+                passesRemaining: POLLING_DIRECTORY_SETTLE_PASSES,
+              });
+            }
+            await reconcilePollingDirectories(entry, true);
+            entry.reconcileReady = true;
+            ensureReconcileTimer(entry);
+          }
+          resolveRootReady();
+          // A file can change after a native watcher fails but before its polling
+          // replacement finishes its initial scan. Force one exact refresh at
+          // the end of that handoff.
+          if (invalidateWhenReady && rootWatchers.get(key) === entry) {
+            scheduleWorktreeChange(entry.target);
+          }
+        })();
       });
     });
     native.on("all", (_event, filePath) => {
@@ -500,19 +737,28 @@ export function startGitWatcher(
       ) {
         return;
       }
+      if (entry.polling) {
+        const observedPath = resolve(filePath);
+        if (_event === "addDir") settlePollingDirectory(entry, observedPath);
+        else if (_event === "unlinkDir")
+          removeSettlingDirectory(entry, observedPath);
+        const parent = entry.settlingDirectories.get(dirname(observedPath));
+        if (observedPollingPath(entry, observedPath)) {
+          if (_event === "add" || _event === "addDir")
+            parent?.children.set(basename(observedPath), _event === "addDir");
+          else if (_event === "unlink" || _event === "unlinkDir")
+            parent?.children.delete(basename(observedPath));
+        }
+      }
       // An active root always has an owner. Falling back to its bound target
       // covers an OS path spelling that differs from path.resolve while still
       // retaining the exact workspace/coarse identity.
       scheduleWorktreeChange(
         changed ?? entry.target,
-        _event === "addDir" ||
-          _event === "unlinkDir" ||
-          basename(filePath) === "design.toml" ||
-          basename(filePath) === DESIGN_CANVAS_FILE ||
-          /(?:^|[\\/])\.zeros[\\/](?:design-dir\.toml|design[\\/])/.test(
-            filePath,
-          ) ||
-          isDesignMetadataRepoPath(filePath),
+        isDesignRecognitionChange(
+          filePath,
+          _event === "addDir" || _event === "unlinkDir",
+        ),
       );
     });
     native.on("error", (error) => {
@@ -530,7 +776,7 @@ export function startGitWatcher(
           `[git-watch] native watcher unavailable (${code}); falling back to polling`,
         );
         rootWatchers.delete(key);
-        trackRetiredWatcher(native.close().catch(() => {}));
+        trackRetiredWatcher(closeRootWatcher(entry).catch(() => {}));
         if (!isSuspended(entry.target.root)) {
           void installRootWatcher(entry.target, true, true);
         }
@@ -580,7 +826,7 @@ export function startGitWatcher(
       rootWatchers.delete(key);
       pendingWorktreeTargets.delete(entry.target.root);
       pendingRecognitionTargets.delete(entry.target.root);
-      trackRetiredWatcher(entry.watcher.close().catch(() => {}));
+      trackRetiredWatcher(closeRootWatcher(entry).catch(() => {}));
       // A Finder deletion may remove the target before Chokidar reports it.
       // Publish its last known identity so presence/list readers see the loss.
       // Managed lifecycle eviction already suspends the root and publishes its
@@ -762,7 +1008,7 @@ export function startGitWatcher(
         pendingRecognitionTargets.delete(entry.target.root);
       }
       try {
-        await Promise.all(matches.map(([, entry]) => entry.watcher.close()));
+        await Promise.all(matches.map(([, entry]) => closeRootWatcher(entry)));
       } catch (error) {
         suspendedRoots.delete(key);
         const currentTargets = readTargets(targets);
@@ -826,7 +1072,7 @@ export function startGitWatcher(
       const activeWatchers = Array.from(rootWatchers.values());
       rootWatchers.clear();
       await Promise.all(
-        activeWatchers.map((entry) => entry.watcher.close().catch(() => {})),
+        activeWatchers.map((entry) => closeRootWatcher(entry).catch(() => {})),
       );
       await Promise.all(retiredWatchers);
     },

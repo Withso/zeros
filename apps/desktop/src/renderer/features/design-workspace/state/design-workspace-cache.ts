@@ -56,7 +56,9 @@ import {
 } from "./design-runtime-store";
 import {
   captureDesignRuntimeScreenshot,
+  notifyDesignSelectionSnapshot,
   persistDesignRuntimeAuditSnapshot,
+  setDesignSelectionSnapshotReader,
 } from "./design-selection";
 import {
   queueDesignWorkspaceBootSnapshot,
@@ -460,6 +462,9 @@ export const designWorkspaceSnapshotCache =
     maxWeight: DESIGN_SNAPSHOT_CACHE_BYTES,
     weightOf: retainedMemory,
   });
+setDesignSelectionSnapshotReader(
+  (workspaceId) => designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
+);
 for (const [workspaceId, snapshot] of readDesignWorkspaceBootSnapshots()) {
   designWorkspaceSnapshotCache.setData(workspaceId, snapshot);
   // A boot preview paints synchronously but is never considered authoritative
@@ -916,6 +921,7 @@ export function stabilizeDesignWorkspaceSnapshot(
 
 /** Called after a cache publication, never from an unadmitted fetch result. */
 export function observeDesignDirectory(workspaceId: string, snapshot: DesignWorkspaceSnapshotWire): void {
+  notifyDesignSelectionSnapshot(workspaceId);
   if (!snapshot.directoryId) return;
   const ui = useDesignWorkspaceUiStore.getState();
   const previous = ui.byWorkspace[workspaceId]?.directoryId;
@@ -938,6 +944,7 @@ function publishDesignWorkspaceSnapshot(
   const retained = applyRetainedRuntimeAuditViolations(workspaceId, next);
   const stable = stabilizeDesignWorkspaceSnapshot(previous, retained);
   designWorkspaceSnapshotCache.setData(workspaceId, stable);
+  notifyDesignSelectionSnapshot(workspaceId);
   queueDesignWorkspaceBootSnapshot(workspaceId, stable);
   return stable;
 }

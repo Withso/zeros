@@ -1,8 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
+import fs, { existsSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
+import chokidar, { type FSWatcher } from "chokidar";
 import { serializeDesignRegistration } from "../../design/manifest";
 
 import {
@@ -32,14 +35,240 @@ async function waitFor(
   }
 }
 
+function controlledPollingTree(root: string, directoryCount: number) {
+  const directories = new Map<string, Map<string, boolean>>();
+  const rootChildren = new Map<string, boolean>();
+  directories.set(root, rootChildren);
+  for (let index = 1; index < directoryCount; index += 1) {
+    const name = `directory-${index}`;
+    rootChildren.set(name, true);
+    directories.set(join(root, name), new Map());
+  }
+  const watchedDirectories = new Map(
+    [...directories].map(([directory, children]) => [
+      directory,
+      new Map(children),
+    ]),
+  );
+  const directoryStats = vi.fn((_directory: string) => {});
+  const native = Object.assign(new EventEmitter(), {
+    add: vi.fn(),
+    close: vi.fn(async () => {}),
+    getWatched: vi.fn(() =>
+      Object.fromEntries(
+        [...watchedDirectories].map(([directory, children]) => [
+          directory,
+          [...children.keys()],
+        ]),
+      ),
+    ),
+  });
+  vi.spyOn(chokidar, "watch").mockReturnValue(native as unknown as FSWatcher);
+  const realStat = fs.promises.stat;
+  vi.spyOn(fs.promises, "stat").mockImplementation(((
+    filePath: fs.PathLike,
+    options?: fs.StatOptions,
+  ) => {
+    const directory = String(filePath);
+    const children = directories.get(directory);
+    if (!children) return realStat(filePath, options);
+    directoryStats(directory);
+    return Promise.resolve({
+      mtimeMs: children.size + 1,
+      ctimeMs: children.size + 1,
+      size: 0,
+    } as fs.Stats);
+  }) as typeof fs.promises.stat);
+  const realReaddir = fs.promises.readdir;
+  vi.spyOn(fs.promises, "readdir").mockImplementation(((
+    filePath: fs.PathLike,
+    options: { withFileTypes: true; encoding?: BufferEncoding | null },
+  ) => {
+    const children = directories.get(String(filePath));
+    if (!children) return realReaddir(filePath, options);
+    return Promise.resolve(
+      [...children].map(
+        ([name, directory]) =>
+          ({ name, isDirectory: () => directory }) as fs.Dirent,
+      ),
+    );
+  }) as typeof fs.promises.readdir);
+  syncBuiltinESMExports();
+  return { directories, watchedDirectories, directoryStats, native };
+}
 afterEach(async () => {
   await Promise.all(watchers.splice(0).map((watcher) => watcher.stop()));
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  syncBuiltinESMExports();
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true })),
   );
 });
 
 describe("startGitWatcher", () => {
+  it("does no per-tick reconciliation work after a stable 5000-directory tree settles", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-settled-poll-watch-"));
+    roots.push(root);
+    const tree = controlledPollingTree(root, 5_000);
+    vi.useFakeTimers();
+    const interval = 750;
+    const watcher = startGitWatcher(
+      () => [{ root, workspaceId: "settled-tree" }],
+      vi.fn(),
+      {
+        usePolling: true,
+        worktreePollIntervalMs: interval,
+        pollIntervalMs: 60_000,
+      },
+    );
+    watchers.push(watcher);
+    tree.native.emit("ready");
+    await watcher.ready;
+    expect(tree.directoryStats.mock.calls.length).toBe(5_000);
+    await vi.advanceTimersByTimeAsync(interval * 8);
+    const startup = {
+      directoryStats: tree.directoryStats.mock.calls.length,
+      watchedTreeCopies: tree.native.getWatched.mock.calls.length,
+    };
+    console.info("[git-watch 5000-directory startup cost]", startup);
+    expect(startup.directoryStats).toBe(20_000);
+    expect(startup.watchedTreeCopies).toBe(1);
+    tree.directoryStats.mockClear();
+    tree.native.getWatched.mockClear();
+    await vi.advanceTimersByTimeAsync(interval * 8);
+    const cost = {
+      directoryStats: tree.directoryStats.mock.calls.length,
+      watchedTreeCopies: tree.native.getWatched.mock.calls.length,
+      timers: vi.getTimerCount(),
+    };
+    console.info("[git-watch settled 5000-directory cost]", cost);
+    expect(cost.directoryStats).toBe(0);
+    expect(cost.watchedTreeCopies).toBe(0);
+    expect(cost.timers).toBe(1);
+  });
+
+  it("reconciles a later directory's first creation only inside its settling window", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-later-poll-watch-"));
+    roots.push(root);
+    const tree = controlledPollingTree(root, 1);
+    vi.useFakeTimers();
+    const interval = 750;
+    const changes: GitWatchChange[] = [];
+    const watcher = startGitWatcher(
+      () => [{ root, workspaceId: "later-directory" }],
+      (change) => changes.push(change),
+      {
+        usePolling: true,
+        worktreePollIntervalMs: interval,
+        pollIntervalMs: 60_000,
+        worktreeDebounceMs: 10,
+      },
+    );
+    watchers.push(watcher);
+    tree.native.emit("ready");
+    await watcher.ready;
+    await vi.advanceTimersByTimeAsync(interval * 8);
+    tree.directoryStats.mockClear();
+
+    const directory = join(root, "later-frame");
+    const children = new Map<string, boolean>();
+    tree.directories.get(root)!.set("later-frame", true);
+    tree.directories.set(directory, children);
+    tree.watchedDirectories.get(root)!.set("later-frame", true);
+    tree.watchedDirectories.set(directory, new Map());
+    tree.native.emit("all", "addDir", directory);
+    await vi.advanceTimersByTimeAsync(interval);
+    changes.length = 0;
+    const canvas = join(directory, "canvas.json");
+    children.set("canvas.json", false);
+    await vi.advanceTimersByTimeAsync(interval + 10);
+
+    expect(tree.native.add).toHaveBeenCalledWith([canvas]);
+    expect(changes).toContainEqual({
+      workspaceIds: ["later-directory"],
+      coarse: false,
+      worktreeChanged: true,
+    });
+    const cost = {
+      directoryStats: tree.directoryStats.mock.calls.length,
+      unrelatedStats: tree.directoryStats.mock.calls.filter(
+        ([filePath]) => filePath !== directory,
+      ).length,
+      watchedTreeCopies: tree.native.getWatched.mock.calls.length,
+    };
+    console.info("[git-watch later-directory window cost]", cost);
+    expect(cost.unrelatedStats).toBe(0);
+    expect(cost.watchedTreeCopies).toBe(1);
+    await vi.advanceTimersByTimeAsync(interval * 8);
+    tree.directoryStats.mockClear();
+    await vi.advanceTimersByTimeAsync(interval * 8);
+    expect(tree.directoryStats.mock.calls.length).toBe(0);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+  it.each(["directory", "canvas"] as const)(
+    "reconciles the first %s creation folded into the polling baseline after readiness",
+    async (kind) => {
+      const root = await mkdtemp(join(tmpdir(), "zeros-first-poll-watch-"));
+      roots.push(root);
+      const directory = join(root, "Design");
+      await mkdir(directory);
+      const realWatchFile = fs.watchFile;
+      let startPolling!: () => void;
+      vi.spyOn(fs, "watchFile").mockImplementation(((
+        filePath: fs.PathLike,
+        options: fs.WatchFileOptions & { bigint?: false },
+        listener: fs.StatsListener,
+      ) => {
+        if (String(filePath) !== directory)
+          return realWatchFile(filePath, options, listener);
+        startPolling = () => {
+          realWatchFile(filePath, options, listener);
+        };
+        return new EventEmitter() as ReturnType<typeof fs.watchFile>;
+      }) as typeof fs.watchFile);
+      syncBuiltinESMExports();
+      const changes: GitWatchChange[] = [];
+      const watcher = startGitWatcher(
+        () => [{ root, workspaceId: "first-poll" }],
+        (change) => changes.push(change),
+        {
+          usePolling: true,
+          worktreePollIntervalMs: 10,
+          pollIntervalMs: 60_000,
+          worktreeDebounceMs: 10,
+          awaitWriteFinishMs: 20,
+        },
+      );
+      watchers.push(watcher);
+      await watcher.ready;
+      await vi.waitFor(() => expect(startPolling).toBeTypeOf("function"));
+      const created = join(
+        directory,
+        kind === "directory" ? "new-frame" : "canvas.json",
+      );
+      if (kind === "directory") await mkdir(created);
+      else await writeFile(created, "first canvas\n");
+      startPolling();
+
+      await vi.waitFor(() =>
+        expect(changes).toContainEqual({
+          workspaceIds: ["first-poll"],
+          coarse: false,
+          worktreeChanged: true,
+          ...(kind === "directory" ? { designRecognitionChanged: true } : {}),
+        }),
+      );
+      changes.length = 0;
+      if (kind === "directory")
+        await writeFile(join(created, "child.html"), "first child\n");
+      else await writeFile(created, "updated canvas with a different size\n");
+      await vi.waitFor(() =>
+        expect(changes.some((change) => change.worktreeChanged)).toBe(true),
+      );
+    },
+  );
+
   it("announces a folder removed outside the app before retiring its watcher", async () => {
     const parent = await mkdtemp(join(tmpdir(), "zeros-missing-watch-"));
     roots.push(parent);
