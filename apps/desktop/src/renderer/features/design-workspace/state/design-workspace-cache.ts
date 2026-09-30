@@ -58,6 +58,7 @@ import {
 import {
   captureDesignRuntimeScreenshot,
   persistDesignRuntimeAuditSnapshot,
+  selectDesignNodes,
 } from "./design-selection";
 import {
   queueDesignWorkspaceBootSnapshot,
@@ -943,6 +944,39 @@ function publishDesignWorkspaceSnapshot(
   const stable = stabilizeDesignWorkspaceSnapshot(previous, retained);
   designWorkspaceSnapshotCache.setData(workspaceId, stable);
   queueDesignWorkspaceBootSnapshot(workspaceId, stable);
+  const selection =
+    useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
+  const selectedFrame = stable.frames.find(
+    (frame) => frame.file === selection?.selectedFrame,
+  );
+  const runtimeWorkspace =
+    useDesignRuntimeStore.getState().byWorkspace[workspaceId];
+  const runtimeFrame = selectedFrame
+    ? runtimeWorkspace?.frames[selectedFrame.file]
+    : undefined;
+  if (
+    selectedFrame &&
+    runtimeWorkspace &&
+    runtimeFrame?.sourceVersion === selectedFrame.sourceVersion &&
+    previous?.frames.find((frame) => frame.file === selectedFrame.file)
+      ?.sourceVersion !== selectedFrame.sourceVersion &&
+    designFrameRuntime(workspaceId, selectedFrame.file)?.isActive?.() !==
+      false &&
+    selection?.selectedNodeIds.some(
+      (nodeId) =>
+        runtimeFrame.detailsByNode[nodeId]?.sourceVersion !==
+        selectedFrame.sourceVersion,
+    )
+  ) {
+    void selectDesignNodes({
+      workspaceId,
+      folder: runtimeWorkspace.folder,
+      frame: selectedFrame,
+      nodeIds: selection.selectedNodeIds,
+      primaryNodeId: selection.selectedNodeId ?? undefined,
+      reveal: false,
+    }).catch(() => {});
+  }
   return stable;
 }
 
