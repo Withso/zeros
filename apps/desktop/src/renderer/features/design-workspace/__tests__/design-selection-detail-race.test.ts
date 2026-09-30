@@ -55,9 +55,16 @@ import {
 } from "../state/design-runtime-store";
 import {
   designWorkspaceSnapshotCache,
+  primeDesignWorkspaceSnapshot,
   resetDesignWorkspaceCacheForTests,
   updateDesignNodeStylesCached,
 } from "../state/design-workspace-cache";
+import {
+  designFrameDisclosure,
+  resetDesignLayerDisclosureForTests,
+  toggleDesignLayerExpanded,
+  useDesignLayerDisclosureStore,
+} from "../state/design-layer-disclosure";
 import {
   designWorkspaceView,
   resetDesignWorkspaceUiForTests,
@@ -186,7 +193,226 @@ describe("selected-detail convergence after hot adoption", () => {
     resetDesignWorkspaceCacheForTests();
     resetDesignRuntimeStoreForTests();
     resetDesignWorkspaceUiForTests();
+    resetDesignLayerDisclosureForTests();
     vi.clearAllMocks();
+  });
+
+  it("keeps manual Layers folds and scroll demand unchanged when promotion retries a pending selection", async () => {
+    const oldRead = deferred<DesignRuntimeNodeDetails>();
+    const initialSnapshot = runtimeSnapshot(INITIAL_VERSION);
+    const tree = [
+      {
+        ...initialSnapshot.tree[0]!,
+        children: initialSnapshot.tree.slice(1),
+      },
+    ];
+    const runtime = {
+      sourceVersion: INITIAL_VERSION,
+      isActive: () => true,
+      getNodeDetails: vi
+        .fn()
+        .mockImplementationOnce(() => oldRead.promise)
+        .mockImplementation(async (nodeId: string) =>
+          nodeDetails(nodeId, runtime.sourceVersion),
+        ),
+    };
+    mocks.designFrameRuntime.mockReturnValue(runtime);
+    designWorkspaceSnapshotCache.setData(
+      WORKSPACE,
+      workspaceSnapshot(INITIAL_VERSION),
+    );
+    useDesignRuntimeStore
+      .getState()
+      .publishSnapshot(
+        WORKSPACE,
+        FOLDER,
+        FRAME.file,
+        { ...initialSnapshot, tree },
+        INITIAL_VERSION,
+      );
+    const selecting = selectDesignNode({
+      workspaceId: WORKSPACE,
+      folder: FOLDER,
+      frame: FRAME,
+      nodeId: "home-hero",
+    });
+    expect(
+      designFrameDisclosure(WORKSPACE, FRAME.file).expandedNodeIds,
+    ).toContain("parent");
+    toggleDesignLayerExpanded(WORKSPACE, FRAME.file, "parent");
+    const folded = designFrameDisclosure(WORKSPACE, FRAME.file);
+    const reveal =
+      useDesignLayerDisclosureStore.getState().revealByWorkspace[WORKSPACE];
+
+    runtime.sourceVersion = NEXT_VERSION;
+    primeDesignWorkspaceSnapshot(WORKSPACE, workspaceSnapshot(NEXT_VERSION));
+    await Promise.resolve();
+    useDesignRuntimeStore
+      .getState()
+      .publishSnapshot(
+        WORKSPACE,
+        FOLDER,
+        FRAME.file,
+        { ...runtimeSnapshot(NEXT_VERSION), tree },
+        NEXT_VERSION,
+      );
+    await vi.waitFor(() => {
+      expect(
+        designRuntimeFrameState(WORKSPACE, FRAME.file)?.detailsByNode[
+          "home-hero"
+        ]?.sourceVersion,
+      ).toBe(NEXT_VERSION);
+    });
+
+    expect(designFrameDisclosure(WORKSPACE, FRAME.file)).toBe(folded);
+    expect(
+      useDesignLayerDisclosureStore.getState().revealByWorkspace[WORKSPACE],
+    ).toBe(reveal);
+    expect(runtime.getNodeDetails).toHaveBeenCalledTimes(2);
+    expect(inspectorMarkup()).toContain("data-selected-style-editor");
+    oldRead.resolve(nodeDetails("home-hero", INITIAL_VERSION));
+    expect(await selecting).toBeNull();
+    expect(
+      designRuntimeFrameState(WORKSPACE, FRAME.file)?.detailsByNode["home-hero"]
+        ?.sourceVersion,
+    ).toBe(NEXT_VERSION);
+  });
+
+  it("seeds one uncached restored group demand from repeated snapshot publications without revealing Layers", async () => {
+    const headingRead = deferred<DesignRuntimeNodeDetails>();
+    const heroRead = deferred<DesignRuntimeNodeDetails>();
+    const getNodeDetails = vi.fn((nodeId: string) =>
+      nodeId === "heading" ? headingRead.promise : heroRead.promise,
+    );
+    mocks.designFrameRuntime.mockReturnValue({
+      sourceVersion: NEXT_VERSION,
+      isActive: () => true,
+      getNodeDetails,
+    });
+    designWorkspaceSnapshotCache.setData(
+      WORKSPACE,
+      workspaceSnapshot(INITIAL_VERSION),
+    );
+    useDesignRuntimeStore
+      .getState()
+      .publishSnapshot(
+        WORKSPACE,
+        FOLDER,
+        FRAME.file,
+        runtimeSnapshot(NEXT_VERSION),
+        NEXT_VERSION,
+      );
+    useDesignWorkspaceUiStore
+      .getState()
+      .setSelection(WORKSPACE, FRAME.file, "heading", ["heading", "home-hero"]);
+    const folded = designFrameDisclosure(WORKSPACE, FRAME.file);
+    primeDesignWorkspaceSnapshot(WORKSPACE, workspaceSnapshot(NEXT_VERSION));
+    primeDesignWorkspaceSnapshot(WORKSPACE, workspaceSnapshot(NEXT_VERSION));
+    expect(getNodeDetails.mock.calls.map(([nodeId]) => nodeId)).toEqual([
+      "heading",
+      "home-hero",
+    ]);
+    headingRead.resolve(nodeDetails("heading", NEXT_VERSION));
+    heroRead.resolve(nodeDetails("home-hero", NEXT_VERSION));
+    await settleDesignSelectionDetails(WORKSPACE, FRAME.file, NEXT_VERSION);
+
+    expect(
+      designRuntimeFrameState(WORKSPACE, FRAME.file)?.detailsByNode.heading,
+    ).toEqual(nodeDetails("heading", NEXT_VERSION));
+    expect(
+      designRuntimeFrameState(WORKSPACE, FRAME.file)?.detailsByNode[
+        "home-hero"
+      ],
+    ).toEqual(nodeDetails("home-hero", NEXT_VERSION));
+    expect(getNodeDetails).toHaveBeenCalledTimes(2);
+    expect(mocks.designSetSelection).toHaveBeenCalledTimes(1);
+    expect(designFrameDisclosure(WORKSPACE, FRAME.file)).toBe(folded);
+    expect(
+      useDesignLayerDisclosureStore.getState().revealByWorkspace[WORKSPACE],
+    ).toBeUndefined();
+    expect(inspectorMarkup()).toContain("data-selected-style-editor");
+  });
+
+  it("retains restored selection demand when publication precedes readiness without awaiting outgoing data", async () => {
+    const outgoingRead = deferred<DesignRuntimeNodeDetails>();
+    const incomingRead = deferred<DesignRuntimeNodeDetails>();
+    const incomingStarted = deferred<void>();
+    const runtime = {
+      sourceVersion: INITIAL_VERSION,
+      isActive: () => true,
+      getNodeDetails: vi
+        .fn()
+        .mockImplementationOnce(() => outgoingRead.promise)
+        .mockImplementation(() => {
+          incomingStarted.resolve();
+          return incomingRead.promise;
+        }),
+    };
+    mocks.designFrameRuntime.mockReturnValue(runtime);
+    designWorkspaceSnapshotCache.setData(
+      WORKSPACE,
+      workspaceSnapshot(INITIAL_VERSION),
+    );
+    useDesignRuntimeStore
+      .getState()
+      .publishSnapshot(
+        WORKSPACE,
+        FOLDER,
+        FRAME.file,
+        runtimeSnapshot(INITIAL_VERSION),
+        INITIAL_VERSION,
+      );
+    useDesignWorkspaceUiStore
+      .getState()
+      .setSelection(WORKSPACE, FRAME.file, "home-hero");
+    const publishedVersions: string[] = [];
+    subscriptions.push(
+      useDesignRuntimeStore.subscribe((state) => {
+        const details =
+          state.byWorkspace[WORKSPACE]?.frames[FRAME.file]?.detailsByNode[
+            "home-hero"
+          ];
+        if (details) publishedVersions.push(details.sourceVersion);
+      }),
+    );
+    primeDesignWorkspaceSnapshot(WORKSPACE, workspaceSnapshot(NEXT_VERSION));
+    const settling = settleDesignSelectionDetails(
+      WORKSPACE,
+      FRAME.file,
+      NEXT_VERSION,
+    );
+    expect(runtime.getNodeDetails).toHaveBeenCalledTimes(1);
+    expect(inspectorMarkup()).not.toContain("data-selected-style-editor");
+
+    runtime.sourceVersion = NEXT_VERSION;
+    useDesignRuntimeStore
+      .getState()
+      .publishSnapshot(
+        WORKSPACE,
+        FOLDER,
+        FRAME.file,
+        runtimeSnapshot(NEXT_VERSION),
+        NEXT_VERSION,
+      );
+    await incomingStarted.promise;
+    incomingRead.resolve(nodeDetails("home-hero", NEXT_VERSION));
+    await settling;
+    expect(inspectorMarkup()).toContain("data-selected-style-editor");
+    outgoingRead.resolve(nodeDetails("home-hero", INITIAL_VERSION));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(
+      designRuntimeFrameState(WORKSPACE, FRAME.file)?.detailsByNode[
+        "home-hero"
+      ],
+    ).toEqual(nodeDetails("home-hero", NEXT_VERSION));
+    expect(publishedVersions).not.toContain(INITIAL_VERSION);
+    expect(runtime.getNodeDetails).toHaveBeenCalledTimes(2);
+    expect(mocks.designSetSelection).toHaveBeenCalledTimes(1);
+    expect(
+      useDesignLayerDisclosureStore.getState().revealByWorkspace[WORKSPACE],
+    ).toBeUndefined();
   });
 
   it.each(["before promotion", "after promotion", "second generation"])(

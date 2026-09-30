@@ -71,33 +71,6 @@ export function designLayerVirtualWindow(input: {
   return { start, end: Math.max(start, end) };
 }
 
-/** Reveal a keyboard target without accidentally collapsing an already-correct
- * window to the height of one row. The caller supplies the measured viewport;
- * targets that are already mounted preserve the current window verbatim. */
-export function designLayerRevealWindow(input: {
-  count: number;
-  index: number;
-  viewportHeight: number;
-  current: DesignLayerWindow;
-  rowHeight?: number;
-  overscan?: number;
-}): DesignLayerWindow {
-  const count = Math.max(0, Math.floor(input.count));
-  if (count <= 400) return { start: 0, end: count };
-  const index = Math.min(count - 1, Math.max(0, Math.floor(input.index)));
-  if (index >= input.current.start && index < input.current.end) {
-    return input.current;
-  }
-  const rowHeight = Math.max(1, input.rowHeight ?? 28);
-  return designLayerVirtualWindow({
-    count,
-    visibleTop: index * rowHeight,
-    viewportHeight: input.viewportHeight,
-    rowHeight,
-    overscan: input.overscan,
-  });
-}
-
 /** Keep the composite tree's sole tab stop on a mounted row. Rows are addressed
  * by panel key, so a frame row can hold the tab stop just like a layer row. */
 export function designLayerRovingTabStop(
@@ -395,56 +368,91 @@ export function collectDesignLayerParentIds(
   return ids;
 }
 
-/** Root-to-parent identity path for synchronously revealing canvas selection. */
-export function designLayerAncestorIds(
-  nodes: readonly DesignRuntimeTreeNode[],
-  nodeId: string | null | undefined,
-): string[] {
-  if (!nodeId) return [];
-  const visit = (
-    node: DesignRuntimeTreeNode,
-    ancestors: readonly string[],
-  ): string[] | null => {
-    if (node.oid === nodeId) return [...ancestors];
-    const nextAncestors = [...ancestors, node.oid];
-    for (const child of node.children) {
-      const found = visit(child, nextAncestors);
-      if (found) return found;
-    }
-    return null;
-  };
-  for (const node of nodes) {
-    const found = visit(node, []);
-    if (found) return found;
-  }
-  return [];
-}
-
-/** Union of the root-to-parent paths of several nodes in one walk, in document
- * order. Group selections reveal their Layers paths from a single tree pass
- * instead of one pass per member. */
-export function designLayerAncestorIdsFor(
+/** The containers a reveal must open — the union of the requested nodes'
+ * root-to-parent paths, in document order — and which requested ids the tree
+ * holds. An id absent from `found` has not reached this tree yet (a node
+ * authored a moment ago, or a frame whose runtime has not reported), so its
+ * path can only open once a later tree contains it. Group selections reveal
+ * every member's path from this single walk. Per-node paths let callers detect
+ * reparenting independently of sibling order or the union of ancestors. */
+export function designLayerRevealPaths(
   nodes: readonly DesignRuntimeTreeNode[],
   nodeIds: readonly string[],
-): string[] {
+): {
+  ancestorIds: string[];
+  found: ReadonlySet<string>;
+  pathsByNode: ReadonlyMap<string, readonly string[]>;
+} {
   const targets = new Set(nodeIds);
-  if (targets.size === 0) return [];
-  const ancestors: string[] = [];
+  const found = new Set<string>();
+  const ancestorIds: string[] = [];
+  const pathsByNode = new Map<string, readonly string[]>();
+  if (targets.size === 0) return { ancestorIds, found, pathsByNode };
   const seen = new Set<string>();
-  const visit = (node: DesignRuntimeTreeNode, path: readonly string[]) => {
-    if (targets.has(node.oid)) {
+  // One shared path stack, and the walk stops once every target is found:
+  // this runs whenever a selected frame's tree refreshes.
+  const path: string[] = [];
+  const visit = (node: DesignRuntimeTreeNode): boolean => {
+    if (targets.has(node.oid) && !found.has(node.oid)) {
+      found.add(node.oid);
+      pathsByNode.set(node.oid, [...path]);
       for (const ancestorId of path) {
         if (seen.has(ancestorId)) continue;
         seen.add(ancestorId);
-        ancestors.push(ancestorId);
+        ancestorIds.push(ancestorId);
       }
+      if (found.size === targets.size) return true;
     }
-    if (node.children.length === 0) return;
-    const nextPath = [...path, node.oid];
-    for (const child of node.children) visit(child, nextPath);
+    if (node.children.length === 0) return false;
+    path.push(node.oid);
+    for (const child of node.children) {
+      if (visit(child)) return true;
+    }
+    path.pop();
+    return false;
   };
-  for (const node of nodes) visit(node, []);
-  return ancestors;
+  for (const node of nodes) {
+    if (visit(node)) break;
+  }
+  return { ancestorIds, found, pathsByNode };
+}
+
+/** Where a Layers viewport must scroll to bring one row into view for a
+ * selection made elsewhere (the canvas, a shortcut, a new layer). A row already
+ * in full view never moves the list; one peeking at an edge scrolls the least
+ * distance; one out of sight lands centered so its context reads around it.
+ * Null means "leave the scroll position alone". */
+export function designLayerRevealScrollTop(input: {
+  rowTop: number;
+  rowHeight: number;
+  scrollTop: number;
+  viewportHeight: number;
+  scrollHeight: number;
+  /** Keyboard travel moves the least distance even from out of sight. */
+  mode?: "reveal" | "nearest";
+}): number | null {
+  const { rowTop, rowHeight, scrollTop, viewportHeight } = input;
+  if (
+    !Number.isFinite(rowTop) ||
+    !Number.isFinite(scrollTop) ||
+    viewportHeight <= 0
+  ) {
+    return null;
+  }
+  const rowBottom = rowTop + rowHeight;
+  const viewportBottom = scrollTop + viewportHeight;
+  if (rowTop >= scrollTop && rowBottom <= viewportBottom) return null;
+  const peeking =
+    input.mode === "nearest" ||
+    (rowBottom > scrollTop && rowTop < viewportBottom);
+  const target = peeking
+    ? rowTop < scrollTop
+      ? rowTop
+      : rowBottom - viewportHeight
+    : rowTop - (viewportHeight - rowHeight) / 2;
+  const maximum = Math.max(0, input.scrollHeight - viewportHeight);
+  const next = Math.round(Math.min(maximum, Math.max(0, target)));
+  return next === Math.round(scrollTop) ? null : next;
 }
 
 function designLayerLocation(

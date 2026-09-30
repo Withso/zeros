@@ -64,9 +64,9 @@
 // which agent-smoke.mjs reaches via ZEROS_SECRETS_FILE) holds safeStorage-
 // ENCRYPTED values that only Electron can decrypt — see resolveCursorKey().
 //
-// A network failure yields a NetworkError, which is NOT a runtime error, so an
-// offline runner degrades to a pass rather than a false red — deliberately, so
-// this gate never becomes the one someone wraps in continue-on-error.
+// Without a real key, a loopback backend rejects the bogus probe keys. This
+// exercises the SDK's store and HTTP paths without depending on remote auth or
+// network retries. With a real key, catalog qualification remains a live check.
 //
 // Dev:      `node scripts/cursor-host-smoke.mjs`            (source/dev runtime)
 // Shipped:  `node scripts/cursor-host-smoke.mjs --electron` (packaged runtime)
@@ -79,6 +79,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -211,6 +212,29 @@ if (requireModels && !cursorKey) {
 const env = { ...process.env };
 if (asNode) env.ELECTRON_RUN_AS_NODE = "1";
 
+let smokeBackend = null;
+if (!cursorKey) {
+  smokeBackend = createServer((_request, response) => {
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        code: "unauthenticated",
+        error: "invalid smoke key",
+        message: "invalid smoke key",
+      }),
+    );
+  });
+  await new Promise((resolve, reject) => {
+    smokeBackend.once("error", reject);
+    smokeBackend.listen(0, "127.0.0.1", resolve);
+  });
+  env.CURSOR_BACKEND_URL = `http://127.0.0.1:${smokeBackend.address().port}`;
+  env.NO_PROXY = [env.NO_PROXY || env.no_proxy, "127.0.0.1", "localhost"]
+    .filter(Boolean)
+    .join(",");
+  env.no_proxy = env.NO_PROXY;
+}
+
 console.log(`▸ host:    ${script}`);
 console.log(`▸ runtime: ${cmd}${asNode ? " (ELECTRON_RUN_AS_NODE)" : ""}`);
 console.log(
@@ -241,6 +265,8 @@ function errText(m) {
 
 function finish(passed, reason) {
   clearTimeout(timer);
+  smokeBackend?.closeAllConnections();
+  smokeBackend?.close();
   try {
     child.kill("SIGTERM");
   } catch {}

@@ -72,6 +72,8 @@ interface DesignThemeEditorProps {
   tokens: readonly DesignTokenWire[];
   tokenSourceVersion: string | null;
   activeTheme: string | null;
+  /** An inactive (retained, hidden) Design surface keeps its window mounted,
+   * with drafts and position, but hidden and inert over the other tab. */
   active: boolean;
   open: boolean;
   returnFocusRef?: React.RefObject<HTMLButtonElement | null>;
@@ -685,11 +687,14 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
           ref={panelRef}
           data-design-theme-editor=""
           aria-modal="false"
+          {...(!active ? { inert: "", "aria-hidden": true } : {})}
           className="zd-theme-editor"
           style={{
             left: position.x,
             top: position.y,
-            visibility: positioned ? "visible" : "hidden",
+            // Portaled outside the Design surface, so its inertness does not
+            // reach here: an inactive surface hides the window itself.
+            visibility: positioned && active ? "visible" : "hidden",
           }}
           onPointerDown={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.stopPropagation()}

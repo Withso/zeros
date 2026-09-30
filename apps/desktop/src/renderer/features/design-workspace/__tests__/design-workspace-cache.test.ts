@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesignTransaction } from "@zeros/design-core";
+import {
+  EMPTY_DESIGN_FRAME_DISCLOSURE,
+  designFrameDisclosure,
+  requestDesignLayerReveal,
+  settleDesignLayerReveal,
+  toggleDesignFrameTreeExpanded,
+  useDesignLayerDisclosureStore,
+} from "../state/design-layer-disclosure";
 
 const platformMocks = vi.hoisted(() => ({
   applyTransaction: vi.fn(),
@@ -8,6 +16,7 @@ const platformMocks = vi.hoisted(() => ({
   history: vi.fn(),
   readSnapshot: vi.fn(),
   setRuntimeAudit: vi.fn(),
+  setSelection: vi.fn(),
   updateToken: vi.fn(),
   updateCanvas: vi.fn(),
   updateStyles: vi.fn(),
@@ -33,6 +42,7 @@ vi.mock("../../../platform/git", async (importOriginal) => ({
   designHistory: platformMocks.history,
   designSnapshot: platformMocks.readSnapshot,
   designSetRuntimeAudit: platformMocks.setRuntimeAudit,
+  designSetSelection: platformMocks.setSelection,
   designUpdateToken: platformMocks.updateToken,
   designUpdateCanvas: platformMocks.updateCanvas,
   designUpdateStyles: platformMocks.updateStyles,
@@ -95,6 +105,11 @@ import {
   publishDesignLivePreviewStyles,
   resetDesignLivePreviewForTests,
 } from "../state/design-live-preview";
+import {
+  resetDesignWorkspaceUiForTests,
+  useDesignWorkspaceUiStore,
+} from "../state/design-workspace-ui";
+import { resetDesignSelectionWorkflowsForTests } from "../state/design-selection";
 
 function snapshot(
   frames: Array<{ file: string; x?: number }> = [{ file: "home.html" }],
@@ -153,6 +168,7 @@ describe("design workspace cache", () => {
     platformMocks.history.mockReset();
     platformMocks.readSnapshot.mockReset();
     platformMocks.setRuntimeAudit.mockReset();
+    platformMocks.setSelection.mockReset().mockResolvedValue(undefined);
     platformMocks.updateToken.mockReset();
     platformMocks.updateCanvas.mockReset();
     platformMocks.updateStyles.mockReset();
@@ -162,6 +178,8 @@ describe("design workspace cache", () => {
     resetDesignWorkspaceCacheForTests();
     resetDesignRuntimeStoreForTests();
     resetDesignLivePreviewForTests();
+    resetDesignWorkspaceUiForTests();
+    resetDesignSelectionWorkflowsForTests();
   });
 
   afterEach(() => {
@@ -737,6 +755,58 @@ describe("design workspace cache", () => {
     ).toBe("b".repeat(24));
   });
 
+  it("starts a replacement directory's Layers folded, without the old directory's pending reveal", () => {
+    const workspaceId = "ws_replaced_directory_layers";
+    const current = { ...snapshot(), directoryId: "design_original" };
+    observeDesignDirectory(workspaceId, current);
+    toggleDesignFrameTreeExpanded(workspaceId, "same.html");
+    requestDesignLayerReveal({
+      workspaceId,
+      frame: "same.html",
+      nodeIds: ["same-child"],
+      tree: undefined,
+    });
+    // A rename keeps the stable ID, so nothing is forgotten.
+    observeDesignDirectory(workspaceId, current);
+    expect(designFrameDisclosure(workspaceId, "same.html").treeExpanded).toBe(
+      true,
+    );
+
+    observeDesignDirectory(workspaceId, {
+      ...current,
+      directoryId: "design_replacement",
+    });
+    expect(designFrameDisclosure(workspaceId, "same.html")).toBe(
+      EMPTY_DESIGN_FRAME_DISCLOSURE,
+    );
+    expect(
+      useDesignLayerDisclosureStore.getState().revealByWorkspace[workspaceId],
+    ).toBeUndefined();
+    // A colliding tree in the new directory opens nothing on its own.
+    settleDesignLayerReveal(workspaceId, "same.html", [
+      {
+        oid: "new-parent",
+        tag: "div",
+        name: "new-parent",
+        text: null,
+        visible: true,
+        children: [
+          {
+            oid: "same-child",
+            tag: "div",
+            name: "same-child",
+            text: null,
+            visible: true,
+            children: [],
+          },
+        ],
+      },
+    ]);
+    expect(designFrameDisclosure(workspaceId, "same.html")).toBe(
+      EMPTY_DESIGN_FRAME_DISCLOSURE,
+    );
+  });
+
   it("does not retarget a queued edit when a different directory has identical frame source", async () => {
     const workspaceId = "ws_replaced_directory_queue";
     const current = { ...snapshot(), directoryId: "design_original" };
@@ -1270,6 +1340,178 @@ describe("design workspace cache", () => {
         .parent,
     ).toBe(refreshedParent);
   });
+
+  it.each([
+    { phase: "commit", selectedFrame: "home.html", active: true },
+    { phase: "readback", selectedFrame: "home.html", active: true },
+    { phase: "readback", selectedFrame: "pricing.html", active: true },
+    { phase: "readback", selectedFrame: "home.html", active: false },
+  ])(
+    "retains an uncached $selectedFrame selection during $phase adoption (active: $active)",
+    async ({ phase, selectedFrame, active }) => {
+      const workspaceId = "ws_selection_adoption";
+      const previous = snapshot([
+        { file: "home.html" },
+        { file: "pricing.html" },
+      ]);
+      const previousFrame = previous.frames[0]!;
+      const nextSourceVersion = "f".repeat(24);
+      const next = {
+        ...previous,
+        frames: previous.frames.map((frame) =>
+          frame.file === previousFrame.file
+            ? { ...frame, sourceVersion: nextSourceVersion, modifiedAt: 20 }
+            : frame,
+        ),
+      };
+      const nodeDetails = {
+        sourceVersion: nextSourceVersion,
+        oid: "hero",
+        tag: "div",
+        name: "Hero",
+        text: null,
+        selector: '[data-oid="hero"]',
+        visible: true,
+        breadcrumb: ["div · Hero"],
+        rect: { x: 0, y: 0, width: 300, height: 240 },
+        styles: { paddingRight: "24px" },
+      };
+      const runtimeSnapshot = {
+        sourceVersion: nextSourceVersion,
+        revision: 2,
+        tree: [],
+        warnings: [],
+        frame: { ...nodeDetails, oid: "" },
+        viewport: { width: 1440, height: 900, scrollX: 0, scrollY: 0 },
+      };
+      const parentDetails = {
+        ...nodeDetails,
+        oid: "parent",
+        sourceVersion: previousFrame.sourceVersion,
+        childrenLayout: {
+          count: 1,
+          nodeIds: ["hero"],
+          x: "start" as const,
+          y: "start" as const,
+          truncated: false,
+        },
+      };
+      const headingDetails = {
+        ...nodeDetails,
+        oid: "heading",
+        tag: "h1",
+        name: "Heading",
+        selector: '[data-oid="heading"]',
+        breadcrumb: ["h1 · Heading"],
+      };
+      const copyDetails = {
+        ...nodeDetails,
+        oid: "copy",
+        tag: "p",
+        name: "Copy",
+        selector: '[data-oid="copy"]',
+        breadcrumb: ["p · Copy"],
+      };
+      const chooseLatestSelection = () =>
+        useDesignWorkspaceUiStore
+          .getState()
+          .setSelection(workspaceId, selectedFrame, "heading", [
+            "heading",
+            "copy",
+          ]);
+      useDesignWorkspaceUiStore
+        .getState()
+        .setSelection(workspaceId, previousFrame.file, "hero");
+      designWorkspaceSnapshotCache.setData(workspaceId, previous);
+      useDesignRuntimeStore.getState().publishSnapshot(
+        workspaceId,
+        "/design/a",
+        previousFrame.file,
+        {
+          ...runtimeSnapshot,
+          sourceVersion: previousFrame.sourceVersion,
+          frame: {
+            ...runtimeSnapshot.frame,
+            sourceVersion: previousFrame.sourceVersion,
+          },
+        },
+        previousFrame.sourceVersion,
+      );
+      useDesignRuntimeStore
+        .getState()
+        .publishNodeDetails(
+          workspaceId,
+          "/design/a",
+          previousFrame.file,
+          parentDetails,
+          previousFrame.sourceVersion,
+        );
+      const getNodeDetails = vi.fn(async (nodeId: string) => {
+        if (nodeId === "parent") {
+          if (phase === "readback") chooseLatestSelection();
+          return { ...parentDetails, sourceVersion: nextSourceVersion };
+        }
+        return nodeId === "heading" ? headingDetails : copyDetails;
+      });
+      const runtime = {
+        sourceVersion: previousFrame.sourceVersion,
+        commitStyles: runtimeMocks.commitStyles,
+        getNodeDetails,
+        isActive: () => active,
+      };
+      runtimeMocks.designFrameRuntime.mockReturnValue(runtime);
+      runtimeMocks.commitStyles.mockImplementation(async () => {
+        runtime.sourceVersion = nextSourceVersion;
+        if (phase === "commit") chooseLatestSelection();
+        return {
+          sourceVersion: nextSourceVersion,
+          treeUnchanged: true,
+          snapshot: runtimeSnapshot,
+          details: [nodeDetails],
+        };
+      });
+      platformMocks.updateStyles.mockResolvedValue({
+        mutation: { changed: true, frame: next.frames[0], lint: next.lint },
+        snapshot: next,
+      });
+
+      await updateDesignNodeStylesCached(workspaceId, {
+        frame: previousFrame.file,
+        nodeId: "hero",
+        sourceVersion: previousFrame.sourceVersion,
+        styles: { "padding-right": "24px" },
+      });
+
+      expect(
+        useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId],
+      ).toMatchObject({
+        selectedFrame,
+        selectedNodeId: "heading",
+        selectedNodeIds: ["heading", "copy"],
+      });
+      if (selectedFrame === previousFrame.file && active) {
+        await vi.waitFor(() => {
+          expect(
+            designRuntimeFrameState(workspaceId, previousFrame.file)
+              ?.detailsByNode.heading,
+          ).toEqual(headingDetails);
+          expect(
+            designRuntimeFrameState(workspaceId, previousFrame.file)
+              ?.detailsByNode.copy,
+          ).toEqual(copyDetails);
+        });
+        expect(getNodeDetails.mock.calls.map(([nodeId]) => nodeId)).toEqual([
+          "parent",
+          "heading",
+          "copy",
+        ]);
+        expect(platformMocks.setSelection).toHaveBeenCalledTimes(1);
+      } else {
+        expect(getNodeDetails).toHaveBeenCalledExactlyOnceWith("parent");
+        expect(platformMocks.setSelection).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it("keeps motion keyframe transactions on the mounted runtime generation", async () => {
     const workspaceId = "ws_motion";

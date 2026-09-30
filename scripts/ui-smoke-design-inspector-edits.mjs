@@ -6,7 +6,9 @@ async function openHeading(page) {
     { waitUntil: "networkidle" },
   );
   await page
-    .locator('#design-layers-panel [data-design-layer-id="home-heading"]')
+    .locator(
+      '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
+    )
     .click();
 }
 
@@ -151,7 +153,7 @@ export async function runDesignPaintRemovalSmoke({ page, check }) {
     });
   });
   await page
-    .locator('#design-layers-panel [data-design-layer-id="home-hero"]')
+    .locator('[data-design-sidebar-panel] [data-design-layer-id="home-hero"]')
     .click();
   await page
     .getByRole("combobox", { name: "Stroke position", exact: true })

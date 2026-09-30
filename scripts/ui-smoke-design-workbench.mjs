@@ -73,8 +73,18 @@ async function exerciseDesignWorkbench({ page, check }) {
         ),
     ),
   );
-  await page.getByRole("button", { name: "Layers", exact: true }).click();
-  await page.getByRole("button", { name: "Inspector", exact: true }).click();
+  await exerciseInactiveDesignTools({
+    page,
+    check,
+    canvas,
+    designTab,
+    filesTab,
+  });
+  await exerciseSharedLayersHeight({ page, check, canvas });
+  await canvas.locator("[data-design-layers-fold]").click();
+  await canvas
+    .getByRole("button", { name: "Toggle Layers and Inspector" })
+    .click();
   await filesTab.click();
   await page.reload({ waitUntil: "networkidle" });
   check(
@@ -87,12 +97,15 @@ async function exerciseDesignWorkbench({ page, check }) {
     .waitFor({ state: "visible" });
   check(
     "Design panel choices survive reload",
-    (await page
-      .getByRole("button", { name: "Layers", exact: true })
-      .getAttribute("aria-pressed")) === "false" &&
-      (await page
-        .getByRole("button", { name: "Inspector", exact: true })
-        .getAttribute("aria-pressed")) === "false",
+    (await canvas
+      .locator("[data-design-layers-fold]")
+      .getAttribute("aria-expanded")) === "false" &&
+      (await canvas
+        .getByRole("button", { name: "Toggle Layers and Inspector" })
+        .getAttribute("aria-pressed")) === "false" &&
+      (await canvas
+        .locator("[data-design-floating-panel]")
+        .getAttribute("inert")) !== null,
   );
   await page.setViewportSize({ width: 900, height: 700 });
   check(
@@ -146,4 +159,127 @@ async function exerciseDesignWorkbench({ page, check }) {
       (await page.getByRole("button", { name: "Retry Design" }).isVisible()) &&
       (await page.getByRole("button", { name: "Cancel merge…" }).isVisible()),
   );
+}
+
+/** Both owners remain mounted while an app-wide preference changes. */
+async function exerciseSharedLayersHeight({ page, check, canvas }) {
+  const second = page.locator('[data-design-retained-workspace="ws_design_harness_second"]');
+  const switchWorkspace = async (suffix) => {
+    await page.evaluate(async (value) => {
+      const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/store.tsx");
+      useWorkspaceStore.setState({
+        activeChatId: null,
+        newAgentFolder: `/Users/demo/zeros/design workspaces/north-one/launch-system${value}`,
+      });
+    }, suffix);
+    await (suffix ? second : canvas).locator("[data-design-canvas-viewport]").waitFor({ state: "visible" });
+  };
+  const split = (owner) => owner.getByRole("separator", { name: "Resize Layers panel" });
+  const height = async (owner) => Math.round((await owner.locator("[data-design-layers-slot]").boundingBox()).height);
+  await split(canvas).dblclick();
+  await switchWorkspace("-second");
+  await page.evaluate(() => {
+    window.__retainedSecondLayers = document.querySelector('[data-design-retained-workspace="ws_design_harness_second"] [data-design-layers-slot]');
+  });
+  await switchWorkspace("");
+  await split(canvas).press("Shift+ArrowDown");
+  const committed = await height(canvas);
+  await switchWorkspace("-second");
+  check(
+    "a retained workspace adopts the app-wide Layers height before it is shown",
+    committed === 272 && (await height(second)) === committed &&
+      await page.evaluate(() => window.__retainedSecondLayers === document.querySelector('[data-design-retained-workspace="ws_design_harness_second"] [data-design-layers-slot]')),
+  );
+  await split(second).press("Shift+ArrowDown");
+  await switchWorkspace("");
+  check(
+    "resizing the second workspace also updates the first retained Layers panel",
+    (await height(canvas)) === committed + 32 &&
+      Number(await split(canvas).getAttribute("aria-valuenow")) === committed + 32,
+    JSON.stringify({ committed, height: await height(canvas), aria: await split(canvas).getAttribute("aria-valuenow") }),
+  );
+  await page.evaluate(() => {
+    const key = "zeros.design.layers.height";
+    localStorage.setItem(key, "336");
+    window.dispatchEvent(new StorageEvent("storage", { key, newValue: "336" }));
+  });
+  await switchWorkspace("-second");
+  check(
+    "a height preference from another window reaches retained panels and separator values",
+    (await height(second)) === 336 &&
+      Number(await split(second).getAttribute("aria-valuenow")) === 336,
+  );
+  await switchWorkspace("");
+  await split(canvas).dblclick();
+}
+
+/** A Design tab that goes inactive must not leave its tool window floating
+ * over the next tab or keep Motion playing; both return with the tab. */
+async function exerciseInactiveDesignTools({
+  page,
+  check,
+  canvas,
+  designTab,
+  filesTab,
+}) {
+  const settle = (locator, state) =>
+    locator.waitFor({ state, timeout: 5_000 }).then(
+      () => true,
+      () => false,
+    );
+  const themeWindow = page.locator("[data-design-theme-editor]");
+  const themeTrigger = canvas.getByRole("button", {
+    name: "Open theme editor",
+  });
+  await themeTrigger.click();
+  await themeWindow.waitFor({ state: "visible" });
+  const themePosition = await themeWindow.boundingBox();
+  await filesTab.click();
+  check(
+    "an inactive Design tab hides and inerts its floating Theme window",
+    (await settle(themeWindow, "hidden")) &&
+      (await themeWindow.evaluate((element) => element.inert)),
+  );
+  await designTab.click();
+  const returnedPosition = (await settle(themeWindow, "visible"))
+    ? await themeWindow.boundingBox()
+    : null;
+  check(
+    "returning to Design shows the same Theme window in place",
+    !!returnedPosition &&
+      Math.abs(returnedPosition.x - themePosition.x) < 1 &&
+      Math.abs(returnedPosition.y - themePosition.y) < 1 &&
+      !(await themeWindow.evaluate((element) => element.inert)),
+  );
+  await themeWindow.getByRole("button", { name: "Close theme editor" }).click();
+  await settle(themeWindow, "detached");
+
+  // The timeline hides its duration field below a 720px container, so play
+  // a long preview in a wide window.
+  await page.setViewportSize({ width: 2400, height: 900 });
+  await canvas.locator("[data-design-canvas-viewport]").focus();
+  await page.keyboard.press("Shift+A");
+  const timeline = canvas.locator("[data-design-motion-timeline]");
+  await timeline.waitFor({ state: "visible" });
+  await canvas.getByRole("button", { name: /^Animate opacity$/i }).click();
+  const duration = timeline.getByLabel("Animation duration");
+  await duration.fill("5000");
+  await duration.press("Enter");
+  const play = timeline.getByRole("button", { name: /motion preview$/ });
+  await play.click();
+  const playing =
+    (await play.getAttribute("aria-label")) === "Pause motion preview";
+  await filesTab.click();
+  await page.waitForTimeout(300);
+  await designTab.click();
+  check(
+    "switching away from Design stops Motion playback and keeps its draft",
+    playing &&
+      (await play.getAttribute("aria-label")) === "Play motion preview" &&
+      (await timeline
+        .getByRole("button", { name: /opacity keyframe at/ })
+        .count()) > 0,
+  );
+  await timeline.getByRole("button", { name: "Close motion timeline" }).click();
+  await page.setViewportSize({ width: 1440, height: 900 });
 }

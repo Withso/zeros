@@ -1,4 +1,5 @@
 import { useDesignWorkspaceUiStore } from "./design-workspace-ui";
+import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
 import { rememberDesignDirectoryIdentity } from "../../../platform/bridge/design-bridge";
 // ──────────────────────────────────────────────────────────
 // Design workspace cache — exact workspace snapshot server state
@@ -928,6 +929,9 @@ export function observeDesignDirectory(workspaceId: string, snapshot: DesignWork
   if (previous && previous !== snapshot.directoryId) {
     useDesignRuntimeStore.getState().forgetWorkspace(workspaceId);
     invalidateWorkspaceDesignFoundations(workspaceId);
+    // Folds and pending reveals name frames and nodes of the old directory;
+    // a replacement with colliding file names must start folded.
+    forgetDesignLayerDisclosure(workspaceId);
   }
   rememberDesignDirectoryIdentity(workspaceId, snapshot.directoryId);
   ui.bindDirectory(workspaceId, snapshot.directoryId);

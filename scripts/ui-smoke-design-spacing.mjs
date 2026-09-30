@@ -7,7 +7,7 @@ export async function runDesignSpacingSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
-  await page.locator("#design-layers-panel").waitFor();
+  await page.locator("[data-design-sidebar-panel]").waitFor();
   // Fixed child heights make the automatic gaps fractional on every host,
   // independently of the installed fonts and their text metrics.
   await page.evaluate(async () => {

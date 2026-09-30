@@ -1,3 +1,4 @@
+import { designCanvasSafeRect } from "./ui-smoke-design-helpers.mjs";
 // Camera safeguards: a canvas never opens onto empty space while it has
 // frames, and selecting a frame the user cannot see brings it into view.
 // Camera setup uses the UI store only; the document is the harness fixture.
@@ -17,29 +18,29 @@ export async function runDesignCameraSmoke({ page, waitFor, check }) {
         .getState()
         .setViewport("ws_design_harness", next);
     }, camera);
-  // Frames with at least a 4px on-screen overlap inside the canvas viewport.
-  const visibleFrames = () =>
-    page.evaluate(() => {
-      const canvas = document
-        .querySelector("[data-design-canvas-viewport]")
-        .getBoundingClientRect();
-      return [
-        ...document.querySelectorAll(
-          "[data-design-canvas-world] [data-design-frame]",
-        ),
-      ]
-        .filter((element) => {
-          const rect = element.getBoundingClientRect();
-          const width =
-            Math.min(rect.right, canvas.right) -
-            Math.max(rect.left, canvas.left);
-          const height =
-            Math.min(rect.bottom, canvas.bottom) -
-            Math.max(rect.top, canvas.top);
-          return width >= 4 && height >= 4;
-        })
-        .map((element) => element.getAttribute("data-design-frame"));
-    });
+  // Frames with at least a 4px overlap in canvas space clear of floating chrome.
+  const visibleFrames = async () =>
+    page.evaluate(
+      (canvas) => {
+        return [
+          ...document.querySelectorAll(
+            "[data-design-canvas-world] [data-design-frame]",
+          ),
+        ]
+          .filter((element) => {
+            const rect = element.getBoundingClientRect();
+            const width =
+              Math.min(rect.right, canvas.right) -
+              Math.max(rect.left, canvas.left);
+            const height =
+              Math.min(rect.bottom, canvas.bottom) -
+              Math.max(rect.top, canvas.top);
+            return width >= 4 && height >= 4;
+          })
+          .map((element) => element.getAttribute("data-design-frame"));
+      },
+      await designCanvasSafeRect(page),
+    );
   const transform = () =>
     world.evaluate((element) => getComputedStyle(element).transform);
 
@@ -91,5 +92,26 @@ export async function runDesignCameraSmoke({ page, waitFor, check }) {
     "selecting a frame already on screen leaves the camera alone",
     !partlyVisible || (await transform()) === before,
     `home visible=${partlyVisible}`,
+  );
+
+  // Pricing is inside the full viewport but completely behind the right
+  // panel. That overlap must not qualify as a visible frame.
+  const safe = await designCanvasSafeRect(page);
+  await setCamera({ zoom: 0.1, panX: safe.right + 8 - 156, panY: 96 });
+  const pricing = await page
+    .locator('[data-design-frame="pricing.html"]')
+    .boundingBox();
+  const obscured =
+    !(await visibleFrames()).includes("pricing.html") &&
+    pricing.x >= safe.right &&
+    pricing.x + pricing.width < 1440;
+  await page.locator('[data-design-frame-row="pricing.html"]').click();
+  check(
+    "selecting a frame covered by the floating panel reveals it in usable canvas",
+    obscured &&
+      (await waitFor(
+        async () => (await visibleFrames()).includes("pricing.html"),
+        "covered frame revealed",
+      )),
   );
 }

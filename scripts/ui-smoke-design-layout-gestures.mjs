@@ -14,7 +14,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
   const heading = runtime.locator('[data-oid="home-heading"]');
   const layout = page.locator("[data-design-layout-section]");
   const select = (id) =>
-    page.locator(`#design-layers-panel [data-design-layer-id="${id}"]`).click();
+    page.locator(`[data-design-sidebar-panel] [data-design-layer-id="${id}"]`).click();
   await select("home-hero");
   await expect(page.locator("[data-design-lint-review]")).toHaveCount(0);
   await expect(

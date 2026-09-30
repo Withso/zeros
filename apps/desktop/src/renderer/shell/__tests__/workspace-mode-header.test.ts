@@ -19,10 +19,17 @@ const conversationPaneSource = readFileSync(
   ),
   "utf8",
 );
-const designSidebarSource = readFileSync(
+const designPillSource = readFileSync(
   resolve(
     process.cwd(),
-    "apps/desktop/src/renderer/features/design-workspace/design-workspace-sidebar.tsx",
+    "apps/desktop/src/renderer/features/design-workspace/design-directory-pill.tsx",
+  ),
+  "utf8",
+);
+const designColumnSource = readFileSync(
+  resolve(
+    process.cwd(),
+    "apps/desktop/src/renderer/features/design-workspace/design-workspace.tsx",
   ),
   "utf8",
 );
@@ -234,15 +241,19 @@ describe("workspace mode header row", () => {
     expect(markup).toContain("collapse-control");
   });
 
-  it("labels the Design directory above Layers without a workspace-mode control", () => {
-    const designHeader = designSidebarSource.indexOf("data-design-directory-header");
-    const designPanels = designSidebarSource.indexOf(
-      "<DesignWorkspaceSidebarPanels",
+  it("labels the Design directory in the canvas pill without a workspace-mode control", () => {
+    // The directory switcher floats at the canvas's top left; Layers moved to
+    // the floating panel on the right.
+    expect(designPillSource).toContain('data-design-directory-header=""');
+    expect(designPillSource).toContain("<DesignDirectoryMenu");
+    expect(designPillSource).not.toContain("<WorkspaceModeHeader");
+    const pill = designColumnSource.indexOf("<DesignDirectoryPill");
+    const panel = designColumnSource.indexOf("<DesignFloatingPanel");
+    expect(pill).toBeGreaterThanOrEqual(0);
+    expect(pill).toBeLessThan(panel);
+    expect(designColumnSource.indexOf("<DesignWorkspaceSidebarPanels")).toBeGreaterThan(
+      panel,
     );
-
-    expect(designHeader).toBeGreaterThanOrEqual(0);
-    expect(designHeader).toBeLessThan(designPanels);
-    expect(designSidebarSource).not.toContain("<WorkspaceModeHeader");
     expect(conversationPaneSource).not.toContain("<WorkspaceModeHeader");
     expect(conversationPaneSource).not.toContain("WorkspaceModeHeader }");
   });

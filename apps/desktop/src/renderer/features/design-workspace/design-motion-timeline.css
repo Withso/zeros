@@ -1,17 +1,30 @@
 /* Motion owns its container and lane geometry. The shared Design recipes own
- * fields, icon buttons, and the portaled settings surface. */
+ * fields, icon buttons, and the portaled settings surface.
+ *
+ * The timeline floats with the rest of the canvas chrome: inset from the
+ * canvas edges and ending beside the floating Layers + Inspector panel
+ * (`--zd-design-panel-inset`, published by the Design surface), so keyframes
+ * and the inspector fields they animate stay usable side by side. */
 .zd-motion-timeline {
   container: motion-timeline / inline-size;
+  right: calc(var(--zd-design-panel-inset, 0px) + 8px);
+  bottom: 8px;
+  left: 8px;
   height: var(--zeros-design-motion-height, 240px);
+  overflow: hidden;
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  box-shadow: var(--shadow-dropdown);
   font-family: var(--font-sans);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 
+/* Inside the rounded top edge: the floating surface clips its overflow. */
 .zd-motion-resize-handle {
   position: absolute;
   z-index: var(--z-panel);
-  inset: -3px 0 auto;
+  inset: 0 0 auto;
   height: 6px;
   cursor: row-resize;
   touch-action: none;
@@ -31,7 +44,7 @@
   background: var(--design-selection-stroke);
 }
 
-[data-design-motion-resizing] > [aria-label="Canvas tools"] {
+[data-design-motion-resizing] > [data-design-canvas-tools-rail] {
   transition: none;
 }
 

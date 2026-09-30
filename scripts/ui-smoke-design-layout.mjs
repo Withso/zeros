@@ -6,7 +6,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
-  const layers = page.locator("#design-layers-panel");
+  const layers = page.locator("[data-design-sidebar-panel]");
   const layout = page.locator("[data-design-layout-section]");
   await page
     .locator('[data-design-frame="home.html"] [data-design-frame-label]')
@@ -333,9 +333,11 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
   // Three 24px transform buttons must still fit the narrowest supported panel.
   const widths = [];
   for (const width of [220, 280, 420]) {
-    await page.locator("[data-design-inspector]").evaluate((element, value) => {
-      element.style.setProperty("--zeros-design-style-width", `${value}px`);
-    }, width);
+    await page
+      .locator("[data-design-workspace-surface]")
+      .evaluate((element, value) => {
+        element.style.setProperty("--zeros-design-style-width", `${value}px`);
+      }, width);
     widths.push(
       await layout
         .locator("[data-design-layout-geometry]")
@@ -352,7 +354,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       widths.slice(1).every((row) => Math.abs(row[0] - row[2]) < 1),
     JSON.stringify(widths),
   );
-  await page.locator("[data-design-inspector]").evaluate((element) => {
+  await page.locator("[data-design-workspace-surface]").evaluate((element) => {
     element.style.setProperty("--zeros-design-style-width", "220px");
   });
   const rows = await layout

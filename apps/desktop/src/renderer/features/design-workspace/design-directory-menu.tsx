@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ChevronDown, Check, Settings } from "lucide-react";
+import { ChevronDown, Check, Folder, Settings } from "lucide-react";
 import type { Workspace } from "../../platform/git";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { bridgeDesignListDirectories } from "../../platform/bridge/design-bridge";
@@ -11,7 +11,7 @@ import {
 } from "../../state/read-caches";
 import { useWorkspaceDispatch } from "../../state/store";
 import { useProjectForFolder } from "../../state/use-projects";
-import { Button, toast } from "../../shared/ui/primitives";
+import { Tooltip, toast } from "../../shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,7 +27,8 @@ import { triggerGitRefresh } from "../../shell/use-git-refresh-key";
 import { errorMessage } from "./design-workspace-error";
 
 /** Selecting a directory changes only this workspace's personal pointer.
- * Rename/adoption remain explicit repository lifecycle actions in Settings. */
+ * Rename/adoption remain explicit repository lifecycle actions in Settings.
+ * The trigger lives in the canvas's floating directory pill. */
 export function DesignDirectoryMenu({
   workspace,
   active,
@@ -81,19 +82,22 @@ export function DesignDirectoryMenu({
   };
   return (
     <DropdownMenu open={active && open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          disabled={!active || busy}
-          className="min-w-0 flex-1 justify-between px-0"
-          aria-label="Choose Design directory"
-        >
-          <span data-design-directory-name="" className="truncate" title={name}>
-            {name}
-          </span>
-          <ChevronDown className="size-3 shrink-0" />
-        </Button>
-      </DropdownMenuTrigger>
+      <Tooltip label="Switch Design directory" side="bottom">
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            disabled={!active || busy}
+            className="zd-design-directory-trigger"
+            aria-label="Choose Design directory"
+          >
+            <Folder aria-hidden="true" />
+            <span data-design-directory-name="" className="min-w-0 truncate">
+              {name}
+            </span>
+            <ChevronDown aria-hidden="true" />
+          </button>
+        </DropdownMenuTrigger>
+      </Tooltip>
       <DropdownMenuContent align="start" className="max-w-sm">
         {listing.error && (
           <DropdownMenuItem onSelect={listing.refresh}>

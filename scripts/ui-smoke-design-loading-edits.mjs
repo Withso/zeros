@@ -5,7 +5,7 @@ export async function runDesignLoadingEditsSmoke({ page, waitFor, check }) {
   const runtime = page.frameLocator(
     '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
   );
-  const layers = page.locator("#design-layers-panel");
+  const layers = page.locator("[data-design-sidebar-panel]");
   const layout = page.locator("[data-design-layout-section]");
   const heading = runtime.locator('[data-oid="home-heading"]');
   const copy = runtime.locator('[data-oid="home-copy"]');

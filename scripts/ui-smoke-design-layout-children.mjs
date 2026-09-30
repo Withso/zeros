@@ -6,7 +6,7 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
-  const layers = page.locator("#design-layers-panel");
+  const layers = page.locator("[data-design-sidebar-panel]");
   const layout = page.locator("[data-design-layout-section]");
   const runtime = page.frameLocator(
     '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
@@ -293,9 +293,11 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
     ),
   );
   for (const width of [220, 280, 420]) {
-    await page.locator("[data-design-inspector]").evaluate((element, width) => {
-      element.style.setProperty("--zeros-design-style-width", `${width}px`);
-    }, width);
+    await page
+      .locator("[data-design-workspace-surface]")
+      .evaluate((element, width) => {
+        element.style.setProperty("--zeros-design-style-width", `${width}px`);
+      }, width);
     check(
       `child controls fit a ${width}px inspector`,
       await layout.evaluate(
