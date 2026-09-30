@@ -69,6 +69,8 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
         const started = await call(2, "thread/start", { model: "gpt-5.6-luna", modelProvider: "openai", cwd: "/srv/zeros/workspace",
           config: CLOUD_CODEX_CONFIG, sandbox: "workspace-write", approvalPolicy: "on-request", experimentalRawEvents: false });
         expect(started.error).toBeUndefined();
+        // Every later native spawn re-checks the view after the CLI has run.
+        expect(() => assertOwnedCloudNativeHome(view, { uid: WORKER, gid: WORKER })).not.toThrow();
         const listed = await call(3, "skills/list", { cwds: ["/srv/zeros/workspace"], forceReload: true });
         const skills = (listed.result?.data ?? []).flatMap((entry: { skills: Array<{ name: string; path: string }> }) => entry.skills);
         expect(skills.find((skill: { name: string }) => skill.name === "zeros-worker-check")?.path)

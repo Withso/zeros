@@ -60,8 +60,9 @@ export function assertOwnedCloudNativeHome(view, worker) {
     const directory = `${view.directory}/codex-config`, stat = lstatSync(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== 0 || (stat.mode & 0o022) || realpathSync(directory) !== directory)
       throw new Error("Cloud Codex configuration is not engine-owned");
+    // Codex makes it 0644 when it opens it; others must never write it.
     const installation = lstatSync(`${view.directory}/codex-installation-id`);
-    if (!installation.isFile() || installation.nlink !== 1 || installation.uid !== worker.uid || (installation.mode & 0o077) !== 0)
+    if (!installation.isFile() || installation.nlink !== 1 || installation.uid !== worker.uid || (installation.mode & 0o022) !== 0)
       throw new Error("Cloud Codex installation state is not privately owned");
   }
   if (view.skills === true) {
