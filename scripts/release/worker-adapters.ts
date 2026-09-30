@@ -76,15 +76,28 @@ export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.Proc
   for (const [file, text] of Object.entries(record.kitFiles ?? {})) {
     requireCheck(allowed.test(file) && typeof text === "string" && text.length <= 512 * 1024, "Invalid worker recovery receipt");
     const target = path.join(directory, file); await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-    if (!fs.existsSync(target)) await writeFile(target, text, { mode: 0o600, flag: "wx" });
+    // "wx" keeps a file the interrupted build already wrote, without a separate
+    // existence check that could race with it.
+    await writeFile(target, text, { mode: 0o600, flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
   }
   const persist = async () => {
     const files: Record<string, string> = {};
     for (const file of fs.readdirSync(directory, { recursive: true })) {
       if (typeof file !== "string" || !allowed.test(file)) continue;
-      const target = path.join(directory, file), stat = fs.lstatSync(target);
-      requireCheck(stat.isFile() && !stat.isSymbolicLink() && stat.size <= 512 * 1024, "Invalid worker kit recovery file");
-      files[file] = fs.readFileSync(target, "utf8");
+      // Check and read one descriptor, opened without following a symlink, so
+      // the file cannot be swapped between the check and the read.
+      let descriptor = -1;
+      try { descriptor = fs.openSync(path.join(directory, file), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch {}
+      requireCheck(descriptor >= 0, "Invalid worker kit recovery file");
+      try {
+        const stat = fs.fstatSync(descriptor);
+        requireCheck(stat.isFile() && stat.size <= 512 * 1024, "Invalid worker kit recovery file");
+        files[file] = fs.readFileSync(descriptor, "utf8");
+      } finally {
+        fs.closeSync(descriptor);
+      }
     }
     requireCheck(JSON.stringify(files).length <= 1024 * 1024, "Worker kit recovery receipt exceeds its bound");
     record.kitFiles = files; await lease.save();

@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { boatImageAdapter, buildBoatImage, runtimeOwnerAdapter } from "./worker-adapters";
 import { workerExecutionConfig } from "./worker-config";
@@ -38,6 +38,19 @@ describe("worker kit recovery", () => {
     expect(await resumed.build()).toEqual(candidate);
     expect(call).not.toHaveBeenCalled(); expect(reserve).not.toHaveBeenCalled();
     expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("keeps a kit file the interrupted build wrote and refuses a symlinked recovery file", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-worker-adapter-test-")); directories.push(directory);
+    const kitDirectory = path.join(directory, "kit"); await mkdir(kitDirectory, { recursive: true });
+    await writeFile(path.join(kitDirectory, "builder.json"), '{"written":"by the build"}');
+    await writeFile(path.join(directory, "elsewhere.json"), "{}");
+    await symlink(path.join(directory, "elsewhere.json"), path.join(kitDirectory, "builder-intent.json"));
+    const record: any = { sourceCommit: sourceSha, snapshotId: "test-new", kitFiles: { "builder.json": '{"from":"receipt"}' } };
+    const request = vi.fn(async (_method: string, route: string) => route.startsWith("/limits") ? { status: 200, body: { creditUsedSeconds: 0 } } : { status: 503, body: {} });
+    const context = { lease: lease(), record, profile: {}, maxUsedHours: 1, snapshotName: "test-new", request, reserve: vi.fn(), release: vi.fn(), kit: vi.fn(kit) };
+    const adapter = await boatImageAdapter(config, environment, kitDirectory, context);
+    expect(await readFile(path.join(kitDirectory, "builder.json"), "utf8")).toBe('{"written":"by the build"}');
+    await expect(adapter.build()).rejects.toThrow("Invalid worker kit recovery file");
   });
   it("refuses a recovered source manifest without its archive before allocating or uploading", async () => {
     const call = vi.fn(kit);
