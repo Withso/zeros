@@ -13,6 +13,18 @@ development runtimes use the always-supported `dev` request identity, even
 when channel-branded, matching Electron main and avoiding a mandatory updater
 that cannot install in an unpackaged build.
 
+Older APIs may omit the client header from their CORS allow-list. When a
+header-bearing GET or HEAD rejects with `TypeError`, the shared renderer/main
+request wrapper retries exactly once without the header. If that retry resolves
+with any HTTP status, requests to that API origin omit the header for ten
+minutes, then try it again so an API upgrade restores compatibility enforcement.
+This in-memory cache retains at most 32 origins. POST/PUT/PATCH/DELETE never retry,
+even with an idempotency key; after successful learning they omit the header on
+their initial send. Account fences run before every send, and 426 handling
+remains active on both attempts. Identity/fence errors and other fetch error
+types do not trigger fallback; if both GET/HEAD attempts fail, no rejection is
+remembered. Electron main has no CORS preflight but shares the bounded retry.
+
 Each channel publishes a cumulative release ledger with its desktop feed:
 
 | Channel    | Public ledger asset under `https://github.com/withso/zeros/releases` |

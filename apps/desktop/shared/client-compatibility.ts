@@ -151,25 +151,84 @@ type ClientCompatibilityFetch = (
   beforeRequest?: () => void,
 ) => Promise<Response>;
 
+const CLIENT_HEADER_REJECTION_TTL_MS = 10 * 60_000;
+const MAX_CLIENT_HEADER_REJECTION_ORIGINS = 32;
+
+function clientRequestOrigin(
+  input: Parameters<typeof fetch>[0],
+): string | null {
+  try {
+    const environment = globalThis as typeof globalThis & {
+      location?: { href: string };
+    };
+    const origin = new URL(
+      input instanceof Request ? input.url : input,
+      environment.location?.href,
+    ).origin;
+    return origin === "null" ? null : origin;
+  } catch {
+    return null;
+  }
+}
+
 export function createClientCompatibilityFetch(options: {
   header: () => string | Promise<string>;
   requireUpgrade: (required: ClientUpgradeRequired) => void;
   fetch?: typeof fetch;
 }): ClientCompatibilityFetch {
+  const headerRejections = new Map<string, number>();
   return async (input, init, beforeRequest) => {
+    const now = Date.now();
+    for (const [origin, expiresAt] of headerRejections)
+      if (expiresAt <= now) headerRejections.delete(origin);
+    const origin = clientRequestOrigin(input);
+    const includeHeader = origin === null || !headerRejections.has(origin);
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
     const headers = new Headers(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
     );
-    const identity = options.header();
-    headers.set(
-      "X-Zeros-Client",
-      typeof identity === "string" ? identity : await identity,
-    );
+    if (includeHeader) {
+      const identity = options.header();
+      headers.set(
+        "X-Zeros-Client",
+        typeof identity === "string" ? identity : await identity,
+      );
+    } else {
+      headers.delete("X-Zeros-Client");
+    }
+    const send = () =>
+      (options.fetch ?? globalThis.fetch)(input, {
+        ...init,
+        headers: Object.fromEntries(headers.entries()),
+      });
+    let response: Response;
     beforeRequest?.();
-    const response = await (options.fetch ?? globalThis.fetch)(input, {
-      ...init,
-      headers: Object.fromEntries(headers.entries()),
-    });
+    try {
+      response = await send();
+    } catch (error) {
+      if (
+        !includeHeader ||
+        !(error instanceof TypeError) ||
+        (method !== "GET" && method !== "HEAD")
+      )
+        throw error;
+      headers.delete("X-Zeros-Client");
+      beforeRequest?.();
+      response = await send();
+      if (origin !== null) {
+        headerRejections.delete(origin);
+        headerRejections.set(
+          origin,
+          Date.now() + CLIENT_HEADER_REJECTION_TTL_MS,
+        );
+        if (headerRejections.size > MAX_CLIENT_HEADER_REJECTION_ORIGINS) {
+          const oldestOrigin = headerRejections.keys().next().value;
+          if (oldestOrigin !== undefined) headerRejections.delete(oldestOrigin);
+        }
+      }
+    }
     if (response.status === 426)
       options.requireUpgrade(await readUpgradeRequired(response));
     return response;

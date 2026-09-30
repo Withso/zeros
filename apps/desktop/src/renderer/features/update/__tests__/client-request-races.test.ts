@@ -44,6 +44,23 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("client identity cold-read races", () => {
+  it("does not retry a cloud GET after its initiating account retires during a preflight failure", async () => {
+    state.appInfo.mockResolvedValue({ channel: "alpha", version: "1.2.3" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async () => {
+        state.generation += 1;
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+    const { cloudAccountRequest } =
+      await import("../../../platform/cloud-workspaces");
+    await expect(
+      cloudAccountRequest("/v1/test", z.object({ ok: z.boolean() })),
+    ).rejects.toThrow(/account changed/i);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it("does not send a cloud mutation after its initiating account retires during app-info", async () => {
     let release!: (value: unknown) => void;
     state.appInfo.mockImplementation(
