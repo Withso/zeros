@@ -5324,15 +5324,25 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   };
   let originOverlayBox = await headingOverlay.boundingBox();
   if (!originOverlayBox) throw new Error("heading overlay has no geometry");
+  const originZoomAnchor = {
+    x: originOverlayBox.x + originOverlayBox.width / 2,
+    y: originOverlayBox.y + originOverlayBox.height / 2,
+  };
+  // The fit zoom and the heading's wrapped line count vary with the viewport
+  // insets and platform fonts, so reach a selection shorter than the marker's
+  // 108px minimum instead of assuming the camera starts there.
+  let originZoomOutSteps = 0;
+  while (originOverlayBox.height >= 108 && originZoomOutSteps < 4) {
+    await zoomAboutSelection(originZoomAnchor, 40, 1);
+    originZoomOutSteps += 1;
+    originOverlayBox = await headingOverlay.boundingBox();
+    if (!originOverlayBox) throw new Error("heading overlay has no geometry");
+  }
   check(
     "a selection too small for the origin marker does not draw one",
     originOverlayBox.height < 108 && (await originHandle.count()) === 0,
     JSON.stringify(originOverlayBox),
   );
-  const originZoomAnchor = {
-    x: originOverlayBox.x + originOverlayBox.width / 2,
-    y: originOverlayBox.y + originOverlayBox.height / 2,
-  };
   const originZoomSteps = 4;
   await zoomAboutSelection(originZoomAnchor, -40, originZoomSteps);
   originOverlayBox = await headingOverlay.boundingBox();
@@ -5544,8 +5554,13 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       .count()) === 0,
   );
   // Return the harness to an upright heading so later checks measure the same
-  // geometry they always have.
-  await zoomAboutSelection(originZoomAnchor, 40, originZoomSteps);
+  // geometry they always have; the steps that shrank the selection already
+  // undid part of the zoom-in.
+  await zoomAboutSelection(
+    originZoomAnchor,
+    40,
+    originZoomSteps - originZoomOutSteps,
+  );
 
   await layersPanel.locator('[data-design-layer-id="home-copy"]').click();
   await waitFor(

@@ -413,15 +413,17 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
     const clickDeep = async () => {
       const box = await deepElement.boundingBox();
       const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-      const clear = await page.evaluate(({ x, y }) => {
+      const obstruction = await page.evaluate(({ x, y }) => {
         const target = document.elementFromPoint(x, y);
-        return (
-          !!target?.closest('[data-design-frame="pricing.html"]') &&
+        return target?.closest('[data-design-frame="pricing.html"]') &&
           !target.closest("[data-design-controls]")
-        );
+          ? null
+          : (target?.getAttribute("aria-label") ?? target?.tagName ?? "none");
       }, point);
-      if (!clear)
-        throw new Error("Deep canvas selection target is obscured by chrome");
+      if (obstruction)
+        throw new Error(
+          `Deep canvas selection target is obscured by chrome: ${obstruction}`,
+        );
       await page.keyboard.down("Meta");
       await page.mouse.click(point.x, point.y);
       await page.keyboard.up("Meta");

@@ -99,7 +99,10 @@ const pricingSource = `<!doctype html>
       .plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
       article { min-height: 420px; display: flex; flex-direction: column; justify-content: space-between; border: 1px solid dimgray; border-radius: 16px; padding: 32px; }
       article:nth-child(2) { background: royalblue; border-color: royalblue; }
-      strong { font-size: 32px; }
+      /* Font-independent: at the default 25% zoom a "normal" line box is only
+         9-11 screen pixels, so a selected name's 4px top and bottom resize
+         strips could cover its center. */
+      strong { font-size: 32px; line-height: 1.5; }
       p { color: lightgray; line-height: 1.5; }
     </style>
   </head>
