@@ -1,5 +1,15 @@
 import { expect } from "@playwright/test";
 
+// Focus arrives before Radix registers a menu as its active dismissable layer.
+// Wait for that layer to accept input before sending Escape.
+async function dismissMenu(page) {
+  const menu = page.getByRole("menu");
+  await expect(menu).toBeFocused();
+  await expect(menu).toHaveCSS("pointer-events", "auto");
+  await menu.press("Escape");
+  await expect(menu).toHaveCount(0);
+}
+
 export async function runWorkspaceArchivesSmoke({ page, check }) {
   const fixtureUrl = `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-workspace-archives.html`;
   const readOutputFormatting = (surface) =>
@@ -204,13 +214,7 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
     "aria-disabled",
     "true",
   );
-  // Focus arrives before Radix registers the menu as its active dismissable
-  // layer. Wait for that layer to accept input before sending Escape.
-  const menu = page.getByRole("menu");
-  await expect(menu).toBeFocused();
-  await expect(menu).toHaveCSS("pointer-events", "auto");
-  await menu.press("Escape");
-  await expect(menu).toHaveCount(0);
+  await dismissMenu(page);
   await options("Recent")
     .locator("..")
     .getByRole("button", { name: "Unarchive", exact: true })
@@ -432,7 +436,9 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
   await expect(
     page.getByRole("menuitem", { name: /Rename|Close Tab/ }),
   ).toHaveCount(0);
-  await page.keyboard.press("Escape");
+  // The same dismissable-layer race as the archive options menu: an early
+  // Escape leaves this modal menu open and the rest of the page aria-hidden.
+  await dismissMenu(page);
   await history
     .getByRole("button", { name: "Pane options", exact: true })
     .click();
@@ -442,7 +448,7 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
   await expect(
     page.getByRole("menuitem", { name: "Split Down", exact: true }),
   ).toHaveAttribute("aria-disabled", "true");
-  await page.keyboard.press("Escape");
+  await dismissMenu(page);
   expect(await interactionState()).toEqual(pendingBefore);
   expect(
     await page.evaluate(
