@@ -126,9 +126,40 @@ Source remains materialized and readable from both surfaces.
 #### Shared workbench navigation
 
 The permanent Design tab sits beside Files, Changes, Review and Context in the
-existing workbench. The same conversation column stays present. Its directory
-header, Layers and Inspector belong inside Design; Layers/Inspector visibility
-is adjustable for narrow layouts. Selecting a tab changes no agent mode.
+existing workbench. The same conversation column stays present. Inside Design
+the canvas is full bleed and its chrome floats over it, 8px from its edges
+(`design-workspace.tsx`, `design-directory-pill.tsx`,
+`design-floating-panel.tsx`):
+
+- **Directory pill** (top left): the Design directory switcher and a toggle
+  that puts the Layers + Inspector panel away and brings it back (also
+  ⌘\ / Ctrl+\ while focus is in the Design surface or nowhere).
+- **Tool rail** (left, vertically centred): Move, Frame, Text, Source, Themes
+  and Motion in one vertical toolbar. It centres in the space between the pill
+  and an open Motion timeline, never overlapping either.
+- **Layers + Inspector panel** (right, full height): Layers on top at a
+  draggable height (`Resize Layers panel`: pointer, arrows, Home/End,
+  double-click resets), the inspector below. The panel's left edge resizes
+  its width. Its title folds the Layers tree down to its header so the
+  inspector can take the panel.
+- **Motion timeline**: floats along the bottom and ends beside the panel, so
+  keyframes and the inspector fields they animate stay usable together.
+
+The chrome is not canvas. Wheel input over any island scrolls that island (or
+nothing) and never pans or zooms the canvas; pointer input on it never
+marquees or deselects. The pill and panel sit outside the canvas viewport and
+its keyboard scope; the tool rail and timeline stay inside it, so tool
+shortcuts and the Space-drag hand keep working from them. When the canvas is
+too short for both, the tool rail stays above the timeline so every tool is
+reachable. Hiding the panel keeps it mounted and inert, so the inspector's
+document shortcuts (save, undo, redo) keep working and focus inside it returns
+to the canvas. Separators resize from, and report, the size actually on screen,
+and a width drag moves the neighbouring chrome with it.
+Source view keeps its filename and scroll viewport clear of the pill, tool
+rail, visible panel and open Motion timeline, following their live sizes.
+An inactive Design surface hides and inerts its portaled Theme window (it
+returns in place with its drafts) and stops Motion playback. Selecting a tab
+changes no agent mode.
 
 `workspace.kind`/`viewMode` and `workspace.setMode` remain serialized legacy
 contracts, including existing creation flows. On first use, a legacy Design
@@ -140,9 +171,16 @@ Frame/node selection, camera, layer disclosure and panel visibility are keyed
 by workspace. A stable directory ID survives rename; replacing it resets the
 old document selection/camera and runtime foundations. Switching back to an
 older directory starts a fresh document view; it does not restore a second
-per-directory editor history. Existing app-wide panel width preferences remain.
-At most two visited Design canvases are retained. Inactive tabs/owners and a
-collapsed workbench are inert, hidden and inactive, with stable iframe DOM order.
+per-directory editor history. The serialized view keeps its field names:
+`inspectorVisible` is the floating panel's visibility and `layersVisible`
+whether its Layers tree is unfolded. App-wide sizes stay in their existing
+keys — the panel width is the Style width (`zeros.design.style.width`) and the
+Layers split has its own `zeros.design.layers.height` (96px minimum, leaving
+the inspector at least 200px); both are boot CSS variables. Layers height
+commits synchronize retained canvases and other windows. The retired Layers
+width key stays readable. At most two visited Design canvases are retained.
+Inactive tabs/owners and a collapsed workbench are inert, hidden and inactive,
+with stable iframe DOM order.
 
 `design.initialize` is an explicit managed-workspace operation. It creates
 or adopts metadata without changing workspace kind, HEAD or the index. Directory
@@ -757,6 +795,13 @@ Escape restores the exact baseline.
   camera is the user's). Selecting a frame nobody can see (from Layers,
   keyboard or history) centers it at the current zoom, or fits it when it
   would be unreadable there; a frame with any visible part never moves.
+  "In view" and every fit, reveal and menu/keyboard zoom centre use the
+  canvas the floating chrome leaves uncovered (pill, tool rail, panel, open
+  timeline), measured when the camera moves on purpose; a covered axis that
+  would leave less than 160px uses the whole viewport. Pointer-to-world
+  conversion, authored geometry and live-runtime ranking keep the full
+  viewport. A new canvas opens at 25% with its first frame label clear of
+  the pill.
 - **Creation:** `F`/`A` creates frames and `T` creates text from one inverse
   pan/zoom transform. Click uses the documented default geometry; drag uses the
   exact world-space rectangle. A host-side draft paints synchronously and one
@@ -781,6 +826,26 @@ Escape restores the exact baseline.
   Until a frame's runtime reports its tree, its disclosure follows the engine's
   `layerCount` (the same rule, so a new frame shows no chevron); older engines
   send only `nodeCount`.
+  A selection made for the user — a canvas click, marquee, keyboard travel,
+  the hit-stack menu, a frame label, a new or moved layer — opens its frame
+  and every container above it in the same update and brings its row into
+  view (`requestDesignLayerReveal`). Only the Layers viewport scrolls, never an
+  ancestor: a row already in view stays put, one peeking at an edge moves the
+  least distance, and one out of sight lands centred (virtualized rows mount
+  in the same commit). Clicking the same layer again after scrolling away asks
+  again. Selecting a frame, or the root that shares its row, scrolls to the
+  frame row without unfolding it. A layer the tree does not hold yet (just
+  authored, runtime still loading) opens once a tree contains it; a restored
+  selection, or one whose layer moved to another parent, opens once for that
+  place. Paths are compared per selected node: reordering siblings preserves
+  folds, while moving selected nodes between parents reveals their new paths
+  even if the group still has the same ancestor union.
+  Background runtime refreshes never reopen a container the user folded
+  or pull the list away from where it was scrolled, and a user fold (frame or
+  container) or Collapse all cancels a path still waiting for its tree; so
+  does replacing the Design directory, which starts its Layers folded. A
+  folded Layers tree or hidden panel scrolls to the selection when it is shown
+  again. Keyboard travel focuses its row only while focus is still in the tree.
   Their canvas frame targets `body` independently. The document-scoped API ID
   `::zeros-document-body` supports body styles and appending top-level content;
   it is never added as a `data-oid`, selectable layer, or source identity. Generic
@@ -935,8 +1000,9 @@ Escape restores the exact baseline.
 - **Motion:** node-local keyframe tracks, preview, playback, and paths exist only
   in explicit Motion mode. Draft identity is workspace + frame + node, not
   source revision. Playback updates a small scalar owner store rather than the
-  full canvas at 60 Hz. The bottom timeline is resizable (default 240px,
-  persisted app-wide); the canvas toolbar follows its live height. In Motion
+  full canvas at 60 Hz. The floating bottom timeline is resizable (default
+  240px, persisted app-wide) and ends beside the Layers + Inspector panel; the
+  tool rail re-centres above its live height. In Motion
   mode an inspector field shows its keyframe diamond on hover and an animated
   property's in-field label takes the Motion accent, so values are never
   covered at rest.
@@ -1078,7 +1144,7 @@ full-width checkpoint footer use 12px 16px 0, 24px 16px, and 10px padding
 respectively. It retains
 modal focus/scroll isolation, explicit close/Escape, and protection against
 accidental outside dismissal; the background canvas does not become interactive
-while review is open. Narrow windows hide the canvas sidebar and keep the
+while review is open. Narrow windows hide the dialog's canvas sidebar and keep the
 comparison, scrollable changes, and checkpoint controls available. Its left side
 shows the current canvas until pages exist; its right side provides independent
 All, Uncommitted, Staged, Unstaged and Agent proposals comparisons, source diffs,

@@ -22,7 +22,6 @@ import { type DesignMotionPropertyRequest } from "./design-motion-timeline";
 // --- TYPES ---
 
 export interface DesignWorkspaceColumnProps {
-  inspectorVisible?: boolean;
   /** Confirmed design workspace; null while an optimistic create is landing. */
   workspace: Workspace | null;
   /** Exact destination path used for the snapshot refresh key. */

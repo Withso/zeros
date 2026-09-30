@@ -1,7 +1,7 @@
 // ============================================
 // COMPONENT: DesignWorkspaceSidebarPanels
-// PURPOSE: Collapsible Layers tree for the native design sidebar
-// USED IN: DesignWorkspaceSidebar for design workspaces
+// PURPOSE: Collapsible Layers tree at the top of the floating Design panel
+// USED IN: DesignWorkspaceColumn (through DesignFloatingPanel)
 // ============================================
 
 // --- IMPORTS ---
@@ -46,11 +46,11 @@ import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
 import { Button, ScrollArea, Tooltip, toast } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import {
-  designLayerAncestorIds,
   designFrameLayerChildren,
   designLayerBlockEdges,
   designFrameRowDiscloses,
-  designLayerRevealWindow,
+  designLayerRevealPaths,
+  designLayerRevealScrollTop,
   designLayerRovingTabStop,
   designLayerSelectionSubtreeIds,
   designLayerVirtualWindow,
@@ -71,9 +71,12 @@ import {
   collapseAllDesignLayers,
   designWorkspaceHasExpandedLayers,
   EMPTY_DESIGN_FRAME_DISCLOSURE,
-  revealDesignLayerPath,
+  requestDesignLayerReveal,
+  settleDesignLayerReveal,
   toggleDesignFrameTreeExpanded,
   toggleDesignLayerExpanded,
+  useDesignLayerDisclosureStore,
+  useDesignLayerRevealRequest,
   useDesignWorkspaceDisclosure,
 } from "./state/design-layer-disclosure";
 
@@ -86,6 +89,9 @@ interface DesignWorkspaceSidebarPanelsProps {
   workspace?: Workspace | null;
   folder?: string | null;
   panelId?: string;
+  /** The tree is open, or folded down to the Layers header row. */
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 }
 
 interface OwnedDesignWorkspaceSidebarPanelsProps {
@@ -94,6 +100,8 @@ interface OwnedDesignWorkspaceSidebarPanelsProps {
   folder: string | null;
   panelId: string;
   isDesign: boolean;
+  expanded: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 }
 
 interface LayerWindowState {
@@ -222,6 +230,8 @@ export function DesignWorkspaceSidebarPanels({
   workspace: workspaceOverride,
   folder: folderOverride,
   panelId = "design-layers-panel",
+  expanded = true,
+  onExpandedChange,
 }: DesignWorkspaceSidebarPanelsProps) {
   if (workspaceOverride && folderOverride) {
     return (
@@ -231,6 +241,8 @@ export function DesignWorkspaceSidebarPanels({
         folder={folderOverride}
         panelId={panelId}
         isDesign
+        expanded={expanded}
+        onExpandedChange={onExpandedChange}
       />
     );
   }
@@ -238,6 +250,8 @@ export function DesignWorkspaceSidebarPanels({
     <ActiveDesignWorkspaceSidebarPanels
       surfaceActive={surfaceActive}
       panelId={panelId}
+      expanded={expanded}
+      onExpandedChange={onExpandedChange}
     />
   );
 }
@@ -245,9 +259,13 @@ export function DesignWorkspaceSidebarPanels({
 function ActiveDesignWorkspaceSidebarPanels({
   surfaceActive,
   panelId,
+  expanded,
+  onExpandedChange,
 }: {
   surfaceActive: boolean;
   panelId: string;
+  expanded: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 }) {
   const { workspace, folder } = useActiveWorkspace();
   const isDesign = Boolean(workspace?.id);
@@ -258,6 +276,8 @@ function ActiveDesignWorkspaceSidebarPanels({
       folder={folder}
       panelId={panelId}
       isDesign={isDesign}
+      expanded={expanded}
+      onExpandedChange={onExpandedChange}
     />
   );
 }
@@ -268,6 +288,8 @@ function OwnedDesignWorkspaceSidebarPanels({
   folder,
   panelId,
   isDesign,
+  expanded,
+  onExpandedChange,
 }: OwnedDesignWorkspaceSidebarPanelsProps) {
   const workspaceId = workspace?.id ?? null;
   const snapshot = useDesignWorkspaceSnapshot(
@@ -377,14 +399,18 @@ function OwnedDesignWorkspaceSidebarPanels({
       : null,
   );
   const disclosures = useDesignWorkspaceDisclosure(workspaceId);
-  const revealedSelectionRef = useRef<string | null>(null);
+  const revealRequest = useDesignLayerRevealRequest(workspaceId);
+  const revealedSelectionRef = useRef<{
+    ownerKey: string;
+    /** Null remembers a selected id that has not reached the tree yet. */
+    pathsByNode: ReadonlyMap<string, readonly string[] | null>;
+  } | null>(null);
+  const scrolledRevealRef = useRef<string | null>(null);
   const selectedTree = selectedFrame
     ? (treesByFile[selectedFrame.file] ?? EMPTY_LAYER_TREE)
     : EMPTY_LAYER_TREE;
-  const selectedAncestors = useMemo(
-    () => designLayerAncestorIds(selectedTree, selectedNodeId),
-    [selectedTree, selectedNodeId],
-  );
+  // Only a live, open tree measures, scrolls, or consumes a reveal.
+  const treeActive = surfaceActive && expanded;
   // Figma semantics: selecting a container selects everything it owns, so its
   // descendant rows carry a softer tint. A selected frame owns every row.
   const selectionSubtreeIds = useMemo(
@@ -491,7 +517,7 @@ function OwnedDesignWorkspaceSidebarPanels({
 
   /** Track only the fixed-height slice intersecting the Radix viewport. */
   useLayoutEffect(() => {
-    if (!surfaceActive || !workspaceId || !virtualizedLayers) return;
+    if (!treeActive || !workspaceId || !virtualizedLayers) return;
     const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
       "[data-radix-scroll-area-viewport]",
     );
@@ -536,91 +562,241 @@ function OwnedDesignWorkspaceSidebarPanels({
         window.cancelAnimationFrame(animationFrame);
       }
     };
-  }, [panelRows.length, surfaceActive, virtualizedLayers, workspaceId]);
+  }, [panelRows.length, treeActive, virtualizedLayers, workspaceId]);
 
+  /** Scroll only the Layers viewport — never an ancestor — so the floating
+   * panel and the canvas under it cannot shift. Rows are a fixed 28px, which
+   * also places rows a virtualized list has not mounted yet. */
+  const scrollRowIntoView = useCallback(
+    (index: number, mode: "reveal" | "nearest"): boolean => {
+      const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
+        "[data-radix-scroll-area-viewport]",
+      );
+      const tree = treeRef.current;
+      if (!viewport || !tree || viewport.clientHeight <= 0) return false;
+      const treeTop =
+        tree.getBoundingClientRect().top -
+        viewport.getBoundingClientRect().top +
+        viewport.scrollTop;
+      const next = designLayerRevealScrollTop({
+        rowTop: treeTop + index * DESIGN_LAYER_ROW_HEIGHT,
+        rowHeight: DESIGN_LAYER_ROW_HEIGHT,
+        scrollTop: viewport.scrollTop,
+        viewportHeight: viewport.clientHeight,
+        scrollHeight: viewport.scrollHeight,
+        mode,
+      });
+      if (next === null) return true;
+      if (virtualizedLayers && workspaceId) {
+        // Mount the destination slice in the same commit as the scroll, so
+        // the list never paints an empty window on its way there.
+        const window = designLayerVirtualWindow({
+          count: panelRows.length,
+          visibleTop: next - treeTop,
+          viewportHeight: viewport.clientHeight,
+          rowHeight: DESIGN_LAYER_ROW_HEIGHT,
+        });
+        setLayerWindowState((current) =>
+          current.ownerKey === workspaceId &&
+          current.count === panelRows.length &&
+          current.start === window.start &&
+          current.end === window.end
+            ? current
+            : { ownerKey: workspaceId, count: panelRows.length, ...window },
+        );
+      }
+      viewport.scrollTop = next;
+      return true;
+    },
+    [panelRows.length, virtualizedLayers, workspaceId],
+  );
+
+  const focusRowFrameRef = useRef<number | null>(null);
+  useLayoutEffect(
+    () => () => {
+      if (focusRowFrameRef.current !== null) {
+        window.cancelAnimationFrame(focusRowFrameRef.current);
+      }
+    },
+    [],
+  );
+
+  /** Keyboard travel: scroll the least distance, then focus the mounted row. */
   const revealRowAtIndex = useCallback(
     (index: number, focus: boolean) => {
       const row = panelRows[index];
       if (!row || !workspaceId) return;
-      if (virtualizedLayers) {
-        const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
-          "[data-radix-scroll-area-viewport]",
-        );
-        const viewportHeight = viewport?.clientHeight || 840;
-        setLayerWindowState((current) => {
-          const currentWindow =
-            current.ownerKey === workspaceId &&
-            current.count === panelRows.length
-              ? current
-              : initialLayerWindow;
-          const next = designLayerRevealWindow({
-            count: panelRows.length,
-            index,
-            viewportHeight,
-            current: currentWindow,
-            rowHeight: DESIGN_LAYER_ROW_HEIGHT,
-          });
-          return current.ownerKey === workspaceId &&
-            current.count === panelRows.length &&
-            current.start === next.start &&
-            current.end === next.end
-            ? current
-            : { ownerKey: workspaceId, count: panelRows.length, ...next };
-        });
+      scrollRowIntoView(index, "nearest");
+      if (focusRowFrameRef.current !== null) {
+        window.cancelAnimationFrame(focusRowFrameRef.current);
       }
-      window.requestAnimationFrame(() => {
+      // A virtualized slice mounts on the next commit; focus follows it.
+      // Focus that fell to the body with its unmounted row follows the
+      // travel too, but focus another owner took since the key press (a
+      // canvas click, a shortcut into another surface) stays there.
+      focusRowFrameRef.current = window.requestAnimationFrame(() => {
+        focusRowFrameRef.current = null;
+        const tree = treeRef.current;
+        if (!focus || !tree) return;
+        const focused = document.activeElement;
+        if (focused && focused !== document.body && !tree.contains(focused)) {
+          return;
+        }
         const element = Array.from(
-          treeRef.current?.querySelectorAll<HTMLButtonElement>(
-            "[data-design-panel-row]",
-          ) ?? [],
+          tree.querySelectorAll<HTMLButtonElement>("[data-design-panel-row]"),
         ).find((candidate) => candidate.dataset.designPanelRow === row.key);
-        element?.scrollIntoView({ block: "nearest" });
-        if (focus) element?.focus();
+        element?.focus({ preventScroll: true });
       });
     },
-    [initialLayerWindow, panelRows, virtualizedLayers, workspaceId],
+    [panelRows, scrollRowIntoView, workspaceId],
   );
 
-  /** A selection restored from durable memory (or published by the engine
-   * rather than by a click) still has to be reachable. Reveal its path once per
-   * selected node, before the browser paints, and never again: a frame or
-   * container the user folds afterwards must stay folded through mutations. */
+  /** A selection restored from durable memory (or set directly in the store
+   * rather than through a selection workflow) still has to be reachable, and
+   * so does one whose layer moved under another parent. Reveal its paths once
+   * for each place the selected layer sits, before the browser paints: a
+   * frame or container the user folds afterwards stays folded through edits
+   * that leave the layer where it is. Nodes the tree does not hold yet retry
+   * on a later tree rather than consuming the reveal. */
+  const selectedRawTree = selectedFrame
+    ? rawTreesByFile[selectedFrame.file]
+    : undefined;
   useLayoutEffect(() => {
-    if (!workspaceId || !selectedFrame || !selectedNodeId) return;
-    if (selectedTree.length === 0) return;
-    const revealKey = `${workspaceId} ${selectedFrame.file} ${selectedNodeId}`;
-    if (revealedSelectionRef.current === revealKey) return;
-    revealedSelectionRef.current = revealKey;
-    revealDesignLayerPath(workspaceId, selectedFrame.file, selectedAncestors);
+    if (!surfaceActive || !workspaceId || !selectedFrame || !selectedNodeId) {
+      return;
+    }
+    if (rootSelected || !selectedRawTree || selectedRawTree.length === 0) {
+      return;
+    }
+    const nodeIds = selectedNodeIds.includes(selectedNodeId)
+      ? selectedNodeIds
+      : [selectedNodeId, ...selectedNodeIds];
+    const { pathsByNode, found } = designLayerRevealPaths(
+      selectedRawTree,
+      nodeIds,
+    );
+    if (!found.has(selectedNodeId)) return;
+    const ownerKey = JSON.stringify([
+      workspaceId,
+      selectedFrame.file,
+      selectedNodeId,
+    ]);
+    const previous = revealedSelectionRef.current;
+    const sameOwner = previous?.ownerKey === ownerKey;
+    const added =
+      sameOwner && nodeIds.some((nodeId) => !previous.pathsByNode.has(nodeId));
+    // Sibling order does not move a layer's path. A newly arrived node belongs
+    // to the pending reveal below, which a manual fold may have cancelled.
+    const moved =
+      sameOwner &&
+      [...pathsByNode].some(([nodeId, path]) => {
+        const previousPath = previous.pathsByNode.get(nodeId);
+        return (
+          previousPath != null &&
+          (previousPath.length !== path.length ||
+            previousPath.some((ancestorId, index) => ancestorId !== path[index]))
+        );
+      });
+    revealedSelectionRef.current = {
+      ownerKey,
+      // Keep known paths through partial trees, bounded to the current group.
+      // Pruning a removed member does not move any surviving selection.
+      pathsByNode: new Map(nodeIds.map((nodeId) => [
+        nodeId,
+        pathsByNode.get(nodeId) ??
+          (sameOwner ? previous.pathsByNode.get(nodeId) : null) ?? null,
+      ])),
+    };
+    if (sameOwner && !added && !moved) return;
+    // A selection workflow already revealed this layer in the same update.
+    const request =
+      useDesignLayerDisclosureStore.getState().revealByWorkspace[workspaceId];
+    if (
+      !moved &&
+      request?.frame === selectedFrame.file &&
+      request.nodeIds[0] === selectedNodeId &&
+      request.nodeIds.length === nodeIds.length &&
+      request.nodeIds.every((nodeId) => nodeIds.includes(nodeId))
+    ) {
+      return;
+    }
+    requestDesignLayerReveal({
+      workspaceId,
+      frame: selectedFrame.file,
+      nodeIds,
+      tree: selectedRawTree,
+      frameRowNodeId: rootIdsByFile[selectedFrame.file],
+    });
   }, [
-    selectedAncestors,
-    selectedFrame,
-    selectedNodeId,
-    selectedTree.length,
-    workspaceId,
-  ]);
-
-  /** Keep an externally selected canvas layer inside the scroll viewport. */
-  useLayoutEffect(() => {
-    if (!selectedNodeId || !selectedFrame) return;
-    const rowKey = rootSelected
-      ? frameRowKey(selectedFrame.file)
-      : layerRowKey(selectedFrame.file, selectedNodeId);
-    const index = panelRows.findIndex((row) => row.key === rowKey);
-    if (index < 0) return;
-    const element = Array.from(
-      treeRef.current?.querySelectorAll<HTMLElement>(
-        "[data-design-panel-row]",
-      ) ?? [],
-    ).find((candidate) => candidate.dataset.designPanelRow === rowKey);
-    if (element) element.scrollIntoView({ block: "nearest" });
-    else revealRowAtIndex(index, false);
-  }, [
-    panelRows,
-    revealRowAtIndex,
+    rootIdsByFile,
     rootSelected,
     selectedFrame,
     selectedNodeId,
+    selectedNodeIds,
+    selectedRawTree,
+    surfaceActive,
+    workspaceId,
+  ]);
+
+  /** Open paths a reveal request left pending until its frame's tree held
+   * them (a layer authored a moment ago, or a runtime still loading). */
+  const pendingRevealTree =
+    revealRequest && revealRequest.pendingNodeIds.length > 0
+      ? rawTreesByFile[revealRequest.frame]
+      : undefined;
+  useLayoutEffect(() => {
+    if (
+      !surfaceActive ||
+      !workspaceId ||
+      !revealRequest ||
+      !pendingRevealTree
+    ) {
+      return;
+    }
+    settleDesignLayerReveal(
+      workspaceId,
+      revealRequest.frame,
+      pendingRevealTree,
+    );
+  }, [pendingRevealTree, revealRequest, surfaceActive, workspaceId]);
+
+  /** Bring the selection's row into view once for each new selection and
+   * each reveal request — a canvas click on the same layer asks again — and
+   * once whenever the tree is shown. Ordinary edits and refreshes never pull
+   * the list away from where the user scrolled it. A row that is not listed
+   * yet (its path still opening, its tree still loading) is retried when the
+   * rows change. */
+  const selectionRowKey =
+    selectedFrame && (selectedNodeId || frameSelected)
+      ? rootSelected || !selectedNodeId
+        ? frameRowKey(selectedFrame.file)
+        : layerRowKey(selectedFrame.file, selectedNodeId)
+      : null;
+  const revealNonce = revealRequest?.nonce ?? 0;
+  useLayoutEffect(() => {
+    if (!treeActive) {
+      scrolledRevealRef.current = null;
+      if (focusRowFrameRef.current !== null) {
+        window.cancelAnimationFrame(focusRowFrameRef.current);
+        focusRowFrameRef.current = null;
+      }
+      return;
+    }
+    if (!selectionRowKey) return;
+    const revealKey = `${workspaceId ?? ""}\u0000${selectionRowKey}\u0000${revealNonce}`;
+    if (scrolledRevealRef.current === revealKey) return;
+    const index = panelRows.findIndex((row) => row.key === selectionRowKey);
+    if (index < 0) return;
+    if (scrollRowIntoView(index, "reveal")) {
+      scrolledRevealRef.current = revealKey;
+    }
+  }, [
+    panelRows,
+    revealNonce,
+    scrollRowIntoView,
+    selectionRowKey,
+    treeActive,
+    workspaceId,
   ]);
 
   if (!isDesign) return null;
@@ -791,46 +967,76 @@ function OwnedDesignWorkspaceSidebarPanels({
       : null,
   );
   const headingId = `${panelId}-heading`;
+  const treeScrollId = `${panelId}-tree`;
 
   return (
     <section
       id={panelId}
       data-design-sidebar-panel=""
+      data-expanded={expanded ? "true" : "false"}
       className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden text-xs"
       aria-labelledby={headingId}
     >
       <div className="flex h-9 shrink-0 items-center gap-2 pr-2 pl-3">
-        <h2 id={headingId} className="text-fg1 text-xs font-medium">
-          Layers
+        <h2 id={headingId} className="text-fg1 min-w-0 text-xs font-medium">
+          {onExpandedChange ? (
+            // The whole tree folds to this header so the inspector below can
+            // take the panel; the selection stays revealed for its return.
+            <button
+              type="button"
+              data-design-layers-fold=""
+              className="zd-design-layers-fold"
+              aria-expanded={expanded}
+              aria-controls={treeScrollId}
+              onClick={() => onExpandedChange(!expanded)}
+            >
+              Layers
+              {expanded ? (
+                <ChevronDown aria-hidden="true" className={DISCLOSURE_ICON} />
+              ) : (
+                <ChevronRight aria-hidden="true" className={DISCLOSURE_ICON} />
+              )}
+            </button>
+          ) : (
+            "Layers"
+          )}
         </h2>
         {selectedNodeIds.length > 1 ? (
           <span className="zd-design-layer-selection-count rounded-sm px-1.5 text-xs tabular-nums">
             {selectedNodeIds.length} selected
           </span>
         ) : null}
-        <Tooltip label="Collapse all layers">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="ml-auto size-6"
-            aria-label="Collapse all layers"
-            // Anything open anywhere counts, including containers inside a frame
-            // the user has since folded — one click closes the whole workspace.
-            disabled={!hasExpandedLayers}
-            onClick={() => {
-              if (!workspaceId) return;
-              collapseAllDesignLayers(workspaceId);
-            }}
-          >
-            <ListCollapse />
-          </Button>
-        </Tooltip>
+        {expanded ? (
+          <Tooltip label="Collapse all layers">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="ml-auto size-6"
+              aria-label="Collapse all layers"
+              // Anything open anywhere counts, including containers inside a
+              // frame the user has since folded — one click closes the whole
+              // workspace.
+              disabled={!hasExpandedLayers}
+              onClick={() => {
+                if (!workspaceId) return;
+                collapseAllDesignLayers(workspaceId);
+              }}
+            >
+              <ListCollapse />
+            </Button>
+          </Tooltip>
+        ) : null}
       </div>
 
       {/* Rows sit flush: a selection and everything it owns must read as one
-          uninterrupted fill, so no gap may cut through the block. */}
-      <ScrollArea ref={scrollAreaRef} className="min-h-0 min-w-0 flex-1">
+          uninterrupted fill, so no gap may cut through the block. A folded
+          tree stays mounted but out of layout; its effects pause. */}
+      <ScrollArea
+        ref={scrollAreaRef}
+        id={treeScrollId}
+        className={cn("min-h-0 min-w-0 flex-1", !expanded && "hidden")}
+      >
         <div className="flex min-w-0 flex-col px-1.5 pb-2">
           <div
             ref={treeRef}

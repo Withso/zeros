@@ -114,7 +114,7 @@ const MotionTimelineResizeHandle = React.memo(
     const preferredHeightRef = useRef(height);
     const maximumRef = useRef(maximum);
 
-    // The canvas and its floating toolbar share this variable. Pointer moves
+    // The canvas and its floating tool rail share this variable. Pointer moves
     // publish directly to the DOM; only a committed size enters React state.
     const publish = useCallback((value: number) => {
       const next = boundedMotionHeight(value, maximumRef.current);
@@ -1033,6 +1033,12 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     clearActivePreview();
   }, [clearActivePreview, open]);
 
+  // A disabled timeline (its Design surface went inactive, or its Foundation
+  // is not ready) stops playing; the draft and playhead stay for its return.
+  useEffect(() => {
+    if (disabled) setPlaying(false);
+  }, [disabled]);
+
   useEffect(
     () => () => {
       activePointerCleanupRef.current?.();
@@ -1422,7 +1428,8 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       <section
         ref={timelineRef}
         data-design-controls
-        className="zd-motion-timeline border-border1 bg-bg1 absolute inset-x-0 bottom-0 z-40 flex min-w-0 flex-col border-t shadow-lg"
+        data-design-motion-timeline=""
+        className="zd-motion-timeline bg-bg1 absolute z-40 flex min-w-0 flex-col"
         aria-label="Motion timeline"
         onPointerDown={(event) => event.stopPropagation()}
       >
@@ -1505,7 +1512,8 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     <section
       ref={timelineRef}
       data-design-controls
-      className="zd-motion-timeline border-border1 bg-bg1 absolute inset-x-0 bottom-0 z-40 flex min-w-0 flex-col border-t shadow-lg"
+      data-design-motion-timeline=""
+      className="zd-motion-timeline bg-bg1 absolute z-40 flex min-w-0 flex-col"
       aria-label="Motion timeline"
       onPointerDown={(event) => event.stopPropagation()}
     >

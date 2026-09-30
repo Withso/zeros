@@ -9,7 +9,7 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?autoLayout=1`,
     { waitUntil: "networkidle" },
   );
-  const layers = page.locator("#design-layers-panel");
+  const layers = page.locator("[data-design-sidebar-panel]");
   const layout = page.locator("[data-design-layout-section]");
   const editor = page.locator("[data-design-style-editor]");
   const runtime = page.frameLocator(

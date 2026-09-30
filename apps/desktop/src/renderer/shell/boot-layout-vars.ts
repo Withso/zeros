@@ -30,8 +30,10 @@ import {
   readPersistedConversationRatio,
 } from "./conversation/pane-sizing";
 import {
+  DESIGN_WORKSPACE_LAYERS_HEIGHT_VAR,
   DESIGN_WORKSPACE_LAYERS_WIDTH_VAR,
   DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
+  readPersistedDesignWorkspaceLayersHeight,
   readPersistedDesignWorkspaceLayersWidth,
   readPersistedDesignWorkspaceStyleWidth,
 } from "../features/design-workspace/design-workspace-width";
@@ -64,6 +66,10 @@ export function applyBootLayoutVars(): void {
     root.style.setProperty(
       DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
       `${readPersistedDesignWorkspaceStyleWidth()}px`,
+    );
+    root.style.setProperty(
+      DESIGN_WORKSPACE_LAYERS_HEIGHT_VAR,
+      `${readPersistedDesignWorkspaceLayersHeight()}px`,
     );
     root.style.setProperty(
       TERMINAL_PANEL_HEIGHT_VAR,

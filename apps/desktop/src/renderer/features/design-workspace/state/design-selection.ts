@@ -46,29 +46,32 @@ import {
   isValidDesignNodeId,
   useDesignWorkspaceUiStore,
 } from "./design-workspace-ui";
-import { revealDesignLayerPath } from "./design-layer-disclosure";
+import { requestDesignLayerReveal } from "./design-layer-disclosure";
 import {
-  designLayerAncestorIdsFor,
   resolveDesignFrameBodyTarget,
   type DesignFrameBodyIntent,
 } from "../design-layer-tree";
 
 /** Open the Layers path down to a selection in the same transition that
- * publishes it, so a canvas click can never leave its row folded away. The
- * user stays free to collapse those containers again afterwards; a snapshot
- * that lands later re-selects and reveals the path from the fresh tree. */
+ * publishes it, so a canvas click can never leave its row folded away, and ask
+ * the Layers panel to bring that row into view — even when the selection is
+ * unchanged, so clicking the same layer again finds it again. The user stays
+ * free to collapse those containers afterwards: background re-selection
+ * (`reconcileDesignRuntimeSnapshot`) never reveals. Ids a tree does not hold
+ * yet open when the Layers panel receives a tree that does. */
 function revealDesignSelectionPath(
   workspaceId: string,
-  frame: string,
+  frame: DesignCanvasFrameWire,
   nodeIds: readonly string[],
 ): void {
-  const tree = designRuntimeFrameState(workspaceId, frame)?.snapshot?.tree;
-  if (!tree) return;
-  revealDesignLayerPath(
+  const snapshot = designRuntimeFrameState(workspaceId, frame.file)?.snapshot;
+  requestDesignLayerReveal({
     workspaceId,
-    frame,
-    designLayerAncestorIdsFor(tree, nodeIds),
-  );
+    frame: frame.file,
+    nodeIds,
+    tree: snapshot?.tree,
+    frameRowNodeId: frame.kind === "text" ? null : snapshot?.frame.oid,
+  });
 }
 
 const selectionGenerationByWorkspace = new Map<string, number>();
@@ -387,7 +390,13 @@ export async function captureDesignRuntimeScreenshot(
 export async function selectDesignFrame(
   workspaceId: string,
   frame: DesignCanvasFrameWire | null,
-  options?: { selected?: boolean },
+  options?: {
+    selected?: boolean;
+    /** A user gesture on the canvas: bring the frame's Layers row into view.
+     * Off by default, because the resting activation republishes on every
+     * snapshot and must not pull the list away from where the user left it. */
+    reveal?: boolean;
+  },
 ): Promise<void> {
   nextGeneration(selectionGenerationByWorkspace, workspaceId);
   const version = nextSelectionVersion();
@@ -411,6 +420,7 @@ export async function selectDesignFrame(
         frameSelected,
       });
   }
+  if (options?.reveal) revealDesignSelectionPath(workspaceId, frame, []);
   await publishDurableDesignSelection(
     workspaceId,
     frameSelection(frame),
@@ -428,6 +438,9 @@ export async function selectDesignNode(input: {
   forceRuntimeRead?: boolean;
   /** Exact-source local selection is ready; engine persistence may still wait. */
   onLocalSelection?: (details: DesignRuntimeNodeDetails) => void;
+  /** Open and scroll to the Layers row (default). Background re-selection of
+   * an unchanged node passes false so the user's folds and scroll survive. */
+  reveal?: boolean;
 }): Promise<DesignRuntimeNodeDetails | null> {
   const { workspaceId, folder, frame, nodeId } = input;
   const generation = nextGeneration(
@@ -446,7 +459,9 @@ export async function selectDesignNode(input: {
       .getState()
       .setSelection(workspaceId, frame.file, nodeId);
   }
-  revealDesignSelectionPath(workspaceId, frame.file, [nodeId]);
+  if (input.reveal !== false) {
+    revealDesignSelectionPath(workspaceId, frame, [nodeId]);
+  }
 
   const cachedCandidate = designRuntimeFrameState(workspaceId, frame.file)
     ?.detailsByNode[nodeId];
@@ -513,6 +528,8 @@ export async function selectDesignNodes(input: {
   details?: readonly DesignRuntimeNodeDetails[];
   /** Runtime revisions can change computed values without changing source. */
   forceRuntimeRead?: boolean;
+  /** Open and scroll to the primary Layers row (default); see selectDesignNode. */
+  reveal?: boolean;
 }): Promise<DesignRuntimeNodeDetails[] | null> {
   const unique = [...new Set(input.nodeIds.filter(isValidDesignNodeId))];
   const primary =
@@ -537,7 +554,9 @@ export async function selectDesignNodes(input: {
   useDesignWorkspaceUiStore
     .getState()
     .setSelection(input.workspaceId, input.frame.file, primary, nodeIds);
-  revealDesignSelectionPath(input.workspaceId, input.frame.file, nodeIds);
+  if (input.reveal !== false) {
+    revealDesignSelectionPath(input.workspaceId, input.frame, nodeIds);
+  }
 
   const supplied = new Map(
     input.details?.map((details) => [details.oid, details]) ?? [],
@@ -698,13 +717,14 @@ export async function selectDesignFrameBodyAtLocation(
   const selectFrame = async () => {
     // Empty-space Shift-click must not replace an existing group of layers.
     if (input.additive && current.selectedNodeIds.length > 0) return null;
-    await selectDesignFrame(workspaceId, frame, {
-      selected: !(
-        input.additive &&
-        current.selectedFrame === frame.file &&
-        current.frameSelected
-      ),
-    });
+    const selected = !(
+      input.additive &&
+      current.selectedFrame === frame.file &&
+      current.frameSelected
+    );
+    // A click on the frame is a user gesture: bring its Layers row into view,
+    // even when the frame was already the selection.
+    await selectDesignFrame(workspaceId, frame, { selected, reveal: selected });
     return null;
   };
   if (labeledFrame && input.intent === "plain" && !selectedNodeId) {
@@ -1436,6 +1456,7 @@ export function reconcileDesignRuntimeSnapshot(input: {
         primaryNodeId: nodeId,
         ...(nodeId === snapshot.frame.oid ? { details: [snapshot.frame] } : {}),
         forceRuntimeRead: previousRuntimeRevision !== snapshot.revision,
+        reveal: false,
       }).catch(() => {
         // Last confirmed exact-key group remains visible during revalidation.
       });
@@ -1448,6 +1469,7 @@ export function reconcileDesignRuntimeSnapshot(input: {
       nodeId,
       ...(nodeId === snapshot.frame.oid ? { details: snapshot.frame } : {}),
       forceRuntimeRead: previousRuntimeRevision !== snapshot.revision,
+      reveal: false,
     }).catch(() => {
       // Last confirmed exact-key details remain visible during revalidation.
     });

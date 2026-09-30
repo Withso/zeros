@@ -1,3 +1,6 @@
+import { runDesignFloatingChromeSmoke } from "./ui-smoke-design-floating-chrome.mjs";
+import { runDesignFloatingChromeEdgesSmoke } from "./ui-smoke-design-floating-chrome-edges.mjs";
+import { designCanvasPoint } from "./ui-smoke-design-helpers.mjs";
 import { expect } from "@playwright/test";
 import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
 // Design-workspace portion of the real-browser interaction contract. Keeping
@@ -21,6 +24,8 @@ import { runDesignInlineToolsSmoke } from "./ui-smoke-design-inline-tools.mjs";
 import { runDesignCameraSmoke } from "./ui-smoke-design-camera.mjs";
 
 export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
+  await runDesignFloatingChromeSmoke({ page, waitFor, check });
+  await runDesignFloatingChromeEdgesSmoke({ page, waitFor, check });
   await runDesignWorkbenchSmoke({ page, check });
   await runDesignGitMenuSmoke({ page, check });
   await runDesignSelectionSmoke({ page, waitFor, check });
@@ -37,6 +42,10 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignFrameRecoverySmoke({ page, check });
   await runDesignInlineToolsSmoke({ page, waitFor, check });
   await runDesignCameraSmoke({ page, waitFor, check });
+  await runDesignWorkspaceCanvasSmoke({ page, waitFor, check });
+}
+
+export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   // The harness uses a sandboxed runtime and production Radix primitives;
   // bridge-backed writes are covered by the engine suites.
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -63,41 +72,44 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       });
     });
   };
-  const layersPanel = page.locator("#design-layers-panel");
-  const designSidebar = page.getByRole("region", {
-    name: "Design workspace sidebar",
+  const layersPanel = page.locator("[data-design-sidebar-panel]");
+  const floatingPanel = page.getByRole("complementary", {
+    name: "Layers and Inspector",
   });
-  const directoryHeader = designSidebar.locator("[data-design-directory-header]");
+  const layersSlot = page.locator("[data-design-layers-slot]");
+  const directoryHeader = page.getByRole("group", { name: "Design directory" });
   const designDirectoryName = directoryHeader.locator("[data-design-directory-name]");
   await layersPanel.waitFor({ state: "visible", timeout: 10_000 });
-  await designSidebar.waitFor({ state: "visible", timeout: 10_000 });
+  await floatingPanel.waitFor({ state: "visible", timeout: 10_000 });
   await directoryHeader.waitFor({ state: "visible", timeout: 10_000 });
   const initialLayersBox = await layersPanel.boundingBox();
-  const initialSidebarBox = await designSidebar.boundingBox();
+  const initialPanelBox = await floatingPanel.boundingBox();
   const initialStylePanelBox = await page
     .locator("[data-design-inspector]")
     .boundingBox();
   const directoryHeaderBox = await directoryHeader.boundingBox();
   const designDirectoryNameBox = await designDirectoryName.boundingBox();
   check(
-    "design Layers fill a dedicated native sidebar",
-    !!initialLayersBox &&
-      initialLayersBox.height > 800 &&
-      !!initialSidebarBox &&
-      Math.abs(initialSidebarBox.width - 240) < 0.5,
+    "design Layers occupy the top of the floating panel",
+    !!initialLayersBox && !!initialPanelBox &&
+      Math.abs(initialLayersBox.height - 240) < 1 &&
+      Math.abs(initialLayersBox.y - initialPanelBox.y - 1) < 1 &&
+      initialPanelBox.height > 800,
   );
   check(
-    "Style opens at 280px while Layers opens at 240px",
-    !!initialStylePanelBox &&
-      Math.abs(initialStylePanelBox.width - 280) < 0.5 &&
-      !!initialSidebarBox &&
-      Math.abs(initialSidebarBox.width - 240) < 0.5,
+    "Style and Layers share the default 280px floating panel",
+    !!initialStylePanelBox && !!initialLayersBox && !!initialPanelBox &&
+      Math.abs(initialPanelBox.width - 280) < 0.5 &&
+      Math.abs(initialStylePanelBox.width - initialLayersBox.width) < 0.5 &&
+      Math.abs(initialStylePanelBox.width - (initialPanelBox.width - 2)) < 0.5,
   );
   check(
-    "Design directory name sits above Layers without the old mode switch",
-    !!directoryHeaderBox && !!designDirectoryNameBox && !!initialLayersBox &&
-      directoryHeaderBox.y + directoryHeaderBox.height <= initialLayersBox.y &&
+    "Design directory name lives in the top-left pill without the old mode switch",
+    !!directoryHeaderBox && !!designDirectoryNameBox && !!initialPanelBox &&
+      directoryHeaderBox.x === 8 && directoryHeaderBox.y === 8 &&
+      directoryHeaderBox.x + directoryHeaderBox.width < initialPanelBox.x &&
       ((await designDirectoryName.textContent())?.trim().length ?? 0) > 0 &&
+      (await directoryHeader.getByRole("button", { name: "Choose Design directory" }).count()) === 1 &&
       (await page.locator("[data-workspace-mode-toggle]").count()) === 0,
   );
   check(
@@ -487,26 +499,25 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     name: "Resize Layers panel",
   });
   await designSplitter.focus();
-  await page.keyboard.press("ArrowRight");
-  const keyboardSidebarBox = await designSidebar.boundingBox();
+  await page.keyboard.press("ArrowDown");
+  const keyboardLayersBox = await layersSlot.boundingBox();
   check(
-    "keyboard splitter resizes the design sidebar",
-    !!initialSidebarBox &&
-      !!keyboardSidebarBox &&
-      keyboardSidebarBox.width > initialSidebarBox.width,
+    "keyboard splitter resizes Layers height",
+    !!initialLayersBox && !!keyboardLayersBox &&
+      Math.abs(keyboardLayersBox.height - initialLayersBox.height - 8) < 1,
   );
 
   await page.setViewportSize({ width: 700, height: 700 });
-  const compactSidebarBox = await designSidebar.boundingBox();
+  const compactPanelBox = await floatingPanel.boundingBox();
   const compactCanvasBox = await page
     .getByRole("region", { name: "Design workspace", exact: true })
     .boundingBox();
   check(
-    "compact design keeps the 34/66 sidebar-canvas split usable",
-    !!compactSidebarBox &&
-      compactSidebarBox.width >= 235 &&
-      !!compactCanvasBox &&
-      compactCanvasBox.width >= 455,
+    "compact design keeps a full-bleed canvas and bounded floating panel",
+    !!compactPanelBox && !!compactCanvasBox &&
+      compactCanvasBox.width === 700 && compactCanvasBox.height === 700 &&
+      compactPanelBox.width === 280 && compactPanelBox.x === 412 &&
+      compactPanelBox.y === 8 && compactPanelBox.height === 684,
   );
   await page.setViewportSize({ width: 1440, height: 900 });
 
@@ -942,15 +953,8 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     });
     if ((await trigger.count()) > 0) await trigger.click();
   };
-  const canvasBoxForPageSelection = await canvasViewport.boundingBox();
-  if (canvasBoxForPageSelection) {
-    await canvasViewport.click({
-      position: {
-        x: canvasBoxForPageSelection.width - 12,
-        y: canvasBoxForPageSelection.height - 12,
-      },
-    });
-  }
+  const pageSelectionPoint = await designCanvasPoint(page, { empty: true });
+  await page.mouse.click(pageSelectionPoint.x, pageSelectionPoint.y);
   await waitFor(
     async () => (await inspectorHeader.textContent())?.trim() === "Page",
     "design-page-background-selection",
@@ -3397,21 +3401,22 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     { steps: 4 },
   );
   check(
-    "dragging motion height moves the toolbar immediately through the canvas variable",
+    "dragging motion height recenters the tool rail immediately through the canvas variable",
     await motionTimeline.evaluate((element) => {
       const root = element.offsetParent;
       const toolbar = root.querySelector('[aria-label="Canvas tools"]');
+      const rail = root.querySelector("[data-design-canvas-tools-rail]");
+      const railBox = rail.getBoundingClientRect();
+      const toolbarBox = toolbar.getBoundingClientRect();
       return (
         element.getBoundingClientRect().height === 328 &&
         root.style.getPropertyValue("--zeros-design-motion-height") ===
           "328px" &&
         root.hasAttribute("data-design-motion-resizing") &&
-        getComputedStyle(toolbar).transitionProperty === "none" &&
-        Math.abs(
-          element.getBoundingClientRect().top -
-            toolbar.getBoundingClientRect().bottom -
-            16,
-        ) < 1
+        getComputedStyle(rail).transitionProperty === "none" &&
+        Math.abs(element.getBoundingClientRect().top - railBox.bottom - 8) < 1 &&
+        Math.abs(toolbarBox.y + toolbarBox.height / 2 -
+          (railBox.y + railBox.height / 2)) < 1
       );
     }),
   );
@@ -4020,17 +4025,20 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       );
     }),
   );
-  for (const width of [1120, 1241, 1280]) {
-    await page.setViewportSize({ width, height: 900 });
+  const motionPanelWidth = (await floatingPanel.boundingBox()).width;
+  for (const width of [560, 720, 800, 900]) {
+    // Panel plus three 8px gaps leave this exact timeline width.
+    await page.setViewportSize({ width: width + motionPanelWidth + 24, height: 900 });
     check(
-      `motion controls fit between responsive breakpoints at ${width}px`,
-      await motionTimeline.evaluate((element) => {
+      `motion controls fit a ${width}px timeline container`,
+      await motionTimeline.evaluate((element, expectedWidth) => {
         const header = element.querySelector(".zd-motion-header");
         return (
+          Math.abs(element.getBoundingClientRect().width - expectedWidth) < 1 &&
           element.scrollWidth === element.clientWidth &&
           header.scrollWidth === header.clientWidth
         );
-      }),
+      }, width),
     );
   }
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -4558,23 +4566,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
 
   const canvasBounds = await page.getByLabel("Design canvas").boundingBox();
   if (!canvasBounds) throw new Error("Design canvas has no bounds");
-  const emptyCanvasPoint = await page.evaluate((bounds) => {
-    const candidates = [
-      { x: bounds.x + 36, y: bounds.y + 36 },
-      { x: bounds.x + bounds.width - 36, y: bounds.y + 36 },
-      { x: bounds.x + 36, y: bounds.y + bounds.height - 72 },
-    ];
-    return (
-      candidates.find((point) => {
-        const target = document.elementFromPoint(point.x, point.y);
-        return (
-          target instanceof Element &&
-          !target.closest("[data-design-frame]") &&
-          !target.closest("[data-design-controls]")
-        );
-      }) ?? candidates[0]
-    );
-  }, canvasBounds);
+  const emptyCanvasPoint = await designCanvasPoint(page, { empty: true });
   await page.getByRole("button", { name: "Text tool" }).click();
   await page.mouse.click(emptyCanvasPoint.x, emptyCanvasPoint.y);
   const looseCanvasText = page.getByLabel("New canvas text");
@@ -5332,15 +5324,25 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   };
   let originOverlayBox = await headingOverlay.boundingBox();
   if (!originOverlayBox) throw new Error("heading overlay has no geometry");
+  const originZoomAnchor = {
+    x: originOverlayBox.x + originOverlayBox.width / 2,
+    y: originOverlayBox.y + originOverlayBox.height / 2,
+  };
+  // The fit zoom and the heading's wrapped line count vary with the viewport
+  // insets and platform fonts, so reach a selection shorter than the marker's
+  // 108px minimum instead of assuming the camera starts there.
+  let originZoomOutSteps = 0;
+  while (originOverlayBox.height >= 108 && originZoomOutSteps < 4) {
+    await zoomAboutSelection(originZoomAnchor, 40, 1);
+    originZoomOutSteps += 1;
+    originOverlayBox = await headingOverlay.boundingBox();
+    if (!originOverlayBox) throw new Error("heading overlay has no geometry");
+  }
   check(
     "a selection too small for the origin marker does not draw one",
     originOverlayBox.height < 108 && (await originHandle.count()) === 0,
     JSON.stringify(originOverlayBox),
   );
-  const originZoomAnchor = {
-    x: originOverlayBox.x + originOverlayBox.width / 2,
-    y: originOverlayBox.y + originOverlayBox.height / 2,
-  };
   const originZoomSteps = 4;
   await zoomAboutSelection(originZoomAnchor, -40, originZoomSteps);
   originOverlayBox = await headingOverlay.boundingBox();
@@ -5552,8 +5554,13 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       .count()) === 0,
   );
   // Return the harness to an upright heading so later checks measure the same
-  // geometry they always have.
-  await zoomAboutSelection(originZoomAnchor, 40, originZoomSteps);
+  // geometry they always have; the steps that shrank the selection already
+  // undid part of the zoom-in.
+  await zoomAboutSelection(
+    originZoomAnchor,
+    40,
+    originZoomSteps - originZoomOutSteps,
+  );
 
   await layersPanel.locator('[data-design-layer-id="home-copy"]').click();
   await waitFor(
@@ -5807,7 +5814,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?denseLayers=1`,
     { waitUntil: "networkidle" },
   );
-  const denseLayersPanel = page.locator("#design-layers-panel");
+  const denseLayersPanel = page.locator("[data-design-sidebar-panel]");
   await denseLayersPanel.waitFor({ state: "visible", timeout: 30_000 });
   const denseTree = denseLayersPanel.getByRole("tree");
   check(

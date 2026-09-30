@@ -1,8 +1,4 @@
 import {
-  useDesignWorkspaceUiStore,
-  DEFAULT_DESIGN_WORKSPACE_VIEW,
-} from "./state/design-workspace-ui";
-import {
   DesignCheckoutPause,
   useDesignCheckoutStatus,
 } from "./design-checkout-state";
@@ -24,7 +20,6 @@ import {
 } from "../../state/design-directory-target";
 import { Button } from "../../shared/ui/primitives/button";
 import { primeDesignWorkspaceSnapshot } from "./state/design-workspace-cache";
-import { DesignWorkspaceSidebar } from "./design-workspace-sidebar";
 import { DesignWorkspaceColumn } from "./design-workspace";
 import { errorMessage } from "./design-workspace-error";
 import { DesignGitSetup } from "./design-git-setup";
@@ -48,9 +43,6 @@ export function DesignWorkbenchSurface({
     workspace.id,
     workspace.path,
     active && !localMain,
-  );
-  const view = useDesignWorkspaceUiStore(
-    (state) => state.byWorkspace[workspace.id] ?? DEFAULT_DESIGN_WORKSPACE_VIEW,
   );
   const refreshTarget = target.refresh;
   const project = useProjectForFolder(folder);
@@ -97,56 +89,18 @@ export function DesignWorkbenchSurface({
       />
     );
   if (!localMain && checkout.data && !checkout.error && target.data?.exists) {
+    // The canvas is full bleed; the directory switcher, tools, and the
+    // Layers + Inspector panel float over it (see DesignWorkspaceColumn).
     return (
       <div
         className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         data-design-tab-surface=""
       >
-        <div className="border-border1 flex h-8 shrink-0 items-center justify-end gap-1 border-b px-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={!active}
-            aria-pressed={view.layersVisible}
-            onClick={() =>
-              useDesignWorkspaceUiStore
-                .getState()
-                .setPanels(workspace.id, { layersVisible: !view.layersVisible })
-            }
-          >
-            Layers
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={!active}
-            aria-pressed={view.inspectorVisible}
-            onClick={() =>
-              useDesignWorkspaceUiStore
-                .getState()
-                .setPanels(workspace.id, {
-                  inspectorVisible: !view.inspectorVisible,
-                })
-            }
-          >
-            Inspector
-          </Button>
-        </div>
-        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-          {view.layersVisible && (
-            <DesignWorkspaceSidebar
-              workspace={workspace}
-              folder={folder}
-              surfaceActive={active}
-            />
-          )}
-          <DesignWorkspaceColumn
-            workspace={workspace}
-            folder={folder}
-            surfaceActive={active}
-            inspectorVisible={view.inspectorVisible}
-          />
-        </div>
+        <DesignWorkspaceColumn
+          workspace={workspace}
+          folder={folder}
+          surfaceActive={active}
+        />
       </div>
     );
   }

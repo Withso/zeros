@@ -18,6 +18,54 @@ export interface DesignCanvasRect {
   height: number;
 }
 
+/** Viewport edges covered by floating chrome — the Layers + Inspector panel,
+ * an open Motion timeline. Fitting, revealing and centring aim for the part of
+ * the canvas a person can actually see; pointer-to-world conversion and
+ * authored geometry keep using the full viewport. */
+export interface DesignViewportInsets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+export const DESIGN_VIEWPORT_NO_INSETS: Readonly<DesignViewportInsets> =
+  Object.freeze({ top: 0, right: 0, bottom: 0, left: 0 });
+
+/** A covered axis narrower than this falls back to the whole viewport, so a
+ * narrow window never fits content into a sliver beside its panel. */
+const DESIGN_MIN_SAFE_VIEWPORT_SIZE = 160;
+
+function safeInset(value: number, size: number): number {
+  return Number.isFinite(value) ? Math.min(size, Math.max(0, value)) : 0;
+}
+
+/** The visible canvas rectangle, in viewport-local screen pixels. */
+export function designSafeViewportRect(
+  viewport: DesignViewportSize,
+  insets: Readonly<DesignViewportInsets> = DESIGN_VIEWPORT_NO_INSETS,
+): DesignCanvasRect {
+  const left = safeInset(insets.left, viewport.width);
+  const right = safeInset(insets.right, viewport.width);
+  const top = safeInset(insets.top, viewport.height);
+  const bottom = safeInset(insets.bottom, viewport.height);
+  const width = viewport.width - left - right;
+  const height = viewport.height - top - bottom;
+  const minimumWidth = Math.min(DESIGN_MIN_SAFE_VIEWPORT_SIZE, viewport.width);
+  const minimumHeight = Math.min(
+    DESIGN_MIN_SAFE_VIEWPORT_SIZE,
+    viewport.height,
+  );
+  const fitsX = width >= minimumWidth;
+  const fitsY = height >= minimumHeight;
+  return {
+    x: fitsX ? left : 0,
+    y: fitsY ? top : 0,
+    width: fitsX ? width : viewport.width,
+    height: fitsY ? height : viewport.height,
+  };
+}
+
 export interface DesignCanvasFrameRect extends DesignCanvasRect {
   file: string;
 }
@@ -1413,30 +1461,33 @@ export function designWheelZoomFactor(event: {
   return Math.exp(exponent);
 }
 
-/** Fit one or more frame rectangles without coupling viewport math to React. */
+/** Fit one or more frame rectangles without coupling viewport math to React.
+ * With insets, the content fits and centres in the uncovered canvas. */
 export function fitDesignRects(
   rects: readonly DesignCanvasRect[],
   viewport: DesignViewportSize,
   padding = 64,
+  insets: Readonly<DesignViewportInsets> = DESIGN_VIEWPORT_NO_INSETS,
 ): DesignViewport | null {
   if (rects.length === 0 || viewport.width <= 0 || viewport.height <= 0) {
     return null;
   }
+  const safe = designSafeViewportRect(viewport, insets);
   const left = Math.min(...rects.map((rect) => rect.x));
   const top = Math.min(...rects.map((rect) => rect.y));
   const right = Math.max(...rects.map((rect) => rect.x + rect.width));
   const bottom = Math.max(...rects.map((rect) => rect.y + rect.height));
   const contentWidth = Math.max(1, right - left);
   const contentHeight = Math.max(1, bottom - top);
-  const availableWidth = Math.max(1, viewport.width - padding * 2);
-  const availableHeight = Math.max(1, viewport.height - padding * 2);
+  const availableWidth = Math.max(1, safe.width - padding * 2);
+  const availableHeight = Math.max(1, safe.height - padding * 2);
   const zoom = clampDesignZoom(
     Math.min(availableWidth / contentWidth, availableHeight / contentHeight),
   );
   return {
     zoom,
-    panX: (viewport.width - contentWidth * zoom) / 2 - left * zoom,
-    panY: (viewport.height - contentHeight * zoom) / 2 - top * zoom,
+    panX: safe.x + (safe.width - contentWidth * zoom) / 2 - left * zoom,
+    panY: safe.y + (safe.height - contentHeight * zoom) / 2 - top * zoom,
   };
 }
 
@@ -1447,17 +1498,17 @@ const DESIGN_MIN_REVEALED_SCREEN_SIZE = 24;
 
 function designRectScreenOverlap(
   view: DesignViewport,
-  viewport: DesignViewportSize,
+  safe: DesignCanvasRect,
   rect: DesignCanvasRect,
 ): { width: number; height: number } {
-  const left = Math.max(0, rect.x * view.zoom + view.panX);
-  const top = Math.max(0, rect.y * view.zoom + view.panY);
+  const left = Math.max(safe.x, rect.x * view.zoom + view.panX);
+  const top = Math.max(safe.y, rect.y * view.zoom + view.panY);
   const right = Math.min(
-    viewport.width,
+    safe.x + safe.width,
     (rect.x + rect.width) * view.zoom + view.panX,
   );
   const bottom = Math.min(
-    viewport.height,
+    safe.y + safe.height,
     (rect.y + rect.height) * view.zoom + view.panY,
   );
   return {
@@ -1467,15 +1518,18 @@ function designRectScreenOverlap(
 }
 
 /** Whether the camera shows any of `rects` at a size a person can see. An
- * empty canvas counts as shown: there is nothing to bring into view. */
+ * empty canvas counts as shown: there is nothing to bring into view. A rect
+ * entirely under floating chrome (the insets) is not shown. */
 export function designViewportShowsAnyRect(
   view: DesignViewport,
   viewport: DesignViewportSize,
   rects: readonly DesignCanvasRect[],
+  insets: Readonly<DesignViewportInsets> = DESIGN_VIEWPORT_NO_INSETS,
 ): boolean {
   if (rects.length === 0) return true;
+  const safe = designSafeViewportRect(viewport, insets);
   return rects.some((rect) => {
-    const overlap = designRectScreenOverlap(view, viewport, rect);
+    const overlap = designRectScreenOverlap(view, safe, rect);
     return (
       overlap.width >= DESIGN_MIN_VISIBLE_SCREEN_SIZE &&
       overlap.height >= DESIGN_MIN_VISIBLE_SCREEN_SIZE
@@ -1492,20 +1546,22 @@ export function designRevealRectViewport(
   viewport: DesignViewportSize,
   rect: DesignCanvasRect,
   padding = 64,
+  insets: Readonly<DesignViewportInsets> = DESIGN_VIEWPORT_NO_INSETS,
 ): DesignViewport | null {
   if (viewport.width <= 0 || viewport.height <= 0) return null;
-  if (designViewportShowsAnyRect(view, viewport, [rect])) return null;
+  if (designViewportShowsAnyRect(view, viewport, [rect], insets)) return null;
+  const safe = designSafeViewportRect(viewport, insets);
   const width = rect.width * view.zoom;
   const height = rect.height * view.zoom;
   const readable =
     Math.max(width, height) >= DESIGN_MIN_REVEALED_SCREEN_SIZE &&
-    width <= viewport.width - padding * 2 &&
-    height <= viewport.height - padding * 2;
-  if (!readable) return fitDesignRects([rect], viewport, padding);
+    width <= safe.width - padding * 2 &&
+    height <= safe.height - padding * 2;
+  if (!readable) return fitDesignRects([rect], viewport, padding, insets);
   return {
     zoom: view.zoom,
-    panX: viewport.width / 2 - (rect.x + rect.width / 2) * view.zoom,
-    panY: viewport.height / 2 - (rect.y + rect.height / 2) * view.zoom,
+    panX: safe.x + safe.width / 2 - (rect.x + rect.width / 2) * view.zoom,
+    panY: safe.y + safe.height / 2 - (rect.y + rect.height / 2) * view.zoom,
   };
 }
 

@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   collectDesignLayerParentIds,
-  designLayerAncestorIds,
   designLayerChildId,
   designLayerParentId,
   designLayerPathIds,
   designLayerPeerIds,
   designLayerBlockEdges,
-  designLayerRevealWindow,
+  designLayerRevealPaths,
+  designLayerRevealScrollTop,
   designLayerRovingTabStop,
   designLayerSelectionSubtreeIds,
   designLayerSiblingId,
@@ -117,26 +117,6 @@ describe("design layer tree", () => {
     ).toEqual({ start: 9_988, end: 10_000 });
   });
 
-  it("keeps a tall viewport window intact while keyboard travel stays inside it", () => {
-    const current = { start: 0, end: 48 };
-    expect(
-      designLayerRevealWindow({
-        count: 10_000,
-        index: 1,
-        viewportHeight: 840,
-        current,
-      }),
-    ).toEqual(current);
-    expect(
-      designLayerRevealWindow({
-        count: 10_000,
-        index: 500,
-        viewportHeight: 840,
-        current,
-      }),
-    ).toEqual({ start: 488, end: 542 });
-  });
-
   it("keeps one roving tab stop inside the rendered virtual slice", () => {
     const dense = Array.from(
       { length: 500 },
@@ -220,8 +200,10 @@ describe("design layer tree", () => {
 
   it("finds parent containers and the exact ancestor path", () => {
     expect(collectDesignLayerParentIds(tree)).toEqual(new Set(["hero"]));
-    expect(designLayerAncestorIds(tree, "heading")).toEqual(["hero"]);
-    expect(designLayerAncestorIds(tree, "missing")).toEqual([]);
+    expect(designLayerRevealPaths(tree, ["heading"]).ancestorIds).toEqual([
+      "hero",
+    ]);
+    expect(designLayerRevealPaths(tree, ["missing"]).ancestorIds).toEqual([]);
     expect(designLayerPathIds(tree, "heading")).toEqual(["hero", "heading"]);
   });
 
@@ -601,5 +583,131 @@ describe("design layer tree", () => {
     expect(designFrameRowDiscloses(undefined, { nodeCount: 1 })).toBe(true);
     expect(designFrameRowDiscloses([], { nodeCount: 4, layerCount: 3 })).toBe(false);
     expect(designFrameRowDiscloses(tree, { nodeCount: 1, layerCount: 0 })).toBe(true);
+  });
+
+  it("opens a reveal's paths in one walk and names the ids the tree lacks", () => {
+    const nested = [
+      {
+        oid: "page",
+        tag: "main",
+        name: "Page",
+        text: null,
+        visible: true,
+        children: [
+          {
+            oid: "card",
+            tag: "article",
+            name: "Card",
+            text: null,
+            visible: true,
+            children: [
+              {
+                oid: "title",
+                tag: "h2",
+                name: "Title",
+                text: "Plans",
+                visible: true,
+                children: [],
+              },
+            ],
+          },
+          {
+            oid: "aside",
+            tag: "aside",
+            name: "Aside",
+            text: null,
+            visible: true,
+            children: [
+              {
+                oid: "note",
+                tag: "p",
+                name: "Note",
+                text: "Hi",
+                visible: true,
+                children: [],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const reveal = designLayerRevealPaths(nested, ["title", "note", "later"]);
+    // Shared ancestors appear once, in document order.
+    expect(reveal.ancestorIds).toEqual(["page", "card", "aside"]);
+    expect([...reveal.found].sort()).toEqual(["note", "title"]);
+    expect(reveal.pathsByNode.get("title")).toEqual(["page", "card"]);
+    expect(reveal.pathsByNode.get("note")).toEqual(["page", "aside"]);
+    expect(reveal.pathsByNode.has("later")).toBe(false);
+    const reordered = designLayerRevealPaths(
+      [{ ...nested[0]!, children: [...nested[0]!.children].reverse() }],
+      ["title", "note"],
+    );
+    expect(reordered.pathsByNode).toEqual(reveal.pathsByNode);
+    // The union alone cannot detect two selected layers swapping parents.
+    const [card, aside] = nested[0]!.children;
+    const swapped = designLayerRevealPaths(
+      [{
+        ...nested[0]!,
+        children: [
+          { ...card!, children: aside!.children },
+          { ...aside!, children: card!.children },
+        ],
+      }],
+      ["title", "note"],
+    );
+    expect(swapped.ancestorIds).toEqual(reveal.ancestorIds);
+    expect(swapped.pathsByNode.get("title")).toEqual(["page", "aside"]);
+    expect(swapped.pathsByNode.get("note")).toEqual(["page", "card"]);
+    // A top-level node needs no container opened, yet it is found.
+    const top = designLayerRevealPaths(nested, ["page"]);
+    expect(top.ancestorIds).toEqual([]);
+    expect(top.found.has("page")).toBe(true);
+    expect(top.pathsByNode.get("page")).toEqual([]);
+    expect(designLayerRevealPaths(nested, []).found.size).toBe(0);
+  });
+
+  it("scrolls a revealed row into view only as far as a designer expects", () => {
+    const base = { rowHeight: 28, viewportHeight: 200, scrollHeight: 2_000 };
+    // Fully visible rows never move the list.
+    expect(
+      designLayerRevealScrollTop({ ...base, rowTop: 56, scrollTop: 0 }),
+    ).toBeNull();
+    // A row peeking at the bottom edge scrolls the least distance.
+    expect(
+      designLayerRevealScrollTop({ ...base, rowTop: 190, scrollTop: 0 }),
+    ).toBe(18);
+    // A row peeking at the top edge aligns to the top.
+    expect(
+      designLayerRevealScrollTop({ ...base, rowTop: 90, scrollTop: 100 }),
+    ).toBe(90);
+    // A row out of sight lands centred, so its neighbours read around it.
+    expect(
+      designLayerRevealScrollTop({ ...base, rowTop: 1_000, scrollTop: 0 }),
+    ).toBe(914);
+    // ...but never past either end of the list.
+    expect(
+      designLayerRevealScrollTop({ ...base, rowTop: 1_990, scrollTop: 0 }),
+    ).toBe(1_800);
+    expect(
+      designLayerRevealScrollTop({ ...base, rowTop: 0, scrollTop: 1_500 }),
+    ).toBe(0);
+    // Keyboard travel moves the least distance even from out of sight.
+    expect(
+      designLayerRevealScrollTop({
+        ...base,
+        rowTop: 1_000,
+        scrollTop: 0,
+        mode: "nearest",
+      }),
+    ).toBe(828);
+    // Nothing to measure yet: leave the list alone.
+    expect(
+      designLayerRevealScrollTop({
+        ...base,
+        rowTop: 1_000,
+        scrollTop: 0,
+        viewportHeight: 0,
+      }),
+    ).toBeNull();
   });
 });

@@ -56,8 +56,10 @@ export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
     activeTheme: null,
     canvasBackground: null,
     zoom: 0.25,
+    // A new canvas opens with its first frame and label clear of the
+    // floating directory pill in the top-left corner.
     panX: 64,
-    panY: 64,
+    panY: 96,
     updatedAt: 0,
   });
 

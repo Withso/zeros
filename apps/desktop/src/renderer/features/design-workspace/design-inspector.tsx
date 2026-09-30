@@ -95,7 +95,6 @@ import {
   type DesignLayoutFieldOptions,
 } from "./design-layout-values";
 import { blockingDesignLintReason } from "./design-lint-summary";
-import { DesignPanelResizeHandle } from "./design-panel-resize-handle";
 import { DesignStyleEditor } from "./design-style-editor";
 import {
   clampDesignStyleFieldValue,
@@ -112,15 +111,6 @@ import {
   withDesignPositionContext,
 } from "./design-style-values";
 import { dispatchDesignWorkspaceShortcut } from "./design-workspace-shortcuts";
-import {
-  DESIGN_WORKSPACE_STYLE_WIDTH_DEFAULT,
-  DESIGN_WORKSPACE_STYLE_WIDTH_MAX,
-  DESIGN_WORKSPACE_STYLE_WIDTH_MIN,
-  DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
-  clampDesignWorkspaceStyleWidth,
-  persistDesignWorkspaceStyleWidth,
-  readPersistedDesignWorkspaceStyleWidth,
-} from "./design-workspace-width";
 import {
   publishDesignLivePreviewStyles,
   useDesignLivePreviewValue,
@@ -150,7 +140,6 @@ import {
 } from "./state/design-workspace-ui";
 import { useDesignFoundation } from "./state/use-design-foundation";
 
-import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import { errorMessage } from "./design-workspace-error";
 import {
   designInspectorPreviewOverlay,
@@ -931,37 +920,17 @@ export function DesignInspector({
   );
   const provenanceAbortRef = useRef<AbortController | null>(null);
   const inspectorRef = useRef<HTMLElement | null>(null);
-  const [stylePanelWidth, setStylePanelWidth] = useState(
-    readPersistedDesignWorkspaceStyleWidth,
-  );
   const inspectorId = workspaceId
     ? `design-style-panel-${workspaceId}`
     : "design-style-panel";
 
-  useLayoutEffect(() => {
-    inspectorRef.current?.parentElement?.style.setProperty(
-      DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
-      `${stylePanelWidth}px`,
-    );
-  }, [stylePanelWidth]);
-
-  const persistStylePanelWidth = useCallback((next: number) => {
-    const committed = persistDesignWorkspaceStyleWidth(next);
-    setStylePanelWidth(committed);
-    inspectorRef.current?.parentElement?.style.setProperty(
-      DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
-      `${committed}px`,
-    );
-    document.documentElement.style.setProperty(
-      DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
-      `${committed}px`,
-    );
-  }, []);
-
+  // The inspector sits in the floating panel above the canvas; its owning
+  // Design surface holds exactly one canvas viewport for this workspace.
   const paintCanvasBackground = useCallback((value: string) => {
     const normalized = normalizeDesignCanvasBackground(value);
     if (!normalized) return;
-    inspectorRef.current?.parentElement
+    inspectorRef.current
+      ?.closest("[data-design-workspace-surface]")
       ?.querySelector<HTMLElement>("[data-design-canvas-viewport]")
       ?.style.setProperty("background-color", normalized);
   }, []);
@@ -1099,8 +1068,10 @@ export function DesignInspector({
                 (candidate) => candidate.file === result.historySelection,
               ) ?? null)
             : null;
+          const restoredFrame = direction === "undo" && selected !== null;
           void selectDesignFrame(workspaceId, selected, {
-            selected: direction === "undo" && selected !== null,
+            selected: restoredFrame,
+            reveal: restoredFrame,
           }).catch((selectionError: unknown) => {
             toast.error("Couldn't save the restored frame selection", {
               description: errorMessage(selectionError),
@@ -2082,26 +2053,15 @@ export function DesignInspector({
       </InspectorSection>
     ) : null;
 
+  // Width, placement, and the popover boundary belong to the floating panel
+  // that stacks this inspector below Layers.
   return (
     <aside
       ref={inspectorRef}
       id={inspectorId}
       data-design-inspector=""
-      {...popoverBoundaryProps}
-      className="border-border1 bg-bg1 relative flex w-[var(--zeros-design-style-width,280px)] max-w-[min(640px,50%)] min-w-[min(220px,45%)] [flex:0_1_var(--zeros-design-style-width,280px)] flex-col overflow-hidden border-l"
+      className="bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
     >
-      <DesignPanelResizeHandle
-        panelRef={inspectorRef}
-        edge="left"
-        value={stylePanelWidth}
-        defaultValue={DESIGN_WORKSPACE_STYLE_WIDTH_DEFAULT}
-        minimum={DESIGN_WORKSPACE_STYLE_WIDTH_MIN}
-        maximum={DESIGN_WORKSPACE_STYLE_WIDTH_MAX}
-        clampValue={clampDesignWorkspaceStyleWidth}
-        onCommit={persistStylePanelWidth}
-        ariaLabel="Resize Style panel"
-        controlsId={inspectorId}
-      />
       <div
         data-design-style-panel-header=""
         className="border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b px-2"

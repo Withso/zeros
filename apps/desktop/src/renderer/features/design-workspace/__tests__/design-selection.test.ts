@@ -57,6 +57,10 @@ import {
 import {
   designFrameDisclosure,
   resetDesignLayerDisclosureForTests,
+  settleDesignLayerReveal,
+  toggleDesignFrameTreeExpanded,
+  toggleDesignLayerExpanded,
+  useDesignLayerDisclosureStore,
 } from "../state/design-layer-disclosure";
 import { designBackgroundWork } from "../state/design-background-work";
 
@@ -528,6 +532,206 @@ describe("design selection workflows", () => {
     expect(designFrameDisclosure("workspace-a", FRAME.file)).toEqual({
       treeExpanded: true,
       expandedNodeIds: ["body", "main"],
+    });
+  });
+
+  describe("Layers reveal", () => {
+    const tree = [
+      {
+        oid: "body",
+        tag: "body",
+        name: "body",
+        text: null,
+        visible: true,
+        children: [
+          {
+            oid: "main",
+            tag: "main",
+            name: "main",
+            text: null,
+            visible: true,
+            children: [
+              {
+                oid: "heading",
+                tag: "h1",
+                name: "heading",
+                text: "Hello",
+                visible: true,
+                children: [],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const snapshot = {
+      sourceVersion: FRAME.sourceVersion,
+      revision: 1,
+      warnings: [],
+      tree,
+      frame: details("body", FRAME.sourceVersion),
+      viewport: { width: 1440, height: 900, scrollX: 0, scrollY: 0 },
+    };
+    const reveal = () =>
+      useDesignLayerDisclosureStore.getState().revealByWorkspace["workspace-a"];
+    const selectHeading = () =>
+      selectDesignNode({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        nodeId: "heading",
+        details: details("heading"),
+      });
+
+    beforeEach(() => {
+      useDesignRuntimeStore
+        .getState()
+        .publishSnapshot(
+          "workspace-a",
+          "/design/a",
+          FRAME.file,
+          snapshot,
+          FRAME.sourceVersion,
+        );
+    });
+
+    it("asks Layers to bring the row into view again when the same layer is clicked again", async () => {
+      await selectHeading();
+      const first = reveal();
+      expect(first).toMatchObject({
+        frame: FRAME.file,
+        nodeIds: ["heading"],
+        pendingNodeIds: [],
+      });
+      // The user folds the frame and scrolls away; clicking the layer on the
+      // canvas again reopens it and asks for the row once more.
+      toggleDesignFrameTreeExpanded("workspace-a", FRAME.file);
+      await selectHeading();
+      expect(reveal()!.nonce).toBeGreaterThan(first!.nonce);
+      expect(designFrameDisclosure("workspace-a", FRAME.file).treeExpanded).toBe(
+        true,
+      );
+    });
+
+    it("keeps the user's folds when a runtime refresh re-selects the same layer", async () => {
+      await selectHeading();
+      const requested = reveal();
+      // The user folds the container that holds the selection.
+      toggleDesignLayerExpanded("workspace-a", FRAME.file, "main");
+      expect(
+        designFrameDisclosure("workspace-a", FRAME.file).expandedNodeIds,
+      ).not.toContain("main");
+
+      // A fresh runtime snapshot (after any edit) re-selects the node to read
+      // its new details. That is not a reveal: the fold stays folded and the
+      // list is not asked to scroll.
+      reconcileDesignRuntimeSnapshot({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        snapshot: { ...snapshot, revision: 2 },
+      });
+      await Promise.resolve();
+      expect(
+        designFrameDisclosure("workspace-a", FRAME.file).expandedNodeIds,
+      ).not.toContain("main");
+      expect(reveal()).toBe(requested);
+    });
+
+    it("opens a path the tree did not hold yet once a tree contains it", async () => {
+      await selectDesignNode({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        nodeId: "fresh",
+        details: details("fresh"),
+      });
+      // The frame opens at once; the unknown node's path waits.
+      expect(designFrameDisclosure("workspace-a", FRAME.file).treeExpanded).toBe(
+        true,
+      );
+      const pending = reveal();
+      expect(pending?.pendingNodeIds).toEqual(["fresh"]);
+
+      const nextTree = [
+        {
+          ...tree[0]!,
+          children: [
+            {
+              ...tree[0]!.children[0]!,
+              children: [
+                ...tree[0]!.children[0]!.children,
+                {
+                  oid: "fresh",
+                  tag: "div",
+                  name: "fresh",
+                  text: null,
+                  visible: true,
+                  children: [],
+                },
+              ],
+            },
+          ],
+        },
+      ];
+      settleDesignLayerReveal("workspace-a", FRAME.file, nextTree);
+      expect(
+        designFrameDisclosure("workspace-a", FRAME.file).expandedNodeIds,
+      ).toEqual(["body", "main"]);
+      // Settling completes the same request; it never scrolls a second time.
+      expect(reveal()?.nonce).toBe(pending?.nonce);
+      expect(reveal()?.pendingNodeIds).toEqual([]);
+    });
+
+    it("reveals the frame row for its root without unfolding the frame", async () => {
+      await selectDesignNode({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        nodeId: "body",
+        details: details("body"),
+      });
+      expect(designFrameDisclosure("workspace-a", FRAME.file).treeExpanded).toBe(
+        false,
+      );
+      expect(reveal()).toMatchObject({ nodeIds: ["body"], pendingNodeIds: [] });
+    });
+
+    it("brings the frame row back for every click on the frame body", async () => {
+      mocks.designFrameRuntime.mockReturnValue(undefined);
+      const click = () =>
+        selectDesignFrameBodyAtLocation({
+          workspaceId: "workspace-a",
+          folder: "/design/a",
+          frame: FRAME,
+          x: 20,
+          y: 20,
+          intent: "plain",
+        });
+      await click();
+      const first = reveal();
+      expect(first).toMatchObject({ frame: FRAME.file, nodeIds: [] });
+      // The frame is already selected: the list may have scrolled away since,
+      // so a second click asks for its row again.
+      await click();
+      expect(reveal()!.nonce).toBeGreaterThan(first!.nonce);
+      expect(designFrameDisclosure("workspace-a", FRAME.file).treeExpanded).toBe(
+        false,
+      );
+    });
+
+    it("scrolls to a frame only for a user gesture, never for the resting activation", async () => {
+      await selectDesignFrame("workspace-a", FRAME, { selected: true });
+      expect(reveal()).toBeUndefined();
+      await selectDesignFrame("workspace-a", FRAME, {
+        selected: true,
+        reveal: true,
+      });
+      expect(reveal()).toMatchObject({ frame: FRAME.file, nodeIds: [] });
+      // Frame selection never unfolds the frame's own tree.
+      expect(designFrameDisclosure("workspace-a", FRAME.file).treeExpanded).toBe(
+        false,
+      );
     });
   });
 
