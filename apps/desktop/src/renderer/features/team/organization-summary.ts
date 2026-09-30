@@ -40,7 +40,7 @@ export function normalizeOrganizationSummary(
     ...(legacyFlat ? { legacyFlat: true } : {}),
     defaultTeamId: value.defaultTeamId ?? null,
     workspaceCapabilities: {
-      local: true,
+      local: isPersonal,
       cloud: !isPersonal && (value.workspaceCapabilities?.cloud ?? true),
     },
     teamCapabilities: { multiple: false, canCreate: false },

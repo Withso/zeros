@@ -69,7 +69,7 @@ if (devAuth.source === "none") {
   );
 } else {
   console.log(
-    `[dev-instance] Alpha WorkOS auth configuration validated (source=${devAuth.source})`,
+    `[dev-instance] ${devAuth.source === "workspace" ? "Workspace" : "Alpha"} WorkOS auth configuration validated (source=${devAuth.source})`,
   );
 }
 if (devAuth.cachedOffline) {
@@ -185,9 +185,12 @@ function hashSlug(s) {
   return Math.abs(h);
 }
 
+const portAttempt = Number(process.env.ZEROS_DEV_PORT_ATTEMPT ?? 0);
+if (!Number.isSafeInteger(portAttempt) || portAttempt < 0 || portAttempt > 2) throw new Error("Invalid Dev port retry");
+delete process.env.ZEROS_DEV_PORT_ATTEMPT;
 async function pickVitePort() {
-  if (!SLUG) return VITE_BASE; // primary owns the pinned port
-  let p = VITE_BASE + 1 + (hashSlug(SLUG) % 200);
+  if (!SLUG && !portAttempt) return VITE_BASE; // primary owns the pinned port
+  let p = VITE_BASE + 1 + (hashSlug(portAttempt ? `${SLUG}:${portAttempt}` : SLUG) % 200);
   for (let i = 0; i < 800; i++, p++) {
     if (p > 65000) p = VITE_BASE + 1;
     if (await portFree(p)) return p;
@@ -196,9 +199,9 @@ async function pickVitePort() {
 }
 
 async function pickEngineBasePort() {
-  if (!SLUG) return ENGINE_BASE_DEV; // primary owns the default block
+  if (!SLUG && !portAttempt) return ENGINE_BASE_DEV; // primary owns the default block
   const SLOTS = 256;
-  const start = 1 + (hashSlug(SLUG) % SLOTS);
+  const start = 1 + (hashSlug(portAttempt ? `${SLUG}:${portAttempt}` : SLUG) % SLOTS);
   for (let i = 0; i < SLOTS; i++) {
     const k = ((start - 1 + i) % SLOTS) + 1; // slot 0 is the primary's
     const base = ENGINE_BASE_DEV + k * ENGINE_STRIDE;
@@ -253,6 +256,9 @@ const env = {
   // whitespace or another unvalidated representation from process.env.
   ...devAuth.env,
   ZEROS_DEV: "1",
+  // The shell PATH loaded by Electron may choose a different (or broken) Node.
+  // Pin the runtime that successfully reached this launcher, for this app only.
+  ZEROS_DEV_NODE_EXECUTABLE: process.execPath,
   ZEROS_VITE_PORT: String(vitePort),
   ELECTRON_RENDERER_URL: `http://localhost:${vitePort}`,
   ZEROS_ENGINE_BASE_PORT: String(engineBase),
@@ -328,10 +334,20 @@ const child = spawn(
     jobs.map((j) => j[1]).join(","),
     ...jobs.map((j) => j[2]),
   ],
-  { stdio: "inherit", env },
+  { stdio: ["inherit", "pipe", "pipe"], env },
 );
 
-child.on("exit", (code) => process.exit(code ?? 0));
+let portCollision = false, recentOutput = "";
+for (const [stream, target] of [[child.stdout, process.stdout], [child.stderr, process.stderr]]) {
+  stream.on("data", chunk => {
+    target.write(chunk);
+    recentOutput = (recentOutput + chunk.toString()).slice(-4096);
+    if (/EADDRINUSE|Port [0-9]+ is already in use/.test(recentOutput)) {
+      portCollision = true; child.kill("SIGTERM");
+    }
+  });
+}
+child.on("exit", (code) => process.exit(portCollision ? 98 : code ?? 0));
 // Forward Ctrl-C so concurrently's -k tears the whole block down cleanly.
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {

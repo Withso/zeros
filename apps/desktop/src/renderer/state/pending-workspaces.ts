@@ -27,7 +27,9 @@
 // arrive via the engine's DB_CHANGED broadcast as before.
 // ──────────────────────────────────────────────────────────
 
-import { useMemo } from "react";
+import { useMemo, useSyncExternalStore } from "react";
+import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "./cloud-workspace-catalog";
+import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { create } from "zustand";
 
 export interface PendingWorkspaceCreate {
@@ -168,10 +170,19 @@ export function usePendingCreatesAll(): PendingWorkspaceCreate[] {
  * into the path until the create publishes, but the provisional chat UI may
  * render and accept a queued message immediately. */
 export function useWorkspaceProvisioning(folder: string | null): boolean {
-  return usePendingWorkspacesStore(
+  const local = usePendingWorkspacesStore(
     (state) =>
       !!folder && state.creates.some((create) => create.path === folder),
   );
+  const cloud = useSyncExternalStore(subscribeCloudWorkspaces, () => cloudWorkspaceProvisioning(folder), () => false);
+  return local || cloud;
+}
+
+function cloudWorkspaceProvisioning(folder: string | null | undefined): boolean {
+  const target = parseCloudWorkspaceKey(folder);
+  if (!target) return false;
+  const document = cloudWorkspaceDocument(target);
+  return !document || !["ready", "busy"].includes(document.status);
 }
 
 /** Imperative exact-key provisioning check for event handlers. */
@@ -179,6 +190,7 @@ export function isWorkspaceProvisioning(
   folder: string | null | undefined,
 ): boolean {
   if (!folder) return false;
+  if (cloudWorkspaceProvisioning(folder)) return true;
   return usePendingWorkspacesStore
     .getState()
     .creates.some((create) => create.path === folder);
@@ -202,7 +214,7 @@ export function usePendingWorkspaceKind(
 ): "code" | "design" | null {
   return usePendingWorkspacesStore(
     (state) =>
-      state.creates.find((create) => create.path === folder)?.kind ?? null,
+      state.creates.find((create) => create.path === folder)?.kind ?? (folder ? state.modeSwitches[folder]?.mode : null) ?? null,
   );
 }
 

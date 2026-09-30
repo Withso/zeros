@@ -59,20 +59,13 @@ describe("inactive retained Changes surface", () => {
     );
   });
 
-  it("does not subscribe hidden Files or Context surfaces to Git refreshes", () => {
-    for (const file of ["../files-tab.tsx", "../context-surface.tsx"]) {
-      const source = readFileSync(
-        fileURLToPath(new URL(file, import.meta.url)),
-        "utf8",
-      );
-      expect(source).toMatch(
-        /useGitRefreshKey\(\s*cwd,\s*workspaceId,\s*active,?\s*\)/,
-      );
-    }
-
+  it("does not subscribe hidden Files surfaces to Git refreshes", () => {
     const files = readFileSync(
       fileURLToPath(new URL("../files-tab.tsx", import.meta.url)),
       "utf8",
+    );
+    expect(files).toMatch(
+      /useGitRefreshKey\(\s*cwd,\s*workspaceId,\s*active,?\s*\)/,
     );
     expect(files).toMatch(/<WorkspaceFileTree[\s\S]{0,180}\bactive=\{active\}/);
     expect(files).toMatch(

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   beginApp: vi.fn(),
@@ -72,6 +72,7 @@ const cliCredential = {
 } as const;
 
 describe("GitHub method disconnect commit order", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.beginApp.mockResolvedValue("install");
@@ -91,7 +92,33 @@ describe("GitHub method disconnect commit order", () => {
       ghAppConnect({ installFlow: true, forceInstall: true }, {} as never),
     ).resolves.toEqual({ flowKind: "install" });
 
-    expect(mocks.beginApp).toHaveBeenCalledWith(true, true);
+    expect(mocks.beginApp).toHaveBeenCalledWith(true, true, false);
+  });
+
+  it.each(["local", "hosted"])(
+    "authorizes the workspace callback before installation for an isolated %s Dev backend",
+    async (mode) => {
+      vi.stubEnv("ZEROS_CHANNEL", "dev");
+      vi.stubEnv("ZEROS_DEV_ENVIRONMENT", mode);
+      vi.stubEnv("ZEROS_ISOLATE", "1");
+      await ghAppConnect({ installFlow: true }, {} as never);
+      expect(mocks.beginApp).toHaveBeenCalledWith(false, false, false);
+    },
+  );
+
+  it.each(["alpha", "beta", "stable"])(
+    "preserves the installation flow for %s even with ambient Dev variables",
+    async (channel) => {
+      vi.stubEnv("ZEROS_CHANNEL", channel);
+      vi.stubEnv("ZEROS_DEV_ENVIRONMENT", "hosted");
+      await ghAppConnect({ installFlow: true }, {} as never);
+      expect(mocks.beginApp).toHaveBeenCalledWith(true, false, false);
+    },
+  );
+
+  it("keeps organization connection setup from selecting a Local GitHub method", async () => {
+    await ghAppConnect({ installFlow: false, preserveSelectedMethod: true }, {} as never);
+    expect(mocks.beginApp).toHaveBeenCalledWith(false, false, true);
   });
 
   it("keeps a selected PAT when its fallback preference cannot be stored", async () => {

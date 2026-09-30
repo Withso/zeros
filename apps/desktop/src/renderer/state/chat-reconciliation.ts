@@ -4,6 +4,23 @@ import {
 } from "@zeros/protocol/identities";
 
 import type { ChatThread } from "./store";
+import { cloudWorkspaceKey, isCloudWorkspace, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
+
+/** A backend snapshot says nothing about an unqueried owner. Retain its boot
+ * cache, but wait for that backend's confirmation before writing it back. */
+export function canMirrorChat(
+  chat: Pick<ChatThread, "folder">,
+  confirmedCloudWorkspaces: ReadonlySet<string>,
+  confirmedLocalChats = true,
+): boolean {
+  if (!isCloudWorkspace(chat.folder)) return confirmedLocalChats;
+  try {
+    const owner = parseCloudWorkspaceKey(chat.folder);
+    return owner !== null && confirmedCloudWorkspaces.has(cloudWorkspaceKey(owner));
+  } catch {
+    return false;
+  }
+}
 
 function sameComposerMode(left: ChatThread, right: ChatThread): boolean {
   return (left.composerMode ?? "code") === (right.composerMode ?? "code") &&
@@ -74,10 +91,14 @@ export function reconcileChatSnapshot(
   local: ChatThread[],
   remote: ChatThread[],
   remoteDeletedIds: Iterable<string>,
+  confirmedCloudWorkspaces: Iterable<string> = [],
+  confirmedLocalChats = true,
 ): ReconciledChatSnapshot {
+  const confirmed = new Set(confirmedCloudWorkspaces);
   const deleted = new Set(remoteDeletedIds);
   const remoteById = new Map<string, ChatThread>();
   for (const chat of remote) {
+    if (!canMirrorChat(chat, confirmed, confirmedLocalChats)) continue;
     remoteById.set(chat.id, chat);
     // A live row represents a recreation and is newer than an old tombstone.
     deleted.delete(chat.id);
@@ -88,6 +109,12 @@ export function reconcileChatSnapshot(
   const removedIds: string[] = [];
 
   for (const localChat of local) {
+    // Transport retention may predate a completed delete, restore or edit in
+    // this consumer. Neither stale rows nor stale tombstones own this backend.
+    if (!canMirrorChat(localChat, confirmed, confirmedLocalChats)) {
+      chats.push(localChat);
+      continue;
+    }
     if (deleted.has(localChat.id)) {
       removedIds.push(localChat.id);
       continue;
@@ -99,7 +126,7 @@ export function reconcileChatSnapshot(
       // bridge write landed. No tombstone means preserving and backfilling it
       // is safer than silently losing the user's chat.
       chats.push(localChat);
-      rowsToPush.push(localChat);
+      if (canMirrorChat(localChat, confirmed, confirmedLocalChats)) rowsToPush.push(localChat);
       continue;
     }
     remoteById.delete(localChat.id);
@@ -116,7 +143,7 @@ export function reconcileChatSnapshot(
       const merged = modeOwner === remoteChat && !sameComposerMode(localChat, remoteChat)
         ? { ...localChat, ...modeFields } : localChat;
       chats.push(merged);
-      rowsToPush.push(merged);
+      if (canMirrorChat(merged, confirmed, confirmedLocalChats)) rowsToPush.push(merged);
     } else if (samePersistedChat(localChat, remoteChat)) {
       chats.push(localChat);
     } else {

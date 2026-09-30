@@ -271,8 +271,9 @@ describe("repository layout contracts", () => {
     // Renderer HMR without a matching main/preload restart creates a split
     // runtime where newly-rendered IPC calls fail as "unknown command".
     expect(rootPackage.scripts["electron:dev"]).toContain(
-      "dev-instance.mjs --watch",
+      "hosted-launcher.mjs start",
     );
+    expect(read("scripts/dev-environment/hosted-launcher.mjs")).toContain('process.argv.includes("--run-only") ? "--run-only" : "--watch"');
     expect(launcher).toContain("useMainSupervisor");
     expect(supervisor).toContain('new Set(["main.cjs", "preload.cjs"])');
   });
@@ -425,7 +426,6 @@ describe("repository layout contracts", () => {
 
   it("keeps development harness entries with their renderer code", () => {
     for (const name of [
-      "context-canvas",
       "design-workspace",
       "diff-preview",
       "github-settings",
@@ -699,16 +699,19 @@ describe("repository layout contracts", () => {
     const image = read("scripts/cloud-workspace-validation/image.ts");
     const launcher = read("scripts/cloud-workspace-validation/sandbox/start-engine.sh");
     const layout = JSON.parse(read("scripts/cloud-workspace-validation/sandbox/runtime-layout.json"));
-    expect(layout.version).toBe(2);
+    expect(layout.version).toBe(3);
     for (const field of ["repository", "data", "agentHome", "captureHome", "log"]) {
       expect(layout[field]).toMatch(/^\/srv\/zeros\//);
       expect(dockerfile).toContain(layout[field]);
     }
-    for (const field of ["repository", "data", "agentHome", "log"]) {
+    for (const field of ["logicalRepository", "data", "agentHome", "log"]) {
       expect(launcher).toContain(layout[field]);
     }
     expect(dockerfile).toContain("COPY sandbox/runtime-layout.json /opt/zeros-runtime/lib/zeros/runtime-layout.json");
     expect(image).toContain('"/opt/zeros-runtime/lib/zeros/runtime-layout.json"');
+    expect(layout.logicalRepository).toBe("/srv/zeros/workspace");
+    expect(layout.repository).toBe(`${layout.engineFilesRoot}/workspace`);
+    expect(layout.attachmentTemporaryRoot).toBe(`${layout.engineFilesRoot}/attachment-staging`);
     for (const source of [dockerfile, image]) {
       expect(source).toContain("--uid 10002 --gid 10002");
       expect(source).toContain("playwright-core install --with-deps chromium");
@@ -759,8 +762,12 @@ describe("repository layout contracts", () => {
       "enterprise-and-self-hosting.md",
       "implementation-roadmap.md",
       "infrastructure-and-operations.md",
+      "lifecycle-diagnostics.md",
+      "mcp-and-skills.md",
+      "organization-setup.md",
       "pro-backend.md",
       "product-contract.md",
+      "provider-background-work.md",
       "provider-contract.md",
       "qualification-status.md",
       "root-coordinator-threat-model.md",

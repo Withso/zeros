@@ -21,7 +21,10 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     const binary=await resolveCodexBinary({}),root=await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-codex-config-"));
     await mkdir(path.join(root,".codex"));
     const child=spawn(path.join(binary.sandboxRuntimeRoot!,"bin","codex"),["app-server",...codexAppServerFeatureArgs(true),
-      ...Object.entries(CLOUD_CODEX_CONFIG).flatMap(([name,value])=>["-c",`${name}=${JSON.stringify(value)}`])],
+      ...Object.entries({...CLOUD_CODEX_CONFIG,
+        // The VM-absolute state directory only exists on Boat workers; keep this
+        // offline check inside its private HOME on developer and CI machines.
+        sqlite_home:path.join(root,".codex","sessions",".zeros-state")}).flatMap(([name,value])=>["-c",`${name}=${JSON.stringify(value)}`])],
       {cwd:root,env:{PATH:"/usr/bin:/bin",HOME:root,CODEX_HOME:path.join(root,".codex"),LANG:"C.UTF-8"},stdio:["pipe","pipe","pipe"]});
     const exited=new Promise<void>(resolve=>child.once("close",()=>resolve()));
     child.stdin.on("error",()=>{});let stderr="";child.stderr.on("data",bytes=>{stderr=(stderr+String(bytes)).slice(-4096);});

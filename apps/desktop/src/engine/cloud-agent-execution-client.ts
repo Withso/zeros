@@ -1,5 +1,6 @@
-import {CloudAgentExecutionAuthoritySchema,CloudAgentExecutionLeaseSchema,CloudAgentActionAuthoritySchema,type CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
+import {CloudAgentExecutionAuthoritySchema,CloudAgentExecutionLeaseSchema,CloudAgentActionAuthoritySchema,CloudBackgroundStateSchema,type CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
 import type {CloudRuntimeAuthority} from "./cloud-runtime-registration";
+import { CloudCustomizationResultSchema } from "@zeros/protocol/cloud-customization";
 
 export class CloudAgentExecutionError extends Error{
   constructor(){super("Cloud agent execution authority is unavailable");this.name="CloudAgentExecutionError";}
@@ -13,10 +14,21 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
   try{
     const endpoint=new URL("/internal/v2/cloud-workspaces/engine/agent-execution",heartbeatEndpoint);
     if(endpoint.protocol!=="https:"&&!(endpoint.protocol==="http:"&&["127.0.0.1","localhost","[::1]"].includes(endpoint.hostname)))throw new CloudAgentExecutionError();
-    response=await requestFetch(endpoint,{method:"POST",redirect:"error",cache:"no-store",signal:AbortSignal.any([signal,AbortSignal.timeout(10_000)]),
+    response=await requestFetch(endpoint,{method:"POST",redirect:"error",signal:AbortSignal.any([signal,AbortSignal.timeout(10_000)]),
       headers:{"content-type":"application/json",authorization:`Bearer ${heartbeatToken}`},body:JSON.stringify({...scope,request})});
   }catch{throw new CloudAgentExecutionError();}
-  const limit=response.ok?40*1024:1024;
+  // Older control planes reject unknown request fields before admission. Only
+  // that definite schema rejection permits a legacy retry; never retry a
+  // timeout or ambiguous credential publication.
+  if(response.status===422&&request.kind==="admit"&&request.backgroundTasksVersion===1){
+    await response.body?.cancel().catch(()=>{});
+    // The previous strict route accepts only kind/admission, not any of the
+    // independently added capability opt-ins. Required customization cannot
+    // be silently discarded to make that profile accept the execution.
+    if(request.admission.customization)throw new CloudAgentExecutionError();
+    return requestCloudAgentExecution(authority,{kind:"admit",admission:request.admission},signal,requestFetch);
+  }
+  const limit=response.ok?(request.kind==="background"?256*1024:request.kind==="customization"||(request.kind==="admit"&&request.admission.customization)?1024*1024:40*1024):1024;
   if(!response.ok||!response.body||Number(response.headers.get("content-length"))>limit){await response.body?.cancel().catch(()=>{});throw new CloudAgentExecutionError();}
   const reader=response.body.getReader();let size=0;const chunks:Uint8Array[]=[];
   try{
@@ -24,6 +36,14 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     const document:unknown=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(Buffer.concat(chunks)));
     if(!document||typeof document!=="object"||Array.isArray(document)||Object.keys(document).join()!=="result")throw new CloudAgentExecutionError();
     const value=(document as {result:unknown}).result;
+    if(request.kind==="background"){
+      const parsed=CloudBackgroundStateSchema.safeParse(value);
+      if(!parsed.success||parsed.data.leaseId!==request.leaseId||parsed.data.conversationId!==request.operation.conversationId)throw new CloudAgentExecutionError();
+      return parsed.data;
+    }
+    if(request.kind==="customization"){
+      const parsed=CloudCustomizationResultSchema.safeParse(value);if(!parsed.success)throw new CloudAgentExecutionError();return parsed.data;
+    }
     if(request.kind==="admit"){
       const result=CloudAgentExecutionAuthoritySchema.safeParse(value);
       if(!result.success||result.data.provider!==request.admission.provider||result.data.model!==request.admission.model)throw new CloudAgentExecutionError();

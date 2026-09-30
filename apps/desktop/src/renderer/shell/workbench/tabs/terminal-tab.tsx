@@ -31,6 +31,8 @@ import {
 } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { type RunAction } from "@zeros/protocol/run-actions";
+import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
+import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
 
 import { createPortal } from "react-dom";
 import { defaultScopeFor } from "../tab-model";
@@ -42,6 +44,7 @@ import {
 } from "../open-terminal";
 import { TerminalPanelResizer } from "../../terminal/terminal-panel-resizer";
 import { RetainedTerminalSurface } from "../../terminal/retained-terminal-surface";
+import { CloudTerminalIndicator } from "../../terminal/cloud-terminal-indicator";
 import {
   TerminalWorkbenchLayout,
   type TerminalNavigationEntry,
@@ -142,7 +145,7 @@ function useEngineTerminalSync(
     const excluded = new Set(chatTerminalIds);
     const refresh = async () => {
       const request = ++generation;
-      const terms = await ptyTerminals();
+      const terms = await ptyTerminals(isCloudWorkspace(folder) ? folder : undefined);
       if (cancelled || request !== generation) return;
       // null = engine unreachable: don't reconcile (would wrongly prune tabs).
       if (terms !== null) {
@@ -155,12 +158,15 @@ function useEngineTerminalSync(
         setSyncedFolder(folder);
       }
     };
-    setSyncedFolder(null);
     void refresh();
     const off = onPtyTerminalsChanged(() => void refresh());
+    const offConnection = onActiveBridgeConnected((_client, { initial }) => {
+      if (!initial) void refresh();
+    }, folder);
     return () => {
       cancelled = true;
       off();
+      offConnection();
     };
   }, [folder, sync, chatTerminalIds, active]);
   return { synced: syncedFolder === folder };
@@ -670,6 +676,7 @@ export function TerminalPanel({
       {workbenchHost &&
         createPortal(
           <TerminalWorkbenchLayout
+            folder={folderKey}
             tab={mainTab}
             entries={entries}
             onSelect={handleActivate}
@@ -1393,6 +1400,7 @@ function TerminalSubTabStrip({
             <div className={STICKY_TAB_ROW_CLS}>
               {showSetup && (
                 <SubTab
+                  folderKey={folderKey}
                   label="Setup"
                   active={showSelection && setupActive}
                   dot={setupDot}
@@ -1404,6 +1412,7 @@ function TerminalSubTabStrip({
                 const status = runStatuses[action.id] ?? null;
                 return (
                   <SubTab
+                    folderKey={folderKey}
                     key={action.id}
                     label={action.name}
                     // Selected before its terminal exists too: the body is its
@@ -1422,6 +1431,7 @@ function TerminalSubTabStrip({
               })}
               {showRunAdd && (
                 <SubTab
+                  folderKey={folderKey}
                   label="Run"
                   active={showSelection && activeSubTab === RUN_ADD_SUBTAB}
                   onActivate={onActivateRunAdd}
@@ -1432,6 +1442,7 @@ function TerminalSubTabStrip({
               )}
               {terminals.map((terminal) => (
                 <SubTab
+                  folderKey={folderKey}
                   key={terminal.id}
                   label={terminal.title}
                   active={showSelection && activeTerminalId === terminal.id}
@@ -1473,6 +1484,7 @@ function TerminalSubTabStrip({
 /** One terminal panel pill. Shared chrome constants keep it identical to workbench while
  *  preserving terminal-only status, exited, and close behaviors. */
 function SubTab({
+  folderKey,
   label,
   active,
   exited,
@@ -1482,6 +1494,7 @@ function SubTab({
   onClose,
   registerRef,
 }: {
+  folderKey: string;
   label: string;
   active: boolean;
   exited?: boolean;
@@ -1515,6 +1528,7 @@ function SubTab({
           : WORKBENCH_TAB_PILL_INACTIVE_CLS,
       )}
     >
+      <CloudTerminalIndicator folder={folderKey} className="mr-1.5" />
       {running && <RunStream size={12} className="mr-1.5" />}
       <span className="max-w-[140px] truncate">
         {label}

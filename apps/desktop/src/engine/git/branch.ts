@@ -291,7 +291,19 @@ export async function checkoutBranch(
       remediation: "Check out a local branch and retry.",
     });
   }
-  updateWorkspace(opts.workspaceId, { branch });
+  // PR identity belongs to a branch. Publish the new branch and removal of the
+  // old binding together; a failed or no-op checkout must retain that binding.
+  const changedBranch = branch !== ws.branch;
+  updateWorkspace(opts.workspaceId, {
+    branch,
+    ...(changedBranch ? {
+      prNumber: null,
+      prState: null,
+      prUrl: null,
+      ...(ws.prNumber !== null && (ws.status === "in-review" || ws.status === "done")
+        ? { status: "in-progress" as const } : {}),
+    } : {}),
+  });
 }
 
 export interface CreateBranchFromOptions {

@@ -96,6 +96,7 @@ export function OrganizationSwitcher({
     organizations: availableOrganizations,
     me,
     status: organizationStatus,
+    reload,
   } = useOrganizations();
   const selected = useActiveOrganization();
   const { email, status: authStatus, startBrowserSignIn, signOut } = useAuth();
@@ -127,7 +128,13 @@ export function OrganizationSwitcher({
   }, [open]);
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <DropdownMenu open={open} onOpenChange={(next) => {
+      setOpen(next);
+      // New memberships can arrive after sign-in from another device or Dev
+      // provisioning. Open immediately with the account's retained snapshot;
+      // the shared store deduplicates refreshes and fences account changes.
+      if (next && sessionActions.showManagement) void reload();
+    }}>
       {/* Sized to its name, up to the sidebar's width; a long organization
           name truncates while the icon and trailing chevron stay whole. 4px
           of padding on every side (px-1 beside the primitive's py-1). */}

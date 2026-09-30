@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { statSync, rmSync } from 'node:fs';
+import { writeFile, readFile, rename } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { CloudRuntimeHumanServices } from '../../../apps/desktop/src/engine/transport/cloud-human-services';
 import { loadCloudWorkerConfiguration } from '../../../apps/desktop/src/engine/agents/containment/cloud-worker-config';
+import { createAttachmentTemporaryDirectory, type AttachmentTemporaryDirectory } from '../../../apps/desktop/src/engine/files/attachment-temporary-directory';
 
 const { Client } = createRequire(import.meta.url)('ssh2');
 const checks: string[] = [];
@@ -13,6 +15,7 @@ const transfer = `${marker}-sftp`;
 let phase = 'configuration';
 let services: CloudRuntimeHumanServices | undefined;
 let client: InstanceType<typeof Client> | undefined;
+let temporary: AttachmentTemporaryDirectory | undefined;
 
 async function main() {
   const worker = loadCloudWorkerConfiguration();
@@ -45,6 +48,19 @@ async function main() {
   assert.equal(identity.code, 0); assert.match(identity.stdout, /^10001\n10001\n/);
   assert.match(identity.stdout, /NoNewPrivs:\s+1/); assert.match(identity.stdout, /CapEff:\s+0+/);
   checks.push('ssh-workload-identity');
+  phase = 'attachment-publication';
+  temporary = await createAttachmentTemporaryDirectory('/srv/zeros/workspace');
+  const staged = `${temporary.path}/payload`;
+  await writeFile(staged, 'complete attachment', { flag: 'wx', mode: 0o600 });
+  // This path consists only of fixed image names and mkdtemp entropy. Never
+  // interpolate a user attachment name or payload into the workload command.
+  assert.match(staged, /^\/srv\/zeros\/attachment-staging\/zeros-attachment-[A-Za-z0-9_-]+\/payload$/);
+  assert.notEqual((await exec(`cat ${staged}`)).code, 0);
+  await rename(staged, transfer);
+  assert.equal(await readFile(transfer, 'utf8'), 'complete attachment');
+  rmSync(transfer);
+  await temporary.dispose(); temporary = undefined;
+  checks.push('private-attachment-staging', 'same-mount-atomic-attachment-publication');
   phase = 'exec-pty';
   assert.deepEqual(await exec('printf output; printf error >&2; exit 17'), { stdout: 'output', stderr: 'error', code: 17 });
   checks.push('ssh-exec-output-and-exit');
@@ -74,5 +90,6 @@ main().catch(() => {
   process.exitCode = 1;
 }).finally(async () => {
   client?.destroy(); await services?.pause().catch(() => {});
+  await temporary?.dispose().catch(() => {});
   for (const file of [marker, transfer]) rmSync(file, { force: true });
 });

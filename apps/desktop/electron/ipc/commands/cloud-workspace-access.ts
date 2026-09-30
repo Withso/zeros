@@ -1,5 +1,8 @@
 import type { CommandHandler } from "../router";
 import { getCloudWorkspaceAccessBroker } from "../../cloud-workspace-access-runtime";
+import { cloudWorkspaceDesktopCapabilityEnabled } from "../../../src/engine/cloud-workspace-capability";
+
+export const cloudWorkspaceCapability: CommandHandler = () => ({ enabled: cloudWorkspaceDesktopCapabilityEnabled() });
 
 function requiredString(args: Record<string, unknown>, key: string): string {
   const value = args[key];

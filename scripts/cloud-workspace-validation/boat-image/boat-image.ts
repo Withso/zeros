@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
 
 import { imageContractSha256 } from "../config";
+import { releaseImageSanitation, releaseImageAttestation, releaseImageAttestationStatus } from "../../../apps/control-plane/src/cloud-workspaces/computer-image-scripts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(here, "../../..");
@@ -61,7 +62,7 @@ const sha256 = (value: string | Buffer) => createHash("sha256").update(value).di
 const pythonString = (value: string) => JSON.stringify(value);
 
 export function fillTemplate(name: string, values: Record<string, string>): string {
-  let text = fs.readFileSync(path.join(TEMPLATES, name), "utf8");
+  let text = ({ "sanitize.sh": releaseImageSanitation, "attest.sh": releaseImageAttestation, "attest-status.sh": releaseImageAttestationStatus } as Record<string,string>)[name] ?? fs.readFileSync(path.join(TEMPLATES, name), "utf8");
   for (const [key, value] of Object.entries(values)) text = text.split(`{{${key}}}`).join(value);
   const left = PLACEHOLDER.exec(text);
   if (left) throw new KitError(`${name}: unfilled placeholder ${left[0]}`);

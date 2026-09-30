@@ -8,7 +8,8 @@ const prepareChatView = vi.fn();
 const selectChatToRestoreForFolder = vi.fn();
 const pendingWorkspaceMode = vi.fn();
 
-vi.mock("react", () => ({
+vi.mock("react", async (importOriginal) => ({
+  ...await importOriginal<typeof import("react")>(),
   useCallback: <T extends (...args: never[]) => unknown>(callback: T) =>
     callback,
 }));
@@ -43,6 +44,13 @@ beforeEach(() => {
 });
 
 describe("useOpenWorkspace", () => {
+  it("waits for cloud conversation discovery before creating an Untitled tab", () => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    selectChatToRestoreForFolder.mockReturnValue(null);
+    useOpenWorkspace()({ id: folder, path: folder, repoRoot: folder, kind: "code" });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "OPEN_WORKSPACE", folder, chatHydrationPending: true }));
+    expect(spawnDefaultChatForWorkspace).not.toHaveBeenCalled();
+  });
   it.each([{ archivedAt: 100 }, { present: false }])(
     "opens history without creating a chat or preparing a live surface: %j",
     (availability) => {

@@ -1,7 +1,7 @@
 /** Pure fail-closed gates shared by the paid/provider qualification commands.
  * Keeping verdict logic here makes it unit-testable without creating or
  * deleting a real sandbox. */
-import {CLOUD_CORE_EXECUTION_PROFILE,CLOUD_CORE_PROVIDER_RESTRICTIONS,type CloudCoreProvider} from "../../../packages/protocol/src/containment";
+import {CLOUD_CORE_EXECUTION_PROFILE,CLOUD_CORE_PROVIDER_RESTRICTIONS,CLOUD_NATIVE_EXECUTION_PROFILE,CLOUD_NATIVE_PROVIDER_RESTRICTIONS,type CloudCoreProvider} from "../../../packages/protocol/src/containment";
 
 export function assertCommandExitCode(
   label: string,
@@ -294,10 +294,19 @@ export function assertFullCloudBoundary(agentId: string, raw: unknown): void {
  * image identity and credential qualification remain independent requirements.
  * Never use this as a fallback when the full-native gate fails. */
 export function assertCloudCoreBoundary(agentId: string, raw: unknown): void {
+  assertDeclaredCloudBoundary(agentId, raw, CLOUD_CORE_EXECUTION_PROFILE, CLOUD_CORE_PROVIDER_RESTRICTIONS);
+}
+
+export function assertCloudNativeBoundary(agentId: string, raw: unknown): void {
+  assertDeclaredCloudBoundary(agentId, raw, CLOUD_NATIVE_EXECUTION_PROFILE, CLOUD_NATIVE_PROVIDER_RESTRICTIONS);
+}
+
+function assertDeclaredCloudBoundary(agentId: string, raw: unknown, expectedProfile: string,
+  manifest: typeof CLOUD_CORE_PROVIDER_RESTRICTIONS): void {
   const record = (value:unknown):Record<string,unknown>|null => value&&typeof value==="object"&&!Array.isArray(value)?value as Record<string,unknown>:null;
   const boundary = record(raw),profile=record(boundary?.cloudExecution),design=record(boundary?.designProtection),parity=record(boundary?.parity);
-  const expected = Object.hasOwn(CLOUD_CORE_PROVIDER_RESTRICTIONS, agentId)
-    ? CLOUD_CORE_PROVIDER_RESTRICTIONS[agentId as CloudCoreProvider] : null;
+  const expected = Object.hasOwn(manifest, agentId)
+    ? manifest[agentId as CloudCoreProvider] : null;
   const restrictions = parity?.restrictions;
   if (!expected || boundary?.version !== 1 || boundary.actor !== "agent-code" || boundary.state !== "ready" ||
       boundary.backend !== "cloud-worker" || design?.required !== true ||
@@ -305,9 +314,9 @@ export function assertCloudCoreBoundary(agentId: string, raw: unknown): void {
       Number(design.protectedDirectoryCount) < 1 || parity?.level !== "restricted" ||
       !Array.isArray(restrictions) || restrictions.length !== expected.length ||
       restrictions.some((value: unknown, index: number) => value !== expected[index]) ||
-      profile?.version !== 1 || profile.profile !== CLOUD_CORE_EXECUTION_PROFILE ||
+      profile?.version !== 1 || profile.profile !== expectedProfile ||
       profile.runtimeProfile !== "zeros-cloud-worker-v3" || profile.provider !== agentId || profile.designApi !== "admitted") {
-    throw new Error(`${agentId} did not receive the declared cloud core and admitted Design API contract`);
+    throw new Error(`${agentId} did not receive the declared ${expectedProfile} and admitted Design API contract`);
   }
 }
 

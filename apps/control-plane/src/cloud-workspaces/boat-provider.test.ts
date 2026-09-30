@@ -123,6 +123,7 @@ function fixture(extraOptions: { billingOrg?: string } = {}) {
     completeDeletion: vi.fn(async () => {
       stored!.deletedAt = new Date(NOW);
     }),
+    recordDeletionProgress: vi.fn(async () => {}),
     list: vi.fn(async function* () {
       if (stored) yield { ...stored };
     }),
@@ -163,6 +164,27 @@ function fixture(extraOptions: { billingOrg?: string } = {}) {
 }
 
 describe("Boat allocation lifecycle", () => {
+  it.each(["create", "start", "renew"])("blocks expired Dev %s at provider admission without dispatching", async operation => {
+    const f = fixture();
+    vi.stubEnv("ZEROS_DEV_ENVIRONMENT", "hosted");
+    vi.stubEnv("ZEROS_DEV_ADMISSION_EXPIRES_AT", new Date(NOW - 1000).toISOString());
+    try {
+      const pending = operation === "create" ? f.provider.create(INPUT)
+        : operation === "start" ? f.provider.start(RESOURCE) : f.provider.renewComputeLease(RESOURCE, 60);
+      await expect(pending).rejects.toThrow(/admission expired/);
+      expect(f.fetcher).not.toHaveBeenCalled();
+      expect(f.operations.prepareCreate).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it("requires exact snapshot resolution before dispatching an organization image", async () => {
+    const f = fixture();
+    const imageRef = `boat:zeros-org-${"a".repeat(32)}@sha256:${"b".repeat(64)}`;
+    const resolveSnapshot = vi.fn(async () => { throw new Error("Snapshot was replaced"); });
+    const provider = new BoatWorkspaceProvider({ ...f.options, imageRef, resolveSnapshot });
+    await expect(provider.create({ ...INPUT, imageRef })).rejects.toThrow("Snapshot was replaced");
+    expect(resolveSnapshot).toHaveBeenCalledOnce();
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
   it("closes a rejected create after restart without inventing a resource or deletion receipt", async () => {
     const f = fixture();
     f.fetcher.mockResolvedValueOnce(rejectedCreate());
@@ -471,6 +493,14 @@ describe("Boat allocation lifecycle", () => {
     await expect(restarted.create(INPUT)).rejects.toMatchObject({
       code: "provider_generation_retired",
     });
+  });
+  it("never advances cleanup progress from an incomplete completed receipt", async () => {
+    const f=fixture(); await f.allocate();
+    await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE,OPERATION);
+    f.fetcher.mockResolvedValueOnce(json(deletion("completed",{completedAt:null})));
+    await expect(f.provider.inspect(RESOURCE)).rejects.toMatchObject({code:"provider_response_invalid"});
+    expect(f.operations.recordDeletionProgress).not.toHaveBeenCalled();
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
   });
 
   it("never treats a 404 after a lost deletion receipt as confirmed deletion", async () => {

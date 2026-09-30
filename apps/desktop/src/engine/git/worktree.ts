@@ -8,18 +8,18 @@
 import { closeSync, constants, existsSync, fstatSync, openSync } from "node:fs";
 import {
   mkdir,
-  mkdtemp,
   readdir,
   realpath,
   rename,
   rm,
-  writeFile,
   lstat,
 } from "node:fs/promises";
 import path from "node:path";
+import { createGitTemporaryDirectory, writeGitTemporaryFile } from "./git-temporary";
 
 import { readBoundedUtf8DescriptorSync } from "../files/bounded-read-sync";
 import { GitError, isGitError } from "./errors";
+import { localWorkspaceCreationError } from "./local-workspace-policy";
 import {
   DESIGN_METADATA_PROTECTED_PATHS,
   readDesignDirectoryRegistry,
@@ -93,7 +93,7 @@ import {
 } from "./setup-hooks";
 import { resolveFilesToCopy, resolvePatternSource } from "./files-to-copy";
 import { contextGraphArchivePaths } from "../files/context-graph";
-import { resolveRepoScript } from "../settings/repo-scripts";
+import { resolveArchiveScript, resolveRepoScript } from "../settings/repo-scripts";
 import { resolveRepoGit } from "../settings/repo-git";
 import {
   initializeWorkspaceSettings,
@@ -1423,6 +1423,8 @@ export function createWorkspace(
   input: CreateWorkspaceInput,
   internal?: InternalCreateWorkspaceOptions,
 ): Promise<CreatedWorkspace> {
+  const ownershipError = localWorkspaceCreationError(input);
+  if (ownershipError) return Promise.reject(ownershipError);
   // Prepared creates have a stable renderer-announced id. Register the flight
   // before the first async repo/fetch read so timeout recovery can prove that a
   // rowless create is still running, and duplicate submissions join the exact
@@ -3091,16 +3093,13 @@ async function archiveWorkspaceInner(
 
   await publishArchiveSnapshot(ws, journal.archiveSnapshot);
 
-  // Run the workspace's effective `scripts.archive` in the worktree while
-  // it's still intact (after the snapshot, before eviction/removal). Non-fatal:
-  // a cleanup script must never block archiving — the user keeps the ability to
-  // archive even if the script errors.
+  // Optional hooks retain their historical best-effort, at-most-once behavior.
+  // Required cleanup is journaled before execution and retried until success.
+  // Pin its command and deadline so settings edits cannot skip pending cleanup.
+  let archiveHookStarted = false;
   if (journal.phase === "prepared") {
-    const archiveCommand = resolveRepoScript(ws.path, "archive");
-    if (!archiveCommand) {
-      // The pre-hook checkpoint is already the exact final tree. Advancing it
-      // atomically avoids a second whole-tree `git add -A` on the overwhelmingly
-      // common no-hook path (which doubled archive latency on large repos).
+    const hook = resolveArchiveScript(ws.path);
+    if (!hook.command) {
       sealWorkspaceArchiveCheckpoint(ws.id, {
         archiveSnapshot: journal.archiveSnapshot,
         archivedHead: journal.archivedHead,
@@ -3108,34 +3107,35 @@ async function archiveWorkspaceInner(
       journal = { ...journal, phase: "archive-script-finished" };
       ws = getWorkspace(ws.id);
     } else {
-      // Mark before execution: after a crash it is safer to skip a potentially
-      // non-idempotent cleanup script than to run it twice. The durable snapshot
-      // was already taken, so the script is never load-bearing for user data.
-      updateWorkspaceLifecyclePhase(ws.id, "archive-script-started");
-      journal = { ...journal, phase: "archive-script-started" };
+      journal = { ...journal, phase: "archive-script-started",
+        payload: { ...journal.payload, archiveHook: hook } };
+      updateWorkspaceLifecycleDetails(ws.id, journal);
+      archiveHookStarted = true;
+    }
+  }
+  if (journal.phase === "archive-script-started" && journal.payload.archiveHook &&
+      journal.payload.archiveHookCompleted !== true) {
+    const hook = journal.payload.archiveHook as ReturnType<typeof resolveArchiveScript>;
+    if (typeof hook.command !== "string" || !hook.command.trim() || typeof hook.required !== "boolean" ||
+        !Number.isInteger(hook.timeoutMs) || hook.timeoutMs < 1000 || hook.timeoutMs > 3600_000) {
+      throw new Error("The pending archive script receipt is invalid; the workspace was preserved");
+    }
+    if (archiveHookStarted || hook.required) {
       const hookStartedAt = Date.now();
       try {
         await runInlineScript({
-          kind: "archive",
-          command: archiveCommand,
-          workspaceId: ws.id,
-          worktreePath: ws.path,
-          repoRoot: ws.repoRoot,
-          baseBranch: ws.baseBranch ?? "",
-          boundaryFactory: repoTaskBoundaryFactory,
+          kind: "archive", command: hook.command, timeoutMs: hook.timeoutMs,
+          workspaceId: ws.id, workspace: ws, worktreePath: ws.path, repoRoot: ws.repoRoot,
+          baseBranch: ws.baseBranch ?? "", boundaryFactory: repoTaskBoundaryFactory,
         });
       } catch (err) {
-        if (isGitError(err) && err.code === "CONTAINMENT_TEARDOWN_FAILED") {
-          throw err;
-        }
-        console.warn(
-          `[archive] archive script failed for ${ws.id} (continuing): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
+        if (hook.required || (isGitError(err) && err.code === "CONTAINMENT_TEARDOWN_FAILED")) throw err;
+        console.warn(`[archive] archive script failed for ${ws.id} (continuing): ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         hookMs += Date.now() - hookStartedAt;
       }
+      journal = { ...journal, payload: { ...journal.payload, archiveHookCompleted: true } };
+      updateWorkspaceLifecycleDetails(ws.id, journal);
     }
   }
 
@@ -3905,11 +3905,11 @@ export function recoverMissingWorkspace(
         // Build the admin entry outside worktrees/ and publish it atomically.
         // read-tree reconstructs the index only: deleted, untracked and ignored
         // working files remain byte-for-byte untouched, unlike a file overlay.
-        const prepared = await mkdtemp(path.join(common, "zeros-recovery-"));
+        const prepared = await createGitTemporaryDirectory(path.join(common, "zeros-recovery-"));
         try {
-          await writeFile(path.join(prepared, "commondir"), `${common}\n`);
-          await writeFile(path.join(prepared, "gitdir"), `${dotGit}\n`);
-          await writeFile(
+          await writeGitTemporaryFile(path.join(prepared, "commondir"), `${common}\n`);
+          await writeGitTemporaryFile(path.join(prepared, "gitdir"), `${dotGit}\n`);
+          await writeGitTemporaryFile(
             path.join(prepared, "HEAD"),
             `ref: refs/heads/${ws.branch}\n`,
           );

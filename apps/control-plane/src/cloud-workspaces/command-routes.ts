@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
-import { CloudCommandError, CloudCommandRequestSchema, type DatabaseCloudWorkspaceCommandService } from "./commands.js";
+import { CloudCommandError, CloudCommandRequestSchema, legacyCloudCommandResponse, type DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import { HttpError } from "../authz.js";
 
@@ -28,6 +28,10 @@ export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandS
     if (!parsed.success) return c.json({ error: "invalid_command" }, 422);
     const { request, actorSessionId, ...binding } = parsed.data;
     const scope = { ...binding, heartbeatToken: token,...(actorSessionId?{actorSessionId}:{}) };
+    const native=c.req.header("x-zeros-native-commands")==="1";
+    if(!native&&request.kind==="confirm-goal")return c.json({error:"invalid_command"},422);
+    if(!native&&request.kind==="mutate"&&"payload" in request.mutation.action&&request.mutation.action.payload.operation)
+      return c.json({error:"invalid_command"},422);
     try {
       let result: unknown;
       switch (request.kind) {
@@ -35,10 +39,11 @@ export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandS
         case "read": result = await service.read(scope, request.commandId); break;
         case "mutate": result = await service.mutate(scope, request.mutation, request.admissionError ?? null); break;
         case "stop": result = await service.stop(scope, request.conversationId, request.operationId); break;
-        case "claim": result = await service.claim(scope, request.conversationId, request.executionId, request.claimId); break;
+        case "claim": result = await service.claim(scope, request.conversationId, request.executionId, request.claimId,native); break;
         case "settle": result = await service.settle(scope, request.result); break;
+        case "confirm-goal": result = await service.confirmGoal(scope,request); break;
       }
-      return c.json({ result });
+      return c.json({ result:native?result:legacyCloudCommandResponse(result) });
     } catch (error) {
       if (error instanceof CloudWorkspaceEngineAuthorityError) return c.json({ error: "engine_authority_rejected" }, 401);
       if (error instanceof HttpError) return c.json({error:"cloud_actor_authority_rejected"},403);

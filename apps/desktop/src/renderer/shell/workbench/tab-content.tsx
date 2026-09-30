@@ -5,7 +5,6 @@
 import React from "react";
 import { BrowserTab } from "./tabs/browser-tab";
 import { ChangesWorkbenchSurface } from "./tabs/changes-surface";
-import { ContextSurface } from "./tabs/context-surface";
 import { FilesTab } from "./tabs/files-tab";
 import { ReviewSurface } from "./tabs/review-surface";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
@@ -28,7 +27,6 @@ const TAB_BODY_MAP: Record<
   design: () => null,
   changes: ChangesWorkbenchSurface,
   review: ReviewSurface,
-  context: ContextSurface,
   browser: BrowserTab,
   files: FilesTab,
 };

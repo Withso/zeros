@@ -1,3 +1,4 @@
+import { createCloudComputerBuildWorker } from "./cloud-workspaces/computer.js";
 // ──────────────────────────────────────────────────────────
 // Zeros control plane — entrypoint.
 // Boot order: config → pool → migrations (idempotent) → HTTP server.
@@ -14,10 +15,13 @@ import { S3CloudWorkspaceObjectStore } from "./cloud-workspaces/s3-object-store.
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool } from "./db.js";
+import { assertHostedDatabaseOwnership } from "./development-environment.js";
 import { runServiceBootMigrations, verifyMigrations, type ServiceBootMigrationResult } from "./migrate.js";
 import { loadEmailConfig, sendEmailStrict } from "./email.js";
 import { startGithubOauthCleanup } from "./github.js";
 import { createApp } from "./app.js";
+import { DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
+import { DatabaseCloudIdleStop } from "./cloud-workspaces/idle-stop.js";
 import {
   CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
   CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
@@ -45,6 +49,9 @@ import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig
 
 const config = loadConfig();
 const pool = createPool(config.databaseUrl, { maxConnections: config.databasePoolMax ?? 10 });
+if (config.development && "generation" in config.development) {
+  await assertHostedDatabaseOwnership(pool, config.development);
+}
 const emailConfig = loadEmailConfig();
 
 // LISTEN is session-scoped and must bypass transaction poolers. The optional
@@ -101,6 +108,7 @@ if (workosSync) {
 let stopCloudReconciler = async () => {};
 let stopCloudProAllowances = async () => {};
 let stopCloudSetupWorker = async () => {};
+let stopCloudComputerBuildWorker = async () => {};
 let stopCloudAccessRevocationWorker = async () => {};
 let stopCloudCheckpointRequestWorker = async () => {};
 let stopCloudForkWorker = async () => {};
@@ -278,7 +286,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
             maxAttempts: 3,
             requestChecksumCalculation: "WHEN_REQUIRED",
             requestHandler: { connectionTimeout: 10_000, requestTimeout: 60_000, httpsAgent: new HttpsAgent({ keepAlive: true, maxSockets: 16 }) },
-          }), durability.s3.bucket)
+          }), durability.s3.bucket, durability.s3.prefix)
         : new FileCloudWorkspaceObjectStore(durability.objectStoreDirectory),
       encryptionKeys: durability.objectEncryptionKeys,
       keyVersion: durability.currentObjectEncryptionKeyVersion,
@@ -460,6 +468,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       workosEnabled: config.auth.provider === "workos",
     });
     const executor = new CloudWorkspaceLinuxSetupExecutor({
+      diagnosticPool: pool,
       admissionBroker: admission,
       commandRunnerResolver: async (execution) => {
         const resolved = await providerResolver.resolve({
@@ -479,6 +488,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     setupWorker = new CloudWorkspaceSetupWorker({
       pool,
       executor,
+      recoveryConfig: cloud,
       workosEnabled: config.auth.provider === "workos",
       sanitizeLog: sanitizeCloudWorkspaceSetupLog,
       intervalMs: setup.intervalMs,
@@ -535,14 +545,21 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     if (outboxWorker) stopCloudOutboxWorker = outboxWorker.start();
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
 
-    if (setupWorker) stopCloudSetupWorker = setupWorker.start();
+    if (setupWorker) { stopCloudSetupWorker = setupWorker.start(); stopCloudComputerBuildWorker = createCloudComputerBuildWorker(pool, cloud).start(); }
     console.log(
       `[control-plane] cloud workspace reconciliation enabled (${provider.name}/${cloud.target}); setup=${setupWorker ? "enabled" : "paused"}; durability=${blobService ? "enabled" : "disabled"}; outbox=${outboxWorker ? "enabled" : "queued"}`,
     );
   };
 }
 
+const cloudGithubWriteGrants = config.github && cloudWorkspaceInternalSetupService
+  ? new DatabaseCloudGithubWriteGrants(pool, config.auth.provider === "workos") : undefined;
+let githubWriteCleanup: ReturnType<typeof setInterval> | undefined;
+let githubWriteCleanupPending = Promise.resolve();
+let githubWriteCleanupRunning = false;
 const app = createApp(config, pool, emailConfig, {
+  ...(cloudWorkspaceInternalSetupService ? { cloudIdleStop: new DatabaseCloudIdleStop(pool, config.auth.provider === "workos") } : {}),
+  ...(cloudGithubWriteGrants ? { cloudGithubWriteGrants } : {}),
   securityEventBroker,
   migrationStatus: migrationResult.status,
   ...(workosProvider ? { workosProvider } : {}),
@@ -563,9 +580,19 @@ const app = createApp(config, pool, emailConfig, {
 });
 
 let shuttingDown = false;
-const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
+const server = serve({ fetch: app.fetch, port: config.port, ...(config.host ? { hostname: config.host } : {}) }, (info) => {
   if (shuttingDown) return;
   if(migrationResult.status.state==="current"){
+    if (cloudGithubWriteGrants) {
+      const sweep = () => {
+        if (githubWriteCleanupRunning) return;
+        githubWriteCleanupRunning = true;
+        githubWriteCleanupPending = cloudGithubWriteGrants.cleanup().catch(() => undefined).finally(() => { githubWriteCleanupRunning = false; });
+      };
+      sweep();
+      githubWriteCleanup = setInterval(sweep, 30_000);
+      githubWriteCleanup.unref();
+    }
     startCloudBackground();
     startCloudHealthAlerts();
     stopSecurityEventPublisher=startSecurityEventPublisher(pool);
@@ -590,12 +617,15 @@ server.on("upgrade", (request, socket, head) => {
 function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
+  if (githubWriteCleanup) clearInterval(githubWriteCleanup);
   cloudRuntimeBridge?.close();
   cloudPreviewWebSocketRelay?.close();
   cloudRuntimeServiceRelay?.close();
   console.log(`[control-plane] ${signal}; draining`);
   const backgroundStopped = Promise.allSettled([
+    githubWriteCleanupPending,
     stopCloudSetupWorker(),
+    stopCloudComputerBuildWorker(),
     stopCloudAccessRevocationWorker(),
     stopCloudCheckpointRequestWorker(),
     stopCloudForkWorker(),

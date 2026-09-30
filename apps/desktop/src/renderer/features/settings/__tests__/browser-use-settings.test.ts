@@ -25,6 +25,8 @@ describe("Browser use settings", () => {
   });
 
   it("keeps Claude external-Chrome access off until explicitly enabled", () => {
+    expect(browserSettingsFromEffective({ browser: { enabled: false } }).codex_enabled).toBe(false);
+    expect(browserSettingsFromEffective({ browser: { enabled: true } }).claude_enabled).toBe(false);
     expect(browserSettingsFromEffective({})).toEqual({
       codex_enabled: true,
       claude_enabled: false,

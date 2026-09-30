@@ -75,7 +75,10 @@ fi
 PROFILE_VERSION=$("$RUNTIME" --input-type=module -e 'import {readCloudHostRuntimeProfile} from "/opt/zeros-runtime/lib/zeros/cloud-runtime-profile.mjs"; process.stdout.write(String(readCloudHostRuntimeProfile().version));')
 case "$PROFILE_VERSION" in
   1) RUNTIME_DIRECTORY="/run/zeros"; ENGINE_UID="0"; SETTINGS_DIRECTORY="/srv/zeros/state/user-settings" ;;
-  2|3) RUNTIME_DIRECTORY="/run/zeros/engine"; ENGINE_UID="10003"; SETTINGS_DIRECTORY="/srv/zeros/managed-settings"; REPO_DIR="/srv/zeros/workspace" ;;
+  2) RUNTIME_DIRECTORY="/run/zeros/engine"; ENGINE_UID="10003"; SETTINGS_DIRECTORY="/srv/zeros/managed-settings"; REPO_DIR="/srv/zeros/workspace" ;;
+  # This shell still runs on the host. The v3 engine view subsequently maps
+  # the physical checkout to /srv/zeros/workspace inside its namespace.
+  3) RUNTIME_DIRECTORY="/run/zeros/engine"; ENGINE_UID="10003"; SETTINGS_DIRECTORY="/srv/zeros/managed-settings"; REPO_DIR="/srv/zeros/files/workspace" ;;
   *) echo "[start-engine] FATAL: unsupported runtime profile" >&2; exit 1 ;;
 esac
 

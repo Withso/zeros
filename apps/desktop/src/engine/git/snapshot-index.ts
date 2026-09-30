@@ -9,11 +9,11 @@ import {
   readFile,
   rm,
   utimes,
-  writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { runGit } from "./git-exec";
+import { writeGitTemporaryFile } from "./git-temporary";
 
 const MAX_INDEX_BYTES = 16 * 1024 * 1024;
 const MAX_CACHE_BYTES = 32 * 1024 * 1024;
@@ -300,7 +300,7 @@ export async function prepareSnapshotIndex(
     if (!before) return cold;
     const reused = previous?.signature === before.signature;
     if (reused) {
-      await writeFile(scratch, previous.bytes, { flag: "wx", mode: 0o600 });
+      await writeGitTemporaryFile(scratch, previous.bytes);
       // Copying with a new timestamp would defeat Git's racy-clean detection.
       // Round down with a millisecond margin, never forward, before Git reads
       // the index. Git then smudges/rechecks entries newer than that timestamp.

@@ -139,3 +139,15 @@ test("requires every hosted auth and routing variable", () => {
   assert.ok(errors.includes("CONTROL_PLANE_URL is required"));
   assert.ok(errors.includes("CF_PAGES_BRANCH is required"));
 });
+test("hosted Dev names the exact checkout and cannot target Alpha or Ops", () => {
+  const owner = "a".repeat(24), generation = "11111111-1111-4111-8111-111111111111";
+  const env = { CF_PAGES: "1", CF_PAGES_BRANCH: "dev", ZEROS_DEPLOY_ENV: "dev", AUTH_PROVIDER: "workos",
+    ZEROS_DEV_OWNER: owner, ZEROS_DEV_GENERATION: generation, ZEROS_DEV_DOMAIN: "example.com",
+    APP_ORIGIN: `https://app-dev-${owner}.example.com`, CONTROL_PLANE_URL: `https://api-dev-${owner}.example.com` };
+  assert.deepEqual(deploymentEnvironmentErrors(env), []);
+  assert.ok(deploymentEnvironmentErrors({ ...env, CONTROL_PLANE_URL: "https://api-alpha.zeros.build" }).length);
+  assert.ok(deploymentEnvironmentErrors({ ...env, ZEROS_SURFACE: "ops" }).length);
+  assert.ok(deploymentEnvironmentErrors({ ...env, AUTH_PROVIDER: "auth0" }).length);
+  assert.ok(deploymentEnvironmentErrors({ ...env, CF_PAGES_BRANCH: "main" }).length);
+  assert.ok(deploymentEnvironmentErrors({ ...env, ZEROS_DEV_GENERATION: "" }).length);
+});

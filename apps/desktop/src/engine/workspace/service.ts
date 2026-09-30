@@ -64,6 +64,7 @@ import {
 // ──────────────────────────────────────────────────────────
 
 import { createHash } from "node:crypto";
+import type { CloudCustomizationOperation } from "@zeros/protocol/cloud-customization";
 import {
   extensionQuerySchema,
   saveZerosSkillSchema,
@@ -222,6 +223,10 @@ import {
 } from "../git/worktree";
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
 import { writeWorkspaceFile } from "../files/write-file";
+import { QualifiedCloudFilePolicy, withCloudFilePolicy } from "../files/cloud-file-policy";
+import { listMentionPaths } from "../files/mention-paths";
+import { zerosStateRoot } from "../git/state";
+import { cloudActorCan, type CloudActorRole } from "@zeros/protocol/cloud-actors";
 import { transferContextAttachment } from "../files/attachment-transfer";
 import {
   externalizeLegacyMessageImages,
@@ -1108,6 +1113,8 @@ const REMOTE_READABLE = new Set<string>([
   // GitHub PR reads
   "gh.authStatus",
   "gh.repoOwnerAvatar",
+  "gh.repoAccess",
+  "gh.prList",
   "gh.prGet",
   "gh.prChecks",
   "gh.prCommits",
@@ -1342,6 +1349,10 @@ export class WorkspaceService {
   }
   setGatewayAccessor(fn: () => McpGateway | null): void {
     this.gatewayAccessor = fn;
+  }
+  private cloudCustomizationRequest: ((actorSessionId: string, operation: CloudCustomizationOperation, params: Record<string, unknown>) => Promise<unknown>) | null = null;
+  setCloudCustomizationRequest(request: NonNullable<WorkspaceService["cloudCustomizationRequest"]>): void {
+    this.cloudCustomizationRequest = request;
   }
   /** Per-launch capability used only by the local Electron custom protocol.
    * Remote renderers use srcDoc and never receive this host-local authority. */
@@ -2130,6 +2141,10 @@ export class WorkspaceService {
   /** A synthetic entry for the primary checkout so a remote client can browse
    *  the project root without a managed worktree. */
   private localMainEntry(): Workspace {
+    if (this.options.primaryDesignWorkspace) {
+      const primary = getWorkspaceById(LOCAL_MAIN_WORKSPACE_ID);
+      if (primary?.placement === "cloud" && primary.path === this.root) return { ...primary, present: true };
+    }
     return {
       id: LOCAL_MAIN_WORKSPACE_ID,
       repoSlug: "",
@@ -2220,7 +2235,7 @@ export class WorkspaceService {
     // drop chats whose workspace the owner restricted from remote — its
     // workspace is hidden, so its transcript must be too. No restrictions →
     // pass the rows through untouched.
-    const restricted = listRemoteRestrictedWorkspaceIds();
+    const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
     if (restricted.size === 0) return rows;
     const workspaces = listWorkspaces({});
     return rows.filter(
@@ -2241,7 +2256,7 @@ export class WorkspaceService {
   }
 
   private remoteFolderRestricted(folder: string): boolean {
-    const restricted = listRemoteRestrictedWorkspaceIds();
+    const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
     if (restricted.size === 0) return false;
     return restricted.has(
       this.redactChatFolderForRemote(folder, listWorkspaces({})),
@@ -2287,19 +2302,54 @@ export class WorkspaceService {
     opts: {
       remote?: boolean;
       cloudWorker?: boolean;
-      cloudActorIdentity?: { userId: string; deviceId: string };
+      cloudActorIdentity?: { userId: string; deviceId: string; sessionId?: string };
+      cloudFileActor?: { role: CloudActorRole; authorized: () => boolean };
       hostLocalResources?: boolean;
       gitMutationAdmitted?: boolean;
       designDirectoryResolved?: boolean;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
+    // Qualified VM authority is server-owned, independent of the paired-host
+    // relay flag. Never infer it from a path, client params, or remote alone.
+    const cloudFileOperation = ["file.tree", "file.ignored", "file.read", "file.write",
+      "context.graph.list", "context.graph.scaffold", "context.graph.setShared",
+      "workspace.listWorkingDirectories", "workspace.setWorkingDirectories"].includes(op);
+    let cloudFiles: QualifiedCloudFilePolicy | undefined;
+    if (cloudFileOperation && opts.cloudFileActor) {
+      if (!remote || !opts.cloudWorker || !this.options.primaryDesignWorkspace || !opts.cloudActorIdentity ||
+          params.workspaceId !== LOCAL_MAIN_WORKSPACE_ID ||
+          (params.repoRoot !== undefined && params.repoRoot !== this.root)) {
+        throw new GitError({ code: "REMOTE_RESTRICTED", message: "Cloud Files requires the admitted primary workspace." });
+      }
+      let ownerRoots: string[] | undefined;
+      const currentOwners = () => {
+        if (!ownerRoots) {
+          const workspaces = listWorkspaces({});
+          ownerRoots = [...workspaces.map(workspace => workspace.path), ...listKnownRepoRoots()];
+          // Registration is engine-owned. Reuse one DB snapshot within a
+          // synchronous filter, then refresh after every asynchronous yield.
+          queueMicrotask(() => { ownerRoots = undefined; });
+        }
+        return ownerRoots;
+      };
+      cloudFiles = new QualifiedCloudFilePolicy(this.root, {
+        canEdit: cloudActorCan(opts.cloudFileActor.role, "edit"), authorized: opts.cloudFileActor.authorized,
+        privateRoots: [zerosStateRoot(), os.homedir(), "/srv/zeros/state", "/srv/zeros/home", "/opt/zeros", "/etc/zeros"],
+        ownerRoots: currentOwners,
+      });
+      cloudFiles.assertAuthorized(["file.write", "context.graph.scaffold", "context.graph.setShared", "workspace.setWorkingDirectories"].includes(op));
+    }
+    if (this.options.primaryDesignWorkspace && params.workspaceId === LOCAL_MAIN_WORKSPACE_ID &&
+        ["workspace.archive", "workspace.delete", "workspace.restore", "workspace.recover", "workspace.deleteSnapshot"].includes(op)) {
+      throw new GitError({ code: "REMOTE_RESTRICTED", message: "Manage the cloud allocation through its workspace lifecycle service." });
+    }
     // Cloud actors are role-admitted by the engine, independently of the
     // trusted-device relay policy. Only an immutable cloud deployment may
-    // expose Design, and only for its opaque primary checkout. Keep `remote`
-    // for all ordinary file/secret/path restrictions.
+    // expose Design, and only for its opaque primary checkout. Files use the
+    // independent qualified policy above; other remote restrictions remain.
     const cloudDesign = remote && opts.cloudWorker === true &&
-      this.options.primaryDesignWorkspace === true && op.startsWith("design.");
+      this.options.primaryDesignWorkspace === true && (op.startsWith("design.") || op === "workspace.setMode");
     const humanActor = cloudDesign && opts.cloudActorIdentity
       ? { kind: "human" as const, id: `cloud:${opts.cloudActorIdentity.userId}:${opts.cloudActorIdentity.deviceId}` }
       : undefined;
@@ -2346,7 +2396,7 @@ export class WorkspaceService {
     // switch reaches them. (chats.upsert/bulkUpsert add/move the client's own
     // rows, so their requested destination folders are checked separately.)
     if (remote) {
-      const restricted = listRemoteRestrictedWorkspaceIds();
+      const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
       const targetWorkspaceId = optStr(params, "workspaceId");
       if (targetWorkspaceId && restricted.has(targetWorkspaceId)) {
         throw new GitError({
@@ -2462,7 +2512,7 @@ export class WorkspaceService {
         // The synthetic local-main trunk is a LIVE entry — never part of an
         // archived-only list (History).
         const base =
-          archived === true ? list : [this.localMainEntry(), ...list];
+          archived === true ? list : [this.localMainEntry(), ...list.filter(row => row.id !== LOCAL_MAIN_WORKSPACE_ID)];
         // Enrich with per-row `hasChanges` ONLY when asked (the Dashboard) — this
         // fires git probes per live row, so the sidebar's frequent refetches
         // (which don't pass withChanges) stay git-free.
@@ -2477,7 +2527,7 @@ export class WorkspaceService {
         // and needs real paths to open/spawn/create like local; the restriction
         // list, NOT path-hiding, is the boundary (a restricted workspace is gone
         // from this list entirely).
-        const restricted = listRemoteRestrictedWorkspaceIds();
+        const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
         return {
           workspaces: workspaces.filter((w) => !restricted.has(w.id)),
         };
@@ -2488,7 +2538,7 @@ export class WorkspaceService {
       // device can neither read nor change what's hidden from it. The desktop
       // owner manages the list from repo settings.
       case "workspace.listRemoteRestricted": {
-        return { ids: Array.from(listRemoteRestrictedWorkspaceIds()) };
+        return { ids: Array.from(listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace)) };
       }
       case "workspace.setRemoteRestricted": {
         setWorkspaceRemoteRestricted(
@@ -2498,22 +2548,26 @@ export class WorkspaceService {
         return { ok: true };
       }
       // ── Working directories (per-worktree sparse-checkout) ──
-      // LOCAL-ONLY for the same reason as the restriction list above: applying
-      // a selection REMOVES folders from the checkout, and a paired device is
-      // not the place to do that blind. Both ops are off the remote allowlist
-      // so the deny-by-default gate rejects them together — a remote client
-      // never sees a picker it could not save.
+      // Paired-host relays cannot use this picker: a selection removes folders
+      // from the checkout. Both operations remain off the relay allowlist.
+      // Qualified VM readers/editors use the independent cloud actor policy.
       //
       // No Zeros-side persistence on purpose: git already stores the cone in
       // the worktree's own `.git` config and it survives restarts. A second
       // copy in settings could only drift from the real thing.
       case "workspace.listWorkingDirectories": {
+        if (remote && !cloudFiles) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Working directories require the desktop or an admitted cloud workspace." });
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        return getWorkingDirectories(cwd, {
+        const state = await getWorkingDirectories(cwd, {
           designRoots: await designRootsForWorkingDirectories(cwd),
         });
+        if (!cloudFiles) return state;
+        cloudFiles.assertAuthorized();
+        return { ...state, all: state.all.filter(dir => cloudFiles.allows(dir)),
+          included: state.included.filter(dir => cloudFiles.allows(dir)), locked: state.locked.filter(dir => cloudFiles.allows(dir)) };
       }
       case "workspace.setWorkingDirectories": {
+        if (remote && !cloudFiles) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Working directories require the desktop or an admitted cloud workspace." });
         const raw = params.directories;
         if (!Array.isArray(raw)) {
           throw new GitError({
@@ -2526,6 +2580,10 @@ export class WorkspaceService {
         const directories = raw.filter(
           (d): d is string => typeof d === "string",
         );
+        if (cloudFiles) {
+          cloudFiles.assertNoNestedOwners();
+          for (const directory of directories) cloudFiles.assertPath(directory, true);
+        }
         // Deafen the worktree watcher for the duration — the single most
         // expensive part of this operation, and the reason a save on a real
         // monorepo timed out.
@@ -2556,8 +2614,13 @@ export class WorkspaceService {
           cwd,
         );
         try {
+          cloudFiles?.assertAuthorized(true);
           return await setWorkingDirectories(cwd, directories, {
             designRoots: await designRootsForWorkingDirectories(cwd),
+            ...(cloudFiles ? { assertAuthorized: () => {
+              cloudFiles.assertNoNestedOwners();
+              for (const directory of directories) cloudFiles.assertPath(directory, true);
+            } } : {}),
           });
         } finally {
           // Always resume, including after a throw: the checkout is still live
@@ -3065,6 +3128,11 @@ export class WorkspaceService {
       case "skills.listZeros":
       case "skills.saveZeros":
       case "skills.removeZeros": {
+        if (remote && opts.cloudWorker && this.options.primaryDesignWorkspace && opts.cloudActorIdentity?.sessionId && this.cloudCustomizationRequest) {
+          if (params.repoRoot !== undefined && params.repoRoot !== this.root) throw new Error("Organization customization cannot import device configuration.");
+          const { repoRoot: _repoRoot, workspaceId: _workspaceId, ...request } = params;
+          return this.cloudCustomizationRequest(opts.cloudActorIdentity.sessionId, op, request);
+        }
         if (remote)
           throw new Error(
             "Local customization is available only on this device.",
@@ -3929,7 +3997,7 @@ export class WorkspaceService {
         if (params.includeIgnored === true) {
           // Inclusive mention search has the same local-only boundary as
           // file.ignored: ignored folders may contain other private worktrees.
-          if (remote)
+          if (remote && !cloudFiles)
             throw new GitError({
               code: "REMOTE_RESTRICTED",
               message: "Ignored files can only be listed from the desktop app.",
@@ -3939,7 +4007,7 @@ export class WorkspaceService {
             remote,
           );
           return {
-            files: await listWorkspaceFiles(cwd, optNum(params, "limit"), {
+            files: cloudFiles ? await listMentionPaths(cwd, optStr(params, "query") ?? "", optNum(params, "limit") ?? 20_000, undefined, cloudFiles) : await listWorkspaceFiles(cwd, optNum(params, "limit"), {
               includeIgnored: true,
               query: optStr(params, "query"),
               mentionRevision: optStr(params, "mentionRevision"),
@@ -3951,7 +4019,8 @@ export class WorkspaceService {
           params.includeDesignDirectories === true
             ? await listWorkspaceFilesWithDesign(cwd, optNum(params, "limit"))
             : { files: await listWorkspaceFiles(cwd, optNum(params, "limit")) };
-        const files = remote
+        cloudFiles?.assertAuthorized();
+        const files = cloudFiles ? listing.files.filter(file => cloudFiles.allows(file)) : remote
           ? listing.files.filter((f) => !isSensitiveRepoPath(f))
           : listing.files;
         // Hide credential/secret files from a remote client even if they're
@@ -3974,7 +4043,7 @@ export class WorkspaceService {
       // directories on demand. LAZY: no `dir` returns the collapsed
       // ignored roots (~8 rows), `dir` returns one level inside one of them.
       //
-      // LOCAL-ONLY, and not by omission — by an explicit refusal, because the
+      // Paired-host relay denial is explicit, because the
       // reasoning is easy to lose. With `dir` this is a one-level directory
       // enumerator over the worktree, and .gitignore is exactly the boundary it
       // stops honouring. That boundary was load-bearing for remote clients in a
@@ -3983,23 +4052,28 @@ export class WorkspaceService {
       // workspace could walk into another one's checkout — around the
       // remote-restriction list entirely — and no per-entry name filter would
       // notice, because none of those paths look sensitive. The desktop app is
-      // the operator's own machine and already reads these files freely. ──
+      // the operator's own machine and already reads these files freely.
+      // Qualified VMs instead use private-path and nested-owner checks. ──
       case "file.ignored": {
-        if (remote) {
+        if (remote && !cloudFiles) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
             message: "Ignored files can only be listed from the desktop app.",
           });
         }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        const directory = optStr(params, "dir");
+        if (cloudFiles && directory && !cloudFiles.allows(directory)) return { entries: [] };
+        const entries = await listIgnoredEntries(cwd, directory);
+        cloudFiles?.assertAuthorized();
         return {
-          entries: await listIgnoredEntries(cwd, optStr(params, "dir")),
+          entries: cloudFiles ? entries.filter(entry => cloudFiles.allows(entry)) : entries,
         };
       }
       case "file.read": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
         const rel = reqStr(params, "path");
-        if (remote && isSensitiveRepoPath(rel)) {
+        if (remote && !cloudFiles && isSensitiveRepoPath(rel)) {
           throw new GitError({
             code: "VALIDATION_FAILED",
             message:
@@ -4008,14 +4082,16 @@ export class WorkspaceService {
         }
         // readWorkspaceFile re-checks the RESOLVED + realpath target so a
         // collapsing path ('.env/.') or an innocuously-named symlink can't leak.
-        const read = await readWorkspaceFile(cwd, rel, { remote });
+        const read = readWorkspaceFile(cwd, rel, { remote, cloudPolicy: cloudFiles });
         // Tag Design territory with the SAME recognizer file.write refuses by,
         // so the viewer never advertises an Edit action the write path will
         // reject. This is presentation only — the guard below is the authority.
-        return makeDesignPathRecognizer(
+        const isDesignPath = makeDesignPathRecognizer(
           cwd,
           activeDesignDirectoryNameFor(cwd),
-        )(rel)
+        );
+        return (isDesignPath(rel) || (cloudFiles && read.kind !== "error" &&
+          isDesignPath(nodePath.relative(cwd, cloudFiles.assertPath(rel)))))
           ? { ...read, designPath: true }
           : read;
       }
@@ -4030,7 +4106,9 @@ export class WorkspaceService {
             message: "file.write requires string content",
           });
         }
-        if (normalizeRepoMutationPath(rel)?.endsWith("/design.toml")) {
+        const expectedCloudTarget = cloudFiles?.assertPath(rel, true);
+        const writePaths = expectedCloudTarget ? [rel, nodePath.relative(cwd, expectedCloudTarget)] : [rel];
+        if (writePaths.some(candidate => normalizeRepoMutationPath(candidate)?.endsWith("/design.toml"))) {
           let claimsDesign: boolean;
           try {
             claimsDesign = parseDesignManifest(content) !== null;
@@ -4048,11 +4126,11 @@ export class WorkspaceService {
         // write path (the design surface's transactional writes).
         await assertNoDesignPathWrites(
           targetWorkspaceId,
-          [rel],
+          writePaths,
           "editing",
           cwd,
         );
-        if (remote && isSensitiveRepoPath(rel)) {
+        if (remote && !cloudFiles && isSensitiveRepoPath(rel)) {
           throw new GitError({
             code: "VALIDATION_FAILED",
             message:
@@ -4063,7 +4141,7 @@ export class WorkspaceService {
         // containment + symlink-escape + secret denylist) — the SAME boundary as
         // file.read — and writes atomically (tmp + rename) so a crash can't
         // truncate the file.
-        return writeWorkspaceFile(cwd, rel, content, { remote });
+        return writeWorkspaceFile(cwd, rel, content, { remote, cloudPolicy: cloudFiles, expectedCloudTarget });
       }
       case "attachment.write": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
@@ -4078,23 +4156,23 @@ export class WorkspaceService {
       }
 
       // ── Context graph (the Context tab's canvas) ──────────
-      // DESKTOP-ONLY for now, and by explicit refusal like `file.ignored`, not
-      // omission: the graph's `local/` scope is gitignored private material,
-      // exactly the boundary the remote read allowlist exists to keep. A future
-      // remote surface would filter to `shared/` — do that deliberately, not by
-      // widening these cases.
+      // Context is workspace-owned on a qualified VM. Paired-host relay clients
+      // retain the refusal for the desktop's private local/ material.
       case "context.graph.list": {
-        if (remote) {
+        if (remote && !cloudFiles) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
             message: "The context graph can only be read from the desktop app.",
           });
         }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        return listContextGraph(cwd);
+        if (!cloudFiles) return listContextGraph(cwd);
+        const result = await withCloudFilePolicy(cloudFiles, () => listContextGraph(cwd));
+        cloudFiles.assertAuthorized();
+        return result;
       }
       case "context.graph.scaffold": {
-        if (remote) {
+        if (remote && !cloudFiles) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
             message:
@@ -4102,10 +4180,14 @@ export class WorkspaceService {
           });
         }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        return ensureContextGraph(cwd);
+        if (!cloudFiles) return ensureContextGraph(cwd);
+        await assertNoDesignPathWrites(LOCAL_MAIN_WORKSPACE_ID, [".context", ".context-graph"], "scaffolding context", cwd);
+        const result = await withCloudFilePolicy(cloudFiles, () => ensureContextGraph(cwd));
+        cloudFiles.assertAuthorized(true);
+        return result;
       }
       case "context.graph.setShared": {
-        if (remote) {
+        if (remote && !cloudFiles) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
             message:
@@ -4113,11 +4195,13 @@ export class WorkspaceService {
           });
         }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        const result = await setContextGraphAttachmentShared(
+        if (cloudFiles) await assertNoDesignPathWrites(LOCAL_MAIN_WORKSPACE_ID, [".context", ".context-graph"], "moving context", cwd);
+        const share = () => setContextGraphAttachmentShared(
           cwd,
           reqStr(params, "attachmentId"),
           params.shared === true,
         );
+        const result = await (cloudFiles ? withCloudFilePolicy(cloudFiles, share) : share());
         if (!result.ok) {
           throw new GitError({
             code: "VALIDATION_FAILED",
@@ -4493,12 +4577,16 @@ export class WorkspaceService {
         return initRepoInPlace(repoRoot);
       }
       // Can the selected connection open a PR on this workspace's remote? A
-      // read, and LOCAL-ONLY by omission from every remote allowlist: it guards
-      // the desktop's Create PR control, which never renders without a native
-      // runtime. Returns a status object rather than throwing — see
-      // getWorkspaceRepoAccess.
-      case "gh.repoAccess":
-        return getWorkspaceRepoAccess(reqStr(params, "workspaceId"));
+      // read of the admitted workspace's configured remote. Cloud and Local
+      // use the same Create PR control and status contract.
+      case "gh.repoAccess": {
+        const workspaceId = reqStr(params, "workspaceId");
+        if (remote) this.resolveCwd(workspaceId);
+        // Cloud's ambient installation credential is read-only. It cannot
+        // answer for the human; the actual write obtains their exact grant.
+        if (opts.cloudWorker) return { state: "unknown" };
+        return getWorkspaceRepoAccess(workspaceId);
+      }
       case "gh.prGet": {
         const workspaceId = reqStr(params, "workspaceId");
         const repository =
@@ -4846,16 +4934,15 @@ export class WorkspaceService {
         return { ok: true };
       }
       // ── Mode switch: one workspace, two modes ─────────────
-      // LOCAL-ONLY (on no remote allowlist — deny-by-default refuses a relay
-      // client): first entry may initialize uncommitted workspace-owned files,
-      // and a paired device is not the place to trigger that mutation blind.
+      // Desktop-local or an admitted cloud manager. The trusted-device relay
+      // remains denied: first entry can initialize workspace-owned files.
       // The lifecycle prologue already refused archived rows, active
       // lifecycle flights, and missing checkouts (setMode is in
       // LIFECYCLE_GATED_WORKSPACE_OPS).
       case "workspace.setMode": {
         // Deny-by-default already refuses relay clients before dispatch; keep
         // the defence-in-depth check anyway (same posture as prepareCreate).
-        if (remote) {
+        if (remote && !cloudDesign) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
             message: "Workspace modes can be switched only in the desktop app.",
@@ -4882,7 +4969,7 @@ export class WorkspaceService {
         if (current === mode) return { ok: true, mode };
         if (mode === "design") {
           const snapshot = await enterDesignMode(workspace, () =>
-            this.readDesignSnapshot(workspace, remote, {
+            this.readDesignSnapshot(workspace, designRemote, {
               hostLocalResources,
             }),
           );
@@ -4926,8 +5013,8 @@ export class WorkspaceService {
         return result;
       }
       // "Continue" after a merged PR — same worktree + chats, fresh generated
-      // branch, PR fields cleared. Desktop-only (absent from every remote
-      // allowlist, so a remote client is refused by deny-by-default).
+      // branch, PR fields cleared. The cloud actor policy admits this as an
+      // edit. It remains absent from the legacy trusted-device allowlist.
       case "workspace.continueOnNewBranch":
         return continueOnNewBranch({
           workspaceId: reqStr(params, "workspaceId"),
@@ -5046,13 +5133,21 @@ export class WorkspaceService {
           force: optBool(params, "force") ?? false,
         });
       // GitHub: list PRs (DB-free, but routed here so ALL PR ops live on the
-      // bridge; auth ops stay in Electron main). Accepts { originUrl } OR
-      // { owner, repo }, mirroring the old IPC handler.
+      // bridge; auth ops stay in Electron main). Remote discovery is bound to
+      // the admitted checkout. Local create-from pickers keep their historical
+      // originUrl/owner/repo contract before a workspace exists.
       case "gh.prList": {
         let owner: string;
         let repo: string;
         const originUrl = optStr(params, "originUrl");
-        if (originUrl) {
+        const workspaceId = optStr(params, "workspaceId");
+        if (remote || workspaceId) {
+          const id = reqStr(params, "workspaceId");
+          this.resolveCwd(id);
+          const repository = await githubForgeAdapter.resolveRepository(id);
+          owner = repository.owner;
+          repo = repository.name;
+        } else if (originUrl) {
           const parsed = parseGitHubRemote(originUrl);
           owner = parsed.owner;
           repo = parsed.repo;

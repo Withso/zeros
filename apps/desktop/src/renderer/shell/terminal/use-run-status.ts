@@ -11,7 +11,7 @@
 // survives an app restart (the trunk / `local:` workspace is in-memory only).
 
 import { useEffect, useMemo, useState } from "react";
-import { runSessionId, type RunAction } from "@zeros/protocol/run-actions";
+import { runSessionId, type RunAction } from "../../platform/workspace-run-identity";
 
 import {
   workspaceRunInfo,

@@ -302,6 +302,10 @@ export type WorkspaceState = {
   // it. In-memory only: a reload starts normal boot validation again.
   pendingWorkspaceValidationFolder: string | null;
 
+  // On reload, knowing that a workspace exists does not mean its chat list is
+  // loaded. Keep the default-chat keeper idle until that backend has replied.
+  pendingChatHydrationFolder: string | null;
+
   // Per-workspace last-active chat — maps a workspace folder path to the id of
   // the chat the user was last VIEWING there. Restores your place when you
   // switch away from a workspace and back. Without it, returning to a workspace

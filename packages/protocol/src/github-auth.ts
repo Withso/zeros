@@ -262,3 +262,71 @@ export function sanitizeGithubCredential(
     ...(login ? { login } : {}),
   };
 }
+
+// Organization GitHub requests are metadata-only at the desktop boundary.
+// User OAuth tokens are supplied by Electron main, never by renderer callers.
+import { z } from "zod";
+export const cloudGithubNativeSourceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("agent"), leaseId: z.string().uuid() }).strict(),
+  z.object({ kind: z.literal("terminal"), actorSessionId: z.string().uuid() }).strict(),
+]);
+export type CloudGithubNativeSource = z.infer<typeof cloudGithubNativeSourceSchema>;
+export const cloudGithubNativePreparationSchema = z.object({
+  requestId: z.string().uuid(), generation: z.number().int().positive().safe(),
+  engineInstanceId: z.string().uuid(), source: cloudGithubNativeSourceSchema,
+  branch: z.string().min(1).max(512).nullable(),
+}).strict();
+export type CloudGithubNativePreparation = z.infer<typeof cloudGithubNativePreparationSchema>;
+export const cloudGithubNativeContextSchema = z.object({
+  actorUserId: z.string().uuid(), organizationId: z.string().uuid(), workspaceId: z.string().uuid(),
+  generation: z.number().int().positive().safe(), engineInstanceId: z.string().uuid(),
+  owner: z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/), repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/),
+  repositoryId: z.string().regex(/^[1-9][0-9]*$/),
+}).strict();
+export const cloudGithubNativeGrantRequestSchema = cloudGithubNativeContextSchema.extend({
+  operation: z.enum(["git.push", "git.fetch"]), paramsSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  native: cloudGithubNativePreparationSchema,
+}).strict();
+export type CloudGithubNativeGrantRequest = z.infer<typeof cloudGithubNativeGrantRequestSchema>;
+export const cloudGithubNativeDesktopSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("ready") }).strict(),
+  z.object({ kind: z.literal("reply"), requestId: z.string().uuid(),
+    grant: z.string().regex(/^zgw_[A-Za-z0-9_-]{43}$/).nullable() }).strict(),
+]);
+export const CLOUD_GITHUB_DESKTOP_REQUIRED = "Open Zeros to authorize GitHub push for this cloud workspace";
+const cloudGithubScope = { organizationId: z.string().uuid() };
+export const CLOUD_GITHUB_WRITE_OPERATIONS = ["git.push", "gh.prCreate", "gh.prUpdate", "gh.prMarkReady", "gh.prMerge", "gh.prComment"] as const;
+export const cloudGithubWriteGrantSchema = z.object({ grant: z.string().regex(/^zgw_[A-Za-z0-9_-]{43}$/) });
+export function isCloudGithubWriteOperation(value: unknown): value is typeof CLOUD_GITHUB_WRITE_OPERATIONS[number] {
+  return typeof value === "string" && (CLOUD_GITHUB_WRITE_OPERATIONS as readonly string[]).includes(value);
+}
+const cloudGithubName = z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/);
+export const cloudGithubRequestSchema = z.discriminatedUnion("action", [
+  z.object({ ...cloudGithubScope, action: z.literal("prepareWrite"), workspaceId: z.string().uuid(), operation: z.enum([...CLOUD_GITHUB_WRITE_OPERATIONS, "git.fetch"]), prNumber: z.number().int().positive().max(2147483647).optional(), paramsSha256: z.string().regex(/^[a-f0-9]{64}$/), native: cloudGithubNativePreparationSchema.optional() }).strict(),
+  z.object({ ...cloudGithubScope, action: z.literal("catalog") }).strict(),
+  z.object({ ...cloudGithubScope, action: z.literal("connect"), installationId: z.string().uuid() }).strict(),
+  z.object({ ...cloudGithubScope, action: z.literal("disconnect"), installationId: z.string().uuid() }).strict(),
+  z.object({ ...cloudGithubScope, action: z.literal("repositories"), installationId: z.string().uuid(), page: z.number().int().min(1).max(100) }).strict(),
+  z.object({ ...cloudGithubScope, action: z.literal("source"), owner: cloudGithubName, repository: cloudGithubName, installationId: z.string().uuid().optional() }).strict(),
+]);
+export type CloudGithubRequest = z.infer<typeof cloudGithubRequestSchema>;
+export const cloudGithubRepositorySchema = z.object({ id: z.string().regex(/^[1-9][0-9]{0,39}$/), owner: cloudGithubName, name: cloudGithubName,
+  defaultBranch: z.string().min(1).max(512), private: z.boolean() });
+export type CloudGithubRepository = z.infer<typeof cloudGithubRepositorySchema>;
+export const cloudGithubCatalogSchema = z.object({ login: cloudGithubName, complete: z.boolean(), installUrl: z.string().regex(/^https:\/\/github\.com\/apps\/[a-zA-Z0-9-]+\/installations\/new$/), installations: z.array(z.object({
+  id: z.string().uuid(), accountLogin: cloudGithubName, accountType: z.enum(["User", "Organization"]), connected: z.boolean(), suspendedAt: z.string().nullable(),
+})).max(1000) });
+export const cloudGithubRepositoriesSchema = z.object({ repositories: z.array(cloudGithubRepositorySchema).max(100), nextPage: z.number().int().min(2).max(100).nullable() });
+export const cloudGithubSourceSchema = z.object({ installationId: z.string().uuid(), repository: cloudGithubRepositorySchema });
+export const cloudGithubConnectedSchema = z.object({ connected: z.literal(true), installationId: z.string().uuid() });
+export const cloudGithubDisconnectedSchema = z.object({ disconnected: z.literal(true) });
+export function parseCloudGithubResponse(request: CloudGithubRequest, value: unknown) {
+  switch (request.action) {
+    case "prepareWrite": return cloudGithubWriteGrantSchema.parse(value);
+    case "catalog": return cloudGithubCatalogSchema.parse(value);
+    case "repositories": return cloudGithubRepositoriesSchema.parse(value);
+    case "source": return cloudGithubSourceSchema.parse(value);
+    case "connect": return cloudGithubConnectedSchema.parse(value);
+    case "disconnect": return cloudGithubDisconnectedSchema.parse(value);
+  }
+}

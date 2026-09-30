@@ -17,18 +17,18 @@ Do not encode ownership, immutable workspace placement, and replication in one
 | Workspace placement | This Mac or Cloud                                           | Where this workspace's single authoritative engine is created; it does not change in place |
 | Device replica      | Off, Syncing, In sync, Paused, Diverged, Detached, or Error | Whether one member's device has a private local mirror of a cloud-authoritative workspace  |
 
-Local placement does **not** imply Personal ownership. An Organization workspace
-may be created on one member's Mac and inherit Organization repository policy
-while its files, chats, paths, processes, and terminals remain private to that
-device. Cloud placement does require Organization ownership; Personal
-workspaces are permanently device-local.
+New device-local database workspaces belong to Personal. Organization workspaces
+always use the cloud durable record, initially with managed Boat execution.
+Registered Mac execution is a later capability with the same cloud ownership.
+Legacy Organization-local rows and copy journals remain readable for recovery;
+new Organization-local creation is rejected.
 
-This separation produces three valid creation combinations:
+Current creation and the deferred registered-host option are:
 
 | Tenant       | Runs on this Mac                                         | Runs in cloud                                                             |
 | ------------ | -------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Personal     | Private local workspace                                  | Not supported                                                             |
-| Organization | Organization-governed but device-private local workspace | Cloud authority shared according to workspace roles; staff pilot only |
+| Organization | Deferred registered-host execution with cloud records | Cloud authority shared according to workspace roles |
 
 ## Sources of truth
 
@@ -54,14 +54,16 @@ Workspace creation asks only three primary questions:
 1. **Where does this belong?** Personal or an Organization/Team.
 2. **Which repository?** One repository identity, not separate Local and Cloud
    repository records.
-3. **Where should it run?** This Mac or Cloud.
+3. Placement follows ownership in the current release: Personal runs on this
+   Mac; Organizations run on Zeros Cloud. Registered host selection is deferred.
 
 Advanced environment and resource choices stay collapsed unless the selected
 repository has no usable default. The workspace UI then shows a placement badge
 (`This Mac` or `Cloud`) and, for cloud workspaces, a separate `Local copy`
 status. Do not use a single ambiguous `Local` status for both.
 
-The workspace-details actions use verbs that state their consequence:
+Later copy and replica phases use verbs that state their consequence. These
+actions are not part of the current Boat parity UI:
 
 - **Create cloud copy** forks a new cloud workspace and retains the local
   source.
@@ -86,8 +88,8 @@ is issued. Workspace deletion, device revocation, or explicit replica
 removal/tombstoning makes the original replica identity terminal; the member
 may remove the retained local copy or create a separately authorized new fork.
 
-Routine remote editing uses **Open via SSH**. A local copy is an independent
-workspace, not a way to make one Mac authoritative for the cloud source.
+SSH access is also outside the current UI phase. A local copy has an independent
+identity; it does not make a Mac authoritative for the cloud source.
 
 ## Ownership and collaboration rules
 
@@ -101,27 +103,21 @@ workspace, not a way to make one Mac authoritative for the cloud source.
   new owner's provider connection.
 - A Personal workspace has exactly one authorized member and cannot enable
   presence, followers, shared chat, or member replicas.
-- An Organization-local workspace remains visible only to its creator by
-  default. Organization policy can govern it, but the server must not imply
-  that locally stored source or chat is shared.
-- A never-cloud Personal workspace needs no server workspace record. A never-
-  cloud Organization workspace may fetch and cache authorized Organization/
-  repository policy without publishing its source, chat, absolute path, or
-  process state. If Organization policy requires a minimal placement audit
-  registration, disclose that before creation and store only identity/policy
-  metadata.
+- Legacy Organization-local workspaces remain readable for recovery. Their
+  historical local source and chat must not be presented as shared cloud data.
+- A Personal workspace needs no server workspace record. New Organization
+  workspaces always have a cloud record, including when a future registered
+  Mac supplies execution. Durable Organization chat and settings stay cloud-owned.
 - An Organization cloud workspace has one compute sponsor and one execution
   authority. Organization sharing, explicit member roles and accepted
   workspace-scoped guest grants determine collaborator access. Eligible members
   can attach independent device replicas; credentials and management require
   their own authority. Legacy private single-member workspaces retain owner-only
   behavior. Individual Pro and staff admission apply to each participating user.
-- Forking an Organization cloud workspace to one Mac does not suspend or
-  modify the source. The destination is a new local workspace in Personal or an
-  authorized Organization, subject to export and destination-creation policy.
-- A local Organization copy remains Organization-owned. Its new source, chats,
-  paths, and processes are private to that device unless a later explicit
-  cloud-copy operation exports selected state into another new workspace.
+- A future fork to one Mac does not suspend or modify the source. A fully local
+  destination belongs to Personal and requires an authorized export. An
+  Organization destination on a registered Mac retains a cloud-owned record
+  with a new workspace identity.
 
 ## Repository and settings model
 
@@ -180,11 +176,9 @@ repository Cloud settings affects new generations; an existing workspace shows
 security policy is always enforced and is not frozen into an old permissive
 snapshot.
 
-An Organization-local engine caches the last verified policy snapshot for
-offline use and labels it stale. Managed policy may set a maximum offline age.
-Membership loss immediately revokes server settings/secrets and marks the local
-workspace detached from Organization services; it never silently converts
-Organization data to Personal ownership.
+A future registered Organization host may cache verified policy for bounded
+offline use, subject to managed policy. Membership loss revokes server
+settings/secrets; it never silently converts Organization data to Personal.
 
 ### Environment, MCP, and secrets
 
@@ -332,11 +326,9 @@ terminal/SSH to change authoritative files, or create an independent local
 copy. This limitation must be stated in the terminal tooltip and first-run
 explanation.
 
-Automatic bidirectional synchronization is not part of Phase 5 or Phase 6A.
-If added later, it requires a separately reviewed three-way reconciliation
-protocol based on a last-agreed manifest, per-file base revisions, durable
-conflicts, deletion tombstones, and multi-device tests. Timestamp-based
-last-writer-wins is prohibited.
+Directory sync is strictly cloud-to-device. Automatic bidirectional sync and
+Apply-local-changes uploads are outside the product plan. Explicit workspace
+copying remains a separate operation with a fresh destination identity.
 
 ## Copy and sync workflows
 

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 
 import { withSystemTx, type Tx } from "../db.js";
+import { cloudWorkspaceHasActiveWork } from "./idle-workloads.js";
 
 export type WorkspaceCheckpointRequestReason =
   | "before_stop"
@@ -16,9 +17,25 @@ export type WorkspaceCheckpointDirective = {
   id: string;
   reason: WorkspaceCheckpointRequestReason;
   deadlineAtMs: number;
+  idleStop?: true;
 };
 
 const SAFE_IDEMPOTENCY = /^[A-Za-z0-9._:-]{8,128}$/;
+
+/** Caller owns the workspace lock. A fresh engine invalidates reuse of an old
+ * final proof; the old engine's own fence remains permanent. */
+export async function loadCommittedFinalCheckpoint(tx: Tx, workspaceId: string, generation: number) {
+  return (await tx.query<{ checkpoint_id: string; lifecycle_intent_id: string; intent_state: string }>(
+    `SELECT request.checkpoint_id, request.lifecycle_intent_id, intent.state AS intent_state
+     FROM workspace_checkpoint_requests request
+     JOIN cloud_workspace_lifecycle_intents intent ON intent.id=request.lifecycle_intent_id
+     WHERE request.workspace_id=$1 AND request.generation=$2 AND request.state='succeeded'
+       AND request.reason IN ('before_stop','before_archive','before_delete')
+       AND NOT EXISTS (SELECT 1 FROM cloud_workspace_engine_instances instance
+         WHERE instance.workspace_id=request.workspace_id AND instance.generation=request.generation
+           AND instance.created_at>request.completed_at)
+     ORDER BY request.completed_at DESC, request.id LIMIT 1`, [workspaceId, generation])).rows[0] ?? null;
+}
 
 export async function enqueueWorkspaceCheckpointRequest(
   tx: Tx,
@@ -119,6 +136,7 @@ export async function deliverWorkspaceCheckpointRequest(
       id: string;
       reason: WorkspaceCheckpointRequestReason;
       deadline_at: Date;
+      idle_engine_instance_id: string | null;
     }>(
       `UPDATE workspace_checkpoint_requests request
        SET state = 'delivered', delivery_count = delivery_count + 1,
@@ -134,7 +152,7 @@ export async function deliverWorkspaceCheckpointRequest(
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        )
-       RETURNING request.id, request.reason, request.deadline_at`,
+       RETURNING request.id, request.reason, request.deadline_at, request.idle_engine_instance_id`,
       [input.workspaceId, input.organizationId, input.generation],
     )
   ).rows[0];
@@ -143,6 +161,7 @@ export async function deliverWorkspaceCheckpointRequest(
         id: row.id,
         reason: row.reason,
         deadlineAtMs: row.deadline_at.getTime(),
+        ...(row.idle_engine_instance_id ? { idleStop: true as const } : {}),
       }
     : null;
 }
@@ -158,9 +177,16 @@ export async function completeWorkspaceCheckpointRequest(
     checkpointId: string;
   },
 ): Promise<void> {
+  // Order completion with lifecycle admission, including a wake cancelling
+  // capture. Content commit already owns these locks; direct callers must too.
+  await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [input.organizationId]);
+  await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE", [input.workspaceId, input.organizationId]);
+  const idle = await tx.query("SELECT 1 FROM workspace_checkpoint_requests WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4 AND idle_engine_instance_id IS NOT NULL",
+    [input.requestId, input.workspaceId, input.organizationId, input.generation]);
+  if (idle.rowCount && await cloudWorkspaceHasActiveWork(tx, input)) throw new Error("Workspace became active before idle checkpoint completed");
   const result = await tx.query(
     `UPDATE workspace_checkpoint_requests
-     SET state = 'succeeded', checkpoint_id = $6, completed_at = now(),
+     SET state = 'succeeded', checkpoint_id = $6, completed_at = clock_timestamp(),
          error_code = NULL
      WHERE id = $1 AND workspace_id = $2 AND org_id = $3
        AND generation = $4 AND reason = $5

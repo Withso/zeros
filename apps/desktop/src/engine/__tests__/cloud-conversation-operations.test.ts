@@ -32,7 +32,7 @@ describe("portable cloud conversations", () => {
   it("creates and reads an idempotent conversation using only opaque workspace identity", async () => {
     const { engine, call } = fixture();
     const input = { conversationId: "chat", workspaceId: "local-main", agentId: "claude" };
-    expect(await call("createConversation", input)).toEqual({ conversationId: "chat", workspaceId: "local-main", agentId: "claude", mode: "code", modeRevision: 0 });
+    expect(await call("createConversation", input)).toMatchObject({ conversationId: "chat", workspaceId: "local-main", agentId: "claude", mode: "code", modeRevision: 0, permissionModeVersion: 1,nativeCommandsVersion:1 });
     await call("createConversation", input);
     expect(getChat("chat")?.folder).toBe(engine.root);
     expect(JSON.stringify(await call("conversation", { conversationId: "chat" }))).not.toContain(engine.root);

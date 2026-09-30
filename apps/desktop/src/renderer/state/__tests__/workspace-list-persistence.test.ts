@@ -44,6 +44,11 @@ function workspace(repoSlug: string, id = "workspace-1"): Workspace {
 beforeEach(installStorage);
 
 describe("workspace-list persistence", () => {
+  it("keeps cloud rows out of the account-independent local workspace mirror", () => {
+    const local = workspace("owner/repo");
+    persistWorkspaceList("owner/repo", [local, { ...local, id: "cloud-row", placement: "cloud", path: "cloud://another-account" }]);
+    expect(loadPersistedWorkspaceLists().get("owner/repo")).toEqual([local]);
+  });
   it("round-trips complete rows under their exact repository key", () => {
     const row = workspace("owner/repo");
     persistWorkspaceList("owner/repo", [row]);

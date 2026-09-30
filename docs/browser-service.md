@@ -7,6 +7,36 @@ protocol, Claude uses Anthropic's official Claude-in-Chrome integration, and
 Cursor receives no browser integration because its current SDK has no native
 browser contract. There is no Zeros browser MCP fallback.
 
+## Organization cloud availability and compatibility
+
+**Native browser is unavailable in cloud workspaces.** Codex's official browser
+runtime is not available for Linux VMs. Claude's Chrome integration requires a
+direct Claude login, not an API key or setup token; cloud chat credentials do
+not supply that login. Cursor has no native browser integration. These limits
+do not disable ordinary cloud chat, separately admitted user MCP, or port preview.
+
+The engine reports an optional `ExecutionBoundaryStatus.browser` diagnostic,
+versioned independently as `CloudBrowserCapability` v1. It carries the provider,
+runtime profile and credential **kind**, never credential material, and one of
+`unavailable(reason)`, `disabled`, or `ready(qualifiedVersion)`. Current workers
+always report unavailable. New/resumed sessions and pre-prompt browser updates
+keep native browser bindings disabled regardless of Local settings.
+
+During rolling upgrades, an absent, invalid or unsupported-version report means
+unavailable; provider/runtime/credential mismatches cannot report readiness.
+Older clients ignore the additive diagnostic. The strict private admission and
+`CloudNativeCapabilities` v1 schemas, boundary status version and
+`zeros-cloud-native-v1` profile exclusions are unchanged: generic native tool
+qualification does not qualify Browser. A future ready diagnostic would still
+require separate runtime/auth qualification and execution authority.
+
+Settings → Agents → Browser, organization provider connections, and the chat's
+Tools panel share the unavailability explanation without Mac or Local install
+actions. Organization Browser settings never read or write Local browser
+preferences. Local defaults remain Codex enabled unless disabled and Claude
+explicit opt-in. Full native cloud browser parity remains a separate, blocked
+feature; installing Chromium alone would not provide it.
+
 ## Ownership and identity
 
 The service receives only Zeros identities:

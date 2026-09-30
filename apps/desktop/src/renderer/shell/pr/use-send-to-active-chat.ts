@@ -20,6 +20,7 @@ import { useAgentSessions } from "../../features/agent/sessions-hooks";
 import { envForChat } from "../../features/agent/model-catalog";
 import type { AutoActionKind } from "../../features/agent/auto-action";
 import { useBridge } from "../../platform/bridge/use-bridge";
+import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import type {
   AgentTextMessageAttachment,
   MessageContentSegment,
@@ -84,7 +85,10 @@ export function useSendToActiveChat(
         if (!chat.agentId) {
           throw new Error("Choose an agent for this chat first.");
         }
-        if (!bridge || bridge.status !== "connected") {
+        const connectionStatus = bridge instanceof WorkspaceRuntimeClient
+          ? bridge.statusForWorkspace(chat.folder)
+          : bridge?.status;
+        if (connectionStatus !== "connected") {
           throw new Error(
             "The engine is reconnecting. Try again once connected.",
           );

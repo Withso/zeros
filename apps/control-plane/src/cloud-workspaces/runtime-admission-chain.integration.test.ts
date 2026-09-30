@@ -9,11 +9,12 @@ import {
 import pg from "pg";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx } from "../db.js";
 import { ensureUser } from "../auth.js";
 import { HttpError } from "../authz.js";
-import type { CloudWorkspaceBackendConfig } from "../config.js";
+import type { CloudWorkspaceBackendConfig, GithubBackendConfig } from "../config.js";
+import { createGithubRoutes } from "../github.js";
 import {
   manageCloudAgentRuntime,
   type CloudAgentRuntimeChange,
@@ -71,6 +72,21 @@ const cloudConfig: CloudWorkspaceBackendConfig = {
   outbox: null,
   setupExecution: null,
 };
+const githubConfig: GithubBackendConfig = {
+  appId: 654321,
+  clientId: "Iv1.runtime-test",
+  clientSecret: "synthetic-client-secret",
+  privateKey: generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+  refreshBindingSecret: "synthetic-binding-secret",
+  appSlug: "runtime-test",
+  oauthCallbackUrl: `${ORIGIN}/v1/github/oauth/callback`,
+  completionPageUrl: "https://app.example.test/github/connected",
+  webBaseUrl: "https://github.example.test",
+  apiBaseUrl: "https://api.github.example.test",
+  variantKey: "github.com",
+  desktopSchemes: ["zeros-dev"],
+};
 
 d("normal shared cloud runtime admission chain", () => {
   let pool: pg.Pool;
@@ -83,8 +99,7 @@ d("normal shared cloud runtime admission chain", () => {
     await pool.end();
   });
   it("creates, reconciles, registers the real client and admits two devices and an exact delegated execution without SQL runtime patches", async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     const owner = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_${randomUUID()}`,
@@ -163,7 +178,7 @@ d("normal shared cloud runtime admission chain", () => {
         `INSERT INTO github_installations (
            github_installation_id, app_variant, owner_user_id,
            account_login, account_type, target_type
-         ) VALUES (123456, 'github.com', $1, 'withso', 'User', 'User')
+         ) VALUES (123456, 'github.com', $1, 'withso', 'Organization', 'Organization')
          RETURNING id`,
         [owner.id],
       );
@@ -243,6 +258,27 @@ d("normal shared cloud runtime admission chain", () => {
       c.set("user", owner);
       await next();
     });
+    app.route("/", createGithubRoutes(pool, githubConfig, {
+      fetch: async (input) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.pathname === "/user") return Response.json({ id: 1234, login: "owner" });
+        if (url.pathname === "/user/installations") return Response.json({
+          total_count: 1,
+          installations: [{ id: 123456, app_id: githubConfig.appId,
+            account: { login: "withso", type: "Organization" },
+            target_type: "Organization", repository_selection: "all",
+            suspended_at: null }],
+        });
+        if (url.pathname === "/user/memberships/orgs/withso") return Response.json({
+          state: "active", organization: { login: "withso" },
+        });
+        if (url.pathname === "/repos/withso/zeros") return Response.json({
+          id: 123456789, owner: { login: "withso" }, name: "zeros",
+          default_branch: "main", private: true, archived: false,
+        });
+        throw new Error(`Unexpected GitHub request: ${url.pathname}`);
+      },
+    }));
     app.route(
       "/",
       createCloudWorkspaceRoutes(pool, cloudConfig, {
@@ -276,6 +312,15 @@ d("normal shared cloud runtime admission chain", () => {
     );
     const fetcher: typeof fetch = async (input, init) =>
       app.fetch(new Request(input, init));
+    // Use the same membership/source proof as the desktop before admission;
+    // the test must not grant repository access by patching runtime rows.
+    const source = await app.request("/v1/github/cloud", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "source", organizationId: orgId,
+        accessToken: "synthetic-user-token", installationId,
+        owner: "withso", repository: "zeros" }),
+    });
+    expect(source.status, JSON.stringify(await source.json())).toBe(200);
     const response = await app.request(
       `/v1/organizations/${orgId}/cloud-workspaces`,
       {

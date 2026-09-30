@@ -27,7 +27,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
+import { createGitTemporaryDirectory } from "./git-temporary";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
@@ -164,7 +165,7 @@ function detachCheckpointRef(workspaceId: string): string {
  * committed HEAD tree before the checkpoint object is written. */
 async function createDetachCheckpoint(workspaceId: string): Promise<string> {
   const ws = getWorkspace(workspaceId);
-  const scratchDir = await mkdtemp(path.join(tmpdir(), "zeros-detach-index-"));
+  const scratchDir = await createGitTemporaryDirectory(path.join(tmpdir(), "zeros-detach-index-"));
   const env = { GIT_INDEX_FILE: path.join(scratchDir, "index") };
   try {
     const { stdout: headOut } = await runGit(ws.path, ["rev-parse", "HEAD"]);

@@ -1,5 +1,15 @@
 import { expect } from "@playwright/test";
 
+// Focus arrives before Radix registers a menu as its active dismissable layer.
+// Wait for that layer to accept input before sending Escape.
+async function dismissMenu(page) {
+  const menu = page.getByRole("menu");
+  await expect(menu).toBeFocused();
+  await expect(menu).toHaveCSS("pointer-events", "auto");
+  await menu.press("Escape");
+  await expect(menu).toHaveCount(0);
+}
+
 export async function runWorkspaceArchivesSmoke({ page, check }) {
   const fixtureUrl = `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-workspace-archives.html`;
   const readOutputFormatting = (surface) =>
@@ -71,9 +81,46 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
         "list-style-type"
       ],
     ).toBe("disc");
+    const retained = reference.locator(".zeros-agent-surface").filter({ visible: true });
+    await retained.evaluate((node) => { node.dataset.retainedHistoryProbe = "same-view"; });
+    const admissions = await reference.evaluate(() =>
+      window.archiveFixture.requests.filter((row) =>
+        ["fixture.ensureSession", "fixture.loadIntoChat"].includes(row.op),
+      ).length,
+    );
+    await reference.evaluate(() => window.archiveFixture.forgetRetainedSession("recent-chat"));
+    await expect(reference.getByText("Your saved conversation remains readable here.", { exact: true })).toBeVisible();
+    await expect(retained).toHaveAttribute("data-retained-history-probe", "same-view");
+    expect(await reference.evaluate(() =>
+      window.archiveFixture.requests.filter((row) =>
+        ["fixture.ensureSession", "fixture.loadIntoChat"].includes(row.op),
+      ).length,
+    )).toBe(admissions);
+    check("A retained chat rehydrates after session cleanup without restarting the agent", true);
+    await reference.evaluate(() => window.archiveFixture.forgetRetainedSession("recent-chat", true));
+    await expect.poll(() => reference.evaluate(() => window.archiveFixture.pendingHistoryReaders("recent-chat"))).toBeGreaterThan(0);
+    await reference.evaluate(() => window.archiveFixture.finishPendingHistory("recent-chat"));
+    await expect(reference.getByText("Your saved conversation remains readable here.", { exact: true })).toBeVisible();
+    expect(await reference.evaluate(() =>
+      window.archiveFixture.requests.filter((row) =>
+        ["fixture.ensureSession", "fixture.loadIntoChat"].includes(row.op),
+      ).length,
+    )).toBe(admissions);
+    check("Session cleanup during an in-flight history read retries after that read retires", true);
     expect(referenceErrors).toEqual([]);
   } finally {
     await reference.close();
+  }
+  const stopped = await page.context().browser().newPage({ viewport: page.viewportSize() });
+  try {
+    await stopped.goto(`${fixtureUrl}?cloud-stopped-reference`);
+    await expect(stopped.getByText("Your saved conversation remains readable here.", { exact: true })).toBeVisible();
+    expect(await stopped.evaluate(() => window.archiveFixture.requests.some((row) =>
+      ["fixture.ensureSession", "fixture.loadIntoChat", "fixture.sendPrompt"].includes(row.op),
+    ))).toBe(false);
+    check("A stopped cloud workspace hydrates saved history without waking or admitting an agent", true);
+  } finally {
+    await stopped.close();
   }
   await page.goto(fixtureUrl);
   const options = (title) =>
@@ -167,13 +214,7 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
     "aria-disabled",
     "true",
   );
-  // Focus arrives before Radix registers the menu as its active dismissable
-  // layer. Wait for that layer to accept input before sending Escape.
-  const menu = page.getByRole("menu");
-  await expect(menu).toBeFocused();
-  await expect(menu).toHaveCSS("pointer-events", "auto");
-  await menu.press("Escape");
-  await expect(menu).toHaveCount(0);
+  await dismissMenu(page);
   await options("Recent")
     .locator("..")
     .getByRole("button", { name: "Unarchive", exact: true })
@@ -395,7 +436,9 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
   await expect(
     page.getByRole("menuitem", { name: /Rename|Close Tab/ }),
   ).toHaveCount(0);
-  await page.keyboard.press("Escape");
+  // The same dismissable-layer race as the archive options menu: an early
+  // Escape leaves this modal menu open and the rest of the page aria-hidden.
+  await dismissMenu(page);
   await history
     .getByRole("button", { name: "Pane options", exact: true })
     .click();
@@ -405,7 +448,7 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
   await expect(
     page.getByRole("menuitem", { name: "Split Down", exact: true }),
   ).toHaveAttribute("aria-disabled", "true");
-  await page.keyboard.press("Escape");
+  await dismissMenu(page);
   expect(await interactionState()).toEqual(pendingBefore);
   expect(
     await page.evaluate(

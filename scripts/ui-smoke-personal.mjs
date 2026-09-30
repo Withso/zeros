@@ -10,7 +10,7 @@ export async function runPersonalOrganizationSmoke({ page, check }) {
   await page.goto(
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-personal-organization.html`,
   );
-  const switcher = page.getByRole("button", { name: "Switch organization" });
+  const switcher = page.getByRole("button", { name: "Switch organization", includeHidden: true });
   const rows = page
     .getByRole("list", { name: "Visible workspaces" })
     .getByRole("listitem");
@@ -41,6 +41,36 @@ export async function runPersonalOrganizationSmoke({ page, check }) {
     "Personal creation is account-independent and cloud creation stays blocked",
     true,
   );
+
+  // Membership may be created by another device (or Dev provisioning) after
+  // sign-in. Opening the menu revalidates without blanking cached Local data.
+  await page.evaluate(async () => {
+    const { controlPlane } = await import("/apps/desktop/src/renderer/features/team/control-plane.ts");
+    const { getTeamStoreState } = await import("/apps/desktop/src/renderer/features/team/team-store.ts");
+    const cached = getTeamStoreState().me;
+    const added = { ...cached.organizations.find(row => !row.isPersonal), id: "org_new", name: "New cloud organization", slug: "new-cloud" };
+    const snapshot = { ...cached, organizations: [...cached.organizations, added], teams: [...cached.teams, added] };
+    window.__membershipRefresh = { requests: 0, finish: null };
+    controlPlane.me = () => {
+      window.__membershipRefresh.requests += 1;
+      return new Promise(resolve => { window.__membershipRefresh.finish = () => resolve(snapshot); });
+    };
+  });
+  await switcher.click();
+  await expect(page.getByRole("menuitem", { name: "Business A", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__membershipRefresh.requests)).toBe(1);
+  const retainedRows = page.getByRole("list", { name: "Visible workspaces", includeHidden: true }).getByRole("listitem", { includeHidden: true });
+  await expect(retainedRows).toHaveText(["Unowned local", "A legacy local", "Created local"]);
+  await page.evaluate(() => window.__membershipRefresh.finish());
+  await expect(page.getByRole("menuitem", { name: "New cloud organization", exact: true })).toBeVisible();
+  await expect(switcher).toHaveText("Local");
+  await expect(retainedRows).toHaveText(["Unowned local", "A legacy local", "Created local"]);
+  await page.evaluate(async () => {
+    const { controlPlane } = await import("/apps/desktop/src/renderer/features/team/control-plane.ts");
+    controlPlane.me = async () => { throw new Error("Harness organization service offline"); };
+  });
+  await page.keyboard.press("Escape");
+  check("opening the switcher discovers new organizations while retaining Local selection and cached workspaces", true);
 
   await switcher.click();
   await page.getByRole("menuitem", { name: "Business A", exact: true }).click();
@@ -125,6 +155,7 @@ async function main() {
     ],
     {
       cwd: root,
+      env: { ...process.env, VITE_CONTROL_PLANE_URL: "https://api.example.test" },
       stdio: ["ignore", "ignore", "pipe"],
       detached: true,
     },

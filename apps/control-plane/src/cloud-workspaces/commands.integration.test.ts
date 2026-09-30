@@ -1,7 +1,7 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx, withUserTx } from "../db.js";
 import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
 import { DatabaseCloudWorkspaceCommandService, type CloudCommandEngineScope, type CloudCommandMutation } from "./commands.js";
@@ -12,8 +12,7 @@ d("durable cloud commands", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     scope = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
       engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
@@ -59,6 +58,80 @@ d("durable cloud commands", () => {
     expect(await service.settle(scope, result)).toMatchObject({ revision: 3, replayed: true });
     await expect(service.settle(scope, { ...result, state: "failed" })).rejects.toMatchObject({ code: "command_conflict" });
     expect(await service.mutate(scope, input)).toMatchObject({ replayed: true, pending: [] });
+  });
+
+  it("persists a fork identity and lineage across retries and rejects foreign authority",async()=>{
+    const input=enqueue(0,"destination");
+    input.action={kind:"fork",commandId:randomUUID(),payload:{...payload(),model:"claude-sonnet-4-6",agentCredentialGrantId:randomUUID(),
+      operation:{version:1,kind:"fork",sourceConversationId:"source",strategy:"transcript"}}};
+    await service.mutate(scope,input);
+    expect(await service.mutate(scope,input)).toMatchObject({replayed:true,pending:[{payload:{operation:{sourceConversationId:"source"}}}]});
+    await expect(service.mutate({...scope,workspaceId:randomUUID()},input)).rejects.toThrow();
+    await expect(service.mutate(scope,{...input,operationId:randomUUID(),expectedRevision:1},"command_not_found")).rejects.toThrow();
+    const claim=(await service.claim(scope,"destination","fork-execution"))!;
+    await service.settle(scope,{commandId:claim.commandId,claimId:claim.claimId,state:"succeeded",resultCode:null});
+    expect(await service.mutate(scope,input)).toMatchObject({replayed:true,pending:[],receipts:[{state:"succeeded"}]});
+  });
+
+  it("admits goal reads after Stop without resuming prompts and retains the confirmed goal receipt",async()=>{
+    await service.mutate(scope,enqueue());
+    await service.stop(scope,"conversation",randomUUID());
+    const input=enqueue(2);
+    input.action={kind:"enqueue",commandId:randomUUID(),payload:{...payload(),agentId:"codex",model:"gpt-5.4",agentCredentialGrantId:randomUUID(),
+      operation:{version:1,kind:"goal",action:"get"}}};
+    await service.mutate(scope,input);
+    expect(await service.claim(scope,"conversation","legacy-worker",undefined,false)).toBeNull();
+    const claim=await service.claim(scope,"conversation","goal-execution");
+    expect(claim?.commandId).toBe(input.action.commandId);
+    const goal={objective:"Persist this goal",status:"paused" as const,tokenBudget:null,tokensUsed:0,timeUsedSeconds:0,createdAt:1,updatedAt:1};
+    await service.settle(scope,{commandId:claim!.commandId,claimId:claim!.claimId,state:"succeeded",resultCode:null,result:{version:1,goal}});
+    const reloaded=new DatabaseCloudWorkspaceCommandService({pool});
+    expect(await reloaded.snapshot(scope,"conversation")).toMatchObject({paused:true,receipts:[{result:{version:1,goal}}]});
+    expect(await reloaded.claim(scope,"conversation","prompt-execution")).toBeNull();
+  });
+
+  it("retains confirmed live goals through Stop, reload and receipt-window eviction",async()=>{
+    const input=enqueue();if(input.action.kind!=="enqueue")throw new Error("fixture");input.action.payload.agentId="codex";
+    await service.mutate(scope,input);const claim=(await service.claim(scope,"conversation","goal-live"))!;
+    const goal={objective:"Confirmed",status:"active" as const,tokenBudget:null,tokensUsed:0,timeUsedSeconds:0,createdAt:1,updatedAt:1};
+    const confirmation={kind:"confirm-goal" as const,commandId:claim.commandId,claimId:claim.claimId,sequence:1,goal};
+    const first=await service.confirmGoal(scope,confirmation);
+    expect(await service.confirmGoal(scope,confirmation)).toEqual(first);
+    const cleared=await service.confirmGoal(scope,{...confirmation,sequence:2,goal:null});
+    expect(cleared.revision).toBeGreaterThan(first.revision);
+    expect(await service.confirmGoal(scope,confirmation)).toEqual(cleared);
+    await expect(service.confirmGoal({...scope,generation:2},confirmation)).rejects.toThrow();
+    await expect(service.confirmGoal(scope,{...confirmation,claimId:randomUUID()})).rejects.toThrow();
+    await expect(service.confirmGoal(scope,{...confirmation,sequence:2})).rejects.toMatchObject({code:"command_conflict"});
+    const reload=new DatabaseCloudWorkspaceCommandService({pool});
+    expect(await reload.snapshot(scope,"conversation")).toMatchObject({nativeGoal:cleared,pending:[{state:"dispatching"}]});
+    await service.stop(scope,"conversation",randomUUID());
+    const terminal={commandId:claim.commandId,claimId:claim.claimId,state:"cancelled" as const,resultCode:"stopped_by_user",result:{version:1 as const,goal}};
+    await service.settle(scope,terminal);await service.settle(scope,terminal);
+    await withSystemTx(pool,tx=>tx.query(`INSERT INTO cloud_workspace_commands
+      (workspace_id,org_id,id,conversation_id,position,state,payload,generation,engine_instance_id,user_message_id,updated_at)
+      SELECT $1,$2,gen_random_uuid(),'conversation',n,'failed',NULL,$3,$4,'later-'||n,now()+interval '1 second'
+      FROM generate_series(2,52) AS n`,[scope.workspaceId,scope.organizationId,scope.generation,scope.engineInstanceId]));
+    const snapshot=await reload.snapshot(scope,"conversation");
+    expect(snapshot.receipts).toHaveLength(50);expect(snapshot.receipts.some(row=>row.commandId===claim.commandId)).toBe(false);
+    expect(snapshot.nativeGoal).toEqual(cleared);
+  });
+
+  it("orders goal confirmations by execution revision when a utility overtakes a paused prompt",async()=>{
+    const prompt=enqueue();if(prompt.action.kind!=="enqueue")throw new Error("fixture");prompt.action.payload.agentId="codex";
+    await service.mutate(scope,prompt);await service.stop(scope,"conversation",randomUUID());
+    const utility=enqueue(2);utility.action={kind:"enqueue",commandId:randomUUID(),payload:{...payload(),agentId:"codex",model:"gpt-5.4",agentCredentialGrantId:randomUUID(),operation:{version:1,kind:"goal",action:"get"}}};
+    await service.mutate(scope,utility);
+    const first=(await service.claim(scope,"conversation","utility"))!;
+    const goal={objective:"Finish",status:"active" as const,tokenBudget:null,tokensUsed:0,timeUsedSeconds:0,createdAt:1,updatedAt:1};
+    await service.confirmGoal(scope,{kind:"confirm-goal",commandId:first.commandId,claimId:first.claimId,sequence:1,goal});
+    const settled=await service.settle(scope,{commandId:first.commandId,claimId:first.claimId,state:"succeeded",resultCode:null});
+    await service.mutate(scope,action("resume",settled.revision));
+    const later=(await service.claim(scope,"conversation","prompt"))!;expect(later.commandId).toBe(prompt.action.commandId);
+    const completed={...goal,status:"complete" as const,tokensUsed:50,updatedAt:3};
+    const confirmed=await service.confirmGoal(scope,{kind:"confirm-goal",commandId:later.commandId,claimId:later.claimId,sequence:1,goal:completed});
+    await service.settle(scope,{commandId:later.commandId,claimId:later.claimId,state:"failed",resultCode:"agent_prompt_failed"});
+    expect((await service.snapshot(scope,"conversation")).nativeGoal).toEqual(confirmed);
   });
 
   it("deletes owned command history when the workspace is physically purged", async () => {

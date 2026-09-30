@@ -6,7 +6,8 @@
 // that from an operator workspace with only a PlanetScale service token:
 //
 //   plan (default)  mint a short-lived owner role, print the pending
-//                   migrations, delete the role. Read-only.
+//                   migrations, delete the role. SQL is read-only; the provider
+//                   credential lifecycle is a mutation (not a dry run).
 //   --execute       take an on-demand backup and wait until it succeeds,
 //                   then mint the role and run the strict runner, which
 //                   verifies every recorded checksum before applying the
@@ -178,7 +179,15 @@ export async function releaseMigration(
           expires_at: text(body.expires_at),
         }
       : null;
-  if (!role) throw new ReleaseMigrationError(`Migration role was not created (HTTP ${created.status})`);
+  if (!role) {
+    // A successful but incomplete response can still have allocated a role.
+    // Delete only the acknowledged ID; never guess another login's identity.
+    if (created.status >= 200 && created.status < 300 && text(body.id)) {
+      const removed = await deps.planetScale("DELETE", `${branchPath}/roles/${encodeURIComponent(body.id as string)}`).catch(() => ({ status: 0 }));
+      if (removed.status < 200 || removed.status >= 300) throw new ReleaseMigrationError("Incomplete migration role response; cleanup is unconfirmed");
+    }
+    throw new ReleaseMigrationError(`Migration role was not created (HTTP ${created.status})`);
+  }
 
   let pendingMigrations: string[] = [];
   let controlledApprovals: string[] = [];
@@ -209,10 +218,7 @@ export async function releaseMigration(
   } catch (error) {
     // Never surface a driver message: it can quote the connection string.
     if (error instanceof ReleaseMigrationError) throw error;
-    const reason = error instanceof Error && !error.message.includes(role.password) && !error.message.includes(role.username)
-      ? error.message
-      : "database error";
-    throw new ReleaseMigrationError(`Migration step failed: ${reason}`);
+    throw new ReleaseMigrationError("Migration step failed: database error");
   } finally {
     const removed = await deps.planetScale("DELETE", `${branchPath}/roles/${role.id}`).catch(() => ({ status: 0, body: null }));
     role.password = "";
@@ -251,6 +257,9 @@ export function parseReleaseMigrationArgs(args: string[]): ReleaseMigrationInput
 
 async function main() {
   const input = parseReleaseMigrationArgs(process.argv.slice(2));
+  if (input.execute && process.env.NODE_ENV !== "production") {
+    throw new ReleaseMigrationError("Release execution requires NODE_ENV=production");
+  }
   const organization = process.env.PLANETSCALE_ORG;
   const tokenId = process.env.PLANETSCALE_SERVICE_TOKEN_ID;
   const token = process.env.PLANETSCALE_SERVICE_TOKEN;
@@ -262,6 +271,8 @@ async function main() {
     createPool: (url) => createMigrationPool(url, { role: "postgres", maxConnections: 1, applicationName: "zeros-release-migrator" }),
   });
   console.log(JSON.stringify(result, null, 2));
+  // TTL is a backstop, never a successful cleanup receipt.
+  if (!result.role.deleted) process.exitCode = 1;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

@@ -290,7 +290,6 @@ describe("defaultTabs", () => {
       "design",
       "changes",
       "review",
-      "context",
       "terminal",
     ]);
     expect(tabs.map((tab) => tab.title)).toEqual([
@@ -298,12 +297,10 @@ describe("defaultTabs", () => {
       "Design",
       "Changes",
       "Review",
-      "Context",
       "Setup",
     ]);
     expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
       false,
-      true,
       true,
       true,
       true,
@@ -336,7 +333,6 @@ describe("normalizeWorkbenchTabs", () => {
       "design",
       "changes",
       "review",
-      "context",
     ]);
     expect(out[0]).toMatchObject({
       title: "Open file",
@@ -372,7 +368,6 @@ describe("normalizeWorkbenchTabs", () => {
       expect.stringMatching(/^design-/),
       expect.stringMatching(/^changes-/),
       expect.stringMatching(/^review-/),
-      expect.stringMatching(/^context-/),
       "b1",
       "b2",
       "f1",
@@ -782,6 +777,43 @@ describe("recent browser history", () => {
 });
 
 describe("migrateScopes", () => {
+  it("retires saved Context tabs while preserving context files and each workspace's selection", () => {
+    const contextFile = {
+      ...createFilesTab(".context/local/attachments/attachment-1/notes.md"),
+      id: "context-file",
+      fixed: true,
+      viewerMode: "preview" as const,
+    };
+    const legacyTabs = JSON.parse(
+      JSON.stringify([
+        contextFile,
+        { id: "old-context", type: "context", title: "Context", pinned: true },
+        { id: "old-context-copy", type: "context", title: "Context" },
+      ]),
+    ) as WorkbenchTab[];
+    const out = migrateScopes({
+      "/repo/a": {
+        tabs: legacyTabs,
+        activeId: "old-context",
+        recentBrowsers: [],
+      },
+      "/repo/b": {
+        tabs: legacyTabs,
+        activeId: contextFile.id,
+        recentBrowsers: [],
+      },
+    });
+
+    for (const scope of ["/repo/a", "/repo/b"]) {
+      expect(out[scope].tabs.map((tab) => tab.type)).not.toContain("context");
+      expect(out[scope].activeId).toBe(contextFile.id);
+      expect(
+        out[scope].tabs.find((tab) => tab.id === contextFile.id),
+      ).toMatchObject(contextFile);
+    }
+    expect(migrateScopes(out)).toEqual(out);
+  });
+
   it("preserves workspace isolation, multi-browser tabs, and recent history", () => {
     const input: WorkbenchScopeMap = {
       "/repo/main": {
@@ -819,7 +851,6 @@ describe("migrateScopes", () => {
       "design",
       "changes",
       "review",
-      "context",
       "terminal",
     ]);
     expect(out["/repo/feature"].tabs[0].fixed).toBe(true);
@@ -867,7 +898,6 @@ describe("workbench persistence compatibility", () => {
       "design",
       "changes",
       "review",
-      "context",
       "terminal",
     ]);
 

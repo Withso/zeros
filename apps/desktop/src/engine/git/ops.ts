@@ -19,9 +19,10 @@ import {
 // conversion) that isomorphic-git is shakier on.
 
 import { existsSync } from "node:fs";
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { copyGitTemporaryFile, createGitTemporaryDirectory } from "./git-temporary";
 
 import { getWorkspace, resolveRepoForGitOp } from "./worktree";
 import {
@@ -225,7 +226,7 @@ async function createCommitIndexSnapshot(
   expectedHead: string | null,
   files?: readonly string[],
 ): Promise<CommitIndexSnapshot> {
-  const directory = await mkdtemp(path.join(tmpdir(), "zeros-commit-index-"));
+  const directory = await createGitTemporaryDirectory(path.join(tmpdir(), "zeros-commit-index-"));
   const indexFile = path.join(directory, "index");
   const env = { GIT_INDEX_FILE: indexFile };
   try {
@@ -256,7 +257,7 @@ async function createCommitIndexSnapshot(
         // Git replaces its index atomically, so copying by pathname captures
         // either the complete prior index or the complete next index. A raw
         // `git add` after this point cannot leak into this commit snapshot.
-        await copyFile(sourceIndex, indexFile);
+        await copyGitTemporaryFile(sourceIndex, indexFile);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         await runGit(

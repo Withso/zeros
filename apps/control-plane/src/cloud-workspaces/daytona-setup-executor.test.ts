@@ -131,6 +131,25 @@ function harness(input = execution()) {
 }
 
 describe("DaytonaCloudWorkspaceSetupExecutor", () => {
+  it("accepts a bounded v2 failure envelope without changing the exact v1 proof", async () => {
+    const { executor, runner, input } = harness();
+    const diagnostic = { version: 1, phase: "image_preflight", checks: { source: false, engine: true } };
+    vi.mocked(runner.execute).mockResolvedValue({ exitCode: 1, outputTruncated: false, output: JSON.stringify({
+      version: 2, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error", code: "image_contract_invalid", diagnostic,
+    }) });
+    await expect(executor.execute(input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_image_contract_invalid", diagnostic });
+  });
+  it("drops untrusted diagnostic fields while retaining fail-closed setup behavior", async () => {
+    const { executor, runner, input } = harness();
+    vi.mocked(runner.execute).mockResolvedValue({ exitCode: 1, outputTruncated: false, output: JSON.stringify({
+      version: 2, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error", code: "image_contract_invalid",
+      diagnostic: { version: 1, phase: "image_preflight", message: "credential-canary" },
+    }) });
+    const failure = await executor.execute(input, new AbortController().signal).catch(error => error);
+    expect(JSON.stringify(failure)).not.toContain("credential-canary");
+    expect(failure.diagnostic).toBeUndefined();
+    expect(failure.code).toBe("setup_helper_failed");
+  });
   it("serializes image setup so a reclaimed remote command cannot overlap its successor", () => {
     expect(DAYTONA_SETUP_HELPER_COMMAND).toBe(
       "/usr/bin/flock --exclusive --nonblock /run/zeros/setup.lock /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs",
@@ -341,6 +360,45 @@ describe("DaytonaCloudWorkspaceSetupExecutor", () => {
     });
     expect(String(error)).not.toContain("secret-bearing");
     expect(broker.revoke).toHaveBeenCalledWith(grant, "failed");
+  });
+
+  it.each([
+    ["boat", "image_contract_invalid", "setup_image_contract_invalid", true],
+    ["daytona", "image_contract_invalid", "setup_image_contract_invalid", false],
+    ["boat", "checkpoint_restore_invalid", "setup_checkpoint_restore_invalid", false],
+    ["boat", "settings_invalid", "setup_settings_invalid", false],
+  ])("keeps %s %s closed while classifying a full setup retry", async (provider, helperCode, code, retryable) => {
+    const input = execution({ provider: { name: provider, resourceId: "sandbox-exact-id" } });
+    const { broker, executor, grant, runner } = harness(input);
+    vi.mocked(runner.execute).mockResolvedValue({
+      exitCode: 1,
+      output: JSON.stringify({ version: 1, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error", code: helperCode }),
+      outputTruncated: false,
+    });
+    await expect(executor.execute(input, new AbortController().signal)).rejects.toMatchObject({ code, retryable });
+    expect(broker.revoke).toHaveBeenCalledWith(grant, "failed");
+    expect(runner.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires a fresh fenced admission and full readiness after a Boat restore race", async () => {
+    const first = execution({ provider: { name: "boat", resourceId: "sandbox-exact-id" } });
+    const next = { ...first, executionFence: first.executionFence + 1 };
+    const { broker, executor, grant, runner } = harness(first);
+    const renewed = admission(next, { id: randomUUID(), token: `zws_${"B".repeat(43)}` });
+    vi.mocked(broker.issue).mockResolvedValueOnce(grant).mockResolvedValueOnce(renewed);
+    vi.mocked(runner.execute)
+      .mockResolvedValueOnce({ exitCode: 1, output: JSON.stringify({ version: 1,
+        audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error", code: "image_contract_invalid" }), outputTruncated: false })
+      .mockResolvedValueOnce({ exitCode: 0, output: JSON.stringify({ version: 1,
+        audience: "zeros-cloud-workspace-setup-result-v1", outcome: "ready", readiness: readiness(next) }), outputTruncated: false });
+    await expect(executor.execute(first, new AbortController().signal)).rejects.toMatchObject({ retryable: true });
+    expect(broker.revoke).toHaveBeenLastCalledWith(grant, "failed");
+    await expect(executor.execute(next, new AbortController().signal)).resolves.toMatchObject({ readiness: readiness(next) });
+    expect(broker.revoke).toHaveBeenLastCalledWith(renewed, "completed");
+    const requests = vi.mocked(runner.execute).mock.calls.map(([call]) =>
+      JSON.parse(Buffer.from(call.env!.ZEROS_CLOUD_WORKSPACE_SETUP_B64!, "base64url").toString("utf8")));
+    expect(requests.map(request => request.admission.id)).toEqual([grant.id, renewed.id]);
+    expect(requests.map(request => request.execution.executionFence)).toEqual([first.executionFence, next.executionFence]);
   });
 
   it.each([

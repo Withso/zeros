@@ -3,7 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ensureUser } from "../auth.js";
 import { withSystemTx, withUserTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   authorizeCloudWorkspaceActor,
   DatabaseCloudWorkspaceCollaborationService,
@@ -26,8 +26,7 @@ d("Pro workspace sharing", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyProCloudWorkspace(pool);
   });
   const scope = () => ({

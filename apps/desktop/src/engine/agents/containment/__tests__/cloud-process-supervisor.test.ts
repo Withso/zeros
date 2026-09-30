@@ -24,6 +24,28 @@ describe.skipIf(process.platform!=="linux")("cloud process reaping proof",()=>{
     expect(exit).toBe(17);expect(await readFile(marker,"utf8")).toBe("finished");
     expect(await readFile(proof,"utf8")).toBe("zeros-process-domain-reaped-v1\n");
   });
+  it("stops adopted descendants after their original leader exits without stopping another domain",async()=>{
+    const proof=path.join(directory,randomBytes(16).toString("hex"));
+    const ready=path.join(directory,"adopted-ready"),release=path.join(directory,"adopted-release");
+    const script=path.join(directory,"detached.py");
+    await writeFile(script,`import os,time\nowner=os.getppid()\nif os.fork()==0:\n os.setsid()\n if os.fork()==0:\n  deadline=time.monotonic()+12\n  while os.getppid()!=owner and time.monotonic()<deadline:time.sleep(.01)\n  assert os.getppid()==owner\n  open(${JSON.stringify(ready)},'w').write(str(os.getpid()))\n  while not os.path.exists(${JSON.stringify(release)}) and time.monotonic()<deadline:time.sleep(.01)\n os._exit(0)\nos._exit(19)\n`);
+    const unrelated=spawn("/usr/bin/sleep",["20"],{stdio:"ignore"});
+    const unrelatedExit=new Promise(resolve=>unrelated.once("exit",resolve));
+    const tracked=new CloudSupervisedProcess(spawn(binary,[proof,String(process.pid),"--","/usr/bin/python3",script],{stdio:"ignore"}),proof);
+    try{
+      let descendant:string|undefined;
+      await expect.poll(async()=>{
+        try{descendant=await readFile(ready,"utf8");return Boolean(descendant);}catch{return false;}
+      },{timeout:3000}).toBe(true);
+      await tracked.stopAndProve();
+      expect(await tracked.wait()).toEqual({code:19,signal:null});
+      await expect(readFile(`/proc/${descendant}/stat`)).rejects.toMatchObject({code:"ENOENT"});
+      expect(unrelated.exitCode).toBeNull();expect(unrelated.signalCode).toBeNull();
+    }finally{
+      await writeFile(release,"release");await tracked.wait();
+      unrelated.kill("SIGKILL");await unrelatedExit;
+    }
+  },15000);
   it("requires a complete receipt and permits idempotent proven retirement",async()=>{
     const proof=path.join(directory,randomBytes(16).toString("hex"));
     const tracked=new CloudSupervisedProcess(spawn(binary,[proof,String(process.pid),"--","/usr/bin/true"]),proof);

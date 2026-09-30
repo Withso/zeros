@@ -62,6 +62,7 @@ import { AddLocalProjectDialog } from "./dialogs/add-local-project";
 import { PublishToGithubDialog } from "./dialogs/publish-to-github";
 import { prepareProjectFolder } from "./project-folder-setup";
 import { InitializeProjectDialog } from "./dialogs/initialize-project";
+import { getActiveOrganizationSnapshot } from "../features/team/team-store";
 
 /** A folder the user has just picked that hasn't finished registering yet.
  *  Drives the minimal shimmer row in the app sidebar. */
@@ -205,6 +206,13 @@ export function AddProjectProvider({
       pendingOpens.current.add(repoRoot);
       const { onSelect } = opts;
       const autoCreate = !onSelect && (opts.autoCreate ?? true);
+      const organization = getActiveOrganizationSnapshot();
+      if (autoCreate && organization && !organization.isPersonal) {
+        pendingOpens.current.delete(repoRoot);
+        setPendingProject(null);
+        setOpenGithubTarget({ onSelect });
+        return;
+      }
       const land = (project: Project) => {
         if (onSelect) {
           onSelect(project);
@@ -350,6 +358,11 @@ export function AddProjectProvider({
 
   const openProject = useCallback(
     async ({ onSelect }: AddProjectOptions = {}) => {
+      const organization = getActiveOrganizationSnapshot();
+      if (organization && !organization.isPersonal) {
+        setOpenGithubTarget({ onSelect });
+        return;
+      }
       if (!nativeRuntime) {
         return;
       }
@@ -404,6 +417,11 @@ export function AddProjectProvider({
   }, []);
 
   const quickStart = useCallback((options: AddProjectOptions = {}) => {
+    const organization = getActiveOrganizationSnapshot();
+    if (organization && !organization.isPersonal) {
+      setOpenGithubTarget(options);
+      return;
+    }
     setQuickStartTarget(options);
   }, []);
 

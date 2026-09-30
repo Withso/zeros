@@ -31,6 +31,29 @@ function processFixture() {
 }
 
 describe("provider browser authorization boundary", () => {
+  it("uses Codex's native device flow without opening a callback server URL", async () => {
+    const server = processFixture(), opened = vi.fn(), code = vi.fn();
+    const requests: Array<{ method: string; params: unknown }> = [];
+    server.child.stdin.on("data", chunk => {
+      const request = JSON.parse(chunk.toString()); requests.push(request);
+      if (!request.id) return;
+      queueMicrotask(() => {
+        const result = request.method === "account/login/start"
+          ? { type: "chatgptDeviceCode", loginId: "device-attempt", verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-EFGH" }
+          : request.method === "account/read" ? { account: { type: "chatgpt", email: "member@example.test", planType: "pro" } } : {};
+        server.child.stdout.write(JSON.stringify({ id: request.id, result }) + "\n");
+        if (request.method === "account/login/start") server.child.stdout.write(JSON.stringify({ method: "account/login/completed", params: { loginId: "device-attempt", success: true } }) + "\n");
+      });
+    });
+    const driver = createSubscriptionDriver("codex", {
+      resolveRuntime: async () => ({ command: "/bundled/codex", cwd: "/isolated/auth", env: {}, cleanup: async () => {} }),
+      spawn: () => server.proc, openBrowser: opened, onDeviceCode: code,
+    });
+    expect(await driver.login({ signal: AbortSignal.timeout(1000), onCodeRequired: () => {} })).toMatchObject({ state: "connected", email: "member@example.test" });
+    expect(requests.find(request => request.method === "account/login/start")?.params).toEqual({ type: "chatgptDeviceCode" });
+    expect(code).toHaveBeenCalledWith({ verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-EFGH" });
+    expect(opened).not.toHaveBeenCalled(); expect(server.proc.stop).toHaveBeenCalledOnce();
+  });
   it.each([false, true])(
     "binds Codex usage to the same app-server account (changed=%s)",
     async (changed) => {

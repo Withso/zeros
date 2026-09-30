@@ -185,6 +185,12 @@ export function releaseEnvironmentErrors(
     );
   }
   if (cloudWorkspacesEnabled === "true") {
+    // An omitted provider retains the legacy Daytona policy. Boat's managed
+    // terminal uses the backend tunnel and has no Daytona SSH gateway.
+    const provider = env.CLOUD_WORKSPACE_PROVIDER || "daytona";
+    if (provider !== "boat" && provider !== "daytona") {
+      errors.push("CLOUD_WORKSPACE_PROVIDER must be boat or daytona");
+    }
     const previewSuffixes = env.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES;
     if (!previewSuffixes?.trim()) {
       errors.push(
@@ -196,11 +202,11 @@ export function releaseEnvironmentErrors(
       );
     }
     const knownHosts = env.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64;
-    if (!knownHosts?.trim()) {
+    if (!knownHosts?.trim() && provider !== "boat") {
       errors.push(
         "VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 is required when ZEROS_CLOUD_WORKSPACES_ENABLED=true",
       );
-    } else if (!validSshKnownHosts(knownHosts)) {
+    } else if (knownHosts?.trim() && !validSshKnownHosts(knownHosts)) {
       errors.push(
         "VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 must be canonical base64url for a valid OpenSSH known_hosts document covering every allowed SSH host",
       );

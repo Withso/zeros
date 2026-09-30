@@ -31,6 +31,7 @@ import {
 // Pure leaf module (node:path only) — no cycle back into git/.
 import { pruneLauncherScriptEnv } from "../env/launcher-env";
 import { gitExecutionIdentity, gitProcessOptions } from "./git-execution-identity";
+import { scopedCloudGitAuthorEnvironment } from "./cloud-git-author";
 export { gitExecutionIdentity } from "./git-execution-identity";
 
 const execFileAsync = promisify(execFile);
@@ -1717,7 +1718,9 @@ export async function runGit(
         ...(opts.identity ? { consumerIdentity: opts.identity } : {}),
       })
     : null;
-  const baseChildEnv = gitChildEnv(opts.env);
+  // Explicit internal author fields (amend/replay/system snapshots) retain
+  // their meaning; this request supplies the defaults, never ambient config.
+  const baseChildEnv = gitChildEnv({ ...scopedCloudGitAuthorEnvironment(), ...opts.env });
   const policyArgs = await engineGitPolicyArgs(
     cwd,
     parsedCommand.globalArgs,

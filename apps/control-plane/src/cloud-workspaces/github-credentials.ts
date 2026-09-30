@@ -68,9 +68,10 @@ async function boundedJson(response: Response): Promise<unknown> {
   }
 }
 
-/** Backend-only GitHub App broker used by the image setup exchange. It never
- * mints an all-repository or write credential: GitHub receives the exact
- * repository name and an explicit contents:read permission reduction. */
+/** Backend-only GitHub App broker. Setup/ambient credentials remain read-only.
+ * Managed writes use the separate on-behalf-of-user proxy. Native writes have
+ * an explicit backend-only mint for one immutable repository; neither path
+ * can mint an all-repository credential. */
 export class GithubCloudWorkspaceCredentialBroker implements CloudWorkspaceRepositoryCredentialBroker {
   private readonly fetch: FetchLike;
   private readonly now: () => number;
@@ -110,11 +111,15 @@ export class GithubCloudWorkspaceCredentialBroker implements CloudWorkspaceRepos
     ) {
       throw new Error("cloud workspace GitHub credential scope is invalid");
     }
+    return this.mintScoped(input.installationId, { repositories: [input.repository], permissions: { contents: "read", pull_requests: "read", checks: "read", statuses: "read" } });
+  }
+
+  private async mintScoped(installationId: number, scope: Record<string, unknown>): Promise<{ token: string; expiresAtMs: number }> {
     const now = this.now();
     let response: Response;
     try {
       response = await this.fetch(
-        `${this.config.apiBaseUrl}/app/installations/${input.installationId}/access_tokens`,
+        `${this.config.apiBaseUrl}/app/installations/${installationId}/access_tokens`,
         {
           method: "POST",
           redirect: "error",
@@ -126,10 +131,7 @@ export class GithubCloudWorkspaceCredentialBroker implements CloudWorkspaceRepos
             "user-agent": "zeros-control-plane",
             "x-github-api-version": GITHUB_API_VERSION,
           },
-          body: JSON.stringify({
-            repositories: [input.repository],
-            permissions: { contents: "read" },
-          }),
+          body: JSON.stringify(scope),
         },
       );
     } catch {

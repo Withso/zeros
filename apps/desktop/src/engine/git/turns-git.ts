@@ -30,6 +30,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { promises as fs } from "node:fs";
+import { createGitTemporaryDirectory, writeGitTemporaryFile } from "./git-temporary";
 import * as os from "node:os";
 import * as nodePath from "node:path";
 
@@ -459,7 +460,7 @@ async function streamArchivePatchToApply(
   archivedHead: string,
   applyArgs: string[],
 ): Promise<boolean> {
-  const tmp = await fs.mkdtemp(
+  const tmp = await createGitTemporaryDirectory(
     nodePath.join(os.tmpdir(), "zeros-archive-patch-"),
   );
   const patchPath = nodePath.join(tmp, "archive.patch");
@@ -938,14 +939,14 @@ async function mergeText(
   base: string,
   theirs: string,
 ): Promise<{ merged: string; conflict: boolean }> {
-  const tmp = await fs.mkdtemp(nodePath.join(os.tmpdir(), "zeros-merge-"));
+  const tmp = await createGitTemporaryDirectory(nodePath.join(os.tmpdir(), "zeros-merge-"));
   try {
     const o = nodePath.join(tmp, "ours");
     const b = nodePath.join(tmp, "base");
     const t = nodePath.join(tmp, "theirs");
-    await fs.writeFile(o, ours);
-    await fs.writeFile(b, base);
-    await fs.writeFile(t, theirs);
+    await writeGitTemporaryFile(o, ours);
+    await writeGitTemporaryFile(b, base);
+    await writeGitTemporaryFile(t, theirs);
     const { code, stdout } = await runRaw(
       ["merge-file", "-p", "-q", o, b, t],
       cwd,

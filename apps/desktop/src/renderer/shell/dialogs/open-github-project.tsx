@@ -1,3 +1,4 @@
+import { CloudRepositoryPicker, type CloudRepositorySelection } from "../../features/settings/cloud-repository-picker";
 // ──────────────────────────────────────────────────────────
 // Open GitHub project dialog
 // ──────────────────────────────────────────────────────────
@@ -6,7 +7,7 @@
 // project. Clones a remote URL into <parent-folder>/<derived-name>
 // and registers it as a project.
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 
 import { Button, GithubIcon, Input } from "../../shared/ui";
@@ -32,6 +33,14 @@ import {
 } from "../../state/use-projects";
 import { upsertProject } from "../../state/projects-store";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { getActiveOrganizationSnapshot, getOrganizationStoreGeneration, useActiveOrganization, useTeams } from "../../features/team/team-store";
+import { parseRemote } from "../pr/github-url";
+import { cloudWorkspaceCapability } from "../../platform/cloud-workspace-access";
+import { createCloudWorkspaceDocument, getCloudWorkspaceCreateOptions } from "../../platform/cloud-workspaces";
+import { acceptCloudWorkspaceDocument, cloudProjectForFolder } from "../../state/cloud-workspace-catalog";
+import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { useWorkspaceDispatch } from "../../state/store";
+import { spawnPreparedDefaultChat } from "../../state/spawn-default-chat";
 
 interface OpenGithubProjectDialogProps {
   open: boolean;
@@ -64,23 +73,38 @@ function previewDirName(url: string): string {
   return "";
 }
 
-export function OpenGithubProjectDialog({
+export function OpenGithubProjectDialog(props: OpenGithubProjectDialogProps) {
+  const organization = useActiveOrganization();
+  const { me } = useTeams();
+  return <ScopedOpenGithubProjectDialog key={JSON.stringify([me?.user.id, organization?.id])} {...props} />;
+}
+
+function ScopedOpenGithubProjectDialog({
   open,
   onOpenChange,
   onCloned,
 }: OpenGithubProjectDialogProps) {
   const [url, setUrl] = useState("");
+  const [repositories, setRepositories] = useState<CloudRepositorySelection[]>([]);
+  const { me } = useTeams();
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [parentFolder, setParentFolder] = useState(defaultParentFolder());
   const [busy, setBusy] = useState(false);
+  const organization = useActiveOrganization();
+  const cloud = Boolean(organization && !organization.isPersonal);
+  const dispatch = useWorkspaceDispatch();
+  const cloudIntent = useRef<{ fingerprint: string; key: string; repository: Parameters<typeof createCloudWorkspaceDocument>[0]["repository"] } | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setUrl("");
+    setRepositories([]);
     setParentFolder(defaultParentFolder());
     setBusy(false);
   }, [open]);
 
-  const urlIsValid = URL_HINT_RE.test(url.trim());
+  const urlIsValid = cloud ? parseRemote(url.trim())?.host === "github.com" : URL_HINT_RE.test(url.trim());
   const dirName = useMemo(() => previewDirName(url.trim()), [url]);
   const fullPath =
     parentFolder.trim() && dirName ? `${parentFolder.trim()}/${dirName}` : "";
@@ -94,9 +118,44 @@ export function OpenGithubProjectDialog({
   };
 
   const handleClone = async () => {
-    if (busy || !urlIsValid || !parentFolder.trim()) return;
+    if (busy || !urlIsValid || (!cloud && !parentFolder.trim())) return;
+    const owner = getActiveOrganizationSnapshot();
+    if (owner?.id !== organization?.id) return;
     setBusy(true);
     try {
+      if (owner && !owner.isPersonal) {
+        const epoch = getOrganizationStoreGeneration();
+        const source = parseRemote(url.trim());
+        if (source?.host !== "github.com") throw new Error("Choose a GitHub repository.");
+        if (!(await cloudWorkspaceCapability()).enabled) throw new Error("Cloud workspaces are not enabled in this desktop build.");
+        const fingerprint = JSON.stringify([epoch, owner.id, source.owner.toLowerCase(), source.repo.toLowerCase()]);
+        if (cloudIntent.current?.fingerprint !== fingerprint) {
+          const options = await getCloudWorkspaceCreateOptions(owner.id, source.owner, source.repo);
+          if (!options.configured) throw new Error("Cloud creation is not enabled for this environment.");
+          if (!options.repository || !options.installations[0]) throw new Error("Connect the GitHub App to this repository in Settings → Integrations.");
+          cloudIntent.current = { fingerprint, key: crypto.randomUUID(), repository: {
+            forge: "github.com", owner: options.repository.owner, name: options.repository.name,
+            revision: `refs/heads/${options.repository.defaultBranch}`, githubInstallationId: options.installations[0].id,
+          } };
+        }
+        const intent = cloudIntent.current;
+        const workspace = await createCloudWorkspaceDocument({ organizationId: owner.id,
+          ...(owner.defaultTeamId ? { teamId: owner.defaultTeamId } : {}), repository: intent.repository, idempotencyKey: intent.key });
+        if (epoch !== getOrganizationStoreGeneration()) return;
+        acceptCloudWorkspaceDocument(workspace);
+        cloudIntent.current = null;
+        const folder = cloudWorkspaceKey({ organizationId: workspace.organizationId, workspaceId: workspace.id });
+        const project = cloudProjectForFolder(folder);
+        if (getActiveOrganizationSnapshot()?.id === owner.id && project) {
+          spawnPreparedDefaultChat({ folder, repoRoot: project.repoRoot, dispatch });
+        } else {
+          toast.success(`Cloud workspace created in ${owner.name}`);
+        }
+        notifyProjectsChanged();
+        notifyWorkspacesChanged();
+        if (mounted.current) onOpenChange(false);
+        return;
+      }
       const result = await workspaceClone({
         url: url.trim(),
         parentFolder: parentFolder.trim(),
@@ -110,23 +169,24 @@ export function OpenGithubProjectDialog({
       onCloned?.({ repoRoot: result.repoRoot });
       onOpenChange(false);
     } catch (err: unknown) {
+      if (!mounted.current) return;
       if (isGitErrorShape(err)) {
         toast.error(`Couldn't clone repository: ${err.message}`, {
           description: err.remediation ?? undefined,
         });
       } else {
         toast.error(
-          `Couldn't clone repository: ${
+          `Couldn't open repository: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
       }
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   };
 
-  const canSubmit = urlIsValid && parentFolder.trim().length > 0 && !busy;
+  const canSubmit = urlIsValid && (cloud || parentFolder.trim().length > 0) && !busy;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -145,11 +205,15 @@ export function OpenGithubProjectDialog({
             Open GitHub project
           </DialogTitle>
           <DialogDescription className="text-fg2 text-xs">
-            Clone a remote repository — `git clone` runs locally, the engine
-            never proxies your credentials.
+            {cloud ? `Create a cloud workspace in ${organization?.name} from this GitHub repository.` : "Clone a remote repository onto this Mac."}
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="gap-5">
+          {cloud && me && organization && <CloudRepositoryPicker userId={me.user.id} organizationId={organization.id}
+            active={open} disabled={busy} value={repositories} onManageConnections={() => onOpenChange(false)} onChange={selected => {
+              setRepositories(selected);
+              if (selected[0]) setUrl(`https://github.com/${selected[0].owner}/${selected[0].name}`);
+            }} />}
           {/* URL */}
           <div className="flex flex-col gap-1.5">
             <label htmlFor="og-url" className="text-fg1 text-sm font-medium">
@@ -173,7 +237,7 @@ export function OpenGithubProjectDialog({
           </div>
 
           {/* Parent folder */}
-          <div className="flex flex-col gap-1.5">
+          {!cloud && <div className="flex flex-col gap-1.5">
             <label htmlFor="og-parent" className="text-fg1 text-sm font-medium">
               Parent folder
             </label>
@@ -203,7 +267,7 @@ export function OpenGithubProjectDialog({
                 </span>
               </p>
             )}
-          </div>
+          </div>}
 
           {/* Footer */}
         </DialogBody>
@@ -223,7 +287,7 @@ export function OpenGithubProjectDialog({
             disabled={!canSubmit}
           >
             {busy && <ZerosSpinner size={16} tone="inverted" />}
-            <span>Clone</span>
+            <span>{cloud ? "Create workspace" : "Clone"}</span>
             <kbd className="bg-primary-button-fg/15 text-primary-button-fg ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-sm px-1 text-xs">
               ⌘↩
             </kbd>

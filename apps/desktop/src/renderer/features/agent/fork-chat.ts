@@ -6,13 +6,24 @@ import {
   transcriptSourceKey,
 } from "./chat-transcript-attach";
 import type { LiveTextAttachmentInput } from "./composer-text-attachment-delivery";
+import {isCloudWorkspace} from "../../platform/bridge/cloud-workspace-key";
+import type {RuntimeClient} from "../../platform/bridge/ws-client";
+
+export async function admitTranscriptFork(source:Pick<ChatThread,"id"|"folder"|"agentId">,destination:Pick<ChatThread,"id">,
+  request:(message:Parameters<RuntimeClient["request"]>[0])=>Promise<{type:string}>,native=false):Promise<void> {
+  if(!isCloudWorkspace(source.folder))return;
+  if(!source.agentId)throw new Error("Choose an agent before forking");
+  const response=await request({type:"AGENT_FORK_CONVERSATION",agentId:source.agentId,
+    sourceChatId:source.id,destinationChatId:destination.id,forkStrategy:native?"native":"transcript"});
+  if(response.type!=="AGENT_CONVERSATION_FORKED")throw new Error("Cloud fork was not admitted");
+}
 
 /** Build a fresh Zeros conversation carrying only user-owned product settings.
  * Provider binding, live execution identity, title/pin/archive state, messages,
  * and drafts intentionally do not cross the boundary. */
 export function createForkedChat(
   source: ChatThread,
-  id = newChatId(),
+  id = newChatId(source.folder),
   now = Date.now(),
 ): ChatThread {
   return {

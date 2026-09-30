@@ -1,3 +1,4 @@
+import { useOrganizationProjects } from "../../state/use-organization-projects";
 // ──────────────────────────────────────────────────────────
 // Dashboard page — cross-repo kanban board of live workspaces
 // ──────────────────────────────────────────────────────────
@@ -67,7 +68,6 @@ import {
   commitWorkspaceArchived,
   useArchivedWorkspaces,
   useLiveWorkspaces,
-  useProjects,
 } from "../../state/use-projects";
 import {
   dedupePendingCreates,
@@ -145,7 +145,7 @@ interface BoardRow {
 }
 
 export function DashboardPage() {
-  const { projects } = useProjects();
+  const { projects } = useOrganizationProjects();
   const chats = useChats();
   const { workspaces: liveWorkspaces, loading } = useLiveWorkspaces();
   const listedWorkspaces = useFolderWorkspaces(liveWorkspaces, projects);

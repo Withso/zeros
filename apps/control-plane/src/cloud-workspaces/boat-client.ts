@@ -258,8 +258,8 @@ export class BoatApiClient {
                   ? "provider_rate_limited"
                   : "provider_request_failed";
         const retrySeconds = Number(response.headers.get("retry-after"));
-        const retryOptions = Number.isFinite(retrySeconds) && retrySeconds > 0
-          ? { retryAfterMs: Math.min(retrySeconds * 1000, 300_000) } : {};
+        const retryOptions = { httpStatus: response.status, ...(Number.isFinite(retrySeconds) && retrySeconds > 0
+          ? { retryAfterMs: Math.min(retrySeconds * 1000, 300_000) } : {}) };
         const createRefusal = path === "/sandboxes" && input.method === "POST" && Boolean(input.idempotencyKey) && response.status === 429;
         const assessment = createRefusal ? assessCreateRefusal(value) : null;
         if (assessment?.code) throw new BoatCreateRejectedError(code, retryable, assessment.code, retryOptions);

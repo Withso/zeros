@@ -1,5 +1,5 @@
-// The Context tab's data cache, under the one race that matters to it:
-// attach-time staging fires its change signal while the tab's own listing can
+// The workspace context data cache, under the one race that matters to it:
+// attach-time staging fires its change signal while the summary's listing can
 // still be in flight, and the write IPC can land inside that window on a fresh
 // workspace. Reads must never scaffold storage or trigger migration.
 //
@@ -30,7 +30,7 @@ import {
   loadContextGraph,
   loadContextGraphForRefresh,
   resetContextGraphCacheForTests,
-} from "../workbench/tabs/context-graph-data";
+} from "../context-graph-data";
 
 const EMPTY = { exists: true, items: [], truncated: false };
 const ONE = {

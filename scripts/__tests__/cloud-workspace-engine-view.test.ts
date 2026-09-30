@@ -5,6 +5,22 @@ import {
 } from "../cloud-workspace-validation/sandbox/cloud-engine-view.mjs";
 
 describe("fixed cloud engine mount and environment contract", () => {
+  it("admits only the fixed native qualification entry in the v3 engine view", () => {
+    expect(cloudEngineViewArguments("qualify-agent", 3).slice(-2)).toEqual(["--v3", "--qualify-agent"]);
+    expect(cloudEngineViewArguments("qualify-agent", 3)).toContain("/opt/zeros");
+    expect(() => cloudEngineViewArguments("qualify-agent", 2)).toThrow();
+    expect(cloudEngineViewEnvironment({ ZEROS_CLOUD_TOKEN: "private" }, "qualify-agent")).not.toHaveProperty("ZEROS_CLOUD_TOKEN");
+  });
+  it("keeps private attachment staging on the repository mount without exposing host authority", () => {
+    const args = cloudEngineViewArguments("serve", 3);
+    const binds = args.flatMap((arg, index) => arg === "--bind" ? [[args[index + 1], args[index + 2]]] : []);
+    expect(binds).toContainEqual(["/srv/zeros/files", "/srv/zeros"]);
+    expect(binds.some(([, target]) => target === "/srv/zeros/workspace" || target === "/srv/zeros/attachment-staging")).toBe(false);
+    expect(binds.some(([source]) => source === "/srv/zeros")).toBe(false);
+    expect(cloudEngineViewEnvironment({ ZEROS_ATTACHMENT_TEMP_DIR: "/untrusted" })).toHaveProperty(
+      "ZEROS_ATTACHMENT_TEMP_DIR", "/srv/zeros/attachment-staging",
+    );
+  });
   it("projects only engine runtime authority and readonly control mounts", () => {
     const args = cloudEngineViewArguments();
     const mounts: Array<[string, string, string]> = [];

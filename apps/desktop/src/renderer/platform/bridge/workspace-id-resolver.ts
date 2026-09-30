@@ -10,6 +10,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { Workspace } from "../git";
+import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "./cloud-workspace-key";
 import { runtimeExecutionKey, type RuntimeClient } from "./ws-client";
 import { requestWorkspaceList } from "./workspace-bridge";
 import {
@@ -70,6 +71,8 @@ export async function resolveBridgeWorkspaceIdForCwd(
   bridge: RuntimeClient,
   cwd: string | null | undefined,
 ): Promise<string | null> {
+  const cloud = parseCloudWorkspaceKey(cwd);
+  if (cloud) return cloudWorkspaceKey(cloud);
   const cached = workspaceIdForCwd(cwd, lookupFor(bridge).rows);
   if (cached) return cached;
   const fresh = await refillBridgeWorkspaces(bridge);

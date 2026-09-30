@@ -50,6 +50,7 @@ export interface CloudProviderOperationStore {
   beginDelete(resourceId: string): Promise<CloudProviderOperationRecord>;
   bindDeletion(resourceId: string, operationId: string): Promise<void>;
   completeDeletion(resourceId: string, operationId: string): Promise<void>;
+  recordDeletionProgress?(resourceId: string, operationId: string, stage: string): Promise<void>;
   list(): AsyncIterable<CloudProviderOperationRecord>;
 }
 
@@ -310,6 +311,13 @@ export class DatabaseCloudProviderOperationStore implements CloudProviderOperati
       );
       if (result.rowCount !== 1) throw conflict();
     });
+  }
+
+  async recordDeletionProgress(resourceId: string, operationId: string, stage: string): Promise<void> {
+    if (!["pending","processing","blocked","waiting_for_uploads","kept_for_newer_snapshots","waiting_for_restore","deleting","completed","unknown"].includes(stage)) return;
+    await withSystemTx(this.pool,tx=>tx.query(`UPDATE cloud_workspace_provider_operations SET deletion_stage=$5
+      WHERE provider=$1 AND account_scope=$2 AND resource_id=$3 AND deletion_operation_id=$4 AND deletion_requested_at IS NOT NULL AND deleted_at IS NULL`,
+    [this.provider,this.accountScope,resourceId,operationId,stage]));
   }
 
   async completeDeletion(

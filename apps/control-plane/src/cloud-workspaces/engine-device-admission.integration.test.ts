@@ -6,7 +6,7 @@ import {
 } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {
   CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH,
   DatabaseCloudWorkspaceEngineClientAdmissionService,
@@ -31,8 +31,7 @@ d("cloud engine device admission", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     service = new DatabaseCloudWorkspaceEngineClientAdmissionService({
       pool,

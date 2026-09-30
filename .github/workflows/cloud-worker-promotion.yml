@@ -1,0 +1,74 @@
+name: Cloud worker promotion
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        type: choice
+        options: [alpha, beta, production]
+        required: true
+      execute:
+        description: Execute only after the release canary transport is rehearsed
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      channel:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      branch:
+        required: true
+        type: string
+      before_sha:
+        default: ''
+        type: string
+      execute:
+        default: false
+        type: boolean
+permissions:
+  contents: read
+jobs:
+  worker:
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.channel }}
+    timeout-minutes: 100
+    concurrency:
+      group: hosted-mutation-${{ inputs.channel }}
+      cancel-in-progress: false
+    env:
+      RELEASE_CHANNEL: ${{ inputs.channel }}
+      RELEASE_SHA: ${{ inputs.source_sha || github.sha }}
+      RELEASE_BRANCH: ${{ inputs.branch || github.ref_name }}
+      RELEASE_BASE: ${{ inputs.before_sha || '' }}
+      ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
+      WORKER_EXECUTE: ${{ inputs.execute }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Worker plan or guarded execution
+        run: |
+          if [ "$WORKER_EXECUTE" = true ]; then
+            pnpm exec tsx scripts/release/worker-cli.ts --execute
+          else
+            pnpm exec tsx scripts/release/worker-cli.ts --plan
+          fi
+      - name: Save plan (never a success receipt)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: worker-plan-${{ inputs.channel }}-${{ inputs.source_sha || github.sha }}
+          path: .context/release/worker-plan.json
+          include-hidden-files: true
+          if-no-files-found: error

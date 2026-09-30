@@ -1,10 +1,10 @@
+import { hostedDevGithubReferencesEnabled,saveDevGithubReference,readDevGithubReference,clearDevGithubReference } from "./github-auth-runtime";
 // Production host wiring for the GitHub App controller.
 //
 // All secrets remain in Electron main. Deep links carry only a single-use
 // nonce; renderer events carry username/count/error-reason metadata only.
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { shell } from "electron";
 import type { GithubCredential } from "@zeros/protocol/github-auth";
 
 import { channel, schemeForChannel } from "../src/engine/runtime";
@@ -34,6 +34,8 @@ import {
 } from "./secret-store";
 import { pushGithubCredentialToEngine } from "./sidecar";
 import { IS_DEV } from "./runtime-mode";
+import { GithubDevCallbackRelay, GithubDevPendingHandoff } from "./github-dev-callback-relay";
+import { localDevCallbackStore } from "./local-dev-callback-store";
 import {
   CrossProcessLockTimeoutError,
   withCrossProcessFileLock,
@@ -47,6 +49,20 @@ const PENDING_ACCOUNT = "github-app-handoff:pending";
 const MAX_TIMER_MS = 2_147_000_000;
 const CREDENTIAL_LOCK_STALE_MS = 60_000;
 const CREDENTIAL_LOCK_WAIT_MS = 65_000;
+let devRelay: GithubDevCallbackRelay | undefined;
+let devHandoff: GithubDevPendingHandoff | undefined;
+
+function githubDevRelay(): GithubDevCallbackRelay {
+  return (devRelay ??= new GithubDevCallbackRelay(localDevCallbackStore()));
+}
+
+function githubDevHandoff(): GithubDevPendingHandoff {
+  return (devHandoff ??= new GithubDevPendingHandoff(githubDevRelay(), callback => {
+    void githubAppController().complete(callback).catch(() => {
+      emitEvent("github-app-error", { reason: "github_unavailable" });
+    });
+  }));
+}
 
 function controlPlaneBaseUrl(): string {
   const baked =
@@ -71,6 +87,8 @@ function readPending(): {
   raw: string;
   nonce: string;
   expiresAtMs: number;
+  preserveSelectedMethod: boolean;
+  ownerSub?: string;
 } | null {
   const raw = getSecret(PENDING_ACCOUNT);
   if (!raw) return null;
@@ -87,6 +105,8 @@ function readPending(): {
       raw,
       nonce: parsed.nonce,
       expiresAtMs: parsed.expiresAtMs,
+      preserveSelectedMethod: parsed.preserveSelectedMethod === true,
+      ...(typeof parsed.ownerSub === "string" ? { ownerSub: parsed.ownerSub } : {}),
     };
   } catch {
     return null;
@@ -94,6 +114,7 @@ function readPending(): {
 }
 
 function consumePending(nonce: string): PendingConsumeResult {
+  if (channel() === "dev") return githubDevHandoff().consume(nonce);
   const pending = readPending();
   if (!pending) return { status: "missing" };
   if (pending.expiresAtMs <= Date.now()) {
@@ -102,11 +123,12 @@ function consumePending(nonce: string): PendingConsumeResult {
   }
   if (!sameNonce(pending.nonce, nonce)) return { status: "mismatch" };
   return replaceSecretIfUnchanged(PENDING_ACCOUNT, pending.raw, null)
-    ? { status: "consumed" }
+    ? { status: "consumed", preserveSelectedMethod: pending.preserveSelectedMethod, ownerSub: pending.ownerSub }
     : { status: "missing" };
 }
 
 function discardPending(nonce: string): void {
+  if (channel() === "dev") { devHandoff?.discard(nonce); return; }
   const pending = readPending();
   if (pending && sameNonce(pending.nonce, nonce)) {
     replaceSecretIfUnchanged(PENDING_ACCOUNT, pending.raw, null);
@@ -114,6 +136,7 @@ function discardPending(nonce: string): void {
 }
 
 function clearPending(): void {
+  if (channel() === "dev") { devHandoff?.clear(); return; }
   const pending = readPending();
   if (pending) {
     replaceSecretIfUnchanged(PENDING_ACCOUNT, pending.raw, null);
@@ -180,6 +203,14 @@ function githubAppController(): GithubAppController {
     );
   }
   controller = new GithubAppController({
+    ...(hostedDevGithubReferencesEnabled()?{devReference:{
+      exchange:(token:string,nonce:string)=>client.exchangeDevReference(token,nonce),save:saveDevGithubReference,
+      async disconnect(){
+        const session=await getValidSessionForMain(),reference=await readDevGithubReference();
+        if(session&&reference)await client.removeDevReference(session.accessToken,reference.reference.bindingId,'local');
+        await clearDevGithubReference();await afterCredentialChange(null);return true;
+      },
+    }}:{}),
     client,
     credentialStore: {
       async get() {
@@ -206,12 +237,16 @@ function githubAppController(): GithubAppController {
         : null;
     },
     savePending(input) {
+      if (channel() === "dev") { githubDevHandoff().save(input); return; }
       setSecret(PENDING_ACCOUNT, JSON.stringify(input));
     },
     consumePending,
     discardPending,
     clearPending,
-    openExternal: (url) => shell.openExternal(url),
+    openExternal: async (url) => {
+      const { openDesktopAuthBrowser } = await import("./deep-link");
+      await openDesktopAuthBrowser(url);
+    },
     randomNonce: () => randomBytes(32).toString("base64url"),
     withCredentialLock,
     afterCredentialChange,
@@ -230,11 +265,13 @@ function githubAppController(): GithubAppController {
 export async function beginGithubAppConnection(
   installFlow: boolean,
   forceInstall = false,
+  preserveSelectedMethod = false,
 ): Promise<GithubAppFlowKind | null> {
   return githubAppController().begin({
     scheme: schemeForChannel(channel()),
     installFlow,
     forceInstall,
+    preserveSelectedMethod,
   });
 }
 
@@ -254,10 +291,18 @@ export function cancelGithubAppConnection(): void {
 
 /** Called directly by the trusted deep-link router. Raw URLs and tokens never
  *  cross the renderer event bus. */
+export function relayGithubAppCallback(input: {
+  nonce: string | null;
+  error?: string | null;
+}): boolean {
+  return channel() === "dev" && githubDevRelay().deliver(input);
+}
+
 export async function completeGithubAppConnection(input: {
   nonce: string | null;
   error?: string | null;
 }): Promise<void> {
+  if (relayGithubAppCallback(input)) return;
   await githubAppController().complete(input);
 }
 
@@ -354,4 +399,15 @@ export async function handleSharedGithubCredentialChange(): Promise<void> {
   emitEvent("github-credential-store-changed", {});
   await pushGithubCredentialToEngine();
   await scheduleGithubAppRefresh();
+}
+
+/** Normal sign-in plus the exact backend/generation restores the separate slot.
+ * No shared legacy safeStorage pair is read or advanced in reference mode. */
+export async function restoreDevGithubBinding(organizationId:string){
+  const session=await getValidSessionForMain();if(!session||!hostedDevGithubReferencesEnabled())throw new Error('Sign in to Zeros to restore Dev GitHub');
+  const existing=await readDevGithubReference();if(existing)return existing.reference.bindingId;
+  const client=new GithubAppClient({baseUrl:controlPlaneBaseUrl()});
+  const result=await client.restoreDevReference(session.accessToken,organizationId);
+  const current=await getValidSessionForMain();if(current?.sub!==session.sub||current?.accountId!==session.accountId)throw new Error('Your account changed');
+  await saveDevGithubReference(result);return result.reference.bindingId;
 }

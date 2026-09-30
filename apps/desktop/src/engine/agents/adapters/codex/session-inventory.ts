@@ -194,7 +194,7 @@ export async function readCodexSessionInventory(
   });
   const [connections, apps, plugins] = await Promise.allSettled([
     readCodexSessionTools(bounded, threadId),
-    accountExtensionsEnabled
+    (accountExtensionsEnabled || accountAppBridgeEnabled)
       ? readApps(bounded, threadId)
       : Promise.resolve(notExposed("apps")),
     accountExtensionsEnabled

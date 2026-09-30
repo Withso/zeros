@@ -43,7 +43,9 @@ and `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`. This pauses background loops;
 it does not block direct provider calls. Qualification must avoid provider
 operations until their separate release gates pass.
 
-End-user cloud creation/catalog/details UI is deliberately not wired yet.
+Cloud creation, catalog, details and organization setup use the existing desktop
+workbench behind the cloud feature gate. These surfaces still require native and
+live provider qualification; their presence is not a customer rollout approval.
 Organization sharing and individually entitled external collaborators have
 backend contracts, regression coverage and isolated deployed API evidence.
 Managed Boat runtime passed qualification on the isolated deployment, apart
@@ -55,7 +57,12 @@ behavior from release qualification and deferred product surfaces.
 
 ## Documents
 
+- [Organization setup](organization-setup.md) defines organization settings,
+  agent accounts, authorized GitHub repositories and Cloud Computer validation.
 - [Agent authentication and language tools](agent-authentication-and-language-tools.md) defines personal consent, native subscription renewal and bounded language services.
+- [MCP and skills](mcp-and-skills.md) defines cloud customization authority and provider configuration.
+- [Provider background work](provider-background-work.md) defines retained native tasks, renewable leases and task recovery.
+- [Lifecycle diagnostics](lifecycle-diagnostics.md) defines setup progress, failure evidence and recovery diagnostics.
 
 - [Qualification status](qualification-status.md) separates the current eight
   backend steps, native tool coverage, live evidence and remaining release gates.

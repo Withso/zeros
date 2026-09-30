@@ -55,8 +55,9 @@ import { useDefaultAgent } from "../../features/settings/default-agent";
 import {
   hasConfirmedAgents,
   loadAgents,
-  useAgentsSnapshot,
 } from "../../features/agent/agents-cache";
+import { useWorkspaceAgents, hasConfirmedWorkspaceAgents } from "../../features/agent/workspace-agent-registry";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { useEnabledAgents } from "../../features/agent/enabled-agents";
 import { isRemovedAgent } from "../../features/agent/agent-runnable";
 import { AgentRemovedPanel } from "../agent-removed-panel";
@@ -102,7 +103,11 @@ export function ChatView({
   // panes container derives per-pane display from the layout model).
   const active = useChatById(chatId);
   const dispatch = useWorkspaceDispatch();
-  const agents = useAgentsSnapshot();
+  const cloud = isCloudWorkspace(active?.folder);
+  // Hidden cloud preparation may consume retained registry data and hydrate
+  // history, but a registry request would claim its speculative runtime peer.
+  const agents = useWorkspaceAgents(active?.folder, surfaceActive || (!cloud && preparing));
+  const bindingActive = !readOnly && (surfaceActive || !cloud);
   // Canonical cwd resolution: the chat's own `folder` OR the current scope
   // (`newAgentFolder` — the worktree row the user has selected). Same chain
   // as useChatCwd / repository panel / the topbar. Without the fallback, a chat with
@@ -116,7 +121,7 @@ export function ChatView({
   const resolvedCwd = useChatCwd();
   // A binding made before the registry answered is a guess. Correct it here —
   // this hook outlives AutoBindAgent, which unmounts the instant it binds.
-  useProvisionalBindingReconcile(active, !readOnly);
+  useProvisionalBindingReconcile(active, bindingActive);
 
   if (!active) {
     // EmptyComposer (the no-chat "start a new chat" landing) no longer exists
@@ -141,7 +146,7 @@ export function ChatView({
   // records, so this branch only catches edge cases (a brand-new
   // chat created elsewhere, a corrupted record bypassing migration).
   if (!readOnly && !active.agentId) {
-    return <AutoBindAgent chat={active} />;
+    return bindingActive ? <AutoBindAgent chat={active} /> : null;
   }
 
   // The chat is bound to an agent the registry no longer knows about —
@@ -234,7 +239,7 @@ function AutoBindAgent({ chat }: { chat: ChatThread }) {
   const dispatch = useWorkspaceDispatch();
   const { agentId: starredId } = useDefaultAgent();
   const { isEnabled } = useEnabledAgents();
-  const agents = useAgentsSnapshot();
+  const agents = useWorkspaceAgents(chat.folder);
   // Latch so the settings update this triggers cannot make the effect
   // double-write the chat on its immediate re-render.
   const boundRef = useRef(false);
@@ -248,7 +253,7 @@ function AutoBindAgent({ chat }: { chat: ChatThread }) {
     // Unconfirmed covers more than a cold null: the cache publishes `[]` when a
     // load fails with nothing on disk, and that array reads exactly like an
     // authoritative empty registry while being nothing of the sort.
-    if (!hasConfirmedAgents()) rememberProvisionalBinding(chat.id, prior);
+    if (!hasConfirmedWorkspaceAgents(chat.folder)) rememberProvisionalBinding(chat.id, prior);
     // Several ChatViews are mounted at once in a split workspace. Updating
     // this one chat must not use HYDRATE_CHATS with `activeChatId: chat.id`:
     // an agentless chat in a background pane would steal keyboard/composer
@@ -282,9 +287,9 @@ function useProvisionalBindingReconcile(
   const dispatch = useWorkspaceDispatch();
   const { agentId: starredId } = useDefaultAgent();
   const { isEnabled } = useEnabledAgents();
-  const agents = useAgentsSnapshot();
+  const agents = useWorkspaceAgents(chat?.folder, enabled);
   const sessions = useAgentSessions();
-  const bridgeStatus = useBridgeStatus();
+  const bridgeStatus = useBridgeStatus(chat?.folder);
   const chatId = chat?.kind === "chat" ? chat.id : null;
   const boundAgentId = chat?.agentId ?? null;
   const hasSession = Boolean(chat?.providerBinding ?? chat?.sessionId);
@@ -302,17 +307,17 @@ function useProvisionalBindingReconcile(
   // so this retries when the array actually changes or the bridge reconnects.
   useEffect(() => {
     if (!enabled) return;
-    if (hasConfirmedAgents() || bridgeStatus !== "connected") return;
+    if (isCloudWorkspace(chat?.folder) || hasConfirmedAgents() || bridgeStatus !== "connected") return;
     void loadAgents((force) => sessions.listAgents(force)).catch(() => {
       /* still unconfirmed; the next snapshot or bridge flip tries again */
     });
-  }, [enabled, agents, bridgeStatus, sessions]);
+  }, [enabled, agents, bridgeStatus, sessions, chat?.folder]);
 
   useEffect(() => {
     if (
       !enabled ||
       !agents ||
-      !hasConfirmedAgents() ||
+      !hasConfirmedWorkspaceAgents(chat?.folder) ||
       !chatId ||
       !boundAgentId
     )
@@ -345,6 +350,7 @@ function useProvisionalBindingReconcile(
   }, [
     enabled,
     agents,
+    chat?.folder,
     boundAgentId,
     chatId,
     dispatch,
@@ -459,6 +465,28 @@ function ChatBody({
   // carried over from a previous app run), we ask the provider to resume it
   // instead of creating a new one.
   const sessions = useAgentSessions();
+  const hasSessionSlot = useSessionsStore((state) => state.sessions[chatId] !== undefined);
+  const hasChatMetadata = Boolean(chat);
+  // Cloud history belongs to the database, including during stop/wake/setup.
+  // Authentication can also clear a slot while its view stays retained under
+  // the same chat id. Hydrate once authorized metadata is available, separately
+  // from agent admission below. Local creation still waits for its filesystem.
+  useEffect(() => {
+    if (!surfaceActive || !hasChatMetadata || hasSessionSlot ||
+        (!readOnly && workspaceProvisioning && !isCloudWorkspace(cwd))) return;
+    let cancelled = false;
+    void sessions.hydrateChat(chatId).then(() => {
+      // Cleanup may have removed the slot while an earlier shared read was
+      // retiring. That read cannot publish into an absent slot. Retry once
+      // after its request identity is released, provided this view still owns
+      // the same authorized chat. Do not turn ordinary failures into polling.
+      if (!cancelled && !sessions.getSession(chatId))
+        return sessions.hydrateChat(chatId);
+    }).catch(() => {
+      if (!cancelled && readOnly) setHistoryError("Couldn't load chat history.");
+    });
+    return () => { cancelled = true; };
+  }, [chatId, cwd, hasChatMetadata, hasSessionSlot, surfaceActive, readOnly, workspaceProvisioning, sessions]);
   // Optimistic create: render the provisional composer immediately, but do not
   // spawn into the announced path until the exact create lifecycle publishes.
   // Workbench's longer presentation-only settling window is deliberately not a
@@ -721,7 +749,7 @@ function ChatBody({
   // away and back to retry — a real "stuck" feeling. We only retry
   // once per reconnect: on the rising edge of bridgeStatus going to
   // "connected" while the session is in a failed/transient state.
-  const bridgeStatus = useBridgeStatus();
+  const bridgeStatus = useBridgeStatus(cwd);
   const lastBridgeStatusRef = useRef(bridgeStatus);
   useEffect(() => {
     const prev = lastBridgeStatusRef.current;

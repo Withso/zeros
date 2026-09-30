@@ -36,7 +36,7 @@ describe("personal cloud credential HTTP boundaries",()=>{
     expect((await call({...input,nativeCache:"x".repeat(100000)})).status).toBe(413);
   });
   it("accepts only bounded engine requests and hides private service failures",async()=>{
-    const service={admit:vi.fn().mockResolvedValue({leaseId:randomUUID()}),validate:vi.fn(),release:vi.fn()},app=createCloudAgentExecutionRoutes(service as unknown as DatabaseCloudAgentExecutionService);
+    const service={admit:vi.fn().mockResolvedValue({leaseId:randomUUID()}),validate:vi.fn(),release:vi.fn(),background:vi.fn().mockResolvedValue({version:1})},app=createCloudAgentExecutionRoutes(service as unknown as DatabaseCloudAgentExecutionService);
     const scope={workspaceId:randomUUID(),organizationId:randomUUID(),generation:1,engineInstanceId:randomUUID()},token=`zwh_${"x".repeat(43)}`;
     const call=(request:unknown,authorization=`Bearer ${token}`,contentType="application/json")=>app.request(CLOUD_AGENT_EXECUTION_PATH,{method:"POST",headers:{authorization,"content-type":contentType},body:JSON.stringify({...scope,request})});
     const admission={executionId:randomUUID(),delegationId:randomUUID(),model:"grok-4.6",source:{kind:"session",actorSessionId:randomUUID()}},request={kind:"admit",admission};
@@ -45,7 +45,18 @@ describe("personal cloud credential HTTP boundaries",()=>{
     expect((await call({...request,credentialId:randomUUID()})).status).toBe(422);
     expect((await call({...request,admission:"x".repeat(5000)})).status).toBe(413);expect(service.admit).not.toHaveBeenCalled();
     const response=await call(request);expect(response.status).toBe(200);expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(service.admit).toHaveBeenCalledWith({...scope,heartbeatToken:token},admission);
+    expect(service.admit).toHaveBeenCalledWith({...scope,heartbeatToken:token},admission,undefined,undefined,undefined);
+    expect((await call({...request,includeGitAuthor:true})).status).toBe(200);
+    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,true,undefined,undefined);
+    expect((await call({...request,nativeCapabilitiesVersion:1})).status).toBe(200);
+    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,undefined,1,undefined);
+    expect((await call({...request,backgroundTasksVersion:1})).status).toBe(200);
+    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,undefined,undefined,1);
+    const background={kind:"background",leaseId:randomUUID(),operation:{kind:"retain",conversationId:"chat",revision:1,
+      snapshot:{tasks:[],waiting:false,processWork:true}}};
+    expect((await call(background)).status).toBe(200);
+    expect(service.background).toHaveBeenCalledWith({...scope,heartbeatToken:token},background.leaseId,background.operation);
+    expect((await call({...background,operation:{...background.operation,snapshot:{...background.operation.snapshot,material:"forbidden"}}})).status).toBe(422);
     for(const [error,status] of [[new CloudWorkspaceEngineAuthorityError(),401],[new HttpError(403,"private","private"),403],[new HttpError(503,"busy","private"),503],[new Error("secret SQL material"),503]] as const){
       service.admit.mockRejectedValueOnce(error);const failed=await call(request);expect(failed.status).toBe(status);expect(await failed.text()).not.toMatch(/secret|SQL|material/);
     }

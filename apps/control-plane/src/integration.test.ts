@@ -8,7 +8,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import { ensureUser, resolveAuthenticatedUser } from "./auth.js";
 import { withSystemTx, withUserTx } from "./db.js";
 
@@ -20,8 +20,7 @@ d("schema + signup transaction", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
   afterAll(async () => {
     await pool.end();

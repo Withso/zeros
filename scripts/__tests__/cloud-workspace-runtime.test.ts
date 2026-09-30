@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import runtimeLayout from "../cloud-workspace-validation/sandbox/runtime-layout.json";
 
 import {
   assertCloudStateMatchesSnapshot,
@@ -90,11 +91,13 @@ describe("cloud workspace runtime admission", () => {
     const result=spawnSync("bash",["-c",`set -euo pipefail
 PROFILE_VERSION=${version}
 ${select}
+printf '%s' "$REPO_DIR"
 RUNTIME=/bin/echo
 LOG="$1"
 ENGINE_DIR=/opt/zeros
 ${launch}`,"test",log],{encoding:"utf8",env:{PATH:"/usr/bin:/bin"}});
     expect(result.status,result.stderr).toBe(0);
+    expect(result.stdout).toBe(version === 3 ? runtimeLayout.repository : runtimeLayout.logicalRepository);
     expect(readFileSync(log,"utf8").trim()).toBe("/opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs");
     } finally { rmSync(temporary,{recursive:true,force:true}); }
   });

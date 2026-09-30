@@ -5,6 +5,12 @@ adapters own native semantics; the renderer owns consistent presentation. A
 provider upgrade must preserve both. Stored native inputs, results, identities
 and statuses remain available even when routine metadata is hidden in the UI.
 
+Codex exec-server connection/disconnection notifications are transport metadata,
+not agent tool calls. Do not project them into the transcript. Exact synthetic
+completed connection rows from older builds remain stored but do not create
+turns, tool counts, nested rows or copy/export content. Native tools, unknown
+records and actual interrupted-turn errors keep their normal presentation.
+
 ## Artifacts and links
 
 - Image generation uses `Generate` plus the native saved-file pill. Inspecting

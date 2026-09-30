@@ -1,11 +1,11 @@
-import type {CloudProviderExecution} from "../../../cloud-provider-execution";
+import {executionMcpServers,type CloudProviderExecution} from "../../../cloud-provider-execution";
 import type {McpServerConfig as CursorMcpConfig} from "@cursor/sdk";
 const CWD="/srv/zeros/workspace";
 const record=(value:unknown):Record<string,unknown>=>value&&typeof value==="object"&&!Array.isArray(value)?value as Record<string,unknown>:{};
 
-/** Applied at the sole engine→private-host boundary, including resume,
- * recovery, prewarm and metadata probes. Caller configuration cannot widen the
- * private native toolset or change the admitted credential/model. */
+/** Applied at the engine→native-host boundary, including resume, recovery,
+ * prewarm and metadata probes. The normal SDK toolset runs on the VM;
+ * callers cannot replace the admitted credential, host, or model. */
 export function cloudCursorRequest(execution:CloudProviderExecution,operation:string,raw:unknown):unknown{
   execution.lease.assertLive();const args=record(raw);
   const apiKey=execution.coordinator.environment().CURSOR_API_KEY;
@@ -27,14 +27,15 @@ export function cloudCursorRequest(execution:CloudProviderExecution,operation:st
   };
   const options=(value:unknown)=>{
     const original=record(value),mcpServers:Record<string,CursorMcpConfig>={};
-    for(const server of execution.productServers){
-      if(server.transport==="stdio")throw new Error("Cloud product tool registration is invalid");
-      mcpServers[server.name]={url:server.url,...(server.headers?{headers:server.headers}:{})};
+    for(const server of executionMcpServers(execution,[])!){
+      mcpServers[server.name]=server.transport==="stdio"?{type:"stdio",command:server.command,
+        ...(server.args?{args:server.args}:{}),...(server.env?{env:server.env}:{}),...(server.cwd?{cwd:server.cwd}:{})}:
+        {...(server.transport==="sse"?{type:"sse" as const}:{}),url:server.url,...(server.headers?{headers:server.headers}:{})};
     }
-    return {apiKey,model:model(original.model),cwd:CWD,tools:["mcp","askQuestion","updateTodos","readTodos"],
-      local:{cwd:CWD,settingSources:[],enableAgentRetries:false},
-      ...mode(original.mode),mcpServers,
-      zerosWorkloadTools:{inputSchema:execution.tools.inputSchema}};
+    return {apiKey,model:model(original.model),cwd:CWD,
+      local:{cwd:CWD,settingSources:execution.lease.customization?["user"]:[],enableAgentRetries:false,
+        autoReview:record(original.local).autoReview===true},
+      ...mode(original.mode),mcpServers};
   };
   switch(operation){
     case "agent.create":case "platform.prewarm":return options(args);

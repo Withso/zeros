@@ -15,6 +15,7 @@ import { deleteChat, listChats, upsertChat, wasChatDeleted } from "../db/chats";
 import { deleteTurnsForChat, deleteTurnsFrom } from "../db/turns";
 import { clearChatMessages, windowChatMessages, listChatMessagesSince, upsertChatMessage } from "../db/messages";
 import { getTurn, startTurn } from "../db/turns";
+import { getWorkspaceById, insertWorkspace, updateWorkspace } from "../git/state";
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
 const authority = {
@@ -193,16 +194,17 @@ function createRecordServer(initialEntries: readonly RemoteEntry[] = []) {
           `${b.entityKind}\0${b.entityId}`,
         ),
       );
-      const page = all
-        .filter(
+      const remaining = all.filter(
           (entry) =>
             after === null || `${entry.entityKind}\0${entry.entityId}` > after,
-        )
-        .slice(0, 10);
+        );
+      const page = remaining.slice(0, 10);
+      const last = page.at(-1);
       return Response.json({
         currentRevision: revision,
         entries: page,
-        next: null,
+        next: remaining.length > page.length && last
+          ? { entityKind: last.entityKind, entityId: last.entityId } : null,
       });
     }
     const body = JSON.parse(
@@ -247,6 +249,67 @@ afterEach(async () => {
 });
 
 describe("cloud durable record runtime", () => {
+  it("revalidates an acknowledged projection without rereading every history page", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-page-cache-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    const server = createRecordServer([
+      ...remoteConversation("completed"),
+      ...Array.from({ length: 205 }, (_, index) => {
+        const entry = remoteMessage("chat-1", `message-${index}`);
+        (entry.document as { ord: number }).ord = index + 1;
+        return entry;
+      }),
+    ]);
+    const runtime = new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch });
+    const reads = () => server.requestFetch.mock.calls.filter(([url]) => String(url).includes('/record/head')).length;
+    await runtime.synchronize(authority);
+    expect(reads()).toBe(21);
+    expect(windowChatMessages("chat-1", 1000)).toHaveLength(205);
+    const before = reads();
+    await runtime.synchronize(authority);
+    expect(reads() - before).toBe(1);
+    upsertChatMessage("chat-1", { msgId: "next-reply", kind: "text", payload: '{"role":"assistant","text":"hello"}', createdAt: NOW });
+    await runtime.synchronize(authority);
+    const afterAppend = reads();
+    await runtime.synchronize(authority);
+    expect(reads() - afterAppend).toBe(1);
+    expect(windowChatMessages("chat-1", 1000)).toHaveLength(206);
+    // An external revision invalidates the exact snapshot, including deletions.
+    server.deleteChildren();
+    const beforeDeletion = reads();
+    await runtime.synchronize(authority);
+    expect(reads() - beforeDeletion).toBeGreaterThan(1);
+    expect(windowChatMessages("chat-1", 1000)).toEqual([]);
+    const beforeReplacement = reads();
+    await runtime.synchronize({ ...authority, generation: 2 });
+    expect(reads() - beforeReplacement).toBeGreaterThan(1);
+  });
+
+  it("rereads the server after an append acknowledgement is lost", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-lost-cache-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    const server = createRecordServer(remoteConversation("completed"));
+    let loseAcknowledgement = false;
+    const requestFetch = vi.fn<typeof fetch>(async (url, init) => {
+      const response = await server.requestFetch(url, init);
+      if (loseAcknowledgement && new URL(String(url)).pathname.endsWith('/record/append')) {
+        loseAcknowledgement = false;
+        throw Error('Lost acknowledgement');
+      }
+      return response;
+    });
+    const runtime = new CloudWorkspaceRecordRuntime(root, { fetch: requestFetch });
+    await runtime.synchronize(authority);
+    const before = server.appendBodies.length;
+    upsertChatMessage("chat-1", { msgId: "new-reply", kind: "text", payload: '{"role":"assistant","text":"hello"}', createdAt: NOW });
+    loseAcknowledgement = true;
+    await expect(runtime.synchronize(authority)).rejects.toThrow('Lost acknowledgement');
+    expect(server.appendBodies).toHaveLength(before + 1);
+    await runtime.synchronize(authority);
+    expect(server.appendBodies).toHaveLength(before + 1);
+    expect(windowChatMessages("chat-1", 100)).toHaveLength(1);
+  });
+
   it("does not restore a locally reset transcript and its deleted turns before publishing deletion", async () => {
     const root=await mkdtemp(path.join(os.tmpdir(),"zeros-record-reset-"));roots.push(root);setZerosDbPathForTesting(":memory:");
     const server=createRecordServer([...remoteConversation("completed"),remoteMessage("chat-1","message-1")]);
@@ -582,6 +645,21 @@ describe("cloud durable record runtime", () => {
       { chatId: "chat-1", msgId: "message-a" },
       { chatId: "chat-1", msgId: "message-b" },
     ]);
+  });
+
+  it("restores the cloud primary workspace's target branch, mode and PR after a worker replacement", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-cloud-metadata-"));
+    roots.push(root);
+    const primary = { id: "local-main", canonicalId: authority.workspaceId, organizationId: authority.organizationId, placement: "cloud" as const,
+      repoRoot: root, path: root, repoSlug: "fixture", branch: "cloud/work", baseBranch: "main", status: "in-progress" as const, createdAt: NOW,
+      archivedAt: null, stashRef: null, prNumber: null, prState: null, prUrl: null, agentId: null, lastActiveAt: null };
+    setZerosDbPathForTesting(":memory:"); openZerosDb(); insertWorkspace(primary);
+    updateWorkspace("local-main", { baseBranch: "release", viewMode: "design", prNumber: 42, prState: "draft", prUrl: "https://github.com/example/fixture/pull/42" });
+    const server = createRecordServer();
+    await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize(authority);
+    closeZerosDb(); setZerosDbPathForTesting(":memory:"); openZerosDb(); insertWorkspace(primary);
+    await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize(authority);
+    expect(getWorkspaceById("local-main")).toMatchObject({ ...primary, baseBranch: "release", viewMode: "design", prNumber: 42, prState: "draft", prUrl: "https://github.com/example/fixture/pull/42" });
   });
 
   it.each([

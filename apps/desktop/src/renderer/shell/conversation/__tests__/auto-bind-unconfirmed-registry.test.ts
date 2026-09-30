@@ -31,7 +31,7 @@ describe("auto-bind against an unconfirmed registry", () => {
   it("records a provisional binding whenever the snapshot is unconfirmed", () => {
     const source = chatViewSource();
     expect(source).toContain(
-      "if (!hasConfirmedAgents()) rememberProvisionalBinding(chat.id, prior);",
+      "if (!hasConfirmedWorkspaceAgents(chat.folder)) rememberProvisionalBinding(chat.id, prior);",
     );
     expect(source).not.toContain(
       "if (agents === null) rememberProvisionalBinding",
@@ -45,13 +45,13 @@ describe("auto-bind against an unconfirmed registry", () => {
     );
     expect(start).toBeGreaterThan(-1);
     const guard = source.slice(source.lastIndexOf("useEffect", start), start);
-    expect(guard).toContain("!hasConfirmedAgents()");
+    expect(guard).toContain("!hasConfirmedWorkspaceAgents(chat?.folder)");
   });
 
   it("keeps asking the engine while the snapshot is still a guess", () => {
     const source = chatViewSource();
     expect(source).toContain(
-      'if (hasConfirmedAgents() || bridgeStatus !== "connected") return;',
+      'if (isCloudWorkspace(chat?.folder) || hasConfirmedAgents() || bridgeStatus !== "connected") return;',
     );
   });
 });

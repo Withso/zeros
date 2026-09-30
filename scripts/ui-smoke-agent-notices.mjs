@@ -13,6 +13,60 @@ export async function runAgentNoticesSmoke({ page, check }) {
     "https://example.com/usage",
   );
   await expect(fixture.locator("[data-agent-notice]")).toHaveCount(5);
+  const geometry = await fixture
+    .locator("[data-agent-notice]")
+    .evaluateAll((notices) =>
+      notices.every((notice) => {
+        const style = getComputedStyle(notice);
+        const text = getComputedStyle(notice.firstElementChild);
+        const buttons = [...notice.querySelectorAll("button")];
+        const actions = buttons.map(
+          (button) => button.parentElement === notice ? button : button.parentElement,
+        );
+        // The hover wash gets 6px side padding while the first label stays
+        // aligned with the message text.
+        const textLeft = notice.firstElementChild.getBoundingClientRect().left;
+        const firstLabelLeft = buttons[0]
+          ? buttons[0].getBoundingClientRect().left + parseFloat(getComputedStyle(buttons[0]).paddingLeft)
+          : textLeft;
+        return (
+          !/mono/i.test(text.fontFamily) &&
+          style.borderRadius === "12px" &&
+          style.padding === "8px 12px" &&
+          actions.every((action) => getComputedStyle(action).marginTop === "4px") &&
+          buttons.every((button) => {
+            const { paddingLeft, paddingRight } = getComputedStyle(button);
+            return paddingLeft === "6px" && paddingRight === "6px";
+          }) &&
+          Math.abs(firstLabelLeft - textLeft) < 0.5
+        );
+      }),
+    );
+  check(
+    "Notices match the sent message's sans text, 12px corners and 8px/12px padding with padded actions 4px below, aligned to the text",
+    geometry,
+  );
+  const spacing = await page.evaluate(() => {
+    const margin = (element) => getComputedStyle(element).margin;
+    const notices = document.querySelector("#agent-notice-fixture");
+    return {
+      lane: margin(
+        document.querySelector("#failed-turn-transcript [data-turn-failure-card]"),
+      ),
+      firstInLane: margin(notices.querySelector("[data-turn-failure-card]")),
+      gapManaged: [
+        ...notices.querySelectorAll("[data-agent-notice]:not([data-turn-failure-card])"),
+      ].map(margin),
+    };
+  });
+  check(
+    "Failure cards keep 8px margins in the gapless turn lane, without one above as its first child; other notices rely on container gaps",
+    spacing.lane === "8px 0px" &&
+      spacing.firstInLane === "0px 0px 8px" &&
+      spacing.gapManaged.length === 2 &&
+      spacing.gapManaged.every((value) => value === "0px"),
+    JSON.stringify(spacing),
+  );
   const originalTheme = await page.locator("html").getAttribute("data-theme");
   const originalViewport = page.viewportSize();
   try {
@@ -43,6 +97,36 @@ export async function runAgentNoticesSmoke({ page, check }) {
         `Errors, warnings and sign-in notices use brown without overflow in ${theme} mode`,
         readable,
       );
+      const hover = await card.evaluate((element) => {
+        const probe = document.createElement("span");
+        element.appendChild(probe);
+        probe.style.color = "var(--agent-notice-action-hover)";
+        const popped = getComputedStyle(probe).color;
+        probe.style.color = "var(--brown-fg)";
+        const rest = getComputedStyle(probe).color;
+        probe.remove();
+        const luma = (color) => {
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = 1;
+          const context = canvas.getContext("2d");
+          context.fillStyle = color;
+          context.fillRect(0, 0, 1, 1);
+          const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        return { popped, rest, lift: luma(popped) - luma(rest) };
+      });
+      await retry.hover();
+      await expect(retry).toHaveCSS("color", hover.popped);
+      await expect(retry.locator("svg")).toHaveCSS("color", hover.popped);
+      await expect(retry).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      // "Pop" means more contrast: lighter on dark, deeper on Light.
+      check(
+        `Notice actions pop their label and icon on hover without a fill in ${theme} mode`,
+        theme === "dark" ? hover.lift > 0 : hover.lift < 0,
+        JSON.stringify(hover),
+      );
+      await page.mouse.move(0, 0);
     }
   } finally {
     await page.evaluate((value) => {

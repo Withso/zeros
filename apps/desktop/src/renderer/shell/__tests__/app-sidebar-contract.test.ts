@@ -210,8 +210,11 @@ describe("sidebar workspace rows", () => {
       "/** Placeholder row",
     );
     expect(row).toContain("<WorkspaceContextMenu");
-    expect(row).toContain("onPointerEnter={() => onPrefetch(workspace)}");
-    expect(row).toContain("onFocus={() => onPrefetch(workspace)}");
+    for (const event of ["onPointerEnter", "onFocus"]) {
+      const handler = between(row, `${event}={() => {`, "}}");
+      expect(handler).toContain("if (!surfaceActive) return;");
+      expect(handler).toContain("onPrefetch(workspace);");
+    }
     expect(row).toContain('data-workspace-tab="true"');
     expect(row).toContain("data-workspace-id={workspace.id}");
   });

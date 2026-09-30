@@ -16,6 +16,8 @@ const HOST_KEY_COMMAND =
   "/usr/bin/sudo -n /usr/bin/cat /etc/ssh/ssh_host_ed25519_key.pub";
 const ENSURE_SUPERVISOR_COMMAND =
   "/usr/bin/sudo -n /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs";
+// A fixed list, no path/argv disclosure and no dependency on the restored Node.
+const BOOTSTRAP_FILE_PROBE_COMMAND = "/bin/sh -c 'for f in /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs /opt/zeros/dist-engine/cli.js; do if test -f \"$f\"; then printf 1; else printf 0; fi; done'";
 const PRIVATE_ADDRESSES = new BlockList();
 for (const [address, prefix] of [
   ["0.0.0.0", 8],
@@ -462,12 +464,20 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
         prepared.timedOut ||
         prepared.stdoutTruncated ||
         prepared.stdout !== "ready\n"
-      )
-        throw new CloudProviderError(
-          "provider_bootstrap_unavailable",
-          "Boat runtime broker is not ready",
-          true,
-        );
+      ) {
+        let files;
+        try {
+          const probe = await this.options.client.request(`/sandboxes/${input.resourceId}/commands`, {
+            method: "POST", body: { command: BOOTSTRAP_FILE_PROBE_COMMAND, timeoutSeconds: 5 }, signal,
+          });
+          if (probe.success === true && probe.exitCode === 0 && !probe.stdoutTruncated && typeof probe.stdout === "string" && /^[01]{4}$/.test(probe.stdout))
+            files = { node: probe.stdout[0] === "1", supervisor: probe.stdout[1] === "1", setup: probe.stdout[2] === "1", engine: probe.stdout[3] === "1" };
+        } catch { /* Diagnostic transport must not weaken bootstrap rejection. */ }
+        throw Object.assign(new CloudProviderError(
+          "provider_bootstrap_unavailable", "Boat runtime broker is not ready", true,
+        ), { diagnostic: { version: 1, phase: "bootstrap", exit: prepared.timedOut ? "timeout" : prepared.stdoutTruncated ? "overflow" :
+          typeof prepared.exitCode === "number" && prepared.exitCode !== 0 ? "nonzero" : "unknown", ...(files ? { files } : {}) } });
+      }
       const key = await this.options.client.request(
         `/sandboxes/${input.resourceId}/commands`,
         {

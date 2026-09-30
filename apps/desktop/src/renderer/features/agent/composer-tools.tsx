@@ -10,6 +10,8 @@ import {
 } from "react";
 import { Blocks, LoaderCircle, RefreshCw } from "lucide-react";
 import { ComposerToolGroups } from "./composer-tool-groups";
+import { NativeBrowserAvailability } from "./native-browser-availability";
+import type { CloudBrowserCapability } from "@zeros/protocol/containment";
 import {
   sessionToolQuerySchema,
   type SessionToolQuery,
@@ -52,6 +54,8 @@ interface ComposerToolsProps {
   onPrepare?: () => void;
   preparing?: boolean;
   preparationError?: string;
+  cloudWorkspace?: boolean;
+  browserCapability?: CloudBrowserCapability;
 }
 
 /** A locally stateful composer island; opening never re-renders the transcript. */
@@ -79,6 +83,8 @@ function ToolsPopover({
   onPrepare,
   preparing = false,
   preparationError,
+  cloudWorkspace = false,
+  browserCapability,
 }: ComposerToolsProps) {
   const bridge = useBridge();
   const resource = bridge ? sessionToolsResource(bridge) : offline;
@@ -260,6 +266,11 @@ function ToolsPopover({
             <RefreshCw className="size-3.5" />
           </Button>
         </div>
+        {cloudWorkspace && (
+          <div className="mb-3">
+            <NativeBrowserAvailability provider={agentId} capability={browserCapability} />
+          </div>
+        )}
         {!enabled ? (
           <p className="text-fg2 text-xs">
             Connect to the workspace to view tools.

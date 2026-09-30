@@ -39,6 +39,7 @@ import {
 } from "../env/launcher-env";
 import { randomUUID } from "node:crypto";
 import type { RepoTaskBoundaryFactory } from "../agents/containment/types";
+import { workspaceScriptIdentity, type ScriptWorkspaceIdentity } from "../env/workspace-identity";
 
 export interface SetupHookOptions {
   workspaceId: string;
@@ -100,10 +101,12 @@ interface RunInlineScriptArgs {
   kind: "setup" | "archive";
   command: string;
   workspaceId: string;
+  workspace?: ScriptWorkspaceIdentity | null;
   worktreePath: string;
   repoRoot: string;
   baseBranch: string;
   boundaryFactory?: RepoTaskBoundaryFactory;
+  timeoutMs?: number;
 }
 
 const INLINE_SCRIPT_MAX_BYTES = 256 * 1024 * 1024;
@@ -234,6 +237,7 @@ export async function runInlineScript(
     ZEROS_WORKTREE_PATH: args.worktreePath,
     ZEROS_REPO_ROOT: args.repoRoot,
     ZEROS_BASE_BRANCH: args.baseBranch,
+    ...workspaceScriptIdentity(args.worktreePath, args.workspace),
   });
   try {
     const loginPath = sanitizeProbedPath(await getLoginShellPath());
@@ -246,7 +250,7 @@ export async function runInlineScript(
   const [shell, flag] =
     process.platform === "win32" ? ["cmd.exe", "/c"] : ["/bin/sh", "-c"];
   try {
-    await runContainedInlineScript(args, shell, flag, command, env);
+    await runContainedInlineScript(args, shell, flag, command, env, { timeoutMs: args.timeoutMs });
   } catch (err) {
     if (err instanceof RepoTaskContainmentTeardownError) {
       throw new GitError({
@@ -371,12 +375,14 @@ export async function buildSetupCommandEnv(ctx: {
   worktreePath: string;
   repoRoot: string;
   baseBranch: string;
+  workspace?: ScriptWorkspaceIdentity | null;
 }): Promise<Record<string, string>> {
   const env = buildSetupEnv({
     ZEROS_WORKSPACE_ID: ctx.workspaceId,
     ZEROS_WORKTREE_PATH: ctx.worktreePath,
     ZEROS_REPO_ROOT: ctx.repoRoot,
     ZEROS_BASE_BRANCH: ctx.baseBranch,
+    ...workspaceScriptIdentity(ctx.worktreePath, ctx.workspace),
   });
   env.TERM = "xterm-256color";
   env.COLORTERM = "truecolor";

@@ -9,6 +9,7 @@ import type {CloudAgentLease} from "./cloud-agent-lease";
 import {CloudLanguageService} from "./cloud-language-service";
 import {parseLanguageDocument} from "./cloud-language-document";
 import {LspError} from "./lsp-rpc";
+import {cloudGitAuthorEnvironment} from "../git/cloud-git-author";
 
 const MAX_OUTPUT=1024*1024,MAX_JOBS=8,MAX_CALLS=4;
 const FILE_HELPER="/opt/zeros/apps/desktop/src/engine/agents/containment/cloud-file-tool.mjs";
@@ -34,7 +35,8 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
     if(!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||!(cwd==="/srv/zeros/workspace"||cwd.startsWith("/srv/zeros/workspace/")))
       throw new Error("Cloud workload root is invalid");
     this.env={HOME:"/srv/zeros/home/agent",PATH:"/opt/zeros-runtime/bin:/usr/local/bin:/usr/bin:/bin",LANG:"C.UTF-8",
-      USER:"zeros-agent",LOGNAME:"zeros-agent",SHELL:"/bin/bash",TMPDIR:"/tmp",ZEROS_WORKTREE_PATH:cwd};
+      USER:"zeros-agent",LOGNAME:"zeros-agent",SHELL:"/bin/bash",TMPDIR:"/tmp",ZEROS_WORKTREE_PATH:cwd,
+      ...cloudGitAuthorEnvironment(lease.gitAuthor??null)};
     lease.attach(this);lease.attach(boundary);
   }
   private assertLive(){if(this.retired)throw unavailable();this.lease.assertLive();}

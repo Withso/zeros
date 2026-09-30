@@ -4,7 +4,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { AuthedUser } from "../auth.js";
 import { withSystemTx, withUserTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import {ensureUser} from "../auth.js";
 import {getSecuritySnapshot,listSecurityEvents} from "../security-events.js";
 import { ensureCloudPilotUser, seedReadyCloudWorkspace } from "./test-fixtures.js";
@@ -23,8 +23,7 @@ d("workspace-scoped multiplayer authority", () => {
   beforeAll(() => { pool = new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:5}); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     const member = await ensureCloudPilotUser(pool, {provider:"workos",providerSubject:`user_${randomUUID()}`,email:`member-${randomUUID()}@example.test`,displayName:"Member"});
     guestEmail = `guest-${randomUUID()}@example.test`;

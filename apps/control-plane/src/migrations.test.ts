@@ -1602,23 +1602,20 @@ d("migration ladder", () => {
     });
   });
 
-  it("replays from every intermediate revision", async () => {
-    // A deployment can be at ANY prior revision (a long-lived staging box, a
-    // restored backup, a rollback). Every suffix of the ladder must apply to
-    // the state its prefix leaves. This deliberately runs the full ladder once
-    // per starting revision, which can exceed Vitest's default on hosted
-    // Postgres even while every migration is making healthy progress.
-    for (let k = 0; k < LADDER.length; k++) {
-      await reset();
-      await applyThrough(k);
+  it.each(LADDER.map((_, revision) => revision))(
+    "replays from intermediate revision %i",
+    async (revision) => {
+      // A deployment can be at ANY prior revision (a long-lived staging box, a
+      // restored backup, a rollback). Every suffix of the ladder must apply to
+      // the state its prefix leaves. This deliberately runs the full ladder once
+      // per starting revision. Give each path its own bounded test so growing
+      // the ladder cannot exhaust one shared timeout while SQL is progressing.
+      await applyThrough(revision);
       const ran = await runMigrations(pool);
-      expect(ran, `applying from revision ${k}`).toEqual(LADDER.slice(k));
-    }
-    // This is O(n²) real DDL: every possible deployed prefix is upgraded through
-    // the full suffix. Forty-plus migrations exceed Vitest's generic 30-second
-    // unit-test ceiling on shared CI even while PostgreSQL is making progress.
-    // Keep the larger budget scoped to this exhaustive compatibility matrix.
-  }, 180_000);
+      expect(ran).toEqual(LADDER.slice(revision));
+    },
+    30_000,
+  );
 
   it("backfills immutable setup inputs and safely requeues pre-lease running work", async () => {
     const setupMigrationIndex = LADDER.findIndex((file) =>

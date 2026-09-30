@@ -16,7 +16,7 @@ const fixture = vi.hoisted(() => ({
   liveResolved: false,
   archivedResolved: false,
 }));
-vi.mock("react", () => ({ useMemo: (fn: () => unknown) => fn() }));
+vi.mock("react", async (importOriginal) => ({ ...await importOriginal<typeof import("react")>(), useMemo: (fn: () => unknown) => fn() }));
 vi.mock("../store", () => ({
   selectActiveFolder: () => fixture.folder,
   useWorkspaceStore: (selector: () => unknown) => selector(),

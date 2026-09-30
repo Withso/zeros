@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { ensureUser } from "../auth.js";
 import { withSystemTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { applyWorkOSIdentityEvent } from "../workos-events.js";
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
 import { seedReadyCloudWorkspace, seedReadyProCloudWorkspace } from "./test-fixtures.js";
@@ -26,8 +26,7 @@ d("cloud workspace paid-authority reconciliation", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   it("rolls a valid entitlement revision into a new immutable billing epoch", async () => {

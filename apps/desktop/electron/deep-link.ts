@@ -32,7 +32,7 @@
 //                                     handle it without a rebuild
 // ──────────────────────────────────────────────────────────
 
-import { app } from "electron";
+import { app, shell } from "electron";
 import {
   assertIsDirectory,
   isPlausibleProject,
@@ -84,6 +84,14 @@ export function registerProtocol(): void {
   } else {
     app.setAsDefaultProtocolClient(s);
   }
+}
+
+/** A sibling Dev checkout may have claimed the channel since startup. Prefer
+ * the initiating app before OAuth opens, including older checkouts that cannot
+ * relay callbacks. Concurrent current checkouts still use the nonce-bound relay. */
+export async function openDesktopAuthBrowser(url: string): Promise<void> {
+  if (channel() === "dev") registerProtocol();
+  await shell.openExternal(url);
 }
 
 /** Parse a zeros:// URL and dispatch. Safe to call before the main
@@ -218,13 +226,16 @@ export async function handleUrl(rawUrl: string): Promise<void> {
       // macOS can deliver open-url before ready; safeStorage and the
       // main-process Auth0 session are not safe to touch until then.
       await app.whenReady();
+      const { completeGithubAppConnection, relayGithubAppCallback } = await import("./github-app-flow");
+      // A cold-launched sibling Dev window may never load its renderer (its
+      // dev server may be stopped). Forward first; only the owner exchanges.
+      if (relayGithubAppCallback({ nonce, error })) return;
       // main.ts creates the window inside that same whenReady turn, so by the
       // time we resume `emitEvent` no longer buffers. Without this the connected
       // / error events of a cold-launch callback are sent to a document that
       // cannot receive them: credential stored, but no toast, no analytics, and
       // no auth-cache invalidation.
       await whenRendererReady();
-      const { completeGithubAppConnection } = await import("./github-app-flow");
       await completeGithubAppConnection({ nonce, error });
     } catch {
       // Raw URLs and caught errors may contain OAuth material. Emit only a

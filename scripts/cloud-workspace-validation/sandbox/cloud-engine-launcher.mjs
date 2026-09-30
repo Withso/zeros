@@ -12,6 +12,7 @@ import {
   mkdirSync,
   openSync,
   readSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -26,6 +27,7 @@ import {
   cloudEngineViewEnvironment,
 } from "./cloud-engine-view.mjs";
 import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
+import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 
 function rootPath(file, directory = false) {
   if (realpathSync(file) !== file)
@@ -223,6 +225,18 @@ export function prepareCloudEngineView() {
   privateDirectory("/run/zeros/view/settings", 10003, 10001, 0o750);
   privateDirectory(profile.runtimeDirectory, 10003, 10003, 0o700);
   privateDirectory("/srv/zeros/state", 10003, 10003, 0o700);
+  rootPath(runtimeLayout.engineFilesRoot, true);
+  privateDirectory(runtimeLayout.attachmentTemporaryRoot, 10003, 10003, 0o700);
+  if (readdirSync(runtimeLayout.engineFilesRoot).some(name =>
+    !["workspace", "attachment-staging", "state", "home", "managed-settings"].includes(name)))
+    throw new Error("Unexpected cloud engine file projection");
+  for (const name of ["home", "state", "managed-settings", "home/agent", "home/capture"]) {
+    const directory = path.join(runtimeLayout.engineFilesRoot, name);
+    rootPath(directory, true);
+    if (name === "home" ? readdirSync(directory).some(child => !["agent", "capture"].includes(child))
+      : readdirSync(directory).length > 0)
+      throw new Error("Unexpected cloud engine mount contents");
+  }
   for (const kind of ["uid", "gid"]) {
     const value = readCloudEngineKernelParameter(`/proc/sys/kernel/overflow${kind}`, 32).toString(
       "utf8",
@@ -363,6 +377,8 @@ if (
       ? "serve"
       : args.length === 1 && args[0] === "--qualify"
         ? "qualify"
+        : args.length === 1 && args[0] === "--qualify-agent"
+          ? "qualify-agent"
         : null;
   if (!operation) process.exitCode = 125;
   else

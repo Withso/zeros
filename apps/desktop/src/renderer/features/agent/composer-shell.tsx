@@ -12,6 +12,7 @@
 //   COMPOSER_FILE_ACCEPT    — canonical accept= string for the file picker
 //   COMPOSER_SURFACE_RADIUS — 18px corners for Create and workspace composers
 //   PROMPT_SURFACE_RADIUS   — 12px corners shared by the prompt surfaces
+//                             and the chat notices beside them
 // ──────────────────────────────────────────────────────────
 
 export const COMPOSER_FILE_ACCEPT =
@@ -21,7 +22,8 @@ export const COMPOSER_FILE_ACCEPT =
  * Sent messages and inline edits retain their existing prompt shape. */
 export const COMPOSER_SURFACE_RADIUS = "rounded-[18px]";
 
-/** 12px corners for sent user messages and their inline edit composer.
+/** 12px corners for sent user messages, their inline edit composer, and the
+ *  chat error/warning/sign-in notices (agent-notice.tsx) that share their shape.
  *
  *  DERIVED from the radius scale (1.5 × --radius-lg) exactly like
  *  menu-surface.ts's 16px dropdown surface and settings-ui.tsx's

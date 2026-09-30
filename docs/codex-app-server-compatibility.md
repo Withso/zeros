@@ -259,12 +259,16 @@ projection; it does not expose a generic Codex capability bridge:
   `thread/approveGuardianDeniedAction` consumes that authority once and revokes
   it only after confirmed success. Retry ids are not folded into durable chat
   messages.
-- Hook, MCP-progress, model-verification/reroute/buffering, environment,
+- Hook, MCP-progress, model-verification/reroute/buffering,
   external-import, Guardian, and MCP-health notifications are projected through
   existing Zeros transcript primitives. Exact-thread filters reject child
   events where the native contract is thread-scoped, late/replayed lifecycle
   edges cannot reopen completed work, and native paths, callback URLs, raw
   action payloads, and diagnostic strings stay adapter-side.
+- Environment connection/disconnection notifications are consumed without
+  transcript output. Retiring an exec-server after a turn is routine transport
+  lifecycle, not a tool call. Genuine turn failures remain visible. The renderer
+  also hides the exact synthetic connection records persisted by older builds.
 
 Claude's independent native auto-memory option is carried through its Agent SDK
 adapter. Cursor currently exposes no equivalent public SDK setting, goal, or

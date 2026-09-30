@@ -391,7 +391,7 @@ function withSaveLock<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
 export function setWorkingDirectories(
   cwd: string,
   included: string[],
-  options: { forceSparse?: boolean; designRoots?: readonly string[] } = {},
+  options: { forceSparse?: boolean; designRoots?: readonly string[]; assertAuthorized?: () => void } = {},
 ): Promise<SetWorkingDirectoriesResult> {
   return withSaveLock(cwd, () =>
     applyWorkingDirectories(cwd, included, options),
@@ -401,7 +401,7 @@ export function setWorkingDirectories(
 async function applyWorkingDirectories(
   cwd: string,
   included: string[],
-  options: { forceSparse?: boolean; designRoots?: readonly string[] },
+  options: { forceSparse?: boolean; designRoots?: readonly string[]; assertAuthorized?: () => void },
 ): Promise<SetWorkingDirectoriesResult> {
   const state = await getWorkingDirectories(cwd, options);
   if (!state.supported) {
@@ -431,6 +431,9 @@ async function applyWorkingDirectories(
   }
 
   // Everything selected → return to the non-sparse default.
+  // Cloud authority may expire while the save lock or Git reads are pending.
+  // The Local caller has no additional admission callback.
+  options.assertAuthorized?.();
   if (wanted.length === state.all.length && !options.forceSparse) {
     if (state.sparse) await runGit(cwd, ["sparse-checkout", "disable"]);
     return { ...(await getWorkingDirectories(cwd, options)), leftBehind: [] };

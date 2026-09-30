@@ -32,7 +32,12 @@ describe("qualified cloud GitHub credential coordinator", () => {
         expect(init).toMatchObject({ method: "POST", redirect: "error" });
         expect(JSON.parse(String(init?.body))).toEqual({
           repositories: ["private-fixture"],
-          permissions: { contents: "read" },
+          permissions: {
+            contents: "read",
+            pull_requests: "read",
+            checks: "read",
+            statuses: "read",
+          },
         });
         return Response.json(
           {

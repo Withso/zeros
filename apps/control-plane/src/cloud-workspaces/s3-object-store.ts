@@ -33,9 +33,13 @@ export class S3CloudWorkspaceObjectStore implements CloudWorkspaceObjectStore {
   constructor(
     private readonly client: S3Client,
     private readonly bucket: string,
+    private readonly prefix = "",
   ) {
     if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) {
       throw new Error("workspace object bucket is invalid");
+    }
+    if (prefix && !/^dev\/[a-f0-9]{24}\/[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\/$/.test(prefix)) {
+      throw new Error("workspace object prefix is invalid");
     }
   }
 
@@ -54,7 +58,7 @@ export class S3CloudWorkspaceObjectStore implements CloudWorkspaceObjectStore {
       await this.client.send(
         new PutObjectCommand({
           Bucket: this.bucket,
-          Key: key,
+          Key: this.prefix + key,
           Body: bytes,
           ContentLength: bytes.byteLength,
           ContentType: "application/octet-stream",
@@ -68,7 +72,7 @@ export class S3CloudWorkspaceObjectStore implements CloudWorkspaceObjectStore {
       if (status(error) !== 412)
         throw new Error("workspace object upload failed");
       const head = await this.client
-        .send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }), {
+        .send(new HeadObjectCommand({ Bucket: this.bucket, Key: this.prefix + key }), {
           abortSignal: signal,
         })
         .catch(() => {
@@ -93,7 +97,7 @@ export class S3CloudWorkspaceObjectStore implements CloudWorkspaceObjectStore {
     deadline.unref();
     try {
       const response = await this.client.send(
-        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+        new GetObjectCommand({ Bucket: this.bucket, Key: this.prefix + key }),
         { abortSignal: controller.signal },
       );
       body = response.Body as Readable | undefined;
@@ -152,7 +156,7 @@ export class S3CloudWorkspaceObjectStore implements CloudWorkspaceObjectStore {
       await this.client.send(
         new PutObjectCommand({
           Bucket: this.bucket,
-          Key: key,
+          Key: this.prefix + key,
           Body: new Uint8Array(),
           ContentLength: 0,
           Metadata: { [FENCE_METADATA]: FENCE_VERSION },

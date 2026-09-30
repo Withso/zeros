@@ -1,12 +1,13 @@
 /* Trusted outer lifetime owner for a private PID namespace. Not setuid.
  * A disappearing PGID is not proof: detached descendants are adopted here,
  * and the private receipt is written only after waitpid reports ECHILD.
- * TERM requests destruction of the namespace launcher, never of this reaper.
+ * TERM retires owned children, including adopted launchers, never this reaper.
  * If reaping cannot complete, the engine must quarantine the entire worker.
  */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,24 @@
 #include <unistd.h>
 
 static void fail(void) { _exit(125); }
+
+static void stop_children(void) {
+  char path[96];
+  int length = snprintf(path, sizeof(path), "/proc/self/task/%ld/children", (long)getpid());
+  if (length < 0 || (size_t)length >= sizeof(path)) fail();
+  FILE *children = fopen(path, "re");
+  if (!children) fail();
+  long pid;
+  int scanned;
+  /* This single-threaded subreaper does not wait while reading or signalling.
+   * Its direct/adopted children remain unreaped, so their PIDs cannot be reused.
+   * Killing a launcher may adopt more children: repeat after CHLD, and accept
+   * only waitpid's ECHILD as proof. Never signal a PGID or unrelated process. */
+  while ((scanned = fscanf(children, "%ld", &pid)) == 1) {
+    if (pid <= 1 || pid > INT_MAX || (kill((pid_t)pid, SIGKILL) && errno != ESRCH)) fail();
+  }
+  if (scanned != EOF || ferror(children) || fclose(children)) fail();
+}
 
 int main(int argc, char **argv) {
   if (argc < 5 || argv[1][0] != '/' || strcmp(argv[3], "--") || argv[4][0] != '/') fail();
@@ -56,16 +75,12 @@ int main(int argc, char **argv) {
     execv(argv[4], &argv[4]);
     fail();
   }
-  int primary_status = 125 << 8, primary_alive = 1, stopping = 0;
+  int primary_status = 125 << 8, stopping = 0;
   for (;;) {
-    if (stopping && primary_alive) {
-      /* The unreaped direct child PID cannot be reused. bwrap's parent-death
-       * contract kills PID 1; the kernel kills every namespace descendant. */
-      if (kill(child, SIGKILL) && errno != ESRCH) fail();
-    }
+    if (stopping) stop_children();
     int status;
     pid_t reaped = waitpid(-1, &status, WNOHANG);
-    if (reaped == child) { primary_status = status; primary_alive = 0; }
+    if (reaped == child) primary_status = status;
     else if (reaped < 0) {
       if (errno == EINTR) continue;
       if (errno != ECHILD) fail();

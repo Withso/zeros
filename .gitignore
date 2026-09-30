@@ -14,6 +14,9 @@ dist/
 dist-engine/
 dist-electron/
 release/
+# Release orchestration is source, not a packaged desktop output directory.
+!scripts/release/
+!scripts/release/**
 binaries/
 /lib/
 *.tgz
@@ -49,6 +52,9 @@ yarn-error.log*
 !.env.example
 !**/.env.example
 !/.env.agent.example
+
+# Portable Dev infrastructure profile. The example has a different filename.
+zeros-dev-env.json
 
 # Cloudflare Workers local secrets (`wrangler dev`) — plaintext service keys,
 # must NEVER be committed. A `.dev.vars.example` template is exempted so one

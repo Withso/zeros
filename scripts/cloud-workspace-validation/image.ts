@@ -138,11 +138,13 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): Image {
         // 4. Seed a physically separate writable checkout. Its origin retains
         //    the operator-selected URL even though the local clone avoids a
         //    second network transfer.
+        "install -d -o root -g root -m 0755 /srv/zeros/files",
         `git clone --no-hardlinks ${engineDirectory} ${workspaceDirectory}`,
         `git -C ${workspaceDirectory} remote set-url origin ${repositoryUrl}`,
         `chown -R ${SANDBOX_AGENT_UID}:${SANDBOX_AGENT_GID} ${workspaceDirectory}`,
         `find ${workspaceDirectory} -type d -exec setfacl -m u:zeros-agent:rwx,d:u:zeros-agent:rwx,d:m:rwx {} +`,
         `find ${workspaceDirectory} -type f -exec setfacl -m u:zeros-agent:rw- {} +`,
+        `cd ${engineDirectory} && node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs`,
         `mkdir -p ${SANDBOX_DATA_DIR}/workspaces /srv/zeros/log /etc/zeros`,
         `chown -R 10003:10003 ${SANDBOX_DATA_DIR}`,
         `chmod 0700 ${SANDBOX_DATA_DIR} ${SANDBOX_DATA_DIR}/workspaces`,

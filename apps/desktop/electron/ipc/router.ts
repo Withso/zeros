@@ -49,6 +49,7 @@ const commandTable: Record<string, CommandHandler> = {
   app_info: notImpl("app_info", 1),
   cursor_subscription: notImpl("cursor_subscription", 1),
   provider_subscription: notImpl("provider_subscription", 1),
+  cloud_provider_auth: notImpl("cloud_provider_auth", 1),
 
   // ── App settings (plain-JSON, main-readable) + engine restart ──
   app_setting_get: notImpl("app_setting_get", 1),
@@ -80,6 +81,7 @@ const commandTable: Record<string, CommandHandler> = {
   cloud_workspace_tunnel_start: notImpl("cloud_workspace_tunnel_start", 3),
   cloud_workspace_access_revoke: notImpl("cloud_workspace_access_revoke", 3),
   cloud_workspace_runtime_open: notImpl("cloud_workspace_runtime_open", 3),
+  cloud_workspace_capability: notImpl("cloud_workspace_capability", 3),
   cloud_workspace_runtime_refresh: notImpl(
     "cloud_workspace_runtime_refresh",
     3,
@@ -192,6 +194,7 @@ const commandTable: Record<string, CommandHandler> = {
   //  bridge; only the GitHub-auth commands run on this IPC channel.)
   gh_auth_snapshot: notImpl("gh_auth_snapshot", 3.7),
   gh_app_cancel: notImpl("gh_app_cancel", 3.7),
+  gh_cloud: notImpl("gh_cloud", 3.7),
   gh_app_connect: notImpl("gh_app_connect", 3.7),
   gh_method_select: notImpl("gh_method_select", 3.7),
   gh_pat_connect: notImpl("gh_pat_connect", 3.7),

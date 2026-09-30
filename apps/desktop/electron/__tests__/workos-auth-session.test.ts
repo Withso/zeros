@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => {
     revoke: vi.fn(),
     setSecret: vi.fn(),
     workosConfigured: false,
+    appOrigin: "https://app-alpha.zeros.build",
+    apiOrigin: "https://api-alpha.zeros.build",
   };
 });
 
@@ -49,7 +51,7 @@ vi.mock("../cross-process-lock", () => ({
 }));
 
 vi.mock("../app-base-url", () => ({
-  appBaseUrl: vi.fn(() => "https://app-alpha.zeros.build"),
+  appBaseUrl: vi.fn(() => mocks.appOrigin),
 }));
 
 vi.mock("../workos-desktop-runtime", () => ({
@@ -74,7 +76,7 @@ vi.mock("../workos-desktop-config", () => ({
 }));
 
 vi.mock("../workos-desktop-account", () => ({
-  controlPlaneBaseUrl: () => "https://api-alpha.zeros.build",
+  controlPlaneBaseUrl: () => mocks.apiOrigin,
 }));
 
 import { parseStoredTokenSnapshot } from "../auth-session-record";
@@ -110,6 +112,8 @@ describe("WorkOS desktop safe-storage session lifecycle", () => {
     mocks.raw = null;
     mocks.readError = null;
     mocks.workosConfigured = false;
+    mocks.appOrigin = "https://app-alpha.zeros.build";
+    mocks.apiOrigin = "https://api-alpha.zeros.build";
     mocks.network.mockReset();
     vi.stubGlobal("fetch", mocks.network);
     mocks.refresh.mockReset();
@@ -120,6 +124,22 @@ describe("WorkOS desktop safe-storage session lifecycle", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
+  });
+
+  it("uses a hosted workspace's isolated WorkOS contract during session migration", () => {
+    const owner = "a".repeat(24);
+    mocks.appOrigin = `https://app-dev-${owner}.example.test`;
+    mocks.apiOrigin = `https://api-dev-${owner}.example.test`;
+    mocks.workosConfigured = true;
+    vi.stubEnv("ZEROS_CHANNEL", "dev"); vi.stubEnv("ZEROS_ISOLATE", "1"); vi.stubEnv("ZEROS_DEV_ENVIRONMENT", "hosted");
+    vi.stubEnv("ZEROS_DEV_AUTH_PROFILE", JSON.stringify({ version: 1, owner, domain: "example.test", authEnvironment: "alpha",
+      webClientId: "client_web_alpha", desktopClientId: "client_desktop_alpha", audience: "https://api-alpha.zeros.build",
+      appOrigin: mocks.appOrigin, apiOrigin: mocks.apiOrigin, issuer: "https://api.workos.com/user_management/client_web_alpha",
+      jwksUrl: "https://api.workos.com/sso/jwks/client_web_alpha" }));
+    mocks.raw = JSON.stringify({ provider: "auth0", accessToken: "legacy-access", refreshToken: "legacy-refresh",
+      expiresAt: Date.now() + 300_000, sub: "auth0|legacy", email: "person@example.com", name: null });
+    expect(authGetSessionUser({}, {} as never)).toBeNull();
+    expect(mocks.raw).toBeNull(); expect(mocks.network).not.toHaveBeenCalled();
   });
 
   it("retires a legacy Dev session once after Alpha WorkOS is configured, without calling the old refresh endpoint", async () => {

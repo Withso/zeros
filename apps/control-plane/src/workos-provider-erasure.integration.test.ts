@@ -4,7 +4,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { withSystemTx, type Tx } from "./db.js";
-import { runMigrations } from "./migrate.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import {
   workOSProviderErasureFenceStatus,
   workOSProviderSubjectHash,
@@ -21,8 +21,7 @@ d("WorkOS provider erasure readiness", () => {
   });
   afterAll(async () => pool.end());
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
   });
 
   const status = (kind: "user" | "organization", id: string) =>

@@ -13,3 +13,14 @@ describe("private coordinator canary deadline",()=>{
     await vi.advanceTimersByTimeAsync(5000);await failed;expect(close).toHaveBeenCalledOnce();expect(controller.signal.aborted).toBe(true);
   });
 });
+describe("private coordinator canary failure",()=>{
+  // The canary's stderr can carry sandbox paths; its exit status is a fixed
+  // number that tells an operator which isolation check (or the sandbox
+  // launcher itself) refused admission.
+  it.each([[91,"ZEROS_CANARY_EXIT_91"],[1,"ZEROS_CANARY_EXIT_1"],[0,"ZEROS_CANARY_OUTPUT"],[null,"ZEROS_CANARY_SIGNAL"]])("classifies exit %i as %s",async(code,expected)=>{
+    const stdout=new PassThrough();stdout.end(code===0?"unexpected":"");
+    const canary={stdout,wait:async()=>({code,signal:null})} as unknown as BoundaryProcess;
+    const lease={signal:new AbortController().signal,close:vi.fn(async()=>{}),retire:vi.fn(),assertLive:vi.fn()} as unknown as CloudAgentLease;
+    await expect(attestCloudCoordinator(lease,canary,"zeros-native-provider-v1")).rejects.toMatchObject({message:"Private coordinator admission failed",code:expected});
+  });
+});

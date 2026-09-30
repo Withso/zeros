@@ -24,6 +24,8 @@ import { warmIgnoredRoots } from "./workbench/tabs/ignored-entries-cache";
 import { resolveReviewProvider } from "./pr/review-provider";
 import { parseRemote } from "./pr/github-url";
 import { warmDesignWorkspaceSnapshot } from "@/renderer/features/design-workspace/state/design-workspace-cache";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
+import { warmCloudWorkspaceDestination } from "../state/cloud-workspace-warmup";
 
 /** Complete identity needed to navigate before an authoritative workspace list
  * is warm. Engine Workspace rows satisfy this shape directly. */
@@ -36,9 +38,15 @@ export type WorkspaceNavigationTarget = Pick<Workspace, "path" | "repoRoot"> &
 export function prefetchWorkspaceSurface(
   workspace: WorkspaceNavigationTarget,
 ): void {
-  if (workspaceIsReadOnly(workspace)) return;
   const folder = workspace.path;
   if (!folder) return;
+  if (isCloudWorkspace(folder)) {
+    // Stopped/archived history is readable without compute. In particular do
+    // not fall through to file/Git/registry calls that require a live worker.
+    void warmCloudWorkspaceDestination(folder, true).catch(() => {});
+    return;
+  }
+  if (workspaceIsReadOnly(workspace)) return;
   warmWorkspaceFiles(folder);
   // Both halves of the Files tree or neither: an ignored listing that lands
   // after the tracked one splices `.env`/`node_modules/` into the middle of the

@@ -1,11 +1,13 @@
 import {createHash,generateKeyPairSync,randomBytes,randomUUID,sign} from "node:crypto";
 import pg from "pg";
-import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from "vitest";
-import {runMigrations} from "../migrate.js";
+import {afterAll,afterEach,beforeAll,beforeEach,describe,expect,it,vi} from "vitest";
+import {DevConnectionRuntime} from "../dev-connections/runtime.js";
+import {resetMigratedTestDatabase} from "../test-database.js";
 import {ensureUser} from "../auth.js";
 import {ensureCloudPilotUser,seedReadyCloudWorkspace} from "./test-fixtures.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
+import { DatabaseCloudCustomizationService } from "./customization-store.js";
 import {DatabaseCloudWorkspaceActorSessionService} from "./actor-sessions.js";
 import {cloudWorkspaceDeviceProofMessage} from "./replicas.js";
 import {DatabaseCloudWorkspaceCommandService} from "./commands.js";
@@ -15,6 +17,7 @@ import {DatabaseCodexAuthRenewal} from "./codex-auth-renewal.js";
 import {syntheticCodexCache} from "./codex-auth-test-fixture.js";
 import {DatabaseCloudWorkspaceActionService} from "./action-receipts.js";
 import {interceptQueries,withAuthorityDeadlineBarrier,pauseBeforeQuery,withHeldEngineRows} from "./authority-deadline-test-utils.js";
+import {cloudWorkspaceHasActiveWork} from "./idle-workloads.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
 // Measured budgets for the approval path (see the statement-budget test).
@@ -36,8 +39,9 @@ d("private provider execution leases",()=>{
   }
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:6});});
   afterAll(async()=>{await pool.end();});
+  afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();});
   beforeEach(async()=>{
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await runMigrations(pool);fixture=await seedReadyCloudWorkspace(pool);
+    await resetMigratedTestDatabase(pool);fixture=await seedReadyCloudWorkspace(pool);
     await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,
       actorUserId:fixture.userId,sharingMode:"organization",expectedRevision:1});
     owner=await ensureUser(pool,{provider:"workos",providerSubject:`workos|${fixture.userId}`,email:`durable-${fixture.userId}@example.test`,displayName:"Owner",
@@ -53,6 +57,107 @@ d("private provider execution leases",()=>{
     delegationId=randomUUID();await credentials.delegate(owner.id,{id:delegationId,credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:owner.id,
       models:["grok-4.6"],expiresAt:new Date(Date.now()+3600_000).toISOString()});
   });
+  async function backgroundFixture(){
+    const commands=new DatabaseCloudWorkspaceCommandService({pool}),commandId=randomUUID(),executionId=randomUUID();
+    const payload={agentId:"cursor" as const,model:"grok-4.6",userMessageId:randomUUID(),prompt:[{type:"text" as const,text:"Synthetic background task"}],modeRevision:0,agentCredentialGrantId:delegationId};
+    await commands.mutate({...engine(),actorSessionId},{conversationId:"chat",operationId:randomUUID(),expectedRevision:0,action:{kind:"enqueue",commandId,payload}});
+    const claim=(await commands.claim(engine(),"chat",executionId))!;
+    const input={...admission(),executionId,source:{kind:"command" as const,commandId,claimId:claim.claimId}};
+    const lease=await service.admit(engine(),input,false,undefined,1);
+    const snapshot={tasks:[{taskId:"native-child",name:"Background task",startedAt:Date.now(),updatedAt:Date.now()}],waiting:true,processWork:true};
+    return {commands,commandId,claim,input,lease,payload,snapshot};
+  }
+  it("background lease survives foreground settlement and desktop disconnect, remains busy, and reloads durable tasks",async()=>{
+    const f=await backgroundFixture();
+    const state=await service.background(engine(),f.lease.leaseId,{kind:"retain",conversationId:"chat",revision:1,snapshot:f.snapshot});
+    await f.commands.settle(engine(),{commandId:f.commandId,claimId:f.claim.claimId,state:"succeeded",resultCode:null});
+    await pool.query("UPDATE cloud_workspace_actor_sessions SET last_renewed_at=now()-interval '2 minutes' WHERE id=$1",[actorSessionId]);
+    expect(await service.validate(engine(),f.lease.leaseId,true)).toHaveProperty("leaseId",f.lease.leaseId);
+    const reloaded=new DatabaseCloudAgentExecutionService(pool,encryption,false);
+    expect(await reloaded.background(engine(),f.lease.leaseId,{kind:"read",conversationId:"chat"})).toMatchObject({snapshot:f.snapshot,deadline:state.deadline});
+    expect(await withSystemTx(pool,tx=>cloudWorkspaceHasActiveWork(tx,engine()))).toBe(true);
+    await service.release(engine(),f.lease.leaseId);
+    await expect(reloaded.background(engine(),f.lease.leaseId,{kind:"read",conversationId:"chat"})).rejects.toThrow();
+    expect(await withSystemTx(pool,tx=>cloudWorkspaceHasActiveWork(tx,engine()))).toBe(false);
+  });
+  it("background execution accepts the next exact actor and credential command without a new lease",async()=>{
+    const f=await backgroundFixture();
+    const retained=await service.background(engine(),f.lease.leaseId,{kind:"retain",conversationId:"chat",revision:1,snapshot:f.snapshot});
+    await f.commands.settle(engine(),{commandId:f.commandId,claimId:f.claim.claimId,state:"succeeded",resultCode:null});
+    const next=randomUUID(),queue=await f.commands.snapshot({...engine(),actorSessionId},"chat");
+    await f.commands.mutate({...engine(),actorSessionId},{conversationId:"chat",operationId:randomUUID(),expectedRevision:queue.revision,action:{kind:"enqueue",commandId:next,payload:{...f.payload,userMessageId:randomUUID()}}});
+    const claim=(await f.commands.claim(engine(),"chat",f.input.executionId))!;
+    const resumed=await service.background(engine(),f.lease.leaseId,{kind:"resume",conversationId:"chat",admission:{...f.input,source:{kind:"command",commandId:next,claimId:claim.claimId}}});
+    expect(resumed).toMatchObject({phase:"foreground",deadline:retained.deadline});
+    expect((await pool.query("SELECT id FROM cloud_agent_execution_leases")).rows).toHaveLength(1);
+    await expect(service.validate(engine(),f.lease.leaseId,true)).resolves.toHaveProperty("leaseId",f.lease.leaseId);
+  });
+  it.each(["credential","delegation","actor","generation","deadline","token-expiry","membership","material-expiry"])("background lease fails closed on %s revocation",async reason=>{
+    const f=await backgroundFixture();
+    await service.background(engine(),f.lease.leaseId,{kind:"retain",conversationId:"chat",revision:1,snapshot:f.snapshot});
+    await f.commands.settle(engine(),{commandId:f.commandId,claimId:f.claim.claimId,state:"succeeded",resultCode:null});
+    if(reason==="credential")await credentials.revoke(owner.id,credentialId);
+    if(reason==="delegation")await pool.query("UPDATE cloud_agent_credential_delegations SET expires_at=now()-interval '1 second',created_at=now()-interval '1 hour' WHERE id=$1",[delegationId]);
+    if(reason==="actor")await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=now() WHERE user_id=$1",[owner.id]);
+    if(reason==="token-expiry")await pool.query("UPDATE auth_sessions SET provider_session_expires_at=clock_timestamp() WHERE user_id=$1",[owner.id]);
+    if(reason==="membership")await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2",[fixture.organizationId,owner.id]);
+    if(reason==="material-expiry")await pool.query("UPDATE cloud_agent_credential_versions SET material_expires_at=clock_timestamp() WHERE credential_id=$1",[credentialId]);
+    if(reason==="deadline")await pool.query("UPDATE cloud_agent_execution_leases SET background_deadline=now()-interval '1 second' WHERE id=$1",[f.lease.leaseId]);
+    await expect(service.validate({...engine(),...(reason==="generation"?{generation:2}:{})},f.lease.leaseId,true)).rejects.toThrow();
+  });
+  it("background reuse rejects a different actor or credential without revoking the original work",async()=>{
+    const f=await backgroundFixture();await service.background(engine(),f.lease.leaseId,{kind:"retain",conversationId:"chat",revision:1,snapshot:f.snapshot});
+    await f.commands.settle(engine(),{commandId:f.commandId,claimId:f.claim.claimId,state:"succeeded",resultCode:null});
+    const other=await seedReadyCloudWorkspace(pool);
+    const member=await ensureUser(pool,{provider:"workos",providerSubject:`workos|${other.userId}`,email:`background-${other.userId}@example.test`,displayName:"Member",
+      session:{id:`session_${randomUUID()}`,clientKind:"desktop",authTime:Math.floor(Date.now()/1000),tokenExpiresAt:Math.floor(Date.now()/1000)+3600}});
+    await pool.query("INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at) VALUES($1,$2,$3,'desktop',now()+interval '1 hour')",[member.authentication.sessionId,member.identity.subject,member.id]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')",[fixture.organizationId,member.id]);
+    await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,assigned_by) VALUES($1,$2,$3)",[fixture.organizationId,member.id,owner.id]);
+    const memberSession=await connectActor(member),grant=randomUUID();
+    await credentials.delegate(owner.id,{id:grant,credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:member.id,models:["grok-4.6"],expiresAt:new Date(Date.now()+3600_000).toISOString()});
+    const next=randomUUID(),queue=await f.commands.snapshot({...engine(),actorSessionId:memberSession},"chat");
+    await f.commands.mutate({...engine(),actorSessionId:memberSession},{conversationId:"chat",operationId:randomUUID(),expectedRevision:queue.revision,
+      action:{kind:"enqueue",commandId:next,payload:{...f.payload,userMessageId:randomUUID(),agentCredentialGrantId:grant}}});
+    const claim=(await f.commands.claim(engine(),"chat",f.input.executionId))!;
+    for(const incomingGrant of [grant,delegationId])await expect(service.background(engine(),f.lease.leaseId,{kind:"resume",conversationId:"chat",
+      admission:{...f.input,delegationId:incomingGrant,source:{kind:"command",commandId:next,claimId:claim.claimId}}})).rejects.toThrow();
+    await expect(service.background(engine(),f.lease.leaseId,{kind:"read",conversationId:"chat"})).resolves.toMatchObject({snapshot:f.snapshot,phase:"background"});
+  });
+  it("background capability is opt-in and task snapshots enforce revision and conversation ownership",async()=>{
+    const legacy=await service.admit(engine(),admission());expect(legacy).not.toHaveProperty("backgroundTasksVersion");
+    await expect(service.background(engine(),legacy.leaseId,{kind:"read",conversationId:"chat"})).rejects.toThrow();
+    const f=await backgroundFixture();const retain={kind:"retain",conversationId:"chat",revision:1,snapshot:f.snapshot};
+    await service.background(engine(),f.lease.leaseId,retain);await service.background(engine(),f.lease.leaseId,retain);
+    await expect(service.background(engine(),f.lease.leaseId,{...retain,snapshot:{...f.snapshot,tasks:[]}})).rejects.toMatchObject({status:409});
+    await expect(service.background(engine(),f.lease.leaseId,{kind:"read",conversationId:"another-chat"})).rejects.toThrow();
+  });
+  it("freezes legacy hosted Dev material when the persistent owner is enabled",async()=>{
+    const generation=randomUUID();
+    for(const [name,value] of Object.entries({ZEROS_DEPLOY_ENV:'dev',ZEROS_DEV_ENVIRONMENT:'hosted',ZEROS_DEV_CONNECTIONS_ENABLED:'true',ZEROS_DEV_GENERATION:generation,
+      DEV_CONNECTIONS_GENERATION:generation,DEV_CONNECTIONS_ORIGIN:'https://connections.example.test',DEV_CONNECTIONS_AUDIENCE:'zeros-dev-connections-v1',DEV_CONNECTIONS_GENERATION_CREDENTIAL:'a'.repeat(43)}))vi.stubEnv(name,value);
+    vi.spyOn(DevConnectionRuntime.prototype,'consumeInvalidations').mockResolvedValue();
+    await expect(service.admit(engine(),admission())).rejects.toThrow();
+  });
+  it("admits references only after exact-image checks, caps persisted and replayed leases, and fails closed on outage",async()=>{
+    const generation=randomUUID(),ref={mode:'dev-reference',bindingId:credentialId,connectionId:randomUUID(),generationId:generation,organization:'org_dev',revision:1,consentRevision:1};
+    await pool.query("UPDATE cloud_agent_credential_versions SET material_mode='dev-reference',dev_reference=$1,key_version=NULL,nonce=NULL,ciphertext=NULL,auth_tag=NULL WHERE credential_id=$2",[ref,credentialId]);
+    for(const [name,value] of Object.entries({ZEROS_DEPLOY_ENV:'dev',ZEROS_DEV_ENVIRONMENT:'hosted',ZEROS_DEV_CONNECTIONS_ENABLED:'true',ZEROS_DEV_GENERATION:generation,
+      DEV_CONNECTIONS_GENERATION:generation,DEV_CONNECTIONS_ORIGIN:'https://connections.example.test',DEV_CONNECTIONS_AUDIENCE:'zeros-dev-connections-v1',DEV_CONNECTIONS_GENERATION_CREDENTIAL:'a'.repeat(43)}))vi.stubEnv(name,value);
+    vi.spyOn(DevConnectionRuntime.prototype,'consumeInvalidations').mockResolvedValue();
+    const expiresAt=new Date(Date.now()+15000).toISOString();
+    const issue=vi.spyOn(DevConnectionRuntime.prototype,'issue').mockResolvedValue({bindingId:credentialId,expiresAt,providerExpiresAt:null,materialVersion:7,
+      scope:{action:'agent',workspaceId:fixture.workspaceId,model:'grok-4.6'},material:{kind:'cursor-api-key',apiKey:'synthetic-broker-access'}});
+    await pool.query('UPDATE cloud_agent_runtime_qualifications SET enabled=false');
+    await expect(service.admit(engine(),admission())).rejects.toThrow();expect(issue).not.toHaveBeenCalled();
+    await pool.query('UPDATE cloud_agent_runtime_qualifications SET enabled=true');
+    const request=admission(),lease=await service.admit(engine(),request);
+    expect(lease).toMatchObject({expiresAt,credentialVersion:7,material:{kind:'cursor-api-key',apiKey:'synthetic-broker-access'}});
+    expect((await pool.query('SELECT expires_at FROM cloud_agent_execution_leases WHERE id=$1',[lease.leaseId])).rows[0].expires_at.toISOString()).toBe(expiresAt);
+    expect((await service.admit(engine(),request)).expiresAt).toBe(expiresAt);
+    issue.mockRejectedValue(new Error('Synthetic broker outage'));
+    await expect(service.validate(engine(),lease.leaseId,true,7)).rejects.toThrow('Synthetic broker outage');
+  });
   async function codexCredential(expiresAt=Math.floor(Date.now()/1000)+3600){
     const nativeCache=syntheticCodexCache({expiresAt,refresh:`synthetic-refresh-${randomUUID()}`});
     const input={ownerUserId:owner.id,credentialId:randomUUID(),operationId:randomUUID(),expectedRevision:0,displayName:"Codex",nativeCache};
@@ -63,6 +168,102 @@ d("private provider execution leases",()=>{
       VALUES('daytona','snapshot-pinned',$1,'codex-chatgpt','zeros-cloud-worker-v3',true) ON CONFLICT DO NOTHING`,["a".repeat(64)]);
     return {input,grant,request:{executionId:randomUUID(),delegationId:grant,provider:"codex" as const,model:"gpt-5.6-sol",source:{kind:"session" as const,actorSessionId}}};
   }
+  it("uses the prompting collaborator's Git identity when agent credentials belong to another member", async () => {
+    const other = await seedReadyCloudWorkspace(pool);
+    const member = await ensureUser(pool, { provider: "workos", providerSubject: `workos|${other.userId}`, email: `member-${other.userId}@example.test`, displayName: "Member",
+      session: { id: `session_${randomUUID()}`, clientKind: "desktop", authTime: Math.floor(Date.now()/1000), tokenExpiresAt: Math.floor(Date.now()/1000)+3600 } });
+    await pool.query("INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at) VALUES($1,$2,$3,'desktop',now()+interval '1 hour')", [member.authentication.sessionId, member.identity.subject, member.id]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')", [fixture.organizationId, member.id]);
+    await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,assigned_by) VALUES($1,$2,$3)", [fixture.organizationId, member.id, owner.id]);
+    await pool.query("INSERT INTO github_authorizations(owner_user_id,app_variant,github_login,github_user_id,git_author_name) VALUES($1,'github.com','owner',1234,'Owner'),($2,'github.com','member',5678,'Member')", [owner.id, member.id]);
+    const memberSession = await connectActor(member), grant = randomUUID();
+    await credentials.delegate(owner.id, { id: grant, credentialId, expectedRevision: 1, workspaceId: fixture.workspaceId, granteeUserId: member.id, models: ["grok-4.6"], expiresAt: new Date(Date.now()+3600_000).toISOString() });
+    const lease = await service.admit(engine(), { ...admission(), delegationId: grant, source: { kind: "session", actorSessionId: memberSession } }, true);
+    expect(lease.gitAuthor).toEqual({ name: "Member", email: "5678+member@users.noreply.github.com" });
+    const legacy = await service.admit(engine(), admission());
+    expect(legacy).not.toHaveProperty("gitAuthor");
+    const owned = await service.admit(engine(), admission(), true);
+    expect(owned.gitAuthor).toEqual({ name: "Owner", email: "1234+owner@users.noreply.github.com" });
+  });
+  it("requires exact-image MCP qualification for customization admission",async()=>{
+    await expect(service.admit(engine(),{...admission(),customization:{version:1,repositoryServers:[]}})).rejects.toMatchObject({status:403});
+  });
+  it("delivers history authority only to version-2 admitted executions and binds it through renewals",async()=>{
+    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
+    const legacy=await service.admit(engine(),{...admission(),customization:{version:1,repositoryServers:[]}});
+    expect(legacy.customization).not.toHaveProperty("history");
+    const request={...admission(),customization:{version:2,repositoryServers:[]}};
+    const result=await service.admit(engine(),request),history=result.customization?.history;
+    expect(history?.owner).toMatch(/^[a-f0-9]{64}$/);expect(history?.keys['1']).toHaveLength(43);
+    expect(JSON.stringify((await pool.query("SELECT * FROM cloud_customization_execution_snapshots")).rows)).not.toContain(history!.keys['1']);
+    expect((await service.admit(engine(),request)).customization?.history).toEqual(history);
+    await expect(service.admit(engine(),{...request,customization:{version:1,repositoryServers:[]}})).rejects.toThrow();
+    expect((await service.validate(engine(),result.leaseId,true)).leaseId).toBe(result.leaseId);
+    const next=await service.admit(engine(),{...request,executionId:randomUUID()});
+    expect(next.customization?.history).toEqual(history);
+  });
+  it("binds customization snapshots, secrets, repository overrides and rotations to the lease",async()=>{
+    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
+    const customization=new DatabaseCloudCustomizationService(pool,encryption),id=randomUUID();
+    const document={servers:[{id,name:"example",transport:"http",url:"https://example.test/mcp",headers:{Authorization:"Bearer synthetic-mcp-value"}},
+      {id:randomUUID(),name:"repo",transport:"http",url:"https://example.test/replaced",headers:{Authorization:"synthetic-do-not-inherit"}}],
+      skills:[{name:"example",content:"# Organization"}],cursorTeamSettings:"disabled"};
+    await customization.save(fixture.organizationId,owner.id,"organization",{expectedRevision:0,document});
+    const request={...admission(),customization:{version:1,repositoryServers:[{name:"repo",transport:"stdio",command:"node",args:["tool.mjs"]}]}};
+    const result=await service.admit(engine(),request);
+    expect(result.customization).toMatchObject({servers:[{server:{name:"example",headers:{Authorization:"Bearer synthetic-mcp-value"}},secretRef:id},{server:{name:"repo",command:"node"}}],skills:[{name:"example"}]});
+    expect(result.customization?.servers[1]).toMatchObject({scope:"repository",secretRef:null,revision:0});
+    expect(result.customization?.servers[1]?.server).not.toHaveProperty("headers");
+    expect(JSON.stringify((await pool.query("SELECT * FROM cloud_customization_execution_snapshots")).rows)).not.toContain("synthetic-mcp-value");
+    expect((await service.admit(engine(),request)).customization).toEqual(result.customization);
+    await expect(service.admit(engine(),{...request,customization:{version:1,repositoryServers:[]}})).rejects.toThrow();
+    await expect(service.admit(engine(),{...request,customization:undefined})).rejects.toThrow();
+    await customization.save(fixture.organizationId,owner.id,"organization",{expectedRevision:1,document:{...document,servers:[],skills:[]}});
+    await expect(service.validate(engine(),result.leaseId,true)).rejects.toThrow();
+    await expect(service.admit(engine(),request)).rejects.toThrow();
+    const next=await service.admit(engine(),{...request,executionId:randomUUID()});
+    expect(next.customization?.servers).toHaveLength(1);expect(next.customization?.skills).toEqual([]);
+  });
+  it("lists, saves and removes organization skills through the authenticated workspace actor", async () => {
+    const scope = engine(), session = admission().source.actorSessionId;
+    const saved = await service.customization(scope, session, "skills.saveZeros", {
+      name:"release", description:"Use for releases", body:"# Release\nFollow this workflow.", expectedRevision:null,
+    });
+    expect(saved).toMatchObject({name:"release",description:"Use for releases",revision:"1"});
+    expect(await service.customization(scope, session, "skills.listZeros", {})).toMatchObject([{name:"release",description:"Use for releases"}]);
+    await expect(service.customization(scope, session, "skills.saveZeros", {name:"release",body:"Stale",expectedRevision:"0"})).rejects.toMatchObject({status:409});
+    expect(await service.customization(scope, session, "skills.removeZeros", {name:"release",expectedRevision:"1"})).toEqual({ok:true});
+    expect(await service.customization(scope, session, "skills.listZeros", {})).toEqual([]);
+  });
+  it("isolates customization from another collaborator even with the same provider grant",async()=>{
+    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
+    const customization=new DatabaseCloudCustomizationService(pool,encryption);
+    await customization.save(fixture.organizationId,owner.id,"member",{expectedRevision:0,document:{servers:[],skills:[{name:"private",content:"# Private"}],cursorTeamSettings:"disabled"}});
+    const request={...admission(),customization:{version:1,repositoryServers:[]}},result=await service.admit(engine(),request);
+    const other=await seedReadyCloudWorkspace(pool);
+    const member=await ensureUser(pool,{provider:"workos",providerSubject:`workos|${other.userId}`,email:`mcp-${other.userId}@example.test`,displayName:"Member",
+      session:{id:`session_${randomUUID()}`,clientKind:"desktop",authTime:Math.floor(Date.now()/1000),tokenExpiresAt:Math.floor(Date.now()/1000)+3600}});
+    await pool.query("INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at) VALUES($1,$2,$3,'desktop',now()+interval '1 hour')",[member.authentication.sessionId,member.identity.subject,member.id]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')",[fixture.organizationId,member.id]);
+    await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,assigned_by) VALUES($1,$2,$3)",[fixture.organizationId,member.id,owner.id]);
+    const session=await connectActor(member),grant=randomUUID();
+    await credentials.delegate(owner.id,{id:grant,credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:member.id,models:["grok-4.6"],expiresAt:new Date(Date.now()+3600_000).toISOString()});
+    await expect(service.authorizeAction(engine(),request.executionId,session)).rejects.toThrow();
+    const own=await service.admit(engine(),{...request,executionId:randomUUID(),delegationId:grant,source:{kind:"session",actorSessionId:session}});
+    expect(own.customization?.skills).toEqual([]);expect(result.customization?.skills).toHaveLength(1);
+  });
+  it("persists an admitted Claude context suffix without weakening model validation",async()=>{
+    const credentialId=randomUUID(),delegationId=randomUUID(),model="claude-opus-5[1m]";
+    await credentials.put({ownerUserId:owner.id,credentialId,operationId:randomUUID(),expectedRevision:0,displayName:"Claude",
+      material:{kind:"claude-api-key",apiKey:"synthetic-claude-credential"}});
+    await credentials.delegate(owner.id,{id:delegationId,credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:owner.id,
+      models:[model],expiresAt:new Date(Date.now()+3600_000).toISOString()});
+    await pool.query(`INSERT INTO cloud_agent_runtime_qualifications(provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled)
+      VALUES('daytona','snapshot-pinned',$1,'claude-api-key','zeros-cloud-worker-v3',true)`,["a".repeat(64)]);
+    const lease=await service.admit(engine(),{executionId:randomUUID(),delegationId,provider:"claude",model,source:{kind:"session",actorSessionId}});
+    expect((await pool.query("SELECT model FROM cloud_agent_execution_leases WHERE id=$1",[lease.leaseId])).rows).toEqual([{model}]);
+    await expect(pool.query("UPDATE cloud_agent_execution_leases SET model=$2 WHERE id=$1",[lease.leaseId,"claude[anything]"])).rejects.toMatchObject({code:"23514"});
+  });
   it.each(["renew", "replay", "action"] as const)("rejects lease expiry after the %s transaction starts",async operation=>{
     const request=admission(),lease=await service.admit(engine(),request);
     let expired:Date|undefined;
@@ -312,6 +513,24 @@ d("private provider execution leases",()=>{
     await expect(service.admit(engine(),{...request,source:{...request.source,claimId:randomUUID()}})).rejects.toMatchObject({status:403});
     const lease=await service.admit(engine(),request);
     await commands.settle(engine(),{commandId,claimId:claim!.claimId,state:"succeeded",resultCode:null});
+    await expect(service.validate(engine(),lease.leaseId)).rejects.toMatchObject({status:403});
+  });
+  it("requires qualified transcript fork capability on the exact admitted image and revokes it on drift",async()=>{
+    const commands=new DatabaseCloudWorkspaceCommandService({pool}),commandId=randomUUID(),executionId=randomUUID();
+    await commands.mutate({...engine(),actorSessionId},{conversationId:"fork-destination",operationId:randomUUID(),expectedRevision:0,action:{kind:"fork",commandId,
+      payload:{agentId:"cursor",model:"grok-4.6",userMessageId:randomUUID(),prompt:[{type:"text",text:""}],modeRevision:0,agentCredentialGrantId:delegationId,
+        operation:{version:1,kind:"fork",sourceConversationId:"source",strategy:"transcript"}}}});
+    const claim=(await commands.claim(engine(),"fork-destination",executionId))!;
+    const request={executionId,delegationId,provider:"cursor" as const,model:"grok-4.6",source:{kind:"command" as const,commandId,claimId:claim.claimId}};
+    await expect(service.admit(engine(),request)).rejects.toMatchObject({status:403});
+    const nativeCapabilities={version:1,goals:false,nativeFork:false,transcriptFork:true,nativeReview:false,connectedApps:false,multiAgent:false};
+    await pool.query("UPDATE cloud_agent_runtime_qualifications SET native_capabilities=$1::jsonb",[JSON.stringify(nativeCapabilities)]);
+    const legacy=await service.admit(engine(),admission());
+    expect(legacy).not.toHaveProperty("nativeCapabilities");
+    const lease=await service.admit(engine(),request,false,1);
+    expect(lease).toMatchObject({nativeCapabilities});
+    expect(await service.validate(engine(),lease.leaseId,false,undefined,false,1)).toMatchObject({nativeCapabilities});
+    await pool.query("UPDATE cloud_agent_runtime_qualifications SET native_capabilities=NULL");
     await expect(service.validate(engine(),lease.leaseId)).rejects.toMatchObject({status:403});
   });
   it("erases reciprocal credential delegations concurrently without a cascade deadlock",async()=>{

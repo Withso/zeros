@@ -9,6 +9,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { getWorkspaceLifecycle } from "../state";
 import type {
   BoundaryProcess,
   BoundarySpawnRequest,
@@ -234,6 +235,34 @@ describe("repo lifecycle scripts", () => {
       testBoundaryFactory,
     );
     expect(getWorkspace(created.workspaceId).archivedAt).not.toBeNull();
+  });
+
+  it("keeps required cleanup retryable and pins the command across settings edits", async () => {
+    await initRepo(repoRoot, `[scripts]\narchive_required = true\narchive_timeout_seconds = 1200\narchive = 'test -f "$ZEROS_REPO_ROOT/cleanup-ready" && printf cleaned > "$ZEROS_REPO_ROOT/cleanup-result"'\n`);
+    const created = await createWorkspace({ repoRoot });
+    const args = { workspaceId: created.workspaceId, stashUncommitted: false };
+    const workspacePath = getWorkspace(created.workspaceId).path;
+    await expect(archiveWorkspace(args, undefined, undefined, testBoundaryFactory)).rejects.toThrow(/Archive script failed/);
+    expect(existsSync(workspacePath)).toBe(true);
+    expect(getWorkspace(created.workspaceId).archivedAt).toBeNull();
+    expect(getWorkspaceLifecycle(created.workspaceId)?.phase).toBe("archive-script-started");
+    // A restart or settings change must not turn incomplete required cleanup
+    // into the old skip-on-retry behavior.
+    await writeFile(path.join(repoRoot, ".zeros/settings.local.toml"), '[scripts]\narchive = "true"\narchive_required = false\n');
+    await expect(archiveWorkspace(args, undefined, undefined, testBoundaryFactory)).rejects.toThrow(/Archive script failed/);
+    await writeFile(path.join(repoRoot, "cleanup-ready"), "ready");
+    await archiveWorkspace(args, undefined, undefined, testBoundaryFactory);
+    expect(await readFile(path.join(repoRoot, "cleanup-result"), "utf8")).toBe("cleaned");
+    expect(getWorkspace(created.workspaceId).archivedAt).not.toBeNull();
+  });
+
+  it("does not interpret a malformed archive settings file as no cleanup", async () => {
+    await initRepo(repoRoot, '[scripts]\narchive = "true"\narchive_required = true\n');
+    const created = await createWorkspace({ repoRoot });
+    await writeFile(path.join(repoRoot, ".zeros/settings.local.toml"), '[scripts\narchive_required = true\n');
+    await expect(archiveWorkspace({ workspaceId: created.workspaceId, stashUncommitted: false }, undefined, undefined, testBoundaryFactory)).rejects.toThrow(/archive script settings/i);
+    expect(getWorkspace(created.workspaceId).archivedAt).toBeNull();
+    expect(existsSync(getWorkspace(created.workspaceId).path)).toBe(true);
   });
 
   it("refuses to remove the worktree when archive-script containment teardown is not proven", async () => {

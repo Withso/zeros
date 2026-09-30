@@ -11,6 +11,7 @@ import type {
   RuntimeClient,
   RuntimeConnectionTarget,
 } from "../ws-client";
+import { WorkspaceRuntimeClient } from "../workspace-runtime-client";
 
 class FakeBridge {
   status: ConnectionStatus;
@@ -40,9 +41,45 @@ function runtimeClient(bridge: FakeBridge): RuntimeClient {
   return bridge as unknown as RuntimeClient;
 }
 
-afterEach(() => setActiveBridge(null));
+afterEach(() => {
+  setActiveBridge(null);
+  vi.restoreAllMocks();
+});
 
 describe("active bridge connection subscriptions", () => {
+  it("observes the requested cloud workspace instead of the local host", () => {
+    const folder =
+      "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const cloud = new FakeBridge("connecting");
+    const bridge = new WorkspaceRuntimeClient({
+      open: vi.fn(),
+      workspaces: () => [],
+    });
+    vi.spyOn(bridge, "status", "get").mockReturnValue("connected");
+    vi.spyOn(bridge, "statusForWorkspace").mockImplementation(
+      () => cloud.status,
+    );
+    const subscribe = vi
+      .spyOn(bridge, "onWorkspaceStatusChange")
+      .mockImplementation((_folder, listener) =>
+        cloud.onStatusChange(listener),
+      );
+    setActiveBridge(bridge);
+    const connected = vi.fn();
+    const stop = onActiveBridgeConnected(connected, folder);
+    expect(connected).not.toHaveBeenCalled();
+    expect(subscribe).toHaveBeenCalledWith(folder, expect.any(Function));
+    cloud.setStatus("connected");
+    cloud.setStatus("disconnected");
+    cloud.setStatus("connected");
+    expect(connected).toHaveBeenCalledTimes(2);
+    stop();
+    cloud.setStatus("disconnected");
+    cloud.setStatus("connected");
+    expect(connected).toHaveBeenCalledTimes(2);
+    bridge.dispose();
+  });
+
   it("fires immediately for an already-connected active bridge, marked initial", () => {
     const bridge = new FakeBridge("connected");
     setActiveBridge(runtimeClient(bridge));

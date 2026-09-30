@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "target": "ES2023", "lib": ["ES2023", "DOM"], "allowJs": true, "checkJs": false, "noEmit": true },
+  "include": ["./**/*.ts"],
+  "exclude": ["./**/*.test.ts"]
+}

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  CloudCommandClientRequestSchema, CloudCommandSnapshotSchema, CloudCommandEntrySchema, CloudCommandClaimSchema,
+  CloudCommandClientRequestSchema, CloudCommandSnapshotSchema, CloudCommandEntrySchema, CloudCommandClaimSchema, CloudGoalSnapshotSchema,
   type CloudCommandEngineRequest, type CloudCommandClaim, type CloudCommandResult, type CloudQueuedPrompt,
 } from "@zeros/protocol/cloud-commands";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
@@ -9,11 +9,15 @@ type Dependencies = {
   request(input: CloudCommandEngineRequest,actorSessionId?:string): Promise<unknown>;
   validate(conversationId: string, payload?: CloudQueuedPrompt): void;
   execution(conversationId: string): string | null;
+  /** Reserve a retained history owner while its next claim is in flight. */
+  retainedExecution?(conversationId:string):string|null;
+  releaseRetainedExecution?(executionId:string):void;
   /** Admission is engine-owned and may cold-resume without a connected device. */
   prepare?(claim:CloudCommandClaim):Promise<void>;
-  /** Required with prepare: prove retirement before publishing the receipt. */
-  retire?(claim:CloudCommandClaim):Promise<void>;
-  dispatch(claim: CloudCommandClaim): Promise<Pick<CloudCommandResult, "state" | "resultCode">>;
+  /** Required with prepare: transfer to a bounded background lease or prove
+   * retirement before publishing the foreground receipt. */
+  retire?(claim:CloudCommandClaim,result:Pick<CloudCommandResult,"state">):Promise<void>;
+  dispatch(claim: CloudCommandClaim): Promise<Pick<CloudCommandResult, "state" | "resultCode" | "result">>;
   cancel(conversationId: string): Promise<void>;
   changed(conversationId: string): void;
 };
@@ -24,6 +28,7 @@ export class CloudCommandRuntime {
   private readonly pumping = new Map<string, { requested: boolean; task: Promise<void> }>();
   private readonly controls = new Map<string, { revision: number; paused: boolean }>();
   private readonly pendingConversations = new Set<string>();
+  private readonly pendingGoals = new Set<string>();
   private readonly stopping = new Map<string, Set<symbol>>();
   private readonly unacknowledgedStop = new Set<string>();
   private readonly active = new Map<string, string>();
@@ -38,6 +43,20 @@ export class CloudCommandRuntime {
     if(Boolean(dependencies.prepare)!==Boolean(dependencies.retire))throw new Error("Cloud command admission requires paired retirement");
   }
 
+  async confirmGoal(claim:CloudCommandClaim,sequence:number,goal:import("@zeros/protocol/agent-events").AgentGoal|null) {
+    if(this.closed)throw new CloudCommandRuntimeError("engine_authority_rejected");
+    const request={kind:"confirm-goal" as const,commandId:claim.commandId,claimId:claim.claimId,sequence,goal};
+    for(let attempt=0;;attempt++){
+      try{
+        const confirmed=CloudGoalSnapshotSchema.parse(await this.dependencies.request(request));
+        if(confirmed.conversationId!==claim.conversationId)throw new CloudCommandRuntimeError("command_response_invalid");
+        return confirmed;
+      }catch(error){
+        if(attempt>=2||!(error instanceof CloudCommandRuntimeError)||error.code!=="command_service_unavailable")throw error;
+      }
+    }
+  }
+
   async handle(value: unknown,actorSessionId?:string): Promise<unknown> {
     const parsed = CloudCommandClientRequestSchema.safeParse(value);
     if (!parsed.success) throw new CloudCommandRuntimeError("invalid_command");
@@ -49,7 +68,7 @@ export class CloudCommandRuntime {
       let admissionError: "command_context_changed" | "command_not_found" | null = null;
       try {
         this.dependencies.validate(request.mutation.conversationId);
-        if (request.mutation.action.kind === "enqueue" || request.mutation.action.kind === "edit")
+        if (request.mutation.action.kind === "enqueue" || request.mutation.action.kind === "fork" || request.mutation.action.kind === "edit")
           this.dependencies.validate(request.mutation.conversationId, request.mutation.action.payload);
       } catch (error) {
         admissionError = error instanceof CloudCommandRuntimeError && error.code === "command_not_found"
@@ -80,8 +99,10 @@ export class CloudCommandRuntime {
         // cannot cancel another member's turn through the local fallback.
         if (error instanceof CloudCommandRuntimeError && ["cloud_actor_authority_rejected","invalid_command","engine_authority_rejected"].includes(error.code)) throw error;
         this.unacknowledgedStop.add(request.conversationId);
-        if (stopCommand && this.active.get(request.conversationId) === stopCommand)
+        if (stopCommand && this.active.get(request.conversationId) === stopCommand) {
+          this.cancelledClaims.add(stopCommand);
           await this.dependencies.cancel(request.conversationId);
+        }
       }
       throw error;
     }
@@ -103,9 +124,13 @@ export class CloudCommandRuntime {
     if (request.kind === "stop" && !snapshot.replayed) {
       const dispatched = snapshot.pending.find(command => command.state === "dispatching");
       if (dispatched) {
-        if (this.active.get(request.conversationId) === dispatched.commandId) await this.dependencies.cancel(request.conversationId);
+        if (this.active.get(request.conversationId) === dispatched.commandId) {
+          this.cancelledClaims.add(dispatched.commandId);
+          await this.dependencies.cancel(request.conversationId);
+        }
         else if (this.claiming.has(request.conversationId)) this.cancelledClaims.add(dispatched.commandId);
       }
+      else await this.dependencies.cancel(request.conversationId);
     }
     this.dependencies.changed(snapshot.conversationId);
     this.kick(snapshot.conversationId);
@@ -151,6 +176,8 @@ export class CloudCommandRuntime {
     this.controls.set(snapshot.conversationId, { revision: snapshot.revision, paused: snapshot.paused });
     if (snapshot.pending.length) this.pendingConversations.add(snapshot.conversationId);
     else this.pendingConversations.delete(snapshot.conversationId);
+    if(snapshot.pending.some(row=>row.payload?.operation?.kind==="goal"))this.pendingGoals.add(snapshot.conversationId);
+    else this.pendingGoals.delete(snapshot.conversationId);
   }
 
   private async drain(conversationId: string): Promise<void> {
@@ -161,9 +188,10 @@ export class CloudCommandRuntime {
       this.clearReceiptRetry(conversationId);
       this.dependencies.changed(conversationId);
     }
-    while (!this.closed && (!this.blocked(conversationId) || this.pendingClaims.has(conversationId))) {
+    while (!this.closed && (!this.blocked(conversationId,this.pendingGoals.has(conversationId)) || this.pendingClaims.has(conversationId))) {
       const previous = this.pendingClaims.get(conversationId);
-      const executionId = previous?.executionId ?? (this.dependencies.prepare?randomUUID():this.dependencies.execution(conversationId));
+      const executionId = previous?.executionId ?? (this.dependencies.prepare?
+        this.dependencies.retainedExecution?.(conversationId)??randomUUID():this.dependencies.execution(conversationId));
       if (!executionId) return; // Explicit session admission is still required.
       const intent = previous ?? { claimId: randomUUID(), executionId };
       this.pendingClaims.set(conversationId, intent);
@@ -171,36 +199,40 @@ export class CloudCommandRuntime {
       this.claiming.add(conversationId);
       try { raw = await this.dependencies.request({ kind: "claim", conversationId, ...intent }); }
       finally { this.claiming.delete(conversationId); }
-      if (raw === null) { this.pendingClaims.delete(conversationId); this.clearReceiptRetry(conversationId); return; }
+      if (raw === null) { this.dependencies.releaseRetainedExecution?.(executionId);this.pendingClaims.delete(conversationId); this.clearReceiptRetry(conversationId); return; }
       const claim = CloudCommandClaimSchema.parse(raw);
       if (claim.conversationId !== conversationId || claim.executionId !== executionId || claim.claimId !== intent.claimId)
         throw new CloudCommandRuntimeError("command_response_invalid");
       this.pendingClaims.delete(conversationId);
       this.clearReceiptRetry(conversationId);
       this.dependencies.changed(conversationId);
-      let result: Pick<CloudCommandResult, "state" | "resultCode">;
+      let result: Pick<CloudCommandResult, "state" | "resultCode" | "result">;
       const cancelledClaim = this.cancelledClaims.delete(claim.commandId);
+      const goalOperation=claim.payload.operation?.kind==="goal";
       if (claim.dispatchAllowed===false) result={state:"cancelled",resultCode:"actor_authority_revoked"};
-      else if (this.closed || this.blocked(conversationId) || cancelledClaim) result = { state: "cancelled", resultCode: "stopped_before_dispatch" };
+      else if (this.closed || this.blocked(conversationId,goalOperation) || cancelledClaim) result = { state: "cancelled", resultCode: "stopped_before_dispatch" };
       else {
         try {
           // Mode and execution may have changed while the claim was in flight.
           this.dependencies.validate(conversationId, claim.payload);
           this.active.set(conversationId, claim.commandId);
           await this.dependencies.prepare?.(claim);
-          if(this.closed||this.blocked(conversationId))result={state:"cancelled",resultCode:"stopped_before_dispatch"};
+          if(this.closed||this.blocked(conversationId,goalOperation)||this.cancelledClaims.delete(claim.commandId))result={state:"cancelled",resultCode:"stopped_before_dispatch"};
           else {
             this.dependencies.validate(conversationId,claim.payload);
-            if (this.dependencies.execution(conversationId) !== executionId) throw new Error("execution changed");
+            // A fork is turnless and its short-lived provider process has
+            // already retired during prepare. It never owns a live route.
+            if (claim.payload.operation?.kind !== "fork" && this.dependencies.execution(conversationId) !== executionId) throw new Error("execution changed");
             result = await this.dependencies.dispatch(claim);
           }
         } catch { result = { state: "failed", resultCode: "command_dispatch_rejected" }; }
         // Dispatch is caught above, so retirement always runs. Its failure
         // closes the pump before a terminal receipt can be published.
-        try { await this.dependencies.retire?.(claim); }
+        try { await this.dependencies.retire?.(claim,result); }
         catch(error) { this.close(); throw error; }
-        finally { this.active.delete(conversationId); }
+        finally { this.active.delete(conversationId); this.cancelledClaims.delete(claim.commandId); }
       }
+      this.dependencies.releaseRetainedExecution?.(executionId);
       const receipt = { commandId: claim.commandId, claimId: claim.claimId, ...result };
       this.unsettled.set(conversationId, receipt);
       this.observe(CloudCommandSnapshotSchema.parse(await this.dependencies.request({ kind: "settle", result: receipt })));
@@ -210,8 +242,8 @@ export class CloudCommandRuntime {
     }
   }
 
-  private blocked(conversationId: string): boolean {
-    return this.controls.get(conversationId)?.paused === true || this.stopping.has(conversationId) || this.unacknowledgedStop.has(conversationId);
+  private blocked(conversationId: string, allowPausedGoal=false): boolean {
+    return (!allowPausedGoal && this.controls.get(conversationId)?.paused === true) || this.stopping.has(conversationId) || this.unacknowledgedStop.has(conversationId);
   }
   private removeStopIntent(conversationId: string, intent: symbol): void {
     this.stopping.get(conversationId)?.delete(intent);

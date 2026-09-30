@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseEnv } from "node:util";
 import { randomUUID } from "node:crypto";
+import { workspaceDesktopAuth } from "./dev-environment/desktop-profile.mjs";
 
 export const DEV_AUTH_ENV_KEYS = Object.freeze([
   "AUTH_PROVIDER",
@@ -172,6 +173,7 @@ export async function ensureDevAuthEnvironment({
   processEnv = process.env,
   fetchImpl = fetch,
 } = {}) {
+  if (processEnv.ZEROS_DEV_AUTH_PROFILE !== undefined) return workspaceDesktopAuth(processEnv);
   const cached = loadDevAuthEnvironment({ homeDir, processEnv: {} });
   const explicit = publicAuthValues(processEnv);
   const effective = loadDevAuthEnvironment({ homeDir, processEnv });

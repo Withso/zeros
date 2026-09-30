@@ -909,15 +909,18 @@ export function setWorkspaceRemoteRestricted(
  *  Design workspaces use a trusted desktop-local API and remain local-only;
  *  they join the owner's explicit opt-outs in the same set so discovery,
  *  chats, PTYs, and agent starts share one boundary. One query keeps the
- *  remote list filter O(1) per row. */
-export function listRemoteRestrictedWorkspaceIds(): Set<string> {
+ *  remote list filter O(1) per row. An attested cloud worker may exempt its
+ *  primary from the legacy Design-view restriction. Explicit owner opt-outs
+ *  still win; client parameters never select this deployment policy. */
+export function listRemoteRestrictedWorkspaceIds(cloudPrimary = false): Set<string> {
   const rows = open()
-    .prepare<[], { workspace_id: string }>(
+    .prepare<[number], { workspace_id: string }>(
       `SELECT workspace_id FROM remote_restricted_workspaces
        UNION
-       SELECT id AS workspace_id FROM workspaces WHERE kind = 'design'`,
+       SELECT id AS workspace_id FROM workspaces WHERE kind = 'design'
+         AND NOT (? = 1 AND id = 'local-main' AND placement = 'cloud')`,
     )
-    .all();
+    .all(cloudPrimary ? 1 : 0);
   return new Set(rows.map((r) => r.workspace_id));
 }
 

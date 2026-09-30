@@ -28,7 +28,7 @@ vi.mock("../../state/projects-store", () => ({
   isKnownProjectRoot: mocks.isKnownProjectRoot,
 }));
 
-import { readWorkspaceImageThumbnail } from "../files";
+import { readWorkspaceImageThumbnail, readWorkspaceFile } from "../files";
 
 describe("readWorkspaceImageThumbnail", () => {
   beforeEach(() => {
@@ -36,6 +36,16 @@ describe("readWorkspaceImageThumbnail", () => {
     mocks.isKnownProjectRoot.mockReturnValue(false);
     mocks.isNativeRuntime.mockReturnValue(true);
     mocks.resolveWorkspaceId.mockResolvedValue(null);
+  });
+
+  it("never consults the desktop filesystem for cloud files or thumbnails", async () => {
+    const cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    mocks.resolveWorkspaceId.mockResolvedValue(cwd);
+    mocks.nativeInvoke.mockResolvedValue({ kind: "image", bytes: 1, dataUrl: "local-wrong-image" });
+    mocks.bridgeFileRead.mockResolvedValue({ kind: "image", path: "shot.png", bytes: 2, dataUrl: "cloud-image" });
+    await expect(readWorkspaceFile(cwd, "shot.png")).resolves.toMatchObject({ dataUrl: "cloud-image" });
+    await expect(readWorkspaceImageThumbnail(cwd, "shot.png")).resolves.toMatchObject({ dataUrl: "cloud-image" });
+    expect(mocks.nativeInvoke).not.toHaveBeenCalled();
   });
 
   it("keeps Local main reads on the trusted engine route", async () => {

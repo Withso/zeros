@@ -12,7 +12,7 @@ import {
 } from "vitest";
 
 import { withSystemTx } from "../db.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 import { DatabaseCloudWorkspaceSetupAdmissionBroker } from "./setup-admission-broker.js";
 import {
@@ -142,8 +142,7 @@ d("cloud workspace setup material redemption", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-    await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
 
     const accountUserId = randomUUID();
     const accountEmail = `setup-materials-${accountUserId}@example.test`;

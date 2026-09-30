@@ -1,3 +1,4 @@
+import { hydrateShellPath } from "./shell-path";
 import { handleSharedCloudAccessSessionChange } from "./cloud-workspace-access-runtime";
 import { startElectronDesignCapture } from "./design-capture";
 import { setDesignCaptureEnvironment } from "./sidecar";
@@ -106,6 +107,7 @@ import { registerIframePickerCommands } from "./ipc/iframe-picker";
 import { installIframeHeaderStripping } from "./iframe-headers";
 import { registerAllCommands } from "./ipc/commands";
 import { stopProviderSubscriptions } from "./ipc/commands/provider-subscription";
+import { stopCloudProviderAuth } from "./ipc/commands/cloud-provider-auth";
 import {
   readPersistedAppearanceMode,
   readPersistedWindowBackground,
@@ -1186,43 +1188,6 @@ function setupDockBrand(): void {
   }
 }
 
-/**
- * Pull the user's real shell PATH into the Electron process BEFORE we
- * spawn the engine. macOS GUI apps launched from Finder or the Dock
- * inherit only `/usr/bin:/bin:/usr/sbin:/sbin` — no Homebrew, no
- * npm-global, no Volta/fnm/mise/asdf shims. That's why `isOnPath(
- * "claude")` in the engine's CLI probe returned false for every user
- * who installed their CLIs the normal way, and why every agent pill
- * showed "not installed" in the packaged app.
- *
- * `fix-path` runs `$SHELL -ilc 'echo $PATH'` once and rewrites
- * `process.env.PATH` before anything else reads it — including the
- * engine child spawn, which inherits the fixed PATH. Every desktop app
- * that shells out to user-installed CLIs lands on this same fix; it's
- * the standard Electron-on-macOS workaround.
- *
- * Dynamic-imported because `fix-path` ships ESM-only and our main
- * bundle is CJS. The await lives inside whenReady() so we never block
- * the event loop before it's running.
- */
-async function hydrateShellPath(): Promise<void> {
-  try {
-    const mod = (await import("fix-path")) as { default: () => void };
-    mod.default();
-    console.log(
-      `[Zeros] shell PATH hydrated (${(process.env.PATH ?? "").split(":").length} entries)`,
-    );
-  } catch (err) {
-    // Non-fatal: on Linux / Windows the default PATH is usually fine,
-    // and even on macOS the user can still launch from `pnpm electron:dev`
-    // which inherits the terminal PATH anyway.
-    console.warn(
-      `[Zeros] fix-path failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-  }
-}
 
 app.whenReady().then(async () => {
   setupDockBrand();
@@ -1277,7 +1242,9 @@ app.whenReady().then(async () => {
   // creation prerequisite. Register a spawn barrier so the child still inherits
   // the repaired PATH, then start the single-flight boot before loading the UI.
   // get_engine_port awaits this same promise; no renderer ever guesses a port.
-  const shellPathReady = hydrateShellPath();
+  const shellPathReady = hydrateShellPath({
+    development: runningDev && !IS_PACKAGED,
+  });
   const githubAuthReady = shellPathReady.then(async () => {
     try {
       await initializeGithubCredentialStore();
@@ -1691,7 +1658,7 @@ let subscriptionsStopped = false;
 app.on("before-quit", (event) => {
   if (!subscriptionsStopped) {
     event.preventDefault();
-    subscriptionShutdown ??= Promise.allSettled([stopProviderSubscriptions(), prepareAttachmentsForQuit()]).then(() => {
+    subscriptionShutdown ??= Promise.allSettled([stopProviderSubscriptions(), stopCloudProviderAuth(), prepareAttachmentsForQuit()]).then(() => {
       subscriptionsStopped = true;
       app.quit();
     });

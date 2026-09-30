@@ -3,12 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import {randomUUID} from "node:crypto";
 import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
-import type {CloudCommandClaim} from "@zeros/protocol/cloud-commands";
+import type {CloudCommandClaim,CloudCommandEngineRequest} from "@zeros/protocol/cloud-commands";
 import type {AgentNewSessionMessage,AgentLoadSessionMessage} from "@zeros/protocol/messages";
 import {ZerosEngine} from "../zeros-engine";
+import {CloudGoalRecorder} from "../cloud-goal-recorder";
+import {CloudCommandRuntime} from "../cloud-command-runtime";
 import type {TransportClient} from "../transport/types";
 import {closeZerosDb,setZerosDbPathForTesting} from "../db";
-import {deleteChat,getChat,upsertChat} from "../db/chats";
+import {deleteChat,getChat,upsertChat,setChatComposerMode} from "../db/chats";
 import type {CloudAgentSelection} from "../agents/cloud-provider-execution";
 import {AgentGateway} from "../agents/gateway";
 import type {AgentAdapter} from "../agents/types";
@@ -19,11 +21,13 @@ type Start=AgentNewSessionMessage|AgentLoadSessionMessage;
 type Spawn={cloudExecution?:CloudAgentSelection;cloudExecutionId?:string;env?:Record<string,string>;cwd?:string};
 const methods=ZerosEngine.prototype as unknown as {
   prepareCloudCommand(this:unknown,claim:CloudCommandClaim):Promise<void>;
-  retireCloudCommand(this:unknown,claim:CloudCommandClaim):Promise<void>;
+  dispatchCloudCommand(this:unknown,claim:CloudCommandClaim):Promise<unknown>;
+  retireCloudCommand(this:unknown,claim:CloudCommandClaim,allowBackground?:boolean):Promise<void>;
   cancelCloudCommandConversation(this:unknown,id:string):Promise<void>;
   deleteCloudConversation(this:unknown,id:string,operationId:string,client:TransportClient,remove:()=>Promise<unknown>):Promise<unknown>;
   agentSpawnOpts(this:unknown,message:Start,client:TransportClient,stage:string):Promise<Spawn>;
   validateCloudCommand(this:unknown,id:string,payload?:unknown):void;
+  handleCloudEventOperation(this:unknown,params:Record<string,unknown>):Promise<unknown>;
 };
 let root:string;
 beforeEach(async()=>{root=await mkdtemp(path.join(os.tmpdir(),"zeros-command-admit-"));setZerosDbPathForTesting(path.join(root,"state.db"));await mkdir(path.join(root,"workspace"));});
@@ -37,8 +41,9 @@ function fixture(){
     payload:{agentId:"cursor",agentCredentialGrantId:randomUUID(),model:"grok-4.6",effort:"xhigh",fast:true,userMessageId:randomUUID(),modeRevision:0,prompt:[{type:"text",text:"test"}]}};
   const captures:Spawn[]=[];
   const engine={root:path.join(root,"workspace"),cloudWorker:{version:3},cloudCommandAdmissions:new WeakMap(),cloudCommandSessions:new Map(),
-    conversationExecution:new Map<string,string>(),sessionAgent:new Map<string,string>(),activePromptContexts:new Map(),
-    agents:{endSession:vi.fn(async(_agentId:string,_executionId:string,_options?:{failClosed?:boolean})=>{}),cancel:vi.fn(async()=>{})},broadcast:vi.fn(),handleCloudRuntimeAuthorityLoss:vi.fn(),
+    cloudGoals:new CloudGoalRecorder(async(claim,_sequence,goal)=>({version:1,conversationId:claim.conversationId,revision:1,goal})),
+    conversationExecution:new Map<string,string>(),sessionAgent:new Map<string,string>(),activePromptContexts:new Map(),retiringCloudExecutions:new Set<string>(),
+    agents:{cloudNativeCapabilities:vi.fn(()=>undefined),endSession:vi.fn(async(_agentId:string,_executionId:string,_options?:{failClosed?:boolean})=>{}),cancel:vi.fn(async()=>{})},broadcast:vi.fn(),handleCloudRuntimeAuthorityLoss:vi.fn(),
     validateCloudCommand:methods.validateCloudCommand,workspace:{workspaceIdForCwd:()=>"workspace"},
     assertRemoteWorkspaceOperable:vi.fn(()=>path.join(root,"workspace")),invalidateConversationBind:vi.fn(),markCancelIntent:vi.fn(),
     clearAgentExecutionRoute:vi.fn((id:string)=>{engine.sessionAgent.delete(id);if(engine.conversationExecution.get("conversation")===id)engine.conversationExecution.delete("conversation");}),
@@ -62,6 +67,138 @@ function failingRetirement(engine:ReturnType<typeof fixture>["engine"],execution
   return proof;
 }
 describe("cloud engine credential admission",()=>{
+  it("preserves another actor's retained execution when a claim fails validation before admission",async()=>{
+    const {claim,engine}=fixture(),incoming={...claim,actor:{...claim.actor!,userId:randomUUID()}};
+    engine.conversationExecution.set("conversation",claim.executionId);engine.sessionAgent.set(claim.executionId,"cursor");
+    Object.assign(engine.agents,{hasRetainedCloudExecution:()=>true});
+    let claimed=false;
+    const request=vi.fn(async(input:CloudCommandEngineRequest)=>{
+      if(input.kind==="claim"){
+        if(claimed)return null;claimed=true;setChatComposerMode("conversation","design",0);
+        return {...incoming,claimId:input.claimId,executionId:input.executionId};
+      }
+      return {version:1,conversationId:"conversation",revision:1,paused:false,pending:[],receipts:[]};
+    });
+    const prepare=vi.fn((c:CloudCommandClaim)=>methods.prepareCloudCommand.call(engine,c)),release=vi.fn(),dispatch=vi.fn(async()=>({state:"succeeded" as const,resultCode:null}));
+    const runtime=new CloudCommandRuntime({request,validate:(id,payload)=>methods.validateCloudCommand.call(engine,id,payload),execution:()=>claim.executionId,
+      retainedExecution:()=>claim.executionId,releaseRetainedExecution:release,prepare,retire:(c,result)=>methods.retireCloudCommand.call(engine,c,result.state==="succeeded"),
+      dispatch,cancel:async()=>{},changed:()=>{}});
+    try{
+      runtime.kick("conversation");await vi.waitFor(()=>expect(request.mock.calls.some(([r])=>r.kind==="settle")).toBe(true));
+      expect(prepare).not.toHaveBeenCalled();expect(dispatch).not.toHaveBeenCalled();expect(engine.agents.endSession).not.toHaveBeenCalled();
+      expect(engine.conversationExecution.get("conversation")).toBe(claim.executionId);expect(release).toHaveBeenCalledWith(claim.executionId);
+    }finally{runtime.close();}
+  });
+  it("retains cleanup authority when a new provider launch fails after admission began",async()=>{
+    const {claim,engine}=fixture();engine.handleAgentMessage.mockRejectedValueOnce(new Error("native launch failed"));
+    await expect(methods.prepareCloudCommand.call(engine,claim)).rejects.toThrow("native launch failed");
+    await methods.retireCloudCommand.call(engine,claim,false);
+    expect(engine.agents.endSession).toHaveBeenCalledWith("cursor",claim.executionId,{failClosed:true});
+  });
+  it("marks deferred background retirement as intentional until the descendant proof finishes",async()=>{
+    const {claim,engine}=fixture();await methods.prepareCloudCommand.call(engine,claim);
+    let retire!:()=>Promise<void>;
+    Object.assign(engine.agents,{completeCloudForeground:vi.fn(async(_a:string,_e:string,callback:()=>Promise<void>)=>{retire=callback;return true;})});
+    await methods.retireCloudCommand.call(engine,claim);
+    engine.agents.endSession.mockImplementation(async()=>{expect(engine.retiringCloudExecutions.has(claim.executionId)).toBe(true);});
+    await retire();expect(engine.agents.endSession).toHaveBeenCalledOnce();expect(engine.retiringCloudExecutions.size).toBe(0);
+  });
+  it("proves retained descendant retirement even if native cancellation fails",async()=>{
+    const {claim,engine}=fixture();engine.conversationExecution.set("conversation",claim.executionId);engine.sessionAgent.set(claim.executionId,"cursor");
+    Object.assign(engine.agents,{hasRetainedCloudExecution:()=>true});engine.agents.cancel.mockRejectedValueOnce(new Error("native cancel failed"));
+    await expect(methods.cancelCloudCommandConversation.call(engine,"conversation")).rejects.toThrow("native cancel failed");
+    expect(engine.agents.endSession).toHaveBeenCalledWith("cursor",claim.executionId,{failClosed:true});
+  });
+  it("settles the foreground without retiring a leased native background task",async()=>{
+    const {claim,engine}=fixture();await methods.prepareCloudCommand.call(engine,claim);
+    Object.assign(engine.agents,{completeCloudForeground:vi.fn(async()=>true)});
+    await methods.retireCloudCommand.call(engine,claim);
+    expect(engine.agents.endSession).not.toHaveBeenCalled();
+    expect(engine.conversationExecution.get("conversation")).toBe(claim.executionId);
+    expect(engine.cloudCommandSessions.size).toBe(0);
+  });
+  it.each(["missing", "empty"])("retires an admitted execution when background inspection is %s",async inspection=>{
+    const {claim,engine}=fixture();await methods.prepareCloudCommand.call(engine,claim);
+    if(inspection==="empty")Object.assign(engine.agents,{completeCloudForeground:vi.fn(async()=>false)});
+    await methods.retireCloudCommand.call(engine,claim);
+    expect(engine.agents.endSession).toHaveBeenCalledTimes(1);
+    expect(engine.agents.endSession).toHaveBeenCalledWith("cursor",claim.executionId,{failClosed:true});
+    expect(engine.conversationExecution.has("conversation")).toBe(false);
+    expect(engine.cloudCommandSessions.size).toBe(0);
+  });
+  it("reuses the retained execution for an authorized next turn without releasing native history",async()=>{
+    const {claim,engine}=fixture();
+    engine.conversationExecution.set("conversation",claim.executionId);engine.sessionAgent.set(claim.executionId,"cursor");
+    const resume=vi.fn(async()=>{});
+    Object.assign(engine.agents,{hasRetainedCloudExecution:()=>true,resumeCloudExecution:resume});
+    await methods.prepareCloudCommand.call(engine,claim);
+    expect(resume).toHaveBeenCalledOnce();expect(engine.agents.endSession).not.toHaveBeenCalled();
+    expect(engine.handleAgentMessage).not.toHaveBeenCalled();
+  });
+  it("does not retire another actor's background execution when reuse is rejected",async()=>{
+    const {claim,engine}=fixture();
+    engine.conversationExecution.set("conversation",claim.executionId);engine.sessionAgent.set(claim.executionId,"cursor");
+    Object.assign(engine.agents,{hasRetainedCloudExecution:()=>true,resumeCloudExecution:vi.fn(async()=>{throw new Error("actor changed");})});
+    await expect(methods.prepareCloudCommand.call(engine,claim)).rejects.toThrow("actor changed");
+    await methods.retireCloudCommand.call(engine,claim);
+    expect(engine.agents.endSession).not.toHaveBeenCalled();
+    expect(engine.conversationExecution.get("conversation")).toBe(claim.executionId);
+  });
+  it("admits a transcript fork through the destination credential before settling",async()=>{
+    const {claim,engine}=fixture(),source=getChat("conversation")!;
+    upsertChat({...source,id:"source"});upsertChat({...source,sourceChatId:"source"});
+    claim.payload.operation={version:1,kind:"fork",sourceConversationId:"source",strategy:"transcript"};
+    await methods.prepareCloudCommand.call(engine,claim);
+    expect(engine.handleAgentMessage).toHaveBeenCalledWith(expect.objectContaining({type:"AGENT_NEW_SESSION",chatId:"conversation"}),expect.anything(),0,true);
+    expect(getChat("source")).toEqual({...source,id:"source"});
+  });
+  it("runs typed goals without creating a prompt turn and returns a durable snapshot",async()=>{
+    const {claim,engine}=fixture();
+    claim.payload.agentId="codex";
+    claim.payload.operation={version:1,kind:"goal",action:"set",update:{objective:"Finish"}};
+    const goal={objective:"Finish",status:"active",tokenBudget:null,tokensUsed:0,timeUsedSeconds:0,createdAt:1,updatedAt:1};
+    Object.assign(engine.agents,{setGoal:vi.fn(async()=>goal),getGoal:vi.fn(async()=>goal),clearGoal:vi.fn(async()=>{})});
+    engine.cloudCommandSessions.set(claim.commandId,{claim,controller:new AbortController()});
+    expect(await methods.dispatchCloudCommand.call(engine,claim)).toEqual({state:"succeeded",resultCode:null,result:{version:1,goal}});
+    expect(engine.handleAgentMessage).not.toHaveBeenCalled();
+  });
+  it("rejects a fork whose source belongs to a different workspace or was deleted",()=>{
+    const {claim,engine}=fixture(),source=getChat("conversation")!;
+    upsertChat({...source,id:"destination",sourceChatId:"conversation"});
+    claim.conversationId="destination";
+    claim.payload.operation={version:1,kind:"fork",sourceConversationId:"conversation",strategy:"transcript"};
+    expect(()=>methods.validateCloudCommand.call(engine,"destination",claim.payload)).not.toThrow();
+    upsertChat({...source,folder:root});
+    expect(()=>methods.validateCloudCommand.call(engine,"destination",claim.payload)).toThrow();
+    deleteChat("conversation");
+    expect(()=>methods.validateCloudCommand.call(engine,"destination",claim.payload)).toThrow();
+  });
+  it("includes confirmed live session metadata in a reconnect snapshot without admitting work", async () => {
+    const { engine, claim } = fixture();
+    engine.conversationExecution.set("conversation", claim.executionId);
+    const session = { modes: { currentModeId: "ask", availableModes: [] } };
+    const initialize = { protocolVersion: 1, agentCapabilities: { steering: true } };
+    Object.assign(engine, { cloudEvents: { snapshot: (capture: () => unknown) => ({ snapshot: capture() }) },
+      sessionLoadResponses: new Map([[claim.executionId, session]]), pendingPermissionRequests: new Map(), pendingQuestionRequests: new Map() });
+    Object.assign(engine.agents, { agentInitializeSnapshot: vi.fn(() => initialize) });
+    expect(await methods.handleCloudEventOperation.call(engine, { request: { kind: "snapshot", conversationId: "conversation" } })).toMatchObject({
+      snapshot: { executionId: claim.executionId, session, initialize },
+    });
+    expect(engine.handleAgentMessage).not.toHaveBeenCalled();
+  });
+  it("restores durable background tasks alongside session modes without overwriting newer native tasks",async()=>{
+    const {engine,claim}=fixture();engine.conversationExecution.set("conversation",claim.executionId);
+    const session={modes:{currentModeId:"ask",availableModes:[]}},task={taskId:"child",name:"Child",startedAt:1,updatedAt:1};
+    const durable={sessionUpdate:"background_tasks_update",tasks:[task],waiting:true};
+    const sessions=new Map<string,Record<string,unknown>>([[claim.executionId,session]]);
+    Object.assign(engine,{cloudEvents:{snapshot:(capture:()=>unknown)=>({snapshot:capture()})},sessionLoadResponses:sessions,
+      pendingPermissionRequests:new Map(),pendingQuestionRequests:new Map()});
+    Object.assign(engine.agents,{readCloudBackgroundTasks:vi.fn(async()=>durable),agentInitializeSnapshot:()=>null});
+    const request={request:{kind:"snapshot",conversationId:"conversation"}};
+    expect(await methods.handleCloudEventOperation.call(engine,request)).toMatchObject({snapshot:{session:{...session,backgroundTasks:durable}}});
+    const newer={...durable,tasks:[]};sessions.set(claim.executionId,{...session,backgroundTasks:newer});
+    expect(await methods.handleCloudEventOperation.call(engine,request)).toMatchObject({snapshot:{session:{backgroundTasks:newer}}});
+  });
   it("attempts strict retirement and quarantines when native cancellation fails",async()=>{
     const {claim,engine}=fixture();await methods.prepareCloudCommand.call(engine,claim);
     engine.agents.cancel.mockRejectedValueOnce(new Error("cancel proof failed"));
@@ -104,7 +241,7 @@ describe("cloud engine credential admission",()=>{
   it("starts from the persisted conversation and exact command actor without a device or ambient key",async()=>{
     const {claim,engine,captures}=fixture();await methods.prepareCloudCommand.call(engine,claim);
     expect(engine.handleAgentMessage.mock.calls[0]?.[0]).toMatchObject({id:claim.commandId,type:"AGENT_NEW_SESSION",chatId:"conversation",workspaceId:"workspace"});
-    expect(captures[0]).toEqual({cwd:path.join(root,"workspace"),workspaceId:"workspace",env:{ZEROS_THINKING_EFFORT:"xhigh",ZEROS_FAST_MODE:"1"},
+    expect(captures[0]).toEqual({cwd:path.join(root,"workspace"),workspaceId:"workspace",env:{ZEROS_THINKING_EFFORT:"xhigh",ZEROS_FAST_MODE:"1",ZEROS_PERMISSION_MODE:"auto"},
       cloudExecutionId:claim.executionId,cloudExecution:{delegationId:claim.payload.agentCredentialGrantId,model:"grok-4.6",source:{kind:"command",commandId:claim.commandId,claimId:claim.claimId}}});
     const receiver=engine.handleAgentMessage.mock.calls[0]![1];expect(receiver.accountUserId).toBe(claim.actor!.userId);
     await methods.retireCloudCommand.call(engine,claim);expect(engine.agents.endSession).toHaveBeenCalledWith("cursor",claim.executionId,{failClosed:true});

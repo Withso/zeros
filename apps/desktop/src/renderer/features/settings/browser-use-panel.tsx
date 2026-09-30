@@ -14,6 +14,8 @@ import { toast } from "../../shared/ui/primitives/elements";
 import { shellOpenUrl } from "../../platform/app";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
 import { useResolvedSettings, useSettingsLayer } from "./use-settings";
+import { getActiveOrganizationIdSnapshot, useActiveOrganization } from "../team/team-store";
+import { NativeBrowserAvailability } from "../agent/native-browser-availability";
 import {
   BROWSER_SETTINGS_ROWS,
   CLAUDE_CHROME_DOCS_URL,
@@ -52,6 +54,19 @@ function openClaudeChromeUrl(url: string): void {
 }
 
 export function BrowserUsePanel() {
+  const organization = useActiveOrganization();
+  if (!organization && getActiveOrganizationIdSnapshot())
+    return <p className="text-fg2 text-xs">Loading organization browser settings…</p>;
+  if (organization && !organization.isPersonal) return (
+    <SettingsGroup title="Browser use">
+      <SettingsRow label="Codex" hint={<NativeBrowserAvailability provider="codex" />} />
+      <SettingsRow label="Claude" hint={<NativeBrowserAvailability provider="claude" />} />
+    </SettingsGroup>
+  );
+  return <LocalBrowserUsePanel />;
+}
+
+function LocalBrowserUsePanel() {
   const resolved = useResolvedSettings();
   const layer = useSettingsLayer("user");
   const [pending, setPending] = useState<PendingBrowserSettings>({});

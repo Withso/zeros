@@ -30,6 +30,7 @@ import {
   type TerminalTabIndicator,
 } from "../terminal/terminal-tab-indicators";
 import { RunStream } from "../../shared/ui/loading";
+import { CloudTerminalIndicator } from "../terminal/cloud-terminal-indicator";
 import { cn } from "../../shared/ui/cn";
 import { DynamicIcon } from "../../shared/ui/icon-registry";
 import { CircleStop, MousePointer2, X } from "lucide-react";
@@ -119,7 +120,7 @@ export function WorkbenchTabStrip({
     if (
       tab.type === "changes" ||
       tab.type === "review" ||
-      tab.type === "context" || tab.type === "design"
+      tab.type === "design"
     )
       return;
     if (tab.type === "browser") {
@@ -153,6 +154,7 @@ export function WorkbenchTabStrip({
               <TabPill
                 key={tab.id}
                 tab={tab}
+                folderKey={folderKey}
                 active={tab.id === activeId}
                 canClose={
                   tab.type === "terminal" ||
@@ -196,6 +198,7 @@ export function WorkbenchTabStrip({
 // ── Tab pill ───────────────────────────────────────────────
 
 interface TabPillProps {
+  folderKey: string;
   tab: WorkbenchTab;
   active: boolean;
   canClose: boolean;
@@ -217,6 +220,7 @@ function tabShowsLabel(tab: WorkbenchTab): boolean {
 
 function TabPill({
   tab,
+  folderKey,
   active,
   canClose,
   badge,
@@ -297,6 +301,7 @@ function TabPill({
           : WORKBENCH_TAB_PILL_INACTIVE_CLS,
       ].join(" ")}
     >
+      {tab.type === "terminal" && <CloudTerminalIndicator folder={folderKey} />}
       {tab.type === "terminal" ? (
         terminalIndicator?.running ? (
           <RunStream
