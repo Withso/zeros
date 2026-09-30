@@ -16,8 +16,9 @@ export type DevRenewalProof = { accountBinding: true; accessChanged: true; cache
 /** This operator runs only on a fresh, empty clone of the qualified image. The
  * native test is already baked in that image; no mutable test code is loaded
  * from the checkout. Credentials use the provider's file API, never argv. */
-export async function startNativeDevCanary(transport: DevCanaryTransport, value: DevCanaryTarget, input: unknown, renewal?: DevRenewalProof) {
+export async function startNativeDevCanary(transport: DevCanaryTransport, value: DevCanaryTarget, input: unknown, renewal?: DevRenewalProof, options: { deadlineSeconds?: number } = {}) {
   const target = DevCanaryTargetSchema.parse(value);
+  const deadlineSeconds = z.number().int().min(60).max(2400).parse(options.deadlineSeconds ?? 420);
   const attempt = target.attempt.replaceAll("-", ""), temp = `/tmp/zeros-native-${attempt}`, remote = `/srv/zeros-qualification/native-${attempt}`;
   await transport.command(`/usr/bin/python3 - <<'PY'
 import pathlib,os,stat
@@ -42,7 +43,7 @@ retirement=125
 try:
  with (base/'native.stdout').open('wb') as out,(base/'native.stderr').open('wb') as err:
   child=subprocess.Popen(['/usr/bin/flock','--exclusive','--nonblock','/run/zeros/engine.lock','/opt/zeros-runtime/bin/node','/opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs','--qualify-agent'],stdout=out,stderr=err,stdin=subprocess.DEVNULL,start_new_session=True,env={'PATH':'/opt/zeros-runtime/bin:/usr/bin:/bin','HOME':'/root'})
-  deadline=time.monotonic()+420
+  deadline=time.monotonic()+${deadlineSeconds}
   while child.poll() is None and time.monotonic()<deadline:
    time.sleep(.5)
    if (base/'native.stdout').stat().st_size>1048576 or (base/'native.stderr').stat().st_size>1048576:break

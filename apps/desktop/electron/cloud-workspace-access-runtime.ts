@@ -14,6 +14,7 @@ import {
 } from "./ipc/commands/auth-session";
 import { emitEvent } from "./ipc/events";
 import { IS_DEV } from "./runtime-mode";
+import { controlPlaneFetch } from "./control-plane-fetch";
 
 declare const __ZEROS_CONTROL_PLANE_URL_BAKED__: string | undefined;
 declare const __ZEROS_CLOUD_PREVIEW_HOST_SUFFIXES_BAKED__: string | undefined;
@@ -124,6 +125,7 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
   };
   broker = new CloudWorkspaceAccessBroker({
     api: new CloudWorkspaceAccessClient({
+      fetch: controlPlaneFetch,
       baseUrl: controlPlaneBaseUrl(),
       signEngineAdmission: signCloudEngineAdmissionForMain,
       allowInsecureLoopback: IS_DEV,

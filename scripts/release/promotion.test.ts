@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { promote, type PromotionDependencies } from "./promotion";
+import { finalizePromotion, promote, promoteServices, type FinalizationDependencies, type PromotionDependencies } from "./promotion";
 import { promotionConfig, type PromotionConfig } from "./contracts";
 const sha = "a".repeat(40);
 export const env = { RELEASE_CHANNEL: "alpha", RELEASE_SHA: sha, RELEASE_BRANCH: "main", GITHUB_SHA: sha,
@@ -18,9 +18,12 @@ function harness(config: PromotionConfig = promotionConfig(env)) {
       branch: { name: "main", production: true }, backup: execute ? { id: "backup1", state: "success" } : null,
       controlledApprovals: [], pendingMigrations: [], applied: [], ledger: execute ? "verified" : "recorded", role: { deleted: true } }; },
     retarget: () => record("retarget"), deploy: async () => { calls.push("deploy"); return "deploy1"; },
-    waitDeployment: () => record("success"), waitIdentity: async () => { calls.push("identity"); return { sourceSha: sha }; },
+    waitDeployment: () => record("success"), waitIdentity: async () => { calls.push("identity"); return { version: 1, ready: true, sourceSha: sha,
+      channel: config.channel, maintenance: false, migrations: { state: "current", head: "0121_example.sql", expectedHead: "0121_example.sql", manifestSha256: "b".repeat(64) },
+      cloud: { enabled: false, ready: true, state: "disabled" }, worker: null }; },
     publishPages: async surface => { calls.push(`pages:${surface}`); return { id: `pages-${surface}`, surface }; },
     betaReceipt: () => record("beta"), checkWorker: () => record("worker"),
+    verifyWorkOS: async () => { calls.push("workos"); return { kind: "workos-handshake-v1", surfaces: config.surfaces, verifiedAt: new Date().toISOString() }; },
   };
   return { calls, deps, config };
 }
@@ -28,7 +31,7 @@ describe("ordered hosted promotion", () => {
   it("orders backup/migration, exact backend readiness, Pages, and receipt", async () => {
     const { deps, calls, config } = harness();
     const receipt = await promote(config, deps);
-    expect(calls).toEqual(["current", "inspect", "worker", "plan", "current", "retarget", "inspect", "migrate", "deploy", "success", "identity", "pages:app", "pages:ops"]);
+    expect(calls).toEqual(["current", "inspect", "worker", "plan", "current", "retarget", "inspect", "migrate", "deploy", "success", "identity", "pages:app", "pages:ops", "workos"]);
     expect(receipt).toMatchObject({ version: 1, status: "success", channel: "alpha", sourceSha: sha, railwayDeploymentId: "deploy1" });
     expect(JSON.stringify(receipt)).not.toContain("fixture");
   });
@@ -61,10 +64,68 @@ describe("ordered hosted promotion", () => {
     await expect(promote(config, deps)).rejects.toThrow();
     expect(calls).toEqual(["beta"]);
   });
+  it("withholds the success receipt after a WorkOS verification failure", async () => {
+    const { config, deps, calls } = harness();
+    Object.assign(deps, { verifyWorkOS: async () => { throw new Error("private-auth-flow"); } });
+    await expect(promote(config, deps)).rejects.toThrow(/WorkOS/);
+    expect(calls).toContain("pages:app");
+  });
   it("refuses mismatched event SHA, channels, destinations and incomplete authority", () => {
     for (const patch of [{ RELEASE_SHA: "b".repeat(40) }, { RELEASE_BRANCH: "release/1.2.3" },
       { PLANETSCALE_DATABASE: "zeros-control-plane-beta" }, { CF_PAGES_APP_PROJECT: "zeros-web" }, { RAILWAY_DEPLOY_TOKEN: "" }]) {
       expect(() => promotionConfig({ ...env, ...patch })).toThrow();
     }
+  });
+});
+
+async function finalizationHarness(workerPromoted = true) {
+  const { config, deps, calls } = harness();
+  const services = await promoteServices(config, deps);
+  calls.length = 0;
+  const final: FinalizationDependencies = { ...deps, workerPromoted,
+    verifyPages: async surface => { calls.push(`verify:${surface}`); } };
+  return { config, services, final, calls };
+}
+describe("services and qualified worker finalization", () => {
+  it("withholds success until the worker handoff and exact-source API redeploy complete", async () => {
+    const { config, services, final, calls } = await finalizationHarness();
+    expect(services.status).toBe("services-ready");
+    expect(await finalizePromotion(config, services, final)).toMatchObject({ status: "success", sourceSha: sha });
+    expect(calls).toEqual(["current", "inspect", "verify:app", "verify:ops", "worker", "current", "deploy", "success", "identity"]);
+  });
+  it("reuses an authenticated earlier services attempt without redeploying an unchanged worker", async () => {
+    const { config, services, final, calls } = await finalizationHarness(false);
+    expect(await finalizePromotion({ ...config, runAttempt: "2" }, services, final)).toMatchObject({ status: "success", runAttempt: "2" });
+    expect(calls).not.toContain("deploy");
+  });
+  it.each(["channel", "source", "manifest", "head", "maintenance", "qualification", "provider"])("refuses final API %s drift before producing success", async change => {
+    const { config, services, final } = await finalizationHarness();
+    const identity = services.backend;
+    const worker = { provider: "boat", imageRef: `boat:zeros-alpha-fixture@sha256:${"d".repeat(64)}`, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096 };
+    final.waitIdentity = async () => ({ ...identity,
+      ...(change === "channel" ? { channel: "beta" } : change === "source" ? { sourceSha: "e".repeat(40) } :
+        change === "manifest" ? { migrations: { ...identity.migrations, manifestSha256: "e".repeat(64) } } :
+        change === "head" ? { migrations: { ...identity.migrations, head: "0122_other.sql", expectedHead: "0122_other.sql" } } :
+        change === "maintenance" ? { maintenance: true } : { cloud: { enabled: true, ready: true, state: "healthy" },
+          worker: { ...worker, ...(change === "provider" ? { provider: "daytona" } : {}) }, workerQualified: change !== "qualification" }) });
+    await expect(finalizePromotion({ ...config, cloudRequired: ["qualification", "provider"].includes(change), provider: "boat" }, services, final)).rejects.toThrow();
+  });
+  it.each(["missing receipt", "failed canary", "rate-limited canary", "cleanup unconfirmed", "tuple changed"])("withholds redeploy and success when the worker handoff reports %s", async failure => {
+    const { config, services, final, calls } = await finalizationHarness();
+    final.checkWorker = async () => { throw new Error(failure); };
+    await expect(finalizePromotion(config, services, final)).rejects.toThrow("qualified worker handoff");
+    expect(calls).not.toContain("deploy");
+    expect(calls).not.toContain("identity");
+  });
+  it.each(["assertCurrent", "inspect", "verifyPages", "deploy", "waitDeployment"] as const)("withholds success on final %s failure without exposing private details", async step => {
+    const { config, services, final } = await finalizationHarness();
+    final[step] = async () => { throw new Error("private-provider-detail"); };
+    await expect(finalizePromotion(config, services, final)).rejects.not.toThrow("private-provider-detail");
+  });
+  it("refuses a plan-mode services receipt and future attempt before provider reads", async () => {
+    const { config, services, final, calls } = await finalizationHarness();
+    for (const patch of [{ migration: { ...services.migration, mode: "plan" } }, { runAttempt: "2" }])
+      await expect(finalizePromotion(config, { ...services, ...patch }, final)).rejects.toThrow();
+    expect(calls).toEqual([]);
   });
 });

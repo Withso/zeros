@@ -21,6 +21,7 @@ import { cn } from "../../shared/ui/cn";
 import { useRunControl } from "../terminal/use-run-control";
 import { useRunStatuses } from "../terminal/use-run-status";
 import { useRunPreviewUrls } from "../terminal/use-run-preview-urls";
+import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
 import { useOpenBrowserInWorkbench } from "../workbench/use-open-browser";
 import { buildDirectFileOpenAction } from "../workbench/direct-file-open";
 import { warmChatFileInWorkbench } from "../workbench/use-open-file";
@@ -223,7 +224,7 @@ export function SummaryContents({
                     role="group"
                     aria-label={`${action.name} run controls`}
                   >
-                    <Tooltip
+                    {workspacePreviewAvailable(folder) && <Tooltip
                       label={
                         previewUrl
                           ? `Open ${previewUrl} in Browser`
@@ -244,7 +245,7 @@ export function SummaryContents({
                           <ArrowUpRight className="size-4" aria-hidden="true" />
                         </Button>
                       </span>
-                    </Tooltip>
+                    </Tooltip>}
                     <Tooltip label={`Stop ${action.name}`}>
                       <span className="inline-flex">
                         <Button

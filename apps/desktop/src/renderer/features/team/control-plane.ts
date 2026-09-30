@@ -12,6 +12,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { getSession } from "../auth/auth-store";
+import { controlPlaneFetch } from "../update/control-plane-fetch";
 import {
   normalizeOrganizationSummary,
   type OrganizationSummaryWire,
@@ -138,7 +139,7 @@ async function request<T>(
   if (!token) {
     throw new ControlPlaneError(401, "signed_out", "You're not signed in");
   }
-  const res = await fetch(`${CONTROL_PLANE_URL}${path}`, {
+  const res = await controlPlaneFetch(`${CONTROL_PLANE_URL}${path}`, {
     method,
     headers: {
       authorization: `Bearer ${token}`,

@@ -16,7 +16,13 @@ function knownHostsDocument(host = "ssh.app.daytona.io"): string {
 }
 
 describe("desktop release environment routing", () => {
-  it("allows Boat without Daytona pins while preserving preview and supplied-pin validation", () => {
+  it("validates supplied preview suffixes even when cloud is off", () => {
+    expect(releaseEnvironmentErrors("alpha", {
+      VITE_APP_BASE_URL: "https://app-alpha.zeros.build", VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build", AUTH_PROVIDER: "auth0",
+      VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "https://preview.example.test",
+    })).toContain("VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES must contain 1-8 exact lowercase DNS suffixes");
+  });
+  it("allows Boat without previews or Daytona pins while validating supplied configuration", () => {
     const env = {
       VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
       VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
@@ -28,7 +34,7 @@ describe("desktop release environment routing", () => {
     expect(releaseEnvironmentErrors("alpha", env)).toEqual([]);
     expect(releaseEnvironmentErrors("alpha", { ...env, CLOUD_WORKSPACE_PROVIDER: "daytona" })).toHaveLength(1);
     expect(releaseEnvironmentErrors("alpha", { ...env, CLOUD_WORKSPACE_PROVIDER: "unknown" })).toContain("CLOUD_WORKSPACE_PROVIDER must be boat or daytona");
-    expect(releaseEnvironmentErrors("alpha", { ...env, VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "" })).toHaveLength(1);
+    expect(releaseEnvironmentErrors("alpha", { ...env, VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "" })).toEqual([]);
     expect(releaseEnvironmentErrors("alpha", { ...env, VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: "invalid" })).toHaveLength(1);
   });
   it("accepts each channel's exact hosted origins", () => {
@@ -156,7 +162,7 @@ describe("desktop release environment routing", () => {
     );
   });
 
-  it("requires valid preview and pinned SSH configuration before enabling desktop cloud", () => {
+  it("validates optional previews and still requires pinned Daytona SSH before enabling cloud", () => {
     const enabled = {
       VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
       VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
@@ -165,7 +171,6 @@ describe("desktop release environment routing", () => {
     };
 
     expect(releaseEnvironmentErrors("alpha", enabled)).toEqual([
-      "VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES is required when ZEROS_CLOUD_WORKSPACES_ENABLED=true",
       "VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 is required when ZEROS_CLOUD_WORKSPACES_ENABLED=true",
     ]);
     expect(

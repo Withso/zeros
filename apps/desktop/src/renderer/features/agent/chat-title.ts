@@ -4,6 +4,7 @@
 import type { AgentMessage } from "@zeros/protocol/agent-messages";
 import { getSession, onAuthStateChange } from "../auth/auth-store";
 import { CONTROL_PLANE_URL } from "../team/control-plane";
+import { controlPlaneFetch } from "../update/control-plane-fetch";
 import { useWorkspaceStore, type Action } from "../../state/workspace-store";
 import type { SessionStatus } from "./use-agent-session";
 
@@ -106,8 +107,7 @@ export function requestAiChatTitle(
       const session = await getSession();
       if (!session?.access_token || attempts.get(key) !== entry || !current())
         return;
-      entry.requested = true;
-      const response = await fetch(`${CONTROL_PLANE_URL}/v1/chat-titles`, {
+      const response = await controlPlaneFetch(`${CONTROL_PLANE_URL}/v1/chat-titles`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${session.access_token}`,
@@ -120,6 +120,9 @@ export function requestAiChatTitle(
         }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         redirect: "error",
+      }, () => {
+        if (attempts.get(key) !== entry || !current()) throw new Error("The chat changed before the title request");
+        entry.requested = true;
       });
       if (!response.ok) {
         await response.body?.cancel();

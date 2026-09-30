@@ -168,6 +168,7 @@ import {
 } from "./ipc/commands/auth-session";
 import { controlPlaneBaseUrl } from "./workos-desktop-account";
 import { WorkOSDesktopSecurityMonitor } from "./auth-security-monitor";
+import { controlPlaneFetch } from "./control-plane-fetch";
 import {
   appIdentity,
   zerosChannelDataDir,
@@ -1481,6 +1482,7 @@ app.whenReady().then(async () => {
   });
   const authSecurityMonitor = new WorkOSDesktopSecurityMonitor({
     baseUrl: controlPlaneBaseUrl(),
+    fetch: controlPlaneFetch,
     getSession: getValidSessionForMain,
     clearSession: clearWorkOSSessionAfterServerRevocation,
     emit: emitEvent,

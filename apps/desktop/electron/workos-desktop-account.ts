@@ -134,8 +134,9 @@ export function controlPlaneBaseUrl(): string {
 
 export async function resolveWorkOSDesktopAccountId(
   accessToken: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<string> {
-  const response = await fetch(`${controlPlaneBaseUrl()}/v1/me`, {
+  const response = await fetchImpl(`${controlPlaneBaseUrl()}/v1/me`, {
     headers: {
       accept: "application/json",
       authorization: `Bearer ${accessToken}`,

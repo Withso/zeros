@@ -4,10 +4,10 @@ name: Release
 #   gh workflow run release.yml --ref release/X.Y.Z
 # or select that branch in Actions ▸ Release ▸ Run workflow.
 #
-# Pipeline (THREE jobs): gate on the Vitest suite → BUILD + sign + submit the
-# .dmg/.zip/.zip.blockmap/latest-mac.yml to Apple's notary (no waiting) and
-# upload them as a run artifact → NOTARIZE: poll Apple, staple, verify, and
-# publish the GitHub Release. That release is BOTH the durable per-version
+# Pipeline: exact-source CI and BUILD + sign run in parallel. After CI, hosted
+# promotion runs while the signed artifact is submitted, notarized and verified.
+# Only the final PUBLISH job can write a feed, after all lanes succeed.
+# That release is BOTH the durable per-version
 # archive and the serving layer: the auto-updater polls
 # /releases/latest/download/latest-mac.yml, which follows whatever is marked
 # Latest (`--latest` below). No separate CDN and no storage secrets — the repo
@@ -16,8 +16,8 @@ name: Release
 # WHY the build and the notarize-wait are SEPARATE jobs: Apple's notary service
 # periodically backs up for tens of minutes to several HOURS (see Apple DTS
 # FB21856584). When that happens we do NOT want to throw away a good, signed
-# build and re-run the whole ~10-min pack from scratch. So `build` submits and
-# stops; the signed artifact is preserved; `notarize` polls + publishes. If the
+# build and re-run the whole ~10-min pack from scratch. `submit` preserves the
+# submission id separately; `notarize` polls and saves the verified artifact. If the
 # notary is slow and `notarize` times out, just RE-RUN THE FAILED JOB
 # (`gh run rerun <id> --failed`) — it re-downloads the SAME signed artifact and
 # re-polls Apple with NO rebuild. The expensive part runs once.
@@ -27,8 +27,8 @@ name: Release
 # workflow on the same branch. The branch name, Beta build, stable artifacts,
 # and vX.Y.Z tag therefore stay on one exact commit lineage.
 #
-# Signing: Developer-ID signed + notarized, ALWAYS. The CSC_*/APPLE_* repo
-# secrets are mandatory and asserted up front ("Require signing credentials"),
+# Signing: Developer-ID signed + notarized, ALWAYS. Protected CSC_* secrets stay
+# in `build`; APPLE_* credentials are used only in the CI-gated notary jobs,
 # and the "Verify code signature" step fails the run loudly if notarization
 # didn't take. There is deliberately no unsigned fallback on the stable channel
 # — see that step's comment for why the old one was unreachable.
@@ -40,8 +40,8 @@ on:
 #
 # Read-only by default. This workflow holds the Developer ID .p12, the Apple
 # notary credentials, and it runs third-party setup actions
-# in the same job — so `test` and `build` get exactly the scope that `checkout`
-# needs and nothing else. Only `notarize` publishes, and it raises itself to
+# in separate protected jobs — `build` has signing credentials but no provider
+# tokens and only read permission. Only `publish` raises itself to
 # `contents: write` at the job level (below).
 permissions:
   contents: read
@@ -52,23 +52,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
-    name: Vitest suite (release gate)
-    runs-on: ubuntu-latest
-    # Never release from a fork. `workflow_dispatch` is triggerable by anyone who
-    # forks a public repo, and the ref assertion below does NOT catch that — a
-    # fork's default branch is also `main`. Without this a fork run burns ~30 min
-    # of macOS minutes before failing at the publish step, and a fork that supplied
-    # its own signing secrets could publish something calling itself "Zeros vX.Y.Z".
-    # Keyed to repository identity, not an owner/name pair, so an ownership
-    # transfer can't silently disable releases. `build` and `notarize` chain off
-    # this job via `needs:`, so gating here gates the whole pipeline.
+  ci:
+    name: Exact-source Preflight and CodeQL barrier
     if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 125
+    permissions:
+      contents: read
+      actions: read
+    env:
+      RELEASE_CHANNEL: production
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Require a Beta-validated release branch
-        # Production is a promotion, never a rebuild of moving `main` state.
-        # workflow_dispatch lets an operator select any ref, so enforce the exact
-        # branch contract before checkout, dependency installation, or macOS work.
         run: |
           BRANCH_VERSION="${GITHUB_REF#refs/heads/release/}"
           if [ "$GITHUB_REF" = "refs/heads/release/$BRANCH_VERSION" ] && printf '%s' "$BRANCH_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -77,89 +75,21 @@ jobs:
             echo "::error::Production must be dispatched from 'release/X.Y.Z' after Beta validation (got: $GITHUB_REF)."
             exit 1
           fi
-
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-
-      - name: Setup pnpm
-        # Reads pnpm version from package.json's `packageManager` field —
-        # passing `with: version:` here conflicts ("Multiple versions of pnpm").
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
-
-      - name: Install JS dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Install control-plane contract dependencies
-        # Contract tests exercise the real control-plane HTTP validators across
-        # both independent package graphs.
-        working-directory: apps/control-plane
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify hosted release contracts
-        run: |
-          pnpm exec tsc -p scripts/release/tsconfig.json
-          pnpm exec vitest run --config scripts/release/vitest.config.ts --maxWorkers=2
-
-      - name: Install contained-execution runtime
-        # The suite below drives real bubblewrap/seccomp containment. Without
-        # these host prerequisites those tests fail with "absolute bwrap
-        # unavailable" — an environmental failure that reads exactly like a
-        # regression and blocked the v0.1.10 Production gate.
-        uses: ./.github/actions/contained-execution-runtime
-
-      - name: Typecheck (app · electron · packages)
-        # vite + tsup strip types via esbuild WITHOUT checking them, so before this
-        # the ONLY type safety on the release path was that preflight gated the PR
-        # earlier. A direct push to main, or a merge-skew interaction between two
-        # independently-green PRs, reached users unchecked.
-        run: pnpm typecheck
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Install Playwright Chromium headless shell
-        # The Vitest suite contains real-browser design-runtime protocol tests.
-        # pnpm installs Playwright's API package but intentionally not its browser.
-        run: pnpm exec playwright install --with-deps --only-shell chromium
-
-      - name: Run Vitest suite
-        # Same suite as the standalone "Vitest suite" workflow — a red suite
-        # blocks the release instead of shipping a known regression.
-        #
-        # Runs through with-userns.sh for the same reason preflight does: the
-        # contained-execution tests nest a capability-bearing user namespace that
-        # Ubuntu's bwrap AppArmor profile strips by default.
-        run: bash scripts/ci/with-userns.sh pnpm test:git
-
-      - name: Ship guards (catalog · packaging · prod env · security)
-        # Defense-in-depth on the ONLY path that produces a public DMG. These are
-        # fast, deterministic, secret-free, and each guards a way the shipped app
-        # breaks: a downgrading model catalog, a dead packaged Cursor, a missing
-        # extraResources path, a prod build shipped without its VITE_* secret-set,
-        # a desynced Codex protocol, a regressed Electron security posture, or a
-        # cross-channel deep-link scheme collision.
-        run: |
-          pnpm models:verify --strict
-          pnpm check:cursor-asar
-          pnpm check:licenses
-          pnpm check:audit
-          pnpm check:packaging-paths
-          pnpm check:vite-env
-          pnpm check:codex-pin
-          pnpm check:electron-hardening
-          pnpm check:deep-link-schemes
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsx scripts/release/ci-cli.ts --wait
 
   hosted:
     name: Hosted promotion (production)
-    needs: test
+    needs: ci
     if: github.event.repository.fork == false
     permissions:
       contents: read
@@ -173,16 +103,16 @@ jobs:
     secrets: inherit
 
   build:
-    name: Build + sign + submit to notary (macOS arm64)
-    needs: [test, hosted]
+    name: Build + sign (macOS arm64)
+    if: github.event.repository.fork == false
     # macos-latest (Apple Silicon): plentiful runners, no queue, native arm64
-    # build. Notarization is submitted here (--no-wait) and AWAITED in the
-    # separate `notarize` job so an Apple-side queue backlog never forces a
-    # rebuild — see the header.
+    # build. Signed artifacts are retained while the CI barrier completes.
     runs-on: macos-latest
-    # Signing/notarization credentials belong to this protected environment,
+    # Signing credentials belong to this protected environment,
     # restricted to release/** with required reviewers.
     environment: production
+    permissions:
+      contents: read
     # Expose the computed version to the `notarize` job (release tag + asset
     # names + title) so it never recomputes and risks a mismatch.
     outputs:
@@ -194,6 +124,15 @@ jobs:
       CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
 
     steps:
+      - name: Require a Beta-validated release branch
+        run: |
+          BRANCH_VERSION="${GITHUB_REF#refs/heads/release/}"
+          if [ "$GITHUB_REF" = "refs/heads/release/$BRANCH_VERSION" ] && printf '%s' "$BRANCH_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Releasing Beta-validated branch $GITHUB_REF"
+          else
+            echo "::error::Production must be dispatched from 'release/X.Y.Z' after Beta validation (got: $GITHUB_REF)."
+            exit 1
+          fi
       - name: Require signing credentials
         # Runs FIRST, before checkout, so a missing cert costs seconds instead of
         # failing ~8 minutes later inside electron-builder with an opaque
@@ -209,24 +148,18 @@ jobs:
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -uo pipefail
           MISSING=""
           [ -n "$CSC_LINK" ] || MISSING="$MISSING CSC_LINK"
           [ -n "$CSC_KEY_PASSWORD" ] || MISSING="$MISSING CSC_KEY_PASSWORD"
-          [ -n "$APPLE_ID" ] || MISSING="$MISSING APPLE_ID"
-          [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] || MISSING="$MISSING APPLE_APP_SPECIFIC_PASSWORD"
-          [ -n "$APPLE_TEAM_ID" ] || MISSING="$MISSING APPLE_TEAM_ID"
           if [ -n "$MISSING" ]; then
-            echo "::error::Missing required signing/notarization secrets:$MISSING"
-            echo "Stable releases are always Developer-ID signed and notarized."
+            echo "::error::Missing required signing secrets:$MISSING"
+            echo "Stable releases are always Developer-ID signed."
             echo "Add them under Settings → Secrets and variables → Actions."
             exit 1
           fi
-          echo "✓ signing + notarization credentials present"
+          echo "✓ signing credentials present"
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -237,6 +170,7 @@ jobs:
           # so request them explicitly.
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -347,14 +281,14 @@ jobs:
 
       - name: Package .dmg + .zip with electron-builder (sign only)
         # `--publish never` disables eb's own upload; the explicit `gh release
-        # create` in the notarize job does it. better-sqlite3 is rebuilt against
+        # create` in the publish job does it. better-sqlite3 is rebuilt against
         # Electron's V8 ABI; node-pty keeps its N-API Darwin prebuild and ships a
         # runtime-safe copy outside app.asar.unpacked.
         #
         # CSC_LINK is asserted non-empty by "Require signing credentials", so eb
         # always SIGNS with the Developer ID cert (the afterPack hook self-skips).
         # Notarization is `false` in electron-builder.yml and is done manually
-        # (--no-wait submit here, poll in the notarize job). Signing is fast +
+        # (CI-gated submit, then poll in the notarize job). Signing is fast +
         # reliable, so no retry harness here.
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -400,18 +334,68 @@ jobs:
             --bundle-id com.zeros \
             --team-id H8MS56JU2Z
 
+      - name: Upload signed build artifact
+        # Carry the signed, NOT-YET-stapled build to the
+        # `notarize` job. This is the keystone of the slow-notary recovery: the
+        # artifact also survives a `gh run rerun --failed`, so re-finalizing never
+        # rebuilds. (.app is intentionally NOT uploaded — upload-artifact breaks
+        # the bundle's symlinks; the notarize job verifies by mounting the DMG.)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zeros-macos-arm64-build
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 5
+          path: |
+            release/Zeros-*-arm64.dmg
+            release/Zeros-*-arm64-mac.zip
+            release/Zeros-*-arm64-mac.zip.blockmap
+            release/latest-mac.yml
+
+  submit:
+    name: Submit to Apple notary
+    needs: [ci, build]
+    if: github.event.repository.fork == false
+    runs-on: macos-latest
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+    env:
+      RELEASE_CHANNEL: production
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Recheck CI, current source, and Beta before Apple submission
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pnpm exec tsx scripts/release/ci-cli.ts --verify --beta
+      - name: Download signed build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: zeros-macos-arm64-build
+          path: release
       - name: Submit to Apple notary (--no-wait, no poll)
-        # Submit the DMG and STOP — do NOT block this job on Apple's analysis. The
-        # `--no-wait` submit returns immediately with a submission id, which we
-        # record into the artifact so the `notarize` job (and any cheap re-run of
-        # it) can poll for the result without re-uploading or rebuilding. The
-        # UPLOAD itself is reliable; it's Apple's server-side processing that drags.
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
+          for REQUIRED in APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!REQUIRED}" ]; then echo "::error::Missing required notary secret $REQUIRED"; exit 1; fi
+          done
           DMG=""
           for CANDIDATE in release/Zeros-*-arm64.dmg; do
             [ -f "$CANDIDATE" ] || continue
@@ -426,28 +410,19 @@ jobs:
           if [ -z "$SUB" ]; then echo "::error::notarytool submit returned no submission id (upload failed)"; exit 1; fi
           printf '%s' "$SUB" > release/notarization-submission-id.txt
           echo "Submission id: $SUB (recorded → release/notarization-submission-id.txt)"
-
-      - name: Upload signed build artifact
-        # Carry the signed, NOT-YET-stapled build (+ the submission id) to the
-        # `notarize` job. This is the keystone of the slow-notary recovery: the
-        # artifact also survives a `gh run rerun --failed`, so re-finalizing never
-        # rebuilds. (.app is intentionally NOT uploaded — upload-artifact breaks
-        # the bundle's symlinks; the notarize job verifies by mounting the DMG.)
+      - name: Save notary submission for polling retries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: zeros-macos-arm64-build
+          name: zeros-macos-arm64-submission
+          overwrite: true
           if-no-files-found: error
           retention-days: 5
-          path: |
-            release/Zeros-*-arm64.dmg
-            release/Zeros-*-arm64-mac.zip
-            release/Zeros-*-arm64-mac.zip.blockmap
-            release/latest-mac.yml
-            release/notarization-submission-id.txt
+          path: release/notarization-submission-id.txt
 
   notarize:
-    name: Notarize + verify + publish (macOS arm64)
-    needs: build
+    name: Notarize + verify (macOS arm64)
+    needs: [ci, build, submit]
+    if: github.event.repository.fork == false
     # macOS for xcrun notarytool/stapler/spctl. This job is CHEAP and re-runnable:
     # on an Apple slow-day it may time out polling — just re-run it
     # (`gh run rerun <id> --failed`) and it re-downloads the same signed artifact
@@ -456,36 +431,32 @@ jobs:
     # This job retrieves the same protected Apple credentials to poll and staple
     # the already-built artifact; it must never fall back to broad repo secrets.
     environment: production
-    # The ONE job that writes: it creates the vX.Y.Z tag + GitHub Release. Raised
-    # above the workflow-level `contents: read` default here and nowhere else.
     permissions:
-      contents: write
+      contents: read
       actions: read
     env:
       RELEASE_CHANNEL: production
       RELEASE_SHA: ${{ github.sha }}
       RELEASE_BRANCH: ${{ github.ref_name }}
-      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
-      ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
-      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
 
     steps:
-      - name: Checkout publication guard at the original source
+      - name: Checkout required-CI guard at the original source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Verify channel state before notarization retry
+      - name: Recheck exact-source CI before notarization retry
         env:
           GH_TOKEN: ${{ github.token }}
-        run: pnpm exec tsx scripts/release/publication-cli.ts
+        run: pnpm exec tsx scripts/release/ci-cli.ts --verify
 
       - name: Download signed build artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -493,8 +464,14 @@ jobs:
           name: zeros-macos-arm64-build
           path: release
 
+      - name: Download saved notary submission
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: zeros-macos-arm64-submission
+          path: release
+
       - name: Poll Apple notary + staple
-        # Poll `notarytool info` for the submission the build job recorded. Each
+        # Poll `notarytool info` for the submission the submit job recorded. Each
         # poll is a quick request, so a `-1009` blip just retries the next poll
         # instead of killing the whole wait. MAX_POLLS×POLL_SLEEP sets the budget
         # (default ~2h); if Apple is slower than that the build artifact is still
@@ -519,7 +496,7 @@ jobs:
           done
           if [ -z "$DMG" ]; then echo "::error::no versioned .dmg in the downloaded artifact"; exit 1; fi
           SUB=$(cat release/notarization-submission-id.txt 2>/dev/null || true)
-          if [ -z "$SUB" ]; then echo "::error::no submission id recorded by the build job"; exit 1; fi
+          if [ -z "$SUB" ]; then echo "::error::no submission id recorded by the submit job"; exit 1; fi
           echo "Polling submission $SUB for $DMG (resilient to -1009 blips)…"
           status="Unknown"
           for ((i=1; i<=MAX_POLLS; i++)); do
@@ -604,6 +581,53 @@ jobs:
           fi
           echo "✓ Developer ID signed · hardened · notarized · stapled DMG · Gatekeeper-accepted · all entries owner-writable"
 
+      - name: Save notarized release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zeros-macos-arm64-release
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 5
+          path: |
+            release/Zeros-*-arm64.dmg
+            release/Zeros-*-arm64-mac.zip
+            release/Zeros-*-arm64-mac.zip.blockmap
+            release/latest-mac.yml
+
+  publish:
+    name: Publish Production feed
+    needs: [ci, build, hosted, notarize]
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+      actions: read
+    env:
+      RELEASE_CHANNEL: production
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
+      ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
+      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download notarized release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: zeros-macos-arm64-release
+          path: release
       - name: Publish GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -613,6 +637,7 @@ jobs:
           set -euo pipefail
           pnpm exec tsx scripts/release/publication-cli.ts
           TAG="v${VERSION}"
+          pnpm exec tsx scripts/release/release-ledger-cli.ts --build
 
           # Auto-generated, PR-based notes grouped per .github/release.yml.
           GENERATED=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
@@ -687,4 +712,6 @@ jobs:
             "release/Zeros-arm64.dmg" \
             "release/Zeros-${VERSION}-arm64-mac.zip" \
             "release/Zeros-${VERSION}-arm64-mac.zip.blockmap" \
-            "release/latest-mac.yml"
+            "release/latest-mac.yml" \
+            "release/release-ledger.json"
+          pnpm exec tsx scripts/release/release-ledger-cli.ts --verify

@@ -122,17 +122,23 @@ process environment override. While disabled, desktop cloud access, device
 enrollment and safeStorage key creation, replica session seeding/refresh, and
 the local replica/fork runtimes remain unconstructed. Direct cloud worker
 runtime registration remains governed by its qualified bootstrap contract. A
-release cannot bake this capability on until the release-environment validator
-accepts 1-8 exact lowercase preview DNS suffixes and canonical base64url
-OpenSSH pins covering every allowed gateway.
+release may enable cloud without preview DNS suffixes; the first cloud release
+intentionally leaves previews off. Supplied suffixes still require 1-8 unique,
+exact lowercase DNS names. Daytona requires canonical base64url OpenSSH pins
+covering every allowed gateway; managed Boat does not require Daytona pins.
 The desktop main process accepts `ZEROS_CLOUD_SSH_HOSTS` as an exact comma-
 separated SSH gateway allowlist; the default is `ssh.app.daytona.io`. Cloud
 preview issuance additionally fails closed unless
 `VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES` was baked into Electron main or the
 development/self-host override `ZEROS_CLOUD_PREVIEW_HOST_SUFFIXES` is present.
 The response must use one 32-hex label immediately below an allowed suffix.
-These are main-process public deployment settings, never renderer values or
-credentials.
+The public `VITE_*` suffix list is baked into both main and renderer. Without
+it the renderer hides cloud previews, skips preview reads/grants and prevents
+restoring broken cloud preview tabs. Native development/self-host overrides
+remain validated and require a matching renderer setting to expose the UI.
+Local previews and independent SSH/control-plane runtime tunnels do not depend
+on the preview domain and remain intact. These settings are public, never
+credentials. See [Desktop compatibility and preview-free cloud releases](../desktop-client-compatibility.md).
 The configured image, architecture, source commit, CPU, memory, and storage are
 recorded per generation and passed through the provider boundary. Public API
 documents use the stable Zeros workspace id and never expose provider resource
@@ -203,7 +209,9 @@ The provider and toolbox clients are intentionally pinned together at
 `0.214.0`. Daytona's current SDK documentation describes newer event-streamed
 lifecycle behavior; upgrading either client is therefore an adapter change,
 not routine dependency maintenance. It requires contract tests plus the full
-live stop/wake/delete/preview/SSH qualification before promotion.
+live stop/wake/delete/SSH qualification before promotion. Preview routing
+qualification is additionally required before shipping a preview-enabled
+release; the first cloud release leaves preview URLs disabled.
 
 `daytona-setup-executor.ts` accepts only a pinned Daytona generation and invokes
 the fixed image-owned command

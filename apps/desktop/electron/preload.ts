@@ -100,6 +100,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "updater_check",
   "updater_install",
   "updater_status",
+  "updater_require",
   "window_drag_end",
   "window_drag_start",
   "window_set_background",

@@ -123,6 +123,7 @@ export function TerminalWorkbenchLayout({
           </Tooltip>
           {activeEntry?.running && activeEntry.runActionId && (
             <RunSessionButtons
+              folderKey={folder}
               title={activeEntry.title}
               previewUrl={activeEntry.previewUrl}
               showLabels
@@ -340,6 +341,7 @@ export function TerminalWorkbenchLayout({
                         >
                           {entry.runActionId && entry.running ? (
                             <RunSessionButtons
+                              folderKey={folder}
                               title={entry.title}
                               previewUrl={entry.previewUrl}
                               onOpenPreview={() =>

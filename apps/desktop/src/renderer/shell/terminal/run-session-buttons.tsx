@@ -2,22 +2,26 @@ import { Globe, Square } from "lucide-react";
 import { Button, Tooltip } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import { WORKBENCH_TITLE_ACTION_CLS } from "../workbench/tab-chrome";
+import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
 
 /** Headers show labels while their own container has room; sidebar rows always
  * use compact icons. Both placements share the same actions and accessible names. */
 export function RunSessionButtons({
   title,
+  folderKey,
   previewUrl,
   showLabels = false,
   onOpenPreview,
   onStop,
 }: {
   title: string;
+  folderKey?: string;
   previewUrl?: string | null;
   showLabels?: boolean;
   onOpenPreview(): void;
   onStop(): void;
 }) {
+  const previewAvailable = workspacePreviewAvailable(folderKey ?? "");
   // The cache supplies normalized HTTP(S) URLs; display their effective port.
   const preview = previewUrl ? new URL(previewUrl) : null;
   const port = preview
@@ -36,7 +40,7 @@ export function RunSessionButtons({
       role="group"
       aria-label={`${title} run controls`}
     >
-      <Tooltip
+      {previewAvailable && <Tooltip
         label={
           previewUrl
             ? `Open ${previewUrl} in Browser`
@@ -65,7 +69,7 @@ export function RunSessionButtons({
             )}
           </Button>
         </span>
-      </Tooltip>
+      </Tooltip>}
       <Tooltip label={`Stop ${title}`}>
         <Button
           variant="secondary"

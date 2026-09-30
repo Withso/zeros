@@ -18,7 +18,8 @@ function validateLedger(ledger, { legacy = false } = {}) {
   for (const row of ledger.reservations) {
     const computeId = row && computeIdentity(row);
     const validCompute = typeof row?.snapshotName === "string"
-      ? uuid.test(row.generation ?? "") && row.snapshotName.startsWith(`dev-${row.owner}-${row.generation.slice(0, 8)}-`) && /^[a-z0-9-]+$/.test(row.snapshotName) && computeId === `snapshot:${row.snapshotName}`
+      ? uuid.test(row.generation ?? "") && (row.snapshotName.startsWith(`dev-${row.owner}-${row.generation.slice(0, 8)}-`) ||
+        row.capacityClass === "custom" && row.snapshotName === `zeros-org-${row.generation.replaceAll("-", "")}`) && /^[a-z0-9-]+$/.test(row.snapshotName) && computeId === `snapshot:${row.snapshotName}`
       : row?.snapshotName === undefined && typeof computeId === "string" && computeId.startsWith("canary:") && uuid.test(computeId.slice(7));
     const key = `${row?.owner}/${row?.generation}/${row?.kind}/${computeId ?? ""}`;
     if (!row || !["generation", "builder"].includes(row.kind) || !/^[a-f0-9]{24}$/.test(row.owner ?? "") || !uuid.test(row.generation ?? "") ||
@@ -131,6 +132,11 @@ export async function reserveHostedAdmission(store, state, profile, { kind = "ge
       if (!names.has(profile.boat.baseSnapshot)) throw new Error("Dev snapshot inventory must confirm the protected base before admission");
       for (const row of ledger.reservations) if (row.kind === "builder" && row.snapshotName && !row.snapshotReleasedAt) names.add(row.snapshotName);
       names.add(snapshotName);
+      const channels = ["alpha", "beta", "production"];
+      const release = name => channels.find(channel => name.startsWith(`dev-${sha256(`zeros-release-worker:${channel}`).slice(0, 24)}-`) || name.startsWith(`zeros-${channel}-`));
+      if ([...names].filter(name => name !== profile.boat.baseSnapshot && !release(name)).length > 2 ||
+        channels.some(channel => [...names].filter(name => release(name) === channel).length > 2))
+        throw new Error("Dev named snapshot capacity is reserved for release and rollback images; image capacity reached");
       if (names.size + policy.snapshotHeadroom > policy.maxNamedSnapshots) throw new Error("Dev named snapshot capacity is reserved; no builder was allocated");
     }
     if (previous) Object.assign(previous, reservation, { releasedAt: undefined, snapshotReleasedAt: undefined }); else ledger.reservations.push(reservation);

@@ -21,6 +21,7 @@ import React, {
   useState,
 } from "react";
 import { useOpenChatPreviewInWorkbench } from "@/renderer/shell/workbench/use-open-browser";
+import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
 import { useOpenChatFileInWorkbench, warmChatFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
 import { chatFileOpenCwd } from "@/renderer/shell/workbench/direct-file-open";
 import {
@@ -1433,6 +1434,7 @@ export function AgentChat({
   const openBoundaryPort = session.openBoundaryPort;
   const openBoundaryPreview = useCallback(
     (port: ExecutionBoundaryPortStatus) => {
+      if (!workspacePreviewAvailable(chatThread?.folder ?? "")) return;
       void (async () => {
         try {
           if (!openBoundaryPort) {
@@ -5066,10 +5068,10 @@ export function AgentChat({
                       (also used in the edit composer). Effort/Fast are part of
                       the model label and edited in its popover. */}
                       {editToolbarPills}
-                      <BoundaryPortsPill
+                      {workspacePreviewAvailable(chatFolder ?? "") && <BoundaryPortsPill
                         snapshot={session.boundaryPorts}
                         onOpenPort={openBoundaryPreview}
-                      />
+                      />}
                     </PromptInputTools>
                     {/* Right cluster: [context ring] [send] (+ save tick while
                     editing a queued message). Grouped so the toolbar's

@@ -5,6 +5,7 @@ import {
   cloudDevicePublicKeyFingerprint,
 } from "../src/engine/cloud-device-enrollment";
 import { HttpCloudReplicaEnrollmentClient } from "../src/engine/cloud-replica-client";
+import { controlPlaneFetch } from "./control-plane-fetch";
 import { cloudWorkspaceDesktopCapabilityEnabled } from "../src/engine/cloud-workspace-capability";
 import { CloudReplicaDeviceSigner } from "../src/engine/cloud-replica-device";
 import {
@@ -279,6 +280,7 @@ export function ensureCloudAccessDeviceForMain(): Promise<{
     getSession: getValidSessionForMain,
     register: async (input) => {
       const result = await new HttpCloudReplicaEnrollmentClient({
+        fetch: controlPlaneFetch,
         baseUrl: controlPlaneBaseUrl(),
         getAccessToken: async () => input.accessToken,
         allowInsecureLoopback: IS_DEV,

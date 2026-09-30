@@ -24,10 +24,11 @@ export function releaseSource(env: NodeJS.ProcessEnv) {
   requireCheck(/^[\w.-]+\/[\w.-]+$/.test(repository), "Repository identity is required");
   return { channel, sourceSha, branch, repository };
 }
-export function promotionConfig(env: NodeJS.ProcessEnv) {
+export function promotionConfig(env: NodeJS.ProcessEnv, options: { migrations?: boolean } = {}) {
   const source = releaseSource(env), expected = CHANNELS[source.channel];
   requireCheck(env.ZEROS_HOSTED_PROMOTION === "enabled", "Hosted promotion is disabled");
-  for (const name of ["RAILWAY_DEPLOY_TOKEN", "PLANETSCALE_SERVICE_TOKEN_ID", "PLANETSCALE_SERVICE_TOKEN", "CLOUDFLARE_API_TOKEN"]) {
+  const secrets = ["RAILWAY_DEPLOY_TOKEN", "CLOUDFLARE_API_TOKEN", ...(options.migrations === false ? [] : ["PLANETSCALE_SERVICE_TOKEN_ID", "PLANETSCALE_SERVICE_TOKEN"])];
+  for (const name of secrets) {
     requireCheck(env[name]?.trim(), `Missing required secret: ${name}`);
   }
   for (const name of ["RAILWAY_PROJECT_ID", "RAILWAY_ENVIRONMENT_ID", "RAILWAY_SERVICE_ID"]) {
@@ -71,8 +72,11 @@ export const ReleaseIdentity = z.object({ version: z.literal(1), ready: z.litera
   // authorize publication of cloud capability without current qualification.
   workerQualified: z.boolean().optional(),
 });
+export const WorkOSVerification = z.object({ kind: z.literal("workos-handshake-v1"), surfaces: z.array(z.enum(["app", "ops"])), verifiedAt: z.string().datetime() });
 export const HostedReceipt = z.object({ version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "beta", "production"]),
   sourceSha: z.string().regex(SHA), branch: z.string(), repository: z.string(), runId: z.string().regex(/^\d+$/), runAttempt: z.string().regex(/^\d+$/),
   migration: MigrationReceipt, backend: ReleaseIdentity, railwayDeploymentId: id, pages: z.array(z.object({ id, surface: z.enum(["app", "ops"]) })),
   completedAt: z.string().datetime(),
+  workos: WorkOSVerification.optional(),
 });
+export const HostedServicesReceipt = HostedReceipt.extend({ status: z.literal("services-ready"), workos: WorkOSVerification });

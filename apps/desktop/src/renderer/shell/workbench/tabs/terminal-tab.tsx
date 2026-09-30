@@ -788,6 +788,7 @@ export function TerminalPanel({
                 panelEntry?.running &&
                 panelEntry.runActionId && (
                   <RunSessionButtons
+                    folderKey={folderKey}
                     title={panelEntry.title}
                     previewUrl={panelEntry.previewUrl}
                     showLabels

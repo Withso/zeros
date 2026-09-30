@@ -23,6 +23,7 @@ import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
+import { validateReleaseLedgerUrl } from "./client-compatibility.js";
 import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
   MAX_ENGINE_HEARTBEAT_INTERVAL_MS,
@@ -47,6 +48,7 @@ const EnvSchema = z.object({
   DATABASE_MAINTENANCE_MODE: z.enum(["true", "false"]).default("false"),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
   SLOW_REQUEST_LOG_MS: z.coerce.number().int().min(50).max(60_000).default(DEFAULT_SLOW_REQUEST_LOG_MS),
+  DESKTOP_RELEASE_LEDGER_URL: z.string().optional(),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
   AUTH0_DOMAIN: z.string().trim().min(1).optional(),
@@ -321,6 +323,7 @@ export type Config = {
   development?: DevelopmentIdentity;
   isProduction: boolean;
   deploymentChannel: "development" | "alpha" | "beta" | "production";
+  desktopReleaseLedgerUrl?: string | null;
   /** Null when no GitHub App is registered for this environment. */
   github: GithubBackendConfig | null;
   /** Null when neither feedback destination is configured. */
@@ -1804,6 +1807,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(e.HOST ? { host: e.HOST } : {}),
     ...(development ? { development } : {}),
     isProduction: e.NODE_ENV === "production",
+    desktopReleaseLedgerUrl: validateReleaseLedgerUrl(e.DESKTOP_RELEASE_LEDGER_URL),
     deploymentChannel: (() => {
       const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development")
         .trim()

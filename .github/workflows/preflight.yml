@@ -39,7 +39,7 @@ on:
   # Required checks must also run for GitHub's synthetic merge-queue commit.
   merge_group:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
 
 # ── Least privilege ──────────────────────────────────────
 #
@@ -291,6 +291,9 @@ jobs:
         # Preserve released migration files. The migration ledger records their
         # checksums, and hosted boot verifies the ledger without applying SQL.
         run: pnpm check:control-plane-migrations
+
+      - name: Control-plane expand/contract migration phases
+        run: pnpm check:migration-phases
 
       - name: Desktop ↔ web deep-link schemes in lockstep
         # The desktop sends its channel's scheme to app.zeros.build; the hub only

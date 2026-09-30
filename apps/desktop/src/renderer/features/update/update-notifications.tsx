@@ -23,7 +23,7 @@
 // check always reports "up to date" and the pending toast never appears.
 // ──────────────────────────────────────────────────────────
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactElement } from "react";
 
 import {
   isElectron,
@@ -37,6 +37,9 @@ import {
   showUpdateToast,
   toast,
 } from "@/renderer/shared/ui/primitives/elements";
+import { useRequiredUpdateStore } from "./required-update-state";
+import { RequiredUpdateScreen } from "./required-update-screen";
+import { mergeClientUpgradeRequired } from "../../../../shared/client-compatibility";
 
 const CHANGELOG_URL = "https://zeros.build/changelog";
 
@@ -58,9 +61,15 @@ function openChangelog(): void {
   }
 }
 
-export function UpdateNotifications(): null {
+export function UpdateNotifications(): ReactElement | null {
   const { status, install } = useUpdater();
   const anyAgentRunning = useAnyAgentRunning();
+  const storedRequired = useRequiredUpdateStore((state) => state.required);
+  const required = status.required ? mergeClientUpgradeRequired(storedRequired, status.required) : storedRequired;
+
+  useEffect(() => {
+    if (status.required) useRequiredUpdateStore.getState().requireUpdate(status.required);
+  }, [status.required]);
 
   // 0 = not suppressed. Otherwise the epoch-ms until which the toast is hidden.
   const [suppressedUntil, setSuppressedUntil] = useState(0);
@@ -132,7 +141,7 @@ export function UpdateNotifications(): null {
   // ── Show / update / hide the persistent toast ──
   useEffect(() => {
     const suppressed = Date.now() < suppressedUntil;
-    if (!ready || suppressed || restartWhenIdle) {
+    if (required || !ready || suppressed || restartWhenIdle) {
       dismissUpdateToast();
       return;
     }
@@ -156,6 +165,7 @@ export function UpdateNotifications(): null {
     handleRestart,
     handleRestartWhenIdle,
     handleDismiss,
+    required,
   ]);
 
   // ── Surface persistent, actionable update failures (e.g. disk full) ──
@@ -177,12 +187,12 @@ export function UpdateNotifications(): null {
 
   // ── Deferred "Restart when idle": fire once agents stay idle past the grace ──
   useEffect(() => {
-    if (!restartWhenIdle || anyAgentRunning || !ready) return;
+    if (required || !restartWhenIdle || anyAgentRunning || !ready) return;
     const id = window.setTimeout(() => {
       void install();
     }, IDLE_GRACE_MS);
     return () => window.clearTimeout(id);
-  }, [restartWhenIdle, anyAgentRunning, ready, install]);
+  }, [required, restartWhenIdle, anyAgentRunning, ready, install]);
 
-  return null;
+  return required ? <RequiredUpdateScreen required={required} status={status} install={install} /> : null;
 }

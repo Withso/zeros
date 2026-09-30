@@ -16,10 +16,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { isElectron, nativeInvoke, nativeListen } from "./runtime";
+import { parseClientUpgradeRequired, type ClientUpgradeRequired } from "../../../shared/client-compatibility";
 
 interface RevisionedStatus {
   /** Monotonic main-process revision for subscribe-then-snapshot races. */
   revision: number;
+  required?: ClientUpgradeRequired;
 }
 
 export type UpdaterStatus = RevisionedStatus &
@@ -46,7 +48,7 @@ function errMsg(err: unknown): string {
 }
 
 /** Validate the IPC/event payload at the renderer boundary. */
-export function parseUpdaterStatus(payload: unknown): UpdaterStatus | null {
+function parseUpdaterState(payload: unknown): UpdaterStatus | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return null;
   }
@@ -101,10 +103,17 @@ export function parseUpdaterStatus(payload: unknown): UpdaterStatus | null {
   }
 }
 
+export function parseUpdaterStatus(payload: unknown): UpdaterStatus | null {
+  const status = parseUpdaterState(payload);
+  if (!status) return null;
+  const required = parseClientUpgradeRequired((payload as Record<string, unknown>).required);
+  return required ? { ...status, required } : status;
+}
+
 export function useUpdater(): {
   status: UpdaterStatus;
   checkNow: () => Promise<void>;
-  install: () => Promise<void>;
+  install: (options?: { requireReady: boolean }) => Promise<void>;
 } {
   const [status, setStatus] = useState<UpdaterStatus>({
     kind: "idle",
@@ -131,13 +140,13 @@ export function useUpdater(): {
     }
   }, []);
 
-  const install = useCallback(async () => {
+  const install = useCallback(async (options?: { requireReady: boolean }) => {
     if (!isElectron()) return;
     try {
       // updater_install either quits + installs immediately (if the background
       // download already finished) or defensively arms install-on-ready for an
       // older caller. Main's event stream remains the status source of truth.
-      await nativeInvoke<void>("updater_install");
+      await nativeInvoke<void>("updater_install", options);
     } catch (err) {
       // Keep the last confirmed ready snapshot visible so the user can retry.
       // Main publishes a newer error revision when quitAndInstall itself fails.

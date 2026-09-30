@@ -1,7 +1,7 @@
 import { expect } from "@playwright/test";
 import { runCloudComputerRefreshSmoke, runCloudComputerSlowRefreshSmoke } from "./ui-smoke-cloud-computer.mjs";
 
-export async function runCloudSettingsSmoke({ page, check, harnessBase }) {
+export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseChecksOnly = false }) {
   page.setDefaultTimeout(15_000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -12,6 +12,9 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase }) {
     computers = new Map(),
     requests = [];
   const resources = { cpuMillicores: 4000, memoryMiB: 8192, storageMiB: 20480 };
+  const designations = new Map(), designationOperations = new Map();
+  let ownerMode = false, designationSequence = 10, loseDesignationResponse = false;
+  let designationResponseHold = null;
   const account = (key) => {
     if (!accounts.has(key))
       accounts.set(key, { credentials: [], connections: [] });
@@ -48,7 +51,34 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase }) {
     const state = account(`${user}:${org}`);
     requests.push({ path, method, body, user });
     let result;
-    if (path.endsWith("/agent-connections") && method === "GET") result = state;
+    const designationPath = path.match(/^\/v1\/cloud-agent-credentials\/([^/]+)\/release-canary$/);
+    if (designationPath) {
+      const credentialId = designationPath[1], key = `${user}:${credentialId}`;
+      const credential = [...accounts.entries()].filter(([scope]) => scope.startsWith(`${user}:`))
+        .flatMap(([, details]) => details.credentials).find(row => row.id === credentialId);
+      if (!ownerMode || user !== userA || !credential) return route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: { code: "release_canary_unavailable", message: "Unavailable" } }) });
+      const previous = designations.get(key) ?? { designationId: "0", credentialRevision: credential.revision, enabled: false, models: [], lastUsedAt: null };
+      if (method === "GET") {
+        const enabled = previous.enabled && previous.credentialRevision === credential.revision;
+        result = { designationId: previous.designationId, credentialRevision: credential.revision, enabled, models: enabled ? previous.models : [], lastUsedAt: previous.lastUsedAt };
+      } else if (method === "PUT") {
+        const replay = designationOperations.get(body.operationId);
+        if (replay) { expect(replay.body).toEqual(body); result = replay.result; }
+        else {
+          expect(body.expectedDesignationId).toBe(previous.designationId);
+          expect(body.credentialRevision).toBe(credential.revision);
+          expect(Object.keys(body).sort()).toEqual(["credentialRevision", "enabled", "expectedDesignationId", "models", "operationId"]);
+          const designationId = String(++designationSequence);
+          designations.set(key, { ...previous, ...body, designationId });
+          result = { designationId, enabled: body.enabled }; designationOperations.set(body.operationId, { body, result });
+          if (loseDesignationResponse) {
+            loseDesignationResponse = false;
+            await designationResponseHold;
+            return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: { code: "unavailable", message: "Unconfirmed fixture response" } }) });
+          }
+        }
+      }
+    } else if (path.endsWith("/agent-connections") && method === "GET") result = state;
     else if (
       /\/cloud-agent-credentials\/[^/]+$/.test(path) &&
       method === "PUT"
@@ -189,6 +219,60 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase }) {
     page.getByText("First subscription", { exact: true }),
   ).toBeVisible();
   await expect(page.getByText("Second API", { exact: true })).toBeVisible();
+  await expect(page.getByRole("switch", { name: "Use for release checks", exact: true })).toHaveCount(0);
+  expect(requests.some(row => row.path.endsWith("/release-canary"))).toBe(false);
+  ownerMode = true;
+  await page.getByRole("button", { name: "Platform owner", exact: true }).click();
+  const firstRow = page.locator("[data-release-canary-control]").locator("..").filter({ has: page.getByText("First subscription", { exact: true }) });
+  const releaseSwitch = firstRow.getByRole("switch", { name: "Use for release checks", exact: true });
+  await expect(releaseSwitch).toBeEnabled(); await expect(releaseSwitch).not.toBeChecked();
+  await expect(firstRow.getByText("Model: claude-haiku-4-5", { exact: true })).toBeVisible();
+  const apiRow = page.locator("[data-release-canary-control]").locator("..").filter({ has: page.getByText("Second API", { exact: true }) });
+  await expect(apiRow.getByRole("switch", { name: "Use for release checks", exact: true })).toBeDisabled();
+  await releaseSwitch.click(); await expect(releaseSwitch).toBeChecked(); await expect(releaseSwitch).toBeEnabled();
+  const firstCredential = account(`${userA}:${orgA}`).credentials.find(row => row.displayName === "First subscription");
+  const designationKey = `${userA}:${firstCredential.id}`;
+  expect(designations.get(designationKey)).toMatchObject({ enabled: true, credentialRevision: 1, models: ["claude-haiku-4-5"] });
+  designations.get(designationKey).lastUsedAt = "2026-09-29T12:00:00.000Z";
+  const refreshReleaseSettings = async () => page.evaluate(async () => {
+    const connections = await import("/apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts");
+    const release = await import("/apps/desktop/src/renderer/features/settings/release-canary-designation.ts");
+    connections.cloudOrganizationConnectionsCache.invalidateAll(); release.releaseCanaryDesignationsCache.invalidateAll();
+  });
+  await refreshReleaseSettings();
+  await expect(firstRow.locator("time")).toHaveAttribute("datetime", "2026-09-29T12:00:00.000Z");
+  await releaseSwitch.click(); await expect(releaseSwitch).not.toBeChecked(); await expect(releaseSwitch).toBeEnabled();
+  const writesBeforeLoss = designationOperations.size; loseDesignationResponse = true;
+  let releaseDesignationResponse;
+  designationResponseHold = new Promise(resolve => { releaseDesignationResponse = resolve; });
+  await releaseSwitch.click(); await expect.poll(() => designationOperations.size).toBe(writesBeforeLoss + 1);
+  await page.getByRole("button", { name: "Toggle settings activity", exact: true }).click();
+  await expect(releaseSwitch).toBeDisabled();
+  const readsBeforeLostResponse = requests.filter(row => row.path.endsWith("/release-canary")).length;
+  releaseDesignationResponse(); await page.waitForTimeout(150);
+  expect(requests.filter(row => row.path.endsWith("/release-canary")).length).toBe(readsBeforeLostResponse);
+  await expect(firstRow.getByRole("alert")).toContainText("Could not confirm the change");
+  await page.getByRole("button", { name: "Toggle settings activity", exact: true }).click();
+  await firstRow.getByRole("button", { name: "Retry change", exact: true }).click();
+  await expect(releaseSwitch).toBeChecked(); await expect(releaseSwitch).toBeEnabled();
+  designationResponseHold = null;
+  expect(designationOperations.size).toBe(writesBeforeLoss + 1);
+  firstCredential.revision = 2; await refreshReleaseSettings();
+  await expect(releaseSwitch).not.toBeChecked(); await expect(releaseSwitch).toBeEnabled();
+  if (releaseChecksOnly) await page.screenshot({ path: ".context/phase1/P3-owner-release-checks.png", fullPage: true });
+  await page.getByRole("button", { name: "Toggle settings activity", exact: true }).click();
+  await expect(releaseSwitch).toBeDisabled();
+  const readsWhileHidden = requests.filter(row => row.path.endsWith("/release-canary")).length;
+  await page.waitForTimeout(100); expect(requests.filter(row => row.path.endsWith("/release-canary")).length).toBe(readsWhileHidden);
+  await page.getByRole("button", { name: "Toggle settings activity", exact: true }).click();
+  await expect(releaseSwitch).toBeEnabled();
+  ownerMode = false;
+  await page.getByRole("button", { name: "Ordinary member", exact: true }).click();
+  await expect(page.getByRole("switch", { name: "Use for release checks", exact: true })).toHaveCount(0);
+  const readsAfterRevocation = requests.filter(row => row.path.endsWith("/release-canary")).length;
+  await page.waitForTimeout(100); expect(requests.filter(row => row.path.endsWith("/release-canary")).length).toBe(readsAfterRevocation);
+  check("Release-check consent is owner-only, model/revision bound, lost-response safe, reconnect-off and inactive-inert", true);
+  if (releaseChecksOnly) { expect(errors).toEqual([]); return; }
   await page
     .getByRole("button", { name: "Organization B", exact: true })
     .click();

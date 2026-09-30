@@ -28,15 +28,54 @@ const snap = {
 };
 function fixture() {
   const request = vi.fn();
+  const admission = { reserve: vi.fn(async () => {}), release: vi.fn(async () => {}), capacity: vi.fn(async () => ({})) };
+  const driver = new BoatComputerImageDriver({ request } as unknown as BoatApiClient, wallet, [], admission as any);
+  vi.spyOn(driver, "inventory").mockResolvedValue([{ ...snap, name: "release-base" }]);
   return {
     request,
-    driver: new BoatComputerImageDriver(
-      { request } as unknown as BoatApiClient,
-      wallet,
-    ),
+    driver,
+    admission,
   };
 }
 describe("Boat image wire adapter (fake provider only)", () => {
+  it("allows cleanup of a proven unstarted image without shared authority, but never frees uncertain reservations", async () => {
+    const request = vi.fn(), driver = new BoatComputerImageDriver({ request } as unknown as BoatApiClient, wallet);
+    const unstarted = { ...image, builder_id: null, verifier_id: null, snapshot_id: null, capture_dispatched_at: null, builder_dispatched_at: null, verifier_dispatched_at: null };
+    await expect(driver.releaseAdmission(unstarted, { computeDeleted: true, snapshotDeleted: true })).resolves.toBeUndefined();
+    await expect(driver.releaseAdmission({ ...unstarted, builder_dispatched_at: new Date() }, { computeDeleted: true, snapshotDeleted: true })).rejects.toMatchObject({ code: "image_capacity_reached" });
+    await expect(driver.releaseAdmission(unstarted, { computeDeleted: true, snapshotDeleted: false })).rejects.toMatchObject({ code: "image_capacity_reached" });
+    expect(request).not.toHaveBeenCalled();
+  });
+  it("uses complete bounded snapshot pagination before reserving or allocating", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ snapshots: [{ ...snap, name: "release-base" }], hasMore: true, nextCursor: "second/page" })
+      .mockResolvedValueOnce({ snapshots: [snap], hasMore: false });
+    const driver = new BoatComputerImageDriver({ request } as unknown as BoatApiClient, wallet);
+    expect((await driver.inventory()).map(row => row.name)).toEqual(["release-base", image.snapshot_name]);
+    expect(request.mock.calls.map(([route]) => route)).toEqual(["/named-snapshots", "/named-snapshots?cursor=second%2Fpage"]);
+  });
+  it("refuses incomplete, looping or changing snapshot inventory without dispatching custom compute", async () => {
+    for (const pages of [
+      [{ snapshots: [{ ...snap, name: "release-base" }], hasMore: true }],
+      [{ snapshots: [{ ...snap, name: "release-base" }], nextCursor: "same" }, { snapshots: [], nextCursor: "same" }],
+      [{ snapshots: [{ ...snap, name: "release-base" }], nextCursor: "next" }, { snapshots: [{ ...snap, name: "release-base" }] }],
+    ]) {
+      const request = vi.fn(); for (const page of pages) request.mockResolvedValueOnce(page);
+      const admission = { reserve: vi.fn(), capacity: vi.fn(), release: vi.fn() }, beforeDispatch = vi.fn();
+      const driver = new BoatComputerImageDriver({ request } as unknown as BoatApiClient, wallet, [], admission);
+      await expect(driver.create(image, "builder", beforeDispatch)).rejects.toMatchObject({ code: "image_capacity_reached" });
+      expect(admission.reserve).not.toHaveBeenCalled(); expect(beforeDispatch).not.toHaveBeenCalled();
+      expect(request.mock.calls.every(([, options]) => options?.method !== "POST")).toBe(true);
+    }
+  });
+  it("refuses custom allocation before dispatch when shared release headroom is unavailable", async () => {
+    const { request, driver, admission } = fixture(), beforeDispatch = vi.fn();
+    admission.reserve.mockRejectedValue(new Error("image capacity reached"));
+    await expect(driver.create(image, "builder", beforeDispatch)).rejects.toMatchObject({ code: "image_capacity_reached" });
+    expect(beforeDispatch).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+    const missing = new BoatComputerImageDriver({ request } as unknown as BoatApiClient, wallet);
+    await expect(missing.create(image, "builder", beforeDispatch)).rejects.toMatchObject({ code: "image_capacity_reached" });
+    expect(request).not.toHaveBeenCalled();
+  });
   it("allocates the dedicated builder with an empty environment and bounded lease", async () => {
     const { request, driver } = fixture();
     request.mockResolvedValue({ sandbox: { id: builder } });

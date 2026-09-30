@@ -92,7 +92,7 @@ export function useIsInternalUser(): boolean {
 /** The set of internal feature flags.
  *  - `copyLogs` — ⇧⌘L copies the scrubbed recent-log tail (the exact
  *    bytes a feedback submission shares) to the clipboard. */
-export type InternalFeature = "copyLogs";
+export type InternalFeature = "copyLogs" | "releaseCanaries";
 
 const STORAGE_KEY = "zeros.internalFeatures";
 
@@ -138,11 +138,11 @@ function getSnapshot(): PersistedShape {
   return current;
 }
 
-/** Read the RAW flag synchronously. Off by default. UI-only (the Internal
+/** Read the RAW flag synchronously. UI-only (the Internal
  *  panel's switches); runtime behavior must use `isInternalFeatureActive`
  *  so the allowlist is enforced. */
 export function isInternalFeatureEnabled(feature: InternalFeature): boolean {
-  return current[feature] === true;
+  return current[feature] === true || feature === "releaseCanaries" && current[feature] === undefined;
 }
 
 /** Flip a flag and notify every subscriber. Always swaps the snapshot
@@ -161,7 +161,8 @@ export function setInternalFeatureEnabled(
  *  old signature took the session email, which invited exactly the bug it
  *  warned about (a caller caching a stale identity). */
 export function isInternalFeatureActive(feature: InternalFeature): boolean {
-  return isInternalUser() && isInternalFeatureEnabled(feature);
+  return isInternalUser() && isInternalFeatureEnabled(feature) &&
+    (feature !== "releaseCanaries" || getTeamStoreState().me?.user.staffRole === "platform_owner");
 }
 
 // Cross-window sync — Electron devtools-in-a-separate-window and any
@@ -181,7 +182,7 @@ export function useInternalFeature(
   feature: InternalFeature,
 ): [boolean, (on: boolean) => void] {
   const persisted = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  const on = persisted[feature] === true;
+  const on = persisted[feature] === true || feature === "releaseCanaries" && persisted[feature] === undefined;
   const set = useCallback(
     (next: boolean) => setInternalFeatureEnabled(feature, next),
     [feature],
@@ -195,8 +196,9 @@ export function useInternalFeature(
  *  flag flips. */
 export function useInternalFeatureActive(feature: InternalFeature): boolean {
   const internalUser = useIsInternalUser();
+  const { me } = useTeams();
   const [on] = useInternalFeature(feature);
-  return internalUser && on;
+  return internalUser && on && (feature !== "releaseCanaries" || me?.user.staffRole === "platform_owner");
 }
 
 subscribePreferenceCache(STORAGE_KEY, () => {

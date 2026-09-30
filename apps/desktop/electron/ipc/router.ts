@@ -141,6 +141,7 @@ const commandTable: Record<string, CommandHandler> = {
   updater_check: notImpl("updater_check", 8),
   updater_install: notImpl("updater_install", 8),
   updater_status: notImpl("updater_status", 8),
+  updater_require: notImpl("updater_require", 8),
   process_relaunch: notImpl("process_relaunch", 8),
 
   // ── Agent attachment staging and context graph ───────────────

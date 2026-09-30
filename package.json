@@ -90,6 +90,7 @@
     "check:zsr-preview-browser": "tsx scripts/zsr-preview-browser-smoke.ts",
     "check:packaging-paths": "node scripts/check-packaging-paths.mjs",
     "check:control-plane-migrations": "node scripts/check-control-plane-migrations.mjs",
+    "check:migration-phases": "tsx scripts/check-migration-phases.ts",
     "check:protocol": "node scripts/check-protocol-version.mjs",
     "check:actions": "node scripts/check-actions.mjs",
     "check:web-deploy": "node scripts/check-web-deploy.mjs",

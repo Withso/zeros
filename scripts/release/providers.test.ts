@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { promotionConfig } from "./contracts";
 import { createProviders, publicPagesEnvironment, assertNotOlderBranch } from "./providers";
 import { jsonClient, poll } from "./io";
+const workosEnv = { AUTH_ISSUER: "https://auth-api.example.com/", AUTH_JWKS_URL: "https://auth-api.example.com/sso/jwks/client_desktop",
+  AUTH_WEB_CLIENT_ID: "client_web", AUTH_DESKTOP_CLIENT_ID: "client_desktop" };
 const sha = "a".repeat(40);
 const config = promotionConfig({ RELEASE_CHANNEL: "beta", RELEASE_SHA: sha, GITHUB_SHA: sha, RELEASE_BRANCH: "release/1.2.3",
   GITHUB_REPOSITORY: "example/zeros", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", ZEROS_HOSTED_PROMOTION: "enabled",
@@ -38,7 +40,7 @@ function fixture(railwayAuto = false, pagesAuto = false) {
       serviceId: config.serviceId, environmentId: config.environmentId, meta: { commitHash: sha, branch: config.branch } } } });
     return Response.json({ data: { serviceInstanceDeployV2: "deploy1" } });
   };
-  return { calls, commands, providers: createProviders(config, { RAILWAY_DEPLOY_TOKEN: "never-log", CLOUDFLARE_API_TOKEN: "never-log" }, {
+  return { calls, commands, providers: createProviders(config, { ...workosEnv, RAILWAY_DEPLOY_TOKEN: "never-log", CLOUDFLARE_API_TOKEN: "never-log" }, {
     fetch: fetcher, pause: async () => {}, command: async (...args) => { commands.push(args); return "private CLI output"; },
   }) };
 }

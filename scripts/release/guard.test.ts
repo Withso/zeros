@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { disabledGuard } from "./guard";
+import { disabledGuard, hostedWorkerPromotionRequired } from "./guard";
 import { classifyChanges } from "./source";
 import { githubClient, validateBetaReceipt } from "./github";
 const sha = "a".repeat(40);
@@ -48,6 +48,33 @@ function fakeIdentity(value: unknown) {
     migrationManifest: vi.fn(async (source?: string) => source === baselineSha ? { head: "0111_test.sql", sha256: "1".repeat(64) } : manifest),
     workerInputsSha256: vi.fn(async (source: string) => (source === baselineSha ? "f" : "d").repeat(64)) };
 }
+describe("enabled worker lane selection", () => {
+  it("does not inspect or rebuild a worker when the execution switch is disabled", async () => {
+    const deps = fakeIdentity(null);
+    expect(await hostedWorkerPromotionRequired(false, candidate, deps)).toBe(false);
+    expect(deps.fetch).not.toHaveBeenCalled();
+    expect(deps.workerInputsSha256).not.toHaveBeenCalled();
+  });
+  it("reuses an older qualified image with the exact same committed worker input tree", async () => {
+    const identity = liveIdentity(); identity.worker.sourceSha = baselineSha;
+    const deps = fakeIdentity(identity); deps.workerInputsSha256.mockResolvedValue("d".repeat(64));
+    expect(await hostedWorkerPromotionRequired(true, candidate, deps)).toBe(false);
+    expect(deps.workerInputsSha256).toHaveBeenCalledWith(baselineSha);
+    expect(deps.workerInputsSha256).toHaveBeenCalledWith(sha);
+  });
+  it("selects native qualification when selected inputs differ or their hash cannot be verified", async () => {
+    const identity = liveIdentity(); identity.worker.sourceSha = baselineSha;
+    const deps = fakeIdentity(identity);
+    expect(await hostedWorkerPromotionRequired(true, candidate, deps)).toBe(true);
+    deps.workerInputsSha256.mockRejectedValue(new Error("private-git-detail"));
+    expect(await hostedWorkerPromotionRequired(true, candidate, deps)).toBe(true);
+  });
+  it("never skips an enabled lane on absent, unqualified, cross-channel or wrong-provider identity", async () => {
+    for (const identity of [null, { ...liveIdentity(), workerQualified: false }, { ...liveIdentity(), channel: "beta" },
+      { ...liveIdentity(), worker: { ...liveIdentity().worker, provider: "daytona" } }])
+      expect(await hostedWorkerPromotionRequired(true, candidate, fakeIdentity(identity))).toBe(true);
+  });
+});
 describe("disabled promotion guard", () => {
   it("allows ordinary engine edits with cloud off and unchanged published schema when the API is absent", async () => {
     const deps = fakeIdentity(null);

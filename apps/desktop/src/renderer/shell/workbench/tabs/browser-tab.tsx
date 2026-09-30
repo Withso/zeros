@@ -25,6 +25,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { workspacePreviewAvailable } from "../../../platform/cloud-workspace-access";
 import {
   ChevronLeft,
   ChevronRight,
@@ -124,6 +125,27 @@ interface BrowserTabProps {
 }
 
 export function BrowserTab(props: BrowserTabProps) {
+  const previewFolder = useWorkspaceStore((state) =>
+    props.tab.previewSource
+      ? state.chats.find((chat) => chat.id === props.tab.previewSource?.chatId)
+          ?.folder
+      : undefined,
+  );
+  if (
+    !props.tab.browserConversationId &&
+    (props.tab.previewSource ||
+      isLoopbackUrl(normalizeBrowserUrl(props.tab.url ?? "") ?? "")) &&
+    !workspacePreviewAvailable(props.scope ?? previewFolder ?? "")
+  ) {
+    return (
+      <div
+        className="bg-bg1 text-fg2 flex min-h-0 flex-1 items-center justify-center p-4 text-sm"
+        role="status"
+      >
+        Cloud preview URLs are not configured for this build.
+      </div>
+    );
+  }
   return props.tab.browserConversationId ? (
     <NativeAgentBrowserTab {...props} />
   ) : (
@@ -592,6 +614,7 @@ function dismissNativeBrowserOverlay() {
 function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
+  const previewAvailable = workspacePreviewAvailable(scope ?? "");
   const updateTab = useCallback(
     (updates: Partial<Omit<WorkbenchTab, "id" | "type">>) => {
       dispatch({ type: "UPDATE_WORKBENCH_TAB", id: tab.id, scope, updates });
@@ -1390,6 +1413,10 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
         webview={webview}
         displayUrl={effectiveUrl}
         onNavigate={(url) => {
+          if (!previewAvailable && isLoopbackUrl(url)) {
+            toast.error("Cloud preview URLs are not configured for this build.");
+            return;
+          }
           clearPreviewRuntimeForTab(tab.id);
           setPreviewRuntime(null);
           if (electron) {
@@ -1435,7 +1462,10 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
         }
       >
         {electron && !hasUrl ? (
-          <EmptyState onNavigate={webview.navigate} />
+          <EmptyState
+            onNavigate={webview.navigate}
+            previewAvailable={previewAvailable}
+          />
         ) : (
           <>
             {/* Canvas background — dot grid that pans/zooms with
@@ -2282,7 +2312,13 @@ function submitElementsToChat({
   });
 }
 
-function EmptyState({ onNavigate }: { onNavigate: (url: string) => void }) {
+function EmptyState({
+  onNavigate,
+  previewAvailable,
+}: {
+  onNavigate: (url: string) => void;
+  previewAvailable: boolean;
+}) {
   const suggestions: Array<{ label: string; url: string }> = [
     { label: "localhost:3000", url: "http://localhost:3000" },
     { label: "localhost:5173", url: "http://localhost:5173" },
@@ -2291,23 +2327,29 @@ function EmptyState({ onNavigate }: { onNavigate: (url: string) => void }) {
   return (
     <div className="bg-bg1 absolute inset-0 flex flex-col items-center justify-center gap-3 px-10 text-center">
       <Globe className="text-fg2 size-7" />
-      <p className="text-fg2 m-0 text-sm">Open a site or preview your app</p>
-      <p className="text-fg2 m-0 max-w-[420px] text-xs leading-[1.55]">
-        Enter any http(s) URL in the address bar. Design and Canvas tools appear
-        automatically for locally running sites.
+      <p className="text-fg2 m-0 text-sm">
+        {previewAvailable ? "Open a site or preview your app" : "Open a site"}
       </p>
-      <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
-        {suggestions.map((s) => (
-          <button
-            key={s.url}
-            type="button"
-            onClick={() => onNavigate(s.url)}
-            className="border-border1 bg-bg1 text-fg2 hover:bg-bg2-hover hover:text-fg1 rounded-sm border px-2 py-1 text-xs transition-colors"
-          >
-            {s.label}
-          </button>
-        ))}
-      </div>
+      <p className="text-fg2 m-0 max-w-[420px] text-xs leading-[1.55]">
+        Enter any http(s) URL in the address bar.
+        {previewAvailable
+          ? " Design and Canvas tools appear automatically for locally running sites."
+          : " Cloud preview URLs are not configured for this build."}
+      </p>
+      {previewAvailable && (
+        <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
+          {suggestions.map((s) => (
+            <button
+              key={s.url}
+              type="button"
+              onClick={() => onNavigate(s.url)}
+              className="border-border1 bg-bg1 text-fg2 hover:bg-bg2-hover hover:text-fg1 rounded-sm border px-2 py-1 text-xs transition-colors"
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

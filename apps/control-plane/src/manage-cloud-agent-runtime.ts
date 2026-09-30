@@ -10,6 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
 import { z } from "zod";
+import { ReleaseCanaryBindingsSchema, RELEASE_CANARY_MODELS } from "./cloud-workspaces/release-canary-contract.js";
 import {createMigrationPool} from "./db.js";
 import {parseDatabaseTarget} from "./database-target.js";
 
@@ -55,6 +56,8 @@ export const CloudAgentRuntimeEvidenceSchema = z
   .object({
     version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     executionProfile: z.literal("zeros-cloud-native-v1").optional(),
+    qualificationProfile: z.enum(["smoke", "full"]).optional(),
+    releaseCanaryBindings: ReleaseCanaryBindingsSchema.optional(),
     channel: z.enum(["development", "alpha", "beta", "production"]),
     provider: z.enum(["boat", "daytona"]),
     runtimeClass: z.literal("linux-vm"),
@@ -73,6 +76,13 @@ export const CloudAgentRuntimeEvidenceSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.releaseCanaryBindings && (value.channel === "development" || value.provider !== "boat" || value.version !== 3 || !value.qualificationProfile ||
+      value.credentials.length !== 3 || value.releaseCanaryBindings.some(binding => !value.credentials.some(row => row.kind === binding.kind) ||
+        value.qualificationProfile === "smoke" && binding.model !== RELEASE_CANARY_MODELS[binding.kind])))
+      context.addIssue({ code: "custom", message: "Release canary bindings must match the exact proven release matrix and profile" });
+    if (value.qualificationProfile === "smoke" && value.credentials.some(row =>
+      ["nativeGoals", "nativeFork", "transcriptFork", "nativeReview", "nativeApps", "nativeMultiAgent"].some(check => (row.checks as Record<string, unknown>)[check] === true)))
+      context.addIssue({ code: "custom", message: "Smoke qualification cannot advertise extended native capabilities" });
     // Native tools deliberately share the active provider account's trust.
     // Their evidence must prove private HOME/engine authority isolation and
     // actual native tools, not claim the former credential-free tool boundary.

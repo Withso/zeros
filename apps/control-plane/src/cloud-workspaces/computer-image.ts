@@ -22,7 +22,7 @@ const attestation = z.object({
 });
 export class ComputerImageError extends Error {
   constructor(readonly code: string) {
-    super("Cloud Computer image operation failed");
+    super(code === "image_capacity_reached" ? "image capacity reached" : "Cloud Computer image operation failed");
   }
 }
 export function computerImageFailure(error: unknown): string {
@@ -92,6 +92,8 @@ export type ComputerSnapshot = {
 /** A separate provider port: no workspace admission, repositories, credentials,
  * engine registration, setup grants, or user environments exist in this role. */
 export interface ComputerImageDriver {
+  assertCapacity?(inventory: string[]): Promise<void>;
+  releaseAdmission?(image: ComputerImage, proof: { computeDeleted: boolean; snapshotDeleted: boolean }): Promise<void>;
   inventory(): Promise<ComputerSnapshot[]>;
   create(image: ComputerImage, role: "builder" | "verifier", beforeDispatch: () => Promise<void>): Promise<string>;
   ready(id: string): Promise<boolean>;
@@ -152,6 +154,10 @@ export async function reserveComputerImageSlot(
       [account],
     )
   ).rows;
+  if (driver.assertCapacity) {
+    try { await driver.assertCapacity([...inventory.map(row => row.name), ...reservations.map(row => row.snapshot_name)]); }
+    catch { throw new HttpError(409, "cloud_computer_capacity_reached", "Image capacity reached. Custom and Dev images share a limited pool; release and rollback slots are reserved."); }
+  }
   if (
     availableComputerImageSlots(
       inventory.map((row) => row.name),
@@ -602,6 +608,7 @@ export class ComputerImageWorker {
         lock.release();
       }
     }
+    if (complete && this.driver.releaseAdmission) await this.driver.releaseAdmission(image, { computeDeleted: true, snapshotDeleted: image.state !== "attested" });
     await withSystemTx(this.pool, async tx => {
       if (complete && image.state !== "attested")
         await tx.query("UPDATE cloud_computer_images SET state='retired',updated_at=now() WHERE id=$1", [image.id]);

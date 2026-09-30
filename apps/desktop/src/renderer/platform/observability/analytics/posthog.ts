@@ -13,10 +13,10 @@
 //                              profile, ~4× cheaper, no PII).
 //   • Only EXPLICIT capture() calls — each one sends metadata only.
 //
-// Dev vs prod routes to two different PostHog projects ("Zeros Dev"
-// vs "Zeros"), keyed off the main process's authoritative runtime
-// mode (apps/desktop/electron/runtime-mode.ts via the app_info IPC command), so
-// dev activity never pollutes prod analytics.
+// All channels prefer the shared VITE_POSTHOG_KEY_PROD project and carry a
+// release_channel super property. The legacy dev-only key remains a fallback
+// for contributor builds without the shared key. Runtime metadata still comes
+// from the main process's authoritative app_info IPC command.
 //
 // Runs in the desktop renderer. Init no-ops anywhere a project key isn't
 // configured or the user has opted out.
@@ -34,6 +34,8 @@ import { scrubError } from "@zeros/protocol/scrub";
 import { isAnalyticsOptedOut, setAnalyticsOptedOut } from "./consent";
 import { isElectron, nativeInvoke } from "../../runtime";
 import { subscribePreferenceCache } from "../../personal-preferences";
+import { CHANNEL } from "../../../config/release-channel";
+import { clientReleaseChannel } from "../../../../../shared/client-compatibility";
 
 type RuntimeMode = "dev" | "prod";
 
@@ -67,7 +69,7 @@ function host(): string {
 function keyForRuntime(mode: RuntimeMode): string | undefined {
   const prod = (import.meta.env.VITE_POSTHOG_KEY_PROD || "").trim();
   const dev = (import.meta.env.VITE_POSTHOG_KEY_DEV || "").trim();
-  const key = mode === "dev" ? dev : prod;
+  const key = prod || (mode === "dev" ? dev : "");
   return key || undefined;
 }
 
@@ -150,6 +152,7 @@ export function initAnalytics(): Promise<void> {
       os: info.platform,
       arch: info.arch,
       runtime_mode: info.runtimeMode,
+      release_channel: clientReleaseChannel(CHANNEL),
     });
 
     ph = posthog;

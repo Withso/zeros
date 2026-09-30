@@ -770,6 +770,7 @@ describe("repository layout contracts", () => {
       "provider-background-work.md",
       "provider-contract.md",
       "qualification-status.md",
+      "release-worker-qualification.md",
       "root-coordinator-threat-model.md",
       "security.md",
     ];
@@ -828,7 +829,10 @@ describe("repository layout contracts", () => {
     expect(beta).toContain("environment: beta");
     expect(alpha).not.toContain("workflow_dispatch:");
     expect(beta).not.toContain("workflow_dispatch:");
-    expect(stable.match(/environment: production/g)).toHaveLength(2);
+    // Signing (build), Apple submission/notarization polling and feed
+    // publication each need Production secrets; nothing else may declare it.
+    const productionJobs = [...stable.matchAll(/^  ([a-z][a-z_-]*):\n(?:(?!^  [a-z][a-z_-]*:\n)[\s\S])*?^    environment: production$/gm)].map((match) => match[1]);
+    expect(productionJobs.sort()).toEqual(["build", "notarize", "publish", "submit"]);
     expect(stable).toContain("Require a Beta-validated release branch");
     expect(stable).toContain(
       "Production must be dispatched from 'release/X.Y.Z' after Beta validation",

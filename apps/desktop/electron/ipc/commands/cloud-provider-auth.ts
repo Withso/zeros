@@ -10,6 +10,7 @@ import { CloudProviderAuthController } from "../../cloud-provider-auth-controlle
 import { createSubscriptionDriver } from "../../provider-subscription-drivers";
 import { cloudWorkspaceDesktopCapabilityEnabled } from "../../../src/engine/cloud-workspace-capability";
 import { controlPlaneBaseUrl } from "../../workos-desktop-account";
+import { controlPlaneFetch } from "../../control-plane-fetch";
 import {
   getValidSessionForMain,
   onMainAuthSessionChanged,
@@ -90,7 +91,7 @@ const controller = new CloudProviderAuthController({
             },
           }),
     };
-    const response = await fetch(
+    const response = await controlPlaneFetch(
       `${controlPlaneBaseUrl()}/v1/cloud-agent-credentials/${input.attemptId}${native ? "/native-codex" : ""}`,
       {
         method: "PUT",

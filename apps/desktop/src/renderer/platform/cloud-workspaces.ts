@@ -1,6 +1,7 @@
 import { authorizeCloudGithubSource } from "./cloud-github";
 import { z } from "zod";
 import { getSession } from "../features/auth/auth-store";
+import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
 import {
   CONTROL_PLANE_URL,
@@ -102,7 +103,7 @@ export async function cloudAccountRequest<T>(
   if (epoch !== getOrganizationStoreGeneration())
     throw new Error("Your account changed while loading cloud workspaces");
   if (!session) throw new Error("Sign in to use cloud workspaces");
-  const response = await fetch(`${CONTROL_PLANE_URL}${path}`, {
+  const response = await controlPlaneFetch(`${CONTROL_PLANE_URL}${path}`, {
     method: input?.method ?? (input ? "POST" : "GET"),
     redirect: "error",
     cache: "no-store",
@@ -117,6 +118,8 @@ export async function cloudAccountRequest<T>(
         : {}),
     },
     ...(input ? { body: JSON.stringify(input.body) } : {}),
+  }, () => {
+    if (epoch !== getOrganizationStoreGeneration()) throw new Error("Your account changed while loading cloud workspaces");
   });
   const body = await readCloudJson(response);
   if (epoch !== getOrganizationStoreGeneration())
@@ -159,14 +162,15 @@ export async function cloudAgentGrant(
   model: string,
 ): Promise<string> {
   const delegations = await cloudAgentDelegations(target);
-  const grant = delegations.find(
+  const candidates = delegations.filter(
     (row) => row.kind.startsWith(`${agentId}-`) && row.models.includes(model),
   );
-  if (!grant)
+  const grant = candidates.find((row) => row.runtimeQualified === true) ?? candidates.find((row) => row.runtimeQualified !== false);
+  if (!candidates.length)
     throw new Error(
       "This agent and model need a cloud credential authorized for this workspace. Configure that authorization before sending.",
     );
-  if (grant.runtimeQualified === false)
+  if (!grant)
     throw new Error(
       "This workspace's agent runtime needs an update before this agent can run. Your account connection is saved.",
     );

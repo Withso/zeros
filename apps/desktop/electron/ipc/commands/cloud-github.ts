@@ -1,6 +1,7 @@
 import { hostedDevGithubReferencesEnabled } from "../../github-auth-runtime";
 import { restoreDevGithubBinding } from "../../github-app-flow";
 import { requestCloudGithub } from "../../cloud-github-client";
+import { controlPlaneFetch } from "../../control-plane-fetch";
 import { refreshGithubAppCredential } from "../../github-app-flow";
 import { controlPlaneBaseUrl } from "../../workos-desktop-account";
 import { cloudWorkspaceDesktopCapabilityEnabled } from "../../../src/engine/cloud-workspace-capability";
@@ -14,7 +15,7 @@ export const ghCloud: CommandHandler = (args) => {
     session: getValidSessionForMain,
     credential: refreshGithubAppCredential,
     baseUrl: controlPlaneBaseUrl,
-    fetch,
+    fetch: controlPlaneFetch,
     ...(hostedDevGithubReferencesEnabled()?{reference:restoreDevGithubBinding}:{}),
   });
 };

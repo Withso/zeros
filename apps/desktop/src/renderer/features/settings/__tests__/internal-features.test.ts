@@ -108,6 +108,19 @@ describe("isInternalUser — the staff gate", () => {
 });
 
 describe("internal feature flags", () => {
+  it("makes release-check controls discoverable only to platform owners without enabling credential consent", async () => {
+    const store = await freshStore();
+    for (const role of [null, "developer", "support_admin"] as const) {
+      signedInAs(role);
+      expect(store.isInternalFeatureActive("releaseCanaries" as any)).toBe(false);
+    }
+    signedInAs("platform_owner");
+    expect(store.isInternalFeatureActive("releaseCanaries" as any)).toBe(true);
+    store.setInternalFeatureEnabled("releaseCanaries" as any, false);
+    expect(store.isInternalFeatureActive("releaseCanaries" as any)).toBe(false);
+    signedOut();
+    expect(store.isInternalFeatureActive("releaseCanaries" as any)).toBe(false);
+  });
   it("defaults off, flips on, and persists to localStorage", async () => {
     const backing = installLocalStorageStub();
     const store = await freshStore();

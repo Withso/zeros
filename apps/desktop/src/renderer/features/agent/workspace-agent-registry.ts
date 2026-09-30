@@ -59,11 +59,13 @@ async function readCloudAgentRegistry(
   ]);
   if (response.type !== "AGENT_AGENTS_LIST" || !Array.isArray(response.agents))
     throw new Error("Cloud agent registry is unavailable");
-  return response.agents.map((agent) => ({
+  const qualified = delegations.filter(grant => grant.runtimeQualified !== false);
+  return response.agents.filter(agent => !delegations.some(grant => grant.kind.startsWith(`${agent.id}-`)) ||
+    qualified.some(grant => grant.kind.startsWith(`${agent.id}-`))).map((agent) => ({
     ...agent,
     authenticated:
       !agent.runtimeUnavailableReason &&
-      delegations.some((grant) => grant.kind.startsWith(`${agent.id}-`)),
+      qualified.some((grant) => grant.kind.startsWith(`${agent.id}-`)),
   }));
 }
 export function warmCloudAgentRegistry(

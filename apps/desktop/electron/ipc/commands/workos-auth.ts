@@ -1,4 +1,5 @@
 import { channel, schemeForChannel } from "../../../src/engine/runtime";
+import { controlPlaneFetch } from "../../control-plane-fetch";
 import { appBaseUrl } from "../../app-base-url";
 import { devWorkOSConfigurationIssue, workspaceDevAuthProfile } from "../../dev-workos-auth-policy";
 import { desktopAuthConfig } from "../../workos-desktop-config";
@@ -43,13 +44,13 @@ function workOSFlow(): WorkOSDesktopAuthorizationFlow {
       const { openDesktopAuthBrowser } = await import("../../deep-link");
       await openDesktopAuthBrowser(url);
     },
-    resolveAccountId: resolveWorkOSDesktopAccountId,
+    resolveAccountId: (accessToken) => resolveWorkOSDesktopAccountId(accessToken, controlPlaneFetch),
     persistSession: persistWorkOSSession,
     registerCallback: (state, expiresAt, accept) =>
       (workspaceDevAuthProfile() !== undefined ? isolatedDevCallbackRelay() : sharedDevCallbackRelay())?.register(state, expiresAt, accept) ??
       (() => undefined),
     revokeSession: async (accessToken) => {
-      if (!(await requestWorkOSDesktopRevocation("current", accessToken))) {
+      if (!(await requestWorkOSDesktopRevocation("current", accessToken, controlPlaneFetch))) {
         throw new Error("The abandoned WorkOS session could not be revoked");
       }
     },

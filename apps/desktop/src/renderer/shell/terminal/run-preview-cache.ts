@@ -2,6 +2,7 @@ import {
   isLoopbackHost,
   normalizeBrowserUrl,
 } from "../workbench/tabs/localhost-url";
+import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
 
 export interface RunPreviewTarget {
   folderKey: string;
@@ -104,9 +105,11 @@ export class RunPreviewCache {
     };
   };
   peek(target: RunPreviewTarget) {
+    if (!workspacePreviewAvailable(target.folderKey)) return null;
     return this.entries.get(this.key(target))?.url ?? null;
   }
   append(target: RunPreviewTarget, chunk: string) {
+    if (!workspacePreviewAvailable(target.folderKey)) return;
     const entry = this.entry(target);
     entry.revision += 1;
     const text = entry.tail + chunk;
@@ -120,6 +123,7 @@ export class RunPreviewCache {
     target: RunPreviewTarget,
     fetch: () => Promise<{ log: string }>,
   ): Promise<void> {
+    if (!workspacePreviewAvailable(target.folderKey)) return Promise.resolve();
     const entry = this.entry(target);
     const epoch = entry.readEpoch;
     if (entry.pending) {

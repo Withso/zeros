@@ -18,6 +18,16 @@ type Dependencies = {
 };
 const sha = (value: string | undefined | null) => /^[a-f0-9]{40}$/.test(value ?? "") ? value! : null;
 const digest = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
+export function qualifiedWorkerMatrix(rows: Array<{ credential_kind: string; runtime_contract_sha256: string; profile: string; enabled: boolean; mcp_qualified: boolean }>) {
+  if (rows.length > 100) return false;
+  const required = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"], contracts = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (!row.enabled || !row.mcp_qualified || row.profile !== "zeros-cloud-worker-v3" || !/^[a-f0-9]{64}$/.test(row.runtime_contract_sha256) || !required.includes(row.credential_kind)) continue;
+    const kinds = contracts.get(row.runtime_contract_sha256) ?? new Set<string>();
+    kinds.add(row.credential_kind); contracts.set(row.runtime_contract_sha256, kinds);
+  }
+  return [...contracts.values()].some(kinds => required.every(kind => kinds.has(kind)));
+}
 
 async function packagedManifest(): Promise<LedgerRow[]> {
   const directory = new URL("../migrations/", import.meta.url);
@@ -82,12 +92,12 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
         // kinds, account identities or evidence. Per-credential runtime
         // admission still enforces its exact contract and MCP qualification.
         workerQualified = deps.readWorkerQualified ? await deps.readWorkerQualified(worker.provider, worker.imageRef) :
-          await withSystemTx(pool, async tx => (await tx.query<{ qualified: boolean }>(
-            `SELECT EXISTS (SELECT 1 FROM cloud_agent_runtime_qualifications
+          await withSystemTx(pool, async tx => qualifiedWorkerMatrix((await tx.query<Parameters<typeof qualifiedWorkerMatrix>[0][number]>(
+            `SELECT credential_kind,runtime_contract_sha256,profile,enabled,mcp_qualified FROM cloud_agent_runtime_qualifications
              WHERE provider=$1 AND image_ref=$2 AND enabled
-               AND profile='zeros-cloud-native-v1' AND mcp_qualified) AS qualified`,
+               AND profile='zeros-cloud-worker-v3' AND mcp_qualified LIMIT 101`,
             [worker.provider, worker.imageRef],
-          )).rows[0]?.qualified === true, { consistentRead: true });
+          )).rows), { consistentRead: true });
       } catch { /* Missing/unreadable approval must not authorize publication. */ }
     }
     return { version: 1 as const, ready: !!sourceSha && !maintenance && migrations.state === "current" && cloud.ready && (!configured || !!worker),
