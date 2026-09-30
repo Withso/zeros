@@ -67,7 +67,7 @@ export async function runChatTitlesSmoke({
       const request = route.request();
       const headers = {
         "access-control-allow-origin": "*",
-        "access-control-allow-headers": "authorization, content-type",
+        "access-control-allow-headers": "authorization, content-type, x-zeros-client",
         "access-control-allow-methods": "POST, OPTIONS",
       };
       if (request.method() === "OPTIONS") {
@@ -104,6 +104,14 @@ export async function runChatTitlesSmoke({
       window.__ZEROS_NATIVE__ = {
         on: () => () => {},
         invoke: async (command) => {
+          if (command === "app_info")
+            return {
+              runtimeMode: "dev",
+              channel: "alpha",
+              version: "0.1.0",
+              platform: "darwin",
+              arch: "arm64",
+            };
           if (command === "auth_get_access_token")
             return { access_token: signedIn ? accessToken : null };
           if (command === "auth_get_session_user")

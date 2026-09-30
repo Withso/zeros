@@ -11,21 +11,25 @@ let identity: Promise<string> | null = null;
 function clientHeader(): Promise<string> {
   if (!isElectron())
     return Promise.resolve(desktopClientHeader("dev", "unknown"));
-  identity ??= nativeInvoke<{
-    channel?: string;
-    version?: string;
-    runtimeMode?: string;
-  }>("app_info").then(
-    (info) =>
-      desktopClientHeader(
+  identity ??= nativeInvoke<unknown>("app_info")
+    .then((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new Error("Invalid native app info");
+      const info = value as Record<string, unknown>;
+      if (typeof info.version !== "string")
+        throw new Error("Invalid native app info");
+      const header = desktopClientHeader(
         info.runtimeMode === "dev" ? "dev" : (info.channel ?? CHANNEL),
-        info.version ?? "unknown",
-      ),
-    () => {
+        info.version,
+      );
+      if (header.endsWith("/unknown"))
+        throw new Error("Invalid native app info");
+      return header;
+    })
+    .catch(() => {
       identity = null;
       return desktopClientHeader(CHANNEL, "unknown");
-    },
-  );
+    });
   return identity;
 }
 

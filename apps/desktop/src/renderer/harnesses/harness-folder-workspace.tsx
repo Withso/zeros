@@ -111,6 +111,13 @@ Object.assign(window, {
     on: () => () => {},
     invoke: async (op: string, params?: Record<string, unknown>) => {
       requests.push({ op, params });
+      if (op === "app_info") return {
+        runtimeMode: "dev",
+        channel: "alpha",
+        version: "0.1.0",
+        platform: "darwin",
+        arch: "arm64",
+      };
       if (op === "cloud_workspace_capability") return { enabled: cloudEnabled };
       if (cloudEnabled && op === "gh_cloud" && params?.action === "source") return {installationId:"33333333-3333-4333-8333-333333333333",repository:{id:"123",owner:"example",name:"project",defaultBranch:"main",private:true}};
       if (cloudEnabled && op === "auth_get_access_token") return { access_token: "fixture-only-access-token" };

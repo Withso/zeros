@@ -181,6 +181,7 @@ vi.mock("@/renderer/config/release-channel", () => ({
 describe("renderer request identity and 426 state", () => {
   beforeEach(() => {
     vi.resetModules();
+    runtime.channel = "alpha";
     runtime.nativeInvoke
       .mockReset()
       .mockResolvedValue({ channel: "alpha", version: "0.1.20-alpha.180" });
@@ -224,6 +225,74 @@ describe("renderer request identity and 426 state", () => {
         "X-Zeros-Client",
       ),
     ).toBe("desktop/dev/0.1.0");
+  });
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["non-object", "invalid"],
+    ["array", [{ version: "1.2.3" }]],
+    ["missing version", { channel: "beta" }],
+    ["non-string version", { channel: "beta", version: 123 }],
+    ["invalid version", { channel: "beta", version: "invalid" }],
+  ])("falls back on %s app-info and retries identity on the next request", async (_name, info) => {
+    runtime.nativeInvoke
+      .mockResolvedValueOnce(info)
+      .mockResolvedValueOnce({ channel: "alpha", version: "1.2.3" });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ok: true })));
+    const { controlPlaneFetch } = await import("../control-plane-fetch");
+
+    await controlPlaneFetch("https://api.example.test/v1/me");
+    await controlPlaneFetch("https://api.example.test/v1/me");
+
+    expect(runtime.nativeInvoke).toHaveBeenCalledTimes(2);
+    expect(
+      vi.mocked(fetch).mock.calls.map(([, init]) =>
+        new Headers(init?.headers).get("X-Zeros-Client"),
+      ),
+    ).toEqual(["desktop/alpha/unknown", "desktop/alpha/1.2.3"]);
+  });
+
+  it("falls back on rejected app-info without caching the failed identity", async () => {
+    runtime.nativeInvoke
+      .mockRejectedValueOnce(new Error("Native app-info unavailable"))
+      .mockResolvedValueOnce({ channel: "alpha", version: "1.2.3" });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ok: true })));
+    const { controlPlaneFetch } = await import("../control-plane-fetch");
+
+    await controlPlaneFetch("https://api.example.test/v1/me");
+    await controlPlaneFetch("https://api.example.test/v1/me");
+
+    expect(runtime.nativeInvoke).toHaveBeenCalledTimes(2);
+    expect(
+      vi.mocked(fetch).mock.calls.map(([, init]) =>
+        new Headers(init?.headers).get("X-Zeros-Client"),
+      ),
+    ).toEqual(["desktop/alpha/unknown", "desktop/alpha/1.2.3"]);
+  });
+
+  it("still requires an update when a request with missing app-info receives 426", async () => {
+    runtime.nativeInvoke.mockResolvedValueOnce(undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          { error: { code: "client_upgrade_required", ...required } },
+          { status: 426 },
+        ),
+      ),
+    );
+    const { controlPlaneFetch } = await import("../control-plane-fetch");
+    const { useRequiredUpdateStore } = await import("../required-update-state");
+
+    expect(
+      (await controlPlaneFetch("https://api.example.test/v1/me")).status,
+    ).toBe(426);
+    expect(useRequiredUpdateStore.getState().required).toEqual(required);
+    expect(runtime.nativeInvoke).toHaveBeenCalledWith(
+      "updater_require",
+      required,
+    );
   });
 
   it("records a sticky requirement and synchronizes it to main without installing", async () => {
