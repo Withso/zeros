@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { sha256 } from "../dev-environment/state.mjs";
+import { DevProviderError } from "../dev-environment/provider-http.mjs";
 import { newHostedGeneration, hostedName } from "../dev-environment/hosted-state.mjs";
 import { ensureRailwayEnvironment, deleteRailwayEnvironment, listRailwayEnvironments, deployRailwayBackend, configureRailwayBackend, railwayEnvironmentName, stopRailwayBackend, ensureRailwayDevDomain, railwayDevClient } from "../dev-environment/railway.mjs";
 
@@ -181,6 +182,39 @@ describe("Railway disposable Dev environments", () => {
     expect(f.state.resources.railway.stopped).toBe(true);
   });
 
+  it.each([["applied", "REMOVING"], ["lost", "SUCCESS"]])("settles a %s removal whose response was unavailable from the deployment's status", async (_case, after) => {
+    // Removal is idempotent. A degraded provider can drop the response to an
+    // applied request, or the request itself; re-read before asking again.
+    const f = fixture(); await ensureRailwayEnvironment(f.lease, f.config, f.request);
+    let removals = 0, clock = 0;
+    const request = vi.fn(async (query, variables) => {
+      if (query.includes("query DevInstances")) {
+        const status = removals === 0 ? "SUCCESS" : removals === 1 ? after : "REMOVED";
+        const deployment = { id: "owned-deployment", status: status === "REMOVING" && clock > 0 ? "REMOVED" : status, deploymentStopped: false };
+        return { environment: { serviceInstances: { edges: [{ node: { serviceId, activeDeployments: [deployment], latestDeployment: deployment } }] } } };
+      }
+      if (query.includes("mutation StopDevDeployment")) {
+        removals++;
+        if (removals === 1) throw new DevProviderError("Railway", "unavailable");
+        return { deploymentRemove: true };
+      }
+      return f.request(query, variables);
+    });
+    await stopRailwayBackend(f.lease, f.config, request, { timeout: 4, interval: 1, now: () => clock, delay: async () => { clock++; } });
+    expect(removals).toBe(after === "REMOVING" ? 1 : 2);
+    expect(f.state.resources.railway.stopped).toBe(true);
+  });
+  it("does not retry a removal the provider rejected", async () => {
+    const f = fixture(); await ensureRailwayEnvironment(f.lease, f.config, f.request);
+    const request = vi.fn(async (query, variables) => {
+      if (query.includes("query DevInstances")) return { environment: { serviceInstances: { edges: [{ node: { serviceId,
+        activeDeployments: [], latestDeployment: { id: "owned", status: "SUCCESS", deploymentStopped: false } } }] } } };
+      if (query.includes("mutation StopDevDeployment")) throw new DevProviderError("Railway", "GraphQL rejected the operation");
+      return f.request(query, variables);
+    });
+    await expect(stopRailwayBackend(f.lease, f.config, request)).rejects.toThrow(/GraphQL rejected/);
+    expect(request.mock.calls.filter(([query]) => query.includes("mutation"))).toHaveLength(1);
+  });
   it("does not accept a stop flag as proof that a successful deployment was removed", async () => {
     const f = fixture(); await ensureRailwayEnvironment(f.lease, f.config, f.request);
     let removed = false;

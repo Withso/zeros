@@ -24,6 +24,10 @@ export function isRailwayOwnerName(name, state) {
   return typeof name === "string" && (name.startsWith(`dev-${state.owner}-`) || name.startsWith(`dev-${state.owner.slice(0, 12)}-`));
 }
 
+const TRANSIENT = new Set(["unavailable", "response unavailable", "invalid response", 408, 429, 500, 502, 503, 504]);
+/** Timeouts, lost or non-JSON edge responses and retryable statuses. */
+export const isTransientRailwayError = error => error instanceof DevProviderError && TRANSIENT.has(error.status);
+
 export function railwayDevClient(config, fetchImpl = fetch, pause = sleep) {
   if (!UUID.test(config?.projectId ?? "") || !UUID.test(config.serviceId ?? "") ||
       !Array.isArray(config.protectedEnvironmentIds) || !config.protectedEnvironmentIds.length ||
@@ -43,9 +47,7 @@ export function railwayDevClient(config, fetchImpl = fetch, pause = sleep) {
         if (response.status !== 200 || response.body?.errors?.length || !response.body?.data) throw new DevProviderError("Railway", response.status === 200 ? "GraphQL rejected the operation" : response.status, response.requestId);
         return response.body.data;
       } catch (error) {
-        const transient = error instanceof DevProviderError &&
-          (["unavailable", "response unavailable", "invalid response"].includes(error.status) || [408, 429, 500, 502, 503, 504].includes(error.status));
-        if (!transient || attempt >= attempts || signal?.aborted) throw error;
+        if (!isTransientRailwayError(error) || attempt >= attempts || signal?.aborted) throw error;
         await pause(2000 * attempt, undefined, { signal });
       }
     }
@@ -293,11 +295,24 @@ export async function stopRailwayBackend(lease, config, request = railwayDevClie
   // A crashed deployment may restart automatically, so remove it as well.
   const terminal = deployment => ["REMOVED", "FAILED", "SKIPPED"].includes(deployment.status);
   const stopped = new Set();
+  const stop = async deployment => {
+    for (let attempt = 1; ; attempt++) {
+      await lease.fence();
+      const mutation = ["BUILDING", "INITIALIZING", "QUEUED", "WAITING"].includes(deployment.status) ? "deploymentCancel" : "deploymentRemove";
+      try { await request(`mutation StopDevDeployment($id: String!) { ${mutation}(id: $id) }`, { id: deployment.id }, lease.signal); return; }
+      catch (error) {
+        if (!isTransientRailwayError(error) || attempt >= 3) throw error;
+        // Removal is idempotent, and a lost response may follow an applied
+        // request: settle it from the current status before asking again.
+        const current = (await instances()).flatMap(i => [...i.activeDeployments, i.latestDeployment].filter(Boolean)).find(d => d.id === deployment.id);
+        if (!current || terminal(current) || current.status === "REMOVING") return;
+        deployment = current;
+      }
+    }
+  };
   for (const instance of list) for (const deployment of [...instance.activeDeployments, instance.latestDeployment].filter(Boolean)) {
     if (stopped.has(deployment.id) || terminal(deployment) || deployment.status === "REMOVING") continue;
-    await lease.fence();
-    const mutation = ["BUILDING", "INITIALIZING", "QUEUED", "WAITING"].includes(deployment.status) ? "deploymentCancel" : "deploymentRemove";
-    await request(`mutation StopDevDeployment($id: String!) { ${mutation}(id: $id) }`, { id: deployment.id }, lease.signal); stopped.add(deployment.id);
+    await stop(deployment); stopped.add(deployment.id);
   }
   await pollProvider("Railway Dev backend shutdown", async () => (await instances()).every(i =>
     [...i.activeDeployments, i.latestDeployment].filter(Boolean).every(terminal)),

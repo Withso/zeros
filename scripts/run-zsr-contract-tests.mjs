@@ -60,6 +60,7 @@ export const ZSR_CONTRACT_TEST_FILES = Object.freeze([
   "apps/desktop/src/engine/agents/containment/__tests__/cloud-native-history.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/cloud-native-boundary.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/cloud-native-view.test.ts",
+  "apps/desktop/src/engine/agents/containment/__tests__/cloud-native-view-ownership.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/cloud-process-supervisor.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/cloud-checkpoint-artifacts.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/cloud-preview-links.test.ts",

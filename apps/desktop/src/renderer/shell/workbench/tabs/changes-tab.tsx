@@ -367,6 +367,13 @@ export function useChangeCount(
 
 // ── non-git trunk: Initialize Git / Publish to GitHub ────────
 
+/** Only a Local folder is probed natively. A cloud trunk reuses the Local main
+ *  row with a cloud:// key, which is a device UI identity rather than a path,
+ *  and its checkout is always a cloned repository. */
+export function nativeTrunkRoot(root: string | null): string | null {
+  return root && !/^cloud:\/\//i.test(root) ? root : null;
+}
+
 /** For Local main, detect a folder that isn't READY for workspaces yet
  *  — either not a git repo, OR a repo with zero commits (unborn HEAD, e.g. a
  *  freshly `git init`'d folder). Both can't host a worktree/diff (`git diff HEAD`
@@ -376,10 +383,11 @@ export function useChangeCount(
  *  `{ nonGit: false, checked: true }`. Re-runs on `refreshKey`, so it clears the
  *  moment the folder is initialized. */
 export function useTrunkGitState(
-  root: string | null,
+  trunkRoot: string | null,
   refreshKey: number,
   active = true,
 ): { nonGit: boolean; checked: boolean } {
+  const root = nativeTrunkRoot(trunkRoot);
   const [state, setState] = useState<{
     root: string;
     nonGit: boolean;

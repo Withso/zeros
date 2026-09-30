@@ -1,6 +1,16 @@
 import { devBoatClient, confirmBoatDeletion, assertDevBuilderBudget } from "./hosted-image.mjs";
 import { sha256 } from "./state.mjs";
 import { dispatchDevCreate, DevProviderError } from "./provider-http.mjs";
+import { QUALIFICATION_DEADLINE_MS } from "./hosted-agents.mjs";
+
+// The machine outlives the qualification deadline, then expires on its own.
+const CANARY_TTL_SECONDS = QUALIFICATION_DEADLINE_MS / 1000 + 5 * 60;
+
+/** The meter is account-wide, so a canary's allowance covers its whole
+ * qualification window, never more than the owner's builder budget. */
+export function canaryBudgetHours(boat) {
+  return Math.min(boat.builderBudgetHours, QUALIFICATION_DEADLINE_MS / 3_600_000 + 0.25);
+}
 
 export function hostedAgentRequest(state, profile, image) {
   const { workosUserId, workosOrganizationId, expectedEmail, expectedOrganizationSlug } = profile.fixture;
@@ -45,8 +55,8 @@ export function hostedAgentCanary(lease, profile, request = devBoatClient(profil
         if (meter.status !== 200 || !Number.isFinite(meter.body?.creditUsedSeconds)) throw new Error("Dev agent test budget is unavailable");
         row = { agentQualificationId: job.id, inputsSha256: sha256(`native-agent:${job.id}`), purpose: "native-agent-qualification",
           sourceCommit: image.sourceCommit, sourceImage: image.snapshotId,
-          maxUsedHours: meter.body.creditUsedSeconds / 3600 + Math.min(profile.boat.builderBudgetHours, 0.25),
-          builderIntent: { key: job.id, at: Date.now(), body: { type: "default", from: image.snapshotId, ttlSeconds: 900, noEnv: true, env: {} } } };
+          maxUsedHours: meter.body.creditUsedSeconds / 3600 + canaryBudgetHours(profile.boat),
+          builderIntent: { key: job.id, at: Date.now(), body: { type: "default", from: image.snapshotId, ttlSeconds: CANARY_TTL_SECONDS, noEnv: true, env: {} } } };
       }
       await assertDevBuilderBudget(lease, profile, row, request);
       await lease.fence();

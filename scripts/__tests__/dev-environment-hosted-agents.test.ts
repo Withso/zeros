@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { advanceHostedAgents, nativeRuntimeEvidence } from "../dev-environment/hosted-agents.mjs";
-import { hostedAgentRequest } from "../dev-environment/hosted-agent-canary.mjs";
+import { advanceHostedAgents, nativeRuntimeEvidence, retireUnfinishedHostedAgents, QUALIFICATION_DEADLINE_MS } from "../dev-environment/hosted-agents.mjs";
+import { hostedAgentRequest, canaryBudgetHours } from "../dev-environment/hosted-agent-canary.mjs";
 
 function fixture() {
   const image = { qualified: true, inputsSha256: "a".repeat(64), snapshotId: "dev-test-image", sourceCommit: "b".repeat(40), buildSha256: "c".repeat(64) };
@@ -168,4 +168,92 @@ describe("automatic hosted Dev agent enablement", () => {
     expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("enabled");
     expect(f.deps.enable).toHaveBeenCalledOnce();
   });
+});
+
+describe("native agent qualification deadline", () => {
+  it("lets an extended native run finish, then retires an overdue one with an explicit deadline failure", async () => {
+    // Codex's extended checks (goals, forks, review, multi-agent, apps) run
+    // past twelve minutes; its canary machine must also outlive that run.
+    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
+    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
+    now += 20 * 60_000;
+    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
+    expect(f.deps.retire).not.toHaveBeenCalled();
+    now += 25 * 60_000;
+    await advanceHostedAgents(f.lease, f.profile, f.deps);
+    expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", retired: true, failure: { stage: "deadline" } });
+  });
+});
+
+it("reports a failed native run's fixed-format error code and class name, never free text", async () => {
+  const f = fixture();
+  await advanceHostedAgents(f.lease, f.profile, f.deps);
+  f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false, phase: "native-start", checks: ["actorAdmission"], failure: "runtime",
+    failureCode: "EROFS", failureName: "Error" } });
+  await advanceHostedAgents(f.lease, f.profile, f.deps);
+  expect(f.state.agentQualifications[0].failure).toMatchObject({ nativePhase: "native-start", category: "runtime", errorCode: "EROFS", errorName: "Error" });
+  const g = fixture();
+  await advanceHostedAgents(g.lease, g.profile, g.deps);
+  g.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false, phase: "native-start", failure: "runtime", failureCode: "read-only: /srv", failureName: "Error: text" } });
+  await advanceHostedAgents(g.lease, g.profile, g.deps);
+  expect(g.state.agentQualifications[0].failure).not.toHaveProperty("errorCode");
+  expect(g.state.agentQualifications[0].failure).not.toHaveProperty("errorName");
+});
+
+it("retires unfinished checks of a replaced image so the new build can take the owner's builder slot", async () => {
+  // A canary holds the owner's builder reservation, and only a ready
+  // environment advances it; a relaunch with new worker source must not wait.
+  const f = fixture();
+  f.state.agentQualifications = [
+    { id: "running", phase: "running", retired: false },
+    { id: "failed", phase: "failed", retired: false, failure: { stage: "native" } },
+    { id: "enabled", phase: "enabled", retired: true },
+  ];
+  expect(await retireUnfinishedHostedAgents(f.lease, f.deps)).toBe(2);
+  expect(f.deps.retire.mock.calls.map(([job]: any) => job.id)).toEqual(["running", "failed"]);
+  expect(f.state.agentQualifications).toMatchObject([
+    { id: "running", phase: "failed", retired: true, failure: { stage: "superseded" } },
+    { id: "failed", phase: "failed", retired: true, failure: { stage: "native" } },
+    { id: "enabled", phase: "enabled", retired: true },
+  ]);
+  expect(await retireUnfinishedHostedAgents(f.lease, f.deps)).toBe(0);
+});
+
+it("fails a check at once when its canary exceeded the builder budget, instead of retrying a deleted machine", async () => {
+  // The budget guard deletes the canary; polling it again can only fail.
+  const f = fixture();
+  await advanceHostedAgents(f.lease, f.profile, f.deps);
+  const job = f.state.agentQualifications[0];
+  f.state.resources.images.push({ purpose: "native-agent-qualification", agentQualificationId: job.id, budgetExceeded: true });
+  f.deps.allocate.mockRejectedValue(new Error("Dev agent canary provider identity changed"));
+  await advanceHostedAgents(f.lease, f.profile, f.deps);
+  expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", retired: true, failure: { stage: "budget" } });
+});
+
+it("sizes a canary's usage allowance to its qualification window within the owner's builder budget", () => {
+  expect(canaryBudgetHours({ builderBudgetHours: 2 })).toBeCloseTo(QUALIFICATION_DEADLINE_MS / 3_600_000 + 0.25);
+  expect(canaryBudgetHours({ builderBudgetHours: 0.5 })).toBe(0.5);
+});
+
+it("checks a report's completion time against the time it was read, not the start of a slow advance", async () => {
+  // Inspection runs an operator build and a database call; a run finishing
+  // meanwhile reports a qualifiedAt after the advance began.
+  const f = fixture(); let clock = Date.now(); f.deps.now = () => clock;
+  await advanceHostedAgents(f.lease, f.profile, f.deps);
+  const result = outcome(f);
+  f.deps.inspect.mockImplementation(async () => { clock += 20_000; return f.status; });
+  f.deps.poll.mockImplementation(async () => ({ ...result, report: { ...result.report, qualifiedAt: new Date(clock - 1000).toISOString() } }));
+  expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("enabled");
+});
+
+it("supersedes a passed check of a replaced image instead of treating it as the active canary", async () => {
+  // A relaunch between a check's pass and its enable leaves it "passed"; once
+  // the worker image changes it must not block the new image's checks.
+  const f = fixture();
+  f.state.agentQualifications = [{ id: "old", signature: "0".repeat(64), phase: "passed", retired: true, startedAt: Date.now() - 60_000,
+    connection: f.connection, image: { snapshotId: "dev-previous-image" } }];
+  expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
+  expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", failure: { stage: "superseded" } });
+  expect(f.state.agentQualifications).toHaveLength(2);
+  expect(f.deps.allocate).toHaveBeenCalledOnce();
 });

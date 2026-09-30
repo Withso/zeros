@@ -4,6 +4,9 @@ import { sha256 } from "./state.mjs";
 const CHECKS = ["privateProviderHome", "engineAuthorityIsolation", "nativeWorkspaceTools", "actorAdmission",
   "stopAndRevocation", "nativeTurn", "nativeResume", "authentication", "nativeMcp"];
 const NATIVE_EXTENSIONS=["nativeGoals","nativeFork","transcriptFork","nativeReview","nativeApps","nativeMultiAgent"];
+/** Codex's extended native checks (goals, forks, review, multi-agent, apps)
+ * take longer than the core set; every step is still individually bounded. */
+export const QUALIFICATION_DEADLINE_MS = 40 * 60_000;
 const digest = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const signature = (image, connection) => sha256(JSON.stringify([image.snapshotId, image.buildSha256,
   connection.credentialId, connection.credentialRevision, connection.connectionRevision, connection.kind, connection.model,
@@ -39,6 +42,19 @@ export function nativeRuntimeEvidence(image, connection, outcome, startedAt, now
 /** One bounded advancement per lease. A native turn runs on the disposable VM
  * after this returns, allowing Archive to acquire the lease immediately. Lost
  * dispatch acknowledgements are polled, never blindly sent a second time. */
+/** A new worker build replaces the image these checks qualify. Each canary
+ * holds the owner's builder reservation, and only a ready environment
+ * advances it, so a relaunch with changed worker source retires unfinished
+ * checks before its build competes for that capacity. */
+export async function retireUnfinishedHostedAgents(lease, deps) {
+  let retired = 0;
+  for (const job of (lease.state.agentQualifications ?? []).filter(row => !row.retired)) {
+    if (job.phase !== "failed" && job.phase !== "enabled") { job.phase = "failed"; job.failure ??= { stage: "superseded" }; await lease.save(); }
+    await deps.retire(job); job.retired = true; await lease.save(); retired++;
+  }
+  return retired;
+}
+
 export async function advanceHostedAgents(lease, profile, deps, { retry = false } = {}) {
   const { state } = lease, now = deps.now?.() ?? Date.now();
   if (state.status !== "ready" || !profile.fixture) return { state: "inactive" };
@@ -53,11 +69,18 @@ export async function advanceHostedAgents(lease, profile, deps, { retry = false 
     .flatMap(({ image, connections }) => connections.map(connection => ({ image, connection })));
   const jobs = state.agentQualifications ??= [];
   // Retire stale work before considering sign-in, a new selection or image.
-  for (const job of jobs.filter(row => !row.retired && row.phase !== "enabled")) {
+  // A retired "passed" check still awaits enable, and counts as stale only
+  // once its image or connection is no longer current.
+  for (const job of jobs.filter(row => row.phase !== "enabled" && (!row.retired || row.phase === "passed"))) {
     const current = candidates.some(({ image, connection }) => signature(image, connection) === job.signature);
-    if (job.phase === "failed" || !current || now - job.startedAt > 12 * 60_000) {
+    const pending = job.phase !== "passed" && job.phase !== "failed";
+    const overdue = pending && now - job.startedAt > QUALIFICATION_DEADLINE_MS;
+    // The budget guard deletes its canary; retrying that machine only fails.
+    const budget = pending && state.resources.images?.some(row => row.agentQualificationId === job.id && row.budgetExceeded === true);
+    if (job.phase === "failed" || !current || overdue || budget) {
+      if (job.phase !== "failed") job.failure ??= { stage: !current ? "superseded" : budget ? "budget" : "deadline" };
       job.phase = "failed"; await lease.save();
-      await deps.retire(job); job.retired = true; await lease.save();
+      if (!job.retired) { await deps.retire(job); job.retired = true; await lease.save(); }
     }
   }
   if (status.needsSignIn) return { state: "sign-in" };
@@ -104,18 +127,28 @@ export async function advanceHostedAgents(lease, profile, deps, { retry = false 
   if (["starting", "running"].includes(job.phase)) {
     const result = await deps.poll(job);
     if (result.running) return { state: "testing", provider: connection.provider };
-    try { job.evidence = nativeRuntimeEvidence({ ...job.image, contractSha256: job.runtimeContractSha256 }, job.connection, result, job.startedAt, now); job.phase = "passed"; }
+    // Judge completion against when the report was read: inspection earlier
+    // in this advance can outlast the run's final seconds.
+    try { job.evidence = nativeRuntimeEvidence({ ...job.image, contractSha256: job.runtimeContractSha256 }, job.connection, result, job.startedAt, deps.now?.() ?? Date.now()); job.phase = "passed"; }
     catch {
       const code = value => Number.isInteger(value) && value >= -256 && value <= 256 ? value : null;
-      const knownChecks = new Set([...CHECKS,...NATIVE_EXTENSIONS, "nativePermissionSelection", "nativeAccessRefresh", "nativeGitAuthor"]);
+      const knownChecks = new Set([...CHECKS,...NATIVE_EXTENSIONS, "nativePermissionSelection", "nativeAccessRefresh", "nativeGitAuthor",
+        "nativeMcpRotation", "nativeMcpRemoval", "nativeMcpOwnerHandoff", "stopAndRevocation"]);
       const phases = ["input", "actor-admission", "native-start", "provider-home-isolation", "native-git-author",
         "native-turn", "native-tool-evidence", "native-mcp", "access-refresh", "native-resume", "permission-selection", "stop", "revocation",
-        "native-goal-set","native-goal-reload","native-fork","transcript-fork","native-review","native-apps","native-multi-agent"];
+        "native-goal-set","native-goal-reload","native-fork","transcript-fork","native-review","native-apps","native-multi-agent",
+        "native-mcp-rotation","native-mcp-removal","native-mcp-owner-handoff"];
       job.failure = { stage: "native", exitCode: code(result.code), retirementCode: code(result.retirement),
         qualified: result.report?.qualified === true,
         completedChecks: [...knownChecks].filter(check => Array.isArray(result.report?.checks) && result.report.checks.includes(check)),
         ...(phases.includes(result.report?.phase) ? { nativePhase: result.report.phase } : {}),
-        ...(["timeout", "assertion", "runtime"].includes(result.report?.failure) ? { category: result.report.failure } : {}) };
+        ...(["timeout", "assertion", "runtime"].includes(result.report?.failure) ? { category: result.report.failure } : {}),
+        ...(/^[A-Z][A-Z0-9_]{1,63}$/.test(result.report?.failureCode ?? "") ? { errorCode: result.report.failureCode } : {}),
+        ...(/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(result.report?.failureName ?? "") ? { errorName: result.report.failureName } : {}),
+        ...(/^[a-z][a-z0-9-]{1,40}$/.test(result.report?.failureKind ?? "") ? { errorKind: result.report.failureKind } : {}),
+        ...(/^[a-z][a-z0-9-]{1,40}$/.test(result.report?.failureStage ?? "") ? { errorStage: result.report.failureStage } : {}),
+        ...(Number.isInteger(result.report?.failureExitCode) && Math.abs(result.report.failureExitCode) <= 256 ? { errorExitCode: result.report.failureExitCode } : {}),
+        ...(/^[a-f0-9]{16}$/.test(result.report?.failureMessageSha256 ?? "") ? { errorMessageSha256: result.report.failureMessageSha256 } : {}) };
       job.phase = "failed";
     }
     await lease.save();
