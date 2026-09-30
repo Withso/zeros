@@ -344,12 +344,12 @@ describe("WorkOS desktop safe-storage session lifecycle", () => {
     mocks.revoke.mockResolvedValue(false);
     install();
     await expect(authClearSession({}, {} as never)).resolves.toBe(true);
-    expect(mocks.revoke).toHaveBeenLastCalledWith("current", "access-current");
+    expect(mocks.revoke).toHaveBeenLastCalledWith("current", "access-current", expect.any(Function));
     expect(mocks.raw).toBeNull();
 
     install();
     await expect(authSignOutEverywhere({}, {} as never)).resolves.toBe(true);
-    expect(mocks.revoke).toHaveBeenLastCalledWith("all", "access-current");
+    expect(mocks.revoke).toHaveBeenLastCalledWith("all", "access-current", expect.any(Function));
     expect(mocks.raw).toBeNull();
   });
 

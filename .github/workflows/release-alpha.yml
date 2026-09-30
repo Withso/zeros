@@ -37,12 +37,8 @@ name: Release (alpha)
 # which existed only because the repo was private and anonymous clients get 404 on
 # a private repo's release assets.
 #
-# GATED (changed): this workflow used to run NO checks at all, on the theory that
-# preflight.yml had already gated the PR. That left real holes — a direct push to
-# main, a merge-skew interaction between two independently-green PRs, or a guard that
-# only ran in the stable release job. Alpha is the ring we dogfood, so an Alpha
-# broken for reasons unrelated to the change under test is worse than a slower Alpha.
-# See the "Gates" block below.
+# Exact-source Preflight and CodeQL gate hosted mutation and feed publication.
+# Signing starts in parallel; only the final publisher has repository write scope.
 
 on:
   push:
@@ -62,79 +58,35 @@ permissions:
   contents: read
 
 jobs:
-  # ── Linux quality gate ───────────────────────────────────
-  #
-  # Typecheck, lint and the Vitest suite run HERE on ubuntu-latest rather than in
-  # the macOS packaging job below, which `needs:` this one — so a red suite still
-  # blocks publishing. Nothing was weakened; the gate moved to a host that can
-  # honour it.
-  #
-  # WHY IT MOVED: the suite drives real bubblewrap/seccomp containment, and
-  # bubblewrap cannot exist on macOS. Running it in the packaging job failed 18
-  # test files with "absolute bwrap unavailable" — an environmental failure that
-  # reads exactly like a regression — while preflight ran the identical
-  # `pnpm test:git` on Ubuntu and passed. Alpha was red on that alone from
-  # 2026-08-16 onward.
-  #
-  # The ~1-2 min a second checkout + install costs is the price of a gate that
-  # can actually go green.
-  test:
-    name: Quality gate (typecheck · lint · vitest)
-    # Mirrors the packaging job: a fork has no signing secrets and no release
-    # permissions, so there is nothing here for it to gate.
+  ci:
+    name: Exact-source Preflight and CodeQL barrier
     if: github.event.repository.fork == false
     runs-on: ubuntu-latest
+    timeout-minutes: 125
+    permissions:
+      contents: read
+      actions: read
+    env:
+      RELEASE_CHANNEL: alpha
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
-
-      - name: Install JS dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Install control-plane contract dependencies
-        # Contract tests exercise the real control-plane HTTP validators across
-        # both independent package graphs.
-        working-directory: apps/control-plane
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify hosted release contracts
-        run: |
-          pnpm exec tsc -p scripts/release/tsconfig.json
-          pnpm exec vitest run --config scripts/release/vitest.config.ts --maxWorkers=2
-
-      - name: Install contained-execution runtime
-        uses: ./.github/actions/contained-execution-runtime
-
-      - name: Typecheck (app · electron · packages)
-        # vite + tsup strip types via esbuild WITHOUT checking them, so without
-        # this nothing on the release path validates types at all.
-        run: pnpm typecheck
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Install Playwright Chromium headless shell
-        # The Vitest suite contains real-browser design-runtime protocol tests.
-        # pnpm installs Playwright's API package but intentionally not its browser.
-        run: pnpm exec playwright install --with-deps --only-shell chromium
-
-      - name: Run Vitest suite
-        run: bash scripts/ci/with-userns.sh pnpm test:git
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsx scripts/release/ci-cli.ts --wait
 
   hosted:
     name: Hosted promotion (alpha)
-    needs: test
+    needs: ci
     if: github.event.repository.fork == false
     permissions:
       contents: read
@@ -147,9 +99,8 @@ jobs:
       before_sha: ${{ github.event.before || '' }}
     secrets: inherit
 
-  alpha:
-    name: Build + publish Alpha (macOS arm64 · signed · NOT notarized)
-    needs: [test, hosted]
+  build:
+    name: Build + sign Alpha (macOS arm64 · NOT notarized)
     # Don't fire on forks (no signing secrets / release perms there). Key this
     # to repository identity rather than an owner/name pair so an ownership
     # transfer cannot silently disable the alpha release job again.
@@ -159,15 +110,14 @@ jobs:
     # main as the only deployment branch. Repository-level secrets would be
     # exposed to every workflow/ref that can name them.
     environment: alpha
-    # Publishes the rolling "alpha" prerelease and retargets its tag.
     permissions:
-      contents: write
-      actions: read
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     env:
       RELEASE_CHANNEL: alpha
       RELEASE_SHA: ${{ github.sha }}
       RELEASE_BRANCH: ${{ github.ref_name }}
-      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
       # Seen by electron:compile (bakes __ZEROS_CHANNEL_BAKED__) AND the
       # electron-builder wrapper (applies the alpha appId/productName/artifact
       # overrides). One job-level value keeps them in lockstep.
@@ -215,6 +165,7 @@ jobs:
           # vMAJOR.MINOR.* release tags to derive the next stable base.
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -265,33 +216,6 @@ jobs:
 
       - name: Qualify ZSR on the shipping kernel
         run: pnpm check:zsr
-
-      # ── Gates ────────────────────────────────────────────
-      #
-      # Typecheck, lint and the Vitest suite live in the `test` job above (see the
-      # comment there for why they cannot run on macOS). This job `needs:` it, so
-      # they still gate every publish.
-      #
-      # The guards BELOW stay here on purpose: they inspect macOS packaging inputs,
-      # and they are cheap, so they run before build:sidecar where a failure costs
-      # seconds instead of a full pack.
-
-      - name: Ship guards (catalog · packaging · prod env · security)
-        # The same set the stable release job runs. Each guards a concrete way the
-        # shipped app breaks: a downgrading model catalog, a dead packaged Cursor, a
-        # missing extraResources path, a build shipped without its VITE_* set, a
-        # desynced Codex protocol, a regressed Electron security posture, a
-        # cross-channel deep-link scheme collision.
-        run: |
-          pnpm models:verify --strict
-          pnpm check:cursor-asar
-          pnpm check:licenses
-          pnpm check:audit
-          pnpm check:packaging-paths
-          pnpm check:vite-env
-          pnpm check:codex-pin
-          pnpm check:electron-hardening
-          pnpm check:deep-link-schemes
 
       - name: Build engine sidecar (bun → binaries/zeros-engine-*)
         run: pnpm build:sidecar
@@ -385,11 +309,58 @@ jobs:
             --bundle-id com.zeros.alpha \
             --team-id H8MS56JU2Z
 
+      - name: Save signed Alpha artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zeros-alpha-arm64-build-${{ github.sha }}
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 5
+          path: |
+            release/Zeros-Alpha-*-arm64.dmg
+            release/Zeros-Alpha-*-arm64-mac.zip
+            release/Zeros-Alpha-*-arm64-mac.zip.blockmap
+            release/alpha-mac.yml
+
+  publish:
+    name: Publish Alpha feed
+    needs: [ci, build, hosted]
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    environment: alpha
+    permissions:
+      contents: write
+      actions: read
+    env:
+      RELEASE_CHANNEL: alpha
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
+      ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
+      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download signed Alpha artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: zeros-alpha-arm64-build-${{ github.sha }}
+          path: release
       - name: Publish rolling "alpha" prerelease
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           pnpm exec tsx scripts/release/publication-cli.ts
@@ -435,6 +406,7 @@ jobs:
           cp "$DMG" "$LATEST_DMG"
 
           TAG="alpha"
+          RELEASE_VERSION="$VERSION" pnpm exec tsx scripts/release/release-ledger-cli.ts --build
           TITLE="Zeros Alpha v${VERSION}"
           # Keep the permanent link owner-agnostic. The quoted heredoc protects
           # Markdown backticks from shell expansion; sed replaces only the
@@ -463,17 +435,18 @@ jobs:
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
               --prerelease --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA"
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-              "$DMG" "$ZIP" "$ZIP_BLOCKMAP" "$LATEST_DMG" "release/alpha-mac.yml"
+              "$DMG" "$ZIP" "$ZIP_BLOCKMAP" "$LATEST_DMG" "release/alpha-mac.yml" "release/alpha-release-ledger.json"
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --prerelease --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA" \
-              "$DMG" "$ZIP" "$ZIP_BLOCKMAP" "$LATEST_DMG" "release/alpha-mac.yml"
+              "$DMG" "$ZIP" "$ZIP_BLOCKMAP" "$LATEST_DMG" "release/alpha-mac.yml" "release/alpha-release-ledger.json"
           fi
           # Updating a release's target_commitish does not move an existing tag.
           # Advance the schema/worker baseline only after publishing the assets.
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
             -f sha="$GITHUB_SHA" -F force=true --silent
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)" = "$GITHUB_SHA"
+          pnpm exec tsx scripts/release/release-ledger-cli.ts --verify
           echo "✓ published $TITLE → release '$TAG' (prerelease, alpha-mac.yml feed)"
 
       - name: Prune old alpha assets (keep newest 3)

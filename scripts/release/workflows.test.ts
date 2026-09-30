@@ -6,17 +6,113 @@ function job(text: string, name: string) {
   return text.split(`\n  ${name}:\n`)[1]?.split(/\n {2}[a-z][a-z_-]+:\n/)[0] ?? "";
 }
 describe("release dependency and authority contracts", () => {
+  it.each(["release-alpha", "release-beta", "release"])("gates %s mutations on exact-source required CI without delaying the build", name => {
+    const text = workflow(name), ci = job(text, "ci");
+    expect(ci).toContain("actions: read");
+    expect(ci).toContain("contents: read");
+    expect(ci).not.toContain("secrets:");
+    expect(ci).toContain("ref: ${{ github.sha }}");
+    expect(ci).toContain("RELEASE_SHA: ${{ github.sha }}");
+    expect(ci).toContain("pnpm exec tsx scripts/release/ci-cli.ts --wait");
+    expect(job(text, "hosted")).toContain("needs: ci");
+    expect(job(text, "build")).not.toMatch(/^    needs:/m);
+    expect(job(text, "test")).toBe("");
+    expect(text).not.toMatch(/pnpm (?:typecheck|lint|test:git)\b/);
+    expect(text).not.toContain("scripts/release/vitest.config.ts");
+  });
+  it("rechecks required CI inside the callable hosted workflow", () => {
+    expect(job(workflow("hosted-promotion"), "guard")).toContain("pnpm exec tsx scripts/release/ci-cli.ts --verify");
+  });
+  it.each(["preflight", "codeql"])("runs %s push checks on main and every release branch", name => {
+    expect(workflow(name)).toContain('branches: [main, "release/**"]');
+  });
+  it("runs services and WorkOS verification before worker qualification, then finalizes the selected tuple", () => {
+    const text = workflow("hosted-promotion"), services = job(text, "services"), worker = job(text, "worker"), promote = job(text, "promote");
+    expect(services).toContain("needs: guard");
+    expect(services).toContain("cli.ts --services");
+    expect(services).toContain("name: hosted-services-");
+    expect(worker).toContain("needs: [guard, services]");
+    expect(promote).toContain("needs: [guard, services, worker]");
+    expect(promote).toContain("cli.ts --finalize");
+  });
+  it("takes the worker decision from qualified input comparison rather than the switch alone", () => {
+    const guard = job(workflow("hosted-promotion"), "guard");
+    expect(guard).toContain("worker_enabled: ${{ steps.guard.outputs.worker_enabled }}");
+    expect(guard).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
+    expect(guard).not.toContain("if [ \"$WORKER_SWITCH\" = enabled ]");
+  });
+  it.each([["release-alpha", "alpha"], ["release-beta", "beta"], ["release", "production"]])("publishes and anonymously verifies the cumulative ledger in %s", (name, channel) => {
+    const text = job(workflow(name), "publish");
+    expect(text).toContain("scripts/release/release-ledger-cli.ts --build");
+    expect(text).toContain("scripts/release/release-ledger-cli.ts --verify");
+    const asset = name === "release" ? "release/release-ledger.json" : `release/${channel}-release-ledger.json`;
+    expect(text).toContain(`"${asset}"`);
+    expect(text.indexOf("release-ledger-cli.ts --verify")).toBeGreaterThan(text.indexOf('gh release create "$TAG"'));
+  });
   it("includes the release controller source in normal Git discovery", () => {
     expect(spawnSync("git", ["check-ignore", "--no-index", "--quiet", "scripts/release/cli.ts"]).status).toBe(1);
   });
-  it.each([["release-alpha", "alpha"], ["release-beta", "beta"], ["release", "production"]])("serializes %s through desktop publication after hosted success", (name, channel) => {
+  it.each([["release-alpha", "alpha"], ["release-beta", "beta"], ["release", "production"]])("publishes %s only after CI, parallel signing, and hosted success", (name, channel) => {
     const text = workflow(name);
     expect(text).toContain(`group: release-${channel}\n  cancel-in-progress: false`);
     const hosted = job(text, "hosted");
-    expect(hosted).toContain("needs: test"); expect(hosted).toContain("uses: ./.github/workflows/hosted-promotion.yml");
+    expect(hosted).toContain("needs: ci"); expect(hosted).toContain("uses: ./.github/workflows/hosted-promotion.yml");
     expect(hosted).toContain("source_sha: ${{ github.sha }}");
-    expect(job(text, channel === "production" ? "build" : channel)).toContain("needs: [test, hosted]");
-    if (channel === "production") { expect(job(text, "build")).toContain("environment: production"); expect(job(text, "notarize")).toContain("needs: build"); }
+    expect(hosted).not.toContain("needs: build");
+    const build = job(text, "build"), publish = job(text, "publish");
+    expect(build).toContain(`environment: ${channel}`);
+    expect(build).toContain("contents: read");
+    expect(build).not.toMatch(/^    needs:/m);
+    expect(build).toContain("if: github.event.repository.fork == false");
+    expect(publish).toContain(channel === "production" ? "needs: [ci, build, hosted, notarize]" : "needs: [ci, build, hosted]");
+    expect(publish).toContain("contents: write");
+    expect(publish).toContain("actions: read");
+    expect(publish).toContain("ref: ${{ github.sha }}");
+    expect(publish).toContain("VERSION: ${{ needs.build.outputs.version }}");
+    expect(publish).not.toContain("always()");
+    expect(build).not.toContain("contents: write");
+    expect(build.replace(/^\s*#.*$/gm, "")).not.toMatch(/(?:gh release|gh api|notarytool|scripts\/release\/(?:cli|publication-cli|release-ledger-cli)\.ts)/);
+    const buildSecrets = [...build.matchAll(/secrets\.([A-Z_]+)/g)].map(match => match[1]);
+    expect(buildSecrets.length).toBeGreaterThan(0);
+    expect(buildSecrets.every(secret => ["CSC_LINK", "CSC_KEY_PASSWORD", "VITE_APP_BASE_URL", "VITE_CONTROL_PLANE_URL", "VITE_POSTHOG_KEY_PROD", "VITE_POSTHOG_HOST"].includes(secret))).toBe(true);
+    expect(text.replace(`\n  build:\n${build}`, "")).not.toContain("secrets.CSC_");
+  });
+  it.each(["release-alpha", "release-beta", "release"])("retains release-only packaged checks and a retryable signed artifact in %s", name => {
+    const build = job(workflow(name), "build");
+    for (const command of ["pnpm check:zsr", "pnpm smoke:engine", "pnpm smoke:packaged-pty", "scripts/verify-macos-release-artifacts.mjs"])
+      expect(build).toContain(command);
+    expect(build).toContain("--publish never");
+    expect(build).toContain("version: ${{ steps.version.outputs.version }}");
+    expect(build).toContain("uses: actions/upload-artifact@");
+    expect(build).toContain("overwrite: true");
+    expect(build).toContain("if-no-files-found: error");
+    expect(build).toContain(".zip.blockmap");
+    expect(build).not.toContain("release/notarization-submission-id.txt");
+    expect(job(workflow(name), "publish")).toContain("uses: actions/download-artifact@");
+  });
+  it("submits to Apple only after CI and signing, preserving a submission for cheap notarization retries", () => {
+    const text = workflow("release"), submit = job(text, "submit"), notarize = job(text, "notarize");
+    expect(submit).toContain("needs: [ci, build]");
+    expect(submit).toContain("scripts/release/ci-cli.ts --verify");
+    expect(submit).toContain("scripts/release/ci-cli.ts --verify --beta");
+    expect(submit).toContain("ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}");
+    expect(submit).toContain("notarytool submit");
+    expect(submit).toContain("secrets.APPLE_");
+    expect(submit).toContain("release/notarization-submission-id.txt");
+    expect(submit).toContain("uses: actions/upload-artifact@");
+    expect(notarize).toContain("needs: [ci, build, submit]");
+    expect(notarize).toContain("notarytool info");
+    expect(notarize).not.toContain("notarytool submit");
+    expect(notarize).not.toContain("contents: write");
+    expect(notarize).toContain("uses: actions/upload-artifact@");
+    expect(notarize).toContain("scripts/release/ci-cli.ts --verify");
+  });
+  it("inherits the exact-source Preflight coverage instead of repeating its secret-free quality checks", () => {
+    const preflight = workflow("preflight");
+    for (const command of ["typecheck:app", "typecheck:electron", "typecheck:packages", "lint", "test:git", "models:verify --strict", "check:cursor-asar", "check:licenses", "check:audit", "check:packaging-paths", "check:vite-env", "check:codex-pin", "check:electron-hardening", "check:deep-link-schemes"])
+      expect(preflight).toContain(`pnpm ${command}`);
+    expect(preflight).toContain("scripts/release/tsconfig.json");
+    expect(preflight).toContain("scripts/release/vitest.config.ts");
   });
   it("has a non-cancelling mutation lock, exact checkout, and success-only receipt", () => {
     const text = workflow("hosted-promotion"), promote = job(text, "promote");
@@ -25,20 +121,29 @@ describe("release dependency and authority contracts", () => {
     expect(promote).toContain("needs.guard.outputs.enabled == 'true'");
     expect(promote).toContain("group: hosted-mutation-${{ inputs.channel }}\n      cancel-in-progress: false");
     expect(promote).toContain("ref: ${{ inputs.source_sha }}");
-    expect(promote).toContain("cli.ts --plan\n          pnpm exec tsx scripts/release/cli.ts --execute");
+    expect(job(text, "services")).toContain("cli.ts --plan\n          pnpm exec tsx scripts/release/cli.ts --services");
+    expect(promote).toContain("cli.ts --finalize");
     expect(promote.split("- name: Save success receipt")[1]).not.toContain("always()");
     expect(promote).toContain("include-hidden-files: true");
   });
-  it("labels the worker artifact a plan and shares the mutation lock", () => {
+  it("overwrites this run's hosted receipt artifacts on a whole-workflow retry without accepting another run's proof", () => {
+    for (const name of ["services", "promote"]) {
+      const producer = job(workflow("hosted-promotion"), name);
+      expect(producer).toContain("overwrite: true");
+      expect(producer).toContain("if-no-files-found: error");
+    }
+  });
+  it("separates worker plans from verified success and shares the mutation lock", () => {
     const text = workflow("cloud-worker-promotion");
     expect(text).toContain("workflow_dispatch:"); expect(text).toContain("workflow_call:");
     expect(text).toContain("group: hosted-mutation-${{ inputs.channel }}");
-    expect(text).toContain("name: worker-plan-"); expect(text).not.toContain("name: worker-promotion-");
+    expect(text).toContain("name: worker-plan-"); expect(text).toContain("name: worker-promotion-");
+    expect(text).toContain("success() && steps.promote.outputs.receipt_issued == 'true'");
     expect(text).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
   });
   it("V6: revalidates publication in all desktop writers, including notarization-only retries", () => {
-    for (const [name, channel, publish] of [["release-alpha", "alpha", 'Publish rolling "alpha" prerelease'], ["release-beta", "beta", 'Publish rolling "beta" prerelease'], ["release", "notarize", "Publish GitHub release"]]) {
-      const text = job(workflow(name), channel), step = text.split(`- name: ${publish}`)[1]?.split(/\n {6}- name:/)[0] ?? "";
+    for (const [name, publish] of [["release-alpha", 'Publish rolling "alpha" prerelease'], ["release-beta", 'Publish rolling "beta" prerelease'], ["release", "Publish GitHub release"]]) {
+      const text = job(workflow(name), "publish"), step = text.split(`- name: ${publish}`)[1]?.split(/\n {6}- name:/)[0] ?? "";
       expect(step).toContain("pnpm exec tsx scripts/release/publication-cli.ts");
       expect(text).toContain("actions: read");
     }

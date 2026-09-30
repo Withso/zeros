@@ -10,6 +10,19 @@ on:
         description: Execute only after the release canary transport is rehearsed
         type: boolean
         default: false
+      qualification_profile:
+        description: Auto selects FULL only for native-contract changes; FULL is an explicit paid check
+        type: choice
+        options: [auto, smoke, full]
+        default: auto
+      services_run_id:
+        description: Trusted exact-source release run with API, Pages and WorkOS services proof
+        type: string
+        required: false
+      receipt_required:
+        description: Require fresh qualification and a run-bound receipt instead of reusing an unchanged worker
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       channel:
@@ -27,14 +40,35 @@ on:
       execute:
         default: false
         type: boolean
+      qualification_profile:
+        default: auto
+        type: string
+      services_run_id:
+        default: ''
+        type: string
+      receipt_required:
+        default: true
+        type: boolean
+    outputs:
+      receipt_issued:
+        description: True only after native qualification, cleanup, approval and tuple readback
+        value: ${{ jobs.worker.outputs.receipt_issued }}
+      receipt_artifact:
+        description: Run-bound worker success artifact, empty for plans and reuse
+        value: ${{ jobs.worker.outputs.receipt_artifact }}
 permissions:
   contents: read
+  actions: read
 jobs:
   worker:
-    if: github.event.repository.fork == false
+    name: worker
+    if: github.event.repository.fork == false && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     environment: ${{ inputs.channel }}
-    timeout-minutes: 100
+    timeout-minutes: 330
+    outputs:
+      receipt_issued: ${{ steps.promote.outputs.receipt_issued }}
+      receipt_artifact: ${{ steps.promote.outputs.receipt_artifact }}
     concurrency:
       group: hosted-mutation-${{ inputs.channel }}
       cancel-in-progress: false
@@ -45,6 +79,24 @@ jobs:
       RELEASE_BASE: ${{ inputs.before_sha || '' }}
       ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       WORKER_EXECUTE: ${{ inputs.execute }}
+      WORKER_QUALIFICATION_PROFILE: ${{ inputs.qualification_profile || 'auto' }}
+      WORKER_SERVICES_RUN_ID: ${{ inputs.services_run_id || github.run_id }}
+      WORKER_RECEIPT_REQUIRED: ${{ inputs.receipt_required }}
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+      RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
+      PLANETSCALE_ORG: ${{ vars.PLANETSCALE_ORG }}
+      PLANETSCALE_DATABASE: ${{ vars.PLANETSCALE_DATABASE }}
+      PLANETSCALE_BRANCH: ${{ vars.PLANETSCALE_BRANCH }}
+      BOAT_BILLING_ORG: ${{ vars.BOAT_BILLING_ORG }}
+      BOAT_ACCOUNT_SCOPE: ${{ vars.BOAT_ACCOUNT_SCOPE }}
+      BOAT_BASE_SNAPSHOT: ${{ vars.BOAT_BASE_SNAPSHOT }}
+      BOAT_BUILDER_BUDGET_HOURS: ${{ vars.BOAT_BUILDER_BUDGET_HOURS }}
+      BOAT_CANARY_BUDGET_HOURS: ${{ vars.BOAT_CANARY_BUDGET_HOURS }}
+      BOAT_WORKER_BUDGET_HOURS: ${{ vars.BOAT_WORKER_BUDGET_HOURS }}
+      RUNTIME_QUALIFICATION_ACTOR_USER_ID: ${{ vars.RUNTIME_QUALIFICATION_ACTOR_USER_ID }}
+      RUNTIME_QUALIFICATION_CREDENTIAL_KINDS: ${{ vars.RUNTIME_QUALIFICATION_CREDENTIAL_KINDS }}
+      WORKER_CANARY_ORGANIZATION_ID: ${{ vars.WORKER_CANARY_ORGANIZATION_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,13 +109,38 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir apps/control-plane install --frozen-lockfile
+      - name: Exact-source Preflight and CodeQL gate
+        if: inputs.execute
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pnpm exec tsx scripts/release/ci-cli.ts --wait
       - name: Worker plan or guarded execution
+        id: promote
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOAT_API_KEY: ${{ secrets.BOAT_API_KEY }}
+          RAILWAY_DEPLOY_TOKEN: ${{ secrets.RAILWAY_DEPLOY_TOKEN }}
+          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PLANETSCALE_SERVICE_TOKEN_ID }}
+          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PLANETSCALE_SERVICE_TOKEN }}
+          WORKER_ADMISSION_CONFIG_JSON: ${{ secrets.WORKER_ADMISSION_CONFIG_JSON }}
+          WORKER_CANARY_ADMISSION_TOKEN: ${{ secrets.WORKER_CANARY_ADMISSION_TOKEN }}
         run: |
           if [ "$WORKER_EXECUTE" = true ]; then
             pnpm exec tsx scripts/release/worker-cli.ts --execute
           else
             pnpm exec tsx scripts/release/worker-cli.ts --plan
           fi
+      - name: Save success receipt
+        if: success() && steps.promote.outputs.receipt_issued == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: worker-promotion-${{ inputs.channel }}-${{ inputs.source_sha || github.sha }}
+          path: .context/release/worker-receipt.json
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
       - name: Save plan (never a success receipt)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -71,4 +148,4 @@ jobs:
           name: worker-plan-${{ inputs.channel }}-${{ inputs.source_sha || github.sha }}
           path: .context/release/worker-plan.json
           include-hidden-files: true
-          if-no-files-found: error
+          if-no-files-found: ignore

@@ -10,6 +10,7 @@ import { DatabaseCloudAgentCredentialService, CloudAgentModelSchema } from "./cl
 import { openCloudAgentCredential, type CloudAgentCredentialKeys, type CloudAgentCredentialKind, type CloudAgentCredentialMaterial } from "./cloud-workspaces/agent-credential-envelope.js";
 import { DatabaseCodexAuthRenewal } from "./cloud-workspaces/codex-auth-renewal.js";
 import { DevCanaryTargetSchema, startNativeDevCanary, type DevRenewalProof } from "./cloud-workspaces/dev-native-canary.js";
+import { prepareNativeCanaryAccess as prepareDevCanaryAccess } from "./cloud-workspaces/native-canary-access.js";
 
 const imageSchema = DevCanaryTargetSchema.omit({ id: true, attempt: true });
 export const DevAgentRequestSchema = z.object({
@@ -112,28 +113,7 @@ export async function inspectDevAgents(pool: pg.Pool, input: Request): Promise<S
     ...(organizationImages === undefined ? {} : { organizationImages }) };
 }
 
-type AccessVersion = { credential: { current_version: number }; material: CloudAgentCredentialMaterial };
-
-/** Bootstrap a live baseline first, then prove an independent renewal/adoption.
- * Reserve/dispatch uncertainty stays owned by DatabaseCodexAuthRenewal. */
-export async function prepareDevCanaryAccess<T extends AccessVersion>(read: () => Promise<T>, renew: () => Promise<void>, now = Date.now) {
-  let before = await read();
-  if (before.material.kind !== "codex-chatgpt") return { before, renewedCodex: undefined, renewal: undefined };
-  const live = (value: AccessVersion) => value.material.kind === "codex-chatgpt" && !value.material.refreshToken &&
-    value.material.expiresAt * 1000 > now() + 120_000;
-  const changed = (previous: AccessVersion, next: AccessVersion) => previous.material.kind === "codex-chatgpt" &&
-    next.material.kind === "codex-chatgpt" && next.material.accountId === previous.material.accountId &&
-    next.material.accessToken !== previous.material.accessToken && next.credential.current_version > previous.credential.current_version;
-  if (!live(before)) {
-    await renew(); const bootstrap = await read();
-    if (!changed(before, bootstrap) || !live(bootstrap)) throw new Error("Dev renewal did not bootstrap live access material");
-    before = bootstrap;
-  }
-  await renew(); const after = await read();
-  if (!changed(before, after) || !live(before) || !live(after) || after.material.kind !== "codex-chatgpt") throw new Error("Dev renewal did not publish new access material with dispatch headroom");
-  const renewal: DevRenewalProof = { accountBinding: true, accessChanged: true, cachePublished: true, consentPreserved: true };
-  return { before, renewedCodex: after.material, renewal };
-}
+export { prepareNativeCanaryAccess as prepareDevCanaryAccess } from "./cloud-workspaces/native-canary-access.js";
 
 /** SSH-only operator entrypoint, never registered as a public API. The login
  * role is the ordinary runtime role: approval writes remain migration-owned. */

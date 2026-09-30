@@ -8,6 +8,9 @@ import { publicationGate } from "./publication";
 async function main() {
   const source = releaseSource(process.env);
   requireCheck((await command("git", ["rev-parse", "HEAD"])).trim() === source.sourceSha, "Publication checkout differs from the event SHA");
+  const github = githubClient(source, process.env);
+  await github.assertRequiredChecks();
+  await github.assertCurrent();
   // Packaging changes package.json. Read manifests from Git objects, and
   // refresh rolling refs at publication rather than trusting checkout time.
   await command("git", ["fetch", "--force", "--prune", "--prune-tags", "--tags", "origin"]);
@@ -20,7 +23,7 @@ async function main() {
     return;
   }
   const config = { ...source, cloudRequired, provider, runId: process.env.GITHUB_RUN_ID ?? "" };
-  const github = githubClient(source, process.env), json = jsonClient();
+  const json = jsonClient();
   await publicationGate(config, {
     receipt: () => github.ownReceipt(source.channel, config.runId),
     identity: async () => (await publicIdentity(source.channel)).identity,

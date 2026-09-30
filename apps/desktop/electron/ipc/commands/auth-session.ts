@@ -24,6 +24,7 @@ import {
 import type { WorkOSDesktopSession } from "../../workos-desktop-client";
 import { workOSDesktopClientForMain } from "../../workos-desktop-runtime";
 import { requestWorkOSDesktopRevocation } from "../../workos-desktop-revocation";
+import { controlPlaneFetch } from "../../control-plane-fetch";
 import { channel } from "../../../src/engine/runtime";
 import { desktopAuthConfig } from "../../workos-desktop-config";
 import { devWorkOSConfigurationIssue, workspaceDevAuthProfile } from "../../dev-workos-auth-policy";
@@ -484,7 +485,7 @@ async function signOutWorkOS(scope: "current" | "all"): Promise<boolean> {
     snapshot?.tokens.provider === "workos" &&
     session.sessionId === snapshot.tokens.sessionId
   ) {
-    if (!(await requestWorkOSDesktopRevocation(scope, session.accessToken))) {
+    if (!(await requestWorkOSDesktopRevocation(scope, session.accessToken, controlPlaneFetch))) {
       console.warn("[auth] WorkOS revoke unavailable");
     }
   }

@@ -31,8 +31,12 @@ import {
   designSetRuntimeAudit,
   designProvenance,
   type DesignCanvasFrameWire,
+  type DesignWorkspaceSnapshotWire,
 } from "../../../platform/git";
-import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
+import {
+  designFrameRuntime,
+  type DesignFrameRuntimeConnection,
+} from "../../../platform/bridge/design-frame-runtime";
 import {
   designRuntimeFrameState,
   useDesignRuntimeStore,
@@ -75,6 +79,88 @@ function revealDesignSelectionPath(
 }
 
 const selectionGenerationByWorkspace = new Map<string, number>();
+const MAX_SELECTION_DETAIL_OWNERS = 32;
+interface DesignSelectionDetailDemand {
+  workspaceId: string;
+  folder: string;
+  directoryId: string | undefined;
+  frame: DesignCanvasFrameWire;
+  nodeIds: readonly string[];
+  generation: number;
+  runtime: DesignFrameRuntimeConnection | null;
+  runtimeSourceVersion: string | undefined;
+  storeSourceVersion: string | undefined;
+  controller: AbortController;
+  read: Promise<DesignRuntimeNodeDetails[] | null>;
+  reconcileQueued: boolean;
+  sourceAdvanced: boolean;
+  fulfilled: boolean;
+  freshRead: boolean;
+}
+const selectionDetailDemandByWorkspace = new Map<
+  string,
+  DesignSelectionDetailDemand
+>();
+let readSelectionSnapshot: (
+  workspaceId: string,
+) => DesignWorkspaceSnapshotWire | undefined = () => undefined;
+
+export function setDesignSelectionSnapshotReader(
+  reader: typeof readSelectionSnapshot,
+): void {
+  readSelectionSnapshot = reader;
+}
+
+export function notifyDesignSelectionSnapshot(workspaceId: string): void {
+  const demand = selectionDetailDemandByWorkspace.get(workspaceId);
+  if (demand) {
+    scheduleCurrentSelectionDetailDemand(demand);
+    return;
+  }
+  const view = designWorkspaceView(workspaceId);
+  const snapshot = readSelectionSnapshot(workspaceId);
+  const frame = snapshot?.frames.find(
+    (candidate) => candidate.file === view.selectedFrame,
+  );
+  const workspace = useDesignRuntimeStore.getState().byWorkspace[workspaceId];
+  const runtimeFrame = frame ? workspace?.frames[frame.file] : undefined;
+  if (
+    !frame ||
+    !workspace ||
+    !runtimeFrame ||
+    !view.selectedNodeId ||
+    view.selectedNodeIds.length === 0 ||
+    (view.directoryId !== undefined &&
+      view.directoryId !== snapshot?.directoryId) ||
+    designFrameRuntime(workspaceId, frame.file)?.isActive?.() === false ||
+    !view.selectedNodeIds.some(
+      (nodeId) =>
+        runtimeFrame.detailsByNode[nodeId]?.sourceVersion !==
+        frame.sourceVersion,
+    )
+  )
+    return;
+  refreshDesignSelectionDetails({
+    workspaceId,
+    folder: workspace.folder,
+    frame,
+    nodeIds: view.selectedNodeIds,
+    generation:
+      selectionGenerationByWorkspace.get(workspaceId) ??
+      nextGeneration(selectionGenerationByWorkspace, workspaceId),
+  });
+}
+
+function currentDesignSelectionFrame(
+  workspaceId: string,
+  frame: DesignCanvasFrameWire,
+): DesignCanvasFrameWire {
+  return (
+    readSelectionSnapshot(workspaceId)?.frames.find(
+      (candidate) => candidate.file === frame.file,
+    ) ?? frame
+  );
+}
 const hoverGenerationByWorkspace = new Map<string, number>();
 interface PendingDesignHoverRead {
   input: {
@@ -228,6 +314,333 @@ function selectionIsCurrent(
     view.selectedFrame === frame &&
     view.selectedNodeId === nodeId
   );
+}
+
+function selectionDetailDemandIsCurrent(
+  demand: DesignSelectionDetailDemand,
+): boolean {
+  const view = designWorkspaceView(demand.workspaceId);
+  const snapshot = readSelectionSnapshot(demand.workspaceId);
+  const workspace =
+    useDesignRuntimeStore.getState().byWorkspace[demand.workspaceId];
+  const sourceVersion = workspace?.frames[demand.frame.file]?.sourceVersion;
+  return (
+    selectionDetailDemandByWorkspace.get(demand.workspaceId) === demand &&
+    !demand.controller.signal.aborted &&
+    selectionIsCurrent(
+      demand.workspaceId,
+      demand.frame.file,
+      demand.nodeIds[0] ?? null,
+      demand.generation,
+    ) &&
+    (snapshot?.directoryId ?? view.directoryId) === demand.directoryId &&
+    (view.directoryId === undefined ||
+      view.directoryId === demand.directoryId) &&
+    (!snapshot ||
+      snapshot.frames.some(
+        (frame) =>
+          frame.file === demand.frame.file &&
+          frame.sourceVersion === demand.frame.sourceVersion,
+      )) &&
+    view.selectedNodeIds.join("\u0000") === demand.nodeIds.join("\u0000") &&
+    (!workspace || workspace.folder === demand.folder) &&
+    (sourceVersion === undefined ||
+      sourceVersion === demand.frame.sourceVersion) &&
+    (!demand.runtime ||
+      (designFrameRuntime(demand.workspaceId, demand.frame.file) ===
+        demand.runtime &&
+        demand.runtime.isActive?.() !== false &&
+        (demand.runtime.sourceVersion === undefined ||
+          demand.runtime.sourceVersion === demand.frame.sourceVersion)))
+  );
+}
+
+function clearSelectionDetailDemand(workspaceId: string): void {
+  const demand = selectionDetailDemandByWorkspace.get(workspaceId);
+  selectionDetailDemandByWorkspace.delete(workspaceId);
+  demand?.controller.abort();
+}
+
+function requestDesignSelectionDetails(input: {
+  workspaceId: string;
+  folder: string;
+  frame: DesignCanvasFrameWire;
+  nodeIds: readonly string[];
+  generation: number;
+  details?: readonly DesignRuntimeNodeDetails[];
+  forceRuntimeRead?: boolean;
+  tolerateReadErrors?: boolean;
+}): DesignSelectionDetailDemand {
+  clearSelectionDetailDemand(input.workspaceId);
+  const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
+  const demand: DesignSelectionDetailDemand = {
+    workspaceId: input.workspaceId,
+    folder: input.folder,
+    directoryId:
+      readSelectionSnapshot(input.workspaceId)?.directoryId ??
+      designWorkspaceView(input.workspaceId).directoryId,
+    frame: input.frame,
+    nodeIds: input.nodeIds,
+    generation: input.generation,
+    runtime,
+    runtimeSourceVersion: runtime?.sourceVersion,
+    storeSourceVersion: designRuntimeFrameState(
+      input.workspaceId,
+      input.frame.file,
+    )?.sourceVersion,
+    controller: new AbortController(),
+    read: Promise.resolve(null),
+    reconcileQueued: false,
+    sourceAdvanced: false,
+    fulfilled: false,
+    freshRead: true,
+  };
+  selectionDetailDemandByWorkspace.set(input.workspaceId, demand);
+  while (selectionDetailDemandByWorkspace.size > MAX_SELECTION_DETAIL_OWNERS) {
+    const oldest = selectionDetailDemandByWorkspace.keys().next().value;
+    if (oldest === undefined) break;
+    clearSelectionDetailDemand(oldest);
+  }
+  const supplied = new Map(
+    input.details?.map((details) => [details.oid, details]),
+  );
+  const cached = designRuntimeFrameState(
+    input.workspaceId,
+    input.frame.file,
+  )?.detailsByNode;
+  const read = Promise.all(
+    input.nodeIds.map(async (nodeId) => {
+      const provided = supplied.get(nodeId);
+      const candidate =
+        provided ??
+        (!input.forceRuntimeRead ? cached?.[nodeId] : undefined);
+      if (candidate?.sourceVersion === input.frame.sourceVersion) {
+        if (!provided) demand.freshRead = false;
+        return candidate;
+      }
+      if (
+        !demand.runtime ||
+        demand.controller.signal.aborted ||
+        demand.runtime.isActive?.() === false
+      )
+        return null;
+      try {
+        return await demand.runtime.getNodeDetails(
+          nodeId,
+          demand.controller.signal,
+        );
+      } catch (error) {
+        if (demand.controller.signal.aborted || input.tolerateReadErrors)
+          return null;
+        throw error;
+      }
+    }),
+  ).then((resolved) => {
+    if (
+      !selectionDetailDemandIsCurrent(demand) ||
+      resolved.some(
+        (details, index) =>
+          !details ||
+          details.oid !== input.nodeIds[index] ||
+          details.sourceVersion !== input.frame.sourceVersion,
+      )
+    )
+      return null;
+    return resolved as DesignRuntimeNodeDetails[];
+  });
+  demand.read = new Promise((resolve, reject) => {
+    const signal = demand.controller.signal;
+    const cancel = () => resolve(null);
+    if (signal.aborted) cancel();
+    else signal.addEventListener("abort", cancel, { once: true });
+    void read.then(
+      (value) => {
+        signal.removeEventListener("abort", cancel);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", cancel);
+        reject(error);
+      },
+    );
+  });
+  scheduleCurrentSelectionDetailDemand(demand);
+  return demand;
+}
+
+function refreshDesignSelectionDetails(
+  input: Parameters<typeof requestDesignSelectionDetails>[0],
+): DesignSelectionDetailDemand {
+  const version = nextSelectionVersion();
+  const demand = requestDesignSelectionDetails({
+    ...input,
+    tolerateReadErrors: true,
+  });
+  void demand.read
+    .then(async (details) => {
+      if (!details || !selectionDetailDemandIsCurrent(demand)) return;
+      demand.fulfilled = true;
+      for (const candidate of details) {
+        useDesignRuntimeStore
+          .getState()
+          .publishNodeDetails(
+            input.workspaceId,
+            input.folder,
+            input.frame.file,
+            candidate,
+            input.frame.sourceVersion,
+          );
+        clearDesignLivePreview(
+          input.workspaceId,
+          input.frame.file,
+          candidate.oid,
+        );
+      }
+      await publishDurableDesignSelection(
+        input.workspaceId,
+        multiElementSelection(input.frame, details),
+        version,
+      );
+      if (!selectionDetailDemandIsCurrent(demand)) return;
+      void captureDesignRuntimeScreenshot(
+        input.workspaceId,
+        input.folder,
+        input.frame.file,
+        input.frame.sourceVersion,
+        details[0]!.oid,
+        1,
+      ).catch(() => {});
+    })
+    .catch(() => {});
+  return demand;
+}
+
+function scheduleCurrentSelectionDetailDemand(
+  demand: DesignSelectionDetailDemand,
+): void {
+  if (demand.reconcileQueued) return;
+  demand.reconcileQueued = true;
+  queueMicrotask(() => {
+    demand.reconcileQueued = false;
+    if (selectionDetailDemandByWorkspace.get(demand.workspaceId) !== demand)
+      return;
+    const view = designWorkspaceView(demand.workspaceId);
+    const snapshot = readSelectionSnapshot(demand.workspaceId);
+    const frame = snapshot?.frames.find(
+      (candidate) => candidate.file === demand.frame.file,
+    );
+    const workspace =
+      useDesignRuntimeStore.getState().byWorkspace[demand.workspaceId];
+    const storeSourceVersion =
+      workspace?.frames[demand.frame.file]?.sourceVersion;
+    const sourceVersion = frame?.sourceVersion ?? storeSourceVersion;
+    const runtime = designFrameRuntime(demand.workspaceId, demand.frame.file);
+    const directoryId = snapshot?.directoryId ?? view.directoryId;
+    const directoryChanged = directoryId !== demand.directoryId;
+    const generationChanged = sourceVersion !== demand.frame.sourceVersion;
+    const availabilityChanged =
+      directoryChanged ||
+      runtime !== demand.runtime ||
+      runtime?.sourceVersion !== demand.runtimeSourceVersion ||
+      storeSourceVersion !== demand.storeSourceVersion;
+    if (
+      !sourceVersion ||
+      (snapshot && !frame) ||
+      storeSourceVersion !== sourceVersion ||
+      (!snapshot && generationChanged && !demand.sourceAdvanced) ||
+      (!generationChanged && (demand.fulfilled || !availabilityChanged)) ||
+      workspace?.folder !== demand.folder ||
+      (directoryChanged && demand.directoryId !== undefined) ||
+      (view.directoryId !== undefined && view.directoryId !== directoryId) ||
+      !selectionIsCurrent(
+        demand.workspaceId,
+        demand.frame.file,
+        demand.nodeIds[0] ?? null,
+        demand.generation,
+      ) ||
+      !runtime ||
+      runtime.isActive?.() === false ||
+      runtime.sourceVersion !== sourceVersion
+    )
+      return;
+    refreshDesignSelectionDetails({
+      workspaceId: demand.workspaceId,
+      folder: demand.folder,
+      frame: frame ?? { ...demand.frame, sourceVersion },
+      nodeIds: view.selectedNodeIds,
+      generation: demand.generation,
+      forceRuntimeRead: directoryChanged,
+    });
+  });
+}
+
+useDesignRuntimeStore.subscribe((state, previous) => {
+  for (const demand of selectionDetailDemandByWorkspace.values()) {
+    const frame =
+      state.byWorkspace[demand.workspaceId]?.frames[demand.frame.file];
+    const previousFrame =
+      previous.byWorkspace[demand.workspaceId]?.frames[demand.frame.file];
+    if (previousFrame && !frame) {
+      clearSelectionDetailDemand(demand.workspaceId);
+    } else if (frame?.sourceVersion !== previousFrame?.sourceVersion) {
+      if (previousFrame?.sourceVersion === demand.frame.sourceVersion)
+        demand.sourceAdvanced = true;
+      scheduleCurrentSelectionDetailDemand(demand);
+    }
+  }
+});
+
+useDesignWorkspaceUiStore.subscribe((state) => {
+  for (const demand of selectionDetailDemandByWorkspace.values()) {
+    const view = state.byWorkspace[demand.workspaceId];
+    if (
+      !view ||
+      view.selectedFrame !== demand.frame.file ||
+      view.selectedNodeIds.join("\u0000") !== demand.nodeIds.join("\u0000")
+    )
+      clearSelectionDetailDemand(demand.workspaceId);
+    else {
+      const directoryId =
+        readSelectionSnapshot(demand.workspaceId)?.directoryId ??
+        view.directoryId;
+      if (directoryId !== demand.directoryId) {
+        if (demand.directoryId !== undefined)
+          clearSelectionDetailDemand(demand.workspaceId);
+        else {
+          demand.controller.abort();
+          scheduleCurrentSelectionDetailDemand(demand);
+        }
+      }
+    }
+  }
+});
+
+export async function settleDesignSelectionDetails(
+  workspaceId: string,
+  frame: string,
+  sourceVersion: string,
+): Promise<void> {
+  for (;;) {
+    let demand = selectionDetailDemandByWorkspace.get(workspaceId);
+    if (
+      !demand ||
+      demand.frame.file !== frame ||
+      demand.frame.sourceVersion !== sourceVersion
+    )
+      return;
+    if (!demand.freshRead && selectionDetailDemandIsCurrent(demand)) {
+      demand = refreshDesignSelectionDetails({
+        workspaceId,
+        folder: demand.folder,
+        frame: demand.frame,
+        nodeIds: demand.nodeIds,
+        generation: demand.generation,
+        forceRuntimeRead: true,
+      });
+    }
+    await demand.read.catch(() => null);
+    if (selectionDetailDemandByWorkspace.get(workspaceId) === demand) return;
+  }
 }
 
 function frameSelection(frame: DesignCanvasFrameWire) {
@@ -398,6 +811,7 @@ export async function selectDesignFrame(
     reveal?: boolean;
   },
 ): Promise<void> {
+  clearSelectionDetailDemand(workspaceId);
   nextGeneration(selectionGenerationByWorkspace, workspaceId);
   const version = nextSelectionVersion();
   if (!frame) {
@@ -442,7 +856,8 @@ export async function selectDesignNode(input: {
    * an unchanged node passes false so the user's folds and scroll survive. */
   reveal?: boolean;
 }): Promise<DesignRuntimeNodeDetails | null> {
-  const { workspaceId, folder, frame, nodeId } = input;
+  const { workspaceId, folder, nodeId } = input;
+  const frame = currentDesignSelectionFrame(workspaceId, input.frame);
   const generation = nextGeneration(
     selectionGenerationByWorkspace,
     workspaceId,
@@ -463,25 +878,26 @@ export async function selectDesignNode(input: {
     revealDesignSelectionPath(workspaceId, frame, [nodeId]);
   }
 
-  const cachedCandidate = designRuntimeFrameState(workspaceId, frame.file)
-    ?.detailsByNode[nodeId];
-  const cached =
-    !input.forceRuntimeRead &&
-    cachedCandidate?.sourceVersion === frame.sourceVersion
-      ? cachedCandidate
-      : undefined;
-  const details =
-    input.details ??
-    cached ??
-    (await designFrameRuntime(workspaceId, frame.file)?.getNodeDetails(nodeId));
+  const demand = requestDesignSelectionDetails({
+    workspaceId,
+    folder,
+    frame,
+    nodeIds: [nodeId],
+    generation,
+    ...(input.details ? { details: [input.details] } : {}),
+    forceRuntimeRead: input.forceRuntimeRead,
+  });
+  const details = (await demand.read)?.[0];
   if (
     !details ||
     details.sourceVersion !== frame.sourceVersion ||
-    !selectionIsCurrent(workspaceId, frame.file, nodeId, generation)
+    !selectionIsCurrent(workspaceId, frame.file, nodeId, generation) ||
+    !selectionDetailDemandIsCurrent(demand)
   ) {
     return null;
   }
 
+  demand.fulfilled = true;
   useDesignRuntimeStore
     .getState()
     .publishNodeDetails(
@@ -498,7 +914,10 @@ export async function selectDesignNode(input: {
     elementSelection(frame, details),
     version,
   );
-  if (!selectionIsCurrent(workspaceId, frame.file, nodeId, generation)) {
+  if (
+    !selectionIsCurrent(workspaceId, frame.file, nodeId, generation) ||
+    !selectionDetailDemandIsCurrent(demand)
+  ) {
     return null;
   }
   void captureDesignRuntimeScreenshot(
@@ -531,13 +950,14 @@ export async function selectDesignNodes(input: {
   /** Open and scroll to the primary Layers row (default); see selectDesignNode. */
   reveal?: boolean;
 }): Promise<DesignRuntimeNodeDetails[] | null> {
+  const frame = currentDesignSelectionFrame(input.workspaceId, input.frame);
   const unique = [...new Set(input.nodeIds.filter(isValidDesignNodeId))];
   const primary =
     (input.primaryNodeId && unique.includes(input.primaryNodeId)
       ? input.primaryNodeId
       : unique[0]) ?? null;
   if (!primary) {
-    await selectDesignFrame(input.workspaceId, input.frame);
+    await selectDesignFrame(input.workspaceId, frame);
     return [];
   }
   const nodeIds = [
@@ -553,74 +973,63 @@ export async function selectDesignNodes(input: {
   const version = nextSelectionVersion();
   useDesignWorkspaceUiStore
     .getState()
-    .setSelection(input.workspaceId, input.frame.file, primary, nodeIds);
+    .setSelection(input.workspaceId, frame.file, primary, nodeIds);
   if (input.reveal !== false) {
-    revealDesignSelectionPath(input.workspaceId, input.frame, nodeIds);
+    revealDesignSelectionPath(input.workspaceId, frame, nodeIds);
   }
 
-  const supplied = new Map(
-    input.details?.map((details) => [details.oid, details]) ?? [],
-  );
-  const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
-  const cached = designRuntimeFrameState(
-    input.workspaceId,
-    input.frame.file,
-  )?.detailsByNode;
-  const resolved = await Promise.all(
-    nodeIds.map(async (nodeId) => {
-      const candidate =
-        supplied.get(nodeId) ??
-        (!input.forceRuntimeRead ? cached?.[nodeId] : undefined);
-      if (candidate?.sourceVersion === input.frame.sourceVersion) {
-        return candidate;
-      }
-      if (!runtime) return null;
-      try {
-        return await runtime.getNodeDetails(nodeId);
-      } catch {
-        return null;
-      }
-    }),
-  );
+  const demand = requestDesignSelectionDetails({
+    ...input,
+    frame,
+    nodeIds,
+    generation,
+    tolerateReadErrors: true,
+  });
+  const resolved = await demand.read;
   const current = designWorkspaceView(input.workspaceId);
   if (
+    !resolved ||
+    !selectionDetailDemandIsCurrent(demand) ||
     selectionGenerationByWorkspace.get(input.workspaceId) !== generation ||
-    current.selectedFrame !== input.frame.file ||
+    current.selectedFrame !== frame.file ||
     current.selectedNodeId !== primary ||
     current.selectedNodeIds.join("\u0000") !== nodeIds.join("\u0000") ||
     resolved.some(
-      (details) =>
-        !details || details.sourceVersion !== input.frame.sourceVersion,
+      (details) => !details || details.sourceVersion !== frame.sourceVersion,
     )
   ) {
     return null;
   }
   const details = resolved as DesignRuntimeNodeDetails[];
+  demand.fulfilled = true;
   for (const candidate of details) {
     useDesignRuntimeStore
       .getState()
       .publishNodeDetails(
         input.workspaceId,
         input.folder,
-        input.frame.file,
+        frame.file,
         candidate,
-        input.frame.sourceVersion,
+        frame.sourceVersion,
       );
-    clearDesignLivePreview(input.workspaceId, input.frame.file, candidate.oid);
+    clearDesignLivePreview(input.workspaceId, frame.file, candidate.oid);
   }
   await publishDurableDesignSelection(
     input.workspaceId,
-    multiElementSelection(input.frame, details),
+    multiElementSelection(frame, details),
     version,
   );
-  if (selectionGenerationByWorkspace.get(input.workspaceId) !== generation) {
+  if (
+    selectionGenerationByWorkspace.get(input.workspaceId) !== generation ||
+    !selectionDetailDemandIsCurrent(demand)
+  ) {
     return null;
   }
   void captureDesignRuntimeScreenshot(
     input.workspaceId,
     input.folder,
-    input.frame.file,
-    input.frame.sourceVersion,
+    frame.file,
+    frame.sourceVersion,
     primary,
     1,
   ).catch(() => {});
@@ -1447,6 +1856,22 @@ export function reconcileDesignRuntimeSnapshot(input: {
         candidate === snapshot.frame.oid ||
         treeContainsOid(snapshot.tree, candidate),
     );
+    if (
+      survivingNodeIds.join("\u0000") === view.selectedNodeIds.join("\u0000")
+    ) {
+      refreshDesignSelectionDetails({
+        workspaceId,
+        folder,
+        frame,
+        nodeIds: survivingNodeIds,
+        generation:
+          selectionGenerationByWorkspace.get(workspaceId) ??
+          nextGeneration(selectionGenerationByWorkspace, workspaceId),
+        ...(nodeId === snapshot.frame.oid ? { details: [snapshot.frame] } : {}),
+        forceRuntimeRead: previousRuntimeRevision !== snapshot.revision,
+      });
+      return;
+    }
     if (survivingNodeIds.length > 1) {
       void selectDesignNodes({
         workspaceId,
@@ -1512,6 +1937,9 @@ export function persistDesignRuntimeAuditSnapshot(input: {
 
 export function resetDesignSelectionWorkflowsForTests(): void {
   designBackgroundWork.reset();
+  for (const workspaceId of selectionDetailDemandByWorkspace.keys()) {
+    clearSelectionDetailDemand(workspaceId);
+  }
   selectionGenerationByWorkspace.clear();
   hoverGenerationByWorkspace.clear();
   for (const queue of hoverReadQueueByWorkspace.values()) {

@@ -1,43 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { sha256 } from "./state.mjs";
+import { CHECKS, NATIVE_EXTENSIONS, QUALIFICATION_DEADLINE_MS, nativeRuntimeEvidence, qualificationRateLimited } from "./native-agent-canary.mjs";
+export { QUALIFICATION_DEADLINE_MS, nativeRuntimeEvidence, qualificationRateLimited } from "./native-agent-canary.mjs";
 
-const CHECKS = ["privateProviderHome", "engineAuthorityIsolation", "nativeWorkspaceTools", "actorAdmission",
-  "stopAndRevocation", "nativeTurn", "nativeResume", "authentication", "nativeMcp"];
-const NATIVE_EXTENSIONS=["nativeGoals","nativeFork","transcriptFork","nativeReview","nativeApps","nativeMultiAgent"];
-/** Codex's extended native checks (goals, forks, review, multi-agent, apps)
- * take longer than the core set; every step is still individually bounded. */
-export const QUALIFICATION_DEADLINE_MS = 40 * 60_000;
-const digest = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const signature = (image, connection) => sha256(JSON.stringify([image.snapshotId, image.buildSha256,
   connection.credentialId, connection.credentialRevision, connection.connectionRevision, connection.kind, connection.model,
   ...(connection.mode ? [connection.mode] : []), ...(image.id ? [image.id] : [])]));
-
-/** Accept only the fixed native-canary result, never SDK logs or a machine-only
- * attestation. The migration owner's existing audited operator validates it a
- * second time before changing the exact image/kind admission row. */
-export function nativeRuntimeEvidence(image, connection, outcome, startedAt, now = Date.now()) {
-  const report = outcome?.report, identity = report?.identity, at = Date.parse(report?.qualifiedAt);
-  if (outcome?.code !== 0 || outcome.retirement !== 0 || report?.version !== 3 || report.qualified !== true ||
-      report.executionProfile !== "zeros-cloud-native-v1" || report.authority !== "isolated-image-canary" ||
-      identity?.sourceCommit !== image.sourceCommit || identity.buildSha256 !== image.buildSha256 ||
-      identity.kind !== connection.kind || identity.model !== connection.model || !digest(identity.contractSha256) ||
-      image.contractSha256 && image.contractSha256 !== identity.contractSha256 ||
-      !Array.isArray(report.checks) || [...CHECKS, "nativePermissionSelection"].some(check => !report.checks.includes(check)) ||
-      !Number.isFinite(at) || at < startedAt - 5000 || at > now + 5000 || now - at > 24 * 3600_000) {
-    throw new Error("The native Dev agent report did not qualify this exact image and connection");
-  }
-  const renewal = connection.kind === "codex-chatgpt";
-  if (renewal && (!report.checks.includes("nativeAccessRefresh") ||
-      ["accountBinding", "accessChanged", "cachePublished", "consentPreserved"].some(check => outcome.renewal?.[check] !== true))) {
-    throw new Error("The Codex native renewal and worker refresh checks did not qualify");
-  }
-  // Only explicitly selected, non-secret fields enter the durable evidence.
-  const evidence = { version: 3, executionProfile: "zeros-cloud-native-v1", channel: "development", provider: "boat",
-    runtimeClass: "linux-vm", imageRef: `boat:${image.snapshotId}@sha256:${image.buildSha256}`, profile: "zeros-cloud-worker-v3",
-    runtimeContractSha256: identity.contractSha256, sourceCommit: image.sourceCommit, qualifiedAt: report.qualifiedAt,
-    credentials: [{ kind: connection.kind, checks: Object.fromEntries([...CHECKS,...NATIVE_EXTENSIONS.filter(check=>report.checks.includes(check))].map(check => [check, true])), renewal }] };
-  return { ...evidence, evidenceSha256: sha256(JSON.stringify(evidence)) };
-}
+const rateLimitedJob = job => job.phase === "failed" && job.failure?.errorKind === "rate-limited";
+const rateLimitResult = job => ({ state: "rate-limited", provider: job.connection.provider, retryAfter: job.retryAfter,
+  message: "Dev canary account rate-limited; automatic retry is deferred with bounded backoff. Qualification attempts are not consumed." });
 
 /** One bounded advancement per lease. A native turn runs on the disposable VM
  * after this returns, allowing Archive to acquire the lease immediately. Lost
@@ -83,23 +54,38 @@ export async function advanceHostedAgents(lease, profile, deps, { retry = false 
       if (!job.retired) { await deps.retire(job); job.retired = true; await lease.save(); }
     }
   }
+  const latestBySignature = new Map(jobs.map(job => [job.signature, job]));
+  const retained = jobs.filter(job => !rateLimitedJob(job) || !job.retired || latestBySignature.get(job.signature) === job);
+  if (retained.length !== jobs.length) { jobs.splice(0, jobs.length, ...retained); await lease.save(); }
   if (status.needsSignIn) return { state: "sign-in" };
   if (status.needsSeed) { await deps.seed(); return { state: "seeding" }; }
   if (!status.connections?.length) return { state: "connections" };
   // One paid canary at a time, including across interrupted launches.
   const active = jobs.find(job => ["allocating", "starting", "running", "passed"].includes(job.phase));
+  const eligible = candidates.filter(({ image, connection }) => {
+    const latest = latestBySignature.get(signature(image, connection));
+    return !connection.enabled && latest?.phase !== "enabled" && !(latest?.phase === "failed" && !rateLimitedJob(latest) && !retry);
+  });
+  const waiting = candidate => {
+    const latest = jobs.findLast(job => job.signature === signature(candidate.image, candidate.connection));
+    return latest && rateLimitedJob(latest) && Date.parse(latest.retryAfter) > now ? latest : undefined;
+  };
   const candidate = active ? candidates.find(({ image, connection }) => signature(image, connection) === active.signature)
-    : candidates.find(({ image, connection }) => !connection.enabled && !jobs.some(job => job.signature === signature(image, connection) &&
-        (job.phase === "enabled" || job.phase === "failed" && !retry)));
+    : eligible.find(value => !waiting(value));
+  if (!candidate && !active) {
+    const deferred = eligible.map(waiting).find(Boolean);
+    if (deferred) return rateLimitResult(deferred);
+  }
   if (!candidate) return { state: candidates.every(({ connection }) => connection.enabled) ? "ready" : "failed" };
   const { image, connection } = candidate;
   const key = signature(image, connection);
   let job = active;
   if (!job) {
     const attempts = jobs.filter(row => row.signature === key);
-    if (attempts.length >= 3) return { state: "failed" };
+    if (attempts.filter(row => !rateLimitedJob(row)).length >= 3) return { state: "failed" };
     if (jobs.length >= 100) throw new Error("Dev agent qualification history reached its bound; archive before more attempts");
     job = { id: randomUUID(), signature: key, phase: "allocating", startedAt: now, actorUserId: status.actorUserId,
+      ...(rateLimitedJob(latestBySignature.get(key) ?? {}) ? { rateLimitCount: latestBySignature.get(key).rateLimitCount } : {}),
       ...(image.id ? { organizationImageId: image.id, runtimeContractSha256: image.contractSha256 } : {}),
       connection: globalThis.structuredClone(connection), image: { snapshotId: image.snapshotId, buildSha256: image.buildSha256, sourceCommit: image.sourceCommit } };
     jobs.push(job); await lease.save();
@@ -150,10 +136,17 @@ export async function advanceHostedAgents(lease, profile, deps, { retry = false 
         ...(Number.isInteger(result.report?.failureExitCode) && Math.abs(result.report.failureExitCode) <= 256 ? { errorExitCode: result.report.failureExitCode } : {}),
         ...(/^[a-f0-9]{16}$/.test(result.report?.failureMessageSha256 ?? "") ? { errorMessageSha256: result.report.failureMessageSha256 } : {}) };
       job.phase = "failed";
+      if (qualificationRateLimited(result)) {
+        job.failure.errorKind = "rate-limited";
+        job.rateLimitCount = Math.min(8, (job.rateLimitCount ?? 0) + 1);
+        job.retryAfter = new Date((deps.now?.() ?? Date.now()) + Math.min(15 * 60_000, 60_000 * 2 ** (job.rateLimitCount - 1))).toISOString();
+        console.info(rateLimitResult(job).message);
+      }
     }
     await lease.save();
   }
   if (!job.retired) { await deps.retire(job); job.retired = true; await lease.save(); }
+  if (rateLimitedJob(job)) return rateLimitResult(job);
   if (job.phase !== "passed") return { state: "failed", provider: connection.provider };
   // The database row is authoritative after a lost acknowledgement. Repeating
   // the operator with a newly issued migration login would change its target

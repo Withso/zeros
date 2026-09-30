@@ -34,6 +34,7 @@ const installationId = "22222222-2222-4222-8222-222222222222";
 const userA = "44444444-4444-4444-8444-444444444444";
 const userB = "55555555-5555-4555-8555-555555555555";
 let user = userA;
+let platformOwner = false;
 function installAccount(next: string) {
   user = next;
   clearTeamStore({ resetSelection: true });
@@ -57,7 +58,7 @@ function installAccount(next: string) {
       id: user,
       email: "fixture@example.test",
       displayName: "Fixture",
-      staffRole: null,
+      staffRole: platformOwner && user === userA ? "platform_owner" : null,
     },
     teams: [
       organization,
@@ -203,6 +204,22 @@ function Harness() {
         <div className="mb-6 flex gap-2">
           <Button onClick={() => installAccount(userA)}>Account A</Button>
           <Button onClick={() => installAccount(userB)}>Account B</Button>
+          <Button
+            onClick={() => {
+              platformOwner = true;
+              installAccount(user);
+            }}
+          >
+            Platform owner
+          </Button>
+          <Button
+            onClick={() => {
+              platformOwner = false;
+              installAccount(user);
+            }}
+          >
+            Ordinary member
+          </Button>
           <Button
             onClick={() =>
               setActiveOrganizationSelection(organizationId, false)

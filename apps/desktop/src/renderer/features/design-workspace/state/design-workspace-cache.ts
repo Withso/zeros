@@ -57,8 +57,9 @@ import {
 } from "./design-runtime-store";
 import {
   captureDesignRuntimeScreenshot,
+  notifyDesignSelectionSnapshot,
   persistDesignRuntimeAuditSnapshot,
-  selectDesignNodes,
+  setDesignSelectionSnapshotReader,
 } from "./design-selection";
 import {
   queueDesignWorkspaceBootSnapshot,
@@ -462,6 +463,9 @@ export const designWorkspaceSnapshotCache =
     maxWeight: DESIGN_SNAPSHOT_CACHE_BYTES,
     weightOf: retainedMemory,
   });
+setDesignSelectionSnapshotReader(
+  (workspaceId) => designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
+);
 for (const [workspaceId, snapshot] of readDesignWorkspaceBootSnapshots()) {
   designWorkspaceSnapshotCache.setData(workspaceId, snapshot);
   // A boot preview paints synchronously but is never considered authoritative
@@ -918,6 +922,7 @@ export function stabilizeDesignWorkspaceSnapshot(
 
 /** Called after a cache publication, never from an unadmitted fetch result. */
 export function observeDesignDirectory(workspaceId: string, snapshot: DesignWorkspaceSnapshotWire): void {
+  notifyDesignSelectionSnapshot(workspaceId);
   if (!snapshot.directoryId) return;
   const ui = useDesignWorkspaceUiStore.getState();
   const previous = ui.byWorkspace[workspaceId]?.directoryId;
@@ -943,40 +948,8 @@ function publishDesignWorkspaceSnapshot(
   const retained = applyRetainedRuntimeAuditViolations(workspaceId, next);
   const stable = stabilizeDesignWorkspaceSnapshot(previous, retained);
   designWorkspaceSnapshotCache.setData(workspaceId, stable);
+  notifyDesignSelectionSnapshot(workspaceId);
   queueDesignWorkspaceBootSnapshot(workspaceId, stable);
-  const selection =
-    useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
-  const selectedFrame = stable.frames.find(
-    (frame) => frame.file === selection?.selectedFrame,
-  );
-  const runtimeWorkspace =
-    useDesignRuntimeStore.getState().byWorkspace[workspaceId];
-  const runtimeFrame = selectedFrame
-    ? runtimeWorkspace?.frames[selectedFrame.file]
-    : undefined;
-  if (
-    selectedFrame &&
-    runtimeWorkspace &&
-    runtimeFrame?.sourceVersion === selectedFrame.sourceVersion &&
-    previous?.frames.find((frame) => frame.file === selectedFrame.file)
-      ?.sourceVersion !== selectedFrame.sourceVersion &&
-    designFrameRuntime(workspaceId, selectedFrame.file)?.isActive?.() !==
-      false &&
-    selection?.selectedNodeIds.some(
-      (nodeId) =>
-        runtimeFrame.detailsByNode[nodeId]?.sourceVersion !==
-        selectedFrame.sourceVersion,
-    )
-  ) {
-    void selectDesignNodes({
-      workspaceId,
-      folder: runtimeWorkspace.folder,
-      frame: selectedFrame,
-      nodeIds: selection.selectedNodeIds,
-      primaryNodeId: selection.selectedNodeId ?? undefined,
-      reveal: false,
-    }).catch(() => {});
-  }
   return stable;
 }
 

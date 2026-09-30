@@ -19,6 +19,7 @@ import { parseNativeQualificationInput, nativeQualificationPermission } from "..
 import { nativeMcpCanarySource } from "../lib/native-mcp-canary";
 import { failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver } from "../lib/native-qualification-steps";
 import { cloudMcpDigest } from "../../../apps/desktop/src/engine/agents/cloud-mcp";
+import { runNativeSmokeCanary } from "../lib/native-canary-smoke";
 
 const inputFile = "/srv/zeros/state/.zeros-live-qualification.json";
 const workspace = "/srv/zeros/workspace";
@@ -41,6 +42,7 @@ const activity = { permissions: 0, rejectedPermissions: 0, questions: 0, message
 let toolEvidence: ReturnType<NativeToolEvidence["summary"]> | undefined;
 let failure: "timeout" | "assertion" | "runtime" | undefined, failureDetail: ReturnType<typeof failureSignature> = {};
 let phase = "input", gateway: AgentGateway | undefined, failed = false;
+let qualificationProfile: "smoke" | "full" = "full";
 let identity: { sourceCommit: string; buildSha256: string; contractSha256: string; kind: string; model: string } | undefined;
 const active = new Set<CloudProviderExecution>();
 const authorityChallenge = "/srv/zeros/state/.native-authority-challenge";
@@ -69,6 +71,7 @@ function consumeInput() {
 async function main() {
   process.umask(0o077);
   const input = consumeInput();
+  qualificationProfile = input.qualificationProfile ?? "full";
   const worker = loadCloudWorkerConfiguration();
   assert.equal(worker?.version, 3); assert(worker);
   const attestation = readCloudAgentRuntimeAttestation(worker);
@@ -79,8 +82,9 @@ async function main() {
   const provider = input.material.kind.startsWith("claude-") ? "claude" : input.material.kind.startsWith("cursor-") ? "cursor" : "codex";
   // These are permissions to run the canary, not published qualification.
   // Each production flag is derived only from its completed check below.
-  const nativeCapabilities={version:1 as const,goals:provider==="codex",nativeFork:provider==="codex",transcriptFork:true,
-    nativeReview:provider==="codex",connectedApps:input.material.kind==="codex-chatgpt",multiAgent:provider==="codex"};
+  const extended = qualificationProfile === "full";
+  const nativeCapabilities={version:1 as const,goals:extended&&provider==="codex",nativeFork:extended&&provider==="codex",transcriptFork:extended,
+    nativeReview:extended&&provider==="codex",connectedApps:extended&&input.material.kind==="codex-chatgpt",multiAgent:extended&&provider==="codex"};
   identity = { sourceCommit: input.sourceCommit, buildSha256: input.buildSha256, contractSha256: attestation.contractSha256,
     kind: input.material.kind, model: input.model };
   const delegationId = randomUUID(), actorSessionId = randomUUID();
@@ -149,7 +153,7 @@ async function main() {
         if (update.sessionUpdate === "current_mode_update") confirmedMode = update.currentModeId;
         if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
           activity.messageChunks++;
-          if (reply.length + update.content.text.length > 65536) throw new Error("qualification response bound");
+          if (reply.length + update.content.text.length > (qualificationProfile === "smoke" ? 4096 : 65536)) throw new Error("qualification response bound");
           reply += update.content.text;
         }
         tools.observe(update);
@@ -172,7 +176,8 @@ async function main() {
   // native Claude runtime does not support Auto; Codex and Cursor use Auto.
   const initialMode = provider === "codex" ? "auto-edit" : provider === "claude" ? "accept-edits" : "auto";
   const restrictedMode = provider === "codex" ? "ask" : "plan";
-  const options = { cwd: workspace, conversationId, env: { ZEROS_PERMISSION_MODE: initialMode }, cloudExecution: { delegationId, model: input.model,
+  const options = { cwd: workspace, conversationId, env: { ZEROS_PERMISSION_MODE: initialMode,
+    ...(qualificationProfile === "smoke" && provider === "codex" ? { ZEROS_THINKING_EFFORT: "low" } : {}) }, cloudExecution: { delegationId, model: input.model,
     source: { kind: "session" as const, actorSessionId } } };
   phase = "actor-admission";
   await assert.rejects(gateway.newSession(provider, { cwd: workspace, conversationId }));
@@ -221,6 +226,72 @@ try{
   const denial = await execution.tools.call({ operation: "exec", command: `${worker.toolchain.node} -e 'if(process.getuid()!==10001||["ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","CURSOR_API_KEY","OPENAI_API_KEY"].some(k=>process.env[k]))process.exit(91);if(require("node:fs").existsSync("/srv/zeros/state/.native-authority-challenge"))process.exit(92);process.stdout.write("credential-denial-qualified")'` });
   assert.equal(denial.ok, true); assert.match(JSON.stringify(denial), /credential-denial-qualified/);
   checks.push("engineAuthorityIsolation");
+  if (qualificationProfile === "smoke") {
+    let sourceBinding: ProviderBinding | undefined;
+    let resumed: Awaited<ReturnType<AgentGateway["loadSession"]>> | undefined;
+    await runNativeSmokeCanary({
+      async toolTurn() {
+        phase = "native-turn"; reply = "";
+        await writeFile(path.join(workspace, files.challenge), marker, { flag: "wx", mode: 0o644 });
+        await chown(path.join(workspace, files.challenge), worker.uid, worker.gid);
+        await bounded(gateway!.prompt(provider, first.sessionId, [{ type: "text", text:
+          `Read ${files.challenge}. Write its exact contents to ${files.edited}, no newline. Run exactly: cat '${files.challenge}' > '${files.executed}'. Call zeros-qualification MCP probe with no arguments. Reply only with the file marker and probe marker; no explanation. Do not inspect credentials or other files.` }]));
+        tools.assertEffects(provider, files, marker); tools.assertMcp("zeros-qualification", "probe");
+        for (const file of [files.edited, files.executed]) assert.equal(await readFile(path.join(workspace, file), "utf8"), marker);
+        assert.equal(await readFile(path.join(workspace, mcpFiles.proof), "utf8"), mcpMarker);
+        assert(reply.includes(marker) && reply.includes(mcpMarker)); assert(binding);
+        sourceBinding = binding; toolEvidence = tools.summary(files);
+        checks.push("nativeTurn", "authentication", "nativeWorkspaceTools", "nativeMcp");
+      },
+      async renew() {
+        if (!input.renewedCodex) return;
+        phase = "access-refresh"; assert(execution);
+        const next = await bounded(execution.lease.refreshCodex(1, input.renewedCodex.accountId), 10_000);
+        assert.equal(next.credentialVersion, 2); assert.deepEqual(next.material, input.renewedCodex);
+        assert.deepEqual(execution.coordinator.codexExternalAuth(), input.renewedCodex);
+        checks.push("nativeAccessRefresh");
+      },
+      async retire() {
+        await bounded(gateway!.endSession(provider, first.sessionId, { failClosed: true }), 20_000);
+        for (const file of Object.values(files)) await rm(path.join(workspace, file), { force: true });
+      },
+      async resume() {
+        phase = "native-resume"; assert(sourceBinding);
+        reply = ""; tools = new NativeToolEvidence();
+        resumed = await bounded(gateway!.loadSession(provider, sourceBinding, options));
+        assert(resumed.executionId); assert.notEqual(resumed.executionId, first.executionId);
+        assert.equal(resumed.modes?.currentModeId, initialMode);
+      },
+      async resumeTurn() {
+        assert(resumed?.executionId);
+        await bounded(gateway!.prompt(provider, resumed.executionId, [{ type: "text", text: "Reply only with the file marker from our previous turn. History only, no tools." }]));
+        assert(reply.includes(marker)); tools.assertNoTools(); checks.push("nativeResume");
+      },
+      async permission() {
+        phase = "permission-selection"; assert(resumed?.executionId); confirmedMode = undefined;
+        await bounded(gateway!.setMode(provider, resumed.executionId, restrictedMode));
+        assert.equal(confirmedMode, restrictedMode); checks.push("nativePermissionSelection");
+      },
+      async stop() {
+        phase = "stop"; assert(execution); assert(resumed?.executionId);
+        const held = await execution.lease.launch(() => execution!.coordinator.spawn({ command: worker.toolchain.node,
+          args: ["-e", "setInterval(()=>{},1000)"], cwd: workspace, env: {}, stdio: "pipe" }));
+        held.stdout?.resume(); held.stderr?.resume();
+        await bounded(gateway!.cancel(provider, resumed.executionId), 20_000); await bounded(held.wait(), 10_000);
+        assert.equal((await execution.tools.call({ operation: "exec", command: "true" })).ok, false);
+        await bounded(gateway!.endSession(provider, resumed.executionId, { failClosed: true }), 20_000);
+      },
+      async revoke() {
+        phase = "revocation"; assert(sourceBinding);
+        await bounded(gateway!.loadSession(provider, sourceBinding, options)); assert(execution); revoked = true;
+        await assert.rejects(execution.lease.validate()); await bounded(execution.lease.close(), 20_000);
+        await assert.rejects(execution.coordinator.spawn({ command: worker.toolchain.node, args: ["-e", "process.exit(0)"], cwd: workspace, env: {} }));
+        assert.equal(leases.size, 0); checks.push("stopAndRevocation");
+      },
+    });
+    assert.equal(failed, false);
+    return;
+  }
   phase = "native-mcp";
   reply = "";
   await bounded(gateway.prompt(provider, first.sessionId, [{ type: "text", text: "Call the probe tool from the zeros-qualification MCP server with no arguments. Reply with its result. Do not use shell or file tools for this check." }]));
@@ -376,7 +447,7 @@ main().catch(error => {
     for(const id of [conversationId,forkConversationId,handoffConversationId])
       await rm(path.join(CLOUD_NATIVE_HISTORY_ROOT, createHash("sha256").update(id).digest("hex")), { recursive: true, force: true });
   } catch { failed = true; }
-  process.stdout.write(JSON.stringify({ version: 3, executionProfile: "zeros-cloud-native-v1", qualified: !failed, phase, identity, checks,
+  process.stdout.write(JSON.stringify({ version: 3, qualificationProfile, executionProfile: "zeros-cloud-native-v1", qualified: !failed, phase, identity, checks,
     activity, toolEvidence, ...(failure ? { failure } : {}),
     ...(failureDetail.code ? { failureCode: failureDetail.code } : {}), ...(failureDetail.name ? { failureName: failureDetail.name } : {}),
     ...(failureDetail.kind ? { failureKind: failureDetail.kind } : {}), ...(failureDetail.stage ? { failureStage: failureDetail.stage } : {}),

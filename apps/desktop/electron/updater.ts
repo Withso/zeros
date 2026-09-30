@@ -35,6 +35,8 @@ import { emitEvent } from "./ipc/events";
 import type { CommandHandler } from "./ipc/router";
 import { IS_PACKAGED } from "./runtime-mode";
 import { channel, type Channel } from "../src/engine/runtime";
+import { mergeClientUpgradeRequired, parseClientUpgradeRequired, type ClientUpgradeRequired } from "../shared/client-compatibility";
+import { onClientUpgrade } from "./client-upgrade-signal";
 
 let wired = false;
 
@@ -152,10 +154,22 @@ type UpdaterStatusState =
   | { kind: "ready"; version: string }
   | { kind: "error"; message: string };
 
-export type UpdaterStatusSnapshot = UpdaterStatusState & { revision: number };
+export type UpdaterStatusSnapshot = UpdaterStatusState & { revision: number; required?: ClientUpgradeRequired };
 
 let statusRevision = 0;
 let currentStatus: UpdaterStatusSnapshot = { kind: "idle", revision: 0 };
+let requiredUpgrade: ClientUpgradeRequired | null = null;
+
+export function requireClientUpgrade(value: unknown): void {
+  const required = parseClientUpgradeRequired(value);
+  if (!required) throw new Error("Invalid required update");
+  const next = mergeClientUpgradeRequired(requiredUpgrade, required);
+  if (next === requiredUpgrade) return;
+  requiredUpgrade = next;
+  installWhenReady = false;
+  publish(currentStatus);
+  if (wired) checkAutomatically("required");
+}
 
 /** Main-process observers of the status stream (the app menu's dynamic
  *  "Check for Updates" item). The renderer gets the same stream via emitEvent;
@@ -275,7 +289,7 @@ export function parseFeedVersion(metadata: string): string | null {
 }
 
 function publish(status: UpdaterStatusState): void {
-  currentStatus = { ...status, revision: ++statusRevision };
+  currentStatus = { ...status, revision: ++statusRevision, ...(requiredUpgrade ? { required: requiredUpgrade } : {}) };
   emitEvent("updater-status", currentStatus);
   for (const listener of statusListeners) listener(currentStatus);
 }
@@ -314,11 +328,11 @@ function checkForUpdatesShared(): Promise<CheckResult> {
  * Restart instant for the current staged build while still replacing it with a
  * later same-day release.
  */
-function checkForNewerThanStaged(reason: string): void {
+function checkForNewerThanStaged(reason: string, force = false): void {
   const elapsed = Date.now() - lastStagedFeedPollAt;
   if (
     stagedFeedPollInFlight ||
-    elapsed < MIN_OPPORTUNISTIC_CHECK_GAP_MS ||
+    (!force && elapsed < MIN_OPPORTUNISTIC_CHECK_GAP_MS) ||
     !updateDownloaded ||
     !stagedVersion
   ) {
@@ -436,6 +450,7 @@ export function isDiskFullError(err: unknown): boolean {
  *  stale click raced a state change and should do nothing. */
 export function installStagedUpdate(): boolean {
   if (!updateDownloaded) return false;
+  if (requiredUpgrade?.minimumVersion && isVersionNewer(requiredUpgrade.minimumVersion, stagedVersion)) return false;
   applyAndRelaunch();
   return true;
 }
@@ -640,7 +655,14 @@ export const updaterCheck: CommandHandler = async () => {
   if (!updaterEnabled()) return null;
   // Never re-run Squirrel for the same staged update. The main scheduler's
   // metadata preflight independently notices and downloads a newer release.
-  if (updateDownloaded) return { version: stagedVersion };
+  if (updateDownloaded && requiredUpgrade?.minimumVersion && isVersionNewer(requiredUpgrade.minimumVersion, stagedVersion)) {
+    checkForNewerThanStaged("required", true);
+    await stagedFeedPollInFlight;
+  }
+  if (updateDownloaded) {
+    if (requiredUpgrade && currentStatus.kind === "error") publish({ kind: "ready", version: stagedVersion });
+    return { version: stagedVersion };
+  }
   const result = await checkForUpdatesShared();
   if (!result?.updateInfo || !result.isUpdateAvailable) {
     return updateDownloaded ? { version: stagedVersion } : null;
@@ -658,8 +680,11 @@ export const updaterCheck: CommandHandler = async () => {
  *  in place, and relaunch. If the background download is still running → mark it
  *  to install the moment it finishes. The normal renderer calls this only from
  *  the ready toast; the latch is defensive for older clients. */
-export const updaterInstall: CommandHandler = async () => {
+export const updaterInstall: CommandHandler = async (args) => {
+  if (args.requireReady !== undefined && typeof args.requireReady !== "boolean") throw new Error("Invalid update restart request");
   if (!updaterEnabled()) return;
+  if (!updateDownloaded && (requiredUpgrade || args.requireReady === true)) throw new Error("The update must be staged before restarting");
+  if (updateDownloaded && requiredUpgrade?.minimumVersion && isVersionNewer(requiredUpgrade.minimumVersion, stagedVersion)) throw new Error("A compatible update must be staged before restarting");
   if (updateDownloaded) {
     applyAndRelaunch();
     return;
@@ -688,6 +713,7 @@ export const updaterInstall: CommandHandler = async () => {
 /** Subscribe-then-snapshot renderer handshake. Events can be dropped while no
  * window exists; this monotonic snapshot makes the current staged state exact. */
 export const updaterStatus: CommandHandler = () => currentStatus;
+export const updaterRequire: CommandHandler = (args) => requireClientUpgrade(args);
 
 /** Explicit process relaunch. Kept for any caller that still needs an in-place
  *  restart after external state change. */
@@ -702,3 +728,7 @@ export const processRelaunch: CommandHandler = () => {
   // sidecar shutdown only signals its process tree and does not await it.
   app.quit();
 };
+
+// Registered after every module binding above is initialized, so a buffered
+// early answer can be applied safely.
+onClientUpgrade(requireClientUpgrade);

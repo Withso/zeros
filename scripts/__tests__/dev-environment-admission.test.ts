@@ -36,7 +36,7 @@ it("fails closed on quarantined ownership and corrupt admission rows", async () 
 it("reserves snapshot headroom before builder allocation and retains an uncertain reservation", async () => {
   const store = fixture(), state = newHostedGeneration({ owner: "a".repeat(24), identity: "a" });
   const selected = { ...profile, admission: { maxBuilders: 2, maxBuildersPerOwner: 2 } };
-  const inventory = [{ provider: "boat", id: "base" }, ...Array.from({ length: 7 }, (_, i) => ({ provider: "boat", id: `release-${i}` }))];
+  const inventory = [{ provider: "boat", id: "base" }, ...["zeros-alpha-current", "zeros-alpha-rollback", "zeros-beta-current", "zeros-beta-rollback", "zeros-production-current", "zeros-production-rollback", "dev-retained"].map(id => ({ provider: "boat", id }))];
   const snapshotName = `dev-${state.owner}-${state.generation.slice(0, 8)}-first`;
   await reserveHostedAdmission(store, state, selected, { kind: "builder", inventory, snapshotName });
   await expect(reserveHostedAdmission(store, state, selected, { kind: "builder", inventory, snapshotName: snapshotName + "other", now: Date.now() + 86400_000 })).rejects.toThrow(/snapshot capacity/);

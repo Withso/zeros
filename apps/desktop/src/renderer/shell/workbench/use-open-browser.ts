@@ -9,6 +9,7 @@ import {
 import type { Action } from "@/renderer/state/workspace-store";
 import { workbenchScopeForFolder } from "@/renderer/state/workspace-store";
 import { isLoopbackUrl } from "./tabs/localhost-url";
+import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
 import {
   canonicalBrowsableHttpUrl,
   createBrowserTab,
@@ -76,7 +77,7 @@ export function useOpenBrowserInWorkbench(
 /** A retained chat must never open its preview in a different workspace. */
 export function useOpenChatPreviewInWorkbench(): (cwd: string | undefined, url: string) => boolean {
   return useCallback((cwd, url) => {
-    if (!cwd || !isLoopbackUrl(url)) return false;
+    if (!cwd || !workspacePreviewAvailable(cwd) || !isLoopbackUrl(url)) return false;
     const scope = workbenchScopeForFolder(cwd);
     const state = useWorkspaceStore.getState();
     const current = state.workbenchByScope[scope] ?? defaultScopeFor(scope);

@@ -4,6 +4,7 @@ import { assertHostedDevAdmission } from "../development-environment.js";
 import { BoatApiClient, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
 import { CloudProviderError } from "./provider.js";
 import { cloudWorkspaceProvisioningProfile } from "./provisioning-profile.js";
+import { configuredBoatAccountAdmission, type BoatAccountAdmission } from "./boat-account-admission.js";
 import {
   ComputerImageError,
   type ComputerImage,
@@ -45,6 +46,7 @@ export function createComputerImageDriver(
     }),
     config.boat.billingOrg,
     [cloudWorkspaceProvisioningProfile(config, "boat").imageRef.split("@")[0]!.replace(/^boat:/, "")],
+    configuredBoatAccountAdmission(config.boat.accountScope, config.boat.billingOrg),
   );
 }
 /** Separate infrastructure role. No normal workspace/setup/agent service is
@@ -54,14 +56,41 @@ export class BoatComputerImageDriver implements ComputerImageDriver {
     private readonly client: BoatApiClient,
     private readonly wallet: string,
     private readonly protectedSnapshots: readonly string[] = [],
+    private readonly admission: Pick<BoatAccountAdmission, "reserve" | "release" | "capacity"> | null = null,
   ) {}
+  async assertCapacity(inventory: string[]) {
+    if (!this.admission) throw new ComputerImageError("image_capacity_reached");
+    try { await this.admission.capacity(inventory); }
+    catch { throw new ComputerImageError("image_capacity_reached"); }
+  }
+  async releaseAdmission(image: ComputerImage, proof: { computeDeleted: boolean; snapshotDeleted: boolean }) {
+    if (!this.admission) {
+      if (proof.computeDeleted && proof.snapshotDeleted && !image.builder_id && !image.verifier_id && !image.snapshot_id &&
+        !image.builder_dispatched_at && !image.verifier_dispatched_at && !image.capture_dispatched_at) return;
+      throw new ComputerImageError("image_capacity_reached");
+    }
+    await this.admission.release(image, proof);
+  }
   async inventory() {
-    const reply = await this.client.request("/named-snapshots", {
-      signal: AbortSignal.timeout(10000),
-    });
-    return z.array(snapshot).max(100).parse(reply.snapshots).map(decode);
+    const rows: ComputerSnapshot[] = [], names = new Set<string>(), cursors = new Set<string>(), signal = AbortSignal.timeout(30000);
+    let cursor: string | undefined;
+    for (let page = 0; page < 100; page++) {
+      const reply = await this.client.request(`/named-snapshots${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
+      const parsed = z.object({ snapshots: z.array(snapshot).max(100), nextCursor: z.string().min(1).max(1024).nullish(), hasMore: z.boolean().optional() }).safeParse(reply);
+      if (!parsed.success || parsed.data.hasMore && !parsed.data.nextCursor) throw new ComputerImageError("image_capacity_reached");
+      for (const row of parsed.data.snapshots) {
+        if (names.has(row.name)) throw new ComputerImageError("image_capacity_reached");
+        names.add(row.name); rows.push(decode(row));
+      }
+      const next = parsed.data.nextCursor;
+      if (!next) return rows;
+      if (cursors.has(next)) throw new ComputerImageError("image_capacity_reached");
+      cursors.add(next); cursor = next;
+    }
+    throw new ComputerImageError("image_capacity_reached");
   }
   async create(image: ComputerImage, role: "builder" | "verifier", beforeDispatch: () => Promise<void>) {
+    if (!this.admission) throw new ComputerImageError("image_capacity_reached");
     const ttlSeconds = 1800;
     try {
       assertHostedDevAdmission(process.env, ttlSeconds);
@@ -86,6 +115,8 @@ export class BoatComputerImageDriver implements ComputerImageDriver {
       )
         throw new ComputerImageError("image_snapshot_identity_mismatch");
     }
+    try { await this.admission.reserve(image, (await this.inventory()).map(row => row.name)); }
+    catch { throw new ComputerImageError("image_capacity_reached"); }
     await beforeDispatch();
     const reply = await this.client.request("/sandboxes", {
       method: "POST",

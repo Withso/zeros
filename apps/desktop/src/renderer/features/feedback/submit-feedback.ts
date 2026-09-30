@@ -25,6 +25,7 @@ import {
 } from "@/renderer/platform/observability/analytics/posthog";
 import { getSession } from "@/renderer/features/auth/auth-store";
 import { CONTROL_PLANE_URL } from "@/renderer/features/team/control-plane";
+import { controlPlaneFetch } from "../update/control-plane-fetch";
 import type { FeedbackType } from "./feedback-types";
 
 export type { FeedbackType } from "./feedback-types";
@@ -101,7 +102,7 @@ export async function submitFeedback(input: FeedbackInput): Promise<void> {
     throw new Error("Please sign in to send feedback.");
   }
 
-  const res = await fetch(FEEDBACK_URL, {
+  const res = await controlPlaneFetch(FEEDBACK_URL, {
     method: "POST",
     headers: {
       "content-type": "application/json",

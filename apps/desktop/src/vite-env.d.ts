@@ -11,6 +11,7 @@ interface ImportMetaEnv {
   readonly VITE_APP_BASE_URL?: string;
   /** Public base URL of this channel's Railway control plane. */
   readonly VITE_CONTROL_PLANE_URL?: string;
+  readonly VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES?: string;
   /** Release channel baked into the bundle at build:
    *  "dev" | "alpha" | "beta" | "stable". Drives renderer feature-flag gating
    *  (apps/desktop/src/renderer/config/release-channel.ts).

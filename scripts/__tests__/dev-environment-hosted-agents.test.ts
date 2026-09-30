@@ -20,6 +20,72 @@ function outcome(f: ReturnType<typeof fixture>) {
 }
 
 describe("automatic hosted Dev agent enablement", () => {
+  it("defers rate-limited qualifications without spending any of the three attempts", async () => {
+    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
+    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false, failureKind: "rate-limited" } });
+    for (let throttle = 0; throttle < 5; throttle++) {
+      expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
+      const result = await advanceHostedAgents(f.lease, f.profile, f.deps);
+      expect(result).toMatchObject({ state: "rate-limited", message: expect.stringContaining("rate-limited") });
+      const job = f.state.agentQualifications.at(-1);
+      expect(job).toMatchObject({ phase: "failed", retired: true, failure: { errorKind: "rate-limited" } });
+      const retryAt = Date.parse(result.retryAfter);
+      expect(retryAt - now).toBeGreaterThanOrEqual(60_000);
+      expect(retryAt - now).toBeLessThanOrEqual(15 * 60_000);
+      expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("rate-limited");
+      expect(f.deps.allocate).toHaveBeenCalledTimes(throttle + 1);
+      now = retryAt;
+    }
+    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
+    f.deps.poll.mockResolvedValue({ ...outcome(f), report: { ...outcome(f).report, qualifiedAt: new Date(now).toISOString() } });
+    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("enabled");
+    expect(f.deps.enable).toHaveBeenCalledOnce();
+  });
+  it("does not let rate limits erase real failures or dispatch while retirement is unconfirmed", async () => {
+    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
+    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, errorKind: "rate-limited" });
+    await advanceHostedAgents(f.lease, f.profile, f.deps);
+    f.deps.retire.mockRejectedValueOnce(new Error("cleanup pending"));
+    await expect(advanceHostedAgents(f.lease, f.profile, f.deps)).rejects.toThrow("cleanup pending");
+    expect(f.deps.allocate).toHaveBeenCalledOnce();
+    await advanceHostedAgents(f.lease, f.profile, f.deps);
+    now = Date.parse(f.state.agentQualifications[0].retryAfter);
+    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false, failureKind: "authentication" } });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("testing");
+      expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("failed");
+    }
+    expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("failed");
+    expect(f.deps.allocate).toHaveBeenCalledTimes(4);
+  });
+  it("automatically resumes a deferred retry even when the connection has an older real failure", async () => {
+    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
+    await advanceHostedAgents(f.lease, f.profile, f.deps);
+    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0 });
+    await advanceHostedAgents(f.lease, f.profile, f.deps);
+    await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true });
+    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, errorKind: "rate-limited" });
+    const result = await advanceHostedAgents(f.lease, f.profile, f.deps);
+    now = Date.parse(result.retryAfter);
+    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
+    expect(f.deps.allocate).toHaveBeenCalledTimes(3);
+  });
+  it("compacts retired rate-limit history without losing backoff or real-attempt accounting", async () => {
+    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
+    await advanceHostedAgents(f.lease, f.profile, f.deps);
+    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0 });
+    await advanceHostedAgents(f.lease, f.profile, f.deps);
+    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, errorKind: "rate-limited" });
+    for (let throttle = 0; throttle < 105; throttle++) {
+      expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("testing");
+      const result = await advanceHostedAgents(f.lease, f.profile, f.deps);
+      expect(result.state).toBe("rate-limited");
+      expect(Date.parse(result.retryAfter) - now).toBe(Math.min(15 * 60_000, 60_000 * 2 ** Math.min(throttle, 7)));
+      now = Date.parse(result.retryAfter);
+    }
+    expect(f.state.agentQualifications.length).toBeLessThanOrEqual(3);
+    expect(f.state.agentQualifications.filter((job: any) => job.failure?.errorKind !== "rate-limited")).toHaveLength(1);
+  });
   function organizationFixture() {
     const f = fixture();
     const organizationImage = { id: "44444444-4444-4444-8444-444444444444", snapshotId: `zeros-org-${"4".repeat(32)}`,

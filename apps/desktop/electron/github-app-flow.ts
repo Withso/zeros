@@ -34,6 +34,7 @@ import {
 } from "./secret-store";
 import { pushGithubCredentialToEngine } from "./sidecar";
 import { IS_DEV } from "./runtime-mode";
+import { controlPlaneFetch } from "./control-plane-fetch";
 import { GithubDevCallbackRelay, GithubDevPendingHandoff } from "./github-dev-callback-relay";
 import { localDevCallbackStore } from "./local-dev-callback-store";
 import {
@@ -187,6 +188,7 @@ function githubAppController(): GithubAppController {
   let client: GithubAppClient;
   try {
     client = new GithubAppClient({
+      fetch: controlPlaneFetch,
       baseUrl: controlPlaneBaseUrl(),
       allowInsecureLoopback: IS_DEV,
     });
@@ -406,7 +408,7 @@ export async function handleSharedGithubCredentialChange(): Promise<void> {
 export async function restoreDevGithubBinding(organizationId:string){
   const session=await getValidSessionForMain();if(!session||!hostedDevGithubReferencesEnabled())throw new Error('Sign in to Zeros to restore Dev GitHub');
   const existing=await readDevGithubReference();if(existing)return existing.reference.bindingId;
-  const client=new GithubAppClient({baseUrl:controlPlaneBaseUrl()});
+  const client=new GithubAppClient({baseUrl:controlPlaneBaseUrl(),fetch:controlPlaneFetch});
   const result=await client.restoreDevReference(session.accessToken,organizationId);
   const current=await getValidSessionForMain();if(current?.sub!==session.sub||current?.accountId!==session.accountId)throw new Error('Your account changed');
   await saveDevGithubReference(result);return result.reference.bindingId;

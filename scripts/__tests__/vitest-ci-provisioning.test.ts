@@ -77,11 +77,10 @@ describe("Vitest CI provisioning", () => {
   const jobs = workflowTestJobs();
 
   it("finds every workflow job that runs the Vitest suite", () => {
+    // Releases require the exact commit's successful Preflight instead of
+    // re-running the suite, so Preflight is the only Vitest job.
     expect(jobs.map(({ file, job }) => `${file}:${job}`).sort()).toEqual([
       "preflight.yml:test",
-      "release-alpha.yml:test",
-      "release-beta.yml:test",
-      "release.yml:test",
     ]);
   });
 

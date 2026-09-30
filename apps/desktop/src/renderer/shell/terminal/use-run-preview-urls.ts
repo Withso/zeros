@@ -4,6 +4,7 @@ import { workspaceRunLog } from "../../platform/git";
 import { bindPtyWriter } from "./terminal-store";
 import { runPreviewCache, type RunPreviewTarget } from "./run-preview-cache";
 import { type RunStatusMap } from "./use-run-status";
+import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
 
 /** One controller subscription serves main, docked, and sidebar buttons.
  * Inactive workspaces detach streams and reads; returning revalidates logs
@@ -15,6 +16,7 @@ export function useRunPreviewUrls(
   statuses: RunStatusMap,
   active: boolean,
 ) {
+  const previewAvailable = workspacePreviewAvailable(folderKey);
   const identities = JSON.stringify(
     actions
       .filter((action) => statuses[action.id]?.state === "running")
@@ -22,7 +24,7 @@ export function useRunPreviewUrls(
   );
   const targets = useMemo(
     () =>
-      workspaceId
+      workspaceId && previewAvailable
         ? (JSON.parse(identities) as Array<[string, number | null]>).map(
             ([actionId, startedAt]) => ({
               actionId,
@@ -35,12 +37,12 @@ export function useRunPreviewUrls(
             }),
           )
         : [],
-    [workspaceId, folderKey, identities],
+    [workspaceId, folderKey, identities, previewAvailable],
   );
   const subscribe = useCallback(
     (listener: () => void) =>
-      active ? runPreviewCache.subscribe(listener) : () => {},
-    [active],
+      active && previewAvailable ? runPreviewCache.subscribe(listener) : () => {},
+    [active, previewAvailable],
   );
   const version = useSyncExternalStore(
     subscribe,
@@ -48,7 +50,7 @@ export function useRunPreviewUrls(
     runPreviewCache.getVersion,
   );
   useEffect(() => {
-    if (!active) return;
+    if (!active || !previewAvailable) return;
     const cleanup = targets.map(({ target }) =>
       bindPtyWriter(target.sessionId, (data) =>
         runPreviewCache.append(target, data),
@@ -65,7 +67,7 @@ export function useRunPreviewUrls(
       for (const off of cleanup) off();
       for (const { target } of targets) runPreviewCache.invalidate(target);
     };
-  }, [active, targets]);
+  }, [active, targets, previewAvailable]);
   return useMemo(
     () =>
       Object.fromEntries(

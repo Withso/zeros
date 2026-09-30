@@ -184,22 +184,18 @@ export function releaseEnvironmentErrors(
       "ZEROS_CLOUD_WORKSPACES_ENABLED must be true or false when set",
     );
   }
+  const previewSuffixes = env.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES;
+  if (previewSuffixes?.trim() && !validPreviewHostSuffixes(previewSuffixes)) {
+    errors.push(
+      "VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES must contain 1-8 exact lowercase DNS suffixes",
+    );
+  }
   if (cloudWorkspacesEnabled === "true") {
     // An omitted provider retains the legacy Daytona policy. Boat's managed
     // terminal uses the backend tunnel and has no Daytona SSH gateway.
     const provider = env.CLOUD_WORKSPACE_PROVIDER || "daytona";
     if (provider !== "boat" && provider !== "daytona") {
       errors.push("CLOUD_WORKSPACE_PROVIDER must be boat or daytona");
-    }
-    const previewSuffixes = env.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES;
-    if (!previewSuffixes?.trim()) {
-      errors.push(
-        "VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES is required when ZEROS_CLOUD_WORKSPACES_ENABLED=true",
-      );
-    } else if (!validPreviewHostSuffixes(previewSuffixes)) {
-      errors.push(
-        "VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES must contain 1-8 exact lowercase DNS suffixes",
-      );
     }
     const knownHosts = env.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64;
     if (!knownHosts?.trim() && provider !== "boat") {

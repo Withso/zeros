@@ -17,6 +17,15 @@ beforeEach(() => { state.generation = 0; state.session.mockReset(); state.source
 afterEach(() => vi.unstubAllGlobals());
 
 describe("cloud request account boundaries", () => {
+  it("chooses the proven account grant even when a newer unqualified API-key grant matches the same model", async () => {
+    state.session.mockResolvedValue(session);
+    const qualified = "44444444-4444-4444-8444-444444444444";
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: [
+      { id: "22222222-2222-4222-8222-222222222222", kind: "codex-api-key", models: ["gpt-5.6-luna"], expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: false },
+      { id: qualified, kind: "codex-chatgpt", models: ["gpt-5.6-luna"], expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: true },
+    ] })));
+    expect(await cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-5.6-luna")).toBe(qualified);
+  });
   it("explains an unqualified workspace image before queueing an agent command", async () => {
     state.session.mockResolvedValue(session);
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: [{

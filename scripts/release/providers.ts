@@ -1,6 +1,7 @@
 import { ReleaseIdentity, WorkerIdentity, requireCheck, type PromotionConfig, type Surface } from "./contracts";
 import { command, jsonClient, poll, type Command } from "./io";
 import type { z } from "zod";
+import { verifyWorkOS, workosVerificationConfig } from "./workos";
 
 export function publicPagesEnvironment(config: PromotionConfig, surface: Surface, env: NodeJS.ProcessEnv) {
   return { PATH: env.PATH, HOME: env.HOME, TMPDIR: env.TMPDIR, CI: "true", CF_PAGES: "1", CF_PAGES_BRANCH: config.branch,
@@ -93,7 +94,24 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
       }`, target);
       requireCheck(expectedKeys.every(key => confirmed.variables?.[key] === variables[key]), "Worker tuple readback mismatch");
     },
-    async inspect() { await inspectRailway(); for (const surface of config.surfaces) await inspectPages(surface); },
+    async inspect() { workosVerificationConfig(env); await inspectRailway(); for (const surface of config.surfaces) await inspectPages(surface); },
+    verifyWorkOS: () => verifyWorkOS(config, env, options.fetch),
+    async verifyPages(surface: Surface) {
+      const origin = surface === "ops" ? config.ops! : config.app;
+      const manifest = await json(`${origin}/zeros-deployment.json`);
+      requireCheck(manifest?.version === 1 && manifest.commitSha === config.sourceSha && manifest.surface === surface, "Pages source changed before hosted finalization");
+    },
+    async verifyWorkerIdentity(expected: z.infer<typeof WorkerIdentity>) {
+      const match = /^boat:([a-z0-9][a-z0-9-]{0,62})@sha256:([a-f0-9]{64})$/.exec(expected.imageRef);
+      requireCheck(expected.provider === "boat" && match, "Worker receipt tuple is invalid");
+      await inspectRailway();
+      const result = await railway(`query WorkerIdentityRead($projectId:String!,$environmentId:String!,$serviceId:String!) {
+        variables(projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId)
+      }`, target);
+      const variables = { CLOUD_WORKSPACE_PROVIDER: "boat", BOAT_SNAPSHOT_ID: match[1], BOAT_IMAGE_BUILD_SHA256: match[2],
+        ZEROS_CLOUD_SOURCE_COMMIT: expected.sourceSha, ZEROS_CLOUD_IMAGE_ARCHITECTURE: expected.architecture, CLOUD_WORKSPACE_STORAGE_MIB: String(expected.storageMiB) };
+      requireCheck(Object.entries(variables).every(([name, value]) => result.variables?.[name] === value), "Selected worker tuple changed after qualification; hosted finalization refused");
+    },
     async retarget() {
       const source = await inspectRailway();
       if (source.branch !== config.branch) {
@@ -132,7 +150,7 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
         return true;
       }, { sleep: options.pause });
     },
-    async waitIdentity(manifest: { head: string; sha256: string }, expectedWorker?: z.infer<typeof WorkerIdentity>) {
+    async waitIdentity(manifest: { head: string; sha256: string }, expectedWorker?: z.infer<typeof WorkerIdentity>, requireWorkerQualification = true) {
       return poll(async () => {
         let value: unknown;
         try { value = await json(`${config.api}/v1/release-identity`); } catch { return false; }
@@ -141,8 +159,8 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
         const identity = parsed.data;
         if (identity.channel !== config.channel || identity.sourceSha !== config.sourceSha || identity.migrations.head !== manifest.head ||
           identity.migrations.expectedHead !== manifest.head || identity.migrations.manifestSha256 !== manifest.sha256) return false;
-        if (config.cloudRequired && (!identity.cloud.enabled || identity.cloud.state !== "healthy" || identity.worker?.provider !== config.provider ||
-          identity.workerQualified !== true || !expectedWorker)) return false;
+        if (config.cloudRequired && (!identity.cloud.enabled || identity.cloud.state !== "healthy" || identity.worker?.provider !== config.provider)) return false;
+        if (requireWorkerQualification && (config.cloudRequired && !expectedWorker || (config.cloudRequired || expectedWorker) && identity.workerQualified !== true)) return false;
         if (expectedWorker && JSON.stringify(identity.worker) !== JSON.stringify(expectedWorker)) return false;
         return identity;
       }, { sleep: options.pause });

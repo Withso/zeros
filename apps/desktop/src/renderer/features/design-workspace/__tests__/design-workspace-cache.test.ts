@@ -1453,13 +1453,15 @@ describe("design workspace cache", () => {
         }
         return nodeId === "heading" ? headingDetails : copyDetails;
       });
-      runtimeMocks.designFrameRuntime.mockReturnValue({
+      const runtime = {
         sourceVersion: previousFrame.sourceVersion,
         commitStyles: runtimeMocks.commitStyles,
         getNodeDetails,
         isActive: () => active,
-      });
+      };
+      runtimeMocks.designFrameRuntime.mockReturnValue(runtime);
       runtimeMocks.commitStyles.mockImplementation(async () => {
+        runtime.sourceVersion = nextSourceVersion;
         if (phase === "commit") chooseLatestSelection();
         return {
           sourceVersion: nextSourceVersion,

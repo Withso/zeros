@@ -142,18 +142,24 @@ d("organization agent accounts", () => {
     )).rows[0];
     const first = await service.authorizeOrganizationForWorkspace(fixture.userId, fixture.workspaceId);
     expect(first.delegations).toMatchObject([{ runtimeQualified: false }]);
-    await pool.query(`INSERT INTO cloud_agent_runtime_qualifications
-      (provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled)
-      VALUES ($1,$2,$3,'claude-setup-token','zeros-cloud-worker-v3',true)`,
-    [scope.provider, `${scope.image_ref}-another-image`, "a".repeat(64)]);
-    expect((await service.forWorkspace(fixture.userId, fixture.workspaceId)).delegations)
-      .toMatchObject([{ id: first.delegations[0]!.id, runtimeQualified: false }]);
-    await pool.query(`INSERT INTO cloud_agent_runtime_qualifications
-      (provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled)
-      VALUES ($1,$2,$3,'claude-setup-token','zeros-cloud-worker-v3',true)`,
-    [scope.provider, scope.image_ref, "a".repeat(64)]);
-    expect((await service.forWorkspace(fixture.userId, fixture.workspaceId)).delegations)
-      .toMatchObject([{ id: first.delegations[0]!.id, runtimeQualified: true }]);
+    // Grants are offered to the live engine, so a qualification must match its
+    // exact runtime contract and profile and carry MCP proof.
+    await pool.query("UPDATE cloud_workspace_engine_instances SET actor_protocol_version=2,agent_runtime_profile='zeros-cloud-worker-v3',agent_runtime_contract_sha256=$2 WHERE id=$1",
+      [fixture.engineInstanceId, "a".repeat(64)]);
+    const qualify = (imageRef: string, contract: string, mcpQualified: boolean) => pool.query(`INSERT INTO cloud_agent_runtime_qualifications
+      (provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled,mcp_qualified)
+      VALUES ($1,$2,$3,'claude-setup-token','zeros-cloud-worker-v3',true,$4)`,
+    [scope.provider, imageRef, contract, mcpQualified]);
+    const delegations = async () => (await service.forWorkspace(fixture.userId, fixture.workspaceId)).delegations;
+    await qualify(`${scope.image_ref}-another-image`, "a".repeat(64), true);
+    expect(await delegations()).toMatchObject([{ id: first.delegations[0]!.id, runtimeQualified: false }]);
+    await qualify(scope.image_ref, "b".repeat(64), true);
+    expect(await delegations()).toMatchObject([{ runtimeQualified: false }]);
+    await qualify(scope.image_ref, "a".repeat(64), false);
+    expect(await delegations()).toMatchObject([{ runtimeQualified: false }]);
+    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true WHERE image_ref=$1 AND runtime_contract_sha256=$2",
+      [scope.image_ref, "a".repeat(64)]);
+    expect(await delegations()).toMatchObject([{ id: first.delegations[0]!.id, runtimeQualified: true }]);
     await pool.query("UPDATE cloud_agent_runtime_qualifications SET enabled=false WHERE image_ref=$1", [scope.image_ref]);
     expect((await service.forWorkspace(fixture.userId, fixture.workspaceId)).delegations)
       .toMatchObject([{ runtimeQualified: false }]);

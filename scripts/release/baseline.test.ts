@@ -35,10 +35,23 @@ function harness(channel: "alpha" | "beta", sameTag = false) {
   const deps = { channelBaseline: baseline, fetch: async () => new Response("missing", { status: 404 }),
     migrationManifest: async (source?: string) => source === snapshot.tagSha ? { head: snapshot.sources[0].head, sha256: "c".repeat(64) } : current,
     workerInputsSha256: async (_source: string) => "d".repeat(64) };
-  return { snapshot, published, run, job, responses, requests, gitCalls, candidate, deps, baseline, current };
+  return { snapshot, published, run, job, responses, requests, gitCalls, candidate, deps, baseline, current, client };
 }
 
 describe("V6b existing rolling-tag bootstrap", () => {
+  it.each(["alpha", "beta"] as const)("recognizes the separate %s publisher while retaining historical combined jobs", async channel => {
+    const fixture = harness(channel);
+    fixture.responses.jobs[0].name = `Publish ${channel === "alpha" ? "Alpha" : "Beta"} feed`;
+    expect((await fixture.baseline())?.sourceSha).toBe(fixture.published.sha);
+  });
+  it.each(["Notarize + verify + publish (macOS arm64)", "Publish Production feed"])("recognizes Production publication provenance from %s", async publisher => {
+    const fixture = harness("beta");
+    fixture.run.path = ".github/workflows/release.yml";
+    fixture.run.event = "workflow_dispatch";
+    fixture.job.name = publisher;
+    fixture.job.steps[0].name = "Publish GitHub release";
+    expect((await fixture.client.lastPublication("production"))?.sourceSha).toBe(fixture.published.sha);
+  });
   it.each(["alpha", "beta"] as const)("allows the already published %s schema despite the saved stale remote tag", async channel => {
     const f = harness(channel);
     const result = await disabledGuard([], f.candidate, f.deps);

@@ -105,6 +105,7 @@ describe("design selection workflows", () => {
     resetDesignLivePreviewForTests();
     resetDesignWorkspaceUiForTests();
     resetDesignLayerDisclosureForTests();
+    mocks.designFrameRuntime.mockReset();
     vi.clearAllMocks();
   });
 

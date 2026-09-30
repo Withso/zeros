@@ -1,8 +1,9 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { CHANNELS, HostedReceipt, SHA, requireCheck, type Channel, type PromotionConfig } from "./contracts";
+import { CHANNELS, HostedReceipt, HostedServicesReceipt, SHA, requireCheck, type Channel, type PromotionConfig } from "./contracts";
 import { command, jsonClient, type Command } from "./io";
+import { assertRequiredCI, requiredCIEvidence, REQUIRED_CI } from "./ci";
 
 function validateHostedReceipt(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel, jobs: any[], requireOverallSuccess: boolean) {
   const parsed = HostedReceipt.safeParse(receipt);
@@ -30,14 +31,52 @@ function validateHostedReceipt(receipt: unknown, run: any, config: Pick<Promotio
 export function validateBetaReceipt(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, jobs: any[] = []) {
   return validateHostedReceipt(receipt, run, config, "beta", jobs, true);
 }
+function assertArtifactRun(run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel) {
+  const workflow = channel === "production" ? "release.yml" : `release-${channel}.yml`;
+  requireCheck(Number.isSafeInteger(run.id) && run.id > 0 && Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0 &&
+    run.head_sha === config.sourceSha && run.head_branch === config.branch && run.repository?.full_name === config.repository &&
+    run.head_repository?.full_name === config.repository && run.path === `.github/workflows/${workflow}` &&
+    run.event === (channel === "production" ? "workflow_dispatch" : "push"), "Release artifact does not belong to the trusted parent workflow");
+}
+function assertArtifactJob(run: any, attempt: number, config: Pick<PromotionConfig, "sourceSha" | "branch">, jobs: any[], name: string, steps: string[]) {
+  requireCheck(jobs.some(job => job.run_id === run.id && job.head_sha === config.sourceSha && job.head_branch === config.branch &&
+    (job.run_attempt === undefined || job.run_attempt === attempt) && job.status === "completed" && job.conclusion === "success" &&
+    (job.name === name || job.name?.endsWith(` / ${name}`)) && steps.every(step => job.steps?.some((value: any) => value.name === step && value.conclusion === "success"))),
+  "The artifact's recorded attempt has no successful producing job");
+}
+export function validateServicesReceipt(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel, jobs: any[]) {
+  assertArtifactRun(run, config, channel);
+  const value = HostedServicesReceipt.parse(receipt), attempt = Number(value.runAttempt), surfaces = CHANNELS[channel].ops ? ["app", "ops"] : ["app"];
+  requireCheck(value.channel === channel && value.sourceSha === config.sourceSha && value.branch === config.branch && value.repository === config.repository &&
+    value.runId === String(run.id) && Number.isSafeInteger(attempt) && attempt > 0 && attempt <= run.run_attempt &&
+    value.migration.mode === "execute" && value.migration.ledger === "verified" && value.migration.backup?.state === "success" && value.migration.role.deleted &&
+    value.migration.database === `zeros-control-plane-${channel}` && value.migration.branch.name === "main" && value.backend.sourceSha === config.sourceSha &&
+    value.backend.channel === channel && value.backend.migrations.head === value.backend.migrations.expectedHead &&
+    value.pages.length === surfaces.length && value.workos.surfaces.length === surfaces.length &&
+    surfaces.every(surface => value.pages.some(page => page.surface === surface) && value.workos.surfaces.some(item => item === surface)),
+  "Services receipt does not bind the verified database, API, Pages and WorkOS to this release");
+  assertArtifactJob(run, attempt, config, jobs, "Hosted services", ["Promote services and verify WorkOS", "Save services receipt"]);
+  return value;
+}
+export async function validateWorkerArtifact(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel, jobs: any[]) {
+  assertArtifactRun(run, config, channel);
+  const { WorkerReceipt, validateWorkerReceipt } = await import("./worker");
+  const parsed = WorkerReceipt.parse(receipt), attempt = Number(parsed.runAttempt);
+  requireCheck(Number.isSafeInteger(attempt) && attempt > 0 && attempt <= run.run_attempt, "Worker artifact attempt is invalid");
+  const value = validateWorkerReceipt(parsed, { ...config, channel, runId: String(run.id), runAttempt: parsed.runAttempt });
+  assertArtifactJob(run, attempt, config, jobs, "worker", ["Worker plan or guarded execution", "Save success receipt"]);
+  return value;
+}
 export function githubClient(config: Pick<PromotionConfig, "repository" | "sourceSha" | "branch">, env: NodeJS.ProcessEnv, options: { fetch?: typeof fetch; command?: Command } = {}) {
   const json = jsonClient(options.fetch), runCommand = options.command ?? command;
   const read = (route: string) => json(`https://api.github.com/repos/${config.repository}${route}`, { headers: {
     authorization: `Bearer ${env.GH_TOKEN}`, accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
   } });
-  async function receiptForRun(run: any, channel: Channel, requireOverallSuccess: boolean) {
+  const requiredChecks = () => Promise.all(REQUIRED_CI.map(async check => requiredCIEvidence(config, check.file, check.name,
+    await read(`/actions/workflows/${check.file}/runs?head_sha=${config.sourceSha}&per_page=100`))));
+  async function receiptForRun(run: any, channel: Channel, requireOverallSuccess: boolean, kind: "hosted" | "services" | "worker" = "hosted") {
     requireCheck(Number.isSafeInteger(run.id), "Invalid hosted workflow run");
-    const name = `hosted-promotion-${channel}-${config.sourceSha}`;
+    const name = `${kind === "services" ? "hosted-services" : kind === "worker" ? "worker-promotion" : "hosted-promotion"}-${channel}-${config.sourceSha}`;
     const list = await read(`/actions/runs/${run.id}/artifacts?per_page=100`);
     const artifact = list.artifacts?.find((item: any) => item.name === name && item.expired === false && item.workflow_run?.head_sha === config.sourceSha);
     if (!artifact) return null;
@@ -45,27 +84,33 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
     try {
       await runCommand("gh", ["run", "download", String(run.id), "--repo", config.repository, "--name", name, "--dir", directory],
         { env: { PATH: env.PATH, HOME: env.HOME, GH_TOKEN: env.GH_TOKEN }, timeout: 60_000 });
-      const bytes = await readFile(path.join(directory, "hosted-receipt.json"));
+      const bytes = await readFile(path.join(directory, kind === "services" ? "hosted-services.json" : kind === "worker" ? "worker-receipt.json" : "hosted-receipt.json"));
       requireCheck(bytes.length <= 64 * 1024, "Hosted receipt exceeds its size bound");
-      const receipt = HostedReceipt.parse(JSON.parse(bytes.toString("utf8"))), attempt = Number(receipt.runAttempt);
+      const parser = kind === "services" ? HostedServicesReceipt : kind === "worker" ? (await import("./worker")).WorkerReceipt : HostedReceipt;
+      const receipt = parser.parse(JSON.parse(bytes.toString("utf8"))), attempt = Number(receipt.runAttempt);
       requireCheck(Number.isSafeInteger(attempt) && attempt > 0 && attempt <= run.run_attempt, "Invalid receipt attempt");
       const jobs: any[] = [];
       for (let page = 1; page <= 10; page++) {
         const result = await read(`/actions/runs/${run.id}/attempts/${attempt}/jobs?per_page=100&page=${page}`);
         requireCheck(Array.isArray(result.jobs), "Hosted job evidence is unavailable");
         jobs.push(...result.jobs);
-        if (result.jobs.length < 100) return validateHostedReceipt(receipt, run, config, channel, jobs, requireOverallSuccess);
+        if (result.jobs.length < 100) return kind === "services" ? validateServicesReceipt(receipt, run, config, channel, jobs)
+          : kind === "worker" ? validateWorkerArtifact(receipt, run, config, channel, jobs)
+          : validateHostedReceipt(receipt, run, config, channel, jobs, requireOverallSuccess);
       }
       throw new Error("Hosted job evidence exceeds its bound");
     } finally { await rm(directory, { force: true, recursive: true }); }
   }
   return {
+    requiredChecks,
+    async assertRequiredChecks() { assertRequiredCI(await requiredChecks()); },
     async lastPublication(channel: Channel) {
       requireCheck(/^[\w.-]+\/[\w.-]+$/.test(config.repository), "Publication repository is invalid");
       const workflow = channel === "production" ? "release.yml" : `release-${channel}.yml`;
       const event = channel === "production" ? "workflow_dispatch" : "push";
-      const jobName = channel === "production" ? "Notarize + verify + publish (macOS arm64)"
-        : `Build + publish ${channel === "alpha" ? "Alpha" : "Beta"} (macOS arm64 · signed · NOT notarized)`;
+      const label = channel === "production" ? "Production" : channel === "alpha" ? "Alpha" : "Beta";
+      const jobNames = [channel === "production" ? "Notarize + verify + publish (macOS arm64)"
+        : `Build + publish ${label} (macOS arm64 · signed · NOT notarized)`, `Publish ${label} feed`];
       const stepName = channel === "production" ? "Publish GitHub release" : `Publish rolling "${channel}" prerelease`;
       const runs: any[] = [];
       // Read bounded complete retained history: creation order alone misses a
@@ -91,7 +136,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
           const result = await read(`/actions/runs/${run.id}/jobs?filter=all&per_page=100&page=${page}`);
           requireCheck(Array.isArray(result.jobs), "Publication job evidence is unavailable");
           for (const job of result.jobs) {
-            if (job.run_id !== run.id || job.head_sha !== run.head_sha || job.head_branch !== run.head_branch || job.name !== jobName ||
+            if (job.run_id !== run.id || job.head_sha !== run.head_sha || job.head_branch !== run.head_branch || !jobNames.includes(job.name) ||
               job.status !== "completed" || job.conclusion !== "success" || !Array.isArray(job.steps)) continue;
             for (const step of job.steps) {
               const publishedAt = Date.parse(step.completed_at);
@@ -117,6 +162,22 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       requireCheck(String(run.id) === runId, "Publication run identity mismatch");
       const receipt = await receiptForRun(run, channel, false);
       requireCheck(receipt, "Current run has no trusted hosted receipt");
+      return receipt;
+    },
+    async ownServicesReceipt(channel: Channel, runId: string) {
+      requireCheck(/^[1-9]\d*$/.test(runId), "Invalid services run identity");
+      const run = await read(`/actions/runs/${runId}`);
+      requireCheck(String(run.id) === runId, "Services run identity mismatch");
+      const receipt = await receiptForRun(run, channel, false, "services");
+      requireCheck(receipt, "Current run has no trusted services receipt");
+      return receipt;
+    },
+    async ownWorkerReceipt(channel: Channel, runId: string) {
+      requireCheck(/^[1-9]\d*$/.test(runId), "Invalid worker run identity");
+      const run = await read(`/actions/runs/${runId}`);
+      requireCheck(String(run.id) === runId, "Worker run identity mismatch");
+      const receipt = await receiptForRun(run, channel, false, "worker");
+      requireCheck(receipt, "Current run has no trusted worker success receipt");
       return receipt;
     },
     async betaReceipt() {

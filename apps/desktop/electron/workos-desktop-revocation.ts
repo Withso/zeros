@@ -5,10 +5,11 @@ const REVOCATION_REQUEST_TIMEOUT_MS = 30_000;
 export async function requestWorkOSDesktopRevocation(
   scope: "current" | "all",
   accessToken: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<boolean> {
   if (!accessToken) return false;
   try {
-    const response = await fetch(
+    const response = await fetchImpl(
       `${controlPlaneBaseUrl()}/auth/desktop-revoke`,
       {
         method: "POST",

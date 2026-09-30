@@ -32,6 +32,15 @@ export async function publicIdentity(channel: Channel, fetcher: typeof fetch = f
   } catch { return { present: false, identity: null }; } finally { clearTimeout(timer); }
 }
 
+export async function hostedWorkerPromotionRequired(enabled: boolean, candidate: Pick<DisabledCandidate, "channel" | "sourceSha" | "provider">, deps: GuardDependencies = {}) {
+  if (!enabled) return false;
+  const { identity } = await publicIdentity(candidate.channel, deps.fetch);
+  if (!identity?.cloud.enabled || identity.cloud.state !== "healthy" || identity.workerQualified !== true || !identity.worker || identity.worker.provider !== candidate.provider) return true;
+  const hash = deps.workerInputsSha256 ?? workerInputsSha256;
+  try { return await hash(identity.worker.sourceSha) !== await hash(candidate.sourceSha); }
+  catch { return true; }
+}
+
 function manualCutoverSteps(candidate: DisabledCandidate) {
   const database = `zeros-control-plane-${candidate.channel}`;
   return `Owner steps: hold independent deploys and complete the reviewed drain/maintenance procedure; from candidate ${candidate.sourceSha}, run ` +
@@ -88,13 +97,16 @@ async function main() {
   const source = releaseSource(process.env);
   const enabled = process.env.ZEROS_HOSTED_PROMOTION === "enabled";
   if (enabled) promotionConfig(process.env); // Missing authority is a failure, never a silent skip.
+  const workerRequired = enabled && await hostedWorkerPromotionRequired(process.env.ZEROS_WORKER_PROMOTION === "enabled", {
+    ...source, provider: process.env.CLOUD_WORKSPACE_PROVIDER,
+  });
   const result = enabled ? { blocked: false, message: "Hosted promotion enabled; required secret names and target identities are present." }
     : await disabledGuard([], {
       ...source, cloudEnabled: process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true", provider: process.env.CLOUD_WORKSPACE_PROVIDER,
     });
   console.log(`::${result.blocked ? "error" : enabled ? "notice" : "warning"}::${result.message}`);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${result.message}\n`);
-  if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `enabled=${enabled}\n`);
+  if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `enabled=${enabled}\nworker_enabled=${workerRequired}\n`);
   if (result.blocked) process.exitCode = 1;
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void main().catch(() => {

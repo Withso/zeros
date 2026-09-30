@@ -9,6 +9,7 @@ const schema = z.object({
   sourceCommit: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
   buildSha256: z.string().regex(/^[a-f0-9]{64}$/),
   model: z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/),
+  qualificationProfile: z.enum(["smoke", "full"]).optional(),
   material: CloudAgentAccessMaterialSchema,
   renewedCodex: CloudAgentExecutionLeaseSchema.shape.rotation.unwrap().shape.material.optional(),
 }).strict();
@@ -18,7 +19,7 @@ const schema = z.object({
  * it. Two bound versions let the image exercise adopting that newer access. */
 export function parseNativeQualificationInput(value: unknown, now = Date.now()) {
   const parsed = schema.safeParse(value);
-  if (!parsed.success || parsed.data.expiresAtMs <= now || parsed.data.expiresAtMs > now + 15 * 60_000)
+  if (!parsed.success || parsed.data.expiresAtMs <= now || parsed.data.expiresAtMs > now + (parsed.data.qualificationProfile === "full" ? 45 : 15) * 60_000)
     throw new Error("Invalid private native qualification input");
   const { material, renewedCodex } = parsed.data;
   if (material.kind === "codex-chatgpt") {

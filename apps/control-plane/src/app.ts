@@ -24,6 +24,7 @@ import type pg from "pg";
 
 import type { Config } from "./config.js";
 import { createReleaseIdentityRoutes } from "./release-identity.js";
+import { ClientCompatibility, createClientCompatibilityMiddleware } from "./client-compatibility.js";
 import { createAuthMiddleware } from "./auth.js";
 import { rateLimit } from "./ratelimit.js";
 import { createChatTitleRoutes } from "./chat-titles.js";
@@ -78,8 +79,13 @@ import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
   engineLifecycleRequestsPerMinute,
 } from "./cloud-workspaces/engine-heartbeat.js";
+import { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService, releaseCanaryConfiguration, releaseCanaryDesignationConfiguration } from "./cloud-workspaces/release-canaries.js";
+import { createReleaseCanaryAdmissionRoutes, createReleaseCanaryDesignationRoutes } from "./cloud-workspaces/release-canary-routes.js";
 
 export type CreateAppDependencies = {
+  releaseCanaries?: DatabaseReleaseCanaryService;
+  releaseCanaryDesignations?: DatabaseReleaseCanaryDesignationService;
+  clientCompatibility?: ClientCompatibility;
   cloudGithubWriteGrants?: DatabaseCloudGithubWriteGrants;
   cloudIdleStop?: DatabaseCloudIdleStop;
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
@@ -111,6 +117,7 @@ function isCloudWorkspaceApiPath(requestPath: string): boolean {
     requestPath.startsWith("/internal/v1/cloud-workspaces/") ||
     requestPath === "/internal/v2/cloud-workspaces" ||
     requestPath.startsWith("/internal/v2/cloud-workspaces/") ||
+    requestPath.startsWith("/internal/v1/release-canaries/") ||
     /^\/v1\/organizations\/[^/]+\/(?:cloud-workspaces|cloud-workspace-management|cloud-compute-credits)(?:\/|$)/u.test(
       requestPath,
     )
@@ -149,6 +156,12 @@ export function createApp(
     dependencies.migrationStatus?.state === "controlled_migration_pending"
       ? dependencies.migrationStatus
       : null;
+  const releaseCanaryConfig = pendingMigration ? null : releaseCanaryConfiguration(config);
+  const releaseCanaries = pendingMigration ? null : dependencies.releaseCanaries ?? (releaseCanaryConfig ? new DatabaseReleaseCanaryService(pool, releaseCanaryConfig) : null);
+  const releaseDesignationConfig = pendingMigration ? null : releaseCanaryDesignationConfiguration(config);
+  const releaseCanaryDesignations = pendingMigration ? null : dependencies.releaseCanaryDesignations ?? releaseCanaries ??
+    (releaseDesignationConfig ? new DatabaseReleaseCanaryDesignationService(pool, releaseDesignationConfig) : null);
+  if (releaseCanaries) app.route("/", createReleaseCanaryAdmissionRoutes(releaseCanaries));
 
   // A deferred 0025 means later cloud columns (starting in 0026) do not exist.
   // Keep the complete public and internal cloud surface behind one first-in-
@@ -403,6 +416,7 @@ export function createApp(
       allowHeaders: [
         "authorization",
         "content-type",
+        "x-zeros-client",
         "idempotency-key",
         "x-zeros-access-credential",
         "x-zeros-runtime-admission",
@@ -417,6 +431,13 @@ export function createApp(
       maxAge: 86400,
     }),
   );
+
+  app.use("/v1/*", createClientCompatibilityMiddleware(
+    dependencies.clientCompatibility ?? new ClientCompatibility({
+      deploymentChannel: config.deploymentChannel,
+      ledgerUrl: config.desktopReleaseLedgerUrl ?? null,
+    }),
+  ));
 
   // Every GitHub response is authentication state, an OAuth redirect, or a
   // token-bearing exchange. Keep it out of browser, CDN, and intermediary
@@ -526,6 +547,7 @@ export function createApp(
   // spam mutations or flood the audit log. Runs AFTER auth so it keys on the
   // verified user id, not the IP.
   app.use("/v1/*", rateLimit("global", 240, 60_000));
+  if (releaseCanaryDesignations) app.route("/", createReleaseCanaryDesignationRoutes(releaseCanaryDesignations));
 
   // The larger fork-blob budget is available only after bearer verification
   // and the global per-user rate limit. The route rechecks exact fork

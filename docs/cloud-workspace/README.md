@@ -66,6 +66,8 @@ behavior from release qualification and deferred product surfaces.
 
 - [Qualification status](qualification-status.md) separates the current eight
   backend steps, native tool coverage, live evidence and remaining release gates.
+- [Release worker qualification](release-worker-qualification.md) defines the
+  automated worker-image canaries, designated owner accounts and snapshot budgets.
 - [Pro backend](pro-backend.md) defines individual sponsorship, monthly
   allowances, staff benefits, explicit writers, unlimited Read-only Pro guests
   and the provider-neutral API migration. Its hosted rollout is separate.

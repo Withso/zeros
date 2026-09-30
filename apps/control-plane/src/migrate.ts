@@ -15,6 +15,7 @@ import path from "node:path";
 import pg from "pg";
 import { loadConfig } from "./config.js";
 import { createMigrationPool, withSystemTx } from "./db.js";
+import { assertContractMigrationReady, migrationPhase, MigrationPhaseError, type MigrationPhaseDeclaration } from "./migration-phase.js";
 
 const MIGRATIONS_DIR = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -44,7 +45,7 @@ function safeSqlState(error: unknown): string {
 }
 
 export function migrationFailureDiagnostic(error: unknown): string {
-  return error instanceof MigrationDiagnosticError
+  return error instanceof MigrationDiagnosticError || error instanceof MigrationPhaseError
     ? error.message
     : `Migration failed${safeSqlState(error)}. Check database connectivity and the migration configuration.`;
 }
@@ -357,6 +358,7 @@ export function assertMigrationApproved(
   sql: string,
   env: NodeJS.ProcessEnv = process.env,
 ): void {
+  assertContractMigrationReady(file, migrationPhase(file, sql));
   if (
     env.NODE_ENV !== "production" ||
     !requiresControlledDowntime(sql) ||
@@ -371,7 +373,7 @@ export function assertMigrationApproved(
   );
 }
 
-type Migration = { file: string; sql: string; checksum: string };
+type Migration = { file: string; sql: string; checksum: string } & MigrationPhaseDeclaration;
 
 export type MigrationStatus =
   | { state: "current" }
@@ -556,7 +558,7 @@ async function loadMigrations(): Promise<Migration[]> {
     files.map(async (file) => {
       const sql = await readFile(path.join(MIGRATIONS_DIR, file), "utf8");
       assertNoTopLevelTransactionControl(file, sql);
-      return { file, sql, checksum: migrationChecksum(sql) };
+      return { file, sql, checksum: migrationChecksum(sql), ...migrationPhase(file, sql) };
     }),
   );
 }
@@ -566,6 +568,7 @@ export async function assertAllControlledMigrationsApproved(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   for (const migration of await loadMigrations()) {
+    assertContractMigrationReady(migration.file, migration);
     if (requiresControlledDowntime(migration.sql)) {
       assertMigrationApproved(migration.file, migration.sql, env);
     }
@@ -826,9 +829,21 @@ async function applyMigration(
   await client.query("BEGIN");
   try {
     await client.query(migration.sql);
+    let recordPhase = false;
+    if (migration.phase !== "legacy") {
+      const supported = await client.query<{ phase_supported: boolean }>(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.schema_migrations'::regclass AND attname = 'phase' AND NOT attisdropped) AS phase_supported",
+      );
+      if (typeof supported.rows[0]?.phase_supported !== "boolean") throw new MigrationDiagnosticError("Could not inspect migration phase ledger support.");
+      recordPhase = supported.rows[0].phase_supported;
+    }
     await client.query(
-      "INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)",
-      [migration.file, migration.checksum],
+      !recordPhase
+        ? "INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)"
+        : "INSERT INTO schema_migrations (name, checksum, phase) VALUES ($1, $2, $3)",
+      !recordPhase
+        ? [migration.file, migration.checksum]
+        : [migration.file, migration.checksum, migration.phase],
     );
     await client.query("COMMIT");
   } catch (error) {
@@ -848,6 +863,10 @@ async function executeMigrations(
   return withMigrationClient(pool, async (client) => {
     const applied = await prepareMigrationLedger(client, migrations);
     const ran: string[] = [];
+
+    for (const migration of migrations) {
+      if (!applied.has(migration.file) && !recordedAlias(migration, applied)) assertContractMigrationReady(migration.file, migration);
+    }
 
     // An operator should learn about every missing approval before any
     // application migration commits. Service-boot compatibility keeps its
@@ -978,7 +997,7 @@ export async function planMigrations(pool: pg.Pool) {
     const pending = migrations.filter(migration => !applied.has(migration.file) && !recordedAlias(migration, applied));
     await client.query("COMMIT");
     return {pendingMigrations: pending.map(migration => migration.file),
-      controlledApprovals: pending.filter(migration => requiresControlledDowntime(migration.sql)).map(migration => migration.file)};
+      controlledApprovals: pending.filter(migration => migration.phase === "contract" || requiresControlledDowntime(migration.sql)).map(migration => migration.file)};
   } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
   finally { client.release(); }
 }
@@ -989,11 +1008,16 @@ export async function verifyMigrations(
   pool: pg.Pool,
 ): Promise<ServiceBootMigrationResult> {
   const migrations = await loadMigrations();
-  const { rows } = await withSystemTx(pool, tx => tx.query<{ name: string; checksum: string | null }>(
-    "SELECT name, checksum FROM schema_migrations",
+  const { rows } = await withSystemTx(pool, tx => tx.query<{ name: string; checksum: string | null; phase: string }>(
+    "SELECT name, checksum, COALESCE(to_jsonb(schema_migrations)->>'phase', 'legacy') AS phase FROM schema_migrations",
   ), { consistentRead: true });
   const applied = new Map(rows.map((row) => [row.name, row.checksum]));
-  assertKnownLedger(migrations, applied.keys());
+  const known = new Set(migrations.flatMap(migration => [migration.file, ...renamedMigrationAliasesFor(migration.file)]));
+  const head = Number(migrations.at(-1)?.file.slice(0, 4) ?? 0);
+  const newer = rows.filter(row => !known.has(row.name));
+  if (newer.some(row => row.phase !== "expand" || !/^\d{4}_[a-z0-9_]+\.sql$/.test(row.name) || Number(row.name.slice(0, 4)) <= head)) {
+    throw new MigrationDiagnosticError("Database contains an unknown migration that is not a newer expand phase; use a runtime that supports the deployed schema before service boot.");
+  }
   for (const migration of migrations) {
     if (!applied.has(migration.file)) {
       throw new MigrationDiagnosticError(`Migration ${migration.file} is pending; run the separate migrator before service boot.`);
@@ -1002,6 +1026,7 @@ export async function verifyMigrations(
       throw new MigrationDiagnosticError(`Migration ${migration.file} checksum mismatch; service boot cannot repair the ledger.`);
     }
   }
+  if (newer.length) console.warn("[migrate] newer expand migrations are present; serving with the packaged compatible schema.");
   return { ran: [], status: { state: "current" } };
 }
 
