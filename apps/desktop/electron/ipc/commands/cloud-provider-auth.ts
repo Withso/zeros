@@ -8,7 +8,6 @@ import {
 } from "@zeros/protocol/provider-auth";
 import { CloudProviderAuthController } from "../../cloud-provider-auth-controller";
 import { createSubscriptionDriver } from "../../provider-subscription-drivers";
-import { cloudWorkspaceDesktopCapabilityEnabled } from "../../../src/engine/cloud-workspace-capability";
 import { controlPlaneBaseUrl } from "../../workos-desktop-account";
 import { controlPlaneFetch } from "../../control-plane-fetch";
 import {
@@ -138,8 +137,6 @@ const controller = new CloudProviderAuthController({
 onMainAuthSessionChanged(() => controller.stop());
 const windows = new Set<number>();
 export const cloudProviderAuth: CommandHandler = (args, event) => {
-  if (!cloudWorkspaceDesktopCapabilityEnabled())
-    throw new Error("Cloud accounts are unavailable in this build.");
   const request = cloudProviderAuthActionSchema.safeParse(args);
   if (!request.success)
     throw new Error("Invalid cloud account connection request.");
