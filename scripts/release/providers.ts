@@ -41,12 +41,18 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
     serviceInstanceAutoDeployStatus(projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId) { enabled }
     environment(id:$environmentId) { id name projectId unmergedChangesCount config(decryptVariables:false) }
     serviceInstance(environmentId:$environmentId,serviceId:$serviceId) { serviceId environmentId domains { customDomains { domain } } }
+    environmentStagedChanges(environmentId:$environmentId) { id patch }
   }`, target);
+  // A base environment reports a null fork count; staged dashboard edits appear
+  // only in its staged-change patch, which must be readable and empty.
+  const noStagedChanges = (environment: { unmergedChangesCount?: unknown }, staged: { patch?: unknown } | null | undefined) =>
+    (environment.unmergedChangesCount === 0 || environment.unmergedChangesCount === null) &&
+    staged?.patch !== null && typeof staged?.patch === "object" && !Array.isArray(staged.patch) && Object.keys(staged.patch).length === 0;
   async function inspectRailway() {
     const data = await readRailway(), environment = data.environment;
     requireCheck(data.serviceInstanceAutoDeployStatus?.enabled === false, "Disable independent Railway autodeploy before enabling hosted promotion");
     requireCheck(environment?.id === config.environmentId && environment.projectId === config.projectId && environment.name === config.channel &&
-      environment.unmergedChangesCount === 0 && data.serviceInstance?.serviceId === config.serviceId && data.serviceInstance.environmentId === config.environmentId,
+      noStagedChanges(environment, data.environmentStagedChanges) && data.serviceInstance?.serviceId === config.serviceId && data.serviceInstance.environmentId === config.environmentId,
     "Railway target mismatch or outstanding staged changes");
     const source = environment.config?.services?.[config.serviceId]?.source;
     requireCheck(source?.repo === config.repository && source.checkSuites === false && source.rootDirectory === "apps/control-plane",

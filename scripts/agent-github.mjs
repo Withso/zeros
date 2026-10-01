@@ -3,9 +3,12 @@
 // agent-github — run git or gh as the zeros-agent GitHub App
 // ──────────────────────────────────────────────────────────
 //
-// Coding agents commit, push and open pull requests as `zeros-agent[bot]`, so
-// a person can review and approve them: GitHub never lets the author of a pull
-// request approve it. The App is installed on this repository only.
+// Authorship stays with people: commits and pull requests use the workspace's
+// own Git and GitHub identity. Agents use `zeros-agent[bot]` only for
+// automation that is not a person's work — merging a green pull request,
+// cutting a release branch, dispatching or rerunning a release workflow — so
+// those steps are attributed to automation. The App is installed on this
+// repository only.
 //
 // The App key never enters the repository. It is read, in order, from
 // `ZEROS_AGENT_GITHUB_APP_B64` (Conductor cloud workspaces),
@@ -15,8 +18,8 @@
 // passed as a command argument: git's credential helper and gh read the token
 // from their environment.
 //
-// Run: `pnpm agent:git commit …`, `pnpm agent:git push …`,
-// `pnpm agent:gh pr create …`, and `pnpm agent:github:check`.
+// Run: `pnpm agent:gh pr merge …`, `pnpm agent:git push origin <sha>:refs/heads/release/X.Y.Z`,
+// `pnpm agent:gh workflow run …`, and `pnpm agent:github:check`.
 // ──────────────────────────────────────────────────────────
 
 import { spawnSync } from "node:child_process";
@@ -168,23 +171,16 @@ export async function agentSession(app, { fetch = globalThis.fetch, now = Date.n
   return session;
 }
 
-/** git as the bot: its identity for new commits and its token for the remote.
- * Conductor's git wrapper only brokers the owner's credentials, so this calls
- * the git it wraps. */
+/** git with the bot's token for the remote. Commits keep the person's own Git
+ * identity. Conductor's git wrapper only brokers the owner's credentials, so
+ * this calls the git it wraps. */
 export function gitInvocation(args, session, env = process.env) {
-  const { name, email } = agentIdentity(session.slug, session.botUserId);
   return {
     command: env.CONDUCTOR_REAL_GIT_PATH || "git",
     // The empty value drops every helper configured before it (including a
     // workspace broker that would answer with the owner's token).
     args: ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${CREDENTIAL_HELPER}`, ...args],
-    env: {
-      GIT_AUTHOR_NAME: name,
-      GIT_AUTHOR_EMAIL: email,
-      GIT_COMMITTER_NAME: name,
-      GIT_COMMITTER_EMAIL: email,
-      [TOKEN_ENV]: session.token,
-    },
+    env: { [TOKEN_ENV]: session.token },
   };
 }
 

@@ -74,13 +74,18 @@ For provider event handling or tool transcript UI, also read
   Production keys.
 - Run `pnpm agent:check` to verify it read-only. Never print, log, commit or
   echo a credential value, including in command arguments and test output.
-- Commit, push and open pull requests as `zeros-agent[bot]`, so the owner can
-  review and approve them: `pnpm agent:git commit …`, `pnpm agent:git push …`
-  and `pnpm agent:gh pr create …`. `pnpm agent:github:check` verifies access
-  without printing a token. The App reaches this repository only; its key
-  stays outside the repository (`ZEROS_AGENT_GITHUB_APP_B64` from Conductor in
-  cloud workspaces, `~/.zeros-dev/agent-github-app.json` on the Mac). Without
-  it, use the workspace's own GitHub identity and say so in the handoff.
+- Commits and pull requests use the workspace's own Git and GitHub identity,
+  so authorship stays with whoever is working; the `Co-Authored-By` trailer
+  records the agent. Never author a commit as `zeros-agent[bot]`. Use the bot
+  only for automation that is not a person's work: merging a green pull
+  request (`pnpm agent:gh pr merge …`), cutting a release branch
+  (`pnpm agent:git push origin <sha>:refs/heads/release/X.Y.Z`), and
+  dispatching or rerunning release workflows (`pnpm agent:gh …`).
+  `pnpm agent:github:check` verifies access without printing a token. The App
+  reaches this repository only; its key stays outside the repository
+  (`ZEROS_AGENT_GITHUB_APP_B64` from Conductor in cloud workspaces,
+  `~/.zeros-dev/agent-github-app.json` on the Mac). Without it, use the
+  workspace's own identity for those steps too.
 
 ## Verification
 
