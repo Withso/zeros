@@ -1,6 +1,7 @@
 // A subprocess boundary around the existing audited migration command.
 // Only its allowlisted JSON receipt reaches the parent, never SQL/driver logs.
-import { releaseMigration, planetScaleClient } from "../../apps/control-plane/src/manage-release-migration";
+import { writeFileSync } from "node:fs";
+import { releaseMigration, planetScaleClient, ReleaseMigrationError } from "../../apps/control-plane/src/manage-release-migration";
 import { createMigrationPool } from "../../apps/control-plane/src/db";
 import { MigrationReceipt, promotionConfig } from "./contracts";
 
@@ -19,6 +20,24 @@ async function main() {
       tokenId: process.env.PLANETSCALE_SERVICE_TOKEN_ID!, token: process.env.PLANETSCALE_SERVICE_TOKEN! }),
     createPool: url => createMigrationPool(url, { role: "postgres", maxConnections: 1, applicationName: "zeros-hosted-promotion" }),
   });
-  process.stdout.write(JSON.stringify(MigrationReceipt.parse(receipt)));
+  const parsed = MigrationReceipt.safeParse(receipt);
+  if (!parsed.success) {
+    // For example SQL succeeded but the owner login's deletion did not: keep
+    // the sanitized execution facts for the cutover's recovery journal.
+    throw Object.assign(new ReleaseMigrationError("Release migration receipt is incomplete"), { partial: {
+      backup: receipt.backup && { id: receipt.backup.id, state: receipt.backup.state }, applied: receipt.applied, roleDeleted: receipt.role.deleted === true } });
+  }
+  process.stdout.write(JSON.stringify(parsed.data));
 }
-void main().catch(() => { process.stderr.write("Release migration failed or owner-role cleanup is unconfirmed. Inspect the target before retrying.\n"); process.exitCode = 1; });
+void main().catch(error => {
+  // The controlled cutover reads these allowlisted recovery facts; output stays private.
+  const partial = error instanceof ReleaseMigrationError ? error.partial : undefined;
+  if (partial && process.env.MIGRATION_FAILURE_FILE) {
+    try {
+      writeFileSync(process.env.MIGRATION_FAILURE_FILE, JSON.stringify({ backup: partial.backup && { id: partial.backup.id, state: partial.backup.state },
+        applied: partial.applied, roleDeleted: partial.roleDeleted }), { mode: 0o600 });
+    } catch { /* Recovery facts are best effort. */ }
+  }
+  process.stderr.write("Release migration failed or owner-role cleanup is unconfirmed. Inspect the target before retrying.\n");
+  process.exitCode = 1;
+});

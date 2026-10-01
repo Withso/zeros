@@ -42,8 +42,12 @@ const hostedJobs = [{ run_id: 1, run_attempt: 1, head_sha: sha, name: "Hosted pr
 function liveIdentity() { return { ...receipt().backend, channel: "alpha", workerQualified: true,
   cloud: { enabled: true, ready: true, state: "healthy" },
   worker: { provider: "boat", imageRef: `boat:zeros-alpha-fixture@sha256:${"c".repeat(64)}`, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096 } }; }
-function fakeIdentity(value: unknown) {
-  return { fetch: vi.fn<typeof fetch>(async () => value === null ? new Response("missing", { status: 404 }) : Response.json(value)),
+function fakeIdentity(value: unknown, pagesSha?: string, receipt = true) {
+  return { fetch: vi.fn<typeof fetch>(async input => String(input).endsWith("/zeros-deployment.json")
+      ? Response.json({ version: 1, commitSha: pagesSha ?? (value as { sourceSha?: string } | null)?.sourceSha,
+        surface: new URL(String(input)).hostname.startsWith("ops") ? "ops" : "app" })
+      : value === null ? new Response("missing", { status: 404 }) : Response.json(value)),
+    cutoverReceipt: vi.fn(async () => receipt),
     channelBaseline: async () => ({ tag: "alpha", sourceSha: baselineSha }),
     migrationManifest: vi.fn(async (source?: string) => source === baselineSha ? { head: "0111_test.sql", sha256: "1".repeat(64) } : manifest),
     workerInputsSha256: vi.fn(async (source: string) => (source === baselineSha ? "f" : "d").repeat(64)) };
@@ -119,6 +123,44 @@ describe("disabled promotion guard", () => {
       method: "GET", credentials: "omit", redirect: "error", cache: "no-store", signal: expect.any(AbortSignal) }));
     expect(new Headers(deps.fetch.mock.calls[0][1]?.headers).has("authorization")).toBe(false);
   });
+  it("keeps a schema cutover blocked until every Pages surface serves the cut-over API's commit", async () => {
+    const identity = liveIdentity(); identity.migrations.manifestSha256 = "f".repeat(64);
+    const stale = await disabledGuard([migrationFile], candidate, fakeIdentity(identity, "9".repeat(40)));
+    expect(stale).toMatchObject({ blocked: true, manualCutoverVerified: false });
+    expect(stale.message).toContain("finish the cutover's Pages upload before publication");
+    const deps = fakeIdentity(identity);
+    expect(await disabledGuard([migrationFile], candidate, deps)).toMatchObject({ blocked: false, manualCutoverVerified: true });
+    expect(deps.fetch.mock.calls.map(call => String(call[0]))).toEqual(["https://api-alpha.zeros.build/v1/release-identity",
+      "https://app-alpha.zeros.build/zeros-deployment.json", "https://ops-alpha.zeros.build/zeros-deployment.json"]);
+  });
+  it("requires the controlled-cutover workflow's own receipt for the cut-over commit", async () => {
+    const identity = liveIdentity(); identity.migrations.manifestSha256 = "f".repeat(64);
+    const deps = fakeIdentity(identity, undefined, false);
+    const result = await disabledGuard([migrationFile], candidate, deps);
+    expect(result).toMatchObject({ blocked: true, manualCutoverVerified: false });
+    expect(result.message).toContain(`No successful controlled-cutover receipt exists for ${identity.sourceSha}`);
+    expect(deps.cutoverReceipt).toHaveBeenCalledWith("alpha", identity.sourceSha, identity.migrations.manifestSha256);
+  });
+  it("requires the same completion proof when the published baseline is unknown", async () => {
+    const without = { ...fakeIdentity(liveIdentity(), undefined, false), channelBaseline: async () => null };
+    expect(await disabledGuard([], candidate, without)).toMatchObject({ blocked: true, manualCutoverVerified: false });
+    const withProof = { ...fakeIdentity(liveIdentity()), channelBaseline: async () => null };
+    expect(await disabledGuard([], candidate, withProof)).toMatchObject({ blocked: false, manualCutoverVerified: true });
+  });
+  it("refuses a Pages manifest for the wrong surface", async () => {
+    const identity = liveIdentity(); identity.migrations.manifestSha256 = "f".repeat(64);
+    const deps = fakeIdentity(identity);
+    deps.fetch.mockImplementation(async input => String(input).endsWith("/zeros-deployment.json")
+      ? Response.json({ version: 1, commitSha: identity.sourceSha, surface: "app" }) : Response.json(identity));
+    expect(await disabledGuard([migrationFile], candidate, deps)).toMatchObject({ blocked: true, manualCutoverVerified: false });
+  });
+  it("does not consult Pages when the published schema is unchanged", async () => {
+    const deps = fakeIdentity(liveIdentity(), "9".repeat(40));
+    deps.migrationManifest = vi.fn(async () => manifest);
+    expect(await disabledGuard([], candidate, deps)).toMatchObject({ blocked: false });
+    expect(deps.fetch.mock.calls.some(call => String(call[0]).endsWith("/zeros-deployment.json"))).toBe(false);
+    expect(deps.cutoverReceipt).not.toHaveBeenCalled();
+  });
   it("accepts a different backend SHA only when the full candidate migration manifest is current", async () => {
     const identity = { ...liveIdentity(), sourceSha: "e".repeat(40) };
     expect(await disabledGuard([migrationFile], candidate, fakeIdentity(identity))).toMatchObject({ blocked: false, manualCutoverVerified: true });
@@ -133,9 +175,10 @@ describe("disabled promotion guard", () => {
       { ...liveIdentity(), migrations: { ...liveIdentity().migrations, state: "pending" } }]) {
       const result = await disabledGuard([migrationFile], candidate, fakeIdentity(identity));
       expect(result.blocked).toBe(true);
-      expect(result.message).toContain("backup");
-      expect(result.message).toContain("NODE_ENV=production pnpm --dir apps/control-plane release-migration:manage --database zeros-control-plane-alpha --branch main --execute --confirm zeros-control-plane-alpha");
-      expect(result.message).toContain(`serviceInstanceDeployV2(commitSha: ${sha}`);
+      expect(result.message).toContain(`dispatch controlled-cutover.yml for alpha`);
+      expect(result.message).toContain(`at ${sha}`);
+      expect(result.message).toContain("confirm=zeros-control-plane-alpha");
+      expect(result.message).toContain("backs up and migrates");
       expect(result.message).toContain("re-run the failed Release (alpha) workflow");
     }
   });

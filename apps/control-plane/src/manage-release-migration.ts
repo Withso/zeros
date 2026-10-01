@@ -72,7 +72,23 @@ export type ReleaseMigrationResult = {
 
 type Role = { id: string; name: string; username: string; password: string; access_host_url: string; expires_at?: string | null };
 
-export class ReleaseMigrationError extends Error {}
+/** Recovery facts after a failed execution: the backup it created, files it
+ * applied and whether its owner login was deleted. Never credentials or SQL. */
+export type ReleaseMigrationPartial = {
+  backup: { id: string; state: string } | null;
+  /** Files committed before the failure; null when the ledger could not be re-read. */
+  applied: string[] | null;
+  roleDeleted: boolean;
+};
+
+export class ReleaseMigrationError extends Error {
+  partial?: ReleaseMigrationPartial;
+}
+
+function withPartial(error: ReleaseMigrationError, backup: { id: string; state: string } | null, applied: string[] | null, roleDeleted: boolean) {
+  error.partial = { backup: backup && { id: backup.id, state: backup.state }, applied, roleDeleted };
+  return error;
+}
 
 const record = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -184,9 +200,11 @@ export async function releaseMigration(
     // Delete only the acknowledged ID; never guess another login's identity.
     if (created.status >= 200 && created.status < 300 && text(body.id)) {
       const removed = await deps.planetScale("DELETE", `${branchPath}/roles/${encodeURIComponent(body.id as string)}`).catch(() => ({ status: 0 }));
-      if (removed.status < 200 || removed.status >= 300) throw new ReleaseMigrationError("Incomplete migration role response; cleanup is unconfirmed");
+      if (removed.status < 200 || removed.status >= 300) {
+        throw withPartial(new ReleaseMigrationError("Incomplete migration role response; cleanup is unconfirmed"), backup, [], false);
+      }
     }
-    throw new ReleaseMigrationError(`Migration role was not created (HTTP ${created.status})`);
+    throw withPartial(new ReleaseMigrationError(`Migration role was not created (HTTP ${created.status})`), backup, [], true);
   }
 
   let pendingMigrations: string[] = [];
@@ -194,6 +212,8 @@ export async function releaseMigration(
   let applied: string[] = [];
   let ledger: ReleaseMigrationResult["ledger"] = "pending";
   let roleDeleted = false;
+  let failure: ReleaseMigrationError | null = null;
+  let appliedOnFailure: string[] | null = [];
   try {
     const pool = deps.createPool(roleConnectionString(role));
     try {
@@ -203,7 +223,16 @@ export async function releaseMigration(
       if (input.execute) {
         // Always run: the strict runner verifies every recorded checksum
         // even when nothing is pending.
-        applied = await migrator.run(pool);
+        try {
+          applied = await migrator.run(pool);
+        } catch (error) {
+          // Each file commits on its own: re-read the ledger with this login
+          // so a partial run reports exactly what committed, or "unknown".
+          appliedOnFailure = await migrator.plan(pool)
+            .then(after => pendingMigrations.filter(name => !after.pendingMigrations.includes(name)))
+            .catch(() => null);
+          throw error;
+        }
         const after = await migrator.plan(pool);
         if (after.pendingMigrations.length > 0) {
           throw new ReleaseMigrationError(`Still pending after apply: ${after.pendingMigrations.join(", ")}`);
@@ -217,13 +246,13 @@ export async function releaseMigration(
     }
   } catch (error) {
     // Never surface a driver message: it can quote the connection string.
-    if (error instanceof ReleaseMigrationError) throw error;
-    throw new ReleaseMigrationError("Migration step failed: database error");
+    failure = error instanceof ReleaseMigrationError ? error : new ReleaseMigrationError("Migration step failed: database error");
   } finally {
     const removed = await deps.planetScale("DELETE", `${branchPath}/roles/${role.id}`).catch(() => ({ status: 0, body: null }));
     role.password = "";
     roleDeleted = removed.status >= 200 && removed.status < 300;
   }
+  if (failure) throw withPartial(failure, backup, applied.length ? applied : appliedOnFailure, roleDeleted);
 
   return {
     mode: input.execute ? "execute" : "plan",

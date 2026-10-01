@@ -1173,6 +1173,53 @@ For this branch's first rollout:
    isolated setup for Beta and promote Production only from its successful
    exact-SHA Beta receipt.
 
+### Controlled cutover workflow
+
+`controlled-cutover.yml` is the dispatched, owner-gated path for migrations
+the automated lane refuses: controlled-downtime and contract boundaries such
+as a first rollout's 0101/0103. Dispatch it from `main` for Alpha or from the
+frozen `release/X.Y.Z` for Beta/Production with `approvals` listing exactly the
+pending controlled filenames (empty when none) and `confirm` set to the
+channel database name. Production waits for its required reviewer. It uses
+the channel environment's promotion secrets and variables and shares the
+`hosted-mutation-<channel>` lock.
+
+In order, it:
+
+1. Checks exact-source CI and branch freshness. Production also requires
+   Beta's latest successful publication to be this exact SHA.
+2. Plans the migration and refuses any mismatch between the plan's controlled
+   set and `approvals`.
+3. Validates every Railway and Pages destination read-only, and requires the
+   channel environment to run only the control-plane service. All of this
+   happens before any provider setting changes.
+4. Turns off Railway autodeploy and Wait for CI, and Pages production and
+   preview builds.
+5. Retargets the Railway and Pages sources to the release branch.
+6. Sets `DATABASE_MAINTENANCE_MODE=true` and deploys the exact SHA, then waits
+   until that candidate reports `maintenance: true`. Maintenance fences every
+   writer and skips schema verification at boot.
+7. Waits until every replaced deployment is `REMOVED`, `FAILED`, `CRASHED` or
+   `SKIPPED`, because Railway can keep an old deployment serving through its
+   overlap and draining windows.
+8. Runs the strict backup and migration with only those approvals, and
+   requires `ledger=verified` and `role.deleted=true`.
+9. Clears maintenance and redeploys the same SHA, then requires ready identity
+   with the candidate manifest.
+10. Uploads Pages and verifies WorkOS.
+
+It saves `controlled-cutover-<channel>-<sha>/cutover-receipt.json` on success,
+and an allowlisted journal on every run: stage, the maintenance state as last
+confirmed, deployment and backup identities, and the pending set after a
+failed migration. A failure leaves the state it reached and names it; nothing
+is rolled back.
+
+Then rerun the failed desktop release for the same SHA. Its disabled guard
+reports **manual cutover verified** only when the API identity matches and
+every Pages surface serves the cut-over API's commit. A run stopped before
+Pages therefore cannot publish the desktop. The hold leaves the channel ready
+for `ZEROS_HOSTED_PROMOTION=enabled`.
+
 Provider contracts used by the controller:
 [Railway service API](https://docs.railway.com/integrations/api/manage-services),
 [Railway environment schema](https://backboard.railway.com/schema/environment.schema.json),
