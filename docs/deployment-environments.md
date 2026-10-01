@@ -1193,8 +1193,9 @@ In order, it:
 3. Validates every Railway and Pages destination read-only, and requires the
    channel environment to run only the control-plane service. All of this
    happens before any provider setting changes.
-4. Turns off Railway autodeploy and Wait for CI, and Pages production and
-   preview builds.
+4. Requires Railway automatic deployments to be already disabled (service
+   Settings → **Disable**; a project token cannot change that switch), then
+   turns off Wait for CI and Pages production and preview builds.
 5. Retargets the Railway and Pages sources to the release branch.
 6. Sets `DATABASE_MAINTENANCE_MODE=true` and deploys the exact SHA, then waits
    until that candidate reports `maintenance: true`. Maintenance fences every

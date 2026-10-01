@@ -29,7 +29,6 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
       return Response.json({ success: true, result: project() });
     }
     const q: string = request.query;
-    if (q.includes("CutoverAutoDeployHold")) { state.autoDeploy = request.variables.input.enabled; return Response.json({ data: { serviceInstanceAutoDeployUpdate: { __typename: "Result" } } }); }
     if (q.includes("CutoverWaitForCiHold")) { state.checkSuites = request.variables.patch.services[config.serviceId].source.checkSuites; return Response.json({ data: { environmentPatchCommit: "commit1" } }); }
     if (q.includes("CutoverServices")) return Response.json({ data: { environment: { serviceInstances: {
       edges: (state.services ?? [config.serviceId]).map(serviceId => ({ node: { serviceId } })) } } } });
@@ -61,13 +60,18 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
 }
 
 describe("cutover provider adapters", () => {
-  it("holds Railway autodeploy, Wait for CI and Pages builds without changing any branch", async () => {
+  it("asks the owner to disable Railway automatic deployments before changing anything", async () => {
     const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true });
-    await expect(f.providers.inspect()).rejects.toThrow("autodeploy");
+    await expect(f.providers.holdDeploys()).rejects.toThrow("Railway automatic deployments are on for beta: open the control-plane service's Settings in Railway and click Disable");
+    expect(f.calls.every(call => !call.query || call.query.startsWith("query"))).toBe(true);
+    expect(f.calls.some(call => call.method === "PATCH")).toBe(false);
+  });
+
+  it("holds Wait for CI and Pages builds without changing any branch", async () => {
+    const f = fixture({ autoDeploy: false, checkSuites: true, pagesAuto: true });
+    await expect(f.providers.inspect()).rejects.toThrow();
     await f.providers.holdDeploys();
     await expect(f.providers.inspect()).resolves.toBeUndefined();
-    const hold = f.calls.find(call => call.query?.includes("CutoverAutoDeployHold"));
-    expect(hold.variables.input).toEqual({ projectId: config.projectId, environmentId: config.environmentId, serviceId: config.serviceId, enabled: false });
     const ci = f.calls.find(call => call.query?.includes("CutoverWaitForCiHold"));
     expect(ci.query).toContain("skipDeploys:true");
     expect(ci.variables.patch).toEqual({ services: { [config.serviceId]: { source: { checkSuites: false } } } });
@@ -84,13 +88,13 @@ describe("cutover provider adapters", () => {
   });
 
   it("refuses to hold over someone else's staged Railway changes", async () => {
-    const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true, staged: { id: "patch1", patch: { services: {} , shared: {} } } });
+    const f = fixture({ autoDeploy: false, checkSuites: true, pagesAuto: true, staged: { id: "patch1", patch: { services: {} , shared: {} } } });
     await expect(f.providers.holdDeploys()).rejects.toThrow("outstanding staged changes");
     expect(f.calls.every(call => !call.query || call.query.startsWith("query"))).toBe(true);
   });
 
   it("refuses before any hold when the environment runs another service that could write", async () => {
-    const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true, services: [config.serviceId, "44444444-4444-4444-8444-444444444444"] });
+    const f = fixture({ autoDeploy: false, checkSuites: true, pagesAuto: true, services: [config.serviceId, "44444444-4444-4444-8444-444444444444"] });
     await expect(f.providers.holdDeploys()).rejects.toThrow("runs another Railway service");
     expect(f.calls.every(call => !call.query || call.query.startsWith("query"))).toBe(true);
     expect(f.calls.some(call => call.method === "PATCH")).toBe(false);

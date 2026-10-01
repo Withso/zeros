@@ -153,24 +153,22 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
       }
     },
     /** Hold every independent deployer before an explicit cutover: Railway
-     * autodeploy and Wait for CI, then Pages production and preview builds.
-     * Source branches stay as they are; `retarget` moves them afterwards. */
+     * Wait for CI, then Pages production and preview builds. Railway's own
+     * automatic deployments must already be disabled: project tokens cannot
+     * change that switch. Source branches stay; `retarget` moves them. */
     async holdDeploys() {
       await validateTargets();
       const before = await readRailway(), environment = before.environment;
-      if (before.serviceInstanceAutoDeployStatus?.enabled !== false) {
-        await railway(`mutation CutoverAutoDeployHold($input:ServiceInstanceAutoDeployUpdateInput!) {
-          serviceInstanceAutoDeployUpdate(input:$input) { __typename }
-        }`, { input: { ...target, enabled: false } });
-      }
+      requireCheck(before.serviceInstanceAutoDeployStatus?.enabled === false,
+        `Railway automatic deployments are on for ${config.channel}: open the control-plane service's Settings in Railway and click Disable ` +
+        "(a project token cannot change it), then dispatch this cutover again");
       if (environment.config?.services?.[config.serviceId]?.source?.checkSuites !== false) {
         await railway(`mutation CutoverWaitForCiHold($environmentId:String!,$patch:EnvironmentConfig!) {
           environmentPatchCommit(environmentId:$environmentId,patch:$patch,skipDeploys:true,commitMessage:"Zeros cutover deploy hold")
         }`, { environmentId: config.environmentId, patch: { services: { [config.serviceId]: { source: { checkSuites: false } } } } });
       }
       const after = await readRailway();
-      requireCheck(after.serviceInstanceAutoDeployStatus?.enabled === false &&
-        after.environment?.config?.services?.[config.serviceId]?.source?.checkSuites === false, "Railway deploy hold was not confirmed");
+      requireCheck(after.environment?.config?.services?.[config.serviceId]?.source?.checkSuites === false, "Railway Wait for CI hold was not confirmed");
       for (const surface of config.surfaces) {
         const project = await pages(pagesPath(surface)), source = project.source?.config;
         if (!project.source || source?.production_deployments_enabled === false && source?.preview_deployment_setting === "none") continue;
