@@ -201,11 +201,13 @@ export class DatabaseCloudWorkspaceActorSessionService {
           AND cloud_workspace_runtime_authority_live(workspace.id,session.generation,workspace.owner_user_id,$3)`,
       [hash(token),options.connected===true,this.options.workosEnabled])).rows[0];
       if (!row || !row.provider_resource_id) return null;
-      try { await assertRecordedCloudActor(tx,{workspaceId:row.workspace_id,organizationId:row.org_id,
-        actorUserId:row.actor_user_id,actor:recordedActor(row),capability:"read"}); }
+      let role:CloudWorkspaceActorRole;
+      try { ({role}=await assertRecordedCloudActor(tx,{workspaceId:row.workspace_id,organizationId:row.org_id,
+        actorUserId:row.actor_user_id,actor:recordedActor(row),capability:"read"})); }
       catch (error) { if (error instanceof HttpError) return null; throw error; }
       return {workspaceId:row.workspace_id,organizationId:row.org_id,generation:row.generation,
-        authorityEpoch:Number(row.authority_epoch),engineInstanceId:row.engine_instance_id,resourceId:row.provider_resource_id};
+        authorityEpoch:Number(row.authority_epoch),engineInstanceId:row.engine_instance_id,resourceId:row.provider_resource_id,
+        readOnly:role==="viewer"};
     });
   }
 }

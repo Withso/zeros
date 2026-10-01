@@ -475,11 +475,15 @@ readable behind its separate deployment configuration, and cannot enter the
 portable relay. Roll out the matching attested engine and coordinator together.
 
 A disconnect closes transport and never replays a prompt or cancels admitted
-work. Limits per relay process are eight connections, four per workspace,
-32 pending admissions, 64 MiB per frame, and 128 MiB aggregate queued output.
-Admission attempts also have a global burst-32, two-per-second token bucket.
-Budget at least 2 GiB per relay process for worst-case frame assembly; scale
-replicas rather than increasing these limits without load evidence.
+work. The measured 2 GiB relay profile defaults to 64 connections per process,
+ten writer connections and ten separately counted Read-only connections per
+workspace, 32 pending admissions, an unchanged 64 MiB message ceiling, a 256 MiB
+shared inbound assembly budget, and a 128 MiB aggregate outbound reservation
+budget. Assemblers allocate lazily and large messages reserve shared capacity
+from their frame headers. Admission attempts have a two-per-second token bucket
+whose burst is the larger of 32 and the configured instance connection ceiling,
+allowing a bounded reconnect wave. See [relay capacity](relay-capacity.md) for
+validated variables, local load evidence, 2/8 GiB sizing and replica caveats.
 
 Boat exposes only the authenticated engine listener. Private HTTP previews pass
 an existing Zeros preview grant to that listener; the engine revalidates it with

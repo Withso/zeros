@@ -738,6 +738,17 @@ qualification. End-user cloud catalog, creation, details, and management UI is
 also intentionally unwired. Configuration and safe defaults are documented in
 [`.env.example`](.env.example).
 
+### Portable runtime relay capacity
+
+The runtime relay defaults to 64 client↔engine pairs per API process, ten writer
+pairs and ten separately counted Read-only pairs per workspace, a 256 MiB shared
+inbound assembly budget, and a 128 MiB shared outbound reservation budget. The
+64 MiB message ceiling is unchanged; it is not allocated eagerly for every pair.
+Read-only guest assignments remain unlimited, not simultaneous connections.
+See [relay capacity and the opt-in local load harness](../../docs/cloud-workspace/relay-capacity.md)
+for validated environment variables, measurements, 2/8 GiB profiles, headroom and
+the limitations of per-process enforcement.
+
 ## Optional feedback destinations
 
 The desktop posts authenticated reports to `POST /v1/feedback` on this service.

@@ -790,9 +790,52 @@ describe("cloud workspace backend configuration", () => {
       currentSettingsSecretEncryptionKeyVersion: null,
       settingsSecretKeyV1: null,
       durability: null,
+      bridge: {
+        maxConnections: 64,
+        maxConnectionsPerWorkspace: 10,
+        maxReadOnlyConnectionsPerWorkspace: 10,
+        outboundBudgetBytes: 128 * 1024 * 1024,
+        inboundBudgetBytes: 256 * 1024 * 1024,
+      },
       outbox: null,
       setupExecution: null,
     });
+  });
+
+  it("sizes the portable runtime relay only from validated bridge variables", () => {
+    expect(
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_BRIDGE_MAX_CONNECTIONS: "64",
+        CLOUD_WORKSPACE_BRIDGE_MAX_CONNECTIONS_PER_WORKSPACE: "4",
+        CLOUD_WORKSPACE_BRIDGE_MAX_READ_ONLY_CONNECTIONS_PER_WORKSPACE: "12",
+        CLOUD_WORKSPACE_BRIDGE_OUTBOUND_BUDGET_MIB: "128",
+        CLOUD_WORKSPACE_BRIDGE_INBOUND_BUDGET_MIB: "256",
+      }).cloudWorkspaces?.bridge,
+    ).toEqual({
+      maxConnections: 64,
+      maxConnectionsPerWorkspace: 4,
+      maxReadOnlyConnectionsPerWorkspace: 12,
+      outboundBudgetBytes: 128 * 1024 * 1024,
+      inboundBudgetBytes: 256 * 1024 * 1024,
+    });
+    for (const [name, value] of [
+      ["CLOUD_WORKSPACE_BRIDGE_MAX_CONNECTIONS", "2048"],
+      ["CLOUD_WORKSPACE_BRIDGE_MAX_CONNECTIONS_PER_WORKSPACE", "65"],
+      ["CLOUD_WORKSPACE_BRIDGE_MAX_READ_ONLY_CONNECTIONS_PER_WORKSPACE", "65"],
+      ["CLOUD_WORKSPACE_BRIDGE_OUTBOUND_BUDGET_MIB", "32"],
+      ["CLOUD_WORKSPACE_BRIDGE_INBOUND_BUDGET_MIB", "1.5"],
+    ] as const)
+      expect(() => loadConfig({ ...cloudEnv(), [name]: value })).toThrow(
+        new RegExp(`Invalid cloud workspace bridge environment: ${name}`),
+      );
+    // The relay variables are inert while cloud workspaces are disabled.
+    expect(
+      loadConfig({
+        ...validEnv(),
+        CLOUD_WORKSPACE_BRIDGE_MAX_CONNECTIONS: "not-a-number",
+      }).cloudWorkspaces,
+    ).toBeNull();
   });
 
   it("loads only a complete HTTPS cloud event outbox sink", () => {

@@ -76,6 +76,18 @@ d.each(["legacy","pro"] as const)("actor-aware cloud runtime admission (%s)",fun
     expect(await service.authorizeRelay(grant.grantToken,{connected:true})).toBeNull();
   });
 
+  it("marks a Read-only actor's relay grant so the relay can keep writer capacity for writers",async()=>{
+    const signer=await device(),writer=await service.issue({...subject(),proof:signer.proof()});
+    expect(await service.authorizeRelay(writer.grantToken)).toMatchObject({readOnly:false});
+    const invitation=await collaboration.invite({...owner(),email:guest.email,role:"viewer"});
+    await collaboration.accept({actorUserId:guest.id,identity:guest.identity,token:invitation.token});
+    expect(await service.authorizeRelay(writer.grantToken)).toBeNull();
+    const viewer=await service.issue({...subject(),proof:signer.proof()});
+    expect(await service.authorizeRelay(viewer.grantToken)).toMatchObject({workspaceId:fixture.workspaceId,readOnly:true});
+    await service.consume({...engine(),token:viewer.grantToken});
+    expect(await service.authorizeRelay(viewer.grantToken,{connected:true})).toMatchObject({readOnly:true});
+  });
+
   it.each(["admission", "renewal", "engine", "source", "pro", "guest"] as const)("rejects %s expiry after the transaction starts",async deadline=>{
     // Isolate the paid deadline from this legacy fixture's complimentary staff benefit.
     if(deadline==="pro")await pool.query("UPDATE staff_pro_benefits SET revoked_at=clock_timestamp() WHERE user_id=$1",[guest.id]);

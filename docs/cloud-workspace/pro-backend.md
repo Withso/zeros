@@ -44,8 +44,13 @@ the invitation's bounded grant, including for Organization members. Expiry
 cannot leave a permanent Write assignment or revive an earlier role.
 
 There is no total Read-only guest or invitation limit for Pro. HTTP throughput
-limits remain. Collaboration reads use separate UUID keyset cursors and pages
-of at most 100 for members, guests and invitations:
+limits remain. Live transport has a separate [relay capacity envelope](relay-capacity.md):
+ten writer connections and ten separately counted Read-only connections per
+workspace by default. These count connections/devices, not assigned people;
+Read-only guests cannot consume the workspace's writer relay slots, but both
+roles consume shared instance capacity and memory. Collaboration reads use
+separate UUID keyset cursors and pages of at most 100 for members, guests and
+invitations:
 
 - `GET /v1/cloud-workspaces/:workspace/collaborators` accepts `pageSize`,
   `memberCursor`, `guestCursor`, `invitationCursor`; returns next cursors and

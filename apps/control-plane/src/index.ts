@@ -357,8 +357,18 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       left.generation === right.generation &&
       left.authorityEpoch === right.authorityEpoch &&
       left.engineInstanceId === right.engineInstanceId &&
-      left.resourceId === right.resourceId;
+      left.resourceId === right.resourceId &&
+      left.readOnly === right.readOnly;
+    const bridge = cloud.bridge;
+    console.log(
+      `[cloud-bridge] limits connections=${bridge.maxConnections} ` +
+        `writers_per_workspace=${bridge.maxConnectionsPerWorkspace} ` +
+        `readers_per_workspace=${bridge.maxReadOnlyConnectionsPerWorkspace} ` +
+        `outbound=${bridge.outboundBudgetBytes / 1_048_576}MiB ` +
+        `inbound=${bridge.inboundBudgetBytes / 1_048_576}MiB`,
+    );
     cloudRuntimeBridge = new CloudRuntimeBridgeRelay({
+      ...bridge,
       resolve: async (token) => {
         const grant = await clientAdmission.authorizeRelay(token);
         if (!grant) return null;
