@@ -365,14 +365,20 @@ The running Dev launcher prepares this fixture after normal sign-in;
 It resolves only that active authenticated member and Organization in this
 generation, verifies email/slug, and uses the existing
 operator utilities to grant Dev platform-owner authority and one
-workspace/running-workspace quota. That role supplies the ordinary audited
-complimentary Pro entitlement. The release allowance issuer supplies its
-standard **500 compute hours per monthly period**, priced with the configured
-worker rate. For example, `secondsPerDollar: 100000` gives $18 of ledger credit;
-this is spending authority, not a purchase or free provider usage. The normal
-lease, metering and exhaustion rules apply. Retrying reuses the existing
-monthly receipt; it never adds another grant. Staff benefits retain their normal
-monthly renewal behavior until the disposable environment is archived.
+workspace/running-workspace quota. That active role supplies the audited
+complimentary Pro entitlement. The release allowance issuer supplies the initial
+ordinary **500 compute hours per monthly period** receipt, priced with the
+configured worker rate. For example, `secondsPerDollar: 100000` gives $18 of
+initial ledger credit; this is spending authority, not a purchase or free
+provider usage. An active platform owner or developer with a current staff
+benefit has no monthly machine-hour allowance cap: audited, user-owned ledger
+extensions fund only the exact finite lease demand beyond the ordinary receipt.
+Ordinary nonstaff Pro retains its 500-hour cap. Staff revocation, suspension or
+deletion prevents further staff-demand funding, including with separately paid
+Pro. Normal lease TTL, metering, provider wallet/admission and quota/resource
+limits still apply. Retrying fixture preparation reuses the existing monthly
+receipt; it never issues it twice. Monthly receipts retain their normal renewal
+behavior until the disposable environment is archived.
 
 The base example provisions infrastructure only. Add and verify the optional
 member/Organization fixture above to enable automatic native qualification.
