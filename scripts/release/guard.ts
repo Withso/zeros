@@ -32,6 +32,27 @@ export async function publicIdentity(channel: Channel, fetcher: typeof fetch = f
   } catch { return { present: false, identity: null }; } finally { clearTimeout(timer); }
 }
 
+/** The commit a channel's Pages surface serves, from its anonymous deployment
+ * manifest; null when unavailable or malformed. Same bounds as identity. */
+export async function publicPagesSource(origin: string, fetcher: typeof fetch = fetch) {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(new Error("pages timeout")); }, 5_000);
+  });
+  try {
+    return await Promise.race([(async () => {
+      const response = await fetcher(`${origin}/zeros-deployment.json`, { method: "GET", credentials: "omit",
+        redirect: "error", cache: "no-store", headers: { accept: "application/json" }, signal: controller.signal });
+      if (!response.ok) return null;
+      const text = await response.text();
+      if (text.length > 4 * 1024) return null;
+      const value = JSON.parse(text);
+      return value?.version === 1 && typeof value.commitSha === "string" && /^[a-f0-9]{40}$/.test(value.commitSha) ? value.commitSha as string : null;
+    })(), deadline]);
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+
 export async function hostedWorkerPromotionRequired(enabled: boolean, candidate: Pick<DisabledCandidate, "channel" | "sourceSha" | "provider">, deps: GuardDependencies = {}) {
   if (!enabled) return false;
   const { identity } = await publicIdentity(candidate.channel, deps.fetch);
@@ -64,8 +85,20 @@ export async function disabledGuard(_files: string[], candidate: DisabledCandida
   let previous: Awaited<ReturnType<typeof migrationManifest>> | undefined;
   if (baseline) { try { previous = await (deps.migrationManifest ?? migrationManifest)(baseline.sourceSha); } catch { /* Require live proof below. */ } }
   const observed = await publicIdentity(candidate.channel, deps.fetch ?? fetch), identity = observed.identity;
-  const manualCutoverVerified = !!identity && (identity.sourceSha === candidate.sourceSha ||
+  const identityMatches = !!identity && (identity.sourceSha === candidate.sourceSha ||
     identity.migrations.expectedHead === manifest.head && identity.migrations.manifestSha256 === manifest.sha256);
+  // A schema change since the verified last publication was cut over by a
+  // person or the controlled-cutover workflow. It is complete only when every
+  // Pages surface serves the same commit as the cut-over API, so a run stopped
+  // after the API but before Pages cannot authorize desktop publication.
+  const schemaChanged = !!previous && previous.sha256 !== manifest.sha256;
+  let pagesVerified = true;
+  if (identityMatches && schemaChanged) {
+    const { app, ops } = CHANNELS[candidate.channel], origins: string[] = ops ? [app, ops] : [app];
+    const served = await Promise.all(origins.map(origin => publicPagesSource(origin, deps.fetch ?? fetch)));
+    pagesVerified = served.every(sha => sha === identity!.sourceSha);
+  }
+  const manualCutoverVerified = identityMatches && pagesVerified;
   let workerChanged = true, workerVerified = false;
   const hash = deps.workerInputsSha256 ?? workerInputsSha256;
   if (baseline) { try { workerChanged = await hash(baseline.sourceSha) !== await hash(candidate.sourceSha); } catch { /* Unknown is changed. */ } }
@@ -86,6 +119,7 @@ export async function disabledGuard(_files: string[], candidate: DisabledCandida
   if (baseline?.evidence) notes.push(baseline.evidence);
   if (!baseline) notes.push("Published baseline unavailable: require the channel tag and retained successful release publish-step evidence (GitHub actions:read), or verify manual cutover through live identity.");
   if (manualCutoverVerified) notes.push("manual cutover verified by the public release identity; this is not a hosted success receipt or backup audit.");
+  if (identityMatches && !pagesVerified) notes.push("The API reports the cutover, but the channel's Pages do not serve its commit yet; finish the cutover's Pages upload before publication.");
   if (changes.migrations && !manualCutoverVerified) notes.push("Candidate migration cutover is not verified. Without a published channel baseline or matching live identity, publication is blocked.", manualCutoverSteps(candidate));
   if (changes.worker && !candidate.cloudEnabled) notes.push("Worker input changes are warning-only because this desktop builds with cloud disabled.");
   if (workerVerified) notes.push("Qualified live worker identity matches the candidate's committed worker inputs.");

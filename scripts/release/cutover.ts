@@ -10,6 +10,7 @@ import { MigrationReceipt, PromotionError, ReleaseIdentity, SHA, WorkOSVerificat
 
 export type CutoverDependencies = {
   assertCurrent(): Promise<void>;
+  validateTargets(): Promise<void>;
   holdDeploys(): Promise<void>;
   inspect(): Promise<void>;
   migration(execute: boolean): Promise<unknown>;
@@ -18,9 +19,26 @@ export type CutoverDependencies = {
   deploy(): Promise<string>;
   waitDeployment(id: string): Promise<void>;
   waitMaintenance(): Promise<unknown>;
+  waitPreviousDeploymentsStopped(activeId: string): Promise<void>;
   waitIdentity(): Promise<unknown>;
   publishPages(surface: Surface): Promise<{ id: string; surface: Surface }>;
   verifyWorkOS(): Promise<unknown>;
+};
+
+/** Maintenance as last confirmed, never as merely requested. */
+export type MaintenanceState = "off" | "requested" | "confirmed" | "clearing" | "cleared";
+
+/** Allowlisted progress for recovery: stage, maintenance state, deployment and
+ * backup identities and migration ledger state. No provider bodies or credentials. */
+export type CutoverJournal = {
+  stage: string;
+  maintenance: MaintenanceState;
+  maintenanceDeploymentId?: string;
+  railwayDeploymentId?: string;
+  plan?: z.infer<typeof MigrationReceipt>;
+  migration?: z.infer<typeof MigrationReceipt>;
+  pendingAfterFailure?: string[];
+  pages: Surface[];
 };
 
 const id = z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/);
@@ -43,57 +61,86 @@ export function parseApprovals(value: string | undefined): string[] {
 const sameSet = (left: readonly string[], right: readonly string[]) =>
   left.length === right.length && [...left].sort().every((name, index) => name === [...right].sort()[index]);
 
-export async function controlledCutover(config: PromotionConfig, deps: CutoverDependencies, approvals: string[]) {
-  let stage = "preflight", inMaintenance = false;
+const MAINTENANCE_NOTE: Record<MaintenanceState, string> = {
+  off: "",
+  requested: " Maintenance was requested but never confirmed live; the previous deployment may still be serving.",
+  confirmed: " The API remains in maintenance mode; no desktop publication was authorized.",
+  clearing: " Maintenance was cleared, but the serving deployment's readiness is unverified; check it before retrying.",
+  cleared: "",
+};
+
+export function newCutoverJournal(): CutoverJournal {
+  return { stage: "preflight", maintenance: "off", pages: [] };
+}
+
+export async function controlledCutover(config: PromotionConfig, deps: CutoverDependencies, approvals: string[], journal = newCutoverJournal()) {
+  const enter = (stage: string) => { journal.stage = stage; };
   try {
     await deps.assertCurrent();
     // Plan first: a wrong approval list stops before any provider setting changes.
-    stage = "migration plan";
+    enter("migration plan");
     const plan = MigrationReceipt.parse(await deps.migration(false));
+    journal.plan = plan;
     requireCheck(plan.mode === "plan" && plan.database === config.database && plan.branch.name === config.databaseBranch, "Migration plan target mismatch");
     requireCheck(sameSet(plan.controlledApprovals, approvals),
       `Approvals must list exactly the pending controlled migrations: ${plan.controlledApprovals.join(", ") || "none"}`);
-    stage = "deploy hold";
+    enter("target validation");
+    await deps.validateTargets();
+    await deps.assertCurrent();
+    enter("deploy hold");
     await deps.holdDeploys();
     await deps.inspect();
-    // Check again before the first destination mutation, after the role plan.
-    await deps.assertCurrent();
-    stage = "source retarget";
+    enter("source retarget");
     await deps.retarget();
     await deps.inspect();
-    stage = "maintenance on";
-    // From the first maintenance write on, an ambiguous failure must be
-    // reconciled as if it applied: keep the API fenced until a person checks.
-    inMaintenance = true;
+    enter("maintenance on");
+    journal.maintenance = "requested";
     await deps.setMaintenance(true);
-    const maintenanceDeploymentId = await deps.deploy();
-    await deps.waitDeployment(maintenanceDeploymentId);
+    journal.maintenanceDeploymentId = await deps.deploy();
+    await deps.waitDeployment(journal.maintenanceDeploymentId);
     await deps.waitMaintenance();
-    stage = "backup and migration";
-    const migration = MigrationReceipt.parse(await deps.migration(true));
+    journal.maintenance = "confirmed";
+    // The candidate is fenced; now every replaced deployment must be gone too.
+    enter("previous deployments stopped");
+    await deps.waitPreviousDeploymentsStopped(journal.maintenanceDeploymentId);
+    await deps.assertCurrent();
+    enter("backup and migration");
+    let migration;
+    try {
+      migration = MigrationReceipt.parse(await deps.migration(true));
+    } catch (error) {
+      // Record what is still pending; earlier files may have committed.
+      try { journal.pendingAfterFailure = MigrationReceipt.parse(await deps.migration(false)).pendingMigrations; } catch { /* Reconcile manually. */ }
+      throw error;
+    }
+    journal.migration = migration;
     requireCheck(migration.mode === "execute" && migration.ledger === "verified" && migration.backup?.state === "success" && migration.role.deleted &&
       migration.database === config.database && migration.branch.name === config.databaseBranch && sameSet(migration.controlledApprovals, approvals),
     "Migration execution receipt is incomplete");
-    stage = "maintenance off";
+    enter("maintenance off");
+    journal.maintenance = "clearing";
     await deps.setMaintenance(false);
-    const railwayDeploymentId = await deps.deploy();
-    await deps.waitDeployment(railwayDeploymentId);
+    journal.railwayDeploymentId = await deps.deploy();
+    await deps.waitDeployment(journal.railwayDeploymentId);
     const backend = ReleaseIdentity.parse(await deps.waitIdentity());
     requireCheck(backend.channel === config.channel && backend.sourceSha === config.sourceSha && backend.migrations.head === backend.migrations.expectedHead,
       "Cutover API identity does not belong to this exact release");
-    inMaintenance = false;
-    stage = "Pages publication";
+    journal.maintenance = "cleared";
+    enter("Pages publication");
     const pages = [];
-    for (const surface of config.surfaces) pages.push(await deps.publishPages(surface));
-    stage = "WorkOS verification";
+    for (const surface of config.surfaces) { pages.push(await deps.publishPages(surface)); journal.pages.push(surface); }
+    enter("WorkOS verification");
     const workos = WorkOSVerification.parse(await deps.verifyWorkOS());
+    enter("complete");
     return CutoverReceipt.parse({ version: 1, status: "cutover-complete", channel: config.channel, sourceSha: config.sourceSha,
       branch: config.branch, repository: config.repository, runId: config.runId, runAttempt: config.runAttempt, approvals,
-      migration, maintenanceDeploymentId, railwayDeploymentId, backend, pages, workos, completedAt: new Date().toISOString() });
+      migration, maintenanceDeploymentId: journal.maintenanceDeploymentId, railwayDeploymentId: journal.railwayDeploymentId,
+      backend, pages, workos, completedAt: new Date().toISOString() });
   } catch (error) {
     // Provider errors, Zod input excerpts, child output and driver details are
     // private. Only fixed policy diagnostics may leave this boundary.
-    const message = error instanceof PromotionError ? error.message : `Controlled cutover stopped at ${stage}; reconcile this stage before retrying.`;
-    throw new PromotionError(inMaintenance ? `${message} The API remains in maintenance mode; no desktop publication was authorized.` : message);
+    const message = error instanceof PromotionError ? `Controlled cutover stopped at ${journal.stage}: ${error.message}`
+      : `Controlled cutover stopped at ${journal.stage}; reconcile this stage before retrying.`;
+    throw new PromotionError(`${message}${MAINTENANCE_NOTE[journal.maintenance]}`);
   }
 }

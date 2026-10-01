@@ -11,7 +11,8 @@ const config = promotionConfig({ RELEASE_CHANNEL: "beta", RELEASE_SHA: sha, GITH
 const workosEnv = { AUTH_ISSUER: "https://auth-api.example.com/", AUTH_JWKS_URL: "https://auth-api.example.com/sso/jwks/client_desktop",
   AUTH_WEB_CLIENT_ID: "client_web", AUTH_DESKTOP_CLIENT_ID: "client_desktop" };
 
-function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: boolean; staged?: unknown; identity?: unknown }) {
+function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: boolean; staged?: unknown; identity?: unknown;
+  services?: string[]; deployments?: { id: string; status: string }[][] }) {
   const calls: any[] = [];
   const variables: Record<string, string> = { SECRET: "must-not-be-returned" };
   const branch = "release/1.2.2";
@@ -29,6 +30,12 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
     const q: string = request.query;
     if (q.includes("CutoverAutoDeployHold")) { state.autoDeploy = request.variables.input.enabled; return Response.json({ data: { serviceInstanceAutoDeployUpdate: { __typename: "Result" } } }); }
     if (q.includes("CutoverWaitForCiHold")) { state.checkSuites = request.variables.patch.services[config.serviceId].source.checkSuites; return Response.json({ data: { environmentPatchCommit: "commit1" } }); }
+    if (q.includes("CutoverServices")) return Response.json({ data: { environment: { serviceInstances: {
+      edges: (state.services ?? [config.serviceId]).map(serviceId => ({ node: { serviceId } })) } } } });
+    if (q.includes("CutoverDeployments")) {
+      const nodes = state.deployments?.length && state.deployments.length > 1 ? state.deployments.shift()! : state.deployments?.[0] ?? [];
+      return Response.json({ data: { deployments: { edges: nodes.map(node => ({ node })) } } });
+    }
     if (q.includes("CutoverMaintenanceRead")) return Response.json({ data: { variables } });
     if (q.includes("CutoverMaintenance")) { Object.assign(variables, request.variables.input.variables); return Response.json({ data: { variableCollectionUpsert: true } }); }
     if (q.includes("PromotionState")) return Response.json({ data: {
@@ -71,6 +78,24 @@ describe("cutover provider adapters", () => {
     const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true, staged: { id: "patch1", patch: { services: {} , shared: {} } } });
     await expect(f.providers.holdDeploys()).rejects.toThrow("outstanding staged changes");
     expect(f.calls.every(call => !call.query || call.query.startsWith("query"))).toBe(true);
+  });
+
+  it("refuses before any hold when the environment runs another service that could write", async () => {
+    const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true, services: [config.serviceId, "44444444-4444-4444-8444-444444444444"] });
+    await expect(f.providers.holdDeploys()).rejects.toThrow("runs another Railway service");
+    expect(f.calls.every(call => !call.query || call.query.startsWith("query"))).toBe(true);
+    expect(f.calls.some(call => call.method === "PATCH")).toBe(false);
+  });
+
+  it("waits until every replaced deployment is gone, not just until the new one serves", async () => {
+    const f = fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false, deployments: [
+      [{ id: "fence", status: "SUCCESS" }, { id: "old", status: "REMOVING" }],
+      [{ id: "fence", status: "SUCCESS" }, { id: "old", status: "REMOVED" }, { id: "older", status: "FAILED" }],
+    ] });
+    await f.providers.waitPreviousDeploymentsStopped("fence");
+    expect(f.calls.filter(call => call.query?.includes("CutoverDeployments"))).toHaveLength(2);
+    const replaced = fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false, deployments: [[{ id: "fence", status: "REMOVED" }, { id: "newer", status: "SUCCESS" }]] });
+    await expect(replaced.providers.waitPreviousDeploymentsStopped("fence")).rejects.toThrow("no longer the serving deployment");
   });
 
   it("writes only the maintenance switch with deploys skipped and confirms it", async () => {

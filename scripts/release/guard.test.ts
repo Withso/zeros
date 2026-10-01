@@ -42,8 +42,10 @@ const hostedJobs = [{ run_id: 1, run_attempt: 1, head_sha: sha, name: "Hosted pr
 function liveIdentity() { return { ...receipt().backend, channel: "alpha", workerQualified: true,
   cloud: { enabled: true, ready: true, state: "healthy" },
   worker: { provider: "boat", imageRef: `boat:zeros-alpha-fixture@sha256:${"c".repeat(64)}`, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096 } }; }
-function fakeIdentity(value: unknown) {
-  return { fetch: vi.fn<typeof fetch>(async () => value === null ? new Response("missing", { status: 404 }) : Response.json(value)),
+function fakeIdentity(value: unknown, pagesSha?: string) {
+  return { fetch: vi.fn<typeof fetch>(async input => String(input).endsWith("/zeros-deployment.json")
+      ? Response.json({ version: 1, commitSha: pagesSha ?? (value as { sourceSha?: string } | null)?.sourceSha, surface: "app" })
+      : value === null ? new Response("missing", { status: 404 }) : Response.json(value)),
     channelBaseline: async () => ({ tag: "alpha", sourceSha: baselineSha }),
     migrationManifest: vi.fn(async (source?: string) => source === baselineSha ? { head: "0111_test.sql", sha256: "1".repeat(64) } : manifest),
     workerInputsSha256: vi.fn(async (source: string) => (source === baselineSha ? "f" : "d").repeat(64)) };
@@ -118,6 +120,22 @@ describe("disabled promotion guard", () => {
     expect(deps.fetch).toHaveBeenCalledWith("https://api-alpha.zeros.build/v1/release-identity", expect.objectContaining({
       method: "GET", credentials: "omit", redirect: "error", cache: "no-store", signal: expect.any(AbortSignal) }));
     expect(new Headers(deps.fetch.mock.calls[0][1]?.headers).has("authorization")).toBe(false);
+  });
+  it("keeps a schema cutover blocked until every Pages surface serves the cut-over API's commit", async () => {
+    const identity = liveIdentity(); identity.migrations.manifestSha256 = "f".repeat(64);
+    const stale = await disabledGuard([migrationFile], candidate, fakeIdentity(identity, "9".repeat(40)));
+    expect(stale).toMatchObject({ blocked: true, manualCutoverVerified: false });
+    expect(stale.message).toContain("finish the cutover's Pages upload before publication");
+    const deps = fakeIdentity(identity);
+    expect(await disabledGuard([migrationFile], candidate, deps)).toMatchObject({ blocked: false, manualCutoverVerified: true });
+    expect(deps.fetch.mock.calls.map(call => String(call[0]))).toEqual(["https://api-alpha.zeros.build/v1/release-identity",
+      "https://app-alpha.zeros.build/zeros-deployment.json", "https://ops-alpha.zeros.build/zeros-deployment.json"]);
+  });
+  it("does not consult Pages when the published schema is unchanged", async () => {
+    const deps = fakeIdentity(liveIdentity(), "9".repeat(40));
+    deps.migrationManifest = vi.fn(async () => manifest);
+    expect(await disabledGuard([], candidate, deps)).toMatchObject({ blocked: false });
+    expect(deps.fetch.mock.calls.some(call => String(call[0]).endsWith("/zeros-deployment.json"))).toBe(false);
   });
   it("accepts a different backend SHA only when the full candidate migration manifest is current", async () => {
     const identity = { ...liveIdentity(), sourceSha: "e".repeat(40) };

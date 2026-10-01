@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { promotionConfig, type Surface } from "./contracts";
-import { controlledCutover, parseApprovals, type CutoverDependencies } from "./cutover";
+import { controlledCutover, newCutoverJournal, parseApprovals, type CutoverDependencies } from "./cutover";
 
 const sha = "a".repeat(40);
 const config = promotionConfig({ RELEASE_CHANNEL: "production", RELEASE_SHA: sha, GITHUB_SHA: sha, RELEASE_BRANCH: "release/1.2.3",
@@ -25,6 +25,7 @@ function dependencies(overrides: Partial<CutoverDependencies> = {}) {
   let deploys = 0;
   const deps: CutoverDependencies = {
     assertCurrent: async () => { calls.push("current"); },
+    validateTargets: async () => { calls.push("validate"); },
     holdDeploys: async () => { calls.push("hold"); },
     inspect: async () => { calls.push("inspect"); },
     migration: async execute => { calls.push(execute ? "migrate" : "plan"); return migration(execute ? "execute" : "plan"); },
@@ -33,6 +34,7 @@ function dependencies(overrides: Partial<CutoverDependencies> = {}) {
     deploy: async () => { deploys++; calls.push("deploy"); return `deploy${deploys}`; },
     waitDeployment: async id => { calls.push(`wait ${id}`); },
     waitMaintenance: async () => { calls.push("fenced"); return true; },
+    waitPreviousDeploymentsStopped: async id => { calls.push(`drained ${id}`); },
     waitIdentity: async () => { calls.push("ready"); return identity; },
     publishPages: async (surface: Surface) => { calls.push(`pages ${surface}`); return { id: `page-${surface}`, surface }; },
     verifyWorkOS: async () => { calls.push("workos"); return { kind: "workos-handshake-v1", surfaces: ["app", "ops"], verifiedAt: new Date().toISOString() }; },
@@ -45,8 +47,8 @@ describe("controlled cutover", () => {
   it("fences writers before the approved backup and migration, then deploys, publishes Pages and verifies WorkOS", async () => {
     const { calls, deps } = dependencies();
     const receipt = await controlledCutover(config, deps, controlled);
-    expect(calls).toEqual(["current", "plan", "hold", "inspect", "current", "retarget", "inspect",
-      "maintenance on", "deploy", "wait deploy1", "fenced", "migrate",
+    expect(calls).toEqual(["current", "plan", "validate", "current", "hold", "inspect", "retarget", "inspect",
+      "maintenance on", "deploy", "wait deploy1", "fenced", "drained deploy1", "current", "migrate",
       "maintenance off", "deploy", "wait deploy2", "ready", "pages app", "pages ops", "workos"]);
     expect(receipt).toMatchObject({ status: "cutover-complete", approvals: controlled, maintenanceDeploymentId: "deploy1", railwayDeploymentId: "deploy2", runId: "9" });
   });
@@ -56,16 +58,52 @@ describe("controlled cutover", () => {
     ["an extra approval", [...controlled, "0104_cloud_workspace_monthly_allowances.sql"]],
   ])("refuses %s before any provider setting changes", async (_name, approvals) => {
     const { calls, deps } = dependencies();
-    await expect(controlledCutover(config, deps, approvals)).rejects.toThrow(
+    await expect(controlledCutover(config, deps, approvals)).rejects.toThrow("Controlled cutover stopped at migration plan: " +
       "Approvals must list exactly the pending controlled migrations: 0101_cloud_workspace_pro_entitlements.sql, 0103_cloud_workspace_pro_sharing.sql");
     expect(calls).toEqual(["current", "plan"]);
+  });
+
+  it("validates every destination read-only before holding any deployer", async () => {
+    const { calls, deps } = dependencies({ validateTargets: async () => { calls.push("validate"); throw new Error("wrong service"); } });
+    await expect(controlledCutover(config, deps, controlled)).rejects.toThrow("Controlled cutover stopped at target validation; reconcile this stage before retrying.");
+    expect(calls).toEqual(["current", "plan", "validate"]);
+  });
+
+  it("does not migrate while a replaced deployment may still be serving", async () => {
+    const { calls, deps } = dependencies({ waitPreviousDeploymentsStopped: async () => { throw new Error("old deployment still SUCCESS"); } });
+    await expect(controlledCutover(config, deps, controlled)).rejects.toThrow(
+      "Controlled cutover stopped at previous deployments stopped; reconcile this stage before retrying. The API remains in maintenance mode");
+    expect(calls).not.toContain("migrate");
+  });
+
+  it("records what is still pending when the migration itself fails", async () => {
+    let plans = 0;
+    const { deps } = dependencies({ migration: async execute => {
+      if (execute) throw new Error("driver detail with connection string");
+      plans++; return migration("plan", plans > 1 ? { pendingMigrations: ["0103_cloud_workspace_pro_sharing.sql"] } : {});
+    } });
+    const journal = newCutoverJournal();
+    const failure = controlledCutover(config, deps, controlled, journal);
+    await expect(failure).rejects.toThrow("Controlled cutover stopped at backup and migration; reconcile this stage before retrying. The API remains in maintenance mode");
+    await expect(failure).rejects.not.toThrow("connection string");
+    expect(journal).toMatchObject({ stage: "backup and migration", maintenance: "confirmed", maintenanceDeploymentId: "deploy1",
+      pendingAfterFailure: ["0103_cloud_workspace_pro_sharing.sql"] });
+  });
+
+  it("says readiness is unverified, not fenced, after maintenance was cleared", async () => {
+    const { deps } = dependencies({ waitIdentity: async () => { throw new Error("timed out"); } });
+    const journal = newCutoverJournal();
+    await expect(controlledCutover(config, deps, controlled, journal)).rejects.toThrow(
+      "Controlled cutover stopped at maintenance off; reconcile this stage before retrying. Maintenance was cleared, but the serving deployment's readiness is unverified");
+    expect(journal.maintenance).toBe("clearing");
   });
 
   it("keeps the API in maintenance and stops when the migration receipt is incomplete", async () => {
     const { calls, deps } = dependencies({
       migration: async execute => execute ? migration("execute", { role: { deleted: false } }) : migration("plan"),
     });
-    await expect(controlledCutover(config, deps, controlled)).rejects.toThrow("The API remains in maintenance mode");
+    await expect(controlledCutover(config, deps, controlled)).rejects.toThrow(
+      "Controlled cutover stopped at backup and migration; reconcile this stage before retrying. The API remains in maintenance mode");
     expect(calls).not.toContain("maintenance off");
     expect(calls.filter(call => call === "deploy")).toHaveLength(1);
   });
@@ -73,7 +111,7 @@ describe("controlled cutover", () => {
   it("does not migrate until the candidate itself serves maintenance", async () => {
     const { calls, deps } = dependencies({ waitMaintenance: async () => { throw new Error("timed out"); } });
     await expect(controlledCutover(config, deps, controlled)).rejects.toThrow(
-      "Controlled cutover stopped at maintenance on; reconcile this stage before retrying. The API remains in maintenance mode");
+      "Controlled cutover stopped at maintenance on; reconcile this stage before retrying. Maintenance was requested but never confirmed live");
     expect(calls).not.toContain("migrate");
   });
 

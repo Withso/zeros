@@ -48,26 +48,26 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
   const noStagedChanges = (environment: { unmergedChangesCount?: unknown }, staged: { patch?: unknown } | null | undefined) =>
     (environment.unmergedChangesCount === 0 || environment.unmergedChangesCount === null) &&
     staged?.patch !== null && typeof staged?.patch === "object" && !Array.isArray(staged.patch) && Object.keys(staged.patch).length === 0;
-  async function inspectRailway() {
+  async function inspectRailway(requireHeld = true) {
     const data = await readRailway(), environment = data.environment;
-    requireCheck(data.serviceInstanceAutoDeployStatus?.enabled === false, "Disable independent Railway autodeploy before enabling hosted promotion");
+    if (requireHeld) requireCheck(data.serviceInstanceAutoDeployStatus?.enabled === false, "Disable independent Railway autodeploy before enabling hosted promotion");
     requireCheck(environment?.id === config.environmentId && environment.projectId === config.projectId && environment.name === config.channel &&
       noStagedChanges(environment, data.environmentStagedChanges) && data.serviceInstance?.serviceId === config.serviceId && data.serviceInstance.environmentId === config.environmentId,
     "Railway target mismatch or outstanding staged changes");
     const source = environment.config?.services?.[config.serviceId]?.source;
-    requireCheck(source?.repo === config.repository && source.checkSuites === false && source.rootDirectory === "apps/control-plane",
+    requireCheck(source?.repo === config.repository && (!requireHeld || source.checkSuites === false) && source.rootDirectory === "apps/control-plane",
       "Railway source/root must match this repository and Wait for CI must be disabled");
     requireCheck(data.serviceInstance.domains?.customDomains?.some((row: { domain: string }) => row.domain === new URL(config.api).hostname), "Railway API domain mismatch");
     if (config.channel !== "alpha") assertNotOlderBranch(config.branch, source.branch);
     else requireCheck(source.branch === "main", "Railway Alpha source must be main");
     return source;
   }
-  async function inspectPages(surface: Surface) {
+  async function inspectPages(surface: Surface, requireHeld = true) {
     const project = await pages(pagesPath(surface)), source = project.source?.config;
     const expected = publicPagesEnvironment(config, surface, {}), vars = project.deployment_configs?.production?.env_vars;
     requireCheck(project.name === (surface === "app" ? config.appProject : config.opsProject) &&
       project.domains?.includes(new URL(expected.APP_ORIGIN).hostname), "Pages project/domain identity mismatch");
-    requireCheck(!project.source || source?.production_deployments_enabled === false && source?.preview_deployment_setting === "none",
+    requireCheck(!requireHeld || !project.source || source?.production_deployments_enabled === false && source?.preview_deployment_setting === "none",
       "Disable independent Pages production and preview autodeploys before enabling hosted promotion");
     if (project.source) requireCheck(`${source.owner}/${source.repo_name}`.toLowerCase() === config.repository.toLowerCase(), "Pages repository mismatch");
     for (const name of ["ZEROS_DEPLOY_ENV", "AUTH_PROVIDER", "APP_ORIGIN", "CONTROL_PLANE_URL", "ZEROS_SURFACE", "WORKOS_BROWSER_ROUTE_PREFIX"] as const) {
@@ -79,8 +79,22 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
     else requireCheck(project.production_branch === "main", "Pages Alpha source must be main");
     return project;
   }
+  /** Read-only: every destination identity a cutover will touch, before any
+   * hold. The channel environment must run only the control-plane service. */
+  async function validateTargets() {
+    workosVerificationConfig(env);
+    await inspectRailway(false);
+    const instances = await railway(`query CutoverServices($environmentId:String!) {
+      environment(id:$environmentId) { serviceInstances { edges { node { serviceId } } } }
+    }`, { environmentId: config.environmentId });
+    const services = instances.environment?.serviceInstances?.edges?.map((edge: { node: { serviceId: string } }) => edge.node.serviceId) ?? [];
+    requireCheck(services.length === 1 && services[0] === config.serviceId,
+      "The channel environment runs another Railway service; account for every database writer before a cutover");
+    for (const surface of config.surfaces) await inspectPages(surface, false);
+  }
   return {
     railway,
+    validateTargets,
     async updateWorkerIdentity(variables: Record<string, string>) {
       const expectedKeys = ["CLOUD_WORKSPACE_PROVIDER", "BOAT_SNAPSHOT_ID", "BOAT_IMAGE_BUILD_SHA256", "ZEROS_CLOUD_SOURCE_COMMIT", "ZEROS_CLOUD_IMAGE_ARCHITECTURE", "CLOUD_WORKSPACE_STORAGE_MIB"];
       requireCheck(Object.keys(variables).length === expectedKeys.length && expectedKeys.every(key => Object.hasOwn(variables, key)), "Worker tuple must be complete");
@@ -142,10 +156,8 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
      * autodeploy and Wait for CI, then Pages production and preview builds.
      * Source branches stay as they are; `retarget` moves them afterwards. */
     async holdDeploys() {
+      await validateTargets();
       const before = await readRailway(), environment = before.environment;
-      requireCheck(environment?.id === config.environmentId && environment.projectId === config.projectId && environment.name === config.channel &&
-        noStagedChanges(environment, before.environmentStagedChanges) && before.serviceInstance?.serviceId === config.serviceId &&
-        before.serviceInstance.environmentId === config.environmentId, "Railway target mismatch or outstanding staged changes");
       if (before.serviceInstanceAutoDeployStatus?.enabled !== false) {
         await railway(`mutation CutoverAutoDeployHold($input:ServiceInstanceAutoDeployUpdateInput!) {
           serviceInstanceAutoDeployUpdate(input:$input) { __typename }
@@ -167,6 +179,19 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
         const held = (await pages(pagesPath(surface))).source?.config;
         requireCheck(held?.production_deployments_enabled === false && held?.preview_deployment_setting === "none", "Pages deploy hold was not confirmed");
       }
+    },
+    /** Every deployment except `activeId` must be gone: a replaced one can keep
+     * serving through Railway's overlap and draining windows. */
+    async waitPreviousDeploymentsStopped(activeId: string) {
+      const stopped = new Set(["REMOVED", "FAILED", "CRASHED", "SKIPPED"]);
+      await poll(async () => {
+        const result = await railway(`query CutoverDeployments($projectId:String!,$environmentId:String!,$serviceId:String!) {
+          deployments(first:50,input:{projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId}) { edges { node { id status } } }
+        }`, target);
+        const nodes: { id: string; status: string }[] = result.deployments?.edges?.map((edge: { node: { id: string; status: string } }) => edge.node) ?? [];
+        requireCheck(nodes.some(node => node.id === activeId && node.status === "SUCCESS"), "The maintenance deployment is no longer the serving deployment");
+        return nodes.every(node => node.id === activeId || stopped.has(node.status));
+      }, { sleep: options.pause });
     },
     /** `DATABASE_MAINTENANCE_MODE` takes effect on the next explicit deploy. */
     async setMaintenance(on: boolean) {
