@@ -9,7 +9,7 @@ import {CloudWorkspaceEngineAuthorityError} from "./engine-authority.js";
 import { CloudCustomizationOperationSchema } from "./customization-workspace.js";
 import {CloudBackgroundOperationSchema} from "./agent-background-tasks.js";
 
-export function createCloudAgentCredentialRoutes(service:DatabaseCloudAgentCredentialService):Hono{
+export function createCloudAgentCredentialRoutes(service:DatabaseCloudAgentCredentialService,options:{workspaceEnabled?:boolean}={}):Hono{
   const app=new Hono(),base="/v1/cloud-agent-credentials";
   for(const path of [base,`${base}/*`]){
     app.use(path,bodyLimit({maxSize:96*1024}));
@@ -40,12 +40,14 @@ export function createCloudAgentCredentialRoutes(service:DatabaseCloudAgentCrede
     return c.json(await service.put({...parsed.data,material:parsed.data.material,ownerUserId:c.get("user").id,credentialId:c.req.param("credential")}));
   });
   app.delete(`${base}/:credential`,async c=>c.json(await service.revoke(c.get("user").id,c.req.param("credential"))));
-  app.get(`${base}/:credential/delegations`,async c=>c.json(await service.listDelegations(c.get("user").id,c.req.param("credential"))));
-  app.post(`${base}/delegations`,async c=>c.json(await service.delegate(c.get("user").id,await c.req.json().catch(()=>null))));
-  app.delete(`${base}/delegations/:delegation`,async c=>c.json(await service.revokeDelegation(c.get("user").id,c.req.param("delegation"))));
-  app.get("/v1/cloud-workspaces/:workspace/agent-credentials",async c=>{
-    c.header("Cache-Control","no-store");return c.json(await service.forWorkspace(c.get("user").id,c.req.param("workspace")));
-  });
+  if(options.workspaceEnabled!==false){
+    app.get(`${base}/:credential/delegations`,async c=>c.json(await service.listDelegations(c.get("user").id,c.req.param("credential"))));
+    app.post(`${base}/delegations`,async c=>c.json(await service.delegate(c.get("user").id,await c.req.json().catch(()=>null))));
+    app.delete(`${base}/delegations/:delegation`,async c=>c.json(await service.revokeDelegation(c.get("user").id,c.req.param("delegation"))));
+    app.get("/v1/cloud-workspaces/:workspace/agent-credentials",async c=>{
+      c.header("Cache-Control","no-store");return c.json(await service.forWorkspace(c.get("user").id,c.req.param("workspace")));
+    });
+  }
   const organizationBase="/v1/organizations/:organization/agent-connections";
   for(const path of [organizationBase,`${organizationBase}/*`,"/v1/cloud-workspaces/:workspace/agent-credentials/prepare"]){
     app.use(path,bodyLimit({maxSize:16*1024}));
@@ -57,11 +59,11 @@ export function createCloudAgentCredentialRoutes(service:DatabaseCloudAgentCrede
     c.get("user").id,c.req.param("organization"),c.req.param("provider"),await c.req.json().catch(()=>null))));
   app.delete(`${organizationBase}/accounts/:credential`,async c=>c.json(await service.removeOrganizationCredential(
     c.get("user").id,c.req.param("organization"),c.req.param("credential"))));
-  app.post("/v1/cloud-workspaces/:workspace/agent-credentials/prepare",async c=>{
-    if(!z.object({}).strict().safeParse(await c.req.json().catch(()=>null)).success)
-      throw new HttpError(422,"invalid_agent_credential_request","Invalid agent credential request");
-    return c.json(await service.authorizeOrganizationForWorkspace(c.get("user").id,c.req.param("workspace")));
-  });
+  if(options.workspaceEnabled!==false)app.post("/v1/cloud-workspaces/:workspace/agent-credentials/prepare",async c=>{
+      if(!z.object({}).strict().safeParse(await c.req.json().catch(()=>null)).success)
+        throw new HttpError(422,"invalid_agent_credential_request","Invalid agent credential request");
+      return c.json(await service.authorizeOrganizationForWorkspace(c.get("user").id,c.req.param("workspace")));
+    });
   return app;
 }
 

@@ -61,6 +61,7 @@ const configuration = z.object({ version: z.literal(1), registry: z.object({ end
   boat: z.object({ accountScope: name, billingOrg: name, baseSnapshot: name }).strict(), railway: z.object({ projectId: name }).strict(),
   planetscale: z.object({ organization: name, database: name }).strict(), cloudflare: z.object({ accountId: name }).strict(),
 }).strict() }).strict();
+export { configuration as BoatAccountAdmissionConfigurationSchema };
 export function configuredBoatAccountAdmission(accountScope: string, billingOrg: string, env: NodeJS.ProcessEnv = process.env): BoatAccountAdmission | null {
   let parsed;
   try { parsed = configuration.safeParse(JSON.parse(env.WORKER_ADMISSION_CONFIG_JSON ?? "")); } catch { return null; }

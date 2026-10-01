@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 import type { Config } from "./config.js";
-import { createReleaseIdentityRoutes } from "./release-identity.js";
+import { createReleaseIdentityRoutes, qualifiedWorkerMatrix } from "./release-identity.js";
 
 const sha = "a".repeat(40);
 const manifest = [{ name: "0001_initial.sql", checksum: `sha256:${"b".repeat(64)}` }];
@@ -16,6 +16,41 @@ function harness(overrides: Partial<Config> = {}, ledger: Array<{ name: string; 
   return { app, readLedger };
 }
 describe("public release readiness", () => {
+  it("requires the enabled three-kind MCP-qualified matrix on one exact runtime contract", () => {
+    const rows = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"].map(credential_kind => ({
+      credential_kind, runtime_contract_sha256: "c".repeat(64), profile: "zeros-cloud-worker-v3", enabled: true, mcp_qualified: true }));
+    expect(qualifiedWorkerMatrix(rows)).toBe(true);
+    expect(qualifiedWorkerMatrix(rows.slice(1))).toBe(false);
+    for (const changed of [{ enabled: false }, { mcp_qualified: false }, { profile: "zeros-cloud-worker-v2" },
+      { runtime_contract_sha256: "d".repeat(64) }, { runtime_contract_sha256: "invalid" }]) {
+      expect(qualifiedWorkerMatrix([{ ...rows[0], ...changed }, ...rows.slice(1)])).toBe(false);
+    }
+    expect(qualifiedWorkerMatrix(Array.from({ length: 101 }, () => rows[0]))).toBe(false);
+  });
+  it("verifies a selected worker's actual approval before customer cloud is enabled", async () => {
+    const worker = { provider: "boat" as const, imageRef: `boat:zeros-beta-fixture@sha256:${"c".repeat(64)}`,
+      sourceSha: sha, architecture: "linux/amd64" as const, storageMiB: 20480 };
+    const readWorkerQualified = vi.fn(async () => true);
+    const app = createReleaseIdentityRoutes({ ...config, selectedCloudWorker: worker }, {} as pg.Pool, {
+      sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest, readWorkerQualified,
+    });
+    const response = await app.request("/v1/release-identity");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ cloud: { enabled: false, state: "disabled" }, worker, workerQualified: true });
+    expect(readWorkerQualified).toHaveBeenCalledWith(worker.provider, worker.imageRef);
+  });
+  it("does not query or report cloud-off qualification across maintenance or an incomplete schema", async () => {
+    for (const maintenance of [false, true]) {
+      const readWorkerQualified = vi.fn(async () => true);
+      const app = createReleaseIdentityRoutes({ ...config, databaseMaintenanceMode: maintenance, selectedCloudWorker: {
+        provider: "boat", imageRef: `boat:zeros-fixture@sha256:${"c".repeat(64)}`, sourceSha: sha,
+        architecture: "linux/amd64", storageMiB: 20480 } }, {} as pg.Pool, {
+        sourceSha: sha, readManifest: async () => manifest, readLedger: async () => maintenance ? manifest : [], readWorkerQualified,
+      });
+      expect(await (await app.request("/v1/release-identity")).json()).toMatchObject({ ready: false, workerQualified: false });
+      expect(readWorkerQualified).not.toHaveBeenCalled();
+    }
+  });
   it("reports a verified exact identity without authentication and shares polls", async () => {
     const { app, readLedger } = harness();
     const [a, b] = await Promise.all([app.request("/v1/release-identity"), app.request("/v1/release-identity")]);
