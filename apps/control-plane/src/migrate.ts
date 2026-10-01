@@ -15,7 +15,7 @@ import path from "node:path";
 import pg from "pg";
 import { loadConfig } from "./config.js";
 import { createMigrationPool, withSystemTx } from "./db.js";
-import { assertContractMigrationReady, migrationPhase, MigrationPhaseError, type MigrationPhaseDeclaration } from "./migration-phase.js";
+import { assertContractMigrationReady, isNewerExpandMigration, migrationPhase, MigrationPhaseError, type MigrationPhaseDeclaration } from "./migration-phase.js";
 
 const MIGRATIONS_DIR = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -1015,7 +1015,7 @@ export async function verifyMigrations(
   const known = new Set(migrations.flatMap(migration => [migration.file, ...renamedMigrationAliasesFor(migration.file)]));
   const head = Number(migrations.at(-1)?.file.slice(0, 4) ?? 0);
   const newer = rows.filter(row => !known.has(row.name));
-  if (newer.some(row => row.phase !== "expand" || !/^\d{4}_[a-z0-9_]+\.sql$/.test(row.name) || Number(row.name.slice(0, 4)) <= head)) {
+  if (newer.some(row => !isNewerExpandMigration(row, head))) {
     throw new MigrationDiagnosticError("Database contains an unknown migration that is not a newer expand phase; use a runtime that supports the deployed schema before service boot.");
   }
   for (const migration of migrations) {

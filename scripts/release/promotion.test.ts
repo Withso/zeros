@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { finalizePromotion, promote, promoteServices, type FinalizationDependencies, type PromotionDependencies } from "./promotion";
-import { promotionConfig, type PromotionConfig } from "./contracts";
+import { promotionConfig, ReleaseIdentity, type PromotionConfig } from "./contracts";
 const sha = "a".repeat(40);
 export const env = { RELEASE_CHANNEL: "alpha", RELEASE_SHA: sha, RELEASE_BRANCH: "main", GITHUB_SHA: sha,
   GITHUB_REPOSITORY: "example/zeros", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1", ZEROS_HOSTED_PROMOTION: "enabled",
@@ -49,6 +49,16 @@ describe("ordered hosted promotion", () => {
       await expect(promote(config, deps)).rejects.not.toThrow("credential");
       expect(calls).not.toContain("pages:app");
     }
+  });
+  it("withholds Pages for a ready rollback identity ahead of its packaged head", async () => {
+    const { deps, calls, config } = harness(), waitIdentity = deps.waitIdentity;
+    deps.waitIdentity = async () => {
+      const identity = ReleaseIdentity.parse(await waitIdentity());
+      return { ...identity, migrations: { ...identity.migrations, head: "0122_migration_phases.sql" } };
+    };
+    await expect(promote(config, deps)).rejects.toThrow("exact release");
+    expect(calls).not.toContain("pages:app");
+    expect(calls).not.toContain("workos");
   });
   it("does not auto-approve controlled migrations", async () => {
     const { deps, calls, config } = harness(); const migration = deps.migration;

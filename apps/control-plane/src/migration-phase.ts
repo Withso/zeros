@@ -5,6 +5,17 @@ export type MigrationPhaseDeclaration = {
 };
 export class MigrationPhaseError extends Error {}
 
+export function isNewerExpandMigration(
+  row: { name: string; phase?: string | null },
+  packagedHead: number,
+): boolean {
+  return (
+    row.phase === "expand" &&
+    /^\d{4}_[a-z0-9_]+\.sql$/.test(row.name) &&
+    Number(row.name.slice(0, 4)) > packagedHead
+  );
+}
+
 export function migrationPhase(
   file: string,
   sql: string,
