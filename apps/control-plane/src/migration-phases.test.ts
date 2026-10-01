@@ -177,7 +177,7 @@ describe("expand/contract schema compatibility", () => {
     // same transaction that records its own row.
     const file = "0122_migration_phases.sql";
     const { pool, query } = database(ledger.filter((row) => row.name < file), false);
-    await expect(runMigrations(pool)).resolves.toEqual([file]);
+    await expect(runMigrations(pool)).resolves.toEqual(files.filter((name) => name >= file));
     expect(
       query.mock.calls.find(([text]) =>
         text.startsWith("INSERT INTO schema_migrations"),

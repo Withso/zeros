@@ -292,6 +292,7 @@ const DeleteWorkspaceSchema = z.object({
 type WorkspaceRow = {
   actor_role: string|null;
   sponsor_pro_live: boolean;
+  sponsor_staff_allowance: boolean;
   allowance_available: string|null;
   allowance_policy_id: string|null;
   allowance_seconds_per_dollar: string|null;
@@ -420,8 +421,12 @@ const workspaceSelect = (actorSql="NULL::text") => `
          g.source_commit, pb.observed_state, pb.provider_target,
          pb.last_observed_at AS provider_last_observed_at,
          cloud_workspace_pro_user_live(cw.owner_user_id) AS sponsor_pro_live,
+         EXISTS(SELECT 1 FROM staff_pro_benefits benefit JOIN users staff_account ON staff_account.id=benefit.user_id
+           WHERE benefit.user_id=cw.owner_user_id AND staff_account.staff_role IN ('platform_owner','developer')
+             AND staff_account.auth_status='active' AND staff_account.deleted_at IS NULL
+             AND benefit.revoked_at IS NULL AND benefit.valid_from<=clock_timestamp()) AS sponsor_staff_allowance,
          allowance.compute_policy_id AS allowance_policy_id,allowance.seconds_per_dollar AS allowance_seconds_per_dollar,
-         funding.granted_micro_usd-coalesce(usage.debited,0)-coalesce(usage.reserved,0) AS allowance_available
+         CASE WHEN funding.id IS NOT NULL THEN greatest(allowance_receipt.amount_micro_usd-coalesce(usage.debited,0)-coalesce(usage.reserved,0),0) END AS allowance_available
   FROM cloud_workspaces cw
   JOIN cloud_workspace_generations g
     ON g.workspace_id = cw.id AND g.generation = cw.current_generation
@@ -430,6 +435,7 @@ const workspaceSelect = (actorSql="NULL::text") => `
   LEFT JOIN managed_compute_pro_allowances allowance ON allowance.user_id=cw.owner_user_id
     AND allowance.starts_at<=clock_timestamp() AND allowance.ends_at>clock_timestamp()
   LEFT JOIN managed_compute_user_periods funding ON funding.id=allowance.period_id
+  LEFT JOIN managed_compute_funding_receipts allowance_receipt ON allowance_receipt.id=allowance.receipt_id
   LEFT JOIN LATERAL(SELECT sum(debited_micro_usd) AS debited,sum(reserved_micro_usd) AS reserved
     FROM managed_compute_credit_periods WHERE funding_period_id=funding.id) usage ON true`;
 
@@ -480,7 +486,7 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
   const reason=!config?"cloud_disabled":!row.actor_role?"pro_required":!canManage?"workspace_role_required":!row.sponsor_pro_live?"sponsor_unavailable"
     :!['stopped','archived'].includes(row.status)?"workspace_not_stopped":!policy||row.allowance_available===null?"allowance_pending"
       :row.allowance_policy_id!==policy.policyId||Number(row.allowance_seconds_per_dollar)!==policy.secondsPerDollar?"allowance_unavailable"
-        :Number(row.allowance_available)<minimum!?"allowance_exhausted":null;
+        :!row.sponsor_staff_allowance&&Number(row.allowance_available)<minimum!?"allowance_exhausted":null;
   return {
     id: row.id,
     organizationId: row.org_id,

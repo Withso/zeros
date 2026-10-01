@@ -49,6 +49,21 @@ describe("funded finite compute leases", () => {
     options.periods[0]!.availableMicroUsd = 1199;
     expect(planManagedComputeCredit(options)).toBeNull();
   });
+  it("removes only the staff balance ceiling, not finite resource or period limits", () => {
+    const options = input({ weightNumerator: 4, requestMarginSeconds: 1800 });
+    options.periods[0]!.availableMicroUsd = 0;
+    expect(planManagedComputeCredit(options)).toBeNull();
+    options.periods[0]!.staffAllowance = true;
+    const result = planManagedComputeCredit(options)!;
+    expect(result.ttlSeconds).toBe(3600);
+    expect(result.fundedUntil.getTime()).toBe(NOW + 5400_000);
+    expect(result.allocations[0]!.authorizationMicroUsd).toBe(216000);
+    expect(() => planManagedComputeCredit({ ...options, maximumTtlSeconds: 3601 })).toThrow();
+    expect(() => planManagedComputeCredit({ ...options, requestMarginSeconds: 1801 })).toThrow();
+    expect(() => planManagedComputeCredit({ ...options, weightNumerator: 17 })).toThrow();
+    options.periods[0]!.endsAtMs = NOW + 119000;
+    expect(planManagedComputeCredit(options)).toBeNull();
+  });
   it("never assumes a future grant or bridges an unfunded time gap", () => {
     expect(planManagedComputeCredit(input({ periods: [] }))).toBeNull();
     expect(

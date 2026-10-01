@@ -3,7 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 import { withSystemTx, type Tx } from "../db.js";
 import { HttpError } from "../authz.js";
-import { lockComputeUserFunding } from "./compute-funding.js";
+import { lockComputeUserFunding, readStaffComputeAllowance } from "./compute-funding.js";
 import { computeMicroUsd } from "./provider-compute.js";
 
 export const PRO_STANDARD_SECONDS = 1_800_000;
@@ -318,6 +318,7 @@ export async function readProComputeUsage(pool: pg.Pool, userId: string) {
   return withSystemTx(
     pool,
     async (tx) => {
+      const staff = await readStaffComputeAllowance(tx, userId);
       const row = (
         await tx.query<{
           now: Date;
@@ -326,17 +327,19 @@ export async function readProComputeUsage(pool: pg.Pool, userId: string) {
           period_id: string | null;
           ends_at: Date | null;
           granted: string | null;
+          ordinary_grant: string | null;
           debited: string;
           reserved: string;
           last_state: string | null;
         }>(
           `WITH clock AS (SELECT clock_timestamp() AS now)
       SELECT clock.now,cloud_workspace_pro_user_live(account.id) AS eligible,anchor.anchor_at,allowance.period_id,allowance.ends_at,
-        period.granted_micro_usd AS granted,coalesce(usage.debited,0)::text AS debited,coalesce(usage.reserved,0)::text AS reserved,queue.last_state
+        period.granted_micro_usd AS granted,base.amount_micro_usd AS ordinary_grant,coalesce(usage.debited,0)::text AS debited,coalesce(usage.reserved,0)::text AS reserved,queue.last_state
       FROM users account CROSS JOIN clock
       LEFT JOIN managed_compute_pro_accounts anchor ON anchor.user_id=account.id
       LEFT JOIN managed_compute_pro_allowances allowance ON allowance.user_id=account.id AND allowance.starts_at<=clock.now AND allowance.ends_at>clock.now
       LEFT JOIN managed_compute_user_periods period ON period.id=allowance.period_id
+      LEFT JOIN managed_compute_funding_receipts base ON base.id=allowance.receipt_id
       LEFT JOIN managed_compute_pro_allowance_queue queue ON queue.user_id=account.id
       LEFT JOIN LATERAL(SELECT sum(debited_micro_usd) AS debited,sum(reserved_micro_usd) AS reserved
         FROM managed_compute_credit_periods WHERE funding_period_id=allowance.period_id) usage ON true
@@ -375,7 +378,7 @@ export async function readProComputeUsage(pool: pg.Pool, userId: string) {
           reservedPercent: null,
           availablePercent: null,
         };
-      const grant = Number(row.granted),
+      const grant = Number(!staff && row.ordinary_grant !== null ? row.ordinary_grant : row.granted),
         debited = Number(row.debited),
         reserved = Number(row.reserved);
       if (
@@ -383,7 +386,7 @@ export async function readProComputeUsage(pool: pg.Pool, userId: string) {
           (value) => Number.isSafeInteger(value) && value >= 0,
         ) ||
         grant === 0 ||
-        debited + reserved > grant
+        debited + reserved > Number(row.granted)
       )
         throw new HttpError(
           503,
@@ -397,7 +400,7 @@ export async function readProComputeUsage(pool: pg.Pool, userId: string) {
       );
       return {
         ...base,
-        state: debited + reserved >= grant ? "exhausted" : "ready",
+        state: !staff && debited + reserved >= grant ? "exhausted" : "ready",
         usedPercent: usedBasis / 100,
         reservedPercent: reservedBasis / 100,
         availablePercent: (10000 - usedBasis - reservedBasis) / 100,
