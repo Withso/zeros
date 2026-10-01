@@ -155,6 +155,14 @@ describe("controlled cutover", () => {
     expect(journal.failedMigration).toEqual({ backup: { id: "backup1", state: "success" }, applied: ["0101_cloud_workspace_pro_entitlements.sql"], roleDeleted: true });
   });
 
+  it("stops before the migration when its recovery record cannot be written", async () => {
+    const { calls, deps } = dependencies();
+    await expect(controlledCutover(config, deps, controlled, newCutoverJournal(), async value => {
+      if (value.stage === "backup and migration") throw new Error("disk full");
+    })).rejects.toThrow("Controlled cutover stopped at backup and migration; reconcile this stage before retrying. The API remains in maintenance mode");
+    expect(calls).not.toContain("migrate");
+  });
+
   it("parses exact, de-duplicated approval filenames", () => {
     expect(parseApprovals("")).toEqual([]);
     expect(parseApprovals(" 0103_cloud_workspace_pro_sharing.sql,0101_cloud_workspace_pro_entitlements.sql,0103_cloud_workspace_pro_sharing.sql ")).toEqual(controlled);

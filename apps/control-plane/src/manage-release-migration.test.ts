@@ -158,7 +158,8 @@ describe("release migration runner", () => {
   });
 
   it("records the backup, applied files and role cleanup on a failed execution, without credentials", async () => {
-    const { deps } = harness({ pending: ["0101_next.sql"], runError: new Error(`password authentication failed for migrator.fixture (${PASSWORD})`) });
+    const { deps } = harness({ pending: ["0101_next.sql"], pendingAfter: ["0101_next.sql"],
+      runError: new Error(`password authentication failed for migrator.fixture (${PASSWORD})`) });
     const failure = await releaseMigration(
       { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" },
       deps,
@@ -166,6 +167,38 @@ describe("release migration runner", () => {
     expect(failure).toBeInstanceOf(ReleaseMigrationError);
     expect(failure.partial).toEqual({ backup: { id: "bk1", state: "success" }, applied: [], roleDeleted: true });
     expect(JSON.stringify(failure.partial)).not.toContain(PASSWORD);
+  });
+
+  it("reports exactly which files committed when a later file fails", async () => {
+    const { deps } = harness({ pending: ["0101_a.sql", "0102_b.sql", "0103_c.sql"], pendingAfter: ["0102_b.sql", "0103_c.sql"],
+      runError: new Error("0102 failed") });
+    const failure = await releaseMigration(
+      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" }, deps,
+    ).catch((error: unknown) => error as ReleaseMigrationError);
+    expect(failure.partial).toEqual({ backup: { id: "bk1", state: "success" }, applied: ["0101_a.sql"], roleDeleted: true });
+  });
+
+  it("marks committed files unknown when the ledger cannot be re-read after a failure", async () => {
+    const { calls, deps } = harness({ pending: ["0101_a.sql"], runError: new Error("connection lost") });
+    const plan = deps.migrator!.plan;
+    deps.migrator!.plan = async pool => {
+      if (calls.includes("run")) throw new Error("connection gone");
+      return plan(pool);
+    };
+    const failure = await releaseMigration(
+      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" }, deps,
+    ).catch((error: unknown) => error as ReleaseMigrationError);
+    expect(failure.partial?.applied).toBeNull();
+    expect(failure.partial?.backup).toEqual({ id: "bk1", state: "success" });
+  });
+
+  it("keeps the backup in the recovery facts when the owner login is refused", async () => {
+    const { deps } = harness({ roleStatus: 403 });
+    const failure = await releaseMigration(
+      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" }, deps,
+    ).catch((error: unknown) => error as ReleaseMigrationError);
+    expect(failure.message).toBe("Migration role was not created (HTTP 403)");
+    expect(failure.partial).toEqual({ backup: { id: "bk1", state: "success" }, applied: [], roleDeleted: true });
   });
 
   it("never mints a role when the backup fails", async () => {

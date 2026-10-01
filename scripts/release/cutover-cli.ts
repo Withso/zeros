@@ -10,7 +10,7 @@ import { assertCheckout, migrationManifest } from "./source";
 import { command } from "./io";
 
 const FailedMigration = z.object({ backup: z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/), state: z.string().max(32) }).nullable(),
-  applied: z.array(z.string().regex(/^\d{4}_[a-z0-9_]+\.sql$/)), roleDeleted: z.boolean() });
+  applied: z.array(z.string().regex(/^\d{4}_[a-z0-9_]+\.sql$/)).nullable(), roleDeleted: z.boolean() });
 
 async function main() {
   const approvals = parseApprovals(process.env.CUTOVER_APPROVALS);

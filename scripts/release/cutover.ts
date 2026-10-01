@@ -40,7 +40,7 @@ export type CutoverJournal = {
   plan?: z.infer<typeof MigrationReceipt>;
   migration?: z.infer<typeof MigrationReceipt>;
   pendingAfterFailure?: string[];
-  failedMigration?: { backup: { id: string; state: string } | null; applied: string[]; roleDeleted: boolean };
+  failedMigration?: { backup: { id: string; state: string } | null; applied: string[] | null; roleDeleted: boolean };
   pages: Surface[];
 };
 
@@ -80,9 +80,10 @@ export function newCutoverJournal(): CutoverJournal {
 
 export async function controlledCutover(config: PromotionConfig, deps: CutoverDependencies, approvals: string[], journal = newCutoverJournal(),
   checkpoint: (journal: CutoverJournal) => Promise<void> = async () => {}) {
-  // Persist after every transition so a timeout or killed runner still leaves
-  // the last acknowledged state behind. A failed write never stops the cutover.
-  const save = () => checkpoint(journal).catch(() => {});
+  // Persist after every transition, before the next irreversible operation, so
+  // a timeout or killed runner still leaves the last acknowledged state. A
+  // write that fails stops the cutover where it stands.
+  const save = () => checkpoint(journal);
   const enter = async (stage: string) => { journal.stage = stage; await save(); };
   const mark = async (state: MaintenanceState) => { journal.maintenance = state; await save(); };
   try {
@@ -130,7 +131,6 @@ export async function controlledCutover(config: PromotionConfig, deps: CutoverDe
       // pending: earlier files may have committed.
       try { journal.failedMigration = await deps.migrationFailure?.(); } catch { /* Reconcile manually. */ }
       try { journal.pendingAfterFailure = MigrationReceipt.parse(await deps.migration(false)).pendingMigrations; } catch { /* Reconcile manually. */ }
-      await save();
       throw error;
     }
     journal.migration = migration;
@@ -164,7 +164,7 @@ export async function controlledCutover(config: PromotionConfig, deps: CutoverDe
     // private. Only fixed policy diagnostics may leave this boundary.
     const message = error instanceof PromotionError ? `Controlled cutover stopped at ${journal.stage}: ${error.message}`
       : `Controlled cutover stopped at ${journal.stage}; reconcile this stage before retrying.`;
-    await save();
+    await checkpoint(journal).catch(() => { /* Best effort while stopping; the CLI writes once more. */ });
     throw new PromotionError(`${message}${MAINTENANCE_NOTE[journal.maintenance]}`);
   }
 }

@@ -20,7 +20,14 @@ async function main() {
       tokenId: process.env.PLANETSCALE_SERVICE_TOKEN_ID!, token: process.env.PLANETSCALE_SERVICE_TOKEN! }),
     createPool: url => createMigrationPool(url, { role: "postgres", maxConnections: 1, applicationName: "zeros-hosted-promotion" }),
   });
-  process.stdout.write(JSON.stringify(MigrationReceipt.parse(receipt)));
+  const parsed = MigrationReceipt.safeParse(receipt);
+  if (!parsed.success) {
+    // For example SQL succeeded but the owner login's deletion did not: keep
+    // the sanitized execution facts for the cutover's recovery journal.
+    throw Object.assign(new ReleaseMigrationError("Release migration receipt is incomplete"), { partial: {
+      backup: receipt.backup && { id: receipt.backup.id, state: receipt.backup.state }, applied: receipt.applied, roleDeleted: receipt.role.deleted === true } });
+  }
+  process.stdout.write(JSON.stringify(parsed.data));
 }
 void main().catch(error => {
   // The controlled cutover reads these allowlisted recovery facts; output stays private.

@@ -7,7 +7,7 @@ import { githubClient } from "./github";
 
 type DisabledCandidate = { channel: Channel; sourceSha: string; cloudEnabled: boolean; provider?: string; repository?: string; branch?: string };
 type GuardDependencies = { fetch?: typeof fetch; channelBaseline?: typeof channelBaseline; migrationManifest?: typeof migrationManifest; workerInputsSha256?: typeof workerInputsSha256;
-  cutoverReceipt?: (channel: Channel, sourceSha: string) => Promise<boolean> };
+  cutoverReceipt?: (channel: Channel, sourceSha: string, manifestSha256: string) => Promise<boolean> };
 
 /** One anonymous, bounded read; the rollout switch must not need provider
  * credentials, follow redirects, retry a stalled origin, or print its body. */
@@ -99,9 +99,9 @@ export async function disabledGuard(_files: string[], candidate: DisabledCandida
     const served = await Promise.all(surfaces.map(([origin, surface]) => publicPagesSource(origin, surface, deps.fetch ?? fetch)));
     pagesVerified = served.every(sha => sha === identity!.sourceSha);
     try {
-      receiptVerified = await (deps.cutoverReceipt ?? ((channel: Channel, sha: string) => githubClient({ sourceSha: candidate.sourceSha,
-        repository: candidate.repository ?? process.env.GITHUB_REPOSITORY ?? "", branch: candidate.branch ?? "" }, process.env).cutoverReceipt(channel, sha)))(
-        candidate.channel, identity!.sourceSha);
+      receiptVerified = await (deps.cutoverReceipt ?? ((channel: Channel, sha: string, manifestSha256: string) => githubClient({ sourceSha: candidate.sourceSha,
+        repository: candidate.repository ?? process.env.GITHUB_REPOSITORY ?? "", branch: candidate.branch ?? "" }, process.env)
+        .cutoverReceipt(channel, sha, manifestSha256)))(candidate.channel, identity!.sourceSha, identity!.migrations.manifestSha256);
     } catch { receiptVerified = false; }
   }
   const manualCutoverVerified = identityMatches && pagesVerified && receiptVerified;

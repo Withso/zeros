@@ -5,8 +5,10 @@ import { githubClient } from "./github";
 
 const sha = "a".repeat(40);
 const config = { repository: "example/zeros", sourceSha: sha, branch: "release/1.2.3" };
-const run = { id: 7, head_sha: sha, status: "completed", conclusion: "success", event: "workflow_dispatch", path: ".github/workflows/controlled-cutover.yml",
-  repository: { full_name: "example/zeros" }, head_repository: { full_name: "example/zeros" } };
+const run = { id: 7, head_sha: sha, head_branch: "release/1.2.3", run_attempt: 1, status: "completed", conclusion: "success", event: "workflow_dispatch",
+  path: ".github/workflows/controlled-cutover.yml", repository: { full_name: "example/zeros" }, head_repository: { full_name: "example/zeros" } };
+const job = { run_id: 7, name: "Controlled cutover (production)", status: "completed", conclusion: "success",
+  steps: [{ name: "Controlled cutover", conclusion: "success" }, { name: "Save cutover receipt", conclusion: "success" }] };
 const receipt = (overrides: Record<string, unknown> = {}) => ({
   version: 1, status: "cutover-complete", channel: "production", sourceSha: sha, branch: "release/1.2.3", repository: "example/zeros",
   runId: "7", runAttempt: "1", approvals: [],
@@ -21,11 +23,12 @@ const receipt = (overrides: Record<string, unknown> = {}) => ({
   completedAt: "2026-10-01T00:00:00.000Z", ...overrides,
 });
 
-function client(runs: unknown[], downloaded: unknown) {
+function client(runs: unknown[], downloaded: unknown, jobs: unknown[] = [job]) {
   return githubClient(config, { GH_TOKEN: "fake-token" }, {
     fetch: async input => {
       const route = String(input);
       if (route.includes("/workflows/controlled-cutover.yml/runs?")) return Response.json({ workflow_runs: runs });
+      if (route.includes("/runs/7/attempts/1/jobs?")) return Response.json({ jobs });
       if (route.includes("/artifacts?")) return Response.json({ artifacts: [{ name: `controlled-cutover-production-${sha}`, expired: false, workflow_run: { head_sha: sha } }] });
       throw new Error("Unexpected API route");
     },
@@ -47,8 +50,20 @@ describe("controlled-cutover receipt evidence", () => {
     ["a backend on another commit", receipt({ backend: { ...receipt().backend, sourceSha: "c".repeat(40) } })],
     ["a missing Ops upload", receipt({ pages: [{ id: "page1", surface: "app" }] })],
     ["unverified WorkOS for Ops", receipt({ workos: { kind: "workos-handshake-v1", surfaces: ["app"], verifiedAt: "2026-10-01T00:00:00.000Z" } })],
+    ["a plan instead of an execution", receipt({ migration: { ...receipt().migration as object, mode: "plan", backup: null, ledger: "pending" } })],
+    ["another channel's database", receipt({ migration: { ...receipt().migration as object, database: "zeros-control-plane-alpha" } })],
+    ["another branch", receipt({ branch: "main" })],
+    ["an attempt the run never had", receipt({ runAttempt: "2" })],
   ])("rejects %s", async (_name, downloaded) => {
     expect(await client([run], downloaded).cutoverReceipt("production", sha)).toBe(false);
+  });
+  it("binds the receipt's API schema to the served identity", async () => {
+    expect(await client([run], receipt()).cutoverReceipt("production", sha, "b".repeat(64))).toBe(true);
+    expect(await client([run], receipt()).cutoverReceipt("production", sha, "c".repeat(64))).toBe(false);
+  });
+  it("requires the producing job's cutover and receipt steps to have succeeded", async () => {
+    expect(await client([run], receipt(), [{ ...job, steps: [{ name: "Controlled cutover", conclusion: "success" }] }]).cutoverReceipt("production", sha)).toBe(false);
+    expect(await client([run], receipt(), []).cutoverReceipt("production", sha)).toBe(false);
   });
   it("ignores failed, forked or differently pathed runs", async () => {
     for (const other of [{ ...run, conclusion: "failure" }, { ...run, head_repository: { full_name: "fork/zeros" } }, { ...run, path: ".github/workflows/release.yml" }]) {

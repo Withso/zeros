@@ -107,7 +107,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
     async assertRequiredChecks() { assertRequiredCI(await requiredChecks()); },
     /** True only for a successful controlled-cutover run's own complete receipt
      * (API, every Pages surface and WorkOS) for this channel and exact SHA. */
-    async cutoverReceipt(channel: Channel, sourceSha: string) {
+    async cutoverReceipt(channel: Channel, sourceSha: string, manifestSha256?: string) {
       requireCheck(SHA.test(sourceSha), "Invalid cutover source");
       const name = `controlled-cutover-${channel}-${sourceSha}`;
       const runs = await read(`/actions/workflows/controlled-cutover.yml/runs?head_sha=${sourceSha}&status=success&event=workflow_dispatch&per_page=100`);
@@ -123,11 +123,24 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
             { env: { PATH: env.PATH, HOME: env.HOME, GH_TOKEN: env.GH_TOKEN }, timeout: 60_000 });
           const bytes = await readFile(path.join(directory, "cutover-receipt.json"));
           if (bytes.length > 64 * 1024) continue;
-          const receipt = CutoverReceipt.safeParse(JSON.parse(bytes.toString("utf8")));
-          const surfaces = CHANNELS[channel].ops ? ["app", "ops"] : ["app"];
-          if (receipt.success && receipt.data.channel === channel && receipt.data.sourceSha === sourceSha && receipt.data.repository === config.repository &&
-            receipt.data.runId === String(run.id) && receipt.data.backend.sourceSha === sourceSha &&
-            surfaces.every(surface => receipt.data.pages.some(page => page.surface === surface) && receipt.data.workos.surfaces.includes(surface as "app" | "ops"))) return true;
+          const parsed = CutoverReceipt.safeParse(JSON.parse(bytes.toString("utf8")));
+          if (!parsed.success) continue;
+          const receipt = parsed.data, attempt = Number(receipt.runAttempt), surfaces = CHANNELS[channel].ops ? ["app", "ops"] : ["app"];
+          // The receipt must prove a finished cutover of this channel's own
+          // database and API, bound to the run, branch and attempt producing it.
+          if (!(receipt.channel === channel && receipt.sourceSha === sourceSha && receipt.repository === config.repository &&
+            receipt.runId === String(run.id) && receipt.branch === run.head_branch &&
+            Number.isSafeInteger(attempt) && attempt >= 1 && attempt <= (run.run_attempt ?? 1) &&
+            receipt.migration.mode === "execute" && receipt.migration.ledger === "verified" && receipt.migration.backup?.state === "success" &&
+            receipt.migration.database === `zeros-control-plane-${channel}` && receipt.migration.branch.name === "main" && receipt.migration.role.deleted &&
+            receipt.backend.channel === channel && receipt.backend.sourceSha === sourceSha &&
+            receipt.backend.migrations.head === receipt.backend.migrations.expectedHead &&
+            (!manifestSha256 || receipt.backend.migrations.manifestSha256 === manifestSha256) &&
+            surfaces.every(surface => receipt.pages.some(page => page.surface === surface) && receipt.workos.surfaces.includes(surface as "app" | "ops")))) continue;
+          const jobs = await read(`/actions/runs/${run.id}/attempts/${attempt}/jobs?per_page=100`);
+          if ((jobs.jobs ?? []).some((job: any) => job.run_id === run.id && job.status === "completed" && job.conclusion === "success" &&
+            typeof job.name === "string" && job.name.startsWith("Controlled cutover") &&
+            ["Controlled cutover", "Save cutover receipt"].every(name => job.steps?.some((step: any) => step.name === name && step.conclusion === "success")))) return true;
         } catch { /* An unreadable artifact is not proof. */ } finally { await rm(directory, { force: true, recursive: true }); }
       }
       return false;

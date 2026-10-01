@@ -139,7 +139,7 @@ describe("disabled promotion guard", () => {
     const result = await disabledGuard([migrationFile], candidate, deps);
     expect(result).toMatchObject({ blocked: true, manualCutoverVerified: false });
     expect(result.message).toContain(`No successful controlled-cutover receipt exists for ${identity.sourceSha}`);
-    expect(deps.cutoverReceipt).toHaveBeenCalledWith("alpha", identity.sourceSha);
+    expect(deps.cutoverReceipt).toHaveBeenCalledWith("alpha", identity.sourceSha, identity.migrations.manifestSha256);
   });
   it("requires the same completion proof when the published baseline is unknown", async () => {
     const without = { ...fakeIdentity(liveIdentity(), undefined, false), channelBaseline: async () => null };
