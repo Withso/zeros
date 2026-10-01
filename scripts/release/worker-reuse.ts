@@ -5,7 +5,10 @@ export async function reusableWorker(config: { channel: Channel; sourceSha: stri
   const parsed = ReleaseIdentity.safeParse(value);
   requireCheck(parsed.success && parsed.data.channel === config.channel, "Current channel readiness is unavailable; complete the first-rollout worker ceremony");
   const identity = parsed.data;
-  if (!identity.cloud.enabled && !config.cloudRequired) return undefined;
+  // A cloud-disabled desktop does not depend on the worker: the redeployed API
+  // keeps its selected worker tuple unchanged, as an independent deploy would,
+  // and worker qualification stays with the worker lane.
+  if (!config.cloudRequired) return undefined;
   requireCheck(identity.cloud.enabled && identity.cloud.state === "healthy" && identity.worker && identity.worker.provider === config.provider &&
     (!config.cloudRequired || identity.workerQualified === true), "Cloud worker qualification or identity is unavailable");
   requireCheck(await hash(identity.worker.sourceSha) === await hash(config.sourceSha), "Worker inputs changed; complete cloud-worker-promotion before hosted promotion");

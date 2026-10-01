@@ -50,7 +50,7 @@ export async function promoteServices(config: PromotionConfig, deps: PromotionDe
     const workos = await deps.verifyWorkOS();
     return HostedServicesReceipt.parse({ version: 1 as const, status: "services-ready" as const, channel: config.channel, sourceSha: config.sourceSha,
       branch: config.branch, repository: config.repository, runId: config.runId, runAttempt: config.runAttempt,
-      migration, backend, railwayDeploymentId, pages, workos, completedAt: new Date().toISOString() });
+      migration, backend, railwayDeploymentId, pages, workos, cloudRequired: config.cloudRequired, completedAt: new Date().toISOString() });
   } catch (error) {
     // Provider errors, Zod input excerpts, child output and driver details are
     // private. Only our fixed policy diagnostics may leave this boundary.
@@ -81,6 +81,7 @@ export async function finalizePromotion(config: PromotionConfig, value: unknown,
       services.backend.channel === config.channel && services.backend.migrations.head === services.backend.migrations.expectedHead && services.pages.length === config.surfaces.length &&
       config.surfaces.every(surface => services.pages.some(page => page.surface === surface) && services.workos.surfaces.includes(surface)) &&
       services.workos.surfaces.length === config.surfaces.length, "Services receipt does not belong to this exact release");
+    requireCheck(services.cloudRequired === config.cloudRequired, "Services were promoted for another desktop cloud capability; rerun the whole release");
     stage = "current source and provider state";
     await deps.assertCurrent(); await deps.inspect();
     for (const surface of config.surfaces) await deps.verifyPages(surface);
@@ -99,6 +100,10 @@ export async function finalizePromotion(config: PromotionConfig, value: unknown,
       backend.migrations.manifestSha256 === services.backend.migrations.manifestSha256, "Final API source or migration manifest changed after services promotion");
     requireCheck(!config.cloudRequired || backend.cloud.enabled && backend.workerQualified === true && backend.worker?.provider === config.provider,
       "Final API worker is unavailable or lacks current channel qualification");
+    // Without a worker promotion, the API must keep the tuple it served at the
+    // services handoff; a change since then belongs to the worker lane.
+    requireCheck(deps.workerPromoted || backend.cloud.enabled === services.backend.cloud.enabled &&
+      JSON.stringify(backend.worker) === JSON.stringify(services.backend.worker), "The API's worker tuple changed after services promotion");
     return HostedReceipt.parse({ ...services, status: "success", runAttempt: config.runAttempt, backend, railwayDeploymentId, completedAt: new Date().toISOString() });
   } catch (error) {
     throw new PromotionError(error instanceof PromotionError ? error.message : `Hosted finalization stopped at ${stage}; no desktop publication was authorized.`);

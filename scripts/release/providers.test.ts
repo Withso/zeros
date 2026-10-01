@@ -11,8 +11,8 @@ const config = promotionConfig({ RELEASE_CHANNEL: "beta", RELEASE_SHA: sha, GITH
   RAILWAY_PROJECT_ID: "11111111-1111-4111-8111-111111111111", RAILWAY_ENVIRONMENT_ID: "22222222-2222-4222-8222-222222222222", RAILWAY_SERVICE_ID: "33333333-3333-4333-8333-333333333333",
   PLANETSCALE_ORG: "example", PLANETSCALE_DATABASE: "zeros-control-plane-beta", PLANETSCALE_BRANCH: "main", CLOUDFLARE_ACCOUNT_ID: "c".repeat(32), CF_PAGES_APP_PROJECT: "zeros-web-beta", AUTH_PROVIDER: "workos" });
 function fixture(railwayAuto = false, pagesAuto = false, staged: { unmergedChangesCount: number | null; stagedChanges: unknown } =
-  { unmergedChangesCount: 0, stagedChanges: { id: "<empty>", patch: {} } }) {
-  let branch = "release/1.2.2", webBranch = branch, triggers: string[] = [];
+  { unmergedChangesCount: 0, stagedChanges: { id: "<empty>", patch: {} } }, settleReads = 0) {
+  let branch = "release/1.2.2", webBranch = branch, triggers: string[] = [], settling = 0;
   const calls: any[] = [], commands: any[] = [];
   let selectedWorker = {};
   const project = () => ({ name: config.appProject, production_branch: webBranch, domains: ["app-beta.zeros.build"],
@@ -35,9 +35,9 @@ function fixture(railwayAuto = false, pagesAuto = false, staged: { unmergedChang
       environment: { id: config.environmentId, name: "beta", projectId: config.projectId, unmergedChangesCount: staged.unmergedChangesCount,
         config: { services: { [config.serviceId]: { source: { repo: config.repository, rootDirectory: "apps/control-plane", checkSuites: false, branch } } } } },
       serviceInstance: { serviceId: config.serviceId, environmentId: config.environmentId, domains: { customDomains: [{ domain: "api-beta.zeros.build" }] } },
-      environmentStagedChanges: staged.stagedChanges,
+      environmentStagedChanges: settling > 0 && settling-- ? { id: "settling", patch: { services: {} } } : staged.stagedChanges,
     } });
-    if (q.includes("PromotionCommit")) { branch = request.variables.patch.services[config.serviceId].source.branch; triggers = ["recreated"]; return Response.json({ data: { environmentPatchCommit: "commit1" } }); }
+    if (q.includes("PromotionCommit")) { branch = request.variables.patch.services[config.serviceId].source.branch; triggers = ["recreated"]; settling = settleReads; return Response.json({ data: { environmentPatchCommit: "commit1" } }); }
     if (q.includes("CutoverTriggers")) return Response.json({ data: { deploymentTriggers: { edges: triggers.map(id => ({ node: { id } })) } } });
     if (q.includes("CutoverTriggerDelete")) { triggers = triggers.filter(id => id !== request.variables.id); return Response.json({ data: { deploymentTriggerDelete: true } }); }
     if (q.includes("PromotionDeployment")) return Response.json({ data: { deployment: { id: "deploy1", status: "SUCCESS", projectId: config.projectId,
@@ -85,6 +85,12 @@ describe("release provider adapters", () => {
     expect(f.commands[0][2].env.CLOUDFLARE_API_TOKEN).toBeUndefined();
     expect(f.commands[1][1]).toContain(sha);
     expect(JSON.stringify(f.commands.map(row => row[1]))).not.toContain("never-log");
+  });
+  it("waits for a retarget's transient staged change to settle before confirming it", async () => {
+    const f = fixture(false, false, undefined, 2);
+    await f.providers.retarget();
+    // Two settling reads after the patch, then a clean confirmation.
+    expect(f.calls.filter(row => row.query?.includes("PromotionState")).length).toBeGreaterThanOrEqual(4);
   });
   it("rejects a release branch older than the selected destination", () => {
     expect(() => assertNotOlderBranch("release/1.2.3", "release/1.3.0")).toThrow("superseded");

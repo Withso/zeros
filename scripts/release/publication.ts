@@ -1,6 +1,12 @@
 import { CHANNELS, HostedReceipt, ReleaseIdentity, WorkerIdentity, requireCheck, type Channel, type Surface } from "./contracts";
 
 type Candidate = { channel: Channel; sourceSha: string; branch: string; repository: string; runId: string; cloudRequired: boolean; provider?: string };
+
+/** The signed build baked its cloud capability in at compile time. A protected
+ * variable changed before a publication retry must not reinterpret it. */
+export function assertBuildCapability(built: string | undefined, cloudRequired: boolean) {
+  requireCheck(built === String(cloudRequired), "The signed desktop's cloud capability differs from this publication's; rebuild before publishing");
+}
 export async function publicationGate(config: Candidate, deps: {
   receipt(): Promise<unknown>; identity(): Promise<unknown>; page(surface: Surface): Promise<unknown>;
 }) {
@@ -11,6 +17,7 @@ export async function publicationGate(config: Candidate, deps: {
   const receipt = parsed.data;
   requireCheck(receipt.channel === config.channel && receipt.sourceSha === config.sourceSha && receipt.branch === config.branch &&
     receipt.repository === config.repository && receipt.runId === config.runId, "Hosted publication receipt belongs to another candidate");
+  requireCheck(receipt.cloudRequired === config.cloudRequired, "Hosted services were promoted for another desktop cloud capability; desktop publication refused");
   const current = ReleaseIdentity.safeParse(await deps.identity());
   requireCheck(current.success, "Current channel readiness is unavailable; desktop publication refused");
   const identity = current.data, expected = receipt.backend;

@@ -116,6 +116,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      cloud_enabled: ${{ steps.capability.outputs.cloud_enabled }}
     env:
       RELEASE_CHANNEL: beta
       RELEASE_SHA: ${{ github.sha }}
@@ -180,6 +181,13 @@ jobs:
 
       - name: Setup Bun (for engine sidecar compile)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Record the baked cloud capability
+        id: capability
+        # tsup bakes exactly `ZEROS_CLOUD_WORKSPACES_ENABLED === "true"` into
+        # main.cjs. Publication requires its own decision to match this one.
+        run: |
+          if [ "$ZEROS_CLOUD_WORKSPACES_ENABLED" = "true" ]; then echo "cloud_enabled=true"; else echo "cloud_enabled=false"; fi >> "$GITHUB_OUTPUT"
 
       - name: Compute beta version
         id: version
@@ -384,6 +392,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
+          BUILD_CLOUD_ENABLED: ${{ needs.build.outputs.cloud_enabled }}
         run: |
           set -euo pipefail
           pnpm exec tsx scripts/release/publication-cli.ts
