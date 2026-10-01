@@ -403,11 +403,30 @@ jobs:
             break
           done
           if [ -z "$DMG" ]; then echo "::error::no versioned .dmg to notarize"; exit 1; fi
-          echo "Submitting $DMG to Apple notary (--no-wait)…"
-          SUB=$(xcrun notarytool submit "$DMG" \
-            --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" \
-            --no-wait --output-format json 2>/dev/null | jq -r '.id // empty' || true)
-          if [ -z "$SUB" ]; then echo "::error::notarytool submit returned no submission id (upload failed)"; exit 1; fi
+          echo "Submitting ${DMG} to Apple notary (--no-wait)…"
+          # A transient upload or service error retries. An authentication or
+          # agreement refusal (HTTP 401/403) stops at once. Either way Apple's
+          # own reason reaches the log: GitHub masks the secret values, and the
+          # reason is also redacted and capped here.
+          SUB=""
+          ERR_FILE=$(mktemp)
+          for ATTEMPT in 1 2 3; do
+            STATUS=0
+            OUT=$(xcrun notarytool submit "$DMG" \
+              --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+              --no-wait --output-format json 2>"$ERR_FILE") || STATUS=$?
+            SUB=$(printf '%s' "$OUT" | jq -r '.id // empty' 2>/dev/null || true)
+            if [ -n "$SUB" ]; then break; fi
+            REASON=$(printf '%s' "$OUT" | jq -r '.message // empty' 2>/dev/null || true)
+            if [ -z "$REASON" ]; then REASON=$(cat "$ERR_FILE"); fi
+            for VALUE in "$APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_ID" "$APPLE_TEAM_ID"; do REASON=${REASON//"$VALUE"/[redacted]}; done
+            REASON=$(printf '%s' "${REASON:-no reason reported}" | tr '\r\n' '  ' | tail -c 600)
+            echo "::warning::notarytool submit attempt ${ATTEMPT}/3 failed (exit ${STATUS}): ${REASON}"
+            if printf '%s' "$REASON" | grep -qiE 'status code: 40[13]|agreement|credential|authenticat'; then break; fi
+            if [ "$ATTEMPT" -lt 3 ]; then sleep 30; fi
+          done
+          rm -f "$ERR_FILE"
+          if [ -z "$SUB" ]; then echo "::error::notarytool submit returned no submission id. Resolve the reason above, then rerun this job. Usual causes: an Apple Developer agreement awaiting the Account Holder, or a revoked app-specific password."; exit 1; fi
           printf '%s' "$SUB" > release/notarization-submission-id.txt
           echo "Submission id: $SUB (recorded → release/notarization-submission-id.txt)"
       - name: Save notary submission for polling retries

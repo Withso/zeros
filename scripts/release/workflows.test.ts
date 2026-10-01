@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 const workflow = (name: string) => readFileSync(`.github/workflows/${name}.yml`, "utf8");
 function job(text: string, name: string) {
@@ -106,6 +108,38 @@ describe("release dependency and authority contracts", () => {
     expect(notarize).not.toContain("contents: write");
     expect(notarize).toContain("uses: actions/upload-artifact@");
     expect(notarize).toContain("scripts/release/ci-cli.ts --verify");
+  });
+  it("reports Apple's reason for a refused submission and retries only transient failures", () => {
+    const step = job(workflow("release"), "submit").split("- name: Submit to Apple notary (--no-wait, no poll)\n")[1]?.split(/\n {6}- /)[0] ?? "";
+    const script = step.split("run: |\n")[1]?.replace(/^ {10}/gm, "") ?? "";
+    expect(script).toContain("notarytool submit");
+    const submit = (mode: string) => {
+      const dir = mkdtempSync(path.join(tmpdir(), "zeros-notary-"));
+      mkdirSync(path.join(dir, "bin")); mkdirSync(path.join(dir, "release"));
+      writeFileSync(path.join(dir, "release", "Zeros-9.9.9-arm64.dmg"), "");
+      writeFileSync(path.join(dir, "bin", "sleep"), "#!/bin/sh\n", { mode: 0o755 });
+      writeFileSync(path.join(dir, "bin", "xcrun"), `#!/bin/bash
+n=$(( $(cat attempts 2>/dev/null || echo 0) + 1 )); echo "$n" > attempts
+case "$MODE" in
+  ok) echo '{"id":"submission-1"}' ;;
+  refused) echo "Error: HTTP status code: 401. Invalid credentials for $APPLE_ID." >&2; exit 69 ;;
+  transient) if [ "$n" -lt 3 ]; then echo "Error: HTTP status code: 500." >&2; exit 1; fi; echo '{"id":"submission-3"}' ;;
+esac
+`, { mode: 0o755 });
+      // Stubs go first after any shell startup that edits PATH.
+      const result = spawnSync("bash", ["-e", "-c", `PATH="$STUBS:$PATH"\n${script}`], { cwd: dir, encoding: "utf8", env: { PATH: process.env.PATH, STUBS: path.join(dir, "bin"), MODE: mode,
+        APPLE_ID: "person@example.invalid", APPLE_APP_SPECIFIC_PASSWORD: "fake-app-password", APPLE_TEAM_ID: "FAKETEAM" } });
+      const read = (file: string) => { try { return readFileSync(path.join(dir, file), "utf8").trim(); } catch { return ""; } };
+      const outcome = { status: result.status, output: `${result.stdout}${result.stderr}`, attempts: read("attempts"), id: read("release/notarization-submission-id.txt") };
+      rmSync(dir, { recursive: true, force: true });
+      return outcome;
+    };
+    expect(submit("ok")).toMatchObject({ status: 0, attempts: "1", id: "submission-1" });
+    const refused = submit("refused");
+    expect(refused).toMatchObject({ status: 1, attempts: "1", id: "" });
+    expect(refused.output).toContain("HTTP status code: 401. Invalid credentials for [redacted].");
+    expect(refused.output).not.toMatch(/person@example\.invalid|fake-app-password|FAKETEAM/);
+    expect(submit("transient")).toMatchObject({ status: 0, attempts: "3", id: "submission-3" });
   });
   it("inherits the exact-source Preflight coverage instead of repeating its secret-free quality checks", () => {
     const preflight = workflow("preflight");
