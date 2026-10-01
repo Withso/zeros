@@ -12,7 +12,7 @@ const config = promotionConfig({ RELEASE_CHANNEL: "beta", RELEASE_SHA: sha, GITH
   PLANETSCALE_ORG: "example", PLANETSCALE_DATABASE: "zeros-control-plane-beta", PLANETSCALE_BRANCH: "main", CLOUDFLARE_ACCOUNT_ID: "c".repeat(32), CF_PAGES_APP_PROJECT: "zeros-web-beta", AUTH_PROVIDER: "workos" });
 function fixture(railwayAuto = false, pagesAuto = false, staged: { unmergedChangesCount: number | null; stagedChanges: unknown } =
   { unmergedChangesCount: 0, stagedChanges: { id: "<empty>", patch: {} } }) {
-  let branch = "release/1.2.2", webBranch = branch;
+  let branch = "release/1.2.2", webBranch = branch, triggers: string[] = [];
   const calls: any[] = [], commands: any[] = [];
   let selectedWorker = {};
   const project = () => ({ name: config.appProject, production_branch: webBranch, domains: ["app-beta.zeros.build"],
@@ -31,13 +31,15 @@ function fixture(railwayAuto = false, pagesAuto = false, staged: { unmergedChang
     if (q.includes("WorkerIdentityUpdate")) { selectedWorker = request.variables.input.variables; return Response.json({ data: { variableCollectionUpsert: true } }); }
     if (q.includes("WorkerIdentityRead")) return Response.json({ data: { variables: { ...selectedWorker, SECRET: "must-not-be-returned" } } });
     if (q.includes("PromotionState")) return Response.json({ data: {
-      serviceInstanceAutoDeployStatus: { enabled: railwayAuto },
+      serviceInstanceAutoDeployStatus: { enabled: railwayAuto || triggers.length > 0 },
       environment: { id: config.environmentId, name: "beta", projectId: config.projectId, unmergedChangesCount: staged.unmergedChangesCount,
         config: { services: { [config.serviceId]: { source: { repo: config.repository, rootDirectory: "apps/control-plane", checkSuites: false, branch } } } } },
       serviceInstance: { serviceId: config.serviceId, environmentId: config.environmentId, domains: { customDomains: [{ domain: "api-beta.zeros.build" }] } },
       environmentStagedChanges: staged.stagedChanges,
     } });
-    if (q.includes("PromotionCommit")) { branch = request.variables.patch.services[config.serviceId].source.branch; return Response.json({ data: { environmentPatchCommit: "commit1" } }); }
+    if (q.includes("PromotionCommit")) { branch = request.variables.patch.services[config.serviceId].source.branch; triggers = ["recreated"]; return Response.json({ data: { environmentPatchCommit: "commit1" } }); }
+    if (q.includes("CutoverTriggers")) return Response.json({ data: { deploymentTriggers: { edges: triggers.map(id => ({ node: { id } })) } } });
+    if (q.includes("CutoverTriggerDelete")) { triggers = triggers.filter(id => id !== request.variables.id); return Response.json({ data: { deploymentTriggerDelete: true } }); }
     if (q.includes("PromotionDeployment")) return Response.json({ data: { deployment: { id: "deploy1", status: "SUCCESS", projectId: config.projectId,
       serviceId: config.serviceId, environmentId: config.environmentId, meta: { commitHash: sha, branch: config.branch } } } });
     return Response.json({ data: { serviceInstanceDeployV2: "deploy1" } });
@@ -70,6 +72,9 @@ describe("release provider adapters", () => {
     const f = fixture(); await f.providers.retarget(); const id = await f.providers.deploy(); await f.providers.waitDeployment(id);
     expect(f.calls.find(row => row.query?.includes("PromotionCommit")).query).toContain("skipDeploys:true");
     expect(f.calls.find(row => row.query?.includes("PromotionCommit")).query).toContain("environmentPatchCommit(");
+    expect(f.calls.find(row => row.query?.includes("PromotionCommit")).variables.patch).toEqual({ services: { [config.serviceId]: { source: { branch: "release/1.2.3" } } } });
+    // The source patch recreated a GitHub trigger; the retarget removed it again.
+    expect(f.calls.filter(row => row.query?.includes("CutoverTriggerDelete")).map(row => row.variables.id)).toEqual(["recreated"]);
     expect(f.calls.some(row => row.query?.includes("environmentStageChanges"))).toBe(false);
     expect(f.calls.find(row => row.query?.includes("PromotionDeploy(")).variables.commitSha).toBe(sha);
     expect(f.calls.find(row => row.method === "PATCH").source.config.production_deployments_enabled).toBe(false);

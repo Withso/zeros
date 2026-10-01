@@ -12,7 +12,8 @@ const workosEnv = { AUTH_ISSUER: "https://auth-api.example.com/", AUTH_JWKS_URL:
   AUTH_WEB_CLIENT_ID: "client_web", AUTH_DESKTOP_CLIENT_ID: "client_desktop" };
 
 function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: boolean; staged?: unknown; identity?: unknown;
-  services?: string[]; deployments?: { id: string; status: string }[][] }) {
+  services?: string[]; deployments?: { id: string; status: string }[][]; triggers?: string[]; deleteFails?: boolean }) {
+  state.triggers ??= state.autoDeploy ? ["trigger1"] : [];
   const calls: any[] = [];
   let current: { id: string; status: string }[] = [];
   const variables: Record<string, string> = { SECRET: "must-not-be-returned" };
@@ -29,7 +30,14 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
       return Response.json({ success: true, result: project() });
     }
     const q: string = request.query;
-    if (q.includes("CutoverWaitForCiHold")) { state.checkSuites = request.variables.patch.services[config.serviceId].source.checkSuites; return Response.json({ data: { environmentPatchCommit: "commit1" } }); }
+    if (q.includes("CutoverTriggers")) return Response.json({ data: { deploymentTriggers: { edges: state.triggers!.map(id => ({ node: { id } })) } } });
+    if (q.includes("CutoverTriggerDelete")) {
+      if (state.deleteFails) return Response.json({ data: { deploymentTriggerDelete: false } });
+      state.triggers = state.triggers!.filter(id => id !== request.variables.id);
+      state.autoDeploy = state.triggers.length > 0;
+      if (!state.autoDeploy) state.checkSuites = false;
+      return Response.json({ data: { deploymentTriggerDelete: true } });
+    }
     if (q.includes("CutoverServices")) return Response.json({ data: { environment: { serviceInstances: {
       edges: (state.services ?? [config.serviceId]).map(serviceId => ({ node: { serviceId } })) } } } });
     if (q.includes("CutoverDeployments")) {
@@ -60,21 +68,19 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
 }
 
 describe("cutover provider adapters", () => {
-  it("asks the owner to disable Railway automatic deployments before changing anything", async () => {
-    const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true });
-    await expect(f.providers.holdDeploys()).rejects.toThrow("Railway automatic deployments are on for beta: open the control-plane service's Settings in Railway and click Disable");
-    expect(f.calls.every(call => !call.query || call.query.startsWith("query"))).toBe(true);
+  it("stops when Railway does not confirm removing a deployment trigger", async () => {
+    const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true, deleteFails: true });
+    await expect(f.providers.holdDeploys()).rejects.toThrow("Railway deployment trigger removal is unconfirmed");
     expect(f.calls.some(call => call.method === "PATCH")).toBe(false);
   });
 
-  it("holds Wait for CI and Pages builds without changing any branch", async () => {
-    const f = fixture({ autoDeploy: false, checkSuites: true, pagesAuto: true });
-    await expect(f.providers.inspect()).rejects.toThrow();
+  it("holds Railway's deployment triggers and Pages builds without changing any branch", async () => {
+    const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true, triggers: ["trigger1", "trigger2"] });
+    await expect(f.providers.inspect()).rejects.toThrow("autodeploy");
     await f.providers.holdDeploys();
     await expect(f.providers.inspect()).resolves.toBeUndefined();
-    const ci = f.calls.find(call => call.query?.includes("CutoverWaitForCiHold"));
-    expect(ci.query).toContain("skipDeploys:true");
-    expect(ci.variables.patch).toEqual({ services: { [config.serviceId]: { source: { checkSuites: false } } } });
+    expect(f.calls.filter(call => call.query?.includes("CutoverTriggerDelete")).map(call => call.variables.id)).toEqual(["trigger1", "trigger2"]);
+    expect(f.calls.some(call => call.query?.includes("environmentPatchCommit"))).toBe(false);
     const patch = f.calls.find(call => call.method === "PATCH");
     expect(patch.production_branch).toBeUndefined();
     expect(patch.source.config).toMatchObject({ production_branch: "release/1.2.2", production_deployments_enabled: false, preview_deployment_setting: "none" });
@@ -83,7 +89,7 @@ describe("cutover provider adapters", () => {
   it("does nothing when every deployer is already held", async () => {
     const f = fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false });
     await f.providers.holdDeploys();
-    expect(f.calls.every(call => !call.query || call.query.startsWith("query"))).toBe(true);
+    expect(f.calls.every(call => !call.query || call.query.trim().startsWith("query"))).toBe(true);
     expect(f.calls.some(call => call.method === "PATCH")).toBe(false);
   });
 

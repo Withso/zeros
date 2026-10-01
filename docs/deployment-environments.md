@@ -1193,9 +1193,13 @@ In order, it:
 3. Validates every Railway and Pages destination read-only, and requires the
    channel environment to run only the control-plane service. All of this
    happens before any provider setting changes.
-4. Requires Railway automatic deployments to be already disabled (service
-   Settings → **Disable**; a project token cannot change that switch), then
-   turns off Wait for CI and Pages production and preview builds.
+4. Holds every independent deployer. It removes the service's Railway GitHub
+   deployment triggers, which are what the dashboard's **Disable** deletes and
+   which carry Wait for CI, and confirms automatic deployments are off. It then
+   turns off Pages production and preview builds. A project token cannot use
+   `serviceInstanceAutoDeployUpdate`, and any source patch, including the
+   branch retarget below, can recreate a trigger, so each retarget removes
+   triggers again.
 5. Retargets the Railway and Pages sources to the release branch.
 6. Sets `DATABASE_MAINTENANCE_MODE=true` and deploys the exact SHA, then waits
    until that candidate reports `maintenance: true`. Maintenance fences every
