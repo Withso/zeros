@@ -17,6 +17,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import net from "node:net";
 import http from "node:http";
 import { confirmLoopbackOwnership, LocalTransport } from "../local";
+import { ENGINE_PORT_SPAN } from "../../runtime";
 
 const TOKEN = "launch-secret-token";
 const DEV_ORIGIN = "http://localhost:5193";
@@ -45,6 +46,24 @@ async function startTransport(opts: {
   transports.push(t);
   await t.start();
   return t;
+}
+
+async function occupyPort(server: net.Server): Promise<number> {
+  // Keep the reservation open: a fixed base can already belong to another test.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve((server.address() as net.AddressInfo).port);
+      });
+    });
+    if (port <= 65536 - ENGINE_PORT_SPAN) return port;
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+  throw new Error("Could not reserve a fixture port with room for the port walk");
 }
 
 /** Send a WebSocket upgrade with explicit headers and report whether the
@@ -357,11 +376,7 @@ describe("LocalTransport — early ownership and bounded walk", () => {
     const squatter = net.createServer(() => {
       /* hold the base port */
     });
-    const base = nextBasePort;
-    nextBasePort += 10;
-    await new Promise<void>((resolve) =>
-      squatter.listen(base, "127.0.0.1", resolve),
-    );
+    const base = await occupyPort(squatter);
     try {
       const t = new LocalTransport({ port: base });
       transports.push(t);
@@ -378,11 +393,7 @@ describe("LocalTransport — early ownership and bounded walk", () => {
     const squatter = net.createServer(() => {
       /* hold the sole allowed port */
     });
-    const base = nextBasePort;
-    nextBasePort += 10;
-    await new Promise<void>((resolve) =>
-      squatter.listen(base, "127.0.0.1", resolve),
-    );
+    const base = await occupyPort(squatter);
     try {
       const t = new LocalTransport({ port: base, portSpan: 1 });
       transports.push(t);
