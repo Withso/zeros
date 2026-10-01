@@ -786,11 +786,12 @@ any migration to the packaged 0121 manifest. It boots and runs migrations on a
 the runner writes phase only when that column exists. No schema-owner mutation
 or ledger alteration happens just because the bridge API boots.
 
-**Step B is held for the owner's controlled Phase 2 Alpha rollout.** After the
-bridge is deployed and verified, add the reviewed
-`apps/control-plane/migrations/0122_migration_phases.sql` in a separate change.
-Do not include it in the Step A merge or before Alpha's bridge deployment.
-Migration 0122 then adds `schema_migrations.phase`, defaulting
+**Step B ships `apps/control-plane/migrations/0122_migration_phases.sql`.** Every
+channel ran the Step A bridge before it (Alpha from `6eabbd78`, Beta and
+Production from `87ee454f`). Alpha's enabled hosted lane applies it as an
+ordinary expand migration. Beta and Production take it with their next release,
+through their hosted lane or a controlled cutover; their disabled guard refuses
+publication until the schema matches. Migration 0122 adds `schema_migrations.phase`, defaulting
 existing rows to `legacy`; files 0001–0121 and their checksums remain immutable.
 New files (0122 onward) start with exactly `-- zeros-migration: expand` or
 `-- zeros-migration: contract`. The runner records the declared phase in the same
