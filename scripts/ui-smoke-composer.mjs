@@ -100,6 +100,7 @@ import {
   expectDiffSeparatorCards,
   runEditDiffSeparatorsSmoke,
 } from "./ui-smoke-diff-separators.mjs";
+import { createSmokeIncidentLog } from "./ui-smoke-incidents.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -136,6 +137,11 @@ function check(name, ok, detail = "") {
   if (!ok) failures.push(name);
 }
 
+// Out-of-scenario disturbances (dev-server reloads, renderer navigations,
+// crashes, uncaught errors, runner stalls) are printed if the run fails.
+const incidents = createSmokeIncidentLog();
+incidents.watchEventLoop();
+
 const port = await freePort();
 // detached → its own process GROUP, so teardown can kill pnpm AND the vite
 // child it execs. Killing just the wrapper leaves vite alive holding our
@@ -154,50 +160,63 @@ const vite = spawn(
   },
 );
 vite.stderr.on("data", (d) => process.stderr.write(`[vite] ${d}`));
+// Vite reports dependency re-optimization and page reloads on stdout. Reading
+// it also keeps an unread pipe from ever back-pressuring the dev server.
+incidents.watchDevServerOutput(vite.stdout);
 
 let browser = null;
 try {
-  const harnessBase = `http://127.0.0.1:${port}/apps/desktop/src/renderer/harnesses`;
+  const devServerOrigin = `http://127.0.0.1:${port}`;
+  const harnessBase = `${devServerOrigin}/apps/desktop/src/renderer/harnesses`;
   const pageUrl = `${harnessBase}/harness-model-menu.html`;
   await waitForHttp(pageUrl);
 
   browser = await chromium.launch();
-  const createPage = await browser.newPage({ viewport: { width: 1100, height: 780 } });
+  const newPage = async (options) => {
+    const created = await browser.newPage(options);
+    await incidents.watchPage(created, { devServerOrigin });
+    return created;
+  };
+  const createPage = await newPage({ viewport: { width: 1100, height: 780 } });
   await runCreateComposerSmoke({ page: createPage, check, harnessBase });
   await createPage.close();
-  const cloudPage = await browser.newPage({ viewport: { width: 900, height: 650 } });
+  const cloudPage = await newPage({ viewport: { width: 900, height: 650 } });
   await runCloudWorkspaceSmoke({ page: cloudPage, check, harnessBase });
   await cloudPage.close();
-  const cloudTerminalPage = await browser.newPage({ viewport: { width: 1100, height: 780 } });
+  const cloudTerminalPage = await newPage({
+    viewport: { width: 1100, height: 780 },
+  });
   await runCloudTerminalSmoke({ page: cloudTerminalPage, check, harnessBase });
   await cloudTerminalPage.close();
-  const cloudSettingsPage = await browser.newPage({ viewport: { width: 1000, height: 850 } });
+  const cloudSettingsPage = await newPage({
+    viewport: { width: 1000, height: 850 },
+  });
   await runCloudSettingsSmoke({ page: cloudSettingsPage, check, harnessBase });
   await cloudSettingsPage.close();
-  const contextPage = await browser.newPage();
+  const contextPage = await newPage();
   await runContextGaugeSmoke({ page: contextPage, harnessBase });
   await contextPage.close();
-  const permissionPage = await browser.newPage();
+  const permissionPage = await newPage();
   await runPermissionHintsSmoke({ page: permissionPage, harnessBase });
   await permissionPage.close();
-  const summaryPage = await browser.newPage();
+  const summaryPage = await newPage();
   await runConversationSummarySmoke({ page: summaryPage, check, harnessBase });
   await summaryPage.close();
-  const overlayPage = await browser.newPage();
+  const overlayPage = await newPage();
   await runOverlayPositioningSmoke({ page: overlayPage, check, harnessBase });
   await overlayPage.close();
-  const draftPage = await browser.newPage();
+  const draftPage = await newPage();
   await runDraftIndicatorsSmoke({ page: draftPage, check, harnessBase });
   await draftPage.close();
-  const sidebarPage = await browser.newPage({
+  const sidebarPage = await newPage({
     viewport: { width: 1280, height: 800 },
   });
   await runAppSidebarSmoke({ page: sidebarPage, check, harnessBase });
   await sidebarPage.close();
-  const titlePage = await browser.newPage();
+  const titlePage = await newPage();
   await runChatTitlesSmoke({ page: titlePage, check, harnessBase });
   await titlePage.close();
-  const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  const page = await newPage({ viewport: { width: 900, height: 700 } });
   const consoleLines = [];
   const pageErrors = [];
   page.on("console", (msg) => consoleLines.push(msg.text()));
@@ -2610,6 +2629,7 @@ try {
 }
 
 if (failures.length > 0) {
+  incidents.report("ui-smoke incidents recorded during this run");
   console.error(
     `\nui-smoke-composer: ${failures.length} failure(s): ${failures.join(", ")}`,
   );

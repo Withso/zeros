@@ -334,16 +334,95 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
     true,
   );
   await page.waitForTimeout(1100);
-  // The drag reuses exact-revision cached pixels. Undo/redo can invalidate a
-  // selection-triggered background capture; explicitly qualify that precondition
-  // instead of treating a fixed delay as proof that a new capture completed.
-  await expect.poll(() => page.evaluate(async () => {
-    const { captureDesignRuntimeScreenshot } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-selection.ts");
-    const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
-    const snapshot = designWorkspaceSnapshotCache.getSnapshot("ws_design_harness").data;
-    const frame = snapshot.frames.find((item) => item.file === "home.html");
-    return !!await captureDesignRuntimeScreenshot("ws_design_harness", snapshot.lint.workspacePath, frame.file, frame.sourceVersion, "home-heading", 1);
-  })).toBe(true);
+  // The drag reuses exact-revision cached pixels: createDesignDragPresentation
+  // reads the runtime store's node (or whole-frame) screenshot for the live
+  // runtime's source version. Wait for exactly that state, once the live and
+  // persisted versions agree, instead of treating a fixed delay as proof.
+  // Undo/redo can invalidate a selection-triggered capture, so request one
+  // while none is cached or queued, but never await it inside the probe:
+  // captures share one idle-gated background lane, so an awaited capture let
+  // one slow lane consume the whole budget, hid pixels the product's own
+  // captures published meanwhile, and timed out without saying what it was
+  // waiting on. (Re-requesting a queued key also moves it to the back.)
+  const dragPixels = (describe = false) =>
+    page.evaluate(async (describe) => {
+      const workspaceId = "ws_design_harness";
+      const [selection, cache, store, runtimes, background] = await Promise.all(
+        [
+          import("/apps/desktop/src/renderer/features/design-workspace/state/design-selection.ts"),
+          import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts"),
+          import("/apps/desktop/src/renderer/features/design-workspace/state/design-runtime-store.ts"),
+          import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts"),
+          import("/apps/desktop/src/renderer/features/design-workspace/state/design-background-work.ts"),
+        ],
+      );
+      const snapshot =
+        cache.designWorkspaceSnapshotCache.getSnapshot(workspaceId).data;
+      const frame = snapshot.frames.find((item) => item.file === "home.html");
+      const live = runtimes.designFrameRuntime(
+        workspaceId,
+        frame.file,
+      )?.sourceVersion;
+      const images =
+        store.designRuntimeFrameState(workspaceId, frame.file)
+          ?.screenshotsByNode ?? {};
+      const settled = live === frame.sourceVersion;
+      const ready =
+        settled &&
+        [images["home-heading"], images[""]].some(
+          (image) => image?.sourceVersion === live,
+        );
+      const lane = background.designBackgroundWork;
+      if (describe) {
+        return {
+          persisted: frame.sourceVersion,
+          live: live ?? null,
+          cached: Object.fromEntries(
+            Object.entries(images).map(([node, image]) => [
+              node || "(frame)",
+              image?.sourceVersion,
+            ]),
+          ),
+          captureInFlight: Boolean(window.__layoutDragPixelsCapture),
+          lane: {
+            queued: [...lane.pending.keys()].map((key) =>
+              key.replaceAll("\0", " "),
+            ),
+            running: lane.running,
+            paused: lane.active,
+            quietForMs: Math.max(0, lane.quietUntil - Date.now()),
+          },
+        };
+      }
+      const queued = lane.pending?.has?.(
+        `capture:${workspaceId}\0${frame.file}\0home-heading`,
+      );
+      if (settled && !ready && !queued)
+        window.__layoutDragPixelsCapture ??= selection
+          .captureDesignRuntimeScreenshot(
+            workspaceId,
+            snapshot.lint.workspacePath,
+            frame.file,
+            frame.sourceVersion,
+            "home-heading",
+            1,
+          )
+          .catch(() => null)
+          .finally(() => {
+            window.__layoutDragPixelsCapture = undefined;
+          });
+      return ready;
+    }, describe);
+  try {
+    await expect.poll(() => dragPixels()).toBe(true);
+  } catch (error) {
+    const state = await dragPixels(true).catch((reason) => ({
+      unavailable: reason.message,
+    }));
+    throw new Error(
+      `${error.message}\nexact-revision drag pixels: ${JSON.stringify(state)}`,
+    );
+  }
   const sourceFrame = await page
     .locator('[data-design-frame="home.html"]')
     .boundingBox();
