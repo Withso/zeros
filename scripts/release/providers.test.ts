@@ -10,7 +10,8 @@ const config = promotionConfig({ RELEASE_CHANNEL: "beta", RELEASE_SHA: sha, GITH
   RAILWAY_DEPLOY_TOKEN: "fixture", PLANETSCALE_SERVICE_TOKEN_ID: "fixture", PLANETSCALE_SERVICE_TOKEN: "fixture", CLOUDFLARE_API_TOKEN: "fixture",
   RAILWAY_PROJECT_ID: "11111111-1111-4111-8111-111111111111", RAILWAY_ENVIRONMENT_ID: "22222222-2222-4222-8222-222222222222", RAILWAY_SERVICE_ID: "33333333-3333-4333-8333-333333333333",
   PLANETSCALE_ORG: "example", PLANETSCALE_DATABASE: "zeros-control-plane-beta", PLANETSCALE_BRANCH: "main", CLOUDFLARE_ACCOUNT_ID: "c".repeat(32), CF_PAGES_APP_PROJECT: "zeros-web-beta", AUTH_PROVIDER: "workos" });
-function fixture(railwayAuto = false, pagesAuto = false) {
+function fixture(railwayAuto = false, pagesAuto = false, staged: { unmergedChangesCount: number | null; stagedChanges: unknown } =
+  { unmergedChangesCount: 0, stagedChanges: { id: "<empty>", patch: {} } }) {
   let branch = "release/1.2.2", webBranch = branch;
   const calls: any[] = [], commands: any[] = [];
   let selectedWorker = {};
@@ -31,9 +32,10 @@ function fixture(railwayAuto = false, pagesAuto = false) {
     if (q.includes("WorkerIdentityRead")) return Response.json({ data: { variables: { ...selectedWorker, SECRET: "must-not-be-returned" } } });
     if (q.includes("PromotionState")) return Response.json({ data: {
       serviceInstanceAutoDeployStatus: { enabled: railwayAuto },
-      environment: { id: config.environmentId, name: "beta", projectId: config.projectId, unmergedChangesCount: 0,
+      environment: { id: config.environmentId, name: "beta", projectId: config.projectId, unmergedChangesCount: staged.unmergedChangesCount,
         config: { services: { [config.serviceId]: { source: { repo: config.repository, rootDirectory: "apps/control-plane", checkSuites: false, branch } } } } },
       serviceInstance: { serviceId: config.serviceId, environmentId: config.environmentId, domains: { customDomains: [{ domain: "api-beta.zeros.build" }] } },
+      environmentStagedChanges: staged.stagedChanges,
     } });
     if (q.includes("PromotionCommit")) { branch = request.variables.patch.services[config.serviceId].source.branch; return Response.json({ data: { environmentPatchCommit: "commit1" } }); }
     if (q.includes("PromotionDeployment")) return Response.json({ data: { deployment: { id: "deploy1", status: "SUCCESS", projectId: config.projectId,
@@ -47,6 +49,21 @@ function fixture(railwayAuto = false, pagesAuto = false) {
 describe("release provider adapters", () => {
   it.each([[true,false],[false,true]])("refuses independent autodeploy before mutations (%s/%s)", async (r,p) => {
     const f = fixture(r,p); await expect(f.providers.inspect()).rejects.toThrow("autodeploy");
+    expect(f.calls.every(row => !row.query || row.query.startsWith("query"))).toBe(true);
+  });
+  it("accepts Railway's null unmerged count when the staged-change patch is empty", async () => {
+    // The live shape on a clean base environment: no fork count, an empty staged patch.
+    const f = fixture(false, false, { unmergedChangesCount: null, stagedChanges: { id: "<empty>", status: "STAGED", patch: {} } });
+    await expect(f.providers.inspect()).resolves.not.toThrow();
+    expect(f.calls.find(row => row.query?.includes("PromotionState")).query).toContain("environmentStagedChanges(");
+  });
+  it.each([
+    ["a staged change", { unmergedChangesCount: null, stagedChanges: { id: "patch1", patch: { services: { x: { source: { branch: "main" } } } } } }],
+    ["unmerged fork changes", { unmergedChangesCount: 2, stagedChanges: { id: "<empty>", patch: {} } }],
+    ["an unreadable staged state", { unmergedChangesCount: null, stagedChanges: null }],
+  ])("refuses %s before mutations", async (_name, staged) => {
+    const f = fixture(false, false, staged);
+    await expect(f.providers.inspect()).rejects.toThrow("staged changes");
     expect(f.calls.every(row => !row.query || row.query.startsWith("query"))).toBe(true);
   });
   it("retargets Beta with deploys suppressed, then deploys only the event SHA", async () => {
