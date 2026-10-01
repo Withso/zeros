@@ -196,7 +196,7 @@ export async function retireReleaseBuilder(config: PromotionConfig, context: Con
   let proof: WorkerBuilderProvenance | undefined;
   if (record.builderProvenance || builder.cleanup?.kind === "release-owned-sanitized-unavailable" || record.candidate && record.builderIntent?.scope) {
     proof = await provenance(config, context, options.historical === true);
-    if (!builder.deleted) await readySnapshot(context);
+    if (!builder.deleted && !builder.deletionOperationId) await readySnapshot(context);
     if (!record.builderProvenance && !builder.cleanup?.provenance) { record.builderProvenance = proof; await lease.save(); }
   }
   if (!builder.deletionOperationId) {
@@ -230,6 +230,7 @@ export async function retireReleaseBuilder(config: PromotionConfig, context: Con
       const pending = pendingOperation.safeParse({ id: operation.id, kind: operation.kind, targetId: operation.targetId,
         status: operation.status, stage: operation.stage, expectedBy: operation.expectedBy ?? null });
       requireCheck(pending.success, "Worker builder pending-storage stage/deadline is invalid");
+      await readySnapshot(context);
       value = { kind: "release-owned-sanitized-unavailable", sandboxId: builder.id, deletionOperationId: builder.deletionOperationId,
         operation: pending.data, operationObservedAt, unavailableObservedAt: operationObservedAt, provenance: proof, provenanceSha256: hash(proof),
         storage: { status: "pending", scope: "sandbox-unshared-snapshots-and-machine-data", stage: pending.data.stage,

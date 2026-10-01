@@ -350,8 +350,12 @@ Later executions observe at most 16 retained builders within a 15-second provide
 read budget under the same owner/account. They keep one compact record per
 builder, never rebuild, replay DELETE, prune selected/rollback images, add a
 cron service or release by age. Authenticated terminal operation plus sandbox
-404 changes the member to `physically-deleted` and sets `builder.deleted:true`;
-the selected named image remains held. Unknown/malformed historical proof is
+404 changes the member to `physically-deleted` and sets `builder.deleted:true`,
+even if that historical named image has since been retired. Existing operation
+recovery checks physical completion before named-image readiness; a ready name
+with the exact source builder is still required for pending-storage eligibility.
+The name hold remains until separate exact retirement readback releases it;
+recovery never deletes or prunes a name. Unknown/malformed historical proof is
 retained and blocks new release work for reviewed reconciliation of its exact
 saved operation, not a new deletion or inferred success.
 

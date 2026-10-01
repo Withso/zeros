@@ -9,7 +9,7 @@ import { nativeAgentCanary } from "../dev-environment/native-agent-canary.mjs";
 import { imageContractSha256 } from "../cloud-workspace-validation/config";
 import { main as imageKit } from "../cloud-workspace-validation/boat-image/boat-image";
 import { boatImageAdapter } from "./worker-adapters";
-import { assertWorkerSnapshotSlots, reserveWorkerSlot, workerOwner, workerSnapshotName } from "./worker-admission";
+import { assertWorkerSnapshotSlots, reconcileWorkerSnapshotHolds, reserveWorkerSlot, workerOwner, workerSnapshotName } from "./worker-admission";
 import { workerExecutionConfig } from "./worker-config";
 import { workerEnvironment, workerConnections } from "./worker-test-fixtures";
 import { promoteWorker, validateWorkerReceipt, WorkerReceipt } from "./worker";
@@ -68,7 +68,7 @@ async function fixture({ savedAgeMs = 20_000, sourceCommit = "a".repeat(40), run
   await reserveWorkerSlot(store, lease, profile, config.channel, snapshotId, inventory);
   const operation: any = { id: `bdop_${(runId === "123" ? "c" : "d").repeat(32)}`, kind: "sandbox", targetId: record.builder.id,
     status: "blocked", stage: "waiting_for_uploads", expectedBy: new Date(Date.now() + 6 * 3600_000).toISOString() };
-  const request = vi.fn(async (method: string, route: string, _settings?: any) => {
+  const request = vi.fn(async (method: string, route: string, _settings?: any): Promise<{ status: number; body: Record<string, unknown> | null }> => {
     if (route.startsWith("/limits")) return { status: 200, body: { creditUsedSeconds: 0 } };
     if (route === `/named-snapshots/${snapshotId}`) return { status: 200, body: { snapshot: { name: snapshotId, sourceSandboxId: record.builder.id, status: "ready" } } };
     if (method === "DELETE" && route === `/sandboxes/${record.builder.id}`) return { status: 202, body: { operation: structuredClone(operation) } };
@@ -82,6 +82,19 @@ async function fixture({ savedAgeMs = 20_000, sourceCommit = "a".repeat(40), run
     release: vi.fn(async () => { await releaseHostedAdmission(store, lease, profile); }), kit: vi.fn() };
   const adapter = await boatImageAdapter(config, environment, directory, context);
   return { adapter, config, environment, profile, state, record, run, candidate, context, operation, request, saves, store, inventory, ledger: () => ledger, directory };
+}
+
+async function historicalFixture() {
+  const repository = await mkdtemp(path.join(os.tmpdir(), "zeros-release-retention-recovery-")); directories.push(repository);
+  const git = (...arguments_: string[]) => execFileSync("/usr/bin/git", ["-c", "user.name=Release Recovery Fixture", "-c", "user.email=release-recovery@example.invalid", ...arguments_],
+    { cwd: repository, encoding: "utf8", env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } }).trim();
+  git("init", "-q"); await writeFile(path.join(repository, "fixture.txt"), "historical release source\n");
+  git("add", "fixture.txt"); git("commit", "-q", "-m", "synthetic historical release");
+  const test = await fixture({ sourceCommit: git("rev-parse", "HEAD") });
+  patchProof(test, "source", proof => { proof.tree = git("rev-parse", "HEAD^{tree}"); });
+  await writeFile(path.join(repository, "fixture.txt"), "next release source\n");
+  git("add", "fixture.txt"); git("commit", "-q", "-m", "synthetic next release");
+  return { ...test, nextConfig: { ...test.config, sourceSha: git("rev-parse", "HEAD"), runId: "124" } };
 }
 
 function patchProof(test: Awaited<ReturnType<typeof fixture>>, name: string, change: (value: any) => void) {
@@ -340,6 +353,85 @@ describe("release-owned builder retirement composition", () => {
     expect(test.request.mock.calls.filter(([method]) => method === "DELETE")).toHaveLength(1);
     expect(test.context.kit).not.toHaveBeenCalled();
   });
+  it("reconciles a historical builder whose named image was retired using its saved physical operation and compact proof", async () => {
+    const test = await historicalFixture(); await test.adapter.cleanup();
+    const certificate = structuredClone(test.record.builder.cleanup.provenance), intent = structuredClone(test.record.builderIntent);
+    expect(test.record.kitFiles).toBeUndefined(); expect(test.record.builder.deleted).toBe(false);
+    const original = test.request.getMockImplementation()!;
+    test.request.mockImplementation(async (method, route, settings) => route === `/named-snapshots/${test.candidate.snapshotId}`
+      ? { status: 404, body: null } : original(method, route, settings));
+    test.operation.status = "completed"; test.operation.completedAt = new Date().toISOString(); test.request.mockClear();
+    await reconcileReleaseBuilderRetentions(test.nextConfig, test.context);
+    expect(test.request.mock.calls.map(([method, route]) => [method, route])).toEqual([
+      ["GET", `/deletion-operations/${test.operation.id}`], ["GET", `/sandboxes/${test.record.builder.id}`],
+    ]);
+    expect(test.record.builder.cleanup).toMatchObject({ kind: "physically-deleted", deletionOperationId: test.operation.id });
+    expect(test.record.builder.deleted).toBe(true); expect(test.record.builderProvenance).toEqual(certificate);
+    expect(test.record.builderIntent).toEqual(intent); expect(test.record.builder.reconcileUnconfirmed).toBeUndefined();
+    expect(test.record.snapshotDeleted).toBeUndefined(); expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
+    expect(test.context.kit).not.toHaveBeenCalled();
+  });
+  it("releases an actually retired named-image hold only after historical physical builder reconciliation and exact name readback", async () => {
+    const test = await historicalFixture(); await test.adapter.cleanup();
+    const original = test.request.getMockImplementation()!, inventory = [{ provider: "boat", id: test.profile.boat.baseSnapshot }];
+    test.request.mockImplementation(async (method, route, settings) => route === `/named-snapshots/${test.candidate.snapshotId}`
+      ? { status: 404, body: null } : original(method, route, settings));
+    await reconcileWorkerSnapshotHolds(test.store, test.context.lease, test.profile, inventory, test.request);
+    expect(test.record.builder.deleted).toBe(false); expect(test.record.snapshotDeleted).toBeUndefined();
+    expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
+    test.operation.status = "completed"; test.operation.completedAt = new Date().toISOString(); test.request.mockClear();
+    await reconcileReleaseBuilderRetentions(test.nextConfig, test.context);
+    expect(test.record.builder.deleted).toBe(true); expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
+    await reconcileWorkerSnapshotHolds(test.store, test.context.lease, test.profile, inventory, test.request);
+    expect(test.record.snapshotDeleted).toBe(true); expect(test.record.snapshotRetirementReason).toBe("externally-pruned-after-builder-cleanup");
+    expect(test.ledger().reservations.find((row: any) => row.snapshotName === test.candidate.snapshotId)).toBeUndefined();
+    expect(test.request.mock.calls.map(([method, route]) => [method, route])).toEqual([
+      ["GET", `/deletion-operations/${test.operation.id}`], ["GET", `/sandboxes/${test.record.builder.id}`],
+      ["GET", `/named-snapshots/${test.candidate.snapshotId}`],
+    ]);
+    expect(test.context.kit).not.toHaveBeenCalled();
+  });
+  it.each(["missing", "wrong-name", "wrong-source-builder", "unready"])("does not authorize historical pending storage with a %s named image", async status => {
+    const test = await historicalFixture(); await test.adapter.cleanup();
+    const cleanup = structuredClone(test.record.builder.cleanup), intent = structuredClone(test.record.builderIntent);
+    const original = test.request.getMockImplementation()!;
+    test.request.mockImplementation(async (method, route, settings) => route === `/named-snapshots/${test.candidate.snapshotId}`
+      ? status === "missing" ? { status: 404, body: null } : { status: 200, body: { snapshot: {
+        name: status === "wrong-name" ? "other" : test.candidate.snapshotId, status: status === "unready" ? "save-pending" : "ready",
+        sourceSandboxId: status === "wrong-source-builder" ? "bx_other" : test.record.builder.id } } }
+      : original(method, route, settings));
+    test.request.mockClear(); test.context.release.mockClear();
+    await expect(reconcileReleaseBuilderRetentions(test.nextConfig, test.context)).rejects.toThrow("unconfirmed");
+    expect(test.request.mock.calls.map(([method, route]) => [method, route])).toEqual([
+      ["GET", `/deletion-operations/${test.operation.id}`], ["GET", `/named-snapshots/${test.candidate.snapshotId}`],
+    ]);
+    expect(test.record.builder.deleted).toBe(false); expect(test.record.builder.cleanup).toEqual(cleanup);
+    expect(test.record.builderIntent).toEqual(intent); expect(test.record.builder.reconcileUnconfirmed).toBe(true);
+    expect(test.record.snapshotDeleted).toBeUndefined(); expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
+    expect(test.context.release).not.toHaveBeenCalled(); expect(test.context.kit).not.toHaveBeenCalled();
+  });
+  it.each(["wrong-operation", "wrong-target", "early-completion", "available-sandbox"])("retains the retired name's hold for %s rather than inferring physical deletion", async status => {
+    const test = await historicalFixture(); await test.adapter.cleanup();
+    const cleanup = structuredClone(test.record.builder.cleanup), operationId = test.record.builder.deletionOperationId;
+    test.operation.status = "completed"; test.operation.completedAt = status === "early-completion"
+      ? new Date(test.record.builderIntent.at - 6000).toISOString() : new Date().toISOString();
+    if (status === "wrong-operation") test.operation.id = `bdop_${"f".repeat(32)}`;
+    if (status === "wrong-target") test.operation.targetId = "bx_other";
+    const original = test.request.getMockImplementation()!;
+    test.request.mockImplementation(async (method, route, settings) => {
+      if (route === `/named-snapshots/${test.candidate.snapshotId}`) return { status: 404, body: null };
+      if (route === `/deletion-operations/${operationId}`) return { status: 200, body: { operation: structuredClone(test.operation) } };
+      if (route === `/sandboxes/${test.record.builder.id}` && status === "available-sandbox") return { status: 200, body: { sandbox: { id: test.record.builder.id } } };
+      return original(method, route, settings);
+    });
+    test.request.mockClear();
+    await expect(reconcileReleaseBuilderRetentions(test.nextConfig, test.context)).rejects.toThrow("unconfirmed");
+    expect(test.request.mock.calls[0]).toEqual(["GET", `/deletion-operations/${operationId}`, { timeoutMs: expect.any(Number) }]);
+    expect(test.request.mock.calls.every(([method, route]) => method === "GET" && !route.startsWith("/named-snapshots/"))).toBe(true);
+    expect(test.record.builder.deleted).toBe(false); expect(test.record.builder.cleanup).toEqual(cleanup);
+    expect(test.record.snapshotDeleted).toBeUndefined(); expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
+    expect(test.context.kit).not.toHaveBeenCalled();
+  });
   it("retains malformed historical pending proof and blocks another release rather than trusting its terminal marker", async () => {
     const test = await fixture(); await test.adapter.cleanup();
     test.record.builder.cleanup.kind = "unknown-retirement";
@@ -532,7 +624,7 @@ describe("release-owned builder retirement composition", () => {
     test.request.mockClear();
     await expect(reconcileReleaseBuilderRetentions(test.config, { ...test.context, now: () => beginning + elapsed }, { budgetMs: 500 })).rejects.toThrow("unconfirmed");
     expect(test.request.mock.calls).toHaveLength(1);
-    expect(test.request.mock.calls[0]).toEqual(["GET", `/named-snapshots/${test.candidate.snapshotId}`, { timeoutMs: 500 }]);
+    expect(test.request.mock.calls[0]).toEqual(["GET", `/deletion-operations/${test.operation.id}`, { timeoutMs: 500 }]);
     expect(test.record.builder.deleted).toBe(false); expect(test.record.builder.reconcileUnconfirmed).toBe(true);
     expect(test.record.builder.cleanup.provenance).toBeDefined(); expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
   });
