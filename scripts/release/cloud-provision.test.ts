@@ -1,4 +1,4 @@
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { createPrivateKey, generateKeyPairSync, randomBytes } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../../apps/control-plane/src/config";
 import { releaseCanaryConfiguration } from "../../apps/control-plane/src/cloud-workspaces/release-canaries";
@@ -7,7 +7,7 @@ import { cloudProvisionConfig, cloudProvisionMain } from "./cloud-provision-cli"
 import { CLOUD_CANARY_INPUTS, CLOUD_ENABLE_FLAGS, CLOUD_KEYRINGS, CLOUD_OWNER_SECRETS, CLOUD_WORKER_VARIABLES,
   cloudProvisionSummary, planCloudProvision } from "./cloud-provision";
 
-const privateKey = generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 const projectId = "11111111-1111-4111-8111-111111111111", environmentId = "22222222-2222-4222-8222-222222222222";
 const serviceId = "33333333-3333-4333-8333-333333333333", actorId = "44444444-4444-4444-8444-444444444444";
 const organizationId = "55555555-5555-4555-8555-555555555555";
@@ -71,6 +71,9 @@ function statuses(plan: ReturnType<typeof planCloudProvision>) {
 }
 
 describe("cloud backend planning", () => {
+  it("uses a GitHub App RSA fixture with at least 2048 bits", () => {
+    expect(createPrivateKey(privateKey).asymmetricKeyDetails?.modulusLength).toBeGreaterThanOrEqual(2048);
+  });
   it("does not label a complete but unproved worker tuple qualified", () => {
     const options = fixture(); Object.assign(options.current, tuple());
     const plan = planCloudProvision({ ...options, enableCloud: true });
