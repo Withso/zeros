@@ -92,6 +92,12 @@ describe("release dependency and authority contracts", () => {
     expect(build).not.toContain("release/notarization-submission-id.txt");
     expect(job(workflow(name), "publish")).toContain("uses: actions/download-artifact@");
   });
+  it.each(["release-alpha", "release-beta", "release"])("binds %s publication to the cloud capability its build baked in", name => {
+    const text = workflow(name), build = job(text, "build"), publish = job(text, "publish");
+    expect(build).toContain("cloud_enabled: ${{ steps.capability.outputs.cloud_enabled }}");
+    expect(build).toContain("id: capability");
+    expect(publish).toContain("BUILD_CLOUD_ENABLED: ${{ needs.build.outputs.cloud_enabled }}");
+  });
   it("submits to Apple only after CI and signing, preserving a submission for cheap notarization retries", () => {
     const text = workflow("release"), submit = job(text, "submit"), notarize = job(text, "notarize");
     expect(submit).toContain("needs: [ci, build]");
@@ -124,6 +130,10 @@ case "$MODE" in
   ok) echo '{"id":"submission-1"}' ;;
   refused) echo "Error: HTTP status code: 401. Invalid credentials for $APPLE_ID." >&2; exit 69 ;;
   transient) if [ "$n" -lt 3 ]; then echo "Error: HTTP status code: 500." >&2; exit 1; fi; echo '{"id":"submission-3"}' ;;
+  long) printf 'Error: HTTP status code: 401. Unable to authenticate.%0700d\n' 0 >&2; exit 69 ;;
+  informational) echo '{"message":"Submission upload starting"}'; echo "Error: HTTP status code: 403. A required agreement is missing or has expired." >&2; exit 1 ;;
+  membership) echo "Error: Your team's Apple Developer Program membership has expired." >&2; exit 1 ;;
+  stdout) echo "Error: notary service unavailable"; exit 1 ;;
 esac
 `, { mode: 0o755 });
       // Stubs go first after any shell startup that edits PATH.
@@ -140,6 +150,12 @@ esac
     expect(refused.output).toContain("HTTP status code: 401. Invalid credentials for [redacted].");
     expect(refused.output).not.toMatch(/person@example\.invalid|fake-app-password|FAKETEAM/);
     expect(submit("transient")).toMatchObject({ status: 0, attempts: "3", id: "submission-3" });
+    // Classification reads the whole response; only the logged excerpt is capped.
+    for (const mode of ["long", "informational", "membership"]) expect(submit(mode)).toMatchObject({ status: 1, attempts: "1", id: "" });
+    expect(submit("informational").output).toContain("A required agreement is missing or has expired.");
+    const stdout = submit("stdout");
+    expect(stdout).toMatchObject({ status: 1, attempts: "3" });
+    expect(stdout.output).toContain("notary service unavailable");
   });
   it("inherits the exact-source Preflight coverage instead of repeating its secret-free quality checks", () => {
     const preflight = workflow("preflight");

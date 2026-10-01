@@ -117,6 +117,7 @@ jobs:
     # names + title) so it never recomputes and risks a mismatch.
     outputs:
       version: ${{ steps.version.outputs.version }}
+      cloud_enabled: ${{ steps.capability.outputs.cloud_enabled }}
     env:
       # Protected release capability, baked into both Electron main and the
       # packaged engine. Unset environments remain explicitly fail-closed.
@@ -183,6 +184,13 @@ jobs:
 
       - name: Setup Bun (for engine sidecar compile)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Record the baked cloud capability
+        id: capability
+        # tsup bakes exactly `ZEROS_CLOUD_WORKSPACES_ENABLED === "true"` into
+        # main.cjs. Publication requires its own decision to match this one.
+        run: |
+          if [ "$ZEROS_CLOUD_WORKSPACES_ENABLED" = "true" ]; then echo "cloud_enabled=true"; else echo "cloud_enabled=false"; fi >> "$GITHUB_OUTPUT"
 
       - name: Compute version
         id: version
@@ -404,10 +412,12 @@ jobs:
           done
           if [ -z "$DMG" ]; then echo "::error::no versioned .dmg to notarize"; exit 1; fi
           echo "Submitting ${DMG} to Apple notary (--no-wait)…"
-          # A transient upload or service error retries. An authentication or
-          # agreement refusal (HTTP 401/403) stops at once. Either way Apple's
-          # own reason reaches the log: GitHub masks the secret values, and the
-          # reason is also redacted and capped here.
+          # A refusal (HTTP 4xx other than 408/429, or an agreement, membership
+          # or credential error) stops at once; other failures retry twice. The
+          # whole response is classified. Only the logged excerpt is redacted
+          # and capped; GitHub also masks the secret values. A retry after an
+          # ambiguous failure can leave an unused submission in Apple's
+          # history, which is harmless: only the recorded ID is polled.
           SUB=""
           ERR_FILE=$(mktemp)
           for ATTEMPT in 1 2 3; do
@@ -417,12 +427,14 @@ jobs:
               --no-wait --output-format json 2>"$ERR_FILE") || STATUS=$?
             SUB=$(printf '%s' "$OUT" | jq -r '.id // empty' 2>/dev/null || true)
             if [ -n "$SUB" ]; then break; fi
-            REASON=$(printf '%s' "$OUT" | jq -r '.message // empty' 2>/dev/null || true)
-            if [ -z "$REASON" ]; then REASON=$(cat "$ERR_FILE"); fi
-            for VALUE in "$APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_ID" "$APPLE_TEAM_ID"; do REASON=${REASON//"$VALUE"/[redacted]}; done
-            REASON=$(printf '%s' "${REASON:-no reason reported}" | tr '\r\n' '  ' | tail -c 600)
-            echo "::warning::notarytool submit attempt ${ATTEMPT}/3 failed (exit ${STATUS}): ${REASON}"
-            if printf '%s' "$REASON" | grep -qiE 'status code: 40[13]|agreement|credential|authenticat'; then break; fi
+            RESPONSE=$(printf '%s %s' "$OUT" "$(cat "$ERR_FILE")" | tr '\r\n' '  ')
+            EXCERPT=$RESPONSE
+            for VALUE in "$APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_ID" "$APPLE_TEAM_ID"; do EXCERPT=${EXCERPT//"$VALUE"/[redacted]}; done
+            if [ "${#EXCERPT}" -gt 900 ]; then EXCERPT="$(printf '%s' "$EXCERPT" | head -c 600) [...] $(printf '%s' "$EXCERPT" | tail -c 300)"; fi
+            case "$EXCERPT" in *[![:space:]]*) ;; *) EXCERPT="notarytool printed nothing" ;; esac
+            echo "::warning::notarytool submit attempt ${ATTEMPT}/3 failed (exit ${STATUS}): ${EXCERPT}"
+            if grep -qiE 'status code: 4[0-9][0-9]' <<<"$RESPONSE" && ! grep -qiE 'status code: 4(08|29)' <<<"$RESPONSE"; then break; fi
+            if grep -qiE 'agreement|membership|credential|authenticat|unauthori[sz]ed|forbidden|not a member|expired|locked' <<<"$RESPONSE"; then break; fi
             if [ "$ATTEMPT" -lt 3 ]; then sleep 30; fi
           done
           rm -f "$ERR_FILE"
@@ -652,6 +664,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
+          BUILD_CLOUD_ENABLED: ${{ needs.build.outputs.cloud_enabled }}
         run: |
           set -euo pipefail
           pnpm exec tsx scripts/release/publication-cli.ts

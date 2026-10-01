@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { publicationGate } from "./publication";
+import { assertBuildCapability, publicationGate } from "./publication";
 import { reusableWorker } from "./worker-reuse";
 import { channelBaseline, migrationManifest } from "./source";
 
@@ -12,7 +12,7 @@ const backend = { version: 1, ready: true, sourceSha: sha, channel: "alpha", mai
 const receipt = { version: 1, status: "success", channel: "alpha", sourceSha: sha, branch: "main", repository: "example/zeros", runId: "1", runAttempt: "1",
   migration: { mode: "execute", database: "zeros-control-plane-alpha", branch: { name: "main", production: true }, backup: { id: "backup", state: "success" },
     controlledApprovals: [], pendingMigrations: [], applied: [], ledger: "verified", role: { deleted: true } }, backend,
-  railwayDeploymentId: "deployment", pages: [{ id: "app", surface: "app" }, { id: "ops", surface: "ops" }], completedAt: new Date().toISOString() };
+  railwayDeploymentId: "deployment", pages: [{ id: "app", surface: "app" }, { id: "ops", surface: "ops" }], cloudRequired: true, completedAt: new Date().toISOString() };
 const deps = () => ({ receipt: async () => receipt, identity: async () => backend,
   page: async (surface: string) => ({ version: 1, commitSha: sha, surface }) });
 
@@ -35,6 +35,17 @@ describe("V6 publication-time proof", () => {
     const hash = async (source: string) => source === sha ? digest : "d".repeat(64);
     expect(await reusableWorker(desktop, unqualified, hash)).toBeUndefined();
     await expect(reusableWorker(desktop, { ...backend, channel: "beta" }, hash)).rejects.toThrow("Current channel readiness is unavailable");
+  });
+  it("refuses a receipt made under another desktop cloud decision", async () => {
+    await expect(publicationGate({ ...candidate, cloudRequired: false }, deps())).rejects.toThrow("desktop cloud capability");
+    const { cloudRequired: _omitted, ...legacy } = receipt;
+    await expect(publicationGate(candidate, { ...deps(), receipt: async () => legacy })).rejects.toThrow("desktop cloud capability");
+  });
+  it("publishes only the cloud capability the signed build baked in", () => {
+    expect(() => assertBuildCapability("false", false)).not.toThrow();
+    expect(() => assertBuildCapability("true", true)).not.toThrow();
+    for (const [built, required] of [["true", false], ["false", true], [undefined, false], ["", false], ["yes", true]] as const)
+      expect(() => assertBuildCapability(built, required)).toThrow("signed desktop");
   });
   it("enabled reuse requires affirmative current qualification", async () => {
     for (const workerQualified of [false, undefined])

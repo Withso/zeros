@@ -122,6 +122,19 @@ describe("services and qualified worker finalization", () => {
     final[step] = async () => { throw new Error("private-provider-detail"); };
     await expect(finalizePromotion(config, services, final)).rejects.not.toThrow("private-provider-detail");
   });
+  it("records the desktop cloud decision and refuses to finalize under another", async () => {
+    const { config, services, final, calls } = await finalizationHarness(false);
+    expect(services.cloudRequired).toBe(false);
+    await expect(finalizePromotion({ ...config, cloudRequired: true, provider: "boat" }, services, final)).rejects.toThrow("desktop cloud capability");
+    await expect(finalizePromotion(config, { ...services, cloudRequired: undefined }, final)).rejects.toThrow("desktop cloud capability");
+    expect(calls).toEqual([]);
+  });
+  it("pins the API's worker tuple through finalization when no worker was promoted", async () => {
+    const { config, services, final } = await finalizationHarness(false);
+    const worker = { provider: "boat", imageRef: `boat:zeros-alpha-fixture@sha256:${"d".repeat(64)}`, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096 };
+    final.waitIdentity = async () => ({ ...services.backend, cloud: { enabled: true, ready: true, state: "healthy" }, worker, workerQualified: false });
+    await expect(finalizePromotion(config, services, final)).rejects.toThrow("worker tuple changed");
+  });
   it("refuses a plan-mode services receipt and future attempt before provider reads", async () => {
     const { config, services, final, calls } = await finalizationHarness();
     for (const patch of [{ migration: { ...services.migration, mode: "plan" } }, { runAttempt: "2" }])

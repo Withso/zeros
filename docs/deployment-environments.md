@@ -1172,6 +1172,17 @@ For this branch's first rollout:
    a changed or unmeasurable worker blocks hosted promotion. Then repeat the
    isolated setup for Beta and promote Production only from its successful
    exact-SHA Beta receipt.
+   A cloud-disabled desktop (`ZEROS_CLOUD_WORKSPACES_ENABLED` not `true`) is
+   the deliberate exception: it does not depend on the worker, so promotion
+   neither compares worker inputs nor requires qualification, even when the
+   API itself runs staff cloud with an unqualified worker. The API must still
+   keep the tuple it served at the services handoff; finalization refuses a
+   change, and a worker change belongs to the worker lane. This is not a
+   cloud qualification: an API change that a running worker depends on still
+   needs the worker ceremony. The services receipt records the desktop cloud
+   capability, and finalization and publication refuse a different one. The
+   build job records the capability it baked into the app, and publication
+   refuses to reinterpret it: changing the variable means rebuilding.
 
 ### Controlled cutover workflow
 

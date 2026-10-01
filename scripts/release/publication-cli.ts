@@ -3,7 +3,7 @@ import { CHANNELS, PromotionError, releaseSource, requireCheck } from "./contrac
 import { disabledGuard, publicIdentity } from "./guard";
 import { githubClient } from "./github";
 import { command, jsonClient } from "./io";
-import { publicationGate } from "./publication";
+import { assertBuildCapability, publicationGate } from "./publication";
 
 async function main() {
   const source = releaseSource(process.env);
@@ -15,6 +15,7 @@ async function main() {
   // refresh rolling refs at publication rather than trusting checkout time.
   await command("git", ["fetch", "--force", "--prune", "--prune-tags", "--tags", "origin"]);
   const cloudRequired = process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true", provider = process.env.CLOUD_WORKSPACE_PROVIDER || "daytona";
+  assertBuildCapability(process.env.BUILD_CLOUD_ENABLED, cloudRequired);
   if (process.env.ZEROS_HOSTED_PROMOTION !== "enabled") {
     const result = await disabledGuard([], { ...source, cloudEnabled: cloudRequired, provider });
     console.log(`::${result.blocked ? "error" : "warning"}::${result.message}`);

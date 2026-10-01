@@ -84,15 +84,19 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
    * Remove every trigger for this service and confirm autodeploy is off. */
   async function removeDeployTriggers() {
     // Railway recreates a trigger asynchronously after a source patch, so keep
-    // removing until three consecutive reads, seconds apart, show none.
+    // removing until three consecutive reads, seconds apart, show none. The
+    // deadline makes a provider that keeps recreating them stop here, with
+    // this diagnostic, rather than at the job timeout.
+    const deadline = Date.now() + 10 * 60_000;
     let clean = 0;
-    for (let attempt = 0; attempt < 24 && clean < 3; attempt++) {
+    for (let attempt = 0; attempt < 24 && clean < 3 && Date.now() < deadline; attempt++) {
       if (attempt > 0) await (options.pause ?? sleep)(5_000);
       const listed = await railway(`query CutoverTriggers($projectId:String!,$environmentId:String!,$serviceId:String!) {
         deploymentTriggers(first:50,projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId) { edges { node { id } } }
       }`, target);
       const ids: string[] = listed.deploymentTriggers?.edges?.map((edge: { node: { id: string } }) => edge.node.id) ?? [];
       for (const id of ids) {
+        requireCheck(Date.now() < deadline, "Railway automatic deployments did not stay off after removing their triggers");
         const removed = await railway(`mutation CutoverTriggerDelete($id:String!) { deploymentTriggerDelete(id:$id) }`, { id });
         requireCheck(removed.deploymentTriggerDelete === true, "Railway deployment trigger removal is unconfirmed");
       }

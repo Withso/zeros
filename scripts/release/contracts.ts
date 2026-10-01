@@ -78,5 +78,8 @@ export const HostedReceipt = z.object({ version: z.literal(1), status: z.literal
   migration: MigrationReceipt, backend: ReleaseIdentity, railwayDeploymentId: id, pages: z.array(z.object({ id, surface: z.enum(["app", "ops"]) })),
   completedAt: z.string().datetime(),
   workos: WorkOSVerification.optional(),
+  // The desktop cloud capability the hosted lane promoted for. Finalization
+  // and publication refuse a different one; older receipts lack it.
+  cloudRequired: z.boolean().optional(),
 });
 export const HostedServicesReceipt = HostedReceipt.extend({ status: z.literal("services-ready"), workos: WorkOSVerification });

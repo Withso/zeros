@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { promotionConfig } from "./contracts";
 import { createProviders, publicPagesEnvironment } from "./providers";
 
@@ -12,7 +12,7 @@ const workosEnv = { AUTH_ISSUER: "https://auth-api.example.com/", AUTH_JWKS_URL:
   AUTH_WEB_CLIENT_ID: "client_web", AUTH_DESKTOP_CLIENT_ID: "client_desktop" };
 
 function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: boolean; staged?: unknown; identity?: unknown;
-  services?: string[]; deployments?: { id: string; status: string }[][]; triggers?: string[]; deleteFails?: boolean; recreateOnList?: number }) {
+  services?: string[]; deployments?: { id: string; status: string }[][]; triggers?: string[]; deleteFails?: boolean; recreateOnList?: number; recreateAlways?: boolean }) {
   let lists = 0;
   state.triggers ??= state.autoDeploy ? ["trigger1"] : [];
   const calls: any[] = [];
@@ -32,7 +32,7 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
     }
     const q: string = request.query;
     if (q.includes("CutoverTriggers")) {
-      if (++lists === state.recreateOnList) { state.triggers!.push("late"); state.autoDeploy = true; }
+      if (++lists === state.recreateOnList || state.recreateAlways) { state.triggers!.push(`late${lists}`); state.autoDeploy = true; }
       return Response.json({ data: { deploymentTriggers: { edges: state.triggers!.map(id => ({ node: { id } })) } } });
     }
     if (q.includes("CutoverTriggerDelete")) {
@@ -76,11 +76,21 @@ describe("cutover provider adapters", () => {
     // Railway's asynchronous recreation: a new trigger appears on the second read.
     const f = fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false, triggers: [], recreateOnList: 2 });
     await f.providers.holdDeploys();
-    expect(f.calls.filter(call => call.query?.includes("CutoverTriggerDelete")).map(call => call.variables.id)).toEqual(["late"]);
+    expect(f.calls.filter(call => call.query?.includes("CutoverTriggerDelete")).map(call => call.variables.id)).toEqual(["late2"]);
     // One clean read, the late trigger, then three consecutive clean reads.
     expect(f.calls.filter(call => call.query?.includes("CutoverTriggers"))).toHaveLength(5);
   });
 
+  it("stops at its time limit when Railway keeps recreating triggers", async () => {
+    const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true, recreateAlways: true });
+    let now = Date.parse("2026-10-01T00:00:00.000Z");
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => (now += 60_000));
+    try {
+      await expect(f.providers.holdDeploys()).rejects.toThrow("Railway automatic deployments did not stay off");
+    } finally { clock.mockRestore(); }
+    // A ten-minute deadline at a minute per clock read stops well before the 24-read bound.
+    expect(f.calls.filter(call => call.query?.includes("CutoverTriggers")).length).toBeLessThan(10);
+  });
   it("stops when Railway does not confirm removing a deployment trigger", async () => {
     const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true, deleteFails: true });
     await expect(f.providers.holdDeploys()).rejects.toThrow("Railway deployment trigger removal is unconfirmed");
