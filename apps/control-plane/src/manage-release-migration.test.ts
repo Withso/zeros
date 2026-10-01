@@ -201,6 +201,34 @@ describe("release migration runner", () => {
     expect(failure.partial).toEqual({ backup: { id: "bk1", state: "success" }, applied: [], roleDeleted: true });
   });
 
+  it("marks cleanup unconfirmed for a successful login response without an ID", async () => {
+    const { calls, deps } = harness();
+    const request = deps.planetScale;
+    deps.planetScale = async (method, path, body) => method === "POST" && path === `${BRANCH}/roles`
+      ? { status: 201, body: { name: "partial" } } : request(method, path, body);
+    const failure = await releaseMigration(
+      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" }, deps,
+    ).catch((error: unknown) => error as ReleaseMigrationError);
+    expect(failure.message).toBe("Incomplete migration role response; cleanup is unconfirmed");
+    expect(failure.partial).toEqual({ backup: { id: "bk1", state: "success" }, applied: [], roleDeleted: false });
+    expect(calls.some(call => call.startsWith("DELETE"))).toBe(false);
+  });
+
+  it("keeps the backup and an unknown cleanup when the login request itself fails", async () => {
+    const { deps } = harness();
+    const request = deps.planetScale;
+    deps.planetScale = async (method, path, body) => {
+      if (method === "POST" && path === `${BRANCH}/roles`) throw new Error("socket hang up with private detail");
+      return request(method, path, body);
+    };
+    const failure = await releaseMigration(
+      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" }, deps,
+    ).catch((error: unknown) => error as ReleaseMigrationError);
+    expect(failure).toBeInstanceOf(ReleaseMigrationError);
+    expect(failure.message).toBe("Migration role request failed; allocation is unknown");
+    expect(failure.partial).toEqual({ backup: { id: "bk1", state: "success" }, applied: [], roleDeleted: false });
+  });
+
   it("never mints a role when the backup fails", async () => {
     const { calls, deps } = harness({ backupStates: ["pending", "failed"] });
     await expect(releaseMigration(

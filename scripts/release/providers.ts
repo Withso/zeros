@@ -55,7 +55,7 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
       noStagedChanges(environment, data.environmentStagedChanges) && data.serviceInstance?.serviceId === config.serviceId && data.serviceInstance.environmentId === config.environmentId,
     "Railway target mismatch or outstanding staged changes");
     const source = environment.config?.services?.[config.serviceId]?.source;
-    requireCheck(source?.repo === config.repository && (!requireHeld || source.checkSuites === false) && source.rootDirectory === "apps/control-plane",
+    requireCheck(source?.repo === config.repository && (!requireHeld || source.checkSuites !== true) && source.rootDirectory === "apps/control-plane",
       "Railway source/root must match this repository and Wait for CI must be disabled");
     requireCheck(data.serviceInstance.domains?.customDomains?.some((row: { domain: string }) => row.domain === new URL(config.api).hostname), "Railway API domain mismatch");
     if (config.channel !== "alpha") assertNotOlderBranch(config.branch, source.branch);
@@ -78,6 +78,21 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
     if (config.channel !== "alpha") assertNotOlderBranch(config.branch, project.production_branch);
     else requireCheck(project.production_branch === "main", "Pages Alpha source must be main");
     return project;
+  }
+  /** Railway models automatic deployments as GitHub deployment triggers: the
+   * dashboard's Disable deletes them, and any source patch can recreate one.
+   * Remove every trigger for this service and confirm autodeploy is off. */
+  async function removeDeployTriggers() {
+    const listed = await railway(`query CutoverTriggers($projectId:String!,$environmentId:String!,$serviceId:String!) {
+      deploymentTriggers(first:50,projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId) { edges { node { id } } }
+    }`, target);
+    const ids: string[] = listed.deploymentTriggers?.edges?.map((edge: { node: { id: string } }) => edge.node.id) ?? [];
+    for (const id of ids) {
+      const removed = await railway(`mutation CutoverTriggerDelete($id:String!) { deploymentTriggerDelete(id:$id) }`, { id });
+      requireCheck(removed.deploymentTriggerDelete === true, "Railway deployment trigger removal is unconfirmed");
+    }
+    const after = await readRailway();
+    requireCheck(after.serviceInstanceAutoDeployStatus?.enabled === false, "Railway automatic deployments are still on after removing their triggers");
   }
   /** Read-only: every destination identity a cutover will touch, before any
    * hold. The channel environment must run only the control-plane service. */
@@ -139,7 +154,9 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
         // accept a shared staging area that may contain someone else's edits.
         await railway(`mutation PromotionCommit($environmentId:String!,$patch:EnvironmentConfig!) {
           environmentPatchCommit(environmentId:$environmentId,patch:$patch,skipDeploys:true,commitMessage:"Zeros release source retarget")
-        }`, { environmentId: config.environmentId, patch: { services: { [config.serviceId]: { source: { branch: config.branch, checkSuites: false } } } } });
+        }`, { environmentId: config.environmentId, patch: { services: { [config.serviceId]: { source: { branch: config.branch } } } } });
+        // A source patch can recreate the GitHub deployment trigger.
+        await removeDeployTriggers();
         requireCheck((await inspectRailway()).branch === config.branch, "Railway source retarget was not confirmed");
       }
       for (const surface of config.surfaces) {
@@ -152,25 +169,12 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
         }
       }
     },
-    /** Hold every independent deployer before an explicit cutover: Railway
-     * autodeploy and Wait for CI, then Pages production and preview builds.
-     * Source branches stay as they are; `retarget` moves them afterwards. */
+    /** Hold every independent deployer before an explicit cutover: Railway's
+     * deployment triggers (automatic deployments and their Wait for CI), then
+     * Pages production and preview builds. Branches stay; `retarget` moves them. */
     async holdDeploys() {
       await validateTargets();
-      const before = await readRailway(), environment = before.environment;
-      if (before.serviceInstanceAutoDeployStatus?.enabled !== false) {
-        await railway(`mutation CutoverAutoDeployHold($input:ServiceInstanceAutoDeployUpdateInput!) {
-          serviceInstanceAutoDeployUpdate(input:$input) { __typename }
-        }`, { input: { ...target, enabled: false } });
-      }
-      if (environment.config?.services?.[config.serviceId]?.source?.checkSuites !== false) {
-        await railway(`mutation CutoverWaitForCiHold($environmentId:String!,$patch:EnvironmentConfig!) {
-          environmentPatchCommit(environmentId:$environmentId,patch:$patch,skipDeploys:true,commitMessage:"Zeros cutover deploy hold")
-        }`, { environmentId: config.environmentId, patch: { services: { [config.serviceId]: { source: { checkSuites: false } } } } });
-      }
-      const after = await readRailway();
-      requireCheck(after.serviceInstanceAutoDeployStatus?.enabled === false &&
-        after.environment?.config?.services?.[config.serviceId]?.source?.checkSuites === false, "Railway deploy hold was not confirmed");
+      await removeDeployTriggers();
       for (const surface of config.surfaces) {
         const project = await pages(pagesPath(surface)), source = project.source?.config;
         if (!project.source || source?.production_deployments_enabled === false && source?.preview_deployment_setting === "none") continue;
