@@ -105,6 +105,34 @@ describe("Conductor Dev actions", () => {
     ]);
   });
 
+  it("installs qualified Node during Linux setup when the cloud VM only supplies Node 24", () => {
+    const f = fixture();
+    const installedNode = path.join(f.home, ".zeros-dev/tools/bin/node");
+    const replacement = fs.readFileSync(installedNode, "utf8").replace("exec ", "export ZEROS_TEST_NODE_VERSION=22.18.0\nexec ");
+    const bootstrap = path.join(path.dirname(f.home), "broken-bin/npm");
+    fs.writeFileSync(path.join(path.dirname(bootstrap), "uname"), "#!/bin/sh\nprintf 'Linux\\n'\n", { mode: 0o755 });
+    fs.writeFileSync(bootstrap, `#!/bin/sh\nprintf '%s\\n' 'bootstrap '"$*" >> "$ZEROS_SCRIPT_TEST_LOG"\nprintf '%s' ${quote(replacement)} > ${quote(installedNode)}\n`, { mode: 0o755 });
+    const result = f.run(scripts.setup, 0, "24.14.1");
+    expect(result.status, result.stderr).toBe(0);
+    expect(f.log()[0]).toContain("node@22");
+    expect(f.log().slice(1)).toEqual([
+      "pnpm install --frozen-lockfile",
+      "pnpm --dir apps/control-plane install --frozen-lockfile",
+      "npm --prefix apps/web ci",
+    ]);
+    expect(f.run(scripts.setup, 0, "24.14.1").status).toBe(0);
+    expect(f.log().filter(line => line.startsWith("bootstrap "))).toHaveLength(1);
+  });
+
+  it("stops Linux setup before dependency installation when Node bootstrap fails", () => {
+    const f = fixture();
+    fs.writeFileSync(path.join(path.dirname(f.home), "broken-bin/uname"), "#!/bin/sh\nprintf 'Linux\\n'\n", { mode: 0o755 });
+    fs.writeFileSync(path.join(path.dirname(f.home), "broken-bin/npm"), "#!/bin/sh\nexit 43\n", { mode: 0o755 });
+    const result = f.run(scripts.setup, 0, "24.14.1");
+    expect(result.status).toBe(43);
+    expect(f.log()).toEqual([]);
+  });
+
   it("does not call a missing profile importer on older Local-only checkouts", () => {
     const f = fixture(false);
     fs.writeFileSync(path.join(f.root, "zeros-dev-env.json"), "{}");

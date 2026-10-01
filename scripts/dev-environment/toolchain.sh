@@ -21,3 +21,22 @@ zeros_dev_select_tools() {
   echo 'Zeros Dev requires qualified Node 22.18+ in the 22.x line. Install Node 22, then retry.' >&2
   return 1
 }
+
+# Cloud workspace images can supply a newer Node than the qualified backend
+# line. Only Setup installs tools; Run and Archive remain non-installing.
+zeros_dev_setup_tools() {
+  if zeros_dev_select_tools 2>/dev/null; then return 0; fi
+  if [ "$(uname -s)" != Linux ]; then
+    zeros_dev_select_tools
+    return $?
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    echo 'Cloud setup needs Node and npm to install the qualified Node 22 toolchain.' >&2
+    return 1
+  fi
+  zeros_dev_tools_prefix="$HOME/.zeros-dev/tools"
+  (umask 077; mkdir -p "$zeros_dev_tools_prefix") || return $?
+  echo '[zeros-dev] Installing Node 22 for this cloud workspace.'
+  npm install --global --prefix "$zeros_dev_tools_prefix" --no-audit --no-fund node@22 || return $?
+  zeros_dev_select_tools
+}

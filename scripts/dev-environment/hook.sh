@@ -4,7 +4,11 @@ if [ "${1:-}" = archive ] && [ "${2:-}" != --receipt-known ]; then
   exec sh scripts/dev-environment/archive-hook.sh
 fi
 . ./scripts/dev-environment/toolchain.sh
-zeros_dev_select_tools
+if [ "${1:-}" = setup ]; then
+  zeros_dev_setup_tools
+else
+  zeros_dev_select_tools
+fi
 case "${1:-}" in
   setup)
     if [ -f scripts/dev-environment/setup.mjs ]; then

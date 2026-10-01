@@ -79,14 +79,16 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
       } catch { /* Never reflect health diagnostics into the identity. */ }
     }
     // Image references are immutable public artifact identities, never URLs.
-    const imageRef = configured?.imageRef;
-    const validImage = configured?.provider === "boat"
+    const selected = configured ? { provider: configured.provider, imageRef: configured.imageRef, sourceSha: configured.sourceCommit,
+      architecture: configured.architecture, storageMiB: configured.storageMiB } : config.selectedCloudWorker;
+    const imageRef = selected?.imageRef;
+    const validImage = selected?.provider === "boat"
       ? /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(imageRef ?? "")
-      : configured?.provider === "daytona" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(imageRef ?? "");
-    const worker = configured && typeof imageRef === "string" && validImage && sha(configured.sourceCommit) &&
-      ["linux/amd64", "linux/arm64"].includes(configured.architecture) && Number.isSafeInteger(configured.storageMiB) && configured.storageMiB > 0 ? {
-      provider: configured.provider, imageRef, sourceSha: sha(configured.sourceCommit),
-      architecture: configured.architecture, storageMiB: configured.storageMiB,
+      : selected?.provider === "daytona" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(imageRef ?? "");
+    const worker = selected && typeof imageRef === "string" && validImage && sha(selected.sourceSha) &&
+      ["linux/amd64", "linux/arm64"].includes(selected.architecture) && Number.isSafeInteger(selected.storageMiB) && selected.storageMiB > 0 ? {
+      provider: selected.provider, imageRef, sourceSha: sha(selected.sourceSha),
+      architecture: selected.architecture, storageMiB: selected.storageMiB,
     } : null;
     let workerQualified = false;
     if (worker && cloud.ready && !maintenance && migrations.state === "current") {

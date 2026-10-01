@@ -3,7 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
-import type { Config } from "../config.js";
+import { loadReleaseCanaryBoatConfig, type Config } from "../config.js";
 import { cloudAgentCredentialKeys } from "./agent-credentials.js";
 import { openCloudAgentCredential, type CloudAgentCredentialKeys, type CloudAgentCredentialKind } from "./agent-credential-envelope.js";
 import { DatabaseCodexAuthRenewal } from "./codex-auth-renewal.js";
@@ -85,13 +85,16 @@ export function releaseCanaryDesignation(request: Pick<ReleaseCanaryRequest, "cr
 }
 export function releaseCanaryConfiguration(config: Config, env: NodeJS.ProcessEnv = process.env): ReleaseCanaryConfiguration | null {
   if (env.ZEROS_RELEASE_CANARIES_ENABLED !== "true" || config.deploymentChannel === "development" || config.databaseMaintenanceMode) return null;
-  const keys = cloudAgentCredentialKeys(config.cloudWorkspaces), profile = config.cloudWorkspaces;
+  const keys = cloudAgentCredentialKeys(config.cloudAgentCredentials ?? config.cloudWorkspaces), profile = config.cloudWorkspaces;
+  const boat = profile?.provider === "boat" && profile.boat
+    ? { apiKey: profile.apiKey, apiUrl: profile.apiUrl, billingOrg: profile.boat.billingOrg, accountScope: profile.boat.accountScope }
+    : profile ? null : loadReleaseCanaryBoatConfig(env);
   const selected = identity.omit({ version: true, qualificationProfile: true }).safeParse({ ownerUserId: env.RUNTIME_QUALIFICATION_ACTOR_USER_ID,
     organizationId: env.WORKER_CANARY_ORGANIZATION_ID, channel: config.deploymentChannel, sourceSha: env.RAILWAY_GIT_COMMIT_SHA, repository: env.WORKER_CANARY_REPOSITORY });
-  if (!selected.success || !keys || profile?.provider !== "boat" || !profile.boat?.billingOrg || !profile.apiKey || !env.WORKER_CANARY_ADMISSION_TOKEN || env.WORKER_CANARY_ADMISSION_TOKEN.length < 32) return null;
-  const sharedAdmission = configuredBoatAccountAdmission(profile.boat.accountScope, profile.boat.billingOrg, env);
+  if (!selected.success || !keys || !boat?.billingOrg || !boat.apiKey || !env.WORKER_CANARY_ADMISSION_TOKEN || env.WORKER_CANARY_ADMISSION_TOKEN.length < 32) return null;
+  const sharedAdmission = configuredBoatAccountAdmission(boat.accountScope, boat.billingOrg, env);
   if (!sharedAdmission) return null;
-  return { ...selected.data, keys, admission: sharedAdmission, tokenSha256: hash(env.WORKER_CANARY_ADMISSION_TOKEN), boat: { apiKey: profile.apiKey, apiUrl: profile.apiUrl, billingOrg: profile.boat.billingOrg } };
+  return { ...selected.data, keys, admission: sharedAdmission, tokenSha256: hash(env.WORKER_CANARY_ADMISSION_TOKEN), boat: { apiKey: boat.apiKey, apiUrl: boat.apiUrl, billingOrg: boat.billingOrg } };
 }
 type NativeDeps = {
   phase: string;
