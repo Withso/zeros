@@ -13,6 +13,7 @@ const MAX_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_REMOTE_BASE_COMMITS = 256;
 const MAX_LOCAL_TIPS = 256;
 const MAX_REMOTE_PACKS = 256;
+const REMOTE_BASE_REUSE_TIMEOUT_MS = 2_000;
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMMIT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const GITHUB_HTTPS_REMOTE = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100}?)(?:\.git)?$/;
@@ -360,14 +361,23 @@ async function reusableRemotePacks(previous, base, files, roots, identity, at) {
   try { validateCloudNativeCheckpoint(previous); } catch { return null; }
   const shallowHash = entries => entries.find(file => file.scope === "git" && file.path === "shallow")?.contentSha256 ?? null;
   if (shallowHash(files) !== shallowHash(previous.files)) return null;
-  for (const old of previous.gitRemoteBase.commits) {
-    let retained = false;
-    for (const current of base.commits) {
-      if (old === current || await gitLines(roots, identity, at, ["merge-base", "--is-ancestor", old, current]) !== null) {
-        retained = true; break;
-      }
+  const current = new Set(base.commits);
+  const changed = previous.gitRemoteBase.commits.filter(oid => !current.has(oid));
+  if (changed.length) {
+    // Test reachability against the whole new base in one bounded graph walk.
+    // Pairwise ancestry subprocesses make unchanged/advanced branch sets
+    // quadratic and can consume the entire periodic-checkpoint deadline.
+    try {
+      const missing = await gitLines(roots, identity, Math.min(at, Date.now() + REMOTE_BASE_REUSE_TIMEOUT_MS),
+        ["rev-list", "--max-count=1", "--stdin"],
+        [Buffer.from(`${[...changed, ...base.commits.map(oid => `^${oid}`)].join("\n")}\n`)]);
+      if (!missing || missing.length) return null;
+    } catch {
+      // Reuse is optional. A slow/failed ancestry check rebuilds the immutable
+      // base while preserving the caller's overall capture deadline.
+      deadline(at);
+      return null;
     }
-    if (!retained) return null;
   }
   return previous.files.filter(file => file.scope === "git-pack" && file.path !== "objects.pack");
 }

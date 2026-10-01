@@ -1,13 +1,18 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { captureCloudNativeCheckpoint, fingerprintCloudNativeCheckpoint, nativeCheckpointFingerprint,
   loadCloudNativeCheckpointCache, restoreCloudNativeCheckpoint, saveCloudNativeCheckpointCache,
   validateCloudNativeCheckpoint } from "../cloud-checkpoint-artifacts.mjs";
 import {acquireCloudNativeHistory,deleteCloudNativeHistory} from "../cloud-native-history";
+
+vi.mock("node:child_process", async original => {
+  const actual = await original<typeof import("node:child_process")>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map(root => fs.rm(root, { recursive: true, force: true }))); });
@@ -273,6 +278,78 @@ async function restoreFromRemote(workspace: RemoteFixture, archive: Awaited<Retu
 }
 
 describe.runIf(process.platform === "linux")("native cloud checkpoint Git history already on the remote", () => {
+  it.each(["unchanged", "advanced", "rewritten"])("bounds Git subprocesses with many %s remote tips", async change => {
+    const workspace = await fixture();
+    git(workspace.repository, "remote", "add", "origin", "https://github.com/example/recovery.git");
+    const tree = git(workspace.repository, "rev-parse", "HEAD^{tree}");
+    const tips: string[] = [];
+    for (let index = 0; index < 24; index++) {
+      const tip = git(workspace.repository, "commit-tree", tree, "-p", workspace.base, "-m", `published branch ${index}`);
+      tips.push(tip);
+      git(workspace.repository, "update-ref", `refs/heads/branch-${index}`, tip);
+      git(workspace.repository, "update-ref", "--create-reflog", "-m", "fetch origin: storing head", `refs/remotes/origin/branch-${index}`, tip);
+    }
+    const first = await captureCloudNativeCheckpoint({ ...workspace, gitBase: "remote" });
+    expect(first.version).toBe(2);
+    expect(first.gitRemoteBase?.commits).toHaveLength(tips.length);
+    if (change !== "unchanged") {
+      for (const [index, tip] of tips.entries()) {
+        const next = git(workspace.repository, "commit-tree", tree, ...(change === "advanced" ? ["-p", tip] : []), "-m", `${change} branch ${index}`);
+        git(workspace.repository, "update-ref", `refs/heads/branch-${index}`, next);
+        git(workspace.repository, "update-ref", "-m", "fetch origin: fast-forward", `refs/remotes/origin/branch-${index}`, next);
+      }
+    }
+    const history = path.join(workspace.roots.agentHome, ".codex/sessions/2026/10/01");
+    await fs.mkdir(history, { recursive: true });
+    await fs.writeFile(path.join(history, "rollout-many-refs.jsonl"), "changed native history\n");
+    vi.mocked(spawn).mockClear();
+    const second = await captureCloudNativeCheckpoint({ ...workspace, gitBase: "remote", previous: first });
+    // A changed transcript must not make ref count multiply the subprocess cost
+    // of every periodic backup, including when all published branches advance.
+    expect(vi.mocked(spawn).mock.calls.filter(([command]) => command === "git").length).toBeLessThan(40);
+    expect(second.version).toBe(2);
+    const baseFiles = (archive: typeof first) => archive.files.filter(file => file.scope === "git-pack" && file.path !== "objects.pack");
+    const oldChunkIds = baseFiles(first).flatMap(file => file.segments.map(segment => first.chunks[segment.chunk]!.blobId));
+    const newChunkIds = baseFiles(second).flatMap(file => file.segments.map(segment => second.chunks[segment.chunk]!.blobId));
+    if (change === "rewritten") expect(newChunkIds).not.toEqual(expect.arrayContaining(oldChunkIds));
+    else expect(newChunkIds).toEqual(expect.arrayContaining(oldChunkIds));
+    expect(second.files.some(file => file.scope === "codex" && file.path.endsWith("rollout-many-refs.jsonl"))).toBe(true);
+    const restored = path.join(workspace.root, "restored-many-refs");
+    await fs.mkdir(restored); git(restored, "init", "-q");
+    await restoreCloudNativeCheckpoint({ archive: second, roots: { ...workspace.roots, repository: restored },
+      deadlineAtMs: workspace.deadlineAtMs, getChunk: async id => workspace.chunks.get(id)! });
+    expect(git(restored, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(git(workspace.repository, "for-each-ref", "--format=%(refname) %(objectname)"));
+  });
+
+  it("rebuilds the immutable base when the optional ancestry walk times out", async () => {
+    const workspace = await fixture();
+    git(workspace.repository, "remote", "add", "origin", "https://github.com/example/recovery.git");
+    git(workspace.repository, "update-ref", "--create-reflog", "-m", "fetch origin: storing head", "refs/remotes/origin/main", "HEAD");
+    const previous = await captureCloudNativeCheckpoint({ ...workspace, gitBase: "remote" });
+    git(workspace.repository, "commit", "-q", "--allow-empty", "-m", "advance published history");
+    git(workspace.repository, "update-ref", "-m", "fetch origin: fast-forward", "refs/remotes/origin/main", "HEAD");
+    const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    let slowProbe = false;
+    vi.mocked(spawn).mockImplementation((file, args, options) => {
+      if (file === "git" && Array.isArray(args) && args.includes("--max-count=1")) {
+        slowProbe = true;
+        return actual.spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], options);
+      }
+      return actual.spawn(file, args, options);
+    });
+    try {
+      const archive = await captureCloudNativeCheckpoint({ ...workspace, gitBase: "remote", previous });
+      expect(slowProbe).toBe(true);
+      expect(archive.version).toBe(2);
+      expect(archive.chunks.some(chunk => previous.chunks.some(old => old.blobId === chunk.blobId))).toBe(false);
+      const restored = path.join(workspace.root, "restored-after-timeout");
+      await fs.mkdir(restored); git(restored, "init", "-q");
+      await restoreCloudNativeCheckpoint({ archive, roots: { ...workspace.roots, repository: restored },
+        deadlineAtMs: workspace.deadlineAtMs, getChunk: async id => workspace.chunks.get(id)! });
+      expect(git(restored, "rev-parse", "HEAD")).toBe(git(workspace.repository, "rev-parse", "HEAD"));
+    } finally { vi.mocked(spawn).mockImplementation(actual.spawn); }
+  });
+
   it("packs only objects the remote does not already have", async () => {
     const workspace = await remoteFixture(); const { pushed, unpublished } = await unpublishedWork(workspace);
     const archive = await captureCloudNativeCheckpoint({ ...workspace, gitBase: "remote" });

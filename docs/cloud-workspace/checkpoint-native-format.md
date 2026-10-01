@@ -65,6 +65,9 @@ continues to emit archive v1, and both versions remain readable by current setup
   Its objects are therefore archived once in an immutable base pack; subsequent
   captures reuse its chunk descriptors without repacking or uploading it.
   Forward pushes add only the newly published objects in another base pack.
+  Unchanged base tips need no ancestry probes. Changed tips share one graph walk
+  with a two-second budget; a failed or slow walk rebuilds the base within the
+  overall capture deadline instead of multiplying work by every pair of refs.
   A rewrite or changed shallow boundaries rebuilds that base rather than reusing
   an unproven ancestor set. The optimization is bounded to 256 base packs;
   saturation falls back to a complete pack for that capture. Each checkpoint
