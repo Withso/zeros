@@ -27,6 +27,9 @@ function retryDelayMs(attempt: number): number {
   return Math.min(60 * 60_000, 5_000 * 2 ** Math.min(attempt, 9));
 }
 
+export const CHECKPOINT_DAILY_RETENTION_DAYS = 14;
+const COMPLETED_CHECKPOINT_REQUEST_HOURS = 24;
+
 function failureCode(error: unknown): string {
   if (
     error instanceof Error &&
@@ -225,7 +228,7 @@ export class CloudWorkspaceOperationsWorker {
            WHERE request.checkpoint_id = checkpoint.id
              AND request.workspace_id = $1 AND request.org_id = $2
              AND request.completed_at <=
-                 now() - ($3::integer * interval '1 day')
+                 now() - (least($3::integer * 24, $4::integer) * interval '1 hour')
              AND checkpoint.id <> coalesce((
                SELECT current_checkpoint_id FROM workspace_content_heads
                WHERE workspace_id = $1 AND org_id = $2
@@ -238,21 +241,55 @@ export class CloudWorkspaceOperationsWorker {
              AND NOT EXISTS (
                SELECT 1 FROM workspace_exports export
                WHERE export.checkpoint_id = checkpoint.id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM cloud_workspace_lifecycle_intents intent
+               WHERE intent.id = request.lifecycle_intent_id
+                 AND intent.state IN ('queued', 'dispatching', 'observing')
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM workspace_fork_intents fork
+               WHERE fork.id = request.fork_intent_id
+                 AND fork.state NOT IN ('succeeded', 'failed', 'cancelled')
              )`,
           [
             policy.workspace_id,
             policy.org_id,
             policy.checkpoint_days,
+            COMPLETED_CHECKPOINT_REQUEST_HOURS,
           ],
         );
 
         const checkpointIds = (
           await tx.query<{ id: string }>(
-            `SELECT checkpoint.id
+            `WITH ranked AS (
+               SELECT candidate.id, candidate.state, candidate.created_at,
+                      row_number() OVER (
+                        PARTITION BY candidate.state,
+                                     date_trunc('hour', candidate.created_at, 'UTC')
+                        ORDER BY candidate.created_at DESC, candidate.id DESC
+                      ) AS hour_rank,
+                      row_number() OVER (
+                        PARTITION BY candidate.state,
+                                     date_trunc('day', candidate.created_at, 'UTC')
+                        ORDER BY candidate.created_at DESC, candidate.id DESC
+                      ) AS day_rank
+               FROM workspace_checkpoints candidate
+               WHERE candidate.workspace_id = $1 AND candidate.org_id = $2
+                 AND candidate.state IN ('durable', 'invalid')
+             ), expired AS (
+               SELECT ranked.id FROM ranked
+               WHERE ranked.created_at <= now() - interval '1 hour'
+                 AND NOT (ranked.state = 'durable' AND ranked.hour_rank = 1
+                          AND ranked.created_at > now() - interval '24 hours')
+                 AND NOT (ranked.state = 'durable' AND ranked.day_rank = 1
+                          AND ranked.created_at >
+                              now() - (least($3::integer, $4::integer) * interval '1 day'))
+             )
+             SELECT checkpoint.id
              FROM workspace_checkpoints checkpoint
+             JOIN expired ON expired.id = checkpoint.id
              WHERE checkpoint.workspace_id = $1 AND checkpoint.org_id = $2
-               AND checkpoint.created_at <=
-                   now() - ($3::integer * interval '1 day')
                AND checkpoint.state IN ('durable', 'invalid')
                AND NOT checkpoint.legal_hold
                AND (checkpoint.retention_until IS NULL
@@ -275,12 +312,13 @@ export class CloudWorkspaceOperationsWorker {
                  WHERE export.checkpoint_id = checkpoint.id
                )
              ORDER BY checkpoint.created_at, checkpoint.id
-             FOR UPDATE SKIP LOCKED
+             FOR UPDATE OF checkpoint SKIP LOCKED
              LIMIT 100`,
             [
               policy.workspace_id,
               policy.org_id,
               policy.checkpoint_days,
+              CHECKPOINT_DAILY_RETENTION_DAYS,
             ],
           )
         ).rows.map((row) => row.id);
@@ -292,7 +330,7 @@ export class CloudWorkspaceOperationsWorker {
                  'checkpoint_manifest', 'checkpoint_artifact', 'checkpoint_file'
                )
                AND reference_id = ANY($3::text[])`,
-            [policy.workspace_id, policy.org_id, checkpointIds],
+            [policy.workspace_id, policy.org_id, checkpointIds.flatMap(id => [id, `${id}:v2`])],
           );
           await tx.query(
             `DELETE FROM workspace_checkpoints

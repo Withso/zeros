@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import {
   mkdir,
@@ -1644,5 +1644,164 @@ describe("cloud durability projection validation", () => {
         ? "cloud durability batch response is invalid"
         : "cloud checkpoint commit response is invalid",
     );
+  });
+});
+
+function durableRecordHarness() {
+  let currentRevision = 0;
+  let durableRevision = 0;
+  let checkpointId: string | null = null;
+  const entries = new Map<string, Record<string, unknown>>();
+  const writes: string[] = [];
+  const commits: Array<Record<string, unknown>> = [];
+  const blobs = new Map<string, Buffer>();
+  const uploadedBlobIds: string[] = [];
+  const blob = (bytes: Uint8Array) => {
+    const hex = createHash("sha256").update(bytes).digest("hex");
+    const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+    blobs.set(id, Buffer.from(bytes));
+    uploadedBlobIds.push(id);
+    return {
+      id,
+      plaintextSha256: hex,
+      sizeBytes: bytes.byteLength,
+    };
+  };
+  const fetchImpl = (async (input, init) => {
+    const pathname = new URL(String(input)).pathname;
+    if (pathname.endsWith("/content/head")) {
+      return Response.json({
+        checkpointId,
+        currentRevision,
+        durableRevision,
+        entries: [...entries.values()].sort((left, right) =>
+          Buffer.compare(Buffer.from(String(left.path)), Buffer.from(String(right.path)))),
+        nextAfterPath: null,
+      });
+    }
+    writes.push(pathname);
+    if (pathname.endsWith("/blobs/batch")) {
+      const body = JSON.parse(String(init?.body)) as { entries: Array<{ bytesBase64: string }> };
+      return Response.json({ blobs: body.entries.map((entry, index) => ({ index, ...blob(Buffer.from(entry.bytesBase64, "base64")) })) });
+    }
+    if (pathname.endsWith("/blobs")) return Response.json(blob(init?.body as Uint8Array));
+    if (pathname.endsWith("/content/append")) {
+      const body = JSON.parse(String(init?.body)) as { expectedRevision: number; mutations: Array<Record<string, unknown>> };
+      if (body.expectedRevision !== currentRevision) {
+        return Response.json({ error: { code: "revision_conflict" } }, { status: 409 });
+      }
+      for (const mutation of body.mutations) {
+        entries.set(String(mutation.path), mutation.operation === "delete"
+          ? { operation: "delete", path: mutation.path, entryType: null, mode: null, blobId: null, contentSha256: null, sizeBytes: null }
+          : { operation: "upsert", path: mutation.path, entryType: mutation.entryType, mode: mutation.mode,
+              blobId: mutation.blobId, contentSha256: mutation.contentSha256, sizeBytes: mutation.sizeBytes });
+      }
+      currentRevision += 1;
+      return Response.json({ revision: currentRevision });
+    }
+    if (pathname.endsWith("/checkpoints/commit")) {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      checkpointId = randomUUID();
+      durableRevision = Number(body.contentRevision);
+      commits.push(body);
+      return Response.json({ checkpointId });
+    }
+    throw new Error(`unexpected durability request: ${pathname}`);
+  }) as typeof fetch;
+  return {
+    fetch: fetchImpl,
+    writes,
+    commits,
+    blobs,
+    uploadedBlobIds,
+    replaceCheckpoint: () => { checkpointId = randomUUID(); },
+  };
+}
+
+describe("cloud durability unchanged periodic recovery points", () => {
+  checkpointIt("reuses immutable published history across engine restarts and generation changes", async () => {
+    const root = await checkpointRepository();
+    const state = await mkdtemp(path.join(tmpdir(), "zeros-cloud-base-cache-")); roots.push(state);
+    const upstream = path.join(state, "upstream.git"); await git(state, "init", "--quiet", "--bare", upstream);
+    const remote = "https://github.com/example/recovery.git";
+    await git(root, "remote", "add", "origin", remote);
+    await git(root, "-c", `url.file://${upstream}.insteadOf=${remote}`, "push", "--quiet", "origin", "HEAD:refs/heads/main");
+    const harness = durableRecordHarness();
+    const dependencies = { fetch: harness.fetch, nativeRoots: { data: state } };
+    const capture = (runtime: CloudWorkspaceDurabilityRuntime, scope = authority) =>
+      runtime.checkpoint({ id: randomUUID(), reason: "manual", deadlineAtMs: Date.now() + 60_000 }, scope);
+    await capture(new CloudWorkspaceDurabilityRuntime(root, dependencies));
+    const native = () => JSON.parse(harness.blobs.get(String(harness.commits.at(-1)!.manifestBlobId))!.toString()).native as {
+      chunks: Array<{ blobId: string }>; files: Array<{ scope: string; path: string; segments: Array<{ chunk: number }> }>;
+    };
+    const first = native();
+    const baseFiles = first.files.filter(file => file.scope === "git-pack" && file.path !== "objects.pack");
+    expect(baseFiles).toHaveLength(1);
+    const baseBlobIds = baseFiles.flatMap(file => file.segments.map(segment => first.chunks[segment.chunk]!.blobId));
+    await writeFile(path.join(root, "README.md"), "new pushed work\n");
+    await git(root, "commit", "--quiet", "-am", "new pushed work");
+    await git(root, "-c", `url.file://${upstream}.insteadOf=${remote}`, "push", "--quiet", "origin", "HEAD:refs/heads/main");
+    const uploadedBefore = harness.uploadedBlobIds.length;
+    await capture(new CloudWorkspaceDurabilityRuntime(root, dependencies));
+    expect(native().files.filter(file => file.scope === "git-pack" && file.path !== "objects.pack")).toHaveLength(2);
+    for (const id of baseBlobIds) expect(harness.uploadedBlobIds.slice(uploadedBefore)).not.toContain(id);
+    await capture(new CloudWorkspaceDurabilityRuntime(root, dependencies), { ...authority, generation: 2, engineInstanceId: randomUUID() });
+    expect(native().files.filter(file => file.scope === "git-pack" && file.path !== "objects.pack")).toHaveLength(2);
+    for (const id of baseBlobIds) expect(harness.uploadedBlobIds.slice(uploadedBefore)).not.toContain(id);
+  });
+
+  checkpointIt("publishes nothing for an unchanged periodic capture but keeps lifecycle checkpoints", async () => {
+    const root = await checkpointRepository();
+    const state = await mkdtemp(path.join(tmpdir(), "zeros-cloud-native-state-"));
+    roots.push(state);
+    const agentHome = path.join(state, "home");
+    const data = path.join(state, "data");
+    await mkdir(agentHome);
+    await mkdir(data);
+    const harness = durableRecordHarness();
+    let runtime = new CloudWorkspaceDurabilityRuntime(root, {
+      fetch: harness.fetch,
+      nativeRoots: { agentHome, data },
+    });
+    type Reason = "periodic" | "manual" | "before_stop";
+    const capture = (reason: Reason) =>
+      runtime.checkpoint({ id: randomUUID(), reason, deadlineAtMs: Date.now() + 60_000 }, authority);
+    const unchanged = async () => {
+      const writes = harness.writes.length;
+      const commits = harness.commits.length;
+      await capture("periodic");
+      expect(harness.writes.length).toBe(writes);
+      expect(harness.commits).toHaveLength(commits);
+    };
+    const published = async (reason: Reason = "periodic") => {
+      const commits = harness.commits.length;
+      await capture(reason);
+      expect(harness.commits).toHaveLength(commits + 1);
+      expect(harness.commits.at(-1)).toMatchObject({ reason });
+    };
+
+    await published();
+    await unchanged();
+    runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: harness.fetch, nativeRoots: { agentHome, data } });
+    await unchanged();
+    await published("manual");
+    await published("before_stop");
+    await unchanged();
+    await writeFile(path.join(root, "README.md"), "working tree change\n");
+    await published();
+    await unchanged();
+    await git(root, "commit", "--quiet", "-am", "move HEAD");
+    await published();
+    await git(root, "branch", "only-a-ref");
+    await published();
+    await unchanged();
+    const sessions = path.join(agentHome, ".codex/sessions/2026/10/01");
+    await mkdir(sessions, { recursive: true });
+    await writeFile(path.join(sessions, "rollout-native.jsonl"), '{"type":"session_meta"}\n');
+    await published();
+    await unchanged();
+    harness.replaceCheckpoint();
+    await published();
+    await unchanged();
   });
 });
