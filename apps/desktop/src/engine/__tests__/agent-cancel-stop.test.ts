@@ -30,7 +30,8 @@ import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../index";
 import { AgentFailureError } from "../agents/types";
 import { closeZerosDb, openZerosDb, setZerosDbPathForTesting } from "../db";
-import { engineRuntimeDir } from "../db/paths";
+import { engineRuntimeDir, zerosDbPath } from "../db/paths";
+import { openSqlite } from "../db/sqlite";
 import { MessageRouter } from "../transport/router";
 import type { TransportClient } from "../transport/types";
 
@@ -183,6 +184,31 @@ function newSessionMessage(agentId: string): EngineMessage {
     chatId: "chat-1",
     cwd: process.cwd(),
   } as EngineMessage;
+}
+
+/** Run `run` with these variables set (or removed, for `undefined`), then put
+ *  every one back, including when `run` throws. */
+function withEnv<T>(
+  overrides: Record<string, string | undefined>,
+  run: () => T,
+): T {
+  const saved = Object.keys(overrides).map(
+    (key) => [key, process.env[key]] as const,
+  );
+  const apply = (
+    entries: ReadonlyArray<readonly [string, string | undefined]>,
+  ) => {
+    for (const [key, value] of entries) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+  apply(Object.entries(overrides));
+  try {
+    return run();
+  } finally {
+    apply(saved);
+  }
 }
 
 function turnStates(messages: EngineMessage[]): Array<{
@@ -541,6 +567,61 @@ describe("an adapter that never acknowledges the cancel", () => {
 });
 
 describe("explicit session close during a live turn", () => {
+  // The pre-dispatch cases below were this file's first Zeros DB readers:
+  // admission resolves the chat's workspace (getChatLocation) synchronously,
+  // before it registers the prompt. While every Vitest worker shared the
+  // machine-wide app-data DB, a sibling worker still creating or migrating it
+  // held its write lock at that moment. This file's first open then failed at
+  // once ("database is locked"), admission answered AGENT_ERROR, and the prompt
+  // was never registered: the intermittent CI failure of these cases.
+  // vitest.setup.ts now gives each test file its own ZEROS_DATA_DIR. This case
+  // stands in for the sibling under a scratch home, so it never touches the
+  // real app-data DB.
+  it("admits a pre-dispatch prompt while another process holds the default Zeros DB", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-sibling-home-"));
+    const scratchHome = {
+      HOME: home,
+      XDG_DATA_HOME: undefined,
+      APPDATA: path.join(home, "AppData", "Roaming"),
+    };
+    // The DB a process with this environment but no per-file data dir opens.
+    const defaultDb = withEnv(
+      { ...scratchHome, ZEROS_DATA_DIR: undefined },
+      zerosDbPath,
+    );
+    fs.mkdirSync(path.dirname(defaultDb), { recursive: true });
+    const sibling = openSqlite(defaultDb);
+    // A first open or migration in flight holds the write lock.
+    sibling.exec("BEGIN IMMEDIATE");
+    try {
+      const { state } = testEngine(29_937);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      state.sessionAgent.set("session-1", "claude");
+      state.sessionChat.set("session-1", "chat-1");
+      const prompt = vi.spyOn(state.agents, "prompt");
+      vi.spyOn(state.agents, "cancel").mockResolvedValue(undefined);
+      vi.spyOn(state.agents, "endSession").mockResolvedValue(undefined);
+      // On CI this admission was the file's first DB open. Make it one here.
+      closeZerosDb();
+
+      const promptFlight = withEnv(scratchHome, () =>
+        state.handleMessage(promptMessage({ agentId: "claude" }), client),
+      );
+      expect(messages.filter((m) => m.type === "AGENT_ERROR")).toEqual([]);
+      expect(state.activePromptContexts.has("session-1")).toBe(true);
+      await Promise.all([
+        promptFlight,
+        state.handleMessage(closeMessage("claude"), client),
+      ]);
+      expect(prompt).not.toHaveBeenCalled();
+    } finally {
+      sibling.exec("ROLLBACK");
+      sibling.close();
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it.each(["claude", "codex", "cursor"])(
     "cancels a %s prompt accepted in the pre-dispatch window",
     async (agentId) => {
