@@ -80,6 +80,8 @@ jobs:
       branch: ${{ inputs.branch }}
       before_sha: ${{ inputs.before_sha }}
       execute: true
+      # Production reaches this only through release.yml's approval job.
+      caller_gated: true
     secrets: inherit
   services:
     name: Hosted services

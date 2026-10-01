@@ -52,6 +52,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The single human approval for this release. Every job that can read
+  # Production secrets needs it, so one click authorizes the whole run.
+  # `production-approval` holds the required reviewer and no secrets; the
+  # `production` environment keeps the secrets, restricted to release/**.
+  approve:
+    name: Approve Production release
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    environment: production-approval
+    permissions: {}
+    steps:
+      - name: Record the approved candidate
+        run: echo "Production release approved for $GITHUB_SHA on $GITHUB_REF_NAME"
+
   ci:
     name: Exact-source Preflight and CodeQL barrier
     if: github.event.repository.fork == false
@@ -89,7 +103,7 @@ jobs:
 
   hosted:
     name: Hosted promotion (production)
-    needs: ci
+    needs: [approve, ci]
     if: github.event.repository.fork == false
     permissions:
       contents: read
@@ -104,12 +118,13 @@ jobs:
 
   build:
     name: Build + sign (macOS arm64)
+    needs: approve
     if: github.event.repository.fork == false
     # macos-latest (Apple Silicon): plentiful runners, no queue, native arm64
     # build. Signed artifacts are retained while the CI barrier completes.
     runs-on: macos-latest
-    # Signing credentials belong to this protected environment,
-    # restricted to release/** with required reviewers.
+    # Signing credentials belong to this protected environment, restricted to
+    # release/**; the approval job above is its human gate.
     environment: production
     permissions:
       contents: read
@@ -362,7 +377,7 @@ jobs:
 
   submit:
     name: Submit to Apple notary
-    needs: [ci, build]
+    needs: [approve, ci, build]
     if: github.event.repository.fork == false
     runs-on: macos-latest
     environment: production
@@ -456,7 +471,7 @@ jobs:
 
   notarize:
     name: Notarize + verify (macOS arm64)
-    needs: [ci, build, submit]
+    needs: [approve, ci, build, submit]
     if: github.event.repository.fork == false
     # macOS for xcrun notarytool/stapler/spctl. This job is CHEAP and re-runnable:
     # on an Apple slow-day it may time out polling — just re-run it
@@ -631,7 +646,7 @@ jobs:
 
   publish:
     name: Publish Production feed
-    needs: [ci, build, hosted, notarize]
+    needs: [approve, ci, build, hosted, notarize]
     if: github.event.repository.fork == false
     runs-on: ubuntu-latest
     environment: production

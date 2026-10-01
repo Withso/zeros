@@ -16,8 +16,9 @@ describe("release dependency and authority contracts", () => {
     expect(ci).toContain("ref: ${{ github.sha }}");
     expect(ci).toContain("RELEASE_SHA: ${{ github.sha }}");
     expect(ci).toContain("pnpm exec tsx scripts/release/ci-cli.ts --wait");
-    expect(job(text, "hosted")).toContain("needs: ci");
-    expect(job(text, "build")).not.toMatch(/^    needs:/m);
+    // Production's build waits only for its single human approval.
+    expect(job(text, "hosted")).toContain(name === "release" ? "needs: [approve, ci]" : "needs: ci");
+    expect(job(text, "build")).not.toMatch(name === "release" ? /^    needs: (?!approve$)/m : /^    needs:/m);
     expect(job(text, "test")).toBe("");
     expect(text).not.toMatch(/pnpm (?:typecheck|lint|test:git)\b/);
     expect(text).not.toContain("scripts/release/vitest.config.ts");
@@ -58,15 +59,15 @@ describe("release dependency and authority contracts", () => {
     const text = workflow(name);
     expect(text).toContain(`group: release-${channel}\n  cancel-in-progress: false`);
     const hosted = job(text, "hosted");
-    expect(hosted).toContain("needs: ci"); expect(hosted).toContain("uses: ./.github/workflows/hosted-promotion.yml");
+    expect(hosted).toContain(channel === "production" ? "needs: [approve, ci]" : "needs: ci"); expect(hosted).toContain("uses: ./.github/workflows/hosted-promotion.yml");
     expect(hosted).toContain("source_sha: ${{ github.sha }}");
     expect(hosted).not.toContain("needs: build");
     const build = job(text, "build"), publish = job(text, "publish");
     expect(build).toContain(`environment: ${channel}`);
     expect(build).toContain("contents: read");
-    expect(build).not.toMatch(/^    needs:/m);
+    expect(build).not.toMatch(channel === "production" ? /^    needs: (?!approve$)/m : /^    needs:/m);
     expect(build).toContain("if: github.event.repository.fork == false");
-    expect(publish).toContain(channel === "production" ? "needs: [ci, build, hosted, notarize]" : "needs: [ci, build, hosted]");
+    expect(publish).toContain(channel === "production" ? "needs: [approve, ci, build, hosted, notarize]" : "needs: [ci, build, hosted]");
     expect(publish).toContain("contents: write");
     expect(publish).toContain("actions: read");
     expect(publish).toContain("ref: ${{ github.sha }}");
@@ -100,7 +101,7 @@ describe("release dependency and authority contracts", () => {
   });
   it("submits to Apple only after CI and signing, preserving a submission for cheap notarization retries", () => {
     const text = workflow("release"), submit = job(text, "submit"), notarize = job(text, "notarize");
-    expect(submit).toContain("needs: [ci, build]");
+    expect(submit).toContain("needs: [approve, ci, build]");
     expect(submit).toContain("scripts/release/ci-cli.ts --verify");
     expect(submit).toContain("scripts/release/ci-cli.ts --verify --beta");
     expect(submit).toContain("ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}");
@@ -108,12 +109,39 @@ describe("release dependency and authority contracts", () => {
     expect(submit).toContain("secrets.APPLE_");
     expect(submit).toContain("release/notarization-submission-id.txt");
     expect(submit).toContain("uses: actions/upload-artifact@");
-    expect(notarize).toContain("needs: [ci, build, submit]");
+    expect(notarize).toContain("needs: [approve, ci, build, submit]");
     expect(notarize).toContain("notarytool info");
     expect(notarize).not.toContain("notarytool submit");
     expect(notarize).not.toContain("contents: write");
     expect(notarize).toContain("uses: actions/upload-artifact@");
     expect(notarize).toContain("scripts/release/ci-cli.ts --verify");
+  });
+  it("asks for one Production approval before any job can read Production secrets", () => {
+    const release = workflow("release"), approve = job(release, "approve");
+    expect(approve).toContain("environment: production-approval");
+    expect(approve).toContain("permissions: {}");
+    expect(approve).not.toMatch(/secrets\.|uses: /);
+    // Every job in the protected environment, and the hosted lane it calls, waits for that approval.
+    const gated = [...release.matchAll(/^  ([a-z][a-z_-]*):\n(?:(?!^  [a-z][a-z_-]*:\n)[\s\S])*?^    environment: production$/gm)].map(match => match[1]);
+    expect(gated.sort()).toEqual(["build", "notarize", "publish", "submit"]);
+    for (const name of [...gated, "hosted"]) expect(job(release, name)).toMatch(/^    needs: (?:approve$|\[approve, )/m);
+    // A direct Production cutover or worker dispatch needs the same approval; Alpha and Beta skip it.
+    const cutover = workflow("controlled-cutover");
+    expect(job(cutover, "approve")).toContain("environment: production-approval");
+    expect(job(cutover, "approve")).toContain("inputs.channel == 'production'");
+    expect(job(cutover, "cutover")).toContain("needs: approve");
+    expect(job(cutover, "cutover")).toContain("needs.approve.result == 'success' || (inputs.channel != 'production' && needs.approve.result == 'skipped')");
+    const worker = workflow("cloud-worker-promotion");
+    expect(job(worker, "approve")).toContain("environment: production-approval");
+    expect(job(worker, "approve")).toContain("inputs.caller_gated != true");
+    expect(job(worker, "worker")).toContain("needs: approve");
+    expect(job(worker, "worker")).toContain("(inputs.channel != 'production' || inputs.caller_gated == true)");
+    // Only the gated Production release reaches the worker lane through hosted promotion.
+    expect(job(workflow("hosted-promotion"), "worker")).toContain("caller_gated: true");
+    expect(workflow("hosted-promotion")).not.toContain("workflow_dispatch:");
+    // The approval environment never carries secrets.
+    for (const name of ["release", "controlled-cutover", "cloud-worker-promotion"])
+      expect(job(workflow(name), "approve")).not.toContain("secrets");
   });
   it("reports Apple's reason for a refused submission and retries only transient failures", () => {
     const step = job(workflow("release"), "submit").split("- name: Submit to Apple notary (--no-wait, no poll)\n")[1]?.split(/\n {6}- /)[0] ?? "";

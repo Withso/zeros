@@ -444,10 +444,36 @@ supplied pin document is still validated. Flags-off builds remain valid without
 either value.
 
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
-`main`; `beta` permits only `release/*`; `production` permits only `release/*`
-and requires a human reviewer. The stable workflow itself now rejects `main`
-and requires an exact `release/X.Y.Z` ref, so a manual dispatch cannot bypass
-the promotion ladder.
+`main`; `beta` permits only `release/*`; `production` permits only `release/*`.
+The stable workflow itself rejects `main` and requires an exact
+`release/X.Y.Z` ref, so a manual dispatch cannot bypass the promotion ladder.
+
+Production takes **one human approval per run**. The `production-approval`
+environment holds the required reviewer, permits only `release/*`, and has no
+secrets or variables. `release.yml` starts with an `approve` job in that
+environment, and every job that can read `production` secrets needs it: build,
+submit, notarize, publish and the hosted lane it calls. A direct Production
+dispatch of `controlled-cutover.yml` or `cloud-worker-promotion.yml` needs the
+same approval; Alpha and Beta skip it. The hosted lane passes `caller_gated` to
+the worker workflow, which a dispatch cannot set. The `production` environment
+therefore keeps its secrets and branch policy but no reviewer of its own.
+
+That moves secret protection to the release branches: the `release` ruleset
+must be active, block deletion and force-push, and restrict branch creation and
+updates to repository admins and the `zeros-agent` App, which cuts release
+branches. Other changes reach a release branch through reviewed PRs.
+
+Apply the settings in this order, so no window runs without a gate:
+
+1. Create `production-approval` with the reviewer and the `release/*` policy.
+   A job that names a missing environment would create it unprotected.
+2. Merge the workflows that use it. Until step 3, Production asks for that
+   approval plus the old per-job approvals.
+3. Activate the `release` ruleset restrictions above.
+4. After the next Beta release publishes, remove the reviewer from
+   `production`. Older release branches still run their earlier workflows,
+   which lack the approval job; their Production jobs refuse a SHA that the
+   latest Beta did not publish.
 
 ### macOS signing keychain
 
@@ -1003,7 +1029,8 @@ controller's no-secret-argv rule, not a verified fix. See
 Owner setup, once per channel before **enabling** the controller:
 
 1. Configure protected environment branch policies (`main` for Alpha,
-   `release/*` for Beta/Production) and keep the Production human reviewer.
+   `release/*` for Beta/Production) and keep the Production human reviewer on
+   `production-approval`.
    Confirm fork workflows cannot access release environments.
 2. Keep server WorkOS/GitHub App/database/object-store/keyring settings in
    Railway. Provision separate channel databases, unprivileged runtime roles,
@@ -1192,7 +1219,8 @@ the automated lane refuses: controlled-downtime and contract boundaries such
 as a first rollout's 0101/0103. Dispatch it from `main` for Alpha or from the
 frozen `release/X.Y.Z` for Beta/Production with `approvals` listing exactly the
 pending controlled filenames (empty when none) and `confirm` set to the
-channel database name. Production waits for its required reviewer. It uses
+channel database name. Production waits for its single approval in
+`production-approval`. It uses
 the channel environment's promotion secrets and variables and shares the
 `hosted-mutation-<channel>` lock.
 
