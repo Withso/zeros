@@ -104,10 +104,14 @@ describe("V6b existing rolling-tag bootstrap", () => {
     const f = harness("alpha");
     f.deps.channelBaseline = async () => { throw new Error("private-github-error"); };
     expect((await disabledGuard([], f.candidate, f.deps)).blocked).toBe(true);
-    f.deps.fetch = async () => Response.json({ version: 1, sourceSha: f.candidate.sourceSha, channel: "alpha", ready: true, maintenance: false,
-      migrations: { state: "current", head: f.current.head, expectedHead: f.current.head, manifestSha256: f.current.sha256 },
-      cloud: { enabled: false, ready: true, state: "disabled" }, worker: null });
-    const result = await disabledGuard([], f.candidate, f.deps);
+    f.deps.fetch = async input => String(input).endsWith("/zeros-deployment.json")
+      ? Response.json({ version: 1, commitSha: f.candidate.sourceSha, surface: new URL(String(input)).hostname.startsWith("ops") ? "ops" : "app" })
+      : Response.json({ version: 1, sourceSha: f.candidate.sourceSha, channel: "alpha", ready: true, maintenance: false,
+        migrations: { state: "current", head: f.current.head, expectedHead: f.current.head, manifestSha256: f.current.sha256 },
+        cloud: { enabled: false, ready: true, state: "disabled" }, worker: null });
+    // Unknown history needs the completed cutover's own receipt, not identity alone.
+    expect(await disabledGuard([], f.candidate, { ...f.deps, cutoverReceipt: async () => false })).toMatchObject({ blocked: true });
+    const result = await disabledGuard([], f.candidate, { ...f.deps, cutoverReceipt: async () => true });
     expect(result).toMatchObject({ blocked: false, manualCutoverVerified: true });
     expect(result.message).not.toContain("private-github-error");
   });

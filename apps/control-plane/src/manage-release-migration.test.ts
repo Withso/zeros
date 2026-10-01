@@ -157,6 +157,17 @@ describe("release migration runner", () => {
     expect(calls.at(-1)).toBe(`DELETE ${BRANCH}/roles/role1`);
   });
 
+  it("records the backup, applied files and role cleanup on a failed execution, without credentials", async () => {
+    const { deps } = harness({ pending: ["0101_next.sql"], runError: new Error(`password authentication failed for migrator.fixture (${PASSWORD})`) });
+    const failure = await releaseMigration(
+      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" },
+      deps,
+    ).catch((error: unknown) => error as ReleaseMigrationError);
+    expect(failure).toBeInstanceOf(ReleaseMigrationError);
+    expect(failure.partial).toEqual({ backup: { id: "bk1", state: "success" }, applied: [], roleDeleted: true });
+    expect(JSON.stringify(failure.partial)).not.toContain(PASSWORD);
+  });
+
   it("never mints a role when the backup fails", async () => {
     const { calls, deps } = harness({ backupStates: ["pending", "failed"] });
     await expect(releaseMigration(

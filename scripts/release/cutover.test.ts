@@ -123,6 +123,38 @@ describe("controlled cutover", () => {
     await expect(failure).rejects.not.toThrow("maintenance mode");
   });
 
+  it("reports an unacknowledged maintenance clear without claiming the variable state", async () => {
+    let writes = 0;
+    const { calls, deps } = dependencies({ setMaintenance: async on => { calls.push(on ? "maintenance on" : "maintenance off"); if (!on && ++writes) throw new Error("ambiguous"); } });
+    const journal = newCutoverJournal();
+    await expect(controlledCutover(config, deps, controlled, journal)).rejects.toThrow(
+      "Controlled cutover stopped at maintenance off; reconcile this stage before retrying. The serving deployment is still in maintenance, but clearing the maintenance variable was not acknowledged");
+    expect(journal.maintenance).toBe("clear-requested");
+    expect(calls.filter(call => call === "deploy")).toHaveLength(1);
+  });
+
+  it("invalidates the maintenance confirmation when the fenced deployment is replaced while draining", async () => {
+    const { deps } = dependencies({ waitPreviousDeploymentsStopped: async () => {
+      throw new (await import("./contracts")).PromotionError("The maintenance deployment is no longer the serving deployment");
+    } });
+    const journal = newCutoverJournal();
+    await expect(controlledCutover(config, deps, controlled, journal)).rejects.toThrow("the serving state is unknown");
+    expect(journal.maintenance).toBe("unknown");
+  });
+
+  it("checkpoints every acknowledged transition and records failed-migration facts", async () => {
+    const snapshots: string[] = [];
+    const { deps } = dependencies({
+      migration: async execute => { if (execute) throw new Error("timeout"); return migration("plan"); },
+      migrationFailure: async () => ({ backup: { id: "backup1", state: "success" }, applied: ["0101_cloud_workspace_pro_entitlements.sql"], roleDeleted: true }),
+    });
+    const journal = newCutoverJournal();
+    await expect(controlledCutover(config, deps, controlled, journal, async value => { snapshots.push(`${value.stage}:${value.maintenance}`); })).rejects.toThrow();
+    expect(snapshots).toEqual(expect.arrayContaining(["migration plan:off", "deploy hold:off", "maintenance on:requested", "maintenance on:confirmed",
+      "previous deployments stopped:confirmed", "backup and migration:confirmed"]));
+    expect(journal.failedMigration).toEqual({ backup: { id: "backup1", state: "success" }, applied: ["0101_cloud_workspace_pro_entitlements.sql"], roleDeleted: true });
+  });
+
   it("parses exact, de-duplicated approval filenames", () => {
     expect(parseApprovals("")).toEqual([]);
     expect(parseApprovals(" 0103_cloud_workspace_pro_sharing.sql,0101_cloud_workspace_pro_entitlements.sql,0103_cloud_workspace_pro_sharing.sql ")).toEqual(controlled);

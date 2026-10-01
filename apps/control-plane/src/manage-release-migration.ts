@@ -72,7 +72,17 @@ export type ReleaseMigrationResult = {
 
 type Role = { id: string; name: string; username: string; password: string; access_host_url: string; expires_at?: string | null };
 
-export class ReleaseMigrationError extends Error {}
+/** Recovery facts after a failed execution: the backup it created, files it
+ * applied and whether its owner login was deleted. Never credentials or SQL. */
+export type ReleaseMigrationPartial = {
+  backup: { id: string; state: string } | null;
+  applied: string[];
+  roleDeleted: boolean;
+};
+
+export class ReleaseMigrationError extends Error {
+  partial?: ReleaseMigrationPartial;
+}
 
 const record = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -194,6 +204,7 @@ export async function releaseMigration(
   let applied: string[] = [];
   let ledger: ReleaseMigrationResult["ledger"] = "pending";
   let roleDeleted = false;
+  let failure: ReleaseMigrationError | null = null;
   try {
     const pool = deps.createPool(roleConnectionString(role));
     try {
@@ -217,12 +228,15 @@ export async function releaseMigration(
     }
   } catch (error) {
     // Never surface a driver message: it can quote the connection string.
-    if (error instanceof ReleaseMigrationError) throw error;
-    throw new ReleaseMigrationError("Migration step failed: database error");
+    failure = error instanceof ReleaseMigrationError ? error : new ReleaseMigrationError("Migration step failed: database error");
   } finally {
     const removed = await deps.planetScale("DELETE", `${branchPath}/roles/${role.id}`).catch(() => ({ status: 0, body: null }));
     role.password = "";
     roleDeleted = removed.status >= 200 && removed.status < 300;
+  }
+  if (failure) {
+    failure.partial = { backup: backup && { id: backup.id, state: backup.state }, applied, roleDeleted };
+    throw failure;
   }
 
   return {

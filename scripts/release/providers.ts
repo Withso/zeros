@@ -185,10 +185,23 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
     async waitPreviousDeploymentsStopped(activeId: string) {
       const stopped = new Set(["REMOVED", "FAILED", "CRASHED", "SKIPPED"]);
       await poll(async () => {
-        const result = await railway(`query CutoverDeployments($projectId:String!,$environmentId:String!,$serviceId:String!) {
-          deployments(first:50,input:{projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId}) { edges { node { id status } } }
-        }`, target);
-        const nodes: { id: string; status: string }[] = result.deployments?.edges?.map((edge: { node: { id: string; status: string } }) => edge.node) ?? [];
+        // Read the whole inventory: an old writer can sit beyond any first page.
+        const nodes: { id: string; status: string }[] = [];
+        let after: string | null = null, complete = false;
+        for (let page = 0; page < 40 && !complete; page++) {
+          const result = await railway(`query CutoverDeployments($projectId:String!,$environmentId:String!,$serviceId:String!,$after:String) {
+            deployments(first:100,after:$after,input:{projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId}) {
+              edges { node { id status } } pageInfo { hasNextPage endCursor }
+            }
+          }`, { ...target, after });
+          const connection = result.deployments;
+          requireCheck(Array.isArray(connection?.edges), "Railway deployment inventory is unavailable");
+          nodes.push(...connection.edges.map((edge: { node: { id: string; status: string } }) => edge.node));
+          complete = connection.pageInfo?.hasNextPage === false;
+          after = connection.pageInfo?.endCursor ?? null;
+          requireCheck(complete || typeof after === "string", "Railway deployment inventory cannot be paged");
+        }
+        requireCheck(complete, "Railway deployment inventory exceeds its bound; confirm every old deployment stopped before migrating");
         requireCheck(nodes.some(node => node.id === activeId && node.status === "SUCCESS"), "The maintenance deployment is no longer the serving deployment");
         return nodes.every(node => node.id === activeId || stopped.has(node.status));
       }, { sleep: options.pause });

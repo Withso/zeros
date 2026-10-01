@@ -4,6 +4,7 @@ import path from "node:path";
 import { CHANNELS, HostedReceipt, HostedServicesReceipt, SHA, requireCheck, type Channel, type PromotionConfig } from "./contracts";
 import { command, jsonClient, type Command } from "./io";
 import { assertRequiredCI, requiredCIEvidence, REQUIRED_CI } from "./ci";
+import { CutoverReceipt } from "./cutover";
 
 function validateHostedReceipt(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel, jobs: any[], requireOverallSuccess: boolean) {
   const parsed = HostedReceipt.safeParse(receipt);
@@ -104,6 +105,33 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
   return {
     requiredChecks,
     async assertRequiredChecks() { assertRequiredCI(await requiredChecks()); },
+    /** True only for a successful controlled-cutover run's own complete receipt
+     * (API, every Pages surface and WorkOS) for this channel and exact SHA. */
+    async cutoverReceipt(channel: Channel, sourceSha: string) {
+      requireCheck(SHA.test(sourceSha), "Invalid cutover source");
+      const name = `controlled-cutover-${channel}-${sourceSha}`;
+      const runs = await read(`/actions/workflows/controlled-cutover.yml/runs?head_sha=${sourceSha}&status=success&event=workflow_dispatch&per_page=100`);
+      for (const run of runs.workflow_runs ?? []) {
+        if (!Number.isSafeInteger(run.id) || run.head_sha !== sourceSha || run.status !== "completed" || run.conclusion !== "success" ||
+          run.event !== "workflow_dispatch" || run.path !== ".github/workflows/controlled-cutover.yml" ||
+          run.repository?.full_name !== config.repository || run.head_repository?.full_name !== config.repository) continue;
+        const list = await read(`/actions/runs/${run.id}/artifacts?per_page=100`);
+        if (!list.artifacts?.some((item: any) => item.name === name && item.expired === false && item.workflow_run?.head_sha === sourceSha)) continue;
+        const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-cutover-receipt-"));
+        try {
+          await runCommand("gh", ["run", "download", String(run.id), "--repo", config.repository, "--name", name, "--dir", directory],
+            { env: { PATH: env.PATH, HOME: env.HOME, GH_TOKEN: env.GH_TOKEN }, timeout: 60_000 });
+          const bytes = await readFile(path.join(directory, "cutover-receipt.json"));
+          if (bytes.length > 64 * 1024) continue;
+          const receipt = CutoverReceipt.safeParse(JSON.parse(bytes.toString("utf8")));
+          const surfaces = CHANNELS[channel].ops ? ["app", "ops"] : ["app"];
+          if (receipt.success && receipt.data.channel === channel && receipt.data.sourceSha === sourceSha && receipt.data.repository === config.repository &&
+            receipt.data.runId === String(run.id) && receipt.data.backend.sourceSha === sourceSha &&
+            surfaces.every(surface => receipt.data.pages.some(page => page.surface === surface) && receipt.data.workos.surfaces.includes(surface as "app" | "ops"))) return true;
+        } catch { /* An unreadable artifact is not proof. */ } finally { await rm(directory, { force: true, recursive: true }); }
+      }
+      return false;
+    },
     async lastPublication(channel: Channel) {
       requireCheck(/^[\w.-]+\/[\w.-]+$/.test(config.repository), "Publication repository is invalid");
       const workflow = channel === "production" ? "release.yml" : `release-${channel}.yml`;

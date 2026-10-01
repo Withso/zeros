@@ -14,6 +14,7 @@ const workosEnv = { AUTH_ISSUER: "https://auth-api.example.com/", AUTH_JWKS_URL:
 function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: boolean; staged?: unknown; identity?: unknown;
   services?: string[]; deployments?: { id: string; status: string }[][] }) {
   const calls: any[] = [];
+  let current: { id: string; status: string }[] = [];
   const variables: Record<string, string> = { SECRET: "must-not-be-returned" };
   const branch = "release/1.2.2";
   const project = () => ({ name: config.appProject, production_branch: branch, domains: ["app-beta.zeros.build"],
@@ -33,8 +34,16 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
     if (q.includes("CutoverServices")) return Response.json({ data: { environment: { serviceInstances: {
       edges: (state.services ?? [config.serviceId]).map(serviceId => ({ node: { serviceId } })) } } } });
     if (q.includes("CutoverDeployments")) {
-      const nodes = state.deployments?.length && state.deployments.length > 1 ? state.deployments.shift()! : state.deployments?.[0] ?? [];
-      return Response.json({ data: { deployments: { edges: nodes.map(node => ({ node })) } } });
+      // Each poll's inventory may span pages: the fixture serves a `next` page
+      // when its first row carries one.
+      const after = request.variables.after;
+      if (!after) current = state.deployments?.length && state.deployments.length > 1 ? state.deployments.shift()! : state.deployments?.[0] ?? [];
+      const pagesFor = current;
+      const split = pagesFor.findIndex(node => node.id === "--page--");
+      const firstPage = split < 0 ? pagesFor : pagesFor.slice(0, split), nextPage = split < 0 ? [] : pagesFor.slice(split + 1);
+      const rows = after === "cursor1" ? nextPage : firstPage;
+      return Response.json({ data: { deployments: { edges: rows.map(node => ({ node })),
+        pageInfo: { hasNextPage: !after && split >= 0, endCursor: !after && split >= 0 ? "cursor1" : null } } } });
     }
     if (q.includes("CutoverMaintenanceRead")) return Response.json({ data: { variables } });
     if (q.includes("CutoverMaintenance")) { Object.assign(variables, request.variables.input.variables); return Response.json({ data: { variableCollectionUpsert: true } }); }
@@ -96,6 +105,17 @@ describe("cutover provider adapters", () => {
     expect(f.calls.filter(call => call.query?.includes("CutoverDeployments"))).toHaveLength(2);
     const replaced = fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false, deployments: [[{ id: "fence", status: "REMOVED" }, { id: "newer", status: "SUCCESS" }]] });
     await expect(replaced.providers.waitPreviousDeploymentsStopped("fence")).rejects.toThrow("no longer the serving deployment");
+  });
+
+  it("finds an old writer on a later page of the deployment inventory", async () => {
+    const page = { id: "--page--", status: "" };
+    const f = fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false, deployments: [
+      [{ id: "fence", status: "SUCCESS" }, { id: "a", status: "REMOVED" }, page, { id: "old", status: "SUCCESS" }],
+      [{ id: "fence", status: "SUCCESS" }, { id: "a", status: "REMOVED" }, page, { id: "old", status: "REMOVED" }],
+    ] });
+    await f.providers.waitPreviousDeploymentsStopped("fence");
+    const reads = f.calls.filter(call => call.query?.includes("CutoverDeployments"));
+    expect(reads.map(call => call.variables.after)).toEqual([null, "cursor1", null, "cursor1"]);
   });
 
   it("writes only the maintenance switch with deploys skipped and confirms it", async () => {
