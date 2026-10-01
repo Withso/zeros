@@ -39,6 +39,15 @@ const execFileAsync = promisify(execFile);
 let workdir: string;
 let repoRoot: string;
 let baseCommit: string;
+const runtimes: CloudWorkspaceForkRuntime[] = [];
+
+function createRuntime(
+  ...input: ConstructorParameters<typeof CloudWorkspaceForkRuntime>
+): CloudWorkspaceForkRuntime {
+  const runtime = new CloudWorkspaceForkRuntime(...input);
+  runtimes.push(runtime);
+  return runtime;
+}
 
 async function initRepo(): Promise<void> {
   repoRoot = path.join(workdir, "repo");
@@ -76,6 +85,48 @@ function api(
   return value as CloudWorkspaceDesktopApi;
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
+async function pauseStartupCollection() {
+  const stage = await import("../cloud-workspace-fork-stage");
+  const collect = stage.collectCloudWorkspaceForkStages;
+  const started = deferred();
+  const release = deferred();
+  const completed = deferred();
+  const collector = vi
+    .spyOn(stage, "collectCloudWorkspaceForkStages")
+    .mockImplementationOnce(async (input) => {
+      started.resolve();
+      await release.promise;
+      try {
+        return await collect(input);
+      } finally {
+        completed.resolve();
+      }
+    });
+  return { started, release, completed, collector };
+}
+
+function createCloudCopyJob(accountUserId: string) {
+  return new DatabaseCloudWorkspaceForkState(openZerosDb()).create({
+    jobId: randomUUID(),
+    operation: "cloud_to_local",
+    accountUserId,
+    organizationId: randomUUID(),
+    sourceWorkspaceId: randomUUID(),
+    targetWorkspaceId: randomUUID(),
+    repoRoot,
+    request: { version: 1, kind: "cloud_to_local", includeChats: false },
+    now: Date.now(),
+  });
+}
+
 beforeEach(async () => {
   workdir = await realpath(
     await mkdtemp(path.join(os.tmpdir(), "zeros-fork-runtime-")),
@@ -87,6 +138,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await Promise.all(runtimes.map((runtime) => runtime.dispose()));
+  runtimes.length = 0;
+  vi.restoreAllMocks();
   closeZerosDb();
   setStateRootForTesting(null);
   delete process.env.ZEROS_DATA_DIR;
@@ -94,6 +148,273 @@ afterEach(async () => {
 });
 
 describe("local and cloud workspace copy runtime", () => {
+  it("waits for startup stage collection before executing a newly journaled copy", async () => {
+    const startup = await pauseStartupCollection();
+    const accountUserId = randomUUID();
+    const requestCloudToLocal = vi.fn(async () => ({
+      forkIntentId: randomUUID(),
+      checkpointRequestId: randomUUID(),
+      replayed: false,
+    }));
+    const runtime = createRuntime(openZerosDb(), {
+      context: () => ({
+        accountUserId,
+        api: api({
+          requestCloudToLocal,
+          issueExportGrant: async () => {
+            throw new CloudReplicaClientError(
+              409,
+              "workspace_fork_export_unavailable",
+              "not ready",
+            );
+          },
+        }),
+      }),
+      schedulerIntervalMs: 300_000,
+    });
+    await startup.started.promise;
+    const job = createCloudCopyJob(accountUserId);
+    const running = runtime.run(job.jobId);
+    try {
+      expect(startup.collector.mock.calls[0]![0].retainJobIds.size).toBe(0);
+      expect(requestCloudToLocal).not.toHaveBeenCalled();
+      startup.release.resolve();
+      await expect(running).resolves.toMatchObject({ state: "waiting_export" });
+      expect(requestCloudToLocal).toHaveBeenCalledOnce();
+    } finally {
+      startup.release.resolve();
+      await startup.completed.promise;
+      await running;
+      await runtime.dispose();
+    }
+  });
+
+  it.each([1, 2])(
+    "joins startup stage collection for %i concurrent disposal calls",
+    async (callCount) => {
+      const startup = await pauseStartupCollection();
+      const runtime = createRuntime(openZerosDb(), {
+        context: () => ({ accountUserId: randomUUID(), api: api({}) }),
+        schedulerIntervalMs: 300_000,
+      });
+      await startup.started.promise;
+      let completedDisposals = 0;
+      const disposals = Array.from({ length: callCount }, () =>
+        runtime.dispose().then(() => {
+          completedDisposals += 1;
+        }),
+      );
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(completedDisposals).toBe(0);
+        startup.release.resolve();
+        await Promise.all(disposals);
+        expect(completedDisposals).toBe(callCount);
+      } finally {
+        startup.release.resolve();
+        await startup.completed.promise;
+        await Promise.all(disposals);
+      }
+    },
+  );
+
+  it("keeps a newly downloaded export intact when startup collection overlaps its copy", async () => {
+    const startup = await pauseStartupCollection();
+    const stage = await import("../cloud-workspace-fork-stage");
+    const stageBlob = stage.stageCloudWorkspaceForkBlob;
+    const staged = deferred();
+    const releaseStaging = deferred();
+    vi.spyOn(stage, "stageCloudWorkspaceForkBlob").mockImplementationOnce(
+      async (input) => {
+        const stageName = await stageBlob(input);
+        staged.resolve();
+        await releaseStaging.promise;
+        return stageName;
+      },
+    );
+    const accountUserId = randomUUID();
+    const bytes = Buffer.from("from cloud during startup collection\n");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const blobId = randomUUID();
+    let targetId = "";
+    const requestCloudToLocal = vi.fn(async () => ({
+      forkIntentId: randomUUID(),
+      checkpointRequestId: randomUUID(),
+      replayed: false,
+    }));
+    const runtime = createRuntime(openZerosDb(), {
+      context: () => ({
+        accountUserId,
+        api: api({
+          requestCloudToLocal,
+          issueExportGrant: async () => ({
+            grantToken: `zwe_${Buffer.alloc(32, 3).toString("base64url")}`,
+            deviceId: randomUUID(),
+            deviceKeyVersion: 1,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          }),
+          readForkManifest: async ({ workspaceId }) => ({
+            sourceCloudWorkspaceId: workspaceId,
+            targetLocalWorkspaceId: targetId,
+            checkpointId: randomUUID(),
+            contentRevision: 1,
+            recordRevision: 0,
+            includeChats: false,
+            fileCount: 1,
+            totalBytes: bytes.byteLength,
+            gitBaseCommit: baseCommit,
+            gitHeadRef: "refs/heads/main",
+            repository: {
+              forge: "github.com",
+              owner: "acme",
+              name: "example",
+              revision: "main",
+            },
+            entries: [
+              {
+                operation: "upsert",
+                path: "README.md",
+                entryType: "file",
+                mode: 33188,
+                blobId,
+                contentSha256: sha256,
+                sizeBytes: bytes.byteLength,
+              },
+            ],
+            nextAfterPath: null,
+          }),
+          readForkBlob: async () => new Uint8Array(bytes),
+        }),
+      }),
+      validateRepository: async () => undefined,
+      schedulerIntervalMs: 300_000,
+    });
+    await startup.started.promise;
+    const job = createCloudCopyJob(accountUserId);
+    targetId = job.targetWorkspaceId;
+    const running = runtime.run(job.jobId);
+    const settled = running.catch(() => undefined);
+    try {
+      if (requestCloudToLocal.mock.calls.length > 0) await staged.promise;
+      startup.release.resolve();
+      await startup.completed.promise;
+      releaseStaging.resolve();
+      await expect(running).resolves.toMatchObject({ state: "succeeded" });
+      const local = getWorkspaceByCanonicalId(targetId);
+      expect(local).toMatchObject({ placement: "local", baseBranch: baseCommit });
+      expect(await readFile(path.join(local!.path, "README.md"))).toEqual(bytes);
+      expect(getWorkspaceByCanonicalId(job.sourceWorkspaceId)).toBeNull();
+      await expect(cloudWorkspaceForkStageRoot(job.jobId)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      startup.release.resolve();
+      releaseStaging.resolve();
+      await startup.completed.promise;
+      await settled;
+      await runtime.dispose();
+    }
+  });
+
+  it("cancels a queued copy without remote work while startup stage collection is pending", async () => {
+    const startup = await pauseStartupCollection();
+    const accountUserId = randomUUID();
+    const requestCloudToLocal = vi.fn(async () => ({
+      forkIntentId: randomUUID(),
+      checkpointRequestId: randomUUID(),
+      replayed: false,
+    }));
+    const runtime = createRuntime(openZerosDb(), {
+      context: () => ({ accountUserId, api: api({ requestCloudToLocal }) }),
+      schedulerIntervalMs: 300_000,
+    });
+    await startup.started.promise;
+    const job = createCloudCopyJob(accountUserId);
+    const running = runtime.run(job.jobId);
+    const cancelling = runtime.cancel(job.jobId);
+    try {
+      startup.release.resolve();
+      await expect(running).resolves.toMatchObject({ state: "cancelled" });
+      await expect(cancelling).resolves.toMatchObject({ state: "cancelled" });
+      expect(requestCloudToLocal).not.toHaveBeenCalled();
+      await expect(cloudWorkspaceForkStageRoot(job.jobId)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      startup.release.resolve();
+      await startup.completed.promise;
+      await Promise.all([running, cancelling]);
+      await runtime.dispose();
+    }
+  });
+
+  it("disposes a queued copy without remote work or making its journal terminal", async () => {
+    const startup = await pauseStartupCollection();
+    const accountUserId = randomUUID();
+    const requestCloudToLocal = vi.fn(async () => ({
+      forkIntentId: randomUUID(),
+      checkpointRequestId: randomUUID(),
+      replayed: false,
+    }));
+    const runtime = createRuntime(openZerosDb(), {
+      context: () => ({ accountUserId, api: api({ requestCloudToLocal }) }),
+      schedulerIntervalMs: 300_000,
+    });
+    await startup.started.promise;
+    const job = createCloudCopyJob(accountUserId);
+    const running = runtime.run(job.jobId);
+    const disposing = runtime.dispose();
+    try {
+      startup.release.resolve();
+      await disposing;
+      await expect(running).resolves.toMatchObject({ state: "prepared" });
+      expect(requestCloudToLocal).not.toHaveBeenCalled();
+      expect(runtime.list()).toMatchObject([{ state: "prepared" }]);
+    } finally {
+      startup.release.resolve();
+      await startup.completed.promise;
+      await Promise.all([running, disposing]);
+    }
+  });
+
+  it("defers a failed startup collection without rejecting later copy work or disposal", async () => {
+    const stage = await import("../cloud-workspace-fork-stage");
+    vi.spyOn(stage, "collectCloudWorkspaceForkStages").mockRejectedValueOnce(
+      new Error("Synthetic startup collection failure"),
+    );
+    const accountUserId = randomUUID();
+    const logger = { warn: vi.fn() };
+    const runtime = createRuntime(openZerosDb(), {
+      context: () => ({
+        accountUserId,
+        api: api({
+          requestCloudToLocal: async () => ({
+            forkIntentId: randomUUID(),
+            checkpointRequestId: randomUUID(),
+            replayed: false,
+          }),
+          issueExportGrant: async () => {
+            throw new CloudReplicaClientError(
+              409,
+              "workspace_fork_export_unavailable",
+              "not ready",
+            );
+          },
+        }),
+      }),
+      logger,
+      schedulerIntervalMs: 300_000,
+    });
+    const job = createCloudCopyJob(accountUserId);
+    await expect(runtime.run(job.jobId)).resolves.toMatchObject({
+      state: "waiting_export",
+    });
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+      "[cloud-fork] staged-data cleanup deferred (error)",
+    );
+    await expect(runtime.dispose()).resolves.toBeUndefined();
+  });
+
   it("startup GC removes terminal, expired, and orphaned plaintext stages while retaining resumable work", async () => {
     const db = openZerosDb();
     const state = new DatabaseCloudWorkspaceForkState(db);
@@ -133,7 +454,7 @@ describe("local and cloud workspace copy runtime", () => {
         stageCloudWorkspaceForkBlob({ jobId, sha256, bytes }),
       ),
     );
-    const runtime = new CloudWorkspaceForkRuntime(db, {
+    const runtime = createRuntime(db, {
       context: () => ({ accountUserId, api: api({}) }),
       schedulerIntervalMs: 300_000,
     });
@@ -170,7 +491,7 @@ describe("local and cloud workspace copy runtime", () => {
       "sensitive overlay\n",
     );
     const accountUserId = randomUUID();
-    const runtime = new CloudWorkspaceForkRuntime(openZerosDb(), {
+    const runtime = createRuntime(openZerosDb(), {
       context: () => ({
         accountUserId,
         api: api({
@@ -227,7 +548,7 @@ describe("local and cloud workspace copy runtime", () => {
     const startedRemote = new Promise<void>((resolve) => {
       started = resolve;
     });
-    const runtime = new CloudWorkspaceForkRuntime(openZerosDb(), {
+    const runtime = createRuntime(openZerosDb(), {
       context: () => ({
         accountUserId,
         api: api({
@@ -335,7 +656,7 @@ describe("local and cloud workspace copy runtime", () => {
       })),
     });
     const accountUserId = randomUUID();
-    const stableRuntime = new CloudWorkspaceForkRuntime(openZerosDb(), {
+    const stableRuntime = createRuntime(openZerosDb(), {
       context: () => ({ accountUserId, api: remote }),
       schedulerIntervalMs: 300_000,
     });
@@ -470,7 +791,7 @@ describe("local and cloud workspace copy runtime", () => {
         replayed: false,
       }));
       const accountUserId = randomUUID();
-      const runtime = new CloudWorkspaceForkRuntime(openZerosDb(), {
+      const runtime = createRuntime(openZerosDb(), {
         context: () => ({
           accountUserId,
           api: api({
@@ -567,7 +888,7 @@ describe("local and cloud workspace copy runtime", () => {
       })),
     });
     const accountUserId = randomUUID();
-    const runtime = new CloudWorkspaceForkRuntime(openZerosDb(), {
+    const runtime = createRuntime(openZerosDb(), {
       context: () => ({ accountUserId, api: remote }),
       validateRepository: async () => undefined,
       schedulerIntervalMs: 300_000,
@@ -662,7 +983,7 @@ describe("local and cloud workspace copy runtime", () => {
       },
     });
     let targetId = "";
-    const runtime = new CloudWorkspaceForkRuntime(openZerosDb(), {
+    const runtime = createRuntime(openZerosDb(), {
       context: () => ({ accountUserId, api: wrapped }),
       validateRepository: async () => undefined,
       schedulerIntervalMs: 300_000,
@@ -851,7 +1172,7 @@ describe("local and cloud workspace copy runtime", () => {
         }),
       });
       const accountUserId = randomUUID();
-      const runtime = new CloudWorkspaceForkRuntime(openZerosDb(), {
+      const runtime = createRuntime(openZerosDb(), {
         context: () => ({ accountUserId, api: remote }),
         validateRepository: async () => undefined,
         createWorkspace: createLocal as never,
@@ -941,7 +1262,7 @@ describe("local and cloud workspace copy runtime", () => {
       readForkBlob: vi.fn(async () => new Uint8Array(descriptorBytes)),
     });
     const accountUserId = randomUUID();
-    const runtime = new CloudWorkspaceForkRuntime(openZerosDb(), {
+    const runtime = createRuntime(openZerosDb(), {
       context: () => ({ accountUserId, api: remote }),
       validateRepository: async () => undefined,
       createWorkspace: createLocal as never,
