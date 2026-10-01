@@ -5,7 +5,7 @@ name: Controlled cutover
 # deploys, retarget sources, fence writers with maintenance mode, back up and
 # migrate, deploy the exact SHA, upload Pages and verify WorkOS. Dispatch from
 # `main` for Alpha or from `release/X.Y.Z` for Beta/Production; Production
-# waits for its required reviewer. Afterwards rerun the failed desktop release
+# waits for its single approval in `production-approval`. Afterwards rerun the failed desktop release
 # for the same SHA. See docs/deployment-environments.md.
 on:
   workflow_dispatch:
@@ -31,9 +31,23 @@ concurrency:
   group: hosted-mutation-${{ inputs.channel }}
   cancel-in-progress: false
 jobs:
+  # Production's single human approval; `production-approval` holds the
+  # required reviewer and no secrets. Alpha and Beta skip it.
+  approve:
+    name: Approve Production cutover
+    if: github.event.repository.fork == false && inputs.channel == 'production'
+    runs-on: ubuntu-latest
+    environment: production-approval
+    permissions: {}
+    steps:
+      - name: Record the approved cutover
+        run: echo "Production cutover approved for $GITHUB_SHA on $GITHUB_REF_NAME"
   cutover:
     name: Controlled cutover (${{ inputs.channel }})
-    if: github.event.repository.fork == false
+    needs: approve
+    if: >-
+      !cancelled() && github.event.repository.fork == false &&
+      (needs.approve.result == 'success' || (inputs.channel != 'production' && needs.approve.result == 'skipped'))
     runs-on: ubuntu-latest
     timeout-minutes: 100
     environment: ${{ inputs.channel }}

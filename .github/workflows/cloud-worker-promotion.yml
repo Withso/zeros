@@ -49,6 +49,10 @@ on:
       receipt_required:
         default: true
         type: boolean
+      caller_gated:
+        description: The calling Production release already holds its single human approval
+        default: false
+        type: boolean
     outputs:
       receipt_issued:
         description: True only after native qualification, cleanup, approval and tuple readback
@@ -60,9 +64,23 @@ permissions:
   contents: read
   actions: read
 jobs:
+  # Production's single human approval for a direct dispatch. A call from the
+  # Production release passes caller_gated, which a dispatch cannot set.
+  approve:
+    name: Approve Production worker promotion
+    if: github.event.repository.fork == false && inputs.channel == 'production' && inputs.caller_gated != true
+    runs-on: ubuntu-latest
+    environment: production-approval
+    permissions: {}
+    steps:
+      - name: Record the approved worker promotion
+        run: echo "Production worker promotion approved for $GITHUB_SHA on $GITHUB_REF_NAME"
   worker:
     name: worker
-    if: github.event.repository.fork == false && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: approve
+    if: >-
+      !cancelled() && github.event.repository.fork == false && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (needs.approve.result == 'success' || (needs.approve.result == 'skipped' && (inputs.channel != 'production' || inputs.caller_gated == true)))
     runs-on: ubuntu-latest
     environment: ${{ inputs.channel }}
     timeout-minutes: 330
