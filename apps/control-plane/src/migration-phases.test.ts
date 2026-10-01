@@ -39,7 +39,7 @@ function database(
       if (text === "SHOW statement_timeout")
         return { rows: [{ statement_timeout: "30s" }] };
       if (/SELECT\s+name,\s*checksum/.test(text)) return { rows };
-      if (/ADD COLUMN phase text/.test(text)) phaseColumn = true;
+      if (/ADD COLUMN (?:IF NOT EXISTS )?phase text/.test(text)) phaseColumn = true;
       if (/AS phase_supported/.test(text))
         return { rows: [{ phase_supported: phaseColumn }] };
       return { rows: [] };
@@ -148,7 +148,7 @@ describe("expand/contract schema compatibility", () => {
     const file = "0122_migration_phases.sql",
       sql =
         "-- zeros-migration: expand\nALTER TABLE schema_migrations ADD COLUMN phase text NOT NULL DEFAULT 'legacy';";
-    vi.mocked(fs.readdir).mockResolvedValue([...files, file] as never);
+    vi.mocked(fs.readdir).mockResolvedValue([...files.filter((name) => name !== file), file] as never);
     vi.mocked(fs.readFile).mockImplementation(((path: unknown) =>
       String(path).endsWith(file)
         ? Promise.resolve(sql)
@@ -172,23 +172,17 @@ describe("expand/contract schema compatibility", () => {
     ).toEqual([file, migrationChecksum(sql), "expand"]);
   });
 
-  it("migrates a declared expansion on the Step A ledger without a phase column", async () => {
-    const file = "0122_additive.sql",
-      sql = "-- zeros-migration: expand\nSELECT 1;";
-    vi.mocked(fs.readdir).mockResolvedValue([...files, file] as never);
-    vi.mocked(fs.readFile).mockImplementation(((path: unknown) =>
-      String(path).endsWith(file)
-        ? Promise.resolve(sql)
-        : Promise.resolve(
-            readFileSync(path as string, "utf8"),
-          )) as typeof fs.readFile);
-    const { pool, query } = database(ledger, false);
+  it("applies the packaged 0122 bridge on a Step A ledger and records its own expand phase", async () => {
+    // A Step A database has 0001-0121 and no phase column; 0122 adds it in the
+    // same transaction that records its own row.
+    const file = "0122_migration_phases.sql";
+    const { pool, query } = database(ledger.filter((row) => row.name < file), false);
     await expect(runMigrations(pool)).resolves.toEqual([file]);
     expect(
       query.mock.calls.find(([text]) =>
         text.startsWith("INSERT INTO schema_migrations"),
       )?.[1],
-    ).toEqual([file, migrationChecksum(sql)]);
+    ).toEqual([file, migrationChecksum(readFileSync(new URL(file, directory), "utf8")), "expand"]);
   });
 
   it("refuses a contract migration before its declared UTC date even outside production", () => {
