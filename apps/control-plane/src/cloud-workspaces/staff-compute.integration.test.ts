@@ -28,14 +28,17 @@ suite("uncapped staff machine-hour funding", () => {
   let admin: pg.Pool, runtime: pg.Pool, ledger: DatabaseManagedComputeCreditLedger;
   let fixture: ReadyCloudWorkspaceFixture, allowance: DatabaseProMonthlyAllowance;
   const runtimeRole = `staff_runtime_${randomUUID().replaceAll("-", "")}`;
+  const runtimePassword = randomBytes(24).toString("hex");
 
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8 });
-    await admin.query(`CREATE ROLE ${runtimeRole} LOGIN NOINHERIT`);
+    await admin.query(`CREATE ROLE ${runtimeRole} LOGIN NOINHERIT NOBYPASSRLS PASSWORD ${pg.escapeLiteral(runtimePassword)}`);
     await admin.query(`GRANT zeros_app TO ${runtimeRole}`);
     const url = new URL(process.env.TEST_DATABASE_URL!);
     url.username = runtimeRole;
+    url.password = runtimePassword;
     runtime = new pg.Pool({ connectionString: url.toString(), max: 8 });
+    expect((await runtime.query("SELECT current_user AS role")).rows).toEqual([{ role: runtimeRole }]);
     ledger = new DatabaseManagedComputeCreditLedger({ pool: runtime, workosEnabled: false });
     allowance = new DatabaseProMonthlyAllowance(runtime, policy);
   });
