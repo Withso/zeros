@@ -1,0 +1,92 @@
+import { describe, expect, it } from "vitest";
+import { promotionConfig } from "./contracts";
+import { createProviders, publicPagesEnvironment } from "./providers";
+
+const sha = "a".repeat(40);
+const config = promotionConfig({ RELEASE_CHANNEL: "beta", RELEASE_SHA: sha, GITHUB_SHA: sha, RELEASE_BRANCH: "release/1.2.3",
+  GITHUB_REPOSITORY: "example/zeros", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", ZEROS_HOSTED_PROMOTION: "enabled",
+  RAILWAY_DEPLOY_TOKEN: "fixture", PLANETSCALE_SERVICE_TOKEN_ID: "fixture", PLANETSCALE_SERVICE_TOKEN: "fixture", CLOUDFLARE_API_TOKEN: "fixture",
+  RAILWAY_PROJECT_ID: "11111111-1111-4111-8111-111111111111", RAILWAY_ENVIRONMENT_ID: "22222222-2222-4222-8222-222222222222", RAILWAY_SERVICE_ID: "33333333-3333-4333-8333-333333333333",
+  PLANETSCALE_ORG: "example", PLANETSCALE_DATABASE: "zeros-control-plane-beta", PLANETSCALE_BRANCH: "main", CLOUDFLARE_ACCOUNT_ID: "c".repeat(32), CF_PAGES_APP_PROJECT: "zeros-web-beta", AUTH_PROVIDER: "workos" });
+const workosEnv = { AUTH_ISSUER: "https://auth-api.example.com/", AUTH_JWKS_URL: "https://auth-api.example.com/sso/jwks/client_desktop",
+  AUTH_WEB_CLIENT_ID: "client_web", AUTH_DESKTOP_CLIENT_ID: "client_desktop" };
+
+function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: boolean; staged?: unknown; identity?: unknown }) {
+  const calls: any[] = [];
+  const variables: Record<string, string> = { SECRET: "must-not-be-returned" };
+  const branch = "release/1.2.2";
+  const project = () => ({ name: config.appProject, production_branch: branch, domains: ["app-beta.zeros.build"],
+    source: { type: "github", config: { owner: "example", repo_name: "zeros", production_branch: branch, production_deployments_enabled: state.pagesAuto, preview_deployment_setting: "none" } },
+    deployment_configs: { production: { env_vars: Object.fromEntries(Object.entries(publicPagesEnvironment(config, "app", {})).map(([k, v]) => [k, { value: v }])) } } });
+  const fetcher: typeof fetch = async (url, init) => {
+    const request = init?.body ? JSON.parse(String(init.body)) : {};
+    calls.push({ url: String(url), method: init?.method, ...request });
+    if (String(url).endsWith("/v1/release-identity")) return Response.json(state.identity ?? {}, { status: 503 });
+    if (String(url).includes("cloudflare")) {
+      if (init?.method === "PATCH") state.pagesAuto = request.source.config.production_deployments_enabled;
+      return Response.json({ success: true, result: project() });
+    }
+    const q: string = request.query;
+    if (q.includes("CutoverAutoDeployHold")) { state.autoDeploy = request.variables.input.enabled; return Response.json({ data: { serviceInstanceAutoDeployUpdate: { __typename: "Result" } } }); }
+    if (q.includes("CutoverWaitForCiHold")) { state.checkSuites = request.variables.patch.services[config.serviceId].source.checkSuites; return Response.json({ data: { environmentPatchCommit: "commit1" } }); }
+    if (q.includes("CutoverMaintenanceRead")) return Response.json({ data: { variables } });
+    if (q.includes("CutoverMaintenance")) { Object.assign(variables, request.variables.input.variables); return Response.json({ data: { variableCollectionUpsert: true } }); }
+    if (q.includes("PromotionState")) return Response.json({ data: {
+      serviceInstanceAutoDeployStatus: { enabled: state.autoDeploy },
+      environment: { id: config.environmentId, name: "beta", projectId: config.projectId, unmergedChangesCount: null,
+        config: { services: { [config.serviceId]: { source: { repo: config.repository, rootDirectory: "apps/control-plane", checkSuites: state.checkSuites, branch } } } } },
+      serviceInstance: { serviceId: config.serviceId, environmentId: config.environmentId, domains: { customDomains: [{ domain: "api-beta.zeros.build" }] } },
+      environmentStagedChanges: state.staged ?? { id: "<empty>", patch: {} },
+    } });
+    throw new Error(`unexpected query ${q}`);
+  };
+  return { calls, variables, providers: createProviders(config, { ...workosEnv, RAILWAY_DEPLOY_TOKEN: "never-log", CLOUDFLARE_API_TOKEN: "never-log" }, {
+    fetch: fetcher, pause: async () => {} }) };
+}
+
+describe("cutover provider adapters", () => {
+  it("holds Railway autodeploy, Wait for CI and Pages builds without changing any branch", async () => {
+    const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true });
+    await expect(f.providers.inspect()).rejects.toThrow("autodeploy");
+    await f.providers.holdDeploys();
+    await expect(f.providers.inspect()).resolves.toBeUndefined();
+    const hold = f.calls.find(call => call.query?.includes("CutoverAutoDeployHold"));
+    expect(hold.variables.input).toEqual({ projectId: config.projectId, environmentId: config.environmentId, serviceId: config.serviceId, enabled: false });
+    const ci = f.calls.find(call => call.query?.includes("CutoverWaitForCiHold"));
+    expect(ci.query).toContain("skipDeploys:true");
+    expect(ci.variables.patch).toEqual({ services: { [config.serviceId]: { source: { checkSuites: false } } } });
+    const patch = f.calls.find(call => call.method === "PATCH");
+    expect(patch.production_branch).toBeUndefined();
+    expect(patch.source.config).toMatchObject({ production_branch: "release/1.2.2", production_deployments_enabled: false, preview_deployment_setting: "none" });
+  });
+
+  it("does nothing when every deployer is already held", async () => {
+    const f = fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false });
+    await f.providers.holdDeploys();
+    expect(f.calls.every(call => !call.query || call.query.startsWith("query"))).toBe(true);
+    expect(f.calls.some(call => call.method === "PATCH")).toBe(false);
+  });
+
+  it("refuses to hold over someone else's staged Railway changes", async () => {
+    const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true, staged: { id: "patch1", patch: { services: {} , shared: {} } } });
+    await expect(f.providers.holdDeploys()).rejects.toThrow("outstanding staged changes");
+    expect(f.calls.every(call => !call.query || call.query.startsWith("query"))).toBe(true);
+  });
+
+  it("writes only the maintenance switch with deploys skipped and confirms it", async () => {
+    const f = fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false });
+    await f.providers.setMaintenance(true);
+    const write = f.calls.find(call => call.query?.includes("mutation CutoverMaintenance"));
+    expect(write.variables.input).toMatchObject({ variables: { DATABASE_MAINTENANCE_MODE: "true" }, replace: false, skipDeploys: true });
+    expect(f.variables.DATABASE_MAINTENANCE_MODE).toBe("true");
+    await f.providers.setMaintenance(false);
+    expect(f.variables.DATABASE_MAINTENANCE_MODE).toBe("false");
+  });
+
+  it("waits until the exact candidate itself serves maintenance", async () => {
+    const fenced = { version: 1, ready: false, sourceSha: sha, channel: "beta", maintenance: true };
+    await expect(fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false, identity: fenced }).providers.waitMaintenance()).resolves.toBe(true);
+    const oldBuild = { ...fenced, sourceSha: "b".repeat(40) };
+    await expect(fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false, identity: oldBuild }).providers.waitMaintenance()).rejects.toThrow();
+  });
+});

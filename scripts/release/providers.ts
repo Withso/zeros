@@ -138,6 +138,63 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
         }
       }
     },
+    /** Hold every independent deployer before an explicit cutover: Railway
+     * autodeploy and Wait for CI, then Pages production and preview builds.
+     * Source branches stay as they are; `retarget` moves them afterwards. */
+    async holdDeploys() {
+      const before = await readRailway(), environment = before.environment;
+      requireCheck(environment?.id === config.environmentId && environment.projectId === config.projectId && environment.name === config.channel &&
+        noStagedChanges(environment, before.environmentStagedChanges) && before.serviceInstance?.serviceId === config.serviceId &&
+        before.serviceInstance.environmentId === config.environmentId, "Railway target mismatch or outstanding staged changes");
+      if (before.serviceInstanceAutoDeployStatus?.enabled !== false) {
+        await railway(`mutation CutoverAutoDeployHold($input:ServiceInstanceAutoDeployUpdateInput!) {
+          serviceInstanceAutoDeployUpdate(input:$input) { __typename }
+        }`, { input: { ...target, enabled: false } });
+      }
+      if (environment.config?.services?.[config.serviceId]?.source?.checkSuites !== false) {
+        await railway(`mutation CutoverWaitForCiHold($environmentId:String!,$patch:EnvironmentConfig!) {
+          environmentPatchCommit(environmentId:$environmentId,patch:$patch,skipDeploys:true,commitMessage:"Zeros cutover deploy hold")
+        }`, { environmentId: config.environmentId, patch: { services: { [config.serviceId]: { source: { checkSuites: false } } } } });
+      }
+      const after = await readRailway();
+      requireCheck(after.serviceInstanceAutoDeployStatus?.enabled === false &&
+        after.environment?.config?.services?.[config.serviceId]?.source?.checkSuites === false, "Railway deploy hold was not confirmed");
+      for (const surface of config.surfaces) {
+        const project = await pages(pagesPath(surface)), source = project.source?.config;
+        if (!project.source || source?.production_deployments_enabled === false && source?.preview_deployment_setting === "none") continue;
+        await pages(pagesPath(surface), "PATCH", { source: { type: project.source.type, config: { ...source,
+          production_deployments_enabled: false, preview_deployment_setting: "none" } } });
+        const held = (await pages(pagesPath(surface))).source?.config;
+        requireCheck(held?.production_deployments_enabled === false && held?.preview_deployment_setting === "none", "Pages deploy hold was not confirmed");
+      }
+    },
+    /** `DATABASE_MAINTENANCE_MODE` takes effect on the next explicit deploy. */
+    async setMaintenance(on: boolean) {
+      const value = on ? "true" : "false";
+      await inspectRailway();
+      const result = await railway(`mutation CutoverMaintenance($input:VariableCollectionUpsertInput!) { variableCollectionUpsert(input:$input) }`,
+        { input: { ...target, variables: { DATABASE_MAINTENANCE_MODE: value }, replace: false, skipDeploys: true } });
+      requireCheck(result.variableCollectionUpsert === true, "Maintenance switch update is unconfirmed");
+      // The provider returns every rendered variable. Compare only this one;
+      // never log, persist or forward the response.
+      const confirmed = await railway(`query CutoverMaintenanceRead($projectId:String!,$environmentId:String!,$serviceId:String!) {
+        variables(projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId)
+      }`, target);
+      requireCheck(confirmed.variables?.DATABASE_MAINTENANCE_MODE === value, "Maintenance switch readback mismatch");
+    },
+    /** The candidate in maintenance fences every writer: it skips schema
+     * verification and serves only health and this identity, which answers 503. */
+    async waitMaintenance() {
+      return poll(async () => {
+        let identity: any;
+        try {
+          const response = await (options.fetch ?? fetch)(`${config.api}/v1/release-identity`, { redirect: "error", signal: AbortSignal.timeout(15_000) });
+          identity = await response.json();
+        } catch { return false; }
+        return identity?.version === 1 && identity.channel === config.channel && identity.sourceSha === config.sourceSha &&
+          identity.maintenance === true && identity.ready === false;
+      }, { sleep: options.pause });
+    },
     async deploy() {
       const result = await railway(`mutation PromotionDeploy($environmentId:String!,$serviceId:String!,$commitSha:String!) {
         serviceInstanceDeployV2(commitSha:$commitSha,environmentId:$environmentId,serviceId:$serviceId)
