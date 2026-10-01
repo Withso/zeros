@@ -12,7 +12,8 @@ const workosEnv = { AUTH_ISSUER: "https://auth-api.example.com/", AUTH_JWKS_URL:
   AUTH_WEB_CLIENT_ID: "client_web", AUTH_DESKTOP_CLIENT_ID: "client_desktop" };
 
 function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: boolean; staged?: unknown; identity?: unknown;
-  services?: string[]; deployments?: { id: string; status: string }[][]; triggers?: string[]; deleteFails?: boolean }) {
+  services?: string[]; deployments?: { id: string; status: string }[][]; triggers?: string[]; deleteFails?: boolean; recreateOnList?: number }) {
+  let lists = 0;
   state.triggers ??= state.autoDeploy ? ["trigger1"] : [];
   const calls: any[] = [];
   let current: { id: string; status: string }[] = [];
@@ -30,7 +31,10 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
       return Response.json({ success: true, result: project() });
     }
     const q: string = request.query;
-    if (q.includes("CutoverTriggers")) return Response.json({ data: { deploymentTriggers: { edges: state.triggers!.map(id => ({ node: { id } })) } } });
+    if (q.includes("CutoverTriggers")) {
+      if (++lists === state.recreateOnList) { state.triggers!.push("late"); state.autoDeploy = true; }
+      return Response.json({ data: { deploymentTriggers: { edges: state.triggers!.map(id => ({ node: { id } })) } } });
+    }
     if (q.includes("CutoverTriggerDelete")) {
       if (state.deleteFails) return Response.json({ data: { deploymentTriggerDelete: false } });
       state.triggers = state.triggers!.filter(id => id !== request.variables.id);
@@ -68,6 +72,15 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
 }
 
 describe("cutover provider adapters", () => {
+  it("keeps removing a trigger that Railway recreates a moment later", async () => {
+    // Railway's asynchronous recreation: a new trigger appears on the second read.
+    const f = fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false, triggers: [], recreateOnList: 2 });
+    await f.providers.holdDeploys();
+    expect(f.calls.filter(call => call.query?.includes("CutoverTriggerDelete")).map(call => call.variables.id)).toEqual(["late"]);
+    // One clean read, the late trigger, then three consecutive clean reads.
+    expect(f.calls.filter(call => call.query?.includes("CutoverTriggers"))).toHaveLength(5);
+  });
+
   it("stops when Railway does not confirm removing a deployment trigger", async () => {
     const f = fixture({ autoDeploy: true, checkSuites: true, pagesAuto: true, deleteFails: true });
     await expect(f.providers.holdDeploys()).rejects.toThrow("Railway deployment trigger removal is unconfirmed");

@@ -1,5 +1,5 @@
 import { ReleaseIdentity, WorkerIdentity, requireCheck, type PromotionConfig, type Surface } from "./contracts";
-import { command, jsonClient, poll, type Command } from "./io";
+import { command, jsonClient, poll, sleep, type Command } from "./io";
 import type { z } from "zod";
 import { verifyWorkOS, workosVerificationConfig } from "./workos";
 
@@ -83,16 +83,23 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
    * dashboard's Disable deletes them, and any source patch can recreate one.
    * Remove every trigger for this service and confirm autodeploy is off. */
   async function removeDeployTriggers() {
-    const listed = await railway(`query CutoverTriggers($projectId:String!,$environmentId:String!,$serviceId:String!) {
-      deploymentTriggers(first:50,projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId) { edges { node { id } } }
-    }`, target);
-    const ids: string[] = listed.deploymentTriggers?.edges?.map((edge: { node: { id: string } }) => edge.node.id) ?? [];
-    for (const id of ids) {
-      const removed = await railway(`mutation CutoverTriggerDelete($id:String!) { deploymentTriggerDelete(id:$id) }`, { id });
-      requireCheck(removed.deploymentTriggerDelete === true, "Railway deployment trigger removal is unconfirmed");
+    // Railway recreates a trigger asynchronously after a source patch, so keep
+    // removing until three consecutive reads, seconds apart, show none.
+    let clean = 0;
+    for (let attempt = 0; attempt < 24 && clean < 3; attempt++) {
+      if (attempt > 0) await (options.pause ?? sleep)(5_000);
+      const listed = await railway(`query CutoverTriggers($projectId:String!,$environmentId:String!,$serviceId:String!) {
+        deploymentTriggers(first:50,projectId:$projectId,environmentId:$environmentId,serviceId:$serviceId) { edges { node { id } } }
+      }`, target);
+      const ids: string[] = listed.deploymentTriggers?.edges?.map((edge: { node: { id: string } }) => edge.node.id) ?? [];
+      for (const id of ids) {
+        const removed = await railway(`mutation CutoverTriggerDelete($id:String!) { deploymentTriggerDelete(id:$id) }`, { id });
+        requireCheck(removed.deploymentTriggerDelete === true, "Railway deployment trigger removal is unconfirmed");
+      }
+      const after = await readRailway();
+      clean = ids.length === 0 && after.serviceInstanceAutoDeployStatus?.enabled === false ? clean + 1 : 0;
     }
-    const after = await readRailway();
-    requireCheck(after.serviceInstanceAutoDeployStatus?.enabled === false, "Railway automatic deployments are still on after removing their triggers");
+    requireCheck(clean >= 3, "Railway automatic deployments did not stay off after removing their triggers");
   }
   /** Read-only: every destination identity a cutover will touch, before any
    * hold. The channel environment must run only the control-plane service. */
