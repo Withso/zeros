@@ -33,6 +33,11 @@ export type CloudEngineRelayGrant = {
   authorityEpoch: number;
   engineInstanceId: string;
   resourceId: string;
+  /** A Read-only actor. The relay counts these apart from writers, so
+   * unlimited Read-only guests cannot take a workspace's writer capacity. A
+   * role change revokes the actor's session, so it is stable for the life of
+   * a relay connection. */
+  readOnly: boolean;
 };
 
 const UUID_PATTERN =
@@ -363,6 +368,8 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
         authorityEpoch,
         engineInstanceId: row.engine_instance_id,
         resourceId: row.provider_resource_id,
+        // This grant is limited to the owner of a private single-member workspace.
+        readOnly: false,
       };
     });
   }

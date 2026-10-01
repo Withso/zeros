@@ -32,6 +32,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "load:relay": "tsx src/cloud-workspaces/runtime-bridge-load.ts",
     "cloud-runtime:manage": "tsx src/manage-cloud-agent-runtime.ts"
   },
   "dependencies": {

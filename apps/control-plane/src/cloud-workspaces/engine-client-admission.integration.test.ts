@@ -145,6 +145,8 @@ d("cloud workspace engine client admission", () => {
       engineInstanceId: fixture.engineInstanceId,
       authorityEpoch: 1,
       resourceId: `sandbox-${fixture.workspaceId}`,
+      // Legacy grants are owner-only, so they always use writer capacity.
+      readOnly: false,
     });
     await service.consume({
       token: document.grantToken,

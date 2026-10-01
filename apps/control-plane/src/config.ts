@@ -29,6 +29,10 @@ import {
   MAX_ENGINE_HEARTBEAT_INTERVAL_MS,
   MIN_ENGINE_HEARTBEAT_INTERVAL_MS,
 } from "./cloud-workspaces/engine-heartbeat.js";
+import {
+  loadCloudRuntimeRelayLimits,
+  type CloudRuntimeRelayLimits,
+} from "./cloud-workspaces/runtime-bridge-limits.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -239,6 +243,8 @@ export type CloudWorkspaceBackendConfig = {
     | { objectStoreDirectory: string; s3?: never }
     | { objectStoreDirectory?: never; s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; prefix?: string } }
   ) | null;
+  /** Capacity envelope of the portable runtime relay on this process. */
+  bridge: CloudRuntimeRelayLimits;
   /** Optional signed event sink. The database outbox remains authoritative
    * while this is absent; events are never silently acknowledged. */
   outbox: {
@@ -1126,6 +1132,7 @@ function loadCloudWorkspaceConfig(
     );
   }
   const value = parsed.data;
+  const bridge = loadCloudRuntimeRelayLimits(env);
   if (
     value.CLOUD_WORKSPACE_PROVIDER === "boat" &&
     (value.ZEROS_CLOUD_IMAGE_ARCHITECTURE !== "linux/amd64" ||
@@ -1629,6 +1636,7 @@ function loadCloudWorkspaceConfig(
       previewBaseDomain,
     },
     durability,
+    bridge,
     outbox,
     setupExecution,
   };
