@@ -11,7 +11,16 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { parse as parseToml } from "smol-toml";
 import { gitExecutionIdentity } from "./git/git-execution-identity";
-import { captureCloudNativeCheckpoint, type NativeCheckpointRoots } from "./agents/containment/cloud-checkpoint-artifacts.mjs";
+import {
+  captureCloudNativeCheckpoint,
+  cloudCheckpointProjectionFingerprint,
+  fingerprintCloudNativeCheckpoint,
+  loadCloudNativeCheckpointCache,
+  nativeCheckpointFingerprint,
+  saveCloudNativeCheckpointCache,
+  type NativeCheckpointArchive,
+  type NativeCheckpointRoots,
+} from "./agents/containment/cloud-checkpoint-artifacts.mjs";
 import { DESIGN_DIRECTORY_ID_PATTERN, sanitizeDesignDirectoryName } from "./design/directory-path";
 
 const execFileAsync = promisify(execFile);
@@ -58,6 +67,16 @@ export type CloudDurabilityAuthority = {
   organizationId: string;
   generation: number;
   engineInstanceId: string;
+};
+
+type DurableCheckpointState = {
+  scope: string;
+  checkpointId: string;
+  contentRevision: number;
+  scanFingerprint: string;
+  nativeFingerprint: string;
+  designSelection: string;
+  nativeArchive: NativeCheckpointArchive;
 };
 
 type ProjectionEntry =
@@ -852,19 +871,10 @@ async function scanCloudWorkspaceChangesOnce(
           }
         }
         await verifyDirectoryBindings([captureRoot.binding]);
-        const fingerprint = createHash("sha256")
-          .update(commit)
-          .update("\0")
-          .update(headRef ?? "")
-          .update("\0")
-          .update(
-            JSON.stringify(
-              [...entries.values()].map(({ bytes: _bytes, ...entry }) => entry),
-            ),
-          )
-          .update("\0")
-          .update(JSON.stringify([...deletions]))
-          .digest("hex");
+        const fingerprint = cloudCheckpointProjectionFingerprint({
+          gitBaseCommit: commit, gitHeadRef: headRef,
+          entries: [...entries.values()].map(({ bytes: _bytes, ...entry }) => entry), deletions: [...deletions],
+        });
         return {
           gitBaseCommit: commit,
           gitHeadRef: headRef,
@@ -1066,6 +1076,7 @@ export class CloudWorkspaceDurabilityRuntime {
   // server still checks exact reservation ownership/expiry on every append.
   private uploadCacheScope = "";
   private readonly uploadCache = new Map<string, { blobId: string; expiresAtMs: number }>();
+  private lastDurable: DurableCheckpointState | null = null;
 
   constructor(
     private readonly repositoryRoot: string,
@@ -1135,6 +1146,48 @@ export class CloudWorkspaceDurabilityRuntime {
     };
   }
 
+  private scopeKey(authority: CloudDurabilityAuthority): string {
+    return JSON.stringify({ origin: new URL(authority.heartbeatEndpoint).origin, ...this.scope(authority) });
+  }
+
+  private async unchangedSinceDurable(
+    authority: CloudDurabilityAuthority,
+    projection: { currentRevision: number; durableRevision: number | null; checkpointId: string | null },
+    deadlineAtMs: number,
+  ): Promise<boolean> {
+    const durable = this.lastDurable;
+    if (
+      !durable ||
+      durable.scope !== this.scopeKey(authority) ||
+      projection.checkpointId !== durable.checkpointId ||
+      projection.currentRevision !== durable.contentRevision ||
+      projection.durableRevision !== durable.contentRevision
+    ) {
+      return false;
+    }
+    const scan = await scanCloudWorkspaceChanges(this.repositoryRoot, {
+      requireDescriptorSafety: true,
+      deadlineAtMs,
+    });
+    for (const entry of scan.entries.values()) entry.bytes.fill(0);
+    if (scan.fingerprint !== durable.scanFingerprint) return false;
+    if (JSON.stringify(await this.readPrivateDesignSelection(deadlineAtMs)) !== durable.designSelection) {
+      return false;
+    }
+    if (
+      (await fingerprintCloudNativeCheckpoint({
+        roots: this.nativeRoots,
+        identity: gitExecutionIdentity(),
+        deadlineAtMs,
+        gitBase: "remote",
+      })) !== durable.nativeFingerprint
+    ) return false;
+    const confirmed = await scanCloudWorkspaceChanges(this.repositoryRoot, { requireDescriptorSafety: true, deadlineAtMs });
+    for (const entry of confirmed.entries.values()) entry.bytes.fill(0);
+    return confirmed.fingerprint === durable.scanFingerprint &&
+      JSON.stringify(await this.readPrivateDesignSelection(deadlineAtMs)) === durable.designSelection;
+  }
+
   private async request(
     authority: CloudDurabilityAuthority,
     url: string,
@@ -1182,10 +1235,13 @@ export class CloudWorkspaceDurabilityRuntime {
     deadlineAtMs: number,
   ): Promise<{
     currentRevision: number;
+    durableRevision: number | null;
+    checkpointId: string | null;
     entries: Map<string, ProjectionEntry>;
   }> {
     let afterPath: string | null = null;
     let revision: number | null = null;
+    let durable: { durableRevision: number | null; checkpointId: string | null } | null = null;
     const entries = new Map<string, ProjectionEntry>();
     const seenCursors = new Set<string>();
     for (let page = 0; page < 100_000; page += 1) {
@@ -1231,6 +1287,15 @@ export class CloudWorkspaceDurabilityRuntime {
         throw new Error(
           "cloud durability projection changed during pagination",
         );
+      }
+      const pageDurable = {
+        durableRevision: Number.isSafeInteger(raw.durableRevision) ? Number(raw.durableRevision) : null,
+        checkpointId: typeof raw.checkpointId === "string" && UUID_PATTERN.test(raw.checkpointId)
+          ? raw.checkpointId.toLowerCase() : null,
+      };
+      if (durable === null) durable = pageDurable;
+      else if (durable.durableRevision !== pageDurable.durableRevision || durable.checkpointId !== pageDurable.checkpointId) {
+        durable = { durableRevision: null, checkpointId: null };
       }
       for (const candidate of raw.entries) {
         if (
@@ -1304,7 +1369,12 @@ export class CloudWorkspaceDurabilityRuntime {
         }
       }
       if (raw.nextAfterPath === null) {
-        return { currentRevision: revision, entries };
+        return {
+          currentRevision: revision,
+          durableRevision: durable.durableRevision,
+          checkpointId: durable.checkpointId,
+          entries,
+        };
       }
       const next = normalizedPath(raw.nextAfterPath);
       if (seenCursors.has(next) || !entries.has(next)) {
@@ -1484,6 +1554,25 @@ export class CloudWorkspaceDurabilityRuntime {
       authority,
       directive.deadlineAtMs,
     );
+    const scope = this.scopeKey(authority);
+    let previous: NativeCheckpointArchive | undefined;
+    if (this.lastDurable?.scope === scope && this.lastDurable.checkpointId === projection.checkpointId) {
+      previous = this.lastDurable.nativeArchive;
+    } else {
+      this.lastDurable = null;
+      if (projection.checkpointId) {
+        const cached = await loadCloudNativeCheckpointCache({ roots: this.nativeRoots, deadlineAtMs: directive.deadlineAtMs,
+          scope: { workspaceId: authority.workspaceId, organizationId: authority.organizationId, checkpointId: projection.checkpointId } });
+        previous = cached?.archive;
+        if (cached?.snapshot) this.lastDurable = { ...cached.snapshot, scope, checkpointId: projection.checkpointId, nativeArchive: cached.archive };
+      }
+    }
+    if (
+      directive.reason === "periodic" &&
+      (await this.unchangedSinceDurable(authority, projection, directive.deadlineAtMs))
+    ) {
+      return;
+    }
     let finalScan: CloudWorkspaceChangeScan | null = null;
     try {
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -1693,6 +1782,8 @@ export class CloudWorkspaceDurabilityRuntime {
         roots: this.nativeRoots,
         identity: gitExecutionIdentity(),
         deadlineAtMs: directive.deadlineAtMs,
+        gitBase: "remote",
+        previous,
         putChunk: async (value) => {
           const bytes = Buffer.from(value);
           try {
@@ -1769,6 +1860,7 @@ export class CloudWorkspaceDurabilityRuntime {
             version: 2,
             basis: "complete-safe-working-tree",
             native: "git-index-history-and-allowlisted-agent-design-state",
+            gitObjects: native.version === 2 ? "immutable-remote-base-and-local-objects" : "complete",
             maxNativeBytes: 2 * 1024 * 1024 * 1024,
             ignored: "excluded",
             secretLike: "excluded",
@@ -1788,6 +1880,20 @@ export class CloudWorkspaceDurabilityRuntime {
       ) {
         throw new Error("cloud checkpoint commit response is invalid");
       }
+      this.lastDurable = {
+        scope: this.scopeKey(authority),
+        checkpointId: committed.checkpointId.toLowerCase(),
+        contentRevision: projection.currentRevision,
+        scanFingerprint: finalScan.fingerprint,
+        nativeFingerprint: nativeCheckpointFingerprint(native),
+        designSelection: JSON.stringify(designSelection),
+        nativeArchive: native,
+      };
+      await saveCloudNativeCheckpointCache({ roots: this.nativeRoots, deadlineAtMs: directive.deadlineAtMs, archive: native,
+        scope: { workspaceId: authority.workspaceId, organizationId: authority.organizationId, checkpointId: this.lastDurable.checkpointId },
+        snapshot: { contentRevision: this.lastDurable.contentRevision, scanFingerprint: this.lastDurable.scanFingerprint,
+          nativeFingerprint: this.lastDurable.nativeFingerprint, designSelection: this.lastDurable.designSelection },
+      }).catch(() => undefined);
     } finally {
       if (finalScan) {
         for (const entry of finalScan.entries.values()) entry.bytes.fill(0);

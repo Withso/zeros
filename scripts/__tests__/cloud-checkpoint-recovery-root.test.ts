@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CloudWorkspaceDurabilityRuntime } from "../../apps/desktop/src/engine/cloud-durability-runtime";
 import { prepareRepositoryAndSettings, restoreCloudWorkspaceCheckpoint } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
+import runtimeLayout from "../cloud-workspace-validation/sandbox/runtime-layout.json" with { type: "json" };
 
 // This suite exercises real setpriv/chown and setup's fixed Linux deployment
 // layout. It requires an explicit disposable-root test invocation; never run it
@@ -15,6 +16,7 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
   let root = ""; let ownsRuntime = false; let server: Server | undefined;
   beforeAll(async () => {
     await fs.mkdir("/srv/zeros", { mode: 0o755 }); ownsRuntime = true;
+    await fs.mkdir(path.dirname(runtimeLayout.repository), { mode: 0o755 });
     root = await fs.mkdtemp(path.join(tmpdir(), "zeros-root-recovery-")); await fs.chmod(root, 0o755);
     for (const directory of ["/srv/zeros/home/agent", "/srv/zeros/state"]) {
       await fs.mkdir(directory, { recursive: true, mode: 0o755 }); await fs.chown(directory, 10001, 10001);
@@ -30,7 +32,7 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
     { cwd, encoding: "utf8", env: { PATH: "/usr/bin:/bin", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", HOME: "/srv/zeros/home/agent" } }).trim();
 
   it("preserves user commits on wake and accepts a restored HEAD beyond the checkout pin", async () => {
-    const repository = "/srv/zeros/workspace";
+    const repository = runtimeLayout.repository;
     await fs.mkdir(repository); git(repository, ["init", "-q"]);
     git(repository, ["config", "user.name", "Recovery"]); git(repository, ["config", "user.email", "recovery@example.test"]);
     git(repository, ["remote", "add", "origin", "https://github.com/example/recovery.git"]);
@@ -54,7 +56,7 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
     await expect(prepareRepositoryAndSettings({ ...material, recovery: { checkpointId: randomUUID() } }, profile, stringify)).resolves.toBe(head);
   });
 
-  it("restores the full working tree, index, unpublished HEAD, attachments, Design selection and histories through HTTP", async () => {
+  it("restores optimized packs through HTTP, including setup when its remote base is unavailable", async () => {
     const source = path.join(root, "source"); await fs.mkdir(source);
     const home = path.join(root, "source-home"); const data = path.join(root, "source-data");
     await fs.mkdir(home); await fs.mkdir(data);
@@ -62,6 +64,9 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
     await fs.writeFile(path.join(source, ".gitignore"), ".context/\n.zeros/\n.env\n");
     await fs.writeFile(path.join(source, "file.txt"), "base\n"); await fs.writeFile(path.join(source, "obsolete.txt"), "old\n");
     git(source, ["add", "."]); git(source, ["commit", "-qm", "base"]); const base = git(source, ["rev-parse", "HEAD"]);
+    const upstream = path.join(root, "upstream.git"); git(root, ["init", "-q", "--bare", upstream]);
+    git(source, ["remote", "add", "origin", "https://github.com/example/recovery.git"]);
+    git(source, ["-c", `url.file://${upstream}.insteadOf=https://github.com/example/recovery.git`, "push", "-q", "origin", "HEAD:refs/heads/main"]);
     await fs.unlink(path.join(source, "obsolete.txt")); await fs.writeFile(path.join(source, "new.txt"), "unpublished\n");
     git(source, ["add", "-A"]); git(source, ["commit", "-qm", "unpublished"]); const head = git(source, ["rev-parse", "HEAD"]);
     await fs.writeFile(path.join(source, "file.txt"), "staged\n"); git(source, ["add", "file.txt"]);
@@ -112,6 +117,7 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
       throw new Error("unexpected checkpoint request");
     } });
     await runtime.checkpoint({ id: randomUUID(), reason: "before_rebuild", deadlineAtMs: Date.now() + 30_000 }, authority);
+    expect(JSON.parse(blobs.get(committed!.manifestBlobId)!.toString()).native.version).toBe(2);
     expect(committed?.artifactBlobIds.length).toBeGreaterThan(0);
     const descriptor = (blobId: string) => ({ blobId, contentSha256: createHash("sha256").update(blobs.get(blobId)!).digest("hex"), sizeBytes: blobs.get(blobId)!.length });
     const recovery = { version: 1, audience: "zeros-cloud-workspace-recovery-v1", checkpointId, contentRevision: revision, recordRevision: 1,
@@ -168,5 +174,20 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
       expect(execFileSync("/usr/bin/setpriv", ["--reuid=10001", "--regid=10001", "--clear-groups", "/usr/bin/cat", file], { encoding: "utf8" })).toContain("history");
     }
     await expect(fs.stat("/srv/zeros/home/agent/.codex/auth.json")).rejects.toMatchObject({ code: "ENOENT" });
+    git(upstream, ["update-ref", "-d", "refs/heads/main"]);
+    git(upstream, ["reflog", "expire", "--expire=now", "--all"]); git(upstream, ["gc", "-q", "--prune=now"]);
+    for (const directory of [runtimeLayout.repository, runtimeLayout.seedBackup, "/srv/zeros/setup", "/srv/zeros/managed"]) {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+    const profile = { version: 1, setupDirectory: "/srv/zeros/setup", managedSettingsDirectory: "/srv/zeros/managed", engineUid: 0, engineGid: 0 };
+    const material = {
+      execution: { workspaceId: authority.workspaceId, organizationId: authority.organizationId, generation: 2, setupRunId: randomUUID(), executionFence: 2 },
+      repository: { cloneUrl: `${recovery.endpoint.replace("http:", "https:")}/unavailable.git`, revision: base, credential: { token: "test-only-git-token" } },
+      settings: { version: 1, snapshotSha256: "a".repeat(64), document: { values: {} }, setupCommands: [], setupEnvironment: [] },
+      recovery,
+    };
+    await expect(prepareRepositoryAndSettings(material, profile, async () => "")).resolves.toBe(head);
+    expect(git(runtimeLayout.repository, ["cat-file", "-t", base], true)).toBe("commit");
+    expect(await fs.readFile(path.join(runtimeLayout.repository, "file.txt"), "utf8")).toBe("unstaged\n");
   });
 });

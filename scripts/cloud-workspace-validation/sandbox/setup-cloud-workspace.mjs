@@ -1132,6 +1132,7 @@ async function restoreCloudWorkspaceCheckpointContents(material, repositoryDirec
   try {
     let native = null;
     let selection = null;
+    let checkpointSnapshot;
     if (manifest.version === 2) {
       const destination = path.join(payloadDirectory, "manifest");
       await downloadRecoveryBlob(material.recovery, manifest.manifest, destination, signal);
@@ -1143,7 +1144,7 @@ async function restoreCloudWorkspaceCheckpointContents(material, repositoryDirec
           document.audience !== "zeros-cloud-workspace-checkpoint-manifest-v2" ||
           document.gitBaseCommit !== manifest.gitBaseCommit || document.gitHeadRef !== manifest.gitHeadRef ||
           !Array.isArray(document.entries) || !Array.isArray(document.deletions)) throw failure("checkpoint_restore_invalid");
-        const { validateCloudNativeCheckpoint } = await import(CHECKPOINT_HELPER_URL.href);
+        const { validateCloudNativeCheckpoint, cloudCheckpointProjectionFingerprint, nativeCheckpointFingerprint } = await import(CHECKPOINT_HELPER_URL.href);
         native = validateCloudNativeCheckpoint(document.native);
         const approved = new Map(manifest.artifacts.map(blob => [blob.blobId, blob]));
         if (approved.size !== new Set(native.chunks.map(blob => blob.blobId)).size || native.chunks.some(blob => {
@@ -1158,6 +1159,8 @@ async function restoreCloudWorkspaceCheckpointContents(material, repositoryDirec
               entry.entryType !== expected.entryType || entry.mode !== expected.mode || entry.contentSha256 !== expected.contentSha256 || entry.sizeBytes !== expected.sizeBytes;
           })) throw failure("checkpoint_restore_invalid");
         selection = parseRecoveryDesignSelection(document.designSelection);
+        checkpointSnapshot = { contentRevision: manifest.contentRevision, scanFingerprint: cloudCheckpointProjectionFingerprint(document),
+          nativeFingerprint: nativeCheckpointFingerprint(native), designSelection: JSON.stringify(selection) };
       } else if (document?.version !== 1 || manifest.artifacts.length) throw failure("checkpoint_restore_invalid");
     }
     if (!native && manifest.gitBaseCommit !== null && manifest.gitBaseCommit !== (await repositoryIdentity(
@@ -1239,6 +1242,13 @@ async function restoreCloudWorkspaceCheckpointContents(material, repositoryDirec
       rmSync(target, { force: true });
       writeFileSync(target, text, { flag: "wx", mode: 0o600 });
       chownSync(target, WORKER_UID, WORKER_GID);
+    }
+    if (native && material.execution) {
+      const { saveCloudNativeCheckpointCache } = await import(CHECKPOINT_HELPER_URL.href);
+      await saveCloudNativeCheckpointCache({ roots: { repository: repositoryDirectory, data: runtimeLayout.data }, identity: privateIdentity,
+        deadlineAtMs, archive: native, snapshot: checkpointSnapshot,
+        scope: { workspaceId: material.execution.workspaceId, organizationId: material.execution.organizationId, checkpointId: material.recovery.checkpointId },
+      }).catch(() => undefined);
     }
     assertRecoveryActive(signal, deadlineAtMs);
     return true;
@@ -1784,17 +1794,19 @@ async function cloneRepository(material,profile) {
       ],
       material.repository.credential.token,
     );
-    if (fetched.code !== 0 || fetched.timedOut || fetched.overflow) {
-      throw failure("repository_temporarily_unavailable");
-    }
-    const checkedOut = await gitCommand(repositoryDirectory, homeDirectory, [
-      "checkout",
-      "--quiet",
-      "--detach",
-      "FETCH_HEAD",
-    ]);
-    if (checkedOut.code !== 0 || checkedOut.timedOut || checkedOut.overflow) {
-      throw failure("repository_revision_invalid");
+    const fetchedBase = fetched.code === 0 && !fetched.timedOut && !fetched.overflow;
+    if (!fetchedBase && !material.recovery) throw failure("repository_temporarily_unavailable");
+    if (fetchedBase) {
+      const checkedOut = await gitCommand(repositoryDirectory, homeDirectory, [
+        "checkout", "--quiet", "--detach", "FETCH_HEAD",
+      ]);
+      if (checkedOut.code !== 0 || checkedOut.timedOut || checkedOut.overflow) {
+        throw failure("repository_revision_invalid");
+      }
+      const fetchedCommit = await repositoryIdentity(repositoryDirectory, homeDirectory, material.repository.cloneUrl);
+      if (!fetchedCommit || (COMMIT_PATTERN.test(material.repository.revision) && fetchedCommit !== material.repository.revision)) {
+        throw failure("repository_revision_invalid");
+      }
     }
     const recovered = await restoreCloudWorkspaceCheckpoint(material, repositoryDirectory,{uid:profile.engineUid,gid:profile.engineGid});
     const commit = await repositoryIdentity(

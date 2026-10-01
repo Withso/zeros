@@ -272,7 +272,12 @@ referenced again. Collection of a live object then waits for the deployment's
 restore window (`CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS`, 48 hours by
 default to match the PlanetScale backup retention that bounds point-in-time
 restore), so a restore to any recoverable point still finds every object its
-rows reference. Erasure and deletions already in flight do not wait. Key
+rows reference. Beta and Production explicitly set
+`CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS=336` (14 days); the code default
+remains 48 hours and the configured maximum remains 720 hours. The deployment
+window must cover its approved PostgreSQL and object-backup restore horizon.
+This window begins at final dereference, independently of checkpoint age.
+Erasure and deletions already in flight do not wait. Key
 rotation still deletes each superseded ciphertext once the new one is
 authoritative: a restore to a point before a rotation finished cannot read the
 blobs rotated after it, so take the restore point after the rotation, or keep
@@ -553,6 +558,37 @@ corrupt, expired, or unavailable:
    revision and reconcile references/reservations before garbage collection.
 4. Do not publish bridge or workspace readiness until checkpoint/repository
    integrity, durable-record connectivity, and exact revision convergence pass.
+
+Native checkpoint archives exclude proven pushed history from their local pack
+but retain an immutable, shared base-pack copy of those objects. Restore verifies
+the fetched commit pin when the clone is available, then verifies every archived
+base/local pack and the exact recovered Git state. If the remote rewrites,
+deletes or collects that base, native recovery can use a fresh initialized
+repository and the archived objects instead. Working-tree-only recovery cannot
+take this fallback. A missing or corrupt native chunk never permits partial
+success. See [the native format](checkpoint-native-format.md) for the versioning,
+shallow/index/reflog contracts and conservative full-pack capture fallbacks.
+
+Checkpoint retention is tiered for active, stopped and archived workspaces:
+keep everything from the last hour, the newest durable checkpoint per UTC hour
+for 24 hours, and the newest durable checkpoint per UTC day for 14 days. The
+existing `checkpoint_days` field can shorten the daily tier; its schema/default
+is unchanged. Always retain the current checkpoint, every generation's
+`recovery_checkpoint_id`, exports, workspace/checkpoint legal holds and unexpired
+`retention_until`. Requests still needed by live lifecycle/fork intents also
+protect their checkpoint. Completed delivery requests otherwise expire after
+24 hours. Protected points may outlive every tier. Deleted workspaces retain
+the explicit provider-erasure, tombstone and permanent-fence lifecycle, rather
+than treating pruning as confirmed deletion.
+
+Pruning removes all checkpoint manifest, projected-file and native-chunk
+references, including `<checkpoint UUID>:v2`. Existing reference accounting
+releases a workspace's logical reservation only after its final reference;
+Organization physical bytes remain charged until object deletion and permanent
+fencing succeed after the deployment's restore window. Shared immutable Git
+bases remain referenced by each retained checkpoint, not by a fragile chain of
+older checkpoints. Periodic unchanged-state checks create no checkpoint or
+upload; manual and lifecycle operations still capture their final state.
 
 Local and cloud workspaces are not bidirectionally merged. “Create cloud from
 local” and “create local from cloud” produce new identities through the fork
