@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { main as imageKit, TEMPLATES, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
 import { imageContractSha256 } from "../cloud-workspace-validation/config";
-import { devBoatClient, confirmBoatDeletion } from "../dev-environment/hosted-image.mjs";
+import { devBoatClient } from "../dev-environment/hosted-image.mjs";
 import { dispatchDevCreate, acknowledgeDevCreate, DevProviderError } from "../dev-environment/provider-http.mjs";
 import { manageCloudAgentRuntime, nativeCapabilitiesFromChecks } from "../../apps/control-plane/src/manage-cloud-agent-runtime";
 import { planetScaleClient, roleConnectionString } from "../../apps/control-plane/src/manage-release-migration";
@@ -12,6 +12,7 @@ import { createMigrationPool } from "../../apps/control-plane/src/db";
 import { DIGEST, SHA, PromotionError, requireCheck, type PromotionConfig } from "./contracts";
 import { poll } from "./io";
 import type { WorkerCandidate, WorkerDependencies } from "./worker";
+import { WorkerBuilderCreationBodySchema, releaseBuilderCreationScope, retireReleaseBuilder } from "./worker-builder-retirement";
 
 /** Image-kit sequence also used by hosted-image.mjs, with committed source and
  * channel names, without creating Dev identities or changing build metadata. */
@@ -63,7 +64,7 @@ export async function buildBoatImage(input: { sourceSha: string; directory: stri
 }
 export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.ProcessEnv, directory: string, context: {
   lease: any; record: any; profile: any; maxUsedHours: number; snapshotName: string; reserve(): Promise<unknown>; release(): Promise<unknown>;
-  request?: any; kit?: typeof imageKit;
+  request?: any; kit?: typeof imageKit; readAdmission?: () => Promise<any>;
 }) {
   requireCheck(env.BOAT_API_KEY && env.BOAT_BILLING_ORG && env.BOAT_BASE_SNAPSHOT && /^[a-z0-9][a-z0-9-]{0,62}$/.test(env.BOAT_BASE_SNAPSHOT), "Boat image authority/configuration missing");
   const budget = Number(env.BOAT_BUILDER_BUDGET_HOURS);
@@ -110,7 +111,17 @@ export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.Proc
     await persist(); await lease.fence();
     const previous = Boolean(record.builderIntent);
     const key = method === "POST" && route === "/sandboxes" ? "builderCreate" : method === "POST" && route === "/named-snapshots" ? "snapshotCreate" : null;
-    if (key === "builderCreate") { record.builderIntent ??= { body: options.body, key: options.headers?.["idempotency-key"], at: Date.now() }; await lease.save(); }
+    if (key === "builderCreate") {
+      if (!record.builderIntent) {
+        const body = WorkerBuilderCreationBodySchema.safeParse(options.body);
+        requireCheck(context.profile.boat?.accountScope === env.BOAT_ACCOUNT_SCOPE && context.profile.boat.billingOrg === env.BOAT_BILLING_ORG &&
+          context.profile.boat.baseSnapshot === env.BOAT_BASE_SNAPSHOT && body.success && body.data.from === env.BOAT_BASE_SNAPSHOT,
+          "Worker builder original account/base/environment intent is invalid");
+        const scope = await releaseBuilderCreationScope(config, { lease, record, profile: context.profile, request, readAdmission: context.readAdmission });
+        record.builderIntent = { body: options.body, key: options.headers?.["idempotency-key"], at: Date.now(), scope };
+      }
+      await lease.save();
+    }
     if (key === "snapshotCreate") { record.snapshotRequested = true; await lease.save(); }
     const dispatch = async () => {
       const response = await request(method, route, options);
@@ -118,6 +129,12 @@ export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.Proc
       if (key === "builderCreate") {
         requireCheck(/^bx_[a-z0-9]+$/.test(response.body?.sandbox?.id ?? ""), "Worker builder allocation is unconfirmed");
         record.builder = { id: response.body.sandbox.id }; await lease.save();
+      }
+      const sandbox = response.body?.sandbox;
+      if (response.status >= 200 && response.status < 300 && sandbox && record.builder && sandbox.id === record.builder.id &&
+          sandbox.team?.id === env.BOAT_BILLING_ORG && record.builderIntent?.scope && !record.builder.billingOrgConfirmed) {
+        record.builder.billingOrgConfirmed = true; record.builder.billingObservedAt = new Date().toISOString();
+        record.builder.accountBinding = record.builderIntent.scope.accountBinding; await lease.save();
       }
       return response;
     };
@@ -171,12 +188,8 @@ export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.Proc
           record.builder = { id: response.body.sandbox.id }; await lease.save();
         }, { key: "builderCreate", idempotentReplay: true });
       }
-      if (record.builder) {
-        requireCheck(!record.builder.deleteRequested || record.builder.deletionOperationId, "Worker builder deletion response was lost; reconcile its terminal operation before retrying");
-        await confirmBoatDeletion(lease, record.builder, request, { allowDeferredStorage: false });
-      }
-      if (record.candidate && record.builder?.deleted === true && record.kitFiles) { delete record.kitFiles; await lease.save(); }
-      await context.release(); return !record.builder || record.builder.deleted === true;
+      const result = record.builder ? await retireReleaseBuilder(config, { lease, record, profile: context.profile, request, readAdmission: context.readAdmission }) : null;
+      await context.release(); return result;
     },
   };
 }

@@ -28,12 +28,18 @@ describe("worker kit recovery", () => {
     const candidate = { snapshotId: "test-new", sourceCommit: sourceSha, buildSha256, architecture: "linux/amd64" as const, storageMiB: 4096 };
     const record: any = { sourceCommit: sourceSha, snapshotId: candidate.snapshotId, candidate, qualified: true,
       builder: { id: "bx_test", deleted: true, deletionOperationId: `bdop_${"c".repeat(32)}` }, kitFiles: { "builder.json": "{}" } };
-    const request = vi.fn(async (_method: string, route: string) => route.startsWith("/limits") ? { status: 200, body: { creditUsedSeconds: 0 } } :
-      { status: 200, body: { snapshot: { name: candidate.snapshotId, sourceSandboxId: record.builder.id, status: "ready" } } });
+    const request = vi.fn(async (_method: string, route: string) => {
+      if (route.startsWith("/limits")) return { status: 200, body: { creditUsedSeconds: 0 } };
+      if (route.startsWith("/deletion-operations/")) return { status: 200, body: { operation: { id: record.builder.deletionOperationId,
+        kind: "sandbox", targetId: record.builder.id, status: "completed", completedAt: new Date(Date.now() - 1000).toISOString() } } };
+      if (route === `/sandboxes/${record.builder.id}`) return { status: 404 };
+      return { status: 200, body: { snapshot: { name: candidate.snapshotId, sourceSandboxId: record.builder.id, status: "ready" } } };
+    });
     const retained = lease(), reserve = vi.fn(), release = vi.fn(), call = vi.fn();
     const context = { lease: retained, record, profile: {}, maxUsedHours: 1, snapshotName: candidate.snapshotId, request, reserve, release, kit: call };
     const first = await boatImageAdapter(config, environment, path.join(directory, "first"), context);
-    expect(await first.cleanup()).toBe(true); expect(record.kitFiles).toBeUndefined();
+    expect(await first.cleanup()).toMatchObject({ kind: "physically-deleted", sandboxId: record.builder.id, deletionOperationId: record.builder.deletionOperationId });
+    expect(record.kitFiles).toBeUndefined();
     const resumed = await boatImageAdapter(config, environment, path.join(directory, "resumed"), context);
     expect(await resumed.build()).toEqual(candidate);
     expect(call).not.toHaveBeenCalled(); expect(reserve).not.toHaveBeenCalled();
