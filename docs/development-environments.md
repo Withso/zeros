@@ -579,6 +579,12 @@ The ten-name ceiling cannot be raised without qualifying another capacity model.
 Unknown creates retain reservations; elapsed time alone never releases them.
 Caps stop new allocation and do not prevent shutdown or cleanup.
 
+Before a changed worker build, the launcher retires its older rollback image
+and retains the currently deployed image as the fallback. The replacement then
+fits within the two Dev snapshot slots reserved alongside channel release and
+rollback images. Failed or unconfirmed deletion keeps its slot reserved and
+prevents the new allocation; a failed build leaves the deployed image available.
+
 Qualification canaries share the builder compute cap but do not reserve a named
 snapshot. Compute reservations have a stable `computeId`; only snapshot builders
 also carry `snapshotName`. Admission enrolls legacy resources for every owner,

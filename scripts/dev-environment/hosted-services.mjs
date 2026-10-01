@@ -175,8 +175,9 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
             reserve: () => { throw new Error("A replaced image's checks cannot allocate"); },
             release: () => releaseHostedAdmission(registry, lease, profile),
           }));
-        // The deployed image and the newest other one stay for rollback.
-        await retireSupersededDevImages(lease, profile, { keepInputs: [lease.state.source?.workerInputsSha256].filter(Boolean) });
+        // The deployed image is the fallback for this build. Release its older
+        // rollback image so the replacement fits the two reserved Dev slots.
+        await retireSupersededDevImages(lease, profile, { keepInputs: [lease.state.source?.workerInputsSha256].filter(Boolean), keepRollback: false });
         const inventory = await inventoryHostedProviders(profile);
         // An earlier interrupted attempt can leave a never-started builder
         // reservation; release it before competing for the owner's slot.

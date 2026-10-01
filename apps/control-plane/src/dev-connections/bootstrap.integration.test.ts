@@ -66,5 +66,7 @@ suite("persistent database bootstrap and offline snapshot recovery",()=>{
         for(const role of rolesToDrop)await admin.query(`DROP ROLE IF EXISTS "${role}"`);
       }finally{await admin.end();}
     }
-  });
+  // This creates and clones real databases; shared CI disk latency can exceed
+  // the default unit-test deadline even when every bootstrap assertion passes.
+  },30_000);
 });
