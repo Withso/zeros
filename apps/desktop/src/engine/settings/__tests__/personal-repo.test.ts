@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -12,6 +13,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { opSettingsRead, opSettingsResolve, opSettingsWrite } from "../ops";
+import { personalRepoRoot } from "../personal-repo";
 import { resolveSettings } from "../resolve";
 
 describe("personal repository settings", () => {
@@ -240,5 +242,121 @@ describe("personal repository settings", () => {
     );
     opSettingsWrite("repo-local", { prompts: { general: null } }, repo);
     expect(opSettingsResolve(repo).effective.prompts).toBeUndefined();
+  });
+
+  describe("when the shared Git directory is not named .git", () => {
+    // personalRepoRoot then asks `git worktree list` for the owning checkout.
+    // That read opens every registered worktree's admin entry, so it can die
+    // on one that a concurrent `git worktree add` is still writing.
+    const linkedWorktree = (): string => {
+      const store = path.join(root, "store.git");
+      const checkout = path.join(root, "separate");
+      const linked = path.join(root, "linked");
+      execFileSync("git", ["init", "-q", "--separate-git-dir", store, checkout], {
+        stdio: "pipe",
+      });
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.com",
+          "commit",
+          "--allow-empty",
+          "-qm",
+          "initial",
+        ],
+        { cwd: checkout, stdio: "pipe" },
+      );
+      execFileSync("git", ["worktree", "add", "-qb", "linked", linked], {
+        cwd: checkout,
+        stdio: "pipe",
+      });
+      return linked;
+    };
+
+    /** Run `read` while a `git` on PATH fails the next `count` worktree
+     *  listings with `stderr`; returns how many failures it injected. */
+    const withFailingWorktreeListings = (
+      count: number,
+      stderr: string,
+      read: () => void,
+    ): number => {
+      const bin = path.join(root, "bin");
+      const budget = path.join(root, "listing-failures");
+      const log = path.join(root, "listing-failure-log");
+      const message = path.join(root, "listing-failure-stderr");
+      const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+      mkdirSync(bin, { recursive: true });
+      rmSync(log, { force: true });
+      writeFileSync(budget, String(count));
+      writeFileSync(message, `${stderr}\n`);
+      writeFileSync(
+        path.join(bin, "git"),
+        `#!/bin/sh
+if (
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -c|-C) shift 2 ;;
+      -*) shift ;;
+      *) break ;;
+    esac
+  done
+  [ "$1" = "worktree" ] && [ "$2" = "list" ]
+); then
+  BUDGET=$(cat ${JSON.stringify(budget)} 2>/dev/null || echo 0)
+  if [ "$BUDGET" -gt 0 ] 2>/dev/null; then
+    echo $((BUDGET - 1)) > ${JSON.stringify(budget)}
+    echo injected >> ${JSON.stringify(log)}
+    cat ${JSON.stringify(message)} >&2
+    exit 128
+  fi
+fi
+exec ${JSON.stringify(realGit)} "$@"
+`,
+      );
+      chmodSync(path.join(bin, "git"), 0o755);
+      const originalPath = process.env.PATH;
+      process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`;
+      try {
+        read();
+      } finally {
+        process.env.PATH = originalPath;
+        rmSync(budget, { force: true });
+      }
+      return existsSync(log)
+        ? readFileSync(log, "utf8").split("\n").filter(Boolean).length
+        : 0;
+    };
+
+    const halfWrittenEntry =
+      "fatal: failed to read .git/worktrees/other/commondir: Undefined error: 0";
+
+    it("retries a registry read that met another worktree's half-written entry", () => {
+      const linked = linkedWorktree();
+      const owner = personalRepoRoot(linked);
+      expect(owner).not.toBe(path.resolve(linked));
+
+      expect(
+        withFailingWorktreeListings(2, halfWrittenEntry, () =>
+          expect(personalRepoRoot(linked)).toBe(owner),
+        ),
+      ).toBe(2);
+    });
+
+    it("bounds that retry and never repeats an unrelated failure", () => {
+      const linked = linkedWorktree();
+      expect(
+        withFailingWorktreeListings(3, halfWrittenEntry, () =>
+          expect(personalRepoRoot(linked)).toBe(path.resolve(linked)),
+        ),
+      ).toBe(3);
+      expect(
+        withFailingWorktreeListings(2, "fatal: not a git repository", () =>
+          expect(personalRepoRoot(linked)).toBe(path.resolve(linked)),
+        ),
+      ).toBe(1);
+    });
   });
 });

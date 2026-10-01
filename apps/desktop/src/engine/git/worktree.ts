@@ -30,6 +30,10 @@ import {
   runGit as runGitCommand,
   type RunGitOptions,
 } from "./git-exec";
+import {
+  runWorktreeRegistryMutation,
+  withWorktreeRegistryLock,
+} from "./worktree-registry";
 import { isConflictEntry, parsePorcelainZ } from "./porcelain";
 import {
   allocatedNameSuffix,
@@ -337,7 +341,9 @@ async function runGit(
 ): Promise<{ stdout: string; stderr: string }> {
   // The shared runner provides the empty-cwd guard, bounded output, structured
   // errors, and bounded retries for transient Git lock contention. Lifecycle
-  // operations on different workspaces can legitimately overlap in one repo.
+  // operations on different workspaces can legitimately overlap in one repo;
+  // their `git worktree` registry mutations go through
+  // runWorktreeRegistryMutation instead, which admits one per repository.
   return runGitCommand(cwd, args, opts);
 }
 
@@ -1722,7 +1728,12 @@ async function createWorkspaceInner(
     });
     branchCreated = true;
     updateWorkspaceLifecyclePhase(workspaceId, "branch-created");
-    await runGit(input.repoRoot, ["worktree", "add", workspacePath, branch]);
+    await runWorktreeRegistryMutation(input.repoRoot, [
+      "worktree",
+      "add",
+      workspacePath,
+      branch,
+    ]);
     updateWorkspaceLifecyclePhase(workspaceId, "worktree-created");
   } catch (err) {
     const rolledBack = await safeRollback(
@@ -2232,7 +2243,12 @@ async function safeRollback(
       }
     }
     try {
-      await runGit(repoRoot, ["worktree", "remove", "--force", worktreePath]);
+      await runWorktreeRegistryMutation(repoRoot, [
+        "worktree",
+        "remove",
+        "--force",
+        worktreePath,
+      ]);
     } catch {
       // A checkout folder can disappear after Git registered it. Verify only
       // this operation's exact registration below; never repository-wide prune
@@ -3315,7 +3331,9 @@ async function listWorktreePaths(repoRoot: string): Promise<string[]> {
  *
  *  Retrying is unconditionally safe: the command is read-only, so a failed
  *  attempt mutated nothing. The backoff is short because the admin directory is
- *  written in one burst — the window closes in milliseconds. */
+ *  written in one burst — the window closes in milliseconds. Registry
+ *  mutations are serialized per repository (worktree-registry.ts); reads stay
+ *  outside that lock so they never wait behind another workspace's checkout. */
 const WORKTREE_LIST_RETRY_BACKOFF_MS = [15, 50, 150];
 
 async function readWorktreeListPorcelain(repoRoot: string): Promise<string> {
@@ -3399,9 +3417,11 @@ async function removeMissingWorkspaceRegistration(
   try {
     // One --force removes an unlocked missing worktree registration. A locked
     // entry deliberately remains protected rather than escalating to -ff.
-    await runGit(ws.repoRoot, ["worktree", "remove", "--force", ws.path], {
-      timeoutMs: WORKTREE_REMOVE_TIMEOUT_MS,
-    });
+    await runWorktreeRegistryMutation(
+      ws.repoRoot,
+      ["worktree", "remove", "--force", ws.path],
+      { timeoutMs: WORKTREE_REMOVE_TIMEOUT_MS },
+    );
   } catch (cause) {
     const afterFailure = await listWorktreeRegistrations(ws.repoRoot, {
       strict: true,
@@ -3496,11 +3516,7 @@ async function branchCheckedOutElsewhere(
   branch: string,
 ): Promise<boolean> {
   try {
-    const { stdout } = await runGit(repoRoot, [
-      "worktree",
-      "list",
-      "--porcelain",
-    ]);
+    const stdout = await readWorktreeListPorcelain(repoRoot);
     const want = `branch refs/heads/${branch}`;
     return stdout.split("\n").some((l) => l.trim() === want);
   } catch {
@@ -3770,7 +3786,11 @@ export async function locateWorkspaceFolder(
         )
       )
         throw reject();
-      await runGit(ws.repoRoot, ["worktree", "repair", targetPath]);
+      await runWorktreeRegistryMutation(ws.repoRoot, [
+        "worktree",
+        "repair",
+        targetPath,
+      ]);
       if (!(await managedCheckoutIdentityMatches(target))) throw reject();
       const restoredAt = Date.now();
       finishWorkspaceLifecycle(
@@ -3916,27 +3936,29 @@ export function recoverMissingWorkspace(
           await runGit(ws.repoRoot, ["read-tree", head], {
             env: { GIT_INDEX_FILE: path.join(prepared, "index") },
           });
-          await mkdir(registrationRoot, { recursive: true });
-          let pointerUnchanged = false;
-          try {
-            pointerUnchanged = readWorktreeGitMetadata(dotGit) === pointer![0];
-          } catch {
-            // A replaced, removed, or unreadable pointer cannot authorize repair.
-          }
-          if (
-            !(await lstat(registrationRoot)).isDirectory() ||
-            existsSync(gitdir) ||
-            !pointerUnchanged
-          )
-            throw new GitError({
-              code: "VALIDATION_FAILED",
-              message:
-                "The folder changed during recovery. Its files were preserved; retry recovery.",
-            });
-          await rename(
-            prepared,
-            path.join(registrationRoot, path.basename(gitdir)),
-          );
+          await withWorktreeRegistryLock(ws.repoRoot, async () => {
+            await mkdir(registrationRoot, { recursive: true });
+            let pointerUnchanged = false;
+            try {
+              pointerUnchanged = readWorktreeGitMetadata(dotGit) === pointer![0];
+            } catch {
+              // A replaced, removed, or unreadable pointer cannot authorize repair.
+            }
+            if (
+              !(await lstat(registrationRoot)).isDirectory() ||
+              existsSync(gitdir) ||
+              !pointerUnchanged
+            )
+              throw new GitError({
+                code: "VALIDATION_FAILED",
+                message:
+                  "The folder changed during recovery. Its files were preserved; retry recovery.",
+              });
+            await rename(
+              prepared,
+              path.join(registrationRoot, path.basename(gitdir)),
+            );
+          });
         } finally {
           await rm(prepared, { recursive: true, force: true });
         }
@@ -4268,7 +4290,12 @@ async function restoreWorkspaceInner(
         updateWorkspaceLifecyclePhase(workspaceId, "branch-created");
         targetBranchExists = true;
       }
-      await runGit(ws.repoRoot, ["worktree", "add", targetPath, targetBranch]);
+      await runWorktreeRegistryMutation(ws.repoRoot, [
+        "worktree",
+        "add",
+        targetPath,
+        targetBranch,
+      ]);
     }
     updateWorkspaceLifecycleDetails(workspaceId, {
       phase: "worktree-created",
@@ -4796,7 +4823,12 @@ export async function migrateWorktreesToNewRoot(
         continue;
       }
       await mkdir(path.dirname(newPath), { recursive: true });
-      await runGit(ws.repoRoot, ["worktree", "move", ws.path, newPath]);
+      await runWorktreeRegistryMutation(ws.repoRoot, [
+        "worktree",
+        "move",
+        ws.path,
+        newPath,
+      ]);
       publishRelocation();
       moved++;
     } catch (err) {

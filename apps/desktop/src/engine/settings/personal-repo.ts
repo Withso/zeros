@@ -16,6 +16,7 @@ import {
 import path from "node:path";
 import os from "node:os";
 import { gitProcessOptions } from "../git/git-execution-identity";
+import { isTransientWorktreeRegistryRead } from "../git/worktree-registry";
 import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import {
   readBoundedUtf8DescriptorSync,
@@ -50,6 +51,26 @@ function git(root: string, args: string[]): string {
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 5_000,
   }).trim();
+}
+
+/** `git worktree list` opens every registered worktree's admin entry, so it can
+ * die on one a concurrent `git worktree add` is still writing. That read is
+ * safe to repeat at once (starting Git again outlasts the window); any other
+ * failure, or a third one, reaches the caller unchanged. */
+function listWorktreesPorcelain(root: string): string {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return git(root, ["worktree", "list", "--porcelain", "-z"]);
+    } catch (error) {
+      const stderr = (error as { stderr?: unknown }).stderr;
+      if (
+        attempt >= 2 ||
+        !isTransientWorktreeRegistryRead(typeof stderr === "string" ? stderr : "")
+      ) {
+        throw error;
+      }
+    }
+  }
 }
 
 /** Git owns the checkout identity, including linked worktrees and submodules.
@@ -92,12 +113,7 @@ export function personalRepoRoot(root: string): string {
           readFileSync(commonFile, "utf8").trim(),
         );
         if (path.basename(common) === ".git") return path.dirname(common);
-        const first = git(candidate, [
-          "worktree",
-          "list",
-          "--porcelain",
-          "-z",
-        ]).split("\0")[0];
+        const first = listWorktreesPorcelain(candidate).split("\0")[0];
         if (first?.startsWith("worktree ")) return first.slice(9);
       }
     } catch {
