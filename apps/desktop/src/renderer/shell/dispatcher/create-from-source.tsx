@@ -279,7 +279,13 @@ export function CreateFromSource({
             disabled={!project || disabled}
             data-create-source-trigger=""
             onPointerEnter={warm}
-            onFocus={warm}
+            onPointerMove={(event) => {
+              if (open) event.preventDefault();
+            }}
+            onFocus={(event) => {
+              warm();
+              if (open) event.preventDefault();
+            }}
             aria-label={
               selected
                 ? `Create from ${sourceName}: ${selected.label}`
@@ -301,11 +307,16 @@ export function CreateFromSource({
         sideOffset={6}
         className="flex w-[480px] flex-col overflow-hidden p-0"
         aria-label="Create from source"
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !event.defaultPrevented) {
+            event.preventDefault();
+            setOpen(false);
+          }
+        }}
       >
         <div className="border-border1 flex shrink-0 items-center gap-2 border-b px-3 py-2">
           <Search className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
           <input
-            autoFocus
             type="search"
             aria-label="Search sources"
             value={query}

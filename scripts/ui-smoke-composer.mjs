@@ -80,6 +80,10 @@ import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 import { runWorkspaceArchivesSmoke } from "./ui-smoke-workspace-archives.mjs";
 import { runComposerEditorSmoke } from "./ui-smoke-composer-editor.mjs";
 import { runCreateComposerSmoke } from "./ui-smoke-create-composer.mjs";
+import {
+  runCreateSourceImmediateEscapeSmoke,
+  runCreateSourceTooltipEscapeSmoke,
+} from "./ui-smoke-create-source-focus.mjs";
 import { runCloudWorkspaceSmoke } from "./ui-smoke-cloud-workspace.mjs";
 import { runCloudTerminalSmoke } from "./ui-smoke-cloud-terminal.mjs";
 import { runCloudSettingsSmoke } from "./ui-smoke-cloud-settings.mjs";
@@ -180,6 +184,14 @@ try {
   const createPage = await newPage({ viewport: { width: 1100, height: 780 } });
   await runCreateComposerSmoke({ page: createPage, check, harnessBase });
   await createPage.close();
+  for (const runSourceFocusSmoke of [
+    runCreateSourceImmediateEscapeSmoke,
+    runCreateSourceTooltipEscapeSmoke,
+  ]) {
+    const sourceFocusPage = await newPage({ viewport: { width: 1100, height: 780 } });
+    await runSourceFocusSmoke({ page: sourceFocusPage, check, harnessBase });
+    await sourceFocusPage.close();
+  }
   const cloudPage = await newPage({ viewport: { width: 900, height: 650 } });
   await runCloudWorkspaceSmoke({ page: cloudPage, check, harnessBase });
   await cloudPage.close();
