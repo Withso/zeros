@@ -501,7 +501,10 @@ export class DatabaseManagedComputeCreditLedger {
         const added =
           a.authorizationMicroUsd - integer(prior?.authorized_micro_usd ?? 0);
         if(scope.entitlement_plan==='pro') {
-          await allocateComputeUserFunding(tx,{periodId:a.periodId,userId:scope.user_id,requiredAvailableMicroUsd:added});
+          await allocateComputeUserFunding(tx,{periodId:a.periodId,userId:scope.user_id,requiredAvailableMicroUsd:added,
+            ...(input.allocationLeaseClaim?{staffDemand:{reservationId:input.reservationId,owner:input.allocationLeaseClaim.owner,
+              policyId:input.policyId,secondsPerDollar:input.secondsPerDollar,meterSince:a.meterSince,coveredUntil:a.coveredUntil,
+              authorizationMicroUsd:a.authorizationMicroUsd}}:{})});
           period=(await tx.query<Period>("SELECT *,clock_timestamp() AS evaluated_at FROM managed_compute_credit_periods WHERE id=$1",[a.periodId])).rows[0]!;
         } else if(period.funding_mode==='pro_user') deny("compute_credit_scope_rejected");
         const available =

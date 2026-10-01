@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withSystemTx } from "../db.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
-import {lockComputeUserFunding,prepareComputeUserPeriods} from "./compute-funding.js";
+import {computeUserFundingAuthorityLive,lockComputeUserFunding,prepareComputeUserPeriods,readStaffComputeAllowance} from "./compute-funding.js";
 import {ensureProMonthlyAllowance} from "./pro-allowance.js";
 import {
   planManagedComputeCredit,
@@ -62,6 +62,7 @@ type Scope = {
   user_id: string;
   billing_epoch: string;
   requires_credit: boolean;
+  entitlement_plan: string;
   live: boolean;
   desired_state: string;
   generation: number;
@@ -149,7 +150,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       const row = (
         await tx.query<Scope>(
           `SELECT workspace.owner_user_id AS user_id,workspace.current_billing_epoch AS billing_epoch,
-        workspace.desired_state,workspace.current_generation AS generation,
+        workspace.desired_state,workspace.current_generation AS generation,billing.entitlement_plan,
         version.credential_source='hosted' AND coalesce(requirement.require_credit,true) AS requires_credit,
         cloud_workspace_paid_authority_live(workspace.id,workspace.owner_user_id,$4)
           AND workspace.status<>'failed'
@@ -160,6 +161,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           )) AS live
         FROM cloud_workspaces workspace JOIN cloud_workspace_generations generation
           ON generation.workspace_id=workspace.id AND generation.org_id=workspace.org_id AND generation.generation=$3
+        JOIN workspace_billing_epochs billing ON billing.workspace_id=workspace.id AND billing.org_id=workspace.org_id AND billing.billing_epoch=workspace.current_billing_epoch
         JOIN provider_connection_versions version ON version.connection_id=generation.provider_connection_id
           AND version.org_id=generation.org_id AND version.version=generation.provider_connection_version
         LEFT JOIN managed_compute_provider_requirements requirement ON requirement.provider=generation.provider
@@ -173,6 +175,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         )
       ).rows[0];
       if (!row) throw failure("compute_scope_unavailable");
+      if(row.live&&row.requires_credit&&row.entitlement_plan==='pro')row.live=await computeUserFundingAuthorityLive(tx,row.user_id);
       return row;
     });
   }
@@ -283,27 +286,31 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       const billing=(await tx.query<{entitlement_plan:string}>(`SELECT entitlement_plan FROM workspace_billing_epochs
         WHERE workspace_id=$1 AND org_id=$2 AND billing_epoch=$3 AND billing_owner_user_id=$4`,
         [lease.workspace_id,lease.org_id,lease.billing_epoch,lease.user_id])).rows[0];
+      let staffAllowance=false;
       if(billing?.entitlement_plan==='pro') {
         await lockComputeUserFunding(tx,lease.user_id);
         const allowance=await ensureProMonthlyAllowance(tx,lease.user_id,policy);
         if(allowance.state!=="ready")throw failure(`compute_allowance_${allowance.state}`);
+        staffAllowance=Boolean(await readStaffComputeAllowance(tx,lease.user_id));
         await prepareComputeUserPeriods(tx,{userId:lease.user_id,organizationId:lease.org_id});
       }
       const now = (await tx.query<{now:Date}>("SELECT clock_timestamp() AS now")).rows[0]!.now.getTime();
       const rows = (
         await tx.query(
           `SELECT period.*,reservation.meter_since,reservation.meter_through,reservation.billable_seconds,
+        EXISTS(SELECT 1 FROM managed_compute_pro_allowances WHERE period_id=period.funding_period_id) AS monthly_allowance,
         reservation.actual_micro_usd,reservation.debited_micro_usd AS reservation_debited,reservation.authorized_micro_usd,reservation.covered_until,
         CASE WHEN period.funding_mode='pro_user' THEN
-          (SELECT root.granted_micro_usd-coalesce((SELECT sum(child.debited_micro_usd+child.reserved_micro_usd)
+          (SELECT greatest((CASE WHEN NOT $4::boolean AND base.id IS NOT NULL THEN base.amount_micro_usd ELSE root.granted_micro_usd END)-coalesce((SELECT sum(child.debited_micro_usd+child.reserved_micro_usd)
             FROM managed_compute_credit_periods child WHERE child.funding_period_id=root.id),0)
-           FROM managed_compute_user_periods root WHERE root.id=period.funding_period_id)
+           ,0) FROM managed_compute_user_periods root LEFT JOIN managed_compute_pro_allowances allowance ON allowance.period_id=root.id
+             LEFT JOIN managed_compute_funding_receipts base ON base.id=allowance.receipt_id WHERE root.id=period.funding_period_id)
           ELSE period.granted_micro_usd-period.debited_micro_usd-period.reserved_micro_usd-period.returned_micro_usd END AS available
         FROM managed_compute_credit_periods period LEFT JOIN managed_compute_credit_reservations reservation
           ON reservation.period_id=period.id AND reservation.id=$3 AND reservation.state='open'
         WHERE period.org_id=$1 AND period.user_id=$2 AND period.ends_at>clock_timestamp()
           AND period.starts_at<clock_timestamp()+interval '2 hours' ORDER BY period.starts_at,period.id LIMIT 17`,
-          [lease.org_id, lease.user_id, lease.id],
+          [lease.org_id, lease.user_id, lease.id,staffAllowance],
         )
       ).rows;
       const periods: ComputeCreditPlanningPeriod[] = rows.map((r) => ({
@@ -311,6 +318,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         startsAtMs: r.starts_at.getTime(),
         endsAtMs: r.ends_at.getTime(),
         availableMicroUsd: money(r.available),
+        staffAllowance: staffAllowance&&r.monthly_allowance,
         ...(r.meter_since
           ? {
               reservation: {
