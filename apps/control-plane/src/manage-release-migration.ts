@@ -182,7 +182,9 @@ export async function releaseMigration(
     name: roleName,
     inherited_roles: ["postgres"],
     ttl: ROLE_TTL_SECONDS,
-  });
+  }).catch(() => null);
+  // A lost response may still have allocated a login: cleanup is unconfirmed.
+  if (!created) throw withPartial(new ReleaseMigrationError("Migration role request failed; allocation is unknown"), backup, [], false);
   const body = record(created.body);
   const role: Role | null =
     created.status < 300 && text(body.id) && text(body.username) && text(body.password) && text(body.access_host_url)
@@ -198,8 +200,11 @@ export async function releaseMigration(
   if (!role) {
     // A successful but incomplete response can still have allocated a role.
     // Delete only the acknowledged ID; never guess another login's identity.
-    if (created.status >= 200 && created.status < 300 && text(body.id)) {
-      const removed = await deps.planetScale("DELETE", `${branchPath}/roles/${encodeURIComponent(body.id as string)}`).catch(() => ({ status: 0 }));
+    if (created.status >= 200 && created.status < 300) {
+      // Without an acknowledged ID there is nothing safe to delete.
+      const removed = text(body.id)
+        ? await deps.planetScale("DELETE", `${branchPath}/roles/${encodeURIComponent(body.id as string)}`).catch(() => ({ status: 0 }))
+        : { status: 0 };
       if (removed.status < 200 || removed.status >= 300) {
         throw withPartial(new ReleaseMigrationError("Incomplete migration role response; cleanup is unconfirmed"), backup, [], false);
       }
