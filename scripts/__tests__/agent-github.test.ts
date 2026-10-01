@@ -142,18 +142,14 @@ describe("agent installation session", () => {
 });
 
 describe("agent git and gh invocations", () => {
-  it("commits as the bot account and keeps the token out of the arguments", () => {
+  it("keeps the person's commit identity and only lends the bot token to the remote", () => {
     const invocation = gitInvocation(["push", "origin", "HEAD"], SESSION, { CONDUCTOR_REAL_GIT_PATH: "/usr/bin/git" });
     expect(agentIdentity("zeros-agent", 336198133)).toEqual({
       name: "zeros-agent[bot]",
       email: "336198133+zeros-agent[bot]@users.noreply.github.com",
     });
     expect(invocation.command).toBe("/usr/bin/git");
-    expect(invocation.env).toMatchObject({
-      GIT_AUTHOR_NAME: "zeros-agent[bot]",
-      GIT_COMMITTER_EMAIL: "336198133+zeros-agent[bot]@users.noreply.github.com",
-      [TOKEN_ENV]: TOKEN,
-    });
+    expect(invocation.env).toEqual({ [TOKEN_ENV]: TOKEN });
     expect(invocation.args.slice(-3)).toEqual(["push", "origin", "HEAD"]);
     expect(invocation.args.join(" ")).not.toContain(TOKEN);
   });

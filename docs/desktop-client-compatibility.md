@@ -42,7 +42,10 @@ is supported until 30 days after the **next newer** entry's publication, not
 30 days after V's publication or the latest release's publication. Exactly at
 that deadline it becomes unsupported. Versions before the oldest retained
 entry are unsupported; unreleased versions newer than the newest entry are
-allowed. Unknown/dev channels, invalid/unknown versions and absent headers
+allowed. A channel's first ledger lists only the release that created it, and
+there is deliberately no grace period or history backfill: a header-sending
+version older than that entry is unsupported immediately. Desktops before
+0.1.20 send no header and are therefore never blocked. Unknown/dev channels, invalid/unknown versions and absent headers
 are allowed. The missing-header allowance intentionally preserves the web
 app and pre-feature desktops; this is compatibility negotiation, not an
 authentication or tamper-resistance boundary.
