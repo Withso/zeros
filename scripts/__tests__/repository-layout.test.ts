@@ -772,6 +772,7 @@ describe("repository layout contracts", () => {
       "provider-background-work.md",
       "provider-contract.md",
       "qualification-status.md",
+      "relay-capacity.md",
       "release-worker-qualification.md",
       "root-coordinator-threat-model.md",
       "security.md",
