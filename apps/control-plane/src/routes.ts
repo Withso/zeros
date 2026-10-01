@@ -34,6 +34,7 @@ import {createCloudAgentCredentialRoutes} from "./cloud-workspaces/agent-credent
 import { createCloudCustomizationRoutes } from "./cloud-workspaces/mcp-routes.js";
 import { DatabaseCloudCustomizationService } from "./cloud-workspaces/customization-store.js";
 import {cloudAgentCredentialKeys,DatabaseCloudAgentCredentialService} from "./cloud-workspaces/agent-credentials.js";
+import type { CloudAgentCredentialKeys } from "./cloud-workspaces/agent-credential-envelope.js";
 import {workspaceInvitationDeliveryConfig} from "./cloud-workspaces/invitation-delivery.js";
 import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
 import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
@@ -411,6 +412,7 @@ export function createRoutes(
   email?: EmailConfig,
   cloudWorkspaces: CloudWorkspaceBackendConfig | null = null,
   options: {
+    cloudAgentCredentialKeys?: CloudAgentCredentialKeys | null;
     cloudWorkspaceAccessService?: CloudWorkspaceAccessService | null;
     cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver | null;
     cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService | null;
@@ -487,9 +489,11 @@ export function createRoutes(
   );
   if(cloudWorkspaces) app.route("/",createCloudWorkspaceCollaborationRoutes(pool,
     workspaceInvitationDeliveryConfig(cloudWorkspaces,options.inviteLinkBase??DEFAULT_INVITE_LINK_BASE,email)));
-  const agentCredentialKeys=cloudAgentCredentialKeys(cloudWorkspaces);
-  if(agentCredentialKeys) app.route("/",createCloudAgentCredentialRoutes(new DatabaseCloudAgentCredentialService(pool,agentCredentialKeys)));
-  if(agentCredentialKeys) app.route("/",createCloudCustomizationRoutes(new DatabaseCloudCustomizationService(pool,agentCredentialKeys)));
+  const workspaceAgentCredentialKeys=cloudAgentCredentialKeys(cloudWorkspaces);
+  const agentCredentialKeys=options.cloudAgentCredentialKeys??workspaceAgentCredentialKeys;
+  if(agentCredentialKeys) app.route("/",createCloudAgentCredentialRoutes(new DatabaseCloudAgentCredentialService(pool,agentCredentialKeys),
+    {workspaceEnabled:cloudWorkspaces!==null}));
+  if(workspaceAgentCredentialKeys) app.route("/",createCloudCustomizationRoutes(new DatabaseCloudCustomizationService(pool,workspaceAgentCredentialKeys)));
 
   app.post(
     "/v1/invitations/accept",

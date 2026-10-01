@@ -8,6 +8,17 @@ native account availability, quota, cleanup latency or a Mac release.
 
 ## Order and handoff
 
+For a channel's first worker, provision encrypted account keys and release-only
+Boat admission first, then deploy the reviewed API/schema with customer cloud
+disabled. Owners can connect accounts and record audited canary designations;
+the release bearer can qualify native runtimes before an image tuple exists.
+These bootstrap surfaces do not admit customer workspaces, execution or
+customization. After qualification and tuple selection, redeploy that same API
+still cloud-off so `/v1/release-identity` can verify the selected worker's actual
+database approval matrix. Only then may cloud provisioning enable customer
+cloud; an explicit subsequent deploy/readiness check precedes desktop rollout.
+See [channel backend provisioning](../deployment-environments.md#provision-a-channels-cloud-backend).
+
 The release order is exact-SHA Preflight + CodeQL → compatible DB migrations →
 API → Pages → WorkOS verification → worker build/native canaries → atomic tuple
 selection → same-SHA API redeploy/readiness → hosted receipt → desktop feed.

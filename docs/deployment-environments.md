@@ -217,6 +217,113 @@ the comma-separated `0009_organization_team_hierarchy.sql`,
 `0061_workos_provider_erasure_fences.sql` migration approvals. It refuses
 Production; Production always receives a fresh database service.
 
+### Provision a channel's cloud backend
+
+Use **Cloud backend provision** (`cloud-provision.yml`) from a reviewed
+`release/X.Y.Z` ref for Beta, then Production. Production takes the single
+`production-approval` review before the channel job reads secrets. Plan and
+apply share `hosted-mutation-<channel>` with cutover and promotion; runs never
+cancel one another. Alpha apply is refused (the CLI permits a read-only Alpha
+plan from `main`). No provisioning run deploys an API or calls Boat, R2 or Resend.
+
+The owner creates only three external credentials per channel, in the `beta`
+or `production` GitHub environment: a non-admin runtime `BOAT_API_KEY`, an R2
+token scoped to `zeros-cloud-workspaces-<channel>` stored as
+`CLOUD_WORKSPACE_S3_ACCESS_KEY_ID` and `CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY`,
+and `RESEND_API_KEY`. Reuse the existing channel `RAILWAY_DEPLOY_TOKEN` and
+Railway target-ID / `PLANETSCALE_DATABASE` variables. Boat is **one shared
+account across Dev and every channel**: the orchestrator supplies the canonical
+`BOAT_ACCOUNT_SCOPE` and `BOAT_BILLING_ORG` as GitHub environment **variables**.
+Apply requires both inputs even if Railway already has them; neither is generated.
+
+The managed-Boat configuration derived from `apps/control-plane/src/config.ts`
+has these sources (all output is names/status only):
+
+| Railway variables | Source / rule |
+| --- | --- |
+| `BOAT_API_KEY`, `CLOUD_WORKSPACE_S3_ACCESS_KEY_ID`, `CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY`, `RESEND_API_KEY` | Owner secrets; set only when different, otherwise unchanged; missing inputs may retain existing values |
+| `BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG` | Required GitHub environment variables; identical to `profile.boat` in the shared admission configuration |
+| `BOAT_COMPUTE_POLICY_ID` | Initially `zeros-<channel>-standard-v1`; thereafter retain the existing channel database price-policy label |
+| `BOAT_TTL_SECONDS`, `BOAT_SECONDS_PER_DOLLAR` | Initial constants `900`, `100000`; retain values belonging to an existing selected price policy, never silently reprice it |
+| `CLOUD_WORKSPACE_CPU_MILLICORES`, `CLOUD_WORKSPACE_MEMORY_MIB` | Constants `4000`, `8192` (4 vCPU / 8 GB) |
+| `CLOUD_WORKSPACE_OBJECT_STORE_KIND`, `CLOUD_WORKSPACE_S3_REGION`, `CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS` | Constants `s3`, `auto`, `336` (14 days); retain recovery keys and objects accordingly |
+| `CLOUD_WORKSPACE_S3_ENDPOINT` | GitHub variable of that name, else `https://<CLOUD_ACCOUNT_ID or CLOUDFLARE_ACCOUNT_ID>.r2.cloudflarestorage.com`; retain a valid existing endpoint if neither source is supplied |
+| `CLOUD_WORKSPACE_S3_BUCKET`, `CLOUD_WORKSPACE_CONTROL_PLANE_URL` | Derived channel bucket and `CHANNELS[channel].api` from `scripts/release/contracts.ts` |
+| `ZEROS_DEPLOY_ENV` | Derived channel marker required by the worker tuple-selection adapter |
+| `CLOUD_WORKSPACE_SECRET_KEYS_JSON`, `CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION` | Generated once, version `1`; settings, setup and agent-credential encryption share this ring |
+| `CLOUD_WORKSPACE_OBJECT_KEYS_JSON`, `CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION` | Independently generated once, version `1`; durable-object encryption |
+| `CLOUD_CODEX_REFRESH_FINGERPRINT_KEYS_JSON`, `CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION` | Independently generated once, version `1`; Codex renewal/security fingerprints, never a native refresh token |
+| `CLOUD_WORKSPACES_ENABLED`, `CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED`, `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` | Initially all `false`; preserve existing enabled/paused states on repeat apply; set all `true` only on an explicit, qualified `enable_cloud` apply |
+| `EMAIL_FROM`, `OPERATIONS_ALERT_EMAIL` | Constants `Zeros <notifications@zeros.build>`, `alert@zeros.build` |
+| `CLOUD_WORKSPACE_PROVIDER`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, `ZEROS_CLOUD_SOURCE_COMMIT`, `ZEROS_CLOUD_IMAGE_ARCHITECTURE`, `CLOUD_WORKSPACE_STORAGE_MIB` | Worker lane's complete qualified six-field tuple; provisioning never writes any of these fields |
+| `ZEROS_RELEASE_CANARIES_ENABLED`, `RUNTIME_QUALIFICATION_ACTOR_USER_ID`, `WORKER_CANARY_ORGANIZATION_ID`, `WORKER_CANARY_REPOSITORY` | Optional existing GitHub environment variables; missing ones are reported `missing-input`, not invented |
+| `WORKER_CANARY_ADMISSION_TOKEN`, `WORKER_ADMISSION_CONFIG_JSON` | Optional existing GitHub environment secrets, also installed server-side; required and validated when release canaries are enabled |
+| Existing `DATABASE_URL`, authentication/WorkOS configuration, `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_SLUG`, `GITHUB_OAUTH_CALLBACK_URL`, `GITHUB_APP_PRIVATE_KEY` | Kept Railway-only; the enabled API requires a valid RSA private key and complete GitHub registration |
+
+Engine protocol/port/heartbeat, setup deadlines and operation/archive/reconcile
+limits retain existing validated values or the boot loader's defaults. Managed
+Boat does not need the optional Daytona/BYO provider-credential key. Railway
+injects `RAILWAY_GIT_COMMIT_SHA` at deployment; provisioning must not invent it.
+
+Every new keyring is a JSON object such as `{"1":"<canonical base64url for 32
+crypto-random bytes>"}` with an independent key and matching current selector.
+No generated value reaches output, artifacts or GitHub secrets. Existing rings
+and selectors are never overwritten or rotated. Supported legacy
+`CLOUD_WORKSPACE_SECRET_KEY_V1` / `CLOUD_WORKSPACE_OBJECT_KEY_V1` are adopted
+without changing their key material. A single V1 ring may receive its missing
+selector; incomplete or ambiguous rings fail rather than guess or rotate. Use
+the separate [key-rotation procedure](cloud-workspace/security.md#secret-binding-verification-and-key-rotation)
+for rotation.
+
+The Actions token is read-only and cannot install environment secrets. The
+orchestrator securely copies the existing release-only admission bearer (at
+least 32 characters) and shared admission JSON into the channel's GitHub secrets;
+this workflow does **not** generate either. The JSON retains the canonical shared
+Dev/Boat/registry profile, not the channel's deployment targets. Native account
+credentials stay in the channel's encrypted API store, never CI. See
+[release worker qualification](cloud-workspace/release-worker-qualification.md)
+for owner designations, budgets and the remaining worker-lane configuration.
+
+1. Configure the owner credentials, canonical identity variables and endpoint
+   source, then dispatch `mode=plan`, `channel=beta` (or `production`). Review
+   only names and `unchanged`, `set`, `generate`, `missing-input`, `kept-existing`.
+2. Dispatch `mode=apply`, `confirm=zeros-control-plane-beta` (or
+   `zeros-control-plane-production`), leaving `enable_cloud=false`. Configuration
+   is validated in memory with a placeholder database URL and the real boot
+   loader, without its potentially sensitive diagnostics. The enabled schema is
+   also checked using validation-only placeholders for absent worker fields and
+   planned keyrings; **none of those placeholders can be written**. Apply uses
+   one `variableCollectionUpsert` with `replace:false, skipDeploys:true`, then
+   verifies exact readback in memory. Missing optional canary inputs do not block
+   staging unless server-side canaries are requested. Autodeploy/staged changes,
+   concurrent variable changes, previews or invalid existing configuration stop apply.
+3. Deploy the reviewed same-SHA API with current compatible migrations and
+   **customer cloud still disabled**. The boot loader validates account encryption
+   keys independently of the worker profile. Authenticated owners can connect
+   native accounts and explicitly designate exact credentials/models for release
+   checks. Customer allocation, workspace credential delegation, engine execution
+   and customization stay disabled. With `ZEROS_RELEASE_CANARIES_ENABLED=true`,
+   the separate release-only bearer, immutable `RAILWAY_GIT_COMMIT_SHA`, owner/
+   organization/repository and matching shared admission configuration, release
+   native canaries can run **without any preexisting image tuple**. Staff/owner
+   consent, migration/maintenance fences and account admission remain enforced.
+4. Obtain the trusted same-SHA services receipt, qualify all three native kinds
+   through the worker lane, select its complete immutable tuple, then redeploy
+   the same API SHA **still cloud-off**. `/v1/release-identity` now exposes that
+   selected tuple and the database-backed three-kind, same-contract, enabled,
+   MCP-qualified approval result independently of customer rollout.
+5. Plan and apply with `enable_cloud=true` only after that readback. The enable
+   gate requires an exact selected tuple match, same channel/API SHA, current
+   compatible schema, valid whole configuration and `workerQualified=true`;
+   tuple presence alone is insufficient. Qualification is rechecked before the
+   single variable write. A default repeat apply preserves existing flags and
+   keyrings, including deliberately paused workers; invalid existing state fails
+   rather than being reset. The next explicit deploy or hosted promotion picks
+   up the enabled values and verifies live readiness. A staged enable is not
+   live readiness: qualification can be revoked after the check, and per-account
+   runtime admission still validates current authority. Desktop cloud capability
+   remains a separate approved release flag. Previews stay off.
+
 ### WorkOS application callbacks
 
 Create separate Web and Desktop Applications inside each channel's WorkOS

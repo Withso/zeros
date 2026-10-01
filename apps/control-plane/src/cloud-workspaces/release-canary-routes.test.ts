@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { describe, expect, it, vi } from "vitest";
 import { HttpError } from "../authz.js";
+import { loadConfig } from "../config.js";
 import { createReleaseCanaryAdmissionRoutes, createReleaseCanaryDesignationRoutes } from "./release-canary-routes.js";
 import { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService, releaseCanaryDesignationConfiguration, releaseCanaryConfiguration } from "./release-canaries.js";
 
@@ -28,6 +29,27 @@ function fakePool(selected?: any, ownerAllowed = true, uncertain = false) {
 }
 
 describe("audited owner credential designation", () => {
+  it("assembles release-only native admission before the first worker tuple and customer enablement", () => {
+    const env = { DATABASE_URL: "postgresql://app@localhost/zeros", AUTH0_DOMAIN: "example.test", AUTH_AUDIENCE: "https://api.example.test",
+      RAILWAY_ENVIRONMENT_NAME: "beta", RAILWAY_GIT_COMMIT_SHA: "a".repeat(40), CLOUD_WORKSPACES_ENABLED: "false",
+      CLOUD_WORKSPACE_SECRET_KEYS_JSON: JSON.stringify({ "1": Buffer.alloc(32, 1).toString("base64url") }),
+      BOAT_API_KEY: "synthetic-bootstrap-boat-key", BOAT_ACCOUNT_SCOPE: "shared-test-account",
+      BOAT_BILLING_ORG: "team_66666666-6666-4666-8666-666666666666", ZEROS_RELEASE_CANARIES_ENABLED: "true",
+      RUNTIME_QUALIFICATION_ACTOR_USER_ID: owner, WORKER_CANARY_ORGANIZATION_ID: config.organizationId,
+      WORKER_CANARY_REPOSITORY: "example/zeros", WORKER_CANARY_ADMISSION_TOKEN: token,
+      WORKER_ADMISSION_CONFIG_JSON: JSON.stringify({ version: 1, registry: { endpoint: `https://${"b".repeat(32)}.r2.cloudflarestorage.com`, bucket: "test-registry",
+        accessKeyId: "synthetic-access-id", secretAccessKey: "synthetic-secret-key", encryptionKey: "c".repeat(64) },
+        profile: { boat: { accountScope: "shared-test-account", billingOrg: "team_66666666-6666-4666-8666-666666666666", baseSnapshot: "test-base" },
+          railway: { projectId: owner }, planetscale: { organization: "test-org", database: "test-db" }, cloudflare: { accountId: "b".repeat(32) } } }) };
+    const server = loadConfig(env);
+    expect(server.cloudWorkspaces).toBeNull();
+    expect(releaseCanaryConfiguration(server, env)).toMatchObject({ channel: "beta", sourceSha: env.RAILWAY_GIT_COMMIT_SHA,
+      keys: { currentKeyVersion: 1 }, boat: { apiKey: env.BOAT_API_KEY, billingOrg: env.BOAT_BILLING_ORG } });
+    for (const changed of [{ BOAT_ACCOUNT_SCOPE: "wrong-account" }, { ZEROS_RELEASE_CANARIES_ENABLED: "false" },
+      { WORKER_CANARY_ADMISSION_TOKEN: "short" }]) expect(releaseCanaryConfiguration(server, { ...env, ...changed })).toBeNull();
+    expect(releaseCanaryConfiguration({ ...server, databaseMaintenanceMode: true }, env)).toBeNull();
+    expect(releaseCanaryConfiguration({ ...server, deploymentChannel: "development" }, env)).toBeNull();
+  });
   it("allows authenticated consent before the pipeline token, native keys and paid admission are enabled", async () => {
     const server = { deploymentChannel: "alpha", databaseMaintenanceMode: false } as any;
     const env = { RUNTIME_QUALIFICATION_ACTOR_USER_ID: owner, WORKER_CANARY_ORGANIZATION_ID: config.organizationId };

@@ -6,7 +6,7 @@ import {withSystemTx,type Tx} from "../db.js";
 import {authorizeCloudWorkspaceActor} from "./actors.js";
 import {lockCloudWorkspaceScope} from "./authorization.js";
 import {parseCloudAgentCredential,sealCloudAgentCredential,type CloudAgentCredentialKeys,type CloudAgentCredentialKind,type CloudAgentCredentialMaterial} from "./agent-credential-envelope.js";
-import type {CloudWorkspaceBackendConfig} from "../config.js";
+import type {CloudAgentCredentialConfig} from "./agent-credential-config.js";
 import {readCloudAgentComputeTrust} from "./agent-compute-trust.js";
 import {CODEX_AUTH_RUNTIME_VERSION,parseCodexNativeCache,sealCodexNativeCache,type CodexNativeAuthCache} from "./codex-auth-cache.js";
 import {rememberCodexRefreshSeed} from "./codex-auth-renewal.js";
@@ -46,7 +46,7 @@ export function cloudAgentCredentialConnectionMethod(material:CloudAgentCredenti
   return material.kind==="claude-setup-token"||material.kind==="codex-chatgpt"||(material.kind==="cursor-api-key"&&material.expiresAt)?"account":"api";
 }
 
-export function cloudAgentCredentialKeys(config:CloudWorkspaceBackendConfig|null):CloudAgentCredentialKeys|null{
+export function cloudAgentCredentialKeys(config:CloudAgentCredentialConfig|null):CloudAgentCredentialKeys|null{
   if(!config)return null;
   const currentKeyVersion=config.currentSettingsSecretEncryptionKeyVersion??(config.settingsSecretKeyV1?1:null);
   const keys:Record<number,string>={};

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 
 import { loadConfig } from "./config.js";
+import { cloudAgentCredentialKeys } from "./cloud-workspaces/agent-credentials.js";
+import { openCloudAgentCredential, sealCloudAgentCredential } from "./cloud-workspaces/agent-credential-envelope.js";
 import {
   cloudWorkspaceProvisioningProfile,
   configuredCloudWorkspaceProviders,
@@ -18,6 +20,60 @@ function baseEnv(): NodeJS.ProcessEnv {
     AUTH_AUDIENCE: "https://api.zeros.build",
   };
 }
+
+describe("cloud-off release bootstrap configuration", () => {
+  it("loads the existing encrypted account keyring without admitting customer cloud or requiring a worker image", () => {
+    const encoded = randomBytes(32).toString("base64url");
+    const config = loadConfig({ ...baseEnv(), CLOUD_WORKSPACES_ENABLED: "false",
+      CLOUD_WORKSPACE_SECRET_KEYS_JSON: JSON.stringify({ "7": encoded }), CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION: "7",
+      CLOUD_CODEX_REFRESH_FINGERPRINT_KEYS_JSON: JSON.stringify({ "1": encoded }), CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION: "1" });
+    expect(config.cloudWorkspaces).toBeNull();
+    const encryption = cloudAgentCredentialKeys(config.cloudAgentCredentials ?? null);
+    expect(encryption?.currentKeyVersion).toBe(7);
+    expect(encryption?.refreshFingerprints?.currentKeyVersion).toBe(1);
+    const material = { kind: "cursor-api-key" as const, apiKey: "synthetic-bootstrap-agent-secret" };
+    const binding = { credentialId: "11111111-1111-4111-8111-111111111111", ownerUserId: "22222222-2222-4222-8222-222222222222",
+      version: 1, keyVersion: 7, kind: material.kind };
+    const envelope = sealCloudAgentCredential(material, binding, encryption!.keys[7]);
+    expect(envelope.ciphertext.includes(Buffer.from(material.apiKey))).toBe(false);
+    expect(openCloudAgentCredential(envelope, binding, encryption!.keys)).toEqual(material);
+  });
+  it("rejects invalid bootstrap keys even while customer cloud is disabled", () => {
+    expect(() => loadConfig({ ...baseEnv(), CLOUD_WORKSPACES_ENABLED: "false",
+      CLOUD_WORKSPACE_SECRET_KEYS_JSON: '{"1":"private-invalid-key-sentinel"}' })).toThrow(/SECRET_KEYS_JSON/);
+  });
+  it("makes only the actual complete selected immutable tuple observable while cloud stays disabled", () => {
+    const env = { ...baseEnv(), CLOUD_WORKSPACES_ENABLED: "false", CLOUD_WORKSPACE_PROVIDER: "boat",
+      BOAT_SNAPSHOT_ID: "zeros-beta-test", BOAT_IMAGE_BUILD_SHA256: "b".repeat(64), ZEROS_CLOUD_SOURCE_COMMIT: "a".repeat(40),
+      ZEROS_CLOUD_IMAGE_ARCHITECTURE: "linux/amd64", CLOUD_WORKSPACE_STORAGE_MIB: "20480" };
+    expect(loadConfig(env).selectedCloudWorker).toEqual({ provider: "boat", imageRef: `boat:zeros-beta-test@sha256:${"b".repeat(64)}`,
+      sourceSha: "a".repeat(40), architecture: "linux/amd64", storageMiB: 20480 });
+    expect(loadConfig({ ...env, BOAT_IMAGE_BUILD_SHA256: undefined }).selectedCloudWorker).toBeNull();
+    expect(loadConfig(env).cloudWorkspaces).toBeNull();
+  });
+});
+
+describe("offline configuration diagnostics", () => {
+  it("lets an in-memory validator suppress every diagnostic without changing boot defaults", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      loadConfig({
+        ...baseEnv(),
+        GITHUB_APP_ID: "private-diagnostic-sentinel",
+        INTERCOM_TOKEN: "synthetic-intercom-token",
+        INTERCOM_REGION: "private-diagnostic-sentinel",
+        LINEAR_API_KEY: "synthetic-linear-key",
+        OPERATIONS_ALERT_EMAIL: "not-an-address",
+      }, { error: () => {}, warn: () => {} });
+      expect(error.mock.calls.length).toBe(0);
+      expect(warn.mock.calls.length).toBe(0);
+    } finally {
+      error.mockRestore();
+      warn.mockRestore();
+    }
+  });
+});
 
 describe("chat title credentials", () => {
   it("uses only the dedicated server key, and is optional", () => {

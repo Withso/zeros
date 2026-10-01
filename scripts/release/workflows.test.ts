@@ -7,6 +7,52 @@ const workflow = (name: string) => readFileSync(`.github/workflows/${name}.yml`,
 function job(text: string, name: string) {
   return text.split(`\n  ${name}:\n`)[1]?.split(/\n {2}[a-z][a-z_-]+:\n/)[0] ?? "";
 }
+describe("cloud backend provisioning workflow", () => {
+  it("uses a dispatch-only plan/apply contract with typed confirmation and cloud off by default", () => {
+    const text = workflow("cloud-provision");
+    expect(text).toContain("workflow_dispatch:");
+    expect(text).not.toMatch(/^  (?:push|pull_request|workflow_call):/m);
+    expect(text).toContain("options: [beta, production]");
+    expect(text).toContain("options: [plan, apply]");
+    expect(text).toContain("default: plan");
+    expect(text).toContain("confirm:\n        description: Apply only - type the channel database name");
+    expect(text).toContain("type: boolean\n        default: false");
+    expect(job(text, "provision")).toContain("CLOUD_PROVISION_CONFIRM: ${{ inputs.confirm }}");
+    expect(job(text, "provision")).toContain("CLOUD_PROVISION_ENABLE_CLOUD: ${{ inputs.enable_cloud }}");
+  });
+  it("takes exactly one Production approval before accessing channel secrets", () => {
+    const text = workflow("cloud-provision"), approve = job(text, "approve"), provision = job(text, "provision");
+    expect((text.match(/environment: production-approval/g) ?? []).length).toBe(1);
+    expect(approve).toContain("inputs.channel == 'production'");
+    expect(approve).toContain("permissions: {}");
+    expect(approve).not.toMatch(/secrets\.|uses: /);
+    expect(provision).toContain("needs: approve");
+    expect(provision).toContain("!cancelled() && github.event.repository.fork == false");
+    expect(provision).toContain("needs.approve.result == 'success' || (inputs.channel != 'production' && needs.approve.result == 'skipped')");
+    expect(provision).toContain("environment: ${{ inputs.channel }}");
+  });
+  it("shares the never-cancelled hosted mutation lock and checks out the immutable event source", () => {
+    const text = workflow("cloud-provision");
+    expect(text).toContain("group: hosted-mutation-${{ inputs.channel }}\n  cancel-in-progress: false");
+    expect(job(text, "provision")).toContain("ref: ${{ github.sha }}");
+    expect(job(text, "provision")).toContain("persist-credentials: false");
+    expect(text).not.toMatch(/contents: write|actions: write|deployments: write|secrets: write/);
+    expect(text).not.toMatch(/serviceInstanceDeploy|railway up|upload-artifact|gh secret/);
+  });
+  it("supplies only provider/optional admission credentials as execution-step environment, never command interpolation", () => {
+    const text = workflow("cloud-provision"), provision = job(text, "provision");
+    expect(provision.split("    steps:")[0]).not.toContain("secrets.");
+    const secretNames = [...text.matchAll(/\$\{\{ secrets\.([A-Z0-9_]+) \}\}/g)].map(match => match[1]).sort();
+    expect(secretNames).toEqual(["RAILWAY_DEPLOY_TOKEN", "BOAT_API_KEY", "CLOUD_WORKSPACE_S3_ACCESS_KEY_ID",
+      "CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY", "RESEND_API_KEY", "WORKER_CANARY_ADMISSION_TOKEN", "WORKER_ADMISSION_CONFIG_JSON"].sort());
+    for (const name of secretNames) expect(text).toContain(`          ${name}: \${{ secrets.${name} }}`);
+    const commands = [...text.matchAll(/^\s+run: ([^\n]*(?:\n {10}[^\n]*)*)/gm)].map(match => match[1]).join("\n");
+    expect(commands).not.toMatch(/\$\{\{\s*(?:secrets\.|github\.token)|\$(?:BOAT_API_KEY|RESEND_API_KEY|RAILWAY_DEPLOY_TOKEN|CLOUD_WORKSPACE_S3_)/);
+    expect(commands).toContain("pnpm exec tsx scripts/release/cloud-provision-cli.ts");
+    expect(text).toContain("BOAT_ACCOUNT_SCOPE: ${{ vars.BOAT_ACCOUNT_SCOPE }}");
+    expect(text).toContain("BOAT_BILLING_ORG: ${{ vars.BOAT_BILLING_ORG }}");
+  });
+});
 describe("release dependency and authority contracts", () => {
   it.each(["release-alpha", "release-beta", "release"])("gates %s mutations on exact-source required CI without delaying the build", name => {
     const text = workflow(name), ci = job(text, "ci");

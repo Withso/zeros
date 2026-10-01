@@ -1,4 +1,5 @@
-import {loadCodexFingerprintKeys,type CodexFingerprintKeys} from "./cloud-workspaces/codex-fingerprint-keys.js";
+import type { CodexFingerprintKeys } from "./cloud-workspaces/codex-fingerprint-keys.js";
+import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type CloudAgentCredentialConfig } from "./cloud-workspaces/agent-credential-config.js";
 // ──────────────────────────────────────────────────────────
 // Config — every knob comes from the environment, validated at boot.
 //
@@ -339,6 +340,16 @@ export type Config = {
   /** Null unless the explicit paid-resource gate and complete provider block
    * are present. Merely setting a Daytona API key never enables creation. */
   cloudWorkspaces: CloudWorkspaceBackendConfig | null;
+  cloudAgentCredentials?: CloudAgentCredentialConfig;
+  selectedCloudWorker?: SelectedCloudWorker | null;
+};
+
+export type SelectedCloudWorker = {
+  provider: "boat" | "daytona";
+  imageRef: string;
+  sourceSha: string;
+  architecture: "linux/amd64" | "linux/arm64";
+  storageMiB: number;
 };
 
 const CloudWorkspaceEnvSchema = z.object({
@@ -450,20 +461,31 @@ const CloudWorkspaceEnvSchema = z.object({
     .min(1)
     .max(256)
     .optional(),
-  CLOUD_WORKSPACE_SECRET_KEY_V1: z.string().trim().min(1).max(256).optional(),
-  CLOUD_WORKSPACE_SECRET_KEYS_JSON: z
-    .string()
-    .trim()
-    .min(2)
-    .max(16_384)
-    .optional(),
-  CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(65_535)
-    .optional(),
+  ...CloudAgentCredentialEnvSchema.shape,
 });
+
+export function loadReleaseCanaryBoatConfig(env: NodeJS.ProcessEnv) {
+  const parsed = CloudWorkspaceEnvSchema.pick({ CLOUD_WORKSPACE_PROVIDER: true, BOAT_API_KEY: true,
+    BOAT_ACCOUNT_SCOPE: true, BOAT_BILLING_ORG: true }).safeParse(env);
+  if (!parsed.success || parsed.data.CLOUD_WORKSPACE_PROVIDER !== "boat" || !parsed.data.BOAT_API_KEY ||
+    !parsed.data.BOAT_ACCOUNT_SCOPE || !parsed.data.BOAT_BILLING_ORG) return null;
+  return { apiKey: parsed.data.BOAT_API_KEY, apiUrl: "https://boat.dev/api/v1",
+    accountScope: parsed.data.BOAT_ACCOUNT_SCOPE, billingOrg: parsed.data.BOAT_BILLING_ORG };
+}
+
+function loadSelectedCloudWorker(env: NodeJS.ProcessEnv): SelectedCloudWorker | null {
+  if (["CLOUD_WORKSPACE_PROVIDER", "BOAT_SNAPSHOT_ID", "BOAT_IMAGE_BUILD_SHA256", "ZEROS_CLOUD_SOURCE_COMMIT",
+    "ZEROS_CLOUD_IMAGE_ARCHITECTURE", "CLOUD_WORKSPACE_STORAGE_MIB"].some(name => !env[name]?.trim())) return null;
+  const parsed = CloudWorkspaceEnvSchema.pick({ CLOUD_WORKSPACE_PROVIDER: true, BOAT_SNAPSHOT_ID: true,
+    BOAT_IMAGE_BUILD_SHA256: true, ZEROS_CLOUD_SOURCE_COMMIT: true, ZEROS_CLOUD_IMAGE_ARCHITECTURE: true,
+    CLOUD_WORKSPACE_STORAGE_MIB: true }).safeParse(env);
+  if (!parsed.success || parsed.data.CLOUD_WORKSPACE_PROVIDER !== "boat" ||
+    !/^[a-f0-9]{40}$/.test(parsed.data.ZEROS_CLOUD_SOURCE_COMMIT)) return null;
+  const value = parsed.data;
+  return { provider: "boat", imageRef: `boat:${value.BOAT_SNAPSHOT_ID}@sha256:${value.BOAT_IMAGE_BUILD_SHA256}`,
+    sourceSha: value.ZEROS_CLOUD_SOURCE_COMMIT, architecture: value.ZEROS_CLOUD_IMAGE_ARCHITECTURE,
+    storageMiB: value.CLOUD_WORKSPACE_STORAGE_MIB };
+}
 
 const CloudWorkspaceSetupEnvSchema = z.object({
   CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: z.literal("true"),
@@ -889,9 +911,12 @@ function parseGithubConfig(env: NodeJS.ProcessEnv): GithubBackendConfig {
   };
 }
 
+type ConfigDiagnostics = Pick<Console, "error" | "warn">;
+
 function parseFeedbackMap(
   raw: string | undefined,
   name: string,
+  diagnostics: ConfigDiagnostics,
 ): Readonly<Partial<Record<FeedbackType, string>>> {
   if (!raw?.trim()) return {};
   try {
@@ -902,7 +927,7 @@ function parseFeedbackMap(
         !FEEDBACK_TYPES.includes(key as (typeof FEEDBACK_TYPES)[number]),
     );
     if (unknown.length > 0) {
-      console.error(
+      diagnostics.error(
         `[config] ${name} ignores unknown feedback types: ${unknown.join(", ")}`,
       );
     }
@@ -912,14 +937,14 @@ function parseFeedbackMap(
       if (value) normalized[type] = value;
     }
     if (parsed.issue) {
-      console.warn(
+      diagnostics.warn(
         `[config] ${name} maps legacy "issue" to "bug"; update the variable to use "bug".`,
       );
       normalized.bug ??= parsed.issue;
     }
     return normalized;
   } catch (error) {
-    console.error(
+    diagnostics.error(
       `[config] ${name} is invalid and feedback tagging is DISABLED: ${
         error instanceof Error ? error.message : String(error)
       }`,
@@ -930,6 +955,7 @@ function parseFeedbackMap(
 
 function loadFeedbackConfig(
   env: NodeJS.ProcessEnv,
+  diagnostics: ConfigDiagnostics,
 ): FeedbackBackendConfig | null {
   const intercomKeys = [
     "INTERCOM_TOKEN",
@@ -948,12 +974,12 @@ function loadFeedbackConfig(
       "us") as string;
     if (region === "us" || region === "eu" || region === "au") {
       const adminId = env.INTERCOM_ADMIN_ID?.trim() || null;
-      const tagIds = parseFeedbackMap(env.INTERCOM_TAG_IDS, "INTERCOM_TAG_IDS");
+      const tagIds = parseFeedbackMap(env.INTERCOM_TAG_IDS, "INTERCOM_TAG_IDS", diagnostics);
       if (
         (adminId && Object.keys(tagIds).length === 0) ||
         (!adminId && Object.keys(tagIds).length > 0)
       ) {
-        console.error(
+        diagnostics.error(
           "[config] Intercom feedback tags require BOTH INTERCOM_ADMIN_ID and INTERCOM_TAG_IDS; conversations remain enabled without tags.",
         );
       }
@@ -965,12 +991,12 @@ function loadFeedbackConfig(
         appId: env.INTERCOM_APP_ID?.trim() || null,
       };
     } else {
-      console.error(
+      diagnostics.error(
         `[config] Intercom feedback is DISABLED — INTERCOM_REGION must be us, eu, or au (received ${JSON.stringify(region)}).`,
       );
     }
   } else if (intercomSupplied.length > 0) {
-    console.error(
+    diagnostics.error(
       "[config] Intercom feedback is DISABLED — INTERCOM_TOKEN is missing.",
     );
   }
@@ -987,10 +1013,10 @@ function loadFeedbackConfig(
     linear = {
       apiKey: linearKey,
       teamId: linearTeam,
-      labelIds: parseFeedbackMap(env.LINEAR_LABEL_IDS, "LINEAR_LABEL_IDS"),
+      labelIds: parseFeedbackMap(env.LINEAR_LABEL_IDS, "LINEAR_LABEL_IDS", diagnostics),
     };
   } else if (linearSupplied.length > 0) {
-    console.error(
+    diagnostics.error(
       "[config] Linear feedback is DISABLED — LINEAR_API_KEY and LINEAR_TEAM_ID must both be set.",
     );
   }
@@ -1004,7 +1030,7 @@ function loadFeedbackConfig(
         { allowPath: true },
       );
     } catch (error) {
-      console.error(
+      diagnostics.error(
         `[config] POSTHOG_PROJECT_URL is ignored: ${
           error instanceof Error ? error.message : String(error)
         }`,
@@ -1231,103 +1257,8 @@ function loadCloudWorkspaceConfig(
       key.fill(0);
     }
   }
-  const settingsSecretEncryptionKeys: Record<number, string> = {};
-  const addSecretKey = (version: number, encoded: unknown, name: string) => {
-    if (
-      !Number.isSafeInteger(version) ||
-      version < 1 ||
-      version > 65_535 ||
-      typeof encoded !== "string" ||
-      !/^[A-Za-z0-9_-]{43}$/.test(encoded)
-    ) {
-      throw new Error(
-        `Invalid cloud workspace environment: ${name} must be canonical base64url for exactly 32 bytes`,
-      );
-    }
-    const key = Buffer.from(encoded, "base64url");
-    try {
-      if (key.length !== 32 || key.toString("base64url") !== encoded) {
-        throw new Error("invalid key");
-      }
-    } catch {
-      throw new Error(
-        `Invalid cloud workspace environment: ${name} must be canonical base64url for exactly 32 bytes`,
-      );
-    } finally {
-      key.fill(0);
-    }
-    const current = settingsSecretEncryptionKeys[version];
-    if (current && current !== encoded) {
-      throw new Error(
-        `Invalid cloud workspace environment: conflicting secret key version ${version}`,
-      );
-    }
-    settingsSecretEncryptionKeys[version] = encoded;
-  };
-  if (value.CLOUD_WORKSPACE_SECRET_KEYS_JSON) {
-    let document: unknown;
-    try {
-      document = JSON.parse(value.CLOUD_WORKSPACE_SECRET_KEYS_JSON);
-    } catch {
-      throw new Error(
-        "Invalid cloud workspace environment: CLOUD_WORKSPACE_SECRET_KEYS_JSON must be a JSON object",
-      );
-    }
-    if (
-      !document ||
-      typeof document !== "object" ||
-      Array.isArray(document) ||
-      Object.keys(document).length < 1 ||
-      Object.keys(document).length > 32
-    ) {
-      throw new Error(
-        "Invalid cloud workspace environment: CLOUD_WORKSPACE_SECRET_KEYS_JSON must contain 1-32 key versions",
-      );
-    }
-    for (const [rawVersion, encoded] of Object.entries(document)) {
-      if (!/^[1-9][0-9]{0,4}$/.test(rawVersion)) {
-        throw new Error(
-          "Invalid cloud workspace environment: secret key versions must be integers from 1 through 65535",
-        );
-      }
-      addSecretKey(
-        Number(rawVersion),
-        encoded,
-        `CLOUD_WORKSPACE_SECRET_KEYS_JSON.${rawVersion}`,
-      );
-    }
-  }
-  if (value.CLOUD_WORKSPACE_SECRET_KEY_V1) {
-    addSecretKey(
-      1,
-      value.CLOUD_WORKSPACE_SECRET_KEY_V1,
-      "CLOUD_WORKSPACE_SECRET_KEY_V1",
-    );
-  }
-  const secretKeyVersions = Object.keys(settingsSecretEncryptionKeys).map(
-    Number,
-  );
-  const currentSettingsSecretEncryptionKeyVersion =
-    value.CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION ??
-    (secretKeyVersions.length === 1 && secretKeyVersions[0] === 1 ? 1 : null);
-  if (
-    currentSettingsSecretEncryptionKeyVersion !== null &&
-    !settingsSecretEncryptionKeys[currentSettingsSecretEncryptionKeyVersion]
-  ) {
-    throw new Error(
-      "Invalid cloud workspace environment: the current secret key version is not present in the keyring",
-    );
-  }
-  if (
-    secretKeyVersions.length > 0 &&
-    currentSettingsSecretEncryptionKeyVersion === null
-  ) {
-    throw new Error(
-      "Invalid cloud workspace environment: CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION is required for a multi-version secret keyring",
-    );
-  }
-  const settingsSecretKeyV1 = settingsSecretEncryptionKeys[1] ?? null;
-  const codexRefreshFingerprints=loadCodexFingerprintKeys(env);
+  const { settingsSecretEncryptionKeys, currentSettingsSecretEncryptionKeyVersion, settingsSecretKeyV1, codexRefreshFingerprints } =
+    loadCloudAgentCredentialConfig(env);
   const durabilityRequested =
     setupEnabled === "true" ||
     [
@@ -1733,16 +1664,16 @@ function validateRailwayEnvironment(
 
 /** Alerting is optional: an unusable mailbox disables it with a warning
  * instead of failing boot. */
-function loadOperationsAlertEmail(env: NodeJS.ProcessEnv): string | null {
+function loadOperationsAlertEmail(env: NodeJS.ProcessEnv, diagnostics: ConfigDiagnostics): string | null {
   const raw = env.OPERATIONS_ALERT_EMAIL?.trim();
   if (!raw) return null;
   const parsed = z.string().max(254).email().safeParse(raw);
   if (parsed.success) return parsed.data;
-  console.warn("[config] OPERATIONS_ALERT_EMAIL is not one email address; cloud health alerts are disabled");
+  diagnostics.warn("[config] OPERATIONS_ALERT_EMAIL is not one email address; cloud health alerts are disabled");
   return null;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: ConfigDiagnostics = console): Config {
   const development = developmentIdentity(env);
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
@@ -1788,7 +1719,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     try {
       github = parseGithubConfig(env);
     } catch (error) {
-      console.error(
+      diagnostics.error(
         "[config] GitHub App sign-in is DISABLED — its configuration is " +
           `incomplete or invalid: ${
             error instanceof Error ? error.message : String(error)
@@ -1806,7 +1737,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
     databasePoolMax: e.DATABASE_POOL_MAX,
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
-    operationsAlertEmail: loadOperationsAlertEmail(env),
+    operationsAlertEmail: loadOperationsAlertEmail(env, diagnostics),
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,
@@ -1827,8 +1758,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         : "development";
     })(),
     github,
-    feedback: loadFeedbackConfig(env),
+    feedback: loadFeedbackConfig(env, diagnostics),
     chatTitleApiKey: e.CHAT_TITLE_OPENAI_API_KEY || null,
     cloudWorkspaces: loadCloudWorkspaceConfig(env, github),
+    cloudAgentCredentials: loadCloudAgentCredentialConfig(env),
+    selectedCloudWorker: loadSelectedCloudWorker(env),
   };
 }

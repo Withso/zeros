@@ -81,6 +81,7 @@ import {
 } from "./cloud-workspaces/engine-heartbeat.js";
 import { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService, releaseCanaryConfiguration, releaseCanaryDesignationConfiguration } from "./cloud-workspaces/release-canaries.js";
 import { createReleaseCanaryAdmissionRoutes, createReleaseCanaryDesignationRoutes } from "./cloud-workspaces/release-canary-routes.js";
+import { cloudAgentCredentialKeys } from "./cloud-workspaces/agent-credentials.js";
 
 export type CreateAppDependencies = {
   releaseCanaries?: DatabaseReleaseCanaryService;
@@ -118,7 +119,7 @@ function isCloudWorkspaceApiPath(requestPath: string): boolean {
     requestPath === "/internal/v2/cloud-workspaces" ||
     requestPath.startsWith("/internal/v2/cloud-workspaces/") ||
     requestPath.startsWith("/internal/v1/release-canaries/") ||
-    /^\/v1\/organizations\/[^/]+\/(?:cloud-workspaces|cloud-workspace-management|cloud-compute-credits)(?:\/|$)/u.test(
+    /^\/v1\/organizations\/[^/]+\/(?:cloud-workspaces|cloud-workspace-management|cloud-compute-credits|agent-connections)(?:\/|$)/u.test(
       requestPath,
     )
   );
@@ -595,6 +596,7 @@ export function createApp(
   app.route(
     "/",
     createRoutes(pool, emailConfig, config.cloudWorkspaces, {
+      cloudAgentCredentialKeys: cloudAgentCredentialKeys(config.cloudAgentCredentials ?? config.cloudWorkspaces),
       cloudWorkspaceAccessService:
         dependencies.cloudWorkspaceAccessService ?? null,
       cloudWorkspaceRepositoryResolver:
