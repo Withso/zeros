@@ -108,6 +108,13 @@ installation, restoring private permissions if the transfer did not retain them.
 Repository-local Conductor settings override the shared script and must include
 this step when they replace setup.
 
+On Linux, Setup also installs Node 22 into the private Dev tools directory when
+the cloud image's Node version is outside the qualified 22.18+ release line.
+It uses the image's existing npm and verifies the installed version before
+importing the profile or installing dependencies. Subsequent setup runs reuse
+that toolchain. Run and Archive never install tools; Mac tool installation stays
+with `scripts/setup-zeros-dev.sh`.
+
 Configure cloud transport once in the main checkout's **private**
 `.conductor/settings.local.toml`, preserving its other settings:
 
