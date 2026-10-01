@@ -283,6 +283,20 @@ retry. Lost tuple writes reconcile readback without a second write. Lost VM
 deletion responses and blocked physical GC retain admission holds and prevent
 approval/receipts until the matching terminal operation is proved.
 
+New disposable native qualification VMs, in both Dev and release lanes, set
+`snapshots:false` when created from the qualified named image. This per-VM policy
+prevents background capture of owner credentials; it does not change shared-account
+retention settings, image builders that must publish snapshots, or customer VMs.
+Native resume and fork checks exercise agent session history inside the same live
+VM, not provider VM resume or snapshot operations. A stopped or failed disposable
+VM has no provider backup and cannot resume. Historical recovery replays its exact
+persisted creation key/body, including an omitted or enabled snapshot flag; it
+never retrofits the new policy onto an existing intent. Snapshots-off is not
+deletion evidence: the release lane sets `strictCleanup:true` and still requires
+the matching terminal deletion operation before freeing compute admission or
+issuing a `resourcesDeleted:true` receipt. Dev's deferred-storage cleanup policy
+remains unchanged.
+
 The kit journal intentionally excludes the binary source archive. A recovered
 source manifest without its archive **before install** fails before allocation/
 upload; reconcile or begin a separately reviewed fresh run rather than silently
