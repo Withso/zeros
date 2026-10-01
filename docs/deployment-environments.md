@@ -313,9 +313,10 @@ for owner designations, budgets and the remaining worker-lane configuration.
    selected tuple and the database-backed three-kind, same-contract, enabled,
    MCP-qualified approval result independently of customer rollout.
 5. Plan and apply with `enable_cloud=true` only after that readback. The enable
-   gate requires an exact selected tuple match, same channel/API SHA, current
-   compatible schema, valid whole configuration and `workerQualified=true`;
-   tuple presence alone is insufficient. Qualification is rechecked before the
+   gate requires an exact selected tuple match, same channel, worker and API
+   source SHAs both equal to the approved release SHA, current compatible schema,
+   valid whole configuration and `workerQualified=true`; tuple presence or a
+   qualified older worker is insufficient. Qualification is rechecked before the
    single variable write. A default repeat apply preserves existing flags and
    keyrings, including deliberately paused workers; invalid existing state fails
    rather than being reset. The next explicit deploy or hosted promotion picks

@@ -78,6 +78,21 @@ describe("cloud backend planning", () => {
     expect(plan.enableGate.names).toContain("WORKER_QUALIFICATION");
     expect(CLOUD_ENABLE_FLAGS.every(name => plan.desired[name] === "false")).toBe(true);
   });
+  it.each(["beta", "production"] as const)("rejects a stale %s tuple even when current API qualification matches that stale worker", channel => {
+    const options = fixture(channel), selected = { ...tuple(channel), ZEROS_CLOUD_SOURCE_COMMIT: "c".repeat(40) };
+    Object.assign(options.current, selected);
+    const qualification = qualifiedIdentity(channel, selected);
+    expect(qualification.sourceSha).toBe(options.inputs.RELEASE_SHA);
+    expect(qualification.worker.sourceSha).toBe(selected.ZEROS_CLOUD_SOURCE_COMMIT);
+    expect(qualification.workerQualified).toBe(true);
+    const plan = planCloudProvision({ ...options, enableCloud: true, qualification });
+    expect(plan.validation.ok).toBe(true);
+    expect(plan.enableGate.ok).toBe(false);
+    expect(plan.enableGate.names).toContain("WORKER_QUALIFICATION");
+    expect(CLOUD_ENABLE_FLAGS.every(name => plan.desired[name] === "false")).toBe(true);
+    expect(CLOUD_WORKER_VARIABLES.some(name => Object.hasOwn(plan.changes, name))).toBe(false);
+    expect(cloudProvisionSummary(plan).join("\n")).not.toContain(selected.ZEROS_CLOUD_SOURCE_COMMIT);
+  });
   it("materializes a real cloud-off account/canary bootstrap without inventing any worker tuple", () => {
     const options = fixture(); Object.assign(options.inputs, canaries(options.inputs));
     const initial = planCloudProvision(options);
@@ -375,6 +390,16 @@ describe("guarded cloud backend CLI", () => {
     const revoked = railwayHarness(); Object.assign(revoked.variables, tuple());
     revoked.inputs.CLOUD_PROVISION_ENABLE_CLOUD = "true"; revoked.state.revokeOnRecheck = true;
     await expect(revoked.run()).rejects.toThrow("WORKER_QUALIFICATION fail"); expect(revoked.writes.length).toBe(0);
+  });
+  it.each(["beta", "production"] as const)("refuses %s enable without writes when both the stored tuple and qualified worker readback are stale", async channel => {
+    const harness = railwayHarness(channel), selected = { ...tuple(channel), ZEROS_CLOUD_SOURCE_COMMIT: "c".repeat(40) };
+    Object.assign(harness.variables, selected);
+    harness.inputs.CLOUD_PROVISION_ENABLE_CLOUD = "true";
+    harness.state.identity = qualifiedIdentity(channel, selected);
+    await expect(harness.run()).rejects.toThrow("WORKER_QUALIFICATION fail");
+    expect(harness.writes.length).toBe(0); expect(harness.createKeyring).not.toHaveBeenCalled();
+    expect(harness.variables.ZEROS_CLOUD_SOURCE_COMMIT).toBe(selected.ZEROS_CLOUD_SOURCE_COMMIT);
+    expect(CLOUD_ENABLE_FLAGS.every(name => harness.variables[name] !== "true")).toBe(true);
   });
   it("rejects target drift, autodeploy, racing variable writes, invalid generated keys and incomplete readback", async () => {
     for (const state of [{ wrongTarget: true }, { autoDeploy: true }, { race: true }]) {

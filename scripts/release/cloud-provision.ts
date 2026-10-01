@@ -189,6 +189,7 @@ export function planCloudProvision(options: { channel: Channel; current: Readonl
     architecture: current.ZEROS_CLOUD_IMAGE_ARCHITECTURE, storageMiB: Number(current.CLOUD_WORKSPACE_STORAGE_MIB) });
   const qualification = ReleaseIdentity.safeParse(options.qualification);
   const qualified = selectedWorker.success && qualification.success && qualification.data.channel === channel &&
+    selectedWorker.data.sourceSha === inputs.RELEASE_SHA &&
     qualification.data.sourceSha === inputs.RELEASE_SHA && qualification.data.migrations.head === qualification.data.migrations.expectedHead &&
     qualification.data.workerQualified === true && JSON.stringify(qualification.data.worker) === JSON.stringify(selectedWorker.data);
   const gateNames = [...new Set([...missingInputs, ...workerMissing, ...validation.names, ...(qualified ? [] : ["WORKER_QUALIFICATION"])])].sort();
