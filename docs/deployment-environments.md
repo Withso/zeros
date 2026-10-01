@@ -551,6 +551,16 @@ Managed Boat uses the backend terminal tunnel, so it needs no Daytona pin; a
 supplied pin document is still validated. Flags-off builds remain valid without
 either value.
 
+Organization Settings → Agents credential enrollment is independent of desktop
+cloud execution. Signed-in members can connect their own native accounts while
+`ZEROS_CLOUD_WORKSPACES_ENABLED=false`; Electron still validates requests, binds
+ceremonies to the current main session and window, and imports into the current
+channel's authenticated backend. That backend needs its credential encryption
+and Codex refresh-fingerprint keys. Enrollment allocates no VM, bypasses no
+workspace admission gate, and does not authorize release checks: **Use for release
+checks** retains its separate configured platform-owner and current-revision
+consent requirements.
+
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
 `main`; `beta` permits only `release/*`; `production` permits only `release/*`.
 The stable workflow itself rejects `main` and requires an exact

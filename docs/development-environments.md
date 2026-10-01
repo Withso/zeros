@@ -722,15 +722,13 @@ automatically running another paid attempt; `pnpm dev:agents --retry` allows at
 most three attempts for the same connection/image. Reconnecting an account or
 changing the image creates a new qualification identity.
 
-Connection reuse across disposable databases is not implemented. A future
-Dev-only connection service should retain each member's consent, encrypted
-credentials and refresh journal independently of checkout lifetimes. Checkouts
-would receive scoped connection references after normal sign-in; archive would
-remove those bindings while preserving the shared Dev connections. Do not solve
-this by copying refresh-token caches into each database: their independent locks
-cannot coordinate rotating tokens or propagate revocation. Keep this service
-separate from Alpha/Beta/Production, and require current GitHub repository access
-and exact-image agent qualification even when a connection is reused.
+Connection reuse across disposable Dev databases is implemented as optional
+**connect-once** mode; see [Persistent Dev connections](dev-connections.md). It
+requires separate protected operator provisioning and live acceptance. Without
+this opt-in, provider connections remain local to each disposable generation.
+Restored references still require normal sign-in, current consent/repository
+access and exact-image agent qualification. Never copy refresh-token caches
+between generations or into Alpha/Beta/Production.
 
 The launcher uses a pinned Railway CLI (5.47.1), installed by Dev setup or lazily
 when first needed, to invoke the SSH-only backend operator. Temporary SSH keys
