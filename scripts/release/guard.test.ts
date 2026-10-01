@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { disabledGuard, hostedWorkerPromotionRequired } from "./guard";
+import { disabledGuard, hostedWorkerPromotionRequired, publicIdentity } from "./guard";
 import { classifyChanges } from "./source";
 import { githubClient, validateBetaReceipt } from "./github";
 const sha = "a".repeat(40);
@@ -29,6 +29,17 @@ describe("rollout and promotion evidence", () => {
       expect(() => validateBetaReceipt(receipt(), { ...run, ...patch }, config, hostedJobs)).toThrow();
     for (const patch of [{ channel: "alpha" }, { sourceSha: "c".repeat(40) }, { status: "disabled" }, { pages: [] }, { runId: "2" }])
       expect(() => validateBetaReceipt({ ...receipt(), ...patch }, run, config, hostedJobs)).toThrow();
+  });
+  it("refuses candidate publication from a ready rollback identity ahead of its packaged head", async () => {
+    const identity = liveIdentity(), aheadManifest = { head: "0113_future_expand.sql", sha256: "e".repeat(64) };
+    identity.sourceSha = baselineSha;
+    identity.migrations.head = aheadManifest.head;
+    const deps = fakeIdentity(identity);
+    deps.migrationManifest.mockImplementation(async source => source === baselineSha ? manifest : aheadManifest);
+    expect(await publicIdentity("alpha", deps.fetch)).toEqual({ present: true, identity: null });
+    expect(await disabledGuard(["apps/control-plane/migrations/0113_future_expand.sql"], candidate, deps))
+      .toMatchObject({ blocked: true, migrations: true, manualCutoverVerified: false });
+    expect(deps.cutoverReceipt).not.toHaveBeenCalled();
   });
 });
 

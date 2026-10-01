@@ -5,9 +5,10 @@ import type pg from "pg";
 import type { Config } from "./config.js";
 import { withSystemTx } from "./db.js";
 import type { MigrationStatus } from "./migrate.js";
+import { isNewerExpandMigration } from "./migration-phase.js";
 import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
 
-type LedgerRow = { name: string; checksum: string | null };
+type LedgerRow = { name: string; checksum: string | null; phase?: string | null };
 type Dependencies = {
   sourceSha?: string;
   migrationStatus?: MigrationStatus;
@@ -53,14 +54,17 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
       manifest ??= (deps.readManifest ?? packagedManifest)().catch(error => { manifest = undefined; throw error; });
       const expected = await manifest;
       const rows = await (deps.readLedger ? deps.readLedger() : withSystemTx(pool, async tx =>
-        (await tx.query<LedgerRow>("SELECT name, checksum FROM schema_migrations ORDER BY name")).rows, { consistentRead: true }));
+        (await tx.query<LedgerRow>("SELECT name, checksum, COALESCE(to_jsonb(schema_migrations)->>'phase', 'legacy') AS phase FROM schema_migrations ORDER BY name")).rows, { consistentRead: true }));
+      const expectedHead = expected.at(-1)?.name ?? null;
+      const expectedSequence = Number(expectedHead?.slice(0, 4) ?? 0);
       const known = new Map(expected.map(row => [row.name, row.checksum]));
       const applied = new Map(rows.map(row => [row.name, row.checksum]));
-      const invalid = expected.length === 0 || applied.size !== rows.length || rows.some(row => !known.has(row.name) || known.get(row.name) !== row.checksum);
+      const invalid = expected.length === 0 || applied.size !== rows.length || rows.some(row =>
+        known.has(row.name) ? known.get(row.name) !== row.checksum : !isNewerExpandMigration(row, expectedSequence));
       migrations = {
         state: invalid ? "unknown" : deps.migrationStatus?.state === "controlled_migration_pending" ? "controlled" : expected.every(row => applied.has(row.name)) ? "current" : "pending",
-        head: invalid ? null : expected.filter(row => applied.has(row.name)).at(-1)?.name ?? null,
-        expectedHead: expected.at(-1)?.name ?? null,
+        head: invalid ? null : rows.map(row => row.name).sort().at(-1) ?? null,
+        expectedHead,
         manifestSha256: digest(JSON.stringify(expected)),
       };
     } catch { /* Fail closed without exposing database errors. */ }

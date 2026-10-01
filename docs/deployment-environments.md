@@ -846,6 +846,13 @@ Unknown `contract`, `legacy`, malformed or historical rows fail closed. An
 explicit migrator remains strict against unknown rows, and a pre-0122 ledger
 without the phase column is read as legacy without changing it at boot.
 
+The phase-aware release identity applies the same rule to a compatible rollback
+binary: it reports ready with `migrations.head` ahead of `migrations.expectedHead`,
+while publication and promotion still require the exact candidate manifest.
+As of October 1, 2026, Beta and Production run `87ee454f`, which predates this
+identity fix; after they take 0122, that rollback target still serves but reports
+a not-ready identity.
+
 Contract SQL belongs to a later, separately reviewed rollout after backfill,
 all live API rollback targets and the 30-day desktop support window no longer
 need the removed schema. Declare the real not-before date in UTC; the runner
