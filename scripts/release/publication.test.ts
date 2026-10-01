@@ -29,6 +29,13 @@ describe("V6 publication-time proof", () => {
       await expect(publicationGate(candidate, { ...deps(), identity: async () => ({ ...backend, ...patch }) })).rejects.toThrow();
     await expect(publicationGate(candidate, { ...deps(), receipt: async () => ({ ...receipt, runId: "2" }) })).rejects.toThrow();
   });
+  it("a cloud-disabled desktop needs no worker, even beside an API running unqualified cloud", async () => {
+    const desktop = { ...candidate, cloudRequired: false, provider: undefined };
+    const unqualified = { ...backend, workerQualified: false, worker: { ...worker, sourceSha: later } };
+    const hash = async (source: string) => source === sha ? digest : "d".repeat(64);
+    expect(await reusableWorker(desktop, unqualified, hash)).toBeUndefined();
+    await expect(reusableWorker(desktop, { ...backend, channel: "beta" }, hash)).rejects.toThrow("Current channel readiness is unavailable");
+  });
   it("enabled reuse requires affirmative current qualification", async () => {
     for (const workerQualified of [false, undefined])
       await expect(reusableWorker(candidate, { ...backend, workerQualified }, async () => digest)).rejects.toThrow();
