@@ -31,6 +31,7 @@ import { GitError } from "./errors";
 import { localWorkspaceCreationError } from "./local-workspace-policy";
 import { generateWorkspaceId } from "./naming";
 import { runGit, assertSafeGitRef } from "./git-exec";
+import { runWorktreeRegistryMutation } from "./worktree-registry";
 import { refExists } from "./default-branch";
 import {
   finishWorkspaceLifecycle,
@@ -694,7 +695,7 @@ async function createWorkspaceFromBranchInner(
       ]);
       updateWorkspaceLifecyclePhase(workspaceId, "branch-created");
     }
-    await runGit(
+    await runWorktreeRegistryMutation(
       opts.repoRoot,
       ["worktree", "add", workspacePath, opts.branchName],
       {
