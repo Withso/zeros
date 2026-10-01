@@ -275,7 +275,10 @@ describe.skipIf(process.platform !== "linux")(
         readConfig: { denyOnly: [denied], allowWithinDeny: [island] },
         writeConfig: { allowOnly: [root, island], denyWithinAllow: [] },
       });
-      const mask = args.indexOf("--tmpfs");
+      const mask = args.findIndex(
+        (arg, index) => arg === "--tmpfs" && args[index + 1] === denied,
+      );
+      expect(mask).toBeGreaterThanOrEqual(0);
       expect(args.slice(mask, mask + 5)).toEqual([
         "--tmpfs",
         denied,

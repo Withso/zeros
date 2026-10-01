@@ -117,6 +117,8 @@ async function initRepository(root: string): Promise<void> {
   await git(root, "init", "-q", "-b", "main");
   await git(root, "config", "user.email", "test@zeros.local");
   await git(root, "config", "user.name", "Zeros Test");
+  await git(root, "config", "maintenance.auto", "false");
+  await git(root, "config", "gc.auto", "0");
   await writeFile(path.join(root, "README.md"), "# registry\n");
   await git(root, "add", ".");
   await git(root, "commit", "-q", "-m", "init");
@@ -181,6 +183,64 @@ describe("Git worktree registry mutations", () => {
     setStateRootForTesting(null);
     resetFetchFreshness();
     await rm(workdir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("disables inherited automatic maintenance before the fixture's first commit", async () => {
+    const fixtureRoot = path.join(workdir, "maintenance-fixture");
+    const inheritedConfig = path.join(workdir, "inherited.gitconfig");
+    const traceFile = path.join(workdir, "git-trace.json");
+    await writeFile(
+      inheritedConfig,
+      "[maintenance]\n\tauto = true\n\tautoDetach = false\n[gc]\n\tauto = 1\n\tautoDetach = false\n",
+    );
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+    vi.stubEnv("GIT_CONFIG_GLOBAL", inheritedConfig);
+    vi.stubEnv("GIT_TRACE2_EVENT", traceFile);
+    try {
+      await initRepository(fixtureRoot);
+      const events = (await readFile(traceFile, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { event?: string; argv?: string[] });
+      expect(
+        events.filter(
+          (event) =>
+            event.event === "child_start" &&
+            event.argv?.includes("maintenance") &&
+            event.argv.includes("--auto"),
+        ),
+      ).toEqual([]);
+      expect(
+        (
+          await git(fixtureRoot, "config", "--local", "maintenance.auto")
+        ).trim(),
+      ).toBe("false");
+      expect(
+        (await git(fixtureRoot, "config", "--local", "gc.auto")).trim(),
+      ).toBe("0");
+
+      const entry = await plantHalfWrittenEntry(
+        path.join(fixtureRoot, ".git"),
+        path.join(workdir, "terminal"),
+        "stuck",
+      );
+      await git(
+        fixtureRoot,
+        "commit",
+        "--allow-empty",
+        "-q",
+        "-m",
+        "follow-up",
+      );
+      expect(await readFile(path.join(entry, "commondir"), "utf8")).toBe("");
+      await expect(
+        git(fixtureRoot, "worktree", "list", "--porcelain"),
+      ).rejects.toMatchObject({
+        stderr: expect.stringMatching(/worktrees[\\/]stuck[\\/]commondir/),
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("never overlaps concurrent workspace creates' worktree adds in one repository", async () => {

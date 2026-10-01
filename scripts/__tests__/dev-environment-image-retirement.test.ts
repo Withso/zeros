@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { newHostedGeneration } from "../dev-environment/hosted-state.mjs";
 import { retireSupersededDevImages } from "../dev-environment/hosted-image.mjs";
+import { reserveHostedAdmission, releaseHostedAdmission } from "../dev-environment/hosted-admission.mjs";
 
 const profile: any = { boat: { accountScope: "scope", billingOrg: "org", baseSnapshot: "base" } };
 
@@ -53,4 +54,28 @@ it("retires legacy images saved before the create journal whose builders were re
   }
   expect(await retireSupersededDevImages(t.lease, profile, { keepInputs: ["2".repeat(64)], request: t.request })).toEqual([t.name(1), t.name(3), t.name(4)]);
   expect([...t.snapshots.keys()]).toEqual([t.name(2), t.name(5)]);
+});
+
+it("makes room for a replacement build while retaining its deployed fallback and all release slots", async () => {
+  const t = generation();
+  t.state.status = "ready";
+  t.state.resources.images = t.state.resources.images.filter((r: any) => [t.name(4), t.name(5)].includes(r.snapshotId));
+  for (const n of [1, 2, 3]) t.snapshots.delete(t.name(n));
+  const selected = { ...profile, railway: { projectId: "project" }, planetscale: { organization: "org", database: "db" }, cloudflare: { accountId: "account" } };
+  let current: any = null;
+  const store = { list: async () => ({ records: [{ state: t.state }], quarantine: [] }),
+    readAdmission: async () => current ? structuredClone(current) : null,
+    writeAdmission: async (state: any) => { current = { state: structuredClone(state), etag: "revision" }; } };
+  const releases = ["alpha", "beta", "production"].flatMap(channel => ["current", "rollback"].map(kind => `zeros-${channel}-${kind}`));
+  const inventory = () => ["base", ...releases, ...t.snapshots.keys()].map(id => ({ provider: "boat", id }));
+  const snapshotName = t.name(6);
+  await reserveHostedAdmission(store, t.state, selected);
+  await expect(reserveHostedAdmission(store, t.state, selected, { kind: "builder", inventory: inventory(), snapshotName })).rejects.toThrow(/snapshot capacity/);
+
+  await retireSupersededDevImages(t.lease, selected, { keepInputs: ["5".repeat(64)], keepRollback: false, request: t.request });
+  await releaseHostedAdmission(store, t.lease, selected);
+  await expect(reserveHostedAdmission(store, t.state, selected, { kind: "builder", inventory: inventory(), snapshotName })).resolves.toMatchObject({ snapshotName });
+  expect([...t.snapshots.keys()]).toEqual([t.name(5)]);
+  expect(t.state.resources.images[1].snapshotDeleted).toBeUndefined();
+  expect(t.request.mock.calls.filter(([method]) => method === "DELETE").map(([, route]) => route)).toEqual([`/named-snapshots/${t.name(4)}`]);
 });

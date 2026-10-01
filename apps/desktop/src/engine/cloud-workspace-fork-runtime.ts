@@ -407,6 +407,7 @@ function delayForAttempt(attemptCount: number): number {
 export class CloudWorkspaceForkRuntime {
   private readonly state: DatabaseCloudWorkspaceForkState;
   private readonly now: () => number;
+  private readonly startupCollection: Promise<void>;
   private readonly active = new Map<string, Promise<CloudWorkspaceForkJob>>();
   private readonly activeControllers = new Map<string, AbortController>();
   private timer: NodeJS.Timeout | null = null;
@@ -437,7 +438,7 @@ export class CloudWorkspaceForkRuntime {
     ) {
       throw new Error("Cloud copy scheduler interval is invalid");
     }
-    void this.collectStagedData().catch((error) => {
+    this.startupCollection = this.collectStagedData().catch((error) => {
       this.dependencies.logger?.warn(
         `[cloud-fork] staged-data cleanup deferred (${runtimeCode(error)})`,
       );
@@ -682,6 +683,7 @@ export class CloudWorkspaceForkRuntime {
   }
 
   private async runExclusive(jobId: string): Promise<CloudWorkspaceForkJob> {
+    await this.startupCollection;
     let job = this.state.job(jobId);
     if (!job) {
       throw new CloudWorkspaceForkRuntimeError(
@@ -1499,11 +1501,10 @@ export class CloudWorkspaceForkRuntime {
   }
 
   async dispose(): Promise<void> {
-    if (this.disposed) return;
     this.disposed = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    await this.cancelActiveWork();
+    await Promise.all([this.startupCollection, this.cancelActiveWork()]);
     this.active.clear();
     this.activeControllers.clear();
   }
