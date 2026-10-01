@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { nativeAgentCanary } from "../dev-environment/native-agent-canary.mjs";
+import { reserveHostedAdmission, releaseHostedAdmission } from "../dev-environment/hosted-admission.mjs";
+import { newHostedGeneration } from "../dev-environment/hosted-state.mjs";
 
 const image = { snapshotId: "test-worker", sourceCommit: "a".repeat(40), buildSha256: "b".repeat(64) };
 const job = () => ({ id: "11111111-1111-4111-8111-111111111111", image });
 function harness(options: Record<string, any> = {}) {
-  const state = { resources: { images: [] as any[] } }, lease = { state, save: vi.fn(async () => {}), fence: vi.fn(async () => {}) };
+  const state = newHostedGeneration({ owner: "a".repeat(24), identity: "native-canary" });
+  state.resources.images = [];
+  const lease = { state, save: vi.fn(async () => {}), fence: vi.fn(async () => {}) };
   const admission = { reserve: vi.fn(async () => {}), release: vi.fn(async () => {}) };
   const provider = { usedSeconds: 0, loseCreate: false, started: true, physicalDeletion: true };
   const operationId = `bdop_${"c".repeat(32)}`, uploads: any[] = [];
@@ -31,7 +35,7 @@ describe("shared disposable native canary transport", () => {
     const test = harness(), target = job(); test.provider.usedSeconds = 360;
     await test.core.allocate(target, image);
     const create = test.request.mock.calls.find(([method, route]) => method === "POST" && route === "/sandboxes")!;
-    expect(create[2].body).toEqual({ type: "default", from: image.snapshotId, ttlSeconds: 360, noEnv: true, env: {} });
+    expect(create[2].body).toEqual({ type: "default", from: image.snapshotId, ttlSeconds: 360, noEnv: true, env: {}, snapshots: false });
     expect(create[2].headers).toEqual({ "idempotency-key": target.id, "x-boat-org": "test-wallet" });
     expect(test.admission.reserve).toHaveBeenCalledOnce();
   });
@@ -42,6 +46,21 @@ describe("shared disposable native canary transport", () => {
     await test.core.allocate(target, image);
     const creates = test.request.mock.calls.filter(([method, route]) => method === "POST" && route === "/sandboxes");
     expect(creates).toHaveLength(2); expect(creates[1][2]).toEqual(creates[0][2]);
+    expect(test.lease.state.resources.images[0].builder.id).toBe("bx_test");
+  });
+  it.each([undefined, true, false])("preserves a historical snapshots=%s creation body and key during recovery", async snapshots => {
+    const test = harness(), target = job();
+    const body = Object.freeze({ type: "default", from: image.snapshotId, ttlSeconds: 360, noEnv: true, env: {},
+      ...(snapshots === undefined ? {} : { snapshots }) });
+    test.lease.state.resources.images.push({ agentQualificationId: target.id, purpose: "native-agent-qualification",
+      sourceCommit: image.sourceCommit, sourceImage: image.snapshotId, maxUsedHours: 0.2,
+      builderIntent: { key: target.id, at: Date.now(), body }, builderCreate: { phase: "uncertain" } });
+    await test.core.allocate(target, image);
+    const create = test.request.mock.calls.find(([method, route]) => method === "POST" && route === "/sandboxes")!;
+    expect(create[2].body).toBe(body);
+    expect(create[2].body).toEqual(body);
+    expect(create[2].headers).toEqual({ "idempotency-key": target.id, "x-boat-org": "test-wallet" });
+    expect(test.lease.state.resources.images[0].builderIntent.body).toBe(body);
     expect(test.lease.state.resources.images[0].builder.id).toBe("bx_test");
   });
   it("never redispatches native authority after a lost start, and fails closed without a runner observation", async () => {
@@ -68,6 +87,43 @@ describe("shared disposable native canary transport", () => {
     expect(test.lease.state.resources.images[0].deleted).not.toBe(true);
     test.provider.physicalDeletion = true; await test.core.retire(target);
     expect(test.lease.state.resources.images[0].deleted).toBe(true);
+    expect(test.request.mock.calls.filter(([method]) => method === "DELETE")).toHaveLength(1);
+  });
+  it("retains real compute admission for a snapshots-off clone until physical deletion is proved", async () => {
+    const test = harness(), target = job(), profile = { boat: { accountScope: "test-scope", billingOrg: "test-wallet", baseSnapshot: "test-base" },
+      railway: { projectId: "test-project" }, planetscale: { organization: "test-organization", database: "test-database" },
+      cloudflare: { accountId: "test-account" } };
+    let current: any = null, revision = 0;
+    const store = { list: async () => ({ records: [{ state: test.lease.state }], quarantine: [] }),
+      readAdmission: async () => current ? structuredClone(current) : null,
+      writeAdmission: async (state: any, etag: any) => {
+        if (current?.etag !== etag) throw Object.assign(new Error(), { code: "DEV_REGISTRY_CONFLICT" });
+        current = { state: structuredClone(state), etag: String(++revision) }; return current.etag;
+      } };
+    test.admission.reserve.mockImplementation(async () => { await reserveHostedAdmission(store, test.lease.state, profile,
+      { kind: "builder", computeId: `canary:${target.id}` }); });
+    test.admission.release.mockImplementation(async () => { await releaseHostedAdmission(store, test.lease, profile); });
+    const holds = () => current.state.reservations.filter((reservation: any) => reservation.kind === "builder");
+    await test.core.allocate(target, image);
+    expect(test.lease.state.resources.images[0].builderIntent.body.snapshots).toBe(false);
+    expect(holds()).toMatchObject([{ computeId: `canary:${target.id}` }]);
+    expect(holds()[0].snapshotName).toBeUndefined();
+    test.provider.physicalDeletion = false;
+    await expect(test.core.retire(target)).rejects.toThrow("blocked");
+    expect(holds()).toHaveLength(1); expect(holds()[0].releasedAt).toBeUndefined();
+    expect(test.lease.state.resources.images[0].builder).toMatchObject({ deleteRequested: true, deletionOperationId: `bdop_${"c".repeat(32)}` });
+    expect(test.lease.state.resources.images[0].builder.deleted).not.toBe(true);
+    expect(test.lease.state.resources.images[0].builder.retiredAt).toBeUndefined();
+    test.provider.physicalDeletion = true; await test.core.retire(target);
+    expect(test.lease.state.resources.images[0].deleted).toBe(true); expect(holds()).toHaveLength(0);
+    expect(test.request.mock.calls.filter(([method]) => method === "DELETE")).toHaveLength(1);
+  });
+  it("does not treat snapshots-off as deletion proof after a lost DELETE response", async () => {
+    const test = harness(), target = job(); await test.core.allocate(target, image);
+    test.request.mockImplementationOnce(async () => { throw new Error("synthetic lost delete"); });
+    await expect(test.core.retire(target)).rejects.toThrow("synthetic lost delete");
+    await expect(test.core.retire(target)).rejects.toThrow("deletion response was lost");
+    expect(test.lease.state.resources.images[0].builder.deleted).not.toBe(true);
     expect(test.request.mock.calls.filter(([method]) => method === "DELETE")).toHaveLength(1);
   });
   it("does not allocate after account exhaustion or an invalid meter", async () => {

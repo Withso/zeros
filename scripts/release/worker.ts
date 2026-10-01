@@ -5,15 +5,30 @@ import { CloudAgentRuntimeEvidenceSchema } from "../../apps/control-plane/src/ma
 import { CHANNELS, DIGEST, SHA, WorkerIdentity, requireCheck, type Channel } from "./contracts";
 import type { WorkerQualificationProfile } from "./worker-profile";
 import { ReleaseCanaryBindingsSchema, RELEASE_CANARY_MODELS, type ReleaseCanaryConnection } from "../../apps/control-plane/src/cloud-workspaces/release-canary-contract";
+import { WorkerBuilderCleanupSchema, WorkerCandidateSchema, WorkerCleanupSchema, builderCleanupBelongsToRun,
+  type WorkerBuilderCleanup, type WorkerCleanup } from "./worker-builder-retirement";
 
 export const WORKER_CREDENTIAL_KINDS = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"] as const;
 const credentialKind = z.enum(WORKER_CREDENTIAL_KINDS);
-export const WorkerReceipt = z.object({ version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "beta", "production"]),
+const commonReceipt = z.object({ status: z.literal("success"), channel: z.enum(["alpha", "beta", "production"]),
   repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), branch: z.string(), runId: z.string().regex(/^[1-9]\d*$/), runAttempt: z.string().regex(/^[1-9]\d*$/),
   sourceSha: z.string().regex(SHA), inputsSha256: z.string().regex(DIGEST), worker: WorkerIdentity.refine(worker => worker.provider === "boat" && worker.architecture === "linux/amd64"),
   qualifiedKinds: z.array(credentialKind).length(3).refine(kinds => new Set(kinds).size === 3), qualificationProfile: z.enum(["smoke", "full"]), runtimeContractSha256: z.string().regex(DIGEST),
   evidenceSha256: z.string().regex(DIGEST), approvalPlanSha256: z.string().regex(DIGEST),
-  approvalTargetSha256: z.string().regex(DIGEST), roleDeleted: z.literal(true), resourcesDeleted: z.literal(true), completedAt: z.string().datetime() }).strict();
+  approvalTargetSha256: z.string().regex(DIGEST), roleDeleted: z.literal(true), completedAt: z.string().datetime() });
+export const WorkerReceipt = z.discriminatedUnion("version", [
+  commonReceipt.extend({ version: z.literal(1), resourcesDeleted: z.literal(true) }).strict(),
+  commonReceipt.extend({ version: z.literal(2), cleanup: WorkerCleanupSchema }).strict(),
+]).refine(receipt => {
+  if (receipt.version === 1) return true;
+  const builder = receipt.cleanup.imageBuilder;
+  if (Date.parse(builder.unavailableObservedAt) > Date.parse(receipt.completedAt)) return false;
+  if (builder.kind === "physically-deleted") return true;
+  const candidate = builder.provenance.candidate;
+  return builderCleanupBelongsToRun(builder, receipt, candidate) && receipt.worker.sourceSha === candidate.sourceCommit &&
+    receipt.worker.imageRef === `boat:${candidate.snapshotId}@sha256:${candidate.buildSha256}` &&
+    receipt.worker.architecture === candidate.architecture && receipt.worker.storageMiB === candidate.storageMiB;
+});
 export function validateWorkerReceipt(value: unknown, expected: { channel: Channel; sourceSha: string; branch: string; repository: string; runId: string; runAttempt: string; inputsSha256?: string }) {
   const parsed = WorkerReceipt.safeParse(value);
   requireCheck(parsed.success, "Worker receipt is invalid or incomplete");
@@ -29,10 +44,11 @@ export type WorkerPromotionInput = { channel: Channel; sourceSha: string; inputs
 export type WorkerCandidate = { snapshotId: string; buildSha256: string; sourceCommit: string; architecture: "linux/amd64" | "linux/arm64"; storageMiB: number };
 export type WorkerDependencies = {
   build(): Promise<WorkerCandidate>;
+  cleanupBuilder(): Promise<WorkerBuilderCleanup | null>;
   qualify(image: WorkerCandidate, kind: string): Promise<{ connection: ReleaseCanaryConnection; outcome: unknown; startedAt: number }>;
   withOwner<T>(action: (owner: { loginIdentity: string; manage(document: unknown, approval?: string): Promise<any> }) => Promise<T>): Promise<{ value: T; deleted: boolean }>;
   updateIdentity(variables: Record<string, string>): Promise<void>;
-  cleanup(): Promise<boolean>;
+  cleanup(): Promise<WorkerCleanup | null>;
   assertCurrent?(): Promise<void>;
   saveEvidence?(evidence: unknown): Promise<void>;
 };
@@ -48,8 +64,11 @@ export async function promoteWorker(input: WorkerPromotionInput, deps: WorkerDep
   let cleaned = false;
   try {
     await deps.assertCurrent?.();
-    const image = await deps.build();
-    requireCheck(image.sourceCommit === input.sourceSha, "Worker build source differs from the event SHA");
+    const built = WorkerCandidateSchema.safeParse(await deps.build());
+    requireCheck(built.success && built.data.sourceCommit === input.sourceSha, "Worker build source differs from the event SHA");
+    const image = built.data;
+    const builderCleanup = WorkerBuilderCleanupSchema.safeParse(await deps.cleanupBuilder());
+    requireCheck(builderCleanup.success && builderCleanupBelongsToRun(builderCleanup.data, input, image), "Worker builder cleanup is unconfirmed; no native canary may start");
     const evidence = [];
     for (const kind of input.kinds) {
       const result = await deps.qualify(image, kind);
@@ -76,8 +95,14 @@ export async function promoteWorker(input: WorkerPromotionInput, deps: WorkerDep
       evidenceSha256: createHash("sha256").update(JSON.stringify(document)).digest("hex") });
     await deps.saveEvidence?.(approvedEvidence);
     // Retire every credential-bearing canary before creating an approval.
-    cleaned = await deps.cleanup();
-    requireCheck(cleaned, "Worker canary cleanup is unconfirmed");
+    const cleanup = WorkerCleanupSchema.safeParse(await deps.cleanup());
+    requireCheck(cleanup.success && builderCleanupBelongsToRun(cleanup.data.imageBuilder, input, image) &&
+      cleanup.data.imageBuilder.sandboxId === builderCleanup.data.sandboxId &&
+      cleanup.data.imageBuilder.deletionOperationId === builderCleanup.data.deletionOperationId &&
+      (builderCleanup.data.kind !== "physically-deleted" || cleanup.data.imageBuilder.kind === "physically-deleted") &&
+      (cleanup.data.imageBuilder.kind !== "release-owned-sanitized-unavailable" || builderCleanup.data.kind === "release-owned-sanitized-unavailable" &&
+        cleanup.data.imageBuilder.provenanceSha256 === builderCleanup.data.provenanceSha256), "Worker canary/builder cleanup is unconfirmed");
+    cleaned = true;
     await deps.assertCurrent?.();
     const change = { operationId: input.operationId, actorUserId: input.actorUserId, enabled: true,
       reason: "Ordered channel worker promotion after native qualification", evidence: approvedEvidence };
@@ -98,10 +123,10 @@ export async function promoteWorker(input: WorkerPromotionInput, deps: WorkerDep
     await deps.assertCurrent?.();
     await deps.updateIdentity({ CLOUD_WORKSPACE_PROVIDER: "boat", BOAT_SNAPSHOT_ID: image.snapshotId, BOAT_IMAGE_BUILD_SHA256: image.buildSha256,
       ZEROS_CLOUD_SOURCE_COMMIT: image.sourceCommit, ZEROS_CLOUD_IMAGE_ARCHITECTURE: image.architecture, CLOUD_WORKSPACE_STORAGE_MIB: String(image.storageMiB) });
-    return WorkerReceipt.parse({ version: 1, status: "success", channel: input.channel, sourceSha: input.sourceSha,
+    return WorkerReceipt.parse({ version: 2, status: "success", channel: input.channel, sourceSha: input.sourceSha,
       repository: input.repository, branch: input.branch, runId: input.runId, runAttempt: input.runAttempt,
       inputsSha256: input.inputsSha256, worker, qualifiedKinds: input.kinds, qualificationProfile: input.qualificationProfile, runtimeContractSha256: approvedEvidence.runtimeContractSha256,
       evidenceSha256: approvedEvidence.evidenceSha256, approvalPlanSha256: approval.value.planSha256, approvalTargetSha256: approval.value.targetSha256,
-      roleDeleted: true, resourcesDeleted: true, completedAt: new Date().toISOString() });
+      roleDeleted: true, cleanup: cleanup.data, completedAt: new Date().toISOString() });
   } finally { if (!cleaned) await deps.cleanup(); }
 }

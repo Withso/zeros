@@ -95,7 +95,7 @@ export function nativeAgentCanary(lease, profile, request = devBoatClient(profil
         row = { agentQualificationId: job.id, inputsSha256: sha256(`native-agent:${job.id}`), purpose: "native-agent-qualification",
           sourceCommit: image.sourceCommit, sourceImage: image.snapshotId,
           maxUsedHours: Math.min(options.maxUsedHours ?? Infinity, meter.body.creditUsedSeconds / 3600 + canaryBudgetHours(profile.boat)),
-          builderIntent: { key: job.id, at: Date.now(), body: { type: "default", from: image.snapshotId, ttlSeconds: CANARY_TTL_SECONDS, noEnv: true, env: {} } } };
+          builderIntent: { key: job.id, at: Date.now(), body: { type: "default", from: image.snapshotId, ttlSeconds: CANARY_TTL_SECONDS, noEnv: true, env: {}, snapshots: false } } };
       }
       const usedSeconds = await assertBudget(row);
       if (boundedLease && !row.builder) {

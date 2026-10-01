@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { promoteWorker, WorkerReceipt, type WorkerDependencies } from "./worker";
+import { describe, expect, it, vi } from "vitest";
+import { promoteWorker, WorkerReceipt, validateWorkerReceipt, type WorkerDependencies } from "./worker";
 import { buildBoatImage } from "./worker-adapters";
 import { workerConnections } from "./worker-test-fixtures";
 const sourceSha = "a".repeat(40), buildSha256 = "b".repeat(64), contract = "c".repeat(64), planSha256 = "d".repeat(64);
@@ -9,14 +9,19 @@ const input = { channel: "alpha" as const, sourceSha, inputsSha256: "e".repeat(6
 const connectionFor = (kind: string) => workerConnections().find(row => row.kind === kind)!;
 function harness() {
   const calls: string[] = [];
+  const completedAt = new Date(Date.now() - 1000).toISOString(), observedAt = new Date().toISOString();
+  const builderCleanup = { kind: "physically-deleted" as const, sandboxId: "bx_test", deletionOperationId: `bdop_${"c".repeat(32)}`,
+    operation: { id: `bdop_${"c".repeat(32)}`, kind: "sandbox" as const, targetId: "bx_test", status: "completed" as const, completedAt },
+    operationObservedAt: observedAt, unavailableObservedAt: observedAt, completedAt };
   const deps: WorkerDependencies = {
     build: async () => { calls.push("build"); return { snapshotId: "zeros-alpha-fixture", buildSha256, sourceCommit: sourceSha, architecture: "linux/amd64", storageMiB: 4096 }; },
+    cleanupBuilder: async () => { calls.push("builder-cleanup"); return builderCleanup; },
     qualify: async (_image, kind) => ({ connection: connectionFor(kind), startedAt: Date.now(), outcome: { code: 0, retirement: 0,
       renewal: { accountBinding: true, accessChanged: true, cachePublished: true, consentPreserved: true },
       report: { version: 3, qualified: true, qualificationProfile: "smoke", executionProfile: "zeros-cloud-native-v1", authority: "isolated-image-canary", qualifiedAt: new Date().toISOString(),
         identity: { sourceCommit: sourceSha, buildSha256, contractSha256: contract, kind, model: connectionFor(kind).model },
         checks: ["privateProviderHome", "engineAuthorityIsolation", "nativeWorkspaceTools", "actorAdmission", "stopAndRevocation", "nativeTurn", "nativeResume", "authentication", "nativePermissionSelection", "nativeAccessRefresh", "nativeMcp"] } } }),
-    cleanup: async () => { calls.push("cleanup"); return true; },
+    cleanup: async () => { calls.push("cleanup"); return { credentialCanaryResourcesDeleted: true, imageBuilder: builderCleanup }; },
     withOwner: async action => {
       calls.push("owner"); const value = await action({ loginIdentity: "same-login", manage: async (document: any, approval) => {
         expect(document.evidence.channel).toBe("alpha"); calls.push(approval ? "apply" : "plan");
@@ -28,6 +33,38 @@ function harness() {
   return { calls, deps };
 }
 describe("worker lane stub contracts", () => {
+  it("emits a v2 receipt without the v1 blanket physical-erasure claim", async () => {
+    const { deps } = harness();
+    const receipt = await promoteWorker(input, deps);
+    expect(receipt).toMatchObject({ version: 2, cleanup: { credentialCanaryResourcesDeleted: true,
+      imageBuilder: { kind: "physically-deleted" } } });
+    expect(receipt).not.toHaveProperty("resourcesDeleted");
+    expect(WorkerReceipt.safeParse({ ...receipt, resourcesDeleted: true }).success).toBe(false);
+  });
+  it("never treats a cleanup object with unconfirmed credential-canary deletion as success", async () => {
+    const { calls, deps } = harness();
+    const original = deps.cleanup;
+    deps.cleanup = async () => ({ ...await original(), credentialCanaryResourcesDeleted: false }) as any;
+    await expect(promoteWorker(input, deps)).rejects.toThrow("cleanup");
+    expect(calls).not.toContain("owner");
+    expect(calls).not.toContain("tuple");
+  });
+  it("keeps the strict physical meaning of historical v1 receipts", async () => {
+    const { deps } = harness(), { cleanup: _cleanup, ...receipt } = await promoteWorker(input, deps) as any;
+    const legacy = { ...receipt, version: 1, resourcesDeleted: true };
+    expect(validateWorkerReceipt(legacy, input)).toEqual(legacy);
+    expect(WorkerReceipt.safeParse({ ...legacy, resourcesDeleted: false }).success).toBe(false);
+    expect(WorkerReceipt.safeParse({ ...legacy, cleanup: { credentialCanaryResourcesDeleted: true } }).success).toBe(false);
+  });
+  it("withholds every native dispatch until a typed builder proof exists", async () => {
+    const { calls, deps } = harness();
+    deps.cleanupBuilder = async () => null;
+    const qualify = vi.fn(deps.qualify); deps.qualify = qualify;
+    await expect(promoteWorker(input, deps)).rejects.toThrow("builder cleanup");
+    expect(qualify).not.toHaveBeenCalled();
+    expect(calls).not.toContain("owner");
+    expect(calls).not.toContain("tuple");
+  });
   it("binds discovered revisions and designations into private approval evidence, not the public receipt", async () => {
     const { deps } = harness(); let saved: any;
     deps.saveEvidence = async evidence => { saved = evidence; };
@@ -46,12 +83,12 @@ describe("worker lane stub contracts", () => {
     deps.qualify = async (_image, kind) => ({ connection: connectionFor(kind), startedAt: Date.now(),
       outcome: { code: 1, retirement: 0, report: { qualified: false, failureKind: "rate-limited" } } });
     await expect(promoteWorker(input, deps)).rejects.toThrow("canary account rate-limited");
-    expect(calls).toEqual(["build", "cleanup"]);
+    expect(calls).toEqual(["build", "builder-cleanup", "cleanup"]);
   });
   it("qualifies all credential kinds, applies via the same owner and changes the complete tuple last", async () => {
     const { calls, deps } = harness(); const result = await promoteWorker(input, deps);
-    expect(calls).toEqual(["build", "cleanup", "owner", "plan", "apply", "role-delete", "tuple"]);
-    expect(result).toMatchObject({ status: "success", sourceSha, roleDeleted: true, resourcesDeleted: true });
+    expect(calls).toEqual(["build", "builder-cleanup", "cleanup", "owner", "plan", "apply", "role-delete", "tuple"]);
+    expect(result).toMatchObject({ status: "success", sourceSha, roleDeleted: true, version: 2, cleanup: { credentialCanaryResourcesDeleted: true } });
     expect(result).toMatchObject({ repository: input.repository, branch: input.branch, runId: input.runId, runAttempt: input.runAttempt,
       qualifiedKinds: expect.arrayContaining(input.kinds) });
     expect(WorkerReceipt.safeParse({ ...result, runId: undefined }).success).toBe(false);
@@ -76,7 +113,7 @@ describe("worker lane stub contracts", () => {
     expect(calls).not.toContain("owner"); expect(calls).not.toContain("tuple");
   });
   it("refuses unconfirmed cleanup and never publishes a tuple", async () => {
-    const { calls, deps } = harness(); deps.cleanup = async () => false;
+    const { calls, deps } = harness(); deps.cleanup = async () => null;
     await expect(promoteWorker(input, deps)).rejects.toThrow("cleanup");
     expect(calls).not.toContain("owner"); expect(calls).not.toContain("tuple");
   });

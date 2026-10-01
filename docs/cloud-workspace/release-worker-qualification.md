@@ -270,9 +270,12 @@ On the next release, read-only reconciliation can free an already acknowledged,
 ready candidate's named-slot hold only after a certified physically deleted
 builder, complete inventory and exact named-snapshot GET 404. It persists a
 tombstone before releasing admission. Snapshot-name absence is not proof of
-backing-storage erasure. Published snapshots remain intentionally retained;
-receipt `resourcesDeleted` refers to temporary builder/canary VMs, not the
-selected image.
+backing-storage erasure. Published snapshots remain intentionally retained.
+Historical v1 receipts remain readable: `resourcesDeleted:true` retains its
+original physical-deletion meaning for temporary builder/canary allocations,
+not the selected named image. New executions issue strict v2 receipts without
+that unscoped field. V2 requires `cleanup.credentialCanaryResourcesDeleted:true`
+and a separately validated `cleanup.imageBuilder` union, described below.
 
 Interrupted creation uses the original persisted idempotency key/body within
 the provider replay window, subject to the retained budget. Native start is
@@ -280,8 +283,81 @@ observed, never credential-redispatched. Lost owner-role creation with no
 unique provider match remains uncertain; empty inventory is not permission to
 create another role. Approval reconciles the exact primary audit/rows before
 retry. Lost tuple writes reconcile readback without a second write. Lost VM
-deletion responses and blocked physical GC retain admission holds and prevent
-approval/receipts until the matching terminal operation is proved.
+deletion responses retain admission holds and prevent approval/receipts until
+their exact operation is reconciled. Credential-bearing canaries always require
+matching terminal physical-deletion proof; builder storage has only the narrow,
+explicit release-owned boundary below.
+
+New disposable native qualification VMs, in both Dev and release lanes, set
+`snapshots:false` when created from the qualified named image. This per-VM policy
+prevents background capture of owner credentials; it does not change shared-account
+retention settings, image builders that must publish snapshots, or customer VMs.
+Native resume and fork checks exercise agent session history inside the same live
+VM, not provider VM resume or snapshot operations. A stopped or failed disposable
+VM has no provider backup and cannot resume. Historical recovery replays its exact
+persisted creation key/body, including an omitted or enabled snapshot flag; it
+never retrofits the new policy onto an existing intent. Snapshots-off is not
+deletion evidence: the release lane sets `strictCleanup:true` and still requires
+the matching terminal deletion operation before freeing compute admission or
+issuing a worker receipt. Dev's deferred-storage cleanup policy
+remains unchanged.
+
+### Release-owned builder retirement receipts
+
+An image builder may contain committed application source, previous base/source
+content, build/cache/log data and synthetic Setup fixtures. Sanitation does not
+prove arbitrary historical filesystem erasure or that the builder contains no
+data. The existing protected source/base trust remains necessary. The eligible
+path never injects live native credentials, infrastructure bearers or owner/user
+fixtures: Boat authority stays in host HTTP headers, and the original protected
+base creation intent uses `noEnv:true` and an empty environment. Image builders
+must still capture/save snapshots; their snapshot policy and global/customer
+retention settings do not change.
+
+Deferred eligibility is restricted to `purpose:release-worker`. Before deletion,
+a bounded, versioned provenance certificate binds the authenticated repository,
+channel/run/source/input digest, lease owner/generation and shared-account
+admission hold; original creation key/body/account/base/builder; exported
+commit/tree/archive hash; generation contract/attempt/script hash; qualified
+secure-Setup/source/build/storage attestation; and ready save ledger/candidate.
+Sanitation must be source/build-bound and fresh within 60 seconds **at save**,
+never a newly fabricated observation after retirement. Original intent and proof
+survive compaction/recovery; a historical intent missing this provenance cannot
+gain deferred eligibility and must use strict physical deletion instead.
+
+The adapter freshly reads the ready named image and exact source builder, the
+authenticated sandbox deletion operation (same ID/kind/target), and sandbox GET
+404. A name retirement or 404 alone is never proof. Only then may the v2 builder
+member be `release-owned-sanitized-unavailable`, with its complete certificate,
+operation and explicit `storage.status:pending`. Allowed pending stages are
+`waiting_for_uploads` (a valid provider `expectedBy`, bounded by the documented
+six-hour upload-link fence), `kept_for_newer_snapshots`, and `waiting_for_restore`.
+The last two may retain dependencies indefinitely; no deadline is invented.
+`expectedBy` passing is not erasure evidence.
+
+Pending storage is scoped to `sandbox-unshared-snapshots-and-machine-data` with
+`physicalBytes:unmeasured`; qualified VM `storageMiB` is not a measurement of
+ordinary historical or deduplicated storage. Published/shared named-image data
+remains independently retained. The complete cleanup/provenance/storage record
+is saved before the compute-terminal marker or admission release. Only compute
+is released: `builder.deleted` stays false and named-image/storage holds survive.
+Native allocation, approval, tuple selection and v2 success all require this
+validated builder state **and** strict physical canary cleanup. Unknown stage,
+available sandbox, mismatched operation, lost response, malformed recovery or
+missing proof withholds approval and success.
+
+Later executions observe at most 16 retained builders within a 15-second provider
+read budget under the same owner/account. They keep one compact record per
+builder, never rebuild, replay DELETE, prune selected/rollback images, add a
+cron service or release by age. Authenticated terminal operation plus sandbox
+404 changes the member to `physically-deleted` and sets `builder.deleted:true`,
+even if that historical named image has since been retired. Existing operation
+recovery checks physical completion before named-image readiness; a ready name
+with the exact source builder is still required for pending-storage eligibility.
+The name hold remains until separate exact retirement readback releases it;
+recovery never deletes or prunes a name. Unknown/malformed historical proof is
+retained and blocks new release work for reviewed reconciliation of its exact
+saved operation, not a new deletion or inferred success.
 
 The kit journal intentionally excludes the binary source archive. A recovered
 source manifest without its archive **before install** fails before allocation/
@@ -291,11 +367,13 @@ status/attestation without another install. Custom cleanup may finish a proven
 unstarted/no-resource image with missing shared configuration, but never
 pretends to free an unknown shared reservation.
 
-Ready candidates with physically deleted builders discard bulky build-only kit
-files from recovery receipts; immutable candidate and cleanup proof still permit
-resume. Run history remains bounded at 100 and the encrypted registry enforces
-its existing document-size cap. Reaching either bound requires reviewed history
-reconciliation, never automatic removal of uncertain intents.
+Ready candidates with validated builder cleanup discard bulky build-only kit
+files only after sufficient authenticated provenance survives; immutable
+candidate, original intent and cleanup proof still permit resume. Certificates
+are bounded at 4 KiB, run history at 100, and the encrypted registry retains its
+existing 1 MiB document cap. Saves/fencing precede provider allocation, so
+reaching a bound fails before another allocation. Reconciliation is reviewed,
+never automatic removal of uncertain intents or retained storage history.
 
 Rehearse exact-source ordering, all three modes/real renewal, rate limits,
 consent revocation, quota/slots, lost responses, physical cleanup, old-generation

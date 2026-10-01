@@ -18,6 +18,7 @@ import { ReleaseIdentity, requireCheck, type PromotionConfig } from "./contracts
 import { githubClient } from "./github";
 import { jsonClient } from "./io";
 import type { WorkerQualificationProfile } from "./worker-profile";
+import { reconcileReleaseBuilderRetentions } from "./worker-builder-retirement";
 
 const name = z.string().min(1).max(256);
 const admissionConfiguration = z.object({ version: z.literal(1), registry: z.object({ endpoint: name, bucket: name, accessKeyId: name, secretAccessKey: name,
@@ -94,6 +95,7 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
       const request = devBoatClient({ apiKey: env.BOAT_API_KEY }, lease.signal), profile = admission.profile;
       const current = async () => { await github.assertRequiredChecks(); await github.assertCurrent(); await assertWorkerApi(config); await lease.fence(); };
       await current();
+      await reconcileReleaseBuilderRetentions(config, { lease, profile, request, readAdmission: () => store.readAdmission() });
       if (!run.maxUsedHours) {
         const meter = await request("GET", `/limits?org=${encodeURIComponent(profile.boat.billingOrg)}`);
         requireCheck(meter.status === 200 && Number.isFinite(meter.body?.creditUsedSeconds) && meter.body.creditUsedSeconds >= 0, "Worker account-wide budget meter is unavailable");
@@ -112,7 +114,7 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
           const inventory = await workerSnapshotInventory(request);
           await reconcileWorkerSnapshotHolds(store, lease, profile, inventory, request);
           return reserveWorkerSlot(store, lease, profile, config.channel, record.snapshotId, inventory);
-        }, release });
+        }, release, readAdmission: () => store.readAdmission() });
       const native = nativeAgentCanary(lease, { ...profile, boat: { ...profile.boat, builderBudgetHours: execution.canaryBudgetHours } }, request, {
         reserve: (job: any) => reserveHostedAdmission(store, state, profile, { kind: "builder", computeId: `canary:${job.id}` }), release,
       }, { strictCleanup: true, maxUsedHours: run.maxUsedHours, cleanupTimeoutMs: 300_000,
@@ -122,20 +124,21 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
       const canary = releaseCanaryAdapter(lease, run, credentials, core, { qualificationProfile });
       const cleanup = async () => {
         const canariesDeleted = await canary.cleanup();
-        let builderDeleted = false;
-        try { builderDeleted = await image.cleanup(); } catch { builderDeleted = false; }
-        return canariesDeleted && builderDeleted;
+        try {
+          const imageBuilder = await image.cleanup();
+          return canariesDeleted && imageBuilder ? { credentialCanaryResourcesDeleted: true as const, imageBuilder } : null;
+        } catch { return null; }
       };
       try {
         const receipt = await promoteWorker({ ...config, kinds: execution.kinds, actorUserId: execution.actorUserId, operationId: run.operationId, inputsSha256, qualificationProfile, releaseCanaryBindings }, {
-          build: async () => { const candidate = await image.build(); requireCheck(await image.cleanup(), "Worker builder physical deletion is unconfirmed"); return candidate; },
+          build: () => image.build(), cleanupBuilder: () => image.cleanup(),
           qualify: async (candidate, kind) => { await current(); return canary.qualify(candidate, kind); }, cleanup, assertCurrent: current,
           saveEvidence: async evidence => { run.evidence = evidence; await lease.save(); },
           withOwner: runtimeOwnerAdapter(config, env, { lease, run }), updateIdentity: workerIdentityAdapter(config, env),
         });
         run.receipt = receipt; run.completedAt = receipt.completedAt; state.status = "ready"; await lease.save();
         return receipt;
-      } finally { await cleanup(); }
+      } catch (error) { await cleanup(); throw error; }
     }, { create: true });
   } finally { registry.close(); await rm(directory, { recursive: true, force: true }); }
 }
