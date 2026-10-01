@@ -6,6 +6,7 @@ export type ComputeCreditPlanningPeriod = {
   startsAtMs: number;
   endsAtMs: number;
   availableMicroUsd: number;
+  staffAllowance?: boolean;
   reservation?: {
     meterSinceMs: number;
     meterThroughMs: number;
@@ -52,9 +53,8 @@ function weightedSeconds(
   return Number(result);
 }
 
-/** Forecast only allocates existing seat credit. Future grants are never
- * presumed. A smaller funded lease can use a remaining balance without silently
- * turning that balance into an overage or cancelling another reservation. */
+/** Forecast retains finite provider leases. Staff demand funding is confirmed
+ * atomically with reservation; other periods can use only existing credit. */
 export function planManagedComputeCredit(
   input: ComputeCreditPlanInput,
 ): ComputeCreditPlan | null {
@@ -78,7 +78,8 @@ export function planManagedComputeCredit(
     if (
       !validInteger(p.startsAtMs, previousEnd) ||
       !validInteger(p.endsAtMs, p.startsAtMs + 1) ||
-      !validInteger(p.availableMicroUsd, 0, 1_000_000_000_000)
+      !validInteger(p.availableMicroUsd, 0, 1_000_000_000_000) ||
+      (p.staffAllowance !== undefined && typeof p.staffAllowance !== "boolean")
     )
       throw new Error("Invalid compute credit period");
     previousEnd = p.endsAtMs;
@@ -134,7 +135,7 @@ export function planManagedComputeCredit(
       const authorized = Math.max(prior?.authorizedMicroUsd ?? 0, required, 1);
       if (
         authorized > 1_000_000_000_000 ||
-        authorized - (prior?.authorizedMicroUsd ?? 0) > p.availableMicroUsd
+        (!p.staffAllowance && authorized - (prior?.authorizedMicroUsd ?? 0) > p.availableMicroUsd)
       )
         return null;
       allocations.push({

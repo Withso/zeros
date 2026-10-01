@@ -81,8 +81,12 @@ paid Pro. The effective entitlement prefers current paid Pro for authority;
 the allowance issuer can independently use an active staff benefit as renewal
 evidence. Both sources together still produce one allowance.
 
-The automatic allowance is 1,800,000 standard-machine seconds per user per
-monthly period (500 hours at 4 vCPU / 8 GiB). Larger machines consume faster.
+Ordinary Pro's automatic allowance is 1,800,000 standard-machine seconds per
+user per monthly period (500 hours at the default 4 vCPU / 8 GiB). Active
+`platform_owner` and `developer` staff with a current audited staff benefit have
+no monthly machine-hour cap, including when they also hold paid Pro. Larger
+machines still consume weighted, user-owned compute; Organizations do not
+sponsor or pool staff usage.
 `managed_compute_pro_accounts.anchor_at` records the first activation and cannot
 be reset by the runtime role. UTC boundaries preserve the original day/time,
 clamping short months independently: January 31 → February 28 → March 31.
@@ -102,9 +106,9 @@ cumulative usage, settlement and platform exposure remain in effect. Policy and
 rate changes fail closed within an existing period; later periods may use the
 new qualified price. Provider metering already applies the machine multiplier.
 
-There is no rollover, expired-month catch-up, top-up of an automatic period, or
-customer overage. An open-ended paid/operator activation funds one period; a
-new period needs fresh renewal evidence, paid-through validity, or current
+Ordinary Pro has no rollover, expired-month catch-up, top-up of an automatic
+period, or customer overage. An open-ended paid/operator activation funds one
+period; a new period needs fresh renewal evidence, paid-through validity, or current
 audited staff eligibility. Cancellation honors an explicit paid-through date.
 Within a finite lease's horizon, a confirmed next period can be issued ahead
 of the boundary and reserved separately. An unconfirmed next period cannot fund
@@ -117,6 +121,25 @@ switch and managed compute policy. It processes at most 50 accounts per tick
 (60 seconds), retries unavailable accounts after an hour, and queues changes
 immediately. Admission repairs a missing allowance synchronously. A process
 restart or concurrent worker cannot issue a second receipt.
+
+Expand migration `0123` adds immutable `managed_compute_staff_allowance_receipts`
+without changing the ordinary monthly receipt or its no-top-up guard. Staff
+forecasting may exceed that receipt's balance only for automatic Pro periods.
+Reservation funds the exact additional demand under the same global user lock,
+in the same transaction as the receipt, child allocation and hold. A live
+allocation claim, matching policy/price, recorded meter state, resource weight
+and finite lease horizon bound each extension. Concurrent Organizations and
+replays cannot issue duplicate funding or debit usage twice. Provider wallet,
+admission, resource, finite TTL and integer ledger limits remain unchanged.
+
+Live staff-role or benefit revocation withdraws this demand authority even when
+paid Pro remains active. Nonstaff spending is limited by the original monthly
+receipt, not accumulated staff extensions or returned holds. Suspension and
+deletion withdraw compute authority entirely. Admission and renewal recheck
+authority before provider dispatch; over-cap leases use the existing draining,
+checkpoint and stop path. Historical receipts, debits and reservations remain
+intact. There is no backfill, reverse SQL or desktop contract change; apply
+`0123` before deploying the staff-demand funding worker.
 
 ## Customer response boundary
 
@@ -140,12 +163,20 @@ sum to 100 when known. Settled/cumulative debits count as used; open reservation
 count separately. Moving allocations between Organizations is not usage. No
 hours, money, grant amount, account selector or supplier data is returned.
 Existing raw credit routes retain their monetary compatibility contract.
+Staff snapshots keep these same fields and report `ready` rather than a false
+monthly exhaustion. Their percentages describe recorded funding, not a staff
+machine-hour ceiling. After demotion, historical staff overage projects as
+bounded ordinary exhaustion rather than an unavailable or negative balance.
 
 Workspace documents expose `capabilities` (`canWrite`, `canManage`, `canStart`,
 `startUnavailableReason`). These are a current availability snapshot, not an
 authorization token or reservation. Start rechecks live membership, paid
 authority, quotas, minimum finite-lease funding and runtime state under locks.
 Collaborators see an availability reason, never the sponsor's global balance.
+Active staff's start availability ignores only the monthly balance ceiling;
+missing periods and incompatible policy/price still block it. Ordinary and
+demoted sponsors' availability uses the original monthly receipt. No staff
+authority or ledger fields are added to workspace responses.
 
 Public workspace/connection documents omit infrastructure provider names,
 targets and image references. Stored failures and customer cloud HTTP errors
