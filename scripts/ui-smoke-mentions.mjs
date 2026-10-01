@@ -9,9 +9,14 @@ export async function runMentionsSmoke({ page, check }) {
   // explicit textbox role in some TipTap builds.
   const input = page.locator('.composer-pm[contenteditable="true"]');
   await input.waitFor({ state: "visible" });
+  // Every picker assertion below assumes the editor holds exactly `@query`;
+  // the @ suggestion only opens after whitespace or at the start of a line.
+  // Confirm that precondition so leftover text from the previous query fails
+  // here, by name, rather than later as a missing picker row.
   const typeQuery = async (query) => {
     await input.fill("");
     await input.pressSequentially(`@${query}`);
+    await expect(input).toHaveText(`@${query}`);
   };
 
   await typeQuery("rollout");
