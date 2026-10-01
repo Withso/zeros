@@ -164,7 +164,12 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
         }`, { environmentId: config.environmentId, patch: { services: { [config.serviceId]: { source: { branch: config.branch } } } } });
         // A source patch can recreate the GitHub deployment trigger.
         await removeDeployTriggers();
-        requireCheck((await inspectRailway()).branch === config.branch, "Railway source retarget was not confirmed");
+        // The commit settles asynchronously (a staged change can show briefly):
+        // wait for a clean inspection, then surface its exact error if it never comes.
+        const settled = await poll(async () => {
+          try { return (await inspectRailway()).branch === config.branch; } catch { return false; }
+        }, { attempts: 24, sleep: options.pause }).catch(() => false);
+        if (!settled) requireCheck((await inspectRailway()).branch === config.branch, "Railway source retarget was not confirmed");
       }
       for (const surface of config.surfaces) {
         const project = await inspectPages(surface);
