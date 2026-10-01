@@ -119,7 +119,7 @@ describe("release dependency and authority contracts", () => {
     const step = job(workflow("release"), "submit").split("- name: Submit to Apple notary (--no-wait, no poll)\n")[1]?.split(/\n {6}- /)[0] ?? "";
     const script = step.split("run: |\n")[1]?.replace(/^ {10}/gm, "") ?? "";
     expect(script).toContain("notarytool submit");
-    const submit = (mode: string) => {
+    const submit = (mode: string, appleId = "person@example.invalid") => {
       const dir = mkdtempSync(path.join(tmpdir(), "zeros-notary-"));
       mkdirSync(path.join(dir, "bin")); mkdirSync(path.join(dir, "release"));
       writeFileSync(path.join(dir, "release", "Zeros-9.9.9-arm64.dmg"), "");
@@ -134,11 +134,13 @@ case "$MODE" in
   informational) echo '{"message":"Submission upload starting"}'; echo "Error: HTTP status code: 403. A required agreement is missing or has expired." >&2; exit 1 ;;
   membership) echo "Error: Your team's Apple Developer Program membership has expired." >&2; exit 1 ;;
   stdout) echo "Error: notary service unavailable"; exit 1 ;;
+  session) if [ "$n" -lt 2 ]; then echo "Error: HTTP status code: 408. Upload session expired. Retry the upload." >&2; exit 1; fi; echo '{"id":"submission-2"}' ;;
+  echoed) if [ "$n" -lt 2 ]; then echo "Error: HTTP status code: 500. Request for $APPLE_ID failed." >&2; exit 1; fi; echo '{"id":"submission-2"}' ;;
 esac
 `, { mode: 0o755 });
       // Stubs go first after any shell startup that edits PATH.
       const result = spawnSync("bash", ["-e", "-c", `PATH="$STUBS:$PATH"\n${script}`], { cwd: dir, encoding: "utf8", env: { PATH: process.env.PATH, STUBS: path.join(dir, "bin"), MODE: mode,
-        APPLE_ID: "person@example.invalid", APPLE_APP_SPECIFIC_PASSWORD: "fake-app-password", APPLE_TEAM_ID: "FAKETEAM" } });
+        APPLE_ID: appleId, APPLE_APP_SPECIFIC_PASSWORD: "fake-app-password", APPLE_TEAM_ID: "FAKETEAM" } });
       const read = (file: string) => { try { return readFileSync(path.join(dir, file), "utf8").trim(); } catch { return ""; } };
       const outcome = { status: result.status, output: `${result.stdout}${result.stderr}`, attempts: read("attempts"), id: read("release/notarization-submission-id.txt") };
       rmSync(dir, { recursive: true, force: true });
@@ -156,6 +158,10 @@ esac
     const stdout = submit("stdout");
     expect(stdout).toMatchObject({ status: 1, attempts: "3" });
     expect(stdout.output).toContain("notary service unavailable");
+    // Transport and server errors retry even when their text mentions expiry,
+    // and a credential value echoed back is never read as a refusal.
+    expect(submit("session")).toMatchObject({ status: 0, attempts: "2", id: "submission-2" });
+    expect(submit("echoed", "locked-person@example.invalid")).toMatchObject({ status: 0, attempts: "2", id: "submission-2" });
   });
   it("inherits the exact-source Preflight coverage instead of repeating its secret-free quality checks", () => {
     const preflight = workflow("preflight");

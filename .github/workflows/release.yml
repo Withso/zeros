@@ -412,12 +412,14 @@ jobs:
           done
           if [ -z "$DMG" ]; then echo "::error::no versioned .dmg to notarize"; exit 1; fi
           echo "Submitting ${DMG} to Apple notary (--no-wait)…"
-          # A refusal (HTTP 4xx other than 408/429, or an agreement, membership
-          # or credential error) stops at once; other failures retry twice. The
-          # whole response is classified. Only the logged excerpt is redacted
-          # and capped; GitHub also masks the secret values. A retry after an
-          # ambiguous failure can leave an unused submission in Apple's
-          # history, which is harmless: only the recorded ID is polled.
+          # A refusal (HTTP 4xx other than 408/429, or an agreement, membership,
+          # credential or account error) stops at once. Server, timeout and
+          # rate-limit errors, and anything unrecognized, retry twice. The whole
+          # redacted response is classified, so an echoed credential value never
+          # reads as a refusal; only the logged excerpt is capped. GitHub also
+          # masks the secret values. A retry after an ambiguous failure can
+          # leave an unused submission in Apple's history, which is harmless:
+          # only the recorded ID is polled.
           SUB=""
           ERR_FILE=$(mktemp)
           for ATTEMPT in 1 2 3; do
@@ -428,13 +430,15 @@ jobs:
             SUB=$(printf '%s' "$OUT" | jq -r '.id // empty' 2>/dev/null || true)
             if [ -n "$SUB" ]; then break; fi
             RESPONSE=$(printf '%s %s' "$OUT" "$(cat "$ERR_FILE")" | tr '\r\n' '  ')
+            for VALUE in "$APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_ID" "$APPLE_TEAM_ID"; do RESPONSE=${RESPONSE//"$VALUE"/[redacted]}; done
             EXCERPT=$RESPONSE
-            for VALUE in "$APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_ID" "$APPLE_TEAM_ID"; do EXCERPT=${EXCERPT//"$VALUE"/[redacted]}; done
             if [ "${#EXCERPT}" -gt 900 ]; then EXCERPT="$(printf '%s' "$EXCERPT" | head -c 600) [...] $(printf '%s' "$EXCERPT" | tail -c 300)"; fi
             case "$EXCERPT" in *[![:space:]]*) ;; *) EXCERPT="notarytool printed nothing" ;; esac
             echo "::warning::notarytool submit attempt ${ATTEMPT}/3 failed (exit ${STATUS}): ${EXCERPT}"
-            if grep -qiE 'status code: 4[0-9][0-9]' <<<"$RESPONSE" && ! grep -qiE 'status code: 4(08|29)' <<<"$RESPONSE"; then break; fi
-            if grep -qiE 'agreement|membership|credential|authenticat|unauthori[sz]ed|forbidden|not a member|expired|locked' <<<"$RESPONSE"; then break; fi
+            if grep -qiE 'status code: (5[0-9][0-9]|408|429)' <<<"$RESPONSE"; then :
+            elif grep -qiE 'status code: 4[0-9][0-9]' <<<"$RESPONSE"; then break
+            elif grep -qiE 'agreement|membership|not a member|credential|authenticat|unauthori[sz]ed|forbidden|(account|team|password)[^.]*(expired|locked|disabled|revoked)' <<<"$RESPONSE"; then break
+            fi
             if [ "$ATTEMPT" -lt 3 ]; then sleep 30; fi
           done
           rm -f "$ERR_FILE"
