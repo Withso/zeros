@@ -15,7 +15,8 @@ import { workerEnvironment, workerConnections } from "./worker-test-fixtures";
 import { promoteWorker, validateWorkerReceipt, WorkerReceipt } from "./worker";
 import { releaseCanaryAdapter } from "./worker-canary";
 import { reconcileReleaseBuilderRetentions, releaseBuilderCreationScope, retireReleaseBuilder, WorkerBuilderCleanupSchema } from "./worker-builder-retirement";
-import { settleWorkerNamedRetirement, validateWorkerNamedRetirementEvidence, workerNamedRetirementSha256 as namedDigest } from "./worker-named-retirement";
+import { settleWorkerNamedRetirement, validateWorkerNamedRetirementEvidence, WorkerNamedNativeAuditSubjectSchema,
+  workerNamedRetirementSha256 as namedDigest } from "./worker-named-retirement";
 import { releaseCanaryCleanup, retireReleaseCanary } from "./worker-canary-recovery";
 import { BoatAccountAdmission } from "../../apps/control-plane/src/cloud-workspaces/boat-account-admission";
 import { DatabaseReleaseCanaryService, releaseCanaryRequest } from "../../apps/control-plane/src/cloud-workspaces/release-canaries";
@@ -282,6 +283,30 @@ function rebindNamedFixture(test: Awaited<ReturnType<typeof namedFixture>>) {
 }
 
 describe("release-owned named retirement authority and recovery", () => {
+  it.each([false, true])("retains strict original native audit parsing across the schema bridge (pending=%s)", async pending => {
+    const test = await fixture(), native = nativeHarness(test, pending, true, "full");
+    try {
+      await test.adapter.cleanup();
+      await native.canary.qualify(test.candidate, native.input.kinds[0]!); await native.canary.cleanup();
+      const subject = namedRetirementEvidence(test, native, test.inventory.map(row => row.id)).audit.natives[0]!.audit.subject;
+      expect(subject.retirement.version).toBe(pending ? 2 : 1);
+      expect(WorkerNamedNativeAuditSubjectSchema.parse(subject)).toEqual(subject);
+      expect(WorkerNamedNativeAuditSubjectSchema.parse({ ...subject, beforeVersion: 2 })).toEqual({ ...subject, beforeVersion: 2 });
+      for (const value of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2"])
+        expect(WorkerNamedNativeAuditSubjectSchema.safeParse({ ...subject, beforeVersion: value }).success).toBe(false);
+      for (const change of [
+        (value: any) => { value.unexpected = true; },
+        (value: any) => { value.retirement.unexpected = true; },
+        (value: any) => { value.retirement.operation.unexpected = true; },
+        (value: any) => { value.retirement.operation.targetId = "bx_foreign"; },
+        (value: any) => { value.retirement.unavailableObservedAt = "2000-01-01T00:00:00.000Z"; },
+        (value: any) => { delete value.retirement; },
+      ]) {
+        const invalid = structuredClone(subject); change(invalid);
+        expect(WorkerNamedNativeAuditSubjectSchema.safeParse(invalid).success).toBe(false);
+      }
+    } finally { vi.unstubAllGlobals(); }
+  });
   it("validates complete pre-action evidence against the actual lease, original named row and primary native audits", async () => {
     const test = await namedFixture();
     try {

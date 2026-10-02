@@ -120,9 +120,9 @@ function nativeSet(state: any, ledger: any, profile: any, record: any, evidence:
       retirement.deletionOperationId === row.builder.deletionOperationId && retirement.targetId === row.builder.id &&
       same(retirement.operation, native.cleanup.operation),
     "Named retirement native audit or original identity changed");
-    const storage = "kind" in native.cleanup;
+    const cleanup = native.cleanup, storage = "kind" in cleanup;
     requireCheck(storage ? native.marker.version === 2 && retirement.version === 2 && audited.action === "cloud.release_canary.storage_retired" &&
-      same(native.cleanup.snapshotsOff, row.snapshotPolicyObserved) && row.snapshotPolicyVersion === 1 && native.creation.body.snapshots === false
+      same(cleanup.snapshotsOff, row.snapshotPolicyObserved) && row.snapshotPolicyVersion === 1 && native.creation.body.snapshots === false
       : native.marker.version === 1 && retirement.version === 1 && audited.action === "cloud.release_canary.retired",
     "Named retirement native acknowledgement is not a committed retirement");
     requireCheck(historical || same(native.marker, job.auditRetired) && same(native.cleanup, storage ? row.builder.storageRetirement : row.builder.physicalCleanup),

@@ -13,12 +13,21 @@ const deletionId = z.string().regex(/^bdop_[a-f0-9]{32}$/), owner = z.string().r
 const label = z.string().min(1).max(256);
 // The control plane owns Zod 3 contracts while release uses Zod 4. Parse them
 // through their public API; never embed one version's internals in the other.
-function nativeContract<T>(schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } }) {
+type NativeParser<T> = { safeParse(value: unknown): { success: true; data: T } | { success: false } };
+function nativeContract<T>(schema: NativeParser<T>): z.ZodType<Awaited<T>> {
   return z.unknown().transform((value, context): T => {
     const result = schema.safeParse(value);
     if (result.success) return result.data;
     context.addIssue({ code: "custom", message: "Invalid retained native contract" }); return z.NEVER;
   });
+}
+type NativeFields<Shape extends Record<string, NativeParser<unknown>>> = {
+  [Key in keyof Shape]: z.ZodType<Awaited<Extract<ReturnType<Shape[Key]["safeParse"]>, { success: true }>["data"]>>;
+};
+function nativeFields<Shape extends Record<string, NativeParser<unknown>>>(shape: Shape): NativeFields<Shape> {
+  // Object.fromEntries loses the association between each field and its output
+  // type. Every field still invokes its owning parser, preserving its checks.
+  return Object.fromEntries(Object.entries(shape).map(([key, schema]) => [key, nativeContract(schema)])) as NativeFields<Shape>;
 }
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
   : value !== null && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort()
@@ -43,15 +52,16 @@ const projection = z.custom<Record<string, Projection>>(value => value !== null 
   !Array.isArray(value) && Object.keys(value).length > 0 && boundedProjection(value) && Buffer.byteLength(JSON.stringify(value)) <= 96 * 1024);
 const retainedProjection = { projection, projectionSha256: digest };
 
-const physicalAudit = nativeZod.object({ version: nativeZod.literal(1), deletionOperationId: nativeZod.string().regex(/^bdop_[a-f0-9]{32}$/),
-  targetId: nativeZod.string().regex(/^bx_[a-z0-9]+$/), operation: NativeCanaryDeletionOperationSchema,
-  operationObservedAt: nativeZod.string().datetime({ offset: true }), unavailableObservedAt: nativeZod.string().datetime({ offset: true }),
-  provenanceSha256: nativeZod.string().regex(/^[a-f0-9]{64}$/) }).strict()
+const nativeTimestamp = nativeContract(nativeZod.string().datetime({ offset: true }));
+const physicalAudit = z.object({ version: z.literal(1), deletionOperationId: deletionId,
+  targetId: sandboxId, operation: nativeContract(NativeCanaryDeletionOperationSchema),
+  operationObservedAt: nativeTimestamp, unavailableObservedAt: nativeTimestamp, provenanceSha256: digest }).strict()
   .refine(value => value.deletionOperationId === value.operation.id && value.targetId === value.operation.targetId &&
     Date.parse(value.operation.completedAt) <= Date.parse(value.operationObservedAt) && Date.parse(value.operationObservedAt) <= Date.parse(value.unavailableObservedAt));
-export const WorkerNamedNativeAuditSubjectSchema = nativeContract(ReleaseCanaryRetirementAuditSchema.strict().extend({
-  beforeVersion: nativeZod.number().int().positive().safe().optional(), retirement: nativeZod.union([NativeCanaryStorageAuditSchema, physicalAudit]),
-}));
+export const WorkerNamedNativeAuditSubjectSchema = z.object({ ...nativeFields(ReleaseCanaryRetirementAuditSchema.shape),
+  beforeVersion: nativeContract(nativeZod.number().int().positive().safe().optional()),
+  retirement: z.union([nativeContract(NativeCanaryStorageAuditSchema), physicalAudit]),
+}).strict();
 export const WorkerNamedNativeAuditSchema = z.object({ id: z.string().regex(/^[1-9]\d*$/), databaseKey: label,
   action: z.enum(["cloud.release_canary.storage_retired", "cloud.release_canary.retired"]), organizationId: uuid, actorUserId: uuid,
   createdAt: timestamp, observedAt: timestamp, primary: z.literal(true), policyVisible: z.literal(true), latestAcrossAllPhases: z.literal(true),
@@ -111,7 +121,8 @@ export const WorkerNamedAdmissionLedgerSchema = z.object({ version: z.literal(1)
     maxNamedSnapshots: z.number().int().positive().max(10), snapshotHeadroom: z.number().int().nonnegative() }).strict().optional() }).strict();
 const namespace = z.object({ nameObservedAt: timestamp, inventoryObservedAt: timestamp, names: z.array(name).min(1).max(10),
   builder: WorkerBuilderCleanupSchema, natives: z.array(z.object({ operationId: uuid,
-    operation: nativeContract(nativeZod.union([NativeCanaryDeletionOperationSchema, NativeCanaryStorageOperationSchema, NativeCanaryStorageProgressSchema])),
+    operation: z.union([nativeContract(NativeCanaryDeletionOperationSchema), nativeContract(NativeCanaryStorageOperationSchema),
+      nativeContract(NativeCanaryStorageProgressSchema)]),
     operationObservedAt: timestamp, unavailableObservedAt: timestamp }).strict()).max(3) }).strict();
 const transition = z.object({ etag: z.string().min(1).max(1024), beforeSha256: digest, afterSha256: digest, reservationSha256: digest,
   reservationIndex: z.number().int().nonnegative(), remainder: WorkerNamedAdmissionLedgerSchema }).strict();
