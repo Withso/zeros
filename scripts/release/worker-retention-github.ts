@@ -197,6 +197,16 @@ export function retentionGithubClient(repository: string, env: NodeJS.ProcessEnv
     requireCheck(step && ["pending", "queued", "in_progress", "completed"].includes(step.status), "Observer upload step is unavailable");
     return { job, step };
   }
+  let boundCurrentProducer: (RetentionProducer & { jobId: number }) | undefined;
+  function requireActiveCurrentProducer(run: any, upload: Awaited<ReturnType<typeof observerUpload>>, producer: RetentionProducer) {
+    const current = RetentionProducerSchema.parse(producer);
+    requireCheck(String(run.id) === current.runId && String(run.run_attempt) === current.runAttempt && run.status === "in_progress" && run.conclusion === null &&
+      upload && upload.job.run_attempt === Number(current.runAttempt) && upload.job.status === "in_progress" && upload.job.conclusion === null &&
+      upload.job.completed_at === null && (!boundCurrentProducer || boundCurrentProducer.runId === current.runId &&
+        boundCurrentProducer.runAttempt === current.runAttempt && boundCurrentProducer.jobId === upload.job.id),
+      "Current observer producer is not the exact active run/job/attempt");
+    boundCurrentProducer ??= { ...current, jobId: upload.job.id };
+  }
   async function validateIntentArtifact(run: any, attempt: number, subject: RetentionSubject, artifacts: any[], observedUpload?: Awaited<ReturnType<typeof observerUpload>>) {
     const upload = observedUpload ?? await observerUpload(run, attempt, subject);
     requireCheck(upload && completed(upload.step), "Observer intent upload did not complete authoritatively");
@@ -217,10 +227,11 @@ export function retentionGithubClient(repository: string, env: NodeJS.ProcessEnv
       requireCheck(run.status === "completed" || ownCurrent, "A prior matching observer is still active");
       for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
         const upload = await observerUpload(run, attempt, subject, ownCurrent && !current && attempt === run.run_attempt && !matching.length);
+        if (current && ownCurrent && attempt === Number(current.runAttempt)) requireActiveCurrentProducer(run, upload, current);
         const reached = upload && upload.step.conclusion !== "skipped" && !["pending", "queued"].includes(upload.step.status);
         if (!reached) { requireCheck(!matching.length, "Intent exists without a matching upload producer"); continue; }
         if (current && ownCurrent && attempt === Number(current.runAttempt)) {
-          await validateIntentArtifact(run, attempt, subject, artifacts); continue;
+          await validateIntentArtifact(run, attempt, subject, artifacts, upload); continue;
         }
         if (completed(upload.step) && matching.length) await validateIntentArtifact(run, attempt, subject, artifacts);
         requireCheck(false, matching.length ? "Original failed-leaf intent is consumed; observation only" : "Prior intent upload is missing or uncertain; observation only");
@@ -232,7 +243,7 @@ export function retentionGithubClient(repository: string, env: NodeJS.ProcessEnv
     for (let observation = 0; observation < 5; observation++) {
       const run = await read(`/actions/runs/${intent.producer.runId}`);
       observerRun(run, intent.subject);
-      requireCheck(String(run.id) === intent.producer.runId && String(run.run_attempt) === intent.producer.runAttempt && run.status === "in_progress",
+      requireCheck(String(run.id) === intent.producer.runId && String(run.run_attempt) === intent.producer.runAttempt && run.status === "in_progress" && run.conclusion === null,
         "Only the current observer attempt may request once");
       const artifacts = await list(`/actions/runs/${run.id}/artifacts`, "artifacts"), name = retentionIntentKey(intent.subject);
       const matching = artifacts.filter(artifact => artifact.name === name || String(artifact.id) === expected.id);
@@ -242,6 +253,7 @@ export function retentionGithubClient(repository: string, env: NodeJS.ProcessEnv
           "Current immutable intent readback does not match upload and local decision");
       }
       const upload = await observerUpload(run, Number(intent.producer.runAttempt), intent.subject);
+      requireActiveCurrentProducer(run, upload, intent.producer);
       requireCheck(upload && (completed(upload.step) || (["pending", "queued", "in_progress"].includes(upload.step.status) && upload.step.conclusion === null)),
         "Observer intent upload did not complete authoritatively");
       if (completed(upload.step) && matching.length) {

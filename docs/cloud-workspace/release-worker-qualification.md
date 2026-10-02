@@ -421,7 +421,10 @@ digest/readback and an exclusive local request flag fence duplicates. The
 current observer's acknowledged upload gets at most five fresh GET passes with
 four one-second pauses for step/list visibility only. Invalid identity,
 integrity or producer evidence fails immediately; exhausted visibility remains
-consumed and sends no POST. A prior intent, interrupted upload or missing
+consumed and sends no POST. Own-upload and fresh current-history readback require
+the same in-progress run/job/attempt, null conclusions and a null job completion
+timestamp. Completed historical producers still authenticate consumed prior
+intents. A prior intent, interrupted upload or missing
 attributable history is observation-only,
 including after refusal or lost acknowledgement. Never delete/reset these
 intents or their workflow history to authorize another POST. Crash after arming

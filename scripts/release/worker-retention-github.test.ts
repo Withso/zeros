@@ -87,19 +87,23 @@ function fixture(channel: RetentionSubject["channel"] = "alpha") {
 }
 
 async function currentUploadFixture(change?: (value: any) => void) {
-  const test = fixture(); test.arm(); test.observer.status = "in_progress"; test.observerJobs[0].status = "in_progress";
-  const payload = structuredClone(test.intent); change?.(payload);
+  const test = fixture(); test.arm();
+  Object.assign(test.observer, { status: "in_progress", conclusion: null });
+  Object.assign(test.observerJobs[0], { status: "in_progress", conclusion: null, completed_at: null });
   const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-worker-upload-")); uploadDirectories.push(directory);
-  await writeFile(path.join(directory, "retention-intent.json"), JSON.stringify(payload), { mode: 0o600, flag: "wx" });
-  let bytes = execFileSync("zip", ["-q", "-X", "-", "retention-intent.json"], { cwd: directory, maxBuffer: 128 * 1024 });
-  const digest = createHash("sha256").update(bytes).digest("hex");
-  Object.assign(test.observerArtifacts[0], { size_in_bytes: bytes.length, digest: `sha256:${digest}` });
+  await writeFile(path.join(directory, "hosted-services.json"), JSON.stringify(test.receipt), { mode: 0o600, flag: "wx" });
+  const serviceBytes = execFileSync("zip", ["-q", "-X", "-", "hosted-services.json"], { cwd: directory, maxBuffer: 128 * 1024 });
+  Object.assign(test.artifacts[1], { size_in_bytes: serviceBytes.length, digest: `sha256:${createHash("sha256").update(serviceBytes).digest("hex")}` });
+  let bytes = Buffer.alloc(0);
   let jobReads = 0, artifactReads = 0, delay: "step" | "artifact" | undefined, neverVisible = false;
   const fetcher = vi.fn(async (url: any, init: RequestInit = {}): Promise<Response> => {
     const target = new URL(String(url));
     if (target.hostname === "fixture.blob.core.windows.net") {
-      expect(init.headers).toBeUndefined(); return new Response(bytes);
+      expect(init.headers).toBeUndefined(); return new Response(target.pathname === "/hosted-services.zip" ? serviceBytes : bytes);
     }
+    if (target.pathname === "/repos/example/zeros/actions/artifacts/601/zip") return new Response(null, {
+      status: 302, headers: { location: "https://fixture.blob.core.windows.net/hosted-services.zip" },
+    });
     if (target.pathname === "/repos/example/zeros/actions/runs/789/attempts/1/jobs") {
       jobReads++;
       if (delay === "step" && (neverVisible || jobReads === 1)) {
@@ -115,8 +119,16 @@ async function currentUploadFixture(change?: (value: any) => void) {
     return test.fetcher(url, init);
   });
   const sleep = vi.fn(async (_milliseconds: number) => {});
+  const options = { ...test.options, fetch: fetcher as typeof fetch, command: undefined, sleep };
+  const { retentionGithubClient } = await import("./worker-retention-github");
+  test.intent.metadataSha256 = (await retentionGithubClient(test.subject.repository, { GH_TOKEN: "synthetic" }, options).inspect(test.subject)).sha256;
+  const payload = structuredClone(test.intent); change?.(payload);
+  await writeFile(path.join(directory, "retention-intent.json"), JSON.stringify(payload), { mode: 0o600, flag: "wx" });
+  bytes = execFileSync("zip", ["-q", "-X", "-", "retention-intent.json"], { cwd: directory, maxBuffer: 128 * 1024 });
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  Object.assign(test.observerArtifacts[0], { size_in_bytes: bytes.length, digest: `sha256:${digest}` });
   return { ...test, acknowledged: { id: "700", digest }, fetcher,
-    options: { ...test.options, fetch: fetcher as typeof fetch, command: undefined, sleep }, sleep,
+    options, sleep,
     delay: (value: "step" | "artifact", forever = false) => { delay = value; neverVisible = forever; },
     corruptBytes: () => { bytes = Buffer.from("not the acknowledged ZIP"); }, reads: () => ({ jobs: jobReads, artifacts: artifactReads }) };
 }
@@ -126,7 +138,7 @@ async function currentUploadRequest(test: Awaited<ReturnType<typeof currentUploa
   const client = retentionGithubClient(test.subject.repository, { GH_TOKEN: "synthetic", GITHUB_RUN_ID: "789", GITHUB_RUN_ATTEMPT: "1" }, test.options);
   const markRequested = vi.fn(async () => {});
   const request = () => requestRetentionResume(test.intent, test.intent.producer, {
-    inspect: async () => ({ sha256: test.intent.metadataSha256, failedAt: test.intent.failedAt }),
+    inspect: client.inspect,
     completion: async () => ({ sha256: test.intent.cleanupSha256, completedAt: test.intent.completedAt }),
     assertIntentAvailable: client.assertIntentAvailable, verifyOwnIntent: intent => client.verifyOwnIntent(intent, test.acknowledged),
     markRequested, rerun: client.rerun });
@@ -213,7 +225,8 @@ describe("authoritative retention GitHub metadata", () => {
       .assertIntentAvailable(test.subject, reason === "observer rerun" ? { runId: "789", runAttempt: "2" } : undefined)).rejects.toThrow();
   });
   it("authenticates only the current exact producing attempt and uploaded artifact before arming", async () => {
-    const test = fixture(); test.arm(); test.observer.status = "in_progress";
+    const test = fixture(); test.arm(); Object.assign(test.observer, { status: "in_progress", conclusion: null });
+    Object.assign(test.observerJobs[0], { status: "in_progress", conclusion: null, completed_at: null });
     const { retentionGithubClient } = await import("./worker-retention-github");
     const client = retentionGithubClient(test.subject.repository, { GH_TOKEN: "synthetic" }, test.options);
     await expect(client.verifyOwnIntent(test.intent, { id: "700", digest: test.digest.slice(7) })).resolves.toBeUndefined();
@@ -222,8 +235,9 @@ describe("authoritative retention GitHub metadata", () => {
     await expect(client.verifyOwnIntent(test.intent, { id: "700", digest: "f".repeat(64) })).rejects.toThrow();
   });
   it("does not require an unstarted future upload step to be visible in its own active preparation", async () => {
-    const test = fixture(); test.observerRuns.push(test.observer); test.observer.status = "in_progress";
-    test.observerJobs[0].status = "in_progress"; test.observerJobs[0].steps = [{ name: "Observe exact native physical completion", status: "in_progress", conclusion: null }];
+    const test = fixture(); test.observerRuns.push(test.observer); Object.assign(test.observer, { status: "in_progress", conclusion: null });
+    Object.assign(test.observerJobs[0], { status: "in_progress", conclusion: null, completed_at: null });
+    test.observerJobs[0].steps = [{ name: "Observe exact native physical completion", status: "in_progress", conclusion: null }];
     const { retentionGithubClient } = await import("./worker-retention-github");
     await expect(retentionGithubClient(test.subject.repository, { GH_TOKEN: "synthetic", GITHUB_RUN_ID: "789", GITHUB_RUN_ATTEMPT: "1" }, test.options)
       .assertIntentAvailable(test.subject)).resolves.toBeUndefined();
@@ -262,7 +276,7 @@ describe("current acknowledged upload visibility", () => {
     await expect(request()).rejects.toThrow("bounded observation");
     expect(test.reads()[delay === "step" ? "jobs" : "artifacts"]).toBe(5); expect(test.sleep).toHaveBeenCalledTimes(4);
     expect(markRequested).not.toHaveBeenCalled(); expect(test.fetcher.mock.calls.every(([, input]) => input?.method !== "POST")).toBe(true);
-    test.observer.status = "completed";
+    Object.assign(test.observer, { status: "completed", conclusion: "failure" });
     await expect(client.assertIntentAvailable(test.subject)).rejects.toThrow();
     expect(test.sleep).toHaveBeenCalledTimes(4);
   });
@@ -298,5 +312,42 @@ describe("current acknowledged upload visibility", () => {
     const { request, markRequested } = await currentUploadRequest(test);
     await expect(request()).rejects.toThrow(); expect(test.sleep).not.toHaveBeenCalled(); expect(markRequested).not.toHaveBeenCalled();
     expect(test.fetcher.mock.calls.every(([, input]) => input?.method !== "POST")).toBe(true);
+  });
+
+  for (const boundary of ["visibility pause", "current history readback"] as const) {
+    it.each([
+      ["cancelled job", (test: any) => { Object.assign(test.observerJobs[0], { status: "completed", conclusion: "cancelled", completed_at: new Date(test.options.now()).toISOString() }); }],
+      ["failed job", (test: any) => { Object.assign(test.observerJobs[0], { status: "completed", conclusion: "failure", completed_at: new Date(test.options.now()).toISOString() }); }],
+      ["successful completed job", (test: any) => { Object.assign(test.observerJobs[0], { status: "completed", conclusion: "success", completed_at: new Date(test.options.now()).toISOString() }); }],
+      ["completed job without conclusion", (test: any) => { test.observerJobs[0].status = "completed"; }],
+      ["cancelled run", (test: any) => { Object.assign(test.observer, { status: "completed", conclusion: "cancelled" }); }],
+      ["contradictory active run", (test: any) => { test.observer.conclusion = "cancelled"; }],
+      ["contradictory active job", (test: any) => { test.observerJobs[0].conclusion = "cancelled"; }],
+      ["completed timestamp on active job", (test: any) => { test.observerJobs[0].completed_at = new Date(test.options.now()).toISOString(); }],
+      ["missing current job attempt", (test: any) => { delete test.observerJobs[0].run_attempt; }],
+      ["changed current job identity", (test: any) => { test.observerJobs[0].id = 901; }],
+    ] as const)(`rejects an observed %s at ${boundary} before another pause or POST`, async (_label, change) => {
+      const test = await currentUploadFixture();
+      const { client, request, markRequested } = await currentUploadRequest(test);
+      if (boundary === "visibility pause") {
+        test.delay("step"); test.sleep.mockImplementationOnce(async () => { change(test); });
+      } else {
+        const verify = client.verifyOwnIntent;
+        vi.spyOn(client, "verifyOwnIntent").mockImplementation(async (intent, expected) => { await verify(intent, expected); change(test); });
+      }
+      await expect(request()).rejects.toThrow();
+      expect(test.sleep).toHaveBeenCalledTimes(boundary === "visibility pause" ? 1 : 0);
+      expect(markRequested).not.toHaveBeenCalled(); expect(test.fetcher.mock.calls.every(([, input]) => input?.method !== "POST")).toBe(true);
+    });
+  }
+
+  it.each(["cancelled", "failure", "success"] as const)("authenticates a historical %s producer but keeps its prior intent consumed", async conclusion => {
+    const test = await currentUploadFixture();
+    Object.assign(test.observer, { status: "completed", conclusion });
+    Object.assign(test.observerJobs[0], { status: "completed", conclusion, completed_at: new Date(test.options.now()).toISOString() });
+    const { client } = await currentUploadRequest(test);
+    await expect(client.assertIntentAvailable(test.subject)).rejects.toThrow("consumed");
+    expect(test.fetcher.mock.calls.some(([url]) => new URL(String(url)).pathname.endsWith("/artifacts/700/zip"))).toBe(true);
+    expect(test.sleep).not.toHaveBeenCalled(); expect(test.fetcher.mock.calls.every(([, input]) => input?.method !== "POST")).toBe(true);
   });
 });
