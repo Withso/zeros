@@ -17,7 +17,8 @@ import { readCloudAgentRuntimeAttestation } from "../../../apps/desktop/src/engi
 import { NativeToolEvidence } from "../lib/native-tool-evidence";
 import { parseNativeQualificationInput, nativeQualificationPermission } from "../lib/native-qualification-input";
 import { nativeMcpCanarySource } from "../lib/native-mcp-canary";
-import { failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver } from "../lib/native-qualification-steps";
+import { failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver, runNativeMcpQualification } from "../lib/native-qualification-steps";
+import type { NativeQualificationPhase } from "../lib/native-qualification-diagnostics";
 import { cloudMcpDigest } from "../../../apps/desktop/src/engine/agents/cloud-mcp";
 import { runNativeSmokeCanary } from "../lib/native-canary-smoke";
 
@@ -41,7 +42,7 @@ const checks: string[] = [];
 const activity = { permissions: 0, rejectedPermissions: 0, questions: 0, messageChunks: 0, toolEvents: 0 };
 let toolEvidence: ReturnType<NativeToolEvidence["summary"]> | undefined;
 let failure: "timeout" | "assertion" | "runtime" | undefined, failureDetail: ReturnType<typeof failureSignature> = {};
-let phase = "input", gateway: AgentGateway | undefined, failed = false;
+let phase: NativeQualificationPhase = "input", gateway: AgentGateway | undefined, failed = false;
 let qualificationProfile: "smoke" | "full" = "full";
 let identity: { sourceCommit: string; buildSha256: string; contractSha256: string; kind: string; model: string } | undefined;
 const active = new Set<CloudProviderExecution>();
@@ -292,13 +293,17 @@ try{
     assert.equal(failed, false);
     return;
   }
-  phase = "native-mcp";
   reply = "";
-  await bounded(gateway.prompt(provider, first.sessionId, [{ type: "text", text: "Call the probe tool from the zeros-qualification MCP server with no arguments. Reply with its result. Do not use shell or file tools for this check." }]));
-  tools.assertMcp("zeros-qualification", "probe");
-  assert.equal(await readFile(path.join(workspace, mcpFiles.proof), "utf8"), mcpMarker);
-  assert(reply.includes(mcpMarker)); checks.push("nativeMcp");
-  assert(rawHistoricalSecretObservations > 0);
+  await runNativeMcpQualification({
+    phase(value) { phase = value; },
+    async prompt() {
+      await bounded(gateway!.prompt(provider, first.sessionId, [{ type: "text", text: "Call the probe tool from the zeros-qualification MCP server with no arguments. Reply with its result. Do not use shell or file tools for this check." }]));
+    },
+    toolEvidence() { tools.assertMcp("zeros-qualification", "probe"); },
+    async proof() { assert.equal(await readFile(path.join(workspace, mcpFiles.proof), "utf8"), mcpMarker); },
+    reply() { assert(reply.includes(mcpMarker)); checks.push("nativeMcp"); },
+    secretObservation() { assert(rawHistoricalSecretObservations > 0); },
+  });
   reply = "";
   await writeFile(path.join(workspace, files.challenge), marker, { flag: "wx", mode: 0o644 });
   await chown(path.join(workspace, files.challenge), worker.uid, worker.gid);
