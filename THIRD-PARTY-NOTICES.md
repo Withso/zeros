@@ -100,6 +100,13 @@ regression test covers that dependency change.
   and generated-key behavioral checks. An unpatched or additional Forge version
   fails closed before the registry audit. Installed-dependency regressions cover
   exponents 3/65537, valid signatures, optional NULL and malformed structures.
+  The shared audit wrapper accepts only the root and independent control-plane
+  graph roots. The control-plane audits its own lock without the Forge exception
+  or root dependencies; effective GHSA/CVE exceptions are checked before audit.
+  The root guard loads its explicitly declared `js-yaml` development tooling
+  only when invoked, inventories parsed package/snapshot maps and checks the
+  actual patch-binding maps. Duplicate keys, multiple documents and merge keys
+  in those maps fail closed. This tooling is not a packaged runtime dependency.
 - **Refresh:** reproduce with `pnpm patch node-forge@1.4.0`, apply the functional
   RSA change from the pinned PR, then `pnpm patch-commit <patch-directory>`.
   Keep unrelated dependency resolutions unchanged. Run the Forge/audit tests,

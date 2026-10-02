@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -62,6 +63,11 @@ describe("Forge advisory exception installed-patch guard", () => {
     cpSync(forgeDirectory, join(fixtureRoot, "node_modules/node-forge"), {
       recursive: true,
     });
+    symlinkSync(
+      dirname(rootRequire.resolve("js-yaml/package.json")),
+      join(fixtureRoot, "node_modules/js-yaml"),
+      "dir",
+    );
   });
 
   afterEach(() => {
@@ -99,6 +105,156 @@ describe("Forge advisory exception installed-patch guard", () => {
     );
     expect(() => verifyNodeForgePatch({ root: fixtureRoot })).toThrow(
       /workspace patch binding missing/,
+    );
+  });
+
+  it("requires the patch binding in patchedDependencies, not an unrelated map", async () => {
+    const binding = `  "node-forge@1.4.0": ${pin.patch}\n`;
+    replaceFixture("pnpm-workspace.yaml", binding, "");
+    appendFileSync(
+      join(fixtureRoot, "pnpm-workspace.yaml"),
+      `\nreviewFixtureBindings:\n${binding}`,
+    );
+    const workspace = rootRequire("js-yaml").load(
+      readFileSync(join(fixtureRoot, "pnpm-workspace.yaml"), "utf8"),
+    );
+    expect(workspace.patchedDependencies["node-forge@1.4.0"]).toBeUndefined();
+    const execute = vi.fn().mockResolvedValue({ exitCode: 0, output: "clean" });
+    await expect(
+      runCheckedAudit({
+        verifyPatch: () => verifyNodeForgePatch({ root: fixtureRoot }),
+        execute,
+      }),
+    ).rejects.toThrow(/workspace patch binding missing/);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it.each(["'", '"'])(
+    "rejects an additional unpatched snapshot with %s-quoted YAML keys",
+    async (quote) => {
+      replaceFixture(
+        "pnpm-lock.yaml",
+        "\nsnapshots:\n",
+        `\nsnapshots:\n\n  ${quote}node-forge@1.4.0${quote}: {}\n`,
+      );
+      const lock = rootRequire("js-yaml").load(
+        readFileSync(join(fixtureRoot, "pnpm-lock.yaml"), "utf8"),
+      );
+      expect(
+        Object.keys(lock.snapshots).filter((key) => key.startsWith("node-forge@")),
+      ).toHaveLength(2);
+      const execute = vi.fn().mockResolvedValue({ exitCode: 0, output: "clean" });
+      await expect(
+        runCheckedAudit({
+          verifyPatch: () => verifyNodeForgePatch({ root: fixtureRoot }),
+          execute,
+        }),
+      ).rejects.toThrow(/unreviewed Forge resolution/);
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["'", '"'])(
+    "rejects an additional Forge version with %s-quoted package and snapshot keys",
+    async (quote) => {
+      replaceFixture(
+        "pnpm-lock.yaml",
+        "\npackages:\n",
+        `\npackages:\n\n  ${quote}node-forge@1.3.1${quote}:\n    resolution: {integrity: sha512-unreviewed}\n`,
+      );
+      replaceFixture(
+        "pnpm-lock.yaml",
+        "\nsnapshots:\n",
+        `\nsnapshots:\n\n  ${quote}node-forge@1.3.1${quote}: {}\n`,
+      );
+      const lock = rootRequire("js-yaml").load(
+        readFileSync(join(fixtureRoot, "pnpm-lock.yaml"), "utf8"),
+      );
+      for (const section of [lock.packages, lock.snapshots]) {
+        expect(
+          Object.keys(section).filter((key) => key.startsWith("node-forge@")),
+        ).toHaveLength(2);
+      }
+      const execute = vi.fn().mockResolvedValue({ exitCode: 0, output: "clean" });
+      await expect(
+        runCheckedAudit({
+          verifyPatch: () => verifyNodeForgePatch({ root: fixtureRoot }),
+          execute,
+        }),
+      ).rejects.toThrow(/unreviewed Forge resolution/);
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["'", '"'])("accepts the exact reviewed maps with %s-quoted keys", (quote) => {
+    replaceFixture(
+      "pnpm-workspace.yaml",
+      `  "node-forge@1.4.0": ${pin.patch}\n`,
+      `  ${quote}node-forge@1.4.0${quote}: ${pin.patch}\n`,
+    );
+    replaceFixture(
+      "pnpm-lock.yaml",
+      "  node-forge@1.4.0:\n",
+      `  ${quote}node-forge@1.4.0${quote}:\n`,
+    );
+    const snapshot = `node-forge@1.4.0(patch_hash=${pin.patchSha256})`;
+    replaceFixture(
+      "pnpm-lock.yaml",
+      `  ${snapshot}: {}\n`,
+      `  ${quote}${snapshot}${quote}: {}\n`,
+    );
+    expect(() => verifyNodeForgePatch({ root: fixtureRoot })).not.toThrow();
+  });
+
+  it.each([
+    ["pnpm-lock.yaml", "\npackages:\n  'node-forge@1.4.0': {}\n"],
+    ["pnpm-lock.yaml", "\nsnapshots:\n  'node-forge@1.4.0': {}\n"],
+    ["pnpm-lock.yaml", "\npatchedDependencies: {}\n"],
+    ["pnpm-workspace.yaml", "\npatchedDependencies: {}\n"],
+    ["pnpm-lock.yaml", "\ninvalidFixture: [\n"],
+    ["pnpm-workspace.yaml", "\n---\npatchedDependencies: {}\n"],
+  ])("rejects duplicate or malformed YAML in %s (%s)", (filename, suffix) => {
+    appendFileSync(join(fixtureRoot, filename), suffix);
+    expect(() => verifyNodeForgePatch({ root: fixtureRoot })).toThrow(/invalid YAML/);
+  });
+
+  it("rejects a duplicate quoted snapshot key instead of silently overwriting it", () => {
+    replaceFixture(
+      "pnpm-lock.yaml",
+      "\nsnapshots:\n",
+      `\nsnapshots:\n\n  'node-forge@1.4.0(patch_hash=${pin.patchSha256})': {}\n`,
+    );
+    expect(() => verifyNodeForgePatch({ root: fixtureRoot })).toThrow(/invalid YAML/);
+  });
+
+  it("rejects a duplicate quoted workspace patch key", () => {
+    const binding = `  "node-forge@1.4.0": ${pin.patch}\n`;
+    replaceFixture(
+      "pnpm-workspace.yaml",
+      binding,
+      `${binding}  'node-forge@1.4.0': ${pin.patch}\n`,
+    );
+    expect(() => verifyNodeForgePatch({ root: fixtureRoot })).toThrow(/invalid YAML/);
+  });
+
+  it("fails closed on YAML map merges containing additional Forge resolutions", () => {
+    replaceFixture(
+      "pnpm-lock.yaml",
+      "\npackages:\n",
+      "\nreviewFixture: &extraForge\n  'node-forge@1.3.1': {}\n\npackages:\n  <<: *extraForge\n",
+    );
+    replaceFixture(
+      "pnpm-lock.yaml",
+      "\nsnapshots:\n",
+      "\nsnapshots:\n  <<: *extraForge\n",
+    );
+    const lock = rootRequire("js-yaml").load(
+      readFileSync(join(fixtureRoot, "pnpm-lock.yaml"), "utf8"),
+    );
+    expect(Object.hasOwn(lock.packages, "node-forge@1.3.1")).toBe(true);
+    expect(Object.hasOwn(lock.snapshots, "node-forge@1.3.1")).toBe(true);
+    expect(() => verifyNodeForgePatch({ root: fixtureRoot })).toThrow(
+      /unreviewed Forge resolution/,
     );
   });
 
