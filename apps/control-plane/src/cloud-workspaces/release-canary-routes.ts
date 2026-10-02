@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { rateLimit } from "../ratelimit.js";
 import type { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService } from "./release-canaries.js";
 
-type AdmissionService = Pick<DatabaseReleaseCanaryService, "preflight" | "admit">;
+type AdmissionService = Pick<DatabaseReleaseCanaryService, "preflight" | "admit" | "retire">;
 type DesignationService = Pick<DatabaseReleaseCanaryDesignationService, "readDesignation" | "designate">;
 const internal = "/internal/v1/release-canaries";
 const designation = "/v1/cloud-agent-credentials/:credential/release-canary";
@@ -15,6 +15,7 @@ export function createReleaseCanaryAdmissionRoutes(service: AdmissionService) {
   app.use(`${internal}/*`, async (context, next) => { context.header("Cache-Control", "no-store"); await next(); });
   app.post(`${internal}/preflight`, async context => context.json(await service.preflight(await context.req.json().catch(() => null), context.req.header("authorization"))));
   app.post(`${internal}/admissions`, async context => context.json(await service.admit(await context.req.json().catch(() => null), context.req.header("authorization"))));
+  app.post(`${internal}/retirements`, async context => context.json(await service.retire(await context.req.json().catch(() => null), context.req.header("authorization"))));
   return app;
 }
 export function createReleaseCanaryDesignationRoutes(service: DesignationService) {

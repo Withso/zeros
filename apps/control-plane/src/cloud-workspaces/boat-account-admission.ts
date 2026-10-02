@@ -2,7 +2,8 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { z } from "zod";
 import type { ReleaseCanaryRequest } from "./release-canaries.js";
-import { ReleaseCanaryBindingsSchema } from "./release-canary-contract.js";
+import { ReleaseCanaryBindingsSchema, type ReleaseCanaryRetirement, type ReleaseCanaryRetirementAudit } from "./release-canary-contract.js";
+import { releaseCanaryRetirementJournal } from "./release-canary-retirement.js";
 
 export const BOAT_SNAPSHOT_BUDGET = { alpha: 2, beta: 2, production: 2, dev: 2, base: 1, headroom: 1, limit: 10 } as const;
 const channels = ["alpha", "beta", "production"] as const;
@@ -165,5 +166,17 @@ export class BoatAccountAdmission {
       row?.purpose !== "native-agent-qualification" || row.sourceImage !== request.target.snapshotId || row.sourceCommit !== request.sourceSha ||
       row.builder?.id !== request.target.id || row.builder.deleted || row.builder.retiredAt || row.builder.deleteRequested || !row.machineAttestationStarted || !row.nativeDispatchStarted)
       unavailable("Release canary target is not a fenced disposable allocation from this exact release run");
+    if (row.snapshotPolicyVersion !== undefined) {
+      if (row.snapshotPolicyVersion !== 1 || row.builderIntent?.body?.snapshots !== false ||
+        row.snapshotPolicyObserved?.version !== 1 || row.snapshotPolicyObserved.targetId !== request.target.id || row.snapshotPolicyObserved.snapshots !== false ||
+        !Number.isFinite(Date.parse(row.snapshotPolicyObserved.observedAt))) unavailable("Release canary snapshots-off policy is unconfirmed");
+      return { snapshotsOffRequired: true as const };
+    }
+    return undefined;
+  }
+  async assertCanaryRetirement(audit: ReleaseCanaryRetirementAudit, input: ReleaseCanaryRetirement, organizationId: string) {
+    const owner = releaseWorkerOwner(audit.channel), document = await this.store.readDocument(`release-workers/v1/${audit.channel}.json`, owner);
+    const { ledger } = await this.read();
+    return releaseCanaryRetirementJournal(document?.state, ledger, this.profile, audit, input, organizationId);
   }
 }

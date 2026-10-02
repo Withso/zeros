@@ -37,7 +37,7 @@ function restoreKitState(directory, packed) {
   }
 }
 
-export async function confirmBoatDeletion(lease, record, request, { allowDeferredStorage = false, ...polling } = {}) {
+export async function confirmBoatDeletion(lease, record, request, { allowDeferredStorage = false, beforeDeleted, ...polling } = {}) {
   if (record.deleted) return;
   if (!/^bx_[a-z0-9]+$/.test(record.id ?? "")) throw new Error("Dev builder allocation is unconfirmed; retain its receipt");
   if (!record.deletionOperationId) {
@@ -47,6 +47,7 @@ export async function confirmBoatDeletion(lease, record, request, { allowDeferre
     if (response.status >= 300 || operation?.kind !== "sandbox" || operation.targetId !== record.id || !/^bdop_[a-f0-9]{32}$/.test(operation.id ?? "")) throw new Error("Dev builder deletion is unconfirmed; a 404 alone does not prove deletion");
     record.deletionOperationId = operation.id; await lease.save();
   }
+  let completedOperation;
   const result = await pollProvider("Dev builder physical deletion", async () => {
     const response = await request("GET", `/deletion-operations/${record.deletionOperationId}`), op = response.body?.operation;
     if (response.status !== 200 || op?.id !== record.deletionOperationId || op.targetId !== record.id || op.kind !== "sandbox") throw new Error("Dev builder deletion proof changed");
@@ -64,9 +65,12 @@ export async function confirmBoatDeletion(lease, record, request, { allowDeferre
       await lease.save(); return "storage-pending";
     }
     if (op.status === "blocked") throw new Error("Boat blocked Dev builder deletion; retain the operation receipt for retry");
-    return op.status === "completed" && typeof op.completedAt === "string" && Number.isFinite(Date.parse(op.completedAt)) ? "completed" : false;
+    if (op.status === "completed" && typeof op.completedAt === "string" && Number.isFinite(Date.parse(op.completedAt))) {
+      completedOperation = op; return "completed";
+    }
+    return false;
   }, { signal: lease.signal, timeout: 300_000, ...polling });
-  if (result === "completed") { record.deleted = true; await lease.save(); }
+  if (result === "completed") { await beforeDeleted?.(completedOperation); record.deleted = true; await lease.save(); }
 }
 
 export async function reconcileRetiredBuilders(lease, profile, request, { maxRecords = 16, budgetMs = 15_000, now = Date.now } = {}) {
