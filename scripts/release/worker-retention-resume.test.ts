@@ -87,14 +87,23 @@ async function fixture(nativeTarget = "bx_native", kind = "claude-setup-token") 
   const producer = { runId: "789", runAttempt: "1" };
   const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-retention-resume-")); directories.push(directory);
   const documents = vi.fn(async () => ({ registry: { state: structuredClone(state), etag: "registry-1" }, admission: { state: structuredClone(ledger), etag: `ledger-${ledgerRevision}` } }));
-  const context = { env, profile, inputsSha256: run.inputsSha256, failedAt, now: () => now + 30_000,
+  const context = { env: { RUNTIME_QUALIFICATION_ACTOR_USER_ID: env.RUNTIME_QUALIFICATION_ACTOR_USER_ID,
+    WORKER_CANARY_ORGANIZATION_ID: env.WORKER_CANARY_ORGANIZATION_ID }, profile, inputsSha256: run.inputsSha256, failedAt, now: () => now + 30_000,
     originalWorker: vi.fn(async (_attempt: string) => ({ startedAt: now - 120_000, finishedAt: failedAt })), documents, request };
   const complete = () => { nativeOperation.status = "completed"; nativeOperation.stage = "completed"; nativeOperation.completedAt = at(20_000); };
-  return { env, state, run, parent, job, row, store, request, nativeOperation, builderOperation, context, subject, producer, directory, complete,
+  return { state, run, parent, job, row, store, request, nativeOperation, builderOperation, context, subject, producer, directory, complete,
     available: () => { nativeUnavailable = false; }, ledger: () => ledger, lease, adapter, retired };
 }
 
 describe("automatic original-worker retention resumption", () => {
+  it("exposes only the non-secret observer identity projection, not guarded-execution authority", async () => {
+    const test = await fixture();
+    expect(Object.keys(test.context.env).sort()).toEqual(["RUNTIME_QUALIFICATION_ACTOR_USER_ID", "WORKER_CANARY_ORGANIZATION_ID"]);
+    expect(test.context.env.RUNTIME_QUALIFICATION_ACTOR_USER_ID).toBe(test.run.actorUserId);
+    expect(test.context.env.WORKER_CANARY_ORGANIZATION_ID).toBe(test.job.admissionRequest.organizationId);
+    expect(test).not.toHaveProperty("env");
+  });
+
   it("retains the real adapter's successful result and compute hold on strict pending cleanup, then recognizes only actual newer completion", async () => {
     const test = await fixture();
     expect(test.job.phase).toBe("completed"); expect(test.job.outcome.code).toBe(0); expect(test.job.retired).toBeUndefined();
