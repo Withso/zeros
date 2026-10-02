@@ -24,12 +24,22 @@ import {
   EMPTY_REVIEW_THREADS,
   type CodeReviewThreadItem,
 } from "./review-thread-model";
+import {
+  beginReviewCacheRequest,
+  type ReviewCacheRequest,
+} from "./review-cache-forget";
 
 const FRESH_MS = 45_000;
 const visible = () =>
   typeof document === "undefined" || document.visibilityState !== "hidden";
 const readKey = (key: string) =>
   getPrInlineReview(githubReviewTargetFromKey(key));
+
+function beginGithubReviewMutation(cwd: string | undefined): ReviewCacheRequest {
+  if (!cwd?.trim())
+    throw new Error("Open a workspace before changing a GitHub review.");
+  return beginReviewCacheRequest(cwd);
+}
 
 export function useGithubReview({
   workspaceId,
@@ -120,15 +130,25 @@ export function useGithubReview({
     loadedBaseSha,
   ]);
 
-  const refreshAfterWrite = useCallback(async () => {
-    if (!key) return;
-    githubReviewCache.invalidate(key);
-    // Posting succeeded even if refreshing fails. Do not keep a successfully
-    // sent draft around inviting a duplicate; the read error remains visible.
-    await githubReviewCache
-      .load(key, () => readKey(key), { force: true })
-      .catch(() => {});
-  }, [key]);
+  const refreshAfterWrite = useCallback(
+    async (request: ReviewCacheRequest) => {
+      if (!key || !request.isCurrent()) return;
+      githubReviewCache.invalidate(key);
+      // Posting succeeded even if refreshing fails. Do not keep a successfully
+      // sent draft around inviting a duplicate; the read error remains visible.
+      await githubReviewCache
+        .load(
+          key,
+          () => {
+            request.assertCurrent();
+            return readKey(key);
+          },
+          { force: true },
+        )
+        .catch(() => {});
+    },
+    [key],
+  );
   const reply = useCallback(
     async (thread: CodeReviewThreadItem, body: string) => {
       if (!key || thread.source !== "github")
@@ -138,14 +158,19 @@ export function useGithubReview({
         .data?.threads.find((item) => item.id === thread.id);
       const commentId = current?.comments[0]?.databaseId;
       if (!commentId) throw new Error("Refresh this thread before replying.");
-      await replyPrReviewThread({
-        ...githubReviewTargetFromKey(key),
-        commentId,
-        body,
-      });
-      await refreshAfterWrite();
+      const request = beginGithubReviewMutation(cwd);
+      try {
+        await replyPrReviewThread({
+          ...githubReviewTargetFromKey(key),
+          commentId,
+          body,
+        });
+        await refreshAfterWrite(request);
+      } finally {
+        request.finish();
+      }
     },
-    [key, refreshAfterWrite],
+    [key, cwd, refreshAfterWrite],
   );
   const setResolved = useCallback(
     async (thread: CodeReviewThreadItem, resolved: boolean) => {
@@ -158,14 +183,19 @@ export function useGithubReview({
         throw new Error(
           "You do not have permission to change this thread's status.",
         );
-      await setPrReviewThreadResolved({
-        ...githubReviewTargetFromKey(key),
-        threadId: thread.id,
-        resolved,
-      });
-      await refreshAfterWrite();
+      const request = beginGithubReviewMutation(cwd);
+      try {
+        await setPrReviewThreadResolved({
+          ...githubReviewTargetFromKey(key),
+          threadId: thread.id,
+          resolved,
+        });
+        await refreshAfterWrite(request);
+      } finally {
+        request.finish();
+      }
     },
-    [key, refreshAfterWrite],
+    [key, cwd, refreshAfterWrite],
   );
   const confirmed =
     confirmedBaseSha &&
@@ -189,18 +219,23 @@ export function useGithubReview({
         throw new Error(
           "Open the published pull request diff before posting a line comment to GitHub.",
         );
-      await postPrLineComment(
-        githubLineCommentForAnchor(
-          githubReviewTargetFromKey(key),
-          { headSha: confirmed, baseSha: confirmedBaseSha },
-          anchor,
-          body,
-          renamedPaths,
-        ),
-      );
-      await refreshAfterWrite();
+      const request = beginGithubReviewMutation(cwd);
+      try {
+        await postPrLineComment(
+          githubLineCommentForAnchor(
+            githubReviewTargetFromKey(key),
+            { headSha: confirmed, baseSha: confirmedBaseSha },
+            anchor,
+            body,
+            renamedPaths,
+          ),
+        );
+        await refreshAfterWrite(request);
+      } finally {
+        request.finish();
+      }
     },
-    [key, confirmed, confirmedBaseSha, renamedPaths, refreshAfterWrite],
+    [key, cwd, confirmed, confirmedBaseSha, renamedPaths, refreshAfterWrite],
   );
   const error = snapshot.error?.message;
   const notice = githubReviewNotice(snapshot.data);

@@ -6,6 +6,9 @@ they are and records a decision. Reject requires confirmation, validates that
 the displayed patch remains one exact live hunk, and reverses only that hunk.
 Neither action stages source or changes Git history. Historical, committed,
 binary, rename, copy, and file-mode changes are outside this action contract.
+Rejecting a tracked file deletion restores its content and regular-file mode
+from the validated deleted-file header for the selected comparison: HEAD for
+Uncommitted, index for Unstaged. The staged blob and mode remain unchanged.
 
 Decisions are local metadata in the existing SQLite settings bag. The durable
 `git.hunk-review.v1:` prefix is followed by a SHA-256 hash of the physical
@@ -28,10 +31,13 @@ Source writes use workspace-relative path validation, the existing cloud file
 authority, and Design recognition from current, index, HEAD, registry, and
 sticky evidence. Code review refuses Design authoring and path aliases. Guarded
 writes compare bounded UTF-8 bytes and file generation before preparing a
-temporary file and immediately before atomic replacement. A stale or unsafe
-write returns an error; the renderer retains the preview and choices. A changed
-confirmed snapshot requires an explicit Reload latest to discard an unsaved
-resolution preview.
+temporary file and immediately before atomic replacement. Restored-file
+permissions are set on the temporary file before local/cloud ownership
+publication and replacement. Creation modes are an internal Git-derived option,
+never a file-write IPC parameter. Existing targets retain their permissions. A
+stale or unsafe write returns an error; the renderer retains the preview and
+choices. A changed confirmed snapshot requires an explicit Reload latest to
+discard an unsaved resolution preview.
 
 The standalone renderer components live in
 `features/code-review/hunk-review-actions.tsx` and

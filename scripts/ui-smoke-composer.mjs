@@ -73,6 +73,7 @@ import { runFolderWorkspaceSmoke, runWorkspaceRecoveryNavigationSmoke } from "./
 import { runFolderReviewSmoke } from "./ui-smoke-folder-review.mjs";
 import { runGitReviewActionsSmoke } from "./ui-smoke-git-review-actions.mjs";
 import { runCodeReviewSmoke } from "./ui-smoke-code-review.mjs";
+import { runCodeReviewRetentionSmoke } from "./ui-smoke-review-retention.mjs";
 import { runFolderFilesSmoke } from "./ui-smoke-folder-files.mjs";
 import { runCreateProjectSelectionSmoke, runFolderCreateSmoke, runFolderDesignSetupSmoke, runFolderAutoSetupSmoke, runStartFromScratchSmoke } from "./ui-smoke-folder-create.mjs";
 import { runRepoSettingsSmoke } from "./ui-smoke-repo-settings.mjs";
@@ -189,6 +190,7 @@ try {
   await reviewActionsPage.close();
   const codeReviewPage = await newPage({ viewport: { width: 1180, height: 900 } });
   await runCodeReviewSmoke({ page: codeReviewPage, check, harnessBase });
+  await runCodeReviewRetentionSmoke({ page: codeReviewPage, check, harnessBase });
   await codeReviewPage.close();
   await runCreateComposerSmoke({ page: createPage, check, harnessBase });
   await createPage.close();

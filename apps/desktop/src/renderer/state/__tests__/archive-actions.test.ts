@@ -157,7 +157,12 @@ function seedReviewCaches(folder: string, workspaceId = target.id) {
   ];
   codeReviewCache.setData(reviewKey, review);
   hunkReviewCache.setData(hunkKey, hunks);
-  return { reviewKey, hunkKey, review, hunks };
+  return {
+    reviewKey,
+    hunkKey,
+    review: codeReviewCache.peekSnapshot(reviewKey).data!,
+    hunks,
+  };
 }
 
 function expectReviewCachesRetained(

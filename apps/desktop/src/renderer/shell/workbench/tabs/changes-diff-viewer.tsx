@@ -144,6 +144,14 @@ export function ChangesDiffViewer({
   readOnly = false,
 }: Props) {
   const view = useRef<CodeViewHandle<ReviewAnnotationPayload, undefined>>(null);
+  const shown = useMemo(
+    () =>
+      presentation === "single"
+        ? files.filter((file) => file.path === selected)
+        : files,
+    [files, presentation, selected],
+  );
+  const shownPaths = useMemo(() => shown.map((file) => file.path), [shown]);
   const review = useCodeReview({
     cwd,
     workspaceId,
@@ -151,7 +159,7 @@ export function ChangesDiffViewer({
     refreshKey,
     external: reviewExternal,
   });
-  const inlineReview = useInlineReview(review, active);
+  const inlineReview = useInlineReview(review, active, shownPaths);
   const { annotationsForDiff, snapshotFor } = inlineReview;
   const retainedReviewItems = useMemo(
     () => new Map<string, CodeViewItem<ReviewAnnotationPayload>>(),
@@ -270,13 +278,6 @@ export function ChangesDiffViewer({
       });
     },
     [],
-  );
-  const shown = useMemo(
-    () =>
-      presentation === "single"
-        ? files.filter((file) => file.path === selected)
-        : files,
-    [files, presentation, selected],
   );
   const items = useMemo<CodeViewItem<ReviewAnnotationPayload>[]>(
     () =>

@@ -305,7 +305,10 @@ export function createGithubInlineReviewService(deps: Dependencies) {
             }),
           );
           for (const [index, annotation] of annotations.data.entries()) {
-            if (snapshot.annotations.length >= 1000) break;
+            if (snapshot.annotations.length >= 1000) {
+              snapshot.annotationsTruncated = true;
+              break;
+            }
             if (
               !githubReviewPathSchema.safeParse(annotation.path).success ||
               annotation.start_line < 1 ||

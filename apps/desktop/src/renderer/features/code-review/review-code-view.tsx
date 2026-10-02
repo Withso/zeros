@@ -136,13 +136,13 @@ function ReviewedCodeView({
   hunkSource?: ReviewLiveHunkSource;
 }) {
   const view = useRef<CodeViewHandle<ReviewAnnotationPayload, undefined>>(null);
-  const inline = useInlineReview(review, active);
+  const inline = useInlineReview(review, active, snapshot.path);
   const { annotationsForDiff, annotationsForFile } = inline;
   const theme = useCodeTheme();
   const retained = useMemo(
     () => new Map<string, CodeViewItem<ReviewAnnotationPayload>>(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- prepared native item objects belong to one workspace owner
-    [review.ownerKey],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- this single-file viewer retains prepared objects only for its current owner and path
+    [review.ownerKey, snapshot.path],
   );
   const file = useMemo<FileContents | undefined>(
     () =>
@@ -304,7 +304,7 @@ function ReviewedPatch({
   active: boolean;
   diffStyle: "unified" | "split";
 }) {
-  const inline = useInlineReview(review, active);
+  const inline = useInlineReview(review, active, snapshot.path);
   const { select } = inline;
   const theme = useCodeTheme();
   const annotations = inline.annotationsForDiff(snapshot.path, snapshot);

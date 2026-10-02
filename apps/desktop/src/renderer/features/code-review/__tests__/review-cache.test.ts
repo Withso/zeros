@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { CodeReviewThread } from "@zeros/protocol/code-review";
+import type {
+  CodeReviewListResult,
+  CodeReviewThread,
+} from "@zeros/protocol/code-review";
 import {
   createCodeReviewCache,
   codeReviewCacheKey,
+  publishCodeReviewPage,
   publishCodeReviewThread,
   type CodeReviewCollection,
 } from "../review-cache";
@@ -40,8 +44,8 @@ function thread(id = "t", version = 1): CodeReviewThread {
   };
 }
 function collection(
-  threads: readonly CodeReviewThread[],
-): CodeReviewCollection {
+  threads: CodeReviewThread[],
+): CodeReviewListResult & { partial: boolean } {
   return { workspaceId: "w", threads, partial: false };
 }
 
@@ -101,6 +105,140 @@ describe("code review exact-key cache", () => {
     );
     expect(cache.getSnapshot(key).data?.threads[1]).toBe(initial.threads[1]);
   });
+
+  it.each([false, true])(
+    "removes inaccessible thread membership after a complete refresh (empty=%s)",
+    async (empty) => {
+      const cache = createCodeReviewCache();
+      const key = codeReviewCacheKey("/parent", "w");
+      const visible = thread("visible");
+      const revoked = {
+        ...thread("nested"),
+        anchor: { ...thread().anchor, path: "nested/old.ts" },
+      };
+      const initial = collection([revoked, visible]);
+      cache.setData(key, initial);
+      const pending = deferred<CodeReviewCollection>();
+      const refresh = cache.load(key, () => pending.promise, { force: true });
+      expect(cache.getSnapshot(key).data).toBe(initial);
+
+      pending.resolve(collection(empty ? [] : [structuredClone(visible)]));
+      await refresh;
+      const current = cache.getSnapshot(key).data!;
+      expect(current.threads.map((item) => item.id)).toEqual(
+        empty ? [] : ["visible"],
+      );
+      if (!empty) expect(current.threads[0]).toBe(visible);
+    },
+  );
+
+  it("retains loaded membership across partial reads and incremental replies and pages", async () => {
+    const cache = createCodeReviewCache();
+    const key = codeReviewCacheKey("/parent", "w");
+    const first = thread("first");
+    const later = thread("later");
+    cache.setData(key, collection([first, later]));
+    await cache.load(
+      key,
+      async () => ({
+        ...collection([structuredClone(first)]),
+        partial: true,
+        nextCursor: "next-page",
+      }),
+      { force: true },
+    );
+    expect(cache.getSnapshot(key).data?.threads).toEqual([first, later]);
+
+    publishCodeReviewThread(cache, key, thread("first", 2));
+    expect(cache.getSnapshot(key).data?.threads[1]).toBe(later);
+    publishCodeReviewPage(
+      cache,
+      key,
+      collection([structuredClone(later), thread("last")]),
+      { cursor: "next-page" },
+    );
+    expect(cache.getSnapshot(key).data?.threads.map((item) => item.id)).toEqual(
+      ["first", "later", "last"],
+    );
+    expect(cache.getSnapshot(key).data?.partial).toBe(false);
+    publishCodeReviewThread(cache, key, thread("first", 3));
+    expect(cache.getSnapshot(key).data?.threads.map((item) => item.id)).toEqual(
+      ["first", "later", "last"],
+    );
+  });
+
+  it.each([false, true])(
+    "removes unconfirmed membership when a refreshed listing reaches its final page (empty=%s)",
+    async (empty) => {
+      const cache = createCodeReviewCache();
+      const key = codeReviewCacheKey("/parent", "w");
+      const first = thread("first");
+      const later = thread("later");
+      cache.setData(key, collection([first, later, thread("revoked")]));
+      await cache.load(
+        key,
+        async () => ({
+          ...collection(empty ? [] : [structuredClone(first)]),
+          partial: true,
+          nextCursor: "after-first",
+        }),
+        { force: true },
+      );
+      expect(cache.getSnapshot(key).data?.threads).toHaveLength(3);
+      publishCodeReviewPage(
+        cache,
+        key,
+        collection(empty ? [] : [structuredClone(later)]),
+        { cursor: "after-first" },
+      );
+      expect(
+        cache.getSnapshot(key).data?.threads.map((item) => item.id),
+      ).toEqual(empty ? [] : ["first", "later"]);
+      if (!empty) expect(cache.getSnapshot(key).data?.threads[1]).toBe(later);
+    },
+  );
+
+  it("keeps a newly acknowledged thread when an overlapping listing finishes", async () => {
+    const cache = createCodeReviewCache();
+    const key = codeReviewCacheKey("/parent", "w");
+    const first = thread("first");
+    cache.setData(key, collection([first, thread("revoked")]));
+    await cache.load(
+      key,
+      async () => ({
+        ...collection([structuredClone(first)]),
+        partial: true,
+        nextCursor: "after-first",
+      }),
+      { force: true },
+    );
+    publishCodeReviewThread(cache, key, thread("new"));
+    publishCodeReviewPage(cache, key, collection([]), {
+      cursor: "after-first",
+    });
+    expect(cache.getSnapshot(key).data?.threads.map((item) => item.id)).toEqual(
+      ["first", "new"],
+    );
+  });
+
+  it.each([undefined, "revoked"])(
+    "does not reintroduce removed membership from a late continuation (threadId=%s)",
+    async (threadId) => {
+      const cache = createCodeReviewCache();
+      const key = codeReviewCacheKey("/parent", "w");
+      cache.setData(key, {
+        ...collection([thread("revoked")]),
+        partial: true,
+        nextCursor: "old-page",
+      });
+      await cache.load(key, async () => collection([]), { force: true });
+      publishCodeReviewPage(cache, key, collection([thread("revoked", 2)]), {
+        cursor: "old-page",
+        threadId,
+      });
+      expect(cache.getSnapshot(key).data?.threads).toEqual([]);
+    },
+  );
 
   it("bounds inactive workspace entries", () => {
     const cache = createCodeReviewCache(2);

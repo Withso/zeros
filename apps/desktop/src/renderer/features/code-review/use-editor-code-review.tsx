@@ -201,7 +201,7 @@ export function useEditorCodeReview({
   content: string;
   active: boolean;
 }) {
-  const inline = useInlineReview(review, active);
+  const inline = useInlineReview(review, active, path);
   const [view, setView] = useState<EditorView | null>(null);
   const snapshot = useMemo<Extract<ReviewCodeSnapshot, { kind: "file" }>>(
     () => ({
@@ -263,8 +263,10 @@ export function useEditorCodeReview({
       const owner = latest.current.review.ownerKey;
       const selectedPath = latest.current.path;
       const clicked = editor.state.doc.lineAt(from).number;
-      const start = pointer.shiftKey ? anchorLine.current : clicked;
-      if (!pointer.shiftKey) anchorLine.current = clicked;
+      const start = pointer.shiftKey
+        ? Math.min(anchorLine.current, editor.state.doc.lines)
+        : clicked;
+      anchorLine.current = start;
       let end = clicked;
       let moved = false;
       const paint = () => {
@@ -328,6 +330,18 @@ export function useEditorCodeReview({
       reviewWidgets,
       reviewEditorTheme,
       reviewGutterAccessibility,
+      EditorView.updateListener.of((update) => {
+        if (!update.docChanged) return;
+        // Keep the Shift anchor attached to its source through edits. A drag's
+        // endpoints belong to the old document and must retire before repaint.
+        stopDrag.current?.();
+        const previous = update.startState.doc.line(
+          Math.min(anchorLine.current, update.startState.doc.lines),
+        );
+        anchorLine.current = update.state.doc.lineAt(
+          update.changes.mapPos(previous.from, 1),
+        ).number;
+      }),
       gutter({
         class: "zeros-review-gutter",
         lineMarker: (editor, block) =>

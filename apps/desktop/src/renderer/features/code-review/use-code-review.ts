@@ -69,10 +69,15 @@ const pages = new KeyedAsyncCache<CodeReviewListResult>({
     ),
 });
 const aliases = new Map<string, string>();
+// Root reads own membership. A page must not supersede a newer root read's
+// cache generation, even before that read has a confirmed snapshot to expose.
+const pendingListings = new Map<string, number>();
+let nextListingId = 0;
 registerReviewCacheForget((ownsFolder) => {
   for (const key of pages.keys()) {
     const [ownerKey] = JSON.parse(key) as [
       string,
+      number | null,
       string | null,
       string | null,
     ];
@@ -80,6 +85,10 @@ registerReviewCacheForget((ownsFolder) => {
   }
   for (const key of aliases.keys()) {
     if (ownsFolder(codeReviewTargetFromKey(key).cwd)) aliases.delete(key);
+  }
+  for (const key of pendingListings.keys()) {
+    if (ownsFolder(codeReviewTargetFromKey(key).cwd))
+      pendingListings.delete(key);
   }
 });
 const normalized = new WeakMap<CodeReviewThread, CodeReviewThreadItem>();
@@ -120,11 +129,16 @@ export async function loadCodeReview(
 ): Promise<CodeReviewCollection> {
   const { cwd, workspaceId } = codeReviewTargetFromKey(key);
   const request = beginReviewCacheRequest(cwd);
+  let listingId: number | undefined;
   try {
     const collection = await codeReviewCache.load(
       key,
       async () => {
         request.assertCurrent();
+        listingId = ++nextListingId;
+        pendingListings.set(key, listingId);
+        const listingInvalidationVersion =
+          codeReviewCache.peekSnapshot(key).invalidationVersion;
         const result = await listCodeReviewThreads({
           workspaceId,
           includeResolved: true,
@@ -134,13 +148,20 @@ export async function loadCodeReview(
         const retained = new Set(codeReviewCache.keys());
         for (const alias of aliases.keys())
           if (!retained.has(alias)) aliases.delete(alias);
-        return { ...result, partial: !!result.partial };
+        return {
+          ...result,
+          partial: !!result.partial,
+          listingId,
+          listingInvalidationVersion,
+        };
       },
       { force, maxAgeMs: 15_000 },
     );
     request.assertCurrent();
     return collection;
   } finally {
+    if (listingId !== undefined && pendingListings.get(key) === listingId)
+      pendingListings.delete(key);
     request.finish();
   }
 }
@@ -151,12 +172,27 @@ export async function loadCodeReviewPage(
 ): Promise<void> {
   const { cwd, workspaceId } = codeReviewTargetFromKey(key);
   const lifetime = beginReviewCacheRequest(cwd);
+  const listingId = codeReviewCache.peekSnapshot(key).data?.listingId;
+  const isCurrentListing = () => {
+    const snapshot = codeReviewCache.peekSnapshot(key);
+    return (
+      snapshot.data !== undefined &&
+      snapshot.data.listingId === listingId &&
+      (snapshot.data.listingInvalidationVersion === undefined ||
+        snapshot.data.listingInvalidationVersion ===
+          snapshot.invalidationVersion) &&
+      !snapshot.refreshing &&
+      !pendingListings.has(key)
+    );
+  };
   const pageKey = JSON.stringify([
     key,
+    listingId ?? null,
     request.threadId ?? null,
     request.cursor ?? null,
   ]);
   try {
+    if (!isCurrentListing()) return;
     const page = await pages.load(
       pageKey,
       () => {
@@ -170,7 +206,11 @@ export async function loadCodeReviewPage(
       { force: true },
     );
     lifetime.assertCurrent();
-    publishCodeReviewPage(codeReviewCache, key, page, request);
+    if (isCurrentListing())
+      publishCodeReviewPage(codeReviewCache, key, page, {
+        ...request,
+        listingId,
+      });
   } finally {
     lifetime.finish();
   }

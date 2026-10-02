@@ -290,6 +290,57 @@ describe("GitHub inline review aggregate", () => {
     expect(partial.threads).toHaveLength(1);
     expect(partial.annotationError).toContain("could not be loaded");
   });
+  it.each([
+    { counts: [950, 100], invalidPrefix: 0, truncated: true, lastId: "13:49" },
+    { counts: [950, 50], invalidPrefix: 0, truncated: false, lastId: "13:49" },
+    { counts: [900, 100], invalidPrefix: 0, truncated: false, lastId: "13:99" },
+    { counts: [1000], invalidPrefix: 0, truncated: false, lastId: "12:999" },
+    { counts: [950, 100], invalidPrefix: 50, truncated: false, lastId: "13:99" },
+  ])(
+    "reports truncation=$truncated for $counts annotations with $invalidPrefix invalid rows in the final run",
+    async ({ counts, invalidPrefix, truncated, lastId }) => {
+      const { service, listForRef, listAnnotations } = setup();
+      listForRef.mockResolvedValue({
+        data: {
+          total_count: counts.length,
+          check_runs: counts.map((count, index) => ({
+            id: 12 + index,
+            name: `Check ${index + 1}`,
+            output: { annotations_count: count },
+          })),
+        },
+      });
+      listAnnotations.mockImplementation(async ({ check_run_id, page }) => {
+        const offset = (page - 1) * 100;
+        const count = counts[check_run_id - 12];
+        return {
+          data: Array.from(
+            { length: Math.min(100, count - offset) },
+            (_, index) => ({
+              path:
+                check_run_id === 12 + counts.length - 1 &&
+                offset + index < invalidPrefix
+                  ? "../secret"
+                  : "src/auth.ts",
+              start_line: offset + index + 1,
+              end_line: offset + index + 1,
+              annotation_level: "warning",
+              message: "Validate role.",
+            }),
+          ),
+        };
+      });
+
+      const result = await service.get(target);
+      expect(result.annotations).toHaveLength(1000);
+      expect(result.annotations.at(-1)?.id).toBe(lastId);
+      expect(result.annotationsTruncated).toBe(truncated);
+      expect(result.annotationError).toBeNull();
+      expect(listAnnotations).toHaveBeenCalledTimes(
+        counts.reduce((pages, count) => pages + Math.ceil(count / 100), 0),
+      );
+    },
+  );
   it("retains outdated and resolved discussions, but rejects unsafe paths and URLs", async () => {
     const { service, graphql } = setup();
     const old = { ...thread(), isOutdated: true, isResolved: true, line: null };

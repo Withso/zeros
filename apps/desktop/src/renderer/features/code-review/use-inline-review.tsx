@@ -27,13 +27,26 @@ import {
   postCapturedReview,
 } from "./review-public-post";
 
-export function useInlineReview(review: CodeReviewController, active: boolean) {
+export function useInlineReview(
+  review: CodeReviewController,
+  active: boolean,
+  itemIds: string | readonly string[],
+) {
   const [record, setRecord] = useState<{
     owner: string;
     target: ReviewSelectionTarget | null;
   }>({ owner: review.ownerKey, target: null });
   const [issue, setIssue] = useState<string | null>(null);
-  const selection = record.owner === review.ownerKey ? record.target : null;
+  const visibleItems = useMemo(
+    () => new Set(typeof itemIds === "string" ? [itemIds] : itemIds),
+    [itemIds],
+  );
+  const selection =
+    record.owner === review.ownerKey &&
+    record.target &&
+    visibleItems.has(record.target.itemId)
+      ? record.target
+      : null;
   // Captured anchors and native payloads have one semantic workspace lifetime.
   const cache = useMemo(
     () => new ReviewAnnotationCache(),
@@ -42,14 +55,14 @@ export function useInlineReview(review: CodeReviewController, active: boolean) {
   );
   const snapshots = useMemo(
     () => new Map<string, ReviewCodeSnapshot>(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- another owner must never reuse captured code snapshots
-    [review.ownerKey],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- full source belongs only to the current owner and displayed file set
+    [review.ownerKey, visibleItems],
   );
   const native = useRef<{ owner: string; value: CodeViewLineSelection | null }>(
     { owner: review.ownerKey, value: null },
   );
-  const latest = useRef({ review, active, selection, snapshots });
-  latest.current = { review, active, selection, snapshots };
+  const latest = useRef({ review, active, selection, snapshots, visibleItems });
+  latest.current = { review, active, selection, snapshots, visibleItems };
 
   const select = useCallback(
     (
@@ -58,7 +71,7 @@ export function useInlineReview(review: CodeReviewController, active: boolean) {
       mode: ReviewSelectionTarget["mode"] = "selection",
     ) => {
       const current = latest.current;
-      if (!current.active) return;
+      if (!current.active || !current.visibleItems.has(itemId)) return;
       if (!range) {
         native.current = { owner: current.review.ownerKey, value: null };
         setRecord((old) =>
@@ -109,6 +122,7 @@ export function useInlineReview(review: CodeReviewController, active: boolean) {
     [],
   );
   const setSelection = useCallback((target: ReviewSelectionTarget) => {
+    if (!latest.current.visibleItems.has(target.itemId)) return;
     setRecord({ owner: latest.current.review.ownerKey, target });
   }, []);
   const cancel = useCallback((target: ReviewSelectionTarget) => {
@@ -126,7 +140,7 @@ export function useInlineReview(review: CodeReviewController, active: boolean) {
       snapshot: Extract<ReviewCodeSnapshot, { kind: "diff" }>,
       hunkSource?: ReviewLiveHunkSource,
     ) => {
-      snapshots.set(itemId, snapshot);
+      if (visibleItems.has(itemId)) snapshots.set(itemId, snapshot);
       return cache.forDiff(
         snapshot,
         review.threads,
@@ -135,14 +149,14 @@ export function useInlineReview(review: CodeReviewController, active: boolean) {
         active,
       );
     },
-    [snapshots, cache, review.threads, selection, active],
+    [snapshots, visibleItems, cache, review.threads, selection, active],
   );
   const annotationsForFile = useCallback(
     (
       itemId: string,
       snapshot: Extract<ReviewCodeSnapshot, { kind: "file" }>,
     ) => {
-      snapshots.set(itemId, snapshot);
+      if (visibleItems.has(itemId)) snapshots.set(itemId, snapshot);
       return cache.forFile(
         snapshot,
         review.threads,
@@ -150,7 +164,7 @@ export function useInlineReview(review: CodeReviewController, active: boolean) {
         active,
       );
     },
-    [snapshots, cache, review.threads, selection, active],
+    [snapshots, visibleItems, cache, review.threads, selection, active],
   );
 
   const renderAnnotation = useCallback(

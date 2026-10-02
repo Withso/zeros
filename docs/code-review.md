@@ -73,6 +73,17 @@ of current snapshots; mutations during paging are reflected by invalidation and
 subsequent refresh, rather than a retained global snapshot. Never silently treat
 a partial page as the entire workspace collection.
 
+Renderer refreshes retain confirmed data while pending. A complete workspace
+listing replaces thread membership, so paths hidden by a new nested owner or
+source policy leave the cache. Paginated refreshes retain loaded history until
+the listing finishes, then keep its confirmed members and acknowledged writes.
+Each root read has a renderer-only listing identity, so identical opaque cursors
+from different passes neither share pending page reads nor advance each other's
+membership. Pages cannot clear a pending invalidation or publish over an active
+root refresh; a failed refresh leaves a still-valid confirmed listing loadable.
+Loaded history for surviving
+threads remains available without restoring membership from an older pass.
+
 Thread previews expose `commentCount`, `commentsComplete` and, when necessary,
 `commentsCursor` with its `commentsCursorAfter` sequence position. Mutation
 previews retain the original comment and newest

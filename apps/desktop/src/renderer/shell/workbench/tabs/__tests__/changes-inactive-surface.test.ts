@@ -54,8 +54,15 @@ describe("inactive retained Changes surface", () => {
     expect(surface).toMatch(
       /useGitRefreshKey\(\s*workspace\?\.path,\s*changesTarget,\s*active,?\s*\)/,
     );
-    expect(view).toMatch(
-      /const \[filesReloadNonce,[\s\S]{0,180}useEffect\(\(\) => \{\s*if \(!active\) return;/,
+    const read = view.indexOf(
+      "const retainedFiles = reviewFilesCache.get(filesKey);",
+    );
+    expect(read).toBeGreaterThan(0);
+    // Check the effect that owns the read, independent of other hook placement.
+    const effect = view.lastIndexOf("useEffect(() => {", read);
+    expect(effect).toBeGreaterThan(0);
+    expect(view.slice(effect, read)).toMatch(
+      /^useEffect\(\(\) => \{\s*if \(!active\) return;/,
     );
   });
 

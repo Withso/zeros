@@ -82,6 +82,26 @@ const MAX_REVIEW_FILE_SNAPSHOTS = 32;
 const reviewFilesMeta = new Map<string, { refreshKey: number; at: number }>();
 const REVIEW_FILES_FRESH_MS = 60_000;
 const reviewFileRequests = new LatestGenerationFlight<ReviewFilesSnapshot>();
+type ReviewFilesRevision = readonly [
+  refreshKey: number,
+  prHeadSha: string | undefined,
+  reviewHeadSha: string | undefined,
+  reviewBaseSha: string | undefined,
+];
+interface ReviewFileRequestVersion {
+  revision: ReviewFilesRevision;
+  generation: number;
+  validateResult: boolean;
+  retry: boolean;
+  consumers: number;
+  promise?: Promise<ReviewFilesSnapshot>;
+}
+// Remote review polls can change the comparison without a Git refresh signal.
+// Share one generation per observed revision, across consumers and remounts.
+// Keep its promise through consumer publication, including the gap after the
+// transport settles. Cancelled consumers cannot retire a version still in use.
+const reviewFileRequestVersions = new Map<string, ReviewFileRequestVersion>();
+let reviewFileRequestGeneration = 0;
 const reviewFileRequestOwners = new Set<{
   workspaceId: string;
   key: string;
@@ -92,11 +112,13 @@ registerPrWorkspaceCacheForget((workspaceId) => {
   for (const key of new Set([
     ...reviewFilesCache.keys(),
     ...reviewFilesMeta.keys(),
+    ...reviewFileRequestVersions.keys(),
   ])) {
     const [, owner] = JSON.parse(key) as [string, string, number, string];
     if (owner !== workspaceId) continue;
     reviewFilesCache.delete(key);
     reviewFilesMeta.delete(key);
+    reviewFileRequestVersions.delete(key);
     reviewFileRequests.forget(key);
   }
   for (const request of reviewFileRequestOwners) {
@@ -236,7 +258,7 @@ export function ReviewView({
   );
 
   // ── published PR diff (Changes) — parent-owned so the sub-nav count and the
-  //    section always agree; re-pulled on the shared refresh bus.
+  //    section always agree; re-pulled on Git and remote comparison changes.
   // Seed the local diff from the last confirmed model for this workspace.
   const [filesSnapshot, setFilesSnapshot] = useState<{
     key: string;
@@ -264,6 +286,14 @@ export function ReviewView({
   const filesError =
     filesSnapshot.key === filesKey ? filesSnapshot.error : null;
   const [filesReloadNonce, setFilesReloadNonce] = useState(0);
+  const renamedPaths = useMemo(() => new Map(files.flatMap(file => file.oldPath ? [[file.oldPath, file.path] as const] : [])), [files]);
+  const githubReview = useGithubReview({
+    workspaceId: provider.family === "github" ? workspaceId : undefined,
+    prNumber, cwd, active: active && sub === "changes", refreshKey,
+    confirmedHeadSha: filesHeadSha, confirmedBaseSha: filesBaseSha, renamedPaths,
+  });
+  const reviewHeadSha = githubReview.snapshot?.headSha;
+  const reviewBaseSha = githubReview.snapshot?.baseSha;
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
@@ -279,21 +309,54 @@ export function ReviewView({
     // A remount on an unchanged refresh generation (workspace hop, tab
     // switch) with a fresh cached diff renders it as-is — re-pulling the
     // (potentially large) base diff is only warranted when the generation
-    // moved, the cache aged out, or Retry invalidated it.
+    // or confirmed comparison moved, the cache aged out, or Retry invalidated it.
     const meta = reviewFilesMeta.get(filesKey);
     if (
       retainedFiles !== undefined &&
       meta &&
       meta.refreshKey === refreshKey &&
       (!snap.pr?.headSha || retainedFiles.headSha === snap.pr.headSha) &&
+      (!reviewHeadSha || retainedFiles.headSha === reviewHeadSha) &&
+      (!reviewBaseSha || retainedFiles.baseSha === reviewBaseSha) &&
       Date.now() - meta.at < REVIEW_FILES_FRESH_MS
     ) {
       return;
     }
+    const revision: ReviewFilesRevision = [
+      refreshKey,
+      snap.pr?.headSha,
+      reviewHeadSha,
+      reviewBaseSha,
+    ];
+    const previousRequest = reviewFileRequestVersions.get(filesKey);
+    const requestVersion: ReviewFileRequestVersion =
+      previousRequest &&
+      !previousRequest.retry &&
+      previousRequest.revision.every(
+        (value, index) => value === undefined || value === revision[index],
+      )
+        ? previousRequest
+        : {
+            revision,
+            generation: ++reviewFileRequestGeneration,
+            validateResult: false,
+            retry: false,
+            consumers: 0,
+          };
+    if (requestVersion === previousRequest) {
+      // Metadata and the initial diff load in parallel. Learning a previously
+      // unknown SHA does not invalidate that read; check its result instead.
+      requestVersion.validateResult ||= requestVersion.revision.some(
+        (value, index) => value !== revision[index],
+      );
+      requestVersion.revision = revision;
+    }
+    reviewFileRequestVersions.set(filesKey, requestVersion);
     const requestOwner = { workspaceId, key: filesKey, cancelled: false };
     reviewFileRequestOwners.add(requestOwner);
-    void reviewFileRequests
-      .run(filesKey, refreshKey, async () => {
+    requestVersion.consumers += 1;
+    requestVersion.promise ??= reviewFileRequests
+      .run(filesKey, requestVersion.generation, async () => {
         if (provider.getDiff) {
           const result = await provider.getDiff({ workspaceId, hostOrigin: provider.hostOrigin, reviewRef: String(prNumber) });
           return { files: parseUnifiedDiffFiles(result.patch), headSha: result.headSha, baseSha: result.baseSha };
@@ -304,9 +367,29 @@ export function ReviewView({
           rawPatch: true,
         });
         return { files: parseUnifiedDiffFiles(diff.patch ?? "") };
-      })
+      });
+    void requestVersion.promise
       .then((nextFiles) => {
-        if (cancelled || requestOwner.cancelled) return;
+        if (
+          cancelled ||
+          requestOwner.cancelled ||
+          reviewFileRequestVersions.get(filesKey) !== requestVersion
+        )
+          return;
+        const [, prHead, reviewHead, reviewBase] = requestVersion.revision;
+        if (
+          provider.getDiff &&
+          requestVersion.validateResult &&
+          ((prHead && nextFiles.headSha !== prHead) ||
+            (reviewHead && nextFiles.headSha !== reviewHead) ||
+            (reviewBase && nextFiles.baseSha !== reviewBase))
+        ) {
+          // This read predates the now-known comparison. Keep confirmed files
+          // visible and start a fresh request without publishing the mismatch.
+          requestVersion.retry = true;
+          setFilesReloadNonce((nonce) => nonce + 1);
+          return;
+        }
         cacheReviewFiles(filesKey, nextFiles, refreshKey);
         setFilesSnapshot({
           key: filesKey,
@@ -318,25 +401,31 @@ export function ReviewView({
         });
       })
       .catch((e) => {
-        if (cancelled || requestOwner.cancelled) return;
+        if (
+          cancelled ||
+          requestOwner.cancelled ||
+          reviewFileRequestVersions.get(filesKey) !== requestVersion
+        )
+          return;
         setFilesSnapshot((current) =>
           current.key === filesKey
             ? { ...current, loading: false, error: humanGitError(e) }
             : current,
         );
       })
-      .finally(() => reviewFileRequestOwners.delete(requestOwner));
+      .finally(() => {
+        reviewFileRequestOwners.delete(requestOwner);
+        requestVersion.consumers -= 1;
+        if (
+          requestVersion.consumers === 0 &&
+          reviewFileRequestVersions.get(filesKey) === requestVersion
+        )
+          reviewFileRequestVersions.delete(filesKey);
+      });
     return () => {
       cancelled = true;
     };
-  }, [active, provider, workspaceId, prNumber, baseBranch, filesKey, refreshKey, filesReloadNonce, snap.pr?.headSha]);
-
-  const renamedPaths = useMemo(() => new Map(files.flatMap(file => file.oldPath ? [[file.oldPath, file.path] as const] : [])), [files]);
-  const githubReview = useGithubReview({
-    workspaceId: provider.family === "github" ? workspaceId : undefined,
-    prNumber, cwd, active: active && sub === "changes", refreshKey,
-    confirmedHeadSha: filesHeadSha, confirmedBaseSha: filesBaseSha, renamedPaths,
-  });
+  }, [active, provider, workspaceId, prNumber, baseBranch, filesKey, refreshKey, filesReloadNonce, snap.pr?.headSha, reviewHeadSha, reviewBaseSha]);
 
   const pr = snap.pr;
   const checksSummary = summarizeChecks(snap.checks);

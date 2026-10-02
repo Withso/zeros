@@ -1,5 +1,99 @@
 import { chromium, expect } from "@playwright/test";
 import { pathToFileURL } from "node:url";
+import { runReviewComparisonSmoke } from "./ui-smoke-review-comparison.mjs";
+
+/** Drive the retained gutter anchor through real document input, including a
+ * document edit while the pointer still owns a gutter drag. */
+export async function runEditorReviewAnchorSmoke({
+  page,
+  check = () => {},
+  harnessBase,
+  duringDrag = false,
+}) {
+  const base =
+    harnessBase ??
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses`;
+  const errors = [];
+  const onPageError = (error) => errors.push(error.message);
+  const onConsole = (message) => {
+    // CodeMirror may report a caught event-handler exception to the console.
+    if (
+      message.type() === "error" &&
+      /Invalid line number/.test(message.text())
+    )
+      errors.push(message.text());
+  };
+  page.on("pageerror", onPageError);
+  page.on("console", onConsole);
+  let pointerHeld = false;
+  try {
+    await page.goto(`${base}/harness-code-review.html`);
+    await page.getByTestId("review-mode-edit").click();
+    const editor = page.locator(".cm-content[contenteditable=true]");
+    const composer = page.locator("[data-review-composer]");
+    const toolbar = page.locator("[data-review-selection-toolbar]");
+    const line = (number) =>
+      page.getByRole("button", {
+        name: `Comment on line ${number}`,
+        exact: true,
+      });
+
+    if (duringDrag) {
+      await line(4).hover();
+      await page.mouse.down();
+      pointerHeld = true;
+    } else {
+      await line(4).click();
+      await expect(composer).toHaveAccessibleName("Comment on line 4");
+      await composer
+        .getByRole("button", { name: "Cancel", exact: true })
+        .click();
+    }
+    await editor.focus();
+    await editor.press("ControlOrMeta+A");
+    await page.keyboard.insertText("one line");
+    await expect(editor.locator(".cm-line")).toHaveCount(1);
+    await expect(editor.locator(".cm-line")).toHaveText("one line");
+
+    if (duringDrag) {
+      await line(1).hover();
+      await page.mouse.up();
+      pointerHeld = false;
+      expect(
+        errors,
+        "shortening the document must cancel the old gutter drag",
+      ).toEqual([]);
+      await expect(toolbar).toHaveCount(0);
+      await expect(composer).toHaveCount(0);
+    }
+    await line(1).click({ modifiers: ["Shift"] });
+    expect(
+      errors,
+      "the retained gutter anchor must belong to the current document",
+    ).toEqual([]);
+    await expect(toolbar).toHaveAccessibleName("Review line 1");
+    await toolbar.getByRole("button", { name: "Comment", exact: true }).click();
+    await expect(composer).toHaveAccessibleName("Comment on line 1");
+    const input = composer.locator("textarea");
+    await expect(input).toBeFocused();
+    await input.fill("Comment after shortening the source document.");
+    await input.press("ControlOrMeta+Enter");
+    await expect(page.getByTestId("review-last-action")).toHaveText(
+      "workspace create file 1–1",
+    );
+    expect(errors).toEqual([]);
+    check(
+      duringDrag
+        ? "Files edit cancels a gutter drag when its document changes and permits a fresh range"
+        : "Files edit bounds the retained Shift-click anchor after the document shrinks",
+      true,
+    );
+  } finally {
+    if (pointerHeld) await page.mouse.up();
+    page.off("pageerror", onPageError);
+    page.off("console", onConsole);
+  }
+}
 
 /** Real Pierre/CodeMirror selection and discussion controls, with deterministic
  * transport fixtures. Cache, authority and persistence have adjacent unit tests. */
@@ -279,6 +373,31 @@ export async function runCodeReviewSmoke({
     true,
   );
 
+  await page
+    .getByRole("button", { name: "Comment on line 4", exact: true })
+    .click();
+  await composer().getByRole("button", { name: "Cancel", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Comment on line 6", exact: true })
+    .click({ modifiers: ["Shift"] });
+  await expect(toolbar()).toHaveAccessibleName("Review lines 4–6");
+  await expect(page.locator(".cm-selectionBackground").first()).toBeVisible();
+  await toolbar().getByRole("button", { name: "Comment", exact: true }).click();
+  await expect(composer()).toHaveAccessibleName("Comment on lines 4–6");
+  await input().press("Escape");
+  check(
+    "Files edit preserves Shift-click ranges and native selection overlays",
+    true,
+  );
+
+  for (const duringDrag of [false, true])
+    await runEditorReviewAnchorSmoke({
+      page,
+      check,
+      harnessBase: base,
+      duringDrag,
+    });
+
   await open();
   await page.getByTestId("review-mode-diff").click();
   await page.getByTestId("review-toggle-hunks").click();
@@ -344,6 +463,7 @@ export async function runCodeReviewSmoke({
     "Conflict choices preview in the real editor and save through the guarded resolution action",
     true,
   );
+  await runReviewComparisonSmoke({ page, check, harnessBase: base });
 }
 
 if (

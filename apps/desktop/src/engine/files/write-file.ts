@@ -66,7 +66,15 @@ export function writeWorkspaceFile(
   cwd: string,
   relPath: string,
   content: string,
-  opts?: { remote?: boolean; cloudPolicy?: QualifiedCloudFilePolicy; expectedCloudTarget?: string; expectedContent?: string | null },
+  opts?: {
+    remote?: boolean;
+    cloudPolicy?: QualifiedCloudFilePolicy;
+    expectedCloudTarget?: string;
+    expectedContent?: string | null;
+    /** Engine-only regular-file mode from validated Git metadata. Applied only
+     * when expectedContent is null and the destination remains absent. */
+    creationMode?: 0o644 | 0o755;
+  },
 ): WriteFileResult {
   const remote = opts?.remote === true;
   const rel = relPath;
@@ -85,6 +93,8 @@ export function writeWorkspaceFile(
   const bytes = Buffer.byteLength(content, "utf-8");
   if (bytes > MAX_TEXT_BYTES) return { kind: "too-large", path: rel, bytes };
   const guarded = opts?.expectedContent !== undefined;
+  const creationMode =
+    opts?.expectedContent === null ? opts.creationMode : undefined;
   const inspect = () => inspectExpectedWorkspaceContent(root, rel, opts!.expectedContent!);
   let expectedGeneration: string | undefined;
   if (guarded) {
@@ -112,7 +122,15 @@ export function writeWorkspaceFile(
       const fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
       try {
         fs.writeFileSync(fd, content, "utf8");
-        try { fs.fchmodSync(fd, fs.statSync(parent.target).mode); } catch { /* new file */ }
+        try {
+          fs.fchmodSync(fd, fs.statSync(parent.target).mode);
+        } catch (error) {
+          if (
+            (error as NodeJS.ErrnoException).code === "ENOENT" &&
+            creationMode !== undefined
+          )
+            fs.fchmodSync(fd, creationMode);
+        }
         opts.cloudPolicy.assertDescriptor(parent.fd, parent.directory, true);
         publishCloudWorkspacePath(path.join(parent.directory, path.basename(temporary)), fd);
       } finally { fs.closeSync(fd); }
@@ -187,8 +205,12 @@ export function writeWorkspaceFile(
       // silent perms change that also surfaces as a spurious mode diff.
       try {
         fs.chmodSync(tmp, fs.statSync(target).mode);
-      } catch {
-        /* new file — no prior mode to preserve */
+      } catch (error) {
+        if (
+          (error as NodeJS.ErrnoException).code === "ENOENT" &&
+          creationMode !== undefined
+        )
+          fs.chmodSync(tmp, creationMode);
       }
       publishCloudWorkspacePath(tmp);
       assertStillExpected();

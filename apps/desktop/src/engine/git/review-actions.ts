@@ -157,6 +157,18 @@ export async function reviewHunk(
       );
     }
     if (!matches) throw stale();
+    // The exact live patch above validates this header for the chosen
+    // comparison; HEAD and the index can carry different executable modes.
+    const deletedMode =
+      input.expectedContent === null
+        ? /^deleted file mode (100644|100755)$/m.exec(input.patch)?.[1]
+        : undefined;
+    const creationMode =
+      deletedMode === "100755"
+        ? 0o755
+        : deletedMode === "100644"
+          ? 0o644
+          : undefined;
     const reversed = reverseReviewHunkContent(
       input.expectedContent,
       input.patch,
@@ -186,6 +198,7 @@ export async function reviewHunk(
           : writeWorkspaceFile(context.cwd, input.path, reversed, {
               ...context,
               expectedContent: input.expectedContent,
+              creationMode,
             });
       if (result.kind !== "success")
         throw invalid(

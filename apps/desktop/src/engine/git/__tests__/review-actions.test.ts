@@ -266,6 +266,105 @@ describe("guarded Git review actions in real repositories", () => {
     expect(read()).toBe(original);
     expect(await git(cwd, "show", ":file.txt")).toBe(original);
   });
+  it("refuses a forged deleted-file mode instead of granting executable permissions", async () => {
+    fs.unlinkSync(file());
+    const input = await target();
+    expect(input.patch).toContain("deleted file mode 100644");
+    await expect(
+      reviewHunk({
+        ...input,
+        patch: input.patch.replace(
+          "deleted file mode 100644",
+          "deleted file mode 100755",
+        ),
+        decision: "rejected",
+        confirm: true,
+      }),
+    ).rejects.toThrow(/changed|refresh/i);
+    expect(fs.existsSync(file())).toBe(false);
+    expect(await git(cwd, "show", ":file.txt")).toBe(original);
+    expect(await listHunkReviews({ workspaceId, path: "file.txt" })).toEqual([]);
+  });
+  for (const cloud of [false, true]) {
+    describe.runIf(!cloud || process.platform === "linux")(
+      `${cloud ? "cloud" : "local"} deleted script restoration`,
+      () => {
+        it.each([
+          ["worktree-vs-head", 0o755, 0o755],
+          ["worktree-vs-index", 0o755, 0o755],
+          ["worktree-vs-head", 0o755, 0o644],
+          ["worktree-vs-index", 0o755, 0o644],
+          ["worktree-vs-head", 0o644, 0o755],
+          ["worktree-vs-index", 0o644, 0o755],
+        ] as const)(
+          "restores %s bytes and mode with HEAD %i / index %i, preserving the index",
+          async (comparison, headMode, indexMode) => {
+            const script = path.join(cwd, "run.sh");
+            const headContent = "#!/bin/sh\necho head\n";
+            const indexContent = "#!/bin/sh\necho staged\n";
+            await git(cwd, "config", "core.fileMode", "true");
+            fs.writeFileSync(script, headContent);
+            fs.chmodSync(script, headMode);
+            await git(cwd, "add", "run.sh");
+            await git(cwd, "commit", "-q", "-m", "script fixture");
+            fs.writeFileSync(script, indexContent);
+            fs.chmodSync(script, indexMode);
+            await git(cwd, "add", "run.sh");
+            const staged = await git(
+              cwd, "ls-files", "--stage", "--", "run.sh",
+            );
+            const head = await git(cwd, "rev-parse", "HEAD");
+            fs.unlinkSync(script);
+            const result = await diff({
+              workspaceId,
+              filePath: "run.sh",
+              mode: comparison,
+              rawPatch: true,
+              ...(comparison === "worktree-vs-head" ? { base: "HEAD" } : {}),
+            });
+            const patch = splitReviewHunks(result.patch!)[0].patch;
+            const expectedMode =
+              comparison === "worktree-vs-head" ? headMode : indexMode;
+            expect(patch).toContain(
+              `deleted file mode 100${expectedMode.toString(8)}`,
+            );
+            await reviewHunk(
+              {
+                workspaceId,
+                path: "run.sh",
+                comparison,
+                patch,
+                expectedContent: null,
+                decision: "rejected",
+                confirm: true,
+              },
+              cloud
+                ? {
+                    cwd,
+                    remote: true,
+                    cloudPolicy: new QualifiedCloudFilePolicy(cwd, {
+                      canEdit: true,
+                      authorized: () => true,
+                      privateRoots: [],
+                      ownerRoots: () => [],
+                    }),
+                  }
+                : undefined,
+            );
+            expect(fs.readFileSync(script, "utf8")).toBe(
+              comparison === "worktree-vs-head" ? headContent : indexContent,
+            );
+            expect(await git(cwd, "ls-files", "--stage", "--", "run.sh")).toBe(
+              staged,
+            );
+            expect(await git(cwd, "show", ":run.sh")).toBe(indexContent);
+            expect(await git(cwd, "rev-parse", "HEAD")).toBe(head);
+            expect(fs.statSync(script).mode & 0o777).toBe(expectedMode);
+          },
+        );
+      },
+    );
+  }
   it("supports complete-context previews and preserves CRLF/no-final-newline bytes", async () => {
     fs.writeFileSync(file(), "before\r\nlast");
     await git(cwd, "add", "file.txt");
