@@ -417,8 +417,12 @@ remaining native qualification. The observer exits without waiting for it.
 Before the non-idempotent POST, a small immutable Actions **intent**, not a
 receipt, is uploaded with 90-day retention and exact source/run/failed-attempt/
 leaf-job plus observer producing-attempt attribution. Its verified artifact
-digest/readback and an exclusive local request flag fence duplicates. A prior
-intent, interrupted upload or missing attributable history is observation-only,
+digest/readback and an exclusive local request flag fence duplicates. The
+current observer's acknowledged upload gets at most five fresh GET passes with
+four one-second pauses for step/list visibility only. Invalid identity,
+integrity or producer evidence fails immediately; exhausted visibility remains
+consumed and sends no POST. A prior intent, interrupted upload or missing
+attributable history is observation-only,
 including after refusal or lost acknowledgement. Never delete/reset these
 intents or their workflow history to authorize another POST. Crash after arming
 but before POST, or unavailable final readback, conservatively requires operator

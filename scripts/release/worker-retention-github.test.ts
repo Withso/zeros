@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./contracts";
 import { retentionIntentKey, retentionRunTitle, type RetentionSubject } from "./worker-retention-resume";
+
+const uploadDirectories: string[] = [];
+afterEach(async () => { await Promise.all(uploadDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))); });
 
 function fixture(channel: RetentionSubject["channel"] = "alpha") {
   const sourceSha = "a".repeat(40), repository = "example/zeros", now = Date.now(), timestamp = (offset: number) => new Date(now + offset).toISOString();
@@ -77,6 +84,53 @@ function fixture(channel: RetentionSubject["channel"] = "alpha") {
     options: { fetch: fetcher as typeof fetch, command, now: () => now }, digest,
     supersede: () => { currentSha = "b".repeat(40); }, incomplete: () => { historyCount = observerRuns.length + 1; },
     refuse: () => { postStatus = 403; }, lose: () => { responseLost = true; } };
+}
+
+async function currentUploadFixture(change?: (value: any) => void) {
+  const test = fixture(); test.arm(); test.observer.status = "in_progress"; test.observerJobs[0].status = "in_progress";
+  const payload = structuredClone(test.intent); change?.(payload);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-worker-upload-")); uploadDirectories.push(directory);
+  await writeFile(path.join(directory, "retention-intent.json"), JSON.stringify(payload), { mode: 0o600, flag: "wx" });
+  let bytes = execFileSync("zip", ["-q", "-X", "-", "retention-intent.json"], { cwd: directory, maxBuffer: 128 * 1024 });
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  Object.assign(test.observerArtifacts[0], { size_in_bytes: bytes.length, digest: `sha256:${digest}` });
+  let jobReads = 0, artifactReads = 0, delay: "step" | "artifact" | undefined, neverVisible = false;
+  const fetcher = vi.fn(async (url: any, init: RequestInit = {}): Promise<Response> => {
+    const target = new URL(String(url));
+    if (target.hostname === "fixture.blob.core.windows.net") {
+      expect(init.headers).toBeUndefined(); return new Response(bytes);
+    }
+    if (target.pathname === "/repos/example/zeros/actions/runs/789/attempts/1/jobs") {
+      jobReads++;
+      if (delay === "step" && (neverVisible || jobReads === 1)) {
+        const jobs = structuredClone(test.observerJobs);
+        Object.assign(jobs[0].steps[1], { status: "in_progress", conclusion: null, completed_at: null });
+        return new Response(JSON.stringify({ total_count: jobs.length, jobs }));
+      }
+    }
+    if (target.pathname === "/repos/example/zeros/actions/runs/789/artifacts") {
+      artifactReads++;
+      if (delay === "artifact" && (neverVisible || artifactReads === 1)) return new Response(JSON.stringify({ total_count: 0, artifacts: [] }));
+    }
+    return test.fetcher(url, init);
+  });
+  const sleep = vi.fn(async (_milliseconds: number) => {});
+  return { ...test, acknowledged: { id: "700", digest }, fetcher,
+    options: { ...test.options, fetch: fetcher as typeof fetch, command: undefined, sleep }, sleep,
+    delay: (value: "step" | "artifact", forever = false) => { delay = value; neverVisible = forever; },
+    corruptBytes: () => { bytes = Buffer.from("not the acknowledged ZIP"); }, reads: () => ({ jobs: jobReads, artifacts: artifactReads }) };
+}
+
+async function currentUploadRequest(test: Awaited<ReturnType<typeof currentUploadFixture>>) {
+  const { retentionGithubClient } = await import("./worker-retention-github"), { requestRetentionResume } = await import("./worker-retention-resume");
+  const client = retentionGithubClient(test.subject.repository, { GH_TOKEN: "synthetic", GITHUB_RUN_ID: "789", GITHUB_RUN_ATTEMPT: "1" }, test.options);
+  const markRequested = vi.fn(async () => {});
+  const request = () => requestRetentionResume(test.intent, test.intent.producer, {
+    inspect: async () => ({ sha256: test.intent.metadataSha256, failedAt: test.intent.failedAt }),
+    completion: async () => ({ sha256: test.intent.cleanupSha256, completedAt: test.intent.completedAt }),
+    assertIntentAvailable: client.assertIntentAvailable, verifyOwnIntent: intent => client.verifyOwnIntent(intent, test.acknowledged),
+    markRequested, rerun: client.rerun });
+  return { client, request, markRequested };
 }
 
 describe("authoritative retention GitHub metadata", () => {
@@ -189,5 +243,60 @@ describe("authoritative retention GitHub metadata", () => {
     const calls = test.fetcher.mock.calls.filter(([, input]) => input?.method === "POST");
     expect(calls).toHaveLength(1); expect(String(calls[0][0])).toBe("https://api.github.com/repos/example/zeros/actions/jobs/456/rerun");
     expect(JSON.parse(String(calls[0][1]?.body))).toEqual({ enable_debug_logging: false, enable_debugger: false });
+  });
+});
+
+describe("current acknowledged upload visibility", () => {
+  it.each(["step", "artifact"] as const)("observes delayed %s through real ZIP verification before exactly one rerun", async delay => {
+    const test = await currentUploadFixture(); test.delay(delay);
+    const { request, markRequested } = await currentUploadRequest(test);
+    await expect(request()).resolves.toBe("accepted");
+    expect(test.reads()[delay === "step" ? "jobs" : "artifacts"]).toBeGreaterThan(1);
+    expect(test.sleep).toHaveBeenCalledOnce(); expect(markRequested).toHaveBeenCalledOnce();
+    expect(test.fetcher.mock.calls.filter(([, input]) => input?.method === "POST")).toHaveLength(1);
+  });
+
+  it.each(["step", "artifact"] as const)("bounds a never-visible %s and keeps the armed intent consumed with no POST", async delay => {
+    const test = await currentUploadFixture(); test.delay(delay, true);
+    const { client, request, markRequested } = await currentUploadRequest(test);
+    await expect(request()).rejects.toThrow("bounded observation");
+    expect(test.reads()[delay === "step" ? "jobs" : "artifacts"]).toBe(5); expect(test.sleep).toHaveBeenCalledTimes(4);
+    expect(markRequested).not.toHaveBeenCalled(); expect(test.fetcher.mock.calls.every(([, input]) => input?.method !== "POST")).toBe(true);
+    test.observer.status = "completed";
+    await expect(client.assertIntentAvailable(test.subject)).rejects.toThrow();
+    expect(test.sleep).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(["wrong artifact ID", "wrong artifact name", "wrong digest", "expired artifact", "expired lifetime", "foreign artifact", "foreign source", "foreign observer run", "prior observer attempt",
+    "failed upload", "failed active upload", "missing upload", "unknown upload", "corrupt ZIP", "corrupt intent", "foreign producer", "bad upload time"])("rejects %s without visibility retry or POST", async reason => {
+    const test = await currentUploadFixture(value => {
+      if (reason === "corrupt intent") value.untrusted = true;
+      if (reason === "foreign producer") value.producer.runId = "790";
+    });
+    if (reason === "wrong artifact ID") test.observerArtifacts[0].id = 701;
+    if (reason === "wrong artifact name") test.observerArtifacts[0].name = "foreign-intent";
+    if (reason === "wrong digest") test.observerArtifacts[0].digest = `sha256:${"f".repeat(64)}`;
+    if (reason === "expired artifact") test.observerArtifacts[0].expired = true;
+    if (reason === "expired lifetime") test.observerArtifacts[0].expires_at = new Date(test.options.now() - 1000).toISOString();
+    if (reason === "foreign artifact") test.observerArtifacts[0].workflow_run.id = 790;
+    if (reason === "foreign source") test.observer.head_sha = "f".repeat(40);
+    if (reason === "foreign observer run") test.observer.id = 790;
+    if (reason === "prior observer attempt") test.observer.run_attempt = 2;
+    if (reason === "failed upload") test.observerJobs[0].steps[1].conclusion = "failure";
+    if (reason === "failed active upload") Object.assign(test.observerJobs[0].steps[1], { status: "in_progress", conclusion: "failure" });
+    if (reason === "missing upload") test.observerJobs[0].steps.splice(1, 1);
+    if (reason === "unknown upload") test.observerJobs[0].steps[1].status = "unknown";
+    if (reason === "corrupt ZIP") test.corruptBytes();
+    if (reason === "bad upload time") test.observerArtifacts[0].created_at = new Date(test.options.now() - 100_000_000).toISOString();
+    const { request, markRequested } = await currentUploadRequest(test);
+    await expect(request()).rejects.toThrow(); expect(test.sleep).not.toHaveBeenCalled(); expect(markRequested).not.toHaveBeenCalled();
+    expect(test.fetcher.mock.calls.every(([, input]) => input?.method !== "POST")).toBe(true);
+  });
+
+  it("rejects known corrupt metadata even while the upload step is still becoming visible", async () => {
+    const test = await currentUploadFixture(); test.delay("step"); test.observerArtifacts[0].digest = `sha256:${"f".repeat(64)}`;
+    const { request, markRequested } = await currentUploadRequest(test);
+    await expect(request()).rejects.toThrow(); expect(test.sleep).not.toHaveBeenCalled(); expect(markRequested).not.toHaveBeenCalled();
+    expect(test.fetcher.mock.calls.every(([, input]) => input?.method !== "POST")).toBe(true);
   });
 });

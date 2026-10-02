@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DIGEST, SHA, requireCheck } from "./contracts";
-import { command, type Command } from "./io";
+import { command, sleep, type Command } from "./io";
 import { githubClient, validateServicesReceipt } from "./github";
 import { assertRequiredCI } from "./ci";
 import { RetentionIntentSchema, RetentionProducerSchema, RetentionSubjectSchema, retentionIntentKey, retentionRunTitle,
@@ -20,9 +20,9 @@ const positive = (value: unknown) => Number.isSafeInteger(Number(value)) && Numb
 const completed = (step: any) => step?.status === "completed" && step.conclusion === "success";
 const executionStep = (job: any) => job.steps?.find((step: any) => step.name === "Worker plan or guarded execution");
 
-export function retentionGithubClient(repository: string, env: NodeJS.ProcessEnv, options: { fetch?: typeof fetch; command?: Command; now?: () => number } = {}) {
+export function retentionGithubClient(repository: string, env: NodeJS.ProcessEnv, options: { fetch?: typeof fetch; command?: Command; now?: () => number; sleep?: typeof sleep } = {}) {
   requireCheck(/^[\w.-]+\/[\w.-]+$/.test(repository) && env.GH_TOKEN?.trim(), "Observer repository Actions authority is missing");
-  const fetcher = options.fetch ?? fetch, runCommand = options.command ?? command, now = options.now ?? Date.now;
+  const fetcher = options.fetch ?? fetch, runCommand = options.command ?? command, now = options.now ?? Date.now, pause = options.sleep ?? sleep;
   const base = `https://api.github.com/repos/${repository}`;
   const headers = { authorization: `Bearer ${env.GH_TOKEN}`, accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
   async function read(route: string) {
@@ -197,8 +197,8 @@ export function retentionGithubClient(repository: string, env: NodeJS.ProcessEnv
     requireCheck(step && ["pending", "queued", "in_progress", "completed"].includes(step.status), "Observer upload step is unavailable");
     return { job, step };
   }
-  async function validateIntentArtifact(run: any, attempt: number, subject: RetentionSubject, artifacts: any[]) {
-    const upload = await observerUpload(run, attempt, subject);
+  async function validateIntentArtifact(run: any, attempt: number, subject: RetentionSubject, artifacts: any[], observedUpload?: Awaited<ReturnType<typeof observerUpload>>) {
+    const upload = observedUpload ?? await observerUpload(run, attempt, subject);
     requireCheck(upload && completed(upload.step), "Observer intent upload did not complete authoritatively");
     const artifact = exactArtifact(artifacts, retentionIntentKey(subject), run), value = RetentionIntentSchema.parse(await smallArtifact(artifact, "retention-intent.json"));
     requireCheck(hash(value.subject) === hash(subject) && value.producer.runId === String(run.id) && value.producer.runAttempt === String(attempt) &&
@@ -229,13 +229,29 @@ export function retentionGithubClient(repository: string, env: NodeJS.ProcessEnv
   }
   async function verifyOwnIntent(intent: RetentionIntent, expected: { id: string; digest: string }) {
     requireCheck(positive(expected.id) && DIGEST.test(expected.digest), "Current intent upload output is unavailable");
-    const run = await read(`/actions/runs/${intent.producer.runId}`);
-    observerRun(run, intent.subject);
-    requireCheck(String(run.run_attempt) === intent.producer.runAttempt && run.status === "in_progress", "Only the current observer attempt may request once");
-    const { artifact, value } = await validateIntentArtifact(run, Number(intent.producer.runAttempt), intent.subject,
-      await list(`/actions/runs/${run.id}/artifacts`, "artifacts"));
-    requireCheck(String(artifact.id) === expected.id && artifact.digest === `sha256:${expected.digest}` && hash(value) === hash(RetentionIntentSchema.parse(intent)),
-      "Current immutable intent readback does not match upload and local decision");
+    for (let observation = 0; observation < 5; observation++) {
+      const run = await read(`/actions/runs/${intent.producer.runId}`);
+      observerRun(run, intent.subject);
+      requireCheck(String(run.id) === intent.producer.runId && String(run.run_attempt) === intent.producer.runAttempt && run.status === "in_progress",
+        "Only the current observer attempt may request once");
+      const artifacts = await list(`/actions/runs/${run.id}/artifacts`, "artifacts"), name = retentionIntentKey(intent.subject);
+      const matching = artifacts.filter(artifact => artifact.name === name || String(artifact.id) === expected.id);
+      if (matching.length) {
+        const artifact = exactArtifact(artifacts, name, run);
+        requireCheck(matching.length === 1 && String(artifact.id) === expected.id && artifact.digest === `sha256:${expected.digest}`,
+          "Current immutable intent readback does not match upload and local decision");
+      }
+      const upload = await observerUpload(run, Number(intent.producer.runAttempt), intent.subject);
+      requireCheck(upload && (completed(upload.step) || (["pending", "queued", "in_progress"].includes(upload.step.status) && upload.step.conclusion === null)),
+        "Observer intent upload did not complete authoritatively");
+      if (completed(upload.step) && matching.length) {
+        const { value } = await validateIntentArtifact(run, Number(intent.producer.runAttempt), intent.subject, artifacts, upload);
+        requireCheck(hash(value) === hash(RetentionIntentSchema.parse(intent)), "Current immutable intent readback does not match upload and local decision");
+        return;
+      }
+      if (observation < 4) await pause(1000);
+    }
+    throw new Error("Current intent upload remains unconfirmed after bounded observation; observation only");
   }
   async function rerun(jobId: string): Promise<"accepted" | "refused" | "unconfirmed"> {
     requireCheck(positive(jobId) && /^[1-9]\d*$/.test(jobId), "Original leaf job identity is invalid");

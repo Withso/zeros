@@ -16,7 +16,9 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 const directories: string[] = [];
 afterEach(async () => { vi.useRealTimers(); await Promise.all(directories.splice(0).map(directory => rm(directory, { force: true, recursive: true }))); });
 
-async function fixture(nativeTarget = "bx_native", kind = "claude-setup-token") {
+type CanaryFixtureOptions = { nativeTarget?: string; kind?: ReturnType<typeof workerConnections>[number]["kind"] };
+async function fixture(options: CanaryFixtureOptions = {}) {
+  const { nativeTarget = "bx_native", kind = "claude-setup-token" } = options;
   const env = workerEnvironment(), { config } = workerExecutionConfig(env), connections = workerConnections();
   const now = Date.now(), at = (offset: number) => new Date(now + offset).toISOString();
   const profile = { boat: { accountScope: env.BOAT_ACCOUNT_SCOPE!, billingOrg: env.BOAT_BILLING_ORG!, baseSnapshot: env.BOAT_BASE_SNAPSHOT!, builderBudgetHours: 0.25 },
@@ -138,7 +140,8 @@ describe("automatic original-worker retention resumption", () => {
     await first.adapter.qualify(first.parent.candidate, first.job.kind);
     first.job.auditRetired = { version: 1, operationId: first.job.id, deletionOperationId: first.nativeOperation.id };
     vi.setSystemTime(first.context.now() + 1000);
-    const test = await fixture("bx_cursor", "cursor-api-key");
+    const test = await fixture({ nativeTarget: "bx_cursor", kind: "cursor-api-key" });
+    expect(test.job.kind).toBe("cursor-api-key"); expect(test.job.admissionRequest.target.id).toBe("bx_cursor");
     test.subject.failedAttempt = "2"; test.job.admissionRequest.runAttempt = "2";
     test.run.canaries.unshift(first.job); test.state.resources.images.push(first.row);
     test.ledger().reservations.push(...first.ledger().reservations.filter((hold: any) => hold.computeId === `canary:${first.job.id}`));
