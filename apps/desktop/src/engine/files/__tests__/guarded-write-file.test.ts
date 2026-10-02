@@ -127,8 +127,16 @@ describe("expected-content workspace writes", () => {
               );
               expect(result.kind).toBe("success");
               expect(preparedModes).toEqual([creationMode]);
-              expect(fs.statSync(target).mode & 0o777).toBe(creationMode);
-              expect(fs.readFileSync(target, "utf8")).toBe("#!/bin/sh\n");
+              const restored = fs.openSync(
+                target,
+                fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+              );
+              try {
+                expect(fs.fstatSync(restored).mode & 0o777).toBe(creationMode);
+                expect(fs.readFileSync(restored, "utf8")).toBe("#!/bin/sh\n");
+              } finally {
+                fs.closeSync(restored);
+              }
               expect(fs.readdirSync(root).sort()).toEqual([
                 "file.txt", "run.sh",
               ]);
