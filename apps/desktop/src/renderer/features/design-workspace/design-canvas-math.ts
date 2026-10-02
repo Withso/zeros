@@ -18,6 +18,20 @@ export interface DesignCanvasRect {
   height: number;
 }
 
+/** Check the unsnapped pointer geometry before a snap or Fixed sizing converts
+ * a return to the starting box into a source edit. Ignore arithmetic residue. */
+export function designGestureRectUnchanged(
+  start: Readonly<DesignCanvasRect>,
+  latest: Readonly<DesignCanvasRect>,
+): boolean {
+  return (
+    Math.abs(latest.x - start.x) < 0.000001 &&
+    Math.abs(latest.y - start.y) < 0.000001 &&
+    Math.abs(latest.width - start.width) < 0.000001 &&
+    Math.abs(latest.height - start.height) < 0.000001
+  );
+}
+
 /** Viewport edges covered by floating chrome — the Layers + Inspector panel,
  * an open Motion timeline. Fitting, revealing and centring aim for the part of
  * the canvas a person can actually see; pointer-to-world conversion and

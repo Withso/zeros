@@ -59,6 +59,7 @@ import {
   designMotionIterationCount,
   designMotionNudgedOffset,
   designMotionPlaybackStartOffset,
+  designMotionPlaybackPosition,
   designMotionPoints,
   designMotionPresetKeyframes,
   designMotionPreviewCurrentTime,
@@ -74,6 +75,12 @@ import {
   type DesignMotionPresetId,
 } from "./design-motion-values";
 import "./design-motion-timeline.css";
+import { beginDesignPointerGesture } from "./design-pointer-gesture";
+import { DesignMotionInput } from "./design-motion-input";
+import {
+  focusDesignPopoverSurface,
+  keepDesignPopoverWhileEditing,
+} from "./design-inspector-kit";
 
 const MOTION_HEIGHT_KEY = "zeros.design.motion-timeline-height";
 const MOTION_HEIGHT_VAR = "--zeros-design-motion-height";
@@ -104,7 +111,7 @@ function readMotionHeight() {
 }
 
 const MotionTimelineResizeHandle = React.memo(
-  function MotionTimelineResizeHandle() {
+  function MotionTimelineResizeHandle({ disabled }: { disabled: boolean }) {
     const handleRef = useRef<HTMLDivElement>(null);
     const rootRef = useRef<HTMLElement | null>(null);
     const cleanupRef = useRef<(() => void) | null>(null);
@@ -143,10 +150,14 @@ const MotionTimelineResizeHandle = React.memo(
     );
 
     useLayoutEffect(() => {
+      if (disabled) return;
       const timeline = handleRef.current?.parentElement;
       const root = timeline?.offsetParent ?? timeline?.parentElement;
       if (!(root instanceof HTMLElement)) return;
       rootRef.current = root;
+      // A retained hidden timeline suspends its listeners. Restore the current
+      // app preference before its first visible measurement after activation.
+      preferredHeightRef.current = readMotionHeight();
       const measure = () => {
         // Retain the requested pixel size when a smaller canvas temporarily
         // caps it. Extremely short canvases keep the 160px control surface.
@@ -186,13 +197,14 @@ const MotionTimelineResizeHandle = React.memo(
         root.style.removeProperty(MOTION_HEIGHT_VAR);
         rootRef.current = null;
       };
-    }, [publish]);
+    }, [disabled, publish]);
 
     return (
       <div
         ref={handleRef}
         role="separator"
-        tabIndex={0}
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
         aria-label="Resize motion timeline"
         aria-orientation="horizontal"
         aria-valuemin={MOTION_HEIGHT_MIN}
@@ -201,6 +213,7 @@ const MotionTimelineResizeHandle = React.memo(
         aria-valuetext={`${height} pixels`}
         className="zd-motion-resize-handle"
         onKeyDown={(event) => {
+          if (disabled) return;
           if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
           event.preventDefault();
           event.stopPropagation();
@@ -208,7 +221,13 @@ const MotionTimelineResizeHandle = React.memo(
           commit(heightRef.current + (event.key === "ArrowUp" ? step : -step));
         }}
         onPointerDown={(event) => {
-          if (event.button !== 0 || !rootRef.current) return;
+          if (
+            disabled ||
+            event.button !== 0 ||
+            !event.isPrimary ||
+            !rootRef.current
+          )
+            return;
           event.preventDefault();
           event.stopPropagation();
           cleanupRef.current?.();
@@ -217,43 +236,28 @@ const MotionTimelineResizeHandle = React.memo(
           const pointerId = event.pointerId;
           const startY = event.clientY;
           const startHeight = heightRef.current;
-          const cursor = document.body.style.cursor;
-          const userSelect = document.body.style.userSelect;
           handle.focus({ preventScroll: true });
-          handle.setPointerCapture(pointerId);
           root.dataset.designMotionResizing = "true";
-          document.body.style.cursor = "row-resize";
-          document.body.style.userSelect = "none";
-          const move = (next: PointerEvent) => {
-            if (next.pointerId === pointerId)
-              publish(startHeight + startY - next.clientY);
-          };
           const cleanup = () => {
-            window.removeEventListener("pointermove", move);
-            window.removeEventListener("pointerup", finish);
-            window.removeEventListener("pointercancel", cancel);
-            window.removeEventListener("blur", cancel);
-            if (handle.hasPointerCapture(pointerId))
-              handle.releasePointerCapture(pointerId);
             delete root.dataset.designMotionResizing;
-            document.body.style.cursor = cursor;
-            document.body.style.userSelect = userSelect;
             cleanupRef.current = null;
           };
-          const finish = (next: PointerEvent) => {
-            if (next.pointerId !== pointerId) return;
-            cleanup();
-            commit(heightRef.current);
-          };
-          const cancel = () => {
-            cleanup();
-            setHeight(publish(startHeight));
-          };
-          cleanupRef.current = cleanup;
-          window.addEventListener("pointermove", move);
-          window.addEventListener("pointerup", finish);
-          window.addEventListener("pointercancel", cancel);
-          window.addEventListener("blur", cancel);
+          cleanupRef.current = beginDesignPointerGesture({
+            target: handle,
+            pointerId,
+            cursor: "row-resize",
+            onMove: (next) => {
+              publish(startHeight + startY - next.clientY);
+            },
+            onFinish: () => {
+              cleanup();
+              commit(heightRef.current);
+            },
+            onCancel: () => {
+              cleanup();
+              setHeight(publish(startHeight));
+            },
+          });
         }}
       />
     );
@@ -276,13 +280,14 @@ function MotionEasingField({
   disabled,
   compact,
   onChange,
+  onValidityChange,
 }: {
   value: string;
   disabled: boolean;
   compact: boolean;
   onChange: (value: string) => void;
+  onValidityChange: (id: string, valid: boolean) => void;
 }) {
-  const [editing, setEditing] = useState(false);
   const preset = MOTION_EASINGS.find(
     (easing) =>
       easing.value.replace(/\s/g, "") ===
@@ -293,20 +298,15 @@ function MotionEasingField({
       {!compact ? (
         <span className="zd-field-label zd-motion-control-label">Easing</span>
       ) : null}
-      <Input
-        value={editing ? value : (preset?.label ?? value)}
+      <DesignMotionInput
+        value={value}
+        displayValue={preset?.label ?? value}
         aria-label="Animation easing"
-        aria-invalid={!designMotionEasingIsValid(value)}
+        isValid={designMotionEasingIsValid}
+        onValidityChange={onValidityChange}
         className="px-2"
         disabled={disabled}
-        onBlur={() => setEditing(false)}
-        onChange={(event) => {
-          setEditing(true);
-          onChange(event.currentTarget.value);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") event.currentTarget.blur();
-        }}
+        onCommit={onChange}
       />
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
@@ -396,9 +396,9 @@ interface SelectedPoint {
 }
 
 interface MotionDraftCacheEntry {
-  definitionsSignature: string;
   draft: DesignMotionTimelineDraft;
   playhead: number;
+  playbackTime: number | null;
   selectedPoint: SelectedPoint | null;
   selectedProperty: string | null;
   presetId: DesignMotionPresetId | null;
@@ -409,6 +409,45 @@ interface MotionDraftCacheEntry {
 
 const motionDraftCache = new Map<string, MotionDraftCacheEntry>();
 const MOTION_DRAFT_CACHE_LIMIT = 16;
+
+interface MotionWrite {
+  type: "save" | "delete";
+  draft: DesignMotionTimelineDraft;
+}
+
+type MotionWriteEvent = MotionWrite | { type: "pending"; pending: boolean };
+
+// A write belongs to the node's session, which can outlive one mounted editor
+// while the user selects another layer. Keep only pending writes and mounted
+// subscribers; completed drafts use the existing bounded retention cache.
+const pendingMotionWrites = new Map<string, MotionWrite>();
+const motionWriteListeners = new Map<
+  string,
+  Set<(event: MotionWriteEvent) => void>
+>();
+
+function publishMotionWrite(key: string, event: MotionWriteEvent) {
+  for (const listener of motionWriteListeners.get(key) ?? []) listener(event);
+}
+
+function acknowledgeMotionWrite(key: string, write: MotionWrite) {
+  const cached = motionDraftCache.get(key);
+  if (cached?.draft === write.draft) {
+    motionDraftCache.delete(key);
+  } else if (cached) {
+    rememberMotionDraft(key, {
+      ...cached,
+      persistedMotion: write.type === "save",
+    });
+  }
+  publishMotionWrite(key, write);
+}
+
+function finishMotionWrite(key: string, write: MotionWrite) {
+  if (pendingMotionWrites.get(key) !== write) return;
+  pendingMotionWrites.delete(key);
+  publishMotionWrite(key, { type: "pending", pending: false });
+}
 
 function rememberMotionDraft(key: string, entry: MotionDraftCacheEntry) {
   motionDraftCache.delete(key);
@@ -437,52 +476,29 @@ function MotionTimeField({
   suffix?: string;
   onOffsetChange: (offset: number) => void;
 }) {
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const cancelRef = useRef(false);
-  const [draft, setDraft] = useState(String(time));
-
-  useEffect(() => {
-    if (document.activeElement !== inputRef.current) setDraft(String(time));
-  }, [time]);
-
-  const commit = () => {
-    if (cancelRef.current) {
-      cancelRef.current = false;
-      return;
-    }
-    const offset = designMotionTimeInputOffset(draft, duration);
-    if (offset === null) {
-      setDraft(String(time));
-      return;
-    }
-    onOffsetChange(offset);
-  };
-
   return (
     <span className={cn("zd-field zd-motion-time-field", className)}>
-      <Input
-        ref={inputRef}
+      <DesignMotionInput
         type="number"
         min={0}
         max={duration}
         step={1}
-        value={draft}
+        value={String(time)}
         aria-label={label}
         className="px-2 text-right"
         disabled={disabled}
-        onFocus={() => setDraft(String(time))}
-        onChange={(event) => setDraft(event.currentTarget.value)}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            event.currentTarget.blur();
-          } else if (event.key === "Escape") {
-            event.preventDefault();
-            cancelRef.current = true;
-            setDraft(String(time));
-            event.currentTarget.blur();
-          }
+        isValid={(value) =>
+          designMotionTimeInputOffset(value, duration) !== null
+        }
+        normalize={(value) => {
+          const offset = designMotionTimeInputOffset(value, duration);
+          return offset === null
+            ? value
+            : String(designMotionTimeAtOffset(offset, duration));
+        }}
+        onCommit={(value) => {
+          const offset = designMotionTimeInputOffset(value, duration);
+          if (offset !== null) onOffsetChange(offset);
         }}
       />
       {suffix ? <span className="zd-field-suffix">{suffix}</span> : null}
@@ -711,11 +727,6 @@ function signedTimeMs(value: string): number {
   );
 }
 
-function previewIterations(value: string): number {
-  const parsed = designMotionIterationCount(value);
-  return parsed === Infinity ? 1_000 : (parsed ?? 1);
-}
-
 function motionDraftIssue(draft: DesignMotionTimelineDraft): string | null {
   const iterations = designMotionIterationCount(draft.iterations);
   if (!/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(draft.name)) {
@@ -779,7 +790,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   const [compactTiming, setCompactTiming] = useState(false);
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
-    if (!open || !timeline) return;
+    if (!open || disabled || !timeline) return;
     // The settings surface is portaled, so mirror the timeline's container
     // breakpoint there. Container queries handle the header before this read.
     const update = (width: number) => setCompactTiming(width <= 720);
@@ -789,7 +800,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     });
     observer.observe(timeline);
     return () => observer.disconnect();
-  }, [open]);
+  }, [disabled, open]);
   const detailsOwner = details?.oid ?? "";
   const motionOwner = `${ownerKey}\u0000${detailsOwner}`;
   const definitionsSignature = useMemo(
@@ -800,17 +811,46 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   definitionsRef.current = definitions;
   const detailsRef = useRef(details);
   detailsRef.current = details;
-  const cachedSessionCandidate = motionDraftCache.get(sessionOwnerKey);
-  const cachedSession =
-    cachedSessionCandidate?.definitionsSignature === definitionsSignature
-      ? cachedSessionCandidate
-      : null;
-  const [draft, setDraft] = useState<DesignMotionTimelineDraft | null>(
+  const authoredTimingSignature = [
+    details?.styles.animationName,
+    details?.styles.animationDuration,
+    details?.styles.animationDelay,
+    details?.styles.animationTimingFunction,
+    details?.styles.animationIterationCount,
+    details?.styles.animationDirection,
+    details?.styles.animationFillMode,
+  ].join("\u0000");
+  const initializedSessionRef = useRef<string | null>(null);
+  const cachedSession = motionDraftCache.get(sessionOwnerKey) ?? null;
+  const [draft, setDraftState] = useState<DesignMotionTimelineDraft | null>(
     () =>
       cachedSession?.draft ??
       (details ? initialMotionDraft(details, definitions, ownerKey) : null),
   );
-  const [playhead, setPlayhead] = useState(cachedSession?.playhead ?? 0);
+  // A field's blur can commit during the pointerdown that begins a gesture.
+  // Capture that accepted draft immediately, before React's next render.
+  const draftRef = useRef(draft);
+  const setDraft = useCallback(
+    (update: React.SetStateAction<DesignMotionTimelineDraft | null>) => {
+      const next =
+        typeof update === "function" ? update(draftRef.current) : update;
+      draftRef.current = next;
+      setDraftState(next);
+    },
+    [],
+  );
+  const [playhead, setPlayheadState] = useState(cachedSession?.playhead ?? 0);
+  const playheadRef = useRef(playhead);
+  const playbackTimeRef = useRef<number | null>(
+    cachedSession?.playbackTime ?? null,
+  );
+  const setPlayhead = useCallback((offset: number) => {
+    // An explicit seek chooses an effect-local time; pause/resume retains the
+    // elapsed loop time separately so alternate playback cannot change phase.
+    playbackTimeRef.current = null;
+    playheadRef.current = offset;
+    setPlayheadState(offset);
+  }, []);
   const [selectedPoint, setSelectedPoint] = useState<SelectedPoint | null>(
     cachedSession?.selectedPoint ?? null,
   );
@@ -827,17 +867,36 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     cachedSession?.propertyDraft ?? "",
   );
   const [propertyInvalid, setPropertyInvalid] = useState(false);
-  const [dirty, setDirty] = useState(cachedSession !== null);
+  const [dirty, setDirtyState] = useState(cachedSession !== null);
+  const dirtyRef = useRef(dirty);
+  const setDirty = useCallback((next: boolean) => {
+    dirtyRef.current = next;
+    setDirtyState(next);
+  }, []);
   const [persistedMotion, setPersistedMotion] = useState(
     () =>
       cachedSession?.persistedMotion ??
       (details ? animationName(details) !== null : false),
   );
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState(() =>
+    pendingMotionWrites.has(sessionOwnerKey),
+  );
   const [playing, setPlaying] = useState(false);
-  const playheadRef = useRef(playhead);
+  const [invalidInputs, setInvalidInputs] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const onValidityChange = useCallback((id: string, valid: boolean) => {
+    setInvalidInputs((current) => {
+      if (current.has(id) === !valid) return current;
+      const next = new Set(current);
+      if (valid) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
   playheadRef.current = playhead;
   const playOriginRef = useRef<{ time: number; offset: number } | null>(null);
+  const playToggleIntentRef = useRef<boolean | null>(null);
   const queuedPreviewRef = useRef<{
     draft: DesignMotionTimelineDraft;
     currentTime: number;
@@ -851,12 +910,13 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   const handledSeekRequestIdRef = useRef<number | null>(null);
   const pointDragMovedRef = useRef(false);
   const activePointerCleanupRef = useRef<(() => void) | null>(null);
+  const focusPointRef = useRef(false);
   const motionDraftSessionRef = useRef<MotionDraftCacheEntry | null>(null);
   motionDraftSessionRef.current = draft
     ? {
-        definitionsSignature,
         draft,
         playhead,
+        playbackTime: playbackTimeRef.current,
         selectedPoint,
         selectedProperty,
         presetId,
@@ -865,8 +925,6 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         persistedMotion,
       }
     : null;
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
   const sessionOwnerKeyRef = useRef(sessionOwnerKey);
   sessionOwnerKeyRef.current = sessionOwnerKey;
 
@@ -887,6 +945,49 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     ? (designMotionIterationCount(draft.iterations) ?? 1)
     : 1;
 
+  useLayoutEffect(() => {
+    const listener = (event: MotionWriteEvent) => {
+      if (event.type === "pending") {
+        setSaving(event.pending);
+        return;
+      }
+      setPersistedMotion(event.type === "save");
+      if (event.type === "save" || draftRef.current !== event.draft) {
+        // A restored editor can have accepted another edit before this reply.
+        // Saving acknowledges that exact object; deletion preserves newer work.
+        setDirty(event.type === "delete" || draftRef.current !== event.draft);
+        return;
+      }
+      const ownerDetails = detailsRef.current;
+      setDraft(ownerDetails ? emptyMotionDraft(ownerDetails, ownerKey) : null);
+      setPlayhead(0);
+      setSelectedPoint(null);
+      setSelectedProperty(null);
+      setPresetId(null);
+      setDirty(false);
+      setPropertyDraft("");
+    };
+    const listeners = motionWriteListeners.get(sessionOwnerKey) ?? new Set();
+    listeners.add(listener);
+    motionWriteListeners.set(sessionOwnerKey, listeners);
+    setSaving(pendingMotionWrites.has(sessionOwnerKey));
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) motionWriteListeners.delete(sessionOwnerKey);
+    };
+  }, [ownerKey, sessionOwnerKey, setDirty, setDraft, setPlayhead]);
+
+  useLayoutEffect(() => {
+    if (!focusPointRef.current) return;
+    focusPointRef.current = false;
+    const point =
+      selectedPoint &&
+      timelineRef.current?.querySelector<HTMLButtonElement>(
+        `[data-motion-property="${CSS.escape(selectedPoint.property)}"][data-motion-offset="${selectedPoint.offset}"]`,
+      );
+    (point || timelineRef.current)?.focus({ preventScroll: true });
+  }, [selectedPoint]);
+
   useEffect(() => {
     onPropertiesChange?.(properties);
   }, [onPropertiesChange, properties]);
@@ -900,11 +1001,18 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   }, [onPlayheadChange, playhead]);
 
   useEffect(() => {
+    const sameSession = initializedSessionRef.current === sessionOwnerKey;
+    initializedSessionRef.current = sessionOwnerKey;
+    // Source refreshes include definitions for every node in the document.
+    // They can update a clean editor, but cannot replace this node's unsaved
+    // work. The directory/frame/node owner already fences draft restoration.
+    if (sameSession && dirtyRef.current) return;
     const cached = motionDraftCache.get(sessionOwnerKey);
-    if (cached?.definitionsSignature === definitionsSignature) {
+    if (cached) {
       motionDraftCache.delete(sessionOwnerKey);
       setDraft(cached.draft);
       setPlayhead(cached.playhead);
+      playbackTimeRef.current = cached.playbackTime;
       setSelectedPoint(cached.selectedPoint);
       setSelectedProperty(cached.selectedProperty);
       setPresetId(cached.presetId);
@@ -933,7 +1041,16 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     setDirty(false);
     setPersistedMotion(animationName(ownerDetails) !== null);
     setPlaying(false);
-  }, [definitionsSignature, motionOwner, ownerKey, sessionOwnerKey]);
+  }, [
+    authoredTimingSignature,
+    definitionsSignature,
+    motionOwner,
+    ownerKey,
+    sessionOwnerKey,
+    setDirty,
+    setDraft,
+    setPlayhead,
+  ]);
 
   const queuePreview = useCallback(
     (
@@ -979,15 +1096,20 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   }, []);
 
   useEffect(() => {
-    if (!open || playing) return;
+    if (!open || disabled || playing) return;
     if (!draft || !validMotionDraft(draft)) {
       clearActivePreview();
       return;
     }
-    queuePreview(draft, (playhead / 100) * durationMs, false);
+    queuePreview(
+      draft,
+      playbackTimeRef.current ?? (playhead / 100) * durationMs,
+      false,
+    );
   }, [
     clearActivePreview,
     draft,
+    disabled,
     durationMs,
     open,
     playhead,
@@ -996,28 +1118,33 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   ]);
 
   useEffect(() => {
-    if (!open || !draft || !playing || !validMotionDraft(draft)) return;
-    const startingPlayhead = playheadRef.current;
-    queuePreview(draft, (startingPlayhead / 100) * durationMs, true);
+    if (!open || disabled || !draft || !playing || !validMotionDraft(draft))
+      return;
+    const startingTime =
+      playbackTimeRef.current ?? (playheadRef.current / 100) * durationMs;
+    queuePreview(draft, startingTime, true);
     const origin = {
       time: performance.now(),
-      offset: (startingPlayhead / 100) * durationMs,
+      offset: startingTime,
     };
     playOriginRef.current = origin;
     let animationFrame = 0;
     const tick = (time: number) => {
       const elapsed = time - origin.time;
       const absoluteTime = origin.offset + elapsed;
-      if (
-        Number.isFinite(iterationCount) &&
-        absoluteTime >= durationMs * iterationCount
-      ) {
-        setPlayhead(100);
+      const position = designMotionPlaybackPosition(
+        absoluteTime,
+        durationMs,
+        iterationCount,
+        draft.direction,
+      );
+      playbackTimeRef.current = position.elapsed;
+      playheadRef.current = position.offset;
+      setPlayheadState(position.offset);
+      if (position.finished) {
         setPlaying(false);
         return;
       }
-      const timeInCycle = absoluteTime % durationMs;
-      setPlayhead((timeInCycle / durationMs) * 100);
       animationFrame = window.requestAnimationFrame(tick);
     };
     animationFrame = window.requestAnimationFrame(tick);
@@ -1025,27 +1152,35 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       window.cancelAnimationFrame(animationFrame);
       playOriginRef.current = null;
     };
-  }, [draft, durationMs, iterationCount, open, playing, queuePreview]);
+  }, [
+    disabled,
+    draft,
+    durationMs,
+    iterationCount,
+    open,
+    playing,
+    queuePreview,
+  ]);
 
   useEffect(() => {
-    if (open) return;
+    if (open && !disabled) return;
+    activePointerCleanupRef.current?.();
     setPlaying(false);
     clearActivePreview();
-  }, [clearActivePreview, open]);
-
-  // A disabled timeline (its Design surface went inactive, or its Foundation
-  // is not ready) stops playing; the draft and playhead stay for its return.
-  useEffect(() => {
-    if (disabled) setPlaying(false);
-  }, [disabled]);
+  }, [clearActivePreview, disabled, open]);
 
   useEffect(
     () => () => {
       activePointerCleanupRef.current?.();
       activePointerCleanupRef.current = null;
       const cachedDraft = motionDraftSessionRef.current;
-      if (dirtyRef.current && cachedDraft) {
-        rememberMotionDraft(sessionOwnerKeyRef.current, cachedDraft);
+      if (dirtyRef.current && cachedDraft && draftRef.current) {
+        rememberMotionDraft(sessionOwnerKeyRef.current, {
+          ...cachedDraft,
+          draft: draftRef.current,
+          playhead: playheadRef.current,
+          playbackTime: playbackTimeRef.current,
+        });
       }
       queuedPreviewRef.current = null;
       if (!motionPreviewActiveRef.current) return;
@@ -1061,10 +1196,30 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     ) => {
       setPlaying(false);
       setPresetId(null);
-      setDraft((current) => (current ? mutate(current) : current));
+      setDraft((current) => {
+        if (!current) return current;
+        const next = mutate(current);
+        const elapsed = playbackTimeRef.current;
+        if (elapsed !== null) {
+          const duration = designDurationMs(next.duration);
+          // Settings and values edit the current pose, not the seek position.
+          // Preserve completed loops and fractional progress when duration
+          // changes, then settle within a newly shortened iteration count.
+          const position = designMotionPlaybackPosition(
+            (elapsed / designDurationMs(current.duration)) * duration,
+            duration,
+            designMotionIterationCount(next.iterations) ?? 1,
+            next.direction,
+          );
+          playbackTimeRef.current = position.elapsed;
+          playheadRef.current = position.offset;
+          setPlayheadState(position.offset);
+        }
+        return next;
+      });
       setDirty(true);
     },
-    [],
+    [setDirty, setDraft],
   );
 
   const applyPreset = useCallback(
@@ -1086,7 +1241,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       setPresetId(preset.id);
       setLayerExpanded(true);
     },
-    [mutateDraft],
+    [mutateDraft, setPlayhead],
   );
 
   useEffect(() => {
@@ -1099,7 +1254,10 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       return;
     }
     handledPropertyRequestIdRef.current = propertyRequest.id;
-    const property = propertyRequest.property.trim().toLocaleLowerCase();
+    const requestedProperty = propertyRequest.property.trim();
+    const property = requestedProperty.startsWith("--")
+      ? requestedProperty
+      : requestedProperty.toLowerCase();
     if (!/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property)) {
       onPropertyRequestHandled?.(propertyRequest.id);
       return;
@@ -1118,7 +1276,14 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     setSelectedPoint({ property, offset });
     setSelectedProperty(property);
     onPropertyRequestHandled?.(propertyRequest.id);
-  }, [details, mutateDraft, onPropertyRequestHandled, open, propertyRequest]);
+  }, [
+    details,
+    mutateDraft,
+    onPropertyRequestHandled,
+    open,
+    propertyRequest,
+    setPlayhead,
+  ]);
 
   useEffect(() => {
     if (
@@ -1134,16 +1299,33 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       Math.round(Math.min(100, Math.max(0, seekRequest.offset)) * 10) / 10,
     );
     onSeekRequestHandled?.(seekRequest.id);
-  }, [onSeekRequestHandled, open, seekRequest]);
+  }, [onSeekRequestHandled, open, seekRequest, setPlayhead]);
 
   const addProperty = useCallback(() => {
     if (!details || !draft) return;
-    const property = propertyDraft.trim().toLowerCase();
+    const requestedProperty = propertyDraft.trim();
+    const property = requestedProperty.startsWith("--")
+      ? requestedProperty
+      : requestedProperty.toLowerCase();
     if (!/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property)) {
       setPropertyInvalid(true);
       return;
     }
     setPropertyInvalid(false);
+    const existing = points.filter((point) => point.property === property);
+    if (existing.length > 0) {
+      const nearest = existing.reduce((closest, point) =>
+        Math.abs(point.offset - playheadRef.current) <
+        Math.abs(closest.offset - playheadRef.current)
+          ? point
+          : closest,
+      );
+      setSelectedProperty(property);
+      setSelectedPoint({ property, offset: nearest.offset });
+      setLayerExpanded(true);
+      setPropertyDraft("");
+      return;
+    }
     mutateDraft((current) => ({
       ...current,
       keyframes: setDesignMotionPoint(
@@ -1161,7 +1343,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     setSelectedPoint({ property, offset: 0 });
     setSelectedProperty(property);
     setPropertyDraft("");
-  }, [details, draft, mutateDraft, propertyDraft]);
+  }, [details, draft, mutateDraft, points, propertyDraft]);
 
   const addPoint = useCallback(
     (property: string) => {
@@ -1219,18 +1401,24 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   );
 
   const removePoint = useCallback(
-    (property: string, offset: number) => {
+    (property: string, offset: number, focus = false) => {
       mutateDraft((current) => ({
         ...current,
         keyframes: removeDesignMotionPoint(current.keyframes, property, offset),
       }));
-      setSelectedPoint(null);
+      const remaining = points.filter(
+        (point) => point.property === property && point.offset !== offset,
+      );
+      const next =
+        remaining.find((point) => point.offset > offset) ?? remaining.at(-1);
+      focusPointRef.current = focus;
+      setSelectedPoint(next ? { property, offset: next.offset } : null);
     },
-    [mutateDraft],
+    [mutateDraft, points],
   );
 
   const retimePoint = useCallback(
-    (property: string, offset: number, nextOffset: number) => {
+    (property: string, offset: number, nextOffset: number, focus = false) => {
       if (offset === nextOffset) return;
       mutateDraft((current) => ({
         ...current,
@@ -1242,10 +1430,11 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         ),
       }));
       setPlayhead(nextOffset);
+      focusPointRef.current = focus;
       setSelectedPoint({ property, offset: nextOffset });
       setSelectedProperty(property);
     },
-    [mutateDraft],
+    [mutateDraft, setPlayhead],
   );
 
   const setPlayheadFromClientX = useCallback(
@@ -1262,36 +1451,38 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         ) / 10,
       );
     },
-    [],
+    [setPlayhead],
   );
 
   const startTimelineScrub = useCallback(
     (event: React.PointerEvent<HTMLElement>) => {
-      if (disabled || event.button !== 0) return;
+      if (disabled || event.button !== 0 || !event.isPrimary) return;
       event.preventDefault();
       activePointerCleanupRef.current?.();
       const track = event.currentTarget;
-      const move = (pointerEvent: PointerEvent) =>
-        setPlayheadFromClientX(pointerEvent.clientX, track);
-      const finish = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", finish);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-        if (activePointerCleanupRef.current === finish) {
+      // Lanes are not focusable. Settle a focused field before capturing the
+      // seek baseline so its eventual blur cannot undo this gesture.
+      timelineRef.current?.focus({ preventScroll: true });
+      const startPlayhead = playheadRef.current;
+      const startPlaybackTime = playbackTimeRef.current;
+      activePointerCleanupRef.current = beginDesignPointerGesture({
+        target: track,
+        pointerId: event.pointerId,
+        cursor: "ew-resize",
+        onMove: (pointerEvent) =>
+          setPlayheadFromClientX(pointerEvent.clientX, track),
+        onFinish: () => {
           activePointerCleanupRef.current = null;
-        }
-      };
-      activePointerCleanupRef.current = finish;
+        },
+        onCancel: () => {
+          activePointerCleanupRef.current = null;
+          setPlayhead(startPlayhead);
+          playbackTimeRef.current = startPlaybackTime;
+        },
+      });
       setPlayheadFromClientX(event.clientX, track);
-      document.body.style.cursor = "ew-resize";
-      document.body.style.userSelect = "none";
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", finish);
-      window.addEventListener("pointercancel", finish);
     },
-    [disabled, setPlayheadFromClientX],
+    [disabled, setPlayhead, setPlayheadFromClientX],
   );
 
   const startPointDrag = useCallback(
@@ -1300,7 +1491,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       property: string,
       initialOffset: number,
     ) => {
-      if (disabled || !draft || event.button !== 0) return;
+      if (disabled || event.button !== 0 || !event.isPrimary) return;
       event.preventDefault();
       event.stopPropagation();
       activePointerCleanupRef.current?.();
@@ -1309,70 +1500,90 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         "[data-motion-track]",
       );
       if (!track) return;
+      event.currentTarget.focus({ preventScroll: true });
+      const baseline = draftRef.current;
+      if (!baseline) return;
+      const baselineDirty = dirtyRef.current;
+      const baselinePreset = presetId;
+      const startX = event.clientX;
+      const bounds = track.getBoundingClientRect();
+      if (bounds.width <= 0) return;
       let lastOffset = initialOffset;
       const move = (pointerEvent: PointerEvent) => {
-        const bounds = track.getBoundingClientRect();
-        const nextOffset = Math.round(
-          Math.min(
-            100,
-            Math.max(
-              0,
-              ((pointerEvent.clientX - bounds.left) / bounds.width) * 100,
-            ),
-          ),
-        );
+        const delta = pointerEvent.clientX - startX;
+        if (!pointDragMovedRef.current && Math.abs(delta) < 3) return;
+        const nextOffset =
+          Math.round(
+            Math.min(
+              100,
+              Math.max(0, initialOffset + (delta / bounds.width) * 100),
+            ) * 10,
+          ) / 10;
         if (nextOffset === lastOffset) return;
         pointDragMovedRef.current = true;
-        setDraft((current) =>
-          current
-            ? {
-                ...current,
+        // Recompute from the pointerdown snapshot. Incremental moves erase a
+        // neighboring point as soon as the pointer crosses its time.
+        setDraft(
+          nextOffset === initialOffset
+            ? baseline
+            : {
+                ...baseline,
                 keyframes: moveDesignMotionPoint(
-                  current.keyframes,
+                  baseline.keyframes,
                   property,
-                  lastOffset,
+                  initialOffset,
                   nextOffset,
                 ),
-              }
-            : current,
+              },
         );
-        setPresetId(null);
+        setPresetId(nextOffset === initialOffset ? baselinePreset : null);
         lastOffset = nextOffset;
         setPlayhead(nextOffset);
+        focusPointRef.current = true;
         setSelectedPoint({ property, offset: nextOffset });
-        setDirty(true);
+        setDirty(nextOffset === initialOffset ? baselineDirty : true);
       };
-      const finish = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", finish);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-        if (activePointerCleanupRef.current === finish) {
+      activePointerCleanupRef.current = beginDesignPointerGesture({
+        // A retimed point changes its React key; the lane retains capture.
+        target: track,
+        pointerId: event.pointerId,
+        cursor: "ew-resize",
+        onMove: move,
+        onFinish: () => {
           activePointerCleanupRef.current = null;
-        }
-      };
-      activePointerCleanupRef.current = finish;
+        },
+        onCancel: () => {
+          activePointerCleanupRef.current = null;
+          setDraft(baseline);
+          setDirty(baselineDirty);
+          setPresetId(baselinePreset);
+          setPlayhead(initialOffset);
+          focusPointRef.current = true;
+          setSelectedPoint({ property, offset: initialOffset });
+        },
+      });
       setPlaying(false);
+      setPlayhead(initialOffset);
       setSelectedPoint({ property, offset: initialOffset });
       setSelectedProperty(property);
-      document.body.style.cursor = "ew-resize";
-      document.body.style.userSelect = "none";
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", finish);
-      window.addEventListener("pointercancel", finish);
     },
-    [disabled, draft],
+    [disabled, presetId, setDirty, setDraft, setPlayhead],
   );
 
   const save = useCallback(async () => {
-    if (!draft || !validMotionDraft(draft) || saving) return;
-    setSaving(true);
+    const currentDraft = draftRef.current;
+    if (
+      !currentDraft ||
+      !validMotionDraft(currentDraft) ||
+      pendingMotionWrites.has(sessionOwnerKey)
+    )
+      return;
+    const write: MotionWrite = { type: "save", draft: currentDraft };
+    pendingMotionWrites.set(sessionOwnerKey, write);
+    publishMotionWrite(sessionOwnerKey, { type: "pending", pending: true });
     try {
-      await onSave(draft);
-      motionDraftCache.delete(sessionOwnerKey);
-      setDirty(false);
-      setPersistedMotion(true);
+      await onSave(currentDraft);
+      acknowledgeMotionWrite(sessionOwnerKey, write);
     } catch (error) {
       toast.error("Couldn't save the motion", {
         description:
@@ -1381,26 +1592,22 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             : "The motion could not be saved.",
       });
     } finally {
-      setSaving(false);
+      finishMotionWrite(sessionOwnerKey, write);
     }
-  }, [draft, onSave, saving, sessionOwnerKey]);
+  }, [onSave, sessionOwnerKey]);
 
   const deleteMotion = useCallback(async () => {
-    if (!details || saving) return;
+    const currentDraft = draftRef.current;
+    if (!details || !currentDraft || pendingMotionWrites.has(sessionOwnerKey))
+      return;
     setPlaying(false);
     clearActivePreview();
-    setSaving(true);
+    const write: MotionWrite = { type: "delete", draft: currentDraft };
+    pendingMotionWrites.set(sessionOwnerKey, write);
+    publishMotionWrite(sessionOwnerKey, { type: "pending", pending: true });
     try {
       if (persistedMotion) await onDeleteMotion();
-      motionDraftCache.delete(sessionOwnerKey);
-      setDraft(emptyMotionDraft(details, ownerKey));
-      setPlayhead(0);
-      setSelectedPoint(null);
-      setSelectedProperty(null);
-      setPresetId(null);
-      setDirty(false);
-      setPersistedMotion(false);
-      setPropertyDraft("");
+      acknowledgeMotionWrite(sessionOwnerKey, write);
     } catch (error) {
       toast.error("Couldn't remove the motion", {
         description:
@@ -1409,15 +1616,13 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             : "The motion could not be removed.",
       });
     } finally {
-      setSaving(false);
+      finishMotionWrite(sessionOwnerKey, write);
     }
   }, [
     clearActivePreview,
     details,
     onDeleteMotion,
-    ownerKey,
     persistedMotion,
-    saving,
     sessionOwnerKey,
   ]);
 
@@ -1433,7 +1638,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         aria-label="Motion timeline"
         onPointerDown={(event) => event.stopPropagation()}
       >
-        <MotionTimelineResizeHandle />
+        <MotionTimelineResizeHandle disabled={disabled} />
         <div className="zd-motion-header">
           <Diamond className="zd-motion-accent size-3.5 fill-current" />
           <span className="text-fg1 text-xs font-medium">Motion</span>
@@ -1468,19 +1673,28 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     : /s$/i.test(draft.duration)
       ? "s"
       : "ms";
+  const durationValue = (value: string) => {
+    const candidate = /^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value.trim())
+      ? `${value.trim()}${durationUnit}`
+      : value.trim();
+    const milliseconds = designDurationMs(candidate, 0);
+    const unit = /ms$/i.test(candidate) ? "ms" : "s";
+    return {
+      milliseconds,
+      value: `${unit === "s" ? milliseconds / 1000 : milliseconds}${unit}`,
+    };
+  };
   const durationField = (
     <span className="zd-field zd-motion-duration-field">
-      <Input
+      <DesignMotionInput
         value={draft.duration.replace(/(?:ms|s)$/i, "")}
         aria-label="Animation duration"
-        aria-invalid={designDurationMs(draft.duration, 0) <= 0}
+        isValid={(value) => durationValue(value).milliseconds > 0}
+        onValidityChange={onValidityChange}
         className="px-2"
         disabled={disabled}
-        onChange={(event) => {
-          const value = event.currentTarget.value;
-          const duration = /^-?(?:\d*(?:\.\d*)?)$/.test(value)
-            ? `${value}${durationUnit}`
-            : value;
+        onCommit={(value) => {
+          const duration = durationValue(value).value;
           mutateDraft((current) => ({ ...current, duration }));
         }}
       />
@@ -1493,6 +1707,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       compact={compactTiming}
       disabled={disabled}
       onChange={(easing) => mutateDraft((current) => ({ ...current, easing }))}
+      onValidityChange={onValidityChange}
     />
   );
   const laneGuides = (
@@ -1515,9 +1730,10 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       data-design-motion-timeline=""
       className="zd-motion-timeline bg-bg1 absolute z-40 flex min-w-0 flex-col"
       aria-label="Motion timeline"
+      tabIndex={-1}
       onPointerDown={(event) => event.stopPropagation()}
     >
-      <MotionTimelineResizeHandle />
+      <MotionTimelineResizeHandle disabled={disabled} />
       <div className="zd-motion-header">
         <div className="zd-motion-heading">
           <Diamond className="zd-motion-accent size-3.5 shrink-0 fill-current" />
@@ -1548,15 +1764,40 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
               aria-label={
                 playing ? "Pause motion preview" : "Play motion preview"
               }
-              disabled={disabled || !validMotionDraft(draft)}
-              onClick={() => {
-                if (playing) {
+              disabled={
+                disabled ||
+                (!playing &&
+                  (invalidInputs.size > 0 || !validMotionDraft(draft)))
+              }
+              onPointerDown={(event) => {
+                if (event.button === 0 && event.isPrimary)
+                  playToggleIntentRef.current = playing;
+              }}
+              onClick={(event) => {
+                // Focus settles a field before click and may stop playback.
+                // Honor the transport action the pointer originally chose.
+                // Keyboard clicks ignore an abandoned pointer press.
+                const pause =
+                  event.detail > 0 && playToggleIntentRef.current !== null
+                    ? playToggleIntentRef.current
+                    : playing;
+                playToggleIntentRef.current = null;
+                if (pause) {
                   setPlaying(false);
                   return;
                 }
-                setPlayhead(
-                  designMotionPlaybackStartOffset(playheadRef.current),
-                );
+                const elapsed = playbackTimeRef.current;
+                if (
+                  elapsed !== null &&
+                  Number.isFinite(iterationCount) &&
+                  elapsed >= durationMs * iterationCount
+                ) {
+                  setPlayhead(0);
+                } else if (elapsed === null) {
+                  setPlayhead(
+                    designMotionPlaybackStartOffset(playheadRef.current),
+                  );
+                }
                 setPlaying(true);
               }}
             >
@@ -1630,22 +1871,22 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             side="top"
             sideOffset={8}
             className="zd-popover zd-motion-settings-popover"
+            onOpenAutoFocus={focusDesignPopoverSurface}
+            onEscapeKeyDown={keepDesignPopoverWhileEditing}
           >
             <div className="zd-popover-header">
               <span className="zd-popover-title">Motion settings</span>
             </div>
             <label className="zd-motion-setting">
               <span className="zd-row-label">Name</span>
-              <Input
+              <DesignMotionInput
                 value={draft.name}
                 aria-label="Animation name"
-                aria-invalid={
-                  !/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(draft.name)
-                }
+                isValid={(name) => /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(name)}
+                onValidityChange={onValidityChange}
                 className="zd-field px-2"
                 disabled={disabled}
-                onChange={(event) => {
-                  const name = event.currentTarget.value;
+                onCommit={(name) => {
                   mutateDraft((current) => ({ ...current, name }));
                 }}
               />
@@ -1664,35 +1905,32 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             ) : null}
             <label className="zd-motion-setting">
               <span className="zd-row-label">Delay</span>
-              <Input
+              <DesignMotionInput
                 value={draft.delay}
                 aria-label="Animation delay"
-                aria-invalid={
-                  !/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:ms|s)$/i.test(
-                    draft.delay.trim(),
-                  )
+                isValid={(delay) =>
+                  /^-?(?:\d+(?:\.\d*)?|\.\d+)(?:ms|s)$/i.test(delay.trim())
                 }
+                onValidityChange={onValidityChange}
                 className="zd-field px-2"
                 disabled={disabled}
-                onChange={(event) => {
-                  const delay = event.currentTarget.value;
+                onCommit={(delay) => {
                   mutateDraft((current) => ({ ...current, delay }));
                 }}
               />
             </label>
             <label className="zd-motion-setting">
               <span className="zd-row-label">Loop</span>
-              <Input
+              <DesignMotionInput
                 value={draft.iterations}
                 aria-label="Animation iterations"
-                aria-invalid={
-                  designMotionIterationCount(draft.iterations) === null ||
-                  (designMotionIterationCount(draft.iterations) ?? 0) <= 0
+                isValid={(iterations) =>
+                  (designMotionIterationCount(iterations) ?? 0) > 0
                 }
+                onValidityChange={onValidityChange}
                 className="zd-field px-2"
                 disabled={disabled}
-                onChange={(event) => {
-                  const iterations = event.currentTarget.value;
+                onCommit={(iterations) => {
                   mutateDraft((current) => ({ ...current, iterations }));
                 }}
               />
@@ -1787,7 +2025,13 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
               size="sm"
               className="zd-motion-save"
               aria-label={saving ? "Saving…" : "Save"}
-              disabled={disabled || saving || !dirty || draftIssue !== null}
+              disabled={
+                disabled ||
+                saving ||
+                !dirty ||
+                invalidInputs.size > 0 ||
+                draftIssue !== null
+              }
               onClick={() => void save()}
             >
               <Save />
@@ -2031,6 +2275,8 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
                           return (
                             <button
                               key={point.offset}
+                              data-motion-property={property}
+                              data-motion-offset={point.offset}
                               type="button"
                               className={cn(
                                 "zd-design-motion-keyframe zd-motion-keyframe",
@@ -2063,7 +2309,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
                                 ) {
                                   event.preventDefault();
                                   event.stopPropagation();
-                                  removePoint(property, point.offset);
+                                  removePoint(property, point.offset, true);
                                   return;
                                 }
                                 let nextOffset: number | null = null;
@@ -2088,7 +2334,12 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
                                 event.preventDefault();
                                 event.stopPropagation();
                                 setPlaying(false);
-                                retimePoint(property, point.offset, nextOffset);
+                                retimePoint(
+                                  property,
+                                  point.offset,
+                                  nextOffset,
+                                  true,
+                                );
                               }}
                               onPointerDown={(event) =>
                                 startPointDrag(event, property, point.offset)
@@ -2118,6 +2369,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             <span className="truncate">{selectedPoint.property}</span>
           </span>
           <MotionTimeField
+            key={`time:${selectedPoint.property}:${selectedPoint.offset}`}
             label="Selected keyframe time"
             time={designMotionTimeAtOffset(selectedPoint.offset, durationMs)}
             duration={durationMs}
@@ -2132,14 +2384,15 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
               )
             }
           />
-          <Input
+          <DesignMotionInput
+            key={`value:${selectedPoint.property}:${selectedPoint.offset}`}
             value={selectedValue}
             aria-label={`${selectedPoint.property} keyframe value`}
-            aria-invalid={!selectedValue.trim()}
+            isValid={(value) => value.trim().length > 0}
+            onValidityChange={onValidityChange}
             className="zd-field zd-motion-keyframe-value px-2"
             disabled={disabled}
-            onChange={(event) => {
-              const value = event.currentTarget.value;
+            onCommit={(value) => {
               mutateDraft((current) => ({
                 ...current,
                 keyframes: setDesignMotionPoint(
@@ -2180,6 +2433,12 @@ export function designMotionPreviewInput(
 ) {
   const duration = designDurationMs(draft.duration);
   const delay = signedTimeMs(draft.delay);
+  const position = designMotionPlaybackPosition(
+    currentTime,
+    duration,
+    designMotionIterationCount(draft.iterations) ?? 1,
+    draft.direction,
+  );
   return {
     keyframes: draft.keyframes.map((keyframe) => ({
       offset: keyframe.offset,
@@ -2188,10 +2447,14 @@ export function designMotionPreviewInput(
     duration,
     delay,
     easing: draft.easing,
-    iterations: previewIterations(draft.iterations),
-    direction: draft.direction,
+    iterations: position.iterations,
+    direction: position.direction,
     fill: draft.fillMode,
-    currentTime: designMotionPreviewCurrentTime(currentTime, duration, delay),
+    currentTime: designMotionPreviewCurrentTime(
+      position.cycleTime,
+      duration,
+      delay,
+    ),
     playing,
   } as const;
 }

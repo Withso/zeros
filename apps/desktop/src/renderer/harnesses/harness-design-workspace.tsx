@@ -119,6 +119,11 @@ const pricingSource = `<!doctype html>
 </html>`;
 
 async function main() {
+  if (new URLSearchParams(location.search).has("motionOwner")) {
+    const { mountDesignMotionOwnerHarness } = await import("./harness-design-motion-owner");
+    mountDesignMotionOwnerHarness();
+    return;
+  }
   const workbenchHarness = new URLSearchParams(location.search).has("workbench");
   const workspaceId = "ws_design_harness";
   const workspacePath =
@@ -849,6 +854,9 @@ async function main() {
         };
       }
       if (message.op === "design.transaction.apply") {
+        await (window as Window & {
+          __zerosHarnessDesignTransactionGate?: Promise<void>;
+        }).__zerosHarnessDesignTransactionGate;
         const transaction = message.params?.transaction as
           | {
               transactionId?: string;

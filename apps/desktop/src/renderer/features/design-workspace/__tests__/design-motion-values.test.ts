@@ -9,6 +9,7 @@ import {
   designMotionNudgedOffset,
   designMotionOffsetAtTime,
   designMotionPlaybackStartOffset,
+  designMotionPlaybackPosition,
   designMotionPresetKeyframes,
   designMotionPreviewCurrentTime,
   designMotionRulerMarks,
@@ -177,6 +178,63 @@ describe("design motion timeline values", () => {
     expect(designMotionPlaybackStartOffset(140)).toBe(0);
     expect(designMotionPlaybackStartOffset(72.34)).toBe(72.3);
     expect(designMotionPlaybackStartOffset(-4)).toBe(0);
+  });
+
+  it("retains the fractional endpoint and remaining alternate iteration when playback finishes", () => {
+    expect(designMotionPlaybackPosition(500, 300, 1.25, "alternate")).toEqual({
+      elapsed: 375,
+      cycleTime: 75,
+      offset: 25,
+      iterations: 0.25,
+      direction: "alternate-reverse",
+      finished: true,
+    });
+  });
+
+  it("keeps the last complete frame at an integral endpoint", () => {
+    expect(
+      designMotionPlaybackPosition(600, 300, 2, "alternate-reverse"),
+    ).toEqual({
+      elapsed: 600,
+      cycleTime: 300,
+      offset: 100,
+      iterations: 1,
+      direction: "alternate",
+      finished: true,
+    });
+  });
+
+  it.each(["normal", "reverse", "alternate", "alternate-reverse"] as const)(
+    "resumes %s playback in the same cycle without replaying completed loops",
+    (direction) => {
+      const reversed =
+        direction === "alternate"
+          ? "alternate-reverse"
+          : direction === "alternate-reverse"
+            ? "alternate"
+            : direction;
+      expect(designMotionPlaybackPosition(375, 300, 2.5, direction)).toEqual({
+        elapsed: 375,
+        cycleTime: 75,
+        offset: 25,
+        iterations: 1.5,
+        direction: reversed,
+        finished: false,
+      });
+    },
+  );
+
+  it("keeps infinite playback previews within the runtime's bounded iteration count", () => {
+    expect(
+      designMotionPlaybackPosition(300_375, 300, Infinity, "alternate"),
+    ).toEqual({
+      elapsed: 300_375,
+      cycleTime: 75,
+      offset: 25,
+      iterations: 1000,
+      direction: "alternate-reverse",
+      finished: false,
+    });
   });
 
   it("does not turn a temporarily blank time field into the first frame", () => {

@@ -181,6 +181,41 @@ export function designMotionPlaybackStartOffset(offset: number): number {
   return bounded >= 100 ? 0 : bounded;
 }
 
+/** Rebase an elapsed animation into its current cycle. Preview messages stay
+ * within one duration while retaining alternate direction and the remaining
+ * (possibly fractional) iterations. At an integral end, hold the last cycle's
+ * endpoint instead of wrapping to the start of a nonexistent next cycle. */
+export function designMotionPlaybackPosition(
+  currentTime: number,
+  duration: number,
+  iterations: number,
+  direction: "normal" | "reverse" | "alternate" | "alternate-reverse",
+) {
+  const total = duration * iterations;
+  const elapsed = Math.min(total, Math.max(0, currentTime));
+  const cycle = Math.min(
+    Math.floor(elapsed / duration),
+    Math.max(0, Math.ceil(iterations) - 1),
+  );
+  const cycleTime = elapsed - cycle * duration;
+  const cycleDirection =
+    cycle % 2 === 1
+      ? direction === "alternate"
+        ? "alternate-reverse"
+        : direction === "alternate-reverse"
+          ? "alternate"
+          : direction
+      : direction;
+  return {
+    elapsed,
+    cycleTime,
+    offset: (cycleTime / duration) * 100,
+    iterations: Number.isFinite(iterations) ? iterations - cycle : 1000,
+    direction: cycleDirection,
+    finished: Number.isFinite(total) && elapsed >= total,
+  };
+}
+
 function normalizedFrames(
   keyframes: readonly DesignMotionKeyframe[],
 ): DesignMotionKeyframe[] {
