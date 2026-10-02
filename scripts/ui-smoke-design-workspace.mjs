@@ -22,6 +22,11 @@ import { runDesignSelectionSmoke } from "./ui-smoke-design-selection.mjs";
 import { runDesignSpacingSmoke } from "./ui-smoke-design-spacing.mjs";
 import { runDesignInlineToolsSmoke } from "./ui-smoke-design-inline-tools.mjs";
 import { runDesignCameraSmoke } from "./ui-smoke-design-camera.mjs";
+import { runDesignInteractionIntegritySmoke } from "./ui-smoke-design-interaction-integrity.mjs";
+import { runDesignPanelIntegritySmoke } from "./ui-smoke-design-panel-integrity.mjs";
+import { runDesignCanvasRefinementsSmoke } from "./ui-smoke-design-canvas-refinements.mjs";
+import { runDesignMotionRefinementsSmoke } from "./ui-smoke-design-motion-refinements.mjs";
+import { runDesignStyleRefinementsSmoke } from "./ui-smoke-design-style-refinements.mjs";
 
 export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignFloatingChromeSmoke({ page, waitFor, check });
@@ -42,6 +47,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignFrameRecoverySmoke({ page, check });
   await runDesignInlineToolsSmoke({ page, waitFor, check });
   await runDesignCameraSmoke({ page, waitFor, check });
+  await runDesignInteractionIntegritySmoke({ page, check });
+  await runDesignPanelIntegritySmoke({ page, check });
+  await runDesignCanvasRefinementsSmoke({ page, check });
+  await runDesignMotionRefinementsSmoke({ page, check });
+  await runDesignStyleRefinementsSmoke({ page, check });
   await runDesignWorkspaceCanvasSmoke({ page, waitFor, check });
 }
 
@@ -3900,6 +3910,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     "transform keyframe value",
   );
   await transformKeyframeValue.fill("translateY(64px)");
+  await transformKeyframeValue.press("Enter");
   const motionPathPoints = page.locator("[data-design-motion-path-point]");
   check(
     "style-editor diamonds expose selectable canvas motion paths",
@@ -3967,6 +3978,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         .isDisabled()),
   );
   await animationEasing.fill("steps(5, end)");
+  await animationEasing.press("Enter");
   await page.setViewportSize({ width: 900, height: 700 });
   await motionTimeline.getByLabel("More motion settings").click();
   const compactMotionSettings = page.locator("[data-design-motion-settings]");
@@ -3994,6 +4006,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await compactMotionSettings
     .getByLabel("Animation easing")
     .fill("steps(5, end)");
+  await compactMotionSettings.getByLabel("Animation easing").press("Enter");
   await page.keyboard.press("Escape");
   await motionTimeline
     .getByRole("button", { name: /transform keyframe at 50%/ })

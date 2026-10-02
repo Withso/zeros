@@ -5,7 +5,7 @@
 // USED IN: DesignStyleEditor
 // ============================================
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Box, Diamond, Minus, Plus, RotateCcw, Sun } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -47,6 +47,7 @@ import {
 } from "./design-effect-values";
 import type { DesignLayoutFieldOptions } from "./design-layout-values";
 import { readDesignComputedStyle } from "./design-style-values";
+import { beginDesignPointerGesture } from "./design-pointer-gesture";
 
 type RenderField = (
   label: string,
@@ -91,20 +92,41 @@ export function EffectNumberField({
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [draft, setDraft] = useState(String(value));
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const dirtyRef = useRef(false);
   const skipCommitRef = useRef(false);
   const previewedRef = useRef(false);
   const focusBaselineRef = useRef(value);
+  const scrubCancelRef = useRef<(() => void) | null>(null);
   const scrubRef = useRef<{
-    pointerId: number;
+    originX: number;
     startX: number;
     start: number;
     latest: number;
+    distance: number;
+    initialDraft: string;
+    initialDirty: boolean;
+    moved: boolean;
   } | null>(null);
 
-  useEffect(() => {
-    if (document.activeElement !== inputRef.current && !scrubRef.current)
-      setDraft(String(value));
+  const setFieldDraft = (next: string) => {
+    draftRef.current = next;
+    setDraft(next);
+  };
+
+  useLayoutEffect(() => {
+    if (document.activeElement === inputRef.current || scrubRef.current) return;
+    focusBaselineRef.current = value;
+    dirtyRef.current = false;
+    draftRef.current = String(value);
+    setDraft(String(value));
   }, [value]);
+
+  useEffect(() => () => scrubCancelRef.current?.(), []);
+  useEffect(() => {
+    if (disabled) scrubCancelRef.current?.();
+  }, [disabled]);
 
   const clampValue = (next: number) =>
     Math.round(
@@ -118,15 +140,21 @@ export function EffectNumberField({
     }
     const previewed = previewedRef.current;
     previewedRef.current = false;
-    const parsed = Number(draft);
-    if (!draft.trim() || !Number.isFinite(parsed)) {
-      setDraft(String(focusBaselineRef.current));
+    const dirty = dirtyRef.current;
+    dirtyRef.current = false;
+    const parsed = Number(draftRef.current);
+    if (!dirty || !draftRef.current.trim() || !Number.isFinite(parsed)) {
+      focusBaselineRef.current = value;
+      setFieldDraft(String(value));
       if (previewed) onCancelPreview?.();
       return;
     }
     const next = clampValue(parsed);
-    setDraft(String(next));
-    if (next !== focusBaselineRef.current) onCommit(next);
+    setFieldDraft(String(next));
+    if (next !== focusBaselineRef.current) {
+      focusBaselineRef.current = next;
+      onCommit(next);
+    }
     else if (previewed) onCancelPreview?.();
   };
 
@@ -139,47 +167,64 @@ export function EffectNumberField({
         aria-label={`Scrub ${name ?? label}`}
         className="zd-field-label zd-field-scrub w-6 cursor-ew-resize"
         onPointerDown={(event) => {
+          if (disabled || event.button !== 0 || !event.isPrimary) return;
+          scrubCancelRef.current?.();
           event.preventDefault();
-          event.currentTarget.setPointerCapture(event.pointerId);
-          scrubRef.current = {
-            pointerId: event.pointerId,
+          const parsed = Number(draftRef.current);
+          const start = draftRef.current.trim() && Number.isFinite(parsed)
+            ? clampValue(parsed)
+            : value;
+          const scrub = {
+            originX: event.clientX,
             startX: event.clientX,
-            start: value,
-            latest: value,
+            start,
+            latest: start,
+            distance: 0,
+            initialDraft: draftRef.current,
+            initialDirty: dirtyRef.current,
+            moved: false,
           };
-        }}
-        onPointerMove={(event) => {
-          const scrub = scrubRef.current;
-          if (!scrub || scrub.pointerId !== event.pointerId) return;
-          const multiplier = event.shiftKey ? 10 : 1;
-          const next = clampValue(
-            scrub.start +
-              ((event.clientX - scrub.startX) / 2) * step * multiplier,
-          );
-          if (next === scrub.latest) return;
-          scrub.latest = next;
-          setDraft(String(next));
-          previewedRef.current = true;
-          onPreview?.(next);
-        }}
-        onPointerUp={(event) => {
-          const scrub = scrubRef.current;
-          if (!scrub || scrub.pointerId !== event.pointerId) return;
-          scrubRef.current = null;
-          event.currentTarget.releasePointerCapture(event.pointerId);
-          const previewed = previewedRef.current;
-          previewedRef.current = false;
-          if (scrub.latest !== scrub.start) {
-            focusBaselineRef.current = scrub.latest;
-            onCommit(scrub.latest);
-          } else if (previewed) onCancelPreview?.();
-        }}
-        onPointerCancel={() => {
-          const start = scrubRef.current?.start ?? value;
-          scrubRef.current = null;
-          setDraft(String(start));
-          if (previewedRef.current) onCancelPreview?.();
-          previewedRef.current = false;
+          scrubRef.current = scrub;
+          const restore = () => {
+            scrubRef.current = null;
+            scrubCancelRef.current = null;
+            dirtyRef.current = scrub.initialDirty;
+            setFieldDraft(scrub.initialDraft);
+            if (previewedRef.current) onCancelPreview?.();
+            previewedRef.current = false;
+          };
+          scrubCancelRef.current = beginDesignPointerGesture({
+            target: event.currentTarget,
+            pointerId: event.pointerId,
+            cursor: "ew-resize",
+            onMove: (pointerEvent) => {
+              if (!scrub.moved && Math.abs(pointerEvent.clientX - scrub.originX) < 3)
+                return;
+              scrub.moved = true;
+              const multiplier = pointerEvent.altKey ? 0.1 : pointerEvent.shiftKey ? 10 : 1;
+              scrub.distance += ((pointerEvent.clientX - scrub.startX) / 2) * step * multiplier;
+              scrub.startX = pointerEvent.clientX;
+              const next = clampValue(scrub.start + scrub.distance);
+              if (next === scrub.latest) return;
+              scrub.latest = next;
+              setFieldDraft(String(next));
+              previewedRef.current = true;
+              onPreview?.(next);
+            },
+            onFinish: () => {
+              if (!scrub.moved || scrub.distance === 0 || scrub.latest === scrub.start) {
+                restore();
+                return;
+              }
+              scrubRef.current = null;
+              scrubCancelRef.current = null;
+              previewedRef.current = false;
+              dirtyRef.current = false;
+              focusBaselineRef.current = scrub.latest;
+              onCommit(scrub.latest);
+            },
+            onCancel: restore,
+          });
         }}
       >
         {label}
@@ -193,30 +238,37 @@ export function EffectNumberField({
         className={suffix ? "pr-1" : "pr-2"}
         onFocus={() => {
           focusBaselineRef.current = value;
+          dirtyRef.current = false;
           skipCommitRef.current = false;
         }}
-        onChange={(event) => setDraft(event.currentTarget.value)}
+        onChange={(event) => {
+          dirtyRef.current = true;
+          setFieldDraft(event.currentTarget.value);
+        }}
         onBlur={commitDraft}
         onKeyDown={(event) => {
-          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Enter") {
+            event.preventDefault();
+            event.currentTarget.blur();
+          }
           else if (event.key === "Escape") {
             event.preventDefault();
             skipCommitRef.current = true;
-            setDraft(String(focusBaselineRef.current));
+            dirtyRef.current = false;
+            setFieldDraft(String(focusBaselineRef.current));
             if (previewedRef.current) onCancelPreview?.();
             previewedRef.current = false;
             event.currentTarget.blur();
           } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
             event.preventDefault();
-            const parsed = Number(draft);
+            const parsed = Number(draftRef.current);
             const next = clampValue(
               (Number.isFinite(parsed) ? parsed : value) +
                 (event.key === "ArrowUp" ? step : -step) *
                   (event.shiftKey ? 10 : 1),
             );
-            setDraft(String(next));
-            previewedRef.current = true;
-            onPreview?.(next);
+            dirtyRef.current = true;
+            setFieldDraft(String(next));
           }
         }}
       />

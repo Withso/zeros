@@ -326,6 +326,7 @@ export function DesignWorkspaceColumn({
       <DesignFloatingPanel
         ref={panelRef}
         workspaceId={workspaceId}
+        active={surfaceActive}
         visible={panelVisible}
         layersExpanded={layersExpanded}
         layers={

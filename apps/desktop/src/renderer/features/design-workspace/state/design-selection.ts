@@ -1297,6 +1297,57 @@ export async function inspectDesignNodesInRect(input: {
   );
 }
 
+/** A marquee claims selection before its asynchronous hit query. A newer
+ * click, source generation, directory or runtime retires the entire result,
+ * including an empty result that would otherwise clear the newer selection. */
+export async function selectDesignNodesInRect(input: {
+  workspaceId: string;
+  folder: string;
+  frame: DesignCanvasFrameWire;
+  rect: { x: number; y: number; width: number; height: number };
+  scopeNodeId?: string | null;
+  additive?: boolean;
+}): Promise<DesignRuntimeNodeDetails[] | null> {
+  const { workspaceId } = input;
+  const frame = currentDesignSelectionFrame(workspaceId, input.frame);
+  const initial = designWorkspaceView(workspaceId);
+  const generation = nextGeneration(selectionGenerationByWorkspace, workspaceId);
+  const runtime = designFrameRuntime(workspaceId, frame.file);
+  if (!runtime) return null;
+  const sourceVersion = runtime.sourceVersion ?? frame.sourceVersion;
+  const isCurrent = () =>
+    selectionGenerationByWorkspace.get(workspaceId) === generation &&
+    designWorkspaceView(workspaceId).directoryId === initial.directoryId &&
+    designFrameRuntime(workspaceId, frame.file) === runtime &&
+    runtime.isActive?.() !== false &&
+    (runtime.sourceVersion ?? frame.sourceVersion) === sourceVersion;
+
+  try {
+    const details = await inspectDesignNodesInRect({ ...input, frame });
+    if (!isCurrent()) return null;
+    const existing =
+      input.additive && initial.selectedFrame === frame.file
+        ? initial.selectedNodeIds
+        : [];
+    const nodeIds = [...existing, ...details.map((candidate) => candidate.oid)];
+    if (nodeIds.length === 0) {
+      if (!input.additive) await selectDesignFrame(workspaceId, frame);
+      return [];
+    }
+    return selectDesignNodes({
+      workspaceId,
+      folder: input.folder,
+      frame,
+      nodeIds,
+      primaryNodeId: details[0]?.oid ?? existing[0],
+      details,
+    });
+  } catch (error) {
+    if (!isCurrent()) return null;
+    throw error;
+  }
+}
+
 /** Everything one gesture frame paints from, in one round trip.
  *
  * The overlay, its padding hatches and its gap affordances are the only things a
