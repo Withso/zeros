@@ -309,6 +309,56 @@ revalidates the target, rejects a stale plan, increments `auth_revision`, emits
 `staff_role_changes` record in the same transaction. The ordinary application
 role can neither mutate the staff column nor forge that evidence.
 
+#### Beta Organization owner bootstrap from GitHub
+
+When Beta's owner login exists only in its protected GitHub environment, use
+the manually dispatched `staff-owner-bootstrap.yml` from the current
+`release/X.Y.Z` branch. It supports only `platform_owner` on
+`zeros-control-plane-beta/main`; it does not deploy, enable cloud, designate
+canaries or change credentials. Exact-source Preflight and CodeQL must pass
+before the privileged job, which shares `hosted-mutation-beta` with releases.
+
+The operator first stages the reviewed subject's email in the Beta environment
+secret `STAFF_EXPECTED_EMAIL`, never a workflow input or command argument. The
+existing Beta PlanetScale variables and service-token secrets supply the owner
+connection. Dispatch a plan with the exact reviewed subject, accountable active
+actor, active nonpersonal Organization owned by that subject, and a nonpersonal
+audit reason:
+
+```sh
+gh workflow run staff-owner-bootstrap.yml --ref release/X.Y.Z \
+  -f mode=plan -f subject_user_id="$BETA_SUBJECT_USER_ID" \
+  -f actor_user_id="$BETA_ACTOR_USER_ID" \
+  -f owner_organization_id="$BETA_OWNER_ORGANIZATION_ID" \
+  -f reason="Bootstrap the reviewed active Beta Organization owner." \
+  -f confirm=zeros-control-plane-beta
+```
+
+Review the sanitized `beta-staff-owner-result-<run>-<attempt>` artifact, then
+dispatch the same inputs with `mode=apply`. Apply generates a fresh plan and
+uses its exact approval through the same bounded owner pool; it never consumes
+a prior run's approval. The optional Organization UUID is approval-bound and
+the existing staff transaction locks and rechecks its ownership/lifecycle
+alongside the active exact-email subject and actor. Without this optional
+requirement, the existing staff utility's behavior and approvals are unchanged.
+An already-correct subject returns `unchanged` without another grant or revision.
+Remove `STAFF_EXPECTED_EMAIL` after the reviewed operation.
+
+Both modes create a temporary PlanetScale login inheriting `postgres`, with a
+one-hour TTL, so plan is not a provider dry run. Its non-secret create intent
+binds the observed database/branch IDs and is uploaded as
+`beta-staff-owner-intent-<run>-<attempt>` before the single POST.
+The helper closes the pool and requires the exact owned role's 404 plus valid
+parent identity before recording deletion. Passwords, URLs, email, SQL and raw
+errors never enter the artifacts or output. A lost one-time password is
+reconciled only by exact run/name/branch/creator identity for cleanup; it is
+never recovered or recreated. GitHub reruns are cleanup-only and fail closed
+on missing or ambiguous ownership evidence. Hard cancellation can prevent
+finally/result upload; retained intent and TTL are recovery backstops, not
+deletion proof. If apply was attempted but no result was confirmed, reconcile
+the existing staff audit before a fresh dispatch; never infer rollback from
+the missing response. This workflow has no Production option.
+
 ## Organization management synchronization
 
 Every collaborative Zeros organization owns exactly one WorkOS Organization,
