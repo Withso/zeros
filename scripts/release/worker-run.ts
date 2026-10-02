@@ -79,7 +79,14 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
   try {
     requireCheck(await store.readAdmission(), "Initialize and reconcile the shared Boat admission ledger before release execution");
     return await withHostedLease(store, identity, async (lease: any) => {
-      const state = lease.state, runs = state.releaseRuns ??= [];
+      const state = lease.state;
+      if (state.status === "provisioning" && state.resources && typeof state.resources === "object" &&
+        !Array.isArray(state.resources) && Object.keys(state.resources).length === 0 &&
+        (state.releaseRuns === undefined || Array.isArray(state.releaseRuns) && state.releaseRuns.length === 0)) {
+        state.releaseRuns ??= [];
+        state.resources.images = [];
+      }
+      const runs = state.releaseRuns;
       const request = devBoatClient({ apiKey: env.BOAT_API_KEY }, lease.signal), profile = admission.profile;
       const release = () => releaseHostedAdmission(store, lease, profile);
       const current = async () => { await github.assertRequiredChecks(); await github.assertCurrent(); await assertWorkerApi(config); await lease.fence(); };
@@ -107,7 +114,7 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
         requireCheck(meter.status === 200 && Number.isFinite(meter.body?.creditUsedSeconds) && meter.body.creditUsedSeconds >= 0, "Worker account-wide budget meter is unavailable");
         run.maxUsedHours = meter.body.creditUsedSeconds / 3600 + execution.budgetHours; await lease.save();
       }
-      const images = state.resources.images ??= [];
+      const images = state.resources.images;
       let record = images.find((value: any) => value.releaseRunId === config.runId);
       if (!record) {
         const slot = createHash("sha256").update(JSON.stringify([config.sourceSha, config.runId])).digest("hex");
