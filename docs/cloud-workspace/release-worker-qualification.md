@@ -345,6 +345,17 @@ including in historical outcomes. This projection survives completed-job
 reentry but does not change qualification, rate-limit or cleanup policy and is
 not copied into approved evidence or public worker receipts.
 
+Optional versioned event summaries retain only counts capped at 2048 and an
+overflow flag. The initial MCP prompt snapshots the assertion's canonical tool
+accumulator even when the prompt rejects, before assertions or cleanup: unique
+rows, exact canary matches, terminal/pending/unknown status, native-ID presence
+and successful matches. Later turns cannot replace that snapshot. The question
+summary counts the canonical source, blocking state and maintained MCP decline
+marker, without inferring other RPC subtypes. Neither summary retains tool or
+question identities, content, arguments or output. Incomplete or incoherent
+summaries are omitted independently; older reports do not acquire measured
+zeros. The question failure latch and every qualification predicate stay intact.
+
 An allowlisted private-input upload HTTP403 records a bounded
 `prelaunchFailure`, separate from qualification outcome, and stops promptly.
 Resume cannot restart absent-runner polling or reupload account material.

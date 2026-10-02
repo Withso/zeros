@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { NativeQualificationPhase } from "./native-qualification-diagnostics";
+import type { NativeToolEvidence } from "./native-tool-evidence";
 export { failureSignature } from "./native-qualification-diagnostics";
 
 const WORDS = [
@@ -42,6 +43,17 @@ export function rawSecretObserver(secret: string) {
     },
     reset() { text = ""; seen = false; },
   };
+}
+
+/** Freeze the initial prompt's fixed evidence before assertions or cleanup,
+ * including a rejected/timed-out prompt. Later turns cannot overwrite it. */
+export async function captureNativeMcpTurn(
+  evidence: NativeToolEvidence,
+  prompt: () => Promise<unknown>,
+  retain: (summary: ReturnType<NativeToolEvidence["canaryMcpSummary"]>) => void,
+): Promise<void> {
+  try { await prompt(); }
+  finally { retain(evidence.canaryMcpSummary()); }
 }
 
 export async function runNativeMcpQualification(steps: {

@@ -15,9 +15,10 @@ import { loadCloudWorkerConfiguration } from "../../../apps/desktop/src/engine/a
 import { CLOUD_NATIVE_HISTORY_ROOT } from "../../../apps/desktop/src/engine/agents/containment/cloud-native-history";
 import { readCloudAgentRuntimeAttestation } from "../../../apps/desktop/src/engine/cloud-runtime-attestation";
 import { NativeToolEvidence } from "../lib/native-tool-evidence";
+import { NativeQuestionEvidence } from "../lib/native-question-evidence";
 import { parseNativeQualificationInput, nativeQualificationPermission } from "../lib/native-qualification-input";
 import { nativeMcpCanarySource } from "../lib/native-mcp-canary";
-import { failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver, runNativeMcpQualification } from "../lib/native-qualification-steps";
+import { captureNativeMcpTurn, failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver, runNativeMcpQualification } from "../lib/native-qualification-steps";
 import type { NativeQualificationPhase } from "../lib/native-qualification-diagnostics";
 import { cloudMcpDigest } from "../../../apps/desktop/src/engine/agents/cloud-mcp";
 import { runNativeSmokeCanary } from "../lib/native-canary-smoke";
@@ -40,7 +41,9 @@ const historicalSecret = rawSecretObserver(mcpSecret);
 let wroteMcpConfig = false;
 const checks: string[] = [];
 const activity = { permissions: 0, rejectedPermissions: 0, questions: 0, messageChunks: 0, toolEvents: 0 };
+const questions = new NativeQuestionEvidence();
 let toolEvidence: ReturnType<NativeToolEvidence["summary"]> | undefined;
+let initialMcpToolEvidence: ReturnType<NativeToolEvidence["canaryMcpSummary"]> | undefined;
 let failure: "timeout" | "assertion" | "runtime" | undefined, failureDetail: ReturnType<typeof failureSignature> = {};
 let phase: NativeQualificationPhase = "input", gateway: AgentGateway | undefined, failed = false;
 let qualificationProfile: "smoke" | "full" = "full";
@@ -172,7 +175,10 @@ async function main() {
         if (response.outcome.outcome !== "selected") { activity.rejectedPermissions++; failed = true; }
         if (!gateway?.answerPermission(id, response)) failed = true;
       },
-      onQuestionRequest(_agent, id) { activity.questions++; failed = true; gateway?.answerQuestion(id, { outcome: { outcome: "dismissed" } }); },
+      onQuestionRequest(_agent, id, request) {
+        questions.observe(request);
+        activity.questions++; failed = true; gateway?.answerQuestion(id, { outcome: { outcome: "dismissed" } });
+      },
     },
   });
   // Match the shared composer's default. Haiku uses Accept Edits because its
@@ -237,8 +243,8 @@ try{
         phase = "native-turn"; reply = "";
         await writeFile(path.join(workspace, files.challenge), marker, { flag: "wx", mode: 0o644 });
         await chown(path.join(workspace, files.challenge), worker.uid, worker.gid);
-        await bounded(gateway!.prompt(provider, first.sessionId, [{ type: "text", text:
-          `Read ${files.challenge}. Write its exact contents to ${files.edited}, no newline. Run exactly: cat '${files.challenge}' > '${files.executed}'. Call zeros-qualification MCP probe with no arguments. Reply only with the file marker and probe marker; no explanation. Do not inspect credentials or other files.` }]));
+        await captureNativeMcpTurn(tools, () => bounded(gateway!.prompt(provider, first.sessionId, [{ type: "text", text:
+          `Read ${files.challenge}. Write its exact contents to ${files.edited}, no newline. Run exactly: cat '${files.challenge}' > '${files.executed}'. Call zeros-qualification MCP probe with no arguments. Reply only with the file marker and probe marker; no explanation. Do not inspect credentials or other files.` }])), summary => { initialMcpToolEvidence = summary; });
         tools.assertEffects(provider, files, marker); tools.assertMcp("zeros-qualification", "probe");
         for (const file of [files.edited, files.executed]) assert.equal(await readFile(path.join(workspace, file), "utf8"), marker);
         assert.equal(await readFile(path.join(workspace, mcpFiles.proof), "utf8"), mcpMarker);
@@ -299,7 +305,7 @@ try{
   await runNativeMcpQualification({
     phase(value) { phase = value; },
     async prompt() {
-      await bounded(gateway!.prompt(provider, first.sessionId, [{ type: "text", text: "Call the probe tool from the zeros-qualification MCP server with no arguments. Reply with its result. Do not use shell or file tools for this check." }]));
+      await captureNativeMcpTurn(tools, () => bounded(gateway!.prompt(provider, first.sessionId, [{ type: "text", text: "Call the probe tool from the zeros-qualification MCP server with no arguments. Reply with its result. Do not use shell or file tools for this check." }])), summary => { initialMcpToolEvidence = summary; });
     },
     toolEvidence() { tools.assertMcp("zeros-qualification", "probe"); },
     async proof() { assert.equal(await readFile(path.join(workspace, mcpFiles.proof), "utf8"), mcpMarker); },
@@ -455,7 +461,7 @@ main().catch(error => {
       await rm(path.join(CLOUD_NATIVE_HISTORY_ROOT, createHash("sha256").update(id).digest("hex")), { recursive: true, force: true });
   } catch { failed = true; }
   process.stdout.write(JSON.stringify({ version: 3, qualificationProfile, executionProfile: "zeros-cloud-native-v1", qualified: !failed, phase, identity, checks,
-    activity, toolEvidence, ...(failure ? { failure } : {}),
+    activity, toolEvidence, initialMcpToolEvidence, questionEvidence: questions.summary(), ...(failure ? { failure } : {}),
     ...(failureDetail.code ? { failureCode: failureDetail.code } : {}), ...(failureDetail.name ? { failureName: failureDetail.name } : {}),
     ...(failureDetail.kind ? { failureKind: failureDetail.kind } : {}), ...(failureDetail.stage ? { failureStage: failureDetail.stage } : {}),
     ...(failureDetail.exitCode !== undefined ? { failureExitCode: failureDetail.exitCode } : {}),

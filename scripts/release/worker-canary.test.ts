@@ -7,6 +7,7 @@ import { workerEnvironment, workerConnections } from "./worker-test-fixtures";
 import { workerExecutionConfig } from "./worker-config";
 import { PromotionError } from "./contracts";
 import { qualificationRateLimited } from "../dev-environment/native-agent-canary.mjs";
+import { newHostedGeneration, openReceipt, sealReceipt } from "../dev-environment/hosted-state.mjs";
 
 const image = { snapshotId: "worker-test", sourceCommit: "a".repeat(40), buildSha256: "b".repeat(64), architecture: "linux/amd64" as const, storageMiB: 4096 };
 const targetFor = () => ({ id: "bx_test", attempt: randomUUID(), snapshotId: image.snapshotId, sourceCommit: image.sourceCommit, buildSha256: image.buildSha256 });
@@ -20,6 +21,12 @@ const diagnosticReport = () => ({ phase: "native-mcp-tool-evidence", failure: "r
 const expectedDiagnostics = () => ({ phase: "native-mcp-tool-evidence", failure: "runtime", code: "EACCES",
   name: "AgentFailureError", kind: "transport-closed", stage: "prompt", exitCode: 1, messageSha256: "ab".repeat(8),
   activity: { permissions: 1, rejectedPermissions: 0, questions: 0, messageChunks: 2, toolEvents: 3 } });
+const initialMcpToolEvidence = () => ({ version: 1, events: 4, overflowed: false, uniqueRows: 2,
+  matched: { rows: 1, completed: 0, failed: 1, pending: 0, unknownStatus: 0, nativeId: 1, missingNativeId: 0, successful: 0 } });
+const questionEvidence = () => ({ version: 1, requests: 1, overflowed: false,
+  sources: { native_dialog: 0, native_rpc: 1, inferred_from_text: 0, unknown: 0 },
+  blocking: { yes: 1, no: 0, unknown: 0 }, elicitation: { mcp: 1, notIndicated: 0, unknown: 0 } });
+const eventEvidence = () => ({ initialMcpToolEvidence: initialMcpToolEvidence(), questionEvidence: questionEvidence() });
 
 describe("protected metadata-only release canary broker", () => {
   it("reports only allowlisted missing/ambiguous kinds and withholds every other server diagnostic", async () => {
@@ -90,6 +97,57 @@ describe("protected metadata-only release canary broker", () => {
 });
 
 describe("release native diagnostic boundary", () => {
+  it("allowlists complete bounded initial-tool and canonical-question summaries with no private nested fields", () => {
+    const privateText = "synthetic private native payload".repeat(4096), bounded = eventEvidence();
+    const result = fixedCanaryOutcome({ code: 1, retirement: 0, report: { ...diagnosticReport(),
+      initialMcpToolEvidence: { ...bounded.initialMcpToolEvidence, title: privateText, rawInput: { privateText },
+        matched: { ...bounded.initialMcpToolEvidence.matched, toolCallId: privateText, provider: { privateText } } },
+      questionEvidence: { ...bounded.questionEvidence, questionId: privateText, questions: [{ prompt: privateText }],
+        sources: { ...bounded.questionEvidence.sources, [privateText]: privateText },
+        elicitation: { ...bounded.questionEvidence.elicitation, labels: [privateText] } },
+    } });
+    expect(result.report).toHaveProperty("diagnostics", { ...expectedDiagnostics(), ...bounded });
+    expect(result.code).toBe(1); expect(result.report.qualified).toBe(false);
+    expect(result.report).not.toHaveProperty("initialMcpToolEvidence");
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(JSON.stringify(result).length).toBeLessThan(2048);
+  });
+  it.each([NaN, Infinity, -1, 1.5, 2049, "1", { private: "synthetic private count" }])(
+    "drops malformed nested counts without fabricating a zero summary", value => {
+      const bounded = eventEvidence();
+      const result = fixedCanaryOutcome({ report: { phase: "native-mcp-tool-evidence",
+        initialMcpToolEvidence: { ...bounded.initialMcpToolEvidence, matched: { ...bounded.initialMcpToolEvidence.matched, failed: value } },
+        questionEvidence: { ...bounded.questionEvidence, sources: { ...bounded.questionEvidence.sources, native_rpc: value } },
+      } });
+      expect(result.report).toHaveProperty("diagnostics", { phase: "native-mcp-tool-evidence" });
+      expect(JSON.stringify(result)).not.toContain("private");
+    });
+  it("rejects missing, incompatible or incoherent new summaries independently and keeps old flat reports", () => {
+    const bounded = eventEvidence();
+    for (const malformed of [undefined, null, [], "private", {}, { ...bounded.initialMcpToolEvidence, version: 2 },
+      { ...bounded.initialMcpToolEvidence, overflowed: "true" }, { ...bounded.initialMcpToolEvidence, uniqueRows: 5 },
+      { ...bounded.initialMcpToolEvidence, matched: { ...bounded.initialMcpToolEvidence.matched, rows: 3 } },
+      { ...bounded.initialMcpToolEvidence, matched: { ...bounded.initialMcpToolEvidence.matched, successful: 1 } }]) {
+      const result = fixedCanaryOutcome({ report: { ...diagnosticReport(), initialMcpToolEvidence: malformed, questionEvidence: bounded.questionEvidence } });
+      expect(result.report).toHaveProperty("diagnostics", { ...expectedDiagnostics(), questionEvidence: bounded.questionEvidence });
+    }
+    for (const malformed of [undefined, null, [], "private", {}, { ...bounded.questionEvidence, version: 2 },
+      { ...bounded.questionEvidence, overflowed: "true" }, { ...bounded.questionEvidence, requests: 2 },
+      { ...bounded.questionEvidence, blocking: { yes: 0, no: 1, unknown: 0 } }]) {
+      const result = fixedCanaryOutcome({ report: { ...diagnosticReport(), initialMcpToolEvidence: bounded.initialMcpToolEvidence, questionEvidence: malformed } });
+      expect(result.report).toHaveProperty("diagnostics", { ...expectedDiagnostics(), initialMcpToolEvidence: bounded.initialMcpToolEvidence });
+    }
+    expect(fixedCanaryOutcome({ report: diagnosticReport() }).report).toHaveProperty("diagnostics", expectedDiagnostics());
+    expect(fixedCanaryOutcome({ report: { diagnostics: { ...expectedDiagnostics(), ...bounded } } }).report).not.toHaveProperty("diagnostics");
+  });
+  it.each([0, 2048])("retains measured endpoints and explicitly saturated counters: %s", count => {
+    const bounded = { initialMcpToolEvidence: { version: 1, events: count, overflowed: count === 2048, uniqueRows: count,
+      matched: { rows: count, completed: 0, failed: 0, pending: count, unknownStatus: 0, nativeId: 0, missingNativeId: count, successful: 0 } },
+    questionEvidence: { version: 1, requests: count, overflowed: count === 2048,
+      sources: { native_dialog: 0, native_rpc: count, inferred_from_text: 0, unknown: 0 },
+      blocking: { yes: count, no: 0, unknown: 0 }, elicitation: { mcp: count, notIndicated: 0, unknown: 0 } } };
+    expect(fixedCanaryOutcome({ report: bounded }).report).toHaveProperty("diagnostics", bounded);
+  });
   it.each([
     { failure: "timeout", failureName: "QualificationDeadline", diagnostics: { failure: "timeout", name: "QualificationDeadline" } },
     { failure: "assertion", failureName: "AssertionError", failureCode: "ERR_ASSERTION", diagnostics: { failure: "assertion", name: "AssertionError", code: "ERR_ASSERTION" } },
@@ -155,7 +213,7 @@ describe("release native diagnostic boundary", () => {
   ])("does not change acceptance or exact rate-limit fields: %j", value => {
     const baseline = JSON.parse(JSON.stringify(fixedCanaryOutcome(value)));
     delete baseline.report.diagnostics;
-    const result = fixedCanaryOutcome({ ...value, report: { ...diagnosticReport(), ...value.report } });
+    const result = fixedCanaryOutcome({ ...value, report: { ...diagnosticReport(), ...eventEvidence(), ...value.report } });
     expect(qualificationRateLimited(result)).toBe(qualificationRateLimited(value));
     const serialized = JSON.parse(JSON.stringify(result));
     expect(serialized.report).toHaveProperty("diagnostics");
@@ -165,6 +223,42 @@ describe("release native diagnostic boundary", () => {
 });
 
 describe("release VM canary coordination", () => {
+  it("saves bounded event diagnostics in the authenticated encrypted journal before failed cleanup and recovers without redispatch", async () => {
+    const run: any = runFor(), lease = leaseFor(), owner = "a".repeat(24), key = "e".repeat(64);
+    const state: any = { ...newHostedGeneration({ owner, identity: "synthetic event evidence" }),
+      resources: { images: [] }, releaseRuns: [run] };
+    lease.state = state;
+    let sealed: string | undefined;
+    lease.save.mockImplementation(async () => { sealed = sealReceipt(state, key); });
+    const expected = { ...expectedDiagnostics(), ...eventEvidence() };
+    const core = { allocate: vi.fn(async () => {}), ready: vi.fn(async () => true), start: vi.fn(async () => {}),
+      poll: vi.fn(async () => ({ code: 1, retirement: 0, report: { version: 3, qualified: false, ...diagnosticReport(), ...eventEvidence(),
+        rawInput: { private: "synthetic private native input" }, questions: [{ prompt: "synthetic private question" }] } })),
+      retire: vi.fn(async () => {
+        const saved = openReceipt(sealed!, key, owner).releaseRuns[0].canaries[0];
+        expect(saved.phase).toBe("completed"); expect(saved.outcome.report.diagnostics).toEqual(expected);
+        throw new Error("synthetic interrupted retirement");
+      }) };
+    const options = { pause: vi.fn(async () => {}), qualificationProfile: "full" as const };
+    await expect(releaseCanaryAdapter(lease, run, connectionsFor("full"), core, options).qualify(image, "codex-chatgpt"))
+      .rejects.toThrow("synthetic interrupted retirement");
+    expect(sealed).not.toContain("native-mcp-tool-evidence");
+    expect(() => openReceipt(sealed!, "f".repeat(64), owner)).toThrow("authenticate");
+    const restored = openReceipt(sealed!, key, owner), replayLease = leaseFor();
+    replayLease.state = restored;
+    replayLease.save.mockImplementation(async () => { sealed = sealReceipt(restored, key); });
+    core.retire.mockImplementation(async () => {});
+    const adapter = releaseCanaryAdapter(replayLease, restored.releaseRuns[0], connectionsFor("full"), core, options);
+    expect(await adapter.cleanup()).toBe(true);
+    const result = await adapter.qualify(image, "codex-chatgpt");
+    expect(result.outcome.report.diagnostics).toEqual(expected);
+    expect(result.outcome.report.qualified).toBe(false);
+    const saved = openReceipt(sealed!, key, owner).releaseRuns[0].canaries[0];
+    expect(saved.retired).toBe(true); expect(saved.outcome.report.diagnostics).toEqual(expected);
+    expect(JSON.stringify(saved.outcome)).not.toContain("private");
+    expect(core.allocate).toHaveBeenCalledOnce(); expect(core.start).toHaveBeenCalledOnce(); expect(core.poll).toHaveBeenCalledOnce();
+    expect(core.retire).toHaveBeenCalledTimes(2); expect(options.pause).not.toHaveBeenCalled();
+  });
   it("saves diagnostics before interrupted retirement and preserves them on cleanup reentry without redispatch", async () => {
     const lease = leaseFor(), run: any = runFor();
     let storedRun: any;
