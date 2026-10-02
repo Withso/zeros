@@ -597,6 +597,8 @@ export async function runDesignMotionFieldIntegritySmoke({ page, check }) {
     .getByRole("button", { name: "More motion settings", exact: true })
     .click();
   const delay = page.getByLabel("Animation delay", { exact: true });
+  // The portal must own keyboard input before Escape tests its dismissal.
+  await expect(page.locator("[data-design-motion-settings]")).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(delay).toBeHidden();
   const settingsButton = timeline.getByRole("button", {

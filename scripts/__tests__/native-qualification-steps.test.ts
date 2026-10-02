@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver, runNativeMcpQualification } from "../cloud-workspace-validation/lib/native-qualification-steps";
+import { captureNativeMcpTurn, failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver, runNativeMcpQualification } from "../cloud-workspace-validation/lib/native-qualification-steps";
 import { NativeToolEvidence } from "../cloud-workspace-validation/lib/native-tool-evidence";
 import type { NativeQualificationPhase } from "../cloud-workspace-validation/lib/native-qualification-diagnostics";
 
@@ -38,6 +38,31 @@ async function mcpFixture(input: { failedStep?: typeof mcpSteps[number]["step"] 
     secretObservation() { observe("secretObservation"); assert(input.failedStep !== "secretObservation"); },
   } };
 }
+
+describe("initial MCP diagnostic snapshot", () => {
+  it.each(["prompt", "assertion"])("retains evidence before %s failure and interrupted cleanup without changing the error", async failureAt => {
+    const tools = new NativeToolEvidence(), error = new Error("synthetic unchanged failure");
+    let retained: ReturnType<NativeToolEvidence["canaryMcpSummary"]> | undefined;
+    const laterSteps: string[] = [];
+    await expect(runNativeMcpQualification({
+      phase() {},
+      prompt: () => captureNativeMcpTurn(tools, async () => {
+        tools.observe({ sessionUpdate: "tool_call_update", toolCallId: "exact", nativeToolCallId: "native-exact",
+          status: "failed", rawInput: { server: "zeros-qualification", tool: "probe" } });
+        if (failureAt === "prompt") throw error;
+      }, summary => { retained = summary; }),
+      toolEvidence() { expect(retained?.matched.failed).toBe(1); throw error; },
+      async proof() { laterSteps.push("proof"); }, reply() { laterSteps.push("reply"); },
+      secretObservation() { laterSteps.push("secret"); },
+    })).rejects.toBe(error);
+    expect(retained).toMatchObject({ events: 1, uniqueRows: 1, matched: { rows: 1, failed: 1, successful: 0 } });
+    const snapshot = JSON.stringify(retained);
+    tools.observe({ sessionUpdate: "tool_call_update", toolCallId: "exact", status: "completed" });
+    expect(() => { throw new Error("synthetic interrupted cleanup"); }).toThrow();
+    expect(JSON.stringify(retained)).toBe(snapshot);
+    expect(laterSteps).toEqual([]);
+  });
+});
 
 describe("first FULL native MCP diagnostic ordering", () => {
   it("labels each unchanged operation in order without repeating calls or changing the nativeMcp append", async () => {

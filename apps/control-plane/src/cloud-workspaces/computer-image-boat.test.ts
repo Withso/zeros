@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { BoatComputerImageDriver } from "./computer-image-boat.js";
-import type { BoatApiClient } from "./boat-client.js";
 import type { ComputerImage } from "./computer-image.js";
+import { BoatApiClient, BoatCreateRejectedError } from "./boat-client.js";
+import { computerImageFailure } from "./computer-image.js";
 
 const builder = "bx_23456789",
   verifier = "bx_abcdefgh",
@@ -38,6 +39,24 @@ function fixture() {
   };
 }
 describe("Boat image wire adapter (fake provider only)", () => {
+  it.each([
+    { status: 429, code: "provider_rate_limited" },
+    { status: 402, code: "provider_budget_exhausted" },
+  ])("preserves actual HTTP $status through inventory and capture without certifying noncreation", async ({ status, code }) => {
+    const fetcher = vi.fn(async () => Response.json({ ok: false, message: "synthetic-private-canary" }, { status, headers: { "retry-after": "7" } }));
+    const client = new BoatApiClient({ apiKey: "boat_test-only-credential", timeoutMs: 1000, fetch: fetcher });
+    const admission = { reserve: vi.fn(), release: vi.fn(), capacity: vi.fn() };
+    const driver = new BoatComputerImageDriver(client, wallet, [], admission), beforeDispatch = vi.fn();
+    for (const run of [() => driver.create(image, "builder", beforeDispatch), () => driver.capture(image)]) {
+      const error = await run().catch(error => error);
+      expect(error).toMatchObject({ code, httpStatus: status, retryAfterMs: 7000 });
+      expect(error).not.toBeInstanceOf(BoatCreateRejectedError);
+      expect(computerImageFailure(error)).toBe(code);
+      expect(String(error)).not.toContain("synthetic-private-canary");
+    }
+    expect(beforeDispatch).not.toHaveBeenCalled(); expect(admission.reserve).not.toHaveBeenCalled();
+    expect(admission.release).not.toHaveBeenCalled();
+  });
   it("allows cleanup of a proven unstarted image without shared authority, but never frees uncertain reservations", async () => {
     const request = vi.fn(), driver = new BoatComputerImageDriver({ request } as unknown as BoatApiClient, wallet);
     const unstarted = { ...image, builder_id: null, verifier_id: null, snapshot_id: null, capture_dispatched_at: null, builder_dispatched_at: null, verifier_dispatched_at: null };
@@ -67,7 +86,7 @@ describe("Boat image wire adapter (fake provider only)", () => {
       expect(request.mock.calls.every(([, options]) => options?.method !== "POST")).toBe(true);
     }
   });
-  it("refuses custom allocation before dispatch when shared release headroom is unavailable", async () => {
+  it("refuses custom allocation before dispatch when shared account capacity is unavailable", async () => {
     const { request, driver, admission } = fixture(), beforeDispatch = vi.fn();
     admission.reserve.mockRejectedValue(new Error("image capacity reached"));
     await expect(driver.create(image, "builder", beforeDispatch)).rejects.toMatchObject({ code: "image_capacity_reached" });

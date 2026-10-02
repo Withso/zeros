@@ -176,7 +176,7 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
             release: () => releaseHostedAdmission(registry, lease, profile),
           }));
         // The deployed image is the fallback for this build. Release its older
-        // rollback image so the replacement fits the two reserved Dev slots.
+        // rollback image before competing for shared account snapshot capacity.
         await retireSupersededDevImages(lease, profile, { keepInputs: [lease.state.source?.workerInputsSha256].filter(Boolean), keepRollback: false });
         const inventory = await inventoryHostedProviders(profile);
         // An earlier interrupted attempt can leave a never-started builder

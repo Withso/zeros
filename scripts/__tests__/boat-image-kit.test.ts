@@ -13,6 +13,7 @@ import {
   type BoatRequest,
   type KitDeps,
 } from "../cloud-workspace-validation/boat-image/boat-image";
+import { DevProviderError, dispatchDevCreate } from "../dev-environment/provider-http.mjs";
 
 const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const NOW = Date.parse("2026-09-25T10:00:00Z");
@@ -232,11 +233,11 @@ describe("Boat image kit", () => {
     expect(fs.existsSync(path.join(deps.stateDir, "builder-intent.json"))).toBe(false);
   });
 
-  it("forgets a create Boat definitely refused, and never replays one past the idempotency window", async () => {
+  it("forgets only an authenticated authorization denial and never replays an uncertain create past its window", async () => {
     const { root } = repository();
-    const fake = boat({ "POST /sandboxes": ({ body }) => (body.from === "missing-snapshot" ? { status: 404, body: { code: "snapshot_not_found" } } : { status: 503 }) });
+    const fake = boat({ "POST /sandboxes": ({ body }) => (body.from === "denied-snapshot" ? { status: 403 } : { status: 503 }) });
     const deps = kit(root, fake.request);
-    await expect(main(["builder", "create", "--from", "missing-snapshot", "--max-used-hours", "9"], deps)).rejects.toThrow("HTTP 404, snapshot_not_found");
+    await expect(main(["builder", "create", "--from", "denied-snapshot", "--max-used-hours", "9"], deps)).rejects.toThrow("HTTP 403");
     expect(fs.existsSync(path.join(deps.stateDir, "builder-intent.json"))).toBe(false);
     const args = ["builder", "create", "--from", "zeros-qualification-aa11196c97a6", "--max-used-hours", "9"];
     await expect(main(args, deps)).rejects.toThrow("HTTP 503");
@@ -244,6 +245,43 @@ describe("Boat image kit", () => {
     const creates = fake.calls.length;
     await expect(main(args, { ...deps, now: () => NOW + 23 * 3600_000 })).rejects.toThrow("too old to replay safely");
     expect(fake.calls.slice(creates).some((call) => call.method === "POST")).toBe(false);
+  });
+
+  it.each([400, 402, 404, 409, 422, 429, 503])("keeps the builder intent for an uncertified HTTP %s without exposing provider text", async status => {
+    const { root } = repository();
+    const fake = boat({ "POST /sandboxes": () => ({ status, body: { code: "synthetic-private-canary" } }) });
+    const deps = kit(root, fake.request);
+    const error = await main(["builder", "create", "--from", "retained-base", "--max-used-hours", "9"], deps).catch(error => error);
+    expect(String(error)).not.toContain("synthetic-private-canary");
+    expect(fs.existsSync(path.join(deps.stateDir, "builder-intent.json"))).toBe(true);
+    expect(fs.existsSync(path.join(deps.stateDir, "builder.json"))).toBe(false);
+  });
+
+  it.each([401, 403])("retains the original uncertain intent when a replay receives HTTP %s", async status => {
+    const { root } = repository();
+    let attempts = 0;
+    const fake = boat({ "POST /sandboxes": () => ({ status: ++attempts === 1 ? 503 : status }) });
+    const deps = kit(root, fake.request), args = ["builder", "create", "--from", "retained-base", "--max-used-hours", "9"];
+    await expect(main(args, deps)).rejects.toThrow("HTTP 503");
+    const file = path.join(deps.stateDir, "builder-intent.json"), original = fs.readFileSync(file, "utf8");
+    await expect(main(args, deps)).rejects.toThrow(`HTTP ${status}`);
+    expect(fs.readFileSync(file, "utf8")).toBe(original);
+    expect(fake.calls.filter(call => call.method === "POST").map(call => call.headers?.["idempotency-key"]))
+      .toEqual([JSON.parse(original).idempotencyKey, JSON.parse(original).idempotencyKey]);
+  });
+
+  it.each([{ status: 402, code: "provider_budget_exhausted" }, { status: 429, code: "provider_rate_limited" }])("preserves $code through the create journal and actual kit", async ({ status, code }) => {
+    const { root } = repository(), record: any = {};
+    const lease = { save: async () => {}, fence: async () => {} };
+    const fake = boat({ "POST /sandboxes": () => ({ status }) });
+    const deps = kit(root, async (method, route, options) => method === "POST" && route === "/sandboxes"
+      ? dispatchDevCreate(lease, record, "Boat Dev", async () => {
+        const reply = await fake.request(method, route, options);
+        throw new DevProviderError("Boat Dev", reply.status);
+      }, { key: "builderCreate" }) : fake.request(method, route, options));
+    await expect(main(["builder", "create", "--from", "retained-base", "--max-used-hours", "9"], deps)).rejects.toMatchObject({ status, code });
+    expect(record.builderCreate).toMatchObject({ phase: "uncertain", outcome: status });
+    expect(fs.existsSync(path.join(deps.stateDir, "builder-intent.json"))).toBe(true);
   });
 
   it("reads back a wallet the create response did not confirm", async () => {
@@ -329,6 +367,47 @@ describe("Boat image kit", () => {
     const attestation = JSON.parse(fs.readFileSync(path.join(stale.dir, "native-attestation.json"), "utf8"));
     fs.writeFileSync(path.join(stale.dir, "native-attestation.json"), JSON.stringify({ ...attestation, qualified: false }));
     await expect(main(["snapshot", "save"], stale.deps)).rejects.toThrow("Attestation gate");
+  });
+
+  it("captures beyond ten snapshots after complete pagination and saves its pending intent before POST", async () => {
+    let pendingFile = "";
+    const f = await prepared({
+      "GET /named-snapshots": () => ({ status: 200, body: { snapshots: Array.from({ length: 20 }, (_, i) => ({ name: `retained-${i}` })), hasMore: true, nextCursor: "second/page" } }),
+      "GET /named-snapshots?cursor=second%2Fpage": () => ({ status: 200, body: { snapshots: [{ name: "last-retained" }], hasMore: false } }),
+      "POST /named-snapshots": ({ body }) => {
+        expect(JSON.parse(fs.readFileSync(pendingFile, "utf8"))).toMatchObject({ name: body.name, state: "save-pending" });
+        return { status: 202, body: { snapshot: { name: body.name, sourceSandboxId: body.sandboxId, status: "saving" } } };
+      },
+    });
+    pendingFile = path.join(f.dir, "snapshot-ledger.json");
+    await main(["attestation", "status"], f.deps); await main(["generate-post"], f.deps);
+    await expect(main(["snapshot", "save"], f.deps)).resolves.toMatchObject({ requested: true });
+    expect(f.fake.calls.filter(call => call.path.startsWith("/named-snapshots")).map(call => call.path))
+      .toEqual(["/named-snapshots", "/named-snapshots?cursor=second%2Fpage", "/named-snapshots"]);
+  });
+
+  it.each(["missing cursor", "looping cursor", "duplicate name", "candidate on later page"])("refuses %s before saving any pending intent or snapshot", async scenario => {
+    let candidate = "";
+    const f = await prepared({
+      "GET /named-snapshots": () => ({ status: 200, body: { snapshots: [{ name: "retained" }], hasMore: true, ...(scenario === "missing cursor" ? {} : { nextCursor: "next" }) } }),
+      "GET /named-snapshots?cursor=next": () => ({ status: 200, body: { snapshots: [{ name: scenario === "duplicate name" ? "retained" : scenario === "candidate on later page" ? candidate : "other" }], ...(scenario === "looping cursor" ? { nextCursor: "next" } : {}) } }),
+      "POST /named-snapshots": () => { throw new Error("unexpected snapshot dispatch"); },
+    });
+    candidate = `zeros-qualification-${f.commit.slice(0, 12)}`;
+    await main(["attestation", "status"], f.deps); await main(["generate-post"], f.deps);
+    await expect(main(["snapshot", "save"], f.deps)).rejects.toThrow(/inventory|already exists/);
+    expect(f.fake.calls.some(call => call.method === "POST" && call.path === "/named-snapshots")).toBe(false);
+    expect(fs.existsSync(path.join(f.dir, "snapshot-ledger.json"))).toBe(false);
+  });
+
+  it.each([{ status: 402, code: "provider_budget_exhausted" }, { status: 429, code: "provider_rate_limited" }])("keeps an ambiguous save pending on $code and refuses a second POST", async ({ status, code }) => {
+    const f = await prepared({ "GET /named-snapshots": () => ({ status: 200, body: { snapshots: [] } }),
+      "POST /named-snapshots": () => ({ status, body: { message: "synthetic-private-canary" } }) });
+    await main(["attestation", "status"], f.deps); await main(["generate-post"], f.deps);
+    await expect(main(["snapshot", "save"], f.deps)).rejects.toMatchObject({ status, code });
+    expect(JSON.parse(fs.readFileSync(path.join(f.dir, "snapshot-ledger.json"), "utf8")).state).toBe("save-pending");
+    await expect(main(["snapshot", "save"], f.deps)).rejects.toThrow("already requested");
+    expect(f.fake.calls.filter(call => call.method === "POST" && call.path === "/named-snapshots")).toHaveLength(1);
   });
 
   it("keeps build state outside the repository", () => {
