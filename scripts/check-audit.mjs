@@ -1,7 +1,70 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { verifyNodeForgePatch } from "./check-node-forge-patch.mjs";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+function verifyAuditGraph() {
+  const cwd = process.cwd();
+  if (cwd === ROOT) {
+    verifyNodeForgePatch();
+    return;
+  }
+  if (cwd !== join(ROOT, "apps/control-plane")) {
+    throw new Error("Unsupported audit working directory");
+  }
+  if (
+    !["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"].every((filename) =>
+      existsSync(join(cwd, filename)),
+    )
+  ) {
+    throw new Error("Control-plane audit boundary files are missing");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8"));
+  } catch {
+    throw new Error("Control-plane audit boundary manifest is invalid");
+  }
+  if (manifest?.name !== "@zeros/control-plane") {
+    throw new Error("Control-plane audit boundary manifest identity changed");
+  }
+  let config;
+  try {
+    const output = execFileSync("pnpm", ["config", "get", "auditConfig", "--json"], {
+      cwd,
+      encoding: "utf8",
+      timeout: 10_000,
+      maxBuffer: 64 * 1024,
+    });
+    config = output.trim() ? JSON.parse(output) : {};
+  } catch {
+    throw new Error("Control-plane audit configuration could not be read");
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    throw new Error("Control-plane audit configuration must be an object");
+  }
+  for (const [field, advisory] of [
+    ["ignoreGhsas", "GHSA-86w9-cpqp-85rv"],
+    ["ignoreCves", "CVE-2026-85393"],
+  ]) {
+    const exceptions = config[field] ?? [];
+    if (
+      !Array.isArray(exceptions) ||
+      exceptions.some((value) => typeof value !== "string")
+    ) {
+      throw new Error(`Control-plane audit configuration ${field} must be an array of strings`);
+    }
+    if (
+      exceptions.some((value) => value.trim().toUpperCase() === advisory.toUpperCase())
+    ) {
+      throw new Error("Control-plane audit cannot ignore the Forge advisory");
+    }
+  }
+}
 
 export const AUDIT_ATTEMPTS = 3;
 // pnpm's audit client already waits 10 seconds and then a minute between its
@@ -142,7 +205,7 @@ export async function runAuditWithRetries({
 }
 
 export async function runCheckedAudit({
-  verifyPatch = verifyNodeForgePatch,
+  verifyPatch = verifyAuditGraph,
   ...options
 } = {}) {
   verifyPatch();

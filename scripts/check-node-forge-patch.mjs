@@ -7,7 +7,7 @@ import {
 } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -15,14 +15,33 @@ const digestInfoError = /does not contain a valid RSASSA-PKCS1-v1_5 DigestInfo/;
 const sha256 = (contents) =>
   createHash("sha256").update(contents).digest("hex");
 
-function lockSection(lock, name) {
-  return lock.split(`\n${name}:\n`)[1]?.split(/\n\S/)[0] ?? "";
+function isMapping(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    !Object.hasOwn(value, "<<")
+  );
 }
 
-function forgeKeys(section) {
-  return [...section.matchAll(/^ {2}(node-forge@[^\n:]+):/gm)].map(
-    (match) => match[1],
-  );
+function readYamlMapping(filename, yaml) {
+  let mapping;
+  try {
+    mapping = yaml.load(readFileSync(filename, "utf8"), {
+      schema: yaml.CORE_SCHEMA,
+      json: false,
+    });
+  } catch {
+    throw new Error(`Forge patch guard: invalid YAML in ${basename(filename)}`);
+  }
+  if (!isMapping(mapping)) {
+    throw new Error(`Forge patch guard: invalid YAML map in ${basename(filename)}`);
+  }
+  return mapping;
+}
+
+function forgeKeys(mapping) {
+  return Object.keys(mapping).filter((key) => key.startsWith("node-forge@"));
 }
 
 function verifyInstalledVerifier(forge) {
@@ -97,36 +116,37 @@ export function verifyNodeForgePatch({ root = ROOT } = {}) {
     throw new Error("Forge patch guard: reviewed patch digest changed");
   }
   const packageKey = `${pin.package}@${pin.version}`;
-  const workspace = readFileSync(join(root, "pnpm-workspace.yaml"), "utf8");
-  if (!workspace.includes(`\n  "${packageKey}": ${pin.patch}\n`)) {
+  const rootRequire = createRequire(join(root, "package.json"));
+  const yaml = rootRequire("js-yaml");
+  const workspace = readYamlMapping(join(root, "pnpm-workspace.yaml"), yaml);
+  if (
+    !isMapping(workspace.patchedDependencies) ||
+    workspace.patchedDependencies[packageKey] !== pin.patch
+  ) {
     throw new Error("Forge patch guard: exact workspace patch binding missing");
   }
-  const lock = readFileSync(join(root, "pnpm-lock.yaml"), "utf8");
-  const packages = lockSection(lock, "packages");
-  const snapshots = lockSection(lock, "snapshots");
-  const packageKeys = forgeKeys(packages);
-  const snapshotKeys = forgeKeys(snapshots);
-  const packageBlock = packages.match(
-    /^ {2}node-forge@[^\n:]+:\n(?: {4}[^\n]*\n)*/m,
-  )?.[0];
+  const lock = readYamlMapping(join(root, "pnpm-lock.yaml"), yaml);
+  const packageKeys = isMapping(lock.packages) ? forgeKeys(lock.packages) : [];
+  const snapshotKeys = isMapping(lock.snapshots) ? forgeKeys(lock.snapshots) : [];
+  const lockedPackage = lock.packages?.[packageKey];
+  const lockedPatch = lock.patchedDependencies?.[packageKey];
   if (
     packageKeys.length !== 1 ||
     packageKeys[0] !== packageKey ||
-    !packageBlock?.includes(
-      `resolution: {integrity: ${pin.tarballIntegrity}}`,
-    ) ||
+    !isMapping(lockedPackage?.resolution) ||
+    lockedPackage.resolution.integrity !== pin.tarballIntegrity ||
     snapshotKeys.length !== 1 ||
     snapshotKeys[0] !== `${packageKey}(patch_hash=${pin.patchSha256})` ||
-    !lockSection(lock, "patchedDependencies").includes(
-      `  ${packageKey}:\n    hash: ${pin.patchSha256}\n    path: ${pin.patch}\n`,
-    )
+    !isMapping(lock.patchedDependencies) ||
+    !isMapping(lockedPatch) ||
+    lockedPatch.hash !== pin.patchSha256 ||
+    lockedPatch.path !== pin.patch
   ) {
     throw new Error(
       "Forge patch guard: lock contains an unreviewed Forge resolution",
     );
   }
 
-  const rootRequire = createRequire(join(root, "package.json"));
   const sandboxRequire = createRequire(
     rootRequire.resolve("@anthropic-ai/sandbox-runtime"),
   );
