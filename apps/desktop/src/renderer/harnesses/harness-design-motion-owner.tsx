@@ -21,6 +21,7 @@ export function mountDesignMotionOwnerHarness() {
   >();
   const control = {
     select: (_owner: string) => {},
+    refresh: (_owner: string, _duration: string) => {},
     writes: [] as Array<{ owner: string; type: "save" | "delete" }>,
     release(owner: string, success = true) {
       const write = pending.get(owner);
@@ -39,6 +40,12 @@ export function mountDesignMotionOwnerHarness() {
     const [revision, setRevision] = useState(0);
     useLayoutEffect(() => {
       control.select = setOwner;
+      control.refresh = (owner, duration) => {
+        const motion = saved.get(owner);
+        if (!motion) throw new Error(`No saved motion for ${owner}`);
+        saved.set(owner, { ...motion, duration });
+        setRevision((current) => current + 1);
+      };
     }, []);
     const { details, definitions } = useMemo(() => {
       const motion = saved.get(owner);

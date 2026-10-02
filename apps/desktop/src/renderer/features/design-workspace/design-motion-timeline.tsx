@@ -413,6 +413,7 @@ const MOTION_DRAFT_CACHE_LIMIT = 16;
 interface MotionWrite {
   type: "save" | "delete";
   draft: DesignMotionTimelineDraft;
+  acknowledged: boolean;
 }
 
 type MotionWriteEvent = MotionWrite | { type: "pending"; pending: boolean };
@@ -431,6 +432,7 @@ function publishMotionWrite(key: string, event: MotionWriteEvent) {
 }
 
 function acknowledgeMotionWrite(key: string, write: MotionWrite) {
+  write.acknowledged = true;
   const cached = motionDraftCache.get(key);
   if (cached?.draft === write.draft) {
     motionDraftCache.delete(key);
@@ -851,8 +853,18 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     playheadRef.current = offset;
     setPlayheadState(offset);
   }, []);
-  const [selectedPoint, setSelectedPoint] = useState<SelectedPoint | null>(
+  const [selectedPoint, setSelectedPointState] = useState<SelectedPoint | null>(
     cachedSession?.selectedPoint ?? null,
+  );
+  const selectedPointRef = useRef(selectedPoint);
+  const setSelectedPoint = useCallback(
+    (update: React.SetStateAction<SelectedPoint | null>) => {
+      const next =
+        typeof update === "function" ? update(selectedPointRef.current) : update;
+      selectedPointRef.current = next;
+      setSelectedPointState(next);
+    },
+    [],
   );
   const [selectedProperty, setSelectedProperty] = useState<string | null>(
     cachedSession?.selectedProperty ?? null,
@@ -945,6 +957,17 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     ? (designMotionIterationCount(draft.iterations) ?? 1)
     : 1;
 
+  const clearMotionDraft = useCallback(() => {
+    const ownerDetails = detailsRef.current;
+    setDraft(ownerDetails ? emptyMotionDraft(ownerDetails, ownerKey) : null);
+    setPlayhead(0);
+    setSelectedPoint(null);
+    setSelectedProperty(null);
+    setPresetId(null);
+    setDirty(false);
+    setPropertyDraft("");
+  }, [ownerKey, setDirty, setDraft, setPlayhead, setSelectedPoint]);
+
   useLayoutEffect(() => {
     const listener = (event: MotionWriteEvent) => {
       if (event.type === "pending") {
@@ -952,20 +975,15 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         return;
       }
       setPersistedMotion(event.type === "save");
-      if (event.type === "save" || draftRef.current !== event.draft) {
-        // A restored editor can have accepted another edit before this reply.
-        // Saving acknowledges that exact object; deletion preserves newer work.
-        setDirty(event.type === "delete" || draftRef.current !== event.draft);
+      // Clean remounts and source refreshes can replace the draft object.
+      // Only accepted local edits can outlive this acknowledgement.
+      const hasNewerEdits =
+        dirtyRef.current && draftRef.current !== event.draft;
+      if (event.type === "save" || hasNewerEdits) {
+        setDirty(hasNewerEdits);
         return;
       }
-      const ownerDetails = detailsRef.current;
-      setDraft(ownerDetails ? emptyMotionDraft(ownerDetails, ownerKey) : null);
-      setPlayhead(0);
-      setSelectedPoint(null);
-      setSelectedProperty(null);
-      setPresetId(null);
-      setDirty(false);
-      setPropertyDraft("");
+      clearMotionDraft();
     };
     const listeners = motionWriteListeners.get(sessionOwnerKey) ?? new Set();
     listeners.add(listener);
@@ -975,7 +993,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       listeners.delete(listener);
       if (listeners.size === 0) motionWriteListeners.delete(sessionOwnerKey);
     };
-  }, [ownerKey, sessionOwnerKey, setDirty, setDraft, setPlayhead]);
+  }, [clearMotionDraft, sessionOwnerKey, setDirty]);
 
   useLayoutEffect(() => {
     if (!focusPointRef.current) return;
@@ -1050,6 +1068,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     setDirty,
     setDraft,
     setPlayhead,
+    setSelectedPoint,
   ]);
 
   const queuePreview = useCallback(
@@ -1180,6 +1199,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
           draft: draftRef.current,
           playhead: playheadRef.current,
           playbackTime: playbackTimeRef.current,
+          selectedPoint: selectedPointRef.current,
         });
       }
       queuedPreviewRef.current = null;
@@ -1241,7 +1261,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       setPresetId(preset.id);
       setLayerExpanded(true);
     },
-    [mutateDraft, setPlayhead],
+    [mutateDraft, setPlayhead, setSelectedPoint],
   );
 
   useEffect(() => {
@@ -1283,6 +1303,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     open,
     propertyRequest,
     setPlayhead,
+    setSelectedPoint,
   ]);
 
   useEffect(() => {
@@ -1343,7 +1364,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     setSelectedPoint({ property, offset: 0 });
     setSelectedProperty(property);
     setPropertyDraft("");
-  }, [details, draft, mutateDraft, points, propertyDraft]);
+  }, [details, draft, mutateDraft, points, propertyDraft, setSelectedPoint]);
 
   const addPoint = useCallback(
     (property: string) => {
@@ -1372,7 +1393,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       setSelectedPoint({ property, offset: Math.round(playhead * 10) / 10 });
       setSelectedProperty(property);
     },
-    [details, draft, mutateDraft, playhead, points],
+    [details, draft, mutateDraft, playhead, points, setSelectedPoint],
   );
 
   const removeProperty = useCallback(
@@ -1397,7 +1418,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       );
       setSelectedProperty((current) => (current === property ? null : current));
     },
-    [mutateDraft],
+    [mutateDraft, setSelectedPoint],
   );
 
   const removePoint = useCallback(
@@ -1414,7 +1435,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       focusPointRef.current = focus;
       setSelectedPoint(next ? { property, offset: next.offset } : null);
     },
-    [mutateDraft, points],
+    [mutateDraft, points, setSelectedPoint],
   );
 
   const retimePoint = useCallback(
@@ -1434,7 +1455,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       setSelectedPoint({ property, offset: nextOffset });
       setSelectedProperty(property);
     },
-    [mutateDraft, setPlayhead],
+    [mutateDraft, setPlayhead, setSelectedPoint],
   );
 
   const setPlayheadFromClientX = useCallback(
@@ -1489,7 +1510,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     (
       event: React.PointerEvent<HTMLButtonElement>,
       property: string,
-      initialOffset: number,
+      pressedOffset: number,
     ) => {
       if (disabled || event.button !== 0 || !event.isPrimary) return;
       event.preventDefault();
@@ -1500,15 +1521,46 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         "[data-motion-track]",
       );
       if (!track) return;
+      const selectedBeforeFocus = selectedPointRef.current;
+      const draftBeforeFocus = draftRef.current;
       event.currentTarget.focus({ preventScroll: true });
       const baseline = draftRef.current;
       if (!baseline) return;
+      // Focusing the diamond can commit its time field and replace the point.
+      // Follow that accepted offset only when this is the same selected point.
+      const selectedAfterFocus = selectedPointRef.current;
+      const initialOffset =
+        selectedBeforeFocus?.property === property &&
+        selectedBeforeFocus.offset === pressedOffset &&
+        selectedAfterFocus?.property === property
+          ? selectedAfterFocus.offset
+          : pressedOffset;
       const baselineDirty = dirtyRef.current;
-      const baselinePreset = presetId;
+      const baselinePreset = baseline === draftBeforeFocus ? presetId : null;
+      const pendingWrite = pendingMotionWrites.get(sessionOwnerKey);
       const startX = event.clientX;
       const bounds = track.getBoundingClientRect();
       if (bounds.width <= 0) return;
       let lastOffset = initialOffset;
+      const restoreBaseline = () => {
+        // A reply can settle while the gesture temporarily differs from its
+        // baseline. Restoring that baseline must also restore its saved/deleted
+        // status, while preserving accepted edits made after the captured write.
+        const baselineWasAcknowledged =
+          pendingWrite?.acknowledged &&
+          (!baselineDirty || baseline === pendingWrite.draft);
+        focusPointRef.current = true;
+        if (baselineWasAcknowledged && pendingWrite.type === "delete") {
+          clearMotionDraft();
+          return;
+        }
+        setDraft(baseline);
+        setDirty(baselineWasAcknowledged ? false : baselineDirty);
+        setPresetId(baselinePreset);
+        setPlayhead(initialOffset);
+        setSelectedPoint({ property, offset: initialOffset });
+        setSelectedProperty(property);
+      };
       const move = (pointerEvent: PointerEvent) => {
         const delta = pointerEvent.clientX - startX;
         if (!pointDragMovedRef.current && Math.abs(delta) < 3) return;
@@ -1521,27 +1573,28 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
           ) / 10;
         if (nextOffset === lastOffset) return;
         pointDragMovedRef.current = true;
+        lastOffset = nextOffset;
+        if (nextOffset === initialOffset) {
+          restoreBaseline();
+          return;
+        }
         // Recompute from the pointerdown snapshot. Incremental moves erase a
         // neighboring point as soon as the pointer crosses its time.
-        setDraft(
-          nextOffset === initialOffset
-            ? baseline
-            : {
-                ...baseline,
-                keyframes: moveDesignMotionPoint(
-                  baseline.keyframes,
-                  property,
-                  initialOffset,
-                  nextOffset,
-                ),
-              },
-        );
-        setPresetId(nextOffset === initialOffset ? baselinePreset : null);
-        lastOffset = nextOffset;
+        setDraft({
+          ...baseline,
+          keyframes: moveDesignMotionPoint(
+            baseline.keyframes,
+            property,
+            initialOffset,
+            nextOffset,
+          ),
+        });
+        setPresetId(null);
         setPlayhead(nextOffset);
         focusPointRef.current = true;
         setSelectedPoint({ property, offset: nextOffset });
-        setDirty(nextOffset === initialOffset ? baselineDirty : true);
+        setSelectedProperty(property);
+        setDirty(true);
       };
       activePointerCleanupRef.current = beginDesignPointerGesture({
         // A retimed point changes its React key; the lane retains capture.
@@ -1554,20 +1607,25 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         },
         onCancel: () => {
           activePointerCleanupRef.current = null;
-          setDraft(baseline);
-          setDirty(baselineDirty);
-          setPresetId(baselinePreset);
-          setPlayhead(initialOffset);
-          focusPointRef.current = true;
-          setSelectedPoint({ property, offset: initialOffset });
+          restoreBaseline();
         },
       });
       setPlaying(false);
       setPlayhead(initialOffset);
+      focusPointRef.current = true;
       setSelectedPoint({ property, offset: initialOffset });
       setSelectedProperty(property);
     },
-    [disabled, presetId, setDirty, setDraft, setPlayhead],
+    [
+      clearMotionDraft,
+      disabled,
+      presetId,
+      sessionOwnerKey,
+      setDirty,
+      setDraft,
+      setPlayhead,
+      setSelectedPoint,
+    ],
   );
 
   const save = useCallback(async () => {
@@ -1578,7 +1636,11 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       pendingMotionWrites.has(sessionOwnerKey)
     )
       return;
-    const write: MotionWrite = { type: "save", draft: currentDraft };
+    const write: MotionWrite = {
+      type: "save",
+      draft: currentDraft,
+      acknowledged: false,
+    };
     pendingMotionWrites.set(sessionOwnerKey, write);
     publishMotionWrite(sessionOwnerKey, { type: "pending", pending: true });
     try {
@@ -1602,7 +1664,11 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       return;
     setPlaying(false);
     clearActivePreview();
-    const write: MotionWrite = { type: "delete", draft: currentDraft };
+    const write: MotionWrite = {
+      type: "delete",
+      draft: currentDraft,
+      acknowledged: false,
+    };
     pendingMotionWrites.set(sessionOwnerKey, write);
     publishMotionWrite(sessionOwnerKey, { type: "pending", pending: true });
     try {

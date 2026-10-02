@@ -1024,16 +1024,22 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   drafts, and a save acknowledges only the draft it wrote. Pending saves and
   deletions retain that exact owner through selection round trips; their late
   replies cannot change another directory or discard newer edits. Failed writes
-  preserve the draft and allow retry. Re-adding a property
+  preserve the draft and allow retry. Returning to a clean editor during a
+  pending deletion does not create unsaved work; success clears that motion
+  unless the user has edited it since deletion began. Re-adding a property
   selects its existing track without replacing values; custom properties retain
   their case-sensitive names. Keyframe drags preview from a fixed baseline, so
   crossing a neighbor cannot erase it, and Escape cancels the whole gesture.
+  Cancellation and no-op returns account for writes acknowledged during the
+  drag, keeping saved motion clean and deleted motion absent.
   Clicks and repeated keyboard retiming retain focus on the selected keyframe.
   Timeline controls retain native Tab, Enter and Space behavior; canvas layer
   shortcuts cannot handle keys while focus belongs to the timeline.
   Timeline fields commit on Enter/blur and revert on Escape; invalid field
   drafts never alter the running preview. Ruler scrubbing settles focused time
-  drafts before capturing its cancellation baseline. Pause remains available
+  drafts before capturing its cancellation baseline. A keyframe gesture follows
+  the same point if that focus change retimes it, and cancellation preserves
+  the accepted field edit. Pause remains available
   with an invalid field and honors the action chosen before a field's blur
   commit. Playback retains elapsed loop time through pause/resume and settings
   edits, rescales progress when duration changes, and holds the actual

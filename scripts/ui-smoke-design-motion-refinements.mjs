@@ -317,6 +317,56 @@ export async function runDesignMotionDeleteNewerDraftSmoke({ page, check }) {
   );
 }
 
+async function expectDeletedMotion(timeline) {
+  await expect(
+    timeline.getByRole("button", { name: "Saving…", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    timeline.getByRole("button", { name: /opacity keyframe at/ }),
+  ).toHaveCount(0);
+  await expect(
+    timeline.getByRole("button", { name: "Save", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    timeline.getByLabel("Unsaved motion changes", { exact: true }),
+  ).toBeHidden();
+  await expect(
+    timeline.getByRole("button", { name: "Delete motion", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    timeline.getByRole("button", { name: "Clear motion draft", exact: true }),
+  ).toHaveCount(0);
+}
+
+export async function runDesignMotionCleanDeleteReturnSmoke({ page, check }) {
+  const timeline = await openMotion(page);
+  await timeline.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(
+    timeline.getByRole("button", { name: "Delete motion", exact: true }),
+  ).toBeVisible();
+  await expect(
+    timeline.getByLabel("Unsaved motion changes", { exact: true }),
+  ).toBeHidden();
+  await holdWrite(page);
+  await timeline
+    .getByRole("button", { name: "Delete motion", exact: true })
+    .click();
+  await page.locator('[data-design-layer-id="home-copy"]').click();
+  await page.locator('[data-design-layer-id="home-heading"]').click();
+  await expect(
+    timeline.getByRole("button", { name: "Saving…", exact: true }),
+  ).toBeVisible();
+  await expect(
+    timeline.getByLabel("Unsaved motion changes", { exact: true }),
+  ).toBeHidden();
+  await page.evaluate(() => window.__zerosReleaseMotionRefinementSave());
+  await expectDeletedMotion(timeline);
+  check(
+    "a clean deletion remains clean after returning to its optimistically updated canvas before the reply",
+    true,
+  );
+}
+
 export async function runDesignMotionFailedSaveReturnSmoke({ page, check }) {
   const timeline = await openMotion(page);
   await holdSave(page, timeline);
@@ -510,6 +560,384 @@ async function selectDirectoryOwner(page, owner) {
   );
 }
 
+async function openSavedDirectoryMotion(page) {
+  await page.goto(
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?motionOwner`,
+    { waitUntil: "networkidle" },
+  );
+  const timeline = page.getByRole("region", { name: "Motion timeline" });
+  await timeline.getByLabel("Motion property", { exact: true }).fill("opacity");
+  await timeline.getByLabel("Motion property", { exact: true }).press("Enter");
+  await timeline.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(
+    timeline.getByRole("button", { name: "Saving…", exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() =>
+    window.__zerosHarnessMotionOwner.release("directory-a"),
+  );
+  await expect(
+    timeline.getByRole("button", { name: "Save", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    timeline.getByRole("button", { name: "Delete motion", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    timeline.getByLabel("Unsaved motion changes", { exact: true }),
+  ).toBeHidden();
+  return timeline;
+}
+
+export async function runDesignMotionCleanDeleteOwnerRefreshSmoke({
+  page,
+  check,
+}) {
+  for (const mode of ["remount", "refresh", "remount-refresh"]) {
+    const timeline = await openSavedDirectoryMotion(page);
+    await timeline
+      .getByRole("button", { name: "Delete motion", exact: true })
+      .click();
+    if (mode.includes("remount")) {
+      await selectDirectoryOwner(page, "directory-b");
+      await selectDirectoryOwner(page, "directory-a");
+    }
+    if (mode.includes("refresh")) {
+      await page.evaluate(() =>
+        window.__zerosHarnessMotionOwner.refresh("directory-a", "450ms"),
+      );
+      await expect(
+        timeline.getByLabel("Animation duration", { exact: true }),
+      ).toHaveValue("450");
+    }
+    await expect(
+      timeline.getByRole("button", { name: "Saving…", exact: true }),
+    ).toBeVisible();
+    await expect(
+      timeline.getByLabel("Unsaved motion changes", { exact: true }),
+    ).toBeHidden();
+    await expect(
+      timeline.getByRole("button", { name: /opacity keyframe at/ }),
+    ).toHaveCount(2);
+    await page.evaluate(() =>
+      window.__zerosHarnessMotionOwner.release("directory-a"),
+    );
+    await expectDeletedMotion(timeline);
+    check(`a pending clean deletion clears after ${mode}`, true);
+  }
+}
+
+export async function runDesignMotionDeleteRemountEditsSmoke({ page, check }) {
+  for (const acknowledgeAway of [false, true]) {
+    const timeline = await openSavedDirectoryMotion(page);
+    await timeline
+      .getByRole("button", { name: "Delete motion", exact: true })
+      .click();
+    await selectDirectoryOwner(page, "directory-b");
+    await selectDirectoryOwner(page, "directory-a");
+    const duration = timeline.getByLabel("Animation duration", { exact: true });
+    await duration.fill("600");
+    await duration.press("Enter");
+    await page.evaluate(() =>
+      window.__zerosHarnessMotionOwner.refresh("directory-a", "450ms"),
+    );
+    await expect(duration).toHaveValue("600");
+    if (acknowledgeAway) await selectDirectoryOwner(page, "directory-b");
+    await page.evaluate(() =>
+      window.__zerosHarnessMotionOwner.release("directory-a"),
+    );
+    if (acknowledgeAway) {
+      await expect(
+        timeline.getByLabel("Unsaved motion changes", { exact: true }),
+      ).toBeHidden();
+      await expect(
+        timeline.getByRole("button", { name: /opacity keyframe at/ }),
+      ).toHaveCount(0);
+      await selectDirectoryOwner(page, "directory-a");
+    }
+    await expect(
+      timeline.getByRole("button", { name: "Saving…", exact: true }),
+    ).toHaveCount(0);
+    await expect(duration).toHaveValue("600");
+    await expect(
+      timeline.getByRole("button", { name: /opacity keyframe at/ }),
+    ).toHaveCount(2);
+    await expect(
+      timeline.getByRole("button", { name: "Clear motion draft", exact: true }),
+    ).toBeEnabled();
+    await expect(
+      timeline.getByRole("button", { name: "Save", exact: true }),
+    ).toBeEnabled();
+    await expect(
+      timeline.getByLabel("Unsaved motion changes", { exact: true }),
+    ).toBeVisible();
+    check(
+      `edits accepted after a pending-delete remount survive source refresh and ${acknowledgeAway ? "cached" : "mounted"} acknowledgement`,
+      true,
+    );
+  }
+}
+
+export async function runDesignMotionFailedCleanDeleteReturnSmoke({
+  page,
+  check,
+}) {
+  const timeline = await openSavedDirectoryMotion(page);
+  const deleteMotion = timeline.getByRole("button", {
+    name: "Delete motion",
+    exact: true,
+  });
+  await deleteMotion.click();
+  await selectDirectoryOwner(page, "directory-b");
+  await selectDirectoryOwner(page, "directory-a");
+  await page.evaluate(() =>
+    window.__zerosHarnessMotionOwner.release("directory-a", false),
+  );
+  await expect(deleteMotion).toBeEnabled();
+  await expect(
+    timeline.getByRole("button", { name: /opacity keyframe at/ }),
+  ).toHaveCount(2);
+  await expect(
+    timeline.getByRole("button", { name: "Save", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    timeline.getByLabel("Unsaved motion changes", { exact: true }),
+  ).toBeHidden();
+  await deleteMotion.click();
+  await page.evaluate(() =>
+    window.__zerosHarnessMotionOwner.release("directory-a"),
+  );
+  await expectDeletedMotion(timeline);
+  check("a failed clean deletion stays clean after remount and permits retry", true);
+}
+
+export async function runDesignMotionTimeDraftClickSmoke({ page, check }) {
+  for (const differentPoint of [false, true]) {
+    const timeline = await openMotion(page);
+    const first = timeline.getByRole("button", {
+      name: "opacity keyframe at 0% (0ms)",
+      exact: true,
+    });
+    await first.click();
+    await timeline
+      .getByLabel("Selected keyframe time", { exact: true })
+      .fill("75");
+    await (differentPoint
+      ? timeline.getByRole("button", {
+          name: "opacity keyframe at 100% (300ms)",
+          exact: true,
+        })
+      : first
+    ).click();
+    await expect(
+      timeline.getByRole("button", {
+        name: "opacity keyframe at 25% (75ms)",
+        exact: true,
+      }),
+    ).toHaveAttribute("aria-pressed", String(!differentPoint));
+    await expect(
+      timeline.getByRole("button", {
+        name: "opacity keyframe at 100% (300ms)",
+        exact: true,
+      }),
+    ).toHaveAttribute("aria-pressed", String(differentPoint));
+    await expect(
+      timeline.getByLabel("Selected keyframe time", { exact: true }),
+    ).toHaveValue(differentPoint ? "300" : "75");
+    await expect(
+      timeline.locator('[data-motion-property="opacity"][aria-pressed="true"]'),
+    ).toBeFocused();
+    check(
+      `a pending keyframe-time commit preserves the ${differentPoint ? "different" : "same"} clicked point's selection and focus`,
+      true,
+    );
+  }
+}
+
+export async function runDesignMotionTimeDraftDragSmoke({ page, check }) {
+  for (const mode of ["drag", "cancel", "return", "different", "retire"]) {
+    const timeline = await openMotion(page);
+    const first = timeline.getByRole("button", {
+      name: "opacity keyframe at 0% (0ms)",
+      exact: true,
+    });
+    await first.click();
+    await timeline
+      .getByLabel("Selected keyframe time", { exact: true })
+      .fill("75");
+    const differentPoint = mode === "different";
+    const target = differentPoint
+      ? timeline.getByRole("button", {
+          name: "opacity keyframe at 100% (300ms)",
+          exact: true,
+        })
+      : first;
+    const bounds = await target.boundingBox();
+    const lane = await timeline.locator(".zd-motion-property-lane").boundingBox();
+    const x = bounds.x + bounds.width / 2;
+    const y = bounds.y + bounds.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + lane.width * (differentPoint ? -0.25 : 0.25), y);
+    await expect(
+      timeline.getByRole("button", {
+        name: differentPoint
+          ? "opacity keyframe at 75% (225ms)"
+          : "opacity keyframe at 50% (150ms)",
+        exact: true,
+      }),
+    ).toHaveAttribute("aria-pressed", "true");
+    if (mode === "cancel") await page.keyboard.press("Escape");
+    if (mode === "return") await page.mouse.move(x, y);
+    if (mode === "retire") {
+      await page
+        .locator('[data-design-layer-id="home-copy"]')
+        .evaluate((element) => element.click());
+      await expect(
+        page.getByRole("textbox", { name: "Size", exact: true }),
+      ).toHaveValue("24");
+    }
+    await page.mouse.up();
+    if (mode === "retire") {
+      await page.locator('[data-design-layer-id="home-heading"]').click();
+    }
+    const acceptedTime = differentPoint ? 225 : mode === "drag" ? 150 : 75;
+    await expect(
+      timeline.getByLabel("Selected keyframe time", { exact: true }),
+    ).toHaveValue(String(acceptedTime));
+    await expect(
+      timeline.getByRole("button", { name: /opacity keyframe at/ }),
+    ).toHaveCount(2);
+    await expect(
+      timeline.getByLabel("opacity keyframe value", { exact: true }),
+    ).toHaveValue(differentPoint ? "1" : "0");
+    await expect(
+      timeline.getByLabel("Unsaved motion changes", { exact: true }),
+    ).toBeVisible();
+    check(`keyframe ${mode} uses the accepted time-field commit as its baseline`, true);
+  }
+}
+
+async function runWriteDuringPointDrag(
+  { page, check },
+  operation,
+  finish,
+  newerBaseline = false,
+) {
+  const timeline = await openSavedDirectoryMotion(page);
+  const duration = timeline.getByLabel("Animation duration", { exact: true });
+  if (operation === "save") {
+    await duration.fill("450");
+    await duration.press("Enter");
+  }
+  await timeline
+    .getByRole("button", {
+      name: operation === "save" ? "Save" : "Delete motion",
+      exact: true,
+    })
+    .click();
+  await expect(
+    timeline.getByRole("button", { name: "Saving…", exact: true }),
+  ).toBeVisible();
+  if (newerBaseline) {
+    // This accepted edit belongs to the cancellation baseline, but was not
+    // included in the pending write. A reply must preserve it.
+    await duration.fill("600");
+    await duration.press("Enter");
+  }
+  const point = await timeline
+    .getByRole("button", { name: /^opacity keyframe at 0%/ })
+    .boundingBox();
+  const lane = await timeline.locator(".zd-motion-property-lane").boundingBox();
+  const x = point.x + point.width / 2;
+  const y = point.y + point.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + lane.width * 0.25, y);
+  await expect(
+    timeline.getByRole("button", { name: /^opacity keyframe at 25%/ }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.evaluate(() =>
+    window.__zerosHarnessMotionOwner.release("directory-a"),
+  );
+  await expect(
+    timeline.getByRole("button", { name: "Saving…", exact: true }),
+  ).toHaveCount(0);
+  if (finish === "escape") await page.keyboard.press("Escape");
+  if (finish === "return") await page.mouse.move(x, y);
+  if (finish === "retire") await selectDirectoryOwner(page, "directory-b");
+  await page.mouse.up();
+  if (finish === "retire") await selectDirectoryOwner(page, "directory-a");
+  const completedDrag = finish === "release";
+  if (operation === "delete" && !newerBaseline && !completedDrag) {
+    await expectDeletedMotion(timeline);
+    await expect(
+      timeline.getByRole("button", { name: "Play motion preview", exact: true }),
+    ).toBeDisabled();
+  } else {
+    await expect(duration).toHaveValue(
+      newerBaseline ? "600" : operation === "save" ? "450" : "300",
+    );
+    await expect(
+      timeline.getByRole("button", { name: /opacity keyframe at/ }),
+    ).toHaveCount(2);
+    await expect(
+      timeline.getByRole("button", {
+        name: completedDrag ? /^opacity keyframe at 25%/ : /^opacity keyframe at 0%/,
+      }),
+    ).toBeVisible();
+    const save = timeline.getByRole("button", { name: "Save", exact: true });
+    const dirty = timeline.getByLabel("Unsaved motion changes", { exact: true });
+    if (newerBaseline || completedDrag) {
+      await expect(save).toBeEnabled();
+      await expect(dirty).toBeVisible();
+    } else {
+      await expect(save).toBeDisabled();
+      await expect(dirty).toBeHidden();
+    }
+    await expect(
+      timeline.getByRole("button", {
+        name: operation === "save" ? "Delete motion" : "Clear motion draft",
+        exact: true,
+      }),
+    ).toBeEnabled();
+  }
+  check(
+    `${operation} acknowledged during a drag respects ${finish}${newerBaseline ? " and the newer accepted edit" : ""}`,
+    true,
+  );
+}
+
+export const runDesignMotionSaveDragEscapeSmoke = (context) =>
+  runWriteDuringPointDrag(context, "save", "escape");
+
+export const runDesignMotionDeleteDragEscapeSmoke = (context) =>
+  runWriteDuringPointDrag(context, "delete", "escape");
+
+export const runDesignMotionSaveDragReturnSmoke = (context) =>
+  runWriteDuringPointDrag(context, "save", "return");
+
+export const runDesignMotionDeleteDragReturnSmoke = (context) =>
+  runWriteDuringPointDrag(context, "delete", "return");
+
+export const runDesignMotionSaveDragRetireSmoke = (context) =>
+  runWriteDuringPointDrag(context, "save", "retire");
+
+export const runDesignMotionDeleteDragRetireSmoke = (context) =>
+  runWriteDuringPointDrag(context, "delete", "retire");
+
+export async function runDesignMotionWriteDragNewerBaselineSmoke(context) {
+  for (const operation of ["save", "delete"]) {
+    for (const finish of ["escape", "return", "retire"]) {
+      await runWriteDuringPointDrag(context, operation, finish, true);
+    }
+  }
+}
+
+export async function runDesignMotionWriteDragReleaseSmoke(context) {
+  for (const operation of ["save", "delete"]) {
+    await runWriteDuringPointDrag(context, operation, "release");
+  }
+}
+
 export async function runDesignMotionDirectoryAcknowledgementIsolationSmoke({
   page,
   check,
@@ -606,8 +1034,22 @@ export async function runDesignMotionRefinementsSmoke(context) {
   await runDesignMotionSaveAcknowledgementNewerDraftSmoke(context);
   await runDesignMotionSaveOwnerIsolationSmoke(context);
   await runDesignMotionDeleteNewerDraftSmoke(context);
+  await runDesignMotionCleanDeleteReturnSmoke(context);
+  await runDesignMotionCleanDeleteOwnerRefreshSmoke(context);
+  await runDesignMotionDeleteRemountEditsSmoke(context);
   await runDesignMotionFailedSaveReturnSmoke(context);
   await runDesignMotionFailedDeleteReturnSmoke(context);
+  await runDesignMotionFailedCleanDeleteReturnSmoke(context);
+  await runDesignMotionTimeDraftClickSmoke(context);
+  await runDesignMotionTimeDraftDragSmoke(context);
+  await runDesignMotionSaveDragEscapeSmoke(context);
+  await runDesignMotionDeleteDragEscapeSmoke(context);
+  await runDesignMotionSaveDragReturnSmoke(context);
+  await runDesignMotionDeleteDragReturnSmoke(context);
+  await runDesignMotionSaveDragRetireSmoke(context);
+  await runDesignMotionDeleteDragRetireSmoke(context);
+  await runDesignMotionWriteDragNewerBaselineSmoke(context);
+  await runDesignMotionWriteDragReleaseSmoke(context);
   await runDesignMotionAlternateSettingsEditSmoke(context);
   await runDesignMotionDirectoryAcknowledgementIsolationSmoke(context);
 }
