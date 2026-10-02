@@ -1,10 +1,11 @@
 import { sha256 } from "./state.mjs";
 
-const defaults = { maxActiveGenerations: 4, maxGenerationsPerOwner: 1, maxBuilders: 1, maxBuildersPerOwner: 1, maxNamedSnapshots: 10, snapshotHeadroom: 1 };
+const defaults = { maxActiveGenerations: 4, maxGenerationsPerOwner: 1, maxBuilders: 1, maxBuildersPerOwner: 1, maxNamedSnapshots: 10, snapshotHeadroom: 0 };
 export function admissionPolicy(profile) {
-  const policy = { ...defaults, ...profile.admission };
+  // Keep the serialized snapshot fields for existing ledger readers. Legacy
+  // overrides no longer partition the account or reserve an unused name.
+  const policy = { ...defaults, ...profile.admission, maxNamedSnapshots: defaults.maxNamedSnapshots, snapshotHeadroom: defaults.snapshotHeadroom };
   for (const [key, value] of Object.entries(policy)) if (!Number.isSafeInteger(value) || value < (key === "snapshotHeadroom" ? 0 : 1)) throw new Error("Invalid Dev admission cap");
-  if (policy.maxNamedSnapshots > 10 || policy.snapshotHeadroom >= policy.maxNamedSnapshots) throw new Error("Dev snapshot cap exceeds qualified capacity");
   return policy;
 }
 const account = profile => sha256(JSON.stringify([profile.boat.accountScope, profile.boat.billingOrg,
@@ -132,12 +133,7 @@ export async function reserveHostedAdmission(store, state, profile, { kind = "ge
       if (!names.has(profile.boat.baseSnapshot)) throw new Error("Dev snapshot inventory must confirm the protected base before admission");
       for (const row of ledger.reservations) if (row.kind === "builder" && row.snapshotName && !row.snapshotReleasedAt) names.add(row.snapshotName);
       names.add(snapshotName);
-      const channels = ["alpha", "beta", "production"];
-      const release = name => channels.find(channel => name.startsWith(`dev-${sha256(`zeros-release-worker:${channel}`).slice(0, 24)}-`) || name.startsWith(`zeros-${channel}-`));
-      if ([...names].filter(name => name !== profile.boat.baseSnapshot && !release(name)).length > 2 ||
-        channels.some(channel => [...names].filter(name => release(name) === channel).length > 2))
-        throw new Error("Dev named snapshot capacity is reserved for release and rollback images; image capacity reached");
-      if (names.size + policy.snapshotHeadroom > policy.maxNamedSnapshots) throw new Error("Dev named snapshot capacity is reserved; no builder was allocated");
+      if (names.size > policy.maxNamedSnapshots) throw new Error("Dev named snapshot capacity is reserved; no builder was allocated");
     }
     if (previous) Object.assign(previous, reservation, { releasedAt: undefined, snapshotReleasedAt: undefined }); else ledger.reservations.push(reservation);
     ledger.policy = policy; return reservation;

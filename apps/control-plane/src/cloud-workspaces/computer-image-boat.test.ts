@@ -67,7 +67,7 @@ describe("Boat image wire adapter (fake provider only)", () => {
       expect(request.mock.calls.every(([, options]) => options?.method !== "POST")).toBe(true);
     }
   });
-  it("refuses custom allocation before dispatch when shared release headroom is unavailable", async () => {
+  it("refuses custom allocation before dispatch when shared account capacity is unavailable", async () => {
     const { request, driver, admission } = fixture(), beforeDispatch = vi.fn();
     admission.reserve.mockRejectedValue(new Error("image capacity reached"));
     await expect(driver.create(image, "builder", beforeDispatch)).rejects.toMatchObject({ code: "image_capacity_reached" });

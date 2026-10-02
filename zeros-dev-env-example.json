@@ -64,7 +64,7 @@
     "maxBuilders": 1,
     "maxBuildersPerOwner": 1,
     "maxNamedSnapshots": 10,
-    "snapshotHeadroom": 1
+    "snapshotHeadroom": 0
   },
   "secretVersions": {
     "github": "1",

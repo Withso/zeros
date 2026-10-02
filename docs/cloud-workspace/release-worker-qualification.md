@@ -271,27 +271,24 @@ proved.
 
 ## Ten-slot account and recovery
 
-| Shared named slots | Budget |
-| --- | --- |
-| Alpha current + rollback | 2 |
-| Beta current + rollback | 2 |
-| Production current + rollback | 2 |
-| Dev and organization-custom images, combined | 2 |
-| Retained clean base | 1 |
-| Empty deletion/publication headroom | 1 |
-| Total | 10 |
+Alpha, Beta, Production, Dev and organization-custom images share one
+account-wide limit of ten named snapshots, including the retained clean base.
+No channel, custom, base or spare allocation is carved out of that total; the
+protected base must still exist in actual provider inventory.
 
 The existing encrypted account ledger, ETag CAS and one-builder cap arbitrate
 release, Dev and custom builds. Complete provider inventory plus unresolved
 reservation holds count once. No timestamp or absent inventory row frees an
-uncertain allocation. Release refuses a third channel slot, missing base,
-non-release overflow or exhausted headroom **before paid allocation**. Dev and
-custom builds cannot consume any of the six release/rollback slots; custom
-capacity errors explicitly say `image capacity reached`. Custom inventory must
+uncertain allocation. A new tenth name is allowed; an eleventh or a missing
+base is refused **before paid allocation**. Candidate channel ownership remains
+required, and compute/generation caps are independent of named-snapshot capacity.
+Legacy `maxNamedSnapshots` and `snapshotHeadroom` profile fields cannot lower
+the limit or reserve a spare name. Custom capacity errors explicitly say
+`image capacity reached`. Custom inventory must
 fully paginate, rejecting missing/looping cursors or changed duplicate names.
 
-Before a third promotion, the owner must retire an **unreferenced** old rollback
-or failed candidate; automatic code never deletes current/rollback snapshots.
+When the account is full, the owner must retire an **unreferenced** old rollback
+or failed candidate; release admission never deletes current/rollback snapshots.
 On the next release, read-only reconciliation can free an already acknowledged,
 ready candidate's named-slot hold only after a certified physically deleted
 builder, complete inventory and exact named-snapshot GET 404. It persists a

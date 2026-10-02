@@ -5,7 +5,7 @@ import type { ReleaseCanaryRequest } from "./release-canaries.js";
 import { ReleaseCanaryBindingsSchema, type ReleaseCanaryRetirement, type ReleaseCanaryRetirementAudit } from "./release-canary-contract.js";
 import { releaseCanaryRetirementJournal } from "./release-canary-retirement.js";
 
-export const BOAT_SNAPSHOT_BUDGET = { alpha: 2, beta: 2, production: 2, dev: 2, base: 1, headroom: 1, limit: 10 } as const;
+export const BOAT_SNAPSHOT_BUDGET = { limit: 10 } as const;
 const channels = ["alpha", "beta", "production"] as const;
 export const releaseWorkerOwner = (channel: string) => createHash("sha256").update(`zeros-release-worker:${channel}`).digest("hex").slice(0, 24);
 export const releaseSnapshotChannel = (name: string) => channels.find(channel => name.startsWith(`dev-${releaseWorkerOwner(channel)}-`) || name.startsWith(`zeros-${channel}-`));
@@ -25,15 +25,13 @@ function unavailable(message = "image capacity reached; shared Boat admission mu
 
 export function protectedBoatSnapshotCapacity(profile: Profile, inventory: string[], reservations: Reservation[], candidate?: string, lane: "release" | "non-release" = "release") {
   const names = new Set(inventory);
+  if (!names.has(profile.boat.baseSnapshot)) unavailable();
   for (const row of reservations) if (row.kind === "builder" && row.snapshotName && !row.snapshotReleasedAt) names.add(row.snapshotName);
-  if (!names.has(profile.boat.baseSnapshot) || [...names].some(name => !/^[a-z0-9][a-z0-9-]{0,62}$/.test(name))) unavailable();
+  if ([...names].some(name => !/^[a-z0-9][a-z0-9-]{0,62}$/.test(name))) unavailable();
   if (candidate) names.add(candidate);
-  const limit = profile.admission?.maxNamedSnapshots ?? 10, headroom = Math.max(1, profile.admission?.snapshotHeadroom ?? 1);
-  if (!Number.isSafeInteger(limit) || limit > 10 || !Number.isSafeInteger(headroom) || names.size + headroom > limit) unavailable();
-  for (const channel of channels) if ([...names].filter(name => releaseSnapshotChannel(name) === channel).length > BOAT_SNAPSHOT_BUDGET[channel]) unavailable();
-  const nonRelease = [...names].filter(name => name !== profile.boat.baseSnapshot && !releaseSnapshotChannel(name));
-  if (nonRelease.length > BOAT_SNAPSHOT_BUDGET.dev || lane === "non-release" && candidate && releaseSnapshotChannel(candidate)) unavailable();
-  return { used: names.size, headroom, limit };
+  const limit = BOAT_SNAPSHOT_BUDGET.limit;
+  if (names.size > limit || lane === "non-release" && candidate && releaseSnapshotChannel(candidate)) unavailable();
+  return { used: names.size, headroom: 0, limit };
 }
 
 export function sealBoatAccountDocument(state: { owner: string }, key: string) {
@@ -108,10 +106,7 @@ export class BoatAccountAdmission {
   }
   async capacity(inventory: string[]) {
     const { ledger } = await this.read(), result = protectedBoatSnapshotCapacity(this.profile, inventory, ledger.reservations);
-    const names = new Set(inventory);
-    for (const row of ledger.reservations) if (row.snapshotName && !row.snapshotReleasedAt) names.add(row.snapshotName);
-    if ([...names].filter(name => name !== this.profile.boat.baseSnapshot && !releaseSnapshotChannel(name)).length >= BOAT_SNAPSHOT_BUDGET.dev ||
-      result.used + 1 + result.headroom > result.limit || ledger.reservations.some(row => row.kind === "builder" && !row.releasedAt)) unavailable();
+    if (result.used + 1 > result.limit || ledger.reservations.some(row => row.kind === "builder" && !row.releasedAt)) unavailable();
     return result;
   }
   private identity(image: Image) {

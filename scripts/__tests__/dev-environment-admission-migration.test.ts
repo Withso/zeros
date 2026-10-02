@@ -81,7 +81,7 @@ it("V4-05 retains a pending snapshot slot after its builder is physically gone",
   const old = generation("a"), fresh = generation("b"); old.status = "ready";
   old.resources.images = [{ snapshotId: name(old), snapshotRequested: true, snapshotCreate: { phase: "uncertain" }, builder: { id: "bx_old", deleted: true } }];
   const store = registry([old]); await reserveHostedAdmission(store, fresh, profile);
-  const inventory = [{ provider: "boat", id: "base" }, ...Array.from({ length: 7 }, (_, i) => ({ provider: "boat", id: `release-${i}` }))];
+  const inventory = [{ provider: "boat", id: "base" }, ...Array.from({ length: 8 }, (_, i) => ({ provider: "boat", id: `release-${i}` }))];
   await expect(reserveHostedAdmission(store, fresh, profile, { kind: "builder", snapshotName: name(fresh), inventory })).rejects.toThrow(/snapshot capacity/);
 });
 

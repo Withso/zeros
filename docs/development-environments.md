@@ -586,16 +586,19 @@ admission policy. `admission/v1/account.json` is an encrypted CAS ledger. It
 reserves active generations and per-owner capacity before provisioning, then a
 builder and named-snapshot slot before builder allocation. Defaults are four
 active generations, one generation per owner, one builder account-wide and per
-owner, ten named snapshots including protected names, and one spare snapshot
-slot. Configure the `admission` fields in the example together across launchers.
-The ten-name ceiling cannot be raised without qualifying another capacity model.
+owner, and ten named snapshots including the protected base. Snapshot capacity
+has no channel, Dev/custom or spare allocations. Complete inventory and
+unreleased named reservations count once against the same ten-name limit.
+Configure compute/generation `admission` fields together across launchers;
+legacy `maxNamedSnapshots` and `snapshotHeadroom` overrides are ignored, with
+effective values of ten and zero retained in the ledger for compatibility.
 Unknown creates retain reservations; elapsed time alone never releases them.
 Caps stop new allocation and do not prevent shutdown or cleanup.
 
 Before a changed worker build, the launcher retires its older rollback image
 and retains the currently deployed image as the fallback. The replacement then
-fits within the two Dev snapshot slots reserved alongside channel release and
-rollback images. Failed or unconfirmed deletion keeps its slot reserved and
+competes for space in the same account pool as release and custom images.
+Failed or unconfirmed deletion keeps its name reserved and
 prevents the new allocation; a failed build leaves the deployed image available.
 
 Qualification canaries share the builder compute cap but do not reserve a named

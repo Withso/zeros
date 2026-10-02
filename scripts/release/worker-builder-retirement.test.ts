@@ -1107,15 +1107,14 @@ describe("release-owned builder retirement composition", () => {
     expect(test.record.builder.deleted).toBe(false); expect(test.record.builder.reconcileUnconfirmed).toBe(true);
     expect(test.record.builder.cleanup.provenance).toBeDefined(); expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
   });
-  it("refuses a third channel name after compute release while allowing only one concurrent native builder", async () => {
+  it("admits a third channel name after compute release while allowing only one concurrent builder", async () => {
     const test = await fixture(); await test.adapter.cleanup();
     const next = workerSnapshotName(test.state, "f".repeat(64));
     const inventory = [...test.inventory, { provider: "boat", id: `dev-${test.state.owner}-${test.state.generation.slice(0, 8)}-rollback` }];
-    expect(() => assertWorkerSnapshotSlots("alpha", next, test.profile, inventory, test.ledger().reservations)).toThrow("channel slot");
-    await expect(reserveWorkerSlot(test.store, test.context.lease, test.profile, "alpha", next, inventory)).rejects.toThrow("image capacity reached");
-    const first = "66666666-6666-4666-8666-666666666666", second = "77777777-7777-4777-8777-777777777777";
-    await reserveHostedAdmission(test.store, test.state, test.profile, { kind: "builder", computeId: `canary:${first}` });
-    await expect(reserveHostedAdmission(test.store, test.state, test.profile, { kind: "builder", computeId: `canary:${second}` })).rejects.toThrow("admission cap");
+    expect(assertWorkerSnapshotSlots("alpha", next, test.profile, inventory, test.ledger().reservations).used).toBe(4);
+    await expect(reserveWorkerSlot(test.store, test.context.lease, test.profile, "alpha", next, inventory)).resolves.toBeDefined();
+    const first = "66666666-6666-4666-8666-666666666666";
+    await expect(reserveHostedAdmission(test.store, test.state, test.profile, { kind: "builder", computeId: `canary:${first}` })).rejects.toThrow("admission cap");
     expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
   });
 });

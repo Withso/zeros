@@ -56,7 +56,7 @@ it("retires legacy images saved before the create journal whose builders were re
   expect([...t.snapshots.keys()]).toEqual([t.name(2), t.name(5)]);
 });
 
-it("makes room for a replacement build while retaining its deployed fallback and all release slots", async () => {
+it("makes room in a full account while retaining its deployed fallback and unrelated snapshots", async () => {
   const t = generation();
   t.state.status = "ready";
   t.state.resources.images = t.state.resources.images.filter((r: any) => [t.name(4), t.name(5)].includes(r.snapshotId));
@@ -67,7 +67,7 @@ it("makes room for a replacement build while retaining its deployed fallback and
     readAdmission: async () => current ? structuredClone(current) : null,
     writeAdmission: async (state: any) => { current = { state: structuredClone(state), etag: "revision" }; } };
   const releases = ["alpha", "beta", "production"].flatMap(channel => ["current", "rollback"].map(kind => `zeros-${channel}-${kind}`));
-  const inventory = () => ["base", ...releases, ...t.snapshots.keys()].map(id => ({ provider: "boat", id }));
+  const inventory = () => ["base", ...releases, "unrelated-retained", ...t.snapshots.keys()].map(id => ({ provider: "boat", id }));
   const snapshotName = t.name(6);
   await reserveHostedAdmission(store, t.state, selected);
   await expect(reserveHostedAdmission(store, t.state, selected, { kind: "builder", inventory: inventory(), snapshotName })).rejects.toThrow(/snapshot capacity/);

@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { reserveHostedAdmission } from "../dev-environment/hosted-admission.mjs";
 import { newHostedGeneration } from "../dev-environment/hosted-state.mjs";
+import { sha256 } from "../dev-environment/state.mjs";
 const profile: any = { boat: { accountScope: "scope", billingOrg: "org", baseSnapshot: "base" }, railway: { projectId: "project" },
   planetscale: { organization: "org", database: "db" }, cloudflare: { accountId: "account" }, admission: { maxActiveGenerations: 1 } };
 function fixture() {
@@ -33,11 +34,32 @@ it("fails closed on quarantined ownership and corrupt admission rows", async () 
   await store.writeAdmission(current.state, current.etag);
   await expect(reserveHostedAdmission(store, state, profile)).rejects.toThrow(/ledger/);
 });
-it("reserves snapshot headroom before builder allocation and retains an uncertain reservation", async () => {
+it.each(["maxActiveGenerations", "maxGenerationsPerOwner", "maxBuilders", "maxBuildersPerOwner"])("still rejects invalid %s despite obsolete snapshot overrides", async key => {
   const store = fixture(), state = newHostedGeneration({ owner: "a".repeat(24), identity: "a" });
-  const selected = { ...profile, admission: { maxBuilders: 2, maxBuildersPerOwner: 2 } };
-  const inventory = [{ provider: "boat", id: "base" }, ...["zeros-alpha-current", "zeros-alpha-rollback", "zeros-beta-current", "zeros-beta-rollback", "zeros-production-current", "zeros-production-rollback", "dev-retained"].map(id => ({ provider: "boat", id }))];
+  const selected = { ...profile, admission: { [key]: 0, maxNamedSnapshots: 9, snapshotHeadroom: 1 } };
+  await expect(reserveHostedAdmission(store, state, selected)).rejects.toThrow("Invalid Dev admission cap");
+  expect(await store.readAdmission()).toBeNull();
+});
+it.each([
+  { label: "third Alpha", owner: sha256("zeros-release-worker:alpha").slice(0, 24), names: ["zeros-alpha-current", "zeros-alpha-rollback"] },
+  { label: "third Dev/custom", owner: "a".repeat(24), names: ["zeros-org-one", "dev-retained"] },
+])("allows a $label snapshot without channel partitions", async ({ owner, names }) => {
+  const store = fixture(), state = newHostedGeneration({ owner, identity: "synthetic" });
+  const snapshotName = `dev-${state.owner}-${state.generation.slice(0, 8)}-next`;
+  await expect(reserveHostedAdmission(store, state, profile, { kind: "builder", snapshotName,
+    inventory: ["base", ...names].map(id => ({ provider: "boat", id })) })).resolves.toMatchObject({ snapshotName });
+});
+it("allows the tenth name with legacy headroom and keeps an absent uncertain reservation against the eleventh", async () => {
+  const store = fixture(), state = newHostedGeneration({ owner: "a".repeat(24), identity: "a" });
+  const selected = { ...profile, admission: { maxBuilders: 2, maxBuildersPerOwner: 2, maxNamedSnapshots: 9, snapshotHeadroom: 1 } };
+  const inventory = ["base", ...Array.from({ length: 8 }, (_, index) => `other-${index}`)].map(id => ({ provider: "boat", id }));
   const snapshotName = `dev-${state.owner}-${state.generation.slice(0, 8)}-first`;
   await reserveHostedAdmission(store, state, selected, { kind: "builder", inventory, snapshotName });
+  const current = await store.readAdmission();
+  expect(current.state.policy.snapshotHeadroom).toBe(0);
+  expect(current.state.policy.maxNamedSnapshots).toBe(10);
+  // Compute release and age do not release this name, even if it is absent from inventory.
+  current.state.reservations.find(row => row.snapshotName === snapshotName).releasedAt = "2020-01-01T00:00:00.000Z";
+  await store.writeAdmission(current.state, current.etag);
   await expect(reserveHostedAdmission(store, state, selected, { kind: "builder", inventory, snapshotName: snapshotName + "other", now: Date.now() + 86400_000 })).rejects.toThrow(/snapshot capacity/);
 });

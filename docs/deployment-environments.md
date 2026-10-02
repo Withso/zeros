@@ -1236,10 +1236,12 @@ adapter/containment/contract inputs or explicit request. Anthropic/OpenAI
 API-key modes stay unoffered on an image until separately qualified. Dev rate
 limits defer retry with bounded backoff without consuming the three attempts;
 release returns **“canary account rate-limited”** without automatic retry or
-approval. All lanes share the same ten-slot Boat account: Alpha/Beta/Production
-two slots each (current and rollback), Dev/custom combined two, retained base
-one, and one empty headroom slot. Custom builds cannot consume release reserves
-and fail with **“image capacity reached”** before paid dispatch.
+approval. Alpha, Beta, Production, Dev and custom images share the same ten-name
+Boat account limit, including the retained base and every unreleased named
+reservation. There are no per-channel allocations or spare slot. The ninth name
+can be followed by a tenth; an eleventh is refused before paid dispatch.
+Builder compute limits remain separate, and custom capacity failures report
+**“image capacity reached”**.
 
 See [release worker qualification](cloud-workspace/release-worker-qualification.md)
 for exact protected secret names/configuration, the encrypted rotation-safe

@@ -156,7 +156,7 @@ export async function reserveComputerImageSlot(
   ).rows;
   if (driver.assertCapacity) {
     try { await driver.assertCapacity([...inventory.map(row => row.name), ...reservations.map(row => row.snapshot_name)]); }
-    catch { throw new HttpError(409, "cloud_computer_capacity_reached", "Image capacity reached. Custom and Dev images share a limited pool; release and rollback slots are reserved."); }
+    catch { throw new HttpError(409, "cloud_computer_capacity_reached", "Image capacity reached. Named images share an account-wide limit of ten; concurrent builders have a separate limit."); }
   }
   if (
     availableComputerImageSlots(
