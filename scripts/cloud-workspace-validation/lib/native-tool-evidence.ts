@@ -32,6 +32,7 @@ export function nativeChallengeCommand(value: unknown, files: CoreChallengeFiles
  * independently before accepting the resulting evidence. */
 export class NativeToolEvidence {
   private readonly records = new Map<string, Record<string, unknown>>();
+  private readonly answeredMcpApprovals = new Set<string>();
   private events = 0;
   observe(value: unknown): void {
     const update = record(value);
@@ -63,6 +64,26 @@ export class NativeToolEvidence {
           tool.title === `mcp__${server}__${name}` || tool.title === `${server}.${name}`) return;
     }
     throw new Error("Qualification lacks a successful native MCP tool call");
+  }
+  /** Bind consent to the actual native question row and the one pending owned
+   * probe. Display copy alone cannot grant permission, and consent is not proof
+   * that the native tool completed. */
+  consumeCanaryMcpApproval(toolCallId: string, nativeRequestId: string): boolean {
+    const question = this.records.get(toolCallId), input = record(question?.rawInput);
+    if (this.events > 2048 || this.answeredMcpApprovals.has(toolCallId) ||
+      question?.kind !== "question" || question.status !== "in_progress" ||
+      question.nativeToolCallId !== `mcp-elicitation:${nativeRequestId}` ||
+      input.serverName !== "zeros-qualification" || !["form", "openai/form", "openaiForm"].includes(String(input.mode)) ||
+      !Array.isArray(input.fields) || input.fields.length !== 0) return false;
+    const probes = [...this.records.values()].filter(tool => {
+      const call = record(tool.rawInput), args = call.arguments;
+      return tool.kind === "mcp" && tool.status === "in_progress" && typeof tool.nativeToolCallId === "string" && !!tool.nativeToolCallId &&
+        call.server === "zeros-qualification" && call.tool === "probe" && call.pluginId === undefined && call.appContext === undefined &&
+        args !== null && typeof args === "object" && !Array.isArray(args) && Object.keys(args).length === 0;
+    });
+    if (probes.length !== 1) return false;
+    this.answeredMcpApprovals.add(toolCallId);
+    return true;
   }
   /** The exact owned canary, using assertMcp's unchanged row predicate. These
    * counts describe the qualification accumulator, not tool discovery or a
