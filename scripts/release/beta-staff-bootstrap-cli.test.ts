@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type pg from "pg";
@@ -257,9 +257,18 @@ describe("Production current-run human approval proof", () => {
     const provider = test.calls.findIndex(call => new URL(call.slice(4)).origin === "https://api.planetscale.com");
     expect(approval).toBeGreaterThanOrEqual(0); expect(provider).toBeGreaterThan(approval);
     const target = path.join(test.directory, ".context/release/production-staff-bootstrap-intent.json");
-    expect((await stat(target)).mode & 0o777).toBe(0o600);
-    const retained = await readFile(target, "utf8");
-    for (const forbidden of [test.env.STAFF_EXPECTED_EMAIL!, test.env.STAFF_REASON!, test.env.PLANETSCALE_SERVICE_TOKEN!, test.env.GH_TOKEN!]) expect(retained).not.toContain(forbidden);
+    descriptorProbe.file = target;
+    descriptorProbe.afterStat = async () => {
+      await rename(target, `${target}.original`);
+      await writeFile(target, test.env.GH_TOKEN!);
+    };
+    const handle = await open(target, "r");
+    try {
+      expect((await handle.stat()).mode & 0o777).toBe(0o600);
+      const retained = await handle.readFile("utf8");
+      for (const forbidden of [test.env.STAFF_EXPECTED_EMAIL!, test.env.STAFF_REASON!, test.env.PLANETSCALE_SERVICE_TOKEN!, test.env.GH_TOKEN!]) expect(retained).not.toContain(forbidden);
+    } finally { await handle.close(); }
+    expect(descriptorProbe.closed).toBe(1);
   });
   it.each(["missing", "failure", "skipped", "cancelled", "pending", "step", "duplicate"])("refuses %s approval before any Production provider access", async boundary => {
     const test = await fixture("production");
