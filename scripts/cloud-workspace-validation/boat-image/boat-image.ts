@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
 
 import { imageContractSha256 } from "../config";
+import { DevProviderError } from "../../dev-environment/provider-http.mjs";
 import { releaseImageSanitation, releaseImageAttestation, releaseImageAttestationStatus } from "../../../apps/control-plane/src/cloud-workspaces/computer-image-scripts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -27,7 +28,6 @@ const CHUNK_BYTES = 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
 const MAX_SCRIPT_BYTES = 65_536;
 const SANITATION_MAX_AGE_MS = 60_000;
-const NAMED_SNAPSHOT_LIMIT = 10;
 const LEASE_SECONDS = 3600;
 // Boat retains an idempotency key for 24 hours; replay only well inside that.
 const IDEMPOTENCY_REPLAY_MS = 23 * 3600_000;
@@ -154,7 +154,8 @@ async function createBuilder(deps: KitDeps, from: string | undefined, type: stri
   // Persist the idempotency key before dispatch: a lost response is replayed
   // with the same key and body, which returns the original sandbox.
   const intentFile = path.join(deps.stateDir, "builder-intent.json");
-  const intent = fs.existsSync(intentFile) ? readJson(intentFile) : { from, type, idempotencyKey: deps.randomUUID(), createdAt: iso(deps) };
+  const replay = fs.existsSync(intentFile);
+  const intent = replay ? readJson(intentFile) : { from, type, idempotencyKey: deps.randomUUID(), createdAt: iso(deps) };
   if (intent.from !== from || intent.type !== type) {
     throw new KitError(`A create from ${intent.from} (${intent.type}) is unresolved; repeat it, or remove builder-intent.json once no such builder exists`);
   }
@@ -171,7 +172,8 @@ async function createBuilder(deps: KitDeps, from: string | undefined, type: stri
       headers: { "idempotency-key": intent.idempotencyKey, "x-boat-org": deps.billingOrg },
       timeoutMs: 180_000,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof DevProviderError) throw error;
     throw new KitError("The create outcome is unknown; repeat the same `builder create` to replay it safely");
   }
   let sandbox = created.body?.sandbox;
@@ -179,9 +181,11 @@ async function createBuilder(deps: KitDeps, from: string | undefined, type: stri
     throw new KitError("Boat is still creating the builder; repeat the same `builder create` shortly");
   }
   if (created.status >= 300 || !SANDBOX_ID.test(sandbox?.id ?? "")) {
-    // A definite client refusal created nothing; anything else may have.
-    if (created.status >= 400 && created.status < 500 && ![408, 409, 429].includes(created.status)) fs.rmSync(intentFile);
-    throw new KitError(`The builder was not created (HTTP ${created.status}${created.body?.code ? `, ${created.body.code}` : ""})`);
+    // A replay refusal cannot establish the original request's outcome.
+    // Quota, rate-limit and other uncertified failures retain the intent.
+    if (!replay && [401, 403].includes(created.status)) fs.rmSync(intentFile);
+    if ([402, 429].includes(created.status)) throw new DevProviderError("Boat", created.status);
+    throw new KitError(`The builder create was not confirmed (HTTP ${created.status})`);
   }
   privateWrite(builderFile(deps), json({ id: sandbox.id, from, type, createdAt: iso(deps) }), { exclusive: true });
   fs.rmSync(intentFile);
@@ -439,6 +443,29 @@ export async function generatePost(deps: KitDeps) {
 
 // ── Named snapshot ────────────────────────────────────────
 
+async function namedSnapshotInventory(deps: KitDeps) {
+  const names = new Set<string>(), cursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 100; page++) {
+    const response = await deps.boat("GET", `/named-snapshots${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+    if ([402, 429].includes(response.status)) throw new DevProviderError("Boat", response.status);
+    const body = response.body, snapshots = body?.snapshots, next = body?.nextCursor;
+    if (response.status !== 200 || !Array.isArray(snapshots) || snapshots.length > 100 ||
+        body.hasMore !== undefined && typeof body.hasMore !== "boolean" ||
+        next != null && (typeof next !== "string" || !next.length || next.length > 1024) || body.hasMore && !next) {
+      throw new KitError("Named snapshot inventory is incomplete");
+    }
+    for (const row of snapshots) {
+      if (typeof row?.name !== "string" || !SNAPSHOT_NAME.test(row.name) || names.has(row.name)) throw new KitError("Named snapshot inventory is ambiguous");
+      names.add(row.name);
+    }
+    if (!next) return names;
+    if (cursors.has(next)) throw new KitError("Named snapshot inventory cursor repeated");
+    cursors.add(next); cursor = next;
+  }
+  throw new KitError("Named snapshot inventory exceeded its bound");
+}
+
 export async function snapshotCommand(action: string | undefined, deps: KitDeps) {
   const { commit, dir } = currentBuild(deps);
   const generation = readJson(path.join(dir, "generation.json"));
@@ -454,11 +481,8 @@ export async function snapshotCommand(action: string | undefined, deps: KitDeps)
         attestation.metadata?.build?.source?.commit !== commit || attestation.metadata?.buildSha256 !== build) {
       throw new KitError("Attestation gate: the image is not qualified for this commit and build");
     }
-    const existing = await deps.boat("GET", "/named-snapshots");
-    const snapshots = existing.body?.snapshots;
-    if (existing.status !== 200 || !Array.isArray(snapshots)) throw new KitError(`Cannot list named snapshots (HTTP ${existing.status})`);
-    if (snapshots.length >= NAMED_SNAPSHOT_LIMIT) throw new KitError(`The account already holds ${snapshots.length} named snapshots; delete an unused one first`);
-    if (snapshots.some((snapshot: any) => snapshot?.name === name)) throw new KitError(`${name} already exists`);
+    const snapshots = await namedSnapshotInventory(deps);
+    if (snapshots.has(name)) throw new KitError(`${name} already exists`);
     const sanitation = await runJson(deps, path.join(dir, "sanitize.sh"), 30);
     if (sanitation.qualified !== true || sanitation.sourceCommit !== commit || sanitation.buildSha256 !== build ||
         !(deps.now() - Date.parse(sanitation.observedAt) <= SANITATION_MAX_AGE_MS)) {
@@ -467,6 +491,7 @@ export async function snapshotCommand(action: string | undefined, deps: KitDeps)
     const ledger = { version: 1, name, resourceId: id, buildSha256: build, sourceCommit: commit, state: "save-pending", createdAt: iso(deps), sanitation };
     privateWrite(ledgerFile, json(ledger), { exclusive: true });
     const saved = await deps.boat("POST", "/named-snapshots", { body: { sandboxId: id, name }, timeoutMs: 180_000 });
+    if ([402, 429].includes(saved.status)) throw new DevProviderError("Boat", saved.status);
     if (saved.status >= 300 || saved.body?.snapshot?.name !== name || saved.body?.snapshot?.sourceSandboxId !== id) {
       throw new KitError(`The snapshot response does not confirm ${name} (HTTP ${saved.status}); check \`snapshot status\` before retrying`);
     }

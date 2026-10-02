@@ -56,7 +56,7 @@ it("retires legacy images saved before the create journal whose builders were re
   expect([...t.snapshots.keys()]).toEqual([t.name(2), t.name(5)]);
 });
 
-it("makes room in a full account while retaining its deployed fallback and unrelated snapshots", async () => {
+it("preserves explicit rollback cleanup and its deployed fallback without a local snapshot ceiling", async () => {
   const t = generation();
   t.state.status = "ready";
   t.state.resources.images = t.state.resources.images.filter((r: any) => [t.name(4), t.name(5)].includes(r.snapshotId));
@@ -70,7 +70,7 @@ it("makes room in a full account while retaining its deployed fallback and unrel
   const inventory = () => ["base", ...releases, "unrelated-retained", ...t.snapshots.keys()].map(id => ({ provider: "boat", id }));
   const snapshotName = t.name(6);
   await reserveHostedAdmission(store, t.state, selected);
-  await expect(reserveHostedAdmission(store, t.state, selected, { kind: "builder", inventory: inventory(), snapshotName })).rejects.toThrow(/snapshot capacity/);
+  await expect(reserveHostedAdmission(store, t.state, selected, { kind: "builder", inventory: inventory(), snapshotName })).resolves.toMatchObject({ snapshotName });
 
   await retireSupersededDevImages(t.lease, selected, { keepInputs: ["5".repeat(64)], keepRollback: false, request: t.request });
   await releaseHostedAdmission(store, t.lease, selected);

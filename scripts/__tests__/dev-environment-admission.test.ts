@@ -49,17 +49,20 @@ it.each([
   await expect(reserveHostedAdmission(store, state, profile, { kind: "builder", snapshotName,
     inventory: ["base", ...names].map(id => ({ provider: "boat", id })) })).resolves.toMatchObject({ snapshotName });
 });
-it("allows the tenth name with legacy headroom and keeps an absent uncertain reservation against the eleventh", async () => {
+it("allows more than ten names without manual quota settings while retaining absent uncertain reservations", async () => {
   const store = fixture(), state = newHostedGeneration({ owner: "a".repeat(24), identity: "a" });
   const selected = { ...profile, admission: { maxBuilders: 2, maxBuildersPerOwner: 2, maxNamedSnapshots: 9, snapshotHeadroom: 1 } };
-  const inventory = ["base", ...Array.from({ length: 8 }, (_, index) => `other-${index}`)].map(id => ({ provider: "boat", id }));
+  const inventory = ["base", ...Array.from({ length: 20 }, (_, index) => `other-${index}`)].map(id => ({ provider: "boat", id }));
   const snapshotName = `dev-${state.owner}-${state.generation.slice(0, 8)}-first`;
   await reserveHostedAdmission(store, state, selected, { kind: "builder", inventory, snapshotName });
   const current = await store.readAdmission();
-  expect(current.state.policy.snapshotHeadroom).toBe(0);
-  expect(current.state.policy.maxNamedSnapshots).toBe(10);
+  expect(current.state.policy).toEqual({ maxBuilders: 2, maxBuildersPerOwner: 2, maxActiveGenerations: 4, maxGenerationsPerOwner: 1 });
   // Compute release and age do not release this name, even if it is absent from inventory.
   current.state.reservations.find(row => row.snapshotName === snapshotName).releasedAt = "2020-01-01T00:00:00.000Z";
   await store.writeAdmission(current.state, current.etag);
-  await expect(reserveHostedAdmission(store, state, selected, { kind: "builder", inventory, snapshotName: snapshotName + "other", now: Date.now() + 86400_000 })).rejects.toThrow(/snapshot capacity/);
+  await expect(reserveHostedAdmission(store, state, selected, { kind: "builder", inventory, snapshotName: snapshotName + "other", now: Date.now() + 86400_000 })).resolves.toMatchObject({ snapshotName: snapshotName + "other" });
+  const rows = (await store.readAdmission()).state.reservations.filter(row => row.snapshotName);
+  expect(rows).toHaveLength(2);
+  expect(rows.find(row => row.snapshotName === snapshotName)).toMatchObject({ releasedAt: "2020-01-01T00:00:00.000Z" });
+  expect(rows.every(row => !row.snapshotReleasedAt)).toBe(true);
 });

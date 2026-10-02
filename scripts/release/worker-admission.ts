@@ -5,22 +5,19 @@ export { workerOwner, workerSnapshotName } from "./worker-owner";
 import { protectedBoatSnapshotCapacity } from "../../apps/control-plane/src/cloud-workspaces/boat-account-admission";
 import { settleWorkerNamedRetirement } from "./worker-named-retirement";
 
-export const WORKER_SNAPSHOT_BUDGET = { limit: 10 } as const;
 type Snapshot = { provider: string; id: string };
 export function assertWorkerSnapshotSlots(channel: Channel, candidate: string, profile: any, inventory: Snapshot[], reservations: any[]) {
   const policy = admissionPolicy(profile);
-  requireCheck(policy.maxNamedSnapshots === WORKER_SNAPSHOT_BUDGET.limit &&
-    policy.maxBuilders === 1 && policy.maxBuildersPerOwner === 1, "Worker shared-account slot and builder policy is invalid");
+  requireCheck(policy.maxBuilders === 1 && policy.maxBuildersPerOwner === 1, "Worker shared-account builder policy is invalid");
   const names = new Set(inventory.filter(row => row.provider === "boat").map(row => row.id));
   requireCheck(names.has(profile.boat.baseSnapshot), "Worker snapshot inventory must confirm the protected base");
   requireCheck([...names].every(name => /^[a-z0-9][a-z0-9-]{0,62}$/.test(name)), "Worker snapshot inventory contains an invalid slot");
   for (const row of reservations) if (row.kind === "builder" && row.snapshotName && !row.snapshotReleasedAt) names.add(row.snapshotName);
   names.add(candidate);
   const belongs = (name: string, owner: Channel) => name.startsWith(`dev-${workerOwner(owner)}-`) || name.startsWith(`zeros-${owner}-`);
-  requireCheck(names.size <= policy.maxNamedSnapshots, "Worker named snapshot capacity is reserved; no build may start");
   requireCheck(belongs(candidate, channel), "Worker candidate slot belongs to another channel");
   protectedBoatSnapshotCapacity(profile, inventory.filter(row => row.provider === "boat").map(row => row.id), reservations, candidate);
-  return { used: names.size, headroom: policy.snapshotHeadroom, limit: policy.maxNamedSnapshots };
+  return { used: names.size };
 }
 export async function reserveWorkerSlot(store: any, lease: any, profile: any, channel: Channel, snapshotName: string, inventory: Snapshot[]) {
   const guarded = { list: (...args: any[]) => store.list(...args), readAdmission: () => store.readAdmission(),

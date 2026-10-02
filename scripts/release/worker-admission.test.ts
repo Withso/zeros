@@ -16,17 +16,15 @@ describe("shared Boat release snapshot slots", () => {
     const names = ["retained-base", snapshot(channel, "current"), snapshot(channel, "rollback")];
     expect(assertWorkerSnapshotSlots(channel, snapshot(channel, "candidate"), profile, inventory(names), []).used).toBe(4);
   });
-  it.each([0, 1, 4])("admits the tenth name across Dev/custom/release names with legacy headroom %s", snapshotHeadroom => {
+  it.each([0, 1, 4])("admits upgraded-plan occupancy with legacy headroom %s without claiming a quota", snapshotHeadroom => {
     const names = ["retained-base", snapshot("alpha", "current"), snapshot("alpha", "rollback"),
-      "dev-one", "dev-two", "dev-three", "zeros-org-one", "zeros-org-two", "zeros-org-three"];
+      "dev-one", "dev-two", "dev-three", ...Array.from({ length: 15 }, (_, index) => `zeros-org-${index}`)];
     const selected = { ...profile, admission: { snapshotHeadroom } };
     expect(assertWorkerSnapshotSlots("alpha", workerSnapshotName(state(), "a".repeat(64)), selected, inventory(names), []))
-      .toEqual({ used: 10, headroom: 0, limit: 10 });
+      .toEqual({ used: 22 });
   });
-  it("refuses an eleventh name, an unconfirmed base and a candidate belonging to another channel", () => {
+  it("refuses an unconfirmed base, a candidate belonging to another channel and invalid builder policy", () => {
     const candidate = workerSnapshotName(state(), "a".repeat(64));
-    const names = ["retained-base", ...Array.from({ length: 9 }, (_, index) => `other-${index}`)];
-    expect(() => assertWorkerSnapshotSlots("alpha", candidate, profile, inventory(names), [])).toThrow(/capacity/);
     expect(() => assertWorkerSnapshotSlots("alpha", candidate, profile, [], [])).toThrow("protected base");
     expect(() => assertWorkerSnapshotSlots("beta", candidate, profile, inventory(["retained-base"]), [])).toThrow("another channel");
     expect(() => assertWorkerSnapshotSlots("alpha", candidate, { ...profile, admission: { maxBuilders: 2 } }, inventory(["retained-base"]), [])).toThrow("builder policy");
@@ -36,7 +34,7 @@ describe("shared Boat release snapshot slots", () => {
     const reservations = [{ kind: "builder", snapshotName: held, releasedAt: "2020-01-01T00:00:00.000Z" }];
     const names = inventory(["retained-base", ...Array.from({ length: 8 }, (_, index) => `other-${index}`)]);
     const candidate = workerSnapshotName(state(), "a".repeat(64));
-    expect(() => assertWorkerSnapshotSlots("alpha", candidate, profile, names, reservations)).toThrow("snapshot capacity");
+    expect(assertWorkerSnapshotSlots("alpha", candidate, profile, names, reservations)).toEqual({ used: 11 });
     expect(assertWorkerSnapshotSlots("alpha", held, profile, [...names, { provider: "boat", id: held }], reservations).used).toBe(10);
     expect(assertWorkerSnapshotSlots("alpha", candidate, profile, names, [{ ...reservations[0], snapshotReleasedAt: "2020-01-02T00:00:00.000Z" }]).used).toBe(10);
   });
@@ -65,7 +63,7 @@ describe("shared Boat release snapshot slots", () => {
     const retained = { state: owner, save: vi.fn(async () => {}), fence: vi.fn(async () => {}) };
     const names = inventory(["retained-base", ...Array.from({ length: 8 }, (_, index) => `other-${index}`)]);
     const request = vi.fn(async () => ({ status: 404 }));
-    expect(() => assertWorkerSnapshotSlots("alpha", next, profile, names, ledger.reservations)).toThrow("snapshot capacity");
+    expect(assertWorkerSnapshotSlots("alpha", next, profile, names, ledger.reservations)).toEqual({ used: 11 });
     await reconcileWorkerSnapshotHolds(store, retained, profile, names, request);
     expect(request).toHaveBeenCalledWith("GET", `/named-snapshots/${old}`);
     expect(image).toMatchObject({ snapshotDeleted: true, snapshotRetirementReason: "externally-pruned-after-builder-cleanup" });

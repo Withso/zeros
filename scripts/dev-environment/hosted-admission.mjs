@@ -1,11 +1,12 @@
 import { sha256 } from "./state.mjs";
 
-const defaults = { maxActiveGenerations: 4, maxGenerationsPerOwner: 1, maxBuilders: 1, maxBuildersPerOwner: 1, maxNamedSnapshots: 10, snapshotHeadroom: 0 };
+const defaults = { maxActiveGenerations: 4, maxGenerationsPerOwner: 1, maxBuilders: 1, maxBuildersPerOwner: 1 };
 export function admissionPolicy(profile) {
-  // Keep the serialized snapshot fields for existing ledger readers. Legacy
-  // overrides no longer partition the account or reserve an unused name.
-  const policy = { ...defaults, ...profile.admission, maxNamedSnapshots: defaults.maxNamedSnapshots, snapshotHeadroom: defaults.snapshotHeadroom };
-  for (const [key, value] of Object.entries(policy)) if (!Number.isSafeInteger(value) || value < (key === "snapshotHeadroom" ? 0 : 1)) throw new Error("Invalid Dev admission cap");
+  // Boat enforces the current plan's snapshot quota when a capture is sent.
+  // Read old profiles without retaining their obsolete local snapshot caps.
+  const policy = { ...defaults, ...profile.admission };
+  delete policy.maxNamedSnapshots; delete policy.snapshotHeadroom;
+  for (const [key, value] of Object.entries(policy)) if (!Object.hasOwn(defaults, key) || !Number.isSafeInteger(value) || value < 1) throw new Error("Invalid Dev admission cap");
   return policy;
 }
 const account = profile => sha256(JSON.stringify([profile.boat.accountScope, profile.boat.billingOrg,
@@ -133,7 +134,7 @@ export async function reserveHostedAdmission(store, state, profile, { kind = "ge
       if (!names.has(profile.boat.baseSnapshot)) throw new Error("Dev snapshot inventory must confirm the protected base before admission");
       for (const row of ledger.reservations) if (row.kind === "builder" && row.snapshotName && !row.snapshotReleasedAt) names.add(row.snapshotName);
       names.add(snapshotName);
-      if (names.size > policy.maxNamedSnapshots) throw new Error("Dev named snapshot capacity is reserved; no builder was allocated");
+      if ([...names].some(name => !/^[a-z0-9][a-z0-9-]{0,62}$/.test(name))) throw new Error("Dev snapshot inventory contains an invalid name");
     }
     if (previous) Object.assign(previous, reservation, { releasedAt: undefined, snapshotReleasedAt: undefined }); else ledger.reservations.push(reservation);
     ledger.policy = policy; return reservation;

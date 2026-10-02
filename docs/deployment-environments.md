@@ -1236,12 +1236,12 @@ adapter/containment/contract inputs or explicit request. Anthropic/OpenAI
 API-key modes stay unoffered on an image until separately qualified. Dev rate
 limits defer retry with bounded backoff without consuming the three attempts;
 release returns **“canary account rate-limited”** without automatic retry or
-approval. Alpha, Beta, Production, Dev and custom images share the same ten-name
-Boat account limit, including the retained base and every unreleased named
-reservation. There are no per-channel allocations or spare slot. The ninth name
-can be followed by a tenth; an eleventh is refused before paid dispatch.
-Builder compute limits remain separate, and custom capacity failures report
-**“image capacity reached”**.
+approval. Alpha, Beta, Production, Dev and custom images share Boat's current
+subscription quota. Zeros imposes no numerical snapshot limit, per-channel
+allocation or spare slot. Complete inventory and unreleased named reservations
+remain tracked, including the retained base. Boat capture responses enforce
+the plan's allowance; quota and rate-limit errors keep their safe classification
+without releasing uncertain reservations. Builder compute limits remain separate.
 
 See [release worker qualification](cloud-workspace/release-worker-qualification.md)
 for exact protected secret names/configuration, the encrypted rotation-safe

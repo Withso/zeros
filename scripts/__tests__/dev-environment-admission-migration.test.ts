@@ -82,7 +82,9 @@ it("V4-05 retains a pending snapshot slot after its builder is physically gone",
   old.resources.images = [{ snapshotId: name(old), snapshotRequested: true, snapshotCreate: { phase: "uncertain" }, builder: { id: "bx_old", deleted: true } }];
   const store = registry([old]); await reserveHostedAdmission(store, fresh, profile);
   const inventory = [{ provider: "boat", id: "base" }, ...Array.from({ length: 8 }, (_, i) => ({ provider: "boat", id: `release-${i}` }))];
-  await expect(reserveHostedAdmission(store, fresh, profile, { kind: "builder", snapshotName: name(fresh), inventory })).rejects.toThrow(/snapshot capacity/);
+  await expect(reserveHostedAdmission(store, fresh, profile, { kind: "builder", snapshotName: name(fresh), inventory })).resolves.toMatchObject({ snapshotName: name(fresh) });
+  const held = (await store.readAdmission()).state.reservations.find(row => row.snapshotName === name(old));
+  expect(held.releasedAt).toBeDefined(); expect(held.snapshotReleasedAt).toBeUndefined();
 });
 
 it("V4-04 validates the enrolled ledger before writing any malformed resource identity", async () => {

@@ -269,26 +269,30 @@ behavior and older additive metadata remain compatible. Anthropic/OpenAI
 API-key modes remain unoffered until their exact image/kind is independently
 proved.
 
-## Ten-slot account and recovery
+## Provider snapshot quota and recovery
 
-Alpha, Beta, Production, Dev and organization-custom images share one
-account-wide limit of ten named snapshots, including the retained clean base.
-No channel, custom, base or spare allocation is carved out of that total; the
-protected base must still exist in actual provider inventory.
+Alpha, Beta, Production, Dev and organization-custom images share Boat's
+account quota. Boat enforces the current subscription's allowance on capture;
+upgrading the plan requires no Zeros snapshot-limit change. Zeros has no
+per-channel, custom or spare allocation. The protected base must still exist
+in actual provider inventory.
 
 The existing encrypted account ledger, ETag CAS and one-builder cap arbitrate
 release, Dev and custom builds. Complete provider inventory plus unresolved
 reservation holds count once. No timestamp or absent inventory row frees an
-uncertain allocation. A new tenth name is allowed; an eleventh or a missing
-base is refused **before paid allocation**. Candidate channel ownership remains
-required, and compute/generation caps are independent of named-snapshot capacity.
-Legacy `maxNamedSnapshots` and `snapshotHeadroom` profile fields cannot lower
-the limit or reserve a spare name. Custom capacity errors explicitly say
-`image capacity reached`. Custom inventory must
+uncertain allocation. A missing base is refused **before paid allocation**.
+Candidate channel ownership remains required, and compute/generation caps
+are independent of snapshot quota. Legacy `maxNamedSnapshots` and
+`snapshotHeadroom` profile fields are ignored; new ledger policies omit them
+while old ledgers remain readable. Capacity summaries report known occupancy,
+not a claimed provider allowance. Genuine provider rate-limit and budget
+errors retain their safe classification and uncertain allocation records.
+Custom inventory must
 fully paginate, rejecting missing/looping cursors or changed duplicate names.
 
-When the account is full, the owner must retire an **unreferenced** old rollback
-or failed candidate; release admission never deletes current/rollback snapshots.
+When Boat refuses a capture for quota, the owner can upgrade the plan or retire
+an **unreferenced** old rollback or failed candidate; release admission never
+deletes current/rollback snapshots.
 On the next release, read-only reconciliation can free an already acknowledged,
 ready candidate's named-slot hold only after a certified physically deleted
 builder, complete inventory and exact named-snapshot GET 404. It persists a

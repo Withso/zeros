@@ -62,9 +62,7 @@
     "maxActiveGenerations": 4,
     "maxGenerationsPerOwner": 1,
     "maxBuilders": 1,
-    "maxBuildersPerOwner": 1,
-    "maxNamedSnapshots": 10,
-    "snapshotHeadroom": 0
+    "maxBuildersPerOwner": 1
   },
   "secretVersions": {
     "github": "1",

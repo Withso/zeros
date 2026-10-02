@@ -247,7 +247,7 @@ async function completeInventory(request: any) {
     const response = await request("GET", `/named-snapshots${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
     requireCheck(response.status === 200 && Array.isArray(response.body?.snapshots), "Named retirement provider inventory is unavailable");
     for (const row of response.body.snapshots) {
-      requireCheck(typeof row?.name === "string" && /^[a-z0-9][a-z0-9-]{0,62}$/.test(row.name) && !names.includes(row.name) && names.length < 10,
+      requireCheck(typeof row?.name === "string" && /^[a-z0-9][a-z0-9-]{0,62}$/.test(row.name) && !names.includes(row.name) && names.length < 10_000,
         "Named retirement provider inventory is ambiguous"); names.push(row.name);
     }
     const next = response.body.nextCursor;

@@ -202,11 +202,8 @@ export async function ensureDevImage(lease, profile, source, stateDirectory, art
     try { const result = await kit.main(args, deps); await persist(); return result; }
     catch (error) {
       await persist();
-      // These are fixed image-kit messages, never provider response bodies.
-      const capacity = /^The account already holds [0-9]{1,6} named snapshots; delete an unused one first$/.test(error?.message ?? "");
-      throw new Error(capacity
-        ? "Dev worker build did not complete: Boat named snapshot limit reached. Retire an unused Dev image after verifying its workspace references, then retry. The build and recovery receipts are retained."
-        : "Dev worker build did not complete. Its encrypted recovery receipts were retained; retry launch or run pnpm dev:archive.");
+      if (error instanceof DevProviderError) throw error;
+      throw new Error("Dev worker build did not complete. Its encrypted recovery receipts were retained; retry launch or run pnpm dev:archive.");
     }
   };
   const dir = path.join(directory, source.commit.slice(0, 12));
