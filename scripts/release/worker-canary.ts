@@ -7,9 +7,11 @@ import type { WorkerCandidate } from "./worker";
 import { ReleaseCanaryPrelaunchError, type ReleaseCanaryConnection } from "./worker-broker";
 import { ReleaseCanaryPrelaunchFailureSchema } from "../../apps/control-plane/src/cloud-workspaces/release-canary-contract";
 import type { WorkerQualificationProfile } from "./worker-profile";
+import { nativeQualificationDiagnostics } from "../cloud-workspace-validation/lib/native-qualification-diagnostics";
 
 export function fixedCanaryOutcome(value: any, expected?: { kind: string; model: string; image: WorkerCandidate }) {
   const report = value?.report;
+  const diagnostics = nativeQualificationDiagnostics(report);
   const checks = [...CHECKS, ...NATIVE_EXTENSIONS, "nativePermissionSelection", "nativeAccessRefresh", "nativeGitAuthor", "nativeMcpRotation", "nativeMcpRemoval", "nativeMcpOwnerHandoff"];
   const integer = (number: unknown) => Number.isInteger(number) && Math.abs(number as number) <= 256 ? number : null;
   return { code: integer(value?.code), retirement: integer(value?.retirement), ...(value?.errorKind === "rate-limited" ? { errorKind: "rate-limited" } : {}),
@@ -24,7 +26,8 @@ export function fixedCanaryOutcome(value: any, expected?: { kind: string; model:
         kind: ["claude-setup-token", "codex-chatgpt", "cursor-api-key"].includes(report?.identity?.kind) && (!expected || report.identity.kind === expected.kind) ? report.identity.kind : undefined,
         model: expected && report?.identity?.model === expected.model ? expected.model : undefined },
       checks: Array.isArray(report?.checks) ? checks.filter(check => report.checks.includes(check)) : [],
-      failureKind: report?.failureKind === "rate-limited" || report?.errorKind === "rate-limited" ? "rate-limited" : undefined },
+      failureKind: report?.failureKind === "rate-limited" || report?.errorKind === "rate-limited" ? "rate-limited" : undefined,
+      ...(diagnostics ? { diagnostics } : {}) },
     ...(value?.renewal ? { renewal: Object.fromEntries(["accountBinding", "accessChanged", "cachePublished", "consentPreserved"].map(check => [check, value.renewal[check] === true])) } : {}) };
 }
 

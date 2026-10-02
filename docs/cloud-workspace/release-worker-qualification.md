@@ -337,6 +337,14 @@ below. Dev's existing deferred-storage cleanup behavior remains unchanged.
 
 ### Strict native retirement and historical recovery
 
+Native outcomes may retain an optional, allowlisted diagnostic projection in the
+private encrypted release journal before retirement: fixed producer phase and
+failure identifiers, bounded exit/activity integers and a truncated message
+digest, never message text or native output. Missing fields remain unobserved,
+including in historical outcomes. This projection survives completed-job
+reentry but does not change qualification, rate-limit or cleanup policy and is
+not copied into approved evidence or public worker receipts.
+
 An allowlisted private-input upload HTTP403 records a bounded
 `prelaunchFailure`, separate from qualification outcome, and stops promptly.
 Resume cannot restart absent-runner polling or reupload account material.
