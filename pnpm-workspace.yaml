@@ -44,7 +44,7 @@ overrides:
   nanoid: "3.3.18"
   qs: "6.16.0"
 
-# Accepted advisories — reviewed 2026-09-04. Every entry below is the same
+# Accepted undici advisories — reviewed 2026-09-04. Those entries share the same
 # story: the ONLY undici in the production graph is
 #   @cursor/sdk 1.0.28 → @connectrpc/connect-node 1.7.0 → undici 5.29.0
 # (`pnpm audit --prod` / `pnpm why undici`). The fixes land in undici >= 6.24
@@ -63,6 +63,9 @@ overrides:
 # (a future @cursor/sdk on @connectrpc v2 removes undici entirely).
 auditConfig:
   ignoreGhsas:
+    # Metadata-only: exact 1.4.0 backport, enforced before audit and by runtime pins.
+    # Provenance/removal contract: scripts/node-forge-patch.json and THIRD-PARTY-NOTICES.md.
+    - GHSA-86w9-cpqp-85rv
     # high — WebSocket permessage-deflate unbounded memory (fixed 6.24.0)
     - GHSA-vrm6-8vpv-qv8q
     # high — WebSocket server_max_window_bits unhandled exception (fixed 6.24.0)
@@ -94,5 +97,7 @@ patchedDependencies:
   # Retain fixed-width Ed25519 public keys with leading zero bytes.
   "ssh2@1.17.0": patches/ssh2@1.17.0.patch
   "@anthropic-ai/sandbox-runtime@0.0.76": patches/@anthropic-ai__sandbox-runtime@0.0.76.patch
+  # Reject unconsumed nested RSA DigestAlgorithm elements; preserve valid signatures.
+  "node-forge@1.4.0": patches/node-forge@1.4.0.patch
   # Keep the generated macOS keychain password separate from P12 passwords.
   "app-builder-lib@26.8.1": patches/app-builder-lib@26.8.1.patch

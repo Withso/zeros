@@ -23,6 +23,9 @@ patchedDependencies:
   app-builder-lib@26.8.1:
     hash: c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd
     path: patches/app-builder-lib@26.8.1.patch
+  node-forge@1.4.0:
+    hash: b6876574a5de19521a766856b293aeae2689848c5d8dab03f93040be0a64b8b4
+    path: patches/node-forge@1.4.0.patch
   ssh2@1.17.0:
     hash: 2ae4ac4c3b9994064837881002959c1bc78b371845aadff5fe1816af60e7c089
     path: patches/ssh2@1.17.0.patch
@@ -7080,7 +7083,7 @@ snapshots:
     dependencies:
       '@pondwader/socks5-server': 1.0.10
       commander: 12.1.0
-      node-forge: 1.4.0
+      node-forge: 1.4.0(patch_hash=b6876574a5de19521a766856b293aeae2689848c5d8dab03f93040be0a64b8b4)
       zod: 3.25.76
 
   '@anthropic-ai/sdk@0.100.1(zod@4.3.6)':
@@ -12756,7 +12759,7 @@ snapshots:
     dependencies:
       semver: 7.7.4
 
-  node-forge@1.4.0: {}
+  node-forge@1.4.0(patch_hash=b6876574a5de19521a766856b293aeae2689848c5d8dab03f93040be0a64b8b4): {}
 
   node-gyp@12.3.0:
     dependencies:
