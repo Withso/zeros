@@ -79,6 +79,34 @@ regression test covers that dependency change.
   inventory and run `check:runtime-pins`, `check:zsr` and
   `check:zsr-preview-browser` on supported hosts before release.
 
+### Forge RSA verifier security backport
+
+- **Component:** `@anthropic-ai/sandbox-runtime`'s locked `node-forge` 1.4.0.
+- **License:** BSD-3-Clause, selected from the upstream BSD-3-Clause/GPL-2.0
+  dual license; the original copyright headers and full upstream license remain
+  in the dependency and `THIRD-PARTY-LICENSES.txt`. This code is not relicensed MIT.
+- **Source:** [Forge PR1152](https://github.com/digitalbazaar/forge/pull/1152),
+  immutable proposed fix `ceba34402e329f0365134f23fe19898756527d65` (not yet
+  merged/released as of October 2, 2026). `scripts/node-forge-patch.json` records
+  the release commit, archive integrity, patch and installed verifier digests.
+- **Modification:** `patches/node-forge@1.4.0.patch` backports only the nested
+  DigestAlgorithm element-count check for
+  [GHSA-86w9-cpqp-85rv](https://github.com/advisories/GHSA-86w9-cpqp-85rv) /
+  CVE-2026-85393. The OID and optional NULL remain valid; extra nested elements
+  do not. No sandbox runtime upgrade or signature-check bypass is included.
+- **Audit:** pnpm audits version metadata, not patched bytes. The single advisory
+  exception is conditional on `check:audit` and `check:runtime-pins` enforcing
+  the exact patch, sole locked Forge resolution, installed RSA source digest
+  and generated-key behavioral checks. An unpatched or additional Forge version
+  fails closed before the registry audit. Installed-dependency regressions cover
+  exponents 3/65537, valid signatures, optional NULL and malformed structures.
+- **Refresh:** reproduce with `pnpm patch node-forge@1.4.0`, apply the functional
+  RSA change from the pinned PR, then `pnpm patch-commit <patch-directory>`.
+  Keep unrelated dependency resolutions unchanged. Run the Forge/audit tests,
+  `check:audit`, `check:runtime-pins`, `check:licenses` and packaging gates.
+  Remove the exception, local patch and its guard together only after a released
+  upstream correction is installed and these verification regressions pass.
+
 ### Codex app-server protocol bindings
 
 - **Path:** `apps/desktop/src/engine/agents/adapters/codex/generated/`

@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { verifyNodeForgePatch } from "./check-node-forge-patch.mjs";
+
 export const AUDIT_ATTEMPTS = 3;
 // pnpm's audit client already waits 10 seconds and then a minute between its
 // own endpoint retries. Leave one whole command enough time to finish that
@@ -139,7 +141,15 @@ export async function runAuditWithRetries({
   return result;
 }
 
+export async function runCheckedAudit({
+  verifyPatch = verifyNodeForgePatch,
+  ...options
+} = {}) {
+  verifyPatch();
+  return runAuditWithRetries(options);
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const result = await runAuditWithRetries();
+  const result = await runCheckedAudit();
   process.exitCode = result.exitCode;
 }

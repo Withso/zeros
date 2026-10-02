@@ -67,6 +67,7 @@ import {
   readClaudeCodeVersion,
   resolveClaudeCliSource,
 } from "./stage-claude-cli.mjs";
+import { verifyNodeForgePatch } from "./check-node-forge-patch.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -535,6 +536,12 @@ const resolved = checkPins();
 checkClaudeArtifact(resolved[CLAUDE_SDK]);
 checkCodexTriple(resolved[CODEX]);
 await checkSandboxRuntime(resolved[SANDBOX_RUNTIME]);
+try {
+  verifyNodeForgePatch();
+  notes.push("node-forge security backport: installed bytes and RSA regression verified");
+} catch (error) {
+  fail(error.message);
+}
 
 for (const n of notes) console.log(`  · ${n}`);
 for (const w of warnings) console.warn(`⚠ ${w}`);

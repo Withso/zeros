@@ -6,9 +6,27 @@ import {
   AUDIT_ATTEMPTS,
   isRetryableAuditTransportFailure,
   runAuditWithRetries,
+  runCheckedAudit,
 } from "../check-audit.mjs";
 
 describe("root production audit retries", () => {
+  it("checks the installed backport before allowing the metadata-only exception", async () => {
+    const order: string[] = [];
+    const verifyPatch = vi.fn(() => {
+      order.push("patch");
+    });
+    const execute = vi.fn(async () => {
+      order.push("audit");
+      return { exitCode: 0, output: "found 0 vulnerabilities" };
+    });
+    await expect(runCheckedAudit({ verifyPatch, execute })).resolves.toEqual({
+      exitCode: 0,
+      output: "found 0 vulnerabilities",
+    });
+    expect(order).toEqual(["patch", "audit"]);
+    expect(verifyPatch).toHaveBeenCalledTimes(1);
+  });
+
   it("routes the root audit check through the bounded wrapper", () => {
     const rootPackage = JSON.parse(readFileSync("package.json", "utf8")) as {
       scripts: Record<string, string>;
@@ -36,6 +54,8 @@ describe("root production audit retries", () => {
     for (const output of [
       "found 1 high severity vulnerability",
       "GHSA-vrm6-8vpv-qv8q",
+      "GHSA-86w9-cpqp-85rv",
+      "HTTP 503 retry metadata\nGHSA-86w9-cpqp-85rv",
       "HTTP 503 retry metadata\nfound 1 high severity vulnerability",
       "HTTP 400 Bad Request",
       "audit command timed out after 60000ms",
