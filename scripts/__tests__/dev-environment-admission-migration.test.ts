@@ -23,7 +23,7 @@ async function realCanary(state: any, id = "11111111-1111-4111-8111-111111111111
   const job = { id }, lease = leaseFor(state);
   await hostedAgentCanary(lease, profile, async (method, route) => route.startsWith("/limits")
     ? { status: 200, body: { creditUsedSeconds: 0 } }
-    : { status: 200, body: { sandbox: { id: "bx_canary", team: { id: "org" } } } }).allocate(job, { snapshotId: "base", sourceCommit: "a".repeat(40) });
+    : { status: 200, body: { sandbox: { id: "bx_canary", team: { id: "org" }, snapshots: false } } }).allocate(job, { snapshotId: "base", sourceCommit: "a".repeat(40) });
   return state.resources.images.find(image => image.agentQualificationId === id);
 }
 
@@ -98,7 +98,7 @@ it("V4-04 reserves canary compute before dispatch and denies a second owner with
   first.resources.images = []; second.resources.images = [];
   const request = vi.fn(async (method, route) => route.startsWith("/limits")
     ? { status: 200, body: { creditUsedSeconds: 0 } }
-    : { status: 200, body: { sandbox: { id: "bx_canary", team: { id: "org" } } } });
+    : { status: 200, body: { sandbox: { id: "bx_canary", team: { id: "org" }, snapshots: false } } });
   const canary = (state: any) => hostedAgentCanary(leaseFor(state), profile, request, {
     reserve: job => reserveHostedAdmission(store, state, profile, { kind: "builder", computeId: `canary:${job.id}` }),
     release: () => releaseHostedAdmission(store, leaseFor(state), profile),
@@ -115,7 +115,7 @@ it("V4-04 reserves canary compute before dispatch and denies a second owner with
     ? { status: 200, body: { creditUsedSeconds: 0 } }
     : route === "/sandboxes/bx_canary" || route.startsWith("/deletion-operations/")
       ? { status: 200, body: { operation: { id: "bdop_" + "a".repeat(32), kind: "sandbox", targetId: "bx_canary", status: "completed", completedAt: new Date().toISOString() } } }
-      : { status: 200, body: { sandbox: { id: "bx_next", team: { id: "org" } } } });
+      : { status: 200, body: { sandbox: { id: "bx_next", team: { id: "org" }, snapshots: false } } });
   await canary(first).retire({ id: "11111111-1111-4111-8111-111111111111" });
   expect((await store.readAdmission()).state.reservations.some(row => row.kind === "builder")).toBe(false);
   await expect(canary(second).allocate({ id: "22222222-2222-4222-8222-222222222222" }, image)).resolves.toBeUndefined();

@@ -10,7 +10,7 @@ function harness(options: Record<string, any> = {}) {
   state.resources.images = [];
   const lease = { state, save: vi.fn(async () => {}), fence: vi.fn(async () => {}) };
   const admission = { reserve: vi.fn(async () => {}), release: vi.fn(async () => {}) };
-  const provider = { usedSeconds: 0, loseCreate: false, started: true, physicalDeletion: true };
+  const provider = { usedSeconds: 0, loseCreate: false, started: true, physicalDeletion: true, snapshots: false as boolean | undefined, deleteRequested: false };
   const operationId = `bdop_${"c".repeat(32)}`, uploads: any[] = [];
   const request = vi.fn(async (method: string, route: string, input: any = {}) => {
     if (route.startsWith("/limits")) return { status: 200, body: { creditUsedSeconds: provider.usedSeconds } };
@@ -18,19 +18,41 @@ function harness(options: Record<string, any> = {}) {
       if (provider.loseCreate) { provider.loseCreate = false; throw new Error("synthetic lost create"); }
       return { status: 201, body: { sandbox: { id: "bx_test" } } };
     }
-    if (method === "GET" && route === "/sandboxes/bx_test") return { status: 200, body: { sandbox: { id: "bx_test", state: "ready", team: { id: "test-wallet" } } } };
-    if (method === "POST" && route.endsWith("/commands")) return { status: 200, body: { exitCode: 0, stdout: JSON.stringify({ started: provider.started }) } };
+    if (method === "GET" && route === "/sandboxes/bx_test") return provider.deleteRequested ? { status: 404, body: {} }
+      : { status: 200, body: { sandbox: { id: "bx_test", state: "ready", snapshots: provider.snapshots, team: { id: "test-wallet" } } } };
+    if (method === "POST" && route.endsWith("/commands")) return { status: 200, body: { exitCode: 0, stdout: JSON.stringify(input.body.command.includes("dispatchUnconfirmed")
+      ? provider.started ? { running: true } : { dispatchUnconfirmed: true } : { started: provider.started }) } };
     if (method === "PUT") { uploads.push(JSON.parse(Buffer.from(input.body.content, "base64").toString())); return { status: 200, body: { size: Buffer.from(input.body.content, "base64").length } }; }
-    if (method === "DELETE") return { status: 202, body: { operation: { id: operationId, kind: "sandbox", targetId: "bx_test" } } };
+    if (method === "DELETE") { provider.deleteRequested = true; return { status: 202, body: { operation: { id: operationId, kind: "sandbox", targetId: "bx_test" } } }; }
     if (route.startsWith("/deletion-operations")) return { status: 200, body: { operation: { id: operationId, kind: "sandbox", targetId: "bx_test",
-      status: provider.physicalDeletion ? "completed" : "blocked", stage: "kept_for_newer_snapshots", completedAt: provider.physicalDeletion ? new Date().toISOString() : null } } };
+      status: provider.physicalDeletion ? "completed" : "blocked", stage: "kept_for_newer_snapshots", requestedAt: new Date().toISOString(), completedAt: provider.physicalDeletion ? new Date().toISOString() : null } } };
     throw new Error("Unexpected fake canary request");
   });
-  const core = nativeAgentCanary(lease, { boat: { billingOrg: "test-wallet", builderBudgetHours: 0.25 } }, request, admission,
+  const core = nativeAgentCanary(lease, { boat: { billingOrg: "test-wallet", accountScope: "test-scope", builderBudgetHours: 0.25 },
+    railway: { projectId: "test-project" }, planetscale: { organization: "test-organization", database: "test-database" }, cloudflare: { accountId: "test-account" } }, request, admission,
     { strictCleanup: true, maxUsedHours: 0.2, nativeDeadlineSeconds: 420, ...options });
   return { core, lease, request, provider, admission, uploads };
 }
 describe("shared disposable native canary transport", () => {
+  it.each([undefined, true])("requires observed snapshots=false before new native dispatch, not the creation request (%s)", async snapshots => {
+    const test = harness(), target = job(), runner = vi.fn(async () => {});
+    await test.core.allocate(target, image); test.provider.snapshots = snapshots;
+    await expect(test.core.start(target, {}, undefined, runner)).rejects.toThrow("snapshots-off");
+    expect(runner).not.toHaveBeenCalled(); expect(test.uploads).toHaveLength(0);
+    expect(test.lease.state.resources.images[0].nativeDispatchStarted).not.toBe(true);
+    await expect(test.core.ready(target)).rejects.toThrow("snapshots-off");
+  });
+  it("requires snapshots-off readback on recovery of a new intent, but preserves historical intents", async () => {
+    const test = harness(), target = job(), runner = vi.fn(async () => {});
+    await test.core.allocate(target, image);
+    expect(test.lease.state.resources.images[0].snapshotPolicyVersion).toBe(1);
+    test.provider.snapshots = true;
+    await expect(test.core.start(target, {}, undefined, runner)).rejects.toThrow("snapshots-off");
+    delete test.lease.state.resources.images[0].snapshotPolicyVersion;
+    await test.core.start(target, {}, undefined, runner);
+    expect(runner).toHaveBeenCalledOnce();
+    expect(test.lease.state.resources.images[0].builderIntent.body.snapshots).toBe(false);
+  });
   it("bounds SMOKE VM lifetime by its profile and the remaining account-wide budget before dispatch", async () => {
     const test = harness(), target = job(); test.provider.usedSeconds = 360;
     await test.core.allocate(target, image);
@@ -80,6 +102,31 @@ describe("shared disposable native canary transport", () => {
     const commands = test.request.mock.calls.filter(([method, route]) => method === "POST" && route.endsWith("/commands")).map(([, , input]) => input.body.command);
     expect(commands.join("\n")).not.toContain(secret); expect(commands.join("\n")).toContain("time.monotonic()+420");
     expect(commands.join("\n")).toContain("os.O_EXCL|os.O_NOFOLLOW");
+  });
+  it("does not call an absent native runner running, while a present runner remains observable without redispatch", async () => {
+    const test = harness(), target = job(); await test.core.allocate(target, image);
+    test.provider.started = false;
+    await expect(test.core.poll(target)).rejects.toThrow("dispatch is unconfirmed");
+    test.provider.started = true;
+    expect(await test.core.poll(target)).toEqual({ running: true });
+    expect(test.uploads).toHaveLength(0);
+  });
+  it("persists bound physical proof before compute release and repairs the historical deleted boolean without DELETE replay", async () => {
+    const test = harness(), target = job(); await test.core.allocate(target, image);
+    test.admission.release.mockClear();
+    test.admission.release.mockImplementation(async () => {
+      const row = test.lease.state.resources.images[0];
+      expect(row.builder.physicalCleanup).toMatchObject({ version: 1, operationId: target.id, targetId: "bx_test", snapshotId: image.snapshotId,
+        sourceCommit: image.sourceCommit, buildSha256: image.buildSha256, operation: { status: "completed" } });
+      expect(test.lease.save).toHaveBeenCalled();
+    });
+    await test.core.retire(target);
+    const row = test.lease.state.resources.images[0];
+    delete row.builder.physicalCleanup;
+    await test.core.retire(target);
+    expect(row.builder.physicalCleanup).toMatchObject({ operationId: target.id, operation: { id: `bdop_${"c".repeat(32)}` } });
+    expect(test.request.mock.calls.filter(([method]) => method === "DELETE")).toHaveLength(1);
+    expect(test.admission.release).toHaveBeenCalledTimes(2);
   });
   it("holds strict cleanup until a matching physical-deletion operation completes", async () => {
     const test = harness(), target = job(); await test.core.allocate(target, image); test.provider.physicalDeletion = false;

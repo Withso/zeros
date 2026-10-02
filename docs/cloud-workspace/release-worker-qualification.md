@@ -1,10 +1,13 @@
 # Release worker qualification
 
-The worker lane is implemented but **not live-qualified**. Keep
-`ZEROS_WORKER_PROMOTION` disabled until an explicitly approved protected-channel
-rehearsal passes. Never run it on PRs/forks, from `.env.agent`, or with Dev
-fixture identities. Unit tests use fakes and cannot certify provider behavior,
-native account availability, quota, cleanup latency or a Mac release.
+Worker qualification is per channel and exact image/source. Keep
+`ZEROS_WORKER_PROMOTION` disabled except for an explicitly authorized,
+protected-channel rehearsal or a previously qualified channel's guarded release.
+A rehearsal must pass the complete protected lane before that channel is treated
+as qualified or customer cloud is enabled. Never run it on PRs/forks, from
+`.env.agent`, or with Dev fixture identities. Unit tests use fakes and cannot
+certify provider behavior, native account availability, quota, cleanup latency
+or a Mac release.
 
 ## Order and handoff
 
@@ -58,6 +61,29 @@ before issuing the hosted receipt. Standalone dispatch needs
 `services_run_id`/`WORKER_SERVICES_RUN_ID` for a trusted prior exact-source services
 run; its worker receipt remains bound to its own run and cannot be substituted
 for a different parent release.
+
+## Infrastructure authority
+
+The channel's non-admin `BOAT_API_KEY` must authorize the actual operations, not
+merely carry a channel label or preset name. Worker build/qualification requires
+`account.read`, `sandbox.create`, `sandbox.read`, `sandbox.delete`, `exec`,
+`file.write`, `snapshot.read` and `snapshot.write`. Private native input uses
+`file.write`; it must not be replaced with command interpolation or another
+credential path. Managed runtime lifecycle also requires `sandbox.update`,
+`sandbox.stop` and `sandbox.resume`. The engine bridge requires `host`:
+`BoatRuntimeEndpointResolver.bridge` calls `POST /sandboxes/:id/host` for the
+engine endpoint even when optional previews are off.
+
+Protected cloud-off provisioning and exact readback establish the actual
+supplied channel binding; inventory labels alone do not. Successful variable
+readback does not establish provider permissions. Verify the bound authority's
+required actions before qualification and activation. A non-admin key cannot
+expand its own scope, and rotation preserves scope. If a required action is
+missing, an authorized account owner must supply a correctly scoped replacement
+through the provider's browser/session or existing-admin setup path and the
+channel's protected secret/configuration/deployment gates. Do not borrow another
+channel's infrastructure or native credentials, mint an admin runtime key, or
+bypass the Production approval boundary.
 
 ## Rotation-safe owner consent
 
@@ -289,18 +315,66 @@ matching terminal physical-deletion proof; builder storage has only the narrow,
 explicit release-owned boundary below.
 
 New disposable native qualification VMs, in both Dev and release lanes, set
-`snapshots:false` when created from the qualified named image. This per-VM policy
-prevents background capture of owner credentials; it does not change shared-account
+`snapshots:false` when created from the qualified named image. Marked new intents
+require authenticated provider readback of `sandbox.snapshots === false` at
+allocation/readiness and again at fresh server dispatch, before native material
+is opened and immediately before upload. This per-VM policy prevents new
+background capture of owner credentials; it does not change shared-account
 retention settings, image builders that must publish snapshots, or customer VMs.
 Native resume and fork checks exercise agent session history inside the same live
 VM, not provider VM resume or snapshot operations. A stopped or failed disposable
 VM has no provider backup and cannot resume. Historical recovery replays its exact
 persisted creation key/body, including an omitted or enabled snapshot flag; it
-never retrofits the new policy onto an existing intent. Snapshots-off is not
-deletion evidence: the release lane sets `strictCleanup:true` and still requires
+never retrofits the new policy onto an existing intent. Requested snapshots-off
+is only intent; observed snapshots-off is policy proof, not physical-deletion
+completion or assurance about inherited/source storage. The release lane sets
+`strictCleanup:true` and still requires
 the matching terminal deletion operation before freeing compute admission or
 issuing a worker receipt. Dev's deferred-storage cleanup policy
 remains unchanged.
+
+### Strict native retirement and historical recovery
+
+An allowlisted private-input upload HTTP403 records a bounded
+`prelaunchFailure`, separate from qualification outcome, and stops promptly.
+Resume cannot restart absent-runner polling or reupload account material.
+Generic transport failures and lost acknowledgments remain uncertain; an absent
+result without a confirmed runner is not reported as a running native test.
+Neither failure classification fabricates a result, clears the immutable
+dispatch fence, or permits a credential retry.
+
+Strict cleanup retains the original DELETE operation and persists a versioned,
+source/image/build/creation/account-bound physical cleanup proof before marking
+the builder deleted or releasing its compute reservation. It requires the exact
+authenticated operation to be completed with coherent provider timestamps and
+the exact sandbox to return 404. Pending storage, an elapsed `expectedBy`, a
+cancelled run, snapshots-off or sandbox404 alone never releases that hold.
+Lost DELETE responses and malformed or missing ownership/provenance remain
+unconfirmed; recovery never dispatches another DELETE or native operation.
+
+Under the current owning lease, the protected release bearer may call
+`POST /internal/v1/release-canaries/retirements` to settle the exact historical
+operation. The server matches its immutable original audit/request hash,
+channel/repository/run/attempt, owner/credential revision/designation/model,
+source/image/build, authenticated encrypted journal, original intent, builder
+provenance and shared-account binding. It freshly observes the retained terminal
+operation and sandbox404 before appending a truthful `cloud.release_canary.retired`
+audit event. Earlier events and their original source remain unchanged. Cleanup
+may settle an older source under a newer API without opening account material,
+renewing credentials or granting new execution consent. A historical named image
+need not still exist merely to settle a deleted native VM.
+
+Audit settlement is exact and retryable even if the compute-release CAS already
+succeeded or an audit response was lost. The local terminal marker and retired
+flag are saved together after acknowledgment. Later guarded executions observe
+at most 16 historical canaries within a 15-second budget before fresh preflight;
+they never allocate, rebuild, reupload, prune images or release holds by age.
+An exact current-run unstarted allocation saved before its resource row exists
+may resume the original allocation ID; missing rows for starting/running or
+historical jobs fail closed. Existing same-source active jobs remain
+observation-only. Terminal settlement permits only a separately fresh operation
+with current source, owner allowance and consent; it is not successful native
+qualification, a worker approval or permission to enable customer cloud.
 
 ### Release-owned builder retirement receipts
 

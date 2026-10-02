@@ -19,6 +19,7 @@ import { githubClient } from "./github";
 import { jsonClient } from "./io";
 import type { WorkerQualificationProfile } from "./worker-profile";
 import { reconcileReleaseBuilderRetentions } from "./worker-builder-retirement";
+import { reconcileReleaseCanaryRetirements, retireReleaseCanary } from "./worker-canary-recovery";
 
 const name = z.string().min(1).max(256);
 const admissionConfiguration = z.object({ version: z.literal(1), registry: z.object({ endpoint: name, bucket: name, accessKeyId: name, secretAccessKey: name,
@@ -67,7 +68,6 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
   await github.assertRequiredChecks();
   await github.assertCurrent();
   await assertWorkerApi(config);
-  const credentials = await broker.preflight(), releaseCanaryBindings = [...credentials.values()];
   const registry = r2Registry(admission.registry);
   const owner = workerOwner(config.channel), identity = { owner, identity: createHash("sha256").update(JSON.stringify(["release-worker", config.repository, config.channel])).digest("hex") };
   const key = `release-workers/v1/${config.channel}.json`;
@@ -80,6 +80,16 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
     requireCheck(await store.readAdmission(), "Initialize and reconcile the shared Boat admission ledger before release execution");
     return await withHostedLease(store, identity, async (lease: any) => {
       const state = lease.state, runs = state.releaseRuns ??= [];
+      const request = devBoatClient({ apiKey: env.BOAT_API_KEY }, lease.signal), profile = admission.profile;
+      const release = () => releaseHostedAdmission(store, lease, profile);
+      const current = async () => { await github.assertRequiredChecks(); await github.assertCurrent(); await assertWorkerApi(config); await lease.fence(); };
+      await current();
+      await reconcileReleaseBuilderRetentions(config, { lease, profile, request, readAdmission: () => store.readAdmission() });
+      const recoverySignal = AbortSignal.any([lease.signal, AbortSignal.timeout(15_000)]);
+      const historical = nativeAgentCanary(lease, profile, devBoatClient({ apiKey: env.BOAT_API_KEY }, recoverySignal), { release },
+        { strictCleanup: true, cleanupTimeoutMs: 0 });
+      await reconcileReleaseCanaryRetirements(config, execution.actorUserId, lease, historical, broker.retire, { signal: recoverySignal });
+      const credentials = await broker.preflight(), releaseCanaryBindings = [...credentials.values()];
       let run = runs.find((value: any) => value.runId === config.runId);
       if (!run) {
         requireCheck(runs.length < 100, "Worker release recovery history reached its bound; reconcile before another run");
@@ -92,10 +102,6 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
         run.releaseCanaryBindings = releaseCanaryBindings; await lease.save();
       }
       requireCheck(JSON.stringify(run.releaseCanaryBindings) === JSON.stringify(releaseCanaryBindings), "Worker credential designations changed during recovery; reconcile before a fresh run");
-      const request = devBoatClient({ apiKey: env.BOAT_API_KEY }, lease.signal), profile = admission.profile;
-      const current = async () => { await github.assertRequiredChecks(); await github.assertCurrent(); await assertWorkerApi(config); await lease.fence(); };
-      await current();
-      await reconcileReleaseBuilderRetentions(config, { lease, profile, request, readAdmission: () => store.readAdmission() });
       if (!run.maxUsedHours) {
         const meter = await request("GET", `/limits?org=${encodeURIComponent(profile.boat.billingOrg)}`);
         requireCheck(meter.status === 200 && Number.isFinite(meter.body?.creditUsedSeconds) && meter.body.creditUsedSeconds >= 0, "Worker account-wide budget meter is unavailable");
@@ -108,7 +114,6 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
         record = { releaseRunId: config.runId, purpose: "release-worker", inputsSha256, sourceCommit: config.sourceSha, snapshotId: workerSnapshotName(state, slot) };
         images.push(record); await lease.save();
       }
-      const release = () => releaseHostedAdmission(store, lease, profile);
       const image = await boatImageAdapter(config, env, path.join(directory, "kit"), { lease, record, profile, maxUsedHours: run.maxUsedHours, snapshotName: record.snapshotId, request,
         reserve: async () => {
           const inventory = await workerSnapshotInventory(request);
@@ -119,8 +124,12 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
         reserve: (job: any) => reserveHostedAdmission(store, state, profile, { kind: "builder", computeId: `canary:${job.id}` }), release,
       }, { strictCleanup: true, maxUsedHours: run.maxUsedHours, cleanupTimeoutMs: 300_000,
         nativeDeadlineSeconds: qualificationProfile === "full" ? 2400 : 420 });
-      const core = { ...native, start: (job: any, input: any) => native.start(job, input, undefined,
-        async (_transport: any, target: any) => broker.start(target, job.kind)) };
+      const core = { ...native, retire: (job: any) => retireReleaseCanary(lease, native, broker.retire, job),
+        start: (job: any, input: any) => native.start(job, input, undefined,
+          async (_transport: any, target: any) => broker.start(target, job.kind, async intent => {
+            requireCheck(!job.admissionRequest || JSON.stringify(job.admissionRequest) === JSON.stringify(intent), "Release canary retained admission intent changed");
+            job.admissionRequest ??= intent; await lease.save();
+          })) };
       const canary = releaseCanaryAdapter(lease, run, credentials, core, { qualificationProfile });
       const cleanup = async () => {
         const canariesDeleted = await canary.cleanup();

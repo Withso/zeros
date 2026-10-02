@@ -50,6 +50,23 @@ export function canaryBudgetHours(boat) {
   return Math.min(boat.builderBudgetHours, QUALIFICATION_DEADLINE_MS / 3_600_000 + 0.25);
 }
 
+function nativeCleanupProof(row, job, profile, operation) {
+  const at = value => typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value));
+  const values = [profile.boat?.accountScope, profile.boat?.billingOrg, profile.railway?.projectId,
+    profile.planetscale?.organization, profile.planetscale?.database, profile.cloudflare?.accountId];
+  if (!values.every(value => typeof value === "string" && value.length > 0) || row.purpose !== "native-agent-qualification" ||
+    row.agentQualificationId !== job.id || row.builderIntent?.key !== job.id || !Number.isFinite(row.builderIntent.at) ||
+    row.sourceCommit !== job.image?.sourceCommit || row.sourceImage !== job.image?.snapshotId || !digest(job.image?.buildSha256) ||
+    operation?.id !== row.builder.deletionOperationId || operation.kind !== "sandbox" || operation.targetId !== row.builder.id ||
+    operation.status !== "completed" || !at(operation.requestedAt) || !at(operation.completedAt) ||
+    Date.parse(operation.requestedAt) < row.builderIntent.at || Date.parse(operation.completedAt) < Date.parse(operation.requestedAt) ||
+    Date.parse(operation.completedAt) > Date.now()) throw new Error("Native canary physical cleanup proof is unconfirmed; retain its admission");
+  return { version: 1, operationId: job.id, targetId: row.builder.id, snapshotId: row.sourceImage, sourceCommit: row.sourceCommit,
+    buildSha256: job.image.buildSha256, creationIntentSha256: sha256(JSON.stringify(row.builderIntent)), accountBinding: sha256(JSON.stringify(values)),
+    billingOrg: profile.boat.billingOrg, operation: { id: operation.id, kind: "sandbox", targetId: row.builder.id, status: "completed",
+      requestedAt: operation.requestedAt, completedAt: operation.completedAt } };
+}
+
 export function nativeAgentCanary(lease, profile, request = devBoatClient(profile.boat, lease.signal), admission, options = {}) {
   const nativeDeadlineSeconds = options.nativeDeadlineSeconds ?? QUALIFICATION_DEADLINE_MS / 1000;
   if (!Number.isSafeInteger(nativeDeadlineSeconds) || nativeDeadlineSeconds < 60 || nativeDeadlineSeconds > 2400) throw new Error("Invalid native canary deadline");
@@ -76,6 +93,12 @@ export function nativeAgentCanary(lease, profile, request = devBoatClient(profil
     if (response.status !== 200 || response.body?.sandbox?.id !== row.builder.id || response.body.sandbox.team?.id !== profile.boat.billingOrg) {
       throw new Error("Dev agent canary provider identity changed");
     }
+    if (row.snapshotPolicyVersion !== undefined) {
+      if (row.snapshotPolicyVersion !== 1 || row.builderIntent?.body?.snapshots !== false || response.body.sandbox.snapshots !== false)
+        throw new Error("Native canary snapshots-off policy is unconfirmed; no account material may be dispatched");
+      row.snapshotPolicyObserved = { version: 1, targetId: row.builder.id, snapshots: false, observedAt: new Date().toISOString() };
+      await lease.save();
+    }
     return response.body.sandbox;
   };
   const command = async (job, script) => {
@@ -92,7 +115,7 @@ export function nativeAgentCanary(lease, profile, request = devBoatClient(profil
       if (!row) {
         const meter = await request("GET", `/limits?org=${encodeURIComponent(profile.boat.billingOrg)}`);
         if (meter.status !== 200 || !Number.isFinite(meter.body?.creditUsedSeconds) || meter.body.creditUsedSeconds < 0) throw new Error("Dev agent test budget is unavailable");
-        row = { agentQualificationId: job.id, inputsSha256: sha256(`native-agent:${job.id}`), purpose: "native-agent-qualification",
+        row = { agentQualificationId: job.id, inputsSha256: sha256(`native-agent:${job.id}`), purpose: "native-agent-qualification", snapshotPolicyVersion: 1,
           sourceCommit: image.sourceCommit, sourceImage: image.snapshotId,
           maxUsedHours: Math.min(options.maxUsedHours ?? Infinity, meter.body.creditUsedSeconds / 3600 + canaryBudgetHours(profile.boat)),
           builderIntent: { key: job.id, at: Date.now(), body: { type: "default", from: image.snapshotId, ttlSeconds: CANARY_TTL_SECONDS, noEnv: true, env: {}, snapshots: false } } };
@@ -194,12 +217,17 @@ p=pathlib.Path('/srv/zeros-qualification/native-${attempt}/result.json')
 if p.exists():
  assert p.is_file() and not p.is_symlink() and p.stat().st_size<32768
  print(p.read_text())
-else:print(json.dumps({'running':True}))
+else:
+ runner=p.parent/'runner.py'
+ print(json.dumps({'running':True} if runner.is_file() and not runner.is_symlink() else {'dispatchUnconfirmed':True}))
 PY` } });
       if (response.status !== 200 || response.body?.exitCode !== 0 || response.body.timedOut) throw new Error("Dev agent result is unavailable");
       // No SDK output is logged or persisted; the coordinator accepts only
       // fixed report fields bound to the exact image and selected credential.
-      return JSON.parse(response.body.stdout);
+      let result;
+      try { result = JSON.parse(response.body.stdout); } catch { throw new Error("Dev agent result is unavailable"); }
+      if (result.dispatchUnconfirmed === true) throw new Error("Native canary dispatch is unconfirmed; reconcile before retrying, never redispatch credentials");
+      return result;
     },
     async retire(job) {
       if (!lease.state.resources.images.some(value => value.agentQualificationId === job.id)) return;
@@ -213,13 +241,34 @@ PY` } });
         // erase an allocation intent on the assumption that creation failed.
         await this.allocate(job, job.image);
       }
+      let confirmed = false;
       try {
         if (options.strictCleanup && row.builder.deleteRequested && !row.builder.deletionOperationId) {
           throw new Error("Native canary deletion response was lost; reconcile its terminal operation before retrying");
         }
-        await confirmBoatDeletion(lease, row.builder, request, { allowDeferredStorage: !options.strictCleanup, timeout: options.cleanupTimeoutMs ?? 30_000 });
+        if (options.strictCleanup) {
+          const retained = row.builder.physicalCleanup;
+          if (row.builder.deleted && !retained) { row.builder.deleted = false; row.deleted = false; await lease.save(); }
+          if (retained) {
+            const expected = nativeCleanupProof(row, job, profile, retained.operation);
+            if (Object.entries(expected).some(([key, value]) => JSON.stringify(retained[key]) !== JSON.stringify(value)) ||
+              !Number.isFinite(Date.parse(retained.operationObservedAt)) || !Number.isFinite(Date.parse(retained.unavailableObservedAt)) ||
+              Date.parse(retained.operation.completedAt) > Date.parse(retained.operationObservedAt) ||
+              Date.parse(retained.operationObservedAt) > Date.parse(retained.unavailableObservedAt) || Date.parse(retained.unavailableObservedAt) > Date.now())
+              throw new Error("Native canary retained physical cleanup proof changed; retain its admission");
+          }
+        }
+        await confirmBoatDeletion(lease, row.builder, request, { allowDeferredStorage: !options.strictCleanup, timeout: options.cleanupTimeoutMs ?? 30_000,
+          ...(options.strictCleanup ? { beforeDeleted: async operation => {
+            const proof = nativeCleanupProof(row, job, profile, operation), operationObservedAt = new Date().toISOString();
+            const sandbox = await request("GET", `/sandboxes/${row.builder.id}`);
+            if (sandbox.status !== 404) throw new Error("Native canary physical cleanup sandbox remains available; retain its admission");
+            row.builder.physicalCleanup = { ...proof, operationObservedAt, unavailableObservedAt: new Date().toISOString() };
+            await lease.save(); await lease.fence();
+          } } : {}) });
+        confirmed = row.builder.deleted === true;
         row.retired = true; row.deleted = row.builder.deleted === true; await lease.save();
-      } finally { await admission?.release(); }
+      } finally { if (!options.strictCleanup || confirmed) await admission?.release(); }
     },
   };
 }

@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { releaseCanaryAdapter, fixedCanaryOutcome } from "./worker-canary";
-import { releaseCanaryBroker, releaseCanaryConnections } from "./worker-broker";
+import { releaseCanaryBroker, releaseCanaryConnections, ReleaseCanaryPrelaunchError } from "./worker-broker";
 import { SMOKE_MODELS } from "./worker-profile";
 import { workerEnvironment, workerConnections } from "./worker-test-fixtures";
 import { workerExecutionConfig } from "./worker-config";
+import { PromotionError } from "./contracts";
 
 const image = { snapshotId: "worker-test", sourceCommit: "a".repeat(40), buildSha256: "b".repeat(64), architecture: "linux/amd64" as const, storageMiB: 4096 };
+const targetFor = () => ({ id: "bx_test", attempt: randomUUID(), snapshotId: image.snapshotId, sourceCommit: image.sourceCommit, buildSha256: image.buildSha256 });
 const environment = workerEnvironment;
 const connectionsFor = (profile: "smoke" | "full" = "smoke") => releaseCanaryConnections(workerConnections(), profile);
 const leaseFor = () => ({ state: { resources: { images: [] as any[] } }, save: vi.fn(async () => {}), fence: vi.fn(async () => {}) });
@@ -53,7 +55,7 @@ describe("protected metadata-only release canary broker", () => {
       return new Response(JSON.stringify(url.endsWith("preflight") ? { ready: true, ...JSON.parse(options.body), connections: workerConnections() } : { started: true }));
     });
     const broker = releaseCanaryBroker(config, env, "smoke", fetcher as any);
-    await broker.preflight(); await broker.start({ id: "bx_test", attempt: randomUUID(), ...image }, "codex-chatgpt");
+    await broker.preflight(); await broker.start(targetFor(), "codex-chatgpt");
     expect(calls).toHaveLength(2); expect(calls[1]).toMatchObject({ kind: "codex-chatgpt", runId: "123", runAttempt: "1", sourceSha: image.sourceCommit });
     expect(JSON.stringify(calls)).not.toContain(env.WORKER_CANARY_ADMISSION_TOKEN);
     expect(calls[1]).not.toHaveProperty("material");
@@ -67,7 +69,7 @@ describe("protected metadata-only release canary broker", () => {
     });
     const broker = releaseCanaryBroker(workerExecutionConfig(env).config, env, "smoke", fetcher as any);
     await broker.preflight();
-    await expect(broker.start({ attempt: randomUUID() }, "codex-chatgpt")).rejects.toThrow("reconcile");
+    await expect(broker.start(targetFor(), "codex-chatgpt")).rejects.toThrow("reconcile");
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
   it("retains only fixed allowlisted proof, not provider output or credential-shaped fields", () => {
@@ -81,6 +83,35 @@ describe("protected metadata-only release canary broker", () => {
 });
 
 describe("release VM canary coordination", () => {
+  it.each(["forbidden", "uncertain"])("stops a %s startup failure without polling, replaying or inventing an outcome", async reason => {
+    const lease = leaseFor(), run: any = runFor(), pause = vi.fn(async () => {});
+    const core = { allocate: vi.fn(async () => {}), ready: vi.fn(async () => true),
+      start: vi.fn(async () => { throw reason === "forbidden"
+        ? new ReleaseCanaryPrelaunchError()
+        : new Error("synthetic-private-start-diagnostic"); }),
+      poll: vi.fn(async () => ({ running: true })), retire: vi.fn(async () => {}) };
+    const adapter = releaseCanaryAdapter(lease, run, connectionsFor(), core, { pause, qualificationProfile: "smoke" });
+    const error = await adapter.qualify(image, "claude-setup-token").catch(value => value);
+    expect(error).toBeInstanceOf(PromotionError);
+    expect(error.message).toContain(reason === "forbidden" ? "file.write" : "unconfirmed");
+    expect(error.message).not.toContain("synthetic-private-start-diagnostic");
+    expect(core.poll).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled();
+    expect(run.canaries[0]).toMatchObject({ phase: "starting" });
+    expect(run.canaries[0].outcome).toBeUndefined(); expect(run.canaries[0].retired).not.toBe(true);
+    expect(core.start).toHaveBeenCalledOnce();
+  });
+  it("persists a definite prelaunch rejection separately from outcome and refuses polling on resume", async () => {
+    const lease = leaseFor(), run: any = runFor();
+    const core = { allocate: vi.fn(async () => {}), ready: vi.fn(async () => true),
+      start: vi.fn(async () => { throw new ReleaseCanaryPrelaunchError(); }),
+      poll: vi.fn(async () => ({ running: true })), retire: vi.fn(async () => {}) };
+    const options = { qualificationProfile: "smoke" as const, pause: vi.fn(async () => {}) };
+    await expect(releaseCanaryAdapter(lease, run, connectionsFor(), core, options).qualify(image, "claude-setup-token")).rejects.toThrow("file.write");
+    expect(run.canaries[0].prelaunchFailure).toEqual({ version: 1, stage: "private-input-upload", classification: "forbidden", status: 403 });
+    expect(run.canaries[0].outcome).toBeUndefined();
+    await expect(releaseCanaryAdapter(lease, run, connectionsFor(), core, options).qualify(image, "claude-setup-token")).rejects.toThrow("file.write");
+    expect(core.poll).not.toHaveBeenCalled(); expect(core.start).toHaveBeenCalledOnce();
+  });
   it("attests the disposable clone before server dispatch, retains fixed evidence and physically deletes it", async () => {
     const lease = leaseFor(), run: any = runFor(), calls: string[] = [];
     const core = { allocate: vi.fn(async () => { calls.push("allocate"); }), ready: vi.fn(async () => { calls.push("attest"); return true; }),

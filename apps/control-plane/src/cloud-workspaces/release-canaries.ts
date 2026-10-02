@@ -7,18 +7,18 @@ import { loadReleaseCanaryBoatConfig, type Config } from "../config.js";
 import { cloudAgentCredentialKeys } from "./agent-credentials.js";
 import { openCloudAgentCredential, type CloudAgentCredentialKeys, type CloudAgentCredentialKind } from "./agent-credential-envelope.js";
 import { DatabaseCodexAuthRenewal } from "./codex-auth-renewal.js";
-import { DevCanaryTargetSchema, startNativeDevCanary } from "./dev-native-canary.js";
+import { startNativeDevCanary } from "./dev-native-canary.js";
 import { prepareNativeCanaryAccess } from "./native-canary-access.js";
 import { configuredBoatAccountAdmission, type BoatAccountAdmission } from "./boat-account-admission.js";
-import { RELEASE_CANARY_KINDS, RELEASE_CANARY_MODELS, ReleaseCanaryConnectionSchema, type ReleaseCanaryConnection } from "./release-canary-contract.js";
+import { RELEASE_CANARY_KINDS, RELEASE_CANARY_MODELS, RELEASE_CANARY_UPLOAD_FORBIDDEN, ReleaseCanaryConnectionSchema, ReleaseCanaryIdentitySchema,
+  ReleaseCanaryAdmissionSchema, ReleaseCanaryRetirementSchema, ReleaseCanaryRetirementAuditSchema, NativeCanaryDeletionOperationSchema,
+  type ReleaseCanaryConnection } from "./release-canary-contract.js";
 
 const uuid = z.string().uuid(), sha = z.string().regex(/^[a-f0-9]{40}$/), counter = z.string().regex(/^[1-9]\d*$/);
 const model = z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/);
 const kind = z.enum(RELEASE_CANARY_KINDS);
 const connection = ReleaseCanaryConnectionSchema;
-const identity = z.object({ version: z.literal(1), ownerUserId: uuid, organizationId: uuid, channel: z.enum(["alpha", "beta", "production"]),
-  sourceSha: sha, repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), qualificationProfile: z.enum(["smoke", "full"]) }).strict();
-const admission = identity.extend({ operationId: uuid, runId: counter, runAttempt: counter, branch: z.string(), ...connection.shape, target: DevCanaryTargetSchema }).strict();
+const identity = ReleaseCanaryIdentitySchema, admission = ReleaseCanaryAdmissionSchema;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const action = "cloud.release_canary.";
 function unavailable(message = "Release canary admission is unavailable"): never { throw new HttpError(409, "release_canary_unavailable", message); }
@@ -208,12 +208,80 @@ export class DatabaseReleaseCanaryService extends DatabaseReleaseCanaryDesignati
     });
     return { ready: true as const, ...parsed.data, connections };
   }
+  private async boatReply(method: string, route: string, body?: unknown): Promise<{ status: number; body: any }> {
+    try {
+      const reply = await fetch(`${this.releaseConfig.boat.apiUrl.replace(/\/$/, "")}${route}`, { method, redirect: "error", signal: AbortSignal.timeout(55_000),
+        headers: { authorization: `Bearer ${this.releaseConfig.boat.apiKey}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+      if (method === "PUT" && route.endsWith("/files") && reply.status === 403)
+        throw new HttpError(409, "release_canary_prelaunch_forbidden", RELEASE_CANARY_UPLOAD_FORBIDDEN);
+      if (method === "GET" && reply.status === 404) return { status: 404, body: null };
+      if (!reply.ok) unavailable();
+      const bytes = await reply.text(); if (bytes.length > 1024 * 1024) unavailable();
+      return { status: reply.status, body: JSON.parse(bytes) };
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      unavailable();
+    }
+  }
   private async boat(method: string, route: string, body?: unknown): Promise<any> {
-    const reply = await fetch(`${this.releaseConfig.boat.apiUrl.replace(/\/$/, "")}${route}`, { method, redirect: "error", signal: AbortSignal.timeout(55_000),
-      headers: { authorization: `Bearer ${this.releaseConfig.boat.apiKey}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    if (!reply.ok) unavailable();
-    const bytes = await reply.text(); if (bytes.length > 1024 * 1024) unavailable();
-    return JSON.parse(bytes);
+    const result = await this.boatReply(method, route, body);
+    if (result.status === 404) unavailable();
+    return result.body;
+  }
+  async retire(value: unknown, authorization: string | undefined) {
+    this.auth(authorization);
+    const input = ReleaseCanaryRetirementSchema.safeParse(value);
+    if (!input.success) unavailable("Release canary retirement request is invalid");
+    const locked = <Result>(callback: (tx: Tx, last: Audit) => Promise<Result>) => withSystemTx(this.pool, async tx => {
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,93147))", [`release-canary:${input.data.operationId}`]);
+      await this.owner(tx, this.config.ownerUserId);
+      const last = (await tx.query<Audit>(`SELECT id::text,action,subject FROM audit_log WHERE org_id=$1 AND actor_id=$2 AND action=ANY($3::text[])
+        AND subject->>'operationId'=$4 ORDER BY id DESC LIMIT 1`, [this.config.organizationId, this.config.ownerUserId,
+        ["reserved", "preparing", "dispatched", "started", "retired"].map(phase => `${action}${phase}`), input.data.operationId])).rows[0];
+      if (!last) unavailable("Release canary retirement requires the original immutable audit");
+      const parsed = ReleaseCanaryRetirementAuditSchema.safeParse(last.subject);
+      if (!parsed.success || parsed.data.operationId !== input.data.operationId || parsed.data.allowanceOwnerUserId !== this.config.ownerUserId ||
+        parsed.data.channel !== this.config.channel || parsed.data.repository !== this.releaseConfig.repository) unavailable("Release canary retirement scope is invalid");
+      const credential = (await tx.query<{ owner_user_id: string }>("SELECT owner_user_id FROM cloud_agent_credentials WHERE id=$1 FOR UPDATE", [parsed.data.credentialId])).rows[0];
+      if (credential && credential.owner_user_id !== this.config.ownerUserId) unavailable("Release canary retirement credential ownership changed");
+      if ((await tx.query(`SELECT 1 FROM cloud_workspace_provider_bindings WHERE provider='boat' AND provider_resource_id=$1
+        UNION ALL SELECT 1 FROM cloud_workspace_provider_operations WHERE provider='boat' AND resource_id=$1
+        UNION ALL SELECT 1 FROM cloud_computer_images WHERE builder_id=$1 OR verifier_id=$1 LIMIT 1`, [parsed.data.targetId])).rowCount !== 0)
+        unavailable("Release canary retirement cannot use a workspace allocation");
+      return callback(tx, last);
+    });
+    const original = await locked(async (_tx, last) => last), audited = ReleaseCanaryRetirementAuditSchema.parse(original.subject);
+    const journal = async () => {
+      try { return await this.releaseConfig.admission.assertCanaryRetirement(audited, input.data, this.config.organizationId); }
+      catch { unavailable("Release canary retirement journal proof is unconfirmed"); }
+    };
+    const retained = await journal(), observed = await this.boatReply("GET", `/deletion-operations/${input.data.deletionOperationId}`);
+    const raw = observed.body?.operation;
+    const operation = NativeCanaryDeletionOperationSchema.safeParse(raw && { id: raw.id, kind: raw.kind, targetId: raw.targetId,
+      status: raw.status, requestedAt: raw.requestedAt, completedAt: raw.completedAt });
+    const operationObservedAt = new Date().toISOString();
+    if (observed.status !== 200 || !operation.success || operation.data.id !== input.data.deletionOperationId || operation.data.targetId !== retained.targetId ||
+      Date.parse(operation.data.requestedAt) < retained.intentAt || Date.parse(operation.data.completedAt) > Date.parse(operationObservedAt) ||
+      JSON.stringify(operation.data) !== JSON.stringify(retained.physicalCleanup.operation)) unavailable("Release canary retirement physical deletion is unconfirmed");
+    const sandbox = await this.boatReply("GET", `/sandboxes/${retained.targetId}`), unavailableObservedAt = new Date().toISOString();
+    if (sandbox.status !== 404) unavailable("Release canary retirement sandbox is still available");
+    const again = await journal();
+    if (again.provenanceSha256 !== retained.provenanceSha256) unavailable("Release canary retirement journal identity changed");
+    return locked(async (tx, last) => {
+      if (last.subject.requestSha256 !== audited.requestSha256) unavailable("Release canary retirement operation identity changed");
+      if (last.action === `${action}retired`) {
+        const previous = NativeCanaryDeletionOperationSchema.safeParse(last.subject.retirement?.operation);
+        if (last.subject.retirement?.deletionOperationId !== input.data.deletionOperationId ||
+          last.subject.retirement.provenanceSha256 !== retained.provenanceSha256 || !previous.success ||
+          JSON.stringify(previous.data) !== JSON.stringify(operation.data))
+          unavailable("Release canary retirement terminal proof changed");
+        return { retired: true as const };
+      }
+      if (last.id !== original.id || JSON.stringify(last.subject) !== JSON.stringify(original.subject)) unavailable("Release canary retirement phase changed; reconcile before retrying");
+      await this.append(tx, "retired", { ...last.subject, retirement: { version: 1, deletionOperationId: input.data.deletionOperationId,
+        targetId: retained.targetId, operation: operation.data, operationObservedAt, unavailableObservedAt, provenanceSha256: retained.provenanceSha256 } });
+      return { retired: true as const };
+    });
   }
   async admit(value: unknown, authorization: string | undefined) {
     this.auth(authorization); const request = releaseCanaryRequest(value, this.releaseConfig), requestSha256 = hash(JSON.stringify(request));
@@ -228,7 +296,7 @@ export class DatabaseReleaseCanaryService extends DatabaseReleaseCanaryDesignati
           SELECT 1 FROM audit_log settled WHERE settled.org_id=pending.org_id AND settled.actor_id=pending.actor_id
           AND settled.subject->>'operationId'=pending.subject->>'operationId' AND settled.action=ANY($6::text[]) AND settled.id>pending.id) LIMIT 1`,
       [this.config.organizationId, this.config.ownerUserId, ["preparing", "dispatched"].map(state => `${action}${state}`), request.credentialId,
-        request.operationId, ["reserved", "preparing", "dispatched", "started"].map(state => `${action}${state}`)])).rowCount !== 0)
+        request.operationId, ["reserved", "preparing", "dispatched", "started", "retired"].map(state => `${action}${state}`)])).rowCount !== 0)
         unavailable("Release canary credential requires reconciliation before another operation");
       return callback(tx, last);
     });
@@ -271,7 +339,7 @@ export class DatabaseReleaseCanaryService extends DatabaseReleaseCanaryDesignati
       if (result.exitCode !== 0 || result.timedOut) unavailable(); return String(result.stdout);
     };
     const assertFresh = async () => {
-      await this.releaseConfig.admission.assertCanary(request);
+      const allocation = await this.releaseConfig.admission.assertCanary(request);
       await withSystemTx(this.pool, async tx => {
         await this.consent(tx, request);
         if ((await tx.query(`SELECT 1 FROM cloud_workspace_provider_bindings WHERE provider='boat' AND provider_resource_id=$1
@@ -280,6 +348,7 @@ export class DatabaseReleaseCanaryService extends DatabaseReleaseCanaryDesignati
       });
       const observed = await this.boat("GET", `/sandboxes/${request.target.id}`);
       if (observed.sandbox?.id !== request.target.id || observed.sandbox?.team?.id !== this.releaseConfig.boat.billingOrg) unavailable();
+      if (allocation?.snapshotsOffRequired && observed.sandbox.snapshots !== false) unavailable("Release canary snapshots-off policy is unconfirmed");
       const machine = JSON.parse(await command(`sudo -n /usr/bin/python3 - <<'PY'\nimport pathlib,json\np=pathlib.Path('/srv/zeros-qualification/machine-${request.operationId.replaceAll("-", "")}/result.json')\nassert p.is_file() and not p.is_symlink() and p.stat().st_size<1024\nprint(json.dumps({'qualified':json.loads(p.read_text()).get('qualified') is True}))\nPY`));
       if (machine.qualified !== true) unavailable("Release canary machine attestation is unconfirmed");
     };

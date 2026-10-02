@@ -4,7 +4,8 @@ import { CHECKS, NATIVE_EXTENSIONS, QUALIFICATION_DEADLINE_MS } from "../dev-env
 import { PromotionError, requireCheck } from "./contracts";
 import { sleep } from "./io";
 import type { WorkerCandidate } from "./worker";
-import type { ReleaseCanaryConnection } from "./worker-broker";
+import { ReleaseCanaryPrelaunchError, type ReleaseCanaryConnection } from "./worker-broker";
+import { ReleaseCanaryPrelaunchFailureSchema } from "../../apps/control-plane/src/cloud-workspaces/release-canary-contract";
 import type { WorkerQualificationProfile } from "./worker-profile";
 
 export function fixedCanaryOutcome(value: any, expected?: { kind: string; model: string; image: WorkerCandidate }) {
@@ -49,6 +50,11 @@ export function releaseCanaryAdapter(lease: any, run: any, credentials: Map<stri
       requireCheck((job.model ?? credential.model) === credential.model && (job.qualificationProfile ?? "full") === qualificationProfile, "Release canary profile or model changed during recovery");
       requireCheck(job.credentialId === credential.credentialId && job.credentialRevision === credential.credentialRevision && job.designationId === credential.designationId,
         "Release canary credential designation binding changed during recovery");
+      if (job.prelaunchFailure !== undefined) {
+        requireCheck(ReleaseCanaryPrelaunchFailureSchema.safeParse(job.prelaunchFailure).success, "Release canary prelaunch diagnostic is invalid; reconcile before retrying");
+        throw new ReleaseCanaryPrelaunchError();
+      }
+      requireCheck(!job.auditRetired || job.outcome, "Release canary operation is physically retired; a fresh release operation is required");
       if (job.phase === "allocating") {
         await lease.fence(); await core.allocate(job, image);
         let attested = false;
@@ -63,13 +69,17 @@ export function releaseCanaryAdapter(lease: any, run: any, credentials: Map<stri
         try {
           await core.start(job, { version: 1, qualificationProfile, sourceCommit: image.sourceCommit, buildSha256: image.buildSha256, model: credential.model, kind });
           job.phase = "running"; await lease.save();
-        } catch {
+        } catch (error) {
           await lease.fence();
+          if (error instanceof ReleaseCanaryPrelaunchError) { job.prelaunchFailure = error.failure; await lease.save(); throw error; }
+          throw new PromotionError("Release canary admission is unconfirmed; reconcile the channel audit and disposable VM before retrying");
         }
       }
       if (!job.outcome) {
         for (let attempt = 0; attempt < 240 && now() - job.startedAt < QUALIFICATION_DEADLINE_MS; attempt++) {
-          const result = await core.poll(job);
+          let result;
+          try { result = await core.poll(job); }
+          catch { throw new PromotionError("Release canary dispatch observation is unconfirmed; retain its audit and never redispatch credentials"); }
           if (!result.running) { job.outcome = fixedCanaryOutcome(result, { kind, model: credential.model, image }); job.phase = "completed"; await lease.save(); break; }
           await pause(10_000);
         }

@@ -118,7 +118,7 @@ function nativeHarness(test: Awaited<ReturnType<typeof fixture>>, blocked = fals
   test.request.mockImplementation(async (method, route, ...settings: any[]) => {
     if (method === "POST" && route === "/sandboxes") {
       allocations++;
-      const id = `bx_native${allocations}`, sandbox = { id, team: { id: test.profile.boat.billingOrg }, state: "running" };
+      const id = `bx_native${allocations}`, sandbox = { id, team: { id: test.profile.boat.billingOrg }, state: "running", snapshots: false };
       sandboxes.set(id, sandbox); return { status: 201, body: { sandbox } } as any;
     }
     if (route.startsWith("/sandboxes/bx_native")) {
@@ -126,7 +126,7 @@ function nativeHarness(test: Awaited<ReturnType<typeof fixture>>, blocked = fals
       if (method === "DELETE") {
         const operation = { id: `bdop_${String(allocations).padStart(32, "0")}`, kind: "sandbox", targetId: id,
           status: blocked ? "blocked" : "completed", stage: blocked ? "waiting_for_uploads" : "completed",
-          expectedBy: test.operation.expectedBy, completedAt: new Date().toISOString() };
+          expectedBy: test.operation.expectedBy, requestedAt: new Date().toISOString(), completedAt: blocked ? null : new Date().toISOString() };
         operations.set(operation.id, operation); sandboxes.delete(id); return { status: 202, body: { operation } } as any;
       }
       return sandboxes.has(id) ? { status: 200, body: { sandbox: sandboxes.get(id) } } as any : { status: 404 } as any;
