@@ -141,6 +141,9 @@ async function main() {
       const redact = redactor.notification.bind(redactor);
       redactor.notification = notification => {
         if (historicalSecret.observe(notification)) rawHistoricalSecretObservations++;
+        // Public redaction can truncate tool names matching a secret prefix.
+        // Keep exact native evidence private and observe it only once.
+        tools.observe(notification.update);
         return redact(notification);
       };
       return prepared;
@@ -157,7 +160,6 @@ async function main() {
           if (reply.length + update.content.text.length > (qualificationProfile === "smoke" ? 4096 : 65536)) throw new Error("qualification response bound");
           reply += update.content.text;
         }
-        tools.observe(update);
         if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") activity.toolEvents++;
       },
       onAgentStderr() {}, onAgentExit() {},
