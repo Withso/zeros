@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { NativeCanaryPhysicalCleanupSchema, ReleaseCanaryAdmissionSchema, ReleaseCanaryBindingsSchema,
+import { NativeCanaryPhysicalCleanupSchema, NativeCanaryStorageRetirementSchema, NativeCanaryStorageAuditSchema, ReleaseCanaryAdmissionSchema, ReleaseCanaryBindingsSchema,
   type ReleaseCanaryRetirement, type ReleaseCanaryRetirementAudit } from "./release-canary-contract.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -93,15 +93,28 @@ export function releaseCanaryRetirementJournal(state: any, ledger: any, profile:
     hash(parentCandidate.data) === hash(proof.candidate) && parent.qualified === true && parent.snapshotRequested === true && parent.snapshotCreate?.phase === "acknowledged" &&
     (parent.builderProvenance || parent.builder.cleanup?.provenanceSha256 === hash(raw)));
   requireProof(!state.resources.images.some((other: any) => other !== row && other.builder?.id === audit.targetId));
-  const cleanup = NativeCanaryPhysicalCleanupSchema.safeParse(row.builder.physicalCleanup);
+  const physical = NativeCanaryPhysicalCleanupSchema.safeParse(row.builder.physicalCleanup);
+  const storage = NativeCanaryStorageRetirementSchema.safeParse(row.builder.storageRetirement);
+  const cleanup = physical.success ? physical : storage;
   requireProof(cleanup.success && cleanup.data.operationId === audit.operationId && cleanup.data.targetId === audit.targetId &&
     cleanup.data.operation.id === input.deletionOperationId && cleanup.data.snapshotId === snapshotId && cleanup.data.sourceCommit === audit.sourceSha &&
     cleanup.data.buildSha256 === buildSha256 && cleanup.data.accountBinding === accountBinding && cleanup.data.billingOrg === profile.boat.billingOrg &&
     cleanup.data.creationIntentSha256 === hash(row.builderIntent) && Date.parse(cleanup.data.operation.requestedAt) >= row.builderIntent.at &&
     Date.parse(cleanup.data.unavailableObservedAt) <= now);
+  if (!physical.success) requireProof(row.builder.physicalCleanup === undefined && row.builder.deleted !== true && row.deleted !== true &&
+    storage.success && row.snapshotPolicyVersion === 1 && body.data.snapshots === false &&
+    hash(row.snapshotPolicyObserved) === hash(storage.data.snapshotsOff) && Date.parse(storage.data.snapshotsOff.observedAt) >= row.builderIntent.at);
   const holds = ledger.reservations.filter((reservation: any) => reservation.computeId === `canary:${audit.operationId}`);
   requireProof(holds.length <= 1 && holds.every((reservation: any) => reservation.kind === "builder" && reservation.owner === owner &&
     reservation.generation === state.generation && reservation.snapshotName === undefined));
-  return { targetId: audit.targetId, intentAt: row.builderIntent.at as number, physicalCleanup: cleanup.data,
-    provenanceSha256: hash({ request: request.data, creation: row.builderIntent, parent: raw, accountBinding, generation: state.generation }) };
+  const provenanceSha256 = hash({ request: request.data, creation: row.builderIntent, parent: raw, accountBinding, generation: state.generation });
+  if (!physical.success && holds.length === 1) requireProof(holds[0].releasedAt === undefined);
+  const acknowledgment = NativeCanaryStorageAuditSchema.safeParse(audit.retirement);
+  if (!physical.success && holds.length === 0) requireProof(job.auditRetired?.version === 2 && job.auditRetired.storagePending === true &&
+    job.auditRetired.operationId === audit.operationId && job.auditRetired.deletionOperationId === input.deletionOperationId &&
+    job.retired === true && Number.isFinite(Date.parse(row.builder.retiredAt)) && acknowledgment.success &&
+    acknowledgment.data.deletionOperationId === input.deletionOperationId && acknowledgment.data.provenanceSha256 === provenanceSha256);
+  return { targetId: audit.targetId, intentAt: row.builderIntent.at as number,
+    physicalCleanup: physical.success ? physical.data : undefined, storageRetirement: !physical.success && storage.success ? storage.data : undefined,
+    provenanceSha256 };
 }

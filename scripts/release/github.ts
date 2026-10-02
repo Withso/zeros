@@ -96,7 +96,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
         requireCheck(Array.isArray(result.jobs), "Hosted job evidence is unavailable");
         jobs.push(...result.jobs);
         if (result.jobs.length < 100) return kind === "services" ? validateServicesReceipt(receipt, run, config, channel, jobs)
-          : kind === "worker" ? validateWorkerArtifact(receipt, run, config, channel, jobs)
+          : kind === "worker" ? await validateWorkerArtifact(receipt, run, config, channel, jobs)
           : validateHostedReceipt(receipt, run, config, channel, jobs, requireOverallSuccess);
       }
       throw new Error("Hosted job evidence exceeds its bound");

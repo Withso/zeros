@@ -33,6 +33,19 @@ function harness() {
   return { calls, deps };
 }
 describe("worker lane stub contracts", () => {
+  it("issues an explicitly pending v3 handoff only after all three real native reports pass", async () => {
+    const { calls, deps } = harness(), original = deps.cleanup, qualify = vi.fn(deps.qualify); deps.qualify = qualify;
+    deps.cleanup = async () => ({ ...await original(), credentialCanaryResourcesDeleted: false,
+      pendingNativeStorage: { status: "pending", count: 3, proofSha256: "a".repeat(64), physicalBytes: "unmeasured" } }) as any;
+    const receipt = await promoteWorker(input, deps);
+    expect(qualify.mock.calls.map(([, kind]) => kind)).toEqual(input.kinds);
+    expect(receipt).toMatchObject({ version: 3, cleanup: { credentialCanaryResourcesDeleted: false, pendingNativeStorage: { status: "pending", count: 3 } } });
+    expect(calls).toContain("tuple"); expect(validateWorkerReceipt(receipt, input)).toEqual(receipt);
+    expect(WorkerReceipt.safeParse({ ...receipt, version: 2 }).success).toBe(false);
+    expect(WorkerReceipt.safeParse({ ...receipt, version: 1, resourcesDeleted: true }).success).toBe(false);
+    expect(WorkerReceipt.safeParse({ ...receipt, cleanup: { ...receipt.cleanup, credentialCanaryResourcesDeleted: true } }).success).toBe(false);
+    expect(WorkerReceipt.safeParse({ ...receipt, cleanup: { ...receipt.cleanup, pendingNativeStorage: { status: "deleted", count: 3, proofSha256: "a".repeat(64), physicalBytes: "unmeasured" } } }).success).toBe(false);
+  });
   it("emits a v2 receipt without the v1 blanket physical-erasure claim", async () => {
     const { deps } = harness();
     const receipt = await promoteWorker(input, deps);

@@ -25,6 +25,21 @@ function job(kind: "services" | "worker", patch: Record<string, unknown> = {}) {
       .map(name => ({ name, conclusion: "success" })), ...patch };
 }
 describe("authenticated release artifact handoff", () => {
+  it("authenticates a truthful v3 pending-storage receipt without reinterpreting v1/v2 or producer provenance", async () => {
+    const { resourcesDeleted: _deleted, ...base } = workerReceipt(), completedAt = base.completedAt;
+    const deferred = { ...base, version: 3, cleanup: { credentialCanaryResourcesDeleted: false,
+      pendingNativeStorage: { status: "pending", count: 3, proofSha256: digest, physicalBytes: "unmeasured" },
+      imageBuilder: { kind: "physically-deleted", sandboxId: "bx_builder", deletionOperationId: `bdop_${"c".repeat(32)}`,
+        operation: { id: `bdop_${"c".repeat(32)}`, kind: "sandbox", targetId: "bx_builder", status: "completed", completedAt },
+        completedAt, operationObservedAt: completedAt, unavailableObservedAt: completedAt } } };
+    expect(await validateWorkerArtifact(deferred, run, config, "alpha", [job("worker")])).toMatchObject({ version: 3, cleanup: { credentialCanaryResourcesDeleted: false } });
+    for (const patch of [{ version: 2 }, { resourcesDeleted: true }, { sourceSha: "c".repeat(40) }, { runAttempt: "4" },
+      { cleanup: { ...deferred.cleanup, credentialCanaryResourcesDeleted: true } }, { qualifiedKinds: ["claude-setup-token"] }])
+      await expect(validateWorkerArtifact({ ...deferred, ...patch }, run, config, "alpha", [job("worker")])).rejects.toThrow();
+    for (const patch of [{ run_attempt: 2 }, { conclusion: "failure" }, { name: "other writer" }, { steps: [] }])
+      await expect(validateWorkerArtifact(deferred, run, config, "alpha", [job("worker", patch)])).rejects.toThrow();
+    await expect(validateWorkerArtifact(deferred, { ...run, path: ".github/workflows/cloud-worker-promotion.yml", event: "workflow_dispatch" }, config, "alpha", [job("worker")])).rejects.toThrow();
+  });
   it("accepts only services-ready proof and its recorded successful producer attempt", () => {
     expect(validateServicesReceipt(serviceReceipt(), run, config, "alpha", [job("services")]).status).toBe("services-ready");
     expect(() => validateServicesReceipt({ ...serviceReceipt(), status: "success" }, run, config, "alpha", [job("services")])).toThrow();

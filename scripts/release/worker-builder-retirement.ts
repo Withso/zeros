@@ -76,6 +76,11 @@ export const WorkerBuilderCleanupSchema = z.discriminatedUnion("kind", [
 export type WorkerBuilderCleanup = z.infer<typeof WorkerBuilderCleanupSchema>;
 export const WorkerCleanupSchema = z.object({ credentialCanaryResourcesDeleted: z.literal(true), imageBuilder: WorkerBuilderCleanupSchema }).strict();
 export type WorkerCleanup = z.infer<typeof WorkerCleanupSchema>;
+export const WorkerDeferredCleanupSchema = z.object({ credentialCanaryResourcesDeleted: z.literal(false), imageBuilder: WorkerBuilderCleanupSchema,
+  pendingNativeStorage: z.object({ status: z.literal("pending"), count: z.number().int().min(1).max(3), proofSha256: digest,
+    physicalBytes: z.literal("unmeasured") }).strict() }).strict();
+export const WorkerReleaseCleanupSchema = z.union([WorkerCleanupSchema, WorkerDeferredCleanupSchema]);
+export type WorkerReleaseCleanup = z.infer<typeof WorkerReleaseCleanupSchema>;
 type Context = { lease: any; record: any; profile: any; request: any; readAdmission?: () => Promise<any>; now?: () => number };
 
 function accountBinding(profile: any) {

@@ -5,8 +5,8 @@ import { CloudAgentRuntimeEvidenceSchema } from "../../apps/control-plane/src/ma
 import { CHANNELS, DIGEST, SHA, WorkerIdentity, requireCheck, type Channel } from "./contracts";
 import type { WorkerQualificationProfile } from "./worker-profile";
 import { ReleaseCanaryBindingsSchema, RELEASE_CANARY_MODELS, type ReleaseCanaryConnection } from "../../apps/control-plane/src/cloud-workspaces/release-canary-contract";
-import { WorkerBuilderCleanupSchema, WorkerCandidateSchema, WorkerCleanupSchema, builderCleanupBelongsToRun,
-  type WorkerBuilderCleanup, type WorkerCleanup } from "./worker-builder-retirement";
+import { WorkerBuilderCleanupSchema, WorkerCandidateSchema, WorkerCleanupSchema, WorkerDeferredCleanupSchema, WorkerReleaseCleanupSchema, builderCleanupBelongsToRun,
+  type WorkerBuilderCleanup, type WorkerReleaseCleanup } from "./worker-builder-retirement";
 
 export const WORKER_CREDENTIAL_KINDS = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"] as const;
 const credentialKind = z.enum(WORKER_CREDENTIAL_KINDS);
@@ -19,6 +19,7 @@ const commonReceipt = z.object({ status: z.literal("success"), channel: z.enum([
 export const WorkerReceipt = z.discriminatedUnion("version", [
   commonReceipt.extend({ version: z.literal(1), resourcesDeleted: z.literal(true) }).strict(),
   commonReceipt.extend({ version: z.literal(2), cleanup: WorkerCleanupSchema }).strict(),
+  commonReceipt.extend({ version: z.literal(3), cleanup: WorkerDeferredCleanupSchema }).strict(),
 ]).refine(receipt => {
   if (receipt.version === 1) return true;
   const builder = receipt.cleanup.imageBuilder;
@@ -48,7 +49,7 @@ export type WorkerDependencies = {
   qualify(image: WorkerCandidate, kind: string): Promise<{ connection: ReleaseCanaryConnection; outcome: unknown; startedAt: number }>;
   withOwner<T>(action: (owner: { loginIdentity: string; manage(document: unknown, approval?: string): Promise<any> }) => Promise<T>): Promise<{ value: T; deleted: boolean }>;
   updateIdentity(variables: Record<string, string>): Promise<void>;
-  cleanup(): Promise<WorkerCleanup | null>;
+  cleanup(): Promise<WorkerReleaseCleanup | null>;
   assertCurrent?(): Promise<void>;
   saveEvidence?(evidence: unknown): Promise<void>;
 };
@@ -95,7 +96,7 @@ export async function promoteWorker(input: WorkerPromotionInput, deps: WorkerDep
       evidenceSha256: createHash("sha256").update(JSON.stringify(document)).digest("hex") });
     await deps.saveEvidence?.(approvedEvidence);
     // Retire every credential-bearing canary before creating an approval.
-    const cleanup = WorkerCleanupSchema.safeParse(await deps.cleanup());
+    const cleanup = WorkerReleaseCleanupSchema.safeParse(await deps.cleanup());
     requireCheck(cleanup.success && builderCleanupBelongsToRun(cleanup.data.imageBuilder, input, image) &&
       cleanup.data.imageBuilder.sandboxId === builderCleanup.data.sandboxId &&
       cleanup.data.imageBuilder.deletionOperationId === builderCleanup.data.deletionOperationId &&
@@ -123,7 +124,7 @@ export async function promoteWorker(input: WorkerPromotionInput, deps: WorkerDep
     await deps.assertCurrent?.();
     await deps.updateIdentity({ CLOUD_WORKSPACE_PROVIDER: "boat", BOAT_SNAPSHOT_ID: image.snapshotId, BOAT_IMAGE_BUILD_SHA256: image.buildSha256,
       ZEROS_CLOUD_SOURCE_COMMIT: image.sourceCommit, ZEROS_CLOUD_IMAGE_ARCHITECTURE: image.architecture, CLOUD_WORKSPACE_STORAGE_MIB: String(image.storageMiB) });
-    return WorkerReceipt.parse({ version: 2, status: "success", channel: input.channel, sourceSha: input.sourceSha,
+    return WorkerReceipt.parse({ version: cleanup.data.credentialCanaryResourcesDeleted ? 2 : 3, status: "success", channel: input.channel, sourceSha: input.sourceSha,
       repository: input.repository, branch: input.branch, runId: input.runId, runAttempt: input.runAttempt,
       inputsSha256: input.inputsSha256, worker, qualifiedKinds: input.kinds, qualificationProfile: input.qualificationProfile, runtimeContractSha256: approvedEvidence.runtimeContractSha256,
       evidenceSha256: approvedEvidence.evidenceSha256, approvalPlanSha256: approval.value.planSha256, approvalTargetSha256: approval.value.targetSha256,

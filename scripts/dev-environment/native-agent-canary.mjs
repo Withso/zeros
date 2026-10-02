@@ -50,21 +50,40 @@ export function canaryBudgetHours(boat) {
   return Math.min(boat.builderBudgetHours, QUALIFICATION_DEADLINE_MS / 3_600_000 + 0.25);
 }
 
-function nativeCleanupProof(row, job, profile, operation) {
-  const at = value => typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value));
+const cleanupTime = value => typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value));
+function nativeCleanupBinding(row, job, profile, operation) {
   const values = [profile.boat?.accountScope, profile.boat?.billingOrg, profile.railway?.projectId,
     profile.planetscale?.organization, profile.planetscale?.database, profile.cloudflare?.accountId];
   if (!values.every(value => typeof value === "string" && value.length > 0) || row.purpose !== "native-agent-qualification" ||
     row.agentQualificationId !== job.id || row.builderIntent?.key !== job.id || !Number.isFinite(row.builderIntent.at) ||
     row.sourceCommit !== job.image?.sourceCommit || row.sourceImage !== job.image?.snapshotId || !digest(job.image?.buildSha256) ||
     operation?.id !== row.builder.deletionOperationId || operation.kind !== "sandbox" || operation.targetId !== row.builder.id ||
-    operation.status !== "completed" || !at(operation.requestedAt) || !at(operation.completedAt) ||
-    Date.parse(operation.requestedAt) < row.builderIntent.at || Date.parse(operation.completedAt) < Date.parse(operation.requestedAt) ||
-    Date.parse(operation.completedAt) > Date.now()) throw new Error("Native canary physical cleanup proof is unconfirmed; retain its admission");
+    !cleanupTime(operation.requestedAt) || Date.parse(operation.requestedAt) < row.builderIntent.at ||
+    Date.parse(operation.requestedAt) > Date.now()) throw new Error("Native canary physical cleanup proof is unconfirmed; retain its admission");
   return { version: 1, operationId: job.id, targetId: row.builder.id, snapshotId: row.sourceImage, sourceCommit: row.sourceCommit,
     buildSha256: job.image.buildSha256, creationIntentSha256: sha256(JSON.stringify(row.builderIntent)), accountBinding: sha256(JSON.stringify(values)),
-    billingOrg: profile.boat.billingOrg, operation: { id: operation.id, kind: "sandbox", targetId: row.builder.id, status: "completed",
+    billingOrg: profile.boat.billingOrg };
+}
+function nativeCleanupProof(row, job, profile, operation) {
+  const binding = nativeCleanupBinding(row, job, profile, operation);
+  if (operation.status !== "completed" || !cleanupTime(operation.completedAt) || Date.parse(operation.completedAt) < Date.parse(operation.requestedAt) ||
+    Date.parse(operation.completedAt) > Date.now()) throw new Error("Native canary physical cleanup proof is unconfirmed; retain its admission");
+  return { ...binding, operation: { id: operation.id, kind: "sandbox", targetId: row.builder.id, status: "completed",
       requestedAt: operation.requestedAt, completedAt: operation.completedAt } };
+}
+function nativeStorageProof(state, row, job, profile, operation) {
+  const binding = nativeCleanupBinding(row, job, profile, operation), observation = row.snapshotPolicyObserved;
+  if (!["alpha", "beta", "production"].some(channel => state.owner === sha256(`zeros-release-worker:${channel}`).slice(0, 24)) ||
+    row.nativeDispatchStarted !== true || row.snapshotPolicyVersion !== 1 || row.builderIntent.body.snapshots !== false ||
+    observation?.version !== 1 || observation.targetId !== row.builder.id || observation.snapshots !== false ||
+    !cleanupTime(observation.observedAt) || Date.parse(observation.observedAt) < row.builderIntent.at ||
+    Date.parse(observation.observedAt) > Date.parse(operation.requestedAt) || operation.status !== "blocked" || operation.completedAt != null ||
+    !["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"].includes(operation.stage) ||
+    operation.stage === "waiting_for_uploads" && !cleanupTime(operation.expectedBy) ||
+    operation.expectedBy != null && (!cleanupTime(operation.expectedBy) || Date.parse(operation.expectedBy) < Date.parse(operation.requestedAt) ||
+      Date.parse(operation.expectedBy) > Date.now() + 6 * 3600_000 + 5000)) throw new Error("Native canary storage retirement proof is unconfirmed; retain its admission");
+  return { ...binding, kind: "storage-pending", snapshotsOff: { ...observation }, operation: { id: operation.id, kind: "sandbox", targetId: row.builder.id,
+    status: "blocked", stage: operation.stage, requestedAt: operation.requestedAt, expectedBy: operation.expectedBy ?? null } };
 }
 
 export function nativeAgentCanary(lease, profile, request = devBoatClient(profile.boat, lease.signal), admission, options = {}) {
@@ -229,7 +248,7 @@ PY` } });
       if (result.dispatchUnconfirmed === true) throw new Error("Native canary dispatch is unconfirmed; reconcile before retrying, never redispatch credentials");
       return result;
     },
-    async retire(job) {
+    async retire(job, beforeStorageRelease) {
       if (!lease.state.resources.images.some(value => value.agentQualificationId === job.id)) return;
       const row = record(job);
       if (!row.builder && ["planned", "rejected"].includes(row.builderCreate?.phase)) {
@@ -241,7 +260,7 @@ PY` } });
         // erase an allocation intent on the assumption that creation failed.
         await this.allocate(job, job.image);
       }
-      let confirmed = false;
+      let confirmed = false, storageAcknowledged = false;
       try {
         if (options.strictCleanup && row.builder.deleteRequested && !row.builder.deletionOperationId) {
           throw new Error("Native canary deletion response was lost; reconcile its terminal operation before retrying");
@@ -257,16 +276,41 @@ PY` } });
               Date.parse(retained.operationObservedAt) > Date.parse(retained.unavailableObservedAt) || Date.parse(retained.unavailableObservedAt) > Date.now())
               throw new Error("Native canary retained physical cleanup proof changed; retain its admission");
           }
+          const storage = row.builder.storageRetirement;
+          if (storage) {
+            const expected = nativeStorageProof(lease.state, row, job, profile, storage.operation);
+            if (!options.releaseStorageDeferral || Object.entries(expected).some(([key, value]) => JSON.stringify(storage[key]) !== JSON.stringify(value)) ||
+              !cleanupTime(storage.operationObservedAt) || !cleanupTime(storage.unavailableObservedAt) ||
+              Date.parse(storage.operation.requestedAt) > Date.parse(storage.operationObservedAt) ||
+              Date.parse(storage.operationObservedAt) > Date.parse(storage.unavailableObservedAt) || Date.parse(storage.unavailableObservedAt) > Date.now())
+              throw new Error("Native canary retained storage retirement proof changed; retain its admission");
+          }
         }
-        await confirmBoatDeletion(lease, row.builder, request, { allowDeferredStorage: !options.strictCleanup, timeout: options.cleanupTimeoutMs ?? 30_000,
+        const deferStorage = options.strictCleanup && options.releaseStorageDeferral === true && row.nativeDispatchStarted === true;
+        await confirmBoatDeletion(lease, row.builder, request, { allowDeferredStorage: !options.strictCleanup || deferStorage, timeout: options.cleanupTimeoutMs ?? 30_000,
+          ...(deferStorage ? { retainedDeferredStorage: operation => Boolean(row.builder.storageRetirement) &&
+            ["pending", "processing"].includes(operation.status) && ["removing", "retrying"].includes(operation.stage) &&
+            operation.completedAt == null && operation.requestedAt === row.builder.storageRetirement.operation.requestedAt } : {}),
+          ...(deferStorage ? { beforeDeferredStorage: async (operation, observations) => {
+            if (typeof beforeStorageRelease !== "function") throw new Error("Native canary storage retirement audit is unconfirmed; retain its admission");
+            if (row.builder.storageRetirement && row.builder.storageRetirement.operation.requestedAt !== operation.requestedAt)
+              throw new Error("Native canary storage retirement operation changed; retain its admission");
+            if (operation.status === "blocked") {
+              const proof = nativeStorageProof(lease.state, row, job, profile, operation);
+              row.builder.storageRetirement = { ...proof, ...observations };
+            } else nativeStorageProof(lease.state, row, job, profile, row.builder.storageRetirement.operation);
+            await lease.save(); await lease.fence(); await beforeStorageRelease(); storageAcknowledged = true;
+          } } : {}),
           ...(options.strictCleanup ? { beforeDeleted: async operation => {
+            if (row.builder.storageRetirement && row.builder.storageRetirement.operation.requestedAt !== operation.requestedAt)
+              throw new Error("Native canary storage retirement operation changed; retain its admission");
             const proof = nativeCleanupProof(row, job, profile, operation), operationObservedAt = new Date().toISOString();
             const sandbox = await request("GET", `/sandboxes/${row.builder.id}`);
             if (sandbox.status !== 404) throw new Error("Native canary physical cleanup sandbox remains available; retain its admission");
             row.builder.physicalCleanup = { ...proof, operationObservedAt, unavailableObservedAt: new Date().toISOString() };
             await lease.save(); await lease.fence();
           } } : {}) });
-        confirmed = row.builder.deleted === true;
+        confirmed = row.builder.deleted === true || storageAcknowledged;
         row.retired = true; row.deleted = row.builder.deleted === true; await lease.save();
       } finally { if (!options.strictCleanup || confirmed) await admission?.release(); }
     },

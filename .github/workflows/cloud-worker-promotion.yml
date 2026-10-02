@@ -10,6 +10,10 @@ on:
         description: Execute only after the release canary transport is rehearsed
         type: boolean
         default: false
+      reconcile_storage:
+        description: Observe retained native cleanup only; no new allocation or qualification
+        type: boolean
+        default: false
       qualification_profile:
         description: Auto selects FULL only for native-contract changes; FULL is an explicit paid check
         type: choice
@@ -38,6 +42,9 @@ on:
         default: ''
         type: string
       execute:
+        default: false
+        type: boolean
+      reconcile_storage:
         default: false
         type: boolean
       qualification_profile:
@@ -97,6 +104,7 @@ jobs:
       RELEASE_BASE: ${{ inputs.before_sha || '' }}
       ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       WORKER_EXECUTE: ${{ inputs.execute }}
+      WORKER_RECONCILE_STORAGE: ${{ inputs.reconcile_storage }}
       WORKER_QUALIFICATION_PROFILE: ${{ inputs.qualification_profile || 'auto' }}
       WORKER_SERVICES_RUN_ID: ${{ inputs.services_run_id || github.run_id }}
       WORKER_RECEIPT_REQUIRED: ${{ inputs.receipt_required }}
@@ -129,7 +137,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir apps/control-plane install --frozen-lockfile
       - name: Exact-source Preflight and CodeQL gate
-        if: inputs.execute
+        if: inputs.execute || inputs.reconcile_storage
         env:
           GH_TOKEN: ${{ github.token }}
         run: pnpm exec tsx scripts/release/ci-cli.ts --wait
@@ -144,7 +152,9 @@ jobs:
           WORKER_ADMISSION_CONFIG_JSON: ${{ secrets.WORKER_ADMISSION_CONFIG_JSON }}
           WORKER_CANARY_ADMISSION_TOKEN: ${{ secrets.WORKER_CANARY_ADMISSION_TOKEN }}
         run: |
-          if [ "$WORKER_EXECUTE" = true ]; then
+          if [ "$WORKER_RECONCILE_STORAGE" = true ]; then
+            pnpm exec tsx scripts/release/worker-cli.ts --reconcile-storage
+          elif [ "$WORKER_EXECUTE" = true ]; then
             pnpm exec tsx scripts/release/worker-cli.ts --execute
           else
             pnpm exec tsx scripts/release/worker-cli.ts --plan

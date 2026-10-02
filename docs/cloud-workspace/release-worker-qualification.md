@@ -299,9 +299,13 @@ tombstone before releasing admission. Snapshot-name absence is not proof of
 backing-storage erasure. Published snapshots remain intentionally retained.
 Historical v1 receipts remain readable: `resourcesDeleted:true` retains its
 original physical-deletion meaning for temporary builder/canary allocations,
-not the selected named image. New executions issue strict v2 receipts without
-that unscoped field. V2 requires `cleanup.credentialCanaryResourcesDeleted:true`
-and a separately validated `cleanup.imageBuilder` union, described below.
+not the selected named image. New executions issue v2 when credential-bearing
+canaries are physically deleted, or v3 for the release-only storage deferral
+described below. V2 still requires
+`cleanup.credentialCanaryResourcesDeleted:true`. V3 instead requires that field
+to be false and a bounded `pendingNativeStorage` count/proof digest with
+`status:pending` and `physicalBytes:unmeasured`. Both versions separately validate
+`cleanup.imageBuilder`; neither changes v1's physical-deletion meaning.
 
 Interrupted creation uses the original persisted idempotency key/body within
 the provider replay window, subject to the retained budget. Native start is
@@ -310,9 +314,9 @@ unique provider match remains uncertain; empty inventory is not permission to
 create another role. Approval reconciles the exact primary audit/rows before
 retry. Lost tuple writes reconcile readback without a second write. Lost VM
 deletion responses retain admission holds and prevent approval/receipts until
-their exact operation is reconciled. Credential-bearing canaries always require
-matching terminal physical-deletion proof; builder storage has only the narrow,
-explicit release-owned boundary below.
+their exact operation is reconciled. Credential-bearing canaries require
+matching physical-deletion proof or the explicit release-only native storage
+certificate below; unmarked history remains physically gated.
 
 New disposable native qualification VMs, in both Dev and release lanes, set
 `snapshots:false` when created from the qualified named image. Marked new intents
@@ -328,10 +332,8 @@ persisted creation key/body, including an omitted or enabled snapshot flag; it
 never retrofits the new policy onto an existing intent. Requested snapshots-off
 is only intent; observed snapshots-off is policy proof, not physical-deletion
 completion or assurance about inherited/source storage. The release lane sets
-`strictCleanup:true` and still requires
-the matching terminal deletion operation before freeing compute admission or
-issuing a worker receipt. Dev's deferred-storage cleanup policy
-remains unchanged.
+`strictCleanup:true` and explicitly enables the certified storage boundary
+below. Dev's existing deferred-storage cleanup behavior remains unchanged.
 
 ### Strict native retirement and historical recovery
 
@@ -347,8 +349,10 @@ Strict cleanup retains the original DELETE operation and persists a versioned,
 source/image/build/creation/account-bound physical cleanup proof before marking
 the builder deleted or releasing its compute reservation. It requires the exact
 authenticated operation to be completed with coherent provider timestamps and
-the exact sandbox to return 404. Pending storage, an elapsed `expectedBy`, a
-cancelled run, snapshots-off or sandbox404 alone never releases that hold.
+the exact sandbox to return 404. An elapsed `expectedBy`, a cancelled run,
+snapshots-off or sandbox404 alone never releases that hold. Pending storage
+without the release-only certificate and server acknowledgment below remains
+unconfirmed.
 Lost DELETE responses and malformed or missing ownership/provenance remain
 unconfirmed; recovery never dispatches another DELETE or native operation.
 
@@ -382,6 +386,55 @@ Existing same-source active jobs remain observation-only. Terminal settlement
 permits only a separately fresh operation
 with current source, owner allowance and consent; it is not successful native
 qualification, a worker approval or permission to enable customer cloud.
+
+### Release-only native storage deferral
+
+A disposable credential-bearing release canary may become logically retired
+while provider storage deletion continues. It must retain its exact acknowledged
+irreversible sandbox DELETE, original creation/source/image/build/account and
+parent builder provenance, plus a marked `snapshots:false` intent and the bound
+actual snapshots-off observation before dispatch. Fresh authenticated reads must
+observe that same operation, then sandbox404. Only documented blocked stages
+`waiting_for_uploads`, `kept_for_newer_snapshots` and `waiting_for_restore` qualify;
+upload retention requires a coherent provider estimate bounded by the documented
+six-hour upload-link fence. Estimates are never completion proof. Unknown,
+missing, foreign or lost operation evidence and available sandboxes stay fenced.
+This boundary does not apply to customer VMs, Dev policy or unmarked histories.
+
+The source/image/creation/account-bound `storageRetirement` certificate is saved
+under the owning lease before the server appends
+`cloud.release_canary.storage_retired`. The matching version2 local audit marker
+and retired flag are saved together before compute admission is released. No
+physical proof or `builder.deleted:true` is invented; the original operation and
+certificate remain observable after admission compaction. The old operation is
+terminal before credential access; any subsequent operation needs fresh current
+source and consent. Three genuine native successes, exact artifacts, audited
+approval, owner-role deletion and selected tuple/readiness still precede release
+publication. Old partial results never qualify a new image or source.
+
+V3 receipts bind the pending certificate count/digest to the exact qualified
+jobs, with `credentialCanaryResourcesDeleted:false`; they do not claim retained
+native storage is sanitized or erased. Only unavailable compute is released,
+not named-image slots or retained storage accounting. Native storage, inherited
+source storage and intentionally retained published images are distinct.
+
+Bounded historical recovery visits deferred records before retired shortcuts.
+The certificate remains pending through authenticated processing/removing or
+retrying observations. Actual matching operation completion plus a subsequent
+sandbox404 persists physical proof and appends `cloud.release_canary.retired`;
+earlier audits and issued v3 receipts remain truthful historical observations.
+No named-image existence is required merely to settle physically deleted native
+storage. Recovery never reallocates, executes native work or reissues DELETE.
+
+For later observation without a new qualification, the maintained protected
+`cloud-worker-promotion.yml` entrypoint accepts default-off
+`reconcile_storage:true` with `execute:false`, invoking
+`worker-cli.ts --reconcile-storage`. It acquires the existing registry lease with
+`create:false` and retains current channel/ref/source, CI, API/schema and
+Production approval gates. It performs bounded retained cleanup observation,
+not allocation, credential execution, tuple selection or a success receipt.
+The normal worker also performs this bounded reconciliation before preflight;
+no new scheduler, pruning policy or automatic erasure claim is added.
 
 ### Release-owned builder retirement receipts
 
@@ -422,8 +475,9 @@ ordinary historical or deduplicated storage. Published/shared named-image data
 remains independently retained. The complete cleanup/provenance/storage record
 is saved before the compute-terminal marker or admission release. Only compute
 is released: `builder.deleted` stays false and named-image/storage holds survive.
-Native allocation, approval, tuple selection and v2 success all require this
-validated builder state **and** strict physical canary cleanup. Unknown stage,
+Native allocation, approval, tuple selection and v2/v3 success all require this
+validated builder state and the matching physical or certified logical native
+retirement. Unknown stage,
 available sandbox, mismatched operation, lost response, malformed recovery or
 missing proof withholds approval and success.
 

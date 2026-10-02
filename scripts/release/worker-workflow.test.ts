@@ -3,6 +3,18 @@ import { describe, expect, it } from "vitest";
 
 const workflow = () => readFileSync(".github/workflows/cloud-worker-promotion.yml", "utf8");
 describe("protected worker workflow handoff", () => {
+  it("keeps storage-only reconciliation default-off and behind the same source, channel and Production gates", () => {
+    const text = workflow();
+    expect(text.split("workflow_call:")[0]).toMatch(/reconcile_storage:[\s\S]*?type: boolean\s+default: false/);
+    expect(text.split("workflow_call:")[1]).toMatch(/reconcile_storage:\s+default: false\s+type: boolean/);
+    expect(text).toContain("WORKER_RECONCILE_STORAGE: ${{ inputs.reconcile_storage }}");
+    expect(text).toContain("if: inputs.execute || inputs.reconcile_storage");
+    expect(text).toContain('if [ "$WORKER_RECONCILE_STORAGE" = true ]; then');
+    expect(text).toContain("worker-cli.ts --reconcile-storage");
+    expect(text).toContain("environment: production-approval"); expect(text).toContain("inputs.caller_gated != true");
+    expect(text).toContain("group: hosted-mutation-${{ inputs.channel }}");
+    expect(text).toContain("success() && steps.promote.outputs.receipt_issued == 'true'");
+  });
   it("gates every mutation on exact-source Preflight/CodeQL and refuses PR/fork runs", () => {
     const text = workflow();
     expect(text).toContain("name: worker"); expect(text).toContain("actions: read");

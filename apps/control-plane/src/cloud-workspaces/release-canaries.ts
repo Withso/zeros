@@ -11,7 +11,7 @@ import { startNativeDevCanary } from "./dev-native-canary.js";
 import { prepareNativeCanaryAccess } from "./native-canary-access.js";
 import { configuredBoatAccountAdmission, type BoatAccountAdmission } from "./boat-account-admission.js";
 import { RELEASE_CANARY_KINDS, RELEASE_CANARY_MODELS, RELEASE_CANARY_UPLOAD_FORBIDDEN, ReleaseCanaryConnectionSchema, ReleaseCanaryIdentitySchema,
-  ReleaseCanaryAdmissionSchema, ReleaseCanaryRetirementSchema, ReleaseCanaryRetirementAuditSchema, NativeCanaryDeletionOperationSchema,
+  ReleaseCanaryAdmissionSchema, ReleaseCanaryRetirementSchema, ReleaseCanaryRetirementAuditSchema, NativeCanaryDeletionOperationSchema, NativeCanaryStorageOperationSchema, NativeCanaryStorageProgressSchema,
   type ReleaseCanaryConnection } from "./release-canary-contract.js";
 
 const uuid = z.string().uuid(), sha = z.string().regex(/^[a-f0-9]{40}$/), counter = z.string().regex(/^[1-9]\d*$/);
@@ -237,7 +237,7 @@ export class DatabaseReleaseCanaryService extends DatabaseReleaseCanaryDesignati
       await this.owner(tx, this.config.ownerUserId);
       const last = (await tx.query<Audit>(`SELECT id::text,action,subject FROM audit_log WHERE org_id=$1 AND actor_id=$2 AND action=ANY($3::text[])
         AND subject->>'operationId'=$4 ORDER BY id DESC LIMIT 1`, [this.config.organizationId, this.config.ownerUserId,
-        ["reserved", "preparing", "dispatched", "started", "retired"].map(phase => `${action}${phase}`), input.data.operationId])).rows[0];
+        ["reserved", "preparing", "dispatched", "started", "storage_retired", "retired"].map(phase => `${action}${phase}`), input.data.operationId])).rows[0];
       if (!last) unavailable("Release canary retirement requires the original immutable audit");
       const parsed = ReleaseCanaryRetirementAuditSchema.safeParse(last.subject);
       if (!parsed.success || parsed.data.operationId !== input.data.operationId || parsed.data.allowanceOwnerUserId !== this.config.ownerUserId ||
@@ -257,16 +257,24 @@ export class DatabaseReleaseCanaryService extends DatabaseReleaseCanaryDesignati
     };
     const retained = await journal(), observed = await this.boatReply("GET", `/deletion-operations/${input.data.deletionOperationId}`);
     const raw = observed.body?.operation;
-    const operation = NativeCanaryDeletionOperationSchema.safeParse(raw && { id: raw.id, kind: raw.kind, targetId: raw.targetId,
-      status: raw.status, requestedAt: raw.requestedAt, completedAt: raw.completedAt });
+    const pending = retained.physicalCleanup === undefined && retained.storageRetirement !== undefined;
+    const projection = raw && { id: raw.id, kind: raw.kind, targetId: raw.targetId, status: raw.status, requestedAt: raw.requestedAt };
+    const progress = pending && ["pending", "processing"].includes(raw?.status);
+    const operation = progress ? NativeCanaryStorageProgressSchema.safeParse(raw && { ...projection, stage: raw.stage })
+      : pending ? NativeCanaryStorageOperationSchema.safeParse(raw && { ...projection, stage: raw.stage, expectedBy: raw.expectedBy ?? null })
+      : NativeCanaryDeletionOperationSchema.safeParse(raw && { ...projection, completedAt: raw.completedAt });
     const operationObservedAt = new Date().toISOString();
+    const cleanup = retained.physicalCleanup ?? retained.storageRetirement;
     if (observed.status !== 200 || !operation.success || operation.data.id !== input.data.deletionOperationId || operation.data.targetId !== retained.targetId ||
-      Date.parse(operation.data.requestedAt) < retained.intentAt || Date.parse(operation.data.completedAt) > Date.parse(operationObservedAt) ||
-      JSON.stringify(operation.data) !== JSON.stringify(retained.physicalCleanup.operation)) unavailable("Release canary retirement physical deletion is unconfirmed");
+      Date.parse(operation.data.requestedAt) < retained.intentAt || Date.parse(operation.data.requestedAt) > Date.parse(operationObservedAt) ||
+      (pending ? raw.completedAt != null : !("completedAt" in operation.data) || Date.parse(operation.data.completedAt) > Date.parse(operationObservedAt)) ||
+      !cleanup || (progress ? operation.data.requestedAt !== cleanup.operation.requestedAt : JSON.stringify(operation.data) !== JSON.stringify(cleanup.operation)))
+      unavailable("Release canary retirement physical deletion is unconfirmed");
     const sandbox = await this.boatReply("GET", `/sandboxes/${retained.targetId}`), unavailableObservedAt = new Date().toISOString();
     if (sandbox.status !== 404) unavailable("Release canary retirement sandbox is still available");
     const again = await journal();
-    if (again.provenanceSha256 !== retained.provenanceSha256) unavailable("Release canary retirement journal identity changed");
+    if (again.provenanceSha256 !== retained.provenanceSha256 || JSON.stringify(again.physicalCleanup ?? again.storageRetirement) !== JSON.stringify(cleanup))
+      unavailable("Release canary retirement journal identity changed");
     return locked(async (tx, last) => {
       if (last.subject.requestSha256 !== audited.requestSha256) unavailable("Release canary retirement operation identity changed");
       if (last.action === `${action}retired`) {
@@ -277,10 +285,20 @@ export class DatabaseReleaseCanaryService extends DatabaseReleaseCanaryDesignati
           unavailable("Release canary retirement terminal proof changed");
         return { retired: true as const };
       }
+      if (last.action === `${action}storage_retired`) {
+        const previous = NativeCanaryStorageOperationSchema.safeParse(last.subject.retirement?.operation);
+        if (last.subject.retirement?.version !== 2 || last.subject.retirement.deletionOperationId !== input.data.deletionOperationId ||
+          last.subject.retirement.provenanceSha256 !== retained.provenanceSha256 || !previous.success ||
+          previous.data.requestedAt !== operation.data.requestedAt) unavailable("Release canary retirement terminal proof changed");
+        if (pending && (progress || JSON.stringify(previous.data) === JSON.stringify(operation.data))) return { retired: true as const, storagePending: true as const };
+      }
       if (last.id !== original.id || JSON.stringify(last.subject) !== JSON.stringify(original.subject)) unavailable("Release canary retirement phase changed; reconcile before retrying");
-      await this.append(tx, "retired", { ...last.subject, retirement: { version: 1, deletionOperationId: input.data.deletionOperationId,
-        targetId: retained.targetId, operation: operation.data, operationObservedAt, unavailableObservedAt, provenanceSha256: retained.provenanceSha256 } });
-      return { retired: true as const };
+      await this.append(tx, pending ? "storage_retired" : "retired", { ...last.subject, retirement: { version: pending ? 2 : 1, deletionOperationId: input.data.deletionOperationId,
+        ...(pending ? { storage: { status: "pending", physicalBytes: "unmeasured" } } : {}),
+        ...(progress ? { progress: { operation: operation.data, operationObservedAt } } : {}),
+        targetId: retained.targetId, operation: progress ? cleanup.operation : operation.data,
+        operationObservedAt: progress ? cleanup.operationObservedAt : operationObservedAt, unavailableObservedAt, provenanceSha256: retained.provenanceSha256 } });
+      return pending ? { retired: true as const, storagePending: true as const } : { retired: true as const };
     });
   }
   async admit(value: unknown, authorization: string | undefined) {
@@ -296,7 +314,7 @@ export class DatabaseReleaseCanaryService extends DatabaseReleaseCanaryDesignati
           SELECT 1 FROM audit_log settled WHERE settled.org_id=pending.org_id AND settled.actor_id=pending.actor_id
           AND settled.subject->>'operationId'=pending.subject->>'operationId' AND settled.action=ANY($6::text[]) AND settled.id>pending.id) LIMIT 1`,
       [this.config.organizationId, this.config.ownerUserId, ["preparing", "dispatched"].map(state => `${action}${state}`), request.credentialId,
-        request.operationId, ["reserved", "preparing", "dispatched", "started", "retired"].map(state => `${action}${state}`)])).rowCount !== 0)
+        request.operationId, ["reserved", "preparing", "dispatched", "started", "storage_retired", "retired"].map(state => `${action}${state}`)])).rowCount !== 0)
         unavailable("Release canary credential requires reconciliation before another operation");
       return callback(tx, last);
     });
