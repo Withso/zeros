@@ -16,6 +16,7 @@ import type { ChangedFile } from "./changes-parse";
 import { hashString } from "./use-viewed-files";
 
 export interface ChangesDiffData {
+  patch?: string;
   fileDiff?: FileDiffMetadata;
   loadedFiles?: FileDiffLoadedFiles;
   message?: string;
@@ -101,6 +102,7 @@ export function completeChangesDiff(
       ? { oldFile, newFile }
       : undefined;
   return {
+    patch,
     // Summary/legacy turn rows have no partial diff to hydrate. Build their
     // first render from the complete snapshots, with native collapsed context.
     ...(renderDiff

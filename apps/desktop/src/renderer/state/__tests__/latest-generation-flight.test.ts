@@ -17,6 +17,54 @@ function deferred<T>(): {
 }
 
 describe("LatestGenerationFlight", () => {
+  it("starts a fresh same-generation read after removal and keeps it owned when the old read settles", async () => {
+    const flights = new LatestGenerationFlight<string>();
+    const key = JSON.stringify(["github.com", "workspace", 7, "main"]);
+    const oldResponse = deferred<string>();
+    const newResponse = deferred<string>();
+    const fetchCurrent = vi.fn(() => newResponse.promise);
+    const oldRead = flights.run(key, 4, () => oldResponse.promise);
+    await Promise.resolve();
+    flights.forget(key);
+    const newRead = flights.run(key, 4, fetchCurrent);
+    expect(newRead).not.toBe(oldRead);
+    await Promise.resolve();
+    expect(fetchCurrent).toHaveBeenCalledOnce();
+    oldResponse.resolve("deleted lifetime");
+    await oldRead;
+    const shared = flights.run(key, 4, fetchCurrent);
+    expect(shared).toBe(newRead);
+    newResponse.resolve("current lifetime");
+    await expect(newRead).resolves.toBe("current lifetime");
+    expect(fetchCurrent).toHaveBeenCalledOnce();
+  });
+
+  it("cancels removed-owner follow-ups without running them or disturbing a sibling", async () => {
+    const flights = new LatestGenerationFlight<string>();
+    const oldResponse = deferred<string>();
+    const siblingResponse = deferred<string>();
+    const oldRead = flights.run("removed", 1, () => oldResponse.promise);
+    const fetchQueued = vi.fn(async () => "must not run");
+    const queued = flights
+      .run("removed", 2, fetchQueued)
+      .catch((error: unknown) => error);
+    const fetchSibling = vi.fn(() => siblingResponse.promise);
+    const siblingRead = flights.run("sibling", 1, fetchSibling);
+    flights.forget("removed");
+    expect(flights.run("sibling", 1, fetchSibling)).toBe(siblingRead);
+    expect(await queued).toMatchObject({
+      message: expect.stringContaining("cancelled"),
+    });
+    oldResponse.resolve("removed");
+    siblingResponse.resolve("sibling");
+    await expect(Promise.all([oldRead, siblingRead])).resolves.toEqual([
+      "removed",
+      "sibling",
+    ]);
+    expect(fetchQueued).not.toHaveBeenCalled();
+    expect(fetchSibling).toHaveBeenCalledOnce();
+  });
+
   it("shares one request for concurrent callers in the same generation", async () => {
     const flights = new LatestGenerationFlight<string>();
     const request = deferred<string>();

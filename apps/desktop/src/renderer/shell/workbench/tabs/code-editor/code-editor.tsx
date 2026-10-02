@@ -74,6 +74,9 @@ export interface CodeEditorProps {
    *  reading offset across tab/workspace round-trips. Omit for embedded
    *  command editors — their content fits without scrolling. */
   scrollMemoryKey?: string;
+  /** Feature-owned extensions share this editor's scroller and lifecycle. */
+  additionalExtensions?: Extension;
+  onCreateView?: (view: EditorView) => void;
   className?: string;
 }
 
@@ -186,6 +189,8 @@ export function CodeEditor({
   editorId,
   offscreen = false,
   scrollMemoryKey,
+  additionalExtensions,
+  onCreateView,
   className,
 }: CodeEditorProps) {
   const [langExt, setLangExt] = useState<Extension[]>([]);
@@ -194,8 +199,11 @@ export function CodeEditor({
   // view exists so the keyed memory can save/restore the reading offset.
   const [scrollDom, setScrollDom] = useState<HTMLElement | null>(null);
   const handleCreateEditor = useCallback(
-    (view: EditorView) => setScrollDom(view.scrollDOM),
-    [],
+    (view: EditorView) => {
+      setScrollDom(view.scrollDOM);
+      onCreateView?.(view);
+    },
+    [onCreateView],
   );
   useScrollMemory(scrollDom, scrollMemoryKey ?? null);
 
@@ -209,8 +217,8 @@ export function CodeEditor({
 
   // Keep the latest value + onSave for the ⌘S keymap WITHOUT re-creating the
   // extension on every keystroke (that would churn the whole editor config).
-  const latest = useRef({ value, onSave });
-  latest.current = { value, onSave };
+  const latest = useRef({ value, onSave, offscreen });
+  latest.current = { value, onSave, offscreen };
 
   useEffect(() => {
     let cancelled = false;
@@ -231,7 +239,8 @@ export function CodeEditor({
             key: "Mod-s",
             preventDefault: true,
             run: () => {
-              latest.current.onSave?.(latest.current.value);
+              if (!latest.current.offscreen)
+                latest.current.onSave?.(latest.current.value);
               return true;
             },
           },
@@ -260,6 +269,7 @@ export function CodeEditor({
     () => [
       saveKeymap,
       contentAttributes,
+      ...(additionalExtensions ? [additionalExtensions] : []),
       ...BASE_EXTENSIONS,
       // Chrome rides live CSS vars, but CM's `dark` flag (polarity of unstyled
       // internals like the autocomplete tooltip) is a JS boolean — recreate it
@@ -283,6 +293,7 @@ export function CodeEditor({
     [
       saveKeymap,
       contentAttributes,
+      additionalExtensions,
       compact,
       langExt,
       shikiLang,

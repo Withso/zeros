@@ -3,6 +3,7 @@ import { describe,expect,it,vi } from "vitest";
 import { ZerosEngine } from "../zeros-engine";
 import type { TransportClient } from "../transport/types";
 import type { EngineMessage } from "../types";
+import { WorkspaceService } from "../workspace/service";
 
 const handle=(ZerosEngine.prototype as unknown as {
   handleMessage(this:unknown,message:EngineMessage,client:TransportClient):Promise<void>;
@@ -20,6 +21,33 @@ function fixture(role:NonNullable<TransportClient["cloudActor"]>["role"]="viewer
   return {client,engine,send};
 }
 describe("actor roles at the worker message boundary",()=>{
+  it("admits review and GitHub inline/diff reads from the actual service allowlist and restricts review mutations", async () => {
+    const reads = ["codeReview.list", "git.reviewHunks", "gh.prInlineReview", "gh.prReviewDiff"];
+    const writes = ["codeReview.create", "codeReview.reply", "codeReview.setResolved", "git.reviewHunk", "git.resolveConflict"];
+    for (const role of ["viewer", "prompter", "developer", "manager", "owner"] as const) {
+      const f = fixture(role);
+      f.engine.workspace.remoteReadable = WorkspaceService.prototype.remoteReadable;
+      f.engine.workspace.isWriteOp = WorkspaceService.prototype.isWriteOp;
+      f.engine.workspace.isRemoteAllowed = WorkspaceService.prototype.isRemoteAllowed;
+      for (const op of reads) {
+        expect(f.engine.workspace.remoteReadable(op)).toBe(true);
+        f.engine.handleWorkspaceMessage.mockClear();
+        await f.send({ type: "WORKSPACE_REQUEST", op, params: { workspaceId: "local-main" } });
+        expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledOnce();
+      }
+      for (const op of writes) {
+        f.engine.handleWorkspaceMessage.mockClear();
+        await f.send({ type: "WORKSPACE_REQUEST", op, params: { workspaceId: "local-main" } });
+        expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledTimes(["developer", "manager", "owner"].includes(role) ? 1 : 0);
+      }
+      f.client.authorized = () => false;
+      for (const op of [...reads, ...writes]) {
+        f.engine.handleWorkspaceMessage.mockClear();
+        await f.send({ type: "WORKSPACE_REQUEST", op, params: { workspaceId: "local-main" } });
+        expect(f.engine.handleWorkspaceMessage).not.toHaveBeenCalled();
+      }
+    }
+  });
   it("admits cloud ignored/context/sparse reads and reserves file/context/sparse mutations for editors", async () => {
     for (const role of ["viewer", "prompter", "developer", "manager", "owner"] as const) {
       const f = fixture(role);

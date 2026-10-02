@@ -2,6 +2,7 @@ import { devConnectionRuntime } from "../dev-connections/runtime.js";
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from "node:crypto";
 import type pg from "pg";
 import { assertNativeGithubActor } from "./github-native-grants.js";
+import { githubCommentWriteBody } from "./github-review-policy.js";
 import { cloudGithubNativePreparationSchema, type CloudGithubNativePreparation, type CloudGithubNativeSource } from "./github-native-schema.js";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
@@ -65,7 +66,7 @@ function expectedBody(input: z.infer<typeof githubWriteRedemption>): Record<stri
     case "git.push": return null;
     case "gh.prCreate": return { title: title.parse(p.title), body: text.parse(p.body), draft: z.boolean().default(true).parse(p.draft), head: input.branch, base: input.baseBranch };
     case "gh.prUpdate": return { ...(p.title !== undefined ? { title: title.parse(p.title) } : {}), ...(p.body !== undefined ? { body: text.parse(p.body) } : {}) };
-    case "gh.prComment": return { body: text.min(1).parse(p.body) };
+    case "gh.prComment": return githubCommentWriteBody(p);
     case "gh.prMerge": return { merge_method: z.enum(["squash", "merge", "rebase"]).parse(p.method), ...(p.commitTitle !== undefined ? { commit_title: title.parse(p.commitTitle) } : {}), ...(p.commitMessage !== undefined ? { commit_message: text.parse(p.commitMessage) } : {}) };
     case "gh.prMarkReady": return null;
   }

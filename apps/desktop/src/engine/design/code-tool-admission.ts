@@ -8,6 +8,7 @@ import type {
   AgentSessionToolFactory,
   AgentSessionToolInput,
   AgentSessionTools,
+  AgentWorkspaceTools,
 } from "../agents/session-tools";
 import { getWorkspaceById, type Workspace } from "../git";
 import { opSettingsResolve } from "../settings/ops";
@@ -136,6 +137,7 @@ export class DesignCodeToolAdmissions {
     private readonly options: {
       cloudWorker?: boolean;
       onChanged?: (workspaceId: string) => void;
+      workspaceTools?: (input: AgentSessionToolInput) => Promise<AgentWorkspaceTools | null> | AgentWorkspaceTools | null;
       mode?: (input: AgentSessionToolInput) => ConversationModePort;
       resolveTarget?: (
         input: AgentSessionToolInput,
@@ -194,16 +196,17 @@ export class DesignCodeToolAdmissions {
       // A broken Design registration must not prevent a Code session from
       // opening. Prompt/tool discovery retries it; owner checks remain below.
       const target = await resolveTarget().catch(() => null);
+      const workspaceTools = await this.options.workspaceTools?.(input) ?? undefined;
       input.signal.throwIfAborted();
       const resolveWorkspace = this.options.resolveWorkspace ?? getWorkspaceById;
       const workspace = input.workspaceId ? resolveWorkspace(input.workspaceId) : null;
-      if (!target && (!workspace || workspace.archivedAt != null ||
+      if (!target && !workspaceTools && (!workspace || workspace.archivedAt != null ||
           (!this.options.cloudWorker && workspace.placement === "cloud"))) {
         release();
         return this.unavailable(input, "Open this conversation in an active registered workspace.");
       }
-      const workspacePath = workspace?.path ?? target!.workspacePath;
-      const workspaceId = workspace?.id ?? target!.workspaceId;
+      const workspacePath = workspace?.path ?? target?.workspacePath ?? workspaceTools!.workspacePath;
+      const workspaceId = workspace?.id ?? target?.workspaceId ?? workspaceTools!.workspaceId;
       const [cwd, root] = await Promise.all([realpath(input.cwd), realpath(workspacePath)]);
       if (cwd !== root && !cwd.startsWith(`${root}${path.sep}`)) {
         release();
@@ -211,12 +214,13 @@ export class DesignCodeToolAdmissions {
       }
       const assertOwner = () => {
         input.signal.throwIfAborted();
+        workspaceTools?.assertCurrent();
         const current = resolveWorkspace(workspaceId);
         if (workspace && (!current || current.archivedAt != null ||
             current.path !== workspace.path || current.repoRoot !== workspace.repoRoot ||
             current.placement !== workspace.placement || current.organizationId !== workspace.organizationId))
           throw new Error("The workspace owning these Design tools changed.");
-        if (this.options.workspaceIdForCwd && this.options.workspaceIdForCwd(input.cwd) !== workspaceId)
+        if (!workspaceTools && this.options.workspaceIdForCwd && this.options.workspaceIdForCwd(input.cwd) !== workspaceId)
           throw new Error("The workspace owning these Design tools changed.");
       };
       assertOwner();
@@ -230,6 +234,7 @@ export class DesignCodeToolAdmissions {
         authoringMethod: this.options.cloudWorker ? "api" : "native",
         renderer: createDesignCaptureRenderer(workspacePath),
         onChanged: () => this.options.onChanged?.(workspaceId),
+        workspaceTools,
       });
       server = new DesignAgentMcpServer({ handler, token: handler.token });
       try {

@@ -21,6 +21,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowRight, ChevronDown, ExternalLink } from "lucide-react";
 
 import { gitDiff, type PR } from "../../../platform/git";
+import { useGithubReview } from "@/renderer/features/code-review/use-github-review";
 import {
   useWorkspaceStore,
   useWorkspaceDispatch,
@@ -45,6 +46,7 @@ import { parseUnifiedDiffFiles, type ChangedFile } from "./changes-parse";
 import { useScrollMemoryRef } from "../../scroll-memory";
 import { AGENT_WORKING_REASON } from "../../pr/use-agent-working";
 import { usePrIslandKind } from "../../pr/pr-island-state-store";
+import { registerPrWorkspaceCacheForget } from "../../pr/pr-cache-forget";
 import {
   type ReviewMergeMethod,
   type ReviewProvider,
@@ -66,10 +68,12 @@ import type { ReviewSubtab } from "../tab-model";
 
 let appendCounter = 0;
 
-// Local PR diffs are small per-workspace snapshots. The provider-backed PR
+// Published PR diffs are bounded per-workspace snapshots. The provider-backed PR
 // model already uses stale-while-revalidate; matching that behavior here keeps
 // the Changes count/list complete through workspace switches and deck eviction.
-const reviewFilesCache = new Map<string, ChangedFile[]>();
+interface ReviewFilesSnapshot { files: ChangedFile[]; headSha?: string; baseSha?: string }
+const EMPTY_REVIEW_FILES: ChangedFile[] = [];
+const reviewFilesCache = new Map<string, ReviewFilesSnapshot>();
 const MAX_REVIEW_FILE_SNAPSHOTS = 32;
 
 /** Refresh generation + completion time of each cached diff, so a remount on
@@ -77,19 +81,43 @@ const MAX_REVIEW_FILE_SNAPSHOTS = 32;
  *  The explicit Retry path deletes the entry to force a pull. */
 const reviewFilesMeta = new Map<string, { refreshKey: number; at: number }>();
 const REVIEW_FILES_FRESH_MS = 60_000;
-const reviewFileRequests = new LatestGenerationFlight<ChangedFile[]>();
+const reviewFileRequests = new LatestGenerationFlight<ReviewFilesSnapshot>();
+const reviewFileRequestOwners = new Set<{
+  workspaceId: string;
+  key: string;
+  cancelled: boolean;
+}>();
 
-function reviewFilesKey(workspaceId: string, baseBranch: string): string {
-  return JSON.stringify([workspaceId, baseBranch]);
+registerPrWorkspaceCacheForget((workspaceId) => {
+  for (const key of new Set([
+    ...reviewFilesCache.keys(),
+    ...reviewFilesMeta.keys(),
+  ])) {
+    const [, owner] = JSON.parse(key) as [string, string, number, string];
+    if (owner !== workspaceId) continue;
+    reviewFilesCache.delete(key);
+    reviewFilesMeta.delete(key);
+    reviewFileRequests.forget(key);
+  }
+  for (const request of reviewFileRequestOwners) {
+    if (request.workspaceId !== workspaceId) continue;
+    request.cancelled = true;
+    reviewFileRequests.forget(request.key);
+    reviewFileRequestOwners.delete(request);
+  }
+});
+
+function reviewFilesKey(providerKey: string, workspaceId: string, prNumber: number, baseBranch: string): string {
+  return JSON.stringify([providerKey, workspaceId, prNumber, baseBranch]);
 }
 
 function cacheReviewFiles(
   key: string,
-  files: ChangedFile[],
+  snapshot: ReviewFilesSnapshot,
   refreshKey: number,
 ): void {
   reviewFilesCache.delete(key);
-  reviewFilesCache.set(key, files);
+  reviewFilesCache.set(key, snapshot);
   reviewFilesMeta.set(key, { refreshKey, at: Date.now() });
   while (reviewFilesCache.size > MAX_REVIEW_FILE_SNAPSHOTS) {
     const oldest = reviewFilesCache.keys().next().value as string | undefined;
@@ -137,6 +165,7 @@ function saveMergeMethod(
 export function ReviewView({
   provider,
   workspaceId,
+  cwd,
   baseBranch,
   branch,
   prNumber,
@@ -150,6 +179,7 @@ export function ReviewView({
 }: {
   provider: ReviewProvider;
   workspaceId: string;
+  cwd: string;
   baseBranch: string;
   /** The workspace's head branch (labels + fix-check prompts). */
   branch: string;
@@ -168,7 +198,7 @@ export function ReviewView({
   /** Commit an explicit inner destination to the owning tab. */
   onSubChange: (sub: ReviewSubtab) => void;
 }) {
-  const filesKey = reviewFilesKey(workspaceId, baseBranch);
+  const filesKey = reviewFilesKey(provider.cacheKey, workspaceId, prNumber, baseBranch);
   const { snap, refresh, postComment, merge, markReady } = useReviewLiveData({
     provider,
     workspaceId,
@@ -205,23 +235,28 @@ export function ReviewView({
     [dispatch, prNumber, activeChatId],
   );
 
-  // ── local PR diff (Changes) — parent-owned so the sub-nav count and the
+  // ── published PR diff (Changes) — parent-owned so the sub-nav count and the
   //    section always agree; re-pulled on the shared refresh bus.
   // Seed the local diff from the last confirmed model for this workspace.
   const [filesSnapshot, setFilesSnapshot] = useState<{
     key: string;
     files: ChangedFile[];
+    headSha?: string;
+    baseSha?: string;
     loading: boolean;
     error: string | null;
   }>(() => ({
     key: filesKey,
-    files: reviewFilesCache.get(filesKey) ?? [],
+    files: reviewFilesCache.get(filesKey)?.files ?? EMPTY_REVIEW_FILES,
+    headSha: reviewFilesCache.get(filesKey)?.headSha,
+    baseSha: reviewFilesCache.get(filesKey)?.baseSha,
     loading: !reviewFilesCache.has(filesKey),
     error: null,
   }));
   const cachedFiles = reviewFilesCache.get(filesKey);
-  const files =
-    filesSnapshot.key === filesKey ? filesSnapshot.files : (cachedFiles ?? []);
+  const files = useMemo(() => filesSnapshot.key === filesKey ? filesSnapshot.files : (cachedFiles?.files ?? EMPTY_REVIEW_FILES), [filesSnapshot, filesKey, cachedFiles]);
+  const filesHeadSha = filesSnapshot.key === filesKey ? filesSnapshot.headSha : cachedFiles?.headSha;
+  const filesBaseSha = filesSnapshot.key === filesKey ? filesSnapshot.baseSha : cachedFiles?.baseSha;
   const filesLoading =
     filesSnapshot.key === filesKey
       ? filesSnapshot.loading
@@ -235,7 +270,9 @@ export function ReviewView({
     const retainedFiles = reviewFilesCache.get(filesKey);
     setFilesSnapshot({
       key: filesKey,
-      files: retainedFiles ?? [],
+      files: retainedFiles?.files ?? EMPTY_REVIEW_FILES,
+      headSha: retainedFiles?.headSha,
+      baseSha: retainedFiles?.baseSha,
       loading: retainedFiles === undefined,
       error: null,
     });
@@ -248,41 +285,58 @@ export function ReviewView({
       retainedFiles !== undefined &&
       meta &&
       meta.refreshKey === refreshKey &&
+      (!snap.pr?.headSha || retainedFiles.headSha === snap.pr.headSha) &&
       Date.now() - meta.at < REVIEW_FILES_FRESH_MS
     ) {
       return;
     }
+    const requestOwner = { workspaceId, key: filesKey, cancelled: false };
+    reviewFileRequestOwners.add(requestOwner);
     void reviewFileRequests
       .run(filesKey, refreshKey, async () => {
+        if (provider.getDiff) {
+          const result = await provider.getDiff({ workspaceId, hostOrigin: provider.hostOrigin, reviewRef: String(prNumber) });
+          return { files: parseUnifiedDiffFiles(result.patch), headSha: result.headSha, baseSha: result.baseSha };
+        }
         const diff = await gitDiff({
           workspaceId,
           mode: "base",
           rawPatch: true,
         });
-        return parseUnifiedDiffFiles(diff.patch ?? "");
+        return { files: parseUnifiedDiffFiles(diff.patch ?? "") };
       })
       .then((nextFiles) => {
-        if (cancelled) return;
+        if (cancelled || requestOwner.cancelled) return;
         cacheReviewFiles(filesKey, nextFiles, refreshKey);
         setFilesSnapshot({
           key: filesKey,
-          files: nextFiles,
+          files: nextFiles.files,
+          headSha: nextFiles.headSha,
+          baseSha: nextFiles.baseSha,
           loading: false,
           error: null,
         });
       })
       .catch((e) => {
-        if (cancelled) return;
+        if (cancelled || requestOwner.cancelled) return;
         setFilesSnapshot((current) =>
           current.key === filesKey
             ? { ...current, loading: false, error: humanGitError(e) }
             : current,
         );
-      });
+      })
+      .finally(() => reviewFileRequestOwners.delete(requestOwner));
     return () => {
       cancelled = true;
     };
-  }, [active, workspaceId, baseBranch, filesKey, refreshKey, filesReloadNonce]);
+  }, [active, provider, workspaceId, prNumber, baseBranch, filesKey, refreshKey, filesReloadNonce, snap.pr?.headSha]);
+
+  const renamedPaths = useMemo(() => new Map(files.flatMap(file => file.oldPath ? [[file.oldPath, file.path] as const] : [])), [files]);
+  const githubReview = useGithubReview({
+    workspaceId: provider.family === "github" ? workspaceId : undefined,
+    prNumber, cwd, active: active && sub === "changes", refreshKey,
+    confirmedHeadSha: filesHeadSha, confirmedBaseSha: filesBaseSha, renamedPaths,
+  });
 
   const pr = snap.pr;
   const checksSummary = summarizeChecks(snap.checks);
@@ -461,6 +515,12 @@ export function ReviewView({
       <div ref={bodyScrollRef} className="min-h-0 flex-1 overflow-auto">
         {sub === "changes" && (
           <ReviewChangesSection
+            key={JSON.stringify([provider.cacheKey, workspaceId, prNumber])}
+            workspaceId={workspaceId}
+            cwd={cwd}
+            active={active && sub === "changes"}
+            refreshKey={refreshKey}
+            reviewExternal={githubReview.source}
             files={files}
             loading={filesLoading}
             error={filesError}

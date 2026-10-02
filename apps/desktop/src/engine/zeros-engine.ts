@@ -82,6 +82,9 @@ import {
   isDesignMetadataRepoPath,
 } from "./design/metadata";
 import { DesignCodeToolAdmissions } from "./design/code-tool-admission";
+import { CodeReviewAgentTools } from "./agents/code-review-tools";
+import { codeReviewAgentActor, codeReviewProfileName } from "./code-review/actors";
+import { CodeReviewError } from "./code-review/errors";
 import {
   DESIGN_CANVAS_FILE,
   designDirectoryNameFor,
@@ -543,6 +546,8 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
  * identity publication. Native Code and Git remain unrestricted; qualified
  * cloud Code additionally performs its immutable authority handoff. */
 const DESIGN_RECOGNITION_PATH_OPS = new Set<string>([
+  "git.reviewHunk",
+  "git.resolveConflict",
   "file.write",
   "git.stage",
   "git.unstage",
@@ -592,6 +597,7 @@ function workspaceOpCanChangeDesignRecognition(
   inspectedHunkPaths: readonly string[] = [],
 ): boolean {
   if (!DESIGN_RECOGNITION_PATH_OPS.has(op)) return false;
+  if (op === "git.reviewHunk" && params.decision !== "rejected") return false;
   // `git apply` accepts traditional/quoted/binary/rename patches that cannot
   // be classified safely with a `diff --git` regex. The caller asks Git's own
   // parser first, so ordinary source hunks keep the fast path while a settings
@@ -609,7 +615,7 @@ function workspaceOpCanChangeDesignRecognition(
     return true;
   }
   const candidates =
-    op === "file.write"
+    op === "file.write" || op === "git.resolveConflict"
       ? [params.path]
       : Array.isArray(params.paths)
         ? params.paths
@@ -990,6 +996,8 @@ export class ZerosEngine {
   private readonly accountAuth: AccountAuth | null = buildAccountAuthFromEnv();
   /** clientId → verified account user id (for audit / multi-device identity). */
   private readonly clientAccount = new Map<string, string>();
+  /** Profile names are accepted only from verified claims, never client metadata. */
+  private readonly clientAccountNames = new Map<string, string>();
   /** clientId → the bound token's `exp` (Unix seconds). A relay session must
    *  not outlive the token it bound with — a periodic sweep demotes any client
    *  whose token has expired, forcing a re-auth with a fresh token. */
@@ -1011,6 +1019,7 @@ export class ZerosEngine {
    *  DIFFERENT account is rejected. Null until the signed-in desktop renderer
    *  connects (then relay clients are fail-closed as owner-unknown). */
   private ownerAccountSub: string | null = null;
+  private ownerAccountName: string | null = null;
   private readonly cloudRuntimeConfig: CloudRuntimeConfig | null;
   private readonly cloudRuntimeRegistration: CloudRuntimeRegistration | null;
   private readonly cloudDurabilityRuntime: CloudWorkspaceDurabilityRuntime | null;
@@ -1915,6 +1924,17 @@ export class ZerosEngine {
         supervisor:{onRetirementFailure:()=>this.handleCloudRuntimeAuthorityLoss()},
       })}:{}),
       sessionToolFactory: new DesignCodeToolAdmissions({
+        workspaceTools: (input) => {
+          const actor = codeReviewAgentActor(input);
+          const scope = actor ? this.workspace.codeReviewAgentScope(input) : null;
+          if (!actor || !scope) return null;
+          return new CodeReviewAgentTools(scope, {
+            resolveReadCwd: (id, remote) => this.workspace.resolveReadCwd(id, remote),
+            ownerRoots: () => this.workspace.codeReviewOwnerRoots(),
+          }, actor, (workspaceId) => this.router.broadcast(createMessage({
+            type: "DB_CHANGED", source: "engine", kinds: ["codeReview"], workspaceIds: [workspaceId],
+          })));
+        },
         mode: (input) => conversationModePort(input, () =>
           this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["chats"] }))),
         cloudWorker: this.cloudWorker !== null,
@@ -3270,7 +3290,7 @@ export class ZerosEngine {
       await this.runs.stopAllAndProve();
       await this.retireAllCodeAgentSessionsForTerritoryChange();
       await this.terminals.clear();
-      await this.cloudRecordRuntime.synchronize(authority);
+      await this.cloudRecordRuntime.flush(authority);
       await this.cloudDurabilityRuntime.checkpoint(directive, authority);
       if (!retainQuiescence) {
         this.cloudRuntimeCheckpointQuiescing = false;
@@ -5038,6 +5058,7 @@ export class ZerosEngine {
     err: unknown,
   ): void {
     try {
+      if (err instanceof CodeReviewError) return;
       const code = isGitError(err) ? err.code : undefined;
       if (code && EXPECTED_ENGINE_ERROR_CODES.has(code)) return;
       const s = scrubError(err);
@@ -8740,7 +8761,14 @@ export class ZerosEngine {
           return this.cloudLanguageServices.request(client.id,()=>client.authorized?.()===true&&
             !!client.cloudActor&&["developer","manager","owner"].includes(client.cloudActor.role)&&!this.cloudRuntimeCheckpointQuiescing&&!this.cloudRuntimeAuthorityStopping,params.request);
         }
+        const reviewUserId = op.startsWith("codeReview.")
+          ? client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub ?? undefined : undefined)
+          : undefined;
+        const reviewUserName = reviewUserId && this.clientAccount.get(client.id) === reviewUserId
+          ? this.clientAccountNames.get(client.id)
+          : client.kind === "local" && reviewUserId === this.ownerAccountSub ? this.ownerAccountName ?? undefined : undefined;
         const handleWorkspace=()=>this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay||client.cloudActor!==undefined,cloudWorker:!!this.cloudWorker,
+          ...(op.startsWith("codeReview.") ? { reviewUserId, reviewUserName } : {}),
           ...(client.cloudActor && client.accountUserId ? { cloudActorIdentity: { userId: client.accountUserId, deviceId: client.cloudActor.deviceId, sessionId: client.cloudActor.sessionId },
             cloudFileActor: { role: client.cloudActor.role, authorized: () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping } } : {})});
         if (this.cloudWorker && needsCloudGitAuthor(op, params)) {
@@ -9079,7 +9107,9 @@ export class ZerosEngine {
       // predicate for why each family is there.
       const changed = dbChangedKinds(op, result);
       if (changed) {
-        const workspaceIds = changed.includes("workspaces")
+        const workspaceIds = (changed.includes("codeReview") || changed.includes("gitReview")) && typeof params.workspaceId === "string"
+          ? [params.workspaceId]
+          : changed.includes("workspaces")
           ? dbChangedWorkspaceIds(params, result)
           : undefined;
         const dbChangedMsg = createMessage({
@@ -9134,7 +9164,7 @@ export class ZerosEngine {
         );
       }
     } catch (err) {
-      const code = isGitError(err) || err instanceof CloudCommandRuntimeError || err instanceof CloudEventRuntimeError ? err.code : "WORKSPACE_OP_FAILED";
+      const code = isGitError(err) || err instanceof CodeReviewError || err instanceof CloudCommandRuntimeError || err instanceof CloudEventRuntimeError ? err.code : "WORKSPACE_OP_FAILED";
       client.send(
         createMessage({
           type: "WORKSPACE_ERROR",
@@ -9477,6 +9507,7 @@ export class ZerosEngine {
     // access token inside the customer sandbox.
     if (client.kind === "cloud" && client.accountUserId) {
       this.clientAccount.set(client.id, client.accountUserId);
+      this.clientAccountNames.delete(client.id);
       appendSecurityAudit({
         type: "account-bound",
         clientId: client.id,
@@ -9497,9 +9528,12 @@ export class ZerosEngine {
       // lock out the trusted desktop or its remote devices; only an explicit
       // sign-out (OWNER_SIGNED_OUT → clearOwnerBinding) clears the owner.
       let sub: string | null = null;
+      let verifiedName: string | undefined;
       if (token) {
         try {
-          sub = (await this.verifyAccountToken(token)).sub;
+          const claims = await this.verifyAccountToken(token);
+          sub = claims.sub;
+          verifiedName = codeReviewProfileName(claims);
         } catch {
           sub = null;
         }
@@ -9514,6 +9548,7 @@ export class ZerosEngine {
         );
       }
       this.ownerAccountSub = next;
+      if (sub) this.ownerAccountName = verifiedName ?? null;
       return;
     }
 
@@ -9583,6 +9618,9 @@ export class ZerosEngine {
       return;
     }
     this.clientAccount.set(client.id, claims.sub);
+    const profileName = codeReviewProfileName(claims);
+    if (profileName) this.clientAccountNames.set(client.id, profileName);
+    else this.clientAccountNames.delete(client.id);
     if (typeof claims.exp === "number")
       this.clientTokenExp.set(client.id, claims.exp);
     this.ensureBindingSweep();
@@ -9615,6 +9653,8 @@ export class ZerosEngine {
       kind: "signed-out",
     });
     this.clientAccount.clear();
+    this.clientAccountNames.clear();
+    this.ownerAccountName = null;
     this.clientTokenExp.clear();
     appendSecurityAudit({ type: "owner-signed-out" });
     if (this.accountAuth?.required) {
@@ -9678,6 +9718,7 @@ export class ZerosEngine {
       if (exp === undefined || now <= exp * 1000 + skewMs) continue;
       const sub = this.clientAccount.get(remoteClient.id);
       this.clientAccount.delete(remoteClient.id);
+      this.clientAccountNames.delete(remoteClient.id);
       this.clientTokenExp.delete(remoteClient.id);
       appendSecurityAudit({
         type: "session-expired",
@@ -10252,6 +10293,7 @@ export class ZerosEngine {
       if (owner === client.id) this.questionOwner.delete(questionId);
     }
     this.clientAccount.delete(client.id);
+    this.clientAccountNames.delete(client.id);
     this.clientTokenExp.delete(client.id);
     this.router.unregister(client.id);
     // NOTE: shared terminals deliberately PERSIST across a client disconnect.

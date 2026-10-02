@@ -42,6 +42,11 @@ import React, {
 import { FileDiff, Folders, Search } from "lucide-react";
 
 import { useWorkspaceDispatch } from "@/renderer/state/store";
+import { useActiveWorkspace } from "@/renderer/state/use-active-workspace";
+import { useGithubReview } from "@/renderer/features/code-review/use-github-review";
+import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
+import { parseRemote } from "../../pr/github-url";
+import { resolveReviewProvider } from "../../pr/review-provider";
 import { Button, Input, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { useChatCwd } from "../../use-chat-cwd";
@@ -97,9 +102,14 @@ export const ChangesWorkbenchSurface = React.memo(
   function ChangesWorkbenchSurface({ tab, active, scope }: TabBodyProps) {
     const cwd = useChatCwd();
     const { workspace, isLocalMain, changesTarget } = useSourceTarget();
+    const { project } = useActiveWorkspace();
     // The same live refresh bus as the File tabs: agent turn-end / git
     // writes / editor saves re-pull the list, the PR row, and the open diff.
     const gitRefresh = useGitRefreshKey(cwd, changesTarget, active);
+    const githubReview = useGithubReview({
+      workspaceId: resolveReviewProvider(parseRemote(project?.originUrl)?.host ?? "github.com") ? changesTarget : undefined,
+      prNumber: workspace?.prNumber, cwd, active, refreshKey: gitRefresh,
+    });
     // The Local main folder might not be a git repo yet — offer Initialize /
     // Publish instead of a raw git error.
     const trunkRoot = isLocalMain ? workspace?.repoRoot || null : null;
@@ -131,6 +141,7 @@ export const ChangesWorkbenchSurface = React.memo(
             scope={scope}
             cwd={cwd}
             workspaceId={changesTarget}
+            reviewExternal={githubReview.source}
             baseBranch={workspace?.baseBranch ?? "main"}
             folder={workspace?.path ?? ""}
             refreshKey={gitRefresh}
@@ -155,6 +166,7 @@ interface ChangesSurfaceProps {
   scope?: string;
   cwd: string | undefined;
   workspaceId: string;
+  reviewExternal?: CodeReviewExternalSource;
   baseBranch: string;
   folder: string;
   refreshKey: number;
@@ -268,6 +280,7 @@ function ChangesSurface({
   scope,
   cwd,
   workspaceId,
+  reviewExternal,
   baseBranch,
   folder,
   refreshKey,
@@ -832,6 +845,7 @@ function ChangesSurface({
                 selected={selected}
                 selectionRequest={selectionRequest}
                 workspaceId={workspaceId}
+                reviewExternal={reviewExternal}
                 cwd={folder}
                 ownerKey={diffOwnerKey}
                 refreshKey={refreshKey}
@@ -884,6 +898,7 @@ function ChangesSurface({
                       cwd={cwd}
                       path={viewTarget.path}
                       workspaceId={workspaceId}
+                      reviewExternal={reviewExternal}
                       diff={viewTarget.diff}
                       diffScope={viewTarget.diffScope}
                       diffSha={viewTarget.diffSha}

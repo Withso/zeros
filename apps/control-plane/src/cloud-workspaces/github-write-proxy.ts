@@ -3,6 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { githubGitDownload } from "./github-git-stream.js";
+import { assertGithubReviewTarget, authorizeGithubReviewRequest, githubReviewPreflight } from "./github-review-policy.js";
 import type { DatabaseCloudGithubWriteGrants, GithubProxyAuthority } from "./github-write-grants.js";
 
 export const CLOUD_GITHUB_PROXY_PATH = "/internal/v1/cloud-workspaces/github-proxy";
@@ -14,6 +15,8 @@ class GitPacketPolicyError extends Error {
 
 /** Exact operation/body binding. No general GitHub/GraphQL forwarding surface. */
 export function authorizeGithubApiRequest(scope: GithubProxyAuthority, method: string, path: string, body: unknown, nodeId?: string): "api" | null {
+  const review = authorizeGithubReviewRequest(scope, method, path, body);
+  if (review !== undefined) return review;
   const repo = `/repos/${scope.owner}/${scope.repository}`;
   if (method === "GET" && path === `${repo}/pulls/${scope.prNumber}` && scope.operation === "gh.prMarkReady") return null;
   if (method === "POST" && path === "/graphql" && scope.operation === "gh.prMarkReady") {
@@ -141,6 +144,14 @@ export function createCloudGithubProxyRoutes(service: DatabaseCloudGithubWriteGr
         const path = url.pathname.slice(`${CLOUD_GITHUB_PROXY_PATH}/api`.length) + url.search;
         const body: unknown = c.req.method === "GET" ? undefined : await c.req.json();
         let nodeId: string | undefined;
+        const reviewPreflight = githubReviewPreflight(scope);
+        if (reviewPreflight) {
+          const target = await json(reviewPreflight.path, reviewPreflight.body ? {
+            method: "POST", body: JSON.stringify(reviewPreflight.body), headers: { "content-type": "application/json" },
+          } : {});
+          if (!target.response.ok) throw denied();
+          assertGithubReviewTarget(scope, target.data);
+        }
         if (path === "/graphql" && scope.operation === "gh.prMarkReady") {
           const pr = await json(`/repos/${scope.owner}/${scope.repository}/pulls/${scope.prNumber}`);
           if (!pr.response.ok) throw denied();

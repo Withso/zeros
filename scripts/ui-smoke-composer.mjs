@@ -71,6 +71,8 @@ import { runCodexTranscriptSmoke } from "./ui-smoke-codex-transcript.mjs";
 import { runSubscriptionSmoke } from "./ui-smoke-subscription.mjs";
 import { runFolderWorkspaceSmoke, runWorkspaceRecoveryNavigationSmoke } from "./ui-smoke-folder-workspace.mjs";
 import { runFolderReviewSmoke } from "./ui-smoke-folder-review.mjs";
+import { runGitReviewActionsSmoke } from "./ui-smoke-git-review-actions.mjs";
+import { runCodeReviewSmoke } from "./ui-smoke-code-review.mjs";
 import { runFolderFilesSmoke } from "./ui-smoke-folder-files.mjs";
 import { runCreateProjectSelectionSmoke, runFolderCreateSmoke, runFolderDesignSetupSmoke, runFolderAutoSetupSmoke, runStartFromScratchSmoke } from "./ui-smoke-folder-create.mjs";
 import { runRepoSettingsSmoke } from "./ui-smoke-repo-settings.mjs";
@@ -182,6 +184,12 @@ try {
     return created;
   };
   const createPage = await newPage({ viewport: { width: 1100, height: 780 } });
+  const reviewActionsPage = await newPage({ viewport: { width: 1100, height: 780 } });
+  await runGitReviewActionsSmoke({ page: reviewActionsPage, check, harnessBase });
+  await reviewActionsPage.close();
+  const codeReviewPage = await newPage({ viewport: { width: 1180, height: 900 } });
+  await runCodeReviewSmoke({ page: codeReviewPage, check, harnessBase });
+  await codeReviewPage.close();
   await runCreateComposerSmoke({ page: createPage, check, harnessBase });
   await createPage.close();
   for (const runSourceFocusSmoke of [

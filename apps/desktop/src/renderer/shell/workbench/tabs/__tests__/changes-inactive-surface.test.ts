@@ -41,7 +41,7 @@ describe("inactive retained Changes surface", () => {
     ).toBeGreaterThanOrEqual(3);
   });
 
-  it("keeps the retained Review surface from pulling a local diff while hidden", () => {
+  it("keeps the retained Review surface from pulling its published diff while hidden", () => {
     const surface = readFileSync(
       fileURLToPath(new URL("../review-surface.tsx", import.meta.url)),
       "utf8",
@@ -55,7 +55,7 @@ describe("inactive retained Changes surface", () => {
       /useGitRefreshKey\(\s*workspace\?\.path,\s*changesTarget,\s*active,?\s*\)/,
     );
     expect(view).toMatch(
-      /\/\/ ── local PR diff[\s\S]{0,1800}useEffect\(\(\) => \{\s*if \(!active\) return;/,
+      /const \[filesReloadNonce,[\s\S]{0,180}useEffect\(\(\) => \{\s*if \(!active\) return;/,
     );
   });
 

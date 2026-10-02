@@ -4828,6 +4828,7 @@ export class AgentGateway {
           if (actor === "agent-code") {
             mcpServers = await this.sessionTools.admit(
               {
+                agentId,
                 executionId,
                 cwd,
                 workspaceId: opts.workspaceId,
@@ -5154,6 +5155,7 @@ export class AgentGateway {
           );
           const mcpServers = await this.sessionTools.admit(
             {
+              agentId,
               executionId,
               cwd,
               workspaceId: opts.workspaceId,

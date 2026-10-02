@@ -31,6 +31,7 @@ export default defineConfig({
       "apps/desktop/src/renderer/features/agent-extensions/__tests__/**/*.test.ts",
       "apps/desktop/src/renderer/features/design-workspace/__tests__/**/*.test.ts",
       "apps/desktop/src/renderer/features/repositories/__tests__/**/*.test.ts",
+      "apps/desktop/src/renderer/features/code-review/__tests__/**/*.test.ts",
       // Desktop bridge commands and workbench contracts.
       "apps/desktop/electron/ipc/commands/__tests__/**/*.test.ts",
       // App log store: repeat coalescing (storm dedup) in apps/desktop/electron/log-store.ts.

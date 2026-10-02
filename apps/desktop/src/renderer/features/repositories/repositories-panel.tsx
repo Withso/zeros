@@ -141,6 +141,8 @@ import { dbDeleteChat } from "../agent/agent-history-client";
 import { setSetting } from "../../platform/settings";
 import { clearChangesFilters } from "../../shell/workbench/tabs/changes-filter-store";
 import { forgetChangesSnapshots } from "../../shell/workbench/tabs/changes-snapshot-cache";
+import { forgetPrCachesForWorkspace } from "../../shell/pr/pr-cache-forget";
+import { forgetReviewCachesForFolders } from "../code-review/review-cache-forget";
 import { clearTerminalFolders } from "../../shell/terminal/terminal-store";
 import { clearChatPaneFolders } from "../../state/chat-panes-store";
 import { clearDashboardRepoFilter } from "../dashboard/preferences";
@@ -2065,6 +2067,15 @@ export function RemoveRepositoryDialog({
         project.repoRoot,
         ...workspaces.map((workspace) => workspace.id),
       ]);
+      forgetReviewCachesForFolders(folderBelongsToRemovedRepo);
+      for (const workspaceId of new Set([
+        project.repoRoot,
+        ...workspaces
+          .filter((workspace) => folderBelongsToRemovedRepo(workspace.path))
+          .map((workspace) => workspace.id),
+      ])) {
+        forgetPrCachesForWorkspace(workspaceId);
+      }
       clearTerminalFolders([...removedFolders], project.id);
       clearChatPaneFolders([...removedFolders], project.id);
       clearDashboardRepoFilter(project.repoSlug);

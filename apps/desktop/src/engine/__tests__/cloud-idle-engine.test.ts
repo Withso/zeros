@@ -14,7 +14,7 @@ function fixture() {
     running: true, cloudRuntimeCheckpointQuiescing: true, cloudRuntimeAuthorityStopping: false,
     cloudIdleReservation: (() => true) as (() => boolean) | null, cloudIdleCheckpoint: null,
     cloudRuntimeRegistration: { idleStopRequest: vi.fn(async () => directive) },
-    cloudDurabilityRuntime: { checkpoint: vi.fn(async () => undefined) }, cloudRecordRuntime: { synchronize: vi.fn(async () => undefined) },
+    cloudDurabilityRuntime: { checkpoint: vi.fn(async () => undefined) }, cloudRecordRuntime: { synchronize: vi.fn(async () => undefined), flush: vi.fn(async () => undefined) },
     cloudHumanServices: { pause: vi.fn(async () => undefined), resume: vi.fn(), hasActiveWork: () => false },
     cloudLanguageServices: { pause: vi.fn(async () => undefined), resume: vi.fn() },
     cloud: { setHumanServicesPaused: vi.fn() }, cloudCheckpointScheduler: { pause: vi.fn(async () => undefined), resume: vi.fn() },
@@ -50,6 +50,23 @@ describe("idle checkpoint execution", () => {
     expect(state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledTimes(1);
     expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);
     expect(state.cloudIdleReservation).toBeNull();
+  });
+  it("awaits a fresh record flush before permitting the final filesystem checkpoint", async () => {
+    const state = fixture();
+    let releaseFlush!: () => void, notifyFlush!: () => void;
+    const heldFlush = new Promise<void>((resolve) => { releaseFlush = resolve; });
+    const enteredFlush = new Promise<void>((resolve) => { notifyFlush = resolve; });
+    state.cloudRecordRuntime.flush.mockImplementation(async () => {
+      notifyFlush(); await heldFlush;
+    });
+    const capture = state.handleCloudCheckpointRequest(directive, authority);
+    await enteredFlush;
+    expect(state.retireAllCodeAgentSessionsForTerritoryChange).toHaveBeenCalledOnce();
+    expect(state.cloudRecordRuntime.synchronize).not.toHaveBeenCalled();
+    expect(state.cloudDurabilityRuntime.checkpoint).not.toHaveBeenCalled();
+    releaseFlush(); await capture;
+    expect(state.cloudRecordRuntime.flush).toHaveBeenCalledWith(authority);
+    expect(state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledOnce();
   });
   it("cancels instead of killing newly observed background work", async () => {
     const state = fixture(); vi.mocked(hasCloudUserProcesses).mockResolvedValue(true);

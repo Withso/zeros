@@ -23,7 +23,7 @@ interface ReaperInternals {
   cloudRuntimeCheckpointQuiescing: boolean;
   cloudWorkspaceMutations: Set<Promise<unknown>>;
   cloudDurabilityRuntime: { checkpoint: ReturnType<typeof vi.fn> } | null;
-  cloudRecordRuntime: { synchronize: ReturnType<typeof vi.fn> } | null;
+  cloudRecordRuntime: { synchronize: ReturnType<typeof vi.fn>; flush: ReturnType<typeof vi.fn> } | null;
   handleCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void>;
   cloudReplicaRuntime: {
     updateSession(session: CloudReplicaHostSession | null): Promise<void>;
@@ -1274,15 +1274,15 @@ describe("qualified cloud workspace authority", () => {
     state.workspaceProcessStarts.set("local-main",new Set([start]));
     vi.spyOn(state.setup,"stopAllAndProve").mockResolvedValue();
     vi.spyOn(state.runs,"stopAllAndProve").mockResolvedValue();
-    const checkpoint=vi.fn(async()=>{}),synchronize=vi.fn(async()=>{});
-    state.cloudDurabilityRuntime={checkpoint};state.cloudRecordRuntime={synchronize};
+    const checkpoint=vi.fn(async()=>{}),synchronize=vi.fn(async()=>{}),flush=vi.fn(async()=>{});
+    state.cloudDurabilityRuntime={checkpoint};state.cloudRecordRuntime={synchronize,flush};
     const writing=state.handleWorkspaceMessage({type:"WORKSPACE_REQUEST",id:"edit",source:"browser",timestamp:1,op:"design.frame.create",params:{workspaceId:"local-main"}},client("cloud"));
     const capture=state.handleCloudCheckpointRequest({id:"fixture",reason:"before_stop",deadlineAtMs:Date.now()+30000},{heartbeatEndpoint:"https://example.test/heartbeat",heartbeatToken:"fixture",workspaceId:"workspace",organizationId:"org",generation:1,engineInstanceId:"engine"});
     try{
       await new Promise(resolve=>setTimeout(resolve,10));expect(checkpoint).not.toHaveBeenCalled();
       releaseStart();await new Promise(resolve=>setTimeout(resolve,10));expect(checkpoint).not.toHaveBeenCalled();
       releaseEdit();await writing;await capture;
-      expect(synchronize).toHaveBeenCalledOnce();expect(checkpoint).toHaveBeenCalledOnce();
+      expect(synchronize).not.toHaveBeenCalled();expect(flush).toHaveBeenCalledOnce();expect(checkpoint).toHaveBeenCalledOnce();
       expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);expect(state.cloudWorkspaceMutations.size).toBe(0);
     }finally{releaseStart();releaseEdit();await Promise.allSettled([writing,capture]);}
   });

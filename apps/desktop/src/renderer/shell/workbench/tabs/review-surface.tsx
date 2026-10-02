@@ -77,6 +77,7 @@ export const ReviewSurface = React.memo(function ReviewSurface({
         key={workspace.id}
         provider={provider}
         workspaceId={workspace.id}
+        cwd={workspace.path}
         baseBranch={workspace.baseBranch ?? "main"}
         branch={workspace.branch}
         prNumber={workspace.prNumber}

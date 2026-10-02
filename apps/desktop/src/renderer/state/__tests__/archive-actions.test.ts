@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { archiveWorkspaceWithFeedback } from "../archive-actions";
+import {
+  archiveWorkspaceWithFeedback,
+  deleteWorkspacePermanently,
+} from "../archive-actions";
+import { loadProjects } from "../projects-store";
 import { selectLiveVisible } from "../live-workspace-selectors";
 import {
   beginPendingCreate,
@@ -10,12 +14,21 @@ import { selectActiveFolder, useWorkspaceStore } from "../store";
 import { peekWorkspacesFor, setWorkspaceRowsForTesting } from "../use-projects";
 import {
   workspaceArchive,
+  workspaceDelete,
   workspaceGet,
   workspaceLifecycleStatus,
   type ArchiveResult,
   type Workspace,
 } from "../../platform/git";
 import { toast } from "../../shared/ui/primitives/elements";
+import {
+  codeReviewCache,
+  codeReviewCacheKey,
+} from "../../features/code-review/review-cache";
+import {
+  hunkReviewCache,
+  hunkReviewCacheKey,
+} from "../../features/code-review/hunk-review-cache";
 
 vi.mock("../../shared/ui/primitives/elements", () => ({
   toast: { success: vi.fn(), info: vi.fn(), error: vi.fn() },
@@ -26,12 +39,13 @@ vi.mock("../../platform/observability/analytics/agent-events", () => ({
 vi.mock("../../platform/git", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../platform/git")>()),
   workspaceArchive: vi.fn(),
+  workspaceDelete: vi.fn(),
   workspaceGet: vi.fn(),
   workspaceLifecycleStatus: vi.fn(),
 }));
 vi.mock("../projects-store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../projects-store")>()),
-  loadProjects: () => [
+  loadProjects: vi.fn(() => [
     {
       id: "archive-fixture",
       name: "Archive fixture",
@@ -40,7 +54,7 @@ vi.mock("../projects-store", async (importOriginal) => ({
       originUrl: null,
       addedAt: 1,
     },
-  ],
+  ]),
 }));
 
 function workspace(id: string, createdAt: number): Workspace {
@@ -92,6 +106,18 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  codeReviewCache.clear();
+  hunkReviewCache.clear();
+  vi.mocked(loadProjects).mockReturnValue([
+    {
+      id: "archive-fixture",
+      name: "Archive fixture",
+      repoRoot: "/repo",
+      repoSlug: "archive-fixture",
+      originUrl: null,
+      addedAt: 1,
+    },
+  ]);
   usePendingWorkspacesStore.setState(
     usePendingWorkspacesStore.getInitialState(),
     true,
@@ -109,6 +135,104 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+function seedReviewCaches(folder: string, workspaceId = target.id) {
+  const reviewKey = codeReviewCacheKey(folder, workspaceId);
+  const hunkKey = hunkReviewCacheKey("engine", folder, "file.ts");
+  const review = {
+    workspaceId,
+    threads: [],
+    partial: true,
+    nextCursor: "retained-history",
+  };
+  const hunks = [
+    {
+      key: "a".repeat(64),
+      path: "file.ts",
+      comparison: "worktree-vs-head" as const,
+      decision: "accepted" as const,
+      updatedAt: 1,
+    },
+  ];
+  codeReviewCache.setData(reviewKey, review);
+  hunkReviewCache.setData(hunkKey, hunks);
+  return { reviewKey, hunkKey, review, hunks };
+}
+
+function expectReviewCachesRetained(
+  entries: ReturnType<typeof seedReviewCaches>[],
+) {
+  for (const entry of entries) {
+    expect(codeReviewCache.peekSnapshot(entry.reviewKey).data).toBe(
+      entry.review,
+    );
+    expect(hunkReviewCache.peekSnapshot(entry.hunkKey).data).toBe(entry.hunks);
+  }
+}
+
+describe("confirmed workspace deletion review caches", () => {
+  it("retains pending or failed deletion snapshots, then purges owned normalized descendants only", async () => {
+    const deleting = {
+      ...target,
+      repoRoot: "/var/repo",
+      path: "/var/repo/worktrees/target",
+    };
+    const project = { ...loadProjects()[0]!, repoRoot: deleting.repoRoot };
+    vi.mocked(loadProjects).mockReturnValue([
+      project,
+      {
+        ...project,
+        id: "nested-project",
+        repoSlug: "nested-project",
+        repoRoot: `${deleting.path}/nested`,
+      },
+    ]);
+    const owned = [
+      seedReviewCaches(`${deleting.path}/`),
+      seedReviewCaches("/private/var/repo/worktrees/target///"),
+      seedReviewCaches("/private/var/repo/worktrees/target/packages/app//"),
+    ];
+    const preserved = [
+      seedReviewCaches(
+        "/private/var/repo/worktrees/target/nested/src//",
+        "nested-workspace",
+      ),
+      seedReviewCaches(`${deleting.path}-sibling/src`, "sibling-workspace"),
+      seedReviewCaches(right.path, right.id),
+    ];
+    const failed = deferred<void>();
+    vi.mocked(workspaceDelete).mockReturnValueOnce(failed.promise);
+    const failure = deleteWorkspacePermanently(deleting, dispatch);
+    expectReviewCachesRetained([...owned, ...preserved]);
+    failed.reject(new Error("worktree is busy"));
+    expect(await failure).toBe("failed");
+    expectReviewCachesRetained([...owned, ...preserved]);
+
+    const confirmed = deferred<void>();
+    vi.mocked(workspaceDelete).mockReturnValueOnce(confirmed.promise);
+    const deletion = deleteWorkspacePermanently(deleting, dispatch);
+    expectReviewCachesRetained([...owned, ...preserved]);
+    confirmed.resolve();
+    expect(await deletion).toBe("deleted");
+    for (const entry of owned) {
+      expect(
+        codeReviewCache.peekSnapshot(entry.reviewKey).data,
+      ).toBeUndefined();
+      expect(hunkReviewCache.peekSnapshot(entry.hunkKey).data).toBeUndefined();
+    }
+    expectReviewCachesRetained(preserved);
+  });
+
+  it("preserves review and hunk history on archive for restoration under the same owner", async () => {
+    const entries = [
+      seedReviewCaches(target.path),
+      seedReviewCaches(`${target.path}/packages/app`),
+    ];
+    vi.mocked(workspaceArchive).mockResolvedValueOnce(result());
+    await archiveWorkspaceWithFeedback(target, dispatch);
+    expectReviewCachesRetained(entries);
+  });
 });
 
 describe("immediate archive presentation", () => {
