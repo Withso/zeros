@@ -228,7 +228,7 @@ describe("scoped navigation memory", () => {
         ),
         cachedWorkspaces: [],
       }),
-    ).toMatchObject({ id: `local:${project.repoSlug}`, path: rootA });
+    ).toBeNull();
   });
 
   it("publishes a worktree-less repository and its selected filter atomically", () => {

@@ -8,6 +8,7 @@ import { createRoot } from "react-dom/client";
 import { RuntimeClient } from "../platform/bridge/ws-client";
 import { BridgeProvider } from "../platform/bridge/use-bridge";
 import type { BridgeMessage } from "../platform/bridge/messages";
+import type { Workspace } from "../platform/git";
 import {
   notifyContextGraphChanged,
   type ContextGraphItemWire,
@@ -29,24 +30,43 @@ import {
   ConversationSummaryIsland,
 } from "../shell/conversation/conversation-summary";
 
-const folderA = "/summary-fixture/a";
-const folderB = "/summary-fixture/b";
+const repoA = "/summary-fixture/a";
+const repoB = "/summary-fixture/b";
+const folderA = `${repoA}/worktree`;
+const folderB = `${repoB}/worktree`;
 // This fixture exercises every destination, including GitHub Review. Plain
 // folder and local-only Review absence live in harness-folder-workspace.
 upsertProject({
-  repoRoot: folderA,
+  repoRoot: repoA,
   repoSlug: "a",
   name: "Summary A",
   isGitRepository: true,
   originUrl: "https://github.com/example/summary-a.git",
 });
 upsertProject({
-  repoRoot: folderB,
+  repoRoot: repoB,
   repoSlug: "b",
   name: "Summary B",
   isGitRepository: true,
   originUrl: "https://github.com/example/summary-b.git",
 });
+const workspaces: Workspace[] = [
+  { id: "ws_summary_a", repoRoot: repoA, repoSlug: "a", path: folderA },
+  { id: "ws_summary_b", repoRoot: repoB, repoSlug: "b", path: folderB },
+].map((workspace) => ({
+  ...workspace,
+  branch: `summary/${workspace.repoSlug}`,
+  baseBranch: "main",
+  status: "in-progress",
+  createdAt: 1,
+  archivedAt: null,
+  stashRef: null,
+  prNumber: null,
+  prState: null,
+  prUrl: null,
+  agentId: null,
+  lastActiveAt: null,
+}));
 const listeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const messages: Array<Record<string, unknown>> = [];
 const overlayIntents: boolean[] = [];
@@ -90,8 +110,20 @@ RuntimeClient.prototype.request = async function <
   const message = raw as Record<string, unknown>;
   messages.push(message);
   const params = (message.params ?? {}) as Record<string, unknown>;
+  const workspaceFolder = workspaces.find(
+    (row) => row.id === params.workspaceId,
+  )?.path;
   let result: unknown = {};
-  if (message.op === "workspace.list") result = { workspaces: [] };
+  if (message.op === "workspace.list") {
+    result = {
+      workspaces:
+        params.archived === true
+          ? []
+          : workspaces.filter(
+              (row) => !params.repoSlug || row.repoSlug === params.repoSlug,
+            ),
+    };
+  }
   if (message.op === "settings.resolve")
     result = {
       effective: {
@@ -110,7 +142,7 @@ RuntimeClient.prototype.request = async function <
     };
   if (message.op === "context.graph.list") {
     const names =
-      params.workspaceId === folderB ? ["Workspace B notes.md"] : contextItems;
+      workspaceFolder === folderB ? ["Workspace B notes.md"] : contextItems;
     const items: ContextGraphItemWire[] = names.map((name, index) => ({
       name,
       relPath: `.context/local/attachments/${index}/${name}`,
@@ -120,7 +152,7 @@ RuntimeClient.prototype.request = async function <
       bytes: 10,
       mtimeMs: index + 1,
     }));
-    if (delayContext && params.workspaceId === folderA)
+    if (delayContext && workspaceFolder === folderA)
       await new Promise<void>((resolve) => {
         releaseContext = resolve;
       });
@@ -163,10 +195,10 @@ RuntimeClient.prototype.request = async function <
   }
   if (message.op === "git.changeLineCounts") {
     result =
-      params.workspaceId === folderB
+      workspaceFolder === folderB
         ? { additions: 0, deletions: 7 }
         : changeLines;
-    if (delayLines && params.workspaceId === folderA) {
+    if (delayLines && workspaceFolder === folderA) {
       delayLines = false;
       await new Promise<void>((resolve) => {
         releaseLines = resolve;

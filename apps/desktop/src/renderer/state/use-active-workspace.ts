@@ -12,7 +12,7 @@
 //   1. Active chat's `folder`, else `state.newAgentFolder`.
 //   2. Project that owns that folder (via findProjectForFolder).
 //   3. The matching managed workspace, including archived or missing rows.
-//   4. After those lists resolve, fall back to the legacy primary checkout.
+//   4. After those lists resolve, allow legacy plain folders and cloud trunks.
 //
 // Returns `{ workspace, folder, project }`. Any of these may be null
 // when there's no active chat / no project / no matching workspace.
@@ -22,7 +22,10 @@ import { useMemo } from "react";
 
 import type { Workspace } from "../platform/git";
 import { findWorkspaceForFolder } from "./workspace-resolution";
-import { buildLocalMainWorkspace } from "./local-main-workspace";
+import {
+  buildLocalMainWorkspace,
+  canRestoreFolderWorkspace,
+} from "./local-main-workspace";
 import { type Project } from "./projects-store";
 import { selectActiveFolder, useWorkspaceStore } from "./store";
 import {
@@ -72,6 +75,7 @@ export function useActiveWorkspace(): ActiveWorkspaceResolution {
     // Do not briefly mount live agent/workbench effects as "local main" while
     // the exact live or archived ownership snapshot is still loading.
     if (!resolved || !archives.resolved) return null;
+    if (!canRestoreFolderWorkspace(project)) return null;
     const main = buildLocalMainWorkspace(project);
     if (findWorkspaceForFolder(folder, [main])) return main;
     return null;

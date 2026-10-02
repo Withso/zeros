@@ -88,10 +88,59 @@ describe("repository workspace restoration", () => {
     }
   });
 
-  it("preserves a chat rooted in a main-checkout subdirectory", () => {
+  it.each([true, undefined])(
+    "leaves a repository empty for saved local main with Git capability %s",
+    (isGitRepository) => {
+      for (const rememberedFolder of ["/repo", "/repo/packages/app"]) {
+        expect(
+          resolveRepoWorkspaceDestination({
+            project: { ...project, isGitRepository },
+            rememberedFolder,
+            cachedWorkspaces: [],
+          }),
+        ).toBeNull();
+      }
+    },
+  );
+
+  it("never restores the primary checkout itself while its workspace list is cold", () => {
     expect(
       resolveRepoWorkspaceDestination({
         project,
+        rememberedFolder: project.repoRoot,
+        cachedWorkspaces: undefined,
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps a cold nested path pending until its managed ownership resolves", () => {
+    const path = "/repo/.worktrees/nested/src";
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: path,
+        cachedWorkspaces: undefined,
+      }),
+    ).toEqual({ path, repoRoot: "/repo", validationPending: true });
+  });
+
+  it("restores an available worktree instead of a saved primary checkout", () => {
+    const managed = workspace("managed", { archivedAt: null });
+    for (const rememberedFolder of ["/repo", "/repo/packages/app"]) {
+      expect(
+        resolveRepoWorkspaceDestination({
+          project,
+          rememberedFolder,
+          cachedWorkspaces: [managed],
+        }),
+      ).toBe(managed);
+    }
+  });
+
+  it("preserves a chat rooted in a plain-folder subdirectory", () => {
+    expect(
+      resolveRepoWorkspaceDestination({
+        project: { ...project, isGitRepository: false },
         rememberedFolder: "/repo/packages/app",
         cachedWorkspaces: [],
       }),
@@ -280,13 +329,12 @@ describe("leftmostLiveWorkspace", () => {
   });
 
   it("returns null for a cold cache rather than guessing", () => {
-    // `undefined` is "not loaded yet", not "no worktrees" — callers fall back
-    // to the repo root, which is recoverable; guessing a tab is not.
+    // `undefined` is "not loaded yet", not "no worktrees".
     expect(leftmostLiveWorkspace(undefined)).toBeNull();
   });
 });
 
-// New work always lands on a managed worktree; old root memories remain readable.
+// Old root memories cannot restore the retired Local main destination.
 describe("repository workspace restoration without local main", () => {
   const older = workspace("older", {
     path: "/worktrees/older",
@@ -345,16 +393,14 @@ describe("repository workspace restoration without local main", () => {
     ).toBe(older);
   });
 
-  it("preserves an explicit legacy root memory when no worktrees remain", () => {
-    // Nowhere else to go — a repo whose only checkout is the trunk has to
-    // resolve somewhere, and "+" is the top bar's call to action from there.
+  it("returns to the empty repository for an explicit legacy root memory", () => {
     expect(
       resolveRepoWorkspaceDestination({
         project,
         rememberedFolder: "/repo",
         cachedWorkspaces: [],
       }),
-    ).toMatchObject({ id: "local:zeros", path: "/repo" });
+    ).toBeNull();
   });
 
   it("does not guess a redirect while the repository cache is cold", () => {
@@ -366,7 +412,7 @@ describe("repository workspace restoration without local main", () => {
         rememberedFolder: "/repo",
         cachedWorkspaces: undefined,
       }),
-    ).toMatchObject({ id: "local:zeros", path: "/repo" });
+    ).toBeNull();
   });
 
   it("leaves a confirmed worktree memory untouched", () => {

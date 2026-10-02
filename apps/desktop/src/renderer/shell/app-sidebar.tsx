@@ -65,10 +65,7 @@ import {
   dedupePendingCreates,
   useLiveVisible,
 } from "../state/live-workspace-selectors";
-import {
-  isLocalMainWorkspace,
-  withLocalMainWorkspace,
-} from "../state/local-main-workspace";
+import { isLocalMainWorkspace } from "../state/local-main-workspace";
 import {
   usePendingCreatesAll,
   useWorkspaceProvisioning,
@@ -542,17 +539,11 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     [activeOrganization, activeProjectWorkspaces],
   );
 
-  const activeProjectDestinations = useMemo(
-    () =>
-      activeProject
-        ? withLocalMainWorkspace(
-            activeProject,
-            activeProjectAccessibleWorkspaces,
-          )
-        : [],
-    [activeProject, activeProjectAccessibleWorkspaces],
-  );
-  const mainWorkspace = activeProjectDestinations[0] ?? null;
+  const mainWorkspace =
+    activeResolution.workspace &&
+    isLocalMainWorkspace(activeResolution.workspace)
+      ? activeResolution.workspace
+      : null;
   const realWorkspaces = useLiveVisible(accessibleWorkspaces);
   useWorkspaceRunActivitySync(realWorkspaces);
 
@@ -621,7 +612,6 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       activePage !== "workspace" ||
       !activeFolder ||
       !activeProject ||
-      activeFolder === activeProject.repoRoot ||
       activeProjectLoading ||
       activeProjectRefreshing ||
       activeResolution.loading ||
@@ -694,7 +684,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     const insideMainCheckout = mainWorkspace
       ? !!findWorkspaceForFolder(activeFolder, [mainWorkspace])
       : false;
-    return insideMainCheckout ? mainWorkspace.id : null;
+    return mainWorkspace && insideMainCheckout ? mainWorkspace.id : null;
   }, [activeFolder, activePage, listedItems, mainWorkspace]);
   const activePendingCreate = useMemo(() => {
     if (activePage !== "workspace") return null;

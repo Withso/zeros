@@ -324,6 +324,8 @@ export async function runCreateSourceSettingsSmoke({ page, check }) {
 
 export async function runFolderDesignSetupSmoke({ page, check }) {
   await openFixture(page, "workbench");
+  const folderRow = page.locator('[data-workspace-id="local:to-do-app"]');
+  await expect(folderRow).toHaveCount(1);
   const chats = await page.locator("[data-folder-state]").textContent();
   await page.getByRole("tab", { name: "Design", exact: true }).click();
   const empty = page.locator("[data-design-tab-empty]");
@@ -361,11 +363,15 @@ export async function runFolderDesignSetupSmoke({ page, check }) {
   );
   expect(initRequests).toHaveLength(2);
   expect(initRequests[1].params.repoRoot).toBe(folder);
-  await expect(
-    page.locator('[data-workspace-id="local:to-do-app"]'),
-  ).toHaveCount(1);
+  await expect(folderRow).toHaveCount(0);
+  await page.getByRole("button", { name: "Show folder settings", exact: true }).click();
+  await expect(page.getByText("No workspaces yet", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-workspace-id]")).toHaveCount(0);
+  expect(await page.evaluate(() => window.folderWorkspaceRequests.filter(({ op }) =>
+    op === "workspace.create",
+  ))).toEqual([]);
   check(
-    "Design offers local Git initialization with a folder icon, retries failure and preserves open chats",
+    "Design Git setup retries failure and preserves chats without restoring a Local main workspace",
     true,
   );
 }

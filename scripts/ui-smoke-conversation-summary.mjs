@@ -289,7 +289,7 @@ export async function runConversationSummarySmoke({
           ),
         )
         .toMatchObject([
-          { actionId: "action-0", repoRoot: "/summary-fixture/a" },
+          { actionId: "action-0", workspaceId: "ws_summary_a" },
         ]);
       await island
         .getByRole("button", { name: "Open Dev server in Browser" })

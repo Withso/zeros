@@ -58,7 +58,7 @@ export async function runSetupSidebarSmoke({ page, check }) {
   await run.click();
   await expect.poll(async () => (await requests()).length).toBe(1);
   const a = (await requests())[0].params;
-  expect(a.repoRoot).toBe("/terminal-fixture/a");
+  expect(a.workspaceId).toBe("ws_terminal_a");
   await expect(run).toBeDisabled();
   await expect(main).toContainText("Setup output preserved");
   await main.locator(".xterm").evaluate((node) => {
@@ -147,7 +147,7 @@ export async function runSetupSidebarSmoke({ page, check }) {
   await run.click();
   await expect.poll(async () => (await requests()).length).toBe(4);
   const b = (await requests())[3].params;
-  expect(b.repoRoot).toBe("/terminal-fixture/b");
+  expect(b.workspaceId).toBe("ws_terminal_b");
   expect(b.workspaceId).not.toBe(a.workspaceId);
   const bSelection = (await state()).activeId;
   await finish(a.workspaceId);
