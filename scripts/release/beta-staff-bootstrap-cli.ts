@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMigrationPool } from "../../apps/control-plane/src/db.js";
@@ -11,8 +11,22 @@ import { command, jsonClient, type Command } from "./io";
 
 async function readJson(file: string, code: "configuration" | "intent"): Promise<unknown> {
   try {
-    if ((await stat(file)).size > 64 * 1024) throw new Error();
-    return JSON.parse(await readFile(file, "utf8"));
+    const handle = await open(file, "r");
+    try {
+      const metadata = await handle.stat();
+      if (!metadata.isFile() || metadata.size > 64 * 1024) throw new Error();
+      const bytes = Buffer.alloc(64 * 1024 + 1);
+      let size = 0;
+      while (size < bytes.length) {
+        const result = await handle.read(bytes, size, bytes.length - size, null);
+        if (result.bytesRead === 0) break;
+        size += result.bytesRead;
+      }
+      if (size > 64 * 1024) throw new Error();
+      return JSON.parse(bytes.subarray(0, size).toString("utf8"));
+    } finally {
+      await handle.close();
+    }
   } catch { throw new BetaStaffBootstrapError(code); }
 }
 
