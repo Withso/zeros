@@ -1,8 +1,16 @@
 import { expect } from "@playwright/test";
 
 export async function runFolderReviewSmoke({ page, check }) {
+  const harness = `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-folder-workspace.html`;
+  const openManagedWorkspace = async (surface) => {
+    await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
+    await page.goto(`${harness}?automatic&${surface}`);
+    await page.getByRole("button", { name: "Open folder fixture", exact: true }).click();
+    await page.getByRole("button", { name: "Initialize git and create", exact: true }).click();
+    await expect(page.locator('[data-workspace-id="ws_fixture_1"]')).toBeVisible();
+  };
   await page.goto(
-    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-folder-workspace.html?workbench`,
+    `${harness}?workbench`,
   );
   await page
     .getByRole("button", { name: "Restore saved folder", exact: true })
@@ -12,7 +20,6 @@ export async function runFolderReviewSmoke({ page, check }) {
   const review = panels.getByRole("tab", { name: "Review", exact: true });
   const files = panels.getByRole("tab", { name: "Open file", exact: true });
   const rootTab = page.locator('[data-workspace-id="local:to-do-app"]');
-  const chats = await page.locator("[data-folder-state]").textContent();
   const resumeWith = async (isRepo, originUrl = null, fails = false) => {
     await page.evaluate(
       ({ isRepo, originUrl, fails }) => {
@@ -31,14 +38,22 @@ export async function runFolderReviewSmoke({ page, check }) {
   );
   await page.evaluate(() => window.setFolderGitState(true, null));
   await expect(review).toHaveCount(0);
+  await expect(rootTab).toHaveCount(0);
+  await expect(page.getByText("No workspaces yet", { exact: true })).toBeVisible();
   check(
-    "Plain folders and local Git without GitHub omit Review, including saved Review selections",
+    "Plain folders omit Review and initializing Git retires the saved root workspace",
     true,
   );
 
+  await openManagedWorkspace("workbench");
+  await expect(review).toHaveCount(0);
+  await files.click();
+  const managedTab = page.locator('[data-workspace-id="ws_fixture_1"]');
+  const chats = await page.locator("[data-folder-state]").textContent();
   await resumeWith(true, "git@github.com:example/project.git");
   await expect(review).toBeVisible();
-  await expect(rootTab).toHaveCount(1);
+  await expect(managedTab).toHaveCount(1);
+  await expect(rootTab).toHaveCount(0);
   await expect(page.locator("[data-folder-state]")).toHaveText(chats);
   await review.click();
   await expect(review).toHaveAttribute("aria-selected", "true");
@@ -53,27 +68,23 @@ export async function runFolderReviewSmoke({ page, check }) {
   await resumeWith(true, null);
   await expect(review).toHaveCount(0);
   await expect(files).toHaveAttribute("aria-selected", "true");
-  await expect(rootTab).toHaveCount(1);
-  await expect(rootTab).toHaveCount(1);
+  await expect(managedTab).toHaveCount(1);
+  await expect(rootTab).toHaveCount(0);
   await expect(page.locator("[data-folder-state]")).toHaveText(chats);
   for (const filter of ["Ungrouped", "Grouped"]) {
     await page
       .getByRole("button", { name: "Filter workspaces", exact: true })
       .click();
     await page.getByRole("menuitem", { name: filter, exact: true }).click();
-    await expect(rootTab).toHaveCount(1);
+    await expect(managedTab).toHaveCount(1);
+    await expect(rootTab).toHaveCount(0);
   }
   check(
-    "Resume refresh updates Review after external Git/remote changes and preserves chats and the folder tab",
+    "Resume refresh updates Review after external Git/remote changes and preserves managed workspace chats",
     true,
   );
 
-  await page.goto(
-    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-folder-workspace.html?summary`,
-  );
-  await page
-    .getByRole("button", { name: "Restore saved folder", exact: true })
-    .click();
+  await openManagedWorkspace("summary");
   const summary = page.getByRole("complementary", {
     name: "Workspace summary",
   });

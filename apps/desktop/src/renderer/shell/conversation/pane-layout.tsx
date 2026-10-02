@@ -59,7 +59,10 @@ import {
   useProjects,
   useWorkspacesFor,
 } from "../../state/use-projects";
-import { buildLocalMainWorkspace } from "../../state/local-main-workspace";
+import {
+  buildLocalMainWorkspace,
+  canRestoreFolderWorkspace,
+} from "../../state/local-main-workspace";
 import {
   findWorkspaceForFolder,
   resolveWorkspacePresentationFolder,
@@ -184,6 +187,7 @@ function resolveWorkspaceForFolder(
   if (!folder || !project) return null;
   const managed = findWorkspaceForFolder(folder, workspaces);
   if (managed) return managed;
+  if (!canRestoreFolderWorkspace(project)) return null;
   const main = buildLocalMainWorkspace(project);
   return findWorkspaceForFolder(folder, [main]) ? main : null;
 }

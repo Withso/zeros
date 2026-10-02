@@ -100,6 +100,104 @@ export async function checkSidebarUnopenedFolder({ page, check, harnessBase }) {
   );
 }
 
+export async function checkSidebarRetiredLocalMain({
+  page,
+  check,
+  harnessBase,
+}) {
+  for (const query of ["", "&no-workspaces", "&no-workspaces&subdirectory"]) {
+    await page.goto(`${harnessBase}/harness-app-sidebar.html`);
+    await page.evaluate(() => sessionStorage.clear());
+    await page.goto(
+      `${harnessBase}/harness-app-sidebar.html?legacy-main${query}`,
+    );
+    await expect(page.locator("[data-app-sidebar]")).toBeVisible();
+    const empty = query.includes("no-workspaces");
+    const state = () => page.evaluate(() => window.appSidebarState());
+    await expect
+      .poll(async () => (await state()).page)
+      .toBe(empty ? "repo" : "workspace");
+    if (empty) {
+      expect((await state()).repoId).toBe("project-zeros");
+      await expect(
+        page.getByText("No workspaces yet", { exact: true }),
+      ).toBeVisible();
+    } else {
+      expect((await state()).folder).toBe("/fixture-workspaces/zeros/atlanta");
+    }
+    const savedChats = (await state()).chats;
+    expect(savedChats).toContainEqual({
+      id: "chat-legacy-main",
+      folder: `/fixture/zeros${query.includes("subdirectory") ? "/packages/app" : ""}`,
+    });
+    for (const presentation of ["Ungrouped", "Grouped"]) {
+      await page
+        .getByRole("button", { name: "Filter workspaces", exact: true })
+        .click();
+      await page
+        .getByRole("menuitem", { name: presentation, exact: true })
+        .click();
+      await expect(page.locator('[data-workspace-id^="local:"]')).toHaveCount(
+        0,
+      );
+    }
+
+    const header = page.locator('[data-sidebar-repository="project-zeros"]');
+    await header.hover();
+    await header
+      .getByRole("button", { name: "Zeros settings", exact: true })
+      .click();
+    await page.getByRole("tab", { name: "Workspaces", exact: true }).click();
+    await expect(
+      page.locator('[data-harness-page="repo"] div[role="button"]'),
+    ).toHaveCount(empty ? 0 : 2);
+    await page.getByRole("button", { name: "Home", exact: true }).click();
+    await expect(
+      page.locator('[data-harness-page="dashboard"] div[role="button"]'),
+    ).toHaveCount(empty ? 3 : 5);
+    expect((await state()).chats).toEqual(savedChats);
+
+    // Simulate another launch of an older build's saved root selection while
+    // leaving its chats and the retired enabled setting in storage.
+    await page.evaluate((subdirectory) => {
+      window.dispatchEvent(new Event("beforeunload"));
+      const saved = JSON.parse(localStorage.getItem("zeros:ui-state:v1"));
+      const folder = `/fixture/zeros${subdirectory ? "/packages/app" : ""}`;
+      localStorage.setItem(
+        "zeros:ui-state:v1",
+        JSON.stringify({
+          ...saved,
+          activePage: "workspace",
+          activeChatId: "chat-legacy-main",
+          lastWorkspaceFolder: folder,
+          lastWorkspaceByRepoRoot: {
+            ...saved.lastWorkspaceByRepoRoot,
+            "/fixture/zeros": folder,
+          },
+        }),
+      );
+    }, query.includes("subdirectory"));
+    await page.reload();
+    await expect(page.locator("[data-app-sidebar]")).toBeVisible();
+    await expect
+      .poll(async () => (await state()).page)
+      .toBe(empty ? "repo" : "workspace");
+    await expect(page.locator('[data-workspace-id^="local:"]')).toHaveCount(0);
+    expect((await state()).chats).toEqual(savedChats);
+    expect(
+      await page.evaluate(() =>
+        window.appSidebarRequests.filter(
+          ({ op }) => op === "workspace.create" || op === "chat.create",
+        ),
+      ),
+    ).toEqual([]);
+  }
+  check(
+    "Saved Local main selections and the retired enabled setting never recreate a workspace, including after reload",
+    true,
+  );
+}
+
 export async function checkSidebarHiddenReads({ page, check, harnessBase }) {
   await resetHarness(page, harnessBase);
   await page.getByRole("button", { name: "Customize", exact: true }).click();
@@ -212,6 +310,7 @@ export async function checkSidebarReselection({ page, check, harnessBase }) {
 export const appSidebarRegressionChecks = [
   checkSidebarNarrowHeader,
   checkSidebarUnopenedFolder,
+  checkSidebarRetiredLocalMain,
   checkSidebarHiddenReads,
   checkSidebarReselection,
 ];

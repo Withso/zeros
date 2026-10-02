@@ -29,12 +29,14 @@ export async function runFolderFilesSmoke({ page, check }) {
   await page.evaluate(() => window.setFolderGitState(true));
   await expect(header).toHaveCount(1);
   await expect(header).toContainText("To-do app");
-  await expect(folderRow).toHaveCount(1);
+  await expect(folderRow).toHaveCount(0);
+  await expect(page.getByText("No workspaces yet", { exact: true })).toBeVisible();
   await page.evaluate(() => window.setFolderGitState(false));
   await expect(header).toHaveCount(0);
   await expect(folderRow).toHaveCount(1);
+  await folderRow.getByRole("button", { name: /^Open workspace/ }).click();
   check(
-    "Sidebar lists a plain folder as a standalone row and a Git repository under its header",
+    "Sidebar keeps an initialized repository empty and restores its saved folder only after Git is removed",
     true,
   );
 
