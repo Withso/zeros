@@ -7,19 +7,21 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
 import { DatabaseReleaseCanaryService, releaseCanaryRequest } from "./release-canaries.js";
+import { NativeCanaryStorageRetirementSchema } from "./release-canary-contract.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const token = "synthetic-protected-retirement-token";
 suite("immutable native retirement audit settlement", () => {
   let pool: pg.Pool, service: DatabaseReleaseCanaryService, originalService: DatabaseReleaseCanaryService;
   let request: ReturnType<typeof releaseCanaryRequest>, operation: any, originalAudit: any, credentials: DatabaseCloudAgentCredentialService;
-  let admission: any, configuration: any;
+  let admission: any, configuration: any, storageRetirement: any, sandboxStatus: number;
   const input = () => ({ version: 1, operationId: request.operationId, deletionOperationId: operation.id,
     leaseToken: "77777777-7777-4777-8777-777777777777" });
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 5 }); });
   afterAll(async () => { await pool.end(); });
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
   beforeEach(async () => {
+    storageRetirement = undefined; sandboxStatus = 404;
     await resetMigratedTestDatabase(pool);
     const fixture = await seedReadyCloudWorkspace(pool), credentialId = randomUUID(), operationId = randomUUID();
     await pool.query("UPDATE users SET staff_role='platform_owner' WHERE id=$1", [fixture.userId]);
@@ -31,7 +33,8 @@ suite("immutable native retirement audit settlement", () => {
       requestedAt: new Date(now - 20_000).toISOString(), completedAt: new Date(now - 10_000).toISOString() };
     admission = { assertCanary: vi.fn(async () => { throw new HttpError(409, "fixture_freshness", "Fresh fixture allocation barrier"); }),
       assertCanaryRetirement: vi.fn(async () => ({ targetId: "bx_native", intentAt: now - 60_000, provenanceSha256: "e".repeat(64),
-        physicalCleanup: { operation } })) };
+        ...(storageRetirement ? { storageRetirement } : { physicalCleanup: { operation: { id: operation.id, kind: operation.kind,
+          targetId: operation.targetId, status: operation.status, requestedAt: operation.requestedAt, completedAt: operation.completedAt } } }) })) };
     configuration = { ownerUserId: fixture.userId, organizationId: fixture.organizationId, channel: "alpha", repository: "example/zeros",
       sourceSha: "d".repeat(40), tokenSha256: createHash("sha256").update(token).digest("hex"), keys: { keys: {}, currentKeyVersion: 1 },
       admission, boat: { apiKey: "synthetic-boat-authority", apiUrl: "https://boat.example.test", billingOrg: "test-wallet" } };
@@ -53,7 +56,8 @@ suite("immutable native retirement audit settlement", () => {
     vi.stubGlobal("fetch", vi.fn(async (url: any, options: any) => {
       expect(options.method).toBe("GET");
       if (String(url).endsWith(`/deletion-operations/${operation.id}`)) return new Response(JSON.stringify({ operation }));
-      if (String(url).endsWith("/sandboxes/bx_native")) return new Response(null, { status: 404 });
+      if (String(url).endsWith("/sandboxes/bx_native")) return sandboxStatus === 404 ? new Response(null, { status: 404 })
+        : Response.json({ sandbox: { id: "bx_native" } }, { status: sandboxStatus });
       throw new Error("Unexpected synthetic provider observation");
     }));
   });
@@ -63,6 +67,57 @@ suite("immutable native retirement audit settlement", () => {
     return { ...request, sourceSha: configuration.sourceSha, operationId: id, runId: "124",
       target: { ...request.target, id: "bx_fresh", attempt: id, sourceCommit: configuration.sourceSha } };
   };
+  const pending = () => {
+    const now = Date.now();
+    Object.assign(operation, { status: "blocked", stage: "waiting_for_uploads", completedAt: null,
+      expectedBy: new Date(now + 3_600_000).toISOString() });
+    storageRetirement = NativeCanaryStorageRetirementSchema.parse({ version: 1, kind: "storage-pending", operationId: request.operationId,
+      targetId: request.target.id, snapshotId: request.target.snapshotId, sourceCommit: request.sourceSha,
+      buildSha256: request.target.buildSha256, creationIntentSha256: "f".repeat(64), accountBinding: "c".repeat(64), billingOrg: "test-wallet",
+      operation: { id: operation.id, kind: "sandbox", targetId: request.target.id, status: "blocked", stage: operation.stage,
+        requestedAt: operation.requestedAt, expectedBy: operation.expectedBy },
+      snapshotsOff: { version: 1, targetId: request.target.id, snapshots: false, observedAt: new Date(now - 45_000).toISOString() },
+      operationObservedAt: new Date(now - 5000).toISOString(), unavailableObservedAt: new Date(now - 4000).toISOString() });
+  };
+  it("settles the real credential fence with an append-only pending audit, then observes actual physical completion", async () => {
+    pending(); const next = fresh();
+    await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow("credential requires reconciliation");
+    expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true, storagePending: true });
+    const rows = (await audit()).rows, pendingAudit = structuredClone(rows[1]);
+    expect(rows).toHaveLength(2); expect(rows[0]).toEqual(originalAudit);
+    expect(rows[1]).toMatchObject({ action: "cloud.release_canary.storage_retired", subject: { sourceSha: request.sourceSha,
+      retirement: { version: 2, operation: { status: "blocked" }, storage: { status: "pending", physicalBytes: "unmeasured" } } } });
+    await expect(originalService.admit(request, `Bearer ${token}`)).rejects.toThrow("credential preparation requires reconciliation");
+    expect(admission.assertCanary).not.toHaveBeenCalled();
+    await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow("Fresh fixture allocation barrier");
+    expect(admission.assertCanary).toHaveBeenCalledOnce();
+    operation.status = "processing"; operation.stage = "removing"; operation.expectedBy = null;
+    expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true, storagePending: true });
+    expect((await audit()).rows).toEqual(rows);
+    operation.status = "completed"; operation.stage = "completed"; operation.completedAt = new Date().toISOString();
+    storageRetirement = undefined;
+    expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true });
+    const completed = (await audit()).rows;
+    expect(completed).toHaveLength(3); expect(completed[0]).toEqual(originalAudit); expect(completed[1]).toEqual(pendingAudit);
+    expect(completed[2]).toMatchObject({ action: "cloud.release_canary.retired", subject: {
+      retirement: { version: 1, operation: { status: "completed" } } } });
+    expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true });
+    expect((await audit()).rows).toEqual(completed);
+  });
+  it("retains pending-storage cleanup authority after revocation without granting new execution consent", async () => {
+    pending(); await credentials.revoke(request.ownerUserId, request.credentialId);
+    expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true, storagePending: true });
+    await expect(service.admit(fresh(), `Bearer ${token}`)).rejects.toThrow("designated");
+    expect(admission.assertCanary).not.toHaveBeenCalled(); expect((await audit()).rows).toHaveLength(2);
+  });
+  it.each(["available sandbox", "foreign operation", "unknown progress"])("does not append logical retirement for %s", async reason => {
+    pending();
+    if (reason === "available sandbox") sandboxStatus = 200;
+    if (reason === "foreign operation") operation.targetId = "bx_foreign";
+    if (reason === "unknown progress") { operation.status = "processing"; operation.stage = "waiting_for_uploads"; }
+    await expect(service.retire(input(), `Bearer ${token}`)).rejects.toThrow("retirement");
+    expect((await audit()).rows).toEqual([originalAudit]);
+  });
   it("settles the real preparing/dispatched SQL fence append-only before allowing a separately fresh admission", async () => {
     const next = fresh();
     await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow("credential requires reconciliation");

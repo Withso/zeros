@@ -37,7 +37,7 @@ function restoreKitState(directory, packed) {
   }
 }
 
-export async function confirmBoatDeletion(lease, record, request, { allowDeferredStorage = false, beforeDeleted, ...polling } = {}) {
+export async function confirmBoatDeletion(lease, record, request, { allowDeferredStorage = false, beforeDeleted, beforeDeferredStorage, retainedDeferredStorage, ...polling } = {}) {
   if (record.deleted) return;
   if (!/^bx_[a-z0-9]+$/.test(record.id ?? "")) throw new Error("Dev builder allocation is unconfirmed; retain its receipt");
   if (!record.deletionOperationId) {
@@ -50,16 +50,18 @@ export async function confirmBoatDeletion(lease, record, request, { allowDeferre
   let completedOperation;
   const result = await pollProvider("Dev builder physical deletion", async () => {
     const response = await request("GET", `/deletion-operations/${record.deletionOperationId}`), op = response.body?.operation;
+    const operationObservedAt = new Date().toISOString();
     if (response.status !== 200 || op?.id !== record.deletionOperationId || op.targetId !== record.id || op.kind !== "sandbox") throw new Error("Dev builder deletion proof changed");
-    if (allowDeferredStorage && op.status === "blocked" &&
+    if (allowDeferredStorage && (op.status === "blocked" &&
         ["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"].includes(op.stage) &&
-        (op.stage !== "waiting_for_uploads" || Number.isFinite(Date.parse(op.expectedBy)))) {
+        (op.stage !== "waiting_for_uploads" || Number.isFinite(Date.parse(op.expectedBy))) || retainedDeferredStorage?.(op) === true)) {
       // These documented stages describe irreversible storage retirement.
       // Tenant-worker lifecycle stays strict. Dev archive may transfer a
       // verified retirement receipt only after its entire backend is gone.
       // An absent sandbox by itself is never sufficient proof.
       const sandbox = await request("GET", `/sandboxes/${record.id}`);
       if (sandbox.status !== 404) throw new Error("The retired Dev builder is not confirmed unavailable");
+      await beforeDeferredStorage?.(op, { operationObservedAt, unavailableObservedAt: new Date().toISOString() });
       record.retiredAt ??= new Date().toISOString();
       record.deletionStage = op.stage; record.deletionExpectedBy = op.expectedBy ?? null;
       await lease.save(); return "storage-pending";

@@ -15,6 +15,9 @@ import { workerEnvironment, workerConnections } from "./worker-test-fixtures";
 import { promoteWorker, validateWorkerReceipt, WorkerReceipt } from "./worker";
 import { releaseCanaryAdapter } from "./worker-canary";
 import { reconcileReleaseBuilderRetentions, WorkerBuilderCleanupSchema } from "./worker-builder-retirement";
+import { releaseCanaryCleanup, retireReleaseCanary } from "./worker-canary-recovery";
+import { BoatAccountAdmission } from "../../apps/control-plane/src/cloud-workspaces/boat-account-admission";
+import { DatabaseReleaseCanaryService, releaseCanaryRequest } from "../../apps/control-plane/src/cloud-workspaces/release-canaries";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const directories: string[] = [];
@@ -112,7 +115,7 @@ function imageHold(test: Awaited<ReturnType<typeof fixture>>) {
   const reservation = test.ledger().reservations.find((row: any) => row.kind === "builder" && row.snapshotName === test.candidate.snapshotId);
   expect(reservation).toBeDefined(); return reservation;
 }
-function nativeHarness(test: Awaited<ReturnType<typeof fixture>>, blocked = false) {
+function nativeHarness(test: Awaited<ReturnType<typeof fixture>>, blocked = false, deferStorage = false, qualificationProfile: "smoke" | "full" = "smoke") {
   const base = test.request.getMockImplementation()!, sandboxes = new Map<string, any>(), operations = new Map<string, any>();
   let allocations = 0;
   test.request.mockImplementation(async (method, route, ...settings: any[]) => {
@@ -138,29 +141,95 @@ function nativeHarness(test: Awaited<ReturnType<typeof fixture>>, blocked = fals
   const release = () => releaseHostedAdmission(test.store, test.context.lease, test.profile);
   const native = nativeAgentCanary(test.context.lease, { ...test.profile, boat: { ...test.profile.boat, builderBudgetHours: 0.25 } }, test.request, {
     reserve: (job: any) => reserveHostedAdmission(test.store, test.state, test.profile, { kind: "builder", computeId: `canary:${job.id}` }), release,
-  }, { strictCleanup: true, maxUsedHours: 2, cleanupTimeoutMs: 0, nativeDeadlineSeconds: 420 });
-  const connections = workerConnections(), core = { ...native, ready: vi.fn(async () => true), start: vi.fn(async () => {}), poll: vi.fn(async (job: any) => ({
+  }, { strictCleanup: true, releaseStorageDeferral: deferStorage, maxUsedHours: 2, cleanupTimeoutMs: 0, nativeDeadlineSeconds: 420 });
+  const connections = workerConnections(), audits: any[] = [];
+  const core = { ...native, ready: vi.fn(async () => true), start: vi.fn(async () => {}), poll: vi.fn(async (job: any) => ({
     code: 0, retirement: 0, renewal: { accountBinding: true, accessChanged: true, cachePublished: true, consentPreserved: true },
-    report: { version: 3, qualified: true, qualificationProfile: "smoke", executionProfile: "zeros-cloud-native-v1", authority: "isolated-image-canary",
+    report: { version: 3, qualified: true, qualificationProfile, executionProfile: "zeros-cloud-native-v1", authority: "isolated-image-canary",
       qualifiedAt: new Date().toISOString(), identity: { sourceCommit: test.candidate.sourceCommit, buildSha256: test.candidate.buildSha256,
         contractSha256: "c".repeat(64), kind: job.kind, model: job.model },
       checks: ["privateProviderHome", "engineAuthorityIsolation", "nativeWorkspaceTools", "actorAdmission", "stopAndRevocation", "nativeTurn", "nativeResume",
-        "authentication", "nativePermissionSelection", "nativeAccessRefresh", "nativeMcp"] } })) };
-  const canary = releaseCanaryAdapter(test.context.lease, test.run, new Map(connections.map(row => [row.kind, row])), core, { qualificationProfile: "smoke" });
+        "authentication", "nativePermissionSelection", "nativeAccessRefresh", "nativeMcp", ...(qualificationProfile === "full"
+          ? ["transcriptFork", ...(job.kind === "codex-chatgpt" ? ["nativeGoals", "nativeFork", "nativeReview", "nativeApps", "nativeMultiAgent"] : [])] : [])] } })) };
+  if (deferStorage) {
+    const actor = "44444444-4444-4444-8444-444444444444", organizationId = "33333333-3333-4333-8333-333333333333";
+    const token = "synthetic-release-storage-authorization";
+    test.state.lease = { token: "77777777-7777-4777-8777-777777777777", expiresAt: Date.now() + 60_000 };
+    test.run.actorUserId = actor; test.run.qualificationProfile = qualificationProfile; test.run.releaseCanaryBindings = connections;
+    const admission = new BoatAccountAdmission({ ...test.store, readDocument: async () => ({ state: test.state, etag: "native-journal" }) } as any, test.profile);
+    const query = vi.fn(async (sql: string, values: any[] = []): Promise<any> => {
+      if (sql.includes("FROM users account")) return { rowCount: 1, rows: [] };
+      if (sql.includes("FROM cloud_agent_credentials")) return { rowCount: 1, rows: [{ owner_user_id: actor }] };
+      if (sql.includes("FROM audit_log")) return { rowCount: 1, rows: [structuredClone(audits.filter(audit => audit.subject.operationId === values[3]).at(-1))] };
+      if (sql.startsWith("INSERT INTO audit_log")) {
+        const audit = { id: String(audits.length + 1), action: values[2], subject: JSON.parse(values[3]) }; audits.push(audit);
+        return { rowCount: 1, rows: [{ id: audit.id }] };
+      }
+      return { rowCount: 0, rows: [] };
+    });
+    const service = new DatabaseReleaseCanaryService({ connect: async () => ({ query, release: vi.fn() }) } as any, {
+      ownerUserId: actor, organizationId, channel: test.config.channel, repository: test.config.repository, sourceSha: test.config.sourceSha,
+      tokenSha256: createHash("sha256").update(token).digest("hex"), keys: {} as any, admission,
+      boat: { apiKey: "synthetic-boat-authority", apiUrl: "https://boat.example.test", billingOrg: test.profile.boat.billingOrg },
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url: any, options: any) => {
+      expect(options.method).toBe("GET");
+      const reply = await test.request("GET", new URL(url).pathname);
+      return new Response(JSON.stringify(reply.body), { status: reply.status });
+    }));
+    core.ready.mockImplementation(async () => { test.state.resources.images.at(-1).machineAttestationStarted = true; return true; });
+    core.start.mockImplementation(async (job: any) => {
+      const row = test.state.resources.images.find((value: any) => value.agentQualificationId === job.id); row.nativeDispatchStarted = true;
+      const request = releaseCanaryRequest({ version: 1, ownerUserId: actor, organizationId, channel: test.config.channel, sourceSha: test.config.sourceSha,
+        repository: test.config.repository, qualificationProfile, operationId: job.id, runId: test.run.runId, runAttempt: test.config.runAttempt,
+        branch: test.config.branch, ...connections.find(connection => connection.kind === job.kind), target: native.target(job) },
+      { ownerUserId: actor, organizationId, channel: test.config.channel, sourceSha: test.config.sourceSha, repository: test.config.repository });
+      job.admissionRequest = request;
+      audits.push({ id: String(audits.length + 1), action: "cloud.release_canary.started", subject: { ...connections.find(connection => connection.kind === job.kind),
+        operationId: job.id, requestSha256: digest(request), qualificationProfile, channel: request.channel, sourceSha: request.sourceSha,
+        repository: request.repository, runId: request.runId, runAttempt: request.runAttempt, targetId: row.builder.id,
+        imageRef: `boat:${test.candidate.snapshotId}@sha256:${test.candidate.buildSha256}`, allowanceOwnerUserId: actor } });
+    });
+    core.retire = (job: any) => retireReleaseCanary(test.context.lease, native, async (operationId, deletionOperationId, leaseToken) => {
+      const reply = await service.retire({ version: 1, operationId, deletionOperationId, leaseToken }, `Bearer ${token}`);
+      return "storagePending" in reply ? "storage-pending" : "physically-deleted";
+    }, job);
+  }
+  const canary = releaseCanaryAdapter(test.context.lease, test.run, new Map(connections.map(row => [row.kind, row])), core, { qualificationProfile });
   const input = { ...test.config, kinds: connections.map(row => row.kind), actorUserId: "44444444-4444-4444-8444-444444444444",
-    operationId: "55555555-5555-4555-8555-555555555555", inputsSha256: test.run.inputsSha256, qualificationProfile: "smoke" as const, releaseCanaryBindings: connections };
+    operationId: "55555555-5555-4555-8555-555555555555", inputsSha256: test.run.inputsSha256, qualificationProfile, releaseCanaryBindings: connections };
   const owner = vi.fn(async (action: any) => ({ value: await action({ loginIdentity: "synthetic-owner", manage: async (_document: any, approval: string) =>
     ({ state: approval ? "changed" : "planned", planSha256: "d".repeat(64), targetSha256: "f".repeat(64) }) }), deleted: true }));
   const tuple = vi.fn(async () => {});
   const deps = { build: () => test.adapter.build(), cleanupBuilder: () => test.adapter.cleanup(), qualify: (image: any, kind: string) => canary.qualify(image, kind),
     cleanup: async () => {
       const deleted = await canary.cleanup(), imageBuilder = await test.adapter.cleanup();
-      return deleted && imageBuilder ? { credentialCanaryResourcesDeleted: true as const, imageBuilder } : null;
+      return deleted && imageBuilder ? { ...(deferStorage ? releaseCanaryCleanup(test.context.lease, test.run) : { credentialCanaryResourcesDeleted: true as const }), imageBuilder } : null;
     }, withOwner: owner, updateIdentity: tuple };
-  return { native, canary, core, input, deps, owner, tuple, sandboxes, operations, allocations: () => allocations };
+  return { native, canary, core, input, deps, owner, tuple, sandboxes, operations, audits, allocations: () => allocations };
 }
 
 describe("release-owned builder retirement composition", () => {
+  it.each(["smoke", "full"] as const)("completes the exact three-kind %s matrix while preserving pending native storage and named holds", async profile => {
+    const test = await historicalFixture(), native = nativeHarness(test, true, true, profile);
+    try {
+      const receipt = await promoteWorker(native.input, native.deps);
+      expect(receipt).toMatchObject({ version: 3, qualificationProfile: profile, cleanup: { credentialCanaryResourcesDeleted: false,
+        pendingNativeStorage: { status: "pending", count: 3, physicalBytes: "unmeasured" } } });
+      expect(validateWorkerReceipt(receipt, native.input)).toEqual(receipt);
+      expect(native.allocations()).toBe(3); expect(native.core.poll).toHaveBeenCalledTimes(3);
+      expect(native.owner).toHaveBeenCalledOnce(); expect(native.tuple).toHaveBeenCalledOnce();
+      expect(native.audits.filter(audit => audit.action === "cloud.release_canary.storage_retired")).toHaveLength(3);
+      expect(native.audits.filter(audit => audit.action === "cloud.release_canary.retired")).toHaveLength(0);
+      expect(test.run.canaries.every((job: any) => job.phase === "completed" && job.retired && job.auditRetired.version === 2)).toBe(true);
+      expect(test.state.resources.images.filter((row: any) => row.purpose === "native-agent-qualification").every((row: any) =>
+        row.builder.deleted !== true && row.builder.physicalCleanup === undefined && row.builder.storageRetirement.operation.status === "blocked")).toBe(true);
+      expect(test.ledger().reservations.filter((row: any) => row.kind === "builder")).toEqual([expect.objectContaining({ snapshotName: test.candidate.snapshotId })]);
+      expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
+      expect(test.request.mock.calls.filter(([method]) => method === "DELETE")).toHaveLength(4);
+      expect(test.request.mock.calls.some(([method, route]) => method === "DELETE" && route.startsWith("/named-snapshots"))).toBe(false);
+    } finally { vi.unstubAllGlobals(); }
+  });
   it("persists truthful pending-storage provenance before freeing compute, retaining the named-image hold", async () => {
     const test = await fixture();
     expect(await test.adapter.build()).toEqual(test.candidate);

@@ -34,7 +34,12 @@ export function releaseCanaryAdapter(lease: any, run: any, credentials: Map<stri
   const now = options.now ?? Date.now, pause = options.pause ?? sleep;
   const qualificationProfile = options.qualificationProfile ?? "full";
   const jobs = run.canaries ??= [];
-  const finish = async (job: any) => { if (!job.retired) { await core.retire(job); job.retired = true; await lease.save(); } };
+  const finish = async (job: any) => {
+    const row = lease.state.resources?.images?.find((value: any) => value.agentQualificationId === job.id);
+    if (!job.retired || job.auditRetired?.version === 2 || row?.builder?.storageRetirement && row.builder.deleted !== true) {
+      await core.retire(job); job.retired = true; await lease.save();
+    }
+  };
   return {
     async qualify(image: WorkerCandidate, kind: string) {
       const credential = credentials.get(kind);
