@@ -383,6 +383,49 @@ permits only a separately fresh operation
 with current source, owner allowance and consent; it is not successful native
 qualification, a worker approval or permission to enable customer cloud.
 
+### Automated retention resumption
+
+`worker-retention-resume.yml` supports future normal channel release parents
+that contain the observer at their original source. Scheduled `main` discovery
+uses GitHub metadata only; it dispatches observation at the original **current**
+protected channel ref, never lends another environment's authority or adopts a
+new source. Standalone worker/bootstrap runs and superseded parents are excluded.
+Production must retain its original successful normal release approval at its
+recorded producing attempt; a standalone Production dispatch is a different gate.
+All actual environment protections remain in force.
+
+The own-channel observer authenticates the retained run, builder certificate,
+account/admission/creation/dispatch bindings and fresh successful fixed native
+outcome. Only the original native DELETE's authenticated physical completion
+**strictly after** the latest failed leaf worker finished, followed by its exact
+sandbox404, is eligible. Deadlines, snapshots-off, failed/prelaunch reports,
+builder retirement and absence alone never permit a retry. The original account
+budget, 24-hour native evidence lifetime and unexpired five-day signed output
+remain required. Authentic cloud-on services and build producers are retained;
+the observer does not inspect the baked desktop bit, and the unchanged final
+publication gate still rejects capability drift.
+
+Observers serialize in their own per-channel queue, never the hosted mutation
+queue whose pending slot could cancel real work. Fresh conflict/ref/attempt,
+journal/admission and provider checks precede one non-debug specific-job rerun
+of the original failed worker and dependants. Successful ancestors and approval
+are not rerun. The observer takes no hosted lease and writes no provider,
+registry, audit, admission, image or qualification state; the original worker
+alone performs strict cleanup/audit reconciliation, fresh consent preflight and
+remaining native qualification. The observer exits without waiting for it.
+
+Before the non-idempotent POST, a small immutable Actions **intent**, not a
+receipt, is uploaded with 90-day retention and exact source/run/failed-attempt/
+leaf-job plus observer producing-attempt attribution. Its verified artifact
+digest/readback and an exclusive local request flag fence duplicates. A prior
+intent, interrupted upload or missing attributable history is observation-only,
+including after refusal or lost acknowledgement. Never delete/reset these
+intents or their workflow history to authorize another POST. Crash after arming
+but before POST, or unavailable final readback, conservatively requires operator
+reconciliation; it is not automatic success. A genuinely distinct later failed
+leaf with a newly completed native operation gets a different intent key.
+Unavailable proof emits only a concise reason and preserves the failed parent.
+
 ### Release-owned builder retirement receipts
 
 An image builder may contain committed application source, previous base/source

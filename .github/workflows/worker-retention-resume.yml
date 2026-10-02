@@ -1,0 +1,158 @@
+name: Worker retention resumption
+run-name: ${{ github.event_name == 'schedule' && 'Worker retention discovery' || format('Worker retention {0} {1}/{2}/{3}', inputs.channel, inputs.parent_run_id, inputs.failed_attempt, inputs.worker_job_id) }}
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+    inputs:
+      channel:
+        type: choice
+        options: [alpha, beta, production]
+        required: true
+      source_sha:
+        type: string
+        required: true
+      parent_run_id:
+        type: string
+        required: true
+      failed_attempt:
+        type: string
+        required: true
+      worker_job_id:
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  discover:
+    name: Discover failed normal release metadata
+    if: github.event_name == 'schedule' && github.event.repository.fork == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+    concurrency:
+      group: worker-retention-discovery
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Discover and dispatch at each original protected ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pnpm exec tsx scripts/release/worker-retention-cli.ts --discover
+  validate:
+    name: Validate protected source and original parent
+    if: github.event_name == 'workflow_dispatch' && github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      channel: ${{ steps.validate.outputs.channel }}
+      source_sha: ${{ steps.validate.outputs.source_sha }}
+    env:
+      RETENTION_CHANNEL: ${{ inputs.channel }}
+      RETENTION_SOURCE_SHA: ${{ inputs.source_sha }}
+      RETENTION_PARENT_RUN_ID: ${{ inputs.parent_run_id }}
+      RETENTION_FAILED_ATTEMPT: ${{ inputs.failed_attempt }}
+      RETENTION_WORKER_JOB_ID: ${{ inputs.worker_job_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Validate immutable source, parent, approval and producers
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pnpm exec tsx scripts/release/worker-retention-cli.ts --validate
+  observe:
+    name: Observe retained cleanup
+    needs: validate
+    if: needs.validate.result == 'success' && github.event_name == 'workflow_dispatch' && github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ${{ needs.validate.outputs.channel }}
+    permissions:
+      contents: read
+      actions: write
+    concurrency:
+      group: worker-retention-resume-${{ needs.validate.outputs.channel }}
+      cancel-in-progress: false
+    env:
+      RETENTION_CHANNEL: ${{ needs.validate.outputs.channel }}
+      RETENTION_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      RETENTION_PARENT_RUN_ID: ${{ inputs.parent_run_id }}
+      RETENTION_FAILED_ATTEMPT: ${{ inputs.failed_attempt }}
+      RETENTION_WORKER_JOB_ID: ${{ inputs.worker_job_id }}
+      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
+      ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
+      ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED }}
+      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER }}
+      BOAT_ACCOUNT_SCOPE: ${{ vars.BOAT_ACCOUNT_SCOPE }}
+      BOAT_BILLING_ORG: ${{ vars.BOAT_BILLING_ORG }}
+      BOAT_BASE_SNAPSHOT: ${{ vars.BOAT_BASE_SNAPSHOT }}
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      PLANETSCALE_ORG: ${{ vars.PLANETSCALE_ORG }}
+      PLANETSCALE_DATABASE: ${{ vars.PLANETSCALE_DATABASE }}
+      PLANETSCALE_BRANCH: ${{ vars.PLANETSCALE_BRANCH }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      RUNTIME_QUALIFICATION_ACTOR_USER_ID: ${{ vars.RUNTIME_QUALIFICATION_ACTOR_USER_ID }}
+      WORKER_CANARY_ORGANIZATION_ID: ${{ vars.WORKER_CANARY_ORGANIZATION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir apps/control-plane install --frozen-lockfile
+      - name: Observe exact native physical completion
+        id: observe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOAT_API_KEY: ${{ secrets.BOAT_API_KEY }}
+          WORKER_ADMISSION_CONFIG_JSON: ${{ secrets.WORKER_ADMISSION_CONFIG_JSON }}
+        run: pnpm exec tsx scripts/release/worker-retention-cli.ts --observe
+      - name: Persist rerun intent
+        id: intent
+        if: steps.observe.outputs.eligible == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.observe.outputs.intent_artifact }}
+          path: .context/release/retention-intent.json
+          include-hidden-files: true
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 90
+      - name: Request original failed worker once
+        if: steps.observe.outputs.eligible == 'true' && steps.intent.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOAT_API_KEY: ${{ secrets.BOAT_API_KEY }}
+          WORKER_ADMISSION_CONFIG_JSON: ${{ secrets.WORKER_ADMISSION_CONFIG_JSON }}
+          RETENTION_INTENT_ARTIFACT_ID: ${{ steps.intent.outputs.artifact-id }}
+          RETENTION_INTENT_ARTIFACT_DIGEST: ${{ steps.intent.outputs.artifact-digest }}
+        run: pnpm exec tsx scripts/release/worker-retention-cli.ts --request
