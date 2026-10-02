@@ -4,6 +4,7 @@ import { DatabaseReleaseCanaryService, releaseCanaryRequest } from "../../apps/c
 import { BoatAccountAdmission, releaseWorkerOwner } from "../../apps/control-plane/src/cloud-workspaces/boat-account-admission";
 import { createReleaseCanaryAdmissionRoutes } from "../../apps/control-plane/src/cloud-workspaces/release-canary-routes";
 import { WorkerBuilderProvenanceSchema } from "./worker-builder-retirement";
+import { buildBoatImage } from "./worker-adapters";
 import { workerSnapshotName } from "./worker-admission";
 import { workerConnections } from "./worker-test-fixtures";
 import { workerEnvironment } from "./worker-test-fixtures";
@@ -101,6 +102,20 @@ function fixture() {
   return { state, parent, row, job, ledger, store, admission, request, subject, audits, query, config, service, operation, provider, fetcher, profile };
 }
 
+async function producedCandidate(test: ReturnType<typeof fixture>) {
+  return buildBoatImage({ sourceSha: test.request.sourceSha, directory: "/tmp/zeros-release-candidate-fixture",
+    baseSnapshot: test.profile.boat.baseSnapshot, maxUsedHours: 1 }, {
+    nameSnapshot: async () => test.parent.snapshotId, pause: async () => {}, kit: async args => {
+      if (args[1] === "status" && args[0] !== "attestation") return { state: "ready", wallet: "billing-org" };
+      if (args[0] === "attestation") return { finished: true, qualified: true, matchesCommit: true,
+        sourceCommit: test.request.sourceSha, measuredStorageMiB: 4096, buildSha256: test.request.target.buildSha256 };
+      if (args[2]?.endsWith("build-hash.sh")) return JSON.stringify({ commit: test.request.sourceSha });
+      if (args[2]?.endsWith("build-status.sh")) return JSON.stringify({ result: { passed: true } });
+      return {};
+    },
+  });
+}
+
 describe("marked release canary policy admission", () => {
   it("requires the retained snapshots-off observation for marked intents before the server's fresh read", async () => {
     const test = fixture(); test.row.builder = { id: test.request.target.id }; test.row.snapshotPolicyVersion = 1;
@@ -125,6 +140,23 @@ describe("marked release canary policy admission", () => {
 });
 
 describe("truthful release-only native retirement reconciliation", () => {
+  it.each(["maintained build producer", "original v1 serialization"] as const)("reconciles the %s candidate without changing original proof bytes", async format => {
+    const test = fixture(), image = await producedCandidate(test);
+    const legacyBytes = `{"snapshotId":"${image.snapshotId}","sourceCommit":"${image.sourceCommit}","buildSha256":"${image.buildSha256}","storageMiB":4096,"architecture":"linux/amd64"}`;
+    test.parent.candidate = format === "maintained build producer" ? image : JSON.parse(legacyBytes);
+    const candidateBytes = JSON.stringify(test.parent.candidate), originalAudit = structuredClone(test.audits[0]);
+    const intentBytes = JSON.stringify(test.row.builderIntent), certificateBytes = JSON.stringify(test.parent.builder.cleanup.provenance);
+    expect(test.parent.candidate).toEqual(test.parent.builder.cleanup.provenance.candidate);
+    expect(test.job.admissionRequest).toBeUndefined(); expect(test.row.snapshotPolicyVersion).toBeUndefined();
+    expect(await test.service.retire(retirementInput(), `Bearer ${token}`)).toEqual({ retired: true });
+    expect(test.audits).toHaveLength(2); expect(test.audits[0]).toEqual(originalAudit);
+    expect(test.audits[1]).toMatchObject({ action: "cloud.release_canary.retired", subject: { requestSha256: test.subject.requestSha256 } });
+    expect(JSON.stringify(test.parent.candidate)).toBe(candidateBytes);
+    expect(JSON.stringify(test.row.builderIntent)).toBe(intentBytes);
+    expect(JSON.stringify(test.parent.builder.cleanup.provenance)).toBe(certificateBytes);
+    expect(test.fetcher).toHaveBeenCalledTimes(2); expect(test.ledger.reservations).toHaveLength(1);
+    expect(test.query.mock.calls.some(([sql]) => sql.includes("cloud_agent_credential_versions"))).toBe(false);
+  });
   it("reconciles an exact terminal audit after JSONB reorders the saved operation fields", async () => {
     const test = fixture();
     await test.service.retire(retirementInput(), `Bearer ${token}`);
@@ -180,6 +212,13 @@ describe("truthful release-only native retirement reconciliation", () => {
     ["conflicting admission hold", (test: any) => { test.ledger.reservations[0].owner = "f".repeat(24); }],
     ["missing account certificate", (test: any) => { delete test.parent.builder.cleanup.provenance; }],
     ["changed compact certificate", (test: any) => { test.parent.builder.cleanup.provenanceSha256 = "f".repeat(64); }],
+    ["changed candidate snapshot", (test: any) => { test.parent.candidate.snapshotId = "another-worker"; }],
+    ["changed candidate source", (test: any) => { test.parent.candidate.sourceCommit = "e".repeat(40); }],
+    ["changed candidate build", (test: any) => { test.parent.candidate.buildSha256 = "e".repeat(64); }],
+    ["changed candidate architecture", (test: any) => { test.parent.candidate.architecture = "linux/arm64"; }],
+    ["changed candidate storage", (test: any) => { test.parent.candidate.storageMiB = 8192; }],
+    ["unknown candidate field", (test: any) => { test.parent.candidate.extra = "synthetic-private-diagnostic"; }],
+    ["missing candidate field", (test: any) => { delete test.parent.candidate.storageMiB; }],
     ["wrong generation", (test: any) => { test.state.generation = operationId; }],
     ["expired lease", (test: any) => { test.state.lease.expiresAt = Date.now() - 1; }],
     ["changed lease", (test: any) => { test.state.lease.token = operationId; }],
@@ -243,6 +282,7 @@ describe("truthful release-only native retirement reconciliation", () => {
   });
   it("recovers the cancelled historical run through real native cleanup, admission CAS and audited replay after a lost response", async () => {
     const test = fixture();
+    test.parent.candidate = await producedCandidate(test);
     delete test.row.builder.physicalCleanup; test.row.builder.deleted = true;
     test.parent.builder.retiredAt = new Date(Date.now() - 40_000).toISOString();
     const namedHold = { kind: "builder", owner: test.state.owner, generation: test.state.generation, computeId: `snapshot:${test.parent.snapshotId}`,

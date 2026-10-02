@@ -74,7 +74,8 @@ export function releaseCanaryRetirementJournal(state: any, ledger: any, profile:
   const parents = state.resources.images.filter((record: any) => record.purpose === "release-worker" && record.releaseRunId === audit.runId);
   requireProof(parents.length === 1);
   const parent = parents[0], raw = parent.builderProvenance ?? parent.builder?.cleanup?.provenance, certificate = provenance.safeParse(raw);
-  requireProof(certificate.success);
+  const parentCandidate = candidate.safeParse(parent.candidate);
+  requireProof(certificate.success && parentCandidate.success);
   const proof = certificate.data;
   requireProof(proof.scope.owner === owner && proof.scope.generation === state.generation && proof.scope.accountBinding === accountBinding &&
     proof.scope.repository === audit.repository && proof.scope.channel === audit.channel && proof.scope.runId === audit.runId &&
@@ -89,7 +90,7 @@ export function releaseCanaryRetirementJournal(state: any, ledger: any, profile:
     proof.snapshot.buildSha256 === buildSha256 && proof.source.commit === audit.sourceSha && proof.source.parent === audit.sourceSha &&
     proof.attestation.sourceCommit === audit.sourceSha && proof.attestation.buildSha256 === buildSha256 &&
     parent.sourceCommit === audit.sourceSha && parent.inputsSha256 === run.inputsSha256 && parent.snapshotId === snapshotId &&
-    hash(parent.candidate) === hash(proof.candidate) && parent.qualified === true && parent.snapshotRequested === true && parent.snapshotCreate?.phase === "acknowledged" &&
+    hash(parentCandidate.data) === hash(proof.candidate) && parent.qualified === true && parent.snapshotRequested === true && parent.snapshotCreate?.phase === "acknowledged" &&
     (parent.builderProvenance || parent.builder.cleanup?.provenanceSha256 === hash(raw)));
   requireProof(!state.resources.images.some((other: any) => other !== row && other.builder?.id === audit.targetId));
   const cleanup = NativeCanaryPhysicalCleanupSchema.safeParse(row.builder.physicalCleanup);
