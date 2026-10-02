@@ -18,6 +18,7 @@ import {
   DESIGN_WORKSPACE_LAYERS_HEIGHT_MIN,
   DESIGN_WORKSPACE_LAYERS_HEIGHT_VAR,
   DESIGN_WORKSPACE_STYLE_WIDTH_DEFAULT,
+  DESIGN_WORKSPACE_STYLE_WIDTH_KEY,
   DESIGN_WORKSPACE_STYLE_WIDTH_MAX,
   DESIGN_WORKSPACE_STYLE_WIDTH_MIN,
   DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
@@ -28,10 +29,12 @@ import {
   readPersistedDesignWorkspaceLayersHeight,
   readPersistedDesignWorkspaceStyleWidth,
   sanitizeDesignWorkspaceLayersHeight,
+  sanitizeDesignWorkspaceStyleWidth,
 } from "./design-workspace-width";
 
 interface DesignFloatingPanelProps {
   workspaceId: string | null;
+  active: boolean;
   /** Hidden stays mounted and inert: the inspector owns the document's save
    * and undo shortcuts, which must keep working with the panel put away. */
   visible: boolean;
@@ -45,7 +48,7 @@ export const DesignFloatingPanel = React.forwardRef<
   HTMLElement,
   DesignFloatingPanelProps
 >(function DesignFloatingPanel(
-  { workspaceId, visible, layersExpanded, layers, inspector },
+  { workspaceId, active, visible, layersExpanded, layers, inspector },
   forwardedRef,
 ) {
   const panelRef = useRef<HTMLElement | null>(null);
@@ -89,6 +92,37 @@ export const DesignFloatingPanel = React.forwardRef<
     const synchronize = (event: Event) => {
       if (
         event instanceof StorageEvent &&
+        event.key !== DESIGN_WORKSPACE_STYLE_WIDTH_KEY &&
+        event.key !== null
+      ) {
+        return;
+      }
+      const next =
+        event instanceof CustomEvent
+          ? sanitizeDesignWorkspaceStyleWidth(event.detail)
+          : readPersistedDesignWorkspaceStyleWidth();
+      panelRef.current?.parentElement?.style.setProperty(
+        DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
+        `${next}px`,
+      );
+      setWidth(next);
+      document.documentElement.style.setProperty(
+        DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
+        `${next}px`,
+      );
+    };
+    window.addEventListener("storage", synchronize);
+    window.addEventListener(DESIGN_WORKSPACE_STYLE_WIDTH_KEY, synchronize);
+    return () => {
+      window.removeEventListener("storage", synchronize);
+      window.removeEventListener(DESIGN_WORKSPACE_STYLE_WIDTH_KEY, synchronize);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const synchronize = (event: Event) => {
+      if (
+        event instanceof StorageEvent &&
         event.key !== DESIGN_WORKSPACE_LAYERS_HEIGHT_KEY &&
         event.key !== null
       ) {
@@ -127,6 +161,9 @@ export const DesignFloatingPanel = React.forwardRef<
     document.documentElement.style.setProperty(
       DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
       `${committed}px`,
+    );
+    window.dispatchEvent(
+      new CustomEvent(DESIGN_WORKSPACE_STYLE_WIDTH_KEY, { detail: committed }),
     );
   }, []);
 
@@ -173,6 +210,7 @@ export const DesignFloatingPanel = React.forwardRef<
       )}
     >
       <DesignPanelResizeHandle
+        active={active && visible}
         panelRef={panelRef}
         edge="left"
         value={width}
@@ -195,6 +233,7 @@ export const DesignFloatingPanel = React.forwardRef<
         {layers}
         {layersExpanded ? (
           <DesignPanelResizeHandle
+            active={active && visible}
             panelRef={layersRef}
             edge="bottom"
             className="zd-design-layers-split"

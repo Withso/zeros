@@ -71,6 +71,7 @@ import {
   toast,
 } from "../../shared/ui/primitives";
 import { isEditableHotkeyTarget } from "../../shell/editable-target";
+import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { hasDesignAssetDrag, readDesignAssetDrag } from "./design-assets";
 import {
   canFillDesignContainer,
@@ -95,6 +96,7 @@ import {
   designResizeLayoutOffset,
   designResizeStyleAxes,
   designRevealRectViewport,
+  designGestureRectUnchanged,
   designSafeViewportRect,
   designRotatedResizeOrigin,
   designRotationCursor,
@@ -203,7 +205,6 @@ import {
   hoverDesignNodeAtLocation,
   inspectDesignNode,
   inspectDesignNodeAtLocation,
-  inspectDesignNodesInRect,
   previewDesignNodeGeometry,
   previewDesignNodeMotionTransient,
   previewDesignNodeStylesTransient,
@@ -213,6 +214,7 @@ import {
   selectDesignNode,
   selectDesignNodeAtLocation,
   selectDesignNodes,
+  selectDesignNodesInRect,
   toggleDesignNodeSelection,
 } from "./state/design-selection";
 import { createDesignSerialQueue } from "./state/design-serial-queue";
@@ -437,6 +439,10 @@ export function DesignCanvas({
   zoomActionsRef,
 }: DesignCanvasProps) {
   const view = useDesignWorkspaceView(workspaceId);
+  const canvasDirectoryId = snapshot?.directoryId ?? view.directoryId;
+  const canvasDocumentOwner = `${workspaceId ?? ""}\0${canvasDirectoryId ?? ""}`;
+  const canvasDocumentOwnerRef = useRef(canvasDocumentOwner);
+  canvasDocumentOwnerRef.current = canvasDocumentOwner;
   const setCodeView = useDesignWorkspaceUiStore((state) => state.setCodeView);
   const setActiveTheme = useDesignWorkspaceUiStore(
     (state) => state.setActiveTheme,
@@ -789,6 +795,7 @@ export function DesignCanvas({
   /** A captured spacing edit freezes the camera: its coordinate system and
    * feedback must not move under the pointer mid-drag. */
   const spacingGestureRef = useRef(false);
+  const panGestureRef = useRef(false);
   // Drives the grab cursor without publishing transient state globally.
   const [spacePressed, setSpacePressed] = useState(false);
   // Option/Alt reveals exact sibling spacing without permanently cluttering
@@ -823,7 +830,7 @@ export function DesignCanvas({
   // The theme matrix is a persistent non-modal tool window launched from the
   // canvas toolbar, so it may coexist with canvas and inspector work.
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
-  const motionOverlayOwner = `${workspaceId ?? ""}\u0000${selectedFrame?.file ?? ""}\u0000${selectedNodeDetails?.oid ?? ""}`;
+  const motionOverlayOwner = `${workspaceId ?? ""}\u0000${snapshot?.directoryId ?? view.directoryId ?? ""}\u0000${selectedFrame?.file ?? ""}\u0000${selectedNodeDetails?.oid ?? ""}`;
   const [motionOverlayState, setMotionOverlayState] =
     useState<DesignMotionOverlayState>({
       owner: "",
@@ -2407,13 +2414,23 @@ export function DesignCanvas({
         "[data-design-frame]",
       );
       if (!element) return;
-      const previewKey = `${workspaceId}\0${frame.file}`;
+      const previewKey = `${canvasDocumentOwner}\0${frame.file}`;
+      const ownerIsCurrent = () =>
+        canvasDocumentOwnerRef.current === canvasDocumentOwner &&
+        designWorkspaceView(workspaceId).directoryId === canvasDirectoryId;
       const previousPreview = frameGeometryPreviewsRef.current.get(previewKey);
       const start = previousPreview?.geometry ?? frameGeometry(frame);
       const preview = { geometry: start, settled: false };
       const startX = event.clientX;
       const startY = event.clientY;
       let latest = start;
+      const startRect = {
+        x: start.x,
+        y: start.y,
+        width: start.w,
+        height: start.h,
+      };
+      let latestRawRect = startRect;
       let moved = false;
       // Resizing a Hug frame fixes the axes it changes. The root previews that
       // intent while dragging so release commits exactly what is on screen.
@@ -2434,7 +2451,7 @@ export function DesignCanvas({
       );
       let rootPreviewKeys = "";
       const rootPreviewLane = resizeRoot
-        ? `${workspaceId}\0${frame.file}\0${resizeRoot.oid}`
+        ? `${canvasDocumentOwner}\0${frame.file}\0${resizeRoot.oid}`
         : "";
       const queueRootPreview = (styles: Record<string, string> | null) => {
         if (!resizeRoot) return;
@@ -2444,6 +2461,7 @@ export function DesignCanvas({
         // One lane per root across gestures: a cancelled drag's restore runs
         // before the next drag's preview, never after it.
         void frameRootPreviewQueue.run(rootPreviewLane, async () => {
+          if (!ownerIsCurrent()) return;
           // Restore the source first so a narrower intent drops the axis that
           // is no longer being fixed.
           if (cleared)
@@ -2453,7 +2471,7 @@ export function DesignCanvas({
               sourceVersion: frame.sourceVersion,
               nodeId,
             });
-          if (styles)
+          if (styles && ownerIsCurrent())
             await previewDesignNodeGeometry({
               workspaceId,
               frame,
@@ -2505,6 +2523,7 @@ export function DesignCanvas({
       };
 
       const move = (pointerEvent: PointerEvent) => {
+        if (!ownerIsCurrent()) return;
         // A trackpad pinch repaints the camera up to 80ms before the store
         // learns the new zoom, so travel divides by what is on screen now.
         const zoom = liveDesignZoom();
@@ -2522,6 +2541,7 @@ export function DesignCanvas({
                   width: start.w,
                   height: start.h,
                 };
+                latestRawRect = moving;
                 const snapped =
                   pointerEvent.metaKey || pointerEvent.ctrlKey
                     ? { rect: moving, guides: {} }
@@ -2557,6 +2577,7 @@ export function DesignCanvas({
                     fromCenter: pointerEvent.altKey,
                   },
                 );
+                latestRawRect = resized;
                 const snapped =
                   pointerEvent.metaKey ||
                   pointerEvent.ctrlKey ||
@@ -2593,15 +2614,23 @@ export function DesignCanvas({
       };
 
       const finish = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", cancel);
-        window.removeEventListener("blur", cancel);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
         paintGuides({});
         gestureCancelRef.current = null;
+        if (!ownerIsCurrent()) {
+          cancel();
+          return;
+        }
         if (!moved) return;
+        if (
+          designGestureRectUnchanged(startRect, latestRawRect) ||
+          (latest.x === Math.round(start.x) &&
+            latest.y === Math.round(start.y) &&
+            latest.w === Math.round(start.w) &&
+            latest.h === Math.round(start.h))
+        ) {
+          cancel();
+          return;
+        }
         const persist = async () => {
           const root =
             useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
@@ -2642,6 +2671,7 @@ export function DesignCanvas({
               presentation?.remove();
             }
           }
+          if (!ownerIsCurrent()) return start;
           const rootStyles = designFrameResizeRootStyles(
             resizeRoot,
             start,
@@ -2651,6 +2681,7 @@ export function DesignCanvas({
             // A quick release must not let the drag's preview land after the
             // committed generation.
             await frameRootPreviewQueue.idle(rootPreviewLane);
+            if (!ownerIsCurrent()) return start;
             await applyDesignEditCached(workspaceId, frame, {
               schemaVersion: 1,
               transactionId: `desktop:${crypto.randomUUID()}`,
@@ -2695,7 +2726,8 @@ export function DesignCanvas({
           if (frameGeometryPreviewsRef.current.get(previewKey) !== preview)
             return;
           frameGeometryPreviewsRef.current.delete(previewKey);
-          if (element.isConnected) paintFrameGeometry(element, geometry);
+          if (ownerIsCurrent() && element.isConnected)
+            paintFrameGeometry(element, geometry);
         };
         void persist()
           .then(settle)
@@ -2705,6 +2737,7 @@ export function DesignCanvas({
               .data?.frames.find((candidate) => candidate.file === frame.file);
             const restored = confirmed ? frameGeometry(confirmed) : start;
             settle(restored);
+            if (!ownerIsCurrent()) return;
             clearRootPreview();
             paintDesignLabelText(
               badge,
@@ -2718,45 +2751,46 @@ export function DesignCanvas({
 
       const cancel = () => {
         if (frameGeometryPreviewsRef.current.get(previewKey) === preview) {
-          if (previousPreview && !previousPreview.settled)
+          if (ownerIsCurrent() && previousPreview && !previousPreview.settled)
             frameGeometryPreviewsRef.current.set(previewKey, previousPreview);
           else frameGeometryPreviewsRef.current.delete(previewKey);
-          const restored = previousPreview?.geometry ?? start;
-          paintFrameGeometry(element, restored);
-          if (mode !== "move") {
-            clearRootPreview();
-            paintDesignLabelText(
-              badge,
-              designSizeBadgeText(restored.w, restored.h, rootModes),
-            );
+          // The label DOM can survive a directory replacement. React has
+          // already painted the new owner; the old rollback must not touch it.
+          if (ownerIsCurrent()) {
+            const restored = previousPreview?.geometry ?? start;
+            paintFrameGeometry(element, restored);
+            if (mode !== "move") {
+              clearRootPreview();
+              paintDesignLabelText(
+                badge,
+                designSizeBadgeText(restored.w, restored.h, rootModes),
+              );
+            }
           }
         }
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", cancel);
-        window.removeEventListener("blur", cancel);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
         paintGuides({});
         gestureCancelRef.current = null;
       };
 
       gestureCancelRef.current?.();
-      gestureCancelRef.current = cancel;
-      document.body.style.cursor =
-        mode === "move"
-          ? "default"
-          : (DESIGN_RESIZE_HANDLES.find((item) => item.handle === mode)
-              ?.cursor ?? "nwse-resize");
-      document.body.style.userSelect = "none";
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", finish);
-      window.addEventListener("pointercancel", cancel);
-      window.addEventListener("blur", cancel);
+      gestureCancelRef.current = beginDesignPointerGesture({
+        target: event.currentTarget,
+        pointerId: event.pointerId,
+        cursor:
+          mode === "move"
+            ? "default"
+            : (DESIGN_RESIZE_HANDLES.find((item) => item.handle === mode)
+                ?.cursor ?? "nwse-resize"),
+        onMove: move,
+        onFinish: finish,
+        onCancel: cancel,
+      });
     },
     [
       active,
       activeTool,
+      canvasDirectoryId,
+      canvasDocumentOwner,
       folder,
       liveDesignZoom,
       publishSelection,
@@ -3637,9 +3671,6 @@ export function DesignCanvas({
       if (!article) return false;
       event.preventDefault();
       event.stopPropagation();
-      const pointerOwner = event.currentTarget;
-      const pointerId = event.pointerId;
-      pointerOwner.setPointerCapture?.(pointerId);
       const overlays = new Map(
         Array.from(
           article.querySelectorAll<HTMLElement>(
@@ -3695,6 +3726,7 @@ export function DesignCanvas({
       const startX = event.clientX;
       const startY = event.clientY;
       let delta = { x: 0, y: 0 };
+      let latestRawBounds = groupBounds;
       let moved = false;
       const paintGuides = (guides: { x?: number; y?: number }) => {
         if (verticalGuideRef.current) {
@@ -3779,6 +3811,7 @@ export function DesignCanvas({
           x: groupBounds.x + rawX,
           y: groupBounds.y + rawY,
         };
+        latestRawBounds = moving;
         const snapped =
           pointerEvent.metaKey || pointerEvent.ctrlKey
             ? { rect: moving, guides: {} }
@@ -3793,16 +3826,7 @@ export function DesignCanvas({
       };
       const cleanup = () => {
         loop.stop();
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", cancel);
-        window.removeEventListener("blur", cancel);
-        if (pointerOwner.hasPointerCapture?.(pointerId)) {
-          pointerOwner.releasePointerCapture(pointerId);
-        }
         paintGuides({});
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
         gestureCancelRef.current = null;
       };
       const finish = () => {
@@ -3848,6 +3872,10 @@ export function DesignCanvas({
               finishInlineTextTool(frame, selected);
             })
             .catch(() => {});
+          return;
+        }
+        if (designGestureRectUnchanged(groupBounds, latestRawBounds)) {
+          restore();
           return;
         }
         const finalUpdates = updates();
@@ -3906,13 +3934,14 @@ export function DesignCanvas({
       };
 
       gestureCancelRef.current?.();
-      gestureCancelRef.current = cancel;
-      document.body.style.cursor = "move";
-      document.body.style.userSelect = "none";
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", finish);
-      window.addEventListener("pointercancel", cancel);
-      window.addEventListener("blur", cancel);
+      gestureCancelRef.current = beginDesignPointerGesture({
+        target: event.currentTarget,
+        pointerId: event.pointerId,
+        cursor: "move",
+        onMove: move,
+        onFinish: finish,
+        onCancel: cancel,
+      });
       return true;
     },
     [
@@ -3958,9 +3987,6 @@ export function DesignCanvas({
       event.preventDefault();
       event.stopPropagation();
       groupOverlay.dataset.designGesture = "resize";
-      const pointerOwner = event.currentTarget;
-      const pointerId = event.pointerId;
-      pointerOwner.setPointerCapture?.(pointerId);
       const overlays = new Map(
         Array.from(
           article.querySelectorAll<HTMLElement>(
@@ -4025,6 +4051,7 @@ export function DesignCanvas({
       const startX = event.clientX;
       const startY = event.clientY;
       let latestBounds = startBounds;
+      let latestRawBounds = startBounds;
       let latestRects = new Map(
         starts.map(({ details }) => [details.oid, details.rect] as const),
       );
@@ -4154,6 +4181,7 @@ export function DesignCanvas({
           keepAspect: pointerEvent.shiftKey,
           fromCenter: pointerEvent.altKey,
         });
+        latestRawBounds = raw;
         const snappingDisabled =
           pointerEvent.metaKey ||
           pointerEvent.ctrlKey ||
@@ -4179,22 +4207,17 @@ export function DesignCanvas({
       };
       const cleanup = () => {
         loop.stop();
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", cancel);
-        window.removeEventListener("blur", cancel);
-        if (pointerOwner.hasPointerCapture?.(pointerId)) {
-          pointerOwner.releasePointerCapture(pointerId);
-        }
         paintGuides({});
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
         delete groupOverlay.dataset.designGesture;
         gestureCancelRef.current = null;
       };
       const finish = () => {
         cleanup();
         if (!moved) return;
+        if (designGestureRectUnchanged(startBounds, latestRawBounds)) {
+          restore();
+          return;
+        }
         const finalUpdates = updates();
         for (const update of finalUpdates) {
           publishDesignGestureLivePreview(
@@ -4251,15 +4274,16 @@ export function DesignCanvas({
       };
 
       gestureCancelRef.current?.();
-      gestureCancelRef.current = cancel;
-      document.body.style.cursor =
-        DESIGN_RESIZE_HANDLES.find((item) => item.handle === handle)?.cursor ??
-        "nwse-resize";
-      document.body.style.userSelect = "none";
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", finish);
-      window.addEventListener("pointercancel", cancel);
-      window.addEventListener("blur", cancel);
+      gestureCancelRef.current = beginDesignPointerGesture({
+        target: event.currentTarget,
+        pointerId: event.pointerId,
+        cursor:
+          DESIGN_RESIZE_HANDLES.find((item) => item.handle === handle)?.cursor ??
+          "nwse-resize",
+        onMove: move,
+        onFinish: finish,
+        onCancel: cancel,
+      });
     },
     [
       active,
@@ -4416,9 +4440,6 @@ export function DesignCanvas({
       }
       event.preventDefault();
       event.stopPropagation();
-      const pointerOwner = event.currentTarget;
-      const pointerId = event.pointerId;
-      pointerOwner.setPointerCapture?.(pointerId);
       const startX = event.clientX;
       const startY = event.clientY;
       const box = designSelectionBox(details);
@@ -4460,6 +4481,7 @@ export function DesignCanvas({
           height: painted.height / box.scaleY,
         });
       let latest = start;
+      let latestRawRect = start;
       let latestStyles: Record<string, string> = {};
       let moved = false;
       const previewInput = {
@@ -4737,6 +4759,7 @@ export function DesignCanvas({
                 keepAspect: pointerEvent.shiftKey,
                 fromCenter: pointerEvent.altKey,
               });
+        latestRawRect = raw;
         const snappingDisabled =
           turned ||
           pointerEvent.metaKey ||
@@ -4762,15 +4785,6 @@ export function DesignCanvas({
 
       const cleanup = () => {
         loop.stop();
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", cancel);
-        window.removeEventListener("blur", cancel);
-        if (pointerOwner.hasPointerCapture?.(pointerId)) {
-          pointerOwner.releasePointerCapture(pointerId);
-        }
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
         paintGuides({});
         gestureCancelRef.current = null;
       };
@@ -4799,6 +4813,15 @@ export function DesignCanvas({
         cleanup();
         if (!moved) {
           finishClickSelection();
+          return;
+        }
+        // Returning to the original authored geometry is a cancelled edit.
+        // Restore source sizing intent (Hug/Fill, %, auto), not fixed pixels.
+        if (
+          designGestureRectUnchanged(start, latestRawRect) ||
+          sameDesignGestureStyles(latestStyles, authoredForRect(start).styles)
+        ) {
+          restorePreview();
           return;
         }
         publishDesignGestureLivePreview(
@@ -4830,17 +4853,18 @@ export function DesignCanvas({
       };
 
       gestureCancelRef.current?.();
-      gestureCancelRef.current = cancel;
-      document.body.style.cursor =
-        gestureMode === "move"
-          ? "move"
-          : (DESIGN_RESIZE_HANDLES.find((item) => item.handle === gestureMode)
-              ?.cursor ?? "nwse-resize");
-      document.body.style.userSelect = "none";
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", finish);
-      window.addEventListener("pointercancel", cancel);
-      window.addEventListener("blur", cancel);
+      gestureCancelRef.current = beginDesignPointerGesture({
+        target: event.currentTarget,
+        pointerId: event.pointerId,
+        cursor:
+          gestureMode === "move"
+            ? "move"
+            : (DESIGN_RESIZE_HANDLES.find((item) => item.handle === gestureMode)
+                ?.cursor ?? "nwse-resize"),
+        onMove: move,
+        onFinish: finish,
+        onCancel: cancel,
+      });
     },
     [
       active,
@@ -4867,59 +4891,71 @@ export function DesignCanvas({
       if (
         !workspaceId ||
         !active ||
-        (event.button !== 1 && !spacePressedRef.current)
+        !event.isPrimary ||
+        (event.button !== 1 && !(event.button === 0 && spacePressedRef.current))
       ) {
         return false;
       }
       event.preventDefault();
+      gestureCancelRef.current?.();
       const startX = event.clientX;
       const startY = event.clientY;
-      const start = view;
+      // The wheel camera may be a paint ahead of persisted state. Transfer that
+      // exact camera to the hand and retire its timer before starting the drag.
+      const camera = wheelViewportRef.current ?? view;
+      const start: DesignViewport = {
+        zoom: camera.zoom,
+        panX: camera.panX,
+        panY: camera.panY,
+      };
+      const ownerIsCurrent = () =>
+        canvasDocumentOwnerRef.current === canvasDocumentOwner &&
+        designWorkspaceView(workspaceId).directoryId === canvasDirectoryId;
+      cancelPendingWheelGesture();
+      wheelViewportRef.current = start;
+      panGestureRef.current = true;
       let latest: DesignViewport = start;
 
       const move = (pointerEvent: PointerEvent) => {
+        if (!ownerIsCurrent()) return;
         latest = {
           ...start,
           panX: start.panX + pointerEvent.clientX - startX,
           panY: start.panY + pointerEvent.clientY - startY,
         };
+        wheelViewportRef.current = latest;
         paintDesignCanvasCamera(worldRef.current, latest, true);
       };
 
-      const finish = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", cancel);
-        window.removeEventListener("blur", cancel);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
+      const settle = (viewport: DesignViewport) => {
+        panGestureRef.current = false;
         gestureCancelRef.current = null;
-        paintDesignCanvasCamera(worldRef.current, latest, false);
-        setViewport(workspaceId, latest);
+        cancelPendingWheelGesture();
+        // Directory replacement already published its own view. Releasing the
+        // retired hand must not restore the old camera or selection into it.
+        if (!ownerIsCurrent()) return;
+        paintDesignCanvasCamera(worldRef.current, viewport, false);
+        setViewport(workspaceId, viewport);
       };
-
-      const cancel = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", cancel);
-        window.removeEventListener("blur", cancel);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-        gestureCancelRef.current = null;
-        paintDesignCanvasCamera(worldRef.current, start, false);
-      };
-
-      gestureCancelRef.current?.();
-      gestureCancelRef.current = cancel;
-      document.body.style.cursor = "grabbing";
-      document.body.style.userSelect = "none";
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", finish);
-      window.addEventListener("pointercancel", cancel);
-      window.addEventListener("blur", cancel);
+      gestureCancelRef.current = beginDesignPointerGesture({
+        target: event.currentTarget,
+        pointerId: event.pointerId,
+        cursor: "grabbing",
+        onMove: move,
+        onFinish: () => settle(latest),
+        onCancel: () => settle(start),
+      });
       return true;
     },
-    [active, setViewport, view, workspaceId],
+    [
+      active,
+      cancelPendingWheelGesture,
+      canvasDirectoryId,
+      canvasDocumentOwner,
+      setViewport,
+      view,
+      workspaceId,
+    ],
   );
 
   // Canvas shortcuts are focus-scoped and attach only while the visible design
@@ -4947,6 +4983,15 @@ export function DesignCanvas({
       }
       const viewport = viewportRef.current;
       if (!viewport) return;
+      // The timeline is mounted inside the canvas, but its controls own native
+      // focus, activation and keyframe editing rather than layer navigation.
+      if (
+        event.defaultPrevented ||
+        (event.target instanceof Element &&
+          event.target.closest(
+            "[data-design-motion-timeline], [data-design-motion-settings]",
+          ))
+      ) return;
       const editableTarget = isEditableHotkeyTarget(event.target);
       // Option measures; it never types, moves, or deletes anything. Reading it
       // outside the canvas's own focus scope is what makes the overlay appear
@@ -5260,7 +5305,7 @@ export function DesignCanvas({
 
   // Navigation/collapse during a drag must release window listeners and restore
   // the pre-gesture DOM geometry before the retained surface becomes inert.
-  useEffect(
+  useLayoutEffect(
     () => () => {
       gestureCancelRef.current?.();
       gestureCancelRef.current = null;
@@ -5286,7 +5331,7 @@ export function DesignCanvas({
       }
       wheelViewportRef.current = null;
     },
-    [active, folder, workspaceId],
+    [active, canvasDocumentOwner, folder, view.directoryId, workspaceId],
   );
 
   // --- EVENT HANDLERS ---
@@ -6172,11 +6217,12 @@ export function DesignCanvas({
           width: Math.abs(latest.x - start.x),
           height: Math.abs(latest.y - start.y),
         };
+        const camera = wheelViewportRef.current ?? designWorkspaceView(workspaceId);
         const worldRect = {
-          x: (screenRect.x - view.panX) / view.zoom,
-          y: (screenRect.y - view.panY) / view.zoom,
-          width: screenRect.width / view.zoom,
-          height: screenRect.height / view.zoom,
+          x: (screenRect.x - camera.panX) / camera.zoom,
+          y: (screenRect.y - camera.panY) / camera.zoom,
+          width: screenRect.width / camera.zoom,
+          height: screenRect.height / camera.zoom,
         };
         const overlapArea = (frame: DesignCanvasFrameWire) => {
           const left = Math.max(worldRect.x, frame.x);
@@ -6210,9 +6256,11 @@ export function DesignCanvas({
           frame.file === selectedFrame?.file && view.selectedNodeId
             ? designLayerParentId(selectedRuntimeTree, view.selectedNodeId)
             : null;
-        void inspectDesignNodesInRect({
+        void selectDesignNodesInRect({
           workspaceId,
+          folder,
           frame,
+          additive,
           rect: {
             x: worldRect.x - frame.x,
             y: worldRect.y - frame.y,
@@ -6221,28 +6269,6 @@ export function DesignCanvas({
           },
           scopeNodeId,
         })
-          .then(async (details) => {
-            const existing =
-              additive && view.selectedFrame === frame.file
-                ? view.selectedNodeIds
-                : EMPTY_NODE_IDS;
-            const nodeIds = [
-              ...existing,
-              ...details.map((candidate) => candidate.oid),
-            ];
-            if (nodeIds.length === 0) {
-              if (!additive) await selectDesignFrame(workspaceId, frame);
-              return;
-            }
-            await selectDesignNodes({
-              workspaceId,
-              folder,
-              frame,
-              nodeIds,
-              primaryNodeId: details[0]?.oid ?? existing[0],
-              details,
-            });
-          })
           .catch((selectionError) => {
             toast.error("Couldn't select layers in that area", {
               description: errorMessage(selectionError),
@@ -6268,12 +6294,7 @@ export function DesignCanvas({
       selectedFrame,
       selectedRuntimeTree,
       snapshot?.frames,
-      view.panX,
-      view.panY,
-      view.selectedFrame,
       view.selectedNodeId,
-      view.selectedNodeIds,
-      view.zoom,
       workspaceId,
     ],
   );
@@ -6326,7 +6347,7 @@ export function DesignCanvas({
         return;
       }
       event.preventDefault();
-      if (spacingGestureRef.current) return;
+      if (spacingGestureRef.current || panGestureRef.current) return;
       const bounds = event.currentTarget.getBoundingClientRect();
       const current = wheelViewportRef.current ?? view;
       let latest: DesignViewport;
@@ -6412,7 +6433,7 @@ export function DesignCanvas({
         >
           {snapshot?.frames.map((frame) => {
             const paintedFrame = frameGeometryPreviewsRef.current.get(
-              `${workspaceId}\0${frame.file}`,
+              `${canvasDocumentOwner}\0${frame.file}`,
             )?.geometry;
             const selected = selectedFrame?.file === frame.file;
             // Keep the last confirmed semantic selection over the last painted
@@ -7345,7 +7366,7 @@ export function DesignCanvas({
         ) : null}
 
         <DesignMotionTimeline
-          key={`${workspaceId ?? "none"}:${selectedFrame?.file ?? "none"}:${selectedNodeDetails?.oid ?? "frame"}`}
+          key={motionOverlayOwner}
           open={motionTimelineOpen}
           ownerKey={selectedFrame?.file ?? "frame"}
           sessionOwnerKey={motionOverlayOwner}

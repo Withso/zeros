@@ -12,6 +12,7 @@ import {
 import { createDesignDragPresentation } from "./design-drag-presentation";
 import type { DesignOperation } from "@zeros/design-core";
 import { designBackgroundWork } from "./state/design-background-work";
+import { beginDesignPointerGesture } from "./design-pointer-gesture";
 
 const dragOwners = new WeakMap<object, object>();
 
@@ -185,10 +186,10 @@ export function startDesignLayoutDrag(input: {
       });
     return inFlight;
   };
-  const schedule = () => {
+  const schedule = (immediate = false) => {
     dirty = true;
     if (animation !== null || stopped) return;
-    animation = requestAnimationFrame(() => {
+    const update = () => {
       animation = null;
       void flush()
         .then(() => {
@@ -196,11 +197,13 @@ export function startDesignLayoutDrag(input: {
         })
         .catch((error) => {
           if (!released) {
-            cancel();
+            cancelPointerGesture();
             input.failed(error);
           }
         });
-    });
+    };
+    if (immediate) update();
+    else animation = requestAnimationFrame(update);
   };
   let ready: Promise<void> | null = null;
   const prepare = () =>
@@ -232,7 +235,7 @@ export function startDesignLayoutDrag(input: {
     if (!ready)
       void prepare().catch((error) => {
         if (!released) {
-          cancel();
+          cancelPointerGesture();
           input.failed(error);
         }
       });
@@ -244,20 +247,14 @@ export function startDesignLayoutDrag(input: {
     // The external visual follows every pointer, even while the source port
     // finishes its previous request. Late responses cannot move it backwards.
     if (suppressed) presentation?.paint(origin());
-    schedule();
+    // The shared pointer owner already sampled this move for the current paint.
+    // Dispatch here rather than adding another frame before the live preview.
+    schedule(true);
   };
   const cleanup = () => {
     if (animation !== null) cancelAnimationFrame(animation);
     animation = null;
-    window.removeEventListener("pointermove", move);
-    window.removeEventListener("pointerup", finish);
-    window.removeEventListener("pointercancel", cancel);
-    window.removeEventListener("blur", cancel);
-    if (owner.hasPointerCapture?.(event.pointerId))
-      owner.releasePointerCapture(event.pointerId);
     line.remove();
-    document.body.style.cursor = "";
-    document.body.style.userSelect = "";
     input.finished();
   };
   const restore = async () => {
@@ -387,12 +384,13 @@ export function startDesignLayoutDrag(input: {
   };
   event.preventDefault();
   event.stopPropagation();
-  owner.setPointerCapture?.(event.pointerId);
-  document.body.style.cursor = "grabbing";
-  document.body.style.userSelect = "none";
-  window.addEventListener("pointermove", move);
-  window.addEventListener("pointerup", finish);
-  window.addEventListener("pointercancel", cancel);
-  window.addEventListener("blur", cancel);
-  return cancel;
+  const cancelPointerGesture = beginDesignPointerGesture({
+    target: owner,
+    pointerId: event.pointerId,
+    cursor: "grabbing",
+    onMove: move,
+    onFinish: finish,
+    onCancel: cancel,
+  });
+  return cancelPointerGesture;
 }
