@@ -17,6 +17,7 @@ import {
 } from "../platform/bridge/cloud-workspace-key";
 import { BridgeProvider } from "../platform/bridge/use-bridge";
 import { type BridgeMessage } from "../platform/bridge/messages";
+import type { Workspace } from "../platform/git";
 import {
   ActionsCtx,
   type SessionsCtx,
@@ -49,12 +50,14 @@ const cloudB = {
   ...cloudA,
   workspaceId: "33333333-3333-4333-8333-333333333333",
 };
-const folderA = cloudFixture
+const repoA = cloudFixture
   ? cloudWorkspaceKey(cloudA)
   : "/terminal-fixture/a";
-const folderB = cloudFixture
+const repoB = cloudFixture
   ? cloudWorkspaceKey(cloudB)
   : "/terminal-fixture/b";
+const folderA = cloudFixture ? repoA : `${repoA}/worktree`;
+const folderB = cloudFixture ? repoB : `${repoB}/worktree`;
 const cloudStatuses = new Map<string, ConnectionStatus>();
 const cloudStatusListeners = new Map<string, Set<() => void>>();
 if (cloudFixture) {
@@ -93,8 +96,38 @@ if (cloudFixture) {
       },
     });
 }
-upsertProject({ repoRoot: folderA, name: "Terminal A" });
-upsertProject({ repoRoot: folderB, name: "Terminal B" });
+const projectA = upsertProject({
+  repoRoot: repoA,
+  name: "Terminal A",
+  isGitRepository: true,
+});
+const projectB = upsertProject({
+  repoRoot: repoB,
+  name: "Terminal B",
+  isGitRepository: true,
+});
+const workspaces: Workspace[] = cloudFixture
+  ? []
+  : [
+      { id: "ws_terminal_a", project: projectA, path: folderA },
+      { id: "ws_terminal_b", project: projectB, path: folderB },
+    ].map(({ id, project, path }) => ({
+      id,
+      repoRoot: project.repoRoot,
+      repoSlug: project.repoSlug,
+      path,
+      branch: `terminal/${project.repoSlug}`,
+      baseBranch: "main",
+      status: "in-progress",
+      createdAt: 1,
+      archivedAt: null,
+      stashRef: null,
+      prNumber: null,
+      prState: null,
+      prUrl: null,
+      agentId: null,
+      lastActiveAt: null,
+    }));
 const listeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const nativeListeners = new Map<string, Set<(payload: unknown) => void>>();
 const emit = (type: string, payload: Record<string, unknown> = {}) => {
@@ -235,7 +268,15 @@ RuntimeClient.prototype.request = async function <
       warnings: [],
     };
   if (message.op === "workspace.list")
-    result = { workspaces: cloudFixture ? getCloudWorkspaceRows() : [] };
+    result = {
+      workspaces: cloudFixture
+        ? getCloudWorkspaceRows()
+        : params.archived === true
+          ? []
+          : workspaces.filter(
+              (row) => !params.repoSlug || row.repoSlug === params.repoSlug,
+            ),
+    };
   if (message.op === "file.tree")
     result = { files: ["scripts/setup.sh", "src/test.ts"] };
   if (message.op === "workspace.setupInfo")
@@ -294,7 +335,9 @@ RuntimeClient.prototype.request = async function <
     pendingRuns.delete(String(params.actionId));
     const sessionId = String(params.sessionId);
     runLogs[sessionId] = "";
-    const folder = String(params.repoRoot ?? params.workspaceId);
+    const folder =
+      workspaces.find((row) => row.id === params.workspaceId)?.path ??
+      String(params.repoRoot ?? params.workspaceId);
     ptys.set(sessionId, { sessionId, cwd: folder, createdAt: Date.now() });
     runStates[String(params.workspaceId)] = {
       ...runStates[String(params.workspaceId)],
