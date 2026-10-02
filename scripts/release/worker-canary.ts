@@ -54,7 +54,8 @@ export function releaseCanaryAdapter(lease: any, run: any, credentials: Map<stri
         requireCheck(ReleaseCanaryPrelaunchFailureSchema.safeParse(job.prelaunchFailure).success, "Release canary prelaunch diagnostic is invalid; reconcile before retrying");
         throw new ReleaseCanaryPrelaunchError();
       }
-      requireCheck(!job.auditRetired || job.outcome, "Release canary operation is physically retired; a fresh release operation is required");
+      requireCheck((!job.retired && !job.auditRetired) || (job.phase === "completed" && job.outcome),
+        "Release canary operation is retired; a fresh release operation is required");
       if (job.phase === "allocating") {
         await lease.fence(); await core.allocate(job, image);
         let attested = false;

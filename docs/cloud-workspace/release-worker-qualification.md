@@ -369,10 +369,17 @@ succeeded or an audit response was lost. The local terminal marker and retired
 flag are saved together after acknowledgment. Later guarded executions observe
 at most 16 historical canaries within a 15-second budget before fresh preflight;
 they never allocate, rebuild, reupload, prune images or release holds by age.
-An exact current-run unstarted allocation saved before its resource row exists
-may resume the original allocation ID; missing rows for starting/running or
-historical jobs fail closed. Existing same-source active jobs remain
-observation-only. Terminal settlement permits only a separately fresh operation
+An authenticated unstarted allocation saved before its resource row exists is
+nonexecuted history, including a superseded run or truthful empty cleanup after
+admission denial. Scanning it never releases admission or fabricates cleanup or
+audit proof. Only an unretired current-run job may resume its original allocation
+ID; a retired empty job never allocates again. Missing rows for starting/running
+jobs or dispatch evidence, and uncertain allocations without retained operations,
+remain fenced. An owned pre-dispatch
+VM with a retained DELETE is observed strictly after completion and sandbox404
+to release its own compute hold without another DELETE or an invented audit.
+Existing same-source active jobs remain observation-only. Terminal settlement
+permits only a separately fresh operation
 with current source, owner allowance and consent; it is not successful native
 qualification, a worker approval or permission to enable customer cloud.
 

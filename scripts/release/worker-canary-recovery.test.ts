@@ -79,13 +79,15 @@ describe("bounded historical native recovery crash windows", () => {
     expect(await reconcileReleaseCanaryRetirements(test.config, test.actor, test.lease, test.core, test.reconcile)).toBe(0);
     expect(test.core.retire).not.toHaveBeenCalled(); expect(test.reconcile).not.toHaveBeenCalled(); expect(test.core.start).not.toHaveBeenCalled();
   });
-  it("does not skip historical, mismatched-source or previously dispatched empty allocations", async () => {
-    for (const change of [(test: any) => { test.config.runId = "124"; }, (test: any) => { test.state.releaseRuns[0].sourceSha = "f".repeat(40); },
+  it("does not skip mismatched-source or previously dispatched empty allocations", async () => {
+    for (const change of [(test: any) => { test.state.releaseRuns[0].sourceSha = "f".repeat(40); },
       (test: any) => { test.job.admissionRequest = { recorded: true }; }, (test: any) => { test.job.prelaunchFailure = { version: 1 }; },
       (test: any) => { test.job.retired = false; }, (test: any) => { test.job.outcome = { success: true }; },
       (test: any) => { test.state.releaseRuns[0].actorUserId = "88888888-8888-4888-8888-888888888888"; },
       (test: any) => { test.job.credentialRevision = 2; }, (test: any) => { test.job.image.sourceCommit = "f".repeat(40); },
-      (test: any) => { test.job.qualificationProfile = "full"; }]) {
+      (test: any) => { test.job.qualificationProfile = "full"; }, (test: any) => { test.job.id = "not-a-uuid"; },
+      (test: any) => { test.state.releaseRuns[0].runId = "not-a-run"; }, (test: any) => { test.job.image.snapshotId = "../wrong-image"; },
+      (test: any) => { test.job.image.buildSha256 = "not-a-digest"; }, (test: any) => { test.job.auditRetired = { version: 1 }; }]) {
       const test = fixture(true); test.job.phase = "allocating"; test.state.resources.images = []; change(test);
       await expect(reconcileReleaseCanaryRetirements(test.config, test.actor, test.lease, test.core, test.reconcile)).rejects.toThrow("journal");
       expect(test.reconcile).not.toHaveBeenCalled(); expect(test.core.allocate).not.toHaveBeenCalled();
