@@ -3,30 +3,34 @@ import { describe, expect, it } from "vitest";
 
 const workflow = () => readFileSync(".github/workflows/staff-owner-bootstrap.yml", "utf8");
 const job = (text: string, name: string) => text.split(`\n  ${name}:\n`)[1]?.split(/\n {2}[a-z][a-z_-]+:\n/)[0] ?? "";
+const betaWorkflow = () => workflow().replaceAll("${{ inputs.channel || 'beta' }}", "beta");
 
-describe("manual Beta owner bootstrap workflow", () => {
-  it("has only the bounded manual inputs, never a Production or arbitrary-role option", () => {
+describe("manual channel owner bootstrap workflow", () => {
+  it("adds only a closed channel choice with backward-compatible Beta default", () => {
     const text = workflow();
     expect(text).toContain("workflow_dispatch:");
     expect(text).not.toMatch(/^ {2}(?:push|pull_request|workflow_call|schedule):/m);
     const inputs = text.split("    inputs:\n")[1]?.split("\npermissions:")[0] ?? "";
     expect([...inputs.matchAll(/^ {6}([a-z_]+):$/gm)].map(match => match[1])).toEqual([
-      "mode", "subject_user_id", "actor_user_id", "owner_organization_id", "reason", "confirm",
+      "channel", "mode", "subject_user_id", "actor_user_id", "owner_organization_id", "reason", "confirm",
     ]);
     expect(inputs).toContain("options: [plan, apply]");
     expect(inputs).toContain("default: plan");
-    expect(text).not.toMatch(/production|STAFF_BOOTSTRAP_ROLE|CONTROL_PLANE_STAFF_ROLE/);
+    expect(inputs).toContain("options: [beta, production]"); expect(inputs).toContain("default: beta");
+    expect(text).not.toMatch(/STAFF_BOOTSTRAP_ROLE|CONTROL_PLANE_STAFF_ROLE|caller_gated/);
     expect(text).not.toMatch(/contents: write|actions: write|deployments: write|secrets: write/);
   });
 
   it("gates the privileged job on exact-source CI, Beta environment and a never-cancelled hosted lock", () => {
-    const text = workflow(), ci = job(text, "ci"), bootstrap = job(text, "bootstrap");
+    const text = betaWorkflow(), ci = job(text, "ci"), bootstrap = job(text, "bootstrap");
     expect(ci).toContain("github.event.repository.fork == false");
     expect(ci).toContain("github.event_name == 'workflow_dispatch'");
     expect(ci).toContain("startsWith(github.ref, 'refs/heads/release/')");
     expect(ci).not.toContain("secrets.");
     expect(ci).toContain("ci-cli.ts --wait");
-    expect(bootstrap).toContain("needs: ci");
+    expect(bootstrap).toContain("needs: [ci, approve]");
+    expect(bootstrap).toContain("needs.ci.result == 'success'");
+    expect(bootstrap).toContain("needs.approve.result == 'skipped'");
     expect(bootstrap).toContain("environment: beta");
     expect(bootstrap).toContain("group: hosted-mutation-beta\n      cancel-in-progress: false");
     expect(bootstrap).toContain("timeout-minutes: 15");
@@ -37,8 +41,23 @@ describe("manual Beta owner bootstrap workflow", () => {
     }
   });
 
+  it("requires the actual secrets-free Production approval job before protected preparation", () => {
+    const text = workflow(), approve = job(text, "approve"), bootstrap = job(text, "bootstrap");
+    expect((text.match(/environment: production-approval/g) ?? []).length).toBe(1);
+    expect(approve).toContain("name: Approve Production staff owner bootstrap");
+    expect(approve).toContain("inputs.channel == 'production'");
+    expect(approve).toContain("github.event.repository.fork == false");
+    expect(approve).toContain("environment: production-approval"); expect(approve).toContain("permissions: {}");
+    expect(approve).not.toContain("secrets."); expect(approve).not.toContain("actions/checkout");
+    expect(bootstrap).toContain("inputs.channel == 'production' && needs.approve.result == 'success'");
+    expect(bootstrap).toContain("(inputs.channel || 'beta') == 'beta' && needs.approve.result == 'skipped'");
+    expect(bootstrap).toContain("environment: ${{ inputs.channel || 'beta' }}");
+    expect(bootstrap).toContain("group: hosted-mutation-${{ inputs.channel || 'beta' }}");
+    expect(bootstrap).not.toContain("PRODUCTION_CONFIRMED:");
+  });
+
   it("durably uploads the exact sanitized intent before the single create-capable entrypoint", () => {
-    const text = job(workflow(), "bootstrap");
+    const text = job(betaWorkflow(), "bootstrap");
     const prepare = text.indexOf("beta-staff-bootstrap-cli.ts --prepare");
     const upload = text.indexOf("name: Retain role-create intent");
     const execute = text.indexOf("beta-staff-bootstrap-cli.ts --run");

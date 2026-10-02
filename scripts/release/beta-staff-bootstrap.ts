@@ -9,16 +9,16 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const providerId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const counter = z.string().regex(/^[1-9]\d{0,19}$/);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
-const failures = ["configuration", "intent", "source", "identity", "journal", "create", "role", "staff", "database", "cleanup", "recovery", "cancelled"] as const;
-const sourceSchema = z.object({ repository: z.string(), channel: z.literal("beta"), branch: z.string().regex(/^release\/\d+\.\d+\.\d+$/),
+const failures = ["configuration", "intent", "source", "approval", "identity", "journal", "create", "role", "staff", "database", "cleanup", "recovery", "cancelled"] as const;
+const sourceSchema = z.object({ repository: z.string(), channel: z.enum(["beta", "production"]), branch: z.string().regex(/^release\/\d+\.\d+\.\d+$/),
   sourceSha: z.string().regex(SHA), runId: counter, runAttempt: counter }).strict();
 const requestSchema = z.object({ subjectUserId: z.string().uuid(), actorUserId: z.string().uuid(), ownerOrganizationId: z.string().uuid(),
   role: z.literal("platform_owner"), reasonSha256: digest }).strict();
 const journalSchema = z.object({
   version: z.literal(1), source: sourceSchema, mode: z.enum(["plan", "apply"]), request: requestSchema,
-  target: z.object({ organization: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), database: z.literal("zeros-control-plane-beta"),
+  target: z.object({ organization: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), database: z.enum(["zeros-control-plane-beta", "zeros-control-plane-production"]),
     branch: z.literal("main"), databaseId: providerId.nullable(), branchId: providerId.nullable() }).strict(),
-  role: z.object({ name: z.string().regex(/^zeros-beta-staff-[1-9]\d{0,19}$/), creatorSha256: digest, ttlSeconds: z.literal(3600),
+  role: z.object({ name: z.string().regex(/^zeros-(?:beta|production)-staff-[1-9]\d{0,19}$/), creatorSha256: digest, ttlSeconds: z.literal(3600),
     phase: z.enum(["planned", "requested", "owned", "deleted"]), id: providerId.nullable(), expiresAt: z.string().datetime({ offset: true }).nullable(),
     deleted: z.boolean(), absentObservedAt: z.string().datetime({ offset: true }).nullable() }).strict(),
   staff: z.object({ state: z.enum(["planned", "changed", "unchanged"]), previousRole: z.enum(["platform_owner", "developer", "support_admin"]).nullable(),
@@ -28,7 +28,8 @@ const journalSchema = z.object({
 }).strict();
 export type BetaStaffBootstrapJournal = z.infer<typeof journalSchema>;
 export class BetaStaffBootstrapError extends Error {
-  constructor(readonly code: typeof failures[number], readonly journal?: BetaStaffBootstrapJournal) { super(`Beta staff bootstrap ${code} failed`); }
+  constructor(readonly code: typeof failures[number], readonly journal?: BetaStaffBootstrapJournal,
+    channel: "beta" | "production" = journal?.source.channel ?? "beta") { super(`${channel === "production" ? "Production" : "Beta"} staff bootstrap ${code} failed`); }
 }
 export type BetaStaffBootstrapConfig = ReturnType<typeof betaStaffBootstrapConfig>;
 export type BetaStaffBootstrapDeps = {
@@ -42,9 +43,12 @@ export type BetaStaffBootstrapDeps = {
 };
 
 export function betaStaffBootstrapConfig(env: NodeJS.ProcessEnv, event: unknown) {
-  const reject = (): never => { throw new BetaStaffBootstrapError("configuration"); };
+  const reject = (): never => { throw new BetaStaffBootstrapError("configuration", undefined, env.RELEASE_CHANNEL === "production" ? "production" : "beta"); };
   let source;
   try { source = releaseSource(env); } catch { return reject(); }
+  const channel = source.channel;
+  if (channel !== "beta" && channel !== "production") return reject();
+  const database = `zeros-control-plane-${channel}` as const;
   const dispatch = z.object({ repository: z.object({ full_name: z.string(), fork: z.literal(false) }).passthrough(),
     ref: z.string(), sender: z.object({ login: z.string().min(1) }).passthrough() }).passthrough().safeParse(event);
   const inputs = z.object({ mode: z.enum(["plan", "apply"]), subjectUserId: z.string().uuid(), actorUserId: z.string().uuid(),
@@ -54,25 +58,25 @@ export function betaStaffBootstrapConfig(env: NodeJS.ProcessEnv, event: unknown)
     ownerOrganizationId: env.STAFF_OWNER_ORGANIZATION_ID, expectedEmail: env.STAFF_EXPECTED_EMAIL, reason: env.STAFF_REASON,
     organization: env.PLANETSCALE_ORG, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT,
   });
-  if (!inputs.success || !dispatch.success || source.channel !== "beta" || env.CI !== "true" || env.GITHUB_ACTIONS !== "true" ||
+  if (!inputs.success || !dispatch.success || env.CI !== "true" || env.GITHUB_ACTIONS !== "true" ||
     env.GITHUB_EVENT_NAME !== "workflow_dispatch" || env.GITHUB_HEAD_REF || dispatch.data.repository.full_name !== source.repository ||
     ![source.branch, `refs/heads/${source.branch}`].includes(dispatch.data.ref) || dispatch.data.sender.login !== env.GITHUB_ACTOR || env.GITHUB_REF_NAME !== source.branch ||
     env.GITHUB_REF !== `refs/heads/${source.branch}` || env.GITHUB_WORKFLOW_SHA !== source.sourceSha ||
     env.GITHUB_WORKFLOW_REF !== `${source.repository}/.github/workflows/staff-owner-bootstrap.yml@refs/heads/${source.branch}` ||
-    env.PLANETSCALE_DATABASE !== "zeros-control-plane-beta" || env.PLANETSCALE_BRANCH !== "main" ||
-    env.STAFF_BOOTSTRAP_CONFIRM !== "zeros-control-plane-beta" || env.STAFF_BOOTSTRAP_ROLE !== undefined ||
+    env.PLANETSCALE_DATABASE !== database || env.PLANETSCALE_BRANCH !== "main" ||
+    env.STAFF_BOOTSTRAP_CONFIRM !== database || env.STAFF_BOOTSTRAP_ROLE !== undefined ||
     !env.PLANETSCALE_SERVICE_TOKEN_ID?.trim() || !env.PLANETSCALE_SERVICE_TOKEN?.trim()) return reject();
-  return { ...source, channel: "beta" as const, ...inputs.data, expectedEmail: inputs.data.expectedEmail.toLowerCase(),
-    database: "zeros-control-plane-beta" as const, databaseBranch: "main" as const, creatorSha256: hash(env.PLANETSCALE_SERVICE_TOKEN_ID) };
+  return { ...source, channel, ...inputs.data, expectedEmail: inputs.data.expectedEmail.toLowerCase(),
+    database, databaseBranch: "main" as const, creatorSha256: hash(env.PLANETSCALE_SERVICE_TOKEN_ID) };
 }
 
 export function prepareBetaStaffBootstrap(config: BetaStaffBootstrapConfig): BetaStaffBootstrapJournal {
-  return journalSchema.parse({ version: 1, source: { repository: config.repository, channel: "beta", branch: config.branch,
+  return journalSchema.parse({ version: 1, source: { repository: config.repository, channel: config.channel, branch: config.branch,
     sourceSha: config.sourceSha, runId: config.runId, runAttempt: config.runAttempt }, mode: config.mode,
     request: { subjectUserId: config.subjectUserId, actorUserId: config.actorUserId, ownerOrganizationId: config.ownerOrganizationId,
       role: "platform_owner", reasonSha256: hash(config.reason) },
     target: { organization: config.organization, database: config.database, branch: "main", databaseId: null, branchId: null },
-    role: { name: `zeros-beta-staff-${config.runId}`, creatorSha256: config.creatorSha256, ttlSeconds: 3600,
+    role: { name: `zeros-${config.channel}-staff-${config.runId}`, creatorSha256: config.creatorSha256, ttlSeconds: 3600,
       phase: "planned", id: null, expiresAt: null, deleted: false, absentObservedAt: null }, staff: null, staffApplyAttempted: false, failure: null });
 }
 
@@ -194,7 +198,7 @@ export async function runBetaStaffBootstrap(config: BetaStaffBootstrapConfig, re
       return current.ready === true;
     }, { attempts: 12, timeoutMs: 120_000, sleep: deps.pause ?? sleep });
     stage = "database"; checkCancelled(); pool = deps.createPool(roleConnectionString(login));
-    const request = { databaseUrl: roleConnectionString(login), channel: "beta", railwayEnvironmentName: "beta", execute: false,
+    const request = { databaseUrl: roleConnectionString(login), channel: config.channel, railwayEnvironmentName: config.channel, execute: false,
       subjectUserId: config.subjectUserId, expectedEmail: config.expectedEmail, actorUserId: config.actorUserId,
       nextRole: "platform_owner", reason: config.reason, ownerOrganizationId: config.ownerOrganizationId };
     stage = "staff";
@@ -203,7 +207,8 @@ export async function runBetaStaffBootstrap(config: BetaStaffBootstrapConfig, re
       stage = "source"; checkCancelled(); await deps.verifySource();
       stage = "staff"; checkCancelled();
       journal.staffApplyAttempted = true; await save(); checkCancelled();
-      result = await manageStaffRole(pool, validateStaffRoleRequest({ ...request, execute: true, approval: result.approval! }));
+      result = await manageStaffRole(pool, validateStaffRoleRequest({ ...request, execute: true, approval: result.approval!,
+        ...(config.channel === "production" ? { productionConfirmed: "true" } : {}) }));
     }
     journal.staff = { state: result.state, previousRole: result.previousRole, nextRole: "platform_owner", targetFingerprint: result.targetFingerprint,
       accountRevision: result.accountRevision, approval: result.approval }; await save();

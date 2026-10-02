@@ -19,22 +19,23 @@ const env = () => ({ RELEASE_CHANNEL: "beta", RELEASE_BRANCH: "release/1.2.3", R
 const event = () => ({ repository: { full_name: "example/zeros", fork: false }, ref: "release/1.2.3", sender: { login: "synthetic-operator" } });
 const now = new Date("2026-10-02T05:00:00.000Z");
 
-function fixture(mode = "apply") {
-  const configuration = betaStaffBootstrapConfig({ ...env(), STAFF_BOOTSTRAP_MODE: mode }, event());
+function fixture(mode = "apply", channel: "beta" | "production" = "beta") {
+  const configuration = betaStaffBootstrapConfig({ ...env(), RELEASE_CHANNEL: channel, STAFF_BOOTSTRAP_MODE: mode,
+    PLANETSCALE_DATABASE: `zeros-control-plane-${channel}`, STAFF_BOOTSTRAP_CONFIRM: `zeros-control-plane-${channel}` }, event());
   const journal = prepareBetaStaffBootstrap(configuration);
   const calls: string[] = [], saved: unknown[] = [], grants: unknown[][] = [];
   const state = { exists: false, role: null as string | null, revision: 1, owner: true, organization: true,
     subjectActive: true, actorActive: true, email: "owner@example.test", roleReady: true, foreign: false,
     lostCreate: false, lostDelete: false, retainDeleted: false, incomplete: false, missingActor: false, duplicate: false,
     createRejected: false, preexisting: false, invalidExpiry: false, closeFailure: false };
-  const databasePath = "/databases/zeros-control-plane-beta", branchPath = `${databasePath}/branches/main`, rolePath = `${branchPath}/roles/temporary-role`;
+  const databasePath = `/databases/zeros-control-plane-${channel}`, branchPath = `${databasePath}/branches/main`, rolePath = `${branchPath}/roles/temporary-role`;
   const role = () => ({ id: "temporary-role", name: journal.role.name, branch: { id: "main-branch", name: "main" },
     actor: { id: state.foreign ? "other-token" : "synthetic-token-id" }, ready: state.roleReady,
     username: "synthetic_owner.mainbranch", password: "synthetic-one-time-password", access_host_url: "synthetic.pg.psdb.cloud",
     expires_at: state.invalidExpiry ? "2099-01-01T00:00:00.000Z" : "2026-10-02T06:00:00.000Z" });
   const request = vi.fn(async (method: string, route: string, body?: unknown) => {
     calls.push(`${method} ${route}`);
-    if (method === "GET" && route === databasePath) return { status: 200, body: { id: "beta-database", name: configuration.database, kind: "postgresql", default_branch: "main" } };
+    if (method === "GET" && route === databasePath) return { status: 200, body: { id: `${channel}-database`, name: configuration.database, kind: "postgresql", default_branch: "main" } };
     if (method === "GET" && route === branchPath) return { status: 200, body: { id: "main-branch", name: "main", kind: "postgresql", production: true } };
     if (method === "GET" && route.startsWith(`${branchPath}/roles?`)) {
       const row = role(); if (state.missingActor) delete (row as any).actor;
@@ -87,9 +88,9 @@ function fixture(mode = "apply") {
     execute: () => runBetaStaffBootstrap(configuration, journal, deps) };
 }
 
-describe("Beta-only staff bootstrap boundary", () => {
+describe("closed channel staff bootstrap boundary", () => {
   it.each([
-    ["Production", { RELEASE_CHANNEL: "production" }], ["main", { RELEASE_BRANCH: "main" }],
+    ["mixed Production/Beta target", { RELEASE_CHANNEL: "production" }], ["main", { RELEASE_BRANCH: "main" }],
     ["other database", { PLANETSCALE_DATABASE: "zeros-control-plane-production" }], ["wrong confirmation", { STAFF_BOOTSTRAP_CONFIRM: "beta" }],
     ["non-main database branch", { PLANETSCALE_BRANCH: "development" }], ["other event", { GITHUB_EVENT_NAME: "pull_request" }],
     ["different SHA", { GITHUB_SHA: "b".repeat(40) }], ["other workflow", { GITHUB_WORKFLOW_REF: "example/zeros/.github/workflows/release.yml@refs/heads/release/1.2.3" }],
@@ -106,6 +107,83 @@ describe("Beta-only staff bootstrap boundary", () => {
     expect(() => betaStaffBootstrapConfig(env(), { ...event(), ref: "refs/heads/release/1.2.3" })).not.toThrow();
     expect(() => betaStaffBootstrapConfig(env(), { ...event(), ref: "refs/heads/release/1.2.4" })).toThrow();
     expect(() => betaStaffBootstrapConfig(env(), { ...event(), ref: "refs/tags/release/1.2.3" })).toThrow();
+  });
+});
+
+describe("Production through the maintained staff operator", () => {
+  const production = () => ({ ...env(), RELEASE_CHANNEL: "production", PLANETSCALE_DATABASE: "zeros-control-plane-production",
+    STAFF_BOOTSTRAP_CONFIRM: "zeros-control-plane-production" });
+  it("accepts an exact Production target without relaxing Beta target checks", () => {
+    const config = betaStaffBootstrapConfig(production(), event()), journal = prepareBetaStaffBootstrap(config);
+    expect(config.channel).toBe("production"); expect(config.database).toBe("zeros-control-plane-production");
+    expect(journal.version).toBe(1); expect(journal.source.channel).toBe("production");
+    expect(journal.role.name).toBe("zeros-production-staff-123");
+    expect(prepareBetaStaffBootstrap(betaStaffBootstrapConfig(env(), event())).role.name).toBe("zeros-beta-staff-123");
+  });
+  it.each([
+    ["Alpha", { RELEASE_CHANNEL: "alpha", RELEASE_BRANCH: "main" }], ["unknown channel", { RELEASE_CHANNEL: "development" }],
+    ["Beta database", { PLANETSCALE_DATABASE: "zeros-control-plane-beta" }], ["Beta confirmation", { STAFF_BOOTSTRAP_CONFIRM: "zeros-control-plane-beta" }],
+    ["main ref", { RELEASE_BRANCH: "main" }], ["other event source", { GITHUB_SHA: "b".repeat(40) }],
+    ["untrusted workflow source", { GITHUB_WORKFLOW_SHA: "b".repeat(40) }], ["different workflow", { GITHUB_WORKFLOW_REF: "example/zeros/.github/workflows/release.yml@refs/heads/release/1.2.3" }],
+    ["different actor", { GITHUB_ACTOR: "other-operator" }], ["missing email", { STAFF_EXPECTED_EMAIL: "" }],
+  ])("refuses Production %s", (_label, change) => {
+    expect(() => betaStaffBootstrapConfig({ ...production(), ...change }, event())).toThrow("configuration");
+  });
+  it("refuses a Production fork before provider access", () => {
+    expect(() => betaStaffBootstrapConfig(production(), { ...event(), repository: { full_name: "example/zeros", fork: true } })).toThrow();
+  });
+  it("performs one owned audited Production grant with revision change and exact cleanup", async () => {
+    const test = fixture("apply", "production"); test.state.role = "developer"; test.state.revision = 2;
+    const result = await test.execute();
+    expect(result.staff?.state).toBe("changed"); expect(result.staff?.previousRole).toBe("developer");
+    expect(result.staff?.accountRevision).toBe(3); expect(result.role.deleted).toBe(true);
+    expect(test.grants).toEqual([[subjectUserId, "platform_owner"]]);
+    expect(test.request.mock.calls.filter(([method]) => method === "POST")).toHaveLength(1);
+    expect(test.request.mock.calls.filter(([method]) => method === "DELETE")).toHaveLength(1);
+    const client = await test.pool.connect();
+    const audit = vi.mocked(client.query).mock.calls.find(([sql]) => String(sql).includes("INSERT INTO staff_role_changes"));
+    expect(audit?.[1]).toEqual([subjectUserId, actorUserId, "developer", "platform_owner", 3, "production", result.staff?.targetFingerprint, "postgres", test.configuration.reason]);
+    const event = vi.mocked(client.query).mock.calls.find(([sql]) => String(sql).includes("INSERT INTO security_events"));
+    expect(event?.[1]).toEqual([subjectUserId, 3, "developer", "platform_owner"]);
+  });
+  it.each(["owner", "organization", "subjectActive", "actorActive", "email"])("retains Production %s rejection and owned cleanup", async boundary => {
+    const test = fixture("apply", "production");
+    if (boundary === "email") test.state.email = "different@example.test"; else (test.state as any)[boundary] = false;
+    await expect(test.execute()).rejects.toThrow("staff"); expect(test.grants).toEqual([]); expect(test.state.exists).toBe(false);
+  });
+  it("rejects a Beta intent in Production before any provider request", async () => {
+    const beta = fixture(), production = fixture("apply", "production");
+    await expect(runBetaStaffBootstrap(production.configuration, beta.journal, production.deps)).rejects.toThrow("intent");
+    expect(production.request).not.toHaveBeenCalled();
+    await expect(runBetaStaffBootstrap(beta.configuration, production.journal, beta.deps)).rejects.toThrow("intent");
+    expect(beta.request).not.toHaveBeenCalled();
+  });
+  it.each(["database", "role"])("rejects a mixed-channel Production journal %s before provider access", async boundary => {
+    const test = fixture("apply", "production");
+    if (boundary === "database") (test.journal.target as any).database = "zeros-control-plane-beta";
+    else test.journal.role.name = "zeros-beta-staff-123";
+    await expect(test.execute()).rejects.toThrow("intent"); expect(test.request).not.toHaveBeenCalled();
+  });
+  it("returns truthful unchanged Production without another grant or revision", async () => {
+    const test = fixture("apply", "production"); test.state.role = "platform_owner"; test.state.revision = 2;
+    const result = await test.execute(); expect(result.staff?.state).toBe("unchanged");
+    expect(result.staff?.accountRevision).toBe(2); expect(test.grants).toEqual([]); expect(result.role.deleted).toBe(true);
+  });
+  it("keeps Production lost-create recovery and rerun cleanup-only", async () => {
+    const lost = fixture("apply", "production"); lost.state.lostCreate = true;
+    await expect(lost.execute()).rejects.toThrow("create"); expect(lost.grants).toEqual([]); expect(lost.state.exists).toBe(false);
+    const rerun = fixture("apply", "production"); rerun.configuration.runAttempt = "2"; rerun.journal.source.runAttempt = "2"; rerun.state.preexisting = true;
+    await expect(rerun.execute()).rejects.toThrow("recovery");
+    expect(rerun.request.mock.calls.some(([method]) => method === "POST")).toBe(false); expect(rerun.grants).toEqual([]);
+  });
+  it("cancels Production before POST and stops a changed source before grant", async () => {
+    const cancelled = fixture("apply", "production"), controller = new AbortController(); controller.abort();
+    await expect(runBetaStaffBootstrap(cancelled.configuration, cancelled.journal, { ...cancelled.deps, signal: controller.signal })).rejects.toThrow("cancelled");
+    expect(cancelled.request).not.toHaveBeenCalled();
+    const drift = fixture("apply", "production"); drift.deps.verifySource.mockImplementation(async () => {
+      if (drift.deps.verifySource.mock.calls.length === 3) throw new Error("source changed");
+    });
+    await expect(drift.execute()).rejects.toThrow("source"); expect(drift.grants).toEqual([]); expect(drift.state.exists).toBe(false);
   });
 });
 
