@@ -297,6 +297,42 @@ ready candidate's named-slot hold only after a certified physically deleted
 builder, complete inventory and exact named-snapshot GET 404. It persists a
 tombstone before releasing admission. Snapshot-name absence is not proof of
 backing-storage erasure. Published snapshots remain intentionally retained.
+
+A separate reviewed release-only path may settle the named slot while certified
+builder/native storage remains pending. It consumes a strict version2 named
+DELETE acknowledgement from a separately reviewed literal action: saved original
+intent, then saved/fenced dispatch, then HTTP200 with the exact
+`snapshot.named.deleted` name and deleted status. A lost response, HTTP404,
+version1 intent or mere deletion request cannot authorize this path. The
+maintained worker exposes no named DELETE entrypoint.
+
+The encrypted journal retains the complete original builder provenance,
+candidate, creation/save bindings and admission reservation; every allocated
+native's canonical admission, creation, cleanup and committed primary retirement
+audit; and the actual reviewed non-reference and finite writer-exclusion
+projections. All configuration, deployment, release/Dev/custom registry,
+archive, application, primary-audit and reference-writer authorities must be
+covered. Review follows the retained plan observations and dispatch remains
+within their original 60-second freshness bound and a maximum five-minute exclusion
+window. Later captures revalidate the reviewed facts without extending those
+timestamps. Expiry requires another plan and actual review. Namespace settlement
+may use a separate later reviewed capture; static source review alone is
+insufficient. These private projections remain bounded inside the existing
+encrypted registry document limit and do not enter public receipts.
+
+GET-only reconciliation freshly reads every original operation, then its exact
+sandbox GET 404, plus exact named GET 404 and complete inventory preserving the protected
+base and every other name. It saves a separate namespace witness and tombstone,
+then uses one guarded admission CAS to remove only the exact original named
+reservation. `snapshotDeleted` is set with committed readback, so an interrupted
+tombstone cannot trigger the ordinary broad admission-release helper. The saved
+before/after transition permits recovery of a lost CAS response from the exact
+authenticated ledger; absence alone does not. A conflict or failed save retains
+the incomplete history, without repeating DELETE or creating a reservation.
+Caps, Dev/customer policy, old helpers and the physical-only fallback stay
+unchanged. Logical namespace settlement preserves all original operations and
+pending/unmeasured storage certificates and never marks backing bytes erased.
+
 Historical v1 receipts remain readable: `resourcesDeleted:true` retains its
 original physical-deletion meaning for temporary builder/canary allocations,
 not the selected named image. New executions issue v2 when credential-bearing
@@ -512,6 +548,16 @@ The name hold remains until separate exact retirement readback releases it;
 recovery never deletes or prunes a name. Unknown/malformed historical proof is
 retained and blocks new release work for reviewed reconciliation of its exact
 saved operation, not a new deletion or inferred success.
+
+After the separately reviewed named settlement above, only the combined
+`observeOnly:true,historical:true` builder path may replace ready-name and active
+reservation prerequisites with the committed namespace witness. It authenticates
+the current account ledger, rejects any replacement reservation or reappeared
+alias, and freshly observes the same original operation, sandbox GET 404 and name GET 404.
+The retained review can expire after commitment; it authorized that historical
+settlement, not another action. Initial/current provenance and admission remain
+strict. Later physical completion uses the original operation proof and retains
+the earlier pending-storage and named-retirement history.
 
 The kit journal intentionally excludes the binary source archive. A recovered
 source manifest without its archive **before install** fails before allocation/

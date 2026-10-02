@@ -1,14 +1,11 @@
-import { createHash } from "node:crypto";
 import { admissionPolicy, releaseHostedAdmission, reserveHostedAdmission } from "../dev-environment/hosted-admission.mjs";
 import { requireCheck, type Channel } from "./contracts";
+import { workerOwner } from "./worker-owner";
+export { workerOwner, workerSnapshotName } from "./worker-owner";
 import { protectedBoatSnapshotCapacity } from "../../apps/control-plane/src/cloud-workspaces/boat-account-admission";
+import { settleWorkerNamedRetirement } from "./worker-named-retirement";
 
 export const WORKER_SNAPSHOT_BUDGET = { alpha: 2, beta: 2, production: 2, dev: 2, base: 1, headroom: 1, limit: 10 } as const;
-export const workerOwner = (channel: Channel) => createHash("sha256").update(`zeros-release-worker:${channel}`).digest("hex").slice(0, 24);
-export function workerSnapshotName(state: { owner: string; generation: string }, digest: string) {
-  requireCheck(/^[a-f0-9]{24}$/.test(state.owner) && /^[a-f0-9-]{36}$/.test(state.generation) && /^[a-f0-9]{64}$/.test(digest), "Invalid worker slot identity");
-  return `dev-${state.owner}-${state.generation.slice(0, 8)}-${digest.slice(0, 16)}`;
-}
 type Snapshot = { provider: string; id: string };
 export function assertWorkerSnapshotSlots(channel: Channel, candidate: string, profile: any, inventory: Snapshot[], reservations: any[]) {
   const policy = admissionPolicy(profile);
@@ -44,7 +41,14 @@ export async function reconcileWorkerSnapshotHolds(store: any, lease: any, profi
   requireCheck(names.has(profile.boat.baseSnapshot) && names.size === inventory.filter(row => row.provider === "boat").length,
     "Worker snapshot retirement requires complete protected-base inventory");
   const images = state.resources.images ?? [];
-  const proven = (image: any) => image.purpose === "release-worker" && image.qualified === true && image.snapshotRequested === true &&
+  const named = (image: any) => image.snapshotNameRetirement !== undefined || image.snapshotRetirementReview !== undefined ||
+    image.snapshotDeleteIntent !== undefined && image.snapshotDeleteIntent?.version !== 1;
+  for (const image of images.filter(named)) {
+    // An explicit reviewed action settles only its exact reservation. Leave the
+    // unchanged physical-only reconciliation to a subsequent ordinary pass.
+    if (await settleWorkerNamedRetirement(store, lease, profile, image, inventory, request)) return;
+  }
+  const proven = (image: any) => !named(image) && image.purpose === "release-worker" && image.qualified === true && image.snapshotRequested === true &&
     image.snapshotId?.startsWith(`dev-${state.owner}-${state.generation.slice(0, 8)}-`) && image.snapshotCreate?.phase === "acknowledged" &&
     image.builder?.deleted === true && /^bx_[a-z0-9]+$/.test(image.builder.id ?? "") && /^bdop_[a-f0-9]{32}$/.test(image.builder.deletionOperationId ?? "") &&
     image.candidate?.snapshotId === image.snapshotId && image.candidate.sourceCommit === image.sourceCommit &&
