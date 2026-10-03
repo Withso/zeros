@@ -255,8 +255,19 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
       else declarations.set(key, value);
     }
     if (changed) {
-      await editor.fill(
-        [...declarations].map(([key, value]) => `${key}: ${value};`).join("\n"),
+      const replacement = [...declarations]
+        .map(([key, value]) => `${key}: ${value};`)
+        .join("\n");
+      // fill() selects through the DOM, racing CodeMirror's own selection, and
+      // can insert before the old text; the parser then keeps the old values.
+      // Select through CodeMirror's key binding and require an exact replacement.
+      await editor.focus();
+      await editor.press("ControlOrMeta+A");
+      await page.keyboard.insertText(replacement);
+      await verify(
+        () => editor.innerText(),
+        (value) => value === replacement,
+        "CSS editor contains exactly the requested replacement",
       );
       await committed(before, id);
       await verify(
