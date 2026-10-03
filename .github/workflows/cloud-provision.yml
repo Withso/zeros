@@ -19,7 +19,12 @@ on:
         type: string
         default: ""
       enable_cloud:
-        description: Enable cloud and its workers only after the qualified worker tuple is selected
+        description: Enable cloud and its workers after a worker tuple is selected (qualified unless worker promotion is off)
+        required: false
+        type: boolean
+        default: false
+      adopt_base_worker:
+        description: Worker promotion off only - select the shared base image Alpha serves when this channel has no worker tuple
         required: false
         type: boolean
         default: false
@@ -54,6 +59,9 @@ jobs:
       CLOUD_PROVISION_MODE: ${{ inputs.mode }}
       CLOUD_PROVISION_CONFIRM: ${{ inputs.confirm }}
       CLOUD_PROVISION_ENABLE_CLOUD: ${{ inputs.enable_cloud }}
+      CLOUD_PROVISION_ADOPT_BASE_WORKER: ${{ inputs.adopt_base_worker }}
+      ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
+      BOAT_BASE_SNAPSHOT: ${{ vars.BOAT_BASE_SNAPSHOT }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
       RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}

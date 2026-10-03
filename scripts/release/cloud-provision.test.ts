@@ -24,7 +24,7 @@ function fixture(channel: Channel = "beta") {
     BOAT_ACCOUNT_SCOPE: "shared-test-account", BOAT_BILLING_ORG: "team_66666666-6666-4666-8666-666666666666",
     BOAT_API_KEY: "synthetic-non-admin-boat-key", CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: "synthetic-r2-access-id",
     CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: "synthetic-r2-secret-key", RESEND_API_KEY: "synthetic-resend-key",
-    CLOUD_ACCOUNT_ID: "a".repeat(32),
+    CLOUD_ACCOUNT_ID: "a".repeat(32), ZEROS_WORKER_PROMOTION: "enabled",
   };
   const current: Record<string, string> = {
     DATABASE_URL: "postgresql://app:synthetic-database-password@database.test:5432/zeros",
@@ -51,6 +51,16 @@ function qualifiedIdentity(channel: Channel = "beta", selected = tuple(channel))
     worker: { provider: selected.CLOUD_WORKSPACE_PROVIDER, imageRef: `boat:${selected.BOAT_SNAPSHOT_ID}@sha256:${selected.BOAT_IMAGE_BUILD_SHA256}`,
       sourceSha: selected.ZEROS_CLOUD_SOURCE_COMMIT, architecture: selected.ZEROS_CLOUD_IMAGE_ARCHITECTURE, storageMiB: Number(selected.CLOUD_WORKSPACE_STORAGE_MIB) } };
 }
+const baseSnapshot = "zeros-qualification-aa11196c97a6";
+function alphaBaseIdentity() {
+  return { version: 1, ready: true, sourceSha: "c".repeat(40), channel: "alpha", maintenance: false,
+    migrations: { state: "current", head: "0001_initial.sql", expectedHead: "0001_initial.sql", manifestSha256: "d".repeat(64) },
+    cloud: { enabled: true, ready: true, state: "healthy" }, workerQualified: false,
+    worker: { provider: "boat", imageRef: `boat:${baseSnapshot}@sha256:${"e".repeat(64)}`, sourceSha: "f".repeat(40),
+      architecture: "linux/amd64", storageMiB: 70225 } };
+}
+const adoptedTuple = { CLOUD_WORKSPACE_PROVIDER: "boat", BOAT_SNAPSHOT_ID: baseSnapshot, BOAT_IMAGE_BUILD_SHA256: "e".repeat(64),
+  ZEROS_CLOUD_SOURCE_COMMIT: "f".repeat(40), ZEROS_CLOUD_IMAGE_ARCHITECTURE: "linux/amd64", CLOUD_WORKSPACE_STORAGE_MIB: "70225" };
 function canaries(inputs: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return { ZEROS_RELEASE_CANARIES_ENABLED: "true", RUNTIME_QUALIFICATION_ACTOR_USER_ID: actorId,
     WORKER_CANARY_ORGANIZATION_ID: organizationId, WORKER_CANARY_REPOSITORY: "example/zeros",
@@ -95,6 +105,24 @@ describe("cloud backend planning", () => {
     expect(CLOUD_ENABLE_FLAGS.every(name => plan.desired[name] === "false")).toBe(true);
     expect(CLOUD_WORKER_VARIABLES.some(name => Object.hasOwn(plan.changes, name))).toBe(false);
     expect(cloudProvisionSummary(plan).join("\n")).not.toContain(selected.ZEROS_CLOUD_SOURCE_COMMIT);
+  });
+  it("adopts the shared base worker and enables cloud without native qualification only while worker promotion is off", () => {
+    const options = fixture(), adoptWorker = alphaBaseIdentity().worker as never;
+    const advisory = planCloudProvision({ ...options, enableCloud: true, adoptWorker, qualificationRequired: false });
+    expect(advisory.enableGate).toEqual({ ok: true, names: [] });
+    expect(advisory.workerMissing).toEqual([]);
+    expect(advisory.changes).toMatchObject({ ...adoptedTuple, ...Object.fromEntries(CLOUD_ENABLE_FLAGS.map(name => [name, "true"])) });
+    expect(cloudProvisionSummary(advisory)).toContain("WORKER_QUALIFICATION advisory");
+    const strict = planCloudProvision({ ...options, enableCloud: true, adoptWorker, qualificationRequired: true });
+    expect(strict.enableGate.names).toContain("WORKER_QUALIFICATION");
+    expect(CLOUD_ENABLE_FLAGS.every(name => strict.desired[name] === "false")).toBe(true);
+  });
+  it("never lets base adoption replace a selected worker tuple", () => {
+    const options = fixture(); Object.assign(options.current, tuple());
+    const plan = planCloudProvision({ ...options, enableCloud: true, adoptWorker: alphaBaseIdentity().worker as never, qualificationRequired: false });
+    expect(CLOUD_WORKER_VARIABLES.some(name => Object.hasOwn(plan.changes, name))).toBe(false);
+    expect(Object.fromEntries(CLOUD_WORKER_VARIABLES.map(name => [name, plan.desired[name]]))).toEqual(tuple());
+    expect(plan.enableGate).toEqual({ ok: true, names: [] });
   });
   it("materializes a real cloud-off account/canary bootstrap without inventing any worker tuple", () => {
     const options = fixture(); Object.assign(options.inputs, canaries(options.inputs));
@@ -297,8 +325,13 @@ function railwayHarness(channel: Channel = "beta") {
   const options = fixture(channel), variables = { ...options.current }, logs: string[] = [], writes: Record<string, any>[] = [];
   let reads = 0;
   const state = { failWrite: false, lostWrite: false, omitReadback: "", race: false, autoDeploy: false, wrongTarget: false,
-    identity: qualifiedIdentity(channel) as unknown, qualificationReads: 0, revokeOnRecheck: false };
+    identity: qualifiedIdentity(channel) as unknown, qualificationReads: 0, revokeOnRecheck: false,
+    alphaIdentity: alphaBaseIdentity() as unknown, alphaReads: 0 };
   const fetcher: typeof fetch = async (url, init) => {
+    if (channel !== "alpha" && String(url) === `${CHANNELS.alpha.api}/v1/release-identity`) {
+      state.alphaReads++;
+      return state.alphaIdentity === null ? new Response("unavailable", { status: 503 }) : Response.json(state.alphaIdentity);
+    }
     if (String(url) === `${CHANNELS[channel].api}/v1/release-identity`) {
       state.qualificationReads++;
       if (state.revokeOnRecheck && state.qualificationReads > 1) return Response.json({ ...qualifiedIdentity(channel), workerQualified: false });
@@ -377,6 +410,51 @@ describe("guarded cloud backend CLI", () => {
     expect(await harness.run()).toEqual({ mode: "apply", changed: false });
     expect(CLOUD_ENABLE_FLAGS.every(name => harness.variables[name] === "true")).toBe(true);
     expect(harness.writes.length).toBe(1);
+  });
+  it.each(["beta", "production"] as const)("adopts Alpha's served base image and enables %s cloud in one write while worker promotion is off", async channel => {
+    const harness = railwayHarness(channel);
+    Object.assign(harness.inputs, { ZEROS_WORKER_PROMOTION: "disabled", CLOUD_PROVISION_ENABLE_CLOUD: "true",
+      CLOUD_PROVISION_ADOPT_BASE_WORKER: "true", BOAT_BASE_SNAPSHOT: baseSnapshot });
+    expect(await harness.run()).toEqual({ mode: "apply", changed: true });
+    expect(harness.writes.length).toBe(1);
+    expect(harness.writes[0].variables).toMatchObject({ ...adoptedTuple, ...Object.fromEntries(CLOUD_ENABLE_FLAGS.map(name => [name, "true"])) });
+    expect(harness.writes[0].skipDeploys).toBe(true);
+    expect(harness.logs).toContain("WORKER_QUALIFICATION advisory");
+    // A repeat run keeps the adopted tuple and writes nothing.
+    expect(await harness.run()).toEqual({ mode: "apply", changed: false });
+    expect(harness.writes.length).toBe(1);
+  });
+  it("enables an unqualified selected tuple only while worker promotion is off", async () => {
+    const harness = railwayHarness(); Object.assign(harness.variables, tuple());
+    harness.inputs.CLOUD_PROVISION_ENABLE_CLOUD = "true"; harness.state.identity = { ...qualifiedIdentity(), workerQualified: false };
+    await expect(harness.run()).rejects.toThrow("WORKER_QUALIFICATION fail"); expect(harness.writes.length).toBe(0);
+    harness.inputs.ZEROS_WORKER_PROMOTION = "disabled";
+    expect(await harness.run()).toEqual({ mode: "apply", changed: true });
+    expect(CLOUD_ENABLE_FLAGS.every(name => harness.writes[0].variables[name] === "true")).toBe(true);
+    expect(CLOUD_WORKER_VARIABLES.some(name => Object.hasOwn(harness.writes[0].variables, name))).toBe(false);
+  });
+  it("refuses unsafe base adoption without writes", async () => {
+    const served = alphaBaseIdentity();
+    const cases: Array<[Record<string, unknown>, (harness: ReturnType<typeof railwayHarness>) => void, string]> = [
+      [{ ZEROS_WORKER_PROMOTION: "enabled" }, () => {}, "CLOUD_PROVISION_ADOPT_BASE_WORKER fail"],
+      [{ CLOUD_PROVISION_ADOPT_BASE_WORKER: "yes" }, () => {}, "CLOUD_PROVISION_ADOPT_BASE_WORKER fail"],
+      [{ BOAT_BASE_SNAPSHOT: "" }, () => {}, "BOAT_BASE_SNAPSHOT fail"],
+      [{ BOAT_BASE_SNAPSHOT: "another-base" }, () => {}, "BOAT_BASE_SNAPSHOT fail"],
+      [{}, harness => { harness.state.alphaIdentity = null; }, "ADOPT_BASE_WORKER fail"],
+      [{}, harness => { harness.state.alphaIdentity = { ...served, worker: null }; }, "ADOPT_BASE_WORKER fail"],
+      [{}, harness => { harness.state.alphaIdentity = { ...served, channel: "beta" }; }, "ADOPT_BASE_WORKER fail"],
+      [{}, harness => { harness.state.alphaIdentity = { ...served, cloud: { enabled: false, ready: true, state: "disabled" } }; }, "ADOPT_BASE_WORKER fail"],
+      [{}, harness => { harness.state.alphaIdentity = { ...served, worker: { ...served.worker, provider: "daytona", imageRef: "11111111-1111-4111-8111-111111111111" } }; }, "ADOPT_BASE_WORKER fail"],
+      [{}, harness => { harness.variables.BOAT_SNAPSHOT_ID = "partial-tuple"; }, "WORKER_TUPLE fail"],
+    ];
+    for (const [patch, prepare, message] of cases) {
+      const harness = railwayHarness();
+      Object.assign(harness.inputs, { ZEROS_WORKER_PROMOTION: "disabled", CLOUD_PROVISION_ENABLE_CLOUD: "true",
+        CLOUD_PROVISION_ADOPT_BASE_WORKER: "true", BOAT_BASE_SNAPSHOT: baseSnapshot }, patch);
+      prepare(harness);
+      await expect(harness.run()).rejects.toThrow(message);
+      expect(harness.writes.length).toBe(0); expect(harness.createKeyring).not.toHaveBeenCalled();
+    }
   });
   it("refuses unqualified, mismatched, stale-source, wrong-channel and unavailable worker approval without writes", async () => {
     const approved = qualifiedIdentity();

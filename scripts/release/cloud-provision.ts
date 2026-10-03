@@ -48,7 +48,17 @@ export type CloudProvisionValidation = { ok: boolean; names: string[] };
 export type CloudProvisionPlan = {
   rows: CloudProvisionRow[]; desired: Record<string, string>; changes: Record<string, string>; generate: string[];
   missingInputs: string[]; workerMissing: string[]; validation: CloudProvisionValidation; enableGate: CloudProvisionValidation;
+  workerQualification: "required" | "advisory";
 };
+
+/** The six Railway variables that select one Boat worker image. */
+export function workerTupleVariables(worker: z.infer<typeof WorkerIdentity>): Record<(typeof CLOUD_WORKER_VARIABLES)[number], string> {
+  const match = /^boat:([a-z0-9][a-z0-9-]{0,62})@sha256:([a-f0-9]{64})$/.exec(worker.imageRef);
+  if (worker.provider !== "boat" || !match) throw new Error("Only a Boat worker image can be selected");
+  return { CLOUD_WORKSPACE_PROVIDER: "boat", BOAT_SNAPSHOT_ID: match[1], BOAT_IMAGE_BUILD_SHA256: match[2],
+    ZEROS_CLOUD_SOURCE_COMMIT: worker.sourceSha, ZEROS_CLOUD_IMAGE_ARCHITECTURE: worker.architecture,
+    CLOUD_WORKSPACE_STORAGE_MIB: String(worker.storageMiB) };
+}
 
 function failureNames(error: unknown): string[] {
   const message = error instanceof Error ? error.message : "";
@@ -102,8 +112,13 @@ function singleVersionOne(encoded: string): boolean {
 }
 
 export function planCloudProvision(options: { channel: Channel; current: Readonly<Record<string, string>>;
-  inputs: NodeJS.ProcessEnv; enableCloud?: boolean; qualification?: unknown; generatedKeyrings?: Readonly<Record<string, string>> }): CloudProvisionPlan {
+  inputs: NodeJS.ProcessEnv; enableCloud?: boolean; qualification?: unknown; generatedKeyrings?: Readonly<Record<string, string>>;
+  /** Fills an entirely absent tuple; never replaces a selected one. */
+  adoptWorker?: z.infer<typeof WorkerIdentity>;
+  /** False while worker promotion is off: enabling cloud needs a selected tuple, not native qualification. */
+  qualificationRequired?: boolean }): CloudProvisionPlan {
   const { channel, current, inputs } = options;
+  const qualificationRequired = options.qualificationRequired ?? true;
   const rows = new Map<string, CloudProvisionRow>(), desired: Record<string, string> = {}, changes: Record<string, string> = {};
   const missingInputs: string[] = [], generate: string[] = [];
   const row = (name: string, status: CloudProvisionStatus) => rows.set(name, { name, status });
@@ -163,9 +178,12 @@ export function planCloudProvision(options: { channel: Channel; current: Readonl
       if (options.generatedKeyrings?.[keyring.name] !== undefined) set(keyring.name, options.generatedKeyrings[keyring.name], "generate");
     }
   }
-  const workerMissing = CLOUD_WORKER_VARIABLES.filter(name => !present(current[name]));
+  const adopted = options.adoptWorker && CLOUD_WORKER_VARIABLES.every(name => !Object.hasOwn(current, name))
+    ? workerTupleVariables(options.adoptWorker) : null;
+  const workerMissing = adopted ? [] : CLOUD_WORKER_VARIABLES.filter(name => !present(current[name]));
   for (const name of CLOUD_WORKER_VARIABLES) {
-    if (Object.hasOwn(current, name)) keep(name);
+    if (adopted) set(name, adopted[name]);
+    else if (Object.hasOwn(current, name)) keep(name);
     else missing(name, false);
   }
   for (const name of [...existingRequired, ...(current.AUTH_PROVIDER === "workos" ? workosRequired : [])]) {
@@ -184,11 +202,12 @@ export function planCloudProvision(options: { channel: Channel; current: Readonl
   if (candidate.CLOUD_WORKSPACE_PROVIDER !== "boat") {
     validation.ok = false; validation.names = [...new Set([...validation.names, "CLOUD_WORKSPACE_PROVIDER"])].sort();
   }
-  const selectedWorker = WorkerIdentity.safeParse({ provider: current.CLOUD_WORKSPACE_PROVIDER,
-    imageRef: `boat:${current.BOAT_SNAPSHOT_ID}@sha256:${current.BOAT_IMAGE_BUILD_SHA256}`, sourceSha: current.ZEROS_CLOUD_SOURCE_COMMIT,
-    architecture: current.ZEROS_CLOUD_IMAGE_ARCHITECTURE, storageMiB: Number(current.CLOUD_WORKSPACE_STORAGE_MIB) });
+  const selected = { ...current, ...(adopted ?? {}) };
+  const selectedWorker = WorkerIdentity.safeParse({ provider: selected.CLOUD_WORKSPACE_PROVIDER,
+    imageRef: `boat:${selected.BOAT_SNAPSHOT_ID}@sha256:${selected.BOAT_IMAGE_BUILD_SHA256}`, sourceSha: selected.ZEROS_CLOUD_SOURCE_COMMIT,
+    architecture: selected.ZEROS_CLOUD_IMAGE_ARCHITECTURE, storageMiB: Number(selected.CLOUD_WORKSPACE_STORAGE_MIB) });
   const qualification = ReleaseIdentity.safeParse(options.qualification);
-  const qualified = selectedWorker.success && qualification.success && qualification.data.channel === channel &&
+  const qualified = !qualificationRequired || selectedWorker.success && qualification.success && qualification.data.channel === channel &&
     selectedWorker.data.sourceSha === inputs.RELEASE_SHA &&
     qualification.data.sourceSha === inputs.RELEASE_SHA && qualification.data.migrations.head === qualification.data.migrations.expectedHead &&
     qualification.data.workerQualified === true && JSON.stringify(qualification.data.worker) === JSON.stringify(selectedWorker.data);
@@ -202,11 +221,13 @@ export function planCloudProvision(options: { channel: Channel; current: Readonl
   const boot = validateCloudProvisionConfiguration({ ...current, ...desired, ...plannedKeyrings }, channel, inputs);
   validation.names = [...new Set([...validation.names, ...boot.names])].sort(); validation.ok = validation.names.length === 0;
   return { rows: [...rows.values()].sort((left, right) => left.name.localeCompare(right.name)), desired, changes, generate,
-    missingInputs: [...new Set(missingInputs)].sort(), workerMissing, validation, enableGate };
+    missingInputs: [...new Set(missingInputs)].sort(), workerMissing, validation, enableGate,
+    workerQualification: qualificationRequired ? "required" : "advisory" };
 }
 
 export function cloudProvisionSummary(plan: CloudProvisionPlan): string[] {
   return [...plan.rows.map(({ name, status }) => `${name} ${status}`), `CONFIGURATION ${plan.validation.ok ? "pass" : "fail"}`,
     ...plan.validation.names.map(name => `${name} fail`), `ENABLE_GATE ${plan.enableGate.ok ? "pass" : "fail"}`,
-    ...plan.enableGate.names.map(name => `${name} missing-input`)];
+    ...plan.enableGate.names.map(name => `${name} missing-input`),
+    ...(plan.workerQualification === "advisory" ? ["WORKER_QUALIFICATION advisory"] : [])];
 }

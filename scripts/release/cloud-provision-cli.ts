@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { CHANNELS, releaseSource, type PromotionConfig } from "./contracts";
+import { CHANNELS, ReleaseIdentity, releaseSource, type PromotionConfig } from "./contracts";
 import { CLOUD_WORKER_VARIABLES, cloudProvisionSummary, planCloudProvision } from "./cloud-provision";
 import { assertNotOlderBranch, createProviders } from "./providers";
 import { jsonClient } from "./io";
@@ -19,6 +19,13 @@ export function cloudProvisionConfig(env: NodeJS.ProcessEnv) {
   let source;
   try { source = releaseSource(env); } catch { return reject("RELEASE_CHANNEL", "RELEASE_SHA", "RELEASE_BRANCH", "GITHUB_REPOSITORY"); }
   if (![undefined, "", "true", "false"].includes(env.CLOUD_PROVISION_ENABLE_CLOUD)) reject("CLOUD_PROVISION_ENABLE_CLOUD");
+  // With worker promotion off, the worker lane cannot select or qualify an
+  // image, so cloud is enabled on a selected tuple without native qualification.
+  const qualificationRequired = env.ZEROS_WORKER_PROMOTION === "enabled";
+  if (![undefined, "", "true", "false"].includes(env.CLOUD_PROVISION_ADOPT_BASE_WORKER)) reject("CLOUD_PROVISION_ADOPT_BASE_WORKER");
+  const adoptBaseWorker = env.CLOUD_PROVISION_ADOPT_BASE_WORKER === "true";
+  if (adoptBaseWorker && qualificationRequired) reject("CLOUD_PROVISION_ADOPT_BASE_WORKER");
+  if (adoptBaseWorker && !/^[a-z0-9][a-z0-9-]{0,62}$/.test(env.BOAT_BASE_SNAPSHOT ?? "")) reject("BOAT_BASE_SNAPSHOT");
   if (env.PLANETSCALE_DATABASE !== `zeros-control-plane-${source.channel}`) reject("PLANETSCALE_DATABASE");
   for (const name of ["RAILWAY_PROJECT_ID", "RAILWAY_ENVIRONMENT_ID", "RAILWAY_SERVICE_ID"]) {
     if (!z.string().uuid().safeParse(env[name]).success) reject(name);
@@ -32,7 +39,21 @@ export function cloudProvisionConfig(env: NodeJS.ProcessEnv) {
     runId: env.GITHUB_RUN_ID ?? "", runAttempt: env.GITHUB_RUN_ATTEMPT ?? "",
     projectId: env.RAILWAY_PROJECT_ID!, environmentId: env.RAILWAY_ENVIRONMENT_ID!, serviceId: env.RAILWAY_SERVICE_ID!,
     organization: "", database: env.PLANETSCALE_DATABASE!, databaseBranch: "main", accountId: "", surfaces: [] };
-  return { config, mode, enableCloud: env.CLOUD_PROVISION_ENABLE_CLOUD === "true" };
+  return { config, mode, enableCloud: env.CLOUD_PROVISION_ENABLE_CLOUD === "true", qualificationRequired,
+    baseSnapshot: adoptBaseWorker ? env.BOAT_BASE_SNAPSHOT! : null };
+}
+
+/** The shared base image Alpha currently serves, when it is this channel's
+ * configured base (one Boat account). Public identity only; no credentials. */
+async function servedBaseWorker(baseSnapshot: string, options: { fetch?: typeof fetch; pause?: (ms: number) => Promise<void> }) {
+  let value: unknown;
+  try { value = await jsonClient(options.fetch, options.pause)(`${CHANNELS.alpha.api}/v1/release-identity`, { headers: { "Cache-Control": "no-store" } }); }
+  catch { return reject("ADOPT_BASE_WORKER"); }
+  const served = ReleaseIdentity.safeParse(value), worker = served.success ? served.data.worker : null;
+  if (!served.success || served.data.channel !== "alpha" || !served.data.cloud.enabled || served.data.cloud.state !== "healthy" ||
+    worker?.provider !== "boat") return reject("ADOPT_BASE_WORKER");
+  if (/^boat:([a-z0-9][a-z0-9-]{0,62})@/.exec(worker.imageRef)?.[1] !== baseSnapshot) return reject("BOAT_BASE_SNAPSHOT");
+  return worker;
 }
 
 function randomKeyring(): string {
@@ -45,7 +66,7 @@ export async function cloudProvisionMain(env: NodeJS.ProcessEnv, options: {
 } = {}): Promise<{ mode: string; changed: boolean }> {
   const log = options.log ?? console.log;
   try {
-    const { config, mode, enableCloud } = cloudProvisionConfig(env);
+    const { config, mode, enableCloud, qualificationRequired, baseSnapshot } = cloudProvisionConfig(env);
     const providers = createProviders(config, env, options);
     const target = { projectId: config.projectId, environmentId: config.environmentId, serviceId: config.serviceId };
     const read = async (): Promise<Record<string, string>> => {
@@ -79,8 +100,15 @@ export async function cloudProvisionMain(env: NodeJS.ProcessEnv, options: {
       try { return await jsonClient(options.fetch, options.pause)(`${config.api}/v1/release-identity`, { headers: { "Cache-Control": "no-store" } }); }
       catch { return undefined; }
     };
-    const qualification = await readQualification();
-    const plan = planCloudProvision({ channel: config.channel, current, inputs: env, enableCloud, qualification });
+    let adoptWorker;
+    if (baseSnapshot) {
+      const selected = CLOUD_WORKER_VARIABLES.filter(name => Object.hasOwn(current, name));
+      // A partial tuple is never completed or replaced; a complete one stays selected.
+      if (selected.length > 0 && (selected.length < CLOUD_WORKER_VARIABLES.length || selected.some(name => !current[name]?.trim()))) reject("WORKER_TUPLE");
+      if (selected.length === 0) adoptWorker = await servedBaseWorker(baseSnapshot, options);
+    }
+    const qualification = qualificationRequired ? await readQualification() : undefined;
+    const plan = planCloudProvision({ channel: config.channel, current, inputs: env, enableCloud, qualification, adoptWorker, qualificationRequired });
     for (const line of cloudProvisionSummary(plan)) log(line);
     if (mode === "plan") return { mode, changed: false };
     const failures = [...plan.missingInputs, ...plan.validation.names, ...(enableCloud ? plan.enableGate.names : [])];
@@ -89,11 +117,14 @@ export async function cloudProvisionMain(env: NodeJS.ProcessEnv, options: {
     if (Object.keys(current).length !== Object.keys(latest).length || Object.entries(current).some(([name, value]) => latest[name] !== value)) reject("RAILWAY_VARIABLES");
     const generatedKeyrings = Object.fromEntries(plan.generate.map(name => [name, (options.createKeyring ?? randomKeyring)()]));
     const materialized = planCloudProvision({ channel: config.channel, current, inputs: env, enableCloud, generatedKeyrings,
-      qualification: enableCloud ? await readQualification() : qualification });
+      qualification: enableCloud && qualificationRequired ? await readQualification() : qualification, adoptWorker, qualificationRequired });
     if (!materialized.validation.ok) throw new CloudProvisionFailure(materialized.validation.names);
     if (enableCloud && !materialized.enableGate.ok) throw new CloudProvisionFailure(materialized.enableGate.names);
-    if (CLOUD_WORKER_VARIABLES.some(name => Object.hasOwn(materialized.changes, name)) ||
-      materialized.generate.some(name => !Object.hasOwn(materialized.changes, name))) reject("WORKER_TUPLE");
+    // Only an explicit adoption into an entirely absent tuple may write it;
+    // otherwise the worker lane owns these variables.
+    const tupleChanges = CLOUD_WORKER_VARIABLES.filter(name => Object.hasOwn(materialized.changes, name));
+    const adoptedTuple = !!adoptWorker && tupleChanges.length === CLOUD_WORKER_VARIABLES.length && tupleChanges.every(name => !Object.hasOwn(current, name));
+    if (tupleChanges.length && !adoptedTuple || materialized.generate.some(name => !Object.hasOwn(materialized.changes, name))) reject("WORKER_TUPLE");
     const changed = Object.keys(materialized.changes).length > 0;
     if (changed) {
       await providers.railway(`mutation CloudProvisionApply($input:VariableCollectionUpsertInput!) { variableCollectionUpsert(input:$input) }`,
