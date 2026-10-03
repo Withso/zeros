@@ -18,7 +18,7 @@ import { ReleaseIdentity, requireCheck, type PromotionConfig } from "./contracts
 import { githubClient } from "./github";
 import { jsonClient } from "./io";
 import type { WorkerQualificationProfile } from "./worker-profile";
-import { reconcileReleaseBuilderRetentions } from "./worker-builder-retirement";
+import { reconcileFailedReleaseBuilderHolds, reconcileReleaseBuilderRetentions } from "./worker-builder-retirement";
 import { reconcileReleaseCanaryRetirements, releaseCanaryCleanup, retireReleaseCanary } from "./worker-canary-recovery";
 
 const name = z.string().min(1).max(256);
@@ -155,6 +155,7 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
       }
       const image = await boatImageAdapter(config, env, path.join(directory, "kit"), { lease, record, profile, maxUsedHours: run.maxUsedHours, snapshotName: record.snapshotId, request,
         reserve: async () => {
+          await reconcileFailedReleaseBuilderHolds(config, { lease, profile, request, readAdmission: () => store.readAdmission() }, store);
           const inventory = await workerSnapshotInventory(request);
           await reconcileWorkerSnapshotHolds(store, lease, profile, inventory, request);
           return reserveWorkerSlot(store, lease, profile, config.channel, record.snapshotId, inventory);

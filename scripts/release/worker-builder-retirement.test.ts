@@ -14,7 +14,7 @@ import { workerExecutionConfig } from "./worker-config";
 import { workerEnvironment, workerConnections } from "./worker-test-fixtures";
 import { promoteWorker, validateWorkerReceipt, WorkerReceipt } from "./worker";
 import { releaseCanaryAdapter } from "./worker-canary";
-import { reconcileReleaseBuilderRetentions, releaseBuilderCreationScope, retireReleaseBuilder, WorkerBuilderCleanupSchema } from "./worker-builder-retirement";
+import { reconcileFailedReleaseBuilderHolds, reconcileReleaseBuilderRetentions, releaseBuilderCreationScope, retireReleaseBuilder, WorkerBuilderCleanupSchema } from "./worker-builder-retirement";
 import { settleWorkerNamedRetirement, validateWorkerNamedRetirementEvidence, WorkerNamedNativeAuditSubjectSchema,
   workerNamedRetirementSha256 as namedDigest } from "./worker-named-retirement";
 import { releaseCanaryCleanup, retireReleaseCanary } from "./worker-canary-recovery";
@@ -24,6 +24,108 @@ import { DatabaseReleaseCanaryService, releaseCanaryRequest } from "../../apps/c
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const directories: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))); });
+
+async function failedBuilderFixture({ acknowledged = false } = {}) {
+  const test = await fixture(), prefix = test.config.sourceSha.slice(0, 12);
+  for (const key of ["candidate", "buildSha256", "qualified", "snapshotRequested", "snapshotCreate"]) delete test.record[key];
+  for (const name of ["native-attestation.json", "snapshot-ledger.json"]) delete test.record.kitFiles[`${prefix}/${name}`];
+  test.record.installStarted = true; test.record.attestationStarted = true;
+  test.operation.requestedAt = new Date(Date.now() - 1000).toISOString();
+  if (acknowledged) Object.assign(test.record.builder, { deleteRequested: true, deletionOperationId: test.operation.id,
+    deletionAcceptedAt: test.operation.requestedAt });
+  const base = test.request.getMockImplementation()!;
+  test.request.mockImplementation((method, route, settings) => route === `/named-snapshots/${test.record.snapshotId}`
+    ? Promise.resolve({ status: 404, body: null }) : base(method, route, settings));
+  return test;
+}
+
+describe("failed image builder compute retirement", () => {
+  it.each([false, true])("releases an unavailable uncaptured builder's compute hold with truthful pending storage (acknowledged=%s)", async acknowledged => {
+    const test = await failedBuilderFixture({ acknowledged });
+    await expect(test.adapter.cleanup()).resolves.toBeNull();
+    expect(test.record.builder).toMatchObject({ deleted: false, retiredAt: expect.any(String),
+      failedBuildRetirement: { kind: "failed-build-unavailable", storage: { status: "pending", physicalBytes: "unmeasured" } } });
+    expect(test.record.builder.cleanup).toBeUndefined(); expect(test.record.candidate).toBeUndefined();
+    expect(test.record.kitFiles).toBeDefined();
+    expect(test.ledger().reservations.some((row: any) => row.kind === "builder")).toBe(false);
+    expect(test.request.mock.calls.filter(([method]) => method === "DELETE")).toHaveLength(acknowledged ? 0 : 1);
+    const next = workerSnapshotName(test.state, "f".repeat(64));
+    await expect(reserveWorkerSlot(test.store, test.context.lease, test.profile, "alpha", next,
+      [{ provider: "boat", id: test.profile.boat.baseSnapshot }])).resolves.toBeDefined();
+    expect(test.run.receipt).toBeUndefined();
+  });
+  it.each([
+    ["captured snapshot", (test: any) => { test.record.snapshotRequested = true; }],
+    ["capture intent", (test: any) => { test.record.snapshotCreate = { phase: "uncertain" }; }],
+    ["candidate", (test: any) => { test.record.candidate = test.candidate; }],
+    ["unacknowledged create", (test: any) => { test.record.builderCreate.phase = "uncertain"; }],
+    ["wrong original account", (test: any) => { test.record.builderIntent.scope.accountBinding = "f".repeat(64); }],
+    ["wrong original source", (test: any) => { test.record.builderIntent.scope.sourceSha = "f".repeat(40); }],
+    ["credential-bearing create", (test: any) => { test.record.builderIntent.body.env = { PRIVATE: "synthetic" }; }],
+    ["lost delete acknowledgement", (test: any) => { delete test.record.builder.deletionOperationId; }],
+    ["wrong operation target", (test: any) => { test.operation.targetId = "bx_other"; }],
+  ] as const)("retains the hold for %s", async (_name, change) => {
+    const test = await failedBuilderFixture({ acknowledged: true }); change(test);
+    const before = structuredClone(test.ledger());
+    await expect(test.adapter.cleanup()).rejects.toThrow();
+    expect(test.ledger()).toEqual(before); expect(test.context.release).not.toHaveBeenCalled();
+    expect(test.record.builder.retiredAt).toBeUndefined();
+    expect(test.request.mock.calls.some(([method]) => method === "DELETE")).toBe(false);
+  });
+  it("does not release admission when saving the unavailable-builder proof fails", async () => {
+    const test = await failedBuilderFixture({ acknowledged: true }), before = structuredClone(test.ledger());
+    test.context.lease.save.mockRejectedValueOnce(new Error("synthetic failed proof write"));
+    await expect(test.adapter.cleanup()).rejects.toThrow("synthetic failed proof write");
+    expect(test.context.release).not.toHaveBeenCalled(); expect(test.ledger()).toEqual(before);
+    expect(test.saves.at(-1)?.resources.images[0].builder.failedBuildRetirement).toBeUndefined();
+  });
+  it("recovers an interrupted admission release and later reenters after its row is pruned", async () => {
+    const test = await failedBuilderFixture({ acknowledged: true });
+    test.store.writeAdmission.mockRejectedValueOnce(new Error("synthetic admission interruption"));
+    await expect(test.adapter.cleanup()).rejects.toThrow("synthetic admission interruption");
+    expect(test.record.builder.retiredAt).toBeDefined(); expect(imageHold(test).releasedAt).toBeUndefined();
+    await expect(test.adapter.cleanup()).resolves.toBeNull();
+    await expect(test.adapter.cleanup()).resolves.toBeNull();
+    expect(test.ledger().reservations.some((row: any) => row.kind === "builder")).toBe(false);
+    expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    expect(WorkerBuilderCleanupSchema.safeParse(test.record.builder.failedBuildRetirement).success).toBe(false);
+    await expect(reconcileReleaseBuilderRetentions(test.config, test.context)).resolves.toBeUndefined();
+    test.record.builder.failedBuildRetirement.provenance.source.commit = "f".repeat(40);
+    await expect(test.adapter.cleanup()).rejects.toThrow("retained retirement proof changed");
+  });
+  it.each(["available builder", "named image", "unknown deletion stage"])("retains compute for %s", async change => {
+    const test = await failedBuilderFixture({ acknowledged: true }), base = test.request.getMockImplementation()!;
+    if (change === "unknown deletion stage") test.operation.stage = "unknown";
+    else test.request.mockImplementation((method, route, settings) => route === (change === "available builder"
+      ? `/sandboxes/${test.record.builder.id}` : `/named-snapshots/${test.record.snapshotId}`)
+      ? Promise.resolve({ status: 200, body: {} }) : base(method, route, settings));
+    await expect(test.adapter.cleanup()).rejects.toThrow();
+    assertHeld(test); expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("observes only the acknowledged failed build occupying a later run's slot, then uses ordinary admission", async () => {
+    const test = await failedBuilderFixture({ acknowledged: true });
+    test.state.resources.images.push({ purpose: "release-worker", releaseRunId: "121", builder: { id: "bx_unrelated", retiredAt: new Date().toISOString() } });
+    const original = structuredClone(test.state.resources.images[1]);
+    const nextConfig = { ...test.config, runId: "124", sourceSha: "f".repeat(40) };
+    await reconcileFailedReleaseBuilderHolds(nextConfig, test.context, test.store);
+    expect(test.state.resources.images[1]).toEqual(original);
+    expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    const next = workerSnapshotName(test.state, digest([nextConfig.sourceSha, nextConfig.runId]));
+    await expect(reserveWorkerSlot(test.store, test.context.lease, test.profile, "alpha", next,
+      [{ provider: "boat", id: test.profile.boat.baseSnapshot }])).resolves.toBeDefined();
+    expect(test.ledger().reservations.filter((row: any) => row.kind === "builder" && !row.releasedAt)).toHaveLength(1);
+  });
+  it("preserves physical-only cleanup for a failed build without deferred-retirement provenance", async () => {
+    const test = await failedBuilderFixture({ acknowledged: true });
+    delete test.record.builder.billingOrgConfirmed;
+    delete test.record.builderIntent.scope;
+    test.operation.status = "completed"; test.operation.completedAt = new Date().toISOString();
+    await expect(test.adapter.cleanup()).resolves.toMatchObject({ kind: "physically-deleted" });
+    expect(test.record.builder.deleted).toBe(true);
+    expect(test.record.builder.failedBuildRetirement).toBeUndefined();
+    expect(test.ledger().reservations.some((row: any) => row.kind === "builder")).toBe(false);
+  });
+});
 
 async function fixture({ savedAgeMs = 20_000, sourceCommit = "a".repeat(40), runId = "123" } = {}) {
   const environment: NodeJS.ProcessEnv = { ...workerEnvironment(), GITHUB_SHA: sourceCommit, RELEASE_SHA: sourceCommit, GITHUB_RUN_ID: runId };
