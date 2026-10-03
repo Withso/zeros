@@ -633,6 +633,8 @@ Current entry points:
   attempt identity and uncertainty. Capture the accepting turn before awaiting and
   ignore callbacks from a replaced queue or execution. Recheck the accepting
   turn after gateway admission as well as after provider input preparation.
+  Stop and execution disposal also retire tool-preparation waits before native
+  dispatch; failures at that stage prove non-delivery and return `queued`.
   `attemptId` opts into structured outcomes; older clients receive AGENT_ERROR
   for non-delivery because they interpret any AGENT_STEERED as success.
 - Explicit failed-turn recovery rebuilds inline attachment segments from the
@@ -645,7 +647,8 @@ Current entry points:
   root steering. A root result with no queued work starts a five-second grace
   for missing acknowledgements: late terminal lifecycle events may still confirm
   delivery; otherwise settle as uncertain, never resend automatically. Positive
-  queued-work evidence keeps delivery pending. Clear the grace on receipt,
+  queued-work evidence keeps delivery pending and clears an earlier grace timer,
+  including on autonomous acknowledgements. Clear the grace on receipt,
   replacement, or disposal. On Stop, discard unpulled local input first, then reconcile the
   interrupt receipt's `cancelled` and `still_queued` UUIDs. A generic lifecycle
   `cancelled` alone does not prove non-consumption.

@@ -41,6 +41,7 @@ export type AgentSessionToolFactory = (
 interface Entry {
   workspaceId?: string;
   controller: AbortController;
+  preparation: AbortController;
   ready: Promise<AgentSessionTools | null>;
   tools: AgentSessionTools | null;
   cancelled: boolean;
@@ -72,6 +73,7 @@ export class AgentSessionToolRegistry {
     const entry: Entry = {
       workspaceId: input.workspaceId,
       controller,
+      preparation: new AbortController(),
       ready: Promise.resolve(null),
       tools: null,
       cancelled: false,
@@ -126,18 +128,46 @@ export class AgentSessionToolRegistry {
     return entry.stop;
   }
 
-  preparePrompt(executionId: string): string | Promise<string> | undefined {
-    return this.entries.get(executionId)?.tools?.preparePrompt?.();
+  async preparePrompt(executionId: string): Promise<string | undefined> {
+    const entry = this.entries.get(executionId);
+    if (!entry) return undefined;
+    const signal = AbortSignal.any([entry.controller.signal, entry.preparation.signal]);
+    signal.throwIfAborted();
+    let abort!: () => void;
+    try {
+      // Discovery can outlive Stop or execution disposal. Retire its waiter
+      // immediately; a late result must never continue into a native send.
+      return await Promise.race([
+        Promise.resolve().then(() => {
+          signal.throwIfAborted();
+          return entry.tools?.preparePrompt?.();
+        }),
+        new Promise<never>((_, reject) => {
+          abort = () => reject(signal.reason);
+          signal.addEventListener("abort", abort, { once: true });
+        }),
+      ]);
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
   }
 
   cancel(executionId: string): void {
     const entry = this.entries.get(executionId);
-    if (entry) { entry.cancelled = true; entry.tools?.cancel?.(); }
+    if (entry) {
+      entry.cancelled = true;
+      entry.preparation.abort();
+      entry.tools?.cancel?.();
+    }
   }
 
   beginPrompt(executionId: string): void {
     const entry = this.entries.get(executionId);
-    if (entry) { entry.cancelled = false; entry.tools?.beginPrompt?.(); }
+    if (entry) {
+      entry.cancelled = false;
+      if (entry.preparation.signal.aborted) entry.preparation = new AbortController();
+      entry.tools?.beginPrompt?.();
+    }
   }
 
   suspend(workspaceId?: string): () => void {
