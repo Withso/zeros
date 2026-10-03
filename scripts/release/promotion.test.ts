@@ -118,7 +118,8 @@ describe("services and qualified worker finalization", () => {
         change === "head" ? { migrations: { ...identity.migrations, head: "0122_other.sql", expectedHead: "0122_other.sql" } } :
         change === "maintenance" ? { maintenance: true } : { cloud: { enabled: true, ready: true, state: "healthy" },
           worker: { ...worker, ...(change === "provider" ? { provider: "daytona" } : {}) }, workerQualified: change !== "qualification" }) });
-    await expect(finalizePromotion({ ...config, cloudRequired: ["qualification", "provider"].includes(change), provider: "boat" }, services, final)).rejects.toThrow();
+    const strict = ["qualification", "provider"].includes(change);
+    await expect(finalizePromotion({ ...config, cloudRequired: strict, requireQualifiedWorker: strict, provider: "boat" }, services, final)).rejects.toThrow();
   });
   it.each(["missing receipt", "failed canary", "rate-limited canary", "cleanup unconfirmed", "tuple changed"])("withholds redeploy and success when the worker handoff reports %s", async failure => {
     const { config, services, final, calls } = await finalizationHarness();
@@ -135,9 +136,24 @@ describe("services and qualified worker finalization", () => {
   it("records the desktop cloud decision and refuses to finalize under another", async () => {
     const { config, services, final, calls } = await finalizationHarness(false);
     expect(services.cloudRequired).toBe(false);
-    await expect(finalizePromotion({ ...config, cloudRequired: true, provider: "boat" }, services, final)).rejects.toThrow("desktop cloud capability");
+    await expect(finalizePromotion({ ...config, cloudRequired: true, requireQualifiedWorker: true, provider: "boat" }, services, final)).rejects.toThrow("desktop cloud capability");
     await expect(finalizePromotion(config, { ...services, cloudRequired: undefined }, final)).rejects.toThrow("desktop cloud capability");
     expect(calls).toEqual([]);
+  });
+  it("finalizes a cloud-enabled desktop on an API without a qualified worker while worker promotion is off", async () => {
+    const cloud = promotionConfig({ ...env, ZEROS_CLOUD_WORKSPACES_ENABLED: "true", CLOUD_WORKSPACE_PROVIDER: "boat", ZEROS_WORKER_PROMOTION: "disabled" });
+    expect(cloud).toMatchObject({ cloudRequired: true, requireQualifiedWorker: false });
+    const { deps, calls } = harness(cloud);
+    const services = await promoteServices(cloud, deps);
+    expect(services).toMatchObject({ status: "services-ready", cloudRequired: true });
+    calls.length = 0;
+    const final: FinalizationDependencies = { ...deps, workerPromoted: false, verifyPages: async surface => { calls.push(`verify:${surface}`); } };
+    expect(await finalizePromotion(cloud, services, final)).toMatchObject({ status: "success", cloudRequired: true, backend: { cloud: { enabled: false } } });
+    expect(calls).not.toContain("deploy");
+    // With worker promotion on, the same API cannot authorize a cloud-enabled desktop.
+    const strict = promotionConfig({ ...env, ZEROS_CLOUD_WORKSPACES_ENABLED: "true", CLOUD_WORKSPACE_PROVIDER: "boat", ZEROS_WORKER_PROMOTION: "enabled" });
+    expect(strict.requireQualifiedWorker).toBe(true);
+    await expect(finalizePromotion(strict, services, final)).rejects.toThrow("qualification");
   });
   it("pins the API's worker tuple through finalization when no worker was promoted", async () => {
     const { config, services, final } = await finalizationHarness(false);

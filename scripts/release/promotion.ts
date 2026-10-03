@@ -98,7 +98,7 @@ export async function finalizePromotion(config: PromotionConfig, value: unknown,
     requireCheck(backend.channel === config.channel && backend.sourceSha === config.sourceSha &&
       backend.migrations.head === services.backend.migrations.head && backend.migrations.expectedHead === services.backend.migrations.expectedHead &&
       backend.migrations.manifestSha256 === services.backend.migrations.manifestSha256, "Final API source or migration manifest changed after services promotion");
-    requireCheck(!config.cloudRequired || backend.cloud.enabled && backend.workerQualified === true && backend.worker?.provider === config.provider,
+    requireCheck(!config.requireQualifiedWorker || backend.cloud.enabled && backend.workerQualified === true && backend.worker?.provider === config.provider,
       "Final API worker is unavailable or lacks current channel qualification");
     // Without a worker promotion, the API must keep the tuple it served at the
     // services handoff; a change since then belongs to the worker lane.

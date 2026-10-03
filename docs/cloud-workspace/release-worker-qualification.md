@@ -9,6 +9,13 @@ as qualified or customer cloud is enabled. Never run it on PRs/forks, from
 certify provider behavior, native account availability, quota, cleanup latency
 or a Mac release.
 
+While `ZEROS_WORKER_PROMOTION` is not `enabled`, releases skip the worker lane
+and a desktop built with `ZEROS_CLOUD_WORKSPACES_ENABLED=true` still publishes
+after the hosted services gate (migrations, backup, Railway, Pages, WorkOS)
+passes. The API keeps its current worker state, which may be none or an
+unqualified image, so cloud workspaces work only where that state already
+allows it. Set the switch to `enabled` to require a qualified worker again.
+
 ## Order and handoff
 
 For a channel's first worker, provision encrypted account keys and release-only
