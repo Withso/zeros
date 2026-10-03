@@ -71,10 +71,13 @@ regression test covers that dependency change.
 - **License:** Apache-2.0; the upstream license is included in the generated bundle.
 - **Modifications:** Zeros' versioned patch in `patches/` adds explicit host-parity
   policy, nested writable exceptions and privileged worker identity transitions.
-  The 0.0.76 rebase retains upstream capability dropping in both Linux isolation
-  modes and its read-only bind deduplication. The Linux patch also consolidates
-  overlapping absent-path masks and creates traversable synthetic ancestors
-  before restoring an allowed worker directory. Local Code execution remains native.
+  The 0.0.78 rebase retains upstream capability dropping, literal/glob path
+  handling, overlapping absent-path masks and read-only bind deduplication.
+  Writable exceptions retain narrower write denies and read masks, including
+  after a read-denied ancestor is remounted. The Linux patch creates traversable
+  synthetic ancestors before restoring an allowed worker directory. Oversized
+  profiles use upstream descriptor transport only with a private `/proc`; host
+  parity and weaker nesting fail closed instead. Local Code execution remains native.
 - **Qualification:** Rebase the patch for each upgrade, regenerate the license
   inventory and run `check:runtime-pins`, `check:zsr` and
   `check:zsr-preview-browser` on supported hosts before release.

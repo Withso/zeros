@@ -1,6 +1,9 @@
-# The pinned/local actionlint runner catalogs predate this standard
-# GitHub-hosted Intel label. GitHub documents `macos-15-intel` as a standard
-# hosted runner; declaring only this label keeps linting strict elsewhere.
+# actionlint 1.7.12 predates these GitHub-hosted labels. This configuration key
+# extends its catalog; these jobs still use GitHub-hosted runners. Keep exact
+# labels so misspellings remain errors, and remove entries as actionlint learns
+# them. Ubuntu 26.04 is exercised on every PR by cloud-runner-qualification.yml.
+# https://github.com/actions/runner-images#available-images
 self-hosted-runner:
   labels:
     - macos-15-intel
+    - ubuntu-26.04

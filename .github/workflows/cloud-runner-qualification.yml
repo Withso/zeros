@@ -1,0 +1,110 @@
+name: Cloud runner qualification
+
+# Prove the runner used by the protected, main-only cloud workflows before
+# merge. Publication and paid provider qualification keep their own gates.
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-runner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    name: cloud runner (Ubuntu 26.04)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Verify runner and install frozen dependency graphs
+        run: |
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = 26.04
+          node --version
+          pnpm --version
+          pnpm install --frozen-lockfile
+          pnpm --dir apps/control-plane install --frozen-lockfile
+      - name: Install contained-execution runtime
+        uses: ./.github/actions/contained-execution-runtime
+      - name: Install Playwright Chromium headless shell
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+      - name: Verify provider artifacts and sandbox enforcement
+        run: |
+          pnpm check:runtime-pins
+          pnpm agents:smoke:offline
+          bash scripts/ci/with-userns.sh pnpm check:zsr
+          bash scripts/ci/with-userns.sh pnpm check:zsr-preview-browser
+      - name: Verify cloud workflow contracts and database connectivity
+        run: |
+          pnpm exec vitest run --config vitest.config.ts \
+            scripts/__tests__/cloud-runtime-publication.test.ts \
+            scripts/__tests__/cloud-publication-disk-budget.test.ts \
+            scripts/__tests__/cloud-publication-process.test.ts \
+            scripts/__tests__/cloud-publication-registry-auth.test.ts \
+            scripts/__tests__/cloud-vm-workflow.test.ts \
+            scripts/__tests__/cloud-vm-snapshot.test.ts \
+            scripts/__tests__/cloud-qualification-attestation.test.ts \
+            scripts/__tests__/cloud-workspace-qualification-gates.test.ts
+          pnpm --dir apps/control-plane typecheck
+          pnpm --dir apps/control-plane exec node --input-type=module -e '
+            import pg from "pg";
+            const client = new pg.Client({ connectionString: "postgres://postgres:postgres@localhost:5432/postgres" });
+            await client.connect();
+            try {
+              const { rows } = await client.query("SHOW server_version_num");
+              if (Number(rows[0].server_version_num) < 180000) throw new Error("Postgres 18 required");
+            } finally { await client.end(); }
+          '
+      - name: Exercise the publication BuildKit toolchain without publishing
+        run: |
+          set -euo pipefail
+          builder="zeros-runner-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          qualification_dir=$(mktemp -d "$RUNNER_TEMP/zeros-buildkit.XXXXXX")
+          cleanup() {
+            timeout --kill-after=5s 30s docker buildx rm --force "$builder"
+          }
+          trap cleanup EXIT
+          docker info --format '{{.ServerVersion}}'
+          docker buildx version
+          printf '[worker.oci]\n  max-parallelism = 2\n' > "$qualification_dir/buildkitd.toml"
+          docker buildx create --name "$builder" --driver docker-container \
+            --driver-opt image=moby/buildkit@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3 \
+            --driver-opt memory=4g --driver-opt memory-swap=4g \
+            --driver-opt cpu-quota=200000 --driver-opt cpu-period=100000 \
+            --driver-opt restart-policy=no \
+            --buildkitd-config "$qualification_dir/buildkitd.toml" --bootstrap
+          mkdir "$qualification_dir/context"
+          printf 'FROM scratch\nCOPY proof.txt /proof.txt\n' > "$qualification_dir/context/Dockerfile"
+          printf '%s\n' "$GITHUB_SHA" > "$qualification_dir/context/proof.txt"
+          docker buildx build --builder "$builder" \
+            --output "type=local,dest=$qualification_dir/output" "$qualification_dir/context"
+          cmp "$qualification_dir/context/proof.txt" "$qualification_dir/output/proof.txt"

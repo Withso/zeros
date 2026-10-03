@@ -47,7 +47,7 @@ PACKAGE INVENTORY (641 resolved package/version records)
   Source: https://github.com/anthropics/claude-agent-sdk-typescript
   License documents: 8ce94b9478bb
 
-@anthropic-ai/sandbox-runtime@0.0.76
+@anthropic-ai/sandbox-runtime@0.0.78
   License: Apache-2.0
   Surfaces: root pnpm workspace
   Author: Anthropic PBC
@@ -2047,7 +2047,7 @@ diff3@0.0.3
   Source: https://github.com/axosoft/diff3
   License documents: 765c480a75a5
 
-dompurify@3.4.13
+dompurify@3.4.16
   License: (MPL-2.0 OR Apache-2.0)
   Surfaces: root pnpm workspace
   Author: Dr.-Ing. Mario Heiderich, Cure53 <mario@cure53.de> (https://cure53.de/)
@@ -2075,7 +2075,7 @@ electron-updater@6.8.9
   Source: https://github.com/electron-userland/electron-builder
   License documents: 3f13dd7700ec
 
-electron@43.2.0
+electron@43.7.7
   License: MIT
   Surfaces: desktop runtime
   Author: Electron Community
@@ -2240,7 +2240,7 @@ fast-sha256@1.3.0
   Source: https://github.com/dchest/fast-sha256-js
   License documents: 88d9b4eb6057
 
-fast-uri@3.1.7
+fast-uri@3.1.8
   License: BSD-3-Clause
   Surfaces: root pnpm workspace
   Author: Vincent Le Goff <vince.legoff@gmail.com> (https://github.com/zekth)
@@ -2542,7 +2542,7 @@ inline-style-parser@0.2.7
   Source: https://github.com/remarkablemark/inline-style-parser
   License documents: 395c95f20598
 
-ip-address@10.3.1
+ip-address@10.7.1
   License: MIT
   Surfaces: root pnpm workspace
   Author: Beau Gunderson <beau@beaugunderson.com> (https://beaugunderson.com/)
@@ -5961,8 +5961,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 1210bc93eb85
 SHA-256: 1210bc93eb85dd786c33192d5bcb7153a93922fa99fbc1512af6a7199cb41080
-Applies to: @anthropic-ai/sandbox-runtime@0.0.76
-Source labels: @anthropic-ai/sandbox-runtime@0.0.76 — LICENSE
+Applies to: @anthropic-ai/sandbox-runtime@0.0.78
+Source labels: @anthropic-ai/sandbox-runtime@0.0.78 — LICENSE
 ================================================================================
 
                                  Apache License
@@ -6681,8 +6681,8 @@ OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHE
 ================================================================================
 DOCUMENT 1f256ecad192
 SHA-256: 1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5
-Applies to: dompurify@3.4.13
-Source labels: dompurify@3.4.13 — LICENSE-MPL
+Applies to: dompurify@3.4.16
+Source labels: dompurify@3.4.16 — LICENSE-MPL
 ================================================================================
 
 Mozilla Public License Version 2.0
@@ -8996,8 +8996,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT 5154e165bd6c
 SHA-256: 5154e165bd6c2cc0cfbcd8916498c7abab0497923bafcd5cb07673fe8480087d
-Applies to: electron@43.2.0
-Source labels: electron@43.2.0 — LICENSE
+Applies to: electron@43.7.7
+Source labels: electron@43.7.7 — LICENSE
 ================================================================================
 
 Copyright (c) Electron contributors
@@ -14340,8 +14340,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT cfc7749b96f6
 SHA-256: cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
-Applies to: dompurify@3.4.13
-Source labels: dompurify@3.4.13 — LICENSE
+Applies to: dompurify@3.4.16
+Source labels: dompurify@3.4.16 — LICENSE
 ================================================================================
 
 
@@ -15577,8 +15577,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT df7464922225
 SHA-256: df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
-Applies to: fast-uri@3.1.7
-Source labels: fast-uri@3.1.7 — LICENSE
+Applies to: fast-uri@3.1.8
+Source labels: fast-uri@3.1.8 — LICENSE
 ================================================================================
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -16894,8 +16894,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 DOCUMENT f8d791359a50
 SHA-256: f8d791359a50cbcac82c29cb7b0b1b889b28be76fdd35b8ee33f0f7c8704702a
-Applies to: ip-address@10.3.1
-Source labels: ip-address@10.3.1 — LICENSE
+Applies to: ip-address@10.7.1
+Source labels: ip-address@10.7.1 — LICENSE
 ================================================================================
 
 Copyright (C) 2011 by Beau Gunderson
