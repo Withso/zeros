@@ -35,10 +35,32 @@ another Railway environment or PlanetScale branch.
 | `pnpm dev:gc --apply --owner OWNER --generation UUID` | Apply eligible cleanup under the same owner lease and resource guards |
 | `pnpm electron:alpha` | Explicit desktop-against-Alpha workflow, separate from workspace Dev |
 
+Conductor's Setup command is `sh scripts/dev-environment/hook.sh setup`.
+Run is `sh scripts/dev-environment/hook.sh dev` on macOS, or
+`sh scripts/dev-environment/hook.sh backend` in a cloud workspace. Archive is
+`sh scripts/dev-environment/hook.sh archive`. The Run hook already invokes the
+package script; do not append a second `pnpm electron:dev`.
+
+The hosted package commands prepare dependencies before loading TypeScript,
+esbuild or the R2 client. A root `pnpm install` does not install the independent
+`apps/control-plane` and `apps/web` graphs, and cloud file sync does not install
+them on the Mac. Setup and Run use the same frozen-lockfile installer. The first
+run after upgrading this tooling verifies each graph with its package manager;
+later runs reuse it until its manifests, lockfile, platform or installed
+dependencies change. Installation receipts live inside each local `node_modules`
+directory, and concurrent installers wait on a machine-local checkout lock.
+An interrupted or failed install stops before provisioning and is retried by Run.
+
 A normal restart preserves the branch, credentials and desktop session. Closing
 the desktop leaves its hosted backend/database available and billable. Archive
 is the destructive reset. Relaunch after a completed archive creates a new
 generation, database, keys and desktop data directory.
+
+Run, backend deployment and Archive wait up to three minutes for a previous
+operation to release its lock. A forcibly stopped launcher can leave a registry
+lease that expires within two minutes. The next command reports that it is
+waiting and resumes automatically after release or expiry; Stop cancels the
+wait. An existing desktop must still be stopped before launching another one.
 
 Renderer changes retain the normal local watch loop. Restart Dev or run
 `dev:backend` after backend, migration, web or cloud-engine changes to deploy a
@@ -519,6 +541,9 @@ environment teardown. Provider storage charges can persist while cleanup runs.
 Conductor's shared configuration wires the archive command and installs all three
 dependency graphs. Local Conductor reads shared settings from the remote default
 branch, so a merge affects existing local workspaces too, even on old branches.
+On hosted branches that predate the dependency bootstrap, the shared Run actions
+perform that branch's Setup before launching. Updating the checkout enables the
+faster per-graph reuse; branches from before hosted Dev retain their Local run.
 Repository-local or managed settings may override the archive/run commands.
 If the main checkout's `.conductor/settings.local.toml` defines those commands,
 update them there too: `.worktreeinclude` copies that local layer into future

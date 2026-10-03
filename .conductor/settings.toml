@@ -137,7 +137,11 @@ run_mode = "concurrent"
 available_in = ["local"]
 command = '''
 set -e
-if [ -f scripts/dev-environment/hook.sh ]; then exec sh scripts/dev-environment/hook.sh dev; fi
+if [ -f scripts/dev-environment/hook.sh ]; then
+  # Shared settings also run on older hosted branches without the bootstrap.
+  if [ -f scripts/dev-environment/hosted-launcher.mjs ] && [ ! -f scripts/dev-environment/hosted-entry.mjs ]; then sh scripts/dev-environment/hook.sh setup; fi
+  exec sh scripts/dev-environment/hook.sh dev
+fi
 if [ -d "$HOME/.zeros-dev/tools/bin" ]; then export PATH="$HOME/.zeros-dev/tools/bin:$PATH"; fi
 exec pnpm electron:dev
 '''
@@ -148,7 +152,10 @@ icon = "play"
 available_in = ["cloud"]
 command = '''
 set -e
-if [ -f scripts/dev-environment/hook.sh ]; then exec sh scripts/dev-environment/hook.sh backend; fi
+if [ -f scripts/dev-environment/hook.sh ]; then
+  if [ -f scripts/dev-environment/hosted-launcher.mjs ] && [ ! -f scripts/dev-environment/hosted-entry.mjs ]; then sh scripts/dev-environment/hook.sh setup; fi
+  exec sh scripts/dev-environment/hook.sh backend
+fi
 # Older cloud checkouts had no hosted backend; preserve their original run.
 if [ -d "$HOME/.zeros-dev/tools/bin" ]; then export PATH="$HOME/.zeros-dev/tools/bin:$PATH"; fi
 exec pnpm electron:dev

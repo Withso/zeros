@@ -273,7 +273,7 @@ describe("repository layout contracts", () => {
     // Renderer HMR without a matching main/preload restart creates a split
     // runtime where newly-rendered IPC calls fail as "unknown command".
     expect(rootPackage.scripts["electron:dev"]).toContain(
-      "hosted-launcher.mjs start",
+      "hosted-entry.mjs start",
     );
     expect(read("scripts/dev-environment/hosted-launcher.mjs")).toContain('process.argv.includes("--run-only") ? "--run-only" : "--watch"');
     expect(launcher).toContain("useMainSupervisor");

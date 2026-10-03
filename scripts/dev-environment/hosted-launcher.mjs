@@ -81,9 +81,20 @@ async function main() {
       const result = await startHosted(lease, identity, profile, services); state = globalThis.structuredClone(lease.state); return result;
     }, { create: ["start", "backend"].includes(action), signal: lifecycle.signal });
     });
-    const result = action === "archive" ? await pollProvider("Previous Dev process shutdown", async () => {
+    // Stop can terminate the old launcher before it releases its registry
+    // lease. Let Run resume after shutdown/expiry, using the same fenced
+    // acquisition as Archive instead of failing during that short window.
+    let waitingForPrevious = false;
+    const result = ["start", "backend", "archive"].includes(action) ? await pollProvider("Previous Dev operation", async () => {
       try { return await operate(); }
-      catch (error) { if (["DEV_LEASE_BUSY", "DEV_LOCAL_BUSY"].includes(error?.code)) return false; throw error; }
+      catch (error) {
+        if (!["DEV_LEASE_BUSY", "DEV_LOCAL_BUSY"].includes(error?.code)) throw error;
+        if (!waitingForPrevious) {
+          console.log("[zeros-dev] Waiting for the previous Dev operation to release its lock. An interrupted launch can take up to two minutes.");
+          waitingForPrevious = true;
+        }
+        return false;
+      }
     }, { signal: lifecycle.signal, timeout: 180_000, interval: 2000 }) : await operate();
     if (action === "reconcile") { console.log(JSON.stringify(result, null, 2)); if (!result.complete) process.exitCode = 1; return; }
     if (action === "seed") {

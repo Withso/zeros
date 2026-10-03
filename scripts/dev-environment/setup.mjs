@@ -88,9 +88,7 @@ async function main() {
   if (version("pnpm") !== pnpmVersion || !version("bun")) throw new Error("Installed tools could not be verified; rerun setup after checking PATH");
   installShellPath(directory, toolsBin);
   await ensureDevRailwayCli();
-  run("pnpm", ["install", "--frozen-lockfile"]);
-  run("pnpm", ["--dir", "apps/control-plane", "install", "--frozen-lockfile"]);
-  run("npm", ["--prefix", "apps/web", "ci"]);
+  run(process.execPath, ["scripts/dev-environment/dependencies.mjs", "--install"]);
   run(process.execPath, ["--import", "tsx", "scripts/dev-environment/setup-native.ts"]);
   console.log("[zeros-dev] Setup complete. Open a new terminal, then run pnpm electron:dev in this checkout. No hosted resources were provisioned by setup.");
 }
