@@ -70,6 +70,13 @@ Codex native review may return its result only in `exitedReviewMode.review`.
 Retain that completed result through successful turn completion, unless the
 same turn supplies a native final agent message. Mode entry is not review
 output; equal text in unrelated messages is not a deduplication key.
+Inline review items and completion belong to the turn ID acknowledged by
+`review/start`. The pinned runtime can also emit a different internal
+`turn/started` ID on that thread; it must not replace the review's ownership.
+Buffer early root review events until acknowledgement (at most 512 events /
+8 MiB), failing explicitly on overflow. Retire unrelated and abandoned review
+IDs so late events cannot enter the next prompt. Child-thread routing remains
+independent.
 
 1. Scope reconciliation to the provider execution, native conversation, parent
    tool, native message, block and tool identity where the provider supplies

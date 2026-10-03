@@ -1287,8 +1287,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // session (reboots the child, resumes the thread) and resends the prompt.
     if (!session.runtimeAlive) throw codexDisconnectedFailure();
 
+    const nativeWorkingTreeReview = isCodexWorkingTreeReviewPrompt(opts.prompt);
     session.modelSelection.beginTurn();
-    session.notifications.startRootTurn();
+    session.notifications.startRootTurn({ review: nativeWorkingTreeReview });
     session.activeTurnId = null;
     session.sawCollabTurns = false;
     session.cancelRequested = false;
@@ -1297,7 +1298,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // this prompt settles.
     session.postCancelInterruptUntil = 0;
 
-    const nativeWorkingTreeReview = isCodexWorkingTreeReviewPrompt(opts.prompt);
     let input: CodexUserInput[] = [];
     if (!nativeWorkingTreeReview) {
       input = await this.buildUserInput(session, opts.prompt);
@@ -1372,6 +1372,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const turnOptions = {
         onTurnStarted: (turnId: string) => {
           session.activeTurnId = turnId;
+          if (nativeWorkingTreeReview) session.notifications.bindRootReviewTurn(turnId);
           if (session.cancelRequested) {
             void session.runtime.interruptTurn(session.threadId, turnId);
           }
@@ -1519,6 +1520,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // their identity and explanation through this catch.
       throw classifyThreadFailure(err, "prompt");
     } finally {
+      if (nativeWorkingTreeReview) session.notifications.endRootReview();
       if (opts.turnId && session.translator.turnUsage) this.ctx.emit.onSessionUpdate(this.agentId, {
         sessionId: opts.sessionId,
         update: { sessionUpdate: "turn_usage_update", turnId: opts.turnId,

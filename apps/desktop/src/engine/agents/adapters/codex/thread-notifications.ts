@@ -6,6 +6,12 @@ export class CodexThreadNotifications {
   private readonly completedChildren = new Map<string, string>();
   private readonly turns = new Map<string, string>();
   private readonly retiredTurns = new Map<string, Set<string>>();
+  private rootReview: {
+    turnId?: string;
+    pending: Array<{ method: string; params: unknown; turnId: string }>;
+    bytes: number;
+    overflowed: boolean;
+  } | undefined;
   constructor(
     private readonly threadId: string,
     private readonly root: CodexAppServerTranslator,
@@ -21,10 +27,41 @@ export class CodexThreadNotifications {
   /** A local prompt owns a new translator/model-selection epoch before input
    * preparation can await I/O. Retire the old native turn at that boundary,
    * including delayed control events before the new turn/started arrives. */
-  startRootTurn(): void {
+  startRootTurn(options: { review?: boolean } = {}): void {
+    this.endRootReview();
     const previous = this.turns.get(this.threadId);
     if (previous) this.retireTurn(this.threadId, previous);
     this.root.startTurn();
+    if (options.review) {
+      this.rootReview = { pending: [], bytes: 0, overflowed: false };
+    }
+  }
+
+  /** Inline review can emit an internal turn/started ID that differs from
+   * review/start's ID on its items and completion. Only the acknowledgement
+   * binds this explicit review; early frames wait for that authority. */
+  bindRootReviewTurn(turnId: string): void {
+    const review = this.rootReview;
+    if (!review) return;
+    if (review.overflowed || this.retiredTurns.get(this.threadId)?.has(turnId)) {
+      this.retireTurn(this.threadId, turnId);
+      throw new Error("Codex review notifications could not be correlated.");
+    }
+    review.turnId = turnId;
+    this.turns.set(this.threadId, turnId);
+    const pending = review.pending.splice(0);
+    review.bytes = 0;
+    for (const event of pending) this.handle(event.method, event.params);
+  }
+
+  endRootReview(): void {
+    if (!this.rootReview) return;
+    // A rejected/cancelled request with no acknowledgement must not leave
+    // its buffered native IDs eligible to become a later prompt's turn.
+    for (const event of this.rootReview.pending) {
+      this.retireTurn(this.threadId, event.turnId);
+    }
+    this.rootReview = undefined;
   }
 
   handle(method: string, params: unknown): void {
@@ -59,6 +96,26 @@ export class CodexThreadNotifications {
     const translator = this.forThread(threadId);
     const turnId = p?.turnId ?? p?.turn?.id;
     if (turnId && this.retiredTurns.get(threadId)?.has(turnId)) return;
+    if (threadId === this.threadId && turnId && this.rootReview) {
+      const review = this.rootReview;
+      if (!review.turnId) {
+        if (!review.overflowed) {
+          review.bytes += Buffer.byteLength(JSON.stringify(params));
+          // Match the native bridge's byte bound, with a separate event cap.
+          // Overflow fails at acknowledgement, never as an empty success.
+          if (review.pending.length >= 512 || review.bytes > 8 * 1024 * 1024) {
+            review.overflowed = true;
+          } else {
+            review.pending.push({ method, params, turnId });
+          }
+        }
+        return;
+      }
+      if (turnId !== review.turnId) {
+        this.retireTurn(threadId, turnId);
+        return;
+      }
+    }
     if (method === "turn/started" && turnId) {
       const previous = this.turns.get(threadId);
       if (previous && previous !== turnId) this.retireTurn(threadId, previous);
