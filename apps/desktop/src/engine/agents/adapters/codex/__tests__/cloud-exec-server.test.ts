@@ -1,5 +1,5 @@
 import {spawn} from "node:child_process";
-import {mkdtemp,mkdir,rm} from "node:fs/promises";
+import {mkdtemp,mkdir,readFile,rm} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {once} from "node:events";
@@ -49,6 +49,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     } finally {for(const server of listeners.mock.instances as Server[]) server.close();listeners.mockRestore();}
   });
   it("authenticates its private bridge and exchanges actual pinned executor frames over stdio",async()=>{
+    const protocolVersion=JSON.parse(await readFile(path.join(process.cwd(),"package.json"),"utf8")).codexProtocolVersion;
     const binary=await resolveCodexBinary({});expect(binary.source).toBe("bundled");
     expect(binary.sandboxRuntimeRoot).toBeTruthy();
     const nativeBinary=path.join(binary.sandboxRuntimeRoot!,"bin","codex");
@@ -80,7 +81,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       socket=new WebSocket(bridge.url);await once(socket,"open");
       const initialize=once(socket,"message");socket.send(JSON.stringify({id:1,method:"initialize",params:{clientName:"qualification",resumeSessionId:null}}));
       const initialized=JSON.parse(String((await initialize)[0]));
-      expect(initialized).toMatchObject({id:1,result:{environmentInfo:{executorVersion:"0.154.0",cwd:`file://${root}`}}});
+      expect(initialized).toMatchObject({id:1,result:{environmentInfo:{executorVersion:protocolVersion,cwd:`file://${root}`}}});
       socket.send(JSON.stringify({method:"initialized",params:{}}));
       const info=once(socket,"message");socket.send(JSON.stringify({id:2,method:"environment/info",params:null}));
       expect(JSON.parse(String((await info)[0]))).toMatchObject({id:2,result:{cwd:`file://${root}`}});

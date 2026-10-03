@@ -4,10 +4,11 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { buildMcpServerOverrides } from '../../app-server';
 import { cloudCodexRequest } from '../../cloud-policy';
+import { resolveCloudCodexBinaryFromImage } from '../../binary-resolver';
 import type { McpServerRegistration } from '../../../../types';
 import type { CloudProviderExecution } from '../../../../cloud-provider-execution';
 
-const binary=path.resolve('node_modules/.pnpm/@openai+codex@0.154.0-linux-x64/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex');
+const {path:binary}=await resolveCloudCodexBinaryFromImage(process.cwd());
 const root=await mkdtemp('/tmp/v7-native-codex-');
 const cwd=path.join(root,'repo'), home=path.join(root,'home');
 await mkdir(path.join(cwd,'.codex'),{recursive:true});

@@ -23,14 +23,17 @@ async function main() {
     requireCheck(!result.blocked, "Publication guard refused this candidate");
     return;
   }
-  const config = { ...source, cloudRequired, provider, runId: process.env.GITHUB_RUN_ID ?? "" };
+  const requireQualifiedWorker = cloudRequired && process.env.ZEROS_WORKER_PROMOTION === "enabled";
+  const config = { ...source, cloudRequired, requireQualifiedWorker, provider, runId: process.env.GITHUB_RUN_ID ?? "" };
   const json = jsonClient();
   await publicationGate(config, {
     receipt: () => github.ownReceipt(source.channel, config.runId),
     identity: async () => (await publicIdentity(source.channel)).identity,
     page: surface => json(`${CHANNELS[source.channel][surface]}/zeros-deployment.json`),
   });
-  const message = `Current hosted receipt and channel identities verified for ${source.channel} at ${source.sourceSha}; desktop publication may proceed.`;
+  const workerNote = cloudRequired && !requireQualifiedWorker
+    ? " Cloud workspaces are enabled in this desktop; worker promotion is off, so the API keeps its current worker state without a release qualification." : "";
+  const message = `Current hosted receipt and channel identities verified for ${source.channel} at ${source.sourceSha}; desktop publication may proceed.${workerNote}`;
   console.log(message);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${message}\n`);
 }

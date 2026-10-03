@@ -12,24 +12,31 @@ const account = createHash("sha256").update(JSON.stringify([profile.boat.account
   profile.railway.projectId, profile.planetscale.organization, profile.planetscale.database, profile.cloudflare.accountId])).digest("hex");
 
 describe("shared Boat release snapshot slots", () => {
-  it("fits three channel pairs, two Dev slots and the base while preserving deletion headroom", () => {
-    const names = ["retained-base", snapshot("alpha", "current"), snapshot("beta", "current"), snapshot("beta", "rollback"),
-      snapshot("production", "current"), snapshot("production", "rollback"), "dev-fixture-one", "dev-fixture-two"];
-    expect(assertWorkerSnapshotSlots("alpha", workerSnapshotName(state(), "a".repeat(64)), profile, inventory(names), [])).toMatchObject({ used: 9, headroom: 1, limit: 10 });
+  it.each(["alpha", "beta", "production"] as const)("allows a third %s name within the account limit", channel => {
+    const names = ["retained-base", snapshot(channel, "current"), snapshot(channel, "rollback")];
+    expect(assertWorkerSnapshotSlots(channel, snapshot(channel, "candidate"), profile, inventory(names), []).used).toBe(4);
   });
-  it("refuses full inventory, a third channel slot, a third Dev slot and an unconfirmed protected base", () => {
+  it.each([0, 1, 4])("admits upgraded-plan occupancy with legacy headroom %s without claiming a quota", snapshotHeadroom => {
+    const names = ["retained-base", snapshot("alpha", "current"), snapshot("alpha", "rollback"),
+      "dev-one", "dev-two", "dev-three", ...Array.from({ length: 15 }, (_, index) => `zeros-org-${index}`)];
+    const selected = { ...profile, admission: { snapshotHeadroom } };
+    expect(assertWorkerSnapshotSlots("alpha", workerSnapshotName(state(), "a".repeat(64)), selected, inventory(names), []))
+      .toEqual({ used: 22 });
+  });
+  it("refuses an unconfirmed base, a candidate belonging to another channel and invalid builder policy", () => {
     const candidate = workerSnapshotName(state(), "a".repeat(64));
-    const cases = [Array.from({ length: 9 }, (_, index) => `other-${index}`),
-      [snapshot("alpha", "current"), snapshot("alpha", "rollback")], ["dev-one", "dev-two", "dev-three"]];
-    for (const names of cases) expect(() => assertWorkerSnapshotSlots("alpha", candidate, profile, inventory(["retained-base", ...names]), [])).toThrow(/slot|capacity/);
     expect(() => assertWorkerSnapshotSlots("alpha", candidate, profile, [], [])).toThrow("protected base");
+    expect(() => assertWorkerSnapshotSlots("beta", candidate, profile, inventory(["retained-base"]), [])).toThrow("another channel");
+    expect(() => assertWorkerSnapshotSlots("alpha", candidate, { ...profile, admission: { maxBuilders: 2 } }, inventory(["retained-base"]), [])).toThrow("builder policy");
   });
   it("counts pending and retired-builder snapshot holds once, never releasing them by age", () => {
     const held = snapshot("alpha", "rollback");
     const reservations = [{ kind: "builder", snapshotName: held, releasedAt: "2020-01-01T00:00:00.000Z" }];
-    const names = inventory(["retained-base", snapshot("alpha", "current")]);
-    expect(() => assertWorkerSnapshotSlots("alpha", workerSnapshotName(state(), "a".repeat(64)), profile, names, reservations)).toThrow("channel slot");
-    expect(assertWorkerSnapshotSlots("alpha", held, profile, [...names, { provider: "boat", id: held }], reservations).used).toBe(3);
+    const names = inventory(["retained-base", ...Array.from({ length: 8 }, (_, index) => `other-${index}`)]);
+    const candidate = workerSnapshotName(state(), "a".repeat(64));
+    expect(assertWorkerSnapshotSlots("alpha", candidate, profile, names, reservations)).toEqual({ used: 11 });
+    expect(assertWorkerSnapshotSlots("alpha", held, profile, [...names, { provider: "boat", id: held }], reservations).used).toBe(10);
+    expect(assertWorkerSnapshotSlots("alpha", candidate, profile, names, [{ ...reservations[0], snapshotReleasedAt: "2020-01-02T00:00:00.000Z" }]).used).toBe(10);
   });
   it("reserves through Dev's account CAS before any builder and rejects stale cross-channel contenders", async () => {
     let ledger: any = { version: 1, owner: "account-admission", account, reservations: [] };
@@ -53,9 +60,10 @@ describe("shared Boat release snapshot slots", () => {
       computeId: `snapshot:${old}`, snapshotName: old, createdAt: owner.createdAt, releasedAt: owner.createdAt }] };
     const store = { list: vi.fn(async () => ({ records: [], quarantine: [] })), readAdmission: vi.fn(async () => ({ state: structuredClone(ledger), etag: "test" })),
       writeAdmission: vi.fn(async (value: any) => { ledger = structuredClone(value); }) };
-    const retained = { state: owner, save: vi.fn(async () => {}), fence: vi.fn(async () => {}) }, names = inventory(["retained-base", snapshot("alpha", "current")]);
+    const retained = { state: owner, save: vi.fn(async () => {}), fence: vi.fn(async () => {}) };
+    const names = inventory(["retained-base", ...Array.from({ length: 8 }, (_, index) => `other-${index}`)]);
     const request = vi.fn(async () => ({ status: 404 }));
-    expect(() => assertWorkerSnapshotSlots("alpha", next, profile, names, ledger.reservations)).toThrow("channel slot");
+    expect(assertWorkerSnapshotSlots("alpha", next, profile, names, ledger.reservations)).toEqual({ used: 11 });
     await reconcileWorkerSnapshotHolds(store, retained, profile, names, request);
     expect(request).toHaveBeenCalledWith("GET", `/named-snapshots/${old}`);
     expect(image).toMatchObject({ snapshotDeleted: true, snapshotRetirementReason: "externally-pruned-after-builder-cleanup" });

@@ -51,7 +51,7 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     );
   });
 
-  it("gates Fable 5.1 / Fable 5 / Sonnet 5 / Opus 5 so none ever silently downgrades", () => {
+  it("gates each Claude generation so none ever silently downgrades", () => {
     // BUILD-TIME gate only (models:verify --strict + this vitest): on an older
     // CLI it warns so we never ship a curated model the pinned CLI can't run.
     // There is no RUNTIME gate — modelsForAgent does NOT hide it (a runtime gate
@@ -67,14 +67,20 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     // from every agent SDK <= 0.3.218 (bisected 0.3.206…0.3.220 — first
     // appearance is 0.3.219 / CLI 2.1.219), so it gates on >= 2.1.219.
     const on206 = checkCliVersionGate(catalog, "2.1.206");
-    expect(on206.some((w) => w.includes("claude-sonnet-5"))).toBe(false);
+    expect(on206.some((w) => w.includes('"claude-sonnet-5[1m]"'))).toBe(false);
     expect(on206.some((w) => w.includes("claude-opus-5"))).toBe(true);
     // Fable 5.1 first shipped in Claude Code 2.1.255. Older CLIs silently
     // substitute another model, so the exact boundary stays executable here.
     const on254 = checkCliVersionGate(catalog, "2.1.254");
     expect(on254.some((w) => w.includes("claude-fable-5-1"))).toBe(true);
-    // On a CLI that knows all four there's no warning at all.
-    expect(checkCliVersionGate(catalog, "2.1.255")).toEqual([]);
+    expect(checkCliVersionGate(catalog, "2.1.255")).toHaveLength(2);
+    // Opus 5.5 arrived in 2.1.280; Sonnet 5.5 followed in 2.1.284.
+    expect(checkCliVersionGate(catalog, "2.1.279")).toHaveLength(2);
+    expect(checkCliVersionGate(catalog, "2.1.280")).toEqual([
+      expect.stringContaining('"claude-sonnet-5-5[1m]"'),
+    ]);
+    expect(checkCliVersionGate(catalog, "2.1.283")).toHaveLength(1);
+    expect(checkCliVersionGate(catalog, "2.1.284")).toEqual([]);
   });
 
   it("ships a catalog every model of which the PINNED SDK can actually run", () => {
@@ -156,13 +162,15 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     });
   });
 
-  it("curates the 2026-09 claude family (Fable 5.1 / Fable 5 / Opus 5 / Opus 4.8 / Sonnet 5 / Haiku, all 1M except Haiku)", () => {
+  it("curates the October Claude family newest-first without retiring saved generations", () => {
     const values = catalog.families.claude.map((m) => m.value);
     for (const v of [
       "claude-fable-5-1[1m]",
       "claude-fable-5[1m]",
+      "claude-opus-5-5[1m]",
       "claude-opus-5[1m]",
       "claude-opus-4-8[1m]",
+      "claude-sonnet-5-5[1m]",
       "claude-sonnet-5[1m]",
       "claude-haiku-4-5",
     ]) {
@@ -174,8 +182,10 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     expect(values).toEqual([
       "claude-fable-5-1[1m]",
       "claude-fable-5[1m]",
+      "claude-opus-5-5[1m]",
       "claude-opus-5[1m]",
       "claude-opus-4-8[1m]",
+      "claude-sonnet-5-5[1m]",
       "claude-sonnet-5[1m]",
       "claude-haiku-4-5",
     ]);
@@ -184,12 +194,18 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     // existing selection jumps a model generation. `opus-5` is additive.
     expect(catalog.aliases.claude["opus-5"]).toBe("claude-opus-5");
     expect(catalog.aliases.claude["opus"]).toBe("claude-opus-4-8");
+    expect(catalog.aliases.claude["sonnet"]).toBe("claude-sonnet-5");
+    expect(catalog.aliases.claude["opus-5.5"]).toBe("claude-opus-5-5");
+    expect(catalog.aliases.claude["sonnet-5.5"]).toBe("claude-sonnet-5-5");
   });
 
   it("curates GPT-6 Astra and Cursor Auto / Grok 4.6 without dropping compatibility rows", () => {
     const codex = catalog.families.codex.map((m) => m.value);
     for (const v of [
       "gpt-6-astra",
+      "gpt-6.1-sol",
+      "gpt-6-sol",
+      "gpt-6-luna",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
       "gpt-5.6-luna",
@@ -203,7 +219,7 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     // / grok-4.5-{level} (applyCursorReasoning; the bare base completes to
     // grok-4.5-xhigh when no level applies). The previously-curated
     // grok-4.5-xhigh lives in the aliases table so persisted picks resolve.
-    expect(cursor).toEqual(["default", "grok-4.6", "composer-2.5", "grok-4.5"]);
+    expect(cursor).toEqual(["default", "grok-4.7", "grok-4.6", "composer-2.5", "grok-4.5"]);
     expect(catalog.families.cursor[0]).toMatchObject({
       value: "default",
       label: "Auto",
@@ -267,8 +283,10 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     expect(values.filter((v) => v.endsWith("[1m]"))).toEqual([
       "claude-fable-5-1[1m]",
       "claude-fable-5[1m]",
+      "claude-opus-5-5[1m]",
       "claude-opus-5[1m]",
       "claude-opus-4-8[1m]",
+      "claude-sonnet-5-5[1m]",
       "claude-sonnet-5[1m]",
     ]);
   });

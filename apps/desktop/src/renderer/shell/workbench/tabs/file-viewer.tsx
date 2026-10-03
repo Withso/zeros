@@ -37,22 +37,27 @@ import {
   ImageOff,
   Undo2,
 } from "lucide-react";
-import {
-  CodeView as DiffCodeView,
-  type CodeViewItem,
-} from "@pierre/diffs/react";
-import { getSingularPatch } from "@pierre/diffs";
-
 import { isGitErrorShape } from "@/renderer/platform/git";
-import { getLang } from "@/renderer/features/agent/renderers/syntax";
-import { HighlightedCode } from "@/renderer/features/agent/renderers/highlighted-code";
 import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-type-icon";
 import { renderMarkdown } from "@/renderer/features/agent/markdown";
-import { zerosCodeViewOptions } from "@/renderer/shared/theme/diff-theme";
-import { useCodeTheme } from "@/renderer/shared/theme/use-code-theme";
+import {
+  ReviewDiffView,
+  ReviewSourceView,
+} from "@/renderer/features/code-review/review-code-view";
+import {
+  useCodeReview,
+  type CodeReviewController,
+} from "@/renderer/features/code-review/use-code-review";
+import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
+import {
+  liveReviewHunkSource,
+  type ReviewLiveHunkSource,
+} from "@/renderer/features/code-review/review-hunk-model";
+import { useWorkspaceReviewStatus } from "@/renderer/features/code-review/use-workspace-review-status";
+import { MergeConflictActions } from "@/renderer/features/code-review/merge-conflict-actions";
 import { SourceEditor } from "./code-editor/source-editor";
 import { useScrollMemory, useScrollMemoryRef } from "../../scroll-memory";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { CodeBlockCopyButton } from "@/renderer/shared/ui/primitives/elements/code-block";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -85,7 +90,7 @@ import {
   type WorkspaceFileReadQuery,
 } from "../../workspace-file-data-cache";
 import { setDiffStyle, useDiffStyle } from "./diff-style-store";
-import { diffViewVersion } from "./diff-view-version";
+import { statusForGeneration } from "./changes-tab";
 
 interface FileViewerProps {
   /** Owning workbench tab. Used to close only this tab if an external delete leaves
@@ -164,6 +169,7 @@ interface FileViewerProps {
    *  tab overrides this to advance its OWN selection in place — without it the
    *  sweep would spawn a separate File tab and yank away from the Changes tab. */
   onOpenPath?: (path: string, opts: OpenFileOpts) => void;
+  reviewExternal?: CodeReviewExternalSource;
 }
 
 const MARKDOWN_EXT = new Set(["md", "markdown", "mdx"]);
@@ -239,8 +245,25 @@ export function FileViewer({
   headerBorder,
   bodyTrailing,
   onOpenPath,
+  reviewExternal,
 }: FileViewerProps) {
   const viewerRef = useRef<HTMLDivElement | null>(null);
+  const review = useCodeReview({
+    cwd,
+    workspaceId,
+    active,
+    refreshKey,
+    external: reviewExternal,
+  });
+  const gitStatus = useWorkspaceReviewStatus({
+    cwd,
+    workspaceId,
+    active,
+    refreshKey,
+    read: statusForGeneration,
+  });
+  const isGitConflict =
+    gitStatus.data?.conflicted.some((file) => file.path === path) ?? false;
 
   // Keyed scroll memory for this file's read-only surfaces — diff, source,
   // and markdown preview each keep their own offset (see shell/scroll-memory).
@@ -550,9 +573,6 @@ export function FileViewer({
         );
       });
   }, [workspaceId, cwd, path, discardTarget, dispatch, isNewFile]);
-  // Highlighting is owned by <HighlightedCode> (sync once warm → no flash).
-  const codeLang = isMarkdown ? "markdown" : getLang(path);
-
   const previewHtml = useMemo(
     () => (previewShown ? renderMarkdown(result?.content ?? "") : null),
     [previewShown, result],
@@ -564,6 +584,31 @@ export function FileViewer({
   // its existing API authoring policy until native cloud authoring is qualified.
   const designReadOnly = result?.designPath === true && isCloudWorkspace(cwd);
   const sourceReadOnly = readOnly || designReadOnly;
+  const hunkSource = useMemo(
+    () =>
+      liveReviewHunkSource({
+        cwd: cwd ?? "",
+        path,
+        patch: diffPatch,
+        scope: diffScope,
+        read: diskResult,
+        deleted: fileMissing,
+        untracked: isNewFile,
+        readOnly: sourceReadOnly,
+        conflicted: isGitConflict,
+      }),
+    [
+      cwd,
+      path,
+      diffPatch,
+      diffScope,
+      diskResult,
+      fileMissing,
+      isNewFile,
+      sourceReadOnly,
+      isGitConflict,
+    ],
+  );
 
   // Mode toggle: markdown → Preview/Edit (+ Diff when a diff is available); other
   // text → Edit (+ Diff). "Diff" stays available for notInCommit so the user can
@@ -603,6 +648,11 @@ export function FileViewer({
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-1">
+        {isGitConflict && !sourceShown && (
+          <Button variant="ghost" onClick={() => onViewerModeChange?.("edit")}>
+            Resolve conflicts
+          </Button>
+        )}
         {/* Viewed — when the file has changes. Dims its Changes-list row and
           auto-advances to the next change (D3). */}
         {hasDiff && (
@@ -767,9 +817,13 @@ export function FileViewer({
               <div className="h-full" aria-busy="true" />
             ) : (
               <DiffView
+                path={path}
                 patch={diffPatch}
                 diffStyle={diffStyle}
                 scrollKey={diffScrollKey}
+                review={review}
+                active={active}
+                hunkSource={hunkSource}
               />
             ))}
           {previewShown && previewHtml !== null && (
@@ -787,12 +841,27 @@ export function FileViewer({
                   Edit this cloud Design source through the Design tools.
                 </div>
               )}
-              <div className="min-h-0 flex-1">
-                <CodeView
+              <div className="flex min-h-0 flex-1 flex-col">
+                <MergeConflictActions
+                  cwd={cwd ?? ""}
+                  path={path}
                   content={result?.content ?? ""}
-                  lang={codeLang}
-                  scrollKey={JSON.stringify([scrollKeyBase, "source"])}
+                  isGitConflict={isGitConflict}
+                  active={active}
+                  readOnly
+                  designPath={designReadOnly}
+                  onPreview={() => {}}
+                  onSaved={() => {}}
                 />
+                <div className="min-h-0 flex-1">
+                  <ReadOnlySource
+                    path={path}
+                    content={result?.content ?? ""}
+                    scrollKey={JSON.stringify([scrollKeyBase, "source"])}
+                    review={review}
+                    active={active}
+                  />
+                </div>
               </div>
             </div>
           )}
@@ -803,7 +872,8 @@ export function FileViewer({
           {isText && !sourceReadOnly && (
             <div
               className={cn("h-full", !sourceShown && "hidden")}
-              aria-hidden={!sourceShown || undefined}
+              aria-hidden={!sourceShown || !active || undefined}
+              {...(!sourceShown || !active ? { inert: "" } : {})}
             >
               <SourceEditor
                 key={`${cwd}::${path}::${contentRevision ?? 0}`}
@@ -811,7 +881,9 @@ export function FileViewer({
                 cwd={cwd ?? ""}
                 path={path}
                 content={result?.content ?? ""}
-                offscreen={!sourceShown}
+                offscreen={!sourceShown || !active}
+                review={review}
+                isGitConflict={isGitConflict}
               />
             </div>
           )}
@@ -849,130 +921,62 @@ function buildAddPatch(path: string, content: string): string {
   return head + lines.map((l) => `+${l}`).join("\n") + "\n";
 }
 
-/** The Diff mode: the file's change rendered with the virtualized <CodeView>
- *  (only the visible lines paint, so even huge/minified diffs stay smooth),
- *  highlighted off the main thread by the worker pool. Themed identically to
- *  the chat EditCard + the Review tab. */
+/** Native reviewed viewers own one scroll surface and restore its exact key. */
 function DiffView({
+  path,
   patch,
   diffStyle,
   scrollKey,
+  review,
+  active,
+  hunkSource,
 }: {
+  path: string;
   patch: string;
   diffStyle: "unified" | "split";
   scrollKey?: string;
+  review: CodeReviewController;
+  active: boolean;
+  hunkSource?: ReviewLiveHunkSource;
 }) {
-  // Follow the unified code theme (re-render + re-highlight on a picker change).
-  const codeTheme = useCodeTheme();
-  // DiffCodeView's ROOT is the scroll container but the library doesn't
-  // expose a ref to it, so a thin wrapper adopts its first child. Ref
-  // callbacks run parent-after-children within a commit, so the library's
-  // DOM already exists when this fires.
-  const [diffScroller, setDiffScroller] = useState<HTMLElement | null>(null);
-  const diffWrapRef = useCallback((node: HTMLDivElement | null) => {
-    setDiffScroller((node?.firstElementChild as HTMLElement | null) ?? null);
-  }, []);
-  useScrollMemory(diffScroller, scrollKey ?? null);
-  // getSingularPatch parses one file's patch → the FileDiffMetadata CodeView
-  // wants; it throws on a non-single-file / malformed patch, so guard it.
-  const items = useMemo<CodeViewItem<undefined>[]>(() => {
-    try {
-      return [
-        {
-          id: "file",
-          type: "diff" as const,
-          // CodeView reconciles stable ids by this explicit version. Without
-          // it, a live patch update keeps the old parsed AST and visible DOM.
-          version: diffViewVersion(patch),
-          fileDiff: getSingularPatch(patch),
-        },
-      ];
-    } catch {
-      return [];
-    }
-  }, [patch]);
-  const options = useMemo(
-    // Drop the in-diff file header (the green +-icon / filename / "+N" badge
-    // row): the file-viewer's own toolbar above already shows the path
-    // breadcrumbs, so the diff body starts straight at the code — matching the
-    // chat EditCard, which disables the same header for the same reason.
-    () =>
-      zerosCodeViewOptions({
-        diffStyle,
-        codeThemeId: codeTheme,
-        disableFileHeader: true,
-      }),
-    [diffStyle, codeTheme],
-  );
-  if (items.length === 0) {
-    return <Placeholder Icon={FileQuestion} text="No textual diff to show" />;
-  }
-  // CodeView is the scroll container, but it does NOT set overflow on its own
-  // root. Workbench's shared provider supplies the off-main-thread worker pool.
+  const [scroller, setScroller] = useState<HTMLElement | null>(null);
+  useScrollMemory(scroller, scrollKey ?? null);
   return (
-    <div ref={diffWrapRef} className="h-full min-h-0">
-      <DiffCodeView
-        items={items}
-        options={options}
-        className="relative h-full overflow-x-hidden overflow-y-auto"
-      />
-    </div>
+    <ReviewDiffView
+      path={path}
+      patch={patch}
+      diffStyle={diffStyle}
+      review={review}
+      active={active}
+      onScroller={setScroller}
+      hunkSource={hunkSource}
+    />
   );
 }
 
-// ── Code view with a line-number gutter ────────────────────
-
-function CodeView({
+function ReadOnlySource({
+  path,
   content,
-  lang,
   scrollKey,
+  review,
+  active,
 }: {
+  path: string;
   content: string;
-  lang: string;
   scrollKey?: string;
+  review: CodeReviewController;
+  active: boolean;
 }) {
-  const scrollRef = useScrollMemoryRef(scrollKey ?? null);
-  // Line count drives the gutter. Strip a single trailing newline so we
-  // don't render a phantom final number that shiki doesn't paint.
-  const lineCount = useMemo(() => {
-    const trimmed = content.endsWith("\n") ? content.slice(0, -1) : content;
-    return trimmed.length === 0 ? 1 : trimmed.split("\n").length;
-  }, [content]);
-
-  const gutter = useMemo(
-    () => Array.from({ length: lineCount }, (_, i) => i + 1),
-    [lineCount],
-  );
-
+  const [scroller, setScroller] = useState<HTMLElement | null>(null);
+  useScrollMemory(scroller, scrollKey ?? null);
   return (
-    <div
-      ref={scrollRef}
-      className="bg-bg1 h-full overflow-auto font-mono text-xs leading-[1.6]"
-    >
-      <div className="flex min-w-full">
-        <div
-          aria-hidden
-          className="border-border1 bg-bg1 text-fg2/45 sticky left-0 z-10 shrink-0 border-r px-3 py-3 text-right select-none"
-        >
-          {gutter.map((n) => (
-            <div key={n}>{n}</div>
-          ))}
-        </div>
-        {/* HighlightedCode renders highlighted on first paint once the shiki
-            highlighter is warm (no white flash); cold, it shows the plain
-            placeholder and swaps in colors. Neutralize shiki's <pre> padding
-            and lock line-height so rows line up 1:1 with the gutter numbers. */}
-        <HighlightedCode
-          code={content}
-          lang={lang}
-          className={cn(
-            "text-fg1 min-w-0 flex-1 py-3 pr-6 pl-4",
-            "[&_code]:!leading-[1.6] [&_pre]:p-0 [&_pre]:!leading-[1.6]",
-            "[&_.line]:!leading-[1.6]",
-          )}
-        />
-      </div>
-    </div>
+    <ReviewSourceView
+      path={path}
+      content={content}
+      review={review}
+      active={active}
+      onScroller={setScroller}
+    />
   );
 }
 

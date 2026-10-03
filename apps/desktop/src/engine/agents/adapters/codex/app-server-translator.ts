@@ -214,6 +214,10 @@ export class CodexAppServerTranslator {
     string,
     "commentary" | "final_answer"
   >();
+  /** Native review can finish with only exitedReviewMode.review. Wait for
+   * turn completion so a companion final agentMessage remains authoritative. */
+  private completedReview: { id: string; review: string } | undefined;
+  private hasFinalAgentMessage = false;
 
   /** Codex command output notifications are true deltas. Session updates,
    * however, replace a tool card's rawOutput snapshot. Retain one cumulative
@@ -428,6 +432,8 @@ export class CodexAppServerTranslator {
     this.reasoningParts.clear();
     this.messagePhases.clear();
     this.emittedMessagePhases.clear();
+    this.completedReview = undefined;
+    this.hasFinalAgentMessage = false;
     this.emittedToolOutput.clear();
     this.hasSeenTurnTerminal = false;
     this.lastStopReason = "end_turn";
@@ -627,6 +633,9 @@ export class CodexAppServerTranslator {
       this.lastStopReason = cls.stopReason;
     } else {
       this.lastStopReason = "end_turn";
+    }
+    if (status === "completed" && this.completedReview && !this.hasFinalAgentMessage) {
+      this.emitMessageDelta(`review-${this.completedReview.id}`, false, this.completedReview.review, "final_answer");
     }
   }
 
@@ -894,10 +903,8 @@ export class CodexAppServerTranslator {
 
       case "enteredReviewMode":
       case "exitedReviewMode":
-        // Native bookkeeping only. Inline review also emits its findings as a
-        // final agentMessage; projecting `exitedReviewMode.review` would print
-        // the same review twice. The user's `/review` bubble already names the
-        // action, so neither marker needs separate provider chrome.
+        // Entry is bookkeeping. Only a completed exit supplies review output;
+        // buffer it below until the turn's companion messages are known.
         return;
 
       case "contextCompaction": {
@@ -994,6 +1001,12 @@ export class CodexAppServerTranslator {
     const p = params as { item?: ThreadItemUnion };
     let item = p?.item;
     if (!item || typeof item.type !== "string") return;
+    // Entry and exit may share the turn ID, so the ordinary item replay set
+    // must not discard the exit after the entry's completion.
+    if (item.type === "exitedReviewMode") {
+      if (typeof item.review === "string") this.completedReview = { id: item.id, review: item.review };
+      return;
+    }
     if (this.completedItemIds.has(item.id)) return;
     // Reconnect/replay may deliver only the authoritative completed item.
     // Materialize its row before settling it, using the same native identity.
@@ -1008,6 +1021,11 @@ export class CodexAppServerTranslator {
     this.completedItemIds.add(item.id);
     this.emittedToolOutput.delete(item.id);
     if (item.type === "agentMessage" && this.emitAsyncQuestion(item)) return;
+    if (item.type === "agentMessage" && item.delivery !== "async" && item.text &&
+        !(item.phase ?? this.messagePhases.get(item.id)) && this.completedReview) {
+      // Older runtimes omit phase on the final companion sent after the exit.
+      this.hasFinalAgentMessage = true;
+    }
 
     switch (item.type) {
       case "subAgentActivity":
@@ -1041,7 +1059,6 @@ export class CodexAppServerTranslator {
         return;
 
       case "enteredReviewMode":
-      case "exitedReviewMode":
         return;
 
       case "commandExecution":
@@ -1761,6 +1778,7 @@ export class CodexAppServerTranslator {
     fullText: string,
     phase?: "commentary" | "final_answer",
   ): void {
+    if (!isThought && phase === "final_answer" && fullText.length > 0) this.hasFinalAgentMessage = true;
     const already = this.emittedMessageText.get(itemId) ?? "";
     if (fullText === already) {
       if (

@@ -129,6 +129,21 @@ describe("release provider adapters", () => {
     expect(await provider.waitIdentity(manifest)).toEqual(ready);
     expect(reads).toBe(5);
   });
+  it("accepts a cloud-enabled desktop's exact API without cloud or a qualified worker only while worker promotion is off", async () => {
+    const manifest = { head: "0112_test.sql", sha256: "e".repeat(64) };
+    const ready = { version: 1, ready: true, sourceSha: sha, channel: "beta", maintenance: false,
+      migrations: { state: "current", head: manifest.head, expectedHead: manifest.head, manifestSha256: manifest.sha256 },
+      cloud: { enabled: false, ready: true, state: "disabled" }, worker: null, workerQualified: false };
+    const advisory = createProviders({ ...config, cloudRequired: true, requireQualifiedWorker: false, provider: "boat" }, {},
+      { fetch: async () => Response.json(ready), pause: async () => {} });
+    expect(await advisory.waitIdentity(manifest)).toEqual(ready);
+    expect(await advisory.waitIdentity(manifest, undefined, false)).toEqual(ready);
+    let reads = 0;
+    const strict = createProviders({ ...config, cloudRequired: true, requireQualifiedWorker: true, provider: "boat" }, {},
+      { fetch: async () => { reads++; return Response.json(ready); }, pause: async () => {} });
+    await expect(strict.waitIdentity(manifest)).rejects.toThrow("timed out");
+    expect(reads).toBeGreaterThan(1);
+  });
   it("rejects a successful Railway deployment with another SHA", async () => {
     const provider = createProviders(config, {}, { fetch: async () => Response.json({ data: { deployment: {
       id: "d1", status: "SUCCESS", projectId: config.projectId, environmentId: config.environmentId, serviceId: config.serviceId,
@@ -140,7 +155,7 @@ describe("release provider adapters", () => {
     const manifest = { head: "0112_test.sql", sha256: "e".repeat(64) };
     const worker = { provider: "boat" as const, imageRef: `boat:zeros-beta-fixture@sha256:${"d".repeat(64)}`, sourceSha: sha, architecture: "linux/amd64" as const, storageMiB: 4096 };
     for (const workerQualified of [undefined, false]) {
-      const provider = createProviders({ ...config, cloudRequired: true, provider: "boat" }, {}, { fetch: async () => Response.json({
+      const provider = createProviders({ ...config, cloudRequired: true, requireQualifiedWorker: true, provider: "boat" }, {}, { fetch: async () => Response.json({
         version: 1, ready: true, sourceSha: sha, channel: "beta", maintenance: false,
         migrations: { state: "current", head: manifest.head, expectedHead: manifest.head, manifestSha256: manifest.sha256 },
         cloud: { enabled: true, ready: true, state: "healthy" }, worker, workerQualified,

@@ -14,6 +14,9 @@ import type { Project } from "../state/projects-store";
 import type { ProcessMetricsSnapshot } from "../platform/process-metrics";
 
 const params = new URLSearchParams(location.search);
+const legacyMainFolder = params.has("legacy-main")
+  ? `/fixture/zeros${params.has("subdirectory") ? "/packages/app" : ""}`
+  : null;
 if (!sessionStorage.getItem("fixture:app-sidebar")) {
   localStorage.clear();
   sessionStorage.setItem("fixture:app-sidebar", "1");
@@ -27,6 +30,23 @@ if (legacyFilter) {
       workspaceListFilter: legacyFilter,
     }),
   );
+}
+if (legacyMainFolder) {
+  localStorage.setItem(
+    "zeros.experimentalFeatures",
+    JSON.stringify({ workInLocalMain: true }),
+  );
+  if (!localStorage.getItem("zeros:ui-state:v1")) {
+    localStorage.setItem(
+      "zeros:ui-state:v1",
+      JSON.stringify({
+        activePage: "workspace",
+        activeChatId: "chat-legacy-main",
+        lastWorkspaceFolder: legacyMainFolder,
+        lastWorkspaceByRepoRoot: { "/fixture/zeros": legacyMainFolder },
+      }),
+    );
+  }
 }
 
 const projects: Project[] = [
@@ -64,7 +84,7 @@ const rows: Workspace[] = [
   ["ocolors", "seville", 2],
   ["okit", "paris-mumbai-city-docs", 5],
   ["todo-app", "new-york", 1],
-].map(([slug, name, created]) => ({
+].map<Workspace>(([slug, name, created]) => ({
   id: `ws-${name}`,
   repoSlug: String(slug),
   repoRoot: `/fixture/${slug}`,
@@ -80,7 +100,7 @@ const rows: Workspace[] = [
   prUrl: null,
   agentId: null,
   lastActiveAt: null,
-}));
+})).filter((row) => !params.has("no-workspaces") || row.repoSlug !== "zeros");
 if (params.has("long-list")) {
   rows.push(
     ...Array.from({ length: 30 }, (_, index) => ({
@@ -257,6 +277,9 @@ const chats = rows.map(
       messages: [],
     }) as unknown as ChatThread,
 );
+if (legacyMainFolder) {
+  chats.push({ ...chats[0], id: "chat-legacy-main", folder: legacyMainFolder });
+}
 const saved = useWorkspaceStore.getState();
 if (saved.chats.length === 0) {
   useWorkspaceStore.setState({ chats });

@@ -215,9 +215,13 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
     const panelBox = await panel.boundingBox();
     await page.mouse.move(seamBox.x + seamBox.width / 2, seamBox.y + 100);
     await page.mouse.down();
-    await page.mouse.move(panelBox.x + panelBox.width - 352, seamBox.y + 100, {
-      steps: 6,
-    });
+    // Keep the pointer's original offset inside the width seam: a 32px
+    // leftward drag grows a 320px panel to 352px without an initial jump.
+    await page.mouse.move(
+      seamBox.x + seamBox.width / 2 - (352 - panelBox.width),
+      seamBox.y + 100,
+      { steps: 6 },
+    );
     await page.mouse.up();
     check(
       "width seam publishes its variable on the Design surface",

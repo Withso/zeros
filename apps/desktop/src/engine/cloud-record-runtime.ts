@@ -20,6 +20,10 @@ import { reinsertTurns, type TurnDbRow } from "./db/turns";
 import type { CloudDurabilityAuthority } from "./cloud-durability-runtime";
 import { z } from "zod";
 import { getWorkspaceById, updateWorkspace } from "./git/state";
+import {
+  captureCloudCodeReviewRecords, isCloudCodeReviewThreadEntity,
+  isUncommittedCloudCodeReviewRecord, prepareCloudCodeReviewRestore,
+} from "./cloud-code-review-records";
 
 const RECORD_HEAD_PATH = "/internal/v1/cloud-workspaces/engine/record/head";
 const RECORD_APPEND_PATH = "/internal/v1/cloud-workspaces/engine/record/append";
@@ -241,6 +245,14 @@ export class CloudWorkspaceRecordRuntime {
     return task;
   }
 
+  /** After lifecycle callers quiesce writers, drain captures that may have
+   * started before the last acknowledged write, then capture fresh state.
+   * Ordinary heartbeat syncs still coalesce and permit live streaming. */
+  async flush(authority: CloudDurabilityAuthority): Promise<void> {
+    while (this.active) await this.active;
+    await this.synchronize(authority);
+  }
+
   private endpoint(authority: CloudDurabilityAuthority, pathname: string): URL {
     const url = new URL(pathname, new URL(authority.heartbeatEndpoint).origin);
     url.searchParams.set("workspaceId", authority.workspaceId);
@@ -358,7 +370,7 @@ export class CloudWorkspaceRecordRuntime {
     throw new Error("cloud record projection exceeded its entity bound");
   }
 
-  private localProjection(): Map<string, LocalEntity> {
+  private localProjection(authority: CloudDurabilityAuthority, remote: ReadonlyMap<string, RecordEntry>): Map<string, LocalEntity> {
     const db = openZerosDb();
     const entities = new Map<string, LocalEntity>();
     const primary = getWorkspaceById("local-main");
@@ -445,6 +457,9 @@ export class CloudWorkspaceRecordRuntime {
         },
       });
     }
+    for (const review of captureCloudCodeReviewRecords(this.repositoryRoot, authority, remote)) {
+      entities.set(entityKey(review.entityKind, review.entityId), review);
+    }
     for (const entity of entities.values()) {
       if (Buffer.byteLength(canonicalJson(entity.document), "utf8") > MAX_DOCUMENT_BYTES) {
         throw new Error(`cloud record ${entity.entityKind} document is too large`);
@@ -497,13 +512,15 @@ export class CloudWorkspaceRecordRuntime {
   }
 
   private restoreRemote(
+    authority: CloudDurabilityAuthority,
     remote: Map<string, RecordEntry>,
     mode: "replace" | "missing",
     settleImportedRunningAt: number | null,
     state: SyncState | null,
   ): void {
     const db = openZerosDb();
-    const existing = this.localProjection();
+    const existing = this.localProjection(authority, remote);
+    const restoreReviews = prepareCloudCodeReviewRestore(this.repositoryRoot, authority, remote, mode);
     const primaryRecord = remote.get(entityKey("metadata", PRIMARY_METADATA_ID));
     if (primaryRecord && !primaryRecord.tombstonedAt && (mode === "replace" || state === null)) {
       if (primaryRecord.schemaVersion !== 1) throw new Error("Cloud workspace metadata schema is unsupported");
@@ -709,6 +726,7 @@ export class CloudWorkspaceRecordRuntime {
       });
     }
     const apply = db.transaction(() => {
+      restoreReviews();
       if (mode === "replace") {
         const deleteTurns = db.prepare("DELETE FROM turns WHERE chat_id = ?");
         const deleteMessages = db.prepare(
@@ -816,7 +834,8 @@ export class CloudWorkspaceRecordRuntime {
     }
     for (const prior of remote.values()) {
       if (
-        !(["chat", "message", "turn"] as RemoteKind[]).includes(prior.entityKind) ||
+        (!(["chat", "message", "turn"] as RemoteKind[]).includes(prior.entityKind) &&
+          !isUncommittedCloudCodeReviewRecord(prior, remote)) ||
         prior.tombstonedAt !== null ||
         local.has(entityKey(prior.entityKind, prior.entityId))
       ) {
@@ -830,6 +849,7 @@ export class CloudWorkspaceRecordRuntime {
       });
     }
     return mutations.sort((a, b) =>
+      Number(isCloudCodeReviewThreadEntity(a)) - Number(isCloudCodeReviewThreadEntity(b)) ||
       entityKey(a.entityKind, a.entityId).localeCompare(entityKey(b.entityKind, b.entityId)),
     );
   }
@@ -914,20 +934,21 @@ export class CloudWorkspaceRecordRuntime {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const remote = await this.remoteProjection(authority);
       const state = this.readState(authority.workspaceId);
-      const localBefore = this.localProjection();
+      const localBefore = this.localProjection(authority, remote.entries);
       if (remote.entries.size > 0) {
         const clean =
           localBefore.size === 0 ||
           (state !== null &&
             this.manifest(localBefore) === state.manifestSha256);
         this.restoreRemote(
+          authority,
           remote.entries,
           clean ? "replace" : "missing",
           settleImportedRunningAt,
           state,
         );
       }
-      const local = this.localProjection();
+      const local = this.localProjection(authority, remote.entries);
       const capturedHead = headRev();
       const pending = this.mutations(local, remote.entries);
       let revision = remote.currentRevision;

@@ -1,81 +1,19 @@
 import { createHash } from "node:crypto";
-import { z } from "zod";
+import type { z } from "zod";
 import { pollProvider } from "../dev-environment/provider-http.mjs";
 import { imageContractSha256 } from "../cloud-workspace-validation/config";
-import { DIGEST, SHA, requireCheck, type PromotionConfig } from "./contracts";
-import { workerOwner, workerSnapshotName } from "./worker-admission";
+import { requireCheck, type PromotionConfig } from "./contracts";
+import { workerOwner, workerSnapshotName } from "./worker-owner";
+import { WorkerBuilderCleanupSchema, WorkerBuilderProvenanceSchema, WorkerCandidateSchema,
+  WorkerBuilderSandboxIdSchema as sandboxId, WorkerBuilderDeletionOperationIdSchema as operationId,
+  WorkerBuilderScopeSchema as creationScope, WorkerBuilderCompletedOperationSchema as completedOperation,
+  WorkerBuilderPendingOperationSchema as pendingOperation, type WorkerBuilderCleanup, type WorkerBuilderProvenance } from "./worker-builder-contracts";
+import { assertHistoricalWorkerNameRetirement } from "./worker-named-retirement";
+import { WorkerFailedBuildProvenanceSchema, WorkerFailedBuildRetirementSchema } from "./worker-builder-contracts";
+import { releaseHostedAdmission } from "../dev-environment/hosted-admission.mjs";
+export * from "./worker-builder-contracts";
 
-const timestamp = z.string().datetime({ offset: true });
-const sourceSha = z.string().regex(SHA);
-const digest = z.string().regex(DIGEST);
-const sandboxId = z.string().regex(/^bx_[a-z0-9]+$/);
-const operationId = z.string().regex(/^bdop_[a-f0-9]{32}$/);
-const snapshotName = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-
-export const WorkerCandidateSchema = z.object({ snapshotId: snapshotName, sourceCommit: sourceSha, buildSha256: digest,
-  architecture: z.literal("linux/amd64"), storageMiB: z.number().int().positive() }).strict();
-export const WorkerBuilderCreationBodySchema = z.object({ type: z.enum(["small", "default", "large", "xlarge"]), from: snapshotName,
-  ttlSeconds: z.literal(3600), noEnv: z.literal(true), env: z.object({}).strict() }).strict();
-const creationScope = z.object({ repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), channel: z.enum(["alpha", "beta", "production"]),
-  runId: z.string().regex(/^[1-9]\d*$/), runAttempt: z.string().regex(/^[1-9]\d*$/), sourceSha, inputsSha256: digest,
-  owner: z.string().regex(/^[a-f0-9]{24}$/), generation: z.string().uuid(), accountBinding: digest, protectedBaseSnapshot: snapshotName }).strict();
-const sanitation = z.object({ qualified: z.literal(true), sourceCommit: sourceSha, buildSha256: digest, observedAt: timestamp }).strict();
-export const WorkerBuilderProvenanceSchema = z.object({ version: z.literal(1), purpose: z.literal("release-worker"), scope: creationScope,
-  creation: z.object({ sandboxId, key: z.string().uuid(), requestedAt: timestamp, createdAt: timestamp,
-    body: WorkerBuilderCreationBodySchema, bodySha256: digest, billingOrgConfirmed: z.literal(true), billingObservedAt: timestamp }).strict(),
-  source: z.object({ commit: sourceSha, parent: sourceSha, tree: sourceSha, archiveSha256: digest, exactMergedCommit: z.literal(true) }).strict(),
-  generation: z.object({ commit: sourceSha, previous: sourceSha, contract: digest, attempt: z.string().regex(/^m2-build-[a-f0-9]{32}$/),
-    scriptSha256: digest, buildSha256: digest, snapshotName }).strict(),
-  attestation: z.object({ qualified: z.literal(true), secureSetup: z.literal(true), sourceCommit: sourceSha,
-    buildSha256: digest, storageMiB: z.number().int().positive(), sha256: digest }).strict(),
-  snapshot: z.object({ name: snapshotName, sourceSandboxId: sandboxId, sourceCommit: sourceSha, buildSha256: digest,
-    savedAt: timestamp, readyObservedAt: timestamp, sanitation, sanitationSha256: digest, sanitationReportSha256: digest }).strict(),
-  candidate: WorkerCandidateSchema,
-}).strict().refine(proof => {
-  const savedAt = Date.parse(proof.snapshot.savedAt), observedAt = Date.parse(proof.snapshot.sanitation.observedAt);
-  return proof.scope.owner === workerOwner(proof.scope.channel) && proof.creation.body.from === proof.scope.protectedBaseSnapshot &&
-    proof.creation.bodySha256 === hash(proof.creation.body) && proof.snapshot.sanitationSha256 === hash(proof.snapshot.sanitation) &&
-    Date.parse(proof.creation.requestedAt) <= Date.parse(proof.creation.createdAt) && Date.parse(proof.creation.createdAt) <= savedAt &&
-    Date.parse(proof.creation.billingObservedAt) >= Date.parse(proof.creation.requestedAt) && Date.parse(proof.creation.billingObservedAt) <= savedAt &&
-    observedAt <= savedAt && savedAt - observedAt <= 60_000 && Date.parse(proof.snapshot.readyObservedAt) >= savedAt &&
-    proof.creation.sandboxId === proof.snapshot.sourceSandboxId && proof.candidate.snapshotId === proof.snapshot.name &&
-    proof.generation.snapshotName === proof.snapshot.name && proof.attestation.storageMiB === proof.candidate.storageMiB &&
-    [proof.source.parent, proof.source.commit, proof.generation.commit, proof.attestation.sourceCommit, proof.snapshot.sourceCommit,
-      proof.snapshot.sanitation.sourceCommit, proof.candidate.sourceCommit].every(commit => commit === proof.scope.sourceSha) &&
-    [proof.generation.buildSha256, proof.attestation.buildSha256, proof.snapshot.buildSha256,
-      proof.snapshot.sanitation.buildSha256].every(build => build === proof.candidate.buildSha256) &&
-    proof.candidate.snapshotId === workerSnapshotName(proof.scope, hash([proof.scope.sourceSha, proof.scope.runId]));
-});
-export type WorkerBuilderProvenance = z.infer<typeof WorkerBuilderProvenanceSchema>;
-
-const pendingStage = z.enum(["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"]);
-const completedOperation = z.object({ id: operationId, kind: z.literal("sandbox"), targetId: sandboxId,
-  status: z.literal("completed"), completedAt: timestamp }).strict();
-const pendingOperation = z.object({ id: operationId, kind: z.literal("sandbox"), targetId: sandboxId, status: z.literal("blocked"),
-  stage: pendingStage, expectedBy: timestamp.nullable() }).strict();
-export const WorkerBuilderCleanupSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("physically-deleted"), sandboxId, deletionOperationId: operationId,
-    operation: completedOperation, operationObservedAt: timestamp, unavailableObservedAt: timestamp, completedAt: timestamp }).strict(),
-  z.object({ kind: z.literal("release-owned-sanitized-unavailable"), sandboxId, deletionOperationId: operationId,
-    operation: pendingOperation, operationObservedAt: timestamp, unavailableObservedAt: timestamp,
-    provenance: WorkerBuilderProvenanceSchema, provenanceSha256: digest,
-    storage: z.object({ status: z.literal("pending"), scope: z.literal("sandbox-unshared-snapshots-and-machine-data"),
-      stage: pendingStage, expectedBy: timestamp.nullable(), physicalBytes: z.literal("unmeasured") }).strict() }).strict(),
-]).refine(result => {
-  if (result.operation.id !== result.deletionOperationId || result.operation.targetId !== result.sandboxId ||
-      Date.parse(result.operationObservedAt) > Date.parse(result.unavailableObservedAt)) return false;
-  if (result.kind === "physically-deleted") return result.completedAt === result.operation.completedAt &&
-    Date.parse(result.completedAt) <= Date.parse(result.operationObservedAt);
-  return result.provenanceSha256 === hash(result.provenance) && result.provenance.creation.sandboxId === result.sandboxId &&
-    result.operation.stage === result.storage.stage && result.operation.expectedBy === result.storage.expectedBy &&
-    (result.storage.stage !== "waiting_for_uploads" || result.storage.expectedBy !== null &&
-      Date.parse(result.storage.expectedBy) >= Date.parse(result.provenance.creation.requestedAt) &&
-      Date.parse(result.storage.expectedBy) <= Date.parse(result.operationObservedAt) + 6 * 3600_000 + 5000);
-});
-export type WorkerBuilderCleanup = z.infer<typeof WorkerBuilderCleanupSchema>;
-export const WorkerCleanupSchema = z.object({ credentialCanaryResourcesDeleted: z.literal(true), imageBuilder: WorkerBuilderCleanupSchema }).strict();
-export type WorkerCleanup = z.infer<typeof WorkerCleanupSchema>;
 type Context = { lease: any; record: any; profile: any; request: any; readAdmission?: () => Promise<any>; now?: () => number };
 
 function accountBinding(profile: any) {
@@ -84,7 +22,7 @@ function accountBinding(profile: any) {
   requireCheck(values.every(value => typeof value === "string" && value.length > 0), "Worker builder account provenance is missing");
   return hash(values);
 }
-async function ownedScope(config: PromotionConfig, context: Context) {
+function releaseScope(config: PromotionConfig, context: Context) {
   const { lease, record, profile } = context, state = lease.state;
   const run = state?.releaseRuns?.find((value: any) => value.runId === config.runId);
   requireCheck(state?.owner === workerOwner(config.channel) && state.identity === hash(["release-worker", config.repository, config.channel]) &&
@@ -94,13 +32,23 @@ async function ownedScope(config: PromotionConfig, context: Context) {
   const scope = creationScope.safeParse({ repository: config.repository, channel: config.channel, runId: config.runId, runAttempt: config.runAttempt,
     sourceSha: config.sourceSha, inputsSha256: record.inputsSha256, owner: state.owner, generation: state.generation,
     accountBinding: accountBinding(profile), protectedBaseSnapshot: profile.boat.baseSnapshot });
-  requireCheck(scope.success && context.readAdmission, "Worker builder admission provenance is missing");
+  requireCheck(scope.success, "Worker builder admission provenance is missing");
+  return scope.data;
+}
+async function ownedScope(config: PromotionConfig, context: Context, retiredName = false) {
+  const { lease, record, profile } = context, state = lease.state, scope = releaseScope(config, context);
+  requireCheck(context.readAdmission, "Worker builder admission provenance is missing");
   const ledger = await context.readAdmission();
-  requireCheck(ledger?.state?.version === 1 && ledger.state.owner === "account-admission" && ledger.state.account === scope.data.accountBinding &&
+  if (retiredName) {
+    await lease.fence();
+    assertHistoricalWorkerNameRetirement(state, ledger?.state, profile, record, (context.now ?? Date.now)());
+    return scope;
+  }
+  requireCheck(ledger?.state?.version === 1 && ledger.state.owner === "account-admission" && ledger.state.account === scope.accountBinding &&
     ledger.state.reservations?.some((row: any) => row.kind === "builder" && row.owner === state.owner && row.generation === state.generation &&
       row.computeId === `snapshot:${record.snapshotId}` && row.snapshotName === record.snapshotId && !row.snapshotReleasedAt),
     "Worker builder admission ownership is unconfirmed");
-  return scope.data;
+  return scope;
 }
 export async function releaseBuilderCreationScope(config: PromotionConfig, context: Context) {
   return ownedScope(config, context);
@@ -122,9 +70,9 @@ export function builderCleanupBelongsToRun(result: WorkerBuilderCleanup, expecte
   return ["repository", "channel", "runId", "sourceSha", "inputsSha256"].every(key =>
     scope[key as keyof typeof scope] === expected[key as keyof typeof expected]) && candidateMatches(result.provenance.candidate, candidate);
 }
-async function provenance(config: PromotionConfig, context: Context, historical: boolean) {
+async function provenance(config: PromotionConfig, context: Context, historical: boolean, retiredName = false) {
   const { record, lease } = context, now = (context.now ?? Date.now)();
-  const expected = await ownedScope(config, context), original = creationScope.safeParse(record.builderIntent?.scope);
+  const expected = await ownedScope(config, context, retiredName), original = creationScope.safeParse(record.builderIntent?.scope);
   requireCheck(original.success && Object.keys(expected).every(key => key === "runAttempt"
     ? Number(original.data.runAttempt) <= Number(expected.runAttempt)
     : original.data[key as keyof typeof expected] === expected[key as keyof typeof expected]), "Worker builder original creation scope changed");
@@ -188,14 +136,117 @@ function validObservation(value: unknown, now: number) {
     "Worker builder cleanup observation is invalid");
   return parsed.data;
 }
+
+function failedBuildProvenance(config: PromotionConfig, context: Context) {
+  const { record, lease } = context, expected = releaseScope(config, context), builder = record.builder;
+  requireCheck(record.candidate === undefined && record.qualified !== true && record.snapshotRequested !== true &&
+    record.snapshotCreate === undefined && record.builderProvenance === undefined && builder?.cleanup === undefined &&
+    record.builderCreate?.phase === "acknowledged" && builder.billingOrgConfirmed === true &&
+    builder.accountBinding === expected.accountBinding && Number.isFinite(record.builderIntent?.at),
+    "Worker failed builder must have an acknowledged creation and no capture or candidate");
+  const original = creationScope.safeParse(record.builderIntent.scope);
+  requireCheck(original.success && Object.keys(expected).every(key => key === "runAttempt"
+    ? Number(original.data.runAttempt) <= Number(expected.runAttempt)
+    : original.data[key as keyof typeof expected] === expected[key as keyof typeof expected]), "Worker failed builder original scope changed");
+  const prefix = config.sourceSha.slice(0, 12), source = jsonProof(record, `${prefix}/source.json`), created = jsonProof(record, "builder.json");
+  const proof = WorkerFailedBuildProvenanceSchema.safeParse({ scope: original.data,
+    creation: { sandboxId: created.id, key: record.builderIntent.key, requestedAt: new Date(record.builderIntent.at).toISOString(),
+      createdAt: created.createdAt, body: record.builderIntent.body, bodySha256: hash(record.builderIntent.body),
+      billingOrgConfirmed: builder.billingOrgConfirmed, billingObservedAt: builder.billingObservedAt },
+    source: { commit: source.commit, parent: source.parent, tree: source.tree, archiveSha256: source.archiveSha256, exactMergedCommit: source.exactMergedCommit } });
+  requireCheck(proof.success && proof.data.creation.sandboxId === builder.id && created.from === proof.data.creation.body.from &&
+    created.type === proof.data.creation.body.type &&
+    !lease.state.resources.images.some((image: any) => image !== record && image.builder?.id === builder.id) &&
+    !lease.state.releaseRuns.some((run: any) => run.canaries?.some((job: any) => job.target?.id === builder.id)),
+    "Worker failed builder original creation/source provenance is invalid");
+  return proof.data;
+}
+function savedFailedBuild(config: PromotionConfig, context: Context) {
+  const parsed = WorkerFailedBuildRetirementSchema.safeParse(context.record.builder?.failedBuildRetirement), now = (context.now ?? Date.now)();
+  requireCheck(parsed.success && parsed.data.provenanceSha256 === hash(failedBuildProvenance(config, context)) &&
+    parsed.data.operation.id === context.record.builder.deletionOperationId && parsed.data.snapshotName === context.record.snapshotId &&
+    Date.parse(parsed.data.snapshotAbsentObservedAt) <= now + 5000,
+    "Worker failed builder retained retirement proof changed");
+  return parsed.data;
+}
+/** Retire only compute for an uncaptured failed build. Never issue an image
+ * cleanup/publication proof or discard its diagnostic and storage history. */
+export async function retireFailedReleaseBuilder(config: PromotionConfig, context: Context, observeOnly = false) {
+  const { lease, record, request } = context, builder = record.builder, now = context.now ?? Date.now;
+  const proof = failedBuildProvenance(config, context);
+  requireCheck(context.readAdmission, "Worker failed builder admission is missing");
+  const ledger = (await context.readAdmission())?.state;
+  requireCheck(ledger?.version === 1 && ledger.owner === "account-admission" && ledger.account === proof.scope.accountBinding &&
+    Array.isArray(ledger.reservations), "Worker failed builder admission account changed");
+  if (builder.failedBuildRetirement !== undefined) savedFailedBuild(config, context);
+  const held = ledger.reservations.find((row: any) => row.kind === "builder" && row.owner === proof.scope.owner &&
+    row.generation === proof.scope.generation && row.computeId === `snapshot:${record.snapshotId}` && row.snapshotName === record.snapshotId);
+  requireCheck(held && !held.snapshotReleasedAt || !held && builder.retiredAt && builder.failedBuildRetirement,
+    "Worker failed builder original reservation is missing");
+  requireCheck(!builder.deleteRequested || operationId.safeParse(builder.deletionOperationId).success,
+    "Worker failed builder deletion response was lost; retain its hold");
+  requireCheck(!builder.deletionOperationId || builder.deleteRequested === true && operationId.safeParse(builder.deletionOperationId).success,
+    "Worker failed builder deletion acknowledgement is invalid");
+  await lease.fence();
+  if (!builder.deletionOperationId) {
+    requireCheck(!observeOnly && !builder.deleted && !builder.retiredAt, "Worker failed builder deletion acknowledgement is missing");
+    builder.deleteRequested = true; await lease.save(); await lease.fence();
+    const response = await request("DELETE", `/sandboxes/${builder.id}`, { headers: { "x-ascii-confirm-delete": builder.id } }), operation = response.body?.operation;
+    requireCheck(response.status >= 200 && response.status < 300 && operationId.safeParse(operation?.id).success &&
+      operation.kind === "sandbox" && operation.targetId === builder.id, "Worker failed builder deletion is unconfirmed");
+    builder.deletionOperationId = operation.id; builder.deletionAcceptedAt = new Date(now()).toISOString(); await lease.save();
+  }
+  const polling = { signal: lease.signal, timeout: observeOnly ? 0 : 300_000 };
+  const result = await pollProvider("Worker failed builder retirement", async () => {
+    const response = await request("GET", `/deletion-operations/${builder.deletionOperationId}`), operation = response.body?.operation;
+    requireCheck(response.status === 200 && operation?.id === builder.deletionOperationId && operation.kind === "sandbox" && operation.targetId === builder.id,
+      "Worker failed builder deletion proof changed");
+    if (["pending", "processing"].includes(operation.status)) return false;
+    const parsed = operation.status === "completed"
+      ? completedOperation.safeParse({ id: operation.id, kind: operation.kind, targetId: operation.targetId, status: operation.status, completedAt: operation.completedAt })
+      : pendingOperation.safeParse({ id: operation.id, kind: operation.kind, targetId: operation.targetId, status: operation.status,
+        stage: operation.stage, expectedBy: operation.expectedBy ?? null });
+    requireCheck(parsed.success, "Worker failed builder deletion operation is invalid");
+    const operationObservedAt = new Date(now()).toISOString();
+    requireCheck((await request("GET", `/sandboxes/${builder.id}`)).status === 404, "Worker failed builder remains available");
+    const unavailableObservedAt = new Date(now()).toISOString();
+    requireCheck((await request("GET", `/named-snapshots/${record.snapshotId}`)).status === 404, "Worker failed builder unexpectedly has a named image");
+    const result = WorkerFailedBuildRetirementSchema.safeParse({ version: 1, kind: "failed-build-unavailable", provenance: proof,
+      provenanceSha256: hash(proof), snapshotName: record.snapshotId, operation: parsed.data, operationObservedAt, unavailableObservedAt,
+      snapshotAbsentObservedAt: new Date(now()).toISOString(), storage: { status: parsed.data.status === "completed" ? "completed" : "pending", physicalBytes: "unmeasured" } });
+    requireCheck(result.success, "Worker failed builder retirement observation is invalid");
+    return result.data;
+  }, polling);
+  await lease.fence();
+  builder.failedBuildRetirement = result; await lease.save();
+  builder.deleted = result.operation.status === "completed"; builder.retiredAt ??= result.unavailableObservedAt; await lease.save();
+}
+
+/** Only an acknowledged failed build still occupying this owner's compute
+ * slot is observed on demand. This does not resume historical storage scans. */
+export async function reconcileFailedReleaseBuilderHolds(config: PromotionConfig, context: Omit<Context, "record">, store: any) {
+  requireCheck(context.readAdmission, "Worker failed builder admission is missing");
+  const ledger = (await context.readAdmission())?.state, state = context.lease.state;
+  requireCheck(ledger?.account === accountBinding(context.profile) && Array.isArray(ledger?.reservations), "Worker failed builder admission account changed");
+  for (const row of ledger.reservations.filter((row: any) => row.kind === "builder" && !row.releasedAt && row.owner === state.owner && row.generation === state.generation)) {
+    const record = state.resources.images.find((image: any) => row.computeId === `snapshot:${image.snapshotId}` && row.snapshotName === image.snapshotId);
+    if (!record || record.purpose !== "release-worker" || record.candidate || record.snapshotRequested || record.snapshotCreate ||
+      !record.builder?.deleteRequested || !record.builder?.deletionOperationId) continue;
+    const original = { ...config, runId: record.releaseRunId, sourceSha: record.sourceCommit, runAttempt: record.builderIntent?.scope?.runAttempt };
+    await retireFailedReleaseBuilder(original, { ...context, record }, true);
+    await releaseHostedAdmission(store, context.lease, context.profile);
+  }
+}
+
 export async function retireReleaseBuilder(config: PromotionConfig, context: Context, options: { observeOnly?: boolean; historical?: boolean } = {}) {
   const { lease, record, request } = context, builder = record.builder, now = context.now ?? Date.now;
+  const retiredName = options.observeOnly === true && options.historical === true && record.snapshotNameRetirement !== undefined;
   requireCheck(sandboxId.safeParse(builder?.id).success, "Worker builder allocation is unconfirmed");
   requireCheck(!builder.deleteRequested || operationId.safeParse(builder.deletionOperationId).success,
     "Worker builder deletion response was lost; reconcile its terminal operation before retrying");
   let proof: WorkerBuilderProvenance | undefined;
   if (record.builderProvenance || builder.cleanup?.kind === "release-owned-sanitized-unavailable" || record.candidate && record.builderIntent?.scope) {
-    proof = await provenance(config, context, options.historical === true);
+    proof = await provenance(config, context, options.historical === true, retiredName);
     if (!builder.deleted && !builder.deletionOperationId) await readySnapshot(context);
     if (!record.builderProvenance && !builder.cleanup?.provenance) { record.builderProvenance = proof; await lease.save(); }
   }
@@ -230,7 +281,7 @@ export async function retireReleaseBuilder(config: PromotionConfig, context: Con
       const pending = pendingOperation.safeParse({ id: operation.id, kind: operation.kind, targetId: operation.targetId,
         status: operation.status, stage: operation.stage, expectedBy: operation.expectedBy ?? null });
       requireCheck(pending.success, "Worker builder pending-storage stage/deadline is invalid");
-      await readySnapshot(context);
+      if (!retiredName) await readySnapshot(context);
       value = { kind: "release-owned-sanitized-unavailable", sandboxId: builder.id, deletionOperationId: builder.deletionOperationId,
         operation: pending.data, operationObservedAt, unavailableObservedAt: operationObservedAt, provenance: proof, provenanceSha256: hash(proof),
         storage: { status: "pending", scope: "sandbox-unshared-snapshots-and-machine-data", stage: pending.data.stage,
@@ -239,6 +290,10 @@ export async function retireReleaseBuilder(config: PromotionConfig, context: Con
     validObservation(value, now());
     const sandbox = await request("GET", `/sandboxes/${builder.id}`);
     requireCheck(sandbox.status === 404, "Worker builder is not confirmed irreversibly unavailable");
+    if (retiredName) {
+      const named = await request("GET", `/named-snapshots/${record.snapshotId}`);
+      requireCheck(named.status === 404, "Worker builder retired name has reappeared");
+    }
     return validObservation({ ...value as object, unavailableObservedAt: new Date(now()).toISOString() }, now());
   }, polling);
   if (result.kind === "physically-deleted" && proof) record.builderProvenance = proof;
@@ -256,7 +311,11 @@ export async function reconcileReleaseBuilderRetentions(config: PromotionConfig,
   const maxRecords = options.maxRecords ?? 16, budgetMs = options.budgetMs ?? 15_000, now = context.now ?? Date.now;
   requireCheck(Number.isSafeInteger(maxRecords) && maxRecords > 0 && maxRecords <= 100 && Number.isFinite(budgetMs) && budgetMs >= 100,
     "Worker builder retention observation budget is invalid");
+  const failed = (context.lease.state.resources.images ?? []).filter((record: any) => record.builder?.failedBuildRetirement !== undefined);
+  for (const record of failed) savedFailedBuild({ ...config, sourceSha: record.sourceCommit, runId: record.releaseRunId,
+    runAttempt: record.builderIntent?.scope?.runAttempt }, { ...context, record });
   const pending = (context.lease.state.resources.images ?? []).filter((record: any) => !record.builder?.deleted &&
+    record.builder?.failedBuildRetirement === undefined &&
     (record.builder?.retiredAt || record.builder?.cleanup) && (record.purpose === "release-worker" || record.releaseRunId !== undefined ||
       record.builder?.cleanup?.provenance?.purpose === "release-worker"))
     .sort((left: any, right: any) => (Date.parse(left.builder.lastReconcileAt) || 0) - (Date.parse(right.builder.lastReconcileAt) || 0));

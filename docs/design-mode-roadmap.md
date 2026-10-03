@@ -155,6 +155,11 @@ reachable. Hiding the panel keeps it mounted and inert, so the inspector's
 document shortcuts (save, undo, redo) keep working and focus inside it returns
 to the canvas. Separators resize from, and report, the size actually on screen,
 and a width drag moves the neighbouring chrome with it.
+Panel seams retain the pointer's grab offset and ignore other pointers. Escape,
+pointer cancellation, window blur, hiding the panel or leaving Design restores
+the starting size without saving; a drag back to its starting position is also
+a no-op. Width and Layers-height preferences update retained workspaces and
+other windows before their separators measure the visible size.
 Source view keeps its filename and scroll viewport clear of the pill, tool
 rail, visible panel and open Motion timeline, following their live sizes.
 An inactive Design surface hides and inerts its portaled Theme window (it
@@ -841,7 +846,10 @@ pending work while teardown stops observers and timers.
 Pointer handling uses Pointer Events and capture. High-frequency input is
 sampled at animation-frame cadence; layout reads are batched before writes.
 One pointer gesture publishes one semantic transaction on release. Cancel or
-Escape restores the exact baseline.
+Escape restores the exact baseline. The owning pointer's release position is
+included; unrelated pointers cannot move or finish the gesture. Lost capture,
+window blur and surface retirement cancel it. Moving or resizing back to the
+original unsnapped geometry writes nothing and preserves authored sizing.
 
 #### Interaction rules
 
@@ -868,15 +876,21 @@ Escape restores the exact baseline.
   replace a newer selection or apply another frame's nesting depth.
 - **Multi-selection:** Shift-click and marquee publish a bounded primary-first
   group. Ancestor/descendant overlap reduces to top-level owners before
-  transform or delete so no subtree is mutated twice.
+  transform or delete so no subtree is mutated twice. A marquee claims its
+  selection generation before hit testing; a newer click, directory, source,
+  inactive surface or replacement runtime retires the delayed result.
 - **Camera:** pinch follows Chromium's synthesized pinch scale, Cmd-wheel uses
   the flatter scroll curve, ordinary wheel pans, and every zoom preserves its
   focal point. Imperative camera state updates the world transform and inverse
-  scale together, then settles one bounded store update. A canvas never opens
-  onto empty space while it has frames: when no frame is at least 4 screen px
-  in view, the first display for that owner fits them all (afterwards the
-  camera is the user's). Selecting a frame nobody can see (from Layers,
-  keyboard or history) centers it at the current zoom, or fits it when it
+  scale together, then settles one bounded store update.
+  Hand panning takes over that exact painted camera and retires the pending
+  wheel settlement. Escape restores the camera at the start of the hand drag.
+  Replacing the directory cancels the hand without restoring the retired
+  directory's camera or selection into the replacement view.
+  A canvas never opens onto empty space while it has frames: when no frame is
+  at least 4 screen px in view, the first display for that owner fits them all
+  (afterwards the camera is the user's). Selecting a frame nobody can see (from
+  Layers, keyboard or history) centers it at the current zoom, or fits it when it
   would be unreadable there; a frame with any visible part never moves.
   "In view" and every fit, reveal and menu/keyboard zoom centre use the
   canvas the floating chrome leaves uncovered (pill, tool rail, panel, open
@@ -939,10 +953,17 @@ Escape restores the exact baseline.
   stylesheet declaration requires explicit rule scope.
 - **Style inspector:** typed values remain local drafts until Enter/blur;
   Escape restores the focus-time value. Scrubs, sliders, and color gestures
-  preview live and commit once. Authored-versus-computed state, shorthands,
-  logical properties, priority, and source target remain explicit; an
-  unauthored (computed) value renders one text tier quieter than an authored
-  one.
+  preview live and commit once. Numeric label scrubs require 3px of movement;
+  clicking or returning to the starting value preserves Hug/Fill and authored
+  units. Escape, lost pointer capture, window blur or deactivation cancels the
+  scrub and restores its baseline without writing. Effect arrow steps remain
+  local until commit. Preview cancellation retains the originating workspace,
+  directory, frame and selected nodes; retired callbacks and color samples
+  cannot follow a replacement selection. Color and opacity drafts preserve
+  refreshed, untouched channels, and an untouched focused field adopts the
+  confirmed value on blur. Authored-versus-computed state, shorthands, logical
+  properties, priority, and source target remain explicit; an unauthored
+  (computed) value renders one text tier quieter than an authored one.
 - **Inspector UI:** one geometry for every Design surface — 28px fields on
   quiet `bg2` fills, 36px section headers, 13px values, 12px in-field labels,
   14px glyphs (`design-workspace-ui.css`, "Design UI standard v1", and
@@ -1081,11 +1102,35 @@ Escape restores the exact baseline.
   and cannot be overtaken by later writes or Undo. Document read failures and
   transaction conflicts retain their normal error and recovery handling.
 - **Motion:** node-local keyframe tracks, preview, playback, and paths exist only
-  in explicit Motion mode. Draft identity is workspace + frame + node, not
-  source revision. Playback updates a small scalar owner store rather than the
-  full canvas at 60 Hz. The floating bottom timeline is resizable (default
-  240px, persisted app-wide) and ends beside the Layers + Inspector panel; the
-  tool rail re-centres above its live height. In Motion
+  in explicit Motion mode. Draft identity is workspace + directory + frame +
+  node, not source revision. Unrelated keyframe refreshes preserve unsaved
+  drafts, and a save acknowledges only the draft it wrote. Pending saves and
+  deletions retain that exact owner through selection round trips; their late
+  replies cannot change another directory or discard newer edits. Failed writes
+  preserve the draft and allow retry. Returning to a clean editor during a
+  pending deletion does not create unsaved work; success clears that motion
+  unless the user has edited it since deletion began. Re-adding a property
+  selects its existing track without replacing values; custom properties retain
+  their case-sensitive names. Keyframe drags preview from a fixed baseline, so
+  crossing a neighbor cannot erase it, and Escape cancels the whole gesture.
+  Cancellation and no-op returns account for writes acknowledged during the
+  drag, keeping saved motion clean and deleted motion absent.
+  Clicks and repeated keyboard retiming retain focus on the selected keyframe.
+  Timeline controls retain native Tab, Enter and Space behavior; canvas layer
+  shortcuts cannot handle keys while focus belongs to the timeline.
+  Timeline fields commit on Enter/blur and revert on Escape; invalid field
+  drafts never alter the running preview. Ruler scrubbing settles focused time
+  drafts before capturing its cancellation baseline. A keyframe gesture follows
+  the same point if that focus change retimes it, and cancellation preserves
+  the accepted field edit. Pause remains available
+  with an invalid field and honors the action chosen before a field's blur
+  commit. Playback retains elapsed loop time through pause/resume and settings
+  edits, rescales progress when duration changes, and holds the actual
+  fractional endpoint, including alternating direction. Playback updates a
+  small scalar owner store rather than the full canvas at 60 Hz. The floating bottom timeline is resizable
+  (default 240px, persisted app-wide) and ends beside the Layers + Inspector panel;
+  retained timelines restore the current height preference on activation.
+  The tool rail re-centres above its live height. In Motion
   mode an inspector field shows its keyframe diamond on hover and an animated
   property's in-field label takes the Motion accent, so values are never
   covered at rest.
@@ -1175,7 +1220,10 @@ cancelled transfer restores it; a confirmed transfer never restores the old
 position first. Destination selection waits for the new document before reading
 the transferred node, and does not replace a selection made during saving.
 Whole-frame gestures retain their visible geometry through overlapping save
-replies, including React renders triggered by those replies.
+replies, including React renders triggered by those replies. Frame previews and
+root preview queues include the Design directory in their owner identity;
+directory replacement retires held gestures and fences late previews,
+rollbacks and save replies from reused frame DOM.
 
 Layout preparation and durable writes have separate queues. A second sizing
 choice or undo can paint while the first write is saving; persistence remains

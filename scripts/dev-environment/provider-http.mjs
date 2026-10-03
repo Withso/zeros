@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 
 export class DevProviderError extends Error {
   constructor(provider, status, requestId) {
-    super(`${provider} request failed (${status}); the Dev receipt was preserved for retry`);
+    const code = status === 429 ? "provider_rate_limited" : status === 402 ? "provider_budget_exhausted" : undefined;
+    super(`${provider} request failed (${status}${code ? `, ${code}` : ""}); the Dev receipt was preserved for retry`);
+    this.code = code;
     this.status = status;
     this.provider = provider;
     this.requestId = /^[A-Za-z0-9_-]{1,100}$/.test(requestId ?? "") ? requestId : undefined;

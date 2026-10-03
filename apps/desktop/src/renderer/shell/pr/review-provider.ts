@@ -29,6 +29,8 @@ import {
   type PrCommitSummary,
   type PrTimelineItem,
 } from "../../platform/git";
+import { getPrReviewDiff } from "../../platform/github-review";
+import type { PrReviewDiff } from "@zeros/protocol/github-review";
 
 export type ForgeFamily =
   | "github"
@@ -78,6 +80,8 @@ export interface ReviewProvider {
   getCommits(target: ReviewTarget): Promise<PrCommitSummary[]>;
   /** Reviews + conversation comments, oldest-first. */
   getTimeline(target: ReviewTarget): Promise<PrTimelineItem[]>;
+  /** Published diff with a verified head; required before posting line comments. */
+  getDiff?(target: ReviewTarget): Promise<PrReviewDiff>;
   addComment(
     target: ReviewTarget,
     body: string,
@@ -125,6 +129,7 @@ const githubProvider: ReviewProvider = {
   getChecks: (target) => ghPrChecks(githubArgs(target)),
   getCommits: (target) => ghPrCommits(githubArgs(target)),
   getTimeline: (target) => ghPrReviews(githubArgs(target)),
+  getDiff: (target) => getPrReviewDiff(githubArgs(target)),
   addComment: (target, body) =>
     ghPrComment({ ...githubArgs(target), body }),
   merge: (target, method) => {

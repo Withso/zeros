@@ -27,11 +27,12 @@ export function nativeChallengeCommand(value: unknown, files: CoreChallengeFiles
   return null;
 }
 
-/** Consumes the ordinary provider transcript projection. An MCP row or model
+/** Consumes canonical tool updates at the caller's observation boundary. An MCP row or model
  * claim cannot qualify native execution; callers also verify effects on disk
  * independently before accepting the resulting evidence. */
 export class NativeToolEvidence {
   private readonly records = new Map<string, Record<string, unknown>>();
+  private readonly answeredMcpApprovals = new Set<string>();
   private events = 0;
   observe(value: unknown): void {
     const update = record(value);
@@ -63,6 +64,49 @@ export class NativeToolEvidence {
           tool.title === `mcp__${server}__${name}` || tool.title === `${server}.${name}`) return;
     }
     throw new Error("Qualification lacks a successful native MCP tool call");
+  }
+  /** Bind consent to the actual native question row and the one pending owned
+   * probe. Display copy alone cannot grant permission, and consent is not proof
+   * that the native tool completed. */
+  consumeCanaryMcpApproval(toolCallId: string, nativeRequestId: string): boolean {
+    const question = this.records.get(toolCallId), input = record(question?.rawInput);
+    if (this.events > 2048 || this.answeredMcpApprovals.has(toolCallId) ||
+      question?.kind !== "question" || question.status !== "in_progress" ||
+      question.nativeToolCallId !== `mcp-elicitation:${nativeRequestId}` ||
+      input.serverName !== "zeros-qualification" || !["form", "openai/form", "openaiForm"].includes(String(input.mode)) ||
+      !Array.isArray(input.fields) || input.fields.length !== 0) return false;
+    const probes = [...this.records.values()].filter(tool => {
+      const call = record(tool.rawInput), args = call.arguments;
+      return tool.kind === "mcp" && tool.status === "in_progress" && typeof tool.nativeToolCallId === "string" && !!tool.nativeToolCallId &&
+        call.server === "zeros-qualification" && call.tool === "probe" && call.pluginId === undefined && call.appContext === undefined &&
+        args !== null && typeof args === "object" && !Array.isArray(args) && Object.keys(args).length === 0;
+    });
+    if (probes.length !== 1) return false;
+    this.answeredMcpApprovals.add(toolCallId);
+    return true;
+  }
+  /** The exact owned canary, using assertMcp's unchanged row predicate. These
+   * counts describe the qualification accumulator, not tool discovery or a
+   * provider response. The summary contains no row identity, title, input or output. */
+  canaryMcpSummary() {
+    const matched = { rows: 0, completed: 0, failed: 0, pending: 0, unknownStatus: 0, nativeId: 0, missingNativeId: 0, successful: 0 };
+    for (const tool of this.records.values()) {
+      const input = record(tool.rawInput);
+      if (!((input.server === "zeros-qualification" && input.tool === "probe") ||
+          (input.providerIdentifier === "zeros-qualification" && input.toolName === "probe") ||
+          tool.title === "mcp__zeros-qualification__probe" || tool.title === "zeros-qualification.probe")) continue;
+      matched.rows++;
+      switch (tool.status) {
+        case "completed": matched.completed++; break;
+        case "failed": matched.failed++; break;
+        case "pending": case "in_progress": matched.pending++; break;
+        default: matched.unknownStatus++;
+      }
+      const nativeId = typeof tool.nativeToolCallId === "string" && !!tool.nativeToolCallId;
+      if (nativeId) matched.nativeId++; else matched.missingNativeId++;
+      if (tool.status === "completed" && nativeId) matched.successful++;
+    }
+    return { version: 1 as const, events: Math.min(this.events, 2048), overflowed: this.events > 2048, uniqueRows: this.records.size, matched };
   }
   assertEffects(_provider: string, files: CoreChallengeFiles, _marker: string): void {
     const evidence = this.summary(files);

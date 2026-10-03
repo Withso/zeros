@@ -20,35 +20,85 @@ function storeFixture() {
       state = structuredClone(next); revision = String(Number(revision) + 1); return revision; },
     readDocument: async () => null };
 }
-describe("one account release and rollback headroom", () => {
-  it("leaves six channel slots, one base and one cleanup slot unavailable to custom or Dev builds", async () => {
-    const releaseNames = (["alpha", "beta", "production"] as const).flatMap(channel => [`zeros-${channel}-current`, `zeros-${channel}-rollback`]);
-    const custom = image(), selected = [...base, ...releaseNames, custom.snapshot_name];
-    expect(protectedBoatSnapshotCapacity(profile, selected, [], image("33333333-3333-4333-8333-333333333333").snapshot_name, "non-release").used).toBe(9);
-    expect(() => protectedBoatSnapshotCapacity(profile, selected, [], "zeros-org-" + "4".repeat(32), "non-release")).not.toThrow();
-    expect(() => protectedBoatSnapshotCapacity(profile, [...selected, "dev-external"], [], "zeros-org-" + "4".repeat(32), "non-release")).toThrow("image capacity reached");
-    const candidate = `dev-${workerOwner("alpha")}-11111111-${"f".repeat(16)}`;
-    expect(() => assertWorkerSnapshotSlots("alpha", candidate, profile, [...base, "zeros-alpha-current", "zeros-beta-current", "zeros-beta-rollback", "zeros-production-current", "zeros-production-rollback",
-      custom.snapshot_name, "zeros-org-" + "4".repeat(32)].map(id => ({ provider: "boat", id })), [])).not.toThrow();
+describe("provider-owned named-snapshot quota", () => {
+  it.each(["alpha", "beta", "production", "dev", "custom"] as const)("admits an upgraded plan's %s name with identical accounting and no claimed quota", channel => {
+    const selected = [...base, ...Array.from({ length: 20 }, (_, index) => `foreign-${index}`)];
+    const release = channel !== "dev" && channel !== "custom";
+    const candidate = release ? `zeros-${channel}-next` : channel === "custom" ? image().snapshot_name : "dev-next";
+    const configured = { ...profile, admission: { snapshotHeadroom: 1, maxNamedSnapshots: 9 } };
+    expect(protectedBoatSnapshotCapacity(configured, selected, [], candidate, release ? "release" : "non-release"))
+      .toEqual({ used: 22 });
+    expect(protectedBoatSnapshotCapacity(configured, [...selected, "held-by-another"], [], candidate)).toEqual({ used: 23 });
+    if (release) expect(assertWorkerSnapshotSlots(channel, candidate, configured, selected.map(id => ({ provider: "boat", id })), []).used).toBe(22);
   });
-  it("fences custom and Dev contenders through the same CAS when only one non-release slot remains", async () => {
-    const store = storeFixture(), admission = new BoatAccountAdmission(store, profile), dev = newHostedGeneration({ owner: "a".repeat(24), identity: "synthetic-dev" });
-    const inventory = [...base, "zeros-org-" + "9".repeat(32)];
-    const results = await Promise.allSettled([admission.reserve(image(), inventory), reserveHostedAdmission(store, dev, profile, { kind: "builder",
+  it("allows custom preflight and reservations beyond ten while retaining compute admission and every name hold", async () => {
+    const store = storeFixture(), admission = new BoatAccountAdmission(store, { ...profile, admission: { snapshotHeadroom: 1, maxNamedSnapshots: 9 } });
+    const inventory = [...base, ...Array.from({ length: 20 }, (_, index) => `zeros-org-existing-${index}`)], first = image();
+    await expect(admission.capacity(inventory)).resolves.toEqual({ used: 21 });
+    await admission.reserve(first, inventory);
+    await expect(admission.capacity(inventory)).rejects.toThrow("image capacity reached");
+    await admission.release(first, { computeDeleted: true, snapshotDeleted: false });
+    await expect(admission.capacity(inventory)).resolves.toEqual({ used: 22 });
+    const reservations = (await store.readAdmission()).state.reservations;
+    expect(protectedBoatSnapshotCapacity(profile, [...inventory, first.snapshot_name], reservations, first.snapshot_name)).toEqual({ used: 22 });
+    await expect(admission.reserve(image("33333333-3333-4333-8333-333333333333"), inventory)).resolves.toBeDefined();
+  });
+  it("retains both custom and Dev name holds through a stale CAS when compute policy permits both builders", async () => {
+    const selected = { ...profile, admission: { maxBuilders: 2 } };
+    const store = storeFixture(), admission = new BoatAccountAdmission(store, selected), dev = newHostedGeneration({ owner: "a".repeat(24), identity: "synthetic-dev" });
+    const inventory = [...base, ...Array.from({ length: 20 }, (_, index) => `other-${index}`)];
+    const read = store.readAdmission, write = store.writeAdmission;
+    let reads = 0, conflicts = 0, releaseReads!: () => void;
+    const bothRead = new Promise<void>(resolve => { releaseReads = resolve; });
+    store.readAdmission = async () => {
+      const current = await read();
+      if (++reads <= 2) { if (reads === 2) releaseReads(); await bothRead; }
+      return current;
+    };
+    store.writeAdmission = async (next, etag) => {
+      try { return await write(next, etag); }
+      catch (error) { if ((error as any).code === "DEV_REGISTRY_CONFLICT") conflicts++; throw error; }
+    };
+    const results = await Promise.allSettled([admission.reserve(image(), inventory), reserveHostedAdmission(store, dev, selected, { kind: "builder",
       snapshotName: `dev-${dev.owner}-${dev.generation.slice(0, 8)}-${"b".repeat(16)}`, inventory: inventory.map(id => ({ provider: "boat", id })) })]);
+    expect(results.filter(row => row.status === "fulfilled")).toHaveLength(2);
+    expect(conflicts).toBe(1);
+    expect((await store.readAdmission()).state.reservations.filter((row: any) => row.snapshotName && !row.snapshotReleasedAt)).toHaveLength(2);
+  });
+  it("keeps the builder cap independent when custom and Dev contenders have spare names", async () => {
+    const store = storeFixture(), admission = new BoatAccountAdmission(store, profile), dev = newHostedGeneration({ owner: "a".repeat(24), identity: "synthetic-dev" });
+    const results = await Promise.allSettled([admission.reserve(image(), base), reserveHostedAdmission(store, dev, profile, { kind: "builder",
+      snapshotName: `dev-${dev.owner}-${dev.generation.slice(0, 8)}-next`, inventory: base.map(id => ({ provider: "boat", id })) })]);
     expect(results.filter(row => row.status === "fulfilled")).toHaveLength(1);
-    expect((await store.readAdmission()).state.reservations.filter((row: any) => row.snapshotName && !row.snapshotReleasedAt)).toHaveLength(1);
+    expect((await store.readAdmission()).state.reservations.filter(row => row.kind === "builder" && !row.releasedAt)).toHaveLength(1);
+  });
+  it("keeps protected-base, account and custom candidate identity checks", async () => {
+    expect(() => protectedBoatSnapshotCapacity(profile, [], [], image().snapshot_name)).toThrow("image capacity reached");
+    expect(() => protectedBoatSnapshotCapacity(profile, base, [], "zeros-alpha-next", "non-release")).toThrow("image capacity reached");
+    const store = storeFixture(), admission = new BoatAccountAdmission(store, profile), first = image();
+    await expect(admission.reserve({ ...first, account_scope: "other-account" }, base)).rejects.toThrow("image capacity reached");
+    await expect(admission.reserve({ ...first, snapshot_name: "zeros-alpha-next" }, base)).rejects.toThrow("image capacity reached");
+    const saved = await store.readAdmission(); saved.state.account = "f".repeat(64); await store.writeAdmission(saved.state, saved.etag);
+    await expect(admission.capacity(base)).rejects.toThrow("image capacity reached");
+    await expect(admission.reserve(first, base)).rejects.toThrow("image capacity reached");
+  });
+  it("requires the protected base in actual inventory even when a ledger row names it", () => {
+    const hold = { kind: "builder" as const, owner: "a".repeat(24), generation: image().id, snapshotName: profile.boat.baseSnapshot,
+      computeId: `snapshot:${profile.boat.baseSnapshot}`, createdAt: new Date().toISOString() };
+    expect(() => protectedBoatSnapshotCapacity(profile, [], [hold], image().snapshot_name)).toThrow("image capacity reached");
   });
   it("never expires uncertain custom snapshots and releases only physically confirmed compute/snapshot capacity", async () => {
     const store = storeFixture(), admission = new BoatAccountAdmission(store, profile), first = image();
-    await admission.reserve(first, base); await admission.release(first, { computeDeleted: false, snapshotDeleted: false });
+    const inventory = [...base, ...Array.from({ length: 7 }, (_, index) => `retained-${index}`)];
+    await admission.reserve(first, inventory); await admission.release(first, { computeDeleted: false, snapshotDeleted: false });
     const next = image("33333333-3333-4333-8333-333333333333");
-    await expect(admission.reserve(next, base)).rejects.toThrow("image capacity reached");
+    await expect(admission.reserve(next, inventory)).rejects.toThrow("image capacity reached");
     await admission.release(first, { computeDeleted: true, snapshotDeleted: false });
-    await admission.reserve(next, base); await admission.release(next, { computeDeleted: true, snapshotDeleted: false });
-    await expect(admission.reserve(image("44444444-4444-4444-8444-444444444444"), base)).rejects.toThrow("image capacity reached");
+    await admission.reserve(next, inventory); await admission.release(next, { computeDeleted: true, snapshotDeleted: false });
+    await expect(admission.reserve(image("44444444-4444-4444-8444-444444444444"), inventory)).resolves.toBeDefined();
+    expect((await store.readAdmission()).state.reservations.filter(row => row.snapshotName && !row.snapshotReleasedAt)).toHaveLength(3);
     await admission.release(first, { computeDeleted: true, snapshotDeleted: true });
-    await expect(admission.reserve(image("44444444-4444-4444-8444-444444444444"), base)).resolves.toBeDefined();
+    expect((await store.readAdmission()).state.reservations.filter(row => row.snapshotName && !row.snapshotReleasedAt)).toHaveLength(2);
   });
   it("uses the authenticated existing encrypted ledger format instead of a separate per-channel counter", () => {
     const key = "e".repeat(64), state = { version: 1, owner: "account-admission", account, reservations: [] };

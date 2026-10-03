@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { main as imageKit, TEMPLATES, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
+import { main as imageKit, KitError, TEMPLATES, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
 import { imageContractSha256 } from "../cloud-workspace-validation/config";
 import { devBoatClient } from "../dev-environment/hosted-image.mjs";
 import { dispatchDevCreate, acknowledgeDevCreate, DevProviderError } from "../dev-environment/provider-http.mjs";
@@ -12,7 +12,7 @@ import { createMigrationPool } from "../../apps/control-plane/src/db";
 import { DIGEST, SHA, PromotionError, requireCheck, type PromotionConfig } from "./contracts";
 import { poll } from "./io";
 import type { WorkerCandidate, WorkerDependencies } from "./worker";
-import { WorkerBuilderCreationBodySchema, releaseBuilderCreationScope, retireReleaseBuilder } from "./worker-builder-retirement";
+import { WorkerBuilderCreationBodySchema, releaseBuilderCreationScope, retireReleaseBuilder, retireFailedReleaseBuilder } from "./worker-builder-retirement";
 
 /** Image-kit sequence also used by hosted-image.mjs, with committed source and
  * channel names, without creating Dev identities or changing build metadata. */
@@ -73,7 +73,8 @@ export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.Proc
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const request = context.request ?? devBoatClient({ apiKey: env.BOAT_API_KEY }, context.lease.signal);
   const { lease, record } = context;
-  const allowed = /^(?:builder(?:-intent)?\.json|[a-f0-9]{12}\/\w[\w-]*\.(?:json|sh))$/;
+  const attestationCommand = /^commands\/\d{1,16}-attest-status\.sh\.json$/;
+  const allowed = /^(?:builder(?:-intent)?\.json|[a-f0-9]{12}\/\w[\w-]*\.(?:json|sh)|commands\/\d{1,16}-attest-status\.sh\.json)$/;
   for (const [file, text] of Object.entries(record.kitFiles ?? {})) {
     requireCheck(allowed.test(file) && typeof text === "string" && text.length <= 512 * 1024, "Invalid worker recovery receipt");
     const target = path.join(directory, file); await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -85,8 +86,14 @@ export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.Proc
   }
   const persist = async () => {
     const files: Record<string, string> = {};
-    for (const file of fs.readdirSync(directory, { recursive: true })) {
+    const entries = fs.readdirSync(directory, { recursive: true });
+    // Keep one private status response, including the failure that precedes
+    // native-attestation.json. Polling must not grow the encrypted journal.
+    const latestAttestation = entries.filter((file): file is string => typeof file === "string" && attestationCommand.test(file))
+      .sort((left, right) => Number(right.slice(9).split("-")[0]) - Number(left.slice(9).split("-")[0]))[0];
+    for (const file of entries) {
       if (typeof file !== "string" || !allowed.test(file)) continue;
+      if (attestationCommand.test(file) && file !== latestAttestation) continue;
       // Check and read one descriptor, opened without following a symlink, so
       // the file cannot be swapped between the check and the read.
       let descriptor = -1;
@@ -95,7 +102,10 @@ export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.Proc
       try {
         const stat = fs.fstatSync(descriptor);
         requireCheck(stat.isFile() && stat.size <= 512 * 1024, "Invalid worker kit recovery file");
-        files[file] = fs.readFileSync(descriptor, "utf8");
+        const text = fs.readFileSync(descriptor, "utf8");
+        files[file] = attestationCommand.test(file) && Buffer.byteLength(text) > 64 * 1024
+          ? JSON.stringify({ truncated: true, bytes: Buffer.byteLength(text), sha256: createHash("sha256").update(text).digest("hex"),
+            head: text.slice(0, 8192), tail: text.slice(-8192) }) : text;
       } finally {
         fs.closeSync(descriptor);
       }
@@ -153,6 +163,10 @@ export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.Proc
       await (context.kit ?? imageKit)(["builder", "renew", "--max-used-hours", String(maxUsedHours)], deps);
     }
     try { return await (context.kit ?? imageKit)(args, deps); }
+    catch (error) {
+      if (args[0] === "attestation" && error instanceof KitError) throw new PromotionError("Worker image attestation failed; private command receipt retained");
+      throw error;
+    }
     finally { await persist(); }
   };
   const verify = async () => {
@@ -188,7 +202,15 @@ export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.Proc
           record.builder = { id: response.body.sandbox.id }; await lease.save();
         }, { key: "builderCreate", idempotentReplay: true });
       }
-      const result = record.builder ? await retireReleaseBuilder(config, { lease, record, profile: context.profile, request, readAdmission: context.readAdmission }) : null;
+      const retirement = { lease, record, profile: context.profile, request, readAdmission: context.readAdmission };
+      let result = null;
+      if (record.builder) {
+        const uncaptured = !record.candidate && !record.builderProvenance && !record.builder.cleanup && !record.snapshotRequested &&
+          record.snapshotCreate === undefined && record.builderCreate?.phase === "acknowledged" && record.builder.billingOrgConfirmed &&
+          record.builderIntent?.scope && record.kitFiles?.["builder.json"] && record.kitFiles?.[`${config.sourceSha.slice(0, 12)}/source.json`];
+        if (record.builder.failedBuildRetirement || uncaptured) await retireFailedReleaseBuilder(config, retirement);
+        else result = await retireReleaseBuilder(config, retirement);
+      }
       await context.release(); return result;
     },
   };

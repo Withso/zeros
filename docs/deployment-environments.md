@@ -1192,7 +1192,9 @@ Owner setup, once per channel before **enabling** the controller:
 
 `cloud-worker-promotion.yml` supports dispatch and `workflow_call`, shares the
 hosted mutation lock, and uses `ZEROS_WORKER_PROMOTION=enabled` as its separate
-switch. Plans remain mutation-free and never issue success receipts. Execution
+switch. With the switch off, hosted promotion and publication do not require a
+qualified worker even for a cloud-enabled desktop; the API keeps its current
+worker tuple and the hosted services gate is unchanged. Plans remain mutation-free and never issue success receipts. Execution
 requires a clean exact-event-SHA checkout, successful exact-SHA Preflight and
 CodeQL, the new exact-SHA API/current schema and trusted pre-worker services
 receipt (API, Pages and WorkOS). The supported broker uses only explicitly
@@ -1236,10 +1238,12 @@ adapter/containment/contract inputs or explicit request. Anthropic/OpenAI
 API-key modes stay unoffered on an image until separately qualified. Dev rate
 limits defer retry with bounded backoff without consuming the three attempts;
 release returns **“canary account rate-limited”** without automatic retry or
-approval. All lanes share the same ten-slot Boat account: Alpha/Beta/Production
-two slots each (current and rollback), Dev/custom combined two, retained base
-one, and one empty headroom slot. Custom builds cannot consume release reserves
-and fail with **“image capacity reached”** before paid dispatch.
+approval. Alpha, Beta, Production, Dev and custom images share Boat's current
+subscription quota. Zeros imposes no numerical snapshot limit, per-channel
+allocation or spare slot. Complete inventory and unreleased named reservations
+remain tracked, including the retained base. Boat capture responses enforce
+the plan's allowance; quota and rate-limit errors keep their safe classification
+without releasing uncertain reservations. Builder compute limits remain separate.
 
 See [release worker qualification](cloud-workspace/release-worker-qualification.md)
 for exact protected secret names/configuration, the encrypted rotation-safe

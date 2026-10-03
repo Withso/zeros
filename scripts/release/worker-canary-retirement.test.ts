@@ -10,9 +10,9 @@ import { workerConnections } from "./worker-test-fixtures";
 import { workerEnvironment } from "./worker-test-fixtures";
 import { workerExecutionConfig } from "./worker-config";
 import { releaseCanaryBroker } from "./worker-broker";
-import { reconcileReleaseCanaryRetirements } from "./worker-canary-recovery";
+import { reconcileReleaseCanaryRetirements, releaseCanaryCleanup, retireReleaseCanary } from "./worker-canary-recovery";
 import { nativeAgentCanary } from "../dev-environment/native-agent-canary.mjs";
-import { releaseHostedAdmission } from "../dev-environment/hosted-admission.mjs";
+import { releaseHostedAdmission, reserveHostedAdmission } from "../dev-environment/hosted-admission.mjs";
 import { runReleaseCanaryAdmission } from "../../apps/control-plane/src/cloud-workspaces/release-canaries";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -115,6 +115,167 @@ async function producedCandidate(test: ReturnType<typeof fixture>) {
     },
   });
 }
+
+function storagePending(test: ReturnType<typeof fixture>, stage = "waiting_for_uploads") {
+  const now = Date.now();
+  test.row.snapshotPolicyVersion = 1;
+  test.row.snapshotPolicyObserved = { version: 1, targetId: test.request.target.id, snapshots: false,
+    observedAt: new Date(now - 50_000).toISOString() };
+  test.operation = Object.assign(test.operation, { status: "blocked", stage, completedAt: null,
+    expectedBy: stage === "waiting_for_uploads" ? new Date(now + 3_600_000).toISOString() : null });
+  const { operation: _physicalOperation, ...binding } = test.row.builder.physicalCleanup;
+  delete test.row.builder.physicalCleanup;
+  test.row.builder.storageRetirement = { ...binding, kind: "storage-pending", snapshotsOff: test.row.snapshotPolicyObserved,
+    operation: { id: test.operation.id, kind: test.operation.kind, targetId: test.operation.targetId,
+      status: test.operation.status, stage: test.operation.stage, requestedAt: test.operation.requestedAt, expectedBy: test.operation.expectedBy } };
+  return test;
+}
+
+function storageRecovery(test: ReturnType<typeof fixture>) {
+  test.state.createdAt = new Date(Date.now() - 120_000).toISOString();
+  test.store.list = async () => ({ records: [], quarantine: [] });
+  test.store.readAdmission = async () => ({ state: structuredClone(test.ledger), etag: "retained-admission" });
+  test.store.writeAdmission = vi.fn(async (ledger: any) => { test.ledger.reservations = structuredClone(ledger.reservations); });
+  const saves: any[] = [], lease = { state: test.state, fence: vi.fn(async () => {}), signal: new AbortController().signal,
+    save: vi.fn(async () => { saves.push(structuredClone(test.state)); }) };
+  const providerRequest = vi.fn(async (method: string, route: string) => {
+    expect(method).toBe("GET");
+    if (route === `/deletion-operations/${deletionOperationId}`) return { status: 200, body: { operation: structuredClone(test.operation) } };
+    if (route === "/sandboxes/bx_canary") return { status: test.provider.sandboxStatus, body: null };
+    throw new Error("Unexpected synthetic retained cleanup request");
+  });
+  const native = nativeAgentCanary(lease, test.profile, providerRequest, { release: () => releaseHostedAdmission(test.store, lease, test.profile) },
+    { strictCleanup: true, releaseStorageDeferral: true, cleanupTimeoutMs: 0 });
+  const reconcile = vi.fn(async () => {
+    const reply = await test.service.retire(retirementInput(), `Bearer ${token}`);
+    return "storagePending" in reply ? "storage-pending" as const : "physically-deleted" as const;
+  });
+  return { lease, native, reconcile, saves, providerRequest };
+}
+
+describe("release-only native storage deferral", () => {
+  it.each(["operationId", "deletionOperationId"])("rejects a physical retirement marker with a different %s before issuing a cleanup receipt", field => {
+    const test = fixture(); test.row.builder.deleted = true; test.job.retired = true;
+    test.job.auditRetired = { version: 1, operationId, deletionOperationId,
+      [field]: field === "operationId" ? "88888888-8888-4888-8888-888888888888" : `bdop_${"e".repeat(32)}` };
+    expect(() => releaseCanaryCleanup({ state: test.state }, test.state.releaseRuns[0])).toThrow("physical cleanup journal");
+  });
+  it.each(["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"])("audits %s without claiming physical deletion", async stage => {
+    const test = storagePending(fixture(), stage);
+    expect(await test.service.retire(retirementInput(), `Bearer ${token}`)).toEqual({ retired: true, storagePending: true });
+    expect(test.audits).toHaveLength(2);
+    expect(test.audits[1]).toMatchObject({ action: "cloud.release_canary.storage_retired",
+      subject: { sourceSha: test.request.sourceSha, retirement: { version: 2, storage: { status: "pending" }, operation: { status: "blocked" } } } });
+    expect(test.row.builder.deleted).not.toBe(true); expect(test.row.builder.physicalCleanup).toBeUndefined();
+    expect(await test.service.retire(retirementInput(), `Bearer ${token}`)).toEqual({ retired: true, storagePending: true });
+    expect(test.audits).toHaveLength(2);
+    test.operation.status = "completed"; test.operation.stage = "completed";
+    test.operation.completedAt = new Date(Date.now() - 1000).toISOString();
+    const proof = test.row.builder.storageRetirement;
+    const { kind: _kind, snapshotsOff: _snapshots, ...physical } = proof;
+    test.row.builder.physicalCleanup = { ...physical, operation: { id: test.operation.id, kind: "sandbox", targetId: test.request.target.id,
+      status: "completed", requestedAt: test.operation.requestedAt, completedAt: test.operation.completedAt },
+      operationObservedAt: new Date().toISOString(), unavailableObservedAt: new Date().toISOString() };
+    test.row.builder.deleted = true;
+    expect(await test.service.retire(retirementInput(), `Bearer ${token}`)).toEqual({ retired: true });
+    expect(test.audits).toHaveLength(3); expect(test.audits[2].action).toBe("cloud.release_canary.retired");
+    expect(test.audits[1].subject.retirement.operation.status).toBe("blocked");
+  });
+  it("persists proof and authenticates the audit before releasing only the exact compute hold", async () => {
+    const test = storagePending(fixture()); delete test.row.builder.storageRetirement;
+    test.state.createdAt = new Date(Date.now() - 120_000).toISOString();
+    const namedHold = { kind: "builder", owner: test.state.owner, generation: test.state.generation,
+      computeId: `snapshot:${test.parent.snapshotId}`, snapshotName: test.parent.snapshotId, createdAt: new Date().toISOString(), releasedAt: new Date().toISOString() };
+    test.ledger.reservations.push(namedHold);
+    test.store.list = async () => ({ records: [], quarantine: [] });
+    test.store.writeAdmission = async (ledger: any) => { test.ledger.reservations = ledger.reservations; };
+    const saves: any[] = [], lease = { state: test.state, fence: vi.fn(async () => {}), signal: new AbortController().signal,
+      save: vi.fn(async () => { saves.push(structuredClone(test.state)); }) };
+    const providerRequest = vi.fn(async (method: string, route: string) => {
+      expect(method).toBe("GET");
+      if (route === `/deletion-operations/${deletionOperationId}`) return { status: 200, body: { operation: structuredClone(test.operation) } };
+      if (route === "/sandboxes/bx_canary") return { status: 404, body: null };
+      throw new Error("Unexpected synthetic storage-retirement request");
+    });
+    const native = nativeAgentCanary(lease, test.profile, providerRequest, { release: () => releaseHostedAdmission(test.store, lease, test.profile) },
+      { strictCleanup: true, releaseStorageDeferral: true, cleanupTimeoutMs: 0 });
+    const audit = vi.fn(async () => {
+      expect(test.ledger.reservations).toHaveLength(2);
+      expect(saves.at(-1).resources.images[1].builder.storageRetirement.operation.status).toBe("blocked");
+      expect(test.row.builder.retiredAt).toBeUndefined();
+      await test.service.retire(retirementInput(), `Bearer ${token}`); return "storage-pending" as const;
+    });
+    await retireReleaseCanary(lease, native, audit, test.job);
+    expect(test.job.auditRetired).toEqual({ version: 2, operationId, deletionOperationId, storagePending: true });
+    expect(test.job.retired).toBe(true); expect(test.row.builder.deleted).not.toBe(true);
+    expect(test.ledger.reservations).toEqual([namedHold]);
+    expect(saves.some(saved => saved.resources.images[1].builder.storageRetirement && !saved.releaseRuns[0].canaries[0].retired)).toBe(true);
+    await expect(reserveHostedAdmission(test.store, test.state, test.profile, { kind: "builder", computeId: "canary:88888888-8888-4888-8888-888888888888" })).resolves.toBeDefined();
+    expect(providerRequest.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("keeps an authenticated certificate observable through processing and final physical completion without a name or hold", async () => {
+    const test = storagePending(fixture()), recovery = storageRecovery(test); delete test.row.builder.storageRetirement;
+    await retireReleaseCanary(recovery.lease, recovery.native, recovery.reconcile, test.job);
+    const pendingAudit = structuredClone(test.audits[1]); expect(test.ledger.reservations).toHaveLength(0);
+    test.operation.status = "processing"; test.operation.stage = "removing"; test.operation.expectedBy = null;
+    const env = workerEnvironment(), config = workerExecutionConfig({ ...env, RELEASE_SHA: test.request.sourceSha }).config;
+    await expect(reconcileReleaseCanaryRetirements(config, owner, recovery.lease, recovery.native, recovery.reconcile)).resolves.toBe(1);
+    expect(test.job.auditRetired.version).toBe(2); expect(test.row.builder.deleted).not.toBe(true);
+    expect(test.row.builder.storageRetirement.operation.status).toBe("blocked"); expect(test.audits[1]).toEqual(pendingAudit);
+    test.operation.status = "completed"; test.operation.stage = "completed"; test.operation.completedAt = new Date().toISOString();
+    await expect(reconcileReleaseCanaryRetirements(config, owner, recovery.lease, recovery.native, recovery.reconcile)).resolves.toBe(1);
+    expect(test.job.auditRetired.version).toBe(1); expect(test.row.builder.physicalCleanup.operation.status).toBe("completed");
+    expect(test.audits.at(-1).action).toBe("cloud.release_canary.retired"); expect(test.audits[1]).toEqual(pendingAudit);
+    expect(recovery.providerRequest.mock.calls.every(([method, route]) => method === "GET" && !route.includes("named-snapshots"))).toBe(true);
+  });
+  it("refuses missing admission provenance before the first logical certificate is acknowledged", async () => {
+    const test = storagePending(fixture()); test.ledger.reservations = [];
+    await expect(test.service.retire(retirementInput(), `Bearer ${token}`)).rejects.toThrow("journal proof");
+    expect(test.audits).toHaveLength(1);
+  });
+  it.each(["certificate save", "audit acknowledgment", "local completion save", "admission CAS"])("recovers interruption at %s without native or DELETE replay", async boundary => {
+    const test = storagePending(fixture()), recovery = storageRecovery(test); delete test.row.builder.storageRetirement;
+    if (boundary === "certificate save") recovery.lease.save.mockRejectedValueOnce(new Error("synthetic-certificate-save-loss"));
+    if (boundary === "audit acknowledgment") recovery.reconcile.mockImplementationOnce(async () => {
+      await test.service.retire(retirementInput(), `Bearer ${token}`); throw new Error("synthetic-ack-loss");
+    });
+    if (boundary === "local completion save") {
+      let failed = false;
+      recovery.lease.save.mockImplementation(async () => {
+        if (!failed && test.job.auditRetired) { failed = true; throw new Error("synthetic-save-loss"); }
+        recovery.saves.push(structuredClone(test.state));
+      });
+    }
+    if (boundary === "admission CAS") test.store.writeAdmission.mockRejectedValueOnce(new Error("synthetic-cas-loss"));
+    await expect(retireReleaseCanary(recovery.lease, recovery.native, recovery.reconcile, test.job)).rejects.toThrow("synthetic");
+    if (boundary === "certificate save") {
+      expect(recovery.reconcile).not.toHaveBeenCalled(); expect(recovery.saves).toEqual([]); expect(test.audits).toHaveLength(1);
+      expect(test.job.auditRetired).toBeUndefined(); expect(test.row.builder.retiredAt).toBeUndefined();
+    }
+    expect(test.ledger.reservations).toHaveLength(1);
+    expect(test.row.builder.storageRetirement).toBeDefined(); expect(test.row.builder.deleted).not.toBe(true);
+    await retireReleaseCanary(recovery.lease, recovery.native, recovery.reconcile, test.job);
+    expect(test.ledger.reservations).toHaveLength(0); expect(test.audits).toHaveLength(2);
+    expect(test.job).toMatchObject({ retired: true, auditRetired: { version: 2, storagePending: true } });
+    expect(recovery.providerRequest.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it.each([
+    ["unmarked history", (test: any) => { delete test.row.snapshotPolicyVersion; }],
+    ["snapshot intent", (test: any) => { test.row.builderIntent.body.snapshots = true; }],
+    ["snapshot observation", (test: any) => { test.row.snapshotPolicyObserved.snapshots = true; }],
+    ["post-dispatch observation", (test: any) => { test.row.snapshotPolicyObserved.observedAt = new Date().toISOString(); }],
+    ["foreign operation", (test: any) => { test.operation.targetId = "bx_foreign"; }],
+    ["unknown stage", (test: any) => { test.operation.stage = "unknown"; }],
+    ["missing estimate", (test: any) => { test.operation.expectedBy = null; }],
+    ["available sandbox", (test: any) => { test.provider.sandboxStatus = 200; }],
+    ["future request", (test: any) => { test.operation.requestedAt = new Date(Date.now() + 60_000).toISOString(); }],
+    ["lost operation", (test: any) => { test.provider.operationStatus = 404; }],
+  ])("keeps %s fenced", async (_name, change) => {
+    const test = storagePending(fixture()); (change as (value: any) => void)(test);
+    await expect(test.service.retire(retirementInput(), `Bearer ${token}`)).rejects.toThrow();
+    expect(test.audits).toHaveLength(1); expect(test.ledger.reservations).toHaveLength(1);
+  });
+});
 
 describe("marked release canary policy admission", () => {
   it("requires the retained snapshots-off observation for marked intents before the server's fresh read", async () => {

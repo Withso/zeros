@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { ReleaseCanaryBindingsSchema, NativeCanaryPhysicalCleanupSchema } from "../../apps/control-plane/src/cloud-workspaces/release-canary-contract";
+import { ReleaseCanaryBindingsSchema, NativeCanaryPhysicalCleanupSchema, NativeCanaryStorageRetirementSchema } from "../../apps/control-plane/src/cloud-workspaces/release-canary-contract";
 import { requireCheck, type PromotionConfig } from "./contracts";
 import { workerOwner } from "./worker-admission";
 
 const terminal = z.object({ version: z.literal(1), operationId: z.string().uuid(), deletionOperationId: z.string().regex(/^bdop_[a-f0-9]{32}$/) }).strict();
-type Reconcile = (operationId: string, deletionOperationId: string, leaseToken: string, signal?: AbortSignal) => Promise<void>;
+const deferred = terminal.extend({ version: z.literal(2), storagePending: z.literal(true) }).strict();
+type Reconcile = (operationId: string, deletionOperationId: string, leaseToken: string, signal?: AbortSignal) => Promise<"physically-deleted" | "storage-pending" | void>;
 
 function hasPhysicalCleanup(row: any, job: any) {
   const proof = NativeCanaryPhysicalCleanupSchema.safeParse(row.builder?.physicalCleanup);
@@ -17,17 +18,48 @@ function hasPhysicalCleanup(row: any, job: any) {
     proof.data.creationIntentSha256 === createHash("sha256").update(JSON.stringify(row.builderIntent)).digest("hex");
 }
 
+export function releaseCanaryCleanup(lease: any, run: any) {
+  const pending = [];
+  for (const job of run.canaries) {
+    const rows = lease.state.resources.images.filter((row: any) => row.agentQualificationId === job.id);
+    requireCheck(rows.length === 1 && job.retired === true, "Release canary cleanup journal is unconfirmed");
+    const row = rows[0];
+    if (row.builder?.deleted === true) {
+      const marker = terminal.safeParse(job.auditRetired);
+      requireCheck(hasPhysicalCleanup(row, job) && marker.success && marker.data.operationId === job.id &&
+        marker.data.deletionOperationId === row.builder.deletionOperationId, "Release canary physical cleanup journal is unconfirmed");
+    } else {
+      const marker = deferred.safeParse(job.auditRetired), proof = NativeCanaryStorageRetirementSchema.safeParse(row.builder?.storageRetirement);
+      requireCheck(marker.success && proof.success && marker.data.operationId === job.id && marker.data.deletionOperationId === row.builder?.deletionOperationId &&
+        proof.data.operationId === job.id && proof.data.operation.id === marker.data.deletionOperationId && proof.data.targetId === row.builder.id &&
+        proof.data.sourceCommit === job.image.sourceCommit && proof.data.snapshotId === job.image.snapshotId && proof.data.buildSha256 === job.image.buildSha256 &&
+        proof.data.creationIntentSha256 === createHash("sha256").update(JSON.stringify(row.builderIntent)).digest("hex"), "Release canary storage retirement journal is unconfirmed");
+      pending.push(proof.data);
+    }
+  }
+  return pending.length ? { credentialCanaryResourcesDeleted: false as const,
+    pendingNativeStorage: { status: "pending" as const, count: pending.length,
+      proofSha256: createHash("sha256").update(JSON.stringify(pending)).digest("hex"), physicalBytes: "unmeasured" as const } }
+    : { credentialCanaryResourcesDeleted: true as const };
+}
+
 export async function retireReleaseCanary(lease: any, core: any, reconcile: Reconcile, job: any, signal?: AbortSignal) {
-  await lease.fence(); await core.retire(job);
+  const acknowledge = async (pending: boolean) => {
+    const row = lease.state.resources.images.find((value: any) => value.agentQualificationId === job.id);
+    const proof = pending ? NativeCanaryStorageRetirementSchema.safeParse(row.builder?.storageRetirement) : NativeCanaryPhysicalCleanupSchema.safeParse(row.builder?.physicalCleanup);
+    requireCheck(proof.success && (pending ? row.builder.deleted !== true : row.builder.deleted === true) && proof.data.operationId === job.id &&
+      proof.data.operation.id === row.builder.deletionOperationId, "Release canary terminal cleanup proof is unconfirmed");
+    await lease.save(); await lease.fence();
+    const result = await reconcile(job.id, row.builder.deletionOperationId, lease.state.lease.token, signal);
+    requireCheck(pending ? result === "storage-pending" : result !== "storage-pending", "Release canary cleanup acknowledgment does not match its proof");
+    job.auditRetired = pending ? { version: 2, operationId: job.id, deletionOperationId: row.builder.deletionOperationId, storagePending: true }
+      : { version: 1, operationId: job.id, deletionOperationId: row.builder.deletionOperationId };
+    job.retired = true; await lease.save();
+  };
+  let storageAcknowledged = false;
+  await lease.fence(); await core.retire(job, async () => { await acknowledge(true); storageAcknowledged = true; });
   const row = lease.state.resources.images.find((value: any) => value.agentQualificationId === job.id);
-  if (!row?.nativeDispatchStarted) return;
-  const proof = NativeCanaryPhysicalCleanupSchema.safeParse(row.builder?.physicalCleanup);
-  requireCheck(proof.success && row.builder.deleted === true && proof.data.operationId === job.id &&
-    proof.data.operation.id === row.builder.deletionOperationId, "Release canary terminal cleanup proof is unconfirmed");
-  await lease.save(); await lease.fence();
-  await reconcile(job.id, row.builder.deletionOperationId, lease.state.lease.token, signal);
-  job.auditRetired = { version: 1, operationId: job.id, deletionOperationId: row.builder.deletionOperationId };
-  job.retired = true; await lease.save();
+  if (row?.nativeDispatchStarted && !storageAcknowledged) await acknowledge(false);
 }
 
 export async function reconcileReleaseCanaryRetirements(config: PromotionConfig, actorUserId: string, lease: any,
@@ -56,14 +88,21 @@ export async function reconcileReleaseCanaryRetirements(config: PromotionConfig,
         [job.outcome, job.auditRetired, job.prelaunchFailure, job.admissionRequest].every(value => value === undefined)) continue;
       requireCheck(rows.length === 1, "Release canary historical allocation journal is missing or ambiguous");
       const row = rows[0];
-      if (job.auditRetired !== undefined) {
+      const pendingMarker = deferred.safeParse(job.auditRetired);
+      if (pendingMarker.success) {
+        const proof = NativeCanaryStorageRetirementSchema.safeParse(row.builder?.storageRetirement);
+        requireCheck(ownedJob && row.nativeDispatchStarted === true && proof.success && job.retired === true && pendingMarker.data.operationId === job.id &&
+          pendingMarker.data.deletionOperationId === row.builder?.deletionOperationId && proof.data.operationId === job.id &&
+          proof.data.operation.id === pendingMarker.data.deletionOperationId, "Release canary historical deferred journal is invalid");
+      }
+      if (job.auditRetired !== undefined && !pendingMarker.success) {
         const marker = terminal.safeParse(job.auditRetired), proof = NativeCanaryPhysicalCleanupSchema.safeParse(row.builder?.physicalCleanup);
         requireCheck(row.nativeDispatchStarted === true && marker.success && proof.success && marker.data.operationId === job.id && marker.data.deletionOperationId === row.builder?.deletionOperationId &&
           proof.data.operationId === job.id && proof.data.operation.id === marker.data.deletionOperationId && row.builder.deleted === true && job.retired === true,
           "Release canary historical terminal journal is invalid");
         continue;
       }
-      if (row.nativeDispatchStarted === true && job.retired && job.outcome) continue;
+      if (row.nativeDispatchStarted === true && job.retired && job.outcome && !pendingMarker.success && row.builder?.storageRetirement === undefined) continue;
       if (currentJob && !job.retired && !row.builder?.deleteRequested && row.builder?.deleted !== true &&
         !row.builder?.retiredAt && job.prelaunchFailure === undefined) continue;
       requireCheck(ownedJob && row.purpose === "native-agent-qualification" && row.sourceCommit === run.sourceSha && row.sourceImage === job.image.snapshotId,

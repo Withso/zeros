@@ -99,6 +99,7 @@ import {
   type DesignLayoutFieldOptions,
 } from "./design-layout-values";
 import { blockingDesignLintReason } from "./design-lint-summary";
+import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { DesignStyleEditor } from "./design-style-editor";
 import {
   clampDesignStyleFieldValue,
@@ -269,12 +270,16 @@ function InspectorEditField({
   const skipCommitRef = useRef(false);
   const unitMenuOpenRef = useRef(false);
   const commitIntentRef = useRef(0);
+  const scrubCancelRef = useRef<(() => void) | null>(null);
   const scrubRef = useRef<{
     pointerId: number;
+    originX: number;
     startX: number;
     startValue: string;
+    initialDraft: string;
     latestValue: string;
     distance: number;
+    moved: boolean;
   } | null>(null);
   const previewFrameRef = useRef<number | null>(null);
   const previewDirtyRef = useRef(false);
@@ -324,6 +329,7 @@ function InspectorEditField({
 
   useEffect(
     () => () => {
+      scrubCancelRef.current?.();
       if (previewFrameRef.current !== null) {
         window.cancelAnimationFrame(previewFrameRef.current);
       }
@@ -334,6 +340,10 @@ function InspectorEditField({
     },
     [],
   );
+
+  useEffect(() => {
+    if (disabled) scrubCancelRef.current?.();
+  }, [disabled]);
 
   const cancelPreview = () => {
     if (previewFrameRef.current !== null) {
@@ -460,55 +470,85 @@ function InspectorEditField({
           )}
           aria-label={`Scrub ${label}`}
           onPointerDown={(event) => {
-            const startValue = numericValue ?? baselineRef.current;
+            if (event.button !== 0 || !event.isPrimary) return;
+            scrubCancelRef.current?.();
+            const resolvedDraft = resolveDraft(
+              draftRef.current,
+              baselineRef.current,
+            );
+            const startValue = parseDesignStyleNumericParts(resolvedDraft)
+              ? resolvedDraft
+              : (numericValue ?? resolvedDraft);
             if (scrubDesignNumericValue(startValue, 0) === null) {
               onInspect?.();
               return;
             }
             event.preventDefault();
-            event.currentTarget.setPointerCapture(event.pointerId);
-            scrubRef.current = {
+            const scrub = {
               pointerId: event.pointerId,
+              originX: event.clientX,
               startX: event.clientX,
               startValue,
+              initialDraft: draftRef.current,
               latestValue: startValue,
               distance: 0,
+              moved: false,
             };
+            scrubRef.current = scrub;
+            const restore = () => {
+              scrubRef.current = null;
+              scrubCancelRef.current = null;
+              setPresentedDraft(scrub.initialDraft);
+              cancelPreview();
+            };
+            scrubCancelRef.current = beginDesignPointerGesture({
+              target: event.currentTarget,
+              pointerId: event.pointerId,
+              cursor: "ew-resize",
+              onMove: (pointerEvent) => {
+                if (
+                  !scrub.moved &&
+                  Math.abs(pointerEvent.clientX - scrub.originX) < 3
+                ) return;
+                scrub.moved = true;
+                const multiplier =
+                  !whole && pointerEvent.altKey
+                    ? 0.1
+                    : pointerEvent.shiftKey ? 10 : 1;
+                scrub.distance +=
+                  (pointerEvent.clientX - scrub.startX) * multiplier;
+                scrub.startX = pointerEvent.clientX;
+                const next = scrubDesignNumericValue(
+                  scrub.startValue,
+                  scrub.distance,
+                );
+                if (next === null) return;
+                const resolved = withinRange(
+                  whole ? roundDesignLayoutValue(next) : next,
+                );
+                if (resolved === scrub.latestValue) return;
+                scrub.latestValue = resolved;
+                setPresentedDraft(resolved);
+                preview(resolved);
+              },
+              onFinish: () => {
+                // Merely pressing a label must not turn Hug/Fill/auto into a
+                // fixed number. Returning to the start is also a no-op.
+                if (
+                  !scrub.moved ||
+                  scrub.distance === 0 ||
+                  scrub.latestValue === scrub.startValue
+                ) {
+                  restore();
+                  return;
+                }
+                scrubRef.current = null;
+                scrubCancelRef.current = null;
+                void commit(scrub.latestValue);
+              },
+              onCancel: restore,
+            });
             onInspect?.();
-          }}
-          onPointerMove={(event) => {
-            const scrub = scrubRef.current;
-            if (!scrub || scrub.pointerId !== event.pointerId) return;
-            const multiplier =
-              !whole && event.altKey ? 0.1 : event.shiftKey ? 10 : 1;
-            scrub.distance += (event.clientX - scrub.startX) * multiplier;
-            scrub.startX = event.clientX;
-            const next = scrubDesignNumericValue(
-              scrub.startValue,
-              scrub.distance,
-            );
-            if (next === null) return;
-            const resolved = withinRange(
-              whole ? roundDesignLayoutValue(next) : next,
-            );
-            if (resolved === scrub.latestValue) return;
-            scrub.latestValue = resolved;
-            setPresentedDraft(resolved);
-            preview(resolved);
-          }}
-          onPointerUp={(event) => {
-            const scrub = scrubRef.current;
-            if (!scrub || scrub.pointerId !== event.pointerId) return;
-            scrubRef.current = null;
-            event.currentTarget.releasePointerCapture(event.pointerId);
-            void commit(scrub.latestValue);
-          }}
-          onPointerCancel={(event) => {
-            const scrub = scrubRef.current;
-            if (!scrub || scrub.pointerId !== event.pointerId) return;
-            scrubRef.current = null;
-            setPresentedDraft(baselineRef.current);
-            cancelPreview();
           }}
         >
           <Label htmlFor={id} className="pointer-events-none text-inherit">
@@ -1242,7 +1282,13 @@ export function DesignInspector({
     [elementDetails, layoutRuntimeState, styleNodeIds],
   );
   const layoutRootId = layoutRuntimeState?.snapshot?.frame.oid;
+  const styleDirectoryKey = workspaceId
+    ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ??
+      designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""
+    : "";
   const styleEditContextRef = useRef({
+    active,
+    directoryKey: styleDirectoryKey,
     workspaceId,
     folder,
     frame,
@@ -1251,8 +1297,9 @@ export function DesignInspector({
     elementDetails,
     layoutRootId,
   });
-  const stylePreviewIntentRef = useRef(0);
   styleEditContextRef.current = {
+    active,
+    directoryKey: styleDirectoryKey,
     workspaceId,
     folder,
     frame,
@@ -1261,9 +1308,28 @@ export function DesignInspector({
     elementDetails,
     layoutRootId,
   };
+  const styleOwnerKey = `${workspaceId ?? ""}\u0000${styleDirectoryKey}\u0000${frame?.file ?? ""}\u0000${styleNodeIds.join("\u0000")}`;
+  // A keyed editor's cleanup runs after the new selection has rendered. Keep
+  // its callbacks and cancellation baseline attached to its own owner; using
+  // the live selection here would restore the incoming layer instead.
+  const styleOwner = useMemo(
+    () => ({
+      key: styleOwnerKey,
+      contextRef: { current: styleEditContextRef.current },
+      previewIntentRef: { current: 0 },
+    }),
+    [styleOwnerKey],
+  );
+  styleOwner.contextRef.current = styleEditContextRef.current;
+  const currentStyleOwnerRef = useRef(styleOwner);
+  currentStyleOwnerRef.current = styleOwner;
+  const stylePreviewIntentRef = styleOwner.previewIntentRef;
   const stylesForNode = useCallback(
-    (nodeId: string, styles: Record<string, string | null>) => {
-      const context = styleEditContextRef.current;
+    (
+      nodeId: string,
+      styles: Record<string, string | null>,
+      context = styleEditContextRef.current,
+    ) => {
       const runtimeDetails =
         context.workspaceId && context.frame
           ? useDesignRuntimeStore.getState().byWorkspace[context.workspaceId]
@@ -1283,7 +1349,8 @@ export function DesignInspector({
 
   const previewSelectedStyles = useCallback(
     async (styles: Record<string, string | null>) => {
-      const context = styleEditContextRef.current;
+      const context = styleOwner.contextRef.current;
+      if (currentStyleOwnerRef.current !== styleOwner || !context.active) return;
       if (
         !context.workspaceId ||
         !context.folder ||
@@ -1298,7 +1365,7 @@ export function DesignInspector({
           context.workspaceId,
           context.frame.file,
           nodeId,
-          stylesForNode(nodeId, styles),
+          stylesForNode(nodeId, styles, context),
         );
       // A slider, a colour drag or a label scrub can ask for this many times a
       // second, so it asks for the same lean geometry a canvas gesture does —
@@ -1320,12 +1387,16 @@ export function DesignInspector({
             workspaceId: context.workspaceId!,
             frame: context.frame!,
             nodeId,
-            styles: stylesForNode(nodeId, styles),
+            styles: stylesForNode(nodeId, styles, context),
             children: wantsChildren && nodeId === context.selectedNodeId,
           }),
         ),
       );
-      if (stylePreviewIntentRef.current !== intent) return;
+      if (
+        stylePreviewIntentRef.current !== intent ||
+        currentStyleOwnerRef.current !== styleOwner ||
+        !styleOwner.contextRef.current.active
+      ) return;
       for (const geometry of previewGeometries) {
         const spacingRoot = paintDesignInspectorPreviewDetails(
           context.workspaceId,
@@ -1342,12 +1413,15 @@ export function DesignInspector({
         }
       }
     },
-    [stylesForNode],
+    [styleOwner, stylePreviewIntentRef, stylesForNode],
   );
 
   const restoreSelectedStylePreview = useCallback(async () => {
-    const context = styleEditContextRef.current;
+    const context = styleOwner.contextRef.current;
     if (!context.workspaceId || !context.folder || !context.frame) return;
+    const snapshot = designWorkspaceSnapshotCache.peekSnapshot(context.workspaceId).data;
+    if ((snapshot?.directoryId ?? snapshot?.directory ?? "") !== context.directoryKey)
+      return;
     const intent = ++stylePreviewIntentRef.current;
     const restoredDetails = await Promise.all(
       context.styleNodeIds.map((nodeId) => {
@@ -1360,7 +1434,11 @@ export function DesignInspector({
         return clearDesignNodeStylePreviewTransient(input);
       }),
     );
-    if (stylePreviewIntentRef.current !== intent) return;
+    if (
+      stylePreviewIntentRef.current !== intent ||
+      currentStyleOwnerRef.current !== styleOwner ||
+      !styleOwner.contextRef.current.active
+    ) return;
     for (const details of restoredDetails) {
       paintDesignInspectorPreviewDetails(
         context.workspaceId,
@@ -1380,7 +1458,11 @@ export function DesignInspector({
       nodeId: primary.oid,
       children: true,
     });
-    if (stylePreviewIntentRef.current !== intent) return;
+    if (
+      stylePreviewIntentRef.current !== intent ||
+      currentStyleOwnerRef.current !== styleOwner ||
+      !styleOwner.contextRef.current.active
+    ) return;
     const spacingRoot = paintDesignInspectorPreviewDetails(
       context.workspaceId,
       context.frame.file,
@@ -1394,7 +1476,7 @@ export function DesignInspector({
         designWorkspaceView(context.workspaceId).zoom,
       );
     }
-  }, []);
+  }, [styleOwner, stylePreviewIntentRef]);
 
   /** Cancelling a speculative preview cannot fail in a way the user can act on:
    * the source was never written. A commit landing mid-cancel makes the runtime
@@ -1410,6 +1492,10 @@ export function DesignInspector({
   const commitSelectedStyles = useCallback(
     (styles: Record<string, string | null>): Promise<void> => {
       const context = styleEditContextRef.current;
+      // Retire stale callbacks during render, before passive unmount cleanup.
+      // An eyedropper or a pending animation frame cannot follow a new layer.
+      if (currentStyleOwnerRef.current !== styleOwner || !context.active)
+        return Promise.resolve();
       if (
         !context.workspaceId ||
         !context.frame ||
@@ -1500,13 +1586,15 @@ export function DesignInspector({
       );
       return task.then((prepared) => prepared.persist);
     },
-    [stylesForNode],
+    [styleOwner, stylesForNode],
   );
 
   const previewLayoutAction = useCallback(
     async (action: DesignLayoutAction) => {
-      const context = styleEditContextRef.current;
+      const context = styleOwner.contextRef.current;
+      if (currentStyleOwnerRef.current !== styleOwner || !context.active) return;
       if (!context.workspaceId || !context.frame) return;
+      const intent = ++stylePreviewIntentRef.current;
       const runtimeState =
         useDesignRuntimeStore.getState().byWorkspace[context.workspaceId]
           ?.frames[context.frame.file];
@@ -1523,6 +1611,11 @@ export function DesignInspector({
             styles: designLayoutActionStyles(details, action),
             children: true,
           });
+          if (
+            stylePreviewIntentRef.current !== intent ||
+            currentStyleOwnerRef.current !== styleOwner ||
+            !styleOwner.contextRef.current.active
+          ) return;
           const spacingRoot = paintDesignInspectorPreviewDetails(
             context.workspaceId!,
             context.frame!.file,
@@ -1538,11 +1631,13 @@ export function DesignInspector({
         }),
       );
     },
-    [],
+    [styleOwner, stylePreviewIntentRef],
   );
 
   const commitLayoutAction = useCallback(
     (action: DesignLayoutAction): Promise<void> => {
+      if (currentStyleOwnerRef.current !== styleOwner || !styleEditContextRef.current.active)
+        return Promise.resolve();
       const intent = ++stylePreviewIntentRef.current;
       // Capture the semantic owner at intent. Queued clicks must never follow a
       // later selection, and every relative rotation reads its own latest value.
@@ -1846,7 +1941,7 @@ export function DesignInspector({
       );
       return task.then((prepared) => prepared?.persist);
     },
-    [],
+    [styleOwner, stylePreviewIntentRef],
   );
 
   const styleContext =
@@ -1891,7 +1986,7 @@ export function DesignInspector({
               : DESIGN_FRAME_POSITION_RANGE
           }
           compact={options?.compact}
-          disabled={pendingHistoryActions > 0}
+          disabled={!active || pendingHistoryActions > 0}
           applied
           onPreview={(next) => {
             const number = Number(next);
@@ -2004,7 +2099,7 @@ export function DesignInspector({
         details={elementDetails ?? undefined}
         onLayoutAction={commitLayoutAction}
         onPreviewLayoutAction={previewLayoutAction}
-        disabled={pendingHistoryActions > 0}
+        disabled={!active || pendingHistoryActions > 0}
         applied={applied}
         hint={
           provenance?.ownerKey === provenanceOwnerKey &&
@@ -2180,9 +2275,9 @@ export function DesignInspector({
         >
           {inspectorSelectionHeader}
           <DesignComputedCssEditor
-            key={`${frame!.file}:${styleNodeIds.join(":")}:css`}
+            key={`${styleOwner.key}:css`}
             details={elementDetails}
-            disabled={pendingHistoryActions > 0}
+            disabled={!active || pendingHistoryActions > 0}
             onPreviewStyles={previewSelectedStyles}
             onCancelStylePreview={clearSelectedStylePreview}
             onCommitStyles={commitSelectedStyles}
@@ -2206,7 +2301,7 @@ export function DesignInspector({
 
             {styleContext && elementDetails ? (
               <DesignStyleEditor
-                key={`${styleContext.workspaceId}:${frame!.file}:${styleNodeIds.join(":")}`}
+                key={styleOwner.key}
                 details={elementDetails}
                 livePreviewOwner={
                   styleContext
@@ -2223,7 +2318,7 @@ export function DesignInspector({
                   frameStyleTarget || elementDetails.oid === layoutRootId
                 }
                 layoutParents={layoutParents}
-                disabled={pendingHistoryActions > 0}
+                disabled={!active || pendingHistoryActions > 0}
                 onPreviewStyles={previewSelectedStyles}
                 onCancelStylePreview={clearSelectedStylePreview}
                 onCommitStyles={commitSelectedStyles}

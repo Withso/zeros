@@ -33,6 +33,7 @@ export interface StaffRoleRequestInput {
   actorUserId: string | undefined;
   nextRole: string | undefined;
   reason: string | undefined;
+  ownerOrganizationId?: string | undefined;
 }
 
 export interface ValidatedStaffRoleRequest {
@@ -46,6 +47,7 @@ export interface ValidatedStaffRoleRequest {
   nextRole: StaffRole | null;
   reason: string;
   targetFingerprint: string;
+  ownerOrganizationId?: string;
 }
 
 export interface StaffRoleChangeResult {
@@ -163,6 +165,10 @@ export function validateStaffRoleRequest(
       "CONTROL_PLANE_STAFF_REASON must contain 16 to 512 characters",
     );
   }
+  const ownerOrganizationId = input.ownerOrganizationId === undefined ? undefined : UserIdSchema.safeParse(input.ownerOrganizationId);
+  if (ownerOrganizationId && !ownerOrganizationId.success) {
+    throw new StaffManagementError("Staff owner Organization must be one exact UUID");
+  }
 
   return {
     databaseUrl: input.databaseUrl,
@@ -175,6 +181,7 @@ export function validateStaffRoleRequest(
     nextRole: nextRole.data === "none" ? null : nextRole.data,
     reason: reason.data,
     targetFingerprint: targetFingerprint(input.databaseUrl, channel),
+    ...(ownerOrganizationId?.success ? {ownerOrganizationId: ownerOrganizationId.data} : {}),
   };
 }
 
@@ -191,6 +198,7 @@ export function staffRoleApprovalText(
     roleLabel(previousRole),
     roleLabel(request.nextRole),
     reasonFingerprint(request.reason),
+    ...(request.ownerOrganizationId ? [request.ownerOrganizationId] : []),
   ].join(":");
 }
 
@@ -243,6 +251,33 @@ export async function manageStaffRole(
       throw new StaffManagementError(
         "Staff changes require the database/migration owner; the application role is refused",
       );
+    }
+
+    if (request.ownerOrganizationId) {
+      const organizations = await client.query<{
+        is_personal: boolean;
+        lifecycle_status: string;
+        deleted_at: Date | null;
+        role: string;
+      }>(
+        `SELECT organization.is_personal, organization.lifecycle_status,
+                organization.deleted_at, membership.role::text
+         FROM organizations organization
+         JOIN organization_members membership ON membership.org_id = organization.id
+           AND membership.user_id = $2
+         JOIN users subject_user ON subject_user.id = membership.user_id
+           AND subject_user.auth_status = 'active' AND subject_user.deleted_at IS NULL
+         JOIN users actor_user ON actor_user.id = $3
+           AND actor_user.auth_status = 'active' AND actor_user.deleted_at IS NULL
+         WHERE organization.id = $1
+         FOR UPDATE OF organization, membership, subject_user, actor_user`,
+        [request.ownerOrganizationId, request.subjectUserId, request.actorUserId],
+      );
+      const organization = organizations.rows[0];
+      if (!organization || organization.is_personal || organization.lifecycle_status !== "active" ||
+        organization.deleted_at !== null || organization.role !== "owner") {
+        throw new StaffManagementError("Staff owner Organization must be active, nonpersonal and owned by the exact active subject");
+      }
     }
 
     const users = await client.query<{

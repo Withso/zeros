@@ -28,8 +28,13 @@ import {
 import { Button, Checkbox, Tooltip } from "@/renderer/shared/ui/primitives";
 import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-type-icon";
 import { useCodeTheme } from "@/renderer/shared/theme/use-code-theme";
+import { finishDiffRender } from "@/renderer/shared/theme/diff-theme";
 import { savedScrollOffset, useScrollMemory } from "../../scroll-memory";
-import type { WorkspaceFileDiffQuery } from "../../workspace-file-data-cache";
+import {
+  loadWorkspaceFileRead,
+  useWorkspaceFileReadSnapshot,
+  type WorkspaceFileDiffQuery,
+} from "../../workspace-file-data-cache";
 import type { ChangedFile } from "./changes-parse";
 import { setDiffStyle, useDiffStyle } from "./diff-style-store";
 import {
@@ -50,6 +55,28 @@ import {
 import { diffViewVersion } from "./diff-view-version";
 import { cn } from "@/renderer/shared/ui/cn";
 import { changesDiffOptions } from "./changes-diff-options";
+import { useCodeReview } from "@/renderer/features/code-review/use-code-review";
+import { useInlineReview } from "@/renderer/features/code-review/use-inline-review";
+import {
+  reviewAnnotationVersion,
+  reviewUnplacedThreads,
+  type ReviewAnnotationPayload,
+} from "@/renderer/features/code-review/review-annotations";
+import { retainReviewCodeViewItem } from "@/renderer/features/code-review/review-code-view-items";
+import { ReviewUnplacedThreads } from "@/renderer/features/code-review/review-annotation-view";
+import { ReviewFeedback } from "@/renderer/features/code-review/review-feedback";
+import {
+  labelReviewGutter,
+  REVIEW_GUTTER_CSS,
+} from "@/renderer/features/code-review/review-pierre-options";
+import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
+import {
+  liveReviewHunkSource,
+  reviewComparisonForScope,
+  type ReviewLiveHunkSource,
+} from "@/renderer/features/code-review/review-hunk-model";
+import { reviewContentRevision } from "@/renderer/features/code-review/review-anchors";
+import { useOpenFileInWorkbench } from "../use-open-file";
 
 interface Props {
   active: boolean;
@@ -64,6 +91,10 @@ interface Props {
   onPresentationChange: (mode: "all" | "single") => void;
   queryForFile: (file: ChangedFile) => WorkspaceFileDiffQuery;
   toolbarContainer: HTMLElement | null;
+  reviewExternal?: CodeReviewExternalSource;
+  /** Only a caller displaying a confirmed published PR-head diff supplies this. */
+  reviewPrRevision?: string;
+  readOnly?: boolean;
 }
 
 const initialData = new WeakMap<ChangedFile, ChangesDiffData>();
@@ -74,6 +105,23 @@ function initial(file: ChangedFile) {
     initialData.set(file, data);
   }
   return data;
+}
+
+function liveHunkSignature(
+  cwd: string,
+  query: WorkspaceFileDiffQuery,
+  file: ChangedFile,
+  refreshKey: number,
+): string {
+  return JSON.stringify([
+    cwd,
+    query.workspaceId,
+    query.diffScope,
+    file.path,
+    file.hash ?? hashString(file.patch),
+    file.status,
+    refreshKey,
+  ]);
 }
 
 /** One Pierre virtualizer owns all visible files and lines. Switching to one
@@ -91,9 +139,63 @@ export function ChangesDiffViewer({
   onPresentationChange,
   queryForFile,
   toolbarContainer,
+  reviewExternal,
+  reviewPrRevision,
+  readOnly = false,
 }: Props) {
-  const view = useRef<CodeViewHandle<undefined, undefined>>(null);
+  const view = useRef<CodeViewHandle<ReviewAnnotationPayload, undefined>>(null);
+  const shown = useMemo(
+    () =>
+      presentation === "single"
+        ? files.filter((file) => file.path === selected)
+        : files,
+    [files, presentation, selected],
+  );
+  const shownPaths = useMemo(() => shown.map((file) => file.path), [shown]);
+  const review = useCodeReview({
+    cwd,
+    workspaceId,
+    active,
+    refreshKey,
+    external: reviewExternal,
+  });
+  const inlineReview = useInlineReview(review, active, shownPaths);
+  const { annotationsForDiff, snapshotFor } = inlineReview;
+  const retainedReviewItems = useMemo(
+    () => new Map<string, CodeViewItem<ReviewAnnotationPayload>>(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Pierre's prepared items must not cross a retained comparison owner
+    [ownerKey],
+  );
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
+  const [hunkSources, setHunkSources] = useState(
+    new Map<
+      string,
+      { signature: string; source: ReviewLiveHunkSource | undefined }
+    >(),
+  );
+  const publishHunkSource = useCallback(
+    (
+      file: ChangedFile,
+      signature: string,
+      source: ReviewLiveHunkSource | undefined,
+    ) => {
+      setHunkSources((old) => {
+        const existing = old.get(file.path);
+        if (
+          existing?.signature === signature &&
+          existing.source?.contentRevision === source?.contentRevision &&
+          existing.source?.patch === source?.patch
+        )
+          return old;
+        const next = new Map(old);
+        next.delete(file.path);
+        next.set(file.path, { signature, source });
+        while (next.size > 96) next.delete(next.keys().next().value!);
+        return next;
+      });
+    },
+    [],
+  );
   const [folds, setFolds] = useState({
     all: false,
     exceptions: new Set<string>(),
@@ -177,14 +279,7 @@ export function ChangesDiffViewer({
     },
     [],
   );
-  const shown = useMemo(
-    () =>
-      presentation === "single"
-        ? files.filter((file) => file.path === selected)
-        : files,
-    [files, presentation, selected],
-  );
-  const items = useMemo<CodeViewItem<undefined>[]>(
+  const items = useMemo<CodeViewItem<ReviewAnnotationPayload>[]>(
     () =>
       shown.map((file) => {
         const entry = data.get(file.path);
@@ -202,27 +297,82 @@ export function ChangesDiffViewer({
         const value = cached ?? current?.value;
         const fileDiff = value?.fileDiff ?? seed.fileDiff;
         const message = value?.message ?? seed.message;
+        const revision = reviewContentRevision(
+          file.patch ||
+            value?.patch ||
+            JSON.stringify([fileDiff?.additionLines, fileDiff?.deletionLines]),
+        );
+        const live = hunkSources.get(file.path);
+        const hunkSource =
+          live?.signature ===
+          liveHunkSignature(cwd, queryForFile(file), file, refreshKey)
+            ? live.source
+            : undefined;
+        const annotations = fileDiff
+          ? annotationsForDiff(
+              file.path,
+              {
+                kind: "diff",
+                path: file.path,
+                revision,
+                fileDiff,
+                confirmedRevision: reviewPrRevision,
+              },
+              hunkSource,
+            )
+          : undefined;
         const common = {
           id: file.path,
           collapsed: collapsed(file.path),
           version: diffViewVersion(
-            `${file.hash ?? hashString(file.patch)}:${cached ? key : (current?.key ?? "partial")}:${collapsed(file.path)}`,
+            `${revision}:${active}:${collapsed(file.path)}:${annotations ? reviewAnnotationVersion(annotations) : ""}`,
           ),
         };
         // Pierre asserts a collapsed re-render commits the exact object it
         // prepared layout for, so placeholder cards must keep one identity.
-        return fileDiff
-          ? { ...common, type: "diff", fileDiff }
-          : {
-              ...common,
-              type: "file",
-              file: placeholderFileContents(
-                file.path,
-                message ?? "No textual changes",
-              ),
-            };
+        return retainReviewCodeViewItem(
+          retainedReviewItems,
+          fileDiff
+            ? { ...common, type: "diff", fileDiff, annotations }
+            : {
+                ...common,
+                type: "file",
+                file: placeholderFileContents(
+                  file.path,
+                  message ?? "No textual changes",
+                ),
+              },
+        );
       }),
-    [shown, data, collapsed, queryForFile, refreshKey],
+    [
+      shown,
+      data,
+      collapsed,
+      queryForFile,
+      refreshKey,
+      annotationsForDiff,
+      reviewPrRevision,
+      retainedReviewItems,
+      hunkSources,
+      cwd,
+      active,
+    ],
+  );
+  useEffect(() => {
+    const paths = new Set(shown.map((file) => file.path));
+    for (const path of retainedReviewItems.keys())
+      if (!paths.has(path)) retainedReviewItems.delete(path);
+  }, [shown, retainedReviewItems]);
+  const unplacedThreads = useMemo(
+    () =>
+      items.flatMap((item) =>
+        item.type === "diff"
+          ? reviewUnplacedThreads(snapshotFor(item.id)!, review.threads)
+          : review.threads
+              .filter((thread) => thread.anchor.path === item.id)
+              .map((thread) => ({ thread, state: "unavailable" as const })),
+      ),
+    [items, review.threads, snapshotFor],
   );
   const loadDiffFiles = useCallback(
     async (fileDiff: FileDiffMetadata) => {
@@ -246,15 +396,24 @@ export function ChangesDiffViewer({
     },
     [byPath, queryForFile, refreshKey, cwd, publish],
   );
-  const options = useMemo(
-    () => ({
-      ...changesDiffOptions({ diffStyle, codeThemeId: theme }),
+  const options = useMemo(() => {
+    const shared = changesDiffOptions<ReviewAnnotationPayload>({
+      diffStyle,
+      codeThemeId: theme,
+    });
+    return {
+      ...shared,
+      ...inlineReview.options,
+      unsafeCSS: `${shared.unsafeCSS ?? ""}\n${REVIEW_GUTTER_CSS}`,
+      onPostRender: (node: HTMLElement) => {
+        finishDiffRender(node);
+        labelReviewGutter(node);
+      },
       stickyHeaders: true,
       hunkSeparators: "line-info" as const,
       loadDiffFiles,
-    }),
-    [diffStyle, theme, loadDiffFiles],
-  );
+    };
+  }, [diffStyle, theme, loadDiffFiles, inlineReview.options]);
   useLayoutEffect(() => {
     if (!active || !selected || !scroller || !byPath.has(selected)) return;
     const previous = lastNavigation.current;
@@ -280,7 +439,7 @@ export function ChangesDiffViewer({
   const allCollapsed =
     files.length > 0 && files.every((file) => collapsed(file.path));
   const renderHeader = useCallback(
-    (item: CodeViewItem<undefined>) => {
+    (item: CodeViewItem<ReviewAnnotationPayload>) => {
       void viewedVersion;
       const file = byPath.get(item.id);
       if (!file) return null;
@@ -299,6 +458,9 @@ export function ChangesDiffViewer({
           hydrateOnMount={initial(file).message === "Loading diff…"}
           notice={entry?.value.notice}
           viewed={isFileViewed(workspaceId, file.path)}
+          patch={file.patch || entry?.value.patch || ""}
+          readOnly={readOnly || !!reviewPrRevision}
+          onHunkSource={publishHunkSource}
         />
       );
       // Viewed is external state. Reconcile the existing header portals on updates.
@@ -315,6 +477,9 @@ export function ChangesDiffViewer({
       toggle,
       publish,
       viewedVersion,
+      readOnly,
+      reviewPrRevision,
+      publishHunkSource,
     ],
   );
 
@@ -339,7 +504,7 @@ export function ChangesDiffViewer({
                     aria-pressed={diffStyle === style}
                     className={cn(
                       // 24px segment inside the 2px-inset track above.
-                      "size-6 text-fg2",
+                      "text-fg2 size-6",
                       diffStyle === style && "bg-bg1 text-fg1",
                     )}
                     onClick={() => setDiffStyle(style)}
@@ -406,14 +571,47 @@ export function ChangesDiffViewer({
           </div>,
           toolbarContainer,
         )}
-      <CodeView
-        ref={view}
-        containerRef={setScroller}
-        items={items}
-        options={options}
-        renderCustomHeader={renderHeader}
-        className="absolute inset-0 min-h-0 overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      />
+      <div
+        className="absolute inset-0 min-h-0 focus-visible:outline-none"
+        tabIndex={active ? 0 : -1}
+        aria-label="Changes diff. Press Command or Control Shift M to comment on lines."
+        onKeyDown={(event) =>
+          inlineReview.onKeyDown(
+            event,
+            selected ?? shown[0]?.path,
+            (selection) => view.current?.setSelectedLines(selection),
+          )
+        }
+      >
+        <CodeView
+          ref={view}
+          containerRef={setScroller}
+          items={items}
+          options={options}
+          renderCustomHeader={renderHeader}
+          renderAnnotation={inlineReview.renderAnnotation}
+          renderCodeViewFooter={() => (
+            <>
+              {inlineReview.issue && (
+                <p
+                  role="status"
+                  className="text-fg3 px-3 py-2 font-sans text-xs"
+                >
+                  {inlineReview.issue}
+                </p>
+              )}
+              <ReviewUnplacedThreads
+                entries={unplacedThreads}
+                review={review}
+                active={active}
+                showPath
+              />
+              <ReviewFeedback review={review} />
+            </>
+          )}
+          className="absolute inset-0 min-h-0 overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        />
+      </div>
     </>
   );
 }
@@ -431,6 +629,9 @@ function ChangesDiffHeader({
   hydrateOnMount,
   notice,
   viewed,
+  patch,
+  readOnly,
+  onHunkSource,
 }: {
   file: ChangedFile;
   query: WorkspaceFileDiffQuery;
@@ -444,10 +645,59 @@ function ChangesDiffHeader({
   hydrateOnMount: boolean;
   notice?: string;
   viewed: boolean;
+  patch: string;
+  readOnly: boolean;
+  onHunkSource: (
+    file: ChangedFile,
+    signature: string,
+    source: ReviewLiveHunkSource | undefined,
+  ) => void;
 }) {
   const key = changesDiffDataKey(query, file, refreshKey);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const openFile = useOpenFileInWorkbench();
+  const readQuery = useMemo(() => ({ cwd, path: file.path }), [cwd, file.path]);
+  const readSnapshot = useWorkspaceFileReadSnapshot(readQuery);
+  const supportsHunks =
+    !readOnly &&
+    !file.binary &&
+    file.status !== "conflicted" &&
+    !!reviewComparisonForScope(query.diffScope);
+  useEffect(() => {
+    if (active && !collapsed && supportsHunks)
+      void loadWorkspaceFileRead(readQuery, { maxAgeMs: 15_000 }).catch(
+        () => {},
+      );
+  }, [active, collapsed, supportsHunks, readQuery, refreshKey]);
+  const hunkSource = useMemo(
+    () =>
+      supportsHunks
+        ? liveReviewHunkSource({
+            cwd,
+            path: file.path,
+            patch,
+            scope: query.diffScope,
+            read: readSnapshot.data,
+            deleted: file.status === "deleted",
+            untracked: file.status === "untracked" || file.isNewFile,
+          })
+        : undefined,
+    [
+      supportsHunks,
+      cwd,
+      file.path,
+      file.status,
+      file.isNewFile,
+      patch,
+      query.diffScope,
+      readSnapshot.data,
+    ],
+  );
+  const hunkSignature = liveHunkSignature(cwd, query, file, refreshKey);
+  useEffect(() => {
+    onHunkSource(file, hunkSignature, hunkSource);
+  }, [onHunkSource, file, hunkSignature, hunkSource]);
   const latest = useRef({ file, query, cwd, onData });
   latest.current = { file, query, cwd, onData };
   const load = useCallback(async () => {
@@ -525,6 +775,15 @@ function ChangesDiffHeader({
             className="text-yellow-primary size-3.5 shrink-0"
           />
         </Tooltip>
+      )}
+      {file.status === "conflicted" && (
+        <Button
+          variant="ghost"
+          disabled={!active}
+          onClick={() => openFile(file.path, { viewerMode: "edit" })}
+        >
+          Resolve conflicts
+        </Button>
       )}
       <Tooltip label="Copy file contents">
         <Button

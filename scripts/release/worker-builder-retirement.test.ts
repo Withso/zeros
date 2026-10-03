@@ -14,11 +14,118 @@ import { workerExecutionConfig } from "./worker-config";
 import { workerEnvironment, workerConnections } from "./worker-test-fixtures";
 import { promoteWorker, validateWorkerReceipt, WorkerReceipt } from "./worker";
 import { releaseCanaryAdapter } from "./worker-canary";
-import { reconcileReleaseBuilderRetentions, WorkerBuilderCleanupSchema } from "./worker-builder-retirement";
+import { reconcileFailedReleaseBuilderHolds, reconcileReleaseBuilderRetentions, releaseBuilderCreationScope, retireReleaseBuilder, WorkerBuilderCleanupSchema } from "./worker-builder-retirement";
+import { settleWorkerNamedRetirement, validateWorkerNamedRetirementEvidence, WorkerNamedNativeAuditSubjectSchema,
+  workerNamedRetirementSha256 as namedDigest } from "./worker-named-retirement";
+import { releaseCanaryCleanup, retireReleaseCanary } from "./worker-canary-recovery";
+import { BoatAccountAdmission } from "../../apps/control-plane/src/cloud-workspaces/boat-account-admission";
+import { DatabaseReleaseCanaryService, releaseCanaryRequest } from "../../apps/control-plane/src/cloud-workspaces/release-canaries";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const directories: string[] = [];
-afterEach(async () => { await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))); });
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))); });
+
+async function failedBuilderFixture({ acknowledged = false } = {}) {
+  const test = await fixture(), prefix = test.config.sourceSha.slice(0, 12);
+  for (const key of ["candidate", "buildSha256", "qualified", "snapshotRequested", "snapshotCreate"]) delete test.record[key];
+  for (const name of ["native-attestation.json", "snapshot-ledger.json"]) delete test.record.kitFiles[`${prefix}/${name}`];
+  test.record.installStarted = true; test.record.attestationStarted = true;
+  test.operation.requestedAt = new Date(Date.now() - 1000).toISOString();
+  if (acknowledged) Object.assign(test.record.builder, { deleteRequested: true, deletionOperationId: test.operation.id,
+    deletionAcceptedAt: test.operation.requestedAt });
+  const base = test.request.getMockImplementation()!;
+  test.request.mockImplementation((method, route, settings) => route === `/named-snapshots/${test.record.snapshotId}`
+    ? Promise.resolve({ status: 404, body: null }) : base(method, route, settings));
+  return test;
+}
+
+describe("failed image builder compute retirement", () => {
+  it.each([false, true])("releases an unavailable uncaptured builder's compute hold with truthful pending storage (acknowledged=%s)", async acknowledged => {
+    const test = await failedBuilderFixture({ acknowledged });
+    await expect(test.adapter.cleanup()).resolves.toBeNull();
+    expect(test.record.builder).toMatchObject({ deleted: false, retiredAt: expect.any(String),
+      failedBuildRetirement: { kind: "failed-build-unavailable", storage: { status: "pending", physicalBytes: "unmeasured" } } });
+    expect(test.record.builder.cleanup).toBeUndefined(); expect(test.record.candidate).toBeUndefined();
+    expect(test.record.kitFiles).toBeDefined();
+    expect(test.ledger().reservations.some((row: any) => row.kind === "builder")).toBe(false);
+    expect(test.request.mock.calls.filter(([method]) => method === "DELETE")).toHaveLength(acknowledged ? 0 : 1);
+    const next = workerSnapshotName(test.state, "f".repeat(64));
+    await expect(reserveWorkerSlot(test.store, test.context.lease, test.profile, "alpha", next,
+      [{ provider: "boat", id: test.profile.boat.baseSnapshot }])).resolves.toBeDefined();
+    expect(test.run.receipt).toBeUndefined();
+  });
+  it.each([
+    ["captured snapshot", (test: any) => { test.record.snapshotRequested = true; }],
+    ["capture intent", (test: any) => { test.record.snapshotCreate = { phase: "uncertain" }; }],
+    ["candidate", (test: any) => { test.record.candidate = test.candidate; }],
+    ["unacknowledged create", (test: any) => { test.record.builderCreate.phase = "uncertain"; }],
+    ["wrong original account", (test: any) => { test.record.builderIntent.scope.accountBinding = "f".repeat(64); }],
+    ["wrong original source", (test: any) => { test.record.builderIntent.scope.sourceSha = "f".repeat(40); }],
+    ["credential-bearing create", (test: any) => { test.record.builderIntent.body.env = { PRIVATE: "synthetic" }; }],
+    ["lost delete acknowledgement", (test: any) => { delete test.record.builder.deletionOperationId; }],
+    ["wrong operation target", (test: any) => { test.operation.targetId = "bx_other"; }],
+  ] as const)("retains the hold for %s", async (_name, change) => {
+    const test = await failedBuilderFixture({ acknowledged: true }); change(test);
+    const before = structuredClone(test.ledger());
+    await expect(test.adapter.cleanup()).rejects.toThrow();
+    expect(test.ledger()).toEqual(before); expect(test.context.release).not.toHaveBeenCalled();
+    expect(test.record.builder.retiredAt).toBeUndefined();
+    expect(test.request.mock.calls.some(([method]) => method === "DELETE")).toBe(false);
+  });
+  it("does not release admission when saving the unavailable-builder proof fails", async () => {
+    const test = await failedBuilderFixture({ acknowledged: true }), before = structuredClone(test.ledger());
+    test.context.lease.save.mockRejectedValueOnce(new Error("synthetic failed proof write"));
+    await expect(test.adapter.cleanup()).rejects.toThrow("synthetic failed proof write");
+    expect(test.context.release).not.toHaveBeenCalled(); expect(test.ledger()).toEqual(before);
+    expect(test.saves.at(-1)?.resources.images[0].builder.failedBuildRetirement).toBeUndefined();
+  });
+  it("recovers an interrupted admission release and later reenters after its row is pruned", async () => {
+    const test = await failedBuilderFixture({ acknowledged: true });
+    test.store.writeAdmission.mockRejectedValueOnce(new Error("synthetic admission interruption"));
+    await expect(test.adapter.cleanup()).rejects.toThrow("synthetic admission interruption");
+    expect(test.record.builder.retiredAt).toBeDefined(); expect(imageHold(test).releasedAt).toBeUndefined();
+    await expect(test.adapter.cleanup()).resolves.toBeNull();
+    await expect(test.adapter.cleanup()).resolves.toBeNull();
+    expect(test.ledger().reservations.some((row: any) => row.kind === "builder")).toBe(false);
+    expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    expect(WorkerBuilderCleanupSchema.safeParse(test.record.builder.failedBuildRetirement).success).toBe(false);
+    await expect(reconcileReleaseBuilderRetentions(test.config, test.context)).resolves.toBeUndefined();
+    test.record.builder.failedBuildRetirement.provenance.source.commit = "f".repeat(40);
+    await expect(test.adapter.cleanup()).rejects.toThrow("retained retirement proof changed");
+  });
+  it.each(["available builder", "named image", "unknown deletion stage"])("retains compute for %s", async change => {
+    const test = await failedBuilderFixture({ acknowledged: true }), base = test.request.getMockImplementation()!;
+    if (change === "unknown deletion stage") test.operation.stage = "unknown";
+    else test.request.mockImplementation((method, route, settings) => route === (change === "available builder"
+      ? `/sandboxes/${test.record.builder.id}` : `/named-snapshots/${test.record.snapshotId}`)
+      ? Promise.resolve({ status: 200, body: {} }) : base(method, route, settings));
+    await expect(test.adapter.cleanup()).rejects.toThrow();
+    assertHeld(test); expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("observes only the acknowledged failed build occupying a later run's slot, then uses ordinary admission", async () => {
+    const test = await failedBuilderFixture({ acknowledged: true });
+    test.state.resources.images.push({ purpose: "release-worker", releaseRunId: "121", builder: { id: "bx_unrelated", retiredAt: new Date().toISOString() } });
+    const original = structuredClone(test.state.resources.images[1]);
+    const nextConfig = { ...test.config, runId: "124", sourceSha: "f".repeat(40) };
+    await reconcileFailedReleaseBuilderHolds(nextConfig, test.context, test.store);
+    expect(test.state.resources.images[1]).toEqual(original);
+    expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    const next = workerSnapshotName(test.state, digest([nextConfig.sourceSha, nextConfig.runId]));
+    await expect(reserveWorkerSlot(test.store, test.context.lease, test.profile, "alpha", next,
+      [{ provider: "boat", id: test.profile.boat.baseSnapshot }])).resolves.toBeDefined();
+    expect(test.ledger().reservations.filter((row: any) => row.kind === "builder" && !row.releasedAt)).toHaveLength(1);
+  });
+  it("preserves physical-only cleanup for a failed build without deferred-retirement provenance", async () => {
+    const test = await failedBuilderFixture({ acknowledged: true });
+    delete test.record.builder.billingOrgConfirmed;
+    delete test.record.builderIntent.scope;
+    test.operation.status = "completed"; test.operation.completedAt = new Date().toISOString();
+    await expect(test.adapter.cleanup()).resolves.toMatchObject({ kind: "physically-deleted" });
+    expect(test.record.builder.deleted).toBe(true);
+    expect(test.record.builder.failedBuildRetirement).toBeUndefined();
+    expect(test.ledger().reservations.some((row: any) => row.kind === "builder")).toBe(false);
+  });
+});
 
 async function fixture({ savedAgeMs = 20_000, sourceCommit = "a".repeat(40), runId = "123" } = {}) {
   const environment: NodeJS.ProcessEnv = { ...workerEnvironment(), GITHUB_SHA: sourceCommit, RELEASE_SHA: sourceCommit, GITHUB_RUN_ID: runId };
@@ -60,12 +167,15 @@ async function fixture({ savedAgeMs = 20_000, sourceCommit = "a".repeat(40), run
   const saves: any[] = [];
   const lease = { state, signal: new AbortController().signal, save: vi.fn(async () => { saves.push(structuredClone(state)); }), fence: vi.fn(async () => {}) };
   const store = { list: vi.fn(async () => ({ records: [], quarantine: [] })),
+    read: vi.fn(async () => ({ state: structuredClone(saves.at(-1) ?? state), etag: "owned-journal" })),
     readAdmission: vi.fn(async () => ({ state: structuredClone(ledger), etag: String(revision) })),
     writeAdmission: vi.fn(async (value: any, etag: string) => {
       expect(etag).toBe(String(revision)); ledger = structuredClone(value); revision++;
     }) };
   const inventory = [{ provider: "boat", id: profile.boat.baseSnapshot }, { provider: "boat", id: snapshotId }];
   await reserveWorkerSlot(store, lease, profile, config.channel, snapshotId, inventory);
+  // Admission precedes the original builder create in the maintained worker.
+  ledger.reservations.find((row: any) => row.snapshotName === snapshotId).createdAt = new Date(Date.parse(createdAt) - 1).toISOString();
   const operation: any = { id: `bdop_${(runId === "123" ? "c" : "d").repeat(32)}`, kind: "sandbox", targetId: record.builder.id,
     status: "blocked", stage: "waiting_for_uploads", expectedBy: new Date(Date.now() + 6 * 3600_000).toISOString() };
   const request = vi.fn(async (method: string, route: string, _settings?: any): Promise<{ status: number; body: Record<string, unknown> | null }> => {
@@ -112,7 +222,7 @@ function imageHold(test: Awaited<ReturnType<typeof fixture>>) {
   const reservation = test.ledger().reservations.find((row: any) => row.kind === "builder" && row.snapshotName === test.candidate.snapshotId);
   expect(reservation).toBeDefined(); return reservation;
 }
-function nativeHarness(test: Awaited<ReturnType<typeof fixture>>, blocked = false) {
+function nativeHarness(test: Awaited<ReturnType<typeof fixture>>, blocked = false, deferStorage = false, qualificationProfile: "smoke" | "full" = "smoke") {
   const base = test.request.getMockImplementation()!, sandboxes = new Map<string, any>(), operations = new Map<string, any>();
   let allocations = 0;
   test.request.mockImplementation(async (method, route, ...settings: any[]) => {
@@ -138,29 +248,500 @@ function nativeHarness(test: Awaited<ReturnType<typeof fixture>>, blocked = fals
   const release = () => releaseHostedAdmission(test.store, test.context.lease, test.profile);
   const native = nativeAgentCanary(test.context.lease, { ...test.profile, boat: { ...test.profile.boat, builderBudgetHours: 0.25 } }, test.request, {
     reserve: (job: any) => reserveHostedAdmission(test.store, test.state, test.profile, { kind: "builder", computeId: `canary:${job.id}` }), release,
-  }, { strictCleanup: true, maxUsedHours: 2, cleanupTimeoutMs: 0, nativeDeadlineSeconds: 420 });
-  const connections = workerConnections(), core = { ...native, ready: vi.fn(async () => true), start: vi.fn(async () => {}), poll: vi.fn(async (job: any) => ({
+  }, { strictCleanup: true, releaseStorageDeferral: deferStorage, maxUsedHours: 2, cleanupTimeoutMs: 0, nativeDeadlineSeconds: 420 });
+  const connections = workerConnections(), audits: any[] = [];
+  const core = { ...native, ready: vi.fn(async () => true), start: vi.fn(async () => {}), poll: vi.fn(async (job: any) => ({
     code: 0, retirement: 0, renewal: { accountBinding: true, accessChanged: true, cachePublished: true, consentPreserved: true },
-    report: { version: 3, qualified: true, qualificationProfile: "smoke", executionProfile: "zeros-cloud-native-v1", authority: "isolated-image-canary",
+    report: { version: 3, qualified: true, qualificationProfile, executionProfile: "zeros-cloud-native-v1", authority: "isolated-image-canary",
       qualifiedAt: new Date().toISOString(), identity: { sourceCommit: test.candidate.sourceCommit, buildSha256: test.candidate.buildSha256,
         contractSha256: "c".repeat(64), kind: job.kind, model: job.model },
       checks: ["privateProviderHome", "engineAuthorityIsolation", "nativeWorkspaceTools", "actorAdmission", "stopAndRevocation", "nativeTurn", "nativeResume",
-        "authentication", "nativePermissionSelection", "nativeAccessRefresh", "nativeMcp"] } })) };
-  const canary = releaseCanaryAdapter(test.context.lease, test.run, new Map(connections.map(row => [row.kind, row])), core, { qualificationProfile: "smoke" });
+        "authentication", "nativePermissionSelection", "nativeAccessRefresh", "nativeMcp", ...(qualificationProfile === "full"
+          ? ["transcriptFork", ...(job.kind === "codex-chatgpt" ? ["nativeGoals", "nativeFork", "nativeReview", "nativeApps", "nativeMultiAgent"] : [])] : [])] } })) };
+  if (deferStorage) {
+    const actor = "44444444-4444-4444-8444-444444444444", organizationId = "33333333-3333-4333-8333-333333333333";
+    const token = "synthetic-release-storage-authorization";
+    test.state.lease = { token: "77777777-7777-4777-8777-777777777777", expiresAt: Date.now() + 60_000 };
+    test.run.actorUserId = actor; test.run.qualificationProfile = qualificationProfile; test.run.releaseCanaryBindings = connections;
+    const admission = new BoatAccountAdmission({ ...test.store, readDocument: async () => ({ state: test.state, etag: "native-journal" }) } as any, test.profile);
+    const query = vi.fn(async (sql: string, values: any[] = []): Promise<any> => {
+      if (sql.includes("FROM users account")) return { rowCount: 1, rows: [] };
+      if (sql.includes("FROM cloud_agent_credentials")) return { rowCount: 1, rows: [{ owner_user_id: actor }] };
+      if (sql.includes("FROM audit_log")) return { rowCount: 1, rows: [structuredClone(audits.filter(audit => audit.subject.operationId === values[3]).at(-1))] };
+      if (sql.startsWith("INSERT INTO audit_log")) {
+        const audit = { id: String(audits.length + 1), createdAt: new Date().toISOString(), action: values[2], subject: JSON.parse(values[3]) }; audits.push(audit);
+        return { rowCount: 1, rows: [{ id: audit.id }] };
+      }
+      return { rowCount: 0, rows: [] };
+    });
+    const service = new DatabaseReleaseCanaryService({ connect: async () => ({ query, release: vi.fn() }) } as any, {
+      ownerUserId: actor, organizationId, channel: test.config.channel, repository: test.config.repository, sourceSha: test.config.sourceSha,
+      tokenSha256: createHash("sha256").update(token).digest("hex"), keys: {} as any, admission,
+      boat: { apiKey: "synthetic-boat-authority", apiUrl: "https://boat.example.test", billingOrg: test.profile.boat.billingOrg },
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url: any, options: any) => {
+      expect(options.method).toBe("GET");
+      const reply = await test.request("GET", new URL(url).pathname);
+      return new Response(JSON.stringify(reply.body), { status: reply.status });
+    }));
+    core.ready.mockImplementation(async () => { test.state.resources.images.at(-1).machineAttestationStarted = true; return true; });
+    core.start.mockImplementation(async (job: any) => {
+      const row = test.state.resources.images.find((value: any) => value.agentQualificationId === job.id); row.nativeDispatchStarted = true;
+      const request = releaseCanaryRequest({ version: 1, ownerUserId: actor, organizationId, channel: test.config.channel, sourceSha: test.config.sourceSha,
+        repository: test.config.repository, qualificationProfile, operationId: job.id, runId: test.run.runId, runAttempt: test.config.runAttempt,
+        branch: test.config.branch, ...connections.find(connection => connection.kind === job.kind), target: native.target(job) },
+      { ownerUserId: actor, organizationId, channel: test.config.channel, sourceSha: test.config.sourceSha, repository: test.config.repository });
+      job.admissionRequest = request;
+      audits.push({ id: String(audits.length + 1), action: "cloud.release_canary.started", subject: { ...connections.find(connection => connection.kind === job.kind),
+        operationId: job.id, requestSha256: digest(request), qualificationProfile, channel: request.channel, sourceSha: request.sourceSha,
+        repository: request.repository, runId: request.runId, runAttempt: request.runAttempt, targetId: row.builder.id,
+        imageRef: `boat:${test.candidate.snapshotId}@sha256:${test.candidate.buildSha256}`, allowanceOwnerUserId: actor } });
+    });
+    core.retire = (job: any) => retireReleaseCanary(test.context.lease, native, async (operationId, deletionOperationId, leaseToken) => {
+      const reply = await service.retire({ version: 1, operationId, deletionOperationId, leaseToken }, `Bearer ${token}`);
+      return "storagePending" in reply ? "storage-pending" : "physically-deleted";
+    }, job);
+  }
+  const canary = releaseCanaryAdapter(test.context.lease, test.run, new Map(connections.map(row => [row.kind, row])), core, { qualificationProfile });
   const input = { ...test.config, kinds: connections.map(row => row.kind), actorUserId: "44444444-4444-4444-8444-444444444444",
-    operationId: "55555555-5555-4555-8555-555555555555", inputsSha256: test.run.inputsSha256, qualificationProfile: "smoke" as const, releaseCanaryBindings: connections };
+    operationId: "55555555-5555-4555-8555-555555555555", inputsSha256: test.run.inputsSha256, qualificationProfile, releaseCanaryBindings: connections };
   const owner = vi.fn(async (action: any) => ({ value: await action({ loginIdentity: "synthetic-owner", manage: async (_document: any, approval: string) =>
     ({ state: approval ? "changed" : "planned", planSha256: "d".repeat(64), targetSha256: "f".repeat(64) }) }), deleted: true }));
   const tuple = vi.fn(async () => {});
   const deps = { build: () => test.adapter.build(), cleanupBuilder: () => test.adapter.cleanup(), qualify: (image: any, kind: string) => canary.qualify(image, kind),
     cleanup: async () => {
       const deleted = await canary.cleanup(), imageBuilder = await test.adapter.cleanup();
-      return deleted && imageBuilder ? { credentialCanaryResourcesDeleted: true as const, imageBuilder } : null;
+      return deleted && imageBuilder ? { ...(deferStorage ? releaseCanaryCleanup(test.context.lease, test.run) : { credentialCanaryResourcesDeleted: true as const }), imageBuilder } : null;
     }, withOwner: owner, updateIdentity: tuple };
-  return { native, canary, core, input, deps, owner, tuple, sandboxes, operations, allocations: () => allocations };
+  return { native, canary, core, input, deps, owner, tuple, sandboxes, operations, audits, allocations: () => allocations };
 }
 
+function namedRetirementEvidence(test: Awaited<ReturnType<typeof fixture>>, native: ReturnType<typeof nativeHarness>, names: string[]) {
+  const now = Date.now(), at = (offset: number) => new Date(now + offset).toISOString();
+  const natives = test.run.canaries.map((job: any) => {
+    const row = test.state.resources.images.find((value: any) => value.agentQualificationId === job.id);
+    const audit = native.audits.filter(value => value.subject.operationId === job.id).at(-1);
+    return { admissionRequest: structuredClone(job.admissionRequest), creation: structuredClone(row.builderIntent),
+      cleanup: structuredClone(row.builder.physicalCleanup ?? row.builder.storageRetirement),
+      marker: structuredClone(job.auditRetired), audit: { id: audit.id, organizationId: job.admissionRequest.organizationId,
+        actorUserId: job.admissionRequest.ownerUserId, action: audit.action, subject: structuredClone(audit.subject), databaseKey: "synthetic-primary-audits",
+        createdAt: audit.createdAt, observedAt: at(-40), primary: true, policyVisible: true, latestAcrossAllPhases: true } };
+  });
+  const domains = ["configurations", "deployments", "registries", "archives", "application", "primary-audits", "reference-writers"];
+  return { version: 1, scope: structuredClone(test.record.builder.cleanup.provenance.scope),
+    builder: structuredClone(test.record.builder.cleanup),
+    creates: { builderSha256: digest(test.record.builderCreate), snapshotSha256: digest(test.record.snapshotCreate) }, audit: { natives },
+    bundle: { sourceSha: "d".repeat(40), treeSha: "e".repeat(40), actionSha256: "f".repeat(64),
+      collectorSha256: "c".repeat(64), reviewArtifactSha256: "a".repeat(64), reviewerId: "88888888-8888-4888-8888-888888888888", reviewedAt: at(-30) },
+    observedAt: at(-40), expiresAt: at(59_000),
+    inventory: { complete: true, observedAt: at(-40), names: [...names].sort() },
+    references: domains.map(domain => ({ domain, observedAt: at(-40), complete: true,
+      authorities: [{ namespace: `synthetic-${domain}`, accountBinding: test.ledger().account, identitySha256: "a".repeat(64), authenticated: true, policyVisible: true,
+        projection: { domain, selectors: [], complete: true }, projectionSha256: namedDigest({ domain, selectors: [], complete: true }),
+        records: [{ key: "complete-namespace", referenceCount: 0, unresolvedCount: 0, references: [], disposition: "unreferenced" }] }] })),
+    exclusion: { id: "99999999-9999-4999-8999-999999999999", accountBinding: test.ledger().account,
+      startedAt: at(-10_000), expiresAt: at(290_000), owners: [test.state.owner], namespaces: domains.map(domain => `synthetic-${domain}`),
+      controllers: [{ identitySha256: "b".repeat(64), oldAndDrainingWritersCovered: true, inFlightWritersCovered: true, excluded: true,
+        projection: { workflows: [], otherLeases: [], complete: true }, projectionSha256: namedDigest({ workflows: [], otherLeases: [], complete: true }) }] } };
+}
+
+function acknowledgeNamedRetirement(test: Awaited<ReturnType<typeof fixture>>, native: ReturnType<typeof nativeHarness>) {
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1000);
+  const now = Date.now(), at = (offset: number) => new Date(now + offset).toISOString();
+  const intent = { phase: "intent-saved", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", savedAt: at(-20),
+    leaseToken: test.state.lease.token, reservation: structuredClone(imageHold(test)),
+    target: { provider: "boat", name: test.candidate.snapshotId, sourceSandboxId: test.record.builder.id, candidate: structuredClone(test.candidate) },
+    namedSnapshot: { name: test.candidate.snapshotId, sourceSandboxId: test.record.builder.id, status: "ready", observedAt: at(-40) },
+    review: namedRetirementEvidence(test, native, test.inventory.map(row => row.id)) };
+  // The separately authorized helper owns actual dispatch. This fixture keeps
+  // its already-consumed, typed response; the maintained worker sends only GETs.
+  const acknowledgement = { version: 2, kind: "release-owned-named-deletion", consumed: true, phase: "acknowledged", intent,
+    dispatch: { phase: "dispatching", intentSha256: namedDigest(intent), intentFencedAt: at(-15), savedAt: at(-10), fencedAt: at(-5), leaseToken: intent.leaseToken },
+    acknowledgedAt: at(0), response: { status: 200, type: "snapshot.named.deleted", name: test.candidate.snapshotId, statusText: "deleted" } };
+  test.record.snapshotDeleteRequested = true; test.record.snapshotDeleteIntent = acknowledgement;
+  test.record.snapshotRetirementReview = { version: 1, kind: "release-owned-name-retirement-review", acknowledgementSha256: namedDigest(acknowledgement),
+    evidence: namedRetirementEvidence(test, native, [test.profile.boat.baseSnapshot]) };
+}
+
+async function namedFixture() {
+  const test = await fixture(), native = nativeHarness(test, true, true, "full");
+  await test.adapter.cleanup();
+  for (const kind of native.input.kinds.slice(0, 2)) await native.canary.qualify(test.candidate, kind);
+  await native.canary.cleanup();
+  test.run.canaries[1].outcome.code = 1; test.run.canaries[1].outcome.report.qualified = false;
+  acknowledgeNamedRetirement(test, native);
+  await test.context.lease.save(); await test.context.lease.fence();
+  const original = test.request.getMockImplementation()!, absentInventory = [{ provider: "boat", id: test.profile.boat.baseSnapshot }];
+  test.request.mockImplementation(async (method, route, settings) => route === `/named-snapshots/${test.candidate.snapshotId}`
+    ? { status: 404, body: null } : route === "/named-snapshots" ? { status: 200, body: { snapshots: absentInventory.map(row => ({ name: row.id })) } }
+      : original(method, route, settings));
+  test.request.mockClear(); test.store.writeAdmission.mockClear();
+  return { ...test, native, absentInventory, settle: () => settleWorkerNamedRetirement(test.store, test.context.lease, test.profile, test.record, absentInventory, test.request) };
+}
+function rebindNamedFixture(test: Awaited<ReturnType<typeof namedFixture>>) {
+  const ack = test.record.snapshotDeleteIntent;
+  if (ack?.dispatch) ack.dispatch.intentSha256 = namedDigest(ack.intent);
+  test.record.snapshotRetirementReview.acknowledgementSha256 = namedDigest(ack);
+}
+
+describe("release-owned named retirement authority and recovery", () => {
+  it.each([false, true])("retains strict original native audit parsing across the schema bridge (pending=%s)", async pending => {
+    const test = await fixture(), native = nativeHarness(test, pending, true, "full");
+    try {
+      await test.adapter.cleanup();
+      await native.canary.qualify(test.candidate, native.input.kinds[0]!); await native.canary.cleanup();
+      const subject = namedRetirementEvidence(test, native, test.inventory.map(row => row.id)).audit.natives[0]!.audit.subject;
+      expect(subject.retirement.version).toBe(pending ? 2 : 1);
+      expect(WorkerNamedNativeAuditSubjectSchema.parse(subject)).toEqual(subject);
+      expect(WorkerNamedNativeAuditSubjectSchema.parse({ ...subject, beforeVersion: 2 })).toEqual({ ...subject, beforeVersion: 2 });
+      for (const value of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2"])
+        expect(WorkerNamedNativeAuditSubjectSchema.safeParse({ ...subject, beforeVersion: value }).success).toBe(false);
+      for (const change of [
+        (value: any) => { value.unexpected = true; },
+        (value: any) => { value.retirement.unexpected = true; },
+        (value: any) => { value.retirement.operation.unexpected = true; },
+        (value: any) => { value.retirement.operation.targetId = "bx_foreign"; },
+        (value: any) => { value.retirement.unavailableObservedAt = "2000-01-01T00:00:00.000Z"; },
+        (value: any) => { delete value.retirement; },
+      ]) {
+        const invalid = structuredClone(subject); change(invalid);
+        expect(WorkerNamedNativeAuditSubjectSchema.safeParse(invalid).success).toBe(false);
+      }
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("validates complete pre-action evidence against the actual lease, original named row and primary native audits", async () => {
+    const test = await namedFixture();
+    try {
+      const evidence = test.record.snapshotDeleteIntent.intent.review;
+      expect(validateWorkerNamedRetirementEvidence(test.state, test.ledger(), test.profile, test.record, evidence)).toMatchObject({ version: 1 });
+      const lease = test.state.lease; delete test.state.lease;
+      expect(() => validateWorkerNamedRetirementEvidence(test.state, test.ledger(), test.profile, test.record, evidence)).toThrow("owning lease");
+      test.state.lease = lease;
+      const hold = imageHold(test); test.ledger().reservations = test.ledger().reservations.filter((row: any) => row !== hold);
+      expect(() => validateWorkerNamedRetirementEvidence(test.state, test.ledger(), test.profile, test.record, evidence)).toThrow("reservation");
+      expect(test.request).not.toHaveBeenCalled(); expect(test.store.writeAdmission).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("retains the reviewed capture through later revalidation and rejects replacing it with observations after the actual review", async () => {
+    const test = await namedFixture();
+    try {
+      const retained = test.record.snapshotDeleteIntent.intent.review, fresh = structuredClone(retained), observedAt = new Date(Date.now()).toISOString();
+      fresh.observedAt = observedAt; fresh.inventory.observedAt = observedAt;
+      fresh.references.forEach((row: any) => { row.observedAt = observedAt; });
+      fresh.audit.natives.forEach((row: any) => { row.audit.observedAt = observedAt; });
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 100);
+      expect(validateWorkerNamedRetirementEvidence(test.state, test.ledger(), test.profile, test.record, retained)).toMatchObject({ observedAt: retained.observedAt });
+      expect(() => validateWorkerNamedRetirementEvidence(test.state, test.ledger(), test.profile, test.record, fresh)).toThrow("stale");
+      expect(fresh.bundle).toEqual(retained.bundle);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  const invalidEvidence: [string, (test: Awaited<ReturnType<typeof namedFixture>>) => void][] = [
+    ["legacy acknowledgement", test => { test.record.snapshotDeleteIntent.version = 1; }],
+    ["unknown acknowledgement version", test => { test.record.snapshotDeleteIntent.version = 3; }],
+    ["lost response", test => { test.record.snapshotDeleteIntent.phase = "uncertain"; }],
+    ["unconsumed intent", test => { test.record.snapshotDeleteIntent.consumed = false; }],
+    ["HTTP404 acknowledgement", test => { test.record.snapshotDeleteIntent.response.status = 404; }],
+    ["wrong typed response", test => { test.record.snapshotDeleteIntent.response.type = "snapshot.deleted"; }],
+    ["another literal source builder", test => { test.record.snapshotDeleteIntent.intent.target.sourceSandboxId = "bx_other"; }],
+    ["another candidate build", test => { test.record.snapshotDeleteIntent.intent.target.candidate.buildSha256 = "d".repeat(64); }],
+    ["another original run", test => { test.record.snapshotDeleteIntent.intent.review.scope.runId = "999"; }],
+    ["another account", test => { test.record.snapshotDeleteIntent.intent.review.scope.accountBinding = "a".repeat(64); }],
+    ["reversed dispatch fences", test => { test.record.snapshotDeleteIntent.dispatch.intentFencedAt = new Date(Date.now() + 1).toISOString(); }],
+    ["changed original creation", test => { test.record.builderIntent.key = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"; }],
+    ["changed snapshot creation", test => { test.record.snapshotCreate.id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"; }],
+    ["missing native", test => { test.record.snapshotRetirementReview.evidence.audit.natives.pop(); }],
+    ["duplicate native", test => { test.record.snapshotRetirementReview.evidence.audit.natives.push(test.record.snapshotRetirementReview.evidence.audit.natives[0]); }],
+    ["foreign native actor", test => { test.record.snapshotRetirementReview.evidence.audit.natives[0].audit.actorUserId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"; }],
+    ["unknown latest primary phase", test => { test.record.snapshotRetirementReview.evidence.audit.natives[0].audit.action = "cloud.release_canary.dispatched"; }],
+    ["primary audit omitted retirement", test => { delete test.record.snapshotRetirementReview.evidence.audit.natives[0].audit.subject.retirement; }],
+    ["transplanted primary provenance", test => { test.record.snapshotRetirementReview.evidence.audit.natives[0].audit.subject.retirement.provenanceSha256 = "a".repeat(64); }],
+    ["primary operation mismatch", test => { const operation = test.record.snapshotRetirementReview.evidence.audit.natives[0].audit.subject.retirement.operation;
+      operation.expectedBy = new Date(Date.parse(operation.expectedBy) + 1000).toISOString(); }],
+    ["unmarked native snapshot policy", test => { delete test.state.resources.images.find((row: any) => row.agentQualificationId).snapshotPolicyVersion; }],
+    ["unrecorded native allocation", test => { test.state.resources.images.push({ purpose: "native-agent-qualification", sourceImage: test.record.snapshotId,
+      agentQualificationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", builder: { id: "bx_othernative" } }); }],
+    ["expired current review", test => { test.record.snapshotRetirementReview.evidence.expiresAt = new Date(Date.now() - 1).toISOString(); }],
+    ["expired pre-dispatch review", test => { test.record.snapshotDeleteIntent.intent.review.expiresAt = test.record.snapshotDeleteIntent.intent.savedAt; }],
+    ["missing reference domain", test => { test.record.snapshotRetirementReview.evidence.references.pop(); }],
+    ["live reference", test => { test.record.snapshotRetirementReview.evidence.references[0].authorities[0].records[0].referenceCount = 1; }],
+    ["hidden primary rows", test => { test.record.snapshotRetirementReview.evidence.references[4].authorities[0].policyVisible = false; }],
+    ["changed retained projection", test => { test.record.snapshotRetirementReview.evidence.references[0].authorities[0].projection.selectors.push(test.candidate.snapshotId); }],
+    ["uncovered writer namespace", test => { test.record.snapshotRetirementReview.evidence.exclusion.namespaces.pop(); }],
+    ["unbounded writer exclusion", test => { test.record.snapshotRetirementReview.evidence.exclusion.expiresAt = new Date(Date.now() + 300_001).toISOString(); }],
+  ];
+  it.each(invalidEvidence)("retains the exact named hold for %s", async (_label, change) => {
+    const test = await namedFixture();
+    try {
+      const before = structuredClone(test.ledger()), cleanup = structuredClone(test.record.builder.cleanup);
+      change(test); rebindNamedFixture(test); await test.context.lease.save();
+      await expect(test.settle()).rejects.toThrow();
+      expect(test.ledger()).toEqual(before); expect(test.store.writeAdmission).not.toHaveBeenCalled();
+      expect(test.record.snapshotDeleted).not.toBe(true); expect(test.record.builder.cleanup).toEqual(cleanup);
+      expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it.each(["replacement", "pruned"] as const)("rejects a %s reservation without committed history", async kind => {
+    const test = await namedFixture();
+    try {
+      const hold = imageHold(test);
+      if (kind === "replacement") hold.createdAt = new Date(Date.now()).toISOString();
+      else test.ledger().reservations = test.ledger().reservations.filter((row: any) => row !== hold);
+      await expect(test.settle()).rejects.toThrow("reservation");
+      expect(test.store.writeAdmission).not.toHaveBeenCalled(); expect(test.record.snapshotNameRetirement).toBeUndefined();
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it.each(["builder available", "native available", "name reappeared", "partial inventory", "duplicate inventory", "unknown builder stage", "foreign native operation"])(
+    "rejects fresh provider evidence when %s", async scenario => {
+      const test = await namedFixture();
+      try {
+        const before = structuredClone(test.ledger()), original = test.request.getMockImplementation()!;
+        const native = test.record.snapshotDeleteIntent.intent.review.audit.natives[0].cleanup;
+        test.request.mockImplementation(async (method, route, settings) => {
+          if (scenario === "builder available" && route === `/sandboxes/${test.record.builder.id}` ||
+              scenario === "native available" && route === `/sandboxes/${native.targetId}` ||
+              scenario === "name reappeared" && route === `/named-snapshots/${test.record.snapshotId}`) return { status: 200, body: {} };
+          if (scenario === "partial inventory" && route === "/named-snapshots") return { status: 200, body: { snapshots: [], hasMore: true } };
+          if (scenario === "duplicate inventory" && route === "/named-snapshots") return { status: 200, body: {
+            snapshots: [{ name: test.profile.boat.baseSnapshot }, { name: test.profile.boat.baseSnapshot }] } };
+          if (scenario === "unknown builder stage" && route === `/deletion-operations/${test.operation.id}`) return { status: 200,
+            body: { operation: { ...test.operation, stage: "unknown" } } };
+          if (scenario === "foreign native operation" && route === `/deletion-operations/${native.operation.id}`) return { status: 200,
+            body: { operation: { ...test.native.operations.get(native.operation.id), targetId: "bx_othernative" } } };
+          return original(method, route, settings);
+        });
+        await expect(test.settle()).rejects.toThrow();
+        expect(test.ledger()).toEqual(before); expect(test.store.writeAdmission).not.toHaveBeenCalled();
+        expect(test.record.snapshotDeleted).not.toBe(true); expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+      } finally { vi.unstubAllGlobals(); }
+    });
+  it("persists a separate tombstone and removes only the exact named row, preserving all other ledger fields", async () => {
+    const test = await namedFixture();
+    try {
+      test.ledger().reservations.push({ kind: "generation", owner: "f".repeat(24), generation: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        createdAt: test.state.createdAt, releasedAt: test.state.createdAt });
+      const before = structuredClone(test.ledger()), write = test.store.writeAdmission.getMockImplementation()!;
+      test.store.writeAdmission.mockImplementation(async (value, etag) => {
+        const durable = test.saves.at(-1).resources.images.find((row: any) => row.snapshotId === test.record.snapshotId);
+        expect(durable.snapshotNameRetirement.phase).toBe("tombstoned"); expect(durable.snapshotDeleted).not.toBe(true);
+        expect(value).toEqual({ ...before, reservations: before.reservations.filter((row: any) => row.snapshotName !== test.record.snapshotId) });
+        await write(value, etag);
+      });
+      await test.settle();
+      expect(test.store.writeAdmission).toHaveBeenCalledTimes(1); expect(test.record.snapshotNameRetirement.phase).toBe("committed");
+      expect(test.ledger().reservations.at(-1)).toEqual(before.reservations.at(-1));
+      expect(test.record.builder.deleted).toBe(false); expect(test.run.canaries[1].outcome.report.qualified).toBe(false);
+      const requests = test.request.mock.calls.map(([, route]) => route);
+      expect(requests.indexOf(`/deletion-operations/${test.operation.id}`)).toBeLessThan(requests.indexOf(`/sandboxes/${test.record.builder.id}`));
+      for (const native of test.record.snapshotDeleteIntent.intent.review.audit.natives) expect(requests.indexOf(`/deletion-operations/${native.cleanup.operation.id}`))
+        .toBeLessThan(requests.indexOf(`/sandboxes/${native.cleanup.targetId}`));
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it.each(["prepared", "tombstoned", "committed"])("does not claim settlement when the %s journal save fails", async phase => {
+    const test = await namedFixture();
+    try {
+      const save = test.context.lease.save.getMockImplementation()!;
+      test.context.lease.save.mockImplementation(async () => {
+        if (test.record.snapshotNameRetirement?.phase === phase) throw new Error("synthetic journal save failure");
+        await save();
+      });
+      await expect(test.settle()).rejects.toThrow("save failure");
+      expect(test.record.snapshotDeleted).not.toBe(true); expect(test.record.snapshotNameRetirement?.phase).not.toBe("committed");
+      expect(test.store.writeAdmission).toHaveBeenCalledTimes(phase === "committed" ? 1 : 0);
+      if (phase !== "committed") expect(imageHold(test)).toBeDefined();
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it.each([false, true])("recovers a failed CAS response (applied=%s) without another deletion or unrelated admission change", async applied => {
+    const test = await namedFixture();
+    try {
+      const write = test.store.writeAdmission.getMockImplementation()!;
+      test.store.writeAdmission.mockImplementationOnce(async (value, etag) => {
+        if (applied) await write(value, etag);
+        throw Object.assign(new Error("synthetic CAS response failure"), { code: "DEV_REGISTRY_CONFLICT" });
+      });
+      await expect(test.settle()).rejects.toThrow("CAS response failure");
+      expect(test.record.snapshotNameRetirement.phase).toBe("tombstoned"); expect(test.record.snapshotDeleted).not.toBe(true);
+      expect(test.store.writeAdmission).toHaveBeenCalledTimes(1);
+      await test.settle();
+      expect(test.record.snapshotNameRetirement.phase).toBe("committed");
+      expect(test.store.writeAdmission).toHaveBeenCalledTimes(applied ? 1 : 2);
+      expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("retains the prior transition if recovery persistence fails after the reservation was pruned", async () => {
+    const test = await namedFixture();
+    try {
+      const write = test.store.writeAdmission.getMockImplementation()!, save = test.context.lease.save.getMockImplementation()!;
+      test.store.writeAdmission.mockImplementationOnce(async (value, etag) => { await write(value, etag); throw new Error("lost CAS response"); });
+      await expect(test.settle()).rejects.toThrow("lost CAS response");
+      const before = structuredClone(test.record.snapshotNameRetirement);
+      test.context.lease.save.mockRejectedValueOnce(new Error("recovery save failed"));
+      await expect(test.settle()).rejects.toThrow("recovery save failed");
+      expect(test.record.snapshotNameRetirement).toEqual(before);
+      expect(test.saves.at(-1).resources.images.find((row: any) => row.snapshotId === test.record.snapshotId).snapshotNameRetirement).toEqual(before);
+      test.context.lease.save.mockImplementation(save);
+      await test.settle(); expect(test.store.writeAdmission).toHaveBeenCalledTimes(1);
+      expect(test.record.snapshotNameRetirement.phase).toBe("committed");
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("rechecks the review window immediately before the admission CAS", async () => {
+    const test = await namedFixture();
+    try {
+      const save = test.context.lease.save.getMockImplementation()!;
+      test.context.lease.save.mockImplementation(async () => {
+        if (test.record.snapshotNameRetirement?.phase === "tombstoned") {
+          vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000); test.state.lease.expiresAt = Date.now() + 60_000;
+        }
+        await save();
+      });
+      await expect(test.settle()).rejects.toThrow("stale");
+      expect(test.store.writeAdmission).not.toHaveBeenCalled(); expect(imageHold(test)).toBeDefined();
+      expect(test.record.snapshotDeleted).not.toBe(true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("rechecks the mutable alias after tombstone persistence and before admission CAS", async () => {
+    const test = await namedFixture();
+    try {
+      const original = test.request.getMockImplementation()!;
+      test.request.mockImplementation(async (method, route, settings) => route === `/named-snapshots/${test.record.snapshotId}` && test.record.snapshotNameRetirement?.phase === "tombstoned"
+        ? { status: 200, body: {} } : original(method, route, settings));
+      await expect(test.settle()).rejects.toThrow();
+      expect(test.store.writeAdmission).not.toHaveBeenCalled(); expect(imageHold(test)).toBeDefined();
+      expect(test.record.snapshotNameRetirement.phase).toBe("tombstoned"); expect(test.record.snapshotDeleted).not.toBe(true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("rechecks freshness after a slow final fence immediately before admission CAS", async () => {
+    const test = await namedFixture();
+    try {
+      let advanced = false;
+      test.context.lease.fence.mockImplementation(async () => {
+        if (!advanced && test.record.snapshotNameRetirement?.phase === "tombstoned" &&
+            test.request.mock.calls.filter(([, route]) => route === `/named-snapshots/${test.record.snapshotId}`).length >= 2) {
+          advanced = true; vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000); test.state.lease.expiresAt = Date.now() + 60_000;
+        }
+      });
+      await expect(test.settle()).rejects.toThrow();
+      expect(advanced).toBe(true); expect(test.store.writeAdmission).not.toHaveBeenCalled(); expect(imageHold(test)).toBeDefined();
+      expect(test.record.snapshotNameRetirement.phase).toBe("tombstoned"); expect(test.record.snapshotDeleted).not.toBe(true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it.each(["name reappeared", "review expired"])("keeps the transition uncommitted when %s during admission CAS", async scenario => {
+    const test = await namedFixture();
+    try {
+      let applied = false;
+      const write = test.store.writeAdmission.getMockImplementation()!, request = test.request.getMockImplementation()!;
+      test.store.writeAdmission.mockImplementation(async (value, etag) => {
+        await write(value, etag); applied = true;
+        if (scenario === "review expired") {
+          vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000); test.state.lease.expiresAt = Date.now() + 60_000;
+        }
+      });
+      test.request.mockImplementation(async (method, route, settings) => applied && scenario === "name reappeared" && route === `/named-snapshots/${test.record.snapshotId}`
+        ? { status: 200, body: {} } : request(method, route, settings));
+      await expect(test.settle()).rejects.toThrow();
+      expect(test.store.writeAdmission).toHaveBeenCalledTimes(1);
+      expect(test.record.snapshotNameRetirement.phase).toBe("tombstoned"); expect(test.record.snapshotDeleted).not.toBe(true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("uses committed history only for historical observation, after review expiry and account-ledger advancement", async () => {
+    const test = await namedFixture();
+    try {
+      await test.settle(); const witness = structuredClone(test.record.snapshotNameRetirement);
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 360_000);
+      test.state.lease = { token: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", expiresAt: Date.now() + 60_000 };
+      test.ledger().reservations.push({ kind: "generation", owner: "f".repeat(24), generation: "ffffffff-ffff-4fff-8fff-ffffffffffff", createdAt: new Date(Date.now()).toISOString() });
+      await test.context.lease.save(); test.request.mockClear();
+      await expect(releaseBuilderCreationScope(test.config, test.context)).rejects.toThrow("admission ownership");
+      await expect(retireReleaseBuilder(test.config, test.context, { observeOnly: true })).rejects.toThrow("admission ownership");
+      await expect(retireReleaseBuilder(test.config, test.context, { historical: true })).rejects.toThrow("admission ownership");
+      await retireReleaseBuilder(test.config, test.context, { observeOnly: true, historical: true });
+      expect(test.record.builder.deleted).toBe(false); expect(test.record.builder.cleanup.storage.physicalBytes).toBe("unmeasured");
+      expect(test.request.mock.calls.map(([, route]) => route)).toEqual([`/deletion-operations/${test.operation.id}`, `/sandboxes/${test.record.builder.id}`, `/named-snapshots/${test.record.snapshotId}`]);
+      expect(test.record.snapshotNameRetirement).toEqual(witness);
+      test.operation.status = "completed"; test.operation.completedAt = new Date(Date.now()).toISOString();
+      await retireReleaseBuilder(test.config, test.context, { observeOnly: true, historical: true });
+      expect(test.record.builder.deleted).toBe(true); expect(test.record.snapshotNameRetirement).toEqual(witness);
+      expect(test.record.builderProvenance).toEqual(witness.review.evidence.builder.provenance);
+      expect(test.store.writeAdmission).toHaveBeenCalledTimes(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it.each(["missing witness", "replacement row", "reappeared alias", "tampered original audit"])("withholds historical observation for %s", async scenario => {
+    const test = await namedFixture();
+    try {
+      await test.settle(); test.request.mockClear();
+      if (scenario === "missing witness") delete test.record.snapshotNameRetirement;
+      if (scenario === "replacement row") test.ledger().reservations.push({ ...test.record.snapshotDeleteIntent.intent.reservation, createdAt: new Date(Date.now()).toISOString() });
+      if (scenario === "tampered original audit") test.record.snapshotNameRetirement.review.evidence.audit.natives[0].audit.subject.retirement.provenanceSha256 = "f".repeat(64);
+      if (scenario === "reappeared alias") {
+        const original = test.request.getMockImplementation()!;
+        test.request.mockImplementation(async (method, route, settings) => route === `/named-snapshots/${test.record.snapshotId}`
+          ? { status: 200, body: {} } : original(method, route, settings));
+      }
+      await expect(retireReleaseBuilder(test.config, test.context, { observeOnly: true, historical: true })).rejects.toThrow();
+      expect(test.record.builder.deleted).toBe(false); expect(test.store.writeAdmission).toHaveBeenCalledTimes(1);
+      expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
 describe("release-owned builder retirement composition", () => {
+  it("settles reviewed pending storage for two natives, observes the pruned reservation and later completes the original builder", async () => {
+    const test = await fixture(), native = nativeHarness(test, true, true, "full");
+    try {
+      await test.adapter.cleanup();
+      for (const kind of native.input.kinds.slice(0, 2)) await native.canary.qualify(test.candidate, kind);
+      await native.canary.cleanup();
+      test.run.canaries[1].outcome.code = 1; test.run.canaries[1].outcome.report.qualified = false;
+      expect(test.run.canaries).toHaveLength(2);
+      expect(test.run.canaries.every((job: any) => job.retired && job.auditRetired.version === 2)).toBe(true);
+      // Provider/readback JSON order is not semantic candidate identity.
+      const candidate = test.record.candidate;
+      test.record.candidate = { storageMiB: candidate.storageMiB, architecture: candidate.architecture,
+        buildSha256: candidate.buildSha256, sourceCommit: candidate.sourceCommit, snapshotId: candidate.snapshotId };
+      acknowledgeNamedRetirement(test, native);
+      await test.context.lease.save(); await test.context.lease.fence();
+      const original = test.request.getMockImplementation()!, inventory = [{ provider: "boat", id: test.profile.boat.baseSnapshot }];
+      test.request.mockImplementation(async (method, route, settings) => route === `/named-snapshots/${test.candidate.snapshotId}`
+        ? { status: 404, body: null } : route === "/named-snapshots" ? { status: 200, body: { snapshots: inventory.map(row => ({ name: row.id })) } }
+          : original(method, route, settings));
+      test.request.mockClear();
+      await reconcileWorkerSnapshotHolds(test.store, test.context.lease, test.profile, inventory, test.request);
+      expect(test.record.snapshotDeleted).toBe(true);
+      expect(test.record.snapshotNameRetirement.phase).toBe("committed");
+      expect(test.ledger().reservations.find((row: any) => row.snapshotName === test.candidate.snapshotId)).toBeUndefined();
+      expect(test.record.builder.deleted).toBe(false);
+      expect(test.record.builder.cleanup.storage.physicalBytes).toBe("unmeasured");
+      const next = { ...test.config, runId: "124", sourceSha: "c".repeat(40) };
+      await reconcileReleaseBuilderRetentions(next, test.context);
+      expect(test.record.builder.deleted).toBe(false);
+      test.operation.status = "completed"; test.operation.completedAt = new Date().toISOString();
+      await reconcileReleaseBuilderRetentions(next, test.context);
+      expect(test.record.builder.deleted).toBe(true);
+      expect(test.record.builder.cleanup).toMatchObject({ kind: "physically-deleted", deletionOperationId: test.operation.id });
+      expect(test.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+      expect(test.run.canaries[1].outcome.report.qualified).toBe(false);
+      expect(native.owner).not.toHaveBeenCalled(); expect(native.tuple).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it.each(["smoke", "full"] as const)("completes the exact three-kind %s matrix while preserving pending native storage and named holds", async profile => {
+    const test = await historicalFixture(), native = nativeHarness(test, true, true, profile);
+    try {
+      const receipt = await promoteWorker(native.input, native.deps);
+      expect(receipt).toMatchObject({ version: 3, qualificationProfile: profile, cleanup: { credentialCanaryResourcesDeleted: false,
+        pendingNativeStorage: { status: "pending", count: 3, physicalBytes: "unmeasured" } } });
+      expect(validateWorkerReceipt(receipt, native.input)).toEqual(receipt);
+      expect(native.allocations()).toBe(3); expect(native.core.poll).toHaveBeenCalledTimes(3);
+      expect(native.owner).toHaveBeenCalledOnce(); expect(native.tuple).toHaveBeenCalledOnce();
+      expect(native.audits.filter(audit => audit.action === "cloud.release_canary.storage_retired")).toHaveLength(3);
+      expect(native.audits.filter(audit => audit.action === "cloud.release_canary.retired")).toHaveLength(0);
+      expect(test.run.canaries.every((job: any) => job.phase === "completed" && job.retired && job.auditRetired.version === 2)).toBe(true);
+      expect(test.state.resources.images.filter((row: any) => row.purpose === "native-agent-qualification").every((row: any) =>
+        row.builder.deleted !== true && row.builder.physicalCleanup === undefined && row.builder.storageRetirement.operation.status === "blocked")).toBe(true);
+      expect(test.ledger().reservations.filter((row: any) => row.kind === "builder")).toEqual([expect.objectContaining({ snapshotName: test.candidate.snapshotId })]);
+      expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
+      expect(test.request.mock.calls.filter(([method]) => method === "DELETE")).toHaveLength(4);
+      expect(test.request.mock.calls.some(([method, route]) => method === "DELETE" && route.startsWith("/named-snapshots"))).toBe(false);
+    } finally { vi.unstubAllGlobals(); }
+  });
   it("persists truthful pending-storage provenance before freeing compute, retaining the named-image hold", async () => {
     const test = await fixture();
     expect(await test.adapter.build()).toEqual(test.candidate);
@@ -628,15 +1209,14 @@ describe("release-owned builder retirement composition", () => {
     expect(test.record.builder.deleted).toBe(false); expect(test.record.builder.reconcileUnconfirmed).toBe(true);
     expect(test.record.builder.cleanup.provenance).toBeDefined(); expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
   });
-  it("refuses a third channel name after compute release while allowing only one concurrent native builder", async () => {
+  it("admits a third channel name after compute release while allowing only one concurrent builder", async () => {
     const test = await fixture(); await test.adapter.cleanup();
     const next = workerSnapshotName(test.state, "f".repeat(64));
     const inventory = [...test.inventory, { provider: "boat", id: `dev-${test.state.owner}-${test.state.generation.slice(0, 8)}-rollback` }];
-    expect(() => assertWorkerSnapshotSlots("alpha", next, test.profile, inventory, test.ledger().reservations)).toThrow("channel slot");
-    await expect(reserveWorkerSlot(test.store, test.context.lease, test.profile, "alpha", next, inventory)).rejects.toThrow("image capacity reached");
-    const first = "66666666-6666-4666-8666-666666666666", second = "77777777-7777-4777-8777-777777777777";
-    await reserveHostedAdmission(test.store, test.state, test.profile, { kind: "builder", computeId: `canary:${first}` });
-    await expect(reserveHostedAdmission(test.store, test.state, test.profile, { kind: "builder", computeId: `canary:${second}` })).rejects.toThrow("admission cap");
+    expect(assertWorkerSnapshotSlots("alpha", next, test.profile, inventory, test.ledger().reservations).used).toBe(4);
+    await expect(reserveWorkerSlot(test.store, test.context.lease, test.profile, "alpha", next, inventory)).resolves.toBeDefined();
+    const first = "66666666-6666-4666-8666-666666666666";
+    await expect(reserveHostedAdmission(test.store, test.state, test.profile, { kind: "builder", computeId: `canary:${first}` })).rejects.toThrow("admission cap");
     expect(imageHold(test).snapshotReleasedAt).toBeUndefined();
   });
 });

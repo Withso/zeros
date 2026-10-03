@@ -401,7 +401,7 @@ export function PrStatusIsland({
     lastRequestAtRef.current = Date.now();
     let cancelled = false;
     void Promise.allSettled([
-      statusForGeneration(workspace.id, refreshKey),
+      statusForGeneration(workspace.id, refreshKey, workspace.path),
       changeCountsForGeneration(workspace.id, refreshKey),
       ghPrGet({ workspaceId: workspace.id, prNumber }),
       ghPrChecks({ workspaceId: workspace.id, prNumber }),
@@ -439,6 +439,7 @@ export function PrStatusIsland({
   }, [
     active,
     workspace.id,
+    workspace.path,
     workspace.prState,
     workspace.repoSlug,
     prNumber,

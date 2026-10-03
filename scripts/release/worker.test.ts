@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { fixedCanaryOutcome } from "./worker-canary";
 import { promoteWorker, WorkerReceipt, validateWorkerReceipt, type WorkerDependencies } from "./worker";
 import { buildBoatImage } from "./worker-adapters";
 import { workerConnections } from "./worker-test-fixtures";
@@ -33,6 +34,39 @@ function harness() {
   return { calls, deps };
 }
 describe("worker lane stub contracts", () => {
+  it("keeps private diagnostics out of approved native evidence and strict public worker receipts", async () => {
+    const { deps } = harness(), original = deps.qualify;
+    let saved: any;
+    deps.saveEvidence = async evidence => { saved = evidence; };
+    deps.qualify = async (candidate, kind) => {
+      const result = await original(candidate, kind), raw = result.outcome as any;
+      const outcome = fixedCanaryOutcome({ ...raw, report: { ...raw.report, phase: "revocation", activity: { toolEvents: 4 } } },
+        { kind, model: result.connection.model, image: candidate });
+      expect(outcome.report).toHaveProperty("diagnostics", { phase: "revocation", activity: { toolEvents: 4 } });
+      return { ...result, outcome };
+    };
+    const receipt = await promoteWorker(input, deps);
+    expect(saved).toBeDefined();
+    expect(JSON.stringify(saved)).not.toContain("diagnostics");
+    expect(JSON.stringify(saved)).not.toContain("toolEvents");
+    expect(JSON.stringify(receipt)).not.toContain("diagnostics");
+    expect(JSON.stringify(receipt)).not.toContain("toolEvents");
+    expect(validateWorkerReceipt(receipt, input)).toEqual(receipt);
+    expect(WorkerReceipt.safeParse({ ...receipt, diagnostics: { phase: "revocation" } }).success).toBe(false);
+  });
+  it("issues an explicitly pending v3 handoff only after all three real native reports pass", async () => {
+    const { calls, deps } = harness(), original = deps.cleanup, qualify = vi.fn(deps.qualify); deps.qualify = qualify;
+    deps.cleanup = async () => ({ ...await original(), credentialCanaryResourcesDeleted: false,
+      pendingNativeStorage: { status: "pending", count: 3, proofSha256: "a".repeat(64), physicalBytes: "unmeasured" } }) as any;
+    const receipt = await promoteWorker(input, deps);
+    expect(qualify.mock.calls.map(([, kind]) => kind)).toEqual(input.kinds);
+    expect(receipt).toMatchObject({ version: 3, cleanup: { credentialCanaryResourcesDeleted: false, pendingNativeStorage: { status: "pending", count: 3 } } });
+    expect(calls).toContain("tuple"); expect(validateWorkerReceipt(receipt, input)).toEqual(receipt);
+    expect(WorkerReceipt.safeParse({ ...receipt, version: 2 }).success).toBe(false);
+    expect(WorkerReceipt.safeParse({ ...receipt, version: 1, resourcesDeleted: true }).success).toBe(false);
+    expect(WorkerReceipt.safeParse({ ...receipt, cleanup: { ...receipt.cleanup, credentialCanaryResourcesDeleted: true } }).success).toBe(false);
+    expect(WorkerReceipt.safeParse({ ...receipt, cleanup: { ...receipt.cleanup, pendingNativeStorage: { status: "deleted", count: 3, proofSha256: "a".repeat(64), physicalBytes: "unmeasured" } } }).success).toBe(false);
+  });
   it("emits a v2 receipt without the v1 blanket physical-erasure claim", async () => {
     const { deps } = harness();
     const receipt = await promoteWorker(input, deps);

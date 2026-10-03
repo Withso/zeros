@@ -148,17 +148,67 @@ describe("previously opened folder workspaces", () => {
     expect(initialized.path).toBe(folder.repoRoot);
   });
 
-  it("keeps previously opened roots reachable after Git changes", () => {
+  it.each([true, undefined])(
+    "does not restore local main from saved checkout history with Git capability %s",
+    (isGitRepository) => {
+      const project = { ...folder, isGitRepository };
+      const cwd = `${project.repoRoot}/packages/app`;
+      const rows: Workspace[] = [];
+      expect(
+        withFolderWorkspaces([project], rows, new Set([project.repoRoot, cwd]), {
+          [project.repoRoot]: cwd,
+        }),
+      ).toBe(rows);
+
+      const managed = {
+        ...buildLocalMainWorkspace(project),
+        id: "ws_main_branch",
+        path: "/worktrees/main",
+      };
+      const managedRows = [managed];
+      expect(
+        withFolderWorkspaces([project], managedRows, new Set([cwd])),
+      ).toBe(managedRows);
+    },
+  );
+
+  it("does not assign a nested Git checkout's saved chats to its plain-folder parent", () => {
+    const nested = {
+      ...folder,
+      id: "proj_nested",
+      repoRoot: `${folder.repoRoot}/nested`,
+      repoSlug: "nested",
+      isGitRepository: true,
+    };
+    const rows: Workspace[] = [];
+    expect(
+      withFolderWorkspaces(
+        [folder, nested],
+        rows,
+        new Set([`${nested.repoRoot}/src`]),
+      ),
+    ).toBe(rows);
+  });
+
+  it("keeps cloud primary workspaces in their catalog", () => {
+    const path =
+      "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const project = { ...folder, repoRoot: path, isGitRepository: true };
+    const rows: Workspace[] = [
+      {
+        ...buildLocalMainWorkspace(project),
+        id: path,
+        placement: "cloud",
+      },
+    ];
+    expect(withFolderWorkspaces([project], rows, new Set([path]))).toBe(rows);
+  });
+
+  it("keeps previously opened plain folders reachable", () => {
     const opened = new Set([folder.repoRoot]);
-    for (const isGitRepository of [false, true]) {
-      const [workspace] = withFolderWorkspaces(
-        [{ ...folder, isGitRepository }],
-        [],
-        opened,
-      );
-      expect(workspace.path).toBe(folder.repoRoot);
-      expect(workspace.id).toBe("local:to-do-app");
-    }
+    const [workspace] = withFolderWorkspaces([folder], [], opened);
+    expect(workspace.path).toBe(folder.repoRoot);
+    expect(workspace.id).toBe("local:to-do-app");
     expect(withFolderWorkspaces([], [], opened)).toEqual([]);
     expect(withFolderWorkspaces([folder], [], new Set(["/other"]))).toEqual([]);
   });

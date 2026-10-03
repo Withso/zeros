@@ -31,72 +31,33 @@ onlyBuiltDependencies:
 # same change as an Electron major-version update.
 overrides:
   node-abi: "^4.33.0"
-  # Transitive security floors. Each version stays within the consuming
-  # package's supported range; keep the override until its parent lock entry
-  # naturally resolves to an equal or newer release.
+  # Transitive security floors. Compatibility exceptions are documented beside
+  # their entries; keep each override until its parent lock entry naturally
+  # resolves to an equal or newer release.
   "@hono/node-server": "2.1.0"
   body-parser: "2.3.0"
-  fast-uri: "3.1.7"
+  fast-uri: "3.1.8"
   fflate: "0.4.9"
   hono: "4.13.7"
-  ip-address: "10.3.1"
+  ip-address: "10.7.1"
   js-yaml: "4.3.2"
   nanoid: "3.3.18"
   qs: "6.16.0"
 
-# Accepted undici advisories — reviewed 2026-09-04. Those entries share the same
-# story: the ONLY undici in the production graph is
-#   @cursor/sdk 1.0.28 → @connectrpc/connect-node 1.7.0 → undici 5.29.0
-# (`pnpm audit --prod` / `pnpm why undici`). The fixes land in undici >= 6.24
-# and 6.27 — a different major than connect-node 1.x's declared `^5.28.4`, with
-# no patched 5.x release. The newer @cursor/sdk 1.0.31 remains on @connectrpc
-# v1 and does not remove this dependency; upgrading that exact-pinned agent
-# runtime is a separate qualification. Forcing undici 6 through an override
-# would run a vendor SDK on an untested major on the agent-run path, a worse
-# trade than the exposure — which is nil in practice: connect-node's only
-# undici import is the `Headers` polyfill in node-headers-polyfill.js, applied
-# ONLY when Node < 18. The app always runs it on far newer Node (Electron's
-# embedded Node 24 in the packaged app, Node >= 22 in dev). None of the
-# vulnerable undici code —
-# WebSocket client, fetch, the HTTP client — ever executes.
-# Drop these entries once `pnpm why undici` shows the production path off 5.x
-# (a future @cursor/sdk on @connectrpc v2 removes undici entirely).
+# Cursor SDK 1.0.35 bundles its Node transport and no longer installs Undici 5.
+# Its former Busboy override and Undici advisory exceptions have been retired.
 auditConfig:
   ignoreGhsas:
     # Metadata-only: exact 1.4.0 backport, enforced before audit and by runtime pins.
     # Provenance/removal contract: scripts/node-forge-patch.json and THIRD-PARTY-NOTICES.md.
     - GHSA-86w9-cpqp-85rv
-    # high — WebSocket permessage-deflate unbounded memory (fixed 6.24.0)
-    - GHSA-vrm6-8vpv-qv8q
-    # high — WebSocket server_max_window_bits unhandled exception (fixed 6.24.0)
-    - GHSA-v9p9-hfj2-hcw8
-    # high — WebSocket fragment-count bypass DoS (fixed 6.27.0)
-    - GHSA-vxpw-j846-p89q
-    # moderate — fetch unbounded Content-Encoding decompression chain
-    - GHSA-g9mf-h72j-4rw9
-    # moderate — HTTP request/response smuggling
-    - GHSA-2mjp-6q6p-2qxm
-    # moderate — CRLF injection via `upgrade` option
-    - GHSA-4992-7rv2-5pvq
-    # moderate — HTTP header injection
-    - GHSA-p88m-4jfj-68fv
-    # moderate — downstream response mixing
-    - GHSA-8xcm-r25x-g524
-    # moderate — CRLF injection via blob-like body
-    - GHSA-m8rv-5g2x-5cg5
-    # moderate — cookie attribute injection
-    - GHSA-v3r7-h72x-cjcm
-    # low — HTTP response queue poisoning
-    - GHSA-35p6-xmwp-9g52
-    # low — Set-Cookie SameSite handling
-    - GHSA-g8m3-5g58-fq7m
 
 # ZSR is exact-pinned and patched as a reviewed runtime component. Any version
 # change must refresh this patch and rerun the live qualification matrix.
 patchedDependencies:
   # Retain fixed-width Ed25519 public keys with leading zero bytes.
   "ssh2@1.17.0": patches/ssh2@1.17.0.patch
-  "@anthropic-ai/sandbox-runtime@0.0.76": patches/@anthropic-ai__sandbox-runtime@0.0.76.patch
+  "@anthropic-ai/sandbox-runtime@0.0.78": patches/@anthropic-ai__sandbox-runtime@0.0.78.patch
   # Reject unconsumed nested RSA DigestAlgorithm elements; preserve valid signatures.
   "node-forge@1.4.0": patches/node-forge@1.4.0.patch
   # Keep the generated macOS keychain password separate from P12 passwords.

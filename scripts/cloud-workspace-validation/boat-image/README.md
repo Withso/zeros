@@ -128,8 +128,11 @@ deliberately a separate operator trust boundary: the web service cannot grant
 itself permission to use stored agent credentials. A changed base requires a
 rebuild; neither activation nor allocation silently falls back to another image.
 
-Admission reserves one of Boat's ten named slots under an account-scoped
-database lock, counting provider inventory plus outstanding reservations.
+Admission records the snapshot name under an account-scoped database lock,
+counting complete provider inventory plus outstanding reservations. Boat
+enforces the current plan's quota on capture; Zeros adds no numerical snapshot
+limit, so plan upgrades need no local quota setting. Rate-limit and budget
+errors remain distinguishable, and uncertain creates/captures keep their holds.
 Only managed `zeros-org-<uuid>` artifacts can be retired. The active image,
 previous image for rollback, every generation reference (including stopped or
 archived generations), all configured deployment bases, and base dependencies

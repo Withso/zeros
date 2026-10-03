@@ -5,7 +5,7 @@ import { CHANNELS, PromotionError, ReleaseIdentity, releaseSource, requireCheck 
 import { classifyChanges, changedFiles, assertCheckout, workerInputsSha256 } from "./source";
 import { githubClient } from "./github";
 import { jsonClient } from "./io";
-import { executeWorkerPromotion } from "./worker-run";
+import { executeWorkerPromotion, reconcileWorkerNativeStorage } from "./worker-run";
 import { workerExecutionConfig } from "./worker-config";
 import { validateWorkerReceipt } from "./worker";
 import { workerQualificationProfile } from "./worker-profile";
@@ -29,15 +29,16 @@ type ServicesProof = { channel: string; sourceSha: string; repository: string; b
 type Dependencies = {
   directory: string; assertCheckout: typeof assertCheckout; assertNoAgentEnv: typeof assertNoAgentEnv; assertTrigger: typeof assertWorkerTrigger;
   hash: typeof workerInputsSha256; changes: typeof changedFiles; assertCI(): Promise<void>; assertCurrent(): Promise<void>;
-  readIdentity(): Promise<unknown>; services(runId: string): Promise<ServicesProof>; execute: typeof executeWorkerPromotion; log(message: string): void;
+  readIdentity(): Promise<unknown>; services(runId: string): Promise<ServicesProof>; execute: typeof executeWorkerPromotion;
+  reconcile: typeof reconcileWorkerNativeStorage; log(message: string): void;
 };
 export async function workerMain(mode: string | undefined, env: NodeJS.ProcessEnv, overrides: Partial<Dependencies> = {}) {
   const source = releaseSource(env), github = githubClient(source, env);
   const deps: Dependencies = { directory: ".context/release", assertCheckout, assertNoAgentEnv, assertTrigger: assertWorkerTrigger, hash: workerInputsSha256,
     changes: changedFiles, assertCI: () => github.assertRequiredChecks(), assertCurrent: () => github.assertCurrent(),
     readIdentity: () => jsonClient()(`${CHANNELS[source.channel].api}/v1/release-identity`), services: runId => github.ownServicesReceipt(source.channel, runId),
-    execute: executeWorkerPromotion, log: console.log, ...overrides };
-  requireCheck(mode === "--plan" || mode === "--execute", "Worker lane requires --plan or --execute");
+    execute: executeWorkerPromotion, reconcile: reconcileWorkerNativeStorage, log: console.log, ...overrides };
+  requireCheck(["--plan", "--execute", "--reconcile-storage"].includes(mode ?? ""), "Worker lane requires --plan, --execute or --reconcile-storage");
   await mkdir(deps.directory, { recursive: true, mode: 0o700 });
   const receiptPath = path.join(deps.directory, "worker-receipt.json");
   await rm(receiptPath, { force: true });
@@ -47,10 +48,12 @@ export async function workerMain(mode: string | undefined, env: NodeJS.ProcessEn
   const plan = { version: 1, status: "plan", ...source, inputsChanged: classifyChanges(files).worker, inputsSha256,
     enabled: env.ZEROS_WORKER_PROMOTION === "enabled", qualificationProfile: workerQualificationProfile(files, requested),
     stages: ["exact-source-ci-services-workos", "shared-account-slot-admission", "credential-free-boat-image-kit", "owner-designated-native-canaries",
-      "physical-cleanup-proof", "same-owner-audited-plan-execute", "owner-role-deletion", "atomic-worker-tuple-skip-deploys", "run-bound-receipt"] };
+      "physical-or-certified-native-storage-retirement", "same-owner-audited-plan-execute", "owner-role-deletion", "atomic-worker-tuple-skip-deploys", "run-bound-receipt"] };
   await writeFile(path.join(deps.directory, "worker-plan.json"), `${JSON.stringify(plan, null, 2)}\n`, { mode: 0o600 });
   if (mode === "--plan") { deps.log("Worker plan saved; no provider mutations or qualification receipt issued."); return { receiptIssued: false }; }
   requireCheck(plan.enabled, "Worker promotion is disabled");
+  requireCheck(mode === "--reconcile-storage" ? env.WORKER_RECONCILE_STORAGE === "true" && env.WORKER_EXECUTE !== "true" : env.WORKER_RECONCILE_STORAGE !== "true",
+    "Worker storage reconciliation requires its exclusive protected intent");
   await deps.assertNoAgentEnv(); await deps.assertTrigger(env); await deps.assertCheckout(source.sourceSha);
   workerExecutionConfig(env);
   await deps.assertCI(); await deps.assertCurrent();
@@ -59,6 +62,11 @@ export async function workerMain(mode: string | undefined, env: NodeJS.ProcessEn
     parsed.data.migrations.state === "current" && parsed.data.migrations.head === parsed.data.migrations.expectedHead,
   "Worker execution requires the new exact-SHA API and current schema after hosted services");
   const identity = parsed.data;
+  if (mode === "--reconcile-storage") {
+    const reconciled = await deps.reconcile(env);
+    deps.log(`Observed ${reconciled} retained native cleanup records; no allocation, qualification, tuple update or receipt issued.`);
+    return { receiptIssued: false, reconciled };
+  }
   if (env.WORKER_RECEIPT_REQUIRED !== "true" && requested !== "full" && identity.ready && identity.cloud.enabled && identity.cloud.ready && identity.cloud.state === "healthy" &&
     identity.worker?.provider === "boat" && identity.workerQualified === true && await deps.hash(identity.worker.sourceSha) === inputsSha256) {
     deps.log("The selected worker is already qualified for identical committed inputs; reused without issuing a new receipt.");
@@ -77,7 +85,8 @@ export async function workerMain(mode: string | undefined, env: NodeJS.ProcessEn
   await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
   const artifact = `worker-promotion-${source.channel}-${source.sourceSha}`;
   if (env.GITHUB_OUTPUT) await appendFile(env.GITHUB_OUTPUT, `receipt_issued=true\nreceipt_artifact=${artifact}\n`);
-  if (env.GITHUB_STEP_SUMMARY) await appendFile(env.GITHUB_STEP_SUMMARY, `Worker ${profile} qualification succeeded for ${source.channel} at ${source.sourceSha}; cleanup and audited approval confirmed. API redeploy/final hosted receipt remain pending.\n`);
+  const storage = receipt.version === 3 ? ` Native physical storage remains pending for ${receipt.cleanup.pendingNativeStorage.count} unavailable canaries.` : "";
+  if (env.GITHUB_STEP_SUMMARY) await appendFile(env.GITHUB_STEP_SUMMARY, `Worker ${profile} qualification succeeded for ${source.channel} at ${source.sourceSha}; sandbox retirement and audited approval confirmed.${storage} API redeploy/final hosted receipt remain pending.\n`);
   deps.log(`Worker qualification succeeded for ${source.channel}; complete tuple selected with API deployment deferred to hosted finalization.`);
   return { receiptIssued: true, artifact };
 }

@@ -28,7 +28,7 @@ export async function runRestoredTerminalScopeSmoke({ page, check }) {
     .click();
   await page.getByRole("option", { name: "Terminal", exact: true }).click();
   const main = page.locator("[data-terminal-workbench]");
-  await expect(main).toContainText("Ready /terminal-fixture/a");
+  await expect(main).toContainText("Ready /terminal-fixture/a/worktree");
   const before = await page.evaluate(() => window.__zerosTerminalSmoke.state());
   const shell = before.tabs.find((tab) => tab.id === before.activeId);
   const originalNode = await main.locator(".xterm").elementHandle();
@@ -55,7 +55,7 @@ export async function runRestoredTerminalScopeSmoke({ page, check }) {
   );
   expect(restored.tabs.find((tab) => tab.id === shell.id)).toEqual(shell);
   expect(restored.activeId).toBe(shell.id);
-  await expect(main).toContainText("Ready /terminal-fixture/a");
+  await expect(main).toContainText("Ready /terminal-fixture/a/worktree");
   await page.getByRole("button", { name: "Workspace A", exact: true }).click();
   expect(
     await main
@@ -109,7 +109,7 @@ export async function runHiddenTerminalAttachmentSmoke({ page, check }) {
     .getByRole("tablist", { name: "Terminal sessions" })
     .getByRole("tab", { name: title, exact: true })
     .click();
-  await expect(terminal).toContainText("Ready /terminal-fixture/a");
+  await expect(terminal).toContainText("Ready /terminal-fixture/a/worktree");
   expect(
     (await terminal.locator(".xterm-rows").textContent()).match(
       /Parked output preserved/g,
@@ -154,7 +154,7 @@ export async function runRunTerminalTitleSmoke({ page, check }) {
   await page.evaluate(() => window.__zerosTerminalSmoke.finishRun("test"));
   const main = page.locator("[data-terminal-workbench]");
   await expect(main.locator("[data-terminal-session]")).toContainText(
-    "Ready /terminal-fixture/a",
+    "Ready /terminal-fixture/a/worktree",
   );
   await page.evaluate(() =>
     window.__zerosTerminalSmoke.setRunName("Integration Test"),

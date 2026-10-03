@@ -33,6 +33,7 @@ import {
 import { clearChangesFilters } from "../shell/workbench/tabs/changes-filter-store";
 import { forgetChangesSnapshots } from "../shell/workbench/tabs/changes-snapshot-cache";
 import { forgetPrCachesForWorkspace } from "../shell/pr/pr-cache-forget";
+import { forgetReviewCachesForFolders } from "../features/code-review/review-cache-forget";
 import { clearTerminalFolders } from "../shell/terminal/terminal-store";
 import { useSessionsStore } from "../features/agent/sessions-store";
 import { branchDisplayName } from "../shared/lib/branch-name";
@@ -288,6 +289,7 @@ function commitConfirmedDeletion(
   workspace: Workspace,
   dispatch: Dispatch,
 ): void {
+  const projects = loadProjects();
   unstable_batchedUpdates(() => {
     forgetWorkspaceVisibility(workspace.id);
     repointViewIfActive(workspace, dispatch);
@@ -306,9 +308,12 @@ function commitConfirmedDeletion(
   // the Changes snapshots. Archive intentionally does NOT purge: restore
   // reuses the id, and the retained caches repaint the restored PR instantly.
   forgetPrCachesForWorkspace(workspace.id);
+  forgetReviewCachesForFolders((folder) =>
+    workspaceOwnsFolder(workspace, folder, projects),
+  );
   forgetDesignWorkspaceBootSnapshot(workspace.id);
   forgetDesignWorkspaceView(workspace.id);
-  const project = findProjectForFolder(workspace.repoRoot, loadProjects());
+  const project = findProjectForFolder(workspace.repoRoot, projects);
   clearTerminalFolders([workspace.path], project?.id);
   clearChatPaneFolders([workspace.path], project?.id);
   dispatch({

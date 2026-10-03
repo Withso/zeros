@@ -27,27 +27,27 @@ a vendor grants redistribution rights beyond its stated terms.
 
 TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 ----------------------------------------------------
-- @anthropic-ai/claude-agent-sdk@0.3.274: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
-- @cursor/sdk@1.0.31: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
+- @anthropic-ai/claude-agent-sdk@0.3.288: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
+- @cursor/sdk@1.0.35: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (643 resolved package/version records)
+PACKAGE INVENTORY (641 resolved package/version records)
 -----------------
 
-@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.274
+@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.288
   License: SEE LICENSE IN LICENSE.md
   Surfaces: desktop packaged runtime (macOS arm64)
   Author: Anthropic <support@anthropic.com>
   Source: https://github.com/anthropics/claude-agent-sdk-typescript
   License documents: 8ce94b9478bb
 
-@anthropic-ai/claude-agent-sdk@0.3.274
+@anthropic-ai/claude-agent-sdk@0.3.288
   License: SEE LICENSE IN README.md
   Surfaces: root pnpm workspace
   Author: Anthropic <support@anthropic.com>
   Source: https://github.com/anthropics/claude-agent-sdk-typescript
   License documents: 8ce94b9478bb
 
-@anthropic-ai/sandbox-runtime@0.0.76
+@anthropic-ai/sandbox-runtime@0.0.78
   License: Apache-2.0
   Surfaces: root pnpm workspace
   Author: Anthropic PBC
@@ -424,12 +424,6 @@ PACKAGE INVENTORY (643 resolved package/version records)
   Source: https://code.haverbeke.berlin/codemirror/view
   License documents: 05c6130cda97
 
-@connectrpc/connect-node@1.7.0
-  License: Apache-2.0
-  Surfaces: root pnpm workspace
-  Source: https://github.com/connectrpc/connect-es
-  License documents: d17f227e4df5
-
 @connectrpc/connect-web@1.7.0
   License: Apache-2.0
   Surfaces: root pnpm workspace
@@ -442,13 +436,13 @@ PACKAGE INVENTORY (643 resolved package/version records)
   Source: https://github.com/connectrpc/connect-es
   License documents: d17f227e4df5
 
-@cursor/sdk-darwin-arm64@1.0.31
+@cursor/sdk-darwin-arm64@1.0.35
   License: SEE LICENSE IN LICENSE.md
   Surfaces: desktop packaged runtime (macOS arm64)
   Source: https://github.com/cursor/cursor
   License documents: 8d17330e28e3
 
-@cursor/sdk@1.0.31
+@cursor/sdk@1.0.35
   License: SEE LICENSE IN LICENSE.md
   Surfaces: root pnpm workspace
   Source: https://github.com/cursor/cursor
@@ -473,13 +467,6 @@ PACKAGE INVENTORY (643 resolved package/version records)
   Surfaces: root pnpm workspace
   Source: https://github.com/DecimalTurn/toml-patch
   License documents: eecb5c151fde
-
-@fastify/busboy@2.1.1
-  License: MIT
-  Surfaces: root pnpm workspace
-  Author: Brian White <mscdex@mscdex.net>
-  Source: https://github.com/fastify/busboy
-  License documents: 9f75981e6039
 
 @floating-ui/core@1.7.5
   License: MIT
@@ -769,19 +756,25 @@ PACKAGE INVENTORY (643 resolved package/version records)
 
 @openai/codex@0.154.0
   License: Apache-2.0
-  Surfaces: control plane, root pnpm workspace
-  Source: https://github.com/openai/codex
-  License documents: 9d71575ecfd9, d17f227e4df5
-
-@openai/codex@0.154.0-darwin-arm64
-  License: Apache-2.0
-  Surfaces: desktop packaged runtime (macOS arm64)
+  Surfaces: control plane
   Source: https://github.com/openai/codex
   License documents: 9d71575ecfd9, d17f227e4df5
 
 @openai/codex@0.154.0-linux-x64
   License: Apache-2.0
   Surfaces: control plane native runtime (Linux x64)
+  Source: https://github.com/openai/codex
+  License documents: 9d71575ecfd9, d17f227e4df5
+
+@openai/codex@0.160.0
+  License: Apache-2.0
+  Surfaces: root pnpm workspace
+  Source: https://github.com/openai/codex
+  License documents: 9d71575ecfd9, d17f227e4df5
+
+@openai/codex@0.160.0-darwin-arm64
+  License: Apache-2.0
+  Surfaces: desktop packaged runtime (macOS arm64)
   Source: https://github.com/openai/codex
   License documents: 9d71575ecfd9, d17f227e4df5
 
@@ -2054,7 +2047,7 @@ diff3@0.0.3
   Source: https://github.com/axosoft/diff3
   License documents: 765c480a75a5
 
-dompurify@3.4.13
+dompurify@3.4.16
   License: (MPL-2.0 OR Apache-2.0)
   Surfaces: root pnpm workspace
   Author: Dr.-Ing. Mario Heiderich, Cure53 <mario@cure53.de> (https://cure53.de/)
@@ -2082,7 +2075,7 @@ electron-updater@6.8.9
   Source: https://github.com/electron-userland/electron-builder
   License documents: 3f13dd7700ec
 
-electron@43.2.0
+electron@43.7.7
   License: MIT
   Surfaces: desktop runtime
   Author: Electron Community
@@ -2247,7 +2240,7 @@ fast-sha256@1.3.0
   Source: https://github.com/dchest/fast-sha256-js
   License documents: 88d9b4eb6057
 
-fast-uri@3.1.7
+fast-uri@3.1.8
   License: BSD-3-Clause
   Surfaces: root pnpm workspace
   Author: Vincent Le Goff <vince.legoff@gmail.com> (https://github.com/zekth)
@@ -2549,7 +2542,7 @@ inline-style-parser@0.2.7
   Source: https://github.com/remarkablemark/inline-style-parser
   License documents: 395c95f20598
 
-ip-address@10.3.1
+ip-address@10.7.1
   License: MIT
   Surfaces: root pnpm workspace
   Author: Beau Gunderson <beau@beaugunderson.com> (https://beaugunderson.com/)
@@ -4117,12 +4110,6 @@ typescript-language-server@5.1.3
   Source: https://github.com/typescript-language-server/typescript-language-server
   License documents: 899d21038f87
 
-undici@5.29.0
-  License: MIT
-  Surfaces: root pnpm workspace
-  Source: https://github.com/nodejs/undici
-  License documents: a6db8096b270
-
 unified@11.0.5
   License: MIT
   Surfaces: marketing standalone deployment, root pnpm workspace
@@ -4360,7 +4347,7 @@ zwitch@2.0.4
   Source: https://github.com/wooorm/zwitch
   License documents: ca4662cb5d1b
 
-LICENSE AND NOTICE TEXTS (288 unique documents)
+LICENSE AND NOTICE TEXTS (287 unique documents)
 ------------------------
 
 ================================================================================
@@ -5974,8 +5961,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 1210bc93eb85
 SHA-256: 1210bc93eb85dd786c33192d5bcb7153a93922fa99fbc1512af6a7199cb41080
-Applies to: @anthropic-ai/sandbox-runtime@0.0.76
-Source labels: @anthropic-ai/sandbox-runtime@0.0.76 — LICENSE
+Applies to: @anthropic-ai/sandbox-runtime@0.0.78
+Source labels: @anthropic-ai/sandbox-runtime@0.0.78 — LICENSE
 ================================================================================
 
                                  Apache License
@@ -6694,8 +6681,8 @@ OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHE
 ================================================================================
 DOCUMENT 1f256ecad192
 SHA-256: 1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5
-Applies to: dompurify@3.4.13
-Source labels: dompurify@3.4.13 — LICENSE-MPL
+Applies to: dompurify@3.4.16
+Source labels: dompurify@3.4.16 — LICENSE-MPL
 ================================================================================
 
 Mozilla Public License Version 2.0
@@ -9009,8 +8996,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT 5154e165bd6c
 SHA-256: 5154e165bd6c2cc0cfbcd8916498c7abab0497923bafcd5cb07673fe8480087d
-Applies to: electron@43.2.0
-Source labels: electron@43.2.0 — LICENSE
+Applies to: electron@43.7.7
+Source labels: electron@43.7.7 — LICENSE
 ================================================================================
 
 Copyright (c) Electron contributors
@@ -11632,8 +11619,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 DOCUMENT 8ce94b9478bb
 SHA-256: 8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a
-Applies to: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.274, @anthropic-ai/claude-agent-sdk@0.3.274
-Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.274 — terms supplied by @anthropic-ai/claude-agent-sdk@0.3.274 — LICENSE.md; @anthropic-ai/claude-agent-sdk@0.3.274 — LICENSE.md
+Applies to: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.288, @anthropic-ai/claude-agent-sdk@0.3.288
+Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.288 — terms supplied by @anthropic-ai/claude-agent-sdk@0.3.288 — LICENSE.md; @anthropic-ai/claude-agent-sdk@0.3.288 — LICENSE.md
 ================================================================================
 
 © Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.
@@ -11641,8 +11628,8 @@ Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.274 — terms sup
 ================================================================================
 DOCUMENT 8d17330e28e3
 SHA-256: 8d17330e28e36f8fef39ccc6facd4b7ddc2855313b679b394f0547dde44408c4
-Applies to: @cursor/sdk-darwin-arm64@1.0.31, @cursor/sdk@1.0.31
-Source labels: @cursor/sdk-darwin-arm64@1.0.31 — terms supplied by @cursor/sdk@1.0.31 — LICENSE.md; @cursor/sdk@1.0.31 — LICENSE.md
+Applies to: @cursor/sdk-darwin-arm64@1.0.35, @cursor/sdk@1.0.35
+Source labels: @cursor/sdk-darwin-arm64@1.0.35 — terms supplied by @cursor/sdk@1.0.35 — LICENSE.md; @cursor/sdk@1.0.35 — LICENSE.md
 ================================================================================
 
 # Cursor SDK License
@@ -11941,8 +11928,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 9d71575ecfd9
 SHA-256: 9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915
-Applies to: @openai/codex@0.154.0, @openai/codex@0.154.0-darwin-arm64, @openai/codex@0.154.0-linux-x64
-Source labels: @openai/codex@0.154.0 generated protocol — NOTICE; @openai/codex@0.154.0-darwin-arm64 staged native runtime — NOTICE; @openai/codex@0.154.0-linux-x64 staged native runtime — NOTICE
+Applies to: @openai/codex@0.154.0, @openai/codex@0.154.0-linux-x64, @openai/codex@0.160.0, @openai/codex@0.160.0-darwin-arm64
+Source labels: @openai/codex@0.154.0 generated protocol — NOTICE; @openai/codex@0.154.0-linux-x64 staged native runtime — NOTICE; @openai/codex@0.160.0 generated protocol — NOTICE; @openai/codex@0.160.0-darwin-arm64 staged native runtime — NOTICE
 ================================================================================
 
 OpenAI Codex
@@ -12043,8 +12030,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 9f75981e6039
 SHA-256: 9f75981e6039d13bf2e591c59e9c89a2641ca605fde59ba78974b11553f6c148
-Applies to: @fastify/busboy@2.1.1, buildcheck@0.0.7, cpu-features@0.0.10, ssh2@1.17.0
-Source labels: @fastify/busboy@2.1.1 — LICENSE; buildcheck@0.0.7 — LICENSE; cpu-features@0.0.10 — LICENSE; ssh2@1.17.0 — LICENSE
+Applies to: buildcheck@0.0.7, cpu-features@0.0.10, ssh2@1.17.0
+Source labels: buildcheck@0.0.7 — LICENSE; cpu-features@0.0.10 — LICENSE; ssh2@1.17.0 — LICENSE
 ================================================================================
 
 Copyright Brian White. All rights reserved.
@@ -12286,35 +12273,6 @@ Source labels: hono@4.13.7 — LICENSE
 MIT License
 
 Copyright (c) 2021 - present, Yusuke Wada and Hono contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
-DOCUMENT a6db8096b270
-SHA-256: a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27
-Applies to: undici@5.29.0
-Source labels: undici@5.29.0 — LICENSE
-================================================================================
-
-MIT License
-
-Copyright (c) Matteo Collina and Undici contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -14382,8 +14340,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT cfc7749b96f6
 SHA-256: cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
-Applies to: dompurify@3.4.13
-Source labels: dompurify@3.4.13 — LICENSE
+Applies to: dompurify@3.4.16
+Source labels: dompurify@3.4.16 — LICENSE
 ================================================================================
 
 
@@ -14652,8 +14610,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT d17f227e4df5
 SHA-256: d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc
-Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @daytona/api-client@0.214.0, @daytona/toolbox-api-client@0.214.0, @openai/codex@0.154.0, @openai/codex@0.154.0-darwin-arm64, @openai/codex@0.154.0-linux-x64, clean-git-ref@2.0.1
-Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/api-client@0.214.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/toolbox-api-client@0.214.0 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.154.0 generated protocol — LICENSE; @openai/codex@0.154.0-darwin-arm64 staged native runtime — LICENSE; @openai/codex@0.154.0-linux-x64 staged native runtime — LICENSE; clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
+Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @daytona/api-client@0.214.0, @daytona/toolbox-api-client@0.214.0, @openai/codex@0.154.0, @openai/codex@0.154.0-linux-x64, @openai/codex@0.160.0, @openai/codex@0.160.0-darwin-arm64, clean-git-ref@2.0.1
+Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/api-client@0.214.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/toolbox-api-client@0.214.0 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.154.0 generated protocol — LICENSE; @openai/codex@0.154.0-linux-x64 staged native runtime — LICENSE; @openai/codex@0.160.0 generated protocol — LICENSE; @openai/codex@0.160.0-darwin-arm64 staged native runtime — LICENSE; clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
 ================================================================================
 
                                  Apache License
@@ -15619,8 +15577,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT df7464922225
 SHA-256: df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
-Applies to: fast-uri@3.1.7
-Source labels: fast-uri@3.1.7 — LICENSE
+Applies to: fast-uri@3.1.8
+Source labels: fast-uri@3.1.8 — LICENSE
 ================================================================================
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -16936,8 +16894,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 DOCUMENT f8d791359a50
 SHA-256: f8d791359a50cbcac82c29cb7b0b1b889b28be76fdd35b8ee33f0f7c8704702a
-Applies to: ip-address@10.3.1
-Source labels: ip-address@10.3.1 — LICENSE
+Applies to: ip-address@10.7.1
+Source labels: ip-address@10.7.1 — LICENSE
 ================================================================================
 
 Copyright (C) 2011 by Beau Gunderson

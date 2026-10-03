@@ -1,7 +1,10 @@
 import type { ChangeLineCounts, Workspace } from "../platform/git";
 import { branchDisplayName } from "../shared/lib/branch-name";
-import { buildLocalMainWorkspace } from "../state/local-main-workspace";
-import type { Project } from "../state/projects-store";
+import {
+  buildLocalMainWorkspace,
+  canRestoreFolderWorkspace,
+} from "../state/local-main-workspace";
+import { normalizeProjectRoot, type Project } from "../state/projects-store";
 import {
   findWorkspaceForFolder,
   workspaceIdFromWorktreePath,
@@ -45,8 +48,8 @@ export function leftmostLiveWorkspace(
  * no remembered workspace”. A confirmed list may invalidate a deleted target;
  * an unresolved list preserves the complete remembered identity immediately.
  *
- * Prefer managed worktrees when available. The original folder remains a
- * compatibility fallback for existing root-bound chats and cold snapshots. */
+ * Prefer managed worktrees when available. Local Git checkouts never become
+ * workspace destinations, even when an older build remembered their paths. */
 export function resolveRepoWorkspaceDestination(args: {
   project: Project;
   rememberedFolder: string | null | undefined;
@@ -56,7 +59,9 @@ export function resolveRepoWorkspaceDestination(args: {
   const accessibleCachedWorkspaces = cachedWorkspaces;
   const rememberedFolder = args.rememberedFolder;
   if (!rememberedFolder) return leftmostLiveWorkspace(cachedWorkspaces);
-  const main = buildLocalMainWorkspace(project);
+  const main = canRestoreFolderWorkspace(project)
+    ? buildLocalMainWorkspace(project)
+    : null;
   const matched = accessibleCachedWorkspaces
     ? findWorkspaceForFolder(rememberedFolder, accessibleCachedWorkspaces)
     : null;
@@ -70,7 +75,7 @@ export function resolveRepoWorkspaceDestination(args: {
       ? matched
       : { ...matched, path: rememberedFolder };
   }
-  if (findWorkspaceForFolder(rememberedFolder, [main])) {
+  if (main && findWorkspaceForFolder(rememberedFolder, [main])) {
     // The remembered folder is the primary checkout (or a directory below it).
     // A cold list can't prove a worktree exists, so it keeps the remembered
     // identity rather than guessing — the warm case is the one that redirects.
@@ -80,7 +85,11 @@ export function resolveRepoWorkspaceDestination(args: {
       ? main
       : { path: rememberedFolder, repoRoot: project.repoRoot };
   }
-  if (accessibleCachedWorkspaces === undefined) {
+  if (
+    accessibleCachedWorkspaces === undefined &&
+    normalizeProjectRoot(rememberedFolder) !==
+      normalizeProjectRoot(project.repoRoot)
+  ) {
     const workspaceId = workspaceIdFromWorktreePath(rememberedFolder);
     return {
       path: rememberedFolder,

@@ -1,6 +1,8 @@
 import { CHANNELS, HostedReceipt, ReleaseIdentity, WorkerIdentity, requireCheck, type Channel, type Surface } from "./contracts";
 
-type Candidate = { channel: Channel; sourceSha: string; branch: string; repository: string; runId: string; cloudRequired: boolean; provider?: string };
+type Candidate = { channel: Channel; sourceSha: string; branch: string; repository: string; runId: string; cloudRequired: boolean;
+  /** False while worker promotion is off: cloud ships on the API's current worker state. */
+  requireQualifiedWorker: boolean; provider?: string };
 
 /** The signed build baked its cloud capability in at compile time. A protected
  * variable changed before a publication retry must not reinterpret it. */
@@ -25,7 +27,7 @@ export async function publicationGate(config: Candidate, deps: {
     identity.migrations.head === expected.migrations.head && identity.migrations.expectedHead === expected.migrations.expectedHead &&
     identity.migrations.manifestSha256 === expected.migrations.manifestSha256 && identity.cloud.enabled === expected.cloud.enabled &&
     JSON.stringify(identity.worker) === JSON.stringify(expected.worker), "Channel state superseded the hosted receipt; desktop publication refused");
-  if (config.cloudRequired) requireCheck(identity.cloud.enabled && identity.cloud.state === "healthy" && identity.workerQualified === true &&
+  if (config.requireQualifiedWorker) requireCheck(identity.cloud.enabled && identity.cloud.state === "healthy" && identity.workerQualified === true &&
     WorkerIdentity.safeParse(expected.worker).success && identity.worker?.provider === config.provider,
   "Current cloud qualification does not authorize desktop publication");
   const surfaces: Surface[] = CHANNELS[config.channel].ops ? ["app", "ops"] : ["app"];

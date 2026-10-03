@@ -480,6 +480,70 @@ describe("applyCursorReasoning (pure) — Effort/Fast pills swap to a variant id
 });
 
 describe("CursorSdkAdapter — model is always passed AND validated", () => {
+  it.each(["low", "medium", "high", "xhigh"].flatMap((effort) =>
+    [false, true].map((fast) => ({ effort, fast })),
+  ))("passes Grok 4.7 $effort / Fast=$fast before discovery on create, send and resume", async ({ effort, fast }) => {
+    const env = {
+      CURSOR_API_KEY: "key_test",
+      CURSOR_MODEL: "grok-4.7",
+      ZEROS_THINKING_EFFORT: effort,
+      ZEROS_FAST_MODE: fast ? "1" : "0",
+    };
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      const fresh = await adapter.newSession({ cwd: "/tmp/proj", env });
+      await adapter.prompt({ sessionId: fresh.session.sessionId, prompt: TEXT });
+      await adapter.loadSession({
+        executionId: "resumed-grok-47",
+        sessionId: "prior-grok-47",
+        cwd: "/tmp/proj",
+        env,
+      });
+      const expected = {
+        id: "grok-4.7",
+        params: [{ id: "reasoning_effort", value: effort }, { id: "fast", value: String(fast) }],
+      };
+      expect(createSpy.mock.calls[0][0].model).toEqual(expected);
+      expect(sendSpy.mock.calls[0][1].model).toEqual(expected);
+      expect(resumeSpy.mock.calls.at(-1)?.[1].model).toEqual(expected);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
+  it("preserves Grok 4.7's live context variant while overriding native reasoning and Fast parameters", async () => {
+    modelsListSpy.mockResolvedValue([{
+      id: "grok-4.7",
+      displayName: "Grok 4.7",
+      parameters: [
+        { id: "context", values: [{ value: "256k" }, { value: "500k" }] },
+        { id: "reasoning_effort", values: ["low", "medium", "high", "xhigh"].map((value) => ({ value })) },
+        { id: "fast", values: [{ value: "false" }, { value: "true" }] },
+      ],
+      variants: [{
+        displayName: "Grok 4.7 High Fast",
+        params: [{ id: "context", value: "500k" }, { id: "reasoning_effort", value: "high" }, { id: "fast", value: "true" }],
+        isDefault: true,
+      }],
+    }]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const env = { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "grok-4.7", ZEROS_THINKING_EFFORT: "xhigh", ZEROS_FAST_MODE: "0" };
+    try {
+      const fresh = await adapter.newSession({ cwd: "/tmp/proj", env });
+      await adapter.prompt({ sessionId: fresh.session.sessionId, prompt: TEXT });
+      await adapter.loadSession({ executionId: "resumed-grok-47", sessionId: "prior-grok-47", cwd: "/tmp/proj", env });
+      const expected = {
+        id: "grok-4.7",
+        params: [{ id: "context", value: "500k" }, { id: "reasoning_effort", value: "xhigh" }, { id: "fast", value: "false" }],
+      };
+      expect(createSpy.mock.calls[0][0].model).toEqual(expected);
+      expect(sendSpy.mock.calls[0][1].model).toEqual(expected);
+      expect(resumeSpy.mock.calls.at(-1)?.[1].model).toEqual(expected);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
   it("preserves cold Auto and its Fast request instead of coercing to Composer", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     const { session } = await adapter.newSession({

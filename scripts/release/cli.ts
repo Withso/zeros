@@ -11,7 +11,7 @@ import { WorkerReceipt, validateWorkerReceipt } from "./worker";
 import { reusableWorker } from "./worker-reuse";
 import type { z } from "zod";
 
-async function main() {
+export async function main() {
   const mode = process.argv[2];
   requireCheck(["--plan", "--execute", "--services", "--finalize"].includes(mode), "Usage: cli.ts --plan|--execute|--services|--finalize");
   const config = promotionConfig(process.env, { migrations: mode !== "--finalize" });

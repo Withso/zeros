@@ -66,7 +66,8 @@ export function releaseCanaryBroker(config: PromotionConfig, env: NodeJS.Process
       const input = ReleaseCanaryRetirementSchema.safeParse({ version: 1, operationId, deletionOperationId, leaseToken });
       requireCheck(input.success, "Release canary retirement identity is invalid");
       const result = await request("retirements", input.data, signal);
-      requireCheck(result.retired === true && Object.keys(result).length === 1, "Release canary terminal reconciliation is unconfirmed");
+      requireCheck(result.retired === true && (Object.keys(result).length === 1 || result.storagePending === true && Object.keys(result).length === 2), "Release canary terminal reconciliation is unconfirmed");
+      return result.storagePending === true ? "storage-pending" as const : "physically-deleted" as const;
     },
   };
 }

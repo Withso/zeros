@@ -54,6 +54,40 @@ const protectedBoundary: ExecutionBoundaryStatus = {
   checkedAt: 1,
 };
 
+describe("October 2026 model controls", () => {
+  const fullEffort = ["low", "medium", "high", "xhigh", "max", "ultracode"];
+  const cases = [
+    { family: "codex", value: "gpt-6.1-sol", label: "GPT-6.1 Sol", levels: fullEffort, fast: true },
+    { family: "codex", value: "gpt-6-sol", label: "GPT-6 Sol", levels: fullEffort, fast: true },
+    { family: "codex", value: "gpt-6-luna", label: "GPT-6 Luna", levels: fullEffort.slice(0, -1), fast: true },
+    { family: "claude", value: "claude-opus-5-5[1m]", label: "Opus 5.5", levels: fullEffort, fast: true },
+    { family: "claude", value: "claude-sonnet-5-5[1m]", label: "Sonnet 5.5", levels: fullEffort.slice(0, -1), fast: false },
+    { family: "cursor", value: "grok-4.7", label: "Grok 4.7", levels: fullEffort.slice(0, 4), fast: true },
+    { family: "cursor", value: "grok-4.6", label: "Grok 4.6", levels: fullEffort.slice(0, 4), fast: true },
+  ];
+
+  it.each(cases)("offers $label with its exact identity and controls before discovery", ({ family, value, label, levels, fast }) => {
+    const model = modelsForAgent(family, null).find((entry) => entry.value === value);
+    expect(model).toBeDefined();
+    expect(displayModelLabel(family, model!.label)).toBe(label);
+    expect(familyForModelValue(value)).toBe(family);
+    expect(effortLevelsFor(family, value)).toEqual(levels);
+    expect(agentSupportsFast(family, value)).toBe(fast);
+  });
+
+  it("keeps new-model capability restrictions scoped to the exact live model", () => {
+    const initialize = {
+      _meta: { models: [{ value: "gpt-6-luna", label: "Live Luna", effortLevels: ["medium"], supportsFast: false }] },
+    } as Parameters<typeof modelsForAgent>[1];
+    expect(effortLevelsFor("codex", "gpt-6-luna", initialize)).toEqual(["medium"]);
+    expect(agentSupportsFast("codex", "gpt-6-luna", initialize)).toBe(false);
+    expect(effortLevelsFor("codex", "gpt-6.1-sol", initialize)).toEqual(fullEffort);
+    expect(agentSupportsFast("codex", "gpt-6.1-sol", initialize)).toBe(true);
+    expect(effortLabel("codex", "ultracode")).toBe("Ultra");
+    expect(effortLabel("claude", "ultracode")).toBe("Ultracode");
+  });
+});
+
 describe("agentFamily", () => {
   const cases: Array<[string, string]> = [
     ["claude", "claude"],
@@ -383,7 +417,7 @@ describe("modelsForAgent — provider renames never reach the UI", () => {
     );
     expect(cursorLabels.get("default")).toBe("Auto");
     expect(cursorLabels.get("composer-2.5")).toBe("Composer 2.5");
-    expect(cursorLabels.get("grok-4.6")).toBe("Cursor Grok 4.6");
+    expect(cursorLabels.get("grok-4.6")).toBe("Grok 4.6");
   });
 
   it("keeps the curated name for a live-gated row the account still advertises", () => {

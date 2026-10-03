@@ -28,7 +28,7 @@ export function cloudProvisionConfig(env: NodeJS.ProcessEnv) {
     if (env.CLOUD_PROVISION_CONFIRM !== env.PLANETSCALE_DATABASE) reject("CLOUD_PROVISION_CONFIRM");
     if (env.GITHUB_ACTIONS !== "true" || env.CI !== "true" || env.GITHUB_EVENT_NAME !== "workflow_dispatch" || env.GITHUB_HEAD_REF) reject("GITHUB_EVENT_NAME");
   }
-  const config: PromotionConfig = { ...source, ...CHANNELS[source.channel], cloudRequired: false, provider: "boat",
+  const config: PromotionConfig = { ...source, ...CHANNELS[source.channel], cloudRequired: false, requireQualifiedWorker: false, provider: "boat",
     runId: env.GITHUB_RUN_ID ?? "", runAttempt: env.GITHUB_RUN_ATTEMPT ?? "",
     projectId: env.RAILWAY_PROJECT_ID!, environmentId: env.RAILWAY_ENVIRONMENT_ID!, serviceId: env.RAILWAY_SERVICE_ID!,
     organization: "", database: env.PLANETSCALE_DATABASE!, databaseBranch: "main", accountId: "", surfaces: [] };

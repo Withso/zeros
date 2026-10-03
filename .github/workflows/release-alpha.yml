@@ -344,6 +344,7 @@ jobs:
       RELEASE_SHA: ${{ github.sha }}
       RELEASE_BRANCH: ${{ github.ref_name }}
       ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
+      ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
       CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
     steps:

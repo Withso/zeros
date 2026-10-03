@@ -71,6 +71,9 @@ import { runCodexTranscriptSmoke } from "./ui-smoke-codex-transcript.mjs";
 import { runSubscriptionSmoke } from "./ui-smoke-subscription.mjs";
 import { runFolderWorkspaceSmoke, runWorkspaceRecoveryNavigationSmoke } from "./ui-smoke-folder-workspace.mjs";
 import { runFolderReviewSmoke } from "./ui-smoke-folder-review.mjs";
+import { runGitReviewActionsSmoke } from "./ui-smoke-git-review-actions.mjs";
+import { runCodeReviewSmoke } from "./ui-smoke-code-review.mjs";
+import { runCodeReviewRetentionSmoke } from "./ui-smoke-review-retention.mjs";
 import { runFolderFilesSmoke } from "./ui-smoke-folder-files.mjs";
 import { runCreateProjectSelectionSmoke, runFolderCreateSmoke, runFolderDesignSetupSmoke, runFolderAutoSetupSmoke, runStartFromScratchSmoke } from "./ui-smoke-folder-create.mjs";
 import { runRepoSettingsSmoke } from "./ui-smoke-repo-settings.mjs";
@@ -182,6 +185,13 @@ try {
     return created;
   };
   const createPage = await newPage({ viewport: { width: 1100, height: 780 } });
+  const reviewActionsPage = await newPage({ viewport: { width: 1100, height: 780 } });
+  await runGitReviewActionsSmoke({ page: reviewActionsPage, check, harnessBase });
+  await reviewActionsPage.close();
+  const codeReviewPage = await newPage({ viewport: { width: 1180, height: 900 } });
+  await runCodeReviewSmoke({ page: codeReviewPage, check, harnessBase });
+  await runCodeReviewRetentionSmoke({ page: codeReviewPage, check, harnessBase });
+  await codeReviewPage.close();
   await runCreateComposerSmoke({ page: createPage, check, harnessBase });
   await createPage.close();
   for (const runSourceFocusSmoke of [
@@ -544,8 +554,7 @@ try {
   const catalogRow = (label) =>
     catalog()
       .locator("[data-model-catalog-item]")
-      .filter({ hasText: label })
-      .first();
+      .filter({ has: page.getByText(label, { exact: true }) });
   const catalogEditButton = (label) =>
     catalogRow(label).getByRole("button", {
       name: `Edit settings for ${label}`,
@@ -752,6 +761,9 @@ try {
     "active model row shows default High effort",
     ((await catalogRow("Opus 5").textContent()) ?? "").includes("High"),
   );
+  for (const label of ["Opus 5.5", "Sonnet 5.5", "GPT-6 Sol", "GPT-6.1 Sol", "GPT-6 Luna", "Grok 4.7"]) {
+    check(`${label} appears once in the existing model catalog`, (await catalogRow(label).count()) === 1);
+  }
   const claudeGroup = catalog().getByRole("group", { name: "Claude Code" });
   // Read related geometry in one browser frame. Three separate boundingBox
   // calls can straddle the sidecar's entrance animation on a busy machine,
@@ -1187,7 +1199,7 @@ try {
     .getByRole("group", { name: "Cursor" })
     .locator("[data-model-section-title]")
     .hover();
-  const cursorName = catalogRow("Cursor Grok 4.6").locator("[data-model-name]");
+  const cursorName = catalogRow("Grok 4.6").locator("[data-model-name]");
   const cursorNameAtRest = await cursorName.evaluate((name) => ({
     clientWidth: name.clientWidth,
     scrollWidth: name.scrollWidth,
@@ -1198,9 +1210,9 @@ try {
     JSON.stringify(cursorNameAtRest),
   );
   const cursorRowHeightBeforeHover = await catalogRow(
-    "Cursor Grok 4.6",
+    "Grok 4.6",
   ).evaluate((row) => row.getBoundingClientRect().height);
-  const cursorActionOverlay = catalogRow("Cursor Grok 4.6").locator(
+  const cursorActionOverlay = catalogRow("Grok 4.6").locator(
     "[data-model-row-actions]",
   );
   const cursorActionLayout = await cursorActionOverlay
@@ -1209,9 +1221,9 @@ try {
       right: getComputedStyle(overlay).right,
     }))
     .catch(() => null);
-  await catalogRow("Cursor Grok 4.6").hover();
+  await catalogRow("Grok 4.6").hover();
   const cursorRowHeightAfterHover = await catalogRow(
-    "Cursor Grok 4.6",
+    "Grok 4.6",
   ).evaluate((row) => row.getBoundingClientRect().height);
   check(
     "hover actions overlay long labels without reflowing the row",

@@ -61,7 +61,7 @@ export class BoatComputerImageDriver implements ComputerImageDriver {
   async assertCapacity(inventory: string[]) {
     if (!this.admission) throw new ComputerImageError("image_capacity_reached");
     try { await this.admission.capacity(inventory); }
-    catch { throw new ComputerImageError("image_capacity_reached"); }
+    catch (error) { if (error instanceof CloudProviderError) throw error; throw new ComputerImageError("image_capacity_reached"); }
   }
   async releaseAdmission(image: ComputerImage, proof: { computeDeleted: boolean; snapshotDeleted: boolean }) {
     if (!this.admission) {
@@ -116,7 +116,7 @@ export class BoatComputerImageDriver implements ComputerImageDriver {
         throw new ComputerImageError("image_snapshot_identity_mismatch");
     }
     try { await this.admission.reserve(image, (await this.inventory()).map(row => row.name)); }
-    catch { throw new ComputerImageError("image_capacity_reached"); }
+    catch (error) { if (error instanceof CloudProviderError) throw error; throw new ComputerImageError("image_capacity_reached"); }
     await beforeDispatch();
     const reply = await this.client.request("/sandboxes", {
       method: "POST",

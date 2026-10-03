@@ -29,6 +29,20 @@ async function harness() {
 afterEach(async () => { await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))); });
 
 describe("worker CLI ordered execution", () => {
+  it("reconciles retained native storage under guarded source without qualification or a new receipt", async () => {
+    const test = await harness(), reconcile = vi.fn(async () => 1);
+    const env = { ...test.env, WORKER_RECONCILE_STORAGE: "true", WORKER_EXECUTE: "false" };
+    expect(await workerMain("--reconcile-storage", env, { ...test.deps, reconcile } as any)).toEqual({ receiptIssued: false, reconciled: 1 });
+    expect(reconcile).toHaveBeenCalledWith(env); expect(test.deps.execute).not.toHaveBeenCalled(); expect(test.deps.services).not.toHaveBeenCalled();
+    expect(test.events).toEqual(["checkout", "ci", "current", "api"]);
+    expect(await readFile(test.env.GITHUB_OUTPUT, "utf8")).not.toContain("receipt_issued=true");
+    await expect(readFile(path.join(test.directory, "worker-receipt.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it.each([{ WORKER_RECONCILE_STORAGE: "false", WORKER_EXECUTE: "false" }, { WORKER_RECONCILE_STORAGE: "true", WORKER_EXECUTE: "true" }])("refuses conflicting or absent reconciliation intent %j", async flags => {
+    const test = await harness(), reconcile = vi.fn(async () => 1);
+    await expect(workerMain("--reconcile-storage", { ...test.env, ...flags }, { ...test.deps, reconcile } as any)).rejects.toThrow();
+    expect(reconcile).not.toHaveBeenCalled(); expect(test.deps.execute).not.toHaveBeenCalled();
+  });
   it("keeps plans credential-free and does not turn disabled execution into a receipt", async () => {
     const test = await harness();
     expect(await workerMain("--plan", { ...test.env, ZEROS_WORKER_PROMOTION: "disabled" }, test.deps as any)).toEqual({ receiptIssued: false });

@@ -489,6 +489,9 @@ export class ClaudeStreamTranslator {
     this.emit({ sessionId: this.sessionId, update });
   });
   private readonly scopedTools = new Map<string, { id: string; announced: boolean; inputComplete?: boolean; resultFrameId?: string; resultRetracted?: boolean; status: "pending" | "in_progress" | "completed" | "failed" }>();
+  /** A priority-now send can detach a web tool until a later turn. Retain its
+   * process without publishing the acknowledgement as a completed result. */
+  private readonly detachedToolKeys = new Set<string>();
   private readonly lifecycleFrames = new Set<string>();
   private readonly feedback = new ClaudeEventFeedback({
     emit: (messageId, text, nativeParent, groupId) => {
@@ -662,7 +665,7 @@ export class ClaudeStreamTranslator {
 
   /** Runtime retention is independent of the visible activity projection. */
   get hasProcessWork(): boolean {
-    return this.liveBackgroundTasks.size > 0 || this.backgroundTaskOverflow || this.hasActiveWork;
+    return this.detachedToolKeys.size > 0 || this.liveBackgroundTasks.size > 0 || this.backgroundTaskOverflow || this.hasActiveWork;
   }
 
   /** Called only by the adapter when it creates a new query/process. SDK
@@ -831,6 +834,7 @@ export class ClaudeStreamTranslator {
     this.activityStartedAt = null;
     this.backgroundTasks.clear();
     this.liveBackgroundTasks.clear();
+    this.detachedToolKeys.clear();
     this.backgroundTaskOverflow = false;
     this.scheduledWakeups.clear();
     this.pendingScheduledWakeupReason = null;
@@ -945,6 +949,7 @@ export class ClaudeStreamTranslator {
       messageIds.push(...retired.messageIds);
       for (const tool of retired.tools) {
         const key = JSON.stringify([tool.parent, tool.id]);
+        this.detachedToolKeys.delete(key);
         const state = this.scopedTools.get(key);
         if (state) { messageIds.push(state.id); addBoundedSet(this.retractedTools, key, 8_000); }
       }
@@ -2414,6 +2419,14 @@ export class ClaudeStreamTranslator {
         (previous?.status === "completed" && !tool.is_error && !agentResult)
       )
         continue;
+      // Since SDK 0.3.287 this envelope means the call is still running. Only
+      // an unambiguous single result can own it; native failures still settle.
+      if (!tool.is_error && resultCount === 1 && isObj(event.tool_use_result) &&
+          event.tool_use_result.detachedToolCall === true) {
+        if (!this.activityStopped) addBoundedSet(this.detachedToolKeys, key, 4_000);
+        continue;
+      }
+      this.detachedToolKeys.delete(key);
       const toolCallId = previous?.id ?? randomUUID();
       const knownAgent = asyncAgent
         ? this.agentTasks.get(agentResult.agentId as string)

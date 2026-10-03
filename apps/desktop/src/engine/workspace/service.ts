@@ -1,4 +1,10 @@
 import { designDirectoryEntry } from "../design/metadata";
+import { isCodeReviewOperation } from "@zeros/protocol/code-review";
+import { handleCodeReviewRoute } from "../code-review/routes";
+import { CodeReviewError } from "../code-review/errors";
+import type { CodeReviewAgentScope } from "../agents/code-review-tools";
+import { isGitReviewOperation } from "@zeros/protocol/git-review-actions";
+import { handleGitReviewOperation } from "../git/review-actions";
 import { assertDesignCheckoutReadable, readDesignCheckoutStatus } from "../design/checkout-status";
 import {
   reqStr,
@@ -27,6 +33,18 @@ import {
   turnHistoryCursorSchema,
 } from "@zeros/protocol/changes-history";
 import { historyDiff, listHistoryTurns } from "../git/history-diff";
+import {
+  getPrInlineReview,
+  getPrReviewDiff,
+  postPrLineComment,
+  replyPrReviewThread,
+  setPrReviewThreadResolved,
+} from "../git/github";
+import {
+  prLineCommentSchema,
+  prThreadReplySchema,
+  prThreadResolveSchema,
+} from "@zeros/protocol/github-review";
 
 import {
   sessionToolQuerySchema,
@@ -513,6 +531,11 @@ function assertRemoteRepoRootAllowed(repoRoot: string, remote: boolean): void {
 }
 
 const WRITE_OPS = new Set<string>([
+  "git.reviewHunk",
+  "git.resolveConflict",
+  "codeReview.create",
+  "codeReview.reply",
+  "codeReview.setResolved",
   // Workspace lifecycle — create a worktree (remote == local for trusted devices).
   "workspace.create",
   "workspace.setStatus",
@@ -594,6 +617,8 @@ const WRITE_OPS = new Set<string>([
  * WRITE_OPS is a remote-security allowlist, and widening it would accidentally
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
+  "git.reviewHunk",
+  "git.resolveConflict",
   "design.capture",
   "design.initialize",
   "file.write",
@@ -683,6 +708,8 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
  * on Git's own lock files, so callers must still surface a lock conflict rather
  * than retrying through another execution backend. */
 const SERIALIZED_GIT_MUTATION_OPS = new Set<string>([
+  "git.reviewHunk",
+  "git.resolveConflict",
   "design.initialize",
   "design.stage",
   "design.unstage",
@@ -1088,6 +1115,8 @@ async function assertNoDesignPathWrites(
  *     nor reads — they are not gated by this allowlist (a remote client edits
  *     its own chat list freely, matching the existing WRITE_OPS exclusion). */
 const REMOTE_READABLE = new Set<string>([
+  "git.reviewHunks",
+  "codeReview.list",
   // Workspaces + projects (repository navigation / workspace picker)
   "workspace.list",
   "project.list",
@@ -1130,6 +1159,8 @@ const REMOTE_READABLE = new Set<string>([
   "gh.prChecks",
   "gh.prCommits",
   "gh.prReviews",
+  "gh.prInlineReview",
+  "gh.prReviewDiff",
   // Settings TOML reads (secret-shaped env values are masked for remote
   // clients in the handler; settings.migrateLegacy stays LOCAL-ONLY).
   "settings.resolve",
@@ -1847,6 +1878,63 @@ export class WorkspaceService {
     }
   }
 
+  /** Bind product review tools to the most-specific registered owner. Opened
+   * repository roots are valid local owners even without a workspaces row. */
+  private codeReviewOwnerForCwd(cwd: string): string | null {
+    const folder = WorkspaceService.normalizeFolder(cwd);
+    const owners = [
+      ...listWorkspaces({}).map((workspace) => ({ id: workspace.id, path: workspace.path })),
+      { id: LOCAL_MAIN_WORKSPACE_ID, path: this.root },
+      ...listKnownRepoRoots().map((root) => ({ id: root, path: root })),
+    ];
+    return owners.filter((owner) => {
+      const root = WorkspaceService.normalizeFolder(owner.path);
+      return folder === root || folder.startsWith(`${root}/`);
+    }).sort((a, b) => b.path.length - a.path.length)[0]?.id ?? null;
+  }
+
+  codeReviewOwnerRoots(): readonly string[] {
+    return [this.root, ...listWorkspaces({}).map((workspace) => workspace.path), ...listKnownRepoRoots()];
+  }
+
+  codeReviewAgentScope(input: { cwd: string; workspaceId?: string; signal: AbortSignal }): CodeReviewAgentScope | null {
+    input.signal.throwIfAborted();
+    const workspaceId = this.codeReviewOwnerForCwd(input.cwd);
+    if (!workspaceId) return null;
+    const workspace = getWorkspaceById(workspaceId);
+    if (workspace && (workspace.archivedAt != null || (!this.options.primaryDesignWorkspace && workspace.placement === "cloud"))) return null;
+    const workspacePath = this.resolveReadCwd(workspaceId, false);
+    // An admitted raw repository root may be a compatibility alias of the
+    // same owner, but never an unrelated or more-specific workspace.
+    if (input.workspaceId && input.workspaceId !== workspaceId) {
+      try { if (this.resolveReadCwd(input.workspaceId, false) !== workspacePath) return null; }
+      catch { return null; }
+    }
+    let root: string;
+    let cwd: string;
+    try { root = fs.realpathSync(workspacePath); cwd = fs.realpathSync(input.cwd); }
+    catch { return null; }
+    if (cwd !== root && !cwd.startsWith(`${root}${nodePath.sep}`)) return null;
+    const ownerSnapshot = (value: Workspace | null) => value ? JSON.stringify([
+      value.path, value.repoRoot, value.archivedAt, value.placement, value.organizationId,
+    ]) : null;
+    const snapshot = ownerSnapshot(workspace);
+    return {
+      workspaceId, workspacePath,
+      assertCurrent: () => {
+        input.signal.throwIfAborted();
+        let current = false;
+        try {
+          current = this.codeReviewOwnerForCwd(input.cwd) === workspaceId &&
+            this.resolveReadCwd(workspaceId, false) === workspacePath &&
+            ownerSnapshot(getWorkspaceById(workspaceId)) === snapshot &&
+            fs.realpathSync(workspacePath) === root && fs.realpathSync(input.cwd) === cwd;
+        } catch { /* Fail closed after removal, relocation, or a path swap. */ }
+        if (!current) throw new CodeReviewError("CODE_REVIEW_AUTHORITY_REJECTED", "The workspace owning these review tools changed. Reopen the conversation.");
+      },
+    };
+  }
+
   /** Tools are scoped again by the gateway to the exact live execution/cwd.
    * Local chats include worktree subdirectories and plain folders, so their
    * cwd is not a workspace database id. This grants no generic filesystem read.
@@ -2314,6 +2402,9 @@ export class WorkspaceService {
       remote?: boolean;
       cloudWorker?: boolean;
       cloudActorIdentity?: { userId: string; deviceId: string; sessionId?: string };
+      /** Verified transport account, never an operation parameter. */
+      reviewUserId?: string;
+      reviewUserName?: string;
       cloudFileActor?: { role: CloudActorRole; authorized: () => boolean };
       hostLocalResources?: boolean;
       gitMutationAdmitted?: boolean;
@@ -2325,7 +2416,7 @@ export class WorkspaceService {
     // relay flag. Never infer it from a path, client params, or remote alone.
     const cloudFileOperation = ["file.tree", "file.ignored", "file.read", "file.write",
       "context.graph.list", "context.graph.scaffold", "context.graph.setShared",
-      "workspace.listWorkingDirectories", "workspace.setWorkingDirectories"].includes(op);
+      "workspace.listWorkingDirectories", "workspace.setWorkingDirectories"].includes(op) || isCodeReviewOperation(op) || isGitReviewOperation(op);
     let cloudFiles: QualifiedCloudFilePolicy | undefined;
     if (cloudFileOperation && opts.cloudFileActor) {
       if (!remote || !opts.cloudWorker || !this.options.primaryDesignWorkspace || !opts.cloudActorIdentity ||
@@ -2349,7 +2440,7 @@ export class WorkspaceService {
         privateRoots: [zerosStateRoot(), os.homedir(), "/srv/zeros/state", "/srv/zeros/home", "/opt/zeros", "/etc/zeros"],
         ownerRoots: currentOwners,
       });
-      cloudFiles.assertAuthorized(["file.write", "context.graph.scaffold", "context.graph.setShared", "workspace.setWorkingDirectories"].includes(op));
+      cloudFiles.assertAuthorized(["file.write", "context.graph.scaffold", "context.graph.setShared", "workspace.setWorkingDirectories"].includes(op) || (isCodeReviewOperation(op) && op !== "codeReview.list") || (isGitReviewOperation(op) && op !== "git.reviewHunks"));
     }
     if (this.options.primaryDesignWorkspace && params.workspaceId === LOCAL_MAIN_WORKSPACE_ID &&
         ["workspace.archive", "workspace.delete", "workspace.restore", "workspace.recover", "workspace.deleteSnapshot"].includes(op)) {
@@ -2492,6 +2583,25 @@ export class WorkspaceService {
         remote: designRemote,
         hostLocalResources,
         ...(humanActor ? { actor: humanActor, primaryRepositoryRoot: this.root } : {}),
+      });
+    }
+    if (isCodeReviewOperation(op)) {
+      return handleCodeReviewRoute({
+        resolveReadCwd: (workspaceId, remoteRequest) => this.resolveReadCwd(workspaceId, remoteRequest),
+        ownerRoots: () => this.codeReviewOwnerRoots(),
+      }, op, params, {
+        remote,
+        userId: opts.reviewUserId ?? opts.cloudActorIdentity?.userId,
+        userName: opts.reviewUserName,
+        cloudFiles,
+      });
+    }
+    if (isGitReviewOperation(op)) {
+      const workspaceId = reqStr(params, "workspaceId");
+      const cwd = this.resolveReadCwd(workspaceId, remote);
+      return handleGitReviewOperation(op, params, {
+        cwd, remote, cloudPolicy: cloudFiles,
+        assertSourceWrite: (paths, action) => assertNoDesignPathWrites(workspaceId, paths, action, cwd),
       });
     }
     switch (op) {
@@ -4632,6 +4742,16 @@ export class WorkspaceService {
           workspaceId: reqStr(params, "workspaceId"),
           prNumber: reqNum(params, "prNumber"),
         });
+      case "gh.prInlineReview":
+        return getPrInlineReview({
+          workspaceId: reqStr(params, "workspaceId"),
+          prNumber: reqNum(params, "prNumber"),
+        });
+      case "gh.prReviewDiff":
+        return getPrReviewDiff({
+          workspaceId: reqStr(params, "workspaceId"),
+          prNumber: reqNum(params, "prNumber"),
+        });
 
       // ── Write: GitHub PR mutations (restriction-gated for remote clients (trusted device; no per-op prompt)) ──
       case "gh.prCreate": {
@@ -4699,6 +4819,19 @@ export class WorkspaceService {
         return { sha: result.resultGitObject.hex };
       }
       case "gh.prComment": {
+        if (params.kind === "line") {
+          return postPrLineComment(prLineCommentSchema.parse(params));
+        }
+        if (params.kind === "reply") {
+          return replyPrReviewThread(prThreadReplySchema.parse(params));
+        }
+        if (params.kind === "resolve") {
+          await setPrReviewThreadResolved(prThreadResolveSchema.parse(params));
+          return { ok: true };
+        }
+        if (params.kind !== undefined) {
+          throw new GitError({ code: "VALIDATION_FAILED", message: "Unknown review comment action." });
+        }
         const workspaceId = reqStr(params, "workspaceId");
         const repository =
           await githubForgeAdapter.resolveRepository(workspaceId);

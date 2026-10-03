@@ -21,6 +21,7 @@ import { assertLegacyDesignDraftWritable, ensureDesignMetadataLayout, readDirect
 import { initializeDesignDocumentUnlocked } from "./document-transactions";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { openDesignVerification } from "./verification-service";
+import type { AgentWorkspaceTools } from "../agents/session-tools";
 
 /** Registration migration is an explicit Design authoring action. Merely
  * inspecting a legacy branch never rewrites its checked-out metadata. */
@@ -114,6 +115,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
       authoringMethod?: DesignAuthoringMethod;
       renderer?: DesignHeadlessRenderer;
       onChanged?: () => void;
+      workspaceTools?: AgentWorkspaceTools;
     },
   ) {}
 
@@ -127,6 +129,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
       throw new Error("Invalid Design authority.");
     this.abort.signal.throwIfAborted();
     this.options.assertOwner();
+    this.options.workspaceTools?.assertCurrent();
   }
 
   dispose(): void {
@@ -175,6 +178,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
 
   listTools(): Tool[] {
     return [
+      ...(this.options.workspaceTools?.listTools() ?? []),
       switchTool,
       ...designCodeToolDefinitions(!!this.options.renderer).filter(
         (tool) => !deferred.has(tool.name),
@@ -229,6 +233,8 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
     joined.throwIfAborted();
     if (!this.listTools().some((tool) => tool.name === name))
       throw new Error("This Design tool is unavailable.");
+    if (this.options.workspaceTools?.listTools().some((tool) => tool.name === name))
+      return this.options.workspaceTools.callTool(name, raw, joined);
     const before = this.options.mode.get();
     if (name === "design_mode_set") {
       const input = switchSchema.parse(raw);

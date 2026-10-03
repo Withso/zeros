@@ -1,11 +1,8 @@
-diff --git a/dist/cli.js b/dist/cli.js
-old mode 100644
-new mode 100755
 diff --git a/dist/sandbox/linux-sandbox-utils.d.ts b/dist/sandbox/linux-sandbox-utils.d.ts
-index 88cc67f6cdb6ed2cb4d019bcbbf077e4d081706b..d6e34e4c9bfa82e157e53de14c75ee9bb94ffd89 100644
+index 624e6c287f0470b9cb35f211bd3c507f2d61967e..8fe9b62b4205047f0f94253bcc9aa3c28b2d2809 100644
 --- a/dist/sandbox/linux-sandbox-utils.d.ts
 +++ b/dist/sandbox/linux-sandbox-utils.d.ts
-@@ -45,6 +45,14 @@ export interface LinuxSandboxParams {
+@@ -46,6 +46,14 @@ export interface LinuxSandboxParams {
       */
      maskedFileStoreDir?: string;
      enableWeakerNestedSandbox?: boolean;
@@ -19,8 +16,8 @@ index 88cc67f6cdb6ed2cb4d019bcbbf077e4d081706b..d6e34e4c9bfa82e157e53de14c75ee9b
 +    hostParity?: boolean;
      allowAllUnixSockets?: boolean;
      binShell?: string;
-     ripgrepConfig?: {
-@@ -55,6 +63,8 @@ export interface LinuxSandboxParams {
+     ripgrepConfig?: RipgrepConfig;
+@@ -53,6 +61,8 @@ export interface LinuxSandboxParams {
      mandatoryDenySearchDepth?: number;
      /** Allow writes to .git/config files (default: false) */
      allowGitConfig?: boolean;
@@ -30,19 +27,10 @@ index 88cc67f6cdb6ed2cb4d019bcbbf077e4d081706b..d6e34e4c9bfa82e157e53de14c75ee9b
       * Directories to emit as `safe.directory` via `GIT_CONFIG_*` env
       * vars (see {@link buildPosixGitSafeDirEnv}). Under `--unshare-user`
 diff --git a/dist/sandbox/linux-sandbox-utils.js b/dist/sandbox/linux-sandbox-utils.js
-index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d745a7fd9f 100644
+index 341c8d1113544dade3f0a316145d46871cdcf333..ab0e4b072499f48ec034567e1373961b9d6bb3b9 100644
 --- a/dist/sandbox/linux-sandbox-utils.js
 +++ b/dist/sandbox/linux-sandbox-utils.js
-@@ -30,7 +30,7 @@ function findSymlinkInPath(targetPath, allowedWritePaths) {
-             const stats = fs.lstatSync(nextPath);
-             if (stats.isSymbolicLink()) {
-                 // Check if this symlink is within an allowed write path
--                const isWithinAllowedPath = allowedWritePaths.some(allowedPath => nextPath.startsWith(allowedPath + '/') || nextPath === allowedPath);
-+                const isWithinAllowedPath = allowedWritePaths.some(allowedPath => allowedPath === '/' || nextPath.startsWith(allowedPath + '/') || nextPath === allowedPath);
-                 if (isWithinAllowedPath) {
-                     return nextPath;
-                 }
-@@ -169,7 +169,9 @@ function findFirstNonExistentComponent(targetPath) {
+@@ -210,7 +210,9 @@ export function linuxGetCwdMandatoryDenyPaths(allowGitConfig = false) {
   * Uses a SINGLE ripgrep call with multiple glob patterns for efficiency.
   * With --max-depth limiting, this is fast enough to run on each command without memoization.
   */
@@ -53,7 +41,28 @@ index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d7
      const cwd = process.cwd();
      // Use provided signal or create a fallback controller
      const fallbackController = new AbortController();
-@@ -616,6 +618,25 @@ function resolveApplySeccompPrefix(applyPath, argv0) {
+@@ -608,7 +610,7 @@ export class LinuxSandboxProfileError extends Error {
+  * so a prefix (`exec`, `timeout 30`) or a suffix (`&& next`) still composes.
+  * Throws {@link LinuxSandboxProfileError} when the profile cannot run.
+  */
+-function renderBwrapInvocation(bwrapBinary, bwrapArgs, mounts) {
++function renderBwrapInvocation(bwrapBinary, bwrapArgs, mounts, privateProc) {
+     if (bwrapArgs.length > BWRAP_MAX_ARGS) {
+         throw new LinuxSandboxProfileError('too_many_arguments', `Sandbox profile has ${bwrapArgs.length} bwrap arguments and bwrap accepts at most ${BWRAP_MAX_ARGS} (about ${BWRAP_MAX_ARGS / 3} mounts); reduce what the configuration expands to: each path takes about three arguments, each environment variable two`);
+     }
+@@ -629,6 +631,11 @@ function renderBwrapInvocation(bwrapBinary, bwrapArgs, mounts) {
+     if (bwrapArgs.length + 2 > BWRAP_MAX_ARGS) {
+         throw new LinuxSandboxProfileError('too_many_arguments', `${tooLong} and, passed through a file, would exceed the ${BWRAP_MAX_ARGS} arguments bwrap accepts`);
+     }
++    // The unnamed profile is safe only when actors cannot reach this process's
++    // descriptors. Host-parity and weaker nesting deliberately keep host /proc.
++    if (!privateProc) {
++        throw new LinuxSandboxProfileError('args_file_unavailable', 'Oversized host-parity or weaker-nesting profiles cannot safely use a supervisor descriptor; reduce the filesystem policy');
++    }
+     let argsFd;
+     try {
+         argsFd = openBwrapArgsProfile(mountWords);
+@@ -1052,6 +1059,25 @@ function resolveApplySeccompPrefix(applyPath, argv0) {
      const binary = getApplySeccompBinaryPath(applyPath);
      return binary ? `${quote([binary])} ` : undefined;
  }
@@ -79,33 +88,57 @@ index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d7
  /**
   * Build the command that runs inside the sandbox.
   * Sets up HTTP proxy on port 3128 and SOCKS proxy on port 1080
-@@ -674,7 +695,24 @@ function resolveSymlinkDenyDest(normalizedPath) {
+@@ -1200,9 +1226,24 @@ function ancestorPinArgs(seeds, writeRoots) {
+  * re-bound, writable and read-only, which is what a later pass re-emits when
+  * a denyWrite bind re-exposes this directory.
   */
- function pushReadDenyDirMounts(args, normalizedPath, allowedWritePaths, readAllowPaths) {
-     const denySep = normalizedPath === '/' ? '/' : normalizedPath + '/';
--    args.push('--tmpfs', normalizedPath);
-+    args.push('--tmpfs', normalizedPath, '--chmod', '0711', normalizedPath);
-+    // A distinct worker UID cannot traverse root-private host ancestors. These
-+    // are new directories in the empty deny mask, never chmods of host state.
-+    // Create ALL ancestors before restoring ANY bind: after a restoration a
-+    // chmod or --dir could reach an intentionally exposed host directory.
-+    const syntheticParents = new Set();
-+    for (const allowedPath of [...allowedWritePaths, ...readAllowPaths]) {
-+        if (!allowedPath.startsWith(denySep) || allowedPath === normalizedPath)
-+            continue;
-+        let parent = path.dirname(allowedPath);
-+        while (parent !== normalizedPath && parent.startsWith(denySep)) {
-+            syntheticParents.add(parent);
++function pushTraversableReadDenyMask(args, landing, restores) {
++    args.push('--tmpfs', landing, '--chmod', '0711', landing);
++    // These are new directories inside the empty mask, never host chmods.
++    // Finish every synthetic ancestor before restoring any vetted host path.
++    const parents = new Set();
++    for (const { dest } of restores) {
++        let parent = path.dirname(dest);
++        while (isStrictlyUnder(parent, landing)) {
++            parents.add(parent);
 +            parent = path.dirname(parent);
 +        }
 +    }
-+    for (const parent of [...syntheticParents].sort((a, b) => a.split('/').length - b.split('/').length)) {
++    for (const parent of [...parents].sort((a, b) => a.split('/').length - b.split('/').length)) {
 +        args.push('--perms', '0711', '--dir', parent);
 +    }
++}
+ function pushReadDenyDirMounts(args, unit) {
+     const { landing, allowedWritePaths, readAllowPaths } = unit;
+-    args.push('--tmpfs', landing);
+     // How to bind allowed path `p` back, if it is a carve-out of this unit:
+     // its name must live inside the denied directory, and so must what it
+     // resolves to. Parent directories may be symlinks (/lib/x is a carve-out
+@@ -1244,10 +1285,13 @@ function pushReadDenyDirMounts(args, unit) {
+         }
+         return { source, dest };
+     };
++    const placements = new Map([...allowedWritePaths, ...readAllowPaths]
++        .map(p => [p, restorePlacementOf(p)]));
++    pushTraversableReadDenyMask(args, landing, [...placements.values()].filter(Boolean));
      // tmpfs wiped any earlier write binds under this path — restore them.
+     const restoredWrites = [];
      for (const writePath of allowedWritePaths) {
-         if (writePath.startsWith(denySep) || writePath === normalizedPath) {
-@@ -708,7 +746,7 @@ function pushReadDenyDirMounts(args, normalizedPath, allowedWritePaths, readAllo
+-        const placement = restorePlacementOf(writePath);
++        const placement = placements.get(writePath);
+         if (placement === undefined)
+             continue;
+         args.push('--bind', placement.source, placement.dest);
+@@ -1259,7 +1303,7 @@ function pushReadDenyDirMounts(args, unit) {
+     // so they are readable again.
+     const restoredReads = [];
+     for (const allowPath of readAllowPaths) {
+-        const placement = restorePlacementOf(allowPath);
++        const placement = placements.get(allowPath);
+         if (placement === undefined)
+             continue;
+         // Skip only if a write path was re-bound just above AND covers
+@@ -1278,12 +1322,13 @@ function pushReadDenyDirMounts(args, unit) {
  /**
   * Generate filesystem bind mount arguments for bwrap
   */
@@ -114,93 +147,123 @@ index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d7
      const args = [];
      // fs already imported
      // Collect normalized allowed write paths. Populated in the writeConfig
-@@ -717,6 +755,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+     // block, read again in the denyRead loop to re-bind writes under tmpfs.
+     const allowedWritePaths = [];
++    let lateWritePaths = [];
      // denyWrite binds are buffered and emitted after denyRead processing so that
      // a denyRead tmpfs over an ancestor directory doesn't wipe them out.
      const denyWriteArgs = [];
-+    const missingWriteMounts = new Map();
-     // Directories that a deny entry re-binds read-only inside the sandbox
-     // (--ro-bind <dir> <dir>), keyed by resolved dest, with every raw
-     // (pre-resolution) spelling each was reached through. A non-existent deny
-@@ -896,12 +935,12 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
-         // directory missing from the record only costs an abort). No spelling
-         // handling is needed here: allowedWritePaths entries are recorded with
-         // trailing slashes stripped, and candidates are resolved deny dests.
--        const isWithinAnyAllowedWritePath = (candidatePath) => allowedWritePaths.some(allowedPath => candidatePath.startsWith(allowedPath + '/') ||
-+        const isWithinAnyAllowedWritePath = (candidatePath) => allowedWritePaths.some(allowedPath => allowedPath === '/' || candidatePath.startsWith(allowedPath + '/') ||
-             candidatePath === allowedPath);
+@@ -1645,8 +1690,11 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
          // Deny writes within allowed paths (user-specified + mandatory denies)
          const denyPaths = [
              ...(writeConfig.denyWithinAllow || []),
 -            ...(await linuxGetMandatoryDenyPaths(ripgrepConfig, mandatoryDenySearchDepth, allowGitConfig, abortSignal)),
 +            ...(await linuxGetMandatoryDenyPaths(ripgrepConfig, mandatoryDenySearchDepth, allowGitConfig, disableMandatoryWriteProtection, abortSignal)),
          ];
++        lateWritePaths = (writeConfig.allowWithinDeny || [])
++            .map(candidate => normalizePathForSandbox(candidate).replace(/\/+$/, '') || '/')
++            .filter(candidate => allowedWritePaths.includes(candidate) && fs.existsSync(candidate));
          // Duplicate deny entries must be collapsed: a duplicate
          // --ro-bind /dev/null <dest> hits a char device on the second pass and
-@@ -1144,6 +1183,21 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
-                 const ancestorIsWithinReadOnlyDeny = coveredBySafeReadOnlyDenyDir(normalizedPath);
-                 if (ancestorIsWithinAllowedPath && !ancestorIsWithinReadOnlyDeny) {
-                     const firstNonExistent = findFirstNonExistentComponent(normalizedPath);
-+                    // Absent private roots can appear both directly and through
-+                    // multiple children. Emit one mount per missing component;
-+                    // a directory requirement dominates a file placeholder in
-+                    // either input order. Stacking a directory over /dev/null
-+                    // makes bwrap fail with ENOTDIR before the actor can start.
-+                    const previous = missingWriteMounts.get(firstNonExistent);
-+                    if (previous !== undefined) {
-+                        if (firstNonExistent !== normalizedPath && denyWriteArgs[previous + 1] === '/dev/null') {
-+                            const emptyDir = fs.mkdtempSync(path.join(tmpdir(), 'claude-empty-'));
-+                            denyWriteArgs[previous + 1] = emptyDir;
-+                            bwrapMountPoints.add(emptyDir);
-+                        }
-+                        continue;
-+                    }
-+                    missingWriteMounts.set(firstNonExistent, denyWriteArgs.length);
-                     // Fix 2: If firstNonExistent is an intermediate component (not the
-                     // leaf deny path itself), mount a read-only empty directory instead
-                     // of /dev/null. This prevents the component from appearing as a file
-@@ -1151,6 +1205,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
-                     if (firstNonExistent !== normalizedPath) {
-                         const emptyDir = fs.mkdtempSync(path.join(tmpdir(), 'claude-empty-'));
-                         denyWriteArgs.push('--ro-bind', emptyDir, firstNonExistent);
-+                        bwrapMountPoints.add(emptyDir);
-                         denyWriteRawDests.set(firstNonExistent, rawPath);
-                         bwrapMountPoints.add(firstNonExistent);
-                         registerExitCleanupHandler();
-@@ -1333,6 +1388,31 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+         // bwrap's ensure_file() falls through to creat() on a read-only mount.
+@@ -1774,6 +1822,11 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+             for (const denyDir of readOnlyDenyDirs) {
+                 if (!isStrictlyUnder(candidate, denyDir))
+                     continue;
++                // A later explicit island reopens this part of the covering
++                // deny. Keep its own nested deny; another narrower directory
++                // that stays read-only may still make that bind redundant.
++                if (lateWritePaths.some(allowed => isStrictlyUnder(allowed, denyDir) && isAtOrUnder(candidate, allowed)))
++                    continue;
+                 if (coveringDirIsUnsafe(denyDir)) {
+                     if (denyDir === '/') {
+                         // A vetoed '/' does not disqualify an inner recorded directory:
+@@ -2196,6 +2249,10 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+     for (let i = 0; i < denyWriteArgs.length; i += 3) {
+         const dest = denyWriteArgs[i + 2];
+         const rawDest = denyWriteRawDests.get(dest) ?? dest;
++        // Apply these after their island is reopened. In particular, an absent
++        // target cannot be created beneath the broader read-only bind here.
++        if (lateWritePaths.some(allowed => isAtOrUnder(dest, allowed)))
++            continue;
+         // A mask's landing, not its dest: the landing is where the mask's bind
+         // actually sits, and this deny's dest is canonical, so the two are
+         // comparable as written.
+@@ -2248,6 +2305,28 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
          if (rawDest !== dest)
              emittedDenyWriteDests.push(rawDest);
      }
-+    // Re-bind explicit writable islands after a broader denyWrite ro-bind.
-+    // Only paths already present in allowOnly qualify, so this changes
-+    // precedence rather than adding authority. Re-apply narrower read/write
-+    // denies that fall inside an exception immediately afterward.
-+    const lateWritePaths = (writeConfig?.allowWithinDeny || [])
-+        .map(candidate => normalizePathForSandbox(candidate).replace(/\/+$/, '') || '/')
-+        .filter(candidate => allowedWritePaths.includes(candidate) && fs.existsSync(candidate));
++    // Reopen only explicitly allowed writable islands, then put the narrower
++    // ancestor pins and write denies back. The read-mask replay below also sees
++    // these binds, so a writable exception cannot reveal a denied file or tree.
++    const restoreNestedWriteProtection = (writePath) => {
++        for (let i = 0; i < pinArgs.length; i += 3) {
++            if (isStrictlyUnder(pinArgs[i + 2], writePath))
++                args.push(...pinArgs.slice(i, i + 3));
++        }
++        for (let i = 0; i < denyWriteArgs.length; i += 3) {
++            const dest = denyWriteArgs[i + 2];
++            if (isAtOrUnder(dest, writePath)) {
++                args.push(...denyWriteArgs.slice(i, i + 3));
++                emittedDenyWriteDests.push(dest);
++            }
++        }
++    };
 +    for (const lateWritePath of lateWritePaths) {
 +        args.push('--bind', lateWritePath, lateWritePath);
-+        for (const deniedDest of emittedDenyWriteDests) {
-+            if (deniedDest === lateWritePath || deniedDest.startsWith(lateWritePath + '/')) {
-+                args.push('--ro-bind', deniedDest, deniedDest);
-+            }
-+        }
-+        for (const [maskedFile, source] of maskedFiles) {
-+            if (maskedFile === lateWritePath || maskedFile.startsWith(lateWritePath + '/')) {
-+                if (resolveSymlinkDenyDest(maskedFile) === maskedFile)
-+                    args.push('--ro-bind', source, maskedFile);
-+            }
-+        }
-+        for (const tmpfsDir of tmpfsDirs) {
-+            if (tmpfsDir === lateWritePath || tmpfsDir.startsWith(lateWritePath + '/'))
-+                pushReadDenyDirMounts(args, tmpfsDir, allowedWritePaths, readAllowPaths);
-+        }
++        restoreNestedWriteProtection(lateWritePath);
 +    }
++    const reExposingBindDests = [...emittedDenyWriteDests, ...lateWritePaths];
++    const nestedWriteDenies = [...denyWriteRawDests.keys()];
      // The inverse stacking problem: a denyWrite ro-bind whose dest strictly
      // contains a read-denied dir re-exposes that dir's real contents (the bind
-     // landed after the tmpfs). Re-apply the tmpfs on top, with the same write
-@@ -1422,7 +1502,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
-  * Dependencies are checked by checkLinuxDependencies() before enabling the sandbox.
+     // landed after the tmpfs). Re-apply the tmpfs on top, with the allowRead
+@@ -2259,21 +2338,21 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+     // Deeper units and masks under the same dest follow in the same order as
+     // the first pass, so nothing restored here stays on top of one.
+     for (const unit of readDenyTmpfsUnits) {
+-        const reExposingDest = emittedDenyWriteDests.find(dest => isStrictlyUnder(unit.landing, dest));
++        const reExposingDest = reExposingBindDests.find(dest => isAtOrUnder(unit.landing, dest));
+         if (reExposingDest !== undefined) {
+             logForDebugging(`[Sandbox Linux] Re-applying denyRead tmpfs re-exposed by denyWrite bind: ${unit.landing}`);
+-            // Name the paths that lose their write access here, and to which deny.
+-            if (unit.restoredWrites.length > 0) {
+-                logForDebugging(`[Sandbox Linux] Restoring write paths read-only inside denyWrite bind ${reExposingDest}: ${unit.restoredWrites.map(w => w.dest).join(', ')}`);
+-            }
+-            // The recorded pairs go back as they are: each restore returns to where
+-            // the first pass put it, from the source it vetted then. Write paths
+-            // come back read-only, being inside the deny that re-exposed the tmpfs.
+-            // The tmpfs goes back at the unit's landing, which is the destination
+-            // the first pass gave bwrap for it.
+-            args.push('--tmpfs', unit.landing);
+-            for (const restored of [...unit.restoredWrites, ...unit.restoredReads]) {
+-                args.push('--ro-bind', restored.source, restored.dest);
++            // Restore only the sources vetted in the first pass. A write path
++            // stays read-only inside the covering deny unless an explicit island
++            // reopens it, and narrower write denies still take precedence.
++            const restores = [...unit.restoredWrites, ...unit.restoredReads];
++            pushTraversableReadDenyMask(args, unit.landing, restores);
++            for (const restored of restores) {
++                const writable = unit.restoredWrites.includes(restored) &&
++                    lateWritePaths.some(allowed => isAtOrUnder(restored.dest, allowed) &&
++                        !nestedWriteDenies.some(denied => isAtOrUnder(denied, allowed) && isAtOrUnder(restored.dest, denied)));
++                args.push(writable ? '--bind' : '--ro-bind', restored.source, restored.dest);
++                if (writable)
++                    restoreNestedWriteProtection(restored.dest);
+             }
+         }
+     }
+@@ -2281,7 +2360,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+     // ancestor bind, so the real file is back. Re-apply the mask with its
+     // original source (/dev/null for read-deny, the fake for credential mask).
+     for (const mask of fileMasks) {
+-        if (emittedDenyWriteDests.some(dest => isAtOrUnder(mask.landing, dest))) {
++        if (reExposingBindDests.some(dest => isAtOrUnder(mask.landing, dest))) {
+             logForDebugging(`[Sandbox Linux] Re-applying file mask re-exposed by denyWrite bind: ${mask.landing}`);
+             args.push('--ro-bind', mask.source, mask.landing);
+         }
+@@ -2352,7 +2431,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+  * inheritable sets.
   */
  export async function wrapCommandWithSandboxLinux(params) {
 -    const { command, commandId, needsNetworkRestriction, httpSocketPath, socksSocketPath, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, javaAgentJarPath, readConfig, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, maskedFileStoreDir, enableWeakerNestedSandbox, allowAllUnixSockets, binShell, ripgrepConfig = { command: 'rg' }, mandatoryDenySearchDepth = DEFAULT_MANDATORY_DENY_SEARCH_DEPTH, allowGitConfig = false, gitSafeDirectories, seccompConfig, bwrapPath, socatPath, observeSocketPath, abortSignal, } = params;
@@ -208,7 +271,7 @@ index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d7
      // Determine if we have restrictions to apply
      // Read: denyOnly pattern - empty array means no restrictions
      // Write: allowOnly pattern - undefined means no restrictions, any config means restrictions
-@@ -1437,9 +1517,32 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -2367,9 +2446,32 @@ export async function wrapCommandWithSandboxLinux(params) {
          !hasReadRestrictions &&
          !hasWriteRestrictions &&
          !hasEnvRestrictions &&
@@ -242,13 +305,15 @@ index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d7
      // Mark this sandbox invocation as active. cleanupBwrapMountPoints() will
      // defer file deletion until this (and every other concurrent) invocation
      // has been cleaned up. The matching decrement happens in
-@@ -1575,10 +1675,12 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -2510,12 +2612,14 @@ export async function wrapCommandWithSandboxLinux(params) {
              // If no sockets provided, network is completely blocked (--unshare-net without proxy)
          }
          // ========== FILESYSTEM RESTRICTIONS ==========
 -        const fsArgs = await generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds, maskedFileStoreDir, ripgrepConfig, mandatoryDenySearchDepth, allowGitConfig, abortSignal);
 +        const fsArgs = await generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds, maskedFileStoreDir, ripgrepConfig, mandatoryDenySearchDepth, allowGitConfig, disableMandatoryWriteProtection, abortSignal);
+         const mountsStart = bwrapArgs.length;
          bwrapArgs.push(...fsArgs);
+         const mounts = { start: mountsStart, end: bwrapArgs.length };
 -        // Always bind /dev
 -        bwrapArgs.push('--dev', '/dev');
 +        if (hostParity)
@@ -258,7 +323,7 @@ index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d7
          // ========== PID NAMESPACE ISOLATION ==========
          // IMPORTANT: These must come AFTER filesystem binds for nested bwrap to work
          // By default, always unshare PID namespace and mount fresh /proc.
-@@ -1586,27 +1688,33 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -2523,34 +2627,33 @@ export async function wrapCommandWithSandboxLinux(params) {
          // If we don't have --proc, it is possible to read host /proc and leak information about code running
          // outside the sandbox. But, --proc is not available when running in unprivileged docker containers
          // so we support running without it if explicitly requested.
@@ -266,29 +331,34 @@ index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d7
 -        // --unshare-user in both modes: bwrap only auto-creates a userns when
 -        // EUID != 0. A root parent in an unprivileged container (Docker's
 -        // default: EUID=0 without CAP_SYS_ADMIN) would otherwise try a direct
--        // clone and EPERM; a root parent WITH capabilities would leave the
--        // command holding them, CAP_SYS_ADMIN included, which unmounts any deny
--        // in this namespace — hence capabilityArgs in both modes as well.
--        // apply-seccomp creates its own nested userns to obtain CAP_SYS_ADMIN
--        // for its PID+mount unshare (see below); for a root caller that needs
--        // the one capability capabilityArgs keeps.
--        bwrapArgs.push('--unshare-user', ...capabilityArgs(applySeccompPrefix !== undefined));
+-        // clone and EPERM.
+         const euid = process.geteuid?.();
+         const hasSetfcap = processHasBoundingCapability(CAP_SETFCAP);
+-        if (euid === 0 && !hasSetfcap && !setfcapMissingLogged) {
+-            setfcapMissingLogged = true;
+-            logForDebugging(`[Sandbox Linux] ${CAP_SETFCAP_MISSING_MESSAGE}`, {
+-                level: 'warn',
+-            });
+-        }
+-        bwrapArgs.push('--unshare-user', ...capabilityArgs({
++        const capabilities = capabilityArgs({
+             euid,
+             hasSetfcap,
+             usesSeccompHelper: applySeccompPrefix !== undefined,
+-        }));
 -        if (!enableWeakerNestedSandbox) {
 -            // Mount fresh /proc if PID namespace is isolated (secure mode).
 -            bwrapArgs.push('--proc', '/proc');
++        });
 +        if (linuxPrivilegedWorker) {
 +            bwrapArgs.push('--unshare-pid', '--proc', '/proc');
-+            // The trusted cloud supervisor needs only these capabilities to
-+            // enter the exact worker uid/gid. setpriv then clears all sets and
-+            // locks securebits before running the workload.
++            // setpriv needs only these capabilities to enter the worker identity;
++            // it then empties every set and locks securebits before the workload.
 +            bwrapArgs.push('--cap-drop', 'ALL', '--cap-add', 'CAP_SETUID',
 +                '--cap-add', 'CAP_SETGID', '--cap-add', 'CAP_SETPCAP');
 +        }
 +        else if (hostParity) {
-+            // Preserve host process visibility without passing ambient
-+            // capabilities into the workload. Retain upstream's seccomp-helper
-+            // exception only when that helper is actually used.
-+            bwrapArgs.push(...capabilityArgs(applySeccompPrefix !== undefined));
++            bwrapArgs.push(...capabilities);
          }
          else {
 -            // --bind /proc /proc: apply-seccomp's nested-userns path writes
@@ -296,22 +366,19 @@ index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d7
 -            // --ro-bind / / leaves /proc read-only and those writes EROFS; a
 -            // fresh proc mount is what an unprivileged container refuses.
 -            bwrapArgs.push('--bind', '/proc', '/proc');
-+            bwrapArgs.push('--unshare-pid');
-+            // Retain upstream's root-caller protection in BOTH normal and
-+            // weaker nesting modes, including the seccomp-helper exception.
-+            bwrapArgs.push('--unshare-user', ...capabilityArgs(applySeccompPrefix !== undefined));
-+            if (!enableWeakerNestedSandbox) {
++            if (euid === 0 && !hasSetfcap && !setfcapMissingLogged) {
++                setfcapMissingLogged = true;
++                logForDebugging(`[Sandbox Linux] ${CAP_SETFCAP_MISSING_MESSAGE}`, { level: 'warn' });
++            }
++            bwrapArgs.push('--unshare-pid', '--unshare-user', ...capabilities);
++            if (!enableWeakerNestedSandbox)
 +                bwrapArgs.push('--proc', '/proc');
-+            }
-+            else {
-+                // apply-seccomp's nested namespace needs writable uid_map and
-+                // setgroups entries when a fresh proc mount is unavailable.
++            else
 +                bwrapArgs.push('--bind', '/proc', '/proc');
-+            }
          }
          // apply-seccomp obtains CAP_SYS_ADMIN for its nested PID+mount unshare
          // by creating a nested user namespace. This requires the host to permit
-@@ -1630,11 +1738,12 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -2574,13 +2677,14 @@ export async function wrapCommandWithSandboxLinux(params) {
              bwrapArgs.push(sandboxCommand);
          }
          else if (applySeccompPrefix) {
@@ -324,9 +391,12 @@ index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d7
 -            bwrapArgs.push(command);
 +            bwrapArgs.push(privilegedWorkerCommand(command, shell, linuxPrivilegedWorker));
          }
-         const wrappedCommand = quote([bwrapPath ?? 'bwrap', ...bwrapArgs]);
+-        const wrappedCommand = renderBwrapInvocation(bwrapPath ?? 'bwrap', bwrapArgs, mounts);
++        const wrappedCommand = renderBwrapInvocation(bwrapPath ?? 'bwrap', bwrapArgs, mounts, Boolean(linuxPrivilegedWorker) || (!hostParity && !enableWeakerNestedSandbox));
          const restrictions = [];
-@@ -1646,6 +1755,8 @@ export async function wrapCommandWithSandboxLinux(params) {
+         if (needsNetworkRestriction)
+             restrictions.push('network');
+@@ -2590,6 +2694,8 @@ export async function wrapCommandWithSandboxLinux(params) {
              restrictions.push('env');
          if (applySeccompPrefix)
              restrictions.push('seccomp(unix-block)');
@@ -335,11 +405,18 @@ index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d7
          logForDebugging(`[Sandbox Linux] Wrapped command with bwrap (${restrictions.join(', ')} restrictions)`);
          return wrappedCommand;
      }
+@@ -2602,4 +2708,4 @@ export async function wrapCommandWithSandboxLinux(params) {
+         throw error;
+     }
+ }
+-//# sourceMappingURL=linux-sandbox-utils.js.map
+\ No newline at end of file
++//# sourceMappingURL=linux-sandbox-utils.js.map
 diff --git a/dist/sandbox/macos-sandbox-utils.d.ts b/dist/sandbox/macos-sandbox-utils.d.ts
-index 93b1106305aa7ffb37f04867cd343f94ff411350..ac95e3be1c8bf8f4b749a72b439414742bf9e601 100644
+index cc0fbf1881d5de426f02388b1f493abd4ec8accc..672fde458be13d9613869adaa82de79660158cdd 100644
 --- a/dist/sandbox/macos-sandbox-utils.d.ts
 +++ b/dist/sandbox/macos-sandbox-utils.d.ts
-@@ -42,6 +42,7 @@ export interface MacOSSandboxParams {
+@@ -49,6 +49,7 @@ export interface MacOSSandboxParams {
      ignoreViolations?: IgnoreViolationsConfig | undefined;
      allowPty?: boolean;
      allowGitConfig?: boolean;
@@ -347,7 +424,7 @@ index 93b1106305aa7ffb37f04867cd343f94ff411350..ac95e3be1c8bf8f4b749a72b43941474
      /**
       * Directories to emit as `safe.directory` via `GIT_CONFIG_*` env
       * vars — see {@link buildPosixGitSafeDirEnv}.
-@@ -49,13 +50,14 @@ export interface MacOSSandboxParams {
+@@ -56,6 +57,7 @@ export interface MacOSSandboxParams {
      gitSafeDirectories?: readonly string[];
      enableWeakerNetworkIsolation?: boolean;
      allowAppleEvents?: boolean;
@@ -355,44 +432,43 @@ index 93b1106305aa7ffb37f04867cd343f94ff411350..ac95e3be1c8bf8f4b749a72b43941474
      binShell?: string;
  }
  /**
-  * Get mandatory deny patterns as glob patterns (no filesystem scanning).
-  * macOS sandbox profile supports regex/glob matching directly via globToRegex().
+@@ -69,7 +71,7 @@ export interface MacOSSandboxParams {
+  * Compiled as one glob, a cwd like `a[b/c]d` would turn into a character
+  * class and every one of these denies would match nothing.
   */
--export declare function macGetMandatoryDenyPatterns(allowGitConfig?: boolean): string[];
-+export declare function macGetMandatoryDenyPatterns(allowGitConfig?: boolean, disableMandatoryWriteProtection?: boolean): string[];
+-export declare function macGetMandatoryDenyEntries(allowGitConfig?: boolean): PathEntry[];
++export declare function macGetMandatoryDenyEntries(allowGitConfig?: boolean, disableMandatoryWriteProtection?: boolean): PathEntry[];
  export interface SandboxViolationEvent {
      line: string;
      command?: string;
 diff --git a/dist/sandbox/macos-sandbox-utils.js b/dist/sandbox/macos-sandbox-utils.js
-index 70de07c6837687fdec53f8db60225f4df5ea8776..17303c904d34cbd92dbb27249f4c7579755d5b4a 100644
+index d88027848254bef3d1dc4f3d41893ccc6c0b73fb..17e46616a11724c70b61ff5a389cc0959a23ca22 100644
 --- a/dist/sandbox/macos-sandbox-utils.js
 +++ b/dist/sandbox/macos-sandbox-utils.js
-@@ -10,7 +10,9 @@ import { shouldIgnoreViolation } from './sandbox-violation-store.js';
-  * Get mandatory deny patterns as glob patterns (no filesystem scanning).
-  * macOS sandbox profile supports regex/glob matching directly via globToRegex().
+@@ -17,7 +17,9 @@ import { shouldIgnoreViolation } from './sandbox-violation-store.js';
+  * Compiled as one glob, a cwd like `a[b/c]d` would turn into a character
+  * class and every one of these denies would match nothing.
   */
--export function macGetMandatoryDenyPatterns(allowGitConfig = false) {
-+export function macGetMandatoryDenyPatterns(allowGitConfig = false, disableMandatoryWriteProtection = false) {
+-export function macGetMandatoryDenyEntries(allowGitConfig = false) {
++export function macGetMandatoryDenyEntries(allowGitConfig = false, disableMandatoryWriteProtection = false) {
 +    if (disableMandatoryWriteProtection)
 +        return [];
-     const cwd = process.cwd();
-     const denyPaths = [];
-     // Dangerous files - static paths in CWD + glob patterns for subtree
-@@ -152,8 +154,11 @@ function lateReadDenyFilters(resolved) {
-     const literalAllowDirs = resolved.allows.filter(a => !a.glob).map(a => a.path);
+     const cwd = normalizePathForSandbox(process.cwd(), { literal: true });
+     const entries = [];
+     const literal = (relativePath) => toLiteralPathEntry(path.resolve(cwd, relativePath));
+@@ -224,7 +226,10 @@ function lateReadDenyFilters(resolved) {
      for (const deny of resolved.denies) {
          if (!deny.glob) {
--            if (literalAllowDirs.some(a => deny.path.startsWith(a + '/'))) {
--                filters.push(denyPathFilter(deny.path));
-+            if (literalAllowDirs.some(a => isStrictlyUnder(deny, a))) {
+             if (literalAllowDirs.some(a => isStrictlyUnder(deny, a))) {
+-                filters.push(denyPathFilter(deny));
 +                const carveOuts = resolved.allows
 +                    .filter(a => isStrictlyUnder(a, deny.path))
-+                    .map(a => pathFilter(a.path));
-+                filters.push(carveFilter(denyPathFilter(deny.path), carveOuts));
++                    .map(a => pathFilter(a));
++                filters.push(carveFilter(denyPathFilter(deny), carveOuts));
              }
              continue;
          }
-@@ -542,25 +547,8 @@ function generateReadRules(resolved, logTag) {
+@@ -620,28 +625,9 @@ function generateReadRules(resolved, logTag) {
      rules.push(...renderRule('allow', ['file-write-unlink', 'file-write-create'], writeAllowFilters, logTag));
      return rules;
  }
@@ -408,18 +484,22 @@ index 70de07c6837687fdec53f8db60225f4df5ea8776..17303c904d34cbd92dbb27249f4c7579
 -    // Generate allow rules
 -    const allowFilters = new Set();
 -    for (const pathPattern of config.allowOnly || []) {
--        allowFilters.add(pathFilter(normalizePathForSandbox(pathPattern)));
+-        allowFilters.add(pathFilter(toPathEntry(pathPattern)));
 -    }
 -    rules.push(...renderRule('allow', ['file-write*'], allowFilters, logTag));
--    // Combine user-specified and mandatory deny patterns (no ripgrep needed on macOS)
--    const denyPaths = [
--        ...(config.denyWithinAllow || []),
--        ...macGetMandatoryDenyPatterns(allowGitConfig),
+-    // Combine user-specified and mandatory deny patterns (no ripgrep needed on
+-    // macOS). The caller's spellings are patterns when they read as patterns;
+-    // the mandatory entries carry their own literal/glob split.
+-    const denyEntries = [
+-        ...(config.denyWithinAllow || []).map(toPathEntry),
+-        ...macGetMandatoryDenyEntries(allowGitConfig),
 -    ];
-     const { groups, rest: ungrouped } = groupLiteralDenyPaths(denyPaths.map(normalizePathForSandbox));
+-    const { groups, rest: ungrouped } = groupLiteralDenyPaths(denyEntries);
++    const { groups, rest: ungrouped } = groupLiteralDenyPaths(denyPaths);
      const groupFilters = groups.map(literalDenyGroupFilters);
      const denyFilters = new Set();
-@@ -588,11 +576,57 @@ function generateWriteRules(config, logTag, allowGitConfig = false) {
+     for (const { deny } of groupFilters) {
+@@ -668,11 +654,42 @@ function generateWriteRules(config, logTag, allowGitConfig = false) {
      rules.push(...renderRule('deny', ['file-write-unlink', 'file-write-create'], moveFilters, logTag));
      return rules;
  }
@@ -427,48 +507,33 @@ index 70de07c6837687fdec53f8db60225f4df5ea8776..17303c904d34cbd92dbb27249f4c7579
 + * Generate filesystem write rules for sandbox profile
 + */
 +function generateWriteRules(config, logTag, allowGitConfig = false, disableMandatoryWriteProtection = false) {
-+    if (!config) {
++    if (!config)
 +        return [`(allow file-write*)`];
-+    }
 +    const rules = [];
-+    // Generate allow rules
-+    const allowFilters = new Set();
-+    for (const pathPattern of config.allowOnly || []) {
-+        allowFilters.add(pathFilter(normalizePathForSandbox(pathPattern)));
-+    }
++    const allowFilters = new Set((config.allowOnly || []).map(p => pathFilter(toPathEntry(p))));
 +    rules.push(...renderRule('allow', ['file-write*'], allowFilters, logTag));
-+    // Combine user-specified and mandatory deny patterns (no ripgrep needed on macOS)
-+    const denyPaths = [
-+        ...(config.denyWithinAllow || []),
-+        ...macGetMandatoryDenyPatterns(allowGitConfig, disableMandatoryWriteProtection),
++    // Keep upstream's distinction between caller globs and computed literals.
++    const denyEntries = [
++        ...(config.denyWithinAllow || []).map(toPathEntry),
++        ...macGetMandatoryDenyEntries(allowGitConfig, disableMandatoryWriteProtection),
 +    ];
-+    rules.push(...generateWriteDenyRules(denyPaths, logTag));
-+    // Re-open explicit writable islands inside a broader denied root, then
-+    // replay any narrower deny nested inside an exception. Seatbelt is
-+    // last-match winning, including rename/unlink/create operations.
-+    const exceptions = (config.allowWithinDeny || []).map(pathPattern => normalizePathForSandbox(pathPattern));
++    rules.push(...generateWriteDenyRules(denyEntries, logTag));
++    const exceptions = (config.allowWithinDeny || []).map(toPathEntry);
 +    rules.push(...renderRule('allow', ['file-write*', 'file-write-unlink', 'file-write-create'], new Set(exceptions.map(pathFilter)), logTag));
-+    const nestedDenies = exceptions.length === 0
-+        ? []
-+        : denyPaths.filter(pathPattern => {
-+            if (containsGlobChars(pathPattern))
-+                return true;
-+            const denied = normalizePathForSandbox(pathPattern);
-+            return exceptions.some(exception => {
-+                const relative = path.relative(exception, denied);
-+                return relative === '' ||
-+                    (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
-+            });
-+        });
++    const nestedDenies = exceptions.length === 0 ? [] : denyEntries.filter(denied =>
++        denied.glob || exceptions.some(exception => {
++            const relative = path.relative(exception.path, denied.path);
++            return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
++        }));
 +    rules.push(...generateWriteDenyRules(nestedDenies, logTag));
 +    return rules;
 +}
  /**
   * Generate complete sandbox profile
   */
--function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksProxyPort, needsNetworkRestriction, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, allowPty, allowGitConfig = false, enableWeakerNetworkIsolation = false, allowAppleEvents = false, logTag, }) {
+-function generateSandboxProfile({ readConfig, libraryDenyEntries, writeConfig, httpProxyPort, socksProxyPort, needsNetworkRestriction, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, allowPty, allowGitConfig = false, enableWeakerNetworkIsolation = false, allowAppleEvents = false, logTag, }) {
 -    const profile = [
-+function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksProxyPort, needsNetworkRestriction, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, allowPty, allowGitConfig = false, disableMandatoryWriteProtection = false, enableWeakerNetworkIsolation = false, allowAppleEvents = false, hostParity = false, logTag, }) {
++function generateSandboxProfile({ readConfig, libraryDenyEntries, writeConfig, httpProxyPort, socksProxyPort, needsNetworkRestriction, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, allowPty, allowGitConfig = false, disableMandatoryWriteProtection = false, enableWeakerNetworkIsolation = false, allowAppleEvents = false, hostParity = false, logTag, }) {
 +    const profile = hostParity ? [
 +        '(version 1)',
 +        '(allow default)',
@@ -479,7 +544,7 @@ index 70de07c6837687fdec53f8db60225f4df5ea8776..17303c904d34cbd92dbb27249f4c7579
          '(version 1)',
          `(deny default (with message "${logTag}"))`,
          '',
-@@ -763,6 +797,20 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+@@ -843,6 +860,20 @@ function generateSandboxProfile({ readConfig, libraryDenyEntries, writeConfig, h
          ')',
          '',
      ];
@@ -500,7 +565,7 @@ index 70de07c6837687fdec53f8db60225f4df5ea8776..17303c904d34cbd92dbb27249f4c7579
      // Network rules
      profile.push('; Network');
      if (!needsNetworkRestriction) {
-@@ -833,6 +881,21 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+@@ -913,6 +944,21 @@ function generateSandboxProfile({ readConfig, libraryDenyEntries, writeConfig, h
              profile.push(`(allow network-outbound (remote ip "localhost:${socksProxyPort}"))`);
          }
      }
@@ -522,7 +587,7 @@ index 70de07c6837687fdec53f8db60225f4df5ea8776..17303c904d34cbd92dbb27249f4c7579
      profile.push('');
      // Read rules
      // Pass write-allowed paths so that move-blocking deny rules in the read section
-@@ -845,7 +908,7 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+@@ -925,7 +971,7 @@ function generateSandboxProfile({ readConfig, libraryDenyEntries, writeConfig, h
      profile.push('');
      // Write rules
      profile.push('; File write');
@@ -531,16 +596,16 @@ index 70de07c6837687fdec53f8db60225f4df5ea8776..17303c904d34cbd92dbb27249f4c7579
      // Read-denied paths inside write roots: the read section's unlink/create
      // re-allow for write roots (and the write section's file-write* allows)
      // must not leave them renameable. Last in the profile so nothing above
-@@ -884,7 +947,7 @@ function escapePath(pathStr) {
+@@ -964,7 +1010,7 @@ function escapePath(pathStr) {
   * Wrap command with macOS sandbox
   */
  export function wrapCommandWithSandboxMacOS(params) {
--    const { command, commandId, needsNetworkRestriction, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, javaAgentJarPath, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, readConfig: readConfigIn, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, allowPty, allowGitConfig = false, gitSafeDirectories, enableWeakerNetworkIsolation = false, allowAppleEvents = false, binShell, } = params;
-+    const { command, commandId, needsNetworkRestriction, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, javaAgentJarPath, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, readConfig: readConfigIn, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, allowPty, allowGitConfig = false, disableMandatoryWriteProtection = false, gitSafeDirectories, enableWeakerNetworkIsolation = false, allowAppleEvents = false, hostParity = false, binShell, } = params;
+-    const { command, commandId, needsNetworkRestriction, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, javaAgentJarPath, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, readConfig, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, degradeToDenyPaths, allowPty, allowGitConfig = false, gitSafeDirectories, enableWeakerNetworkIsolation = false, allowAppleEvents = false, binShell, } = params;
++    const { command, commandId, needsNetworkRestriction, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, javaAgentJarPath, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, readConfig, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, degradeToDenyPaths, allowPty, allowGitConfig = false, disableMandatoryWriteProtection = false, gitSafeDirectories, enableWeakerNetworkIsolation = false, allowAppleEvents = false, hostParity = false, binShell, } = params;
      // SBPL cannot redirect a read to different bytes, so whole-file masking
      // degrades to read-deny on macOS: the sandboxed process gets EPERM
      // instead of the sentinel. The DYLD interposer (a later step) lifts
-@@ -935,8 +998,10 @@ export function wrapCommandWithSandboxMacOS(params) {
+@@ -1017,8 +1063,10 @@ export function wrapCommandWithSandboxMacOS(params) {
          allowMachLookup,
          allowPty,
          allowGitConfig,
@@ -552,10 +617,10 @@ index 70de07c6837687fdec53f8db60225f4df5ea8776..17303c904d34cbd92dbb27249f4c7579
      });
      // Generate proxy environment variables using shared utility
 diff --git a/dist/sandbox/sandbox-config.d.ts b/dist/sandbox/sandbox-config.d.ts
-index 42b8e0c2678fc2219c1305b1dd4319c3b94415e9..6e591ac65919e709b67f5861341d1539277c6707 100644
+index 7eb00bfa236d195eaaa2c53afc1b49c66b0d1f98..15a8c02c67b79633f82510ececb141d55e4c2df7 100644
 --- a/dist/sandbox/sandbox-config.d.ts
 +++ b/dist/sandbox/sandbox-config.d.ts
-@@ -721,21 +721,27 @@ export declare const FilesystemConfigSchema: z.ZodObject<{
+@@ -717,21 +717,27 @@ export declare const FilesystemConfigSchema: z.ZodObject<{
      allowRead: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
      allowWrite: z.ZodArray<z.ZodString, "many">;
      denyWrite: z.ZodArray<z.ZodString, "many">;
@@ -583,7 +648,7 @@ index 42b8e0c2678fc2219c1305b1dd4319c3b94415e9..6e591ac65919e709b67f5861341d1539
  }>;
  /**
   * Configuration schema for ignoring specific sandbox violations
-@@ -970,22 +976,29 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+@@ -966,22 +972,29 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
          allowRead: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
          allowWrite: z.ZodArray<z.ZodString, "many">;
          denyWrite: z.ZodArray<z.ZodString, "many">;
@@ -613,7 +678,7 @@ index 42b8e0c2678fc2219c1305b1dd4319c3b94415e9..6e591ac65919e709b67f5861341d1539
      credentials: z.ZodOptional<z.ZodObject<{
          files: z.ZodOptional<z.ZodArray<z.ZodObject<{
              path: z.ZodString;
-@@ -1207,6 +1220,19 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+@@ -1203,6 +1216,19 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
      }>>;
      ignoreViolations: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodArray<z.ZodString, "many">>>;
      enableWeakerNestedSandbox: z.ZodOptional<z.ZodBoolean>;
@@ -633,7 +698,7 @@ index 42b8e0c2678fc2219c1305b1dd4319c3b94415e9..6e591ac65919e709b67f5861341d1539
      enableWeakerNetworkIsolation: z.ZodOptional<z.ZodBoolean>;
      allowAppleEvents: z.ZodOptional<z.ZodBoolean>;
      ripgrep: z.ZodOptional<z.ZodObject<{
-@@ -1690,6 +1716,14 @@ export type GitConfig = z.infer<typeof GitConfigSchema>;
+@@ -1686,6 +1712,14 @@ export type GitConfig = z.infer<typeof GitConfigSchema>;
  export type SeccompConfig = z.infer<typeof SeccompConfigSchema>;
  export type SrtWinConfig = z.infer<typeof SrtWinConfigSchema>;
  export type WindowsConfig = z.infer<typeof WindowsConfigSchema>;
@@ -651,10 +716,10 @@ index 42b8e0c2678fc2219c1305b1dd4319c3b94415e9..6e591ac65919e709b67f5861341d1539
  //# sourceMappingURL=sandbox-config.d.ts.map
 \ No newline at end of file
 diff --git a/dist/sandbox/sandbox-config.js b/dist/sandbox/sandbox-config.js
-index f5f3f045aa5b65f9efe34492e29bcc122a92bc1f..c08107ffb88803db3bad5539d5b9913b5736529b 100644
+index 42a49a7b9f8d59b7de8a118b785ebff0aa8e88a5..9fa2589ca42690e7a9c52c85f59da6bcb4d5a759 100644
 --- a/dist/sandbox/sandbox-config.js
 +++ b/dist/sandbox/sandbox-config.js
-@@ -776,10 +776,18 @@ export const FilesystemConfigSchema = z.object({
+@@ -778,10 +778,18 @@ export const FilesystemConfigSchema = z.object({
      denyWrite: z
          .array(filesystemPathSchema)
          .describe('Paths denied for writing (takes precedence over allowWrite)'),
@@ -673,7 +738,7 @@ index f5f3f045aa5b65f9efe34492e29bcc122a92bc1f..c08107ffb88803db3bad5539d5b9913b
  });
  /**
   * Configuration schema for ignoring specific sandbox violations
-@@ -902,6 +910,14 @@ export const SeccompConfigSchema = z.object({
+@@ -904,6 +912,14 @@ export const SeccompConfigSchema = z.object({
          'applyPath resolves inside the bwrap namespace and that the target ' +
          'binary implements the apply-seccomp interface when ARGV0 matches.'),
  });
@@ -686,9 +751,9 @@ index f5f3f045aa5b65f9efe34492e29bcc122a92bc1f..c08107ffb88803db3bad5539d5b9913b
 +})
 +    .strict();
  /**
-  * Main configuration schema for Sandbox Runtime validation
-  */
-@@ -909,6 +925,10 @@ export const SandboxRuntimeConfigSchema = z
+  * An inert deny is fail-open, so a deny glob whose trailing separator leaves
+  * it matching nothing is rejected; the same glob as an allow fails closed,
+@@ -939,6 +955,10 @@ export const SandboxRuntimeConfigSchema = z
      .object({
      network: NetworkConfigSchema.describe('Network restrictions configuration'),
      filesystem: FilesystemConfigSchema.describe('Filesystem restrictions configuration'),
@@ -699,7 +764,7 @@ index f5f3f045aa5b65f9efe34492e29bcc122a92bc1f..c08107ffb88803db3bad5539d5b9913b
      credentials: CredentialsConfigSchema.optional().describe('Credential handling configuration. Only the explicitly declared files ' +
          'and environment variables are restricted.'),
      ignoreViolations: IgnoreViolationsConfigSchema.optional().describe('Optional configuration for ignoring specific violations'),
-@@ -916,6 +936,7 @@ export const SandboxRuntimeConfigSchema = z
+@@ -946,6 +966,7 @@ export const SandboxRuntimeConfigSchema = z
          .boolean()
          .optional()
          .describe('Enable weaker nested sandbox mode (for Docker environments)'),
@@ -707,7 +772,7 @@ index f5f3f045aa5b65f9efe34492e29bcc122a92bc1f..c08107ffb88803db3bad5539d5b9913b
      enableWeakerNetworkIsolation: z
          .boolean()
          .optional()
-@@ -966,6 +987,13 @@ export const SandboxRuntimeConfigSchema = z
+@@ -996,6 +1017,13 @@ export const SandboxRuntimeConfigSchema = z
          '`safe.directory` without adding them to `filesystem.allowWrite`.'),
  })
      .superRefine((cfg, ctx) => {
@@ -718,14 +783,14 @@ index f5f3f045aa5b65f9efe34492e29bcc122a92bc1f..c08107ffb88803db3bad5539d5b9913b
 +            message: 'linuxPrivilegedWorker and enableWeakerNestedSandbox are mutually exclusive',
 +        });
 +    }
-     const creds = cfg.credentials;
-     if (!creds)
-         return;
+     // filesystem.disabled drops every filesystem rule, the credential file
+     // denies included (getFsReadConfig, getFsWriteConfig and
+     // computeWindowsFsAccessSet all short-circuit on it), so an inert deny
 diff --git a/dist/sandbox/sandbox-manager.js b/dist/sandbox/sandbox-manager.js
-index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd1997c7f9faf 100644
+index a1180f0ba0ffa9ca9781ce0025963cba71576999..e07e553caf93c75e88048012ff5d69700ebcd483 100644
 --- a/dist/sandbox/sandbox-manager.js
 +++ b/dist/sandbox/sandbox-manager.js
-@@ -677,6 +677,15 @@ async function initialize(runtimeConfig, sandboxAskCallback, enableLogMonitor =
+@@ -696,6 +696,15 @@ async function initialize(runtimeConfig, sandboxAskCallback, enableLogMonitor =
      // Initialize network infrastructure
      initializationPromise = (async () => {
          try {
@@ -741,7 +806,7 @@ index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd199
              // On Windows the WFP loopback permit covers a fixed port
              // range, so the proxies must bind inside it. Other platforms
              // bake the actual ephemeral port into the sandbox profile, so
-@@ -986,6 +995,7 @@ function getFsWriteConfig() {
+@@ -1049,6 +1058,7 @@ function getFsWriteConfig() {
      return {
          allowOnly,
          denyWithinAllow: denyPaths,
@@ -749,7 +814,7 @@ index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd199
      };
  }
  /**
-@@ -1115,12 +1125,18 @@ function getIgnoreViolations() {
+@@ -1178,12 +1188,18 @@ function getIgnoreViolations() {
  function getEnableWeakerNestedSandbox() {
      return config?.enableWeakerNestedSandbox;
  }
@@ -768,7 +833,7 @@ index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd199
  function getRipgrepConfig() {
      return config?.ripgrep ?? { command: 'rg' };
  }
-@@ -1130,6 +1146,9 @@ function getMandatoryDenySearchDepth() {
+@@ -1193,6 +1209,9 @@ function getMandatoryDenySearchDepth() {
  function getAllowGitConfig() {
      return config?.filesystem?.allowGitConfig ?? false;
  }
@@ -778,7 +843,7 @@ index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd199
  /**
   * Union of session-level and per-call `git.safeDirectories`. Marks
   * paths as `safe.directory` (dubious-ownership bypass) WITHOUT
-@@ -1226,6 +1245,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1285,6 +1304,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
              denyWithinAllow: stripWriteGlobs(customConfig?.filesystem?.denyWrite ??
                  config?.filesystem.denyWrite ??
                  []),
@@ -788,7 +853,7 @@ index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd199
          };
          // Credential deny paths are unioned with the caller's denyRead — never
          // replacing it — so explicit filesystem restrictions always survive.
-@@ -1271,8 +1293,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1316,8 +1338,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
      // 1. customConfig has network.allowedDomains defined (even if empty array = block all)
      // 2. OR config has network.allowedDomains defined (even if empty array = block all)
      // An empty allowedDomains array means "no domains allowed" = block all network access
@@ -800,7 +865,7 @@ index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd199
      // Network RESTRICTION is needed whenever network config is specified
      // This includes empty allowedDomains which means "block all network"
      const needsNetworkRestriction = hasNetworkConfig;
-@@ -1313,9 +1336,11 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1359,9 +1382,11 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
                  ignoreViolations: getIgnoreViolations(),
                  allowPty,
                  allowGitConfig: getAllowGitConfig(),
@@ -812,7 +877,7 @@ index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd199
                  binShell,
              });
          case 'linux':
-@@ -1346,11 +1371,14 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1392,11 +1417,14 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
                  maskedFileBinds: credentialRestrictions.maskedFileBinds,
                  maskedFileStoreDir: credentialRestrictions.maskedFileStoreDir,
                  enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
@@ -827,7 +892,7 @@ index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd199
                  gitSafeDirectories,
                  seccompConfig: getSeccompConfig(),
                  bwrapPath: config?.bwrapPath,
-@@ -1395,8 +1423,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1441,8 +1469,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
  async function wrapWithSandboxArgv(command, binShell, customConfig, abortSignal, cwd, options) {
      const platform = getPlatform();
      if (platform === 'windows') {
@@ -840,10 +905,10 @@ index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd199
              await waitForNetworkInitialization();
          }
 diff --git a/dist/sandbox/sandbox-schemas.d.ts b/dist/sandbox/sandbox-schemas.d.ts
-index d753a3a3a500be8c485f511ec5a94d5921094b91..743e2cb71b1ce5d15aa70553abd18ddab23dd01c 100644
+index 3da7ae71baf772729db0cd90d60e0a8267312e6b..271519b0e6c091582f903247566998c8e4159b55 100644
 --- a/dist/sandbox/sandbox-schemas.d.ts
 +++ b/dist/sandbox/sandbox-schemas.d.ts
-@@ -34,6 +34,7 @@ export interface FsReadRestrictionConfig {
+@@ -42,6 +42,7 @@ export interface FsReadRestrictionConfig {
  export interface FsWriteRestrictionConfig {
      allowOnly: string[];
      denyWithinAllow: string[];

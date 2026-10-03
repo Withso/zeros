@@ -1,16 +1,18 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CloudWorkspaceRecordRuntime } from "../cloud-record-runtime";
+import { CodeReviewAgentTools } from "../agents/code-review-tools";
 import {
   CloudRuntimeRegistration,
   type CloudRuntimeConfig,
 } from "../cloud-runtime-registration";
 import { closeZerosDb, openZerosDb, setZerosDbPathForTesting } from "../db";
+import { codeReviewStore } from "../db/code-review";
 import { deleteChat, listChats, upsertChat, wasChatDeleted } from "../db/chats";
 import { deleteTurnsForChat, deleteTurnsFrom } from "../db/turns";
 import { clearChatMessages, windowChatMessages, listChatMessagesSince, upsertChatMessage } from "../db/messages";
@@ -161,6 +163,16 @@ function localChat(id: string, folder: string, title: string) {
   };
 }
 
+function cloudReviewOwner(root: string, id = "local-main") {
+  return {
+    id, canonicalId: authority.workspaceId, organizationId: authority.organizationId,
+    placement: "cloud" as const, repoRoot: root, path: root, repoSlug: "fixture",
+    branch: "cloud/work", baseBranch: "main", status: "in-progress" as const,
+    createdAt: NOW, archivedAt: null, stashRef: null, prNumber: null,
+    prState: null, prUrl: null, agentId: null, lastActiveAt: null,
+  };
+}
+
 function createRecordServer(initialEntries: readonly RemoteEntry[] = []) {
   let revision = initialEntries.reduce(
     (maximum, entry) => Math.max(maximum, entry.revision),
@@ -236,6 +248,23 @@ function createRecordServer(initialEntries: readonly RemoteEntry[] = []) {
       remote.set(key,{...entry,revision:++revision,document:null,tombstonedAt:new Date(NOW).toISOString()});
   };
   return { appendBodies, remote, requestFetch, deleteChildren };
+}
+
+const reviewHuman = { id: "fixture-human", name: "Fixture reviewer", kind: "human" as const };
+const reviewAgent = { id: "fixture-session", name: "Codex", kind: "agent" as const, provider: "codex" };
+async function captureReviewFixture(root: string, ownerId = "local-main") {
+  insertWorkspace(cloudReviewOwner(root, ownerId));
+  const input = { workspaceId: ownerId, requestId: "fixture-create",
+    anchor: { path: "deleted/example.ts", side: "old" as const, startLine: 2, endLine: 3, revision: "fixture-old-revision" },
+    body: "Fixture review" };
+  const thread = codeReviewStore.create(input, reviewHuman);
+  const server = createRecordServer();
+  await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize(authority);
+  return { server, input, thread };
+}
+
+function reviewDocument(entries: readonly RemoteEntry[], kind: string): Record<string, unknown> {
+  return entries.find((entry) => (entry.document as { kind?: string } | null)?.kind === kind)!.document as Record<string, unknown>;
 }
 
 const roots: string[] = [];
@@ -647,6 +676,76 @@ describe("cloud durable record runtime", () => {
     ]);
   });
 
+  it("restores review history, authors, resolution and retry receipts in a replacement allocation", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-reviews-"));
+    const replacement = await mkdtemp(path.join(os.tmpdir(), "zeros-record-reviews-next-"));
+    roots.push(root, replacement);
+    for (const folder of [root, replacement]) {
+      await mkdir(path.join(folder, "src"));
+      await writeFile(path.join(folder, "src/example.ts"), "export const fixture = 1;\n");
+    }
+    setZerosDbPathForTesting(":memory:");
+    insertWorkspace(cloudReviewOwner(root));
+    const human = { id: "reviewer-1", name: "Fixture reviewer", kind: "human" as const };
+    const agent = { id: "session-1", name: "Codex", kind: "agent" as const, provider: "codex" };
+    const integration = { id: "integration-1", name: "Fixture integration", kind: "integration" as const };
+    const createInput = {
+      workspaceId: "local-main", requestId: "durable-create",
+      anchor: { path: "src/example.ts", side: "file" as const, startLine: 1, endLine: 1,
+        revision: "fixture-original-content", context: "export const fixture = 1;" },
+      body: "Original fixture comment",
+    };
+    let thread = codeReviewStore.create(createInput, human);
+    const replyInput = {
+      workspaceId: "local-main", threadId: thread.id, body: "Agent fixture reply", requestId: "durable-reply",
+    };
+    thread = codeReviewStore.reply(replyInput, agent);
+    for (let index = 0; index < 130; index++) {
+      thread = codeReviewStore.reply({ workspaceId: "local-main", threadId: thread.id,
+        body: `Ordered fixture reply ${index}`, requestId: `durable-reply-${index}` }, integration);
+    }
+    const resolveInput = { workspaceId: "local-main", threadId: thread.id,
+      resolved: true, expectedVersion: thread.version, requestId: "durable-resolve" };
+    thread = codeReviewStore.setResolved(resolveInput, human);
+    const comments = openZerosDb().prepare("SELECT * FROM code_review_comments ORDER BY seq").all();
+    const receipts = openZerosDb().prepare("SELECT * FROM code_review_requests ORDER BY actor_key, request_id").all();
+    // A thread under an unrelated semantic owner must never join this record.
+    codeReviewStore.create({ ...createInput, workspaceId: "outside-owner", requestId: "outside-create" }, human);
+    const server = createRecordServer();
+    await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize(authority);
+
+    closeZerosDb();
+    setZerosDbPathForTesting(":memory:");
+    insertWorkspace(cloudReviewOwner(replacement));
+    await new CloudWorkspaceRecordRuntime(replacement, { fetch: server.requestFetch }).synchronize({
+      ...authority, generation: 2, engineInstanceId: "55555555-5555-4555-8555-555555555555",
+    });
+    expect(codeReviewStore.list({ workspaceId: "local-main" }).threads).toMatchObject([
+      { id: thread.id, anchor: thread.anchor, resolved: true, version: thread.version,
+        commentCount: 132, resolvedBy: human, resolvedAt: thread.resolvedAt },
+    ]);
+    expect(openZerosDb().prepare("SELECT * FROM code_review_comments ORDER BY seq").all()).toEqual(comments);
+    expect(openZerosDb().prepare("SELECT * FROM code_review_requests ORDER BY actor_key, request_id").all()).toEqual(receipts);
+    expect(codeReviewStore.list({ workspaceId: "outside-owner" }).threads).toEqual([]);
+    expect(codeReviewStore.create(createInput, human).id).toBe(thread.id);
+    expect(codeReviewStore.reply(replyInput, agent).version).toBe(thread.version);
+    expect(codeReviewStore.setResolved(resolveInput, human).version).toBe(thread.version);
+    expect(() => codeReviewStore.setResolved({ ...resolveInput, requestId: "stale-reopen", resolved: false }, human))
+      .toThrow("This review thread changed");
+    expect(codeReviewStore.setResolved({ ...resolveInput, expectedVersion: thread.version,
+      requestId: "durable-reopen", resolved: false }, agent)).toMatchObject({ resolved: false, version: thread.version + 1 });
+    expect(() => openZerosDb().prepare("UPDATE code_review_comments SET author_json = ? WHERE id = ?")
+      .run(JSON.stringify(integration), thread.comments[0].id)).toThrow("Review comments are immutable");
+    expect(await readFile(path.join(replacement, "src/example.ts"), "utf8")).toBe("export const fixture = 1;\n");
+    for (const body of server.appendBodies) {
+      expect(body.mutations.length).toBeLessThanOrEqual(100);
+      expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(2 * 1024 * 1024);
+      for (const mutation of body.mutations) {
+        expect(Buffer.byteLength(JSON.stringify(mutation.document))).toBeLessThanOrEqual(512 * 1024);
+      }
+    }
+  });
+
   it("restores the cloud primary workspace's target branch, mode and PR after a worker replacement", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-cloud-metadata-"));
     roots.push(root);
@@ -660,6 +759,250 @@ describe("cloud durable record runtime", () => {
     closeZerosDb(); setZerosDbPathForTesting(":memory:"); openZerosDb(); insertWorkspace(primary);
     await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize(authority);
     expect(getWorkspaceById("local-main")).toMatchObject({ ...primary, baseBranch: "release", viewMode: "design", prNumber: 42, prState: "draft", prUrl: "https://github.com/example/fixture/pull/42" });
+  });
+
+  it("remaps the canonical review owner while preserving retries, actors and comment order", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-remap-"));
+    const replacement = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-remap-next-"));
+    roots.push(root, replacement);
+    setZerosDbPathForTesting(":memory:");
+    const { server, input, thread } = await captureReviewFixture(root, "previous-route");
+    const replyInput = { workspaceId: "previous-route", threadId: thread.id, requestId: "remap-reply", body: "Reply before replacement" };
+    const replied = codeReviewStore.reply(replyInput, reviewAgent);
+    const resolveInput = { workspaceId: "previous-route", threadId: thread.id, requestId: "remap-resolve", resolved: true, expectedVersion: replied.version };
+    const resolved = codeReviewStore.setResolved(resolveInput, reviewHuman);
+    await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize(authority);
+    closeZerosDb(); setZerosDbPathForTesting(":memory:");
+    insertWorkspace(cloudReviewOwner(replacement, "replacement-route"));
+    await new CloudWorkspaceRecordRuntime(replacement, { fetch: server.requestFetch }).synchronize({ ...authority, generation: 2 });
+    const restored = codeReviewStore.get("replacement-route", thread.id);
+    expect(restored).toEqual({ ...resolved, workspaceId: "replacement-route" });
+    expect(restored.comments.map((comment) => [comment.sequence, comment.author])).toEqual([[1, reviewHuman], [2, reviewAgent]]);
+    expect(codeReviewStore.create({ ...input, workspaceId: "replacement-route" }, reviewHuman).id).toBe(thread.id);
+    expect(codeReviewStore.reply({ ...replyInput, workspaceId: "replacement-route" }, reviewAgent).version).toBe(3);
+    expect(codeReviewStore.setResolved({ ...resolveInput, workspaceId: "replacement-route" }, reviewHuman).version).toBe(3);
+    expect(codeReviewStore.list({ workspaceId: "previous-route" }).threads).toEqual([]);
+    expect(openZerosDb().prepare("SELECT DISTINCT workspace_id FROM code_review_requests").all()).toEqual([{ workspace_id: "replacement-route" }]);
+  });
+
+  it("keeps replies added during a record upload dirty until the next durable capture", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-stream-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    const { server, thread } = await captureReviewFixture(root);
+    codeReviewStore.reply({ workspaceId: "local-main", threadId: thread.id, body: "Captured reply" }, reviewAgent);
+    let appendWhileUploading = true;
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      const response = await server.requestFetch(url, init);
+      if (appendWhileUploading && new URL(String(url)).pathname.endsWith("/record/append")) {
+        appendWhileUploading = false;
+        codeReviewStore.reply({ workspaceId: "local-main", threadId: thread.id, body: "Concurrent reply" }, reviewHuman);
+      }
+      return response;
+    });
+    const runtime = new CloudWorkspaceRecordRuntime(root, { fetch: fetcher });
+    await runtime.synchronize(authority);
+    expect(codeReviewStore.get("local-main", thread.id)).toMatchObject({ version: 3, commentCount: 3 });
+    expect(reviewDocument([...server.remote.values()], "thread")).toMatchObject({ thread: { version: 2, commentCount: 2 } });
+    await runtime.synchronize(authority);
+    expect(reviewDocument([...server.remote.values()], "thread")).toMatchObject({ thread: { version: 3, commentCount: 3 } });
+    expect(codeReviewStore.get("local-main", thread.id).comments.map((comment) => comment.body))
+      .toEqual(["Fixture review", "Captured reply", "Concurrent reply"]);
+  });
+
+  it("flushes acknowledged replies after a held heartbeat capture before allocation replacement", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-final-flush-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    const { server, thread } = await captureReviewFixture(root);
+    codeReviewStore.reply({ workspaceId: "local-main", threadId: thread.id, body: "Reply A", requestId: "final-reply-a" }, reviewAgent);
+    let releaseUpload!: () => void;
+    let notifyUpload!: () => void;
+    const heldUpload = new Promise<void>((resolve) => { releaseUpload = resolve; });
+    const uploadEntered = new Promise<void>((resolve) => { notifyUpload = resolve; });
+    let holdNextUpload = true;
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      if (holdNextUpload && new URL(String(url)).pathname.endsWith("/record/append")) {
+        holdNextUpload = false;
+        notifyUpload();
+        await heldUpload;
+      }
+      return server.requestFetch(url, init);
+    });
+    const runtime = new CloudWorkspaceRecordRuntime(root, { fetch: fetcher });
+    const heartbeat = runtime.synchronize(authority);
+    await uploadEntered;
+    codeReviewStore.reply({ workspaceId: "local-main", threadId: thread.id, body: "Reply B", requestId: "final-reply-b" }, reviewHuman);
+    // Final lifecycle admission is quiescent at this point. A pre-existing
+    // heartbeat captured A before the acknowledged B write reached SQLite.
+    const finalCapture = runtime.flush(authority);
+    releaseUpload();
+    await Promise.all([heartbeat, finalCapture]);
+    closeZerosDb(); setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(root));
+    await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize({ ...authority, generation: 2 });
+    const restored = codeReviewStore.get("local-main", thread.id);
+    expect(restored).toMatchObject({ version: 3, commentCount: 3 });
+    expect(restored.comments.map((comment) => comment.body)).toEqual(["Fixture review", "Reply A", "Reply B"]);
+    expect(restored.comments.map((comment) => comment.author)).toEqual([reviewHuman, reviewAgent, reviewHuman]);
+    expect(openZerosDb().prepare("SELECT COUNT(*) AS count FROM code_review_requests").get()).toEqual({ count: 3 });
+  });
+
+  it("captures scoped agent tool writes through the same durable record lifecycle", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-agent-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(root));
+    const tools = new CodeReviewAgentTools({ workspaceId: "local-main", workspacePath: root, assertCurrent: vi.fn() }, {
+      resolveReadCwd: () => root, ownerRoots: () => [root],
+    }, reviewAgent);
+    const signal = new AbortController().signal;
+    await tools.callTool("code_review_create", {
+      anchor: { path: "deleted/agent.ts", side: "old", startLine: 1, endLine: 1, revision: "fixture-agent-revision" },
+      body: "Scoped agent fixture comment", requestId: "scoped-agent-create",
+    }, signal);
+    const thread = codeReviewStore.list({ workspaceId: "local-main" }).threads[0]!;
+    await tools.callTool("code_review_reply", { threadId: thread.id, body: "Scoped agent fixture reply", requestId: "scoped-agent-reply" }, signal);
+    await tools.callTool("code_review_set_resolved", { threadId: thread.id, resolved: true, expectedVersion: 2, requestId: "scoped-agent-resolve" }, signal);
+    const server = createRecordServer();
+    await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize(authority);
+    closeZerosDb(); setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(root));
+    await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize({ ...authority, generation: 2 });
+    const restored = codeReviewStore.get("local-main", thread.id);
+    expect(restored).toMatchObject({ version: 3, commentCount: 2, resolved: true, resolvedBy: reviewAgent });
+    expect(restored.comments.map((comment) => [comment.sequence, comment.author])).toEqual([[1, reviewAgent], [2, reviewAgent]]);
+    expect(openZerosDb().prepare("SELECT COUNT(*) AS count FROM code_review_requests").get()).toEqual({ count: 3 });
+  });
+
+  it("restores the last committed review after an interrupted multibatch upload and permits a safe retry", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-interrupted-"));
+    const replacement = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-interrupted-next-"));
+    roots.push(root, replacement);
+    setZerosDbPathForTesting(":memory:");
+    const { server, input, thread } = await captureReviewFixture(root);
+    const replyInput = { workspaceId: "local-main", threadId: thread.id, requestId: "interrupted-reply-0", body: "Pending fixture reply 0" };
+    for (let index = 0; index < 140; index++) codeReviewStore.reply({ ...replyInput,
+      requestId: `interrupted-reply-${index}`, body: `Pending fixture reply ${index}` }, reviewAgent);
+    let appended = 0;
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      const response = await server.requestFetch(url, init);
+      if (new URL(String(url)).pathname.endsWith("/record/append") && ++appended === 2) throw new Error("Fixture upload interrupted");
+      return response;
+    });
+    await expect(new CloudWorkspaceRecordRuntime(root, { fetch: fetcher }).synchronize(authority)).rejects.toThrow("Fixture upload interrupted");
+    expect(reviewDocument([...server.remote.values()], "thread")).toMatchObject({ thread: { version: 1, commentCount: 1 } });
+    expect([...server.remote.values()].filter((entry) => (entry.document as { kind?: string } | null)?.kind === "request").length).toBeGreaterThan(1);
+    closeZerosDb(); setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(replacement));
+    const runtime = new CloudWorkspaceRecordRuntime(replacement, { fetch: server.requestFetch });
+    await runtime.synchronize({ ...authority, generation: 2 });
+    expect(codeReviewStore.get("local-main", thread.id)).toEqual(thread);
+    expect(codeReviewStore.create(input, reviewHuman).id).toBe(thread.id);
+    expect(openZerosDb().prepare("SELECT COUNT(*) AS count FROM code_review_requests").get()).toEqual({ count: 1 });
+    expect([...server.remote.values()].filter((entry) => entry.document &&
+      ["comment", "request"].includes((entry.document as { kind: string }).kind))).toHaveLength(2);
+    expect(codeReviewStore.reply(replyInput, reviewAgent)).toMatchObject({ version: 2, commentCount: 2 });
+    await runtime.synchronize({ ...authority, generation: 2 });
+    closeZerosDb(); setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(replacement));
+    await new CloudWorkspaceRecordRuntime(replacement, { fetch: server.requestFetch }).synchronize({ ...authority, generation: 3 });
+    expect(codeReviewStore.get("local-main", thread.id).comments.map((comment) => comment.body)).toEqual(["Fixture review", "Pending fixture reply 0"]);
+    expect(codeReviewStore.reply(replyInput, reviewAgent).commentCount).toBe(2);
+  });
+
+  it.each([
+    ["workspace binding", "thread", (document: Record<string, unknown>) => { document.workspaceId = "99999999-9999-4999-8999-999999999999"; }],
+    ["organization binding", "comment", (document: Record<string, unknown>) => { document.organizationId = "99999999-9999-4999-8999-999999999999"; }],
+    ["author", "comment", (document: Record<string, unknown>) => { (document.comment as { author: unknown }).author = { ...reviewHuman, kind: "untrusted" }; }],
+    ["line range", "thread", (document: Record<string, unknown>) => { ((document.thread as { anchor: { endLine: number } }).anchor).endLine = 1; }],
+    ["path", "thread", (document: Record<string, unknown>) => { ((document.thread as { anchor: { path: string } }).anchor).path = "../outside.ts"; }],
+    ["comment order", "comment", (document: Record<string, unknown>) => { (document.comment as { sequence: number }).sequence = 2; }],
+    ["version", "thread", (document: Record<string, unknown>) => { (document.thread as { version: number }).version = 0; }],
+    ["retry receipt", "request", (document: Record<string, unknown>) => { document.actorKey = '["human","spoofed"]'; }],
+  ])("rejects a malformed restored review %s without partial import", async (_label, kind, corrupt) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-invalid-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    const { server } = await captureReviewFixture(root);
+    const entries = structuredClone([...server.remote.values()]);
+    corrupt(reviewDocument(entries, kind));
+    closeZerosDb(); setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(root));
+    const malformed = createRecordServer(entries);
+    await expect(new CloudWorkspaceRecordRuntime(root, { fetch: malformed.requestFetch }).synchronize({ ...authority, generation: 2 }))
+      .rejects.toThrow("cloud review document is invalid");
+    expect(codeReviewStore.list({ workspaceId: "local-main" }).threads).toEqual([]);
+    expect(openZerosDb().prepare("SELECT COUNT(*) AS count FROM code_review_requests").get()).toEqual({ count: 0 });
+    expect(malformed.appendBodies).toEqual([]);
+  });
+
+  it("fails closed on a review thread identity belonging to a different local workspace", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-collision-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    const { server, thread } = await captureReviewFixture(root);
+    closeZerosDb(); setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(root));
+    openZerosDb().prepare("INSERT INTO code_review_threads (id, workspace_id, file_path, anchor_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(thread.id, "different-owner", thread.anchor.path, JSON.stringify(thread.anchor), thread.createdAt, thread.updatedAt);
+    await expect(new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize({ ...authority, generation: 2 }))
+      .rejects.toThrow("cloud review identity belongs to another workspace");
+    expect(openZerosDb().prepare("SELECT workspace_id FROM code_review_threads WHERE id = ?").get(thread.id)).toEqual({ workspace_id: "different-owner" });
+    expect(openZerosDb().prepare("SELECT COUNT(*) AS count FROM code_review_comments").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects changes to an existing immutable review author", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-author-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    const { server, thread } = await captureReviewFixture(root);
+    const entries = structuredClone([...server.remote.values()]);
+    (reviewDocument(entries, "comment").comment as { author: unknown }).author = reviewAgent;
+    const changed = createRecordServer(entries);
+    await expect(new CloudWorkspaceRecordRuntime(root, { fetch: changed.requestFetch }).synchronize(authority))
+      .rejects.toThrow("cloud review immutable comment changed");
+    expect(codeReviewStore.get("local-main", thread.id).comments[0]!.author).toEqual(reviewHuman);
+    expect(changed.appendBodies).toEqual([]);
+  });
+
+  it("keeps protected and aliased review context out of durable capture and preserves historical paths", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-policy-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(root));
+    await writeFile(path.join(root, ".env"), "SYNTHETIC_FIXTURE_ONLY=1\n");
+    await symlink(".env", path.join(root, "public-alias.txt"));
+    const paths = [".env", "public-alias.txt", ".zeros/review.txt", ".conductor/review.txt", "nested/review.ts"];
+    insertWorkspace({ ...cloudReviewOwner(path.join(root, "nested"), "nested-owner"),
+      canonicalId: "77777777-7777-4777-8777-777777777777", placement: "local", branch: "nested/work" });
+    const input = { workspaceId: "local-main", body: "Synthetic fixture comment",
+      anchor: { path: "deleted/example.ts", side: "old" as const, startLine: 1, endLine: 1, revision: "fixture-historical" } };
+    const historical = codeReviewStore.create(input, reviewHuman);
+    for (const [index, file] of paths.entries()) codeReviewStore.create({ ...input, requestId: `protected-${index}`,
+      anchor: { ...input.anchor, path: file, context: "SYNTHETIC_PRIVATE_CONTEXT" } }, reviewHuman);
+    const server = createRecordServer();
+    await new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize(authority);
+    const records = [...server.remote.values()].filter((entry) => entry.entityId.startsWith("code-review-v1:"));
+    expect(records).toHaveLength(2);
+    expect(reviewDocument(records, "thread")).toMatchObject({ thread: { id: historical.id, anchor: input.anchor } });
+    expect(JSON.stringify(records)).not.toContain("SYNTHETIC_PRIVATE_CONTEXT");
+    expect(codeReviewStore.list({ workspaceId: "local-main" }).threads).toHaveLength(6);
+  });
+
+  it.each([".env", "public-alias.txt", ".zeros/history.txt", ".conductor/history.txt"])(
+    "retains a durable protected %s anchor without importing its context", async (file) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-protected-")); roots.push(root);
+      setZerosDbPathForTesting(":memory:");
+      const { server } = await captureReviewFixture(root);
+      const entries = structuredClone([...server.remote.values()]);
+      const header = reviewDocument(entries, "thread").thread as { anchor: { path: string; context?: string } };
+      header.anchor.path = file; header.anchor.context = "SYNTHETIC_PRIVATE_CONTEXT";
+      await writeFile(path.join(root, ".env"), "SYNTHETIC_FIXTURE_ONLY=1\n");
+      await symlink(".env", path.join(root, "public-alias.txt"));
+      closeZerosDb(); setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(root));
+      const protectedServer = createRecordServer(entries);
+      await new CloudWorkspaceRecordRuntime(root, { fetch: protectedServer.requestFetch }).synchronize({ ...authority, generation: 2 });
+      expect(codeReviewStore.list({ workspaceId: "local-main" }).threads).toEqual([]);
+      expect(protectedServer.appendBodies).toEqual([]);
+      expect(reviewDocument([...protectedServer.remote.values()], "thread")).toMatchObject({ thread: { anchor: header.anchor } });
+    },
+  );
+
+  it("rejects restore when the canonical owner is registered at another checkout", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-owner-path-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "zeros-record-review-owner-path-other-"));
+    roots.push(root, outside); setZerosDbPathForTesting(":memory:");
+    const { server } = await captureReviewFixture(root);
+    closeZerosDb(); setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(outside));
+    await expect(new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch }).synchronize({ ...authority, generation: 2 }))
+      .rejects.toThrow("cloud review workspace identity changed");
+    expect(codeReviewStore.list({ workspaceId: "local-main" }).threads).toEqual([]);
   });
 
   it.each([

@@ -17,6 +17,26 @@ function deferred<T>(): {
 }
 
 describe("KeyedAsyncCache", () => {
+  it("keeps a reopened owner's pending slot when a forgotten request finishes", async () => {
+    const cache = new KeyedAsyncCache<string>();
+    const oldResponse = deferred<string>();
+    const newResponse = deferred<string>();
+    const oldFlight = cache.load("owner", () => oldResponse.promise);
+    await Promise.resolve();
+    cache.forget("owner");
+    const fetchCurrent = vi.fn(() => newResponse.promise);
+    const newFlight = cache.load("owner", fetchCurrent);
+    await Promise.resolve();
+    oldResponse.resolve("deleted owner");
+    await oldFlight;
+    const shared = cache.load("owner", fetchCurrent);
+    newResponse.resolve("current owner");
+    await Promise.all([newFlight, shared]);
+    expect(fetchCurrent).toHaveBeenCalledTimes(1);
+    expect(shared).toBe(newFlight);
+    expect(cache.peekSnapshot("owner").data).toBe("current owner");
+  });
+
   it("forgets a removed owner without resurrecting its late response or queued refresh", async () => {
     const cache = new KeyedAsyncCache<string>();
     const response = deferred<string>(); const fetch = vi.fn(() => response.promise);

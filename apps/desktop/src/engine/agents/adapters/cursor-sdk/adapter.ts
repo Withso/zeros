@@ -432,12 +432,13 @@ type CuratedCursorModel = {
 const CURSOR_EFFORT_PARAMETER_RX = /effort|reason|thinking/i;
 const CURSOR_FAST_PARAMETER_RX = /speed|fast/i;
 
-/** Parameter names verified against @cursor/sdk 1.0.31's models.list wire.
+/** Parameter names verified against the SDK's models.list wire.
  * The capability values stay owned by catalogs/models-v1.json, so the cold
  * path cannot grow a second model menu or drift from renderer validation. */
 const CURSOR_CURATED_PARAMETER_WIRES: Readonly<
   Record<string, { effort?: string; fast?: string }>
 > = {
+  "grok-4.7": { effort: "reasoning_effort", fast: "fast" },
   "grok-4.6": { effort: "effort", fast: "fast" },
 };
 

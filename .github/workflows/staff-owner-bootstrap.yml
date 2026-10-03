@@ -1,0 +1,145 @@
+name: Beta staff owner bootstrap
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Protected channel for the audited owner grant (existing dispatches default to Beta)
+        required: false
+        type: choice
+        options: [beta, production]
+        default: beta
+      mode:
+        description: Plan the audited grant or apply a freshly revalidated plan
+        required: true
+        type: choice
+        options: [plan, apply]
+        default: plan
+      subject_user_id:
+        description: Exact reviewed channel Zeros subject UUID
+        required: true
+        type: string
+      actor_user_id:
+        description: Accountable active channel Zeros operator UUID
+        required: true
+        type: string
+      owner_organization_id:
+        description: Exact active nonpersonal channel Organization UUID owned by the subject
+        required: true
+        type: string
+      reason:
+        description: Nonpersonal audit reason (16 to 512 characters)
+        required: true
+        type: string
+      confirm:
+        description: Type the exact channel database name (zeros-control-plane-beta or zeros-control-plane-production)
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  approve:
+    name: Approve Production staff owner bootstrap
+    if: github.event_name == 'workflow_dispatch' && github.event.repository.fork == false && inputs.channel == 'production' && startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    environment: production-approval
+    permissions: {}
+    steps:
+      - name: Record the approved staff bootstrap
+        run: echo "Production staff bootstrap approved for $GITHUB_SHA on $GITHUB_REF_NAME"
+  ci:
+    name: Verify exact-source CI
+    if: github.event_name == 'workflow_dispatch' && github.event.repository.fork == false && startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      RELEASE_CHANNEL: ${{ inputs.channel || 'beta' }}
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Wait for required exact-source checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pnpm exec tsx scripts/release/ci-cli.ts --wait
+  bootstrap:
+    name: Audited Beta owner bootstrap
+    needs: [ci, approve]
+    if: >-
+      !cancelled() && github.event_name == 'workflow_dispatch' && github.event.repository.fork == false &&
+      startsWith(github.ref, 'refs/heads/release/') && needs.ci.result == 'success' &&
+      ((inputs.channel == 'production' && needs.approve.result == 'success') ||
+      ((inputs.channel || 'beta') == 'beta' && needs.approve.result == 'skipped'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.channel || 'beta' }}
+    concurrency:
+      group: hosted-mutation-${{ inputs.channel || 'beta' }}
+      cancel-in-progress: false
+    env:
+      RELEASE_CHANNEL: ${{ inputs.channel || 'beta' }}
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      PLANETSCALE_ORG: ${{ vars.PLANETSCALE_ORG }}
+      PLANETSCALE_DATABASE: ${{ vars.PLANETSCALE_DATABASE }}
+      PLANETSCALE_BRANCH: ${{ vars.PLANETSCALE_BRANCH }}
+      STAFF_BOOTSTRAP_MODE: ${{ inputs.mode }}
+      STAFF_SUBJECT_USER_ID: ${{ inputs.subject_user_id }}
+      STAFF_ACTOR_USER_ID: ${{ inputs.actor_user_id }}
+      STAFF_OWNER_ORGANIZATION_ID: ${{ inputs.owner_organization_id }}
+      STAFF_REASON: ${{ inputs.reason }}
+      STAFF_BOOTSTRAP_CONFIRM: ${{ inputs.confirm }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm --dir apps/control-plane install --frozen-lockfile --ignore-scripts
+      - name: Prepare sanitized role-create intent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAFF_EXPECTED_EMAIL: ${{ secrets.STAFF_EXPECTED_EMAIL }}
+          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PLANETSCALE_SERVICE_TOKEN_ID }}
+          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PLANETSCALE_SERVICE_TOKEN }}
+        run: pnpm exec tsx scripts/release/beta-staff-bootstrap-cli.ts --prepare
+      - name: Retain role-create intent
+        id: intent
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ inputs.channel || 'beta' }}-staff-owner-intent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .context/release/${{ inputs.channel || 'beta' }}-staff-bootstrap-intent.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+      - name: Plan or apply the audited owner role
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAFF_EXPECTED_EMAIL: ${{ secrets.STAFF_EXPECTED_EMAIL }}
+          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PLANETSCALE_SERVICE_TOKEN_ID }}
+          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PLANETSCALE_SERVICE_TOKEN }}
+          STAFF_BOOTSTRAP_INTENT_ARTIFACT_ID: ${{ steps.intent.outputs.artifact-id }}
+        run: pnpm exec tsx scripts/release/beta-staff-bootstrap-cli.ts --run
+      - name: Retain sanitized operation and cleanup result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ inputs.channel || 'beta' }}-staff-owner-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .context/release/${{ inputs.channel || 'beta' }}-staff-bootstrap-result.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 90

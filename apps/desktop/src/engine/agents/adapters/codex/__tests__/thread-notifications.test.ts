@@ -5,6 +5,73 @@ import { CodexThreadNotifications } from "../thread-notifications";
 import type { SessionNotification } from "@zeros/protocol/agent-events";
 
 describe("Codex notification ownership", () => {
+  it("buffers review output until its acknowledgement while children keep streaming", () => {
+    const t = setup();
+    t.router.handle("turn/started", { threadId: "parent", turn: { id: "old" } });
+    t.router.startRootTurn({ review: true });
+    const message = (threadId: string, turnId: string, text: string) =>
+      t.router.handle("item/completed", {
+        threadId, turnId, item: { type: "agentMessage", id: turnId, text },
+      });
+    message("parent", "old", "Retired output");
+    t.router.handle("turn/started", { threadId: "parent", turn: { id: "internal-review" } });
+    message("parent", "review", "Review result");
+    message("child", "child-turn", "Child result");
+    expect(t.messages()).toHaveLength(1);
+    t.router.handle("turn/completed", { threadId: "parent", turn: { id: "review", status: "completed" } });
+    expect(t.root.sawTurnTerminal).toBe(false);
+
+    t.router.bindRootReviewTurn("review");
+    expect(t.messages()).toHaveLength(2);
+    expect(t.root.sawTurnTerminal).toBe(true);
+    t.router.endRootReview();
+    t.router.startRootTurn();
+    for (const turnId of ["old", "internal-review", "review"]) {
+      t.router.handle("turn/started", { threadId: "parent", turn: { id: turnId } });
+      message("parent", turnId, "Late output");
+      t.router.handle("turn/completed", { threadId: "parent", turn: { id: turnId, status: "completed" } });
+    }
+    expect(t.root.sawTurnTerminal).toBe(false);
+    expect(t.messages()).toHaveLength(2);
+    t.router.handle("turn/started", { threadId: "parent", turn: { id: "next" } });
+    message("parent", "next", "Ordinary result");
+    expect(t.messages()).toHaveLength(3);
+  });
+
+  it("discards unacknowledged review output when its request fails", () => {
+    const t = setup();
+    t.router.startRootTurn({ review: true });
+    const params = { threadId: "parent", turnId: "unacknowledged", item: { type: "agentMessage", id: "answer", text: "Unowned output" } };
+    t.router.handle("item/completed", params);
+    t.router.endRootReview();
+    t.router.startRootTurn();
+    t.router.handle("turn/started", { threadId: "parent", turn: { id: params.turnId } });
+    t.router.handle("item/completed", params);
+    expect(t.messages()).toEqual([]);
+    t.router.handle("turn/started", { threadId: "parent", turn: { id: "next" } });
+    t.router.handle("item/completed", { ...params, turnId: "next" });
+    expect(t.messages()).toHaveLength(1);
+  });
+
+  it.each(["events", "bytes"])("fails explicitly when early review output exceeds the %s bound", (bound) => {
+    const t = setup();
+    t.router.startRootTurn({ review: true });
+    const params = {
+      threadId: "parent", turnId: "review",
+      item: { type: "agentMessage", id: "answer", text: bound === "bytes" ? "x".repeat(8 * 1024 * 1024) : "Review result" },
+    };
+    for (let i = 0; i < (bound === "events" ? 513 : 1); i += 1) {
+      t.router.handle("item/completed", params);
+    }
+    expect(() => t.router.bindRootReviewTurn("review")).toThrow("could not be correlated");
+    expect(t.messages()).toEqual([]);
+    t.router.endRootReview();
+    t.router.startRootTurn();
+    t.router.handle("turn/started", { threadId: "parent", turn: { id: "next" } });
+    t.router.handle("item/completed", { ...params, turnId: "next", item: { ...params.item, text: "Next result" } });
+    expect(t.messages()).toHaveLength(1);
+  });
+
   it("retires the preceding parent turn at the local prompt boundary without silencing children", () => {
     const t = setup();
     t.router.handle("turn/started", { threadId: "parent", turn: { id: "old" } });

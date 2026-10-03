@@ -35,10 +35,32 @@ another Railway environment or PlanetScale branch.
 | `pnpm dev:gc --apply --owner OWNER --generation UUID` | Apply eligible cleanup under the same owner lease and resource guards |
 | `pnpm electron:alpha` | Explicit desktop-against-Alpha workflow, separate from workspace Dev |
 
+Conductor's Setup command is `sh scripts/dev-environment/hook.sh setup`.
+Run is `sh scripts/dev-environment/hook.sh dev` on macOS, or
+`sh scripts/dev-environment/hook.sh backend` in a cloud workspace. Archive is
+`sh scripts/dev-environment/hook.sh archive`. The Run hook already invokes the
+package script; do not append a second `pnpm electron:dev`.
+
+The hosted package commands prepare dependencies before loading TypeScript,
+esbuild or the R2 client. A root `pnpm install` does not install the independent
+`apps/control-plane` and `apps/web` graphs, and cloud file sync does not install
+them on the Mac. Setup and Run use the same frozen-lockfile installer. The first
+run after upgrading this tooling verifies each graph with its package manager;
+later runs reuse it until its manifests, lockfile, platform or installed
+dependencies change. Installation receipts live inside each local `node_modules`
+directory, and concurrent installers wait on a machine-local checkout lock.
+An interrupted or failed install stops before provisioning and is retried by Run.
+
 A normal restart preserves the branch, credentials and desktop session. Closing
 the desktop leaves its hosted backend/database available and billable. Archive
 is the destructive reset. Relaunch after a completed archive creates a new
 generation, database, keys and desktop data directory.
+
+Run, backend deployment and Archive wait up to three minutes for a previous
+operation to release its lock. A forcibly stopped launcher can leave a registry
+lease that expires within two minutes. The next command reports that it is
+waiting and resumes automatically after release or expiry; Stop cancels the
+wait. An existing desktop must still be stopped before launching another one.
 
 Renderer changes retain the normal local watch loop. Restart Dev or run
 `dev:backend` after backend, migration, web or cloud-engine changes to deploy a
@@ -519,6 +541,9 @@ environment teardown. Provider storage charges can persist while cleanup runs.
 Conductor's shared configuration wires the archive command and installs all three
 dependency graphs. Local Conductor reads shared settings from the remote default
 branch, so a merge affects existing local workspaces too, even on old branches.
+On hosted branches that predate the dependency bootstrap, the shared Run actions
+perform that branch's Setup before launching. Updating the checkout enables the
+faster per-graph reuse; branches from before hosted Dev retain their Local run.
 Repository-local or managed settings may override the archive/run commands.
 If the main checkout's `.conductor/settings.local.toml` defines those commands,
 update them there too: `.worktreeinclude` copies that local layer into future
@@ -586,16 +611,21 @@ admission policy. `admission/v1/account.json` is an encrypted CAS ledger. It
 reserves active generations and per-owner capacity before provisioning, then a
 builder and named-snapshot slot before builder allocation. Defaults are four
 active generations, one generation per owner, one builder account-wide and per
-owner, ten named snapshots including protected names, and one spare snapshot
-slot. Configure the `admission` fields in the example together across launchers.
-The ten-name ceiling cannot be raised without qualifying another capacity model.
+owner. Boat enforces the current subscription's snapshot quota at capture;
+Zeros adds no numerical snapshot cap or channel, Dev/custom or spare allocations.
+Complete inventory and unreleased named reservations count once in known
+occupancy, including the protected base.
+Configure compute/generation `admission` fields together across launchers;
+legacy `maxNamedSnapshots` and `snapshotHeadroom` overrides are ignored, with
+new ledger policies containing only compute/generation limits. Old ledgers
+retain their historical snapshot fields when read.
 Unknown creates retain reservations; elapsed time alone never releases them.
 Caps stop new allocation and do not prevent shutdown or cleanup.
 
 Before a changed worker build, the launcher retires its older rollback image
 and retains the currently deployed image as the fallback. The replacement then
-fits within the two Dev snapshot slots reserved alongside channel release and
-rollback images. Failed or unconfirmed deletion keeps its slot reserved and
+uses the same provider quota as release and custom images.
+Failed or unconfirmed deletion keeps its name reserved and
 prevents the new allocation; a failed build leaves the deployed image available.
 
 Qualification canaries share the builder compute cap but do not reserve a named

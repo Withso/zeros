@@ -15,9 +15,11 @@ import { loadCloudWorkerConfiguration } from "../../../apps/desktop/src/engine/a
 import { CLOUD_NATIVE_HISTORY_ROOT } from "../../../apps/desktop/src/engine/agents/containment/cloud-native-history";
 import { readCloudAgentRuntimeAttestation } from "../../../apps/desktop/src/engine/cloud-runtime-attestation";
 import { NativeToolEvidence } from "../lib/native-tool-evidence";
-import { parseNativeQualificationInput, nativeQualificationPermission } from "../lib/native-qualification-input";
+import { NativeQuestionEvidence } from "../lib/native-question-evidence";
+import { parseNativeQualificationInput, nativeQualificationPermission, nativeQualificationQuestion } from "../lib/native-qualification-input";
 import { nativeMcpCanarySource } from "../lib/native-mcp-canary";
-import { failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver } from "../lib/native-qualification-steps";
+import { captureNativeMcpTurn, failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver, runNativeMcpQualification } from "../lib/native-qualification-steps";
+import type { NativeQualificationPhase } from "../lib/native-qualification-diagnostics";
 import { cloudMcpDigest } from "../../../apps/desktop/src/engine/agents/cloud-mcp";
 import { runNativeSmokeCanary } from "../lib/native-canary-smoke";
 
@@ -39,9 +41,11 @@ const historicalSecret = rawSecretObserver(mcpSecret);
 let wroteMcpConfig = false;
 const checks: string[] = [];
 const activity = { permissions: 0, rejectedPermissions: 0, questions: 0, messageChunks: 0, toolEvents: 0 };
+const questions = new NativeQuestionEvidence();
 let toolEvidence: ReturnType<NativeToolEvidence["summary"]> | undefined;
+let initialMcpToolEvidence: ReturnType<NativeToolEvidence["canaryMcpSummary"]> | undefined;
 let failure: "timeout" | "assertion" | "runtime" | undefined, failureDetail: ReturnType<typeof failureSignature> = {};
-let phase = "input", gateway: AgentGateway | undefined, failed = false;
+let phase: NativeQualificationPhase = "input", gateway: AgentGateway | undefined, failed = false;
 let qualificationProfile: "smoke" | "full" = "full";
 let identity: { sourceCommit: string; buildSha256: string; contractSha256: string; kind: string; model: string } | undefined;
 const active = new Set<CloudProviderExecution>();
@@ -125,7 +129,7 @@ async function main() {
       return { leaseId: request.leaseId, credentialVersion,nativeCapabilities, expiresAt: new Date(Date.now() + 45_000).toISOString() };
     },
   });
-  let execution: CloudProviderExecution | undefined, reply = "", binding: ProviderBinding | undefined;
+  let execution: CloudProviderExecution | undefined, reply = "", binding: ProviderBinding | undefined, firstSessionId: string | undefined = undefined;
   let confirmedMode: string | undefined;
   let tools = new NativeToolEvidence();
   gateway = new AgentGateway({
@@ -140,6 +144,9 @@ async function main() {
       const redact = redactor.notification.bind(redactor);
       redactor.notification = notification => {
         if (historicalSecret.observe(notification)) rawHistoricalSecretObservations++;
+        // Public redaction can truncate tool names matching a secret prefix.
+        // Keep exact native evidence private and observe it only once.
+        tools.observe(notification.update);
         return redact(notification);
       };
       return prepared;
@@ -156,7 +163,6 @@ async function main() {
           if (reply.length + update.content.text.length > (qualificationProfile === "smoke" ? 4096 : 65536)) throw new Error("qualification response bound");
           reply += update.content.text;
         }
-        tools.observe(update);
         if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") activity.toolEvents++;
       },
       onAgentStderr() {}, onAgentExit() {},
@@ -169,7 +175,13 @@ async function main() {
         if (response.outcome.outcome !== "selected") { activity.rejectedPermissions++; failed = true; }
         if (!gateway?.answerPermission(id, response)) failed = true;
       },
-      onQuestionRequest(_agent, id) { activity.questions++; failed = true; gateway?.answerQuestion(id, { outcome: { outcome: "dismissed" } }); },
+      onQuestionRequest(_agent, id, request) {
+        questions.observe(request);
+        activity.questions++;
+        const response = nativeQualificationQuestion(request, { provider, phase, sessionId: firstSessionId, tools });
+        if (response.outcome.outcome !== "answered") failed = true;
+        if (!gateway?.answerQuestion(id, response)) failed = true;
+      },
     },
   });
   // Match the shared composer's default. Haiku uses Accept Edits because its
@@ -191,6 +203,7 @@ async function main() {
   wroteMcpConfig = true;
   phase = "native-start";
   const first = await bounded(gateway.newSession(provider, options));
+  firstSessionId = first.sessionId;
   assert.equal(first.modes?.currentModeId, initialMode);
   binding = first.providerBinding ?? binding;
   assert(execution);
@@ -234,8 +247,8 @@ try{
         phase = "native-turn"; reply = "";
         await writeFile(path.join(workspace, files.challenge), marker, { flag: "wx", mode: 0o644 });
         await chown(path.join(workspace, files.challenge), worker.uid, worker.gid);
-        await bounded(gateway!.prompt(provider, first.sessionId, [{ type: "text", text:
-          `Read ${files.challenge}. Write its exact contents to ${files.edited}, no newline. Run exactly: cat '${files.challenge}' > '${files.executed}'. Call zeros-qualification MCP probe with no arguments. Reply only with the file marker and probe marker; no explanation. Do not inspect credentials or other files.` }]));
+        await captureNativeMcpTurn(tools, () => bounded(gateway!.prompt(provider, first.sessionId, [{ type: "text", text:
+          `Read ${files.challenge}. Write its exact contents to ${files.edited}, no newline. Run exactly: cat '${files.challenge}' > '${files.executed}'. Call zeros-qualification MCP probe with no arguments. Reply only with the file marker and probe marker; no explanation. Do not inspect credentials or other files.` }])), summary => { initialMcpToolEvidence = summary; });
         tools.assertEffects(provider, files, marker); tools.assertMcp("zeros-qualification", "probe");
         for (const file of [files.edited, files.executed]) assert.equal(await readFile(path.join(workspace, file), "utf8"), marker);
         assert.equal(await readFile(path.join(workspace, mcpFiles.proof), "utf8"), mcpMarker);
@@ -292,13 +305,17 @@ try{
     assert.equal(failed, false);
     return;
   }
-  phase = "native-mcp";
   reply = "";
-  await bounded(gateway.prompt(provider, first.sessionId, [{ type: "text", text: "Call the probe tool from the zeros-qualification MCP server with no arguments. Reply with its result. Do not use shell or file tools for this check." }]));
-  tools.assertMcp("zeros-qualification", "probe");
-  assert.equal(await readFile(path.join(workspace, mcpFiles.proof), "utf8"), mcpMarker);
-  assert(reply.includes(mcpMarker)); checks.push("nativeMcp");
-  assert(rawHistoricalSecretObservations > 0);
+  await runNativeMcpQualification({
+    phase(value) { phase = value; },
+    async prompt() {
+      await captureNativeMcpTurn(tools, () => bounded(gateway!.prompt(provider, first.sessionId, [{ type: "text", text: "Call the probe tool from the zeros-qualification MCP server with no arguments. Reply with its result. Do not use shell or file tools for this check." }])), summary => { initialMcpToolEvidence = summary; });
+    },
+    toolEvidence() { tools.assertMcp("zeros-qualification", "probe"); },
+    async proof() { assert.equal(await readFile(path.join(workspace, mcpFiles.proof), "utf8"), mcpMarker); },
+    reply() { assert(reply.includes(mcpMarker)); checks.push("nativeMcp"); },
+    secretObservation() { assert(rawHistoricalSecretObservations > 0); },
+  });
   reply = "";
   await writeFile(path.join(workspace, files.challenge), marker, { flag: "wx", mode: 0o644 });
   await chown(path.join(workspace, files.challenge), worker.uid, worker.gid);
@@ -325,7 +342,7 @@ try{
     if(nativeCapabilities.connectedApps) {
       phase="native-apps";
       const inventory=await bounded(gateway.readSessionToolInventory(provider,first.sessionId,workspace));
-      assert.equal(inventory.groups.find(group=>group.kind==="apps")?.state,"ready");checks.push("nativeApps");
+      assert.equal(inventory.groups?.find(group=>group.kind==="apps")?.state,"ready");checks.push("nativeApps");
     }
   }
   const sourceBinding=binding;
@@ -448,7 +465,7 @@ main().catch(error => {
       await rm(path.join(CLOUD_NATIVE_HISTORY_ROOT, createHash("sha256").update(id).digest("hex")), { recursive: true, force: true });
   } catch { failed = true; }
   process.stdout.write(JSON.stringify({ version: 3, qualificationProfile, executionProfile: "zeros-cloud-native-v1", qualified: !failed, phase, identity, checks,
-    activity, toolEvidence, ...(failure ? { failure } : {}),
+    activity, toolEvidence, initialMcpToolEvidence, questionEvidence: questions.summary(), ...(failure ? { failure } : {}),
     ...(failureDetail.code ? { failureCode: failureDetail.code } : {}), ...(failureDetail.name ? { failureName: failureDetail.name } : {}),
     ...(failureDetail.kind ? { failureKind: failureDetail.kind } : {}), ...(failureDetail.stage ? { failureStage: failureDetail.stage } : {}),
     ...(failureDetail.exitCode !== undefined ? { failureExitCode: failureDetail.exitCode } : {}),

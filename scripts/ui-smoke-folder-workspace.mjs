@@ -84,12 +84,10 @@ export async function runWorkspaceRecoveryNavigationSmoke({ page, check }) {
     useWorkspaceStore.getState().dispatch({ type: "OPEN_REPO_PAGE", projectId, view: "workspaces" });
   }, nested.id);
   const nestedRow = page.locator("main").locator('div[role="button"]').filter({ hasText: "main" });
-  await expect(nestedRow).toHaveCount(1);
-  await nestedRow.click();
-  await expect.poll(async () => (await snapshot()).page).toBe("workspace");
-  expect((await snapshot()).folder).toBe(cwd);
+  await expect(nestedRow).toHaveCount(0);
+  await expect(page.getByText("No workspaces yet", { exact: true }).filter({ visible: true })).toBeVisible();
   expect((await snapshot()).chats).toEqual(saved.chats);
-  check("Repository pages assign saved subdirectory chats to the nested owner without duplicating a parent workspace", true);
+  check("A nested Git repository stays empty despite saved checkout chats and never revives its parent's folder workspace", true);
   await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
 }
 

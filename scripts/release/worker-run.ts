@@ -18,8 +18,8 @@ import { ReleaseIdentity, requireCheck, type PromotionConfig } from "./contracts
 import { githubClient } from "./github";
 import { jsonClient } from "./io";
 import type { WorkerQualificationProfile } from "./worker-profile";
-import { reconcileReleaseBuilderRetentions } from "./worker-builder-retirement";
-import { reconcileReleaseCanaryRetirements, retireReleaseCanary } from "./worker-canary-recovery";
+import { reconcileFailedReleaseBuilderHolds, reconcileReleaseBuilderRetentions } from "./worker-builder-retirement";
+import { reconcileReleaseCanaryRetirements, releaseCanaryCleanup, retireReleaseCanary } from "./worker-canary-recovery";
 
 const name = z.string().min(1).max(256);
 const admissionConfiguration = z.object({ version: z.literal(1), registry: z.object({ endpoint: name, bucket: name, accessKeyId: name, secretAccessKey: name,
@@ -61,6 +61,37 @@ export async function workerSnapshotInventory(request: any) {
   throw new Error("Worker snapshot inventory exceeded its page bound");
 }
 
+function workerStateStore(config: PromotionConfig, admission: ReturnType<typeof workerAdmissionConfiguration>) {
+  const registry = r2Registry(admission.registry), owner = workerOwner(config.channel);
+  const identity = { owner, identity: createHash("sha256").update(JSON.stringify(["release-worker", config.repository, config.channel])).digest("hex") };
+  const key = `release-workers/v1/${config.channel}.json`;
+  const store = { read: () => registry.readDocument(key, owner, (state: any) => state),
+    write: (_owner: string, state: any, etag: string) => registry.writeDocument(key, state, etag),
+    readAdmission: () => registry.readAdmission(), writeAdmission: (ledger: any, etag: string) => registry.writeAdmission(ledger, etag),
+    list: async () => ({ records: [], quarantine: [] }) };
+  return { registry, identity, store };
+}
+
+export async function reconcileWorkerNativeStorage(env: NodeJS.ProcessEnv) {
+  const { config, actorUserId } = workerExecutionConfig(env), admission = workerAdmissionConfiguration(env);
+  const github = githubClient(config, env), broker = releaseCanaryBroker(config, env, "smoke");
+  await github.assertRequiredChecks(); await github.assertCurrent(); await assertWorkerApi(config);
+  const { registry, identity, store } = workerStateStore(config, admission);
+  try {
+    requireCheck(await store.readAdmission(), "Initialize and reconcile the shared Boat admission ledger before release cleanup");
+    const result = await withHostedLease(store, identity, async (lease: any) => {
+      await github.assertRequiredChecks(); await github.assertCurrent(); await assertWorkerApi(config); await lease.fence();
+      const signal = AbortSignal.any([lease.signal, AbortSignal.timeout(15_000)]);
+      const core = nativeAgentCanary(lease, admission.profile, devBoatClient({ apiKey: env.BOAT_API_KEY }, signal),
+        { release: () => releaseHostedAdmission(store, lease, admission.profile) },
+        { strictCleanup: true, releaseStorageDeferral: true, cleanupTimeoutMs: 0 });
+      return reconcileReleaseCanaryRetirements(config, actorUserId, lease, core, broker.retire, { signal });
+    }, { create: false });
+    requireCheck(typeof result === "number" || result?.absent === true, "Release native storage reconciliation result is unconfirmed");
+    return typeof result === "number" ? result : 0;
+  } finally { registry.close(); }
+}
+
 export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha256: string, qualificationProfile: WorkerQualificationProfile) {
   const execution = workerExecutionConfig(env), { config } = execution;
   const admission = workerAdmissionConfiguration(env);
@@ -68,13 +99,7 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
   await github.assertRequiredChecks();
   await github.assertCurrent();
   await assertWorkerApi(config);
-  const registry = r2Registry(admission.registry);
-  const owner = workerOwner(config.channel), identity = { owner, identity: createHash("sha256").update(JSON.stringify(["release-worker", config.repository, config.channel])).digest("hex") };
-  const key = `release-workers/v1/${config.channel}.json`;
-  const store = { read: () => registry.readDocument(key, owner, (state: any) => state),
-    write: (_owner: string, state: any, etag: string) => registry.writeDocument(key, state, etag),
-    readAdmission: () => registry.readAdmission(), writeAdmission: (ledger: any, etag: string) => registry.writeAdmission(ledger, etag),
-    list: async () => ({ records: [], quarantine: [] }) };
+  const { registry, identity, store } = workerStateStore(config, admission);
   const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-release-worker-"));
   try {
     requireCheck(await store.readAdmission(), "Initialize and reconcile the shared Boat admission ledger before release execution");
@@ -91,11 +116,18 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
       const release = () => releaseHostedAdmission(store, lease, profile);
       const current = async () => { await github.assertRequiredChecks(); await github.assertCurrent(); await assertWorkerApi(config); await lease.fence(); };
       await current();
-      await reconcileReleaseBuilderRetentions(config, { lease, profile, request, readAdmission: () => store.readAdmission() });
-      const recoverySignal = AbortSignal.any([lease.signal, AbortSignal.timeout(15_000)]);
-      const historical = nativeAgentCanary(lease, profile, devBoatClient({ apiKey: env.BOAT_API_KEY }, recoverySignal), { release },
-        { strictCleanup: true, cleanupTimeoutMs: 0 });
-      await reconcileReleaseCanaryRetirements(config, execution.actorUserId, lease, historical, broker.retire, { signal: recoverySignal });
+      requireCheck(state.owner === workerOwner(config.channel) && Array.isArray(runs) && runs.length <= 100 &&
+        Array.isArray(state.resources.images), "Release canary historical ownership is unconfirmed");
+      // Temporarily defer earlier test-machine recovery for Alpha publication.
+      // Preserve the entire journal and admission holds; this run still uses
+      // the normal exact-source qualification and strict cleanup below.
+      if (config.channel !== "alpha") {
+        await reconcileReleaseBuilderRetentions(config, { lease, profile, request, readAdmission: () => store.readAdmission() });
+        const recoverySignal = AbortSignal.any([lease.signal, AbortSignal.timeout(15_000)]);
+        const historical = nativeAgentCanary(lease, profile, devBoatClient({ apiKey: env.BOAT_API_KEY }, recoverySignal), { release },
+          { strictCleanup: true, releaseStorageDeferral: true, cleanupTimeoutMs: 0 });
+        await reconcileReleaseCanaryRetirements(config, execution.actorUserId, lease, historical, broker.retire, { signal: recoverySignal });
+      }
       const credentials = await broker.preflight(), releaseCanaryBindings = [...credentials.values()];
       let run = runs.find((value: any) => value.runId === config.runId);
       if (!run) {
@@ -123,13 +155,14 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
       }
       const image = await boatImageAdapter(config, env, path.join(directory, "kit"), { lease, record, profile, maxUsedHours: run.maxUsedHours, snapshotName: record.snapshotId, request,
         reserve: async () => {
+          await reconcileFailedReleaseBuilderHolds(config, { lease, profile, request, readAdmission: () => store.readAdmission() }, store);
           const inventory = await workerSnapshotInventory(request);
           await reconcileWorkerSnapshotHolds(store, lease, profile, inventory, request);
           return reserveWorkerSlot(store, lease, profile, config.channel, record.snapshotId, inventory);
         }, release, readAdmission: () => store.readAdmission() });
       const native = nativeAgentCanary(lease, { ...profile, boat: { ...profile.boat, builderBudgetHours: execution.canaryBudgetHours } }, request, {
         reserve: (job: any) => reserveHostedAdmission(store, state, profile, { kind: "builder", computeId: `canary:${job.id}` }), release,
-      }, { strictCleanup: true, maxUsedHours: run.maxUsedHours, cleanupTimeoutMs: 300_000,
+      }, { strictCleanup: true, releaseStorageDeferral: true, maxUsedHours: run.maxUsedHours, cleanupTimeoutMs: 300_000,
         nativeDeadlineSeconds: qualificationProfile === "full" ? 2400 : 420 });
       const core = { ...native, retire: (job: any) => retireReleaseCanary(lease, native, broker.retire, job),
         start: (job: any, input: any) => native.start(job, input, undefined,
@@ -139,10 +172,10 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
           })) };
       const canary = releaseCanaryAdapter(lease, run, credentials, core, { qualificationProfile });
       const cleanup = async () => {
-        const canariesDeleted = await canary.cleanup();
+        const canariesRetired = await canary.cleanup();
         try {
           const imageBuilder = await image.cleanup();
-          return canariesDeleted && imageBuilder ? { credentialCanaryResourcesDeleted: true as const, imageBuilder } : null;
+          return canariesRetired && imageBuilder ? { ...releaseCanaryCleanup(lease, run), imageBuilder } : null;
         } catch { return null; }
       };
       try {

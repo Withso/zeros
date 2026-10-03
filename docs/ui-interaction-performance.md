@@ -97,15 +97,21 @@ switch destination. Unknown inspection results are errors, not non-Git folders.
 Opening an external deep link only registers the project; startup and resume
 inspection are read-only. The retired direct-folder preference is ignored.
 
-Previously opened roots retain their last confirmed `isGitRepository` snapshot
-and `local:<repoSlug>` identity. `useFolderWorkspaces` projects roots only when
-saved chats, workbench state or selection already refer to them. This projection
-includes saved checkout subdirectories, preserves their exact navigation cwd,
-and assigns nested paths to their most-specific registered owner. A missing
-repository selection stays absent instead of defaulting to the primary checkout.
-Its repository-page fallback publishes the selected filter atomically. The
-projection never enters managed-workspace caches or engine lifecycle calls. Restoring old
-state keeps its original directory and does not mutate Git or move chats.
+Local Git repositories list only managed workspaces. Saved chats, workbench
+state, selections and the retired direct-folder setting never restore the
+synthetic `main` workspace, including for older project records without a
+confirmed `isGitRepository` snapshot. Once its exact workspace list settles, a
+saved checkout selection opens an available worktree or the empty repository
+page. Cold nested paths still await managed-worktree ownership validation.
+Existing chats and files remain stored at their original paths.
+
+Previously opened plain folders retain their `local:<repoSlug>` identity.
+`useFolderWorkspaces` projects them only when saved chats, workbench state or
+selection already refer to them. This includes saved subdirectories, preserves
+their exact navigation cwd, and assigns nested paths to their most-specific
+registered owner. A nested Git repository cannot revive its parent's folder
+row. This projection never enters managed-workspace caches or engine lifecycle
+calls. Cloud primary workspaces retain their remote catalog identity.
 
 Desktop app resume uses one capability observer with two concurrent folder
 inspections, coalesced focus/visibility events and exact-owner in-flight

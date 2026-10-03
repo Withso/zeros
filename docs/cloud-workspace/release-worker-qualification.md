@@ -9,6 +9,13 @@ as qualified or customer cloud is enabled. Never run it on PRs/forks, from
 certify provider behavior, native account availability, quota, cleanup latency
 or a Mac release.
 
+While `ZEROS_WORKER_PROMOTION` is not `enabled`, releases skip the worker lane
+and a desktop built with `ZEROS_CLOUD_WORKSPACES_ENABLED=true` still publishes
+after the hosted services gate (migrations, backup, Railway, Pages, WorkOS)
+passes. The API keeps its current worker state, which may be none or an
+unqualified image, so cloud workspaces work only where that state already
+allows it. Set the switch to `enabled` to require a qualified worker again.
+
 ## Order and handoff
 
 For a channel's first worker, provision encrypted account keys and release-only
@@ -269,39 +276,80 @@ behavior and older additive metadata remain compatible. Anthropic/OpenAI
 API-key modes remain unoffered until their exact image/kind is independently
 proved.
 
-## Ten-slot account and recovery
+## Provider snapshot quota and recovery
 
-| Shared named slots | Budget |
-| --- | --- |
-| Alpha current + rollback | 2 |
-| Beta current + rollback | 2 |
-| Production current + rollback | 2 |
-| Dev and organization-custom images, combined | 2 |
-| Retained clean base | 1 |
-| Empty deletion/publication headroom | 1 |
-| Total | 10 |
+Alpha, Beta, Production, Dev and organization-custom images share Boat's
+account quota. Boat enforces the current subscription's allowance on capture;
+upgrading the plan requires no Zeros snapshot-limit change. Zeros has no
+per-channel, custom or spare allocation. The protected base must still exist
+in actual provider inventory.
 
 The existing encrypted account ledger, ETag CAS and one-builder cap arbitrate
 release, Dev and custom builds. Complete provider inventory plus unresolved
 reservation holds count once. No timestamp or absent inventory row frees an
-uncertain allocation. Release refuses a third channel slot, missing base,
-non-release overflow or exhausted headroom **before paid allocation**. Dev and
-custom builds cannot consume any of the six release/rollback slots; custom
-capacity errors explicitly say `image capacity reached`. Custom inventory must
+uncertain allocation. A missing base is refused **before paid allocation**.
+Candidate channel ownership remains required, and compute/generation caps
+are independent of snapshot quota. Legacy `maxNamedSnapshots` and
+`snapshotHeadroom` profile fields are ignored; new ledger policies omit them
+while old ledgers remain readable. Capacity summaries report known occupancy,
+not a claimed provider allowance. Genuine provider rate-limit and budget
+errors retain their safe classification and uncertain allocation records.
+Custom inventory must
 fully paginate, rejecting missing/looping cursors or changed duplicate names.
 
-Before a third promotion, the owner must retire an **unreferenced** old rollback
-or failed candidate; automatic code never deletes current/rollback snapshots.
+When Boat refuses a capture for quota, the owner can upgrade the plan or retire
+an **unreferenced** old rollback or failed candidate; release admission never
+deletes current/rollback snapshots.
 On the next release, read-only reconciliation can free an already acknowledged,
 ready candidate's named-slot hold only after a certified physically deleted
 builder, complete inventory and exact named-snapshot GET 404. It persists a
 tombstone before releasing admission. Snapshot-name absence is not proof of
 backing-storage erasure. Published snapshots remain intentionally retained.
+
+A separate reviewed release-only path may settle the named slot while certified
+builder/native storage remains pending. It consumes a strict version2 named
+DELETE acknowledgement from a separately reviewed literal action: saved original
+intent, then saved/fenced dispatch, then HTTP200 with the exact
+`snapshot.named.deleted` name and deleted status. A lost response, HTTP404,
+version1 intent or mere deletion request cannot authorize this path. The
+maintained worker exposes no named DELETE entrypoint.
+
+The encrypted journal retains the complete original builder provenance,
+candidate, creation/save bindings and admission reservation; every allocated
+native's canonical admission, creation, cleanup and committed primary retirement
+audit; and the actual reviewed non-reference and finite writer-exclusion
+projections. All configuration, deployment, release/Dev/custom registry,
+archive, application, primary-audit and reference-writer authorities must be
+covered. Review follows the retained plan observations and dispatch remains
+within their original 60-second freshness bound and a maximum five-minute exclusion
+window. Later captures revalidate the reviewed facts without extending those
+timestamps. Expiry requires another plan and actual review. Namespace settlement
+may use a separate later reviewed capture; static source review alone is
+insufficient. These private projections remain bounded inside the existing
+encrypted registry document limit and do not enter public receipts.
+
+GET-only reconciliation freshly reads every original operation, then its exact
+sandbox GET 404, plus exact named GET 404 and complete inventory preserving the protected
+base and every other name. It saves a separate namespace witness and tombstone,
+then uses one guarded admission CAS to remove only the exact original named
+reservation. `snapshotDeleted` is set with committed readback, so an interrupted
+tombstone cannot trigger the ordinary broad admission-release helper. The saved
+before/after transition permits recovery of a lost CAS response from the exact
+authenticated ledger; absence alone does not. A conflict or failed save retains
+the incomplete history, without repeating DELETE or creating a reservation.
+Caps, Dev/customer policy, old helpers and the physical-only fallback stay
+unchanged. Logical namespace settlement preserves all original operations and
+pending/unmeasured storage certificates and never marks backing bytes erased.
+
 Historical v1 receipts remain readable: `resourcesDeleted:true` retains its
 original physical-deletion meaning for temporary builder/canary allocations,
-not the selected named image. New executions issue strict v2 receipts without
-that unscoped field. V2 requires `cleanup.credentialCanaryResourcesDeleted:true`
-and a separately validated `cleanup.imageBuilder` union, described below.
+not the selected named image. New executions issue v2 when credential-bearing
+canaries are physically deleted, or v3 for the release-only storage deferral
+described below. V2 still requires
+`cleanup.credentialCanaryResourcesDeleted:true`. V3 instead requires that field
+to be false and a bounded `pendingNativeStorage` count/proof digest with
+`status:pending` and `physicalBytes:unmeasured`. Both versions separately validate
+`cleanup.imageBuilder`; neither changes v1's physical-deletion meaning.
 
 Interrupted creation uses the original persisted idempotency key/body within
 the provider replay window, subject to the retained budget. Native start is
@@ -310,9 +358,9 @@ unique provider match remains uncertain; empty inventory is not permission to
 create another role. Approval reconciles the exact primary audit/rows before
 retry. Lost tuple writes reconcile readback without a second write. Lost VM
 deletion responses retain admission holds and prevent approval/receipts until
-their exact operation is reconciled. Credential-bearing canaries always require
-matching terminal physical-deletion proof; builder storage has only the narrow,
-explicit release-owned boundary below.
+their exact operation is reconciled. Credential-bearing canaries require
+matching physical-deletion proof or the explicit release-only native storage
+certificate below; unmarked history remains physically gated.
 
 New disposable native qualification VMs, in both Dev and release lanes, set
 `snapshots:false` when created from the qualified named image. Marked new intents
@@ -328,12 +376,29 @@ persisted creation key/body, including an omitted or enabled snapshot flag; it
 never retrofits the new policy onto an existing intent. Requested snapshots-off
 is only intent; observed snapshots-off is policy proof, not physical-deletion
 completion or assurance about inherited/source storage. The release lane sets
-`strictCleanup:true` and still requires
-the matching terminal deletion operation before freeing compute admission or
-issuing a worker receipt. Dev's deferred-storage cleanup policy
-remains unchanged.
+`strictCleanup:true` and explicitly enables the certified storage boundary
+below. Dev's existing deferred-storage cleanup behavior remains unchanged.
 
 ### Strict native retirement and historical recovery
+
+Native outcomes may retain an optional, allowlisted diagnostic projection in the
+private encrypted release journal before retirement: fixed producer phase and
+failure identifiers, bounded exit/activity integers and a truncated message
+digest, never message text or native output. Missing fields remain unobserved,
+including in historical outcomes. This projection survives completed-job
+reentry but does not change qualification, rate-limit or cleanup policy and is
+not copied into approved evidence or public worker receipts.
+
+Optional versioned event summaries retain only counts capped at 2048 and an
+overflow flag. The initial MCP prompt snapshots the assertion's canonical tool
+accumulator even when the prompt rejects, before assertions or cleanup: unique
+rows, exact canary matches, terminal/pending/unknown status, native-ID presence
+and successful matches. Later turns cannot replace that snapshot. The question
+summary counts the canonical source, blocking state and maintained MCP decline
+marker, without inferring other RPC subtypes. Neither summary retains tool or
+question identities, content, arguments or output. Incomplete or incoherent
+summaries are omitted independently; older reports do not acquire measured
+zeros. The question failure latch and every qualification predicate stay intact.
 
 An allowlisted private-input upload HTTP403 records a bounded
 `prelaunchFailure`, separate from qualification outcome, and stops promptly.
@@ -347,8 +412,10 @@ Strict cleanup retains the original DELETE operation and persists a versioned,
 source/image/build/creation/account-bound physical cleanup proof before marking
 the builder deleted or releasing its compute reservation. It requires the exact
 authenticated operation to be completed with coherent provider timestamps and
-the exact sandbox to return 404. Pending storage, an elapsed `expectedBy`, a
-cancelled run, snapshots-off or sandbox404 alone never releases that hold.
+the exact sandbox to return 404. An elapsed `expectedBy`, a cancelled run,
+snapshots-off or sandbox404 alone never releases that hold. Pending storage
+without the release-only certificate and server acknowledgment below remains
+unconfirmed.
 Lost DELETE responses and malformed or missing ownership/provenance remain
 unconfirmed; recovery never dispatches another DELETE or native operation.
 
@@ -369,6 +436,15 @@ succeeded or an audit response was lost. The local terminal marker and retired
 flag are saved together after acknowledgment. Later guarded executions observe
 at most 16 historical canaries within a 15-second budget before fresh preflight;
 they never allocate, rebuild, reupload, prune images or release holds by age.
+Alpha publication temporarily skips the automatic historical builder and native
+canary recovery pass. It retains the complete journal and account reservations;
+the new run still requires all three agents to qualify and its own strict
+cleanup before publication. Explicit `--reconcile-storage` remains available.
+Beta and Production retain their automatic historical recovery. Restore the
+Alpha recovery pass when the deferred cleanup work is addressed.
+Before a fresh builder reservation, an acknowledged failed image build still
+occupying this owner's compute slot may be observed on demand as described
+below. This does not resume the historical storage/canary scan.
 An authenticated unstarted allocation saved before its resource row exists is
 nonexecuted history, including a superseded run or truthful empty cleanup after
 admission denial. Scanning it never releases admission or fabricates cleanup or
@@ -383,7 +459,71 @@ permits only a separately fresh operation
 with current source, owner allowance and consent; it is not successful native
 qualification, a worker approval or permission to enable customer cloud.
 
+### Release-only native storage deferral
+
+A disposable credential-bearing release canary may become logically retired
+while provider storage deletion continues. It must retain its exact acknowledged
+irreversible sandbox DELETE, original creation/source/image/build/account and
+parent builder provenance, plus a marked `snapshots:false` intent and the bound
+actual snapshots-off observation before dispatch. Fresh authenticated reads must
+observe that same operation, then sandbox404. Only documented blocked stages
+`waiting_for_uploads`, `kept_for_newer_snapshots` and `waiting_for_restore` qualify;
+upload retention requires a coherent provider estimate bounded by the documented
+six-hour upload-link fence. Estimates are never completion proof. Unknown,
+missing, foreign or lost operation evidence and available sandboxes stay fenced.
+This boundary does not apply to customer VMs, Dev policy or unmarked histories.
+
+The source/image/creation/account-bound `storageRetirement` certificate is saved
+under the owning lease before the server appends
+`cloud.release_canary.storage_retired`. The matching version2 local audit marker
+and retired flag are saved together before compute admission is released. No
+physical proof or `builder.deleted:true` is invented; the original operation and
+certificate remain observable after admission compaction. The old operation is
+terminal before credential access; any subsequent operation needs fresh current
+source and consent. Three genuine native successes, exact artifacts, audited
+approval, owner-role deletion and selected tuple/readiness still precede release
+publication. Old partial results never qualify a new image or source.
+
+V3 receipts bind the pending certificate count/digest to the exact qualified
+jobs, with `credentialCanaryResourcesDeleted:false`; they do not claim retained
+native storage is sanitized or erased. Only unavailable compute is released,
+not named-image slots or retained storage accounting. Native storage, inherited
+source storage and intentionally retained published images are distinct.
+
+Bounded historical recovery visits deferred records before retired shortcuts.
+The certificate remains pending through authenticated processing/removing or
+retrying observations. Actual matching operation completion plus a subsequent
+sandbox404 persists physical proof and appends `cloud.release_canary.retired`;
+earlier audits and issued v3 receipts remain truthful historical observations.
+No named-image existence is required merely to settle physically deleted native
+storage. Recovery never reallocates, executes native work or reissues DELETE.
+
+For later observation without a new qualification, the maintained protected
+`cloud-worker-promotion.yml` entrypoint accepts default-off
+`reconcile_storage:true` with `execute:false`, invoking
+`worker-cli.ts --reconcile-storage`. It acquires the existing registry lease with
+`create:false` and retains current channel/ref/source, CI, API/schema and
+Production approval gates. It performs bounded retained cleanup observation,
+not allocation, credential execution, tuple selection or a success receipt.
+The normal worker also performs this bounded reconciliation before preflight;
+no new scheduler, pruning policy or automatic erasure claim is added.
+
 ### Release-owned builder retirement receipts
+
+An unsuccessful build that never requested capture has no publishable image.
+Its compute slot can be released after validating the original owning
+lease/account/run/source, acknowledged credential-free creation, retained
+source archive identity, acknowledged deletion operation, sandbox GET 404 and
+named-image GET 404. The separate `failed-build-unavailable` proof is saved
+before its compute-terminal marker and ordinary admission release. A blocked
+storage operation remains pending/unmeasured with `builder.deleted:false`;
+the unused name reservation is released because capture was never dispatched.
+The proof cannot satisfy the image-cleanup or publication schemas. Candidate,
+capture or uncertain-create records remain ineligible. Diagnostics and original
+storage history are retained, and recovery never replays an acknowledged DELETE.
+The encrypted owning journal keeps only the latest attestation command receipt;
+large responses retain bounded excerpts and their complete digest. Public
+errors identify the failed stage without printing the private command output.
 
 An image builder may contain committed application source, previous base/source
 content, build/cache/log data and synthetic Setup fixtures. Sanitation does not
@@ -422,8 +562,9 @@ ordinary historical or deduplicated storage. Published/shared named-image data
 remains independently retained. The complete cleanup/provenance/storage record
 is saved before the compute-terminal marker or admission release. Only compute
 is released: `builder.deleted` stays false and named-image/storage holds survive.
-Native allocation, approval, tuple selection and v2 success all require this
-validated builder state **and** strict physical canary cleanup. Unknown stage,
+Native allocation, approval, tuple selection and v2/v3 success all require this
+validated builder state and the matching physical or certified logical native
+retirement. Unknown stage,
 available sandbox, mismatched operation, lost response, malformed recovery or
 missing proof withholds approval and success.
 
@@ -439,6 +580,16 @@ The name hold remains until separate exact retirement readback releases it;
 recovery never deletes or prunes a name. Unknown/malformed historical proof is
 retained and blocks new release work for reviewed reconciliation of its exact
 saved operation, not a new deletion or inferred success.
+
+After the separately reviewed named settlement above, only the combined
+`observeOnly:true,historical:true` builder path may replace ready-name and active
+reservation prerequisites with the committed namespace witness. It authenticates
+the current account ledger, rejects any replacement reservation or reappeared
+alias, and freshly observes the same original operation, sandbox GET 404 and name GET 404.
+The retained review can expire after commitment; it authorized that historical
+settlement, not another action. Initial/current provenance and admission remain
+strict. Later physical completion uses the original operation proof and retains
+the earlier pending-storage and named-retirement history.
 
 The kit journal intentionally excludes the binary source archive. A recovered
 source manifest without its archive **before install** fails before allocation/

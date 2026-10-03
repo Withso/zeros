@@ -22,13 +22,14 @@ import { qualifiesAgainst, resolvesAgainst } from "../cursor-curated-ids.mjs";
 
 const ROOT = path.resolve(__dirname, "..", "..");
 
-/** One current @cursor/sdk 1.0.31 account response. Grok 4.5 is
+/** The current SDK model family. Grok 4.5 is
  * account-dependent compatibility data, not assumed globally retired. */
 const CURRENT_ACCOUNT = new Set([
   "default",
   "composer-2",
   "composer-2.5",
   "grok-4.6",
+  "grok-4.7",
 ]);
 
 const LEGACY_ACCOUNT = new Set([...CURRENT_ACCOUNT, "grok-4.5"]);
@@ -43,6 +44,10 @@ const LIVE_SUFFIXED_ONLY = new Set([
   "grok-4.6-medium",
   "grok-4.6-high",
   "grok-4.6-xhigh",
+  "grok-4.7-low",
+  "grok-4.7-medium",
+  "grok-4.7-high",
+  "grok-4.7-xhigh",
   "grok-4.5-low",
   "grok-4.5-medium",
   "grok-4.5-high",

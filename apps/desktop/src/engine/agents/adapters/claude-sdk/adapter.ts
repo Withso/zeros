@@ -1,6 +1,7 @@
 import { TurnUsageLedger } from "../shared/turn-usage";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { FallbackModelSelection } from "../shared/fallback-model-selection";
+import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 import { exactModelFallbackError, requireExplicitModel } from "../shared/exact-model-selection";
 import {
   AccountModelDiscovery,
@@ -1079,8 +1080,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  one (best-effort; the gateway re-poll then surfaces the live list to the
    *  empty composer + subsequent chats). `ultracode` is OUR setting-layer tier
    *  (xhigh + dynamic workflows) which the SDK's effort enum (capped at "max")
-   *  doesn't list, so we append it wherever the model supports xhigh — keeping
-   *  the 7th pill tier. */
+   *  doesn't list. Append it only when xhigh is available and the curated
+   *  model enables this separate mode; xhigh alone must not give Sonnet 5.5
+   *  an Ultracode control. */
   private async discoverModels(state: SdkSession): Promise<void> {
     // Capture the live query ONCE — don't re-read state.query after the await
     // (a concurrent dispose/restart could null it mid-flight). With no live
@@ -1091,6 +1093,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     return this.modelDiscovery.discover(state.modelState, async () => {
       const infos = await q.supportedModels();
       const models: AdvertisedModel[] = (infos ?? []).map((mi) => {
+        const value = mi.resolvedModel?.trim() || mi.value;
+        const baseValue = value.replace(/\[1m\]$/i, "").replace(/-\d{8}$/, "");
+        const curated = modelCatalogJson.families.claude.find(
+          (model) => model.value.replace(/\[1m\]$/i, "") === baseValue,
+        );
         const base = Array.isArray(mi.supportedEffortLevels)
           ? (mi.supportedEffortLevels as string[])
           : undefined;
@@ -1098,7 +1105,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           mi.supportsEffort === false
             ? []
             : base
-              ? base.includes("xhigh")
+              ? base.includes("xhigh") && (!curated || curated.effortLevels.includes("ultracode"))
                 ? [...base, "ultracode"]
                 : base
               : undefined;
@@ -1107,7 +1114,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           // exact wire model it currently resolves to. Capability overlays
           // must key by that canonical id; a local alias table can lag a new
           // generation and attach Opus 5 capabilities to Opus 4.8.
-          value: mi.resolvedModel?.trim() || mi.value,
+          value,
           // Advisory only — the curated catalog names every claude row.
           label: mi.displayName || mi.value,
           ...(effortLevels !== undefined ? { effortLevels } : {}),

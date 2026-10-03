@@ -84,6 +84,12 @@ describe("release dependency and authority contracts", () => {
     expect(promote).toContain("needs: [guard, services, worker]");
     expect(promote).toContain("cli.ts --finalize");
   });
+  it("passes the worker promotion switch to every stage that decides whether cloud needs a qualified worker", () => {
+    const text = workflow("hosted-promotion");
+    for (const name of ["services", "promote"]) expect(job(text, name)).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
+    for (const name of ["release-alpha", "release-beta", "release"]) expect(job(workflow(name), "publish")).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
+    expect(job(workflow("controlled-cutover"), "cutover")).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
+  });
   it("takes the worker decision from qualified input comparison rather than the switch alone", () => {
     const guard = job(workflow("hosted-promotion"), "guard");
     expect(guard).toContain("worker_enabled: ${{ steps.guard.outputs.worker_enabled }}");

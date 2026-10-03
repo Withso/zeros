@@ -5,6 +5,7 @@ const STARTUP_RECOVERY: Record<string, { category: "auth-required" | "protocol-e
   gateway_signin_required: { category: "auth-required", advice: "Sign in to your configured Claude gateway again, then retry." },
   gateway_access_denied: { category: "protocol-error", advice: "Contact your organization's administrator to enable Claude access, then retry." },
   org_pin_api_key_conflict: { category: "protocol-error", advice: "Remove the conflicting API credential and use the organization sign-in required by your administrator." },
+  provider_not_allowed: { category: "protocol-error", advice: "Use an API provider allowed by your administrator, or ask them to update the managed Claude settings, then retry." },
   org_verify_failed: { category: "protocol-error", advice: "Check the connection and your required organization sign-in, then retry." },
   org_pin_mismatch: { category: "protocol-error", advice: "Sign in using an organization allowed by your administrator, then retry." },
   managed_settings_invalid: { category: "protocol-error", advice: "Ask your administrator to correct the managed Claude settings, then retry." },

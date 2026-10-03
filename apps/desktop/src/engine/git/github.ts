@@ -25,6 +25,7 @@
 // configs also externalize it so it's never bundled.
 
 import type { Octokit as OctokitClass } from "@octokit/rest";
+import { createGithubInlineReviewService } from "./github-inline-review";
 import { createHash } from "node:crypto";
 import { githubWriteCredential } from "./github-write-context";
 import { githubWritePublication } from "./github-write-publication";
@@ -2217,8 +2218,8 @@ export interface PrTimelineItem {
 
 /** Merged review + comment timeline for a PR, oldest-first. Covers the
  *  reviews (verdicts + bodies — e.g. an automated-review card) and the
- *  PR conversation comments. (Per-line inline-comment threads + resolve
- *  are GraphQL and deferred.) */
+ *  PR conversation comments. Inline threads and check annotations use the
+ *  separate exact-PR aggregate from getPrInlineReview. */
 export async function getPrReviews(opts: {
   workspaceId: string;
   prNumber: number;
@@ -2303,6 +2304,16 @@ export async function addPrComment(
   );
   return { id: r.data.id, url: r.data.html_url };
 }
+
+const inlineReview = createGithubInlineReviewService({
+  repository: workspaceRemote,
+  withAuth: withAuthRetry,
+});
+export const getPrInlineReview = inlineReview.get;
+export const getPrReviewDiff = inlineReview.diff;
+export const postPrLineComment = inlineReview.post;
+export const replyPrReviewThread = inlineReview.reply;
+export const setPrReviewThreadResolved = inlineReview.setResolved;
 
 export interface MergePrOptions {
   workspaceId: string;

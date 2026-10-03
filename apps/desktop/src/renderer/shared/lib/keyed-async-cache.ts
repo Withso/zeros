@@ -244,7 +244,7 @@ export class KeyedAsyncCache<T> {
       })
       .finally(() => {
         const active = this.pending.get(key);
-        if (active?.generation === generation) {
+        if (active?.generation === generation && active.promise === promise) {
           this.pending.delete(key);
           // A burst can temporarily exceed the retention bound while every
           // candidate is request-owned. Return to the hard bound as soon as a

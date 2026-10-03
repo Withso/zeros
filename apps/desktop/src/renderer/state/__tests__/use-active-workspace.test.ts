@@ -10,6 +10,7 @@ const fixture = vi.hoisted(() => ({
     name: "Repo",
     originUrl: null,
     addedAt: 1,
+    isGitRepository: undefined as boolean | undefined,
   },
   live: [] as Workspace[],
   archived: [] as Workspace[],
@@ -59,6 +60,7 @@ beforeEach(() => {
   fixture.archived = [];
   fixture.liveResolved = false;
   fixture.archivedResolved = false;
+  fixture.project.isGitRepository = undefined;
 });
 
 describe("active history resolution", () => {
@@ -93,12 +95,44 @@ describe("active history resolution", () => {
     });
   });
 
-  it("resolves legacy main only after nested ownership has been checked", () => {
+  it.each([
+    { isGitRepository: true, folder: "/repo" },
+    { isGitRepository: true, folder: "/repo/packages/app" },
+    { isGitRepository: undefined, folder: "/repo" },
+    { isGitRepository: undefined, folder: "/repo/packages/app" },
+  ])(
+    "never resolves saved local main at $folder with Git capability $isGitRepository",
+    ({ isGitRepository, folder }) => {
+      fixture.project.isGitRepository = isGitRepository;
+      fixture.folder = folder;
+      fixture.liveResolved = true;
+      fixture.archivedResolved = true;
+      expect(useActiveWorkspace()).toMatchObject({
+        workspace: null,
+        loading: false,
+      });
+    },
+  );
+
+  it("resolves a saved plain folder only after nested ownership has been checked", () => {
+    fixture.project.isGitRepository = false;
     fixture.liveResolved = true;
     fixture.archivedResolved = true;
     expect(useActiveWorkspace()).toMatchObject({
       workspace: { id: "local:repo", path: "/repo" },
       loading: false,
     });
+  });
+
+  it("keeps a managed nested worktree even when its branch is main", () => {
+    const managed = {
+      ...history,
+      branch: "main",
+      archivedAt: null,
+      present: true,
+    };
+    fixture.project.isGitRepository = true;
+    fixture.live = [managed];
+    expect(useActiveWorkspace().workspace).toBe(managed);
   });
 });

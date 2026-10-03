@@ -309,6 +309,78 @@ revalidates the target, rejects a stale plan, increments `auth_revision`, emits
 `staff_role_changes` record in the same transaction. The ordinary application
 role can neither mutate the staff column nor forge that evidence.
 
+#### Beta and Production Organization owner bootstrap from GitHub
+
+When the owner login exists only in the channel's protected GitHub environment, use
+the manually dispatched `staff-owner-bootstrap.yml` from the current
+reviewed `release/X.Y.Z` branch. It supports only `platform_owner` on
+`zeros-control-plane-beta/main` or `zeros-control-plane-production/main`;
+it does not deploy, enable cloud, designate
+canaries or change credentials. Exact-source Preflight and CodeQL must pass
+before the privileged job, which shares `hosted-mutation-<channel>` with releases.
+Existing dispatches default to Beta. The historical workflow name, Beta CLI
+entrypoint, version-1 journals, role names and artifact names remain compatible.
+
+The operator first stages the reviewed subject's email in that channel's environment
+secret `STAFF_EXPECTED_EMAIL`, never a workflow input or command argument. The
+channel's own PlanetScale variables and service-token secrets supply the owner
+connection. Dispatch a plan with the exact reviewed subject, accountable active
+actor, active nonpersonal Organization owned by that subject, and a nonpersonal
+audit reason:
+
+```sh
+pnpm -s agent:gh workflow run staff-owner-bootstrap.yml --ref release/X.Y.Z \
+  -f mode=plan -f subject_user_id="$BETA_SUBJECT_USER_ID" \
+  -f actor_user_id="$BETA_ACTOR_USER_ID" \
+  -f owner_organization_id="$BETA_OWNER_ORGANIZATION_ID" \
+  -f reason="Bootstrap the reviewed active Beta Organization owner." \
+  -f confirm=zeros-control-plane-beta
+```
+
+For Production, specify `-f channel=production`, use the separately reviewed
+Production subject/actor/Organization UUIDs, and confirm
+`zeros-control-plane-production`. Its secrets-free `approve` job uses the existing
+human `production-approval` environment; both that job and exact-source CI must
+succeed before the `production` environment is read. The CLI additionally
+authenticates the current workflow/run/attempt/SHA/ref and the completed approval
+job before privileged preparation, before role creation and before staff apply.
+An input confirmation or a prior run's approval cannot replace that job. Both
+environments retain their `release/*` branch policy. Branch staging and any normal
+release triggered by a push must be reviewed separately from this operator.
+
+Review the sanitized `<channel>-staff-owner-result-<run>-<attempt>` artifact, then
+dispatch the same inputs with `mode=apply`. Apply generates a fresh plan and
+uses its exact approval through the same bounded owner pool; it never consumes
+a prior run's approval. The optional Organization UUID is approval-bound and
+the existing staff transaction locks and rechecks its ownership/lifecycle
+alongside the active exact-email subject and actor. Without this optional
+requirement, the existing staff utility's behavior and approvals are unchanged.
+An already-correct subject returns `unchanged` without another grant or revision.
+Production supplies the staff utility's additional confirmation only through the
+gated apply. The grant changes only the exact subject and preserves existing
+owners; it records the staff audit and authorization revision transactionally.
+Remove `STAFF_EXPECTED_EMAIL` after the completed operation and cleanup readback.
+
+Both modes create a temporary PlanetScale login inheriting `postgres`, with a
+one-hour TTL, so plan is not a provider dry run. Its non-secret create intent
+binds the observed database/branch IDs and is uploaded as
+`<channel>-staff-owner-intent-<run>-<attempt>` before the single POST.
+The helper closes the pool and requires the exact owned role's 404 plus valid
+parent identity before recording deletion. Passwords, URLs, email, SQL and raw
+errors never enter the artifacts or output. A lost one-time password is
+reconciled only by exact run/name/branch/creator identity for cleanup; it is
+never recovered or recreated. GitHub reruns are cleanup-only and fail closed
+on missing or ambiguous ownership evidence. Hard cancellation can prevent
+finally/result upload; retained intent and TTL are recovery backstops, not
+deletion proof. If apply was attempted but no result was confirmed, reconcile
+the existing staff audit before a fresh dispatch; never infer rollback from
+the missing response. The grant does not rebind release owner configuration.
+`RUNTIME_QUALIFICATION_ACTOR_USER_ID` and `WORKER_CANARY_ORGANIZATION_ID` need a
+separate reviewed configuration plan and an approved deployment before the
+designation API serves the new owner. Role-only UI visibility is insufficient.
+Keep existing execution holds and normal Alpha/Beta/Production qualification
+gates; staff setup does not authorize a new Production source deployment.
+
 ## Organization management synchronization
 
 Every collaborative Zeros organization owns exactly one WorkOS Organization,
