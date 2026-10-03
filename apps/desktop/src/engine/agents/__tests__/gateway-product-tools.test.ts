@@ -35,6 +35,7 @@ describe("native Code product tool admission", () => {
         onAgentExit() {},
       },
       sessionToolFactory: async (input) => {
+        expect(input.agentId).toBe("fixture");
         expect(input.conversationId).toBe("durable-chat");
         const tools = {
           env: { TEST_SESSION_TOOL_AUTHORITY: input.executionId },

@@ -29,10 +29,14 @@ import {
   defaultScopeFor,
   planWorkbenchFileOpen,
 } from "./tab-model";
+import type { ViewerMode } from "./tab-model";
 import { buildDirectFileOpenAction } from "./direct-file-open";
 import { useWorkbenchDirtyEditorIds } from "./tabs/code-editor/editor-state";
 import { pickFileMatch } from "../resolve-file-ref";
-import { loadWorkspaceFileRead, prefetchWorkspaceFileRead } from "../workspace-file-data-cache";
+import {
+  loadWorkspaceFileRead,
+  prefetchWorkspaceFileRead,
+} from "../workspace-file-data-cache";
 import {
   loadWorkspaceFiles,
   peekWorkspaceFiles,
@@ -56,7 +60,10 @@ function relativeToCwd(abs: string, cwd: string): string | null {
 
 /** Warm the same bounded, exact-key snapshot used by the Files viewer. This
  * runs on reference hover/focus only; hidden chats never prefetch artifacts. */
-export function warmChatFileInWorkbench(cwd: string | undefined, rawPath: string): void {
+export function warmChatFileInWorkbench(
+  cwd: string | undefined,
+  rawPath: string,
+): void {
   if (!cwd) return;
   const path = rawPath.startsWith("/") ? relativeToCwd(rawPath, cwd) : rawPath;
   if (!path || path.split("/").includes("..")) return;
@@ -72,6 +79,8 @@ export function warmChatFileInWorkbench(cwd: string | undefined, rawPath: string
  *  (mirrors the Changes filter), the commit SHA for `diffScope:"commit"`, and
  *  whether the Discard control is allowed (All-changes filter + uncommitted). */
 export interface OpenFileOpts {
+  /** Explicit source mode for actions such as resolving a Markdown conflict. */
+  viewerMode?: ViewerMode;
   diff?: boolean;
   diffScope?:
     | "all"
@@ -120,7 +129,7 @@ export function useOpenFileInWorkbench(): (
         isNewFile: opts?.isNewFile ?? false,
         // A file-open is a new navigation intent. The viewer follows its entry
         // point default until the user explicitly chooses another mode again.
-        viewerMode: undefined,
+        viewerMode: opts?.viewerMode,
       };
       // A tracked discard uses a non-zero revision to clear editor state and
       // land in Edit (including Markdown). A fresh user open is a new intent,

@@ -115,7 +115,7 @@ function diffShadowCss(surface: "bg1" | "bg2" | "sidebar-bg"): string {
 /** Pierre owns these shadow-DOM text nodes and offers no label option. Its
  * post-render hook also runs after context expansion and virtual remounts, so
  * the visible and accessible trailing label stay in sync on every surface. */
-function finishDiffRender(node: HTMLElement): void {
+export function finishDiffRender(node: HTMLElement): void {
   for (const label of node.shadowRoot?.querySelectorAll(
     "[data-separator-last] [data-unmodified-lines]",
   ) ?? []) {
@@ -190,13 +190,16 @@ function zerosSharedDiffPresentation(opts?: {
  *  theme/themeType/unsafeCSS/diffStyle pass-through keys as the single-file
  *  components, plus virtualization layout — so the diff chrome reads identically
  *  to the chat EditCard and the Review tab. */
-export function zerosCodeViewOptions(opts?: {
+export function zerosCodeViewOptions<
+  LAnnotation = undefined,
+  Caret = undefined,
+>(opts?: {
   diffStyle?: "unified" | "split";
   disableFileHeader?: boolean;
   codeThemeId?: string;
   /** Diff surface bg. Workbench file-tab diffs use "sidebar-bg" (default). */
   surface?: "bg1" | "bg2" | "sidebar-bg";
-}): CodeViewOptions<undefined, undefined> {
+}): CodeViewOptions<LAnnotation, Caret> {
   const presentation = zerosSharedDiffPresentation(opts);
   return {
     ...presentation,

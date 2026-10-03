@@ -130,6 +130,10 @@ export async function runToolsSmoke({ page, check }) {
       await expect
         .poll(async () => (await textAppearance()).lightness)
         .toBeGreaterThan(normal.lightness + 0.01);
+      // Sample the endpoint, not an intermediate color in the CSS transition.
+      await expect
+        .poll(() => matchesToken(textAction, "--composer-tool-action-hover"))
+        .toBe(true);
       const hovered = await textAppearance();
       expect(hovered.padding).toEqual(normal.padding);
       expect(hovered.background).toBe("rgba(0, 0, 0, 0)");

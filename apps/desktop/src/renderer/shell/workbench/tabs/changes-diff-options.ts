@@ -4,11 +4,11 @@ import { zerosCodeViewOptions } from "@/renderer/shared/theme/diff-theme";
 /** Changes-specific chrome lives in Pierre's shadow DOM. Keep the painted
  * dimensions and the virtualizer's estimates together: mismatches accumulate
  * across files and can leave the last card outside the scrollable extent. */
-export function changesDiffOptions(options: {
+export function changesDiffOptions<LAnnotation = undefined>(options: {
   diffStyle: "unified" | "split";
   codeThemeId: string;
-}): CodeViewOptions<undefined, undefined> {
-  const shared = zerosCodeViewOptions(options);
+}): CodeViewOptions<LAnnotation, undefined> {
+  const shared = zerosCodeViewOptions<LAnnotation>(options);
   return {
     ...shared,
     // Reserve the end of the scroll range in Pierre's layout, rather than

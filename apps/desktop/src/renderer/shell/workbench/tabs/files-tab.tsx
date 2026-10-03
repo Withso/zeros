@@ -30,6 +30,9 @@ import React, { useCallback, useRef, useState } from "react";
 import { File, FolderOpen, FolderTree, Search } from "lucide-react";
 
 import { useActiveWorkspace } from "@/renderer/state/use-active-workspace";
+import { useGithubReview } from "@/renderer/features/code-review/use-github-review";
+import { parseRemote } from "../../pr/github-url";
+import { resolveReviewProvider } from "../../pr/review-provider";
 import { isLocalMainWorkspace } from "@/renderer/state/local-main-workspace";
 import { useWorkspaceDispatch } from "@/renderer/state/store";
 import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
@@ -77,7 +80,7 @@ export const FilesTab = React.memo(function FilesTab({
   const cwd = useChatCwd();
   // The git target for the Diff view: a real worktree diffs by its id; the
   // read-only Local-main trunk diffs by its repoRoot (matches useSourceTarget).
-  const { workspace } = useActiveWorkspace();
+  const { workspace, project } = useActiveWorkspace();
   // Local main (the trunk) resolves to the primary checkout's working tree and
   // is now a first-class EDITABLE target (the engine's TRUNK_READ_ONLY gate was
   // removed) — so it gets a git workspaceId like any worktree and is never
@@ -98,6 +101,10 @@ export const FilesTab = React.memo(function FilesTab({
   // saves invalidate the cached listing, then bump — so the sidebar picks up
   // created/deleted files without a manual refresh.
   const gitRefresh = useGitRefreshKey(cwd, workspaceId, active);
+  const githubReview = useGithubReview({
+    workspaceId: resolveReviewProvider(parseRemote(project?.originUrl)?.host ?? "github.com") ? workspaceId : undefined,
+    prNumber: workspace?.prNumber, cwd, active: active && !!tab.filePath, refreshKey: gitRefresh,
+  });
   // Whether the tree sidebar stacks a "Design files" section under the code
   // tree (design-files-pane.tsx). Decided here, from the same cached listing
   // the trees read, so a repo without a design document mounts exactly one
@@ -393,6 +400,7 @@ export const FilesTab = React.memo(function FilesTab({
             cwd={cwd}
             path={filePath}
             workspaceId={workspaceId}
+            reviewExternal={githubReview.source}
             diff={tab.diff ?? false}
             diffScope={tab.diffScope}
             diffSha={tab.diffSha}

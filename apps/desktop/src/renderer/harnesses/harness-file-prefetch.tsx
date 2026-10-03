@@ -7,7 +7,9 @@ import "../../../../../styles/globals.css";
 import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
+import type { CodeReviewListResult } from "@zeros/protocol/code-review";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
+import type { StatusResult } from "../platform/git";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { FileViewer } from "../shell/workbench/tabs/file-viewer";
 import {
@@ -36,6 +38,20 @@ setActiveBridge({
     } else if (op === "file.read") {
       const content = `Contents of ${path}`;
       result = { kind: "text", path, content, bytes: content.length };
+    } else if (op === "git.status") {
+      result = {
+        staged: [],
+        unstaged: [],
+        untracked: [],
+        conflicted: [],
+        conflictState: null,
+      } satisfies StatusResult;
+    } else if (op === "codeReview.list") {
+      result = {
+        workspaceId,
+        threads: [],
+        partial: false,
+      } satisfies CodeReviewListResult;
     } else if (op === "workspace.list") {
       result = [];
     }

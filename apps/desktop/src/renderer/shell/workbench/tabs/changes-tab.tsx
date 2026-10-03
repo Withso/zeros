@@ -75,6 +75,7 @@ import { useWorkspaceDispatch } from "@/renderer/state/store";
 import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { LatestGenerationFlight } from "@/renderer/shared/lib/latest-generation-flight";
+import { registerReviewCacheForget } from "@/renderer/features/code-review/review-cache-forget";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useAddProject } from "../../add-project-provider";
 import {
@@ -212,16 +213,33 @@ function pathBaseName(path: string): string {
 // each exact owner to one running request and one latest queued successor; an
 // old generation must not compete with every intermediate invalidation.
 const statusRequests = new LatestGenerationFlight<StatusResult>();
+const statusRequestOwners = new Set<{ workspaceId: string; folder: string }>();
+
+registerReviewCacheForget((ownsFolder) => {
+  for (const owner of statusRequestOwners) {
+    if (!ownsFolder(owner.folder)) continue;
+    statusRequests.forget(owner.workspaceId);
+    statusRequestOwners.delete(owner);
+  }
+});
 
 /** Exported so the PR-status island joins the same coalesced generation
  *  instead of issuing a second `git status` for the same refresh key. */
 export function statusForGeneration(
   workspaceId: string,
   refreshKey: number,
+  cwd: string,
 ): Promise<StatusResult> {
-  return statusRequests.run(workspaceId, refreshKey, () =>
+  const owner = { workspaceId, folder: cwd };
+  statusRequestOwners.add(owner);
+  const request = statusRequests.run(workspaceId, refreshKey, () =>
     gitStatus(workspaceId),
   );
+  const release = () => {
+    statusRequestOwners.delete(owner);
+  };
+  void request.then(release, release);
+  return request;
 }
 
 // Coalesce the (up to two) mounted Changes surfaces' turns fetches onto ONE
@@ -912,7 +930,7 @@ export function useChangesModel({
                   ? "worktree-vs-index"
                   : "worktree-vs-head";
             const [status, scopeDiff] = await Promise.all([
-              statusForGeneration(workspaceId, refreshKey),
+              statusForGeneration(workspaceId, refreshKey, folder),
               gitDiff({
                 workspaceId,
                 mode,
@@ -951,7 +969,7 @@ export function useChangesModel({
                 rawPatch: true,
                 summaryLimit: LARGE_CHANGE_FILE_LIMIT,
               }),
-              statusForGeneration(workspaceId, refreshKey),
+              statusForGeneration(workspaceId, refreshKey, folder),
             ]);
             const conflictedPaths = new Set(
               status.conflicted.map((f) => f.path),

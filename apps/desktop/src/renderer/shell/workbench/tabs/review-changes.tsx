@@ -2,8 +2,7 @@
 // ReviewChangesSection — the Review tab's Changes sub-tab
 // ──────────────────────────────────────────────────────────
 //
-// The PR's cumulative diff (base...worktree — the branch is checked out
-// locally, so the local diff IS the PR diff plus any not-yet-pushed work) as
+// The PR's published head diff as
 // stacked, collapsible file cards: header (status chip · path · ±counts ·
 // viewed toggle) + the @pierre diff body. Diff bodies mount lazily (only
 // while expanded) so a 100-file PR stays snappy; marking a file viewed
@@ -12,12 +11,13 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronsDownUp, ChevronsUpDown } from "lucide-react";
-import { PatchDiff } from "@pierre/diffs/react";
 
 import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
-import { zerosDiffOptions } from "@/renderer/shared/theme/diff-theme";
-import { useCodeTheme } from "@/renderer/shared/theme/use-code-theme";
+import { ReviewPatchDiff } from "@/renderer/features/code-review/review-code-view";
+import { ReviewFeedback } from "@/renderer/features/code-review/review-feedback";
+import { useCodeReview } from "@/renderer/features/code-review/use-code-review";
+import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
 import type { ChangedFile } from "./changes-parse";
 import {
   Centered,
@@ -47,14 +47,30 @@ export function ReviewChangesSection({
   error,
   baseBranch,
   onRetry,
+  cwd,
+  workspaceId,
+  active = true,
+  refreshKey = 0,
+  reviewExternal,
 }: {
   files: ChangedFile[];
   loading: boolean;
   error: string | null;
   baseBranch: string;
   onRetry: () => void;
+  cwd?: string;
+  workspaceId?: string | null;
+  active?: boolean;
+  refreshKey?: number;
+  reviewExternal?: CodeReviewExternalSource;
 }) {
-  const codeTheme = useCodeTheme();
+  const review = useCodeReview({
+    cwd,
+    workspaceId,
+    active,
+    refreshKey,
+    external: reviewExternal,
+  });
   // Per-path UI state survives silent refreshes (files array identity churns).
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [viewed, setViewed] = useState<Set<string>>(new Set());
@@ -86,25 +102,31 @@ export function ReviewChangesSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- signature is the files identity
   }, [signature, autoCollapsed]);
 
-  const diffOptions = useMemo(
-    // Our own card header replaces the in-diff file header row.
-    () => zerosDiffOptions({ codeThemeId: codeTheme, disableFileHeader: true }),
-    [codeTheme],
-  );
-
   if (loading && files.length === 0)
-    return <div className="min-h-24" aria-busy="true" />;
+    return (
+      <>
+        <div className="min-h-24" aria-busy="true" />
+        <ReviewFeedback review={review} />
+      </>
+    );
   if (error && files.length === 0)
     return (
       <div className="p-3">
         <ErrorCallout text={error} onRetry={onRetry} />
+        <ReviewFeedback review={review} />
       </div>
     );
   if (files.length === 0)
     return (
-      <Centered>
-        No changes vs {baseBranch}. New commits appear here as the branch moves.
-      </Centered>
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="min-h-0 flex-1">
+          <Centered>
+            No changes vs {baseBranch}. New commits appear here as the branch
+            moves.
+          </Centered>
+        </div>
+        <ReviewFeedback review={review} />
+      </div>
     );
 
   const totals = files.reduce(
@@ -178,6 +200,7 @@ export function ReviewChangesSection({
         </Tooltip>
       </div>
       {error && <ErrorCallout text={error} onRetry={onRetry} />}
+      <ReviewFeedback review={review} />
 
       {files.map((f) => {
         const open = !collapsed.has(f.path);
@@ -232,7 +255,13 @@ export function ReviewChangesSection({
                 // scroll and seam-drag frame. `auto` remembers the rendered
                 // height once measured; 240px estimates a never-rendered one.
                 <div className="[contain-intrinsic-size:auto_0px_auto_240px] [content-visibility:auto]">
-                  <PatchDiff patch={f.patch} options={diffOptions} />
+                  <ReviewPatchDiff
+                    path={f.path}
+                    patch={f.patch}
+                    review={review}
+                    active={active}
+                    confirmedRevision={reviewExternal?.confirmedRevision}
+                  />
                 </div>
               ) : (
                 <Centered>No textual diff to show.</Centered>

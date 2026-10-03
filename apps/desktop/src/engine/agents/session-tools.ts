@@ -1,4 +1,14 @@
 import type { McpServerRegistration } from "./types";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+
+/** A trusted product handler bound once to a registered workspace owner. */
+export interface AgentWorkspaceTools {
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  assertCurrent(): void;
+  listTools(): Tool[];
+  callTool(name: string, raw: unknown, signal: AbortSignal): Promise<CallToolResult>;
+}
 
 export interface AgentSessionTools {
   readonly env: Readonly<Record<string, string>>;
@@ -16,6 +26,8 @@ export interface AgentSessionTools {
   suspend?(): () => void;
 }
 export interface AgentSessionToolInput {
+  /** Registered provider chosen by gateway admission, not a tool caller. */
+  agentId?: string;
   executionId: string;
   cwd: string;
   workspaceId?: string;

@@ -3120,6 +3120,11 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     .getByRole("dialog")
     .getByRole("button", { name: "Close", exact: true })
     .click();
+  // Let the dialog restore focus before starting a new inspector draft.
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Review Design changes", exact: true }),
+  ).toBeFocused();
   const beforeSaveShortcut = await page.evaluate(
     () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
   );

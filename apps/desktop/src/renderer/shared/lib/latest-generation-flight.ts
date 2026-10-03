@@ -34,6 +34,17 @@ interface FlightEntry<T> {
 export class LatestGenerationFlight<T> {
   private readonly entries = new Map<string, FlightEntry<T>>();
 
+  /** Detach a removed owner's lifetime. Its running read may still settle for
+   * existing callers, but new callers must not share it or start its queue. */
+  public forget(key: string): void {
+    const entry = this.entries.get(key);
+    if (!entry) return;
+    this.entries.delete(key);
+    const queued = entry.queued;
+    entry.queued = undefined;
+    queued?.reject(new Error("Request cancelled because its owner was removed"));
+  }
+
   /** Run the newest read for one semantic key. Generations must come from a
    * monotonic invalidation clock (the renderer Git refresh bus does). */
   public run(
@@ -95,7 +106,8 @@ export class LatestGenerationFlight<T> {
     entry: FlightEntry<T>,
     settled: Promise<T>,
   ): void {
-    if (entry.running.promise !== settled) return;
+    if (this.entries.get(key) !== entry || entry.running.promise !== settled)
+      return;
     const queued = entry.queued;
     if (!queued) {
       if (this.entries.get(key) === entry) this.entries.delete(key);
