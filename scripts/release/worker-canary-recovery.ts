@@ -71,7 +71,7 @@ export async function reconcileReleaseCanaryRetirements(config: PromotionConfig,
   const signal = options.signal ?? AbortSignal.any([...(lease.signal ? [lease.signal] : []), AbortSignal.timeout(budgetMs)]);
   requireCheck(state.owner === workerOwner(config.channel) && Array.isArray(state.releaseRuns) && state.releaseRuns.length <= 100 &&
     Array.isArray(state.resources.images), "Release canary historical ownership is unconfirmed");
-  let observed = 0;
+  const required: { job: any; row: any; optional: boolean }[] = [], acknowledged: typeof required = [];
   for (const run of state.releaseRuns) {
     requireCheck(Array.isArray(run.canaries) && run.canaries.length <= 3, "Release canary historical job inventory is invalid");
     for (const job of run.canaries) {
@@ -107,6 +107,15 @@ export async function reconcileReleaseCanaryRetirements(config: PromotionConfig,
         !row.builder?.retiredAt && job.prelaunchFailure === undefined) continue;
       requireCheck(ownedJob && row.purpose === "native-agent-qualification" && row.sourceCommit === run.sourceSha && row.sourceImage === job.image.snapshotId,
         "Release canary historical ownership or image binding is unconfirmed");
+      if (pendingMarker.success) {
+        requireCheck(typeof core.validateRetainedCleanup === "function", "Release canary retained cleanup validator is missing");
+        core.validateRetainedCleanup(job);
+        for (const key of ["retiredAt", "lastReconcileAt"]) {
+          requireCheck(row.builder[key] === undefined || typeof row.builder[key] === "string" &&
+            Number.isFinite(Date.parse(row.builder[key])) && Date.parse(row.builder[key]) <= now(),
+          "Release canary historical observation time is invalid");
+        }
+      }
       if (row.nativeDispatchStarted !== true) {
         requireCheck(row.nativeDispatchStarted === undefined && ["allocating", "starting"].includes(job.phase) &&
           [job.outcome, job.prelaunchFailure, job.admissionRequest].every(value => value === undefined) &&
@@ -120,17 +129,32 @@ export async function reconcileReleaseCanaryRetirements(config: PromotionConfig,
           continue;
         }
       }
-      requireCheck(observed < maxRecords && now() < deadline && !signal.aborted, "Release canary historical recovery budget exhausted; retain all remaining holds");
       requireCheck(/^bx_[a-z0-9]+$/.test(row.builder?.id ?? "") &&
         row.builder?.deleteRequested === true && /^bdop_[a-f0-9]{32}$/.test(row.builder.deletionOperationId ?? ""),
         "Release canary historical dispatch requires exact retained ownership and deletion operation; never allocate or DELETE again");
-      await retireReleaseCanary(lease, core, reconcile, job, signal);
-      if (row.nativeDispatchStarted !== true) {
-        requireCheck(hasPhysicalCleanup(row, job), "Release canary historical physical cleanup proof is unconfirmed");
-        job.retired = true; await lease.save();
-      }
-      observed++;
+      const optional = pendingMarker.success && row.retired === true && row.deleted === false &&
+        row.builder.deleted !== true && row.builder.retiredAt !== undefined;
+      (optional ? acknowledged : required).push({ job, row, optional });
     }
+  }
+  // Unacknowledged recovery must finish before fresh work. Already-audited
+  // storage remains truthfully pending and rotates across bounded later passes.
+  acknowledged.sort((left, right) => (Date.parse(left.row.builder.lastReconcileAt) || 0) - (Date.parse(right.row.builder.lastReconcileAt) || 0));
+  let observed = 0;
+  for (const { job, row, optional } of [...required, ...acknowledged]) {
+    requireCheck(!lease.signal?.aborted && !signal.aborted, "Release canary historical recovery budget exhausted; retain all remaining holds");
+    if (optional && (observed >= maxRecords || deadline - now() < 100)) break;
+    requireCheck(observed < maxRecords && now() < deadline, "Release canary historical recovery budget exhausted; retain all remaining holds");
+    await retireReleaseCanary(lease, core, reconcile, job, signal);
+    requireCheck(!lease.signal?.aborted && !signal.aborted && now() < deadline,
+      "Release canary historical recovery budget exhausted; retain all remaining holds");
+    if (row.nativeDispatchStarted !== true) {
+      requireCheck(hasPhysicalCleanup(row, job), "Release canary historical physical cleanup proof is unconfirmed");
+      job.retired = true;
+    }
+    row.builder.lastReconcileAt = new Date(now()).toISOString();
+    await lease.save();
+    observed++;
   }
   return observed;
 }

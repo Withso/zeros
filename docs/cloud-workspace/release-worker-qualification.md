@@ -426,9 +426,15 @@ need not still exist merely to settle a deleted native VM.
 
 Audit settlement is exact and retryable even if the compute-release CAS already
 succeeded or an audit response was lost. The local terminal marker and retired
-flag are saved together after acknowledgment. Later guarded executions observe
-at most 16 historical canaries within a 15-second budget before fresh preflight;
-they never allocate, rebuild, reupload, prune images or release holds by age.
+flag are saved together after acknowledgment. Later guarded executions validate
+the complete retained history, then observe at most one historical canary within
+the unchanged 15-second budget before fresh preflight. Unacknowledged or locally
+incomplete cleanup takes priority and must finish before new work; an exhausted
+mandatory recovery pass still blocks the release. Already-audited, locally
+retired storage can remain queued with its full proof and storage/name holds intact. These
+observations rotate by the separately saved `builder.lastReconcileAt`; they never
+allocate, rebuild, reupload, prune images or release holds by age. An uncertain
+selected observation, lease loss or persistence failure still blocks the pass.
 An authenticated unstarted allocation saved before its resource row exists is
 nonexecuted history, including a superseded run or truthful empty cleanup after
 admission denial. Scanning it never releases admission or fabricates cleanup or
@@ -474,7 +480,9 @@ native storage is sanitized or erased. Only unavailable compute is released,
 not named-image slots or retained storage accounting. Native storage, inherited
 source storage and intentionally retained published images are distinct.
 
-Bounded historical recovery visits deferred records before retired shortcuts.
+Bounded historical recovery validates every deferred record before selecting
+the next observation, including account, creation and snapshots-off bindings
+for records outside that pass's observation budget.
 The certificate remains pending through authenticated processing/removing or
 retrying observations. Actual matching operation completion plus a subsequent
 sandbox404 persists physical proof and appends `cloud.release_canary.retired`;

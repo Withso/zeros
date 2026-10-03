@@ -85,7 +85,7 @@ export async function reconcileWorkerNativeStorage(env: NodeJS.ProcessEnv) {
       const core = nativeAgentCanary(lease, admission.profile, devBoatClient({ apiKey: env.BOAT_API_KEY }, signal),
         { release: () => releaseHostedAdmission(store, lease, admission.profile) },
         { strictCleanup: true, releaseStorageDeferral: true, cleanupTimeoutMs: 0 });
-      return reconcileReleaseCanaryRetirements(config, actorUserId, lease, core, broker.retire, { signal });
+      return reconcileReleaseCanaryRetirements(config, actorUserId, lease, core, broker.retire, { signal, maxRecords: 1 });
     }, { create: false });
     requireCheck(typeof result === "number" || result?.absent === true, "Release native storage reconciliation result is unconfirmed");
     return typeof result === "number" ? result : 0;
@@ -120,7 +120,7 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
       const recoverySignal = AbortSignal.any([lease.signal, AbortSignal.timeout(15_000)]);
       const historical = nativeAgentCanary(lease, profile, devBoatClient({ apiKey: env.BOAT_API_KEY }, recoverySignal), { release },
         { strictCleanup: true, releaseStorageDeferral: true, cleanupTimeoutMs: 0 });
-      await reconcileReleaseCanaryRetirements(config, execution.actorUserId, lease, historical, broker.retire, { signal: recoverySignal });
+      await reconcileReleaseCanaryRetirements(config, execution.actorUserId, lease, historical, broker.retire, { signal: recoverySignal, maxRecords: 1 });
       const credentials = await broker.preflight(), releaseCanaryBindings = [...credentials.values()];
       let run = runs.find((value: any) => value.runId === config.runId);
       if (!run) {

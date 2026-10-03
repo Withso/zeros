@@ -107,6 +107,26 @@ export function nativeAgentCanary(lease, profile, request = devBoatClient(profil
     if (!row || row.purpose !== "native-agent-qualification") throw new Error("Dev agent canary ownership receipt is missing");
     return row;
   };
+  const validateRetainedCleanup = job => {
+    const row = record(job), retained = row.builder?.physicalCleanup;
+    if (retained) {
+      const expected = nativeCleanupProof(row, job, profile, retained.operation);
+      if (Object.entries(expected).some(([key, value]) => JSON.stringify(retained[key]) !== JSON.stringify(value)) ||
+          !Number.isFinite(Date.parse(retained.operationObservedAt)) || !Number.isFinite(Date.parse(retained.unavailableObservedAt)) ||
+          Date.parse(retained.operation.completedAt) > Date.parse(retained.operationObservedAt) ||
+          Date.parse(retained.operationObservedAt) > Date.parse(retained.unavailableObservedAt) || Date.parse(retained.unavailableObservedAt) > Date.now())
+        throw new Error("Native canary retained physical cleanup proof changed; retain its admission");
+    }
+    const storage = row.builder?.storageRetirement;
+    if (storage) {
+      const expected = nativeStorageProof(lease.state, row, job, profile, storage.operation);
+      if (!options.releaseStorageDeferral || Object.entries(expected).some(([key, value]) => JSON.stringify(storage[key]) !== JSON.stringify(value)) ||
+          !cleanupTime(storage.operationObservedAt) || !cleanupTime(storage.unavailableObservedAt) ||
+          Date.parse(storage.operation.requestedAt) > Date.parse(storage.operationObservedAt) ||
+          Date.parse(storage.operationObservedAt) > Date.parse(storage.unavailableObservedAt) || Date.parse(storage.unavailableObservedAt) > Date.now())
+        throw new Error("Native canary retained storage retirement proof changed; retain its admission");
+    }
+  };
   const owned = async job => {
     const row = record(job), response = await request("GET", `/sandboxes/${row.builder?.id}`);
     if (response.status !== 200 || response.body?.sandbox?.id !== row.builder.id || response.body.sandbox.team?.id !== profile.boat.billingOrg) {
@@ -126,6 +146,9 @@ export function nativeAgentCanary(lease, profile, request = devBoatClient(profil
     return result.body.stdout;
   };
   return {
+    // Pure validation lets bounded history scans check every saved proof before
+    // selecting which acknowledged records need a fresh provider observation.
+    validateRetainedCleanup,
     async allocate(job, image) {
       let row = lease.state.resources.images.find(value => value.agentQualificationId === job.id);
       const newRecord = !row;
@@ -268,23 +291,7 @@ PY` } });
         if (options.strictCleanup) {
           const retained = row.builder.physicalCleanup;
           if (row.builder.deleted && !retained) { row.builder.deleted = false; row.deleted = false; await lease.save(); }
-          if (retained) {
-            const expected = nativeCleanupProof(row, job, profile, retained.operation);
-            if (Object.entries(expected).some(([key, value]) => JSON.stringify(retained[key]) !== JSON.stringify(value)) ||
-              !Number.isFinite(Date.parse(retained.operationObservedAt)) || !Number.isFinite(Date.parse(retained.unavailableObservedAt)) ||
-              Date.parse(retained.operation.completedAt) > Date.parse(retained.operationObservedAt) ||
-              Date.parse(retained.operationObservedAt) > Date.parse(retained.unavailableObservedAt) || Date.parse(retained.unavailableObservedAt) > Date.now())
-              throw new Error("Native canary retained physical cleanup proof changed; retain its admission");
-          }
-          const storage = row.builder.storageRetirement;
-          if (storage) {
-            const expected = nativeStorageProof(lease.state, row, job, profile, storage.operation);
-            if (!options.releaseStorageDeferral || Object.entries(expected).some(([key, value]) => JSON.stringify(storage[key]) !== JSON.stringify(value)) ||
-              !cleanupTime(storage.operationObservedAt) || !cleanupTime(storage.unavailableObservedAt) ||
-              Date.parse(storage.operation.requestedAt) > Date.parse(storage.operationObservedAt) ||
-              Date.parse(storage.operationObservedAt) > Date.parse(storage.unavailableObservedAt) || Date.parse(storage.unavailableObservedAt) > Date.now())
-              throw new Error("Native canary retained storage retirement proof changed; retain its admission");
-          }
+          validateRetainedCleanup(job);
         }
         const deferStorage = options.strictCleanup && options.releaseStorageDeferral === true && row.nativeDispatchStarted === true;
         await confirmBoatDeletion(lease, row.builder, request, { allowDeferredStorage: !options.strictCleanup || deferStorage, timeout: options.cleanupTimeoutMs ?? 30_000,

@@ -43,7 +43,7 @@ function fixture(channel: Channel = "production", existing = true) {
       durable = structuredClone(next); revision = String(Number(revision ?? "0") + 1); return revision;
     }),
     readAdmission: vi.fn(async () => ({ state: { version: 1, owner: "account-admission", account: "d".repeat(64), reservations: [] }, etag: "1" })),
-    writeAdmission: vi.fn(async () => { throw new Error("Unexpected admission mutation in synthetic preflight test"); }),
+    writeAdmission: vi.fn(async (_ledger: unknown, _etag?: string): Promise<string> => { throw new Error("Unexpected admission mutation in synthetic preflight test"); }),
     close: vi.fn(),
   };
   dependencies.registry.mockReturnValue(registry);
@@ -137,6 +137,63 @@ describe("worker runner first-generation recovery ordering", () => {
 });
 
 describe("reconciliation-only worker runner", () => {
+  it.each(["promotion", "reconciliation"])("bounds %s history under the real lease before any fresh canary", async mode => {
+    const test = fixture("alpha"), now = Date.now(), at = (age: number) => new Date(now - age).toISOString();
+    const profile = JSON.parse(test.env.WORKER_ADMISSION_CONFIG_JSON).profile;
+    const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    const account = hash([profile.boat.accountScope, profile.boat.billingOrg, profile.railway.projectId,
+      profile.planetscale.organization, profile.planetscale.database, profile.cloudflare.accountId]);
+    test.registry.readAdmission.mockImplementation(async () => ({ state: { version: 1, owner: "account-admission", account, reservations: [] }, etag: "1" }));
+    test.registry.writeAdmission.mockImplementation(async (ledger, etag) => {
+      expect(ledger).toEqual({ version: 1, owner: "account-admission", account, reservations: [] });
+      expect(etag).toBe("1"); return "2";
+    });
+    const rows = [0, 1].map(index => {
+      const id = `88888888-8888-4888-8888-${String(index + 1).padStart(12, "0")}`, targetId = `bx_history${index}`;
+      const operationId = `bdop_${index.toString(16).padStart(32, "0")}`;
+      const image = { snapshotId: "synthetic-image", sourceCommit: test.run.sourceSha, buildSha256: "b".repeat(64) };
+      const intent = { key: id, at: now - 40_000, body: { from: image.snapshotId, snapshots: false, noEnv: true, env: {} } };
+      const snapshotsOff = { version: 1, targetId, snapshots: false, observedAt: at(30_000) };
+      test.run.canaries.push({ ...workerConnections()[index], id, startedAt: now - 50_000, image,
+        phase: "completed", qualificationProfile: "full", retired: true,
+        auditRetired: { version: 2, operationId: id, deletionOperationId: operationId, storagePending: true } });
+      return { purpose: "native-agent-qualification", agentQualificationId: id, sourceCommit: image.sourceCommit, sourceImage: image.snapshotId,
+        nativeDispatchStarted: true, builderIntent: intent, snapshotPolicyVersion: 1, snapshotPolicyObserved: snapshotsOff, retired: true, deleted: false,
+        builder: { id: targetId, deleteRequested: true, deleted: false, retiredAt: at(5000), deletionOperationId: operationId,
+          storageRetirement: { version: 1, kind: "storage-pending", operationId: id, targetId, snapshotId: image.snapshotId,
+            sourceCommit: image.sourceCommit, buildSha256: image.buildSha256, creationIntentSha256: hash(intent),
+            accountBinding: account, billingOrg: profile.boat.billingOrg, snapshotsOff,
+            operation: { id: operationId, kind: "sandbox", targetId, status: "blocked", stage: "waiting_for_restore", requestedAt: at(20_000), expectedBy: null },
+            operationObservedAt: at(10_000), unavailableObservedAt: at(9000) } } };
+    });
+    test.state.resources.images = rows; test.state.releaseRuns.push(test.run);
+    const original = test.fetcher.getMockImplementation()!, observations: string[] = [];
+    test.fetcher.mockImplementation(async (url, init = {}) => {
+      const route = new URL(String(url)).pathname;
+      if (route.startsWith("/api/v1/")) {
+        expect(init.method).toBe("GET"); observations.push(route);
+        if (route.endsWith(`/deletion-operations/${rows[0].builder.deletionOperationId}`)) return Response.json({ operation: {
+          ...rows[0].builder.storageRetirement.operation, status: "processing", stage: "removing" } });
+        if (route.endsWith(`/sandboxes/${rows[0].builder.id}`)) return Response.json({}, { status: 404 });
+        throw new Error("An unselected historical canary was observed");
+      }
+      if (route.endsWith("/release-canaries/retirements")) {
+        expect(JSON.parse(String(init.body))).toMatchObject({ operationId: test.run.canaries[0].id,
+          deletionOperationId: rows[0].builder.deletionOperationId });
+        return Response.json({ retired: true, storagePending: true });
+      }
+      return original(url, init);
+    });
+    if (mode === "promotion") {
+      await expect(test.execute()).rejects.toThrow("Release canary designation missing for claude-setup-token");
+      expect(test.preflight).toHaveBeenCalledOnce();
+    } else await expect(reconcileWorkerNativeStorage(test.env)).resolves.toBe(1);
+    expect(observations).toHaveLength(2);
+    expect(test.saved().resources.images[0].builder.lastReconcileAt).toEqual(expect.any(String));
+    expect(test.saved().resources.images[1]).toEqual(rows[1]);
+    expect(test.saved().releaseRuns).toEqual([test.run]); expect(test.saved()).not.toHaveProperty("lease");
+    expect(test.registry.writeAdmission).toHaveBeenCalledOnce();
+  });
   it("does not create a registry generation when the exact release receipt is absent", async () => {
     const test = fixture("alpha", false);
     await expect(reconcileWorkerNativeStorage(test.env)).resolves.toBe(0);
