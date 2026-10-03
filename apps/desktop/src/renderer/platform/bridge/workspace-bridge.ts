@@ -127,6 +127,13 @@ const NETWORK_GIT_TIMEOUT_MS = 60_000;
  *  working tree or hook-heavy repo can outlive the 10s default. */
 const LOCAL_GIT_TIMEOUT_MS = 30_000;
 
+/** Git observations can scan a large working tree while an agent writes it.
+ * Keep their reads alive beyond the DB-oriented 10s default: abandoning them
+ * early lets refresh successors compete with Git still running in the engine.
+ * Callers coalesce refresh generations; this finite budget bounds a stalled
+ * read without timing out an ordinary slow diff or status scan. */
+const GIT_READ_TIMEOUT_MS = 60_000;
+
 /** Context-graph mutations can intentionally wait behind workspace creation's
  * app-wide Design-owner publication. Give those queued requests the same
  * budget as the create that owns the transition. Transcript windows are served
@@ -1037,11 +1044,16 @@ export async function bridgeGitStatus(
   workspaceId: string,
   options: { paths?: string[]; includeTracking?: boolean } = {},
 ): Promise<StatusResult> {
-  return (await workspaceOp(bridge, "git.status", {
-    workspaceId,
-    paths: options.paths,
-    includeTracking: options.includeTracking,
-  })) as StatusResult;
+  return (await workspaceOp(
+    bridge,
+    "git.status",
+    {
+      workspaceId,
+      paths: options.paths,
+      includeTracking: options.includeTracking,
+    },
+    GIT_READ_TIMEOUT_MS,
+  )) as StatusResult;
 }
 
 /** Path-free totals for All / Uncommitted / Staged / Unstaged. The engine
@@ -1051,9 +1063,12 @@ export async function bridgeGitChangeCounts(
   bridge: RuntimeClient,
   workspaceId: string,
 ): Promise<ChangeCounts> {
-  return (await workspaceOp(bridge, "git.changeCounts", {
-    workspaceId,
-  })) as ChangeCounts;
+  return (await workspaceOp(
+    bridge,
+    "git.changeCounts",
+    { workspaceId },
+    GIT_READ_TIMEOUT_MS,
+  )) as ChangeCounts;
 }
 
 /** ± line totals for the All Changes comparison — what the workspace tabs
@@ -1063,9 +1078,12 @@ export async function bridgeGitChangeLineCounts(
   bridge: RuntimeClient,
   workspaceId: string,
 ): Promise<ChangeLineCounts> {
-  const result = (await workspaceOp(bridge, "git.changeLineCounts", {
-    workspaceId,
-  })) as Partial<ChangeLineCounts> | undefined;
+  const result = (await workspaceOp(
+    bridge,
+    "git.changeLineCounts",
+    { workspaceId },
+    GIT_READ_TIMEOUT_MS,
+  )) as Partial<ChangeLineCounts> | undefined;
   // An engine predating this op answers with no totals rather than an error;
   // read that as "nothing to show" instead of NaN reaching the tab.
   return {
@@ -1081,9 +1099,12 @@ export async function bridgeGitHasChanges(
   bridge: RuntimeClient,
   workspaceId: string,
 ): Promise<boolean> {
-  const result = (await workspaceOp(bridge, "git.hasChanges", {
-    workspaceId,
-  })) as { hasChanges?: boolean } | undefined;
+  const result = (await workspaceOp(
+    bridge,
+    "git.hasChanges",
+    { workspaceId },
+    GIT_READ_TIMEOUT_MS,
+  )) as { hasChanges?: boolean } | undefined;
   return result?.hasChanges ?? false;
 }
 
@@ -1113,19 +1134,24 @@ export async function bridgeGitDiff(
   files?: DiffFileSummary[];
   summary?: boolean;
 }> {
-  return (await workspaceOp(bridge, "git.diff", {
-    workspaceId: args.workspaceId,
-    filePath: args.filePath,
-    ...(args.oldFilePath ? { oldFilePath: args.oldFilePath } : {}),
-    against: args.against,
-    mode: args.mode,
-    base: args.base,
-    head: args.head,
-    rawPatch: args.rawPatch,
-    ...(args.fullContext ? { fullContext: true } : {}),
-    summaryLimit: args.summaryLimit,
-    ...(args.history ? { history: args.history } : {}),
-  })) as {
+  return (await workspaceOp(
+    bridge,
+    "git.diff",
+    {
+      workspaceId: args.workspaceId,
+      filePath: args.filePath,
+      ...(args.oldFilePath ? { oldFilePath: args.oldFilePath } : {}),
+      against: args.against,
+      mode: args.mode,
+      base: args.base,
+      head: args.head,
+      rawPatch: args.rawPatch,
+      ...(args.fullContext ? { fullContext: true } : {}),
+      summaryLimit: args.summaryLimit,
+      ...(args.history ? { history: args.history } : {}),
+    },
+    GIT_READ_TIMEOUT_MS,
+  )) as {
     hunks: Hunk[];
     patch?: string;
     files?: DiffFileSummary[];
@@ -1142,10 +1168,15 @@ export async function bridgeGitShow(
   bridge: RuntimeClient,
   args: { workspaceId: string; sha: string },
 ): Promise<ShowCommitResult> {
-  return (await workspaceOp(bridge, "git.show", {
-    workspaceId: args.workspaceId,
-    sha: args.sha,
-  })) as ShowCommitResult;
+  return (await workspaceOp(
+    bridge,
+    "git.show",
+    {
+      workspaceId: args.workspaceId,
+      sha: args.sha,
+    },
+    GIT_READ_TIMEOUT_MS,
+  )) as ShowCommitResult;
 }
 
 export async function bridgeGitLog(
@@ -1159,14 +1190,19 @@ export async function bridgeGitLog(
     base?: string;
   },
 ): Promise<Commit[]> {
-  const r = (await workspaceOp(bridge, "git.log", {
-    workspaceId: args.workspaceId,
-    limit: args.limit,
-    ...(args.skip !== undefined ? { skip: args.skip } : {}),
-    since: args.since,
-    ref: args.ref,
-    base: args.base,
-  })) as { commits?: Commit[] } | undefined;
+  const r = (await workspaceOp(
+    bridge,
+    "git.log",
+    {
+      workspaceId: args.workspaceId,
+      limit: args.limit,
+      ...(args.skip !== undefined ? { skip: args.skip } : {}),
+      since: args.since,
+      ref: args.ref,
+      base: args.base,
+    },
+    GIT_READ_TIMEOUT_MS,
+  )) as { commits?: Commit[] } | undefined;
   return r?.commits ?? [];
 }
 

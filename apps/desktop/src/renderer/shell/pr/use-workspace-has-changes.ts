@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { gitHasChanges, type Workspace } from "../../platform/git";
+import { LatestGenerationFlight } from "../../shared/lib/latest-generation-flight";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 
 /** Last probe result per workspace id — survives the hook's unmount/remount
@@ -10,6 +11,9 @@ import { useGitRefreshKey } from "../use-git-refresh-key";
  *  live workspaces. */
 const lastKnownHasChanges = new Map<string, boolean>();
 const MAX_HAS_CHANGES_WORKSPACES = 128;
+// Agent edits can invalidate faster than Git answers. Share each read across
+// PR surfaces and retain only the latest follow-up for that exact workspace.
+const hasChangesRequests = new LatestGenerationFlight<boolean>();
 
 function rememberHasChanges(workspaceId: string, value: boolean): void {
   lastKnownHasChanges.delete(workspaceId);
@@ -41,12 +45,16 @@ export function useWorkspaceHasChanges(
   active: boolean,
   opts?: { probeWithPr?: boolean },
 ): boolean | undefined {
-  const refreshKey = useGitRefreshKey(workspace?.path, workspace?.id);
   const id = workspace?.id ?? null;
   const prNumber = workspace?.prNumber ?? null;
   const probeWithPr = opts?.probeWithPr ?? false;
   // Skip probing when a PR exists and the caller doesn't need dirtiness-with-PR.
   const skipForPr = prNumber != null && !probeWithPr;
+  const refreshKey = useGitRefreshKey(
+    workspace?.path,
+    id,
+    active && !skipForPr,
+  );
   // Live state carries its workspace id so a workspace switch can never serve
   // another workspace's probe; the module cache covers the remount gap.
   const [live, setLive] = useState<{ id: string; value: boolean } | null>(null);
@@ -54,15 +62,29 @@ export function useWorkspaceHasChanges(
   useEffect(() => {
     if (!active || !id || skipForPr) return;
     let cancelled = false;
-    void gitHasChanges(id)
+    void hasChangesRequests
+      .run(id, refreshKey, () => gitHasChanges(id))
       .then((v) => {
+        if (cancelled) return;
         rememberHasChanges(id, v);
-        if (!cancelled) setLive({ id, value: v });
+        setLive((current) =>
+          current?.id === id && current.value === v
+            ? current
+            : { id, value: v },
+        );
       })
       .catch(() => {
-        // Keep the last-known answer on a failed probe (offline / transient).
-        if (!cancelled)
-          setLive({ id, value: lastKnownHasChanges.get(id) ?? false });
+        // Failure is not a confirmed clean tree. Preserve the last exact-key
+        // result, including undefined when the first read has not succeeded.
+        // Another surface may have confirmed a newer answer while this one
+        // was retained but inactive; prefer that over its older local state.
+        const confirmed = lastKnownHasChanges.get(id);
+        if (cancelled || confirmed === undefined) return;
+        setLive((current) =>
+          current?.id === id && current.value === confirmed
+            ? current
+            : { id, value: confirmed },
+        );
       });
     return () => {
       cancelled = true;

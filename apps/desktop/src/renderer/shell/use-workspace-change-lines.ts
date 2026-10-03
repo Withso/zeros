@@ -7,7 +7,8 @@
 //
 //   • one in-flight request per (workspace, refresh generation), shared by any
 //     surface that asks for the same pair — the same coalescing the Changes
-//     badge uses for its file totals;
+//     badge uses for its file totals; newer generations share one latest
+//     follow-up instead of filling the global queue with obsolete reads;
 //   • the last confirmed pair is remembered per workspace across unmounts, so
 //     a repository switch renders the known numbers immediately instead of
 //     blanking and re-probing;
@@ -27,6 +28,7 @@ import {
   type Workspace,
 } from "../platform/git";
 import { isLocalMainWorkspace } from "../state/local-main-workspace";
+import { LatestGenerationFlight } from "../shared/lib/latest-generation-flight";
 import { useGitRefreshKey } from "./use-git-refresh-key";
 
 /** The shared "nothing to show" value. Frozen and module-level so a tab that
@@ -81,10 +83,9 @@ export function lastConfirmedChangeLines(
   return lastKnownChangeLines.get(target) ?? NO_CHANGE_LINES;
 }
 
-// In-flight deduplication only — the entry is dropped the moment it settles,
-// so this is never a stale cache. Two surfaces asking for the same workspace
-// in one refresh generation share a single engine round-trip.
-const changeLineRequests = new Map<string, Promise<ChangeLineCounts>>();
+// Coalesce before taking a global slot: one busy workspace must not enqueue
+// every intermediate file-watcher generation ahead of the other workspaces.
+let changeLineRequests = new LatestGenerationFlight<ChangeLineCounts>();
 
 /** The strip probes EVERY visible workspace, and one probe costs the engine
  *  several Git subprocesses. A cold start, and any coarse refresh (a bridge
@@ -122,21 +123,16 @@ export function changeLineCountsForGeneration(
   target: string,
   refreshKey: number,
 ): Promise<ChangeLineCounts> {
-  const key = JSON.stringify([target, refreshKey]);
-  const pending = changeLineRequests.get(key);
-  if (pending) return pending;
-  // Every bridge op carries its own timeout, so a queued read is always
-  // reached — a stuck engine cannot strand the queue behind it.
-  const request = acquireChangeLineSlot()
-    .then(() => gitChangeLineCounts(target))
-    .finally(() => {
+  return changeLineRequests.run(target, refreshKey, async () => {
+    // Start the bridge timeout only after acquiring a slot. Every running
+    // read has a finite budget, so a stalled engine still releases its slot.
+    await acquireChangeLineSlot();
+    try {
+      return await gitChangeLineCounts(target);
+    } finally {
       releaseChangeLineSlot();
-      if (changeLineRequests.get(key) === request) {
-        changeLineRequests.delete(key);
-      }
-    });
-  changeLineRequests.set(key, request);
-  return request;
+    }
+  });
 }
 
 /** The Git target for a workspace's own comparison: a real worktree is
@@ -207,7 +203,7 @@ export function useWorkspaceChangeLines(
 /** Test-only reset so a suite's remembered pairs cannot leak between cases. */
 export function resetWorkspaceChangeLinesForTests(): void {
   lastKnownChangeLines.clear();
-  changeLineRequests.clear();
+  changeLineRequests = new LatestGenerationFlight<ChangeLineCounts>();
   activeChangeLineReads = 0;
   waitingChangeLineReads.length = 0;
 }
