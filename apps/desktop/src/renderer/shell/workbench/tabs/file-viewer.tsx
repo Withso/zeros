@@ -1,3 +1,4 @@
+import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import {
   changesHistoryKey,
   type ChangesHistory,
@@ -579,13 +580,9 @@ export function FileViewer({
 
   const canCopy = result?.kind === "text" && result.content != null;
 
-  // Design territory has exactly one write path — the design surface — so the
-  // engine refuses generic editor writes, staging and discard for these paths
-  // in EVERY mode (modes are concurrent; an agent can be working in code
-  // territory while the canvas is open). Rendering read-only here keeps the UI
-  // from offering an action the engine is going to reject. The engine remains
-  // the authority: if a transport omits the tag we simply behave as before.
-  const designReadOnly = result?.designPath === true;
+  // Local source editing also repairs conflicted Design metadata. Cloud keeps
+  // its existing API authoring policy until native cloud authoring is qualified.
+  const designReadOnly = result?.designPath === true && isCloudWorkspace(cwd);
   const sourceReadOnly = readOnly || designReadOnly;
   const hunkSource = useMemo(
     () =>
@@ -841,8 +838,7 @@ export function FileViewer({
             <div className="flex h-full min-h-0 flex-col">
               {designReadOnly && (
                 <div className="text-fg3 bg-bg2 border-bd1 shrink-0 border-b px-5 py-2 text-xs">
-                  Design files are edited in Design view, then staged and
-                  committed with the dedicated Design actions.
+                  Edit this cloud Design source through the Design tools.
                 </div>
               )}
               <div className="flex min-h-0 flex-1 flex-col">

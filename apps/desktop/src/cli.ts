@@ -167,6 +167,7 @@ function showHelp() {
   \x1b[1mCommands:\x1b[0m
     serve         Start the Zeros engine (design server)
     status        Check if the engine is running
+    design        Validate, capture or preview an authored Design frame
 
   \x1b[1mServe Options:\x1b[0m
     --port <n>        Channel footprint base (stable 24193; beta 24203; dev 24293)
@@ -208,6 +209,13 @@ if (command === "serve") {
     : ENGINE_PORT_SPAN;
   const root = getFlag("--root");
   runServe(process.cwd(), port, portStart, portSpan, root);
+} else if (command === "design") {
+  void import("./engine/design/verification-cli").then(({ runDesignVerificationCli }) =>
+    runDesignVerificationCli(args.slice(1)),
+  ).then((code) => { process.exitCode = code; }).catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : "Design verification failed.");
+    process.exitCode = 1;
+  });
 } else if (command === "status") {
   const port = getFlag("--port")
     ? parseInt(getFlag("--port")!, 10)

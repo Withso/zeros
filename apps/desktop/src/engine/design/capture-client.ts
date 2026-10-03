@@ -55,6 +55,7 @@ export interface DesignEvidenceRenderer extends DesignHeadlessRenderer {
     input: Parameters<DesignHeadlessRenderer["render"]>[0] & {
       html: string;
       sourceVersion: string;
+      rasterSize?: { width: number; height: number };
     },
   ): ReturnType<DesignHeadlessRenderer["render"]>;
 }
@@ -67,9 +68,10 @@ export function createDesignCaptureRenderer(
   if (!config) return undefined;
   const renderComposed: NonNullable<
     DesignEvidenceRenderer["renderComposed"]
-  > = async ({ state, viewport, signal, html, sourceVersion }) => {
+  > = async ({ state, viewport, signal, html, sourceVersion, rasterSize }) => {
     signal?.throwIfAborted();
     const composed = { sanitized: html, sourceVersion };
+    const raster = rasterSize ?? viewport;
     const response = await fetchImpl(`${config.url}/capture`, {
       method: "POST",
       headers: {
@@ -85,8 +87,10 @@ export function createDesignCaptureRenderer(
         version: 1,
         html: composed.sanitized,
         revision: state.revision,
-        width: viewport.width,
-        height: viewport.height,
+        width: raster.width,
+        height: raster.height,
+        ...(raster.width !== viewport.width || raster.height !== viewport.height
+          ? { layoutViewport: { width: viewport.width, height: viewport.height } } : {}),
         colorScheme: viewport.colorScheme,
       }),
     });
@@ -120,14 +124,14 @@ export function createDesignCaptureRenderer(
     );
     if (
       reply.revision !== state.revision ||
-      reply.width !== viewport.width ||
-      reply.height !== viewport.height
+      reply.width !== raster.width ||
+      reply.height !== raster.height
     )
       throw new Error(
         "Design capture returned a different source or viewport.",
       );
     const bytes = Buffer.from(reply.data, "base64");
-    assertDesignCapturePng(bytes, viewport.width, viewport.height);
+    assertDesignCapturePng(bytes, raster.width, raster.height);
     return {
       mimeType: "image/png",
       bytes,
@@ -144,6 +148,8 @@ export function createDesignCaptureRenderer(
         networkDisabled: true,
         authoredJavaScriptDisabled: true,
         deviceScaleFactor: 1,
+        viewportWidth: viewport.width,
+        viewportHeight: viewport.height,
         reducedMotion: true,
       },
     };

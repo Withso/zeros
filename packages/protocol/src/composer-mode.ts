@@ -14,13 +14,24 @@ export type ComposerModeSnapshot = z.infer<typeof composerModeSnapshotSchema>;
 export const DESIGN_MCP_SERVER = "design-draft";
 export type DesignAuthoringMethod = "native" | "api";
 
-/** This is instruction policy, not a filesystem sandbox or proof of consent. */
+/** A frame's output format is independent of the agent's authoring tools. */
+export const DESIGN_FRAME_AUTHORING_INSTRUCTION =
+  "Design frames render HTML, CSS and supported local assets. Use CSS @keyframes for animation and CSS transitions for visual states. Authored scripts, inline event handlers, JSX/TSX and application logic do not run in a frame. Represent controls as visual states; live components will use separate Code layers. Normal shell, Node and Python tools may generate and validate source. Preserve stable frame IDs and viewport dimensions, and verify the actual rendered frame. When implementing an application from a frame reference, follow that application's normal source and runtime conventions.";
+
+/** Local mode is task intent. API-only executions retain their authoring policy. */
 export function composerModeInstruction(
   mode: ComposerMode,
   revision?: number,
   authoringMethod: DesignAuthoringMethod = "native",
 ): string {
-  return `Current composer mode: ${mode === "design" ? "Design" : "Code"}. ${
+  if (authoringMethod === "native") {
+    return `Current composer mode: ${mode === "design" ? "Design" : "Code"}. ${
+      mode === "design"
+        ? "Default to creating or editing Design source for the user's request."
+        : "Default to implementing application code; attached Design frames are reference context. Design inspection and explicitly requested Design source edits are available in this context."
+    } The user's explicit request determines the editing target. Use your normal Read, Write, Edit, patch and Bash tools for authorized Code and Design work. No mode switch or separate Design session is required. ${DESIGN_FRAME_AUTHORING_INSTRUCTION} Read the relevant directory's rules.md and canvas.json, then relevant source. Create frames by writing HTML and adding stable IDs, source paths and bounds to canvas.json frames and pages[0].frames. Zeros refreshes the canvas from saved files. No Design API apply or publish is required; inspection and semantic API tools are optional. Provider Plan and permission settings still apply. Use Zeros lifecycle operations to create, migrate or remove directory registration; preserve existing identities during source conflict repair. Git operates on the same checkout in either context and does not change the Design tag. Saving never stages or commits. Re-read changed files before editing and preserve concurrent work. ${revision === undefined ? "" : `Composer intent revision: expectedRevision=${revision}.`}`;
+  }
+  return `Current composer mode: ${mode === "design" ? "Design" : "Code"}. ${DESIGN_FRAME_AUTHORING_INSTRUCTION} ${
     mode === "design"
       ? authoringMethod === "api"
         ? "Author designs through the Design API in this execution. Native file writes to Design are unavailable under the execution boundary. Read design_capabilities for the active directory before editing. Use design_frame_create for new frames and design_document_open to obtain the exact revision, then use design_transaction_apply for supported semantic edits. Reuse the same request ID and body after a lost reply; refresh stale revisions before preparing a new edit. Inspect, styles, validate and capture remain available helpers. No proposal or separate Design session is needed."

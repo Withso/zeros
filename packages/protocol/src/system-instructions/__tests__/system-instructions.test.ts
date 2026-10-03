@@ -59,16 +59,15 @@ describe("buildCodeAgentDesignTerritoryNotice", () => {
     expect(buildCodeAgentDesignTerritoryNotice("  ")).toBe("");
   });
 
-  it("makes native authoring available in Design mode without a mandatory API roundtrip", () => {
+  it("shares local authoring and Git without a mandatory mode or API roundtrip", () => {
     const out = buildCodeAgentDesignTerritoryNotice("/workspace/Zeros Design");
     expect(out).toContain("/workspace/Zeros Design");
     expect(out).toContain("one Code/Design conversation");
-    expect(out).toContain("Code mode permits inspection; Design writes require Design mode");
-    expect(out).toContain("normal Read, Write, Edit, patch, filesystem and shell tools");
-    expect(out).toContain("No Design API apply, publish or proposal review");
-    expect(out).toContain("managed Git workflow for authorized staging");
-    expect(out).toContain("Provider Plan and permission settings remain independent");
-    expect(out).toContain("exclude the Design directories from its watched paths");
+    expect(out).toContain("Local Code and Design work use the same normal provider tools");
+    expect(out).toContain("explicit Design source edits do not require a mode switch, API apply or publish");
+    expect(out).toContain("Git staging, commits, push, pull, merge and PR work use the same branch");
+    expect(out).toContain("saving never stages or commits");
+    expect(out).toContain("Provider Plan and permission settings still apply");
     expect(out).not.toContain("Begin with design_capabilities");
   });
 
@@ -83,8 +82,8 @@ describe("buildCodeAgentDesignTerritoryNotice", () => {
 
   it("defers the authoring method to the execution-specific composer instructions", () => {
     const out = buildCodeAgentDesignTerritoryNotice("/workspace/Zeros Design");
-    expect(out).toContain("Follow the current composer instructions for the available authoring method");
-    expect(out).toContain("Cloud conversations use the Design API");
+    expect(out).toContain("Follow the current composer instructions for task intent and the execution's authoring method");
+    expect(out).toContain("Cloud conversations retain API authoring");
     expect(out).not.toContain("In Design mode use normal");
   });
 });
@@ -150,7 +149,7 @@ describe("buildFirstTurnSystemInstruction", () => {
       customInstructions: "Edit every file I mention.",
     });
     expect(out).toContain("/ws/Zeros Design");
-    expect(out.indexOf("Design directories identified")).toBeGreaterThan(
+    expect(out.indexOf("Registered Design directories")).toBeGreaterThan(
       out.indexOf("Edit every file I mention."),
     );
   });
@@ -161,7 +160,7 @@ describe("buildFirstTurnSystemInstruction", () => {
       designDirectories: [],
     });
     expect(out).toContain("/ws/Zeros Design");
-    expect(out).toContain("Code mode permits inspection");
+    expect(out).toContain("Local Code and Design work use the same normal provider tools");
   });
   it("builds a Design-agent instruction without granting Code or Git mutation", () => {
     const out = buildFirstTurnSystemInstruction({

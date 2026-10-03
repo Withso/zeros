@@ -106,6 +106,13 @@ export async function withDesignDirectoryNameLease<T>(
   return readLeaseStorage.run(next, run);
 }
 
+/** Shared servers outlive the read that starts them. Their async resources
+ * must bind a fresh lease per request instead of inheriting that caller's
+ * directory. exit restores the caller's lease when this callback returns. */
+export function withoutDesignDirectoryNameLease<T>(run: () => T): T {
+  return readLeaseStorage.exit(run);
+}
+
 /** Drop a workspace's entry (archive/delete) so a future checkout at the same
  *  path starts from the default again. */
 export function forgetDesignDirectoryName(workspacePath: string): void {

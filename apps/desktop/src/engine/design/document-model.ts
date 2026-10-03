@@ -81,6 +81,7 @@ export interface DesignFrameRestorePoint {
 
 export interface DesignFrameSummary {
   file: string;
+  frameId?: string;
   title: string;
   /** Text-backed frames give loose canvas text durable HTML ownership without
    * visually pretending that the text is a conventional artboard. */

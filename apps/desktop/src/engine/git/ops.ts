@@ -1273,6 +1273,10 @@ export async function continueOperation(
       message: "No merge/rebase/cherry-pick/revert is in progress",
     });
   }
+  const conflicts = await listConflictedPaths(ws.path);
+  if (conflicts.length) return { conflicts, kind };
+  const staged = await runGit(ws.path, ["diff", "--cached", "--name-only", "-z"], { readOnly: true });
+  await assertDesignCommitMetadata(ws.path, {}, staged.stdout.split("\0").filter(Boolean));
   const result = await runGit(ws.path, [...NO_EDITOR, kind, "--continue"], {
     treatAsExpected: ["conflict"] as ExpectedCategory[],
   });

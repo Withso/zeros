@@ -105,7 +105,7 @@ describe("shared conversation Design tools over MCP", () => {
         createdAt: Date.now(),
         title: "Landing",
       }),
-    ).rejects.toThrow("Design mode");
+    ).rejects.toThrow(/Create or select/);
     const selected = await call("design_mode_set", {
       mode: "design",
       expectedRevision: 0,
@@ -189,6 +189,20 @@ describe("shared conversation Design tools over MCP", () => {
     expect(await handler.preparePrompt()).toContain("Current composer mode: Design");
   });
 
+  it.each(["code", "design"] as const)("authors with native helpers in %s context without switching modes", async (selected) => {
+    mode = { mode: selected, revision: 3 };
+    await initializeDesignDocument(root);
+    const caps = await call("design_capabilities");
+    expect(caps.designWritesEnabled).toBe(true);
+    const created = await call("design_frame_create", {
+      requestId: "native-no-switch",
+      createdAt: caps.serverTime,
+      title: "Native frame",
+    });
+    expect((await listDesignFrames(root))[0].file).toBe(created.file);
+    expect(mode).toEqual({ mode: selected, revision: 3 });
+  });
+
   it("keeps API authoring available after switching a cloud conversation to Design", async () => {
     await initializeDesignDocument(root);
     const cloud = new ConversationDesignTools({
@@ -206,6 +220,11 @@ describe("shared conversation Design tools over MCP", () => {
       return JSON.parse(first.text);
     };
     try {
+      await expect(invoke("design_frame_create", {
+        requestId: "cloud-before-mode",
+        createdAt: Date.now(),
+        title: "Cloud frame",
+      })).rejects.toThrow("Design mode");
       const selected = await invoke("design_mode_set", {
         mode: "design",
         expectedRevision: 0,

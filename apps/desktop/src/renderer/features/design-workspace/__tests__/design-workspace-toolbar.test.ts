@@ -25,13 +25,10 @@ describe("design workspace inspector toolbar", () => {
     expect(source).not.toContain('toast.success("Design draft saved"');
     expect(source).toContain('toast.error("Couldn\'t save design draft"');
   });
-  it("reports load and review errors through toasts without a canvas error card", () => {
+  it("reports load errors without a canvas error card", () => {
     expect(source).not.toContain("<AlertTitle>Design unavailable</AlertTitle>");
-    const review = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-review-dialog.tsx"), "utf8");
-    expect(review).not.toContain('<p role="alert" className="design-review-error">');
-    expect(review).toContain('toast.error("Design review needs attention"');
   });
-  it("keeps save, undo, and redo keyboard-only while exposing explicit Design Git actions", () => {
+  it("keeps save, undo, and redo keyboard-only and Git in the shared workbench", () => {
     const inspector = source.match(
       /<aside[\s\S]*?data-design-inspector=""[\s\S]*?<\/aside>/,
     )?.[0];
@@ -43,7 +40,7 @@ describe("design workspace inspector toolbar", () => {
     expect(inspector).not.toContain('aria-label="Redo design edit"');
     expect(source).not.toMatch(/\bSave,|\bUndo2,|\bRedo2,/);
     expect(source).toContain("saveDesigns(");
-    expect(inspector).toContain("<DesignReviewDialog");
+    expect(inspector).not.toContain("<DesignReviewDialog");
   });
 
   it("deletes frames and elements immediately without confirmation or success toasts", () => {

@@ -1,4 +1,3 @@
-import { DesignReviewDialog } from "./design-review-dialog";
 // ============================================
 // COMPONENT: DesignWorkspaceColumn
 // PURPOSE: Live HTML/CSS canvas and structured design inspector
@@ -11,6 +10,7 @@ import {
   AlertTriangle,
   Diamond,
   Download,
+  ExternalLink,
   File,
   Frame as FrameIcon,
   Image as ImageIcon,
@@ -40,6 +40,10 @@ import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 
 import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
 import { exportDesignPng } from "../../platform/design";
+import { getActiveBridge } from "../../platform/bridge/active-bridge";
+import { openDesignFramePreview } from "../../platform/bridge/design-context-bridge";
+import { shellOpenUrl } from "../../platform/app";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { cn } from "../../shared/ui/cn";
 import {
   Button,
@@ -933,6 +937,41 @@ export function DesignInspector({
   onOpenMotionTimeline,
   zoomActionsRef,
 }: DesignInspectorProps) {
+  const previewDirectoryId = useDesignWorkspaceUiStore(state =>
+    workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined,
+  );
+  const previewOwner = useMemo(() => ({
+    active, workspaceId, directoryId: previewDirectoryId,
+    file: frame?.file, frameId: frame?.frameId,
+  }), [active, workspaceId, previewDirectoryId, frame?.file, frame?.frameId]);
+  const [openingPreviewOwner, setOpeningPreviewOwner] = useState<typeof previewOwner | null>(null);
+  const openingPreview = openingPreviewOwner === previewOwner;
+  const previewOwnerRef = useRef<typeof previewOwner | null>(previewOwner);
+  previewOwnerRef.current = previewOwner;
+  useLayoutEffect(() => {
+    previewOwnerRef.current = previewOwner;
+    return () => { previewOwnerRef.current = null; };
+  }, [previewOwner]);
+  const openPreview = async () => {
+    const previewBridge = getActiveBridge();
+    if (!active || !previewBridge || !workspaceId || !frame || openingPreview) return;
+    const directoryId = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId;
+    if (!directoryId || directoryId !== previewDirectoryId) return;
+    setOpeningPreviewOwner(previewOwner);
+    try {
+      const result = await openDesignFramePreview(previewBridge, workspaceId, directoryId, frame.file);
+      if (previewOwnerRef.current !== previewOwner || getActiveBridge() !== previewBridge ||
+          useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId !== directoryId ||
+          result.reference.workspaceId !== workspaceId || result.reference.directoryId !== directoryId ||
+          result.reference.frame !== frame.file || (frame.frameId && result.reference.frameId !== frame.frameId)) return;
+      await shellOpenUrl(result.previewUrl);
+    } catch (error) {
+      if (previewOwnerRef.current === previewOwner)
+        toast.error("Couldn’t open frame preview", { description: errorMessage(error) });
+    } finally {
+      if (previewOwnerRef.current === previewOwner) setOpeningPreviewOwner(null);
+    }
+  };
   const styleTargetNodeId =
     selectedNodeId ?? (frameSelected && details?.oid ? details.oid : null);
   const frameStyleTarget =
@@ -2122,6 +2161,11 @@ export function DesignInspector({
   const exportSection =
     frame && folder && (frameSelected || selectedNodeId) ? (
       <InspectorSection title="Export" data-design-export-section="">
+        {!isCloudWorkspace(folder) && (
+          <Button type="button" variant="secondary" className="w-full" disabled={openingPreview || !active} onClick={() => void openPreview()}>
+            <ExternalLink /> Open preview
+          </Button>
+        )}
         <div className="grid grid-cols-[76px_minmax(0,1fr)] gap-2">
           <InspectorSelect
             label="Export scale"
@@ -2186,7 +2230,6 @@ export function DesignInspector({
           </button>
         </div>
         <div className="ml-auto flex items-center gap-0.5">
-          {workspaceId ? <DesignReviewDialog key={workspaceId} workspaceId={workspaceId} folder={folder} active={active} queueAction={queueInspectorAction} /> : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button

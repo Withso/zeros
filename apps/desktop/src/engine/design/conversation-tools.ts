@@ -20,6 +20,7 @@ import { withDesignWorkspaceMutation } from "./document-write-lock";
 import { assertLegacyDesignDraftWritable, ensureDesignMetadataLayout, readDirectoryDesignManifest } from "./metadata";
 import { initializeDesignDocumentUnlocked } from "./document-transactions";
 import { withDesignDirectoryNameLease } from "./directory-registry";
+import { openDesignVerification } from "./verification-service";
 import type { AgentWorkspaceTools } from "../agents/session-tools";
 
 /** Registration migration is an explicit Design authoring action. Merely
@@ -41,23 +42,29 @@ export async function nativeDesignContext(target: DesignCodeToolTarget | null, m
   return `Active Design directory (relative to workspace ${JSON.stringify(target.workspacePath)}): ${JSON.stringify(target.directory)}. Its registration ID is ${JSON.stringify(target.directoryId)}.`;
 }
 
-/** Design discovery is optional for Code prompts, including conflict repair.
+/** Design discovery is optional for local prompts, including conflict repair.
  * Ownership and cancellation must still be checked after a failed lookup. */
 export async function designPromptContext(
   resolveTarget: () => Promise<DesignCodeToolTarget | null>,
   mode: "code" | "design",
   assertCurrent: () => void,
+  authoringMethod: DesignAuthoringMethod = "native",
 ): Promise<string> {
   assertCurrent();
-  let target: DesignCodeToolTarget | null;
   try {
-    target = await resolveTarget();
+    const target = await resolveTarget();
+    const context = await nativeDesignContext(target, mode, assertCurrent);
+    if (authoringMethod !== "native" || !target || !readDirectoryDesignManifest(target.workspacePath, target.directory)) return context;
+    const verification = await openDesignVerification(target);
+    assertCurrent();
+    return `${context}\nNative frame verification is available through ordinary shell commands: ${verification.command} <list|validate|capture|preview> --url '${verification.url}' --frame '<frame.html>'. Omit --frame for list. Capture requires --output '.context/frame.png'; use --revision to require a previously validated source revision. ${verification.captureAvailable ? "Capture uses the native PNG renderer; inspect its saved PNG with your normal image tool." : "PNG capture is unavailable on this host; validation and the HTTP preview remain available."} Preview returns an HTTP URL using the canvas's sanitized HTML/CSS and assets. Use the browser actually available through your provider's native browser tooling; do not assume an iab backend exists or navigate to file://. A successful lint or capture is not proof of visual inspection or application behavior. Verification URLs expire after 30 minutes; request fresh frame context if expired.`;
   } catch (error) {
     assertCurrent();
-    if (mode === "design") throw error;
-    return "Design inspection is currently unavailable. Resolve the Design directory configuration before using Design tools.";
+    if (authoringMethod === "api" && mode === "design") throw error;
+    return authoringMethod === "native"
+      ? "The Design canvas or registration is currently unavailable. Normal tools remain available to inspect and repair the existing source and Git conflicts. Preserve directory/frame IDs; do not recreate registration to bypass a conflict. Refresh the canvas after resolving the source."
+      : "Design inspection is currently unavailable. Resolve the Design directory configuration before using Design tools.";
   }
-  return nativeDesignContext(target, mode, assertCurrent);
 }
 
 const switchSchema = z
@@ -73,7 +80,7 @@ const switchSchema = z
 const switchTool: Tool = {
   name: "design_mode_set",
   description:
-    "Change this conversation's composer mode only when the user's request authorizes the work. Use expectedRevision from the current prompt or design_capabilities. The response supplies instructions for continuing in the same conversation; provider permissions are unchanged.",
+    "Change the conversation's default editing intent when requested. Local Code and Design use the same normal tools; switching is not required for an explicit source edit or Git operation. API-only workers retain their Design authoring policy. Use expectedRevision from the prompt or design_capabilities.",
   inputSchema: z.toJSONSchema(switchSchema) as Tool["inputSchema"],
 };
 const deferred = new Set([
@@ -164,7 +171,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
       if (this.paused || this.options.mode.get().revision !== snapshot.revision)
         throw new Error("Composer mode or Design directory changed before dispatch; retry the prompt.");
     };
-    const context = await designPromptContext(() => this.options.resolveTarget(), snapshot.mode, assertCurrent);
+    const context = await designPromptContext(() => this.options.resolveTarget(), snapshot.mode, assertCurrent, this.options.authoringMethod);
     assertCurrent();
     return wrapSystemInstruction(`${composerModeInstruction(snapshot.mode, snapshot.revision, this.options.authoringMethod)} ${context}`);
   }
@@ -193,6 +200,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
           if (!target) return null;
           this.handler = new DesignCodeTools(target, {
             mode: () => this.options.mode.get(),
+            requireDesignMode: this.options.authoringMethod === "api",
             renderer: this.options.renderer,
             onChanged: this.options.onChanged,
           });
@@ -235,7 +243,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
         this.assertActive(this.token);
         joined.throwIfAborted();
         if (this.options.mode.get().revision !== before.revision) throw new Error("Composer mode changed.");
-      });
+      }, this.options.authoringMethod);
       joined.throwIfAborted();
       const composerMode = this.options.mode.set(
         input.mode,
@@ -247,11 +255,12 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
       });
     }
     const writes = isDesignWriteTool(name, raw);
-    if (writes && before.mode !== "design")
+    const modeRequired = this.options.authoringMethod === "api";
+    if (writes && modeRequired && before.mode !== "design")
       throw new Error("Switch to Design mode before editing designs.");
     const handler = await this.target();
     joined.throwIfAborted();
-    if (writes && this.options.mode.get().revision !== before.revision)
+    if (writes && modeRequired && this.options.mode.get().revision !== before.revision)
       throw new Error(
         "Composer mode changed before this Design edit was admitted.",
       );
@@ -270,7 +279,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
         composerMode: this.options.mode.get(),
         tools: this.listTools().map((tool) => tool.name),
         designWritesEnabled:
-          this.options.mode.get().mode === "design" && !!handler,
+          (!modeRequired || this.options.mode.get().mode === "design") && !!handler,
         ...(!handler
           ? {
               instruction:

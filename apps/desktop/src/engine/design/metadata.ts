@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { DESIGN_FRAME_AUTHORING_INSTRUCTION } from "@zeros/protocol/composer-mode";
 import { assertDesignWriteAuthorized } from "./write-authority";
 import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import {
@@ -60,7 +61,8 @@ Commit this folder and design.toml together. Do not gitignore them.
 Edit through Zeros Settings or Design mode using the Design API.
 Code agents may read this folder but must not create, edit, move, delete, stage, or commit its files through generic tools.
 `;
-export const DESIGN_RULES = `# Zeros Design
+/** Exact previously generated content is a migration/cleanup compatibility contract. */
+export const PREVIOUS_NATIVE_DESIGN_RULES = `# Zeros Design
 design.toml registers this directory; canvas.json owns its canvas metadata. Commit this folder together. Do not gitignore it.
 In Design mode, use normal Read, Write, Edit, patch or Bash tools to author HTML, CSS, assets and canvas.json. No API apply or publish is required.
 Code agents may inspect this folder; switch to Design mode only for user-authorized Design edits. Provider permissions and Plan still apply.
@@ -69,6 +71,26 @@ Keep existing IDs and unrelated metadata. Patch existing source; canvas dimensio
 Use Zeros Settings or Design mode lifecycle tools for directory registration and design.toml. Design API inspect, styles, validate and capture are optional helpers; visual controls edit the same source.
 Save sources before canvas references. Re-read changed files before edits; do not overwrite concurrent work. Normal authorized Git operations publish these checkout files; saving never auto-commits.
 `;
+export const DESIGN_RULES = `# Zeros Design
+design.toml registers this directory; canvas.json owns its canvas metadata. Commit this folder together. Do not gitignore it.
+For authorized local Design edits, use normal Read, Write, Edit, patch or Bash tools to author HTML, CSS, assets and canvas.json. No API apply, publish or mode switch is required. Cloud executions follow their composer authoring policy.
+Code agents may inspect or edit this folder when the user's request calls for it. The Design tag sets the default editing target; an attached frame in Code context is normally a reference for application implementation. Provider permissions and Plan still apply.
+Create a frame by writing a complete HTML file and adding a stable ID to canvas.json frames and pages[0].frames. Example frame: {"kind":"html","source":"home.html","title":"Home","x":0,"y":0,"width":390,"height":844}.
+Keep existing IDs and unrelated metadata. Patch existing source; canvas dimensions set its viewport. ${DESIGN_FRAME_AUTHORING_INSTRUCTION} Only listed HTML files are frames; one page is supported.
+Use Zeros Settings or Design mode lifecycle tools to create, migrate or remove directory registration. Preserve directory and frame IDs when repairing existing source conflicts. Design API inspect, styles, validate and capture are optional helpers; visual controls edit the same source.
+Save sources before canvas references. Re-read changed files before edits; do not overwrite concurrent work. Normal authorized Git operations integrate these same checkout files; saving never auto-commits.
+`;
+const GENERATED_DESIGN_RULES = [
+  DESIGN_RULES,
+  PREVIOUS_NATIVE_DESIGN_RULES,
+  LEGACY_DESIGN_RULES,
+];
+
+function upgradedDesignRules(source: string | null): string {
+  if (source === null) return DESIGN_RULES;
+  const generated = GENERATED_DESIGN_RULES.find((rules) => source.startsWith(rules));
+  return generated ? DESIGN_RULES + source.slice(generated.length) : source;
+}
 const MAX_METADATA_BYTES = 16 * 1024 * 1024;
 const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
 const portable = (value: string) => value.normalize("NFC").toLowerCase();
@@ -570,9 +592,28 @@ export function ensureDesignMetadataLayout(
   workspace: string,
   directory: string,
 ): string[] {
-  // A current canvas is agent-authored input, not a normalization job on read.
+  // A current canvas is agent-authored input, not a normalization job. Only
+  // recognized generated guidance is upgraded in this authoring lifecycle.
   recoverDesignMetadataMigration(workspace, directory);
-  if (readDirectoryDesignManifest(workspace, directory)?.canvas) return [];
+  if (readDirectoryDesignManifest(workspace, directory)?.canvas) {
+    const file = `${directory}/rules.md`;
+    const before = readDesignStorageFile(workspace, file);
+    const after = upgradedDesignRules(before);
+    if (before === after) return [];
+    assertDesignWriteAuthorized();
+    if (Buffer.byteLength(after) > MAX_METADATA_BYTES)
+      throw new Error("Design rules exceed the metadata size limit.");
+    const changes = [{ file, before, after }];
+    const journal = writePrivateDesignState(
+      workspace,
+      journalName(directory),
+      JSON.stringify({ version: 1, workspace: path.resolve(workspace), directory, changes }),
+    );
+    applyStorageChanges(workspace, directory, changes);
+    unlinkSync(journal);
+    syncDirectory(path.dirname(journal));
+    return [file];
+  }
   const registry = readDesignRegistrySource(workspace);
   if (!designDirectoryEntry(workspace, directory)) return [];
   const file = path
@@ -921,8 +962,9 @@ export function commitDesignMetadata(
     changes.push({ file: metadata, before, after: manifest?.canvas ? before : serializeDesignRegistration(entryId) });
     const rules = `${folder}/rules.md`;
     const rulesBefore = readDesignStorageFile(workspace, rules);
-    if (rulesBefore === null || rulesBefore === LEGACY_DESIGN_RULES)
-      changes.push({ file: rules, before: rulesBefore, after: DESIGN_RULES });
+    const rulesAfter = upgradedDesignRules(rulesBefore);
+    if (rulesBefore !== rulesAfter)
+      changes.push({ file: rules, before: rulesBefore, after: rulesAfter });
     visibleFiles.push(metadata, canvasFile, rules);
     if (oldSource !== null)
       deletions.push({ file: oldFile, before: oldSource, after: null });
@@ -1035,7 +1077,7 @@ export function prepareDesignMetadataRemoval(
   remove(`${directory}/${DESIGN_MANIFEST_FILE}`);
   remove(legacy);
   const rules = `${directory}/rules.md`;
-  if ([DESIGN_RULES, LEGACY_DESIGN_RULES].includes(readDesignStorageFile(workspace, rules) ?? "")) remove(rules);
+  if (GENERATED_DESIGN_RULES.includes(readDesignStorageFile(workspace, rules) ?? "")) remove(rules);
   if (entry) {
     remove(designDocumentRelativePath(entry.id));
     remove(`${designDocumentMetadataDirectory(entry.id)}/document.json`);

@@ -1199,6 +1199,21 @@ describe("design workspace cache", () => {
     expect(stable.frames[0]?.sourceVersion).toBe("ffffffffffffffffffffffff");
   });
 
+  it.each([undefined, "frame_old"])("adopts a frame identity replacing %s without discarding unchanged rows", (frameId) => {
+    const previous = snapshot([{ file: "home.html" }, { file: "pricing.html" }]);
+    previous.frames[0]!.frameId = frameId;
+    const next = snapshot([{ file: "home.html" }, { file: "pricing.html" }]);
+    next.frames[0]!.frameId = "frame_replacement";
+
+    const stable = stabilizeDesignWorkspaceSnapshot(previous, next);
+
+    expect(stable.frames[0]?.frameId).toBe("frame_replacement");
+    expect(stable.frames[0]).not.toBe(previous.frames[0]);
+    expect(stable.frames[1]).toBe(previous.frames[1]);
+    expect(stable.tokens).toBe(previous.tokens);
+    expect(stabilizeDesignWorkspaceSnapshot(stable, next)).toBe(stable);
+  });
+
   it("does not reuse a snapshot from another protocol capability generation", () => {
     const previous = snapshot();
     const next = snapshot();

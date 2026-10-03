@@ -1,5 +1,7 @@
 import { BrowserWindow, session } from "electron";
 import { randomUUID } from "node:crypto";
+import { DESIGN_STATIC_RENDER_CSS } from "@zeros/protocol/design-capture";
+import { prepareDesignCaptureViewport, captureScaledDesignPng } from "../src/engine/design/capture-viewport";
 import {
   startDesignCaptureService,
   type DesignCaptureService,
@@ -64,7 +66,7 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
       window.webContents.on("will-attach-webview", (event) =>
         event.preventDefault(),
       );
-      const policy = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';"><style>*,:before,:after{animation:none!important;transition:none!important;caret-color:transparent!important}html{color-scheme:${input.colorScheme}}</style>`;
+      const policy = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';"><style>${DESIGN_STATIC_RENDER_CSS}html{color-scheme:${input.colorScheme}}</style>`;
       const html = insertDesignHeadMarkup(
         sanitizeDesignFrameMarkup(input.html),
         policy,
@@ -77,6 +79,7 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
       // color-scheme alone does not change authored prefers-* media queries.
       // Navigate first: Electron may defer debugger commands before navigation.
       window.webContents.debugger.attach("1.3");
+      await prepareDesignCaptureViewport(input, params => window.webContents.debugger.sendCommand("Emulation.setDeviceMetricsOverride", params));
       await window.webContents.debugger.sendCommand(
         "Emulation.setEmulatedMedia",
         {
@@ -93,6 +96,11 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
         `Promise.all([document.fonts.ready,...Array.from(document.images, image => image.decode().catch(()=>{}))]).then(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))`,
       );
       signal.throwIfAborted();
+      if (input.layoutViewport) {
+        const bytes = await captureScaledDesignPng(input, params => window.webContents.debugger.sendCommand("Page.captureScreenshot", params));
+        signal.throwIfAborted();
+        return { bytes, renderer: `electron-${process.versions.electron}/chromium-${process.versions.chrome}` };
+      }
       const captured = await window.webContents.capturePage(
         { x: 0, y: 0, width: input.width, height: input.height },
         { stayHidden: true, stayAwake: false },

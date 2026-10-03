@@ -1,6 +1,7 @@
 import { designContextReferenceSchema } from "@zeros/protocol/design-context";
-import { designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
+import { DESIGN_CAPTURE_TIMEOUT_MS, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
 import { captureWorkspaceDesign } from "./workspace-capture";
+import { openDesignVerification, designFramePreviewUrl } from "./verification-service";
 import { createDesignContextReference, inspectDesignContext } from "./context";
 import {
   designReviewCaptureRequestSchema,
@@ -191,6 +192,8 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.capture",
   "design.context.create",
   "design.context.inspect",
+  "design.verification.open",
+  "design.context.capture",
   "design.review.snapshot",
   "design.review.file",
   "design.review.proposal",
@@ -572,13 +575,42 @@ export async function handleDesignWorkspaceRoute(
     case "design.context.create": {
       const workspaceId = reqStr(params, "workspaceId");
       return host.withDesignReadWorkspace(workspaceId, remote, async ({ root }) => ({
-        reference: await createDesignContextReference(root, workspaceId, reqStr(params, "frame"), optStr(params, "nodeId")),
+        reference: await createDesignContextReference(root, workspaceId, reqStr(params, "frame"), optStr(params, "nodeId"), optStr(params, "expectedDirectoryId")),
       }));
     }
     case "design.context.inspect": {
       const reference = designContextReferenceSchema.parse(params.reference);
       if (reqStr(params, "workspaceId") !== reference.workspaceId) throw new GitError({ code: "VALIDATION_FAILED", message: "The Design reference belongs to another workspace." });
-      return host.withDesignReadWorkspace(reference.workspaceId, remote, ({ root }) => inspectDesignContext(root, reference));
+      return host.withDesignReadWorkspace(reference.workspaceId, remote, async ({ root, designDirectory }) => {
+        const inspection = await inspectDesignContext(root, reference);
+        if (inspection.status !== "ready" || remote || !hostLocalResources) return inspection;
+        const verification = await openDesignVerification({ workspaceId: reference.workspaceId, workspacePath: root, directory: designDirectory, directoryId: reference.directoryId });
+        return { ...inspection, verification, previewUrl: designFramePreviewUrl(verification, reference) };
+      });
+    }
+    case "design.verification.open": {
+      if (remote || !hostLocalResources) throw new Error("Frame preview is currently available in local workspaces.");
+      const workspaceId = reqStr(params, "workspaceId");
+      return host.withDesignReadWorkspace(workspaceId, false, async ({ root, designDirectory }) => {
+        const reference = await createDesignContextReference(root, workspaceId, reqStr(params, "frame"), undefined, reqStr(params, "directoryId"));
+        const verification = await openDesignVerification({ workspaceId, workspacePath: root, directory: designDirectory, directoryId: reference.directoryId });
+        return { reference, verification, previewUrl: designFramePreviewUrl(verification, reference) };
+      });
+    }
+    case "design.context.capture": {
+      if (remote || !hostLocalResources) throw new Error("Frame image attachments are currently available in local workspaces.");
+      const reference = designContextReferenceSchema.parse(params.reference);
+      if (reqStr(params, "workspaceId") !== reference.workspaceId) throw new Error("The frame belongs to another workspace.");
+      return host.withDesignReadWorkspace(reference.workspaceId, false, async ({ root, designDirectory }) => {
+        if ((await inspectDesignContext(root, reference)).status !== "ready") throw new Error("The selected frame changed. Send again to capture its current revision.");
+        const access = await openDesignVerification({ workspaceId: reference.workspaceId, workspacePath: root, directory: designDirectory, directoryId: reference.directoryId });
+        const response = await fetch(`${access.url}/${encodeURIComponent(reference.frame)}/capture?revision=${reference.revision}&frameId=${encodeURIComponent(reference.frameId ?? "")}`, { signal: AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 3_000), redirect: "error" });
+        if (!response.ok) {
+          const error = await response.json() as { error: string };
+          throw new Error(error.error);
+        }
+        return { reference, mimeType: "image/png", data: Buffer.from(await response.arrayBuffer()).toString("base64") };
+      });
     }
     case "design.frames": {
       return host.withDesignReadWorkspace(

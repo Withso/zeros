@@ -317,6 +317,8 @@ export class DesignCodeTools implements DesignMcpToolHandler {
       renderer?: DesignHeadlessRenderer;
       now?: () => number;
       mode?: () => ComposerModeSnapshot;
+      /** API-only workers retain the mode gate; local intent does not grant tools. */
+      requireDesignMode?: boolean;
     } = {},
   ) {
     this.expiresAt = this.now() + 24 * 60 * 60_000;
@@ -424,7 +426,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     const writes = isDesignWriteTool(name, validated);
     const admittedMode = this.mode();
     const assertMode = () => {
-      if (!writes) return;
+      if (!writes || this.options.requireDesignMode === false) return;
       const current = this.mode();
       if (current.mode !== "design" || current.revision !== admittedMode.revision)
         throw new Error("Design mode is required for this edit, and must remain unchanged until write admission. Read design_capabilities and prepare a new request.");

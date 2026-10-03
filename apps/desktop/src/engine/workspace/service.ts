@@ -298,6 +298,8 @@ import {
   withDesignDirectoryNameLease,
 } from "../design/directory-registry";
 import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
+import { readDirectoryDesignManifest } from "../design/metadata";
+import { designRegistryAtGitRef } from "../design/metadata-git";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
 import { initializeWorkspaceDesign } from "../git/design-mode";
@@ -938,6 +940,19 @@ function normalizeRepoMutationPath(candidate: string): string | null {
   return normalized.replace(/^\.\//, "");
 }
 
+/** Existing registration can be repaired without parsing its conflicted
+ * source. Ordinary TOML files cannot become new registrations through Files. */
+async function isExistingDesignManifest(cwd: string, candidate: string): Promise<boolean> {
+  const normalized = normalizeRepoMutationPath(candidate);
+  if (!normalized || !fs.existsSync(nodePath.resolve(cwd, normalized))) return false;
+  const directory = nodePath.posix.dirname(normalized);
+  if (activeDesignDirectoryNameFor(cwd) === directory ||
+      (await stickyRecognizedDesignDirectories(cwd)).includes(directory)) return true;
+  try { if (readDirectoryDesignManifest(cwd, directory)) return true; } catch { /* Source repair may need HEAD's identity. */ }
+  const registered = await designRegistryAtGitRef(cwd, "HEAD").catch(() => null);
+  return Object.values(registered?.directories ?? {}).some(entry => entry.path === directory);
+}
+
 /** The bridge's path arrays are exact repository paths, never Git pathspec
  * programs. `--` ends option parsing but does not disable `:(top)`, glob, or
  * exclude expansion, so lower Git helpers wrap every validated path in
@@ -1056,12 +1071,8 @@ async function designPathsInCodeMutation(
   );
 }
 
-/** Hard-refuse code-side writes aimed at the Design directory. Design files
- *  are edited through the Design surface, then staged and committed through
- *  dedicated Design Git actions. Generic staging/discard/commit/editor writes
- *  into that territory are refused instead of competing with the Design
- *  mutation sequencer. Managed worktrees, local-main, and registered rowless
- *  project roots all use the same recognizer. */
+/** Retained API-only/remote authoring policy. Local Files and explicit Git
+ * operations share the checkout with the canvas; lifecycle files stay managed. */
 async function assertNoDesignPathWrites(
   workspaceId: string,
   paths: readonly string[],
@@ -4193,17 +4204,20 @@ export class WorkspaceService {
         // readWorkspaceFile re-checks the RESOLVED + realpath target so a
         // collapsing path ('.env/.') or an innocuously-named symlink can't leak.
         const read = readWorkspaceFile(cwd, rel, { remote, cloudPolicy: cloudFiles });
-        // Tag Design territory with the SAME recognizer file.write refuses by,
-        // so the viewer never advertises an Edit action the write path will
-        // reject. This is presentation only — the guard below is the authority.
-        const isDesignPath = makeDesignPathRecognizer(
-          cwd,
-          activeDesignDirectoryNameFor(cwd),
-        );
-        return (isDesignPath(rel) || (cloudFiles && read.kind !== "error" &&
-          isDesignPath(nodePath.relative(cwd, cloudFiles.assertPath(rel)))))
-          ? { ...read, designPath: true }
-          : read;
+        // Design ownership is presentation here. A malformed local manifest
+        // must not block reading the source needed to repair it.
+        try {
+          const isDesignPath = makeDesignPathRecognizer(cwd, activeDesignDirectoryNameFor(cwd));
+          return (isDesignPath(rel) || (cloudFiles && read.kind !== "error" &&
+            isDesignPath(nodePath.relative(cwd, cloudFiles.assertPath(rel)))))
+            ? { ...read, designPath: true } : read;
+        } catch (error) {
+          if (remote || cloudFiles) throw error;
+          const normalized = normalizeRepoMutationPath(rel);
+          const roots = await stickyRecognizedDesignDirectories(cwd);
+          return normalized && roots.some(root => normalized.startsWith(`${root}/`))
+            ? { ...read, designPath: true } : read;
+        }
       }
       case "file.write": {
         const targetWorkspaceId = reqStr(params, "workspaceId");
@@ -4218,28 +4232,33 @@ export class WorkspaceService {
         }
         const expectedCloudTarget = cloudFiles?.assertPath(rel, true);
         const writePaths = expectedCloudTarget ? [rel, nodePath.relative(cwd, expectedCloudTarget)] : [rel];
-        if (writePaths.some(candidate => normalizeRepoMutationPath(candidate)?.endsWith("/design.toml"))) {
+        for (const candidate of writePaths.filter(candidate => normalizeRepoMutationPath(candidate)?.endsWith("/design.toml"))) {
           let claimsDesign: boolean;
           try {
             claimsDesign = parseDesignManifest(content) !== null;
           } catch {
             claimsDesign = true;
           }
-          if (claimsDesign)
+          if (claimsDesign && (remote || cloudFiles || !await isExistingDesignManifest(cwd, candidate)))
             throw new GitError({
               code: "VALIDATION_FAILED",
               message:
                 "Create or update Design manifests through Zeros Settings or the Design API.",
             });
         }
-        // The file editor is a code actor — design files have exactly one
-        // write path (the design surface's transactional writes).
-        await assertNoDesignPathWrites(
-          targetWorkspaceId,
-          writePaths,
-          "editing",
-          cwd,
-        );
+        // Native source repair remains available while canvas/manifest JSON
+        // cannot parse. Registration creation and private lifecycle state are
+        // still owned by Settings, independent of the composer tag.
+        if (remote || cloudFiles) {
+          await assertNoDesignPathWrites(targetWorkspaceId, writePaths, "editing", cwd);
+        } else if (writePaths.some(candidate => {
+          const normalized = normalizeRepoMutationPath(candidate);
+          return normalized && (normalized.startsWith(".zeros/design/") ||
+            normalized === ".zeros/design-dir.toml" ||
+            (normalized.endsWith("/.zeros-canvas.json") && !fs.existsSync(nodePath.resolve(cwd, candidate))));
+        })) {
+          throw new GitError({ code: "VALIDATION_FAILED", message: "Use Zeros Settings to create or migrate Design registration." });
+        }
         if (remote && !cloudFiles && isSensitiveRepoPath(rel)) {
           throw new GitError({
             code: "VALIDATION_FAILED",
@@ -4516,9 +4535,8 @@ export class WorkspaceService {
         const workspaceId = reqStr(params, "workspaceId");
         const paths = strArr(params, "paths");
         assertLiteralGitMutationPaths(paths, "Discarding");
-        // Discarding design paths would destroy unsaved canvas work AND
-        // half-apply under the fence — refused with the design-mode pointer.
-        await assertNoDesignPathWrites(
+        this.resolveReadCwd(workspaceId, remote);
+        if (remote || cloudFiles) await assertNoDesignPathWrites(
           workspaceId,
           paths,
           "discarding",
@@ -4533,7 +4551,7 @@ export class WorkspaceService {
           ? strArr(params, "files")
           : undefined;
         // Managed Git snapshots explicitly staged Code and Design together.
-        // Generic file/patch/discard operations retain their authoring fences.
+        // Explicit local file/patch/discard actions use the same checkout.
         this.resolveReadCwd(workspaceId, remote);
         if (files) assertLiteralGitMutationPaths(files, "Committing");
         return commit({
@@ -4879,7 +4897,8 @@ export class WorkspaceService {
         const workspaceId = reqStr(params, "workspaceId");
         const paths = strArr(params, "paths");
         assertLiteralGitMutationPaths(paths, "Restoring");
-        await assertNoDesignPathWrites(
+        this.resolveReadCwd(workspaceId, remote);
+        if (remote || cloudFiles) await assertNoDesignPathWrites(
           workspaceId,
           paths,
           "restoring",
@@ -4978,7 +4997,8 @@ export class WorkspaceService {
           workspaceId,
           patch,
         );
-        await assertNoDesignPathWrites(
+        this.resolveReadCwd(workspaceId, remote);
+        if (remote || cloudFiles) await assertNoDesignPathWrites(
           workspaceId,
           patchPaths,
           "staging",
@@ -4994,7 +5014,8 @@ export class WorkspaceService {
           workspaceId,
           patch,
         );
-        await assertNoDesignPathWrites(
+        this.resolveReadCwd(workspaceId, remote);
+        if (remote || cloudFiles) await assertNoDesignPathWrites(
           workspaceId,
           patchPaths,
           "unstaging",
@@ -5013,7 +5034,8 @@ export class WorkspaceService {
           workspaceId,
           patch,
         );
-        await assertNoDesignPathWrites(
+        this.resolveReadCwd(workspaceId, remote);
+        if (remote || cloudFiles) await assertNoDesignPathWrites(
           workspaceId,
           patchPaths,
           "discarding",

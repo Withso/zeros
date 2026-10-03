@@ -101,6 +101,8 @@ import {
 } from "./composer-shell";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import { ComposerDesignTag } from "./composer-design-tag";
+import { ComposerDesignFrame, useComposerDesignFrame } from "./composer-design-frame";
+import { prepareDesignFrameAttachments } from "./design-frame-attachment";
 import { setComposerMode } from "./composer-mode";
 import {
   Conversation,
@@ -405,10 +407,12 @@ export function AgentChat({
     text: string;
     attachments: ComposerAttachment[];
     json: object | null;
+    designFrame?: import("./design-frame-attachment").DesignFrameAttachmentTarget | null;
   }>({
     text: seededDraft?.text ?? "",
     attachments: seededDraft?.attachments ?? [],
     json: seededDraft?.json ?? null,
+    designFrame: seededDraft?.designFrame,
   });
   // Indirections so the once-built editor + early keybind handlers reach the
   // current handlers (which are defined below the editor hook).
@@ -872,6 +876,18 @@ export function AgentChat({
   }, [capabilitiesBridge, chatId]);
   const enterDesignMode = useCallback(() => changeComposerMode("design"), [changeComposerMode]);
   const leaveDesignMode = useCallback(() => changeComposerMode("code"), [changeComposerMode]);
+  const designFrameContext = useComposerDesignFrame({
+    chatId,
+    cwd: chatThread?.folder ?? session.cwd ?? undefined,
+    active: interactive && !readOnly,
+    intent: chatThread?.composerMode ?? "code",
+    initialFrame: seededDraft?.designFrame,
+    onPin: useCallback((target: import("./design-frame-attachment").DesignFrameAttachmentTarget | null | undefined) => {
+      composerLiveRef.current.designFrame = target;
+      if (chatId && !readOnly) setLiveChatDraft(chatId, { ...composerLiveRef.current });
+    }, [chatId, readOnly]),
+  });
+  const pinDesignFrame = designFrameContext.pin;
   const preparationOwner = JSON.stringify([
     chatId,
     session.agentId ?? chatThread?.agentId,
@@ -2907,6 +2923,7 @@ export function AgentChat({
       text: s.displayText,
       attachments: s.attachments,
       json: s.json,
+      designFrame: composerLiveRef.current.designFrame,
     };
     composerLiveRef.current = draft;
     setLiveChatDraft(chatId, { ...draft });
@@ -2914,7 +2931,7 @@ export function AgentChat({
   updateLiveDraftRef.current = updateLiveDraft;
   const persistComposerDraft = useCallback(() => {
     if (readOnly || !chatId) return;
-    const { text, attachments: atts, json } = composerLiveRef.current;
+    const { text, attachments: atts, json, designFrame } = composerLiveRef.current;
     if (text.trim() === "" && atts.length === 0) {
       dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
       return;
@@ -2922,7 +2939,7 @@ export function AgentChat({
     dispatch({
       type: "SET_CHAT_DRAFT",
       chatId,
-      draft: { text, attachments: atts, json },
+      draft: { text, attachments: atts, json, designFrame },
     });
   }, [chatId, dispatch, readOnly]);
   useEffect(() => {
@@ -2943,10 +2960,12 @@ export function AgentChat({
         text: draft.text,
         attachments: draft.attachments,
         json: draft.json ?? null,
+        designFrame: draft.designFrame,
       };
+      pinDesignFrame(draft.designFrame);
       return true;
     });
-  }, [chatId, serializeComposerState, setComposerContent, readOnly]);
+  }, [chatId, serializeComposerState, setComposerContent, readOnly, pinDesignFrame]);
   useEffect(() => {
     return () => {
       if (readOnly || !chatId) return;
@@ -3404,6 +3423,7 @@ export function AgentChat({
       text: snapshot.displayText,
       attachments: snapshot.attachments,
       json: snapshot.json,
+      designFrame: composerLiveRef.current.designFrame,
     };
     composerLiveRef.current = draft;
     dispatch({ type: "SET_CHAT_DRAFT", chatId: parkChatId, draft });
@@ -3458,6 +3478,7 @@ export function AgentChat({
     // — happens further down, so awaiting here (or at the session rebuild below)
     // opens a window in which a second Enter re-enters, snapshots the same
     // composer state, and sends it again.
+    const submittedDesignFrame = override === undefined ? designFrameContext.capture() : null;
     const hydrateNeeded = session.transcriptState !== "resident";
     const forkAttachmentPending = chatId
       ? hasPendingTextAttachmentDelivery(chatId)
@@ -3503,6 +3524,7 @@ export function AgentChat({
         storeTranscriptState !== "resident" &&
         !(storeTranscriptState === undefined && workspaceProvisioning)
       ) {
+        designFrameContext.pin(submittedDesignFrame);
         parkUnreadableTranscriptSend(chatId, override);
         return;
       }
@@ -3569,6 +3591,7 @@ export function AgentChat({
     // accept independent first messages without spawning into missing paths or
     // letting the newest request overwrite an older one.
     if (workspaceProvisioning && chatId && override === undefined && snapshot) {
+      designFrameContext.pin(submittedDesignFrame);
       if (recordActivity && chatThread?.folder) {
         recordWorkspaceActivity(chatThread.folder);
       }
@@ -3576,6 +3599,7 @@ export function AgentChat({
         text: snapshot.displayText,
         attachments: snapshot.attachments,
         json: snapshot.json,
+        designFrame: submittedDesignFrame,
       };
       composerLiveRef.current = draft;
       dispatch({ type: "SET_CHAT_DRAFT", chatId, draft });
@@ -3730,6 +3754,17 @@ export function AgentChat({
         : "";
     const wireText =
       importPrefix + expandMentionsInText(displayText, browserPickerSelection);
+    let submittedDesignAttachments: ComposerAttachment[] = [];
+    if (submittedDesignFrame) {
+      if (!capabilitiesBridge) throw new Error("The frame context connection is unavailable.");
+      setSendPreparing(true);
+      try {
+        submittedDesignAttachments = await prepareDesignFrameAttachments(capabilitiesBridge, submittedDesignFrame);
+        attachmentsToEncode.push(...submittedDesignAttachments);
+      } finally {
+        setSendPreparing(false);
+      }
+    }
     const {
       blocks: localImageBlocks,
       bubbleAttachments: localBubbleAttachments,
@@ -3764,9 +3799,22 @@ export function AgentChat({
             localBubbleAttachmentById,
           )
         : extras?.bubbleSegments;
+    // The generated frame attachment is outside the editable TipTap document;
+    // include its normal file chip in the sent message's ordered segments.
+    if (submittedDesignFrame && messageSegments) {
+      for (const attachment of submittedDesignAttachments) {
+        messageSegments.push(...toMessageSegments([{
+          type: "attachment", attachmentId: attachment.id, name: attachment.name,
+          mimeType: attachment.mimeType, kind: attachment.kind,
+        }], [attachment], localBubbleAttachmentById));
+      }
+    }
     const submittedDraftUnchanged = override === undefined && snapshot &&
       isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
-    if (submittedDraftUnchanged) clearComposer();
+    if (submittedDraftUnchanged) {
+      clearComposer();
+      designFrameContext.pin(undefined);
+    }
     // Drop any stashed draft for this chat —
     // the user just sent it. Defensive against the cleanup-on-unmount
     // path racing the post-send empty state.
@@ -5036,6 +5084,11 @@ export function AgentChat({
                   everything lives in the text flow). Linked workspaces remain
                   in the AddedDirectories row above. */}
                   {composerEditorContent}
+                  {!editingQueuedId && designFrameContext.selection && (
+                    <div className="flex min-w-0 items-center py-1">
+                      <ComposerDesignFrame selection={designFrameContext.selection} onRemove={designFrameContext.remove} onToggleScreenshot={designFrameContext.toggleScreenshot} />
+                    </div>
+                  )}
                   <PromptInputToolbar
                     data-permission-feedback-boundary=""
                     className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"

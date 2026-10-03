@@ -128,10 +128,10 @@ describe("Zeros-scoped design-directory containment guarantees", () => {
       "utf8",
     );
     expect(designWorkspace).toContain("Shared Code/Design agent");
-    expect(designWorkspace).toContain("Design may author with native file tools");
+    expect(designWorkspace).toContain("can edit Code and Design in either context");
     expect(designWorkspace).toContain("External terminal/editor");
     expect(designWorkspace).toMatch(
-      /do not change the\s+native permissions of the Code process or external same-user tools/,
+      /Provider permissions and same-user host\s+authority remain independent of the composer tag/,
     );
   });
 });

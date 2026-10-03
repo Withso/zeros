@@ -244,6 +244,7 @@ export async function listDesignFramesUnlocked(
     const info = await stat(path.join(designDirectory(workspacePath), file));
     summaries.push({
       file,
+      frameId: canvas.frame_info[file]?.id ?? legacyFrameId(file),
       title: meta.title,
       kind: meta.kind,
       width: geometry.w,

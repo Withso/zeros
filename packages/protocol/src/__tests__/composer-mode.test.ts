@@ -14,7 +14,8 @@ describe("native Design authoring instructions", () => {
   it("keeps Code inspection and provider permissions independent", () => {
     const instruction = composerModeInstruction("code", 5);
     expect(instruction).toContain("inspection");
-    expect(instruction).toContain("Design writes require Design mode");
+    expect(instruction).toContain("explicitly requested Design source edits");
+    expect(instruction).not.toContain("Design writes require Design mode");
     expect(instruction).toContain("Provider Plan and permission settings still apply");
   });
   it("uses API authoring when the execution boundary forbids native Design writes", () => {

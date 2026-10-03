@@ -170,93 +170,6 @@ function comparisonPathKey(candidate: string): string {
     : normalized;
 }
 
-async function changedTreePaths(
-  cwd: string,
-  from: string | null,
-  to: string | null,
-): Promise<string[]> {
-  if (!from && !to) return [];
-  const { stdout } =
-    from && to
-      ? await runGit(
-          cwd,
-          ["diff", "--name-only", "-z", "--no-renames", from, to],
-          { readOnly: true },
-        )
-      : await runGit(
-          cwd,
-          ["ls-tree", "-r", "-z", "--name-only", (from ?? to)!],
-          { readOnly: true },
-        );
-  return stdout.split("\0").filter(Boolean);
-}
-
-async function independentlyChangedPaths(
-  cwd: string,
-  target: string,
-): Promise<string[]> {
-  let base: string | null = null;
-  try {
-    const { stdout } = await runGit(cwd, ["merge-base", "HEAD", target], {
-      readOnly: true,
-    });
-    base = stdout.trim() || null;
-  } catch {
-    // Unrelated histories share no merge base. Comparing both complete trees
-    // is conservative and prevents a same-path Design collision from being
-    // materialized into the checkout.
-  }
-
-  const [local, incoming, different] = await Promise.all([
-    changedTreePaths(cwd, base, "HEAD"),
-    changedTreePaths(cwd, base, target),
-    changedTreePaths(cwd, "HEAD", target),
-  ]);
-  const localKeys = new Set(local.map(comparisonPathKey));
-  const differentKeys = new Set(different.map(comparisonPathKey));
-  return incoming.filter((candidate) => {
-    const key = comparisonPathKey(candidate);
-    return localKeys.has(key) && differentKeys.has(key);
-  });
-}
-
-async function firstParent(
-  cwd: string,
-  commit: string,
-): Promise<string | null> {
-  try {
-    const { stdout } = await runGit(
-      cwd,
-      ["rev-parse", "--verify", `${commit}^1`],
-      { readOnly: true },
-    );
-    return stdout.trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-async function independentlyChangedSingleCommitPaths(
-  cwd: string,
-  target: string,
-  mode: "apply" | "revert",
-): Promise<string[]> {
-  const parent = await firstParent(cwd, target);
-  const base = mode === "apply" ? parent : target;
-  const result = mode === "apply" ? target : parent;
-  const [patch, local, different] = await Promise.all([
-    changedTreePaths(cwd, base, result),
-    changedTreePaths(cwd, base, "HEAD"),
-    changedTreePaths(cwd, "HEAD", result),
-  ]);
-  const localKeys = new Set(local.map(comparisonPathKey));
-  const differentKeys = new Set(different.map(comparisonPathKey));
-  return patch.filter((candidate) => {
-    const key = comparisonPathKey(candidate);
-    return localKeys.has(key) && differentKeys.has(key);
-  });
-}
-
 function isDesignIdentityPath(candidate: string): boolean {
   const normalized = candidate.replace(/\\/g, "/").replace(/^\.\//, "");
   return (
@@ -300,57 +213,8 @@ export async function prepareDesignSafeIntegration(opts: {
   ].sort((left, right) => left.localeCompare(right));
   if (protectedDirectories.length === 0) return target;
 
-  if (opts.comparison === "merge-side" || opts.comparison === "rebase") {
-    const designConflicts = (
-      await independentlyChangedPaths(opts.path, target)
-    ).filter((candidate) =>
-      protectedDirectories.some((designDir) =>
-        repoPathOverlapsDesignRoot(candidate, designDir),
-      ),
-    );
-    if (designConflicts.length > 0) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: `${opts.operation} would require Design conflict reconciliation for independently changed Design content.`,
-        remediation:
-          "Reconcile those Design revisions explicitly before retrying this branch-wide Git operation.",
-        context: {
-          workspaceId: opts.workspaceId,
-          designPaths: [...new Set(designConflicts)].slice(0, 20),
-          target,
-        },
-      });
-    }
-  }
-  if (
-    opts.comparison === "single-commit-apply" ||
-    opts.comparison === "single-commit-revert"
-  ) {
-    const designConflicts = (
-      await independentlyChangedSingleCommitPaths(
-        opts.path,
-        target,
-        opts.comparison === "single-commit-apply" ? "apply" : "revert",
-      )
-    ).filter((candidate) =>
-      protectedDirectories.some((designDir) =>
-        repoPathOverlapsDesignRoot(candidate, designDir),
-      ),
-    );
-    if (designConflicts.length > 0) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: `${opts.operation} would require Design conflict reconciliation for independently changed Design content.`,
-        remediation:
-          "Reconcile those Design revisions explicitly before retrying this branch-wide Git operation.",
-        context: {
-          workspaceId: opts.workspaceId,
-          designPaths: [...new Set(designConflicts)].slice(0, 20),
-          target,
-        },
-      });
-    }
-  }
+  // Committed Design edits use Git's normal three-way merge. The canvas
+  // pauses on unmerged paths while ordinary source tools repair them.
 
   const { stdout: dirty } = await runGit(
     opts.path,
@@ -359,7 +223,10 @@ export async function prepareDesignSafeIntegration(opts: {
       "--porcelain=v1",
       "-z",
       "--untracked-files=all",
-      "--ignored=matching",
+      // Expand ignored files: "matching" can collapse a private settings
+      // file into "!! .zeros/" despite these pathspecs, making every clean
+      // portable Design checkout look like an uncommitted legacy draft.
+      "--ignored=traditional",
       "--",
       ...protectedDirectories.map((candidate) => `:(literal)${candidate}`),
       ...DESIGN_IDENTITY_STATUS_PATHS,
@@ -411,7 +278,7 @@ export async function prepareDesignSafeIntegration(opts: {
       code: "VALIDATION_FAILED",
       message: `${opts.operation} would rewrite or temporarily remove a live uncommitted Design draft.`,
       remediation:
-        "Commit the Design draft as an explicit Design checkpoint, then retry the Git operation.",
+        "Commit or preserve the uncommitted Design files through the shared Git workflow, then retry.",
       context: {
         workspaceId: opts.workspaceId,
         designPaths: protectedDirectories.slice(0, 20),
@@ -438,7 +305,7 @@ export async function prepareDesignSafeIntegration(opts: {
     code: "VALIDATION_FAILED",
     message: `${opts.operation} changes Design territory while this workspace has a live uncommitted Design draft.`,
     remediation:
-      "Commit the Design draft as an explicit Design checkpoint, then retry the Git operation.",
+      "Commit or preserve the uncommitted Design files through the shared Git workflow, then retry.",
     context: {
       workspaceId: opts.workspaceId,
       designPaths: designImpact.slice(0, 20),

@@ -114,8 +114,9 @@ browser MCP registration, and no primitive click/snapshot tool definitions.
 The public `@openai/codex` CLI package does not currently ship the separate
 desktop `cua_node` runtime. At thread boot, Zeros locates an installed official
 ChatGPT/Codex Desktop `cua_node` bundle (or a future packaged copy), follows its
-manifest-declared executable/module paths, locates the cached
-`browser@openai-bundled` plugin, and hashes `scripts/browser-client.mjs` into
+manifest-declared executable/module paths, locates the materialized
+`browser@openai-bundled` plugin under the selected CODEX_HOME's
+`.tmp/bundled-marketplaces/openai-bundled/plugins/browser` (then older cache roots), and hashes `scripts/browser-client.mjs` into
 `NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S`. It replaces any user-configured MCP
 entry named `node_repl` with that verified registration. If the official runtime,
 plugin manifest, trusted Browser client, Codex executable, architecture, or
@@ -573,3 +574,19 @@ raw developer CDP, or a Zeros-authored replacement Browser skill. Codex's
 official bundled plugin and Claude's official extension remain provider-owned.
 This is browser use—not unrestricted control of the user's Mac. Broader
 capabilities require separate product and trust-model decisions.
+
+
+For authored Design frames, use the HTTP preview supplied in frame context or
+**Open preview**. The raw HTML file is not the composed canvas render, and native
+browser URL policy may reject `file://`. Normal shell validation and PNG capture
+are independently available through the engine's `design` command.
+
+Current Desktop can materialize `control-in-app-browser/SKILL.md` without that
+file being present in its cached source archive. Runtime discovery checks the
+materialized package first and retains the same manifest, safe-path and exact
+client-hash checks. Missing-runtime discovery leaves the Code conversation
+usable. `unified-computer-use@openai-bundled` / `cua_repl` remains a provider-owned
+surface; provenance recognition alone does not establish IAB compatibility.
+Only the verified `browser@openai-bundled` / `node_repl` integration is registered
+with Zeros' IAB host. Do not fabricate an unavailable backend or substitute a
+custom Zeros browser MCP.

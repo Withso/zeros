@@ -89,6 +89,19 @@ describe("Design workspace boot cache", () => {
       ).not.toHaveProperty("layerCount");
   });
 
+  it("restores frame IDs while retaining compatibility with records predating frame identity", async () => {
+    const cache = await import("../state/design-workspace-boot-cache");
+    const current = snapshot("phone.html");
+    current.frames[0]!.frameId = "frame_phone";
+    cache.queueDesignWorkspaceBootSnapshot("workspace", current);
+    cache.resetDesignWorkspaceBootCacheForTests();
+    expect(cache.readDesignWorkspaceBootSnapshots().get("workspace")?.frames[0]?.frameId).toBe("frame_phone");
+    expect(cache.safeDesignWorkspaceBootSnapshot(snapshot("legacy.html"))?.frames[0]).not.toHaveProperty("frameId");
+    for (const frameId of ["", "a".repeat(257), "bad\nidentity", null, 123]) {
+      expect(cache.safeDesignWorkspaceBootSnapshot({ ...current, frames: [{ ...current.frames[0], frameId }] })).toBeNull();
+    }
+  });
+
   it("cancels an idle flush only through the scheduler that created it", async () => {
     let flush: (() => void) | undefined;
     const cancelIdleCallback = vi.fn();

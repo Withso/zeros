@@ -17,17 +17,28 @@ These instructions apply to the entire repository. Read and follow
 - For a bug, add a failing regression test first, implement the fix, and retain
   the test.
 - Run adjacent Vitest suites after each meaningful edit, not only at handoff.
-- A Zeros `design.toml` registers a Design directory. Code mode may inspect it;
-  user-authorized local Design mode may author HTML, CSS, assets and `canvas.json`
-  using normal provider Read/Write/Edit/patch/shell tools. Read the directory's
-  `rules.md`, preserve stable frame IDs, and re-read changed files before editing.
-  No Design API apply/import/publish is required after native edits. The Design
-  API remains available for inspection and optional semantic edits. Cloud
-  workers retain their execution policy and use API authoring instead.
-- Use Zeros Settings/lifecycle operations for `design.toml`, generated `rules.md`,
-  registration and legacy migration. Do not bypass mode instructions or provider
-  permissions with Git-as-editor, ACL changes or filesystem aliases. Mode is an
-  authoring policy, not a filesystem sandbox; Design mode can still edit Code.
+- A Zeros `design.toml` registers a Design directory. Local Code and Design
+  use the same normal provider Read/Write/Edit/patch/shell tools and permissions.
+  The Design tag means edit Design source by default; a frame attached in Code
+  context means implement application code from that reference. Explicit user
+  instructions take precedence; mixed work needs no mode switch. Read `rules.md`,
+  preserve stable frame IDs, and re-read changed files before editing.
+- Frames contain HTML, CSS, supported local assets and CSS keyframes/transitions.
+  Authored JavaScript, event handlers, framework runtimes and TSX do not execute.
+  Shell/Node/Python may generate supported source. App implementation from a
+  frame follows that application's runtime conventions. Live Code layers are deferred.
+- Native edits save directly into the checkout; no Design apply/import/publish
+  is required. DesignDraftStore supplies checked transactions for the canvas and
+  optional semantic tools; it is not another authored copy. Use the native
+  verification command supplied in frame context to validate, capture a PNG or
+  open the HTTP preview. Inspect PNGs with the ordinary image tool. Use only
+  browsers the provider actually exposes, and preserve its URL/origin policy.
+- Use Zeros Settings/lifecycle operations to create, migrate, rename or remove
+  registration and generated rules. Existing manifest/canvas conflicts can be
+  repaired in shared Files or normal source tools. Saving never stages or commits.
+  Local managed Git integrates Code and Design together; conflicts pause the
+  canvas until shared source resolution/continue or abort completes. Provider
+  permissions and Plan remain unchanged. Cloud retains API authoring for now.
 - Commit each Design folder with its `design.toml`, `canvas.json`, `rules.md` and
   referenced source. Authorized managed Git operations may include both Code
   and Design. Saving never implicitly stages or commits. `.zeros/` is private

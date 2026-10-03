@@ -4,10 +4,12 @@ import { chromium } from "playwright-core";
 import {
   DESIGN_CAPTURE_HTML_BYTES,
   DESIGN_CAPTURE_TIMEOUT_MS,
+  DESIGN_STATIC_RENDER_CSS,
   designCaptureRequestSchema,
 } from "@zeros/protocol/design-capture";
 import { sanitizeDesignFrameMarkup, insertDesignHeadMarkup } from "./source";
 import { assertDesignCapturePng } from "./capture-service";
+import { prepareDesignCaptureViewport, captureScaledDesignPng } from "./capture-viewport";
 
 async function main() {
   if (process.platform !== "linux" || process.getuid?.() === 0)
@@ -45,10 +47,15 @@ async function main() {
     });
     await context.route("**/*", (route) => route.abort("blockedbyclient"));
     const page = await context.newPage();
+    const debuggerSession = input.layoutViewport ? await context.newCDPSession(page) : null;
+    if (debuggerSession) await prepareDesignCaptureViewport(input, params => debuggerSession.send("Emulation.setDeviceMetricsOverride", params));
     page.setDefaultTimeout(DESIGN_CAPTURE_TIMEOUT_MS);
+    // The scaled CDP path supplies the still styles itself; ordinary captures
+    // retain Playwright's existing animation handling below.
+    const stillStyles = input.layoutViewport ? `<style>${DESIGN_STATIC_RENDER_CSS}</style>` : "";
     const html = insertDesignHeadMarkup(
       sanitizeDesignFrameMarkup(input.html),
-      `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';">`,
+      `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';">${stillStyles}`,
     );
     await page.setContent(html, { waitUntil: "load" });
     await page.evaluate(async () => {
@@ -57,7 +64,7 @@ async function main() {
         Array.from(document.images, (image) => image.decode().catch(() => {})),
       );
     });
-    const bytes = await page.screenshot({
+    const bytes = debuggerSession ? await captureScaledDesignPng(input, params => debuggerSession.send("Page.captureScreenshot", params)) : await page.screenshot({
       type: "png",
       animations: "disabled",
       caret: "hide",

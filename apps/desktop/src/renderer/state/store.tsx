@@ -58,6 +58,8 @@ export interface ComposerDraft {
    *  present it is the source of truth for restoring the composer; `text`
    *  is kept for display/back-compat with pre-editor drafts. */
   json?: object | null;
+  /** A parked send keeps its submitted canvas target, including explicit removal. */
+  designFrame?: import("../features/agent/design-frame-attachment").DesignFrameAttachmentTarget | null;
 }
 
 // Per-message edit-mode draft. Same lifecycle reasoning as the
