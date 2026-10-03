@@ -66,6 +66,11 @@ mixed structured content and keyboard activation. Browser coverage lives in
 
 ## Identity and streaming
 
+Codex native review may return its result only in `exitedReviewMode.review`.
+Retain that completed result through successful turn completion, unless the
+same turn supplies a native final agent message. Mode entry is not review
+output; equal text in unrelated messages is not a deduplication key.
+
 1. Scope reconciliation to the provider execution, native conversation, parent
    tool, native message, block and tool identity where the provider supplies
    them. Keep the resulting durable message ID stable through all updates.
