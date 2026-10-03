@@ -30,6 +30,7 @@ import {
   recoverWorkspaceDesignMetadata,
   writePrivateDesignState,
   DESIGN_DIRECTORY_REGISTRY_FILES,
+  LEGACY_DESIGN_RULES,
 } from "../metadata";
 import { withDesignDocumentWrite } from "../document-write-lock";
 import { parseDesignManifest, serializeDesignManifest } from "../manifest";
@@ -116,6 +117,25 @@ describe("portable Design metadata", () => {
     const before = read(`${directory}/design.toml`);
     ensureDesignMetadataLayout(root, directory);
     expect(read(`${directory}/design.toml`)).toBe(before);
+  });
+
+  it("upgrades generated rules while preserving appended user instructions", () => {
+    commitDesignMetadata(root, directory, json);
+    const currentRules = read(`${directory}/rules.md`);
+    const custom = "\n## Project guidance\nUse the supplied brand assets.\n";
+    write(`${directory}/rules.md`, LEGACY_DESIGN_RULES + custom);
+    ensureDesignMetadataLayout(root, directory);
+    expect(read(`${directory}/rules.md`)).toBe(currentRules + custom);
+    ensureDesignMetadataLayout(root, directory);
+    expect(read(`${directory}/rules.md`)).toBe(currentRules + custom);
+  });
+
+  it("preserves independently authored rules during a metadata refresh", () => {
+    commitDesignMetadata(root, directory, json);
+    const custom = "# Project design rules\nKeep the accessible color palette.\n";
+    write(`${directory}/rules.md`, custom);
+    ensureDesignMetadataLayout(root, directory);
+    expect(read(`${directory}/rules.md`)).toBe(custom);
   });
 
   it.each(

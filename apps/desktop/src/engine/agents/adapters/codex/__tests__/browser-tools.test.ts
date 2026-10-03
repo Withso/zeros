@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -191,6 +191,25 @@ describe("Codex browser tool adapter", () => {
       NODE_REPL_NODE_PATH: nodePath,
       NODE_REPL_NODE_MODULE_DIRS: nodeModulesPath,
     });
+  });
+
+  it("discovers the official materialized Browser skill when the cache omits it", async () => {
+    const fixture = await nativeBrowserFixture();
+    const materialized = join(fixture.codexHome, ".tmp/bundled-marketplaces/openai-bundled/plugins/browser");
+    await cp(fixture.pluginRoot, materialized, { recursive: true });
+    // Current Desktop completes the provider package when materializing it;
+    // its cached source archive does not contain this installed skill.
+    const cache = join(fixture.codexHome, "plugins/cache/openai-bundled/browser/current");
+    await cp(fixture.pluginRoot, cache, { recursive: true });
+    await rm(join(cache, "skills"), { recursive: true });
+    await rm(join(fixture.pluginRoot, "skills"), { recursive: true });
+    const runtime = await resolveCodexNativeBrowserRuntime({
+      runtimeRoots: [fixture.runtimeRoot], codexCliPath: fixture.codexCliPath,
+      codexHome: fixture.codexHome, platform: process.platform, arch: process.arch, env: {},
+    });
+    expect(runtime?.pluginRoot).toBe(materialized);
+    expect(runtime?.browserSkill.path).toBe(join(materialized, "skills/control-in-app-browser/SKILL.md"));
+    expect(runtime?.mcpServer.env?.BROWSER_USE_AVAILABLE_BACKENDS).toBe("iab");
   });
 
   it("fails closed when the official helper or Browser plugin is incomplete", async () => {

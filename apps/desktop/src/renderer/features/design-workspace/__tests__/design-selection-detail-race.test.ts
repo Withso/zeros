@@ -31,9 +31,6 @@ vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
 vi.mock("../../../platform/bridge/active-bridge", () => ({
   onActiveBridgeConnected: vi.fn(() => () => {}),
 }));
-vi.mock("../design-review-dialog", () => ({
-  DesignReviewDialog: () => null,
-}));
 vi.mock("../design-style-editor", () => ({
   DesignStyleEditor: () =>
     React.createElement("div", {

@@ -214,6 +214,10 @@ async function defaultBrowserPluginRoots(
 ): Promise<string[]> {
   const roots: string[] = [];
   pushCandidate(roots, env.ZEROS_CODEX_BROWSER_PLUGIN_ROOT);
+  // Current Desktop materializes the runnable skill here. Its cache archive
+  // can contain browser-client.mjs without the injected Browser SKILL.md.
+  // Keep the same manifest, realpath and exact-client-hash checks below.
+  roots.push(join(codexHome, ".tmp", "bundled-marketplaces", "openai-bundled", "plugins", "browser"));
   const cacheRoot = join(
     codexHome,
     "plugins",

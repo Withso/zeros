@@ -17,17 +17,16 @@ import { runDesignLayoutChildrenSmoke } from "./ui-smoke-design-layout-children.
 import { runDesignFrameChildrenSmoke } from "./ui-smoke-design-frame-children.mjs";
 import { runDesignAuthoredFrameSmoke } from "./ui-smoke-design-authored-frame.mjs";
 import { runDesignLoadingEditsSmoke } from "./ui-smoke-design-loading-edits.mjs";
-import { runDesignGitMenuSmoke } from "./ui-smoke-design-git-menu.mjs";
 import { runDesignSelectionSmoke } from "./ui-smoke-design-selection.mjs";
 import { runDesignSpacingSmoke } from "./ui-smoke-design-spacing.mjs";
 import { runDesignInlineToolsSmoke } from "./ui-smoke-design-inline-tools.mjs";
 import { runDesignCameraSmoke } from "./ui-smoke-design-camera.mjs";
+import { runDesignPreviewSmoke } from "./ui-smoke-design-preview.mjs";
 
 export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignFloatingChromeSmoke({ page, waitFor, check });
   await runDesignFloatingChromeEdgesSmoke({ page, waitFor, check });
   await runDesignWorkbenchSmoke({ page, check });
-  await runDesignGitMenuSmoke({ page, check });
   await runDesignSelectionSmoke({ page, waitFor, check });
   await runDesignAutoLayoutSmoke({ page, check });
   await runDesignSpacingSmoke({ page, check });
@@ -42,6 +41,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignFrameRecoverySmoke({ page, check });
   await runDesignInlineToolsSmoke({ page, waitFor, check });
   await runDesignCameraSmoke({ page, waitFor, check });
+  await runDesignPreviewSmoke({ page, check });
   await runDesignWorkspaceCanvasSmoke({ page, waitFor, check });
 }
 
@@ -3064,52 +3064,11 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       }),
     "design-static-offset-removal-settled",
   );
-  await page.getByLabel("Review Design changes", { exact: true }).click();
-  // Opening review flushes the focused inspector field. Count Git actions
-  // only after that save and the review snapshot have settled.
-  await waitFor(
-    () => page.getByLabel("Stage Design changes", { exact: true }).isEnabled(),
-    "design-explicit-review-ready",
-  );
-  const beforeExplicitGitActions = await page.evaluate(
-    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
-  );
-  await page.getByLabel("Stage Design changes", { exact: true }).click();
-  await waitFor(
-    async () =>
-      (await page.evaluate(
-        (start) =>
-          (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
-          start + 2,
-        beforeExplicitGitActions,
-      )) === true,
-    "design-explicit-stage",
-  );
-  await page.getByLabel("Commit staged Design changes").click();
-  const explicitGitActionsSettled = await waitFor(async () => {
-    const operations = await page.evaluate(
-      (start) =>
-        (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
-      beforeExplicitGitActions,
-    );
-    return operations.length >= 3;
-  }, "design-explicit-commit");
-  const explicitGitActions = await page.evaluate(
-    (start) =>
-      (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
-    beforeExplicitGitActions,
-  );
   check(
-    "Design staging and commit remain separate explicit actions",
-    explicitGitActionsSettled &&
-      explicitGitActions.slice(0, 3).join(",") ===
-        "stage:start,stage:end,commit",
-    JSON.stringify(explicitGitActions),
+    "Design uses the shared Git tabs without a second review dialog",
+    (await page.getByRole("button", { name: "Review Design changes", exact: true }).count()) === 0 &&
+      (await page.getByRole("dialog", { name: "Review Design changes", exact: true }).count()) === 0,
   );
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "Close", exact: true })
-    .click();
   const beforeSaveShortcut = await page.evaluate(
     () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
   );

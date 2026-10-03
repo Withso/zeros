@@ -1023,7 +1023,7 @@ describe("write ops", () => {
     );
   });
 
-  it("refuses rebase before committed Design revisions can conflict", async () => {
+  it("allows Design rebase conflicts to be repaired or aborted with Git", async () => {
     const ws = getWorkspace(workspaceId);
     await mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true });
     await Promise.all([
@@ -1055,12 +1055,9 @@ describe("write ops", () => {
       cwd: ws.path,
     });
 
-    await expect(
-      rebase({ workspaceId, ontoBranch: "main" }),
-    ).rejects.toMatchObject({
-      code: "VALIDATION_FAILED",
-      message: expect.stringMatching(/Design.*conflict/i),
-    });
+    expect(await rebase({ workspaceId, ontoBranch: "main" })).toMatchObject({ conflicts: ["Zeros Design/draft.html"] });
+    expect(await readFile(draft, "utf8")).toContain("<<<<<<<");
+    await execFileAsync("git", ["rebase", "--abort"], { cwd: ws.path });
     await expect(readFile(draft, "utf8")).resolves.toBe("<main>local</main>\n");
   });
 

@@ -41,6 +41,7 @@ const DESIGN_AGGREGATE_READ_TIMEOUT_MS = 30_000;
 
 export interface DesignFrameSummaryWire {
   file: string;
+  frameId?: string;
   title: string;
   /** Omitted by older remote engines; absence is a conventional frame. */
   kind?: "frame" | "text";

@@ -5,6 +5,7 @@
 // layers, tokens, and review rows before the first bridge round trip settles.
 // Every hydrated entry is marked stale by the owner cache and revalidated.
 
+import { designContextReferenceSchema } from "@zeros/protocol/design-context";
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/git";
 import { getSetting, setSetting } from "../../../platform/settings";
 
@@ -79,6 +80,8 @@ export function safeDesignWorkspaceBootSnapshot(
 
   const frames: DesignWorkspaceSnapshotWire["frames"] = [];
   for (const frame of candidate.frames) {
+    const frameId = designContextReferenceSchema.shape.frameId.safeParse(frame?.frameId);
+    if (!frameId.success) return null;
     const file = boundedString(frame?.file, 2_048);
     const title = boundedString(frame?.title, 512);
     const sourceVersion = boundedString(frame?.sourceVersion, 24);
@@ -124,6 +127,7 @@ export function safeDesignWorkspaceBootSnapshot(
     const layerCount = finiteNumber(frame?.layerCount);
     frames.push({
       file,
+      ...(frameId.data !== undefined ? { frameId: frameId.data } : {}),
       title,
       ...(frame.kind ? { kind: frame.kind } : {}),
       width,

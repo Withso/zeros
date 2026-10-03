@@ -691,6 +691,7 @@ function sameFrame(
 ): boolean {
   return (
     left.file === right.file &&
+    left.frameId === right.frameId &&
     left.title === right.title &&
     left.kind === right.kind &&
     left.width === right.width &&

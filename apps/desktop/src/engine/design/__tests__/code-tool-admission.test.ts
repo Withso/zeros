@@ -75,7 +75,7 @@ describe("Code Design target admission", () => {
   }
 
   it.each(["admission", "prompt"])(
-    "keeps Code usable when a Design index conflict appears before %s",
+    "keeps native source repair usable in either context when a Design index conflict appears before %s",
     async (stage) => {
       let mode: "code" | "design" = "code";
       const owner = new DesignCodeToolAdmissions({
@@ -95,7 +95,7 @@ describe("Code Design target admission", () => {
           "Current composer mode: Code",
         );
         mode = "design";
-        await expect(tools!.preparePrompt!()).rejects.toThrow("Git conflict");
+        await expect(tools!.preparePrompt!()).resolves.toContain("repair");
         mode = "code";
         execFileSync("git", ["add", `${DESIGN_DIRECTORY_NAME}/design.toml`], {
           cwd: root,

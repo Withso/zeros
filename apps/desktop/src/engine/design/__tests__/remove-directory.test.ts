@@ -126,16 +126,28 @@ describe("remove Design registration", () => {
         );
       }
 
-      // The same folder can be registered again; removal must not exempt it
-      // from future Design ownership.
+      // The same folder can be registered again; local source edits remain
+      // available, while remote Design authoring retains its API policy.
       const preview = await previewExistingDesignDirectory(root, directory);
       await adoptExistingDesignDirectory(root, directory, preview.revision);
       await expect(
         new WorkspaceService(root).handle("file.write", {
           workspaceId: LOCAL_MAIN_WORKSPACE_ID,
           path: file,
-          content: "Refuse this Code edit",
+          content: "Local Design source edit",
         }),
+      ).resolves.toMatchObject({ kind: "success" });
+      const read = await new WorkspaceService(root).handle("file.read", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        path: file,
+      });
+      expect(read).toMatchObject({ designPath: true });
+      await expect(
+        new WorkspaceService(root).handle("file.write", {
+          workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+          path: file,
+          content: "Remote direct edit",
+        }, { remote: true }),
       ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
     },
   );

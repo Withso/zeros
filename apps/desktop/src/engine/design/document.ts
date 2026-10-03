@@ -1265,7 +1265,11 @@ async function lintFrame(
           "no-script",
           "Design frames are HTML and CSS only; scripts are not allowed.",
           location,
-          { severity: "error", oid: oid ?? undefined, fix: "Remove <script>." },
+          {
+            severity: "error",
+            oid: oid ?? undefined,
+            fix: "Remove the script from this frame. Use CSS @keyframes for motion or represent the control state visually; application behavior belongs in application code.",
+          },
         ),
       );
     }
@@ -1282,7 +1286,7 @@ async function lintFrame(
             {
               severity: "error",
               oid: oid ?? undefined,
-              fix: `Remove ${attribute.name}; interactivity belongs to Prototype mode.`,
+              fix: `Remove ${attribute.name} from this frame and represent the control state visually. Implement working interactions in application code.`,
             },
           ),
         );

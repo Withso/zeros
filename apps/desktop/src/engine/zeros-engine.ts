@@ -6,6 +6,7 @@ import { CloudIdleStopScheduler, hasCloudUserProcesses, isCloudIdleMaintenance }
 import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
+import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
 import type { DesignCaptureService } from "./design/capture-service";
 // ──────────────────────────────────────────────────────────
 // ZerosEngine — The heart of Zeros V2
@@ -1433,6 +1434,7 @@ export class ZerosEngine {
     // drops the tab instead of showing "(exited)".
     this.workspace.setWorkspaceProcessReaper(
       async (workspaceId, worktreePath) => {
+        await revokeDesignVerification(workspaceId);
         const root = path.resolve(worktreePath);
         const isUnderRoot = (candidate: string): boolean => {
           const relative = path.relative(root, path.resolve(candidate));
@@ -3058,6 +3060,7 @@ export class ZerosEngine {
     // Revoke product tool authority before slow cloud/provider cleanup can
     // yield. The registry aborts every grant synchronously, then drains them.
     const productToolsRetired = settle(() => this.agents.revokeSessionTools());
+    await settle(() => stopDesignVerification());
     const captureService = this.designCaptureService;
     this.designCaptureService = undefined;
     if (captureService) {

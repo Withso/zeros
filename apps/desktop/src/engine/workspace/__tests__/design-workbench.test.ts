@@ -100,9 +100,11 @@ describe("Design in the shared workbench", () => {
       service.handle("file.write", {
         ...params,
         path: `${designDirectoryNameFor(workspace.path)}/${created.frame.file}`,
-        content: "overwrite",
+        content: '<main data-oid="screen">Native edit</main>',
       }),
-    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    ).resolves.toMatchObject({ kind: "success" });
+    expect(git(workspace.path, "rev-parse", "HEAD")).toBe(beforeHead);
+    expect(git(workspace.path, "write-tree")).toBe(beforeIndex);
   });
 
   it("initializes Design in a cloud primary checkout without creating a second worktree", async () => {
@@ -168,7 +170,10 @@ describe("Design in the shared workbench", () => {
     expect(git(workspace.path, "diff", "--cached", "--name-only")).toBe("");
     await expect(
       service.handle("git.discard", { ...params, paths: [directory] }),
-    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    ).resolves.toEqual({ ok: true });
+    expect(git(workspace.path, "diff", "--name-only")).toBe("code.txt");
+    expect(await readFile(path.join(workspace.path, "code.txt"), "utf8")).toBe("Code three\n");
+    expect(git(workspace.path, "rev-parse", "HEAD^{tree}")).toBe(stagedTree);
   });
 
   it("unstages Design without changing authored files or unrelated staged Code", async () => {

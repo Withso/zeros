@@ -16,6 +16,9 @@ import {
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createDesignFrame, initializeDesignDocument, readDesignFrame } from "../../design/document";
+import { designDirectoryNameFor } from "../../design/directory-registry";
+import { assertDesignCheckoutReadable } from "../../design/checkout-status";
 
 import {
   abortOperation,
@@ -180,6 +183,13 @@ describe("advanced Git operations", () => {
   });
 
   describe("conflict status, continue, and abort", () => {
+    async function seedPortableDesign() {
+      await initializeDesignDocument(wsPath);
+      const frame = await createDesignFrame(wsPath, { title: "Phone" });
+      const directory = designDirectoryNameFor(wsPath);
+      return { frame: frame.file, directory, designDir: path.join(wsPath, directory) };
+    }
+
     async function makeMergeConflict(): Promise<void> {
       // Diverge README on the workspace branch...
       await writeFile(path.join(wsPath, "README.md"), "ours\n");
@@ -221,7 +231,7 @@ describe("advanced Git operations", () => {
       expect(s.conflictState).toBeNull();
     });
 
-    it("refuses a merge that would leave committed Design content conflicted", async () => {
+    it("surfaces Design merge conflicts for ordinary source resolution and continuation", async () => {
       const designDir = path.join(wsPath, "Zeros Design");
       await mkdir(designDir, { recursive: true });
       await Promise.all([
@@ -253,19 +263,87 @@ describe("advanced Git operations", () => {
       );
       await git(wsPath, "commit", "-aqm", "ours design");
 
-      await expect(
-        merge({ workspaceId, branch: "design-other" }),
-      ).rejects.toMatchObject({
-        code: "VALIDATION_FAILED",
-        message: expect.stringMatching(/Design.*conflict/i),
+      expect(await merge({ workspaceId, branch: "design-other" })).toMatchObject({
+        merged: false, conflicts: ["Zeros Design/frame.html"],
       });
-      await expect(
-        readFile(path.join(designDir, "frame.html"), "utf8"),
-      ).resolves.toBe("<main>ours</main>\n");
+      expect(await readFile(path.join(designDir, "frame.html"), "utf8")).toContain("<<<<<<<");
+      await writeFile(path.join(designDir, "frame.html"), "<main>resolved</main>\n");
+      await stagePaths({ workspaceId, paths: ["Zeros Design/frame.html"] });
+      expect(await continueOperation(workspaceId)).toMatchObject({ conflicts: [], kind: "merge" });
       await expect(status(workspaceId)).resolves.toMatchObject({
         conflictState: null,
         conflicted: [],
       });
+    });
+
+    it("merges non-overlapping committed edits to the same Design source and reads the merged checkout", async () => {
+      const { frame, directory, designDir } = await seedPortableDesign();
+      const source = `<main data-oid="screen">\n<h1 data-oid="heading">Base heading</h1>\n${Array.from({ length: 10 }, (_, index) => `<p data-oid="row-${index}">Row ${index}</p>`).join("\n")}\n<footer data-oid="footer">Base footer</footer>\n</main>\n`;
+      await writeFile(path.join(designDir, frame), source);
+      await git(wsPath, "add", "--", directory, ".gitignore");
+      await git(wsPath, "commit", "-qm", "Portable Design baseline");
+      await git(repoRoot, "checkout", "-qb", "design-clean", getWorkspace(workspaceId).branch);
+      await writeFile(path.join(repoRoot, directory, frame), source.replace("Base footer", "Incoming footer"));
+      await git(repoRoot, "commit", "-aqm", "Incoming footer");
+      await git(repoRoot, "checkout", "-q", "main");
+      await writeFile(path.join(designDir, frame), source.replace("Base heading", "Local heading"));
+      await git(wsPath, "commit", "-aqm", "Local heading");
+      const before = await readDesignFrame(wsPath, frame, 0, { writeBack: false });
+      const canvasBefore = await readFile(path.join(designDir, "canvas.json"), "utf8");
+      expect(await merge({ workspaceId, branch: "design-clean" })).toMatchObject({ merged: true, conflicts: [] });
+      const after = await readDesignFrame(wsPath, frame, 0, { writeBack: false });
+      expect(after.source).toContain("Local heading");
+      expect(after.source).toContain("Incoming footer");
+      expect(after.sourceVersion).not.toBe(before.sourceVersion);
+      expect(await readFile(path.join(designDir, "canvas.json"), "utf8")).toBe(canvasBefore);
+      expect((await git(wsPath, "status", "--porcelain")).trim()).toBe("");
+    });
+
+    it.each(["tokens.css", "canvas.json", "design.toml"])("repairs a genuine %s merge conflict with stable identities and validates metadata before continue", async (filename) => {
+      const { directory, designDir } = await seedPortableDesign();
+      const file = `${directory}/${filename}`;
+      const destination = path.join(designDir, filename);
+      let baseline: string;
+      if (filename === "tokens.css") baseline = "body { color: black; } /* Base */\n";
+      else if (filename === "design.toml") baseline = `# Base\n${await readFile(destination, "utf8")}`;
+      else {
+        const canvas = JSON.parse(await readFile(destination, "utf8"));
+        baseline = JSON.stringify({ ...canvas, title: "Base" }, null, 2) + "\n";
+      }
+      await writeFile(destination, baseline);
+      const manifestBefore = await readFile(path.join(designDir, "design.toml"), "utf8");
+      const frameIds = Object.keys(JSON.parse(await readFile(path.join(designDir, "canvas.json"), "utf8")).frames);
+      await git(wsPath, "add", "--", directory, ".gitignore");
+      await git(wsPath, "commit", "-qm", "Portable Design baseline");
+      await git(repoRoot, "checkout", "-qb", "design-conflict", getWorkspace(workspaceId).branch);
+      await writeFile(path.join(repoRoot, file), baseline.replace("Base", "Incoming"));
+      await git(repoRoot, "commit", "-aqm", "Incoming Design edit");
+      await git(repoRoot, "checkout", "-q", "main");
+      await writeFile(destination, baseline.replace("Base", "Local"));
+      await git(wsPath, "commit", "-aqm", "Local Design edit");
+      const head = await git(wsPath, "rev-parse", "HEAD");
+      expect(await merge({ workspaceId, branch: "design-conflict" })).toMatchObject({ merged: false, conflicts: [file] });
+      expect(await readFile(destination, "utf8")).toContain("<<<<<<<");
+      await expect(assertDesignCheckoutReadable(wsPath)).rejects.toThrow(/paused/);
+      expect(await continueOperation(workspaceId)).toMatchObject({ kind: "merge", conflicts: [file] });
+
+      if (filename !== "tokens.css") {
+        await writeFile(destination, filename === "canvas.json" ? "{ invalid JSON" : 'format = "zeros-design"\nversion =');
+        await stagePaths({ workspaceId, paths: [file] });
+        const staged = await git(wsPath, "write-tree");
+        await expect(continueOperation(workspaceId)).rejects.toThrow();
+        expect(await git(wsPath, "rev-parse", "HEAD")).toBe(head);
+        expect(await git(wsPath, "write-tree")).toBe(staged);
+      }
+      const resolved = baseline.replace("Base", "Resolved");
+      await writeFile(destination, resolved);
+      await stagePaths({ workspaceId, paths: [file] });
+      expect(await continueOperation(workspaceId)).toMatchObject({ kind: "merge", conflicts: [] });
+      await expect(assertDesignCheckoutReadable(wsPath)).resolves.toBeUndefined();
+      expect(await git(wsPath, "show", `HEAD:${file}`)).toBe(resolved);
+      expect(Object.keys(JSON.parse(await readFile(path.join(designDir, "canvas.json"), "utf8")).frames)).toEqual(frameIds);
+      expect((await readFile(path.join(designDir, "design.toml"), "utf8")).split("\n").filter(line => line.startsWith("id =")))
+        .toEqual(manifestBefore.split("\n").filter(line => line.startsWith("id =")));
     });
   });
 
@@ -385,7 +463,7 @@ describe("advanced Git operations", () => {
       expect(existsSync(path.join(wsPath, "cp.txt"))).toBe(true);
     });
 
-    it("refuses a cherry-pick that would leave committed Design content conflicted", async () => {
+    it("surfaces Design cherry-pick conflicts and restores the checkout on abort", async () => {
       const designDir = path.join(wsPath, "Zeros Design");
       await mkdir(designDir, { recursive: true });
       await Promise.all([
@@ -418,12 +496,8 @@ describe("advanced Git operations", () => {
       );
       await git(wsPath, "commit", "-aqm", "ours design");
 
-      await expect(
-        cherryPick({ workspaceId, sha: picked }),
-      ).rejects.toMatchObject({
-        code: "VALIDATION_FAILED",
-        message: expect.stringMatching(/Design.*conflict/i),
-      });
+      expect(await cherryPick({ workspaceId, sha: picked })).toEqual({ conflicts: ["Zeros Design/frame.html"] });
+      await abortOperation(workspaceId);
       await expect(
         readFile(path.join(designDir, "frame.html"), "utf8"),
       ).resolves.toBe("<main>ours</main>\n");
@@ -433,7 +507,7 @@ describe("advanced Git operations", () => {
       });
     });
 
-    it("refuses a revert that would leave newer committed Design content conflicted", async () => {
+    it("surfaces Design revert conflicts and restores newer work on abort", async () => {
       const designDir = path.join(wsPath, "Zeros Design");
       await mkdir(designDir, { recursive: true });
       await Promise.all([
@@ -454,12 +528,8 @@ describe("advanced Git operations", () => {
       );
       await git(wsPath, "commit", "-aqm", "newer design");
 
-      await expect(
-        revert({ workspaceId, sha: checkpoint }),
-      ).rejects.toMatchObject({
-        code: "VALIDATION_FAILED",
-        message: expect.stringMatching(/Design.*conflict/i),
-      });
+      expect(await revert({ workspaceId, sha: checkpoint })).toEqual({ conflicts: ["Zeros Design/frame.html"] });
+      await abortOperation(workspaceId);
       await expect(
         readFile(path.join(designDir, "frame.html"), "utf8"),
       ).resolves.toBe("<main>newer</main>\n");

@@ -29,7 +29,7 @@ User-selected or user-authorized agent switches preserve the session and inject
 fresh instructions. There is no Code Restriction toggle, designer-only workspace,
 separate Design provider, or mode-selected sandbox in v1.
 
-Local Design mode authors HTML, CSS, assets and `canvas.json` with ordinary
+Local Code and Design contexts author HTML, CSS, assets and `canvas.json` with ordinary
 provider Read/Write/Edit/patch/shell tools. No API apply/import/publish step is
 required. Optional API inspection and semantic editing, and human visual edits,
 operate on those same files. Cloud worker execution policy is separate: its
@@ -55,9 +55,9 @@ never delete them to bypass admission or silently discard unpublished work.
 | Local native HTML/CSS authoring, `canvas.json`, migration and watcher refresh        | Implemented                                                               |
 | Foundation, visual editing, semantic transactions, history and sandboxed previews    | Implemented                                                               |
 | Scoped inspection, semantic helpers, request receipts and optional capture           | Implemented; capture requires a qualified host                            |
-| Existing Design review, explicit checkpoints and mixed managed Git                   | Implemented; no new v1 Git/proposal workflow                              |
+| Shared Files/Changes/Review and mixed managed Git                                     | Implemented; Design checkpoint compatibility retained internally         |
 | Proposal/result storage and existing human review compatibility                      | Retained internally; not exposed through the v1 conversation tool catalog |
-| Read-only frame-context routes                                                       | Implemented; composer delivery deferred                                   |
+| Frame-context routes, composer source/image attachments and HTTP preview              | Implemented; native capture requires a qualified host                                   |
 | Conflict detection, paused canvas, Retry/Cancel                                      | Implemented; semantic Design conflict resolution deferred                 |
 | Deployed-cloud Design continuity                                                     | Qualification open; local worker fixtures do not qualify deployment       |
 | Controls/media, code/web/tool surfaces, lite components and advanced orchestration   | Phases 2–8; not implemented by the native-authoring enhancement           |
@@ -214,12 +214,14 @@ restrictions and ordinary remote file/credential filtering remain independent.
   .zeros/               ignored private settings and local state
 ```
 
-Code mode may inspect Design files. User-authorized Design mode uses normal
-provider file tools to author HTML, CSS, assets and `canvas.json`. The Design
-surface and optional API edit the same files. Generic app file-editor and
-discard routes keep their existing Design guard; managed Git may stage, commit
-and integrate authorized Code and Design changes. Mode instructions do not
-provide a hostile-process filesystem boundary.
+Local Code and Design contexts use normal provider tools to author HTML, CSS,
+assets and `canvas.json` when requested. The Design tag chooses the default
+editing target; a selected frame in Code context is normally an application
+implementation reference. Explicit instructions override that default. Shared
+Files editing, partial staging, discard and restore support Design source,
+including repair of existing malformed or conflicted metadata. Creation of
+registration remains lifecycle-managed. Cloud/remote authoring retains its
+existing policy. Mode instructions do not provide a filesystem sandbox.
 
 Commit the folder, `design.toml`, `canvas.json`, `rules.md` and referenced source
 together. Uncommitted work is local to the checkout. Registration and generated
@@ -308,7 +310,8 @@ manifest. During migration, projection of shared legacy registry entries keeps
 other folders' staged and committed states independent. Directory renaming moves
 source and manifest together in one scoped commit; the private selection retains
 the same ID. Shared workspace Git can include recognized Design roots and legacy
-metadata; generic file-editor and discard routes retain their Design guard.
+metadata. Local file-editor and explicit discard routes use that same checkout;
+remote/API-only authoring keeps its existing guard.
 Archives finish recoverable writes before capturing source and metadata.
 
 Design writes maintain an idempotent block in the root `.gitignore`: ignore
@@ -396,12 +399,77 @@ avoid colliding with frame extensions. Camera, credentials, grants, recovery
 journals, captures and caches do not belong in this file. No DOM/node tree or
 copy of the HTML is stored here.
 
+### Native verification and selected-frame context
+
+The composer shows the selected local frame as a removable chip. Send fixes
+workspace, directory, frame ID/file, optional node, source revision, viewport and
+editing intent. A queued reconnect keeps that target. Newer source or replaced
+identity produces an actionable stale-context error. The source snapshot is an
+ordinary persisted attachment. The adjacent image toggle adds an on-demand PNG
+through the existing attachment path; a changed-during-capture result is rejected.
+No frame selection changes an in-flight task's target or provider binding.
+
+The existing engine CLI now implements:
+
+```sh
+<engine-command> design list --url <verification-url>
+<engine-command> design validate --url <verification-url> --frame phone.html
+<engine-command> design capture --url <verification-url> --frame phone.html --output .context/phone.png
+<engine-command> design preview --url <verification-url> --frame phone.html
+```
+
+Prompt/frame context supplies the actual executable command and local URL. The
+Node dev bundle and compiled sidecar use the same CLI entrypoint. Optional
+`--revision` requires an exact render revision; omit it after an edit to validate
+and capture current source. Validation reports existing file/line diagnostics
+without healing source and exits nonzero for errors. Capture writes an ordinary
+PNG and reports revision, dimensions, capture time and reduced-motion behavior.
+Fractional frame dimensions round up to whole CSS viewport pixels. Frames above
+2048 pixels retain that layout viewport (up to the canvas's 16384-pixel bound)
+while the complete PNG scales proportionally into 2048 × 2048, with at least one
+pixel per axis. Capture reports both PNG dimensions and the layout viewport and
+scale; the existing PNG byte and render-time limits still apply.
+Capture and HTTP preview disable authored animations/transitions to show the
+canvas's default still state. Capture uses light/reduced-motion media emulation;
+the browser preview retains its browser's media preferences.
+The capture host is the existing qualified native renderer; no browser agent or
+Design MCP is required. Capturing a still image is not visual inspection or an
+application behavior test. CSS animation phase selection is not implemented.
+
+The Inspector's **Open preview** opens the same HTTP frame preview supplied to
+agents. A pending open belongs to that view, workspace, directory and frame;
+changing its owner or unmounting the view discards the late response.
+`verification-service.ts` uses existing composition/sanitization and
+inlines the same local CSS/assets. The only script belongs to a trusted wrapper;
+authored content lives in a separate iframe with scripts, network, forms and
+navigation capabilities denied by sandbox/CSP and trusted link interception.
+The wrapper invalidates readiness on any unexpected iframe document load.
+`window.__ZEROS_FRAME_PREVIEW__`
+reports current reference, dimensions and readiness after fonts/images settle.
+A preview renders once even when a native browser opens it offscreen. After
+that, only visible pages check for edits, one request at a time. Fetch and
+resource-readiness waits are bounded; late results cannot mark a replaced
+document ready. Generation changes replace the frame only for its bound identity.
+
+The read-only service binds loopback and checks Host/origin. A random capability
+names one registered directory, lasts 30 minutes after explicit context/preview
+creation, and grants no general filesystem, process, engine or capture-host
+credential access. Admission is bounded to 32 directory leases and four requests;
+the existing capture host retains its single-capture limit. Workspace retirement
+revokes access and engine shutdown drains the service. The shared listener starts
+outside its caller's directory read lease; each HTTP request obtains the lease
+for its own registered directory. No authored files,
+screenshot caches, capture windows or background browser sessions are created by
+opening context. A missing capture host leaves validation and HTTP preview usable.
+Native provider browser discovery and URL policy remain separate concerns; use
+an available provider browser, never assume `iab` or use a `file://` workaround.
+
 ### Actor and execution contract
 
 | Actor                    | Code/repository authority              | Design authority                                                      | Execution                          |
 | ------------------------ | -------------------------------------- | --------------------------------------------------------------------- | ---------------------------------- |
-| Human Code workflow      | Normal native files and Git            | Readable; Zeros Code routes reject Design writes                      | Native host                        |
-| Shared Code/Design agent | Normal provider tools and permissions  | Code inspects; Design authors with native file tools and optional API | Native host process lifecycle      |
+| Human Code workflow      | Normal native files and Git            | Shared source editing and explicit Git operations                      | Native host                        |
+| Shared Code/Design agent | Normal provider tools and permissions  | Native file tools and optional API in either local context | Native host process lifecycle      |
 | Human Design surface     | Read-only Code context                 | Semantic Design API transactions                                      | Trusted application process        |
 | Cloud worker agent       | Worker-owned provider and cloud policy | Design API in Design mode; native Design writes unavailable           | Qualified cloud execution boundary |
 | External terminal/editor | Normal same-user authority             | Normal same-user authority                                            | Outside the Zeros actor guarantee  |
@@ -412,12 +480,11 @@ Zeros ACL, Design sparse shape, alternate checkout, or Code-to-sandbox fallback.
 graceful/forced teardown, and stale-process recovery while preserving normal
 provider and host behavior.
 
-Agents receive recognized roots and mode instructions: Code may inspect;
-Design may author with native file tools. Generic app file writes/discard remain
-guarded, while authorized managed Git includes Design. These
-workflow guards do not change the
-native permissions of the Code process or external same-user tools and are not
-a hostile-process filesystem security claim.
+Agents receive recognized roots and default task intent. Local native tools and
+the shared Files editor can edit Code and Design in either context; explicit
+requests override the default intent. Managed Git includes both. Cloud workers
+retain their API-only Design policy. Provider permissions and same-user host
+authority remain independent of the composer tag.
 
 View identity never selects execution posture. Local Design directory changes
 suspend and revoke document grants while preserving the provider and MCP
@@ -458,8 +525,8 @@ make Code files read-only.
 - `design_mode_set` owns agent selection. Its required `expectedRevision` comes
   from the current prompt or `design_capabilities`; a late switch cannot overwrite a newer manual
   selection, including an away-and-back transition.
-- User intent is instruction policy. Only switch for user-authorized Design or
-  Code work. A mixed request can authorize both; repeated approval is not needed.
+- User intent is instruction policy. Switching the tag changes the default
+  target; an explicit local Design edit or mixed request needs no mode switch.
   Neither a tool schema nor a model assertion proves natural-language consent.
 - User selections are serialized per conversation. Prompt and steer submission
   wait for pending selections. Engine mode instructions precede each submitted
@@ -468,9 +535,10 @@ make Code files read-only.
 - The native MCP registration retains the compatible `design-draft` name and
   `ZEROS_DESIGN_AGENT_CAPABILITY` credential channel. Its schema catalog stays
   stable across mode changes, including within a native turn. Tool-name
-  discovery is not write authority: Code can discover signatures and inspect,
-  but every API Design write requires the current Design mode and generation.
-  Native file tools follow the mode instructions and provider permissions; they
+  discovery is not write authority: workspace/directory ownership and generation
+  still gate every helper. Local helpers can author in either context; cloud
+  API writes still require Design mode. Native tools follow user intent and
+  provider permissions; they
   are not intercepted or protected by an OS sandbox.
   This avoids refreshing a shared Cursor executor or relying on provider-specific
   mid-turn tool-catalog reloads.
@@ -480,14 +548,15 @@ make Code files read-only.
   a fresh capability read; they preserve the provider and MCP endpoint. Existing
   cloud execution-boundary transitions retain their separate lifecycle policy.
 - API writes retain the existing owner/directory checks, document CAS,
-  durable request receipts, journal recovery, and actor-local undo. Code mode
-  cannot apply a cached or queued write. Already-admitted journals finish or
+  durable request receipts, journal recovery, and actor-local undo. On API-only
+  workers, Code mode cannot apply a cached or queued Design write. Already-admitted journals finish or
   recover consistently even if Stop or a mode change arrives during commit.
 - Stop cancels pending Design work. A subsequent prompt starts a new tool turn;
   late prompt preparation and steering cannot clear Stop. Session disposal
   revokes the endpoint, including an admission still in flight.
-- A first Code prompt may precede sidebar persistence; it remains read-only for
-  Design until its conversation exists. Deleted/archived owners are rejected.
+- A first Code prompt may precede sidebar persistence; its optional Design API
+  helpers remain read-only until the conversation exists. Local provider file
+  tools follow their normal permissions. Deleted/archived owners are rejected.
   Invalid workspace ownership blocks Design prompts. At the 16-execution MCP
   capacity limit, local native file authoring remains usable with validated directory
   context; optional helpers require a free connection. Cloud Design prompts
@@ -733,12 +802,14 @@ it is not the authored autosave store. Undo/redo history is bounded in memory.
 For a cloud workspace, the workspace engine writes the cloud worktree and its
 own configured app-data directory.
 
-Stage Design snapshots the selected folder into Git's index, including its
-manifest and rules. It does not stage Code or other Design folders. Later edits
-continue autosaving to the worktree and can leave the same file both staged and
-unstaged. Commit staged Design records only the staged version; push subsequently
-publishes the branch's commits. A proposal awaiting acceptance has not changed
-authored source; its request/evidence records are private.
+The shared Files, Changes and Review tabs include Code and Design. Staging is
+an explicit action in Changes; include a new Design folder's registration,
+canvas, rules and referenced source together. Later edits can leave the same
+file both staged and unstaged. Ordinary workspace commits record the staged
+snapshot, and push publishes the branch's commits. A proposal awaiting
+acceptance has not changed authored source; its request/evidence records are
+private. The legacy Design-scoped Git routes remain compatibility consumers
+of the same index, with no separate canvas review/commit dialog.
 
 Desktop, headless, CI, and shared-session tools use the same Design API
 schemas. MCP is a transport adapter, not the core model. A headless caller can
@@ -747,6 +818,18 @@ transactions, render frames, capture artifacts, and receive diagnostics without
 Electron or React.
 
 ### Renderer and editor contract
+
+Authored frames contain HTML, CSS and supported local assets. Agents receive
+this format contract in their composer instructions and generated directory
+rules. Use CSS `@keyframes` for motion and CSS transitions for visual states;
+authored scripts, inline handlers, JSX/TSX and application logic do not execute
+in a frame. Ordinary shell tools may generate or validate frame source. A
+frame used as reference for application implementation does not constrain the
+application's own runtime. Live components remain the separate Phase 3 Code
+surface contract. Existing lint reports unsupported authored content with a
+source location and suggested correction, without rewriting saved source.
+Lifecycle updates replace recognized generated rules while preserving appended
+project guidance; independently authored rules remain intact.
 
 The DOM renderer runs in an opaque `allow-scripts` sandbox. Authored scripts,
 active URLs, forms, nested frames, workers, and network access remain blocked.
@@ -1137,31 +1220,21 @@ Existing review and evidence support visual/API edits and compatibility.
 The minimal v1 conversation workflow does not require proposals or expose
 proposal/result tools to the model.
 
-The **Review Design changes** dialog lives inside the Design tab. It is a compact
-640 × 480 dialog, bounded by the window, with the shared 50% black modal overlay,
-15px title and top-right close control. Its shared header, middle section, and
-full-width checkpoint footer use 12px 16px 0, 24px 16px, and 10px padding
-respectively. It retains
-modal focus/scroll isolation, explicit close/Escape, and protection against
-accidental outside dismissal; the background canvas does not become interactive
-while review is open. Narrow windows hide the dialog's canvas sidebar and keep the
-comparison, scrollable changes, and checkpoint controls available. Its left side
-shows the current canvas until pages exist; its right side provides independent
-All, Uncommitted, Staged, Unstaged and Agent proposals comparisons, source diffs,
-and saved before/after images. Accept/Reject records trusted human review
-separately from the originating agent receipt. Accept applies an exact-revision
-proposal; it does not stage it. Stage, Unstage and Commit staged Design are
-separate actions. Commit pins the reviewed index fingerprint and refuses changed
-staging. Its Design-only commit scope preserves staged Code; workspace Git
-commit can deliberately include the shared staged snapshot.
+Design uses the shared All, Uncommitted, Staged and Unstaged comparisons in
+Changes and the shared branch Review tab. The duplicate Design review dialog
+has been removed. Future visual comparisons belong in Review beside the same
+revision's source diff. Existing proposal/evidence APIs and private records
+remain compatible: accepting an exact-revision proposal changes source without
+staging it, and review authority remains separate from the originating receipt.
+Legacy Design-scoped commits pin their reviewed index fingerprint; ordinary
+workspace commits can include Code and Design together.
 
 Results preserve source, composed HTML, hashes, revisions, viewport and renderer
 identity. Retention is bounded to 16 bundles / 64 MiB per workspace, at most 32
 MiB per bundle and seven days. Capture has one browser slot per engine, two
 aggregate evidence-preparation/read slots, and a 20-second host deadline. Slow
 browser work releases the document write lane; later source edits do not rewrite
-saved evidence. The review dialog has bounded exact-key caches and no closed
-polling. Evidence is displayed as PNG, never executable authored HTML.
+saved evidence. Evidence is represented as PNG, never executable authored HTML.
 
 The existing `ZEROS_DESIGN_AGENT_CAPABILITY` environment-header contract carries
 the private bearer. Each grant expires after 24 hours and is revoked on execution
@@ -1253,7 +1326,7 @@ continue during capture. Finalization reloads the current request ledger rather
 than overwriting intervening proposals. Artifact inventory, lengths, hashes,
 and canonical base64 are checked on write and read. Directory authority is
 rechecked before private persistence; raw captured HTML never executes in the
-review dialog.
+evidence viewer.
 
 These are local durable artifacts. They do not create a replicated job database,
 a process-wide disk quota across all workspaces, or a guarantee that a deleted
@@ -1303,7 +1376,7 @@ reduced motion; unpinned host pixels are never treated as a stable baseline.
 | Retained API documents | 2 documents / 16 MiB estimated retained state per execution. This is not a process-RSS limit.                                                                                 |
 | Request/proposal store | 512 entries / 4 MiB per directory, resolved receipt age up to seven days. Atomic private writes; no background sweeper.                                                       |
 | Source pages           | Default 16,384 / maximum 32,768 UTF-16 units; never split a surrogate pair.                                                                                                   |
-| Capture                | One active capture per host; 20-second deadline, 2048 × 2048 maximum, DPR 1, 16 MiB HTML, 1 MiB PNG. No waiting browser queue; each browser/window is disposed after capture. |
+| Capture                | One active capture per host; 20-second deadline, 2048 × 2048 PNG maximum, DPR 1, 16 MiB HTML, 1 MiB PNG. Larger frame layouts scale into that raster. No waiting browser queue; each browser/window is disposed after capture. |
 | Evidence work          | Two admitted composition/read jobs per engine, including direct capture. Reject saturation before claiming a new mutation receipt or allocating another result.               |
 | Result store           | 16 results / 64 MiB per workspace, 32 MiB maximum bundle, seven-day retention. Atomic private files, bounded index and orphan scan; no idle sweeper.                          |
 | Review reads           | At most 128 rows per page; 512 KiB detail patch; each of the eight Git metadata streams is limited to 1 MiB.                                                                  |
@@ -1351,8 +1424,13 @@ Pull, merge, rebase, checkout, reset, cherry-pick, revert, and push are
 branch-wide operations performed once against the shared checkout. An open
 Design surface refreshes from the resulting files; there is no Design-only pull
 or hidden convergence branch. A live dirty draft is protected from rewrites,
-and independently committed changes to the same Design path are refused before
-Git materializes conflict markers that the Design editor cannot reconcile.
+while independently committed edits use Git's normal three-way merge. Ignored
+private settings alone are not a dirty Design draft; an incoming legacy tracked
+settings path still receives a collision check. Real
+conflicts pause the canvas before metadata parsing; shared Files and normal
+source tools remain usable. Continue validates the resolved staged manifest,
+canvas and referenced source; Abort restores Git's previous checkout. Neither
+operation needs a second Design pull or import.
 
 Zeros-owned checkout/index/ref mutations share a re-entrant FIFO lane for the
 physical worktree and a repository-global ref/stash lane across linked
@@ -1364,12 +1442,12 @@ command through another backend.
 
 Paths are normalized as repository-relative POSIX paths and validated against
 traversal, case aliases, symlinks, hard links, and Git pathspec ambiguity before
-Zeros publishes authority. Generic file/discard/restore/clean and destructive
-reset paths still refuse Design targets. Managed integration is deliberately
-separate from authored editing; it is not an unrestricted native-shell sandbox.
+Zeros publishes authority. Local Files and explicit discard/restore/partial
+staging share Code and Design paths. Broad clean and destructive reset still
+protect live Design drafts. Remote authoring retains its existing policy.
 
-Files provides a Design section and read-only source. Workspace Changes and
-Design Review observe the same index. Direct Create PR publishes existing branch
+Files provides a Design section with editable local source. Workspace Changes
+and Review observe the shared checkout. Direct Create PR publishes existing branch
 commits, preserving staged, unstaged and untracked Code and Design; if no branch
 commits exist it asks the user to review and commit first. The agent PR brief
 uses the same publication scope and no longer instructs commit-all. Push/pull
@@ -1387,8 +1465,9 @@ canvas conservatively, including Code-only conflicts. Read/mutation admission
 checks this before resolving a potentially conflicted manifest. Retry rechecks
 the checkout; Cancel integration explicitly confirms and invokes managed
 `git.abort`. A conflict with no abortable operation offers Retry only. Existing
-managed integration may refuse overlapping Design changes before creating any
-conflict at all. This is pause/recovery, not automatic conflict resolution.
+managed integration protects dirty/untracked work before creating conflicts.
+Independently committed same-file edits proceed through Git. Source resolution
+and Continue/Abort are shared; semantic conflict resolution remains deferred.
 
 `design.context.create` and `design.context.inspect` are local, read-only routes.
 The version-1 reference contains workspace ID, stable directory ID, portable
@@ -1396,9 +1475,9 @@ HTML frame, optional node ID and exact semantic revision. Inspection returns
 `ready` with source/geometry, `stale` with the current revision, `missing`, or
 `wrong-directory`; it rejects a mismatched outer workspace. Reads never heal or
 write metadata, and an external source race cannot return newer bytes as the
-referenced revision. The renderer bridge exposes this contract; composer frame
-context pills remain deferred. Conversation mode transitions and Design API
-write gating are implemented independently of this context delivery.
+referenced revision. The renderer bridge delivers removable composer source
+context and an optional exact-revision image through ordinary attachments.
+Conversation intent and cloud API write gating remain independent of context delivery.
 
 ### Scoped API compatibility
 
@@ -1438,7 +1517,7 @@ continue using the checkout-backed store without migration.
 | Semantic revision | 96-bit conflict key over source/Foundation/geometry                                     | External edits invalidate apply/undo expectations                                                       |
 | Render            | Composed source generation, dependencies, viewport and mounted runtime generation       | Source equality never authorizes a replaced runtime                                                     |
 | Iframe protocol   | Runtime v2 over a private port                                                          | Validate version, generation, bounds and cancellation                                                   |
-| Context reference | v1 workspace/directory/frame/optional-node/revision                                     | Read-only ready/stale/missing/wrong-directory; composer delivery deferred                               |
+| Context reference | v1 workspace/directory/frame/optional-node/revision, optional stable frame ID           | Read-only ready/stale/missing/wrong-directory; removable source and optional PNG composer attachments  |
 | Legacy storage    | Inline manifests, central registry/JSON and `.zeros-canvas.json`                        | Read without migration; explicit authoring journals the upgrade                                         |
 
 Unsupported kinds and versions fail closed. They must never be rewritten into
@@ -1728,10 +1807,10 @@ A Linux harness does not establish macOS energy, GPU, or native browser results.
 ### 2.6 Design API, concurrent actors, and autonomous jobs
 
 **One session, two composer modes.** Local native sessions use normal file
-authoring in Design mode plus optional scoped Design API writes. Cloud workers
+authoring in either local context plus optional scoped Design API writes. Cloud workers
 use API authoring under their existing execution policy. Both reuse the same
 provider conversation. Code mode may
-inspect Code and Design context; authored Design changes require Design mode.
+inspect and edit Code and Design according to the explicit task; the tag sets the default target.
 The user switches modes, or explicitly authorizes the agent to switch for the
 requested work. Merely selecting a frame or viewing the Design tab never grants
 editing authority. See [Composer and shared agent lifecycle](#composer-and-shared-agent-lifecycle).
@@ -1746,8 +1825,9 @@ editing authority. See [Composer and shared agent lifecycle](#composer-and-share
   directory/document, mode generation, and revision. Check on admission and
   immediately before mutation, including stale tool calls. Revoke or drain
   correctly on switches without interrupting an already-admitted atomic write.
-- Keep Code inspection available without a write grant. Future frame-pill delivery must carry
-  exact owner/document/node identity and revision, not embedded instructions.
+- Keep inspection available without a write grant. Frame-pill delivery carries
+  exact owner/document/node identity and revision, source snapshot, default task
+  intent and an optional PNG through ordinary attachments.
   Refresh stale context and fail explicitly when the source identity is gone.
 - Keep source operations independent of the visible tab and usable headlessly.
   UI and agents share the engine mutation authority and change events. The
@@ -1938,11 +2018,11 @@ a separate work package and continues using the checkout-backed transaction
 repository. Phase 8 depends on its adapter and product evidence. Independent
 work packages do not require simultaneous implementation or additional agents.
 
-**First useful milestone:** the agent reads an existing frame in Code mode,
-switches to Design mode for a user-authorized layout change, saves it and can
-optionally capture exact-source evidence, then returns to Code work in the same
-conversation. Composer frame attachment delivery remains deferred. The user can also
-start in Design mode. Measure time to accepted change, conflict/rollback rate,
+**First useful milestone:** a selected frame becomes visible, removable context.
+In Code context it is an implementation reference; in Design context it is the
+default editing target. An explicit source edit works in either. The agent saves,
+validates and optionally captures the same source with ordinary tools, then
+continues Code work in the same conversation. No mode repair or API apply is required. Measure time to accepted change, conflict/rollback rate,
 render count, and local/remote resource cost before broad framework coverage.
 
 ### Phase 0: Land, measure, and establish boundaries (M)
@@ -2013,7 +2093,7 @@ directory and legacy metadata through the
 Exit gates: a scripted MCP client completes the first useful milestone's API
 steps with no renderer attached, then a human reviews the result. Lost reply,
 restart, stale grant, concurrent human edit, and actor-interleaved undo are
-covered. Code-mode API calls remain read-only; Design mode authoring follows its host
+covered. Local API calls follow the shared authoring intent; cloud Design authoring follows its host
 contract. No stronger same-user shell containment claim is made.
 
 ### Architecture gate A: Shared session and minimal Design mode (L)
@@ -2425,8 +2505,10 @@ Reproduction tools (outputs stay under gitignored/private test storage):
 | `scripts/design-adapter-prototype.mjs`                     | Inert lifecycle/admission conformance, not a production adapter                            |
 | `scripts/design-host-prototype.mjs`                        | Browser-context and interruptible worker experiments, not OS quotas                        |
 | `scripts/design-native-qualification.ts`                   | Real Electron capture/isolation/teardown; requires macOS                                   |
+| `scripts/design-verification-native.ts`                    | Exact-source macOS shell capture, HTTP preview and official Browser host-contract checks; not a live model turn |
 | `scripts/design-cloud-capture-qualification.ts`            | Dedicated Linux capture worker; not deployed cloud continuity                              |
 | `scripts/ui-smoke-design-mode.mjs`                         | Production menu/tag/tool rows with synthetic transport                                     |
+| `scripts/ui-smoke-design-preview.mjs`                      | Real Inspector preview actions with delayed replies, directory replacement and unmount     |
 | `engine/design/__tests__/native-authoring-browser.test.ts` | Real Chromium layout/refresh and observational source preservation                         |
 | `scripts/smoke-engine.mjs`                                 | macOS packaged health plus workspace create/archive/restore                                |
 
@@ -2450,6 +2532,13 @@ new changes:
   its lifecycle smoke. See [Development restarts](development-restarts.md) for
   current restart/recovery behavior. Never replay an unfinished tool write
   automatically; inspect source or its API receipt before continuing.
+- Local Design simplification (2026-10-03): the exact-source native fixture on
+  Electron 43.2.0 passed script diagnostics, a 390 × 844 PNG with window cleanup,
+  sanitized HTTP rendering, saved-source refresh, official Browser discovery,
+  and registered IAB navigation/pixel capture. This qualifies the installed
+  `browser@openai-bundled` host contract, not a live provider turn or
+  `unified-computer-use` compatibility. The packaged engine lifecycle smoke was
+  not rerun for this source; earlier packaged results remain historical.
 
 Open gates: deployed-cloud admission/reconnect/retention, advertised-provider
 coverage, new-kind hardware budgets and every phase-specific exit criterion.

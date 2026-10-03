@@ -79,6 +79,40 @@ export async function runDesignModeSmoke({ page, check }) {
     "Design tools use the Design icon and ordinary expandable code details",
     true,
   );
+  const frame = page.locator("[data-composer-design-frame]");
+  await expect(frame).toHaveText("phone.html");
+  await page.getByRole("button", { name: "Deselect frame", exact: true }).click();
+  await expect(frame).toHaveCount(0);
+  await page.getByRole("button", { name: "Select phone", exact: true }).click();
+  await expect(frame).toHaveText("phone.html");
+  await page.getByRole("button", { name: "Include frame image", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Include frame image", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Park frame send", exact: true }).click();
+  await expect(page.getByLabel("Submitted frame target")).toContainText('"includeScreenshot":true');
+  await expect(page.getByLabel("Submitted frame target")).toContainText('"frameId":"frame_a_phone"');
+  const parkedTarget = await page.getByLabel("Submitted frame target").textContent();
+  await page.getByRole("button", { name: "Toggle concealed", exact: true }).click();
+  await expect(frame).toHaveCount(0);
+  // Reconnect drains a pending send even while its retained composer is inert.
+  await page.getByRole("button", { name: "Park frame send", exact: true, includeHidden: true }).evaluate(button => button.click());
+  await expect(page.getByLabel("Submitted frame target")).toHaveText(parkedTarget);
+  await page.getByRole("button", { name: "Toggle concealed", exact: true }).click();
+  await expect(frame).toHaveText("phone.html");
+  await page.getByRole("button", { name: "Select tablet", exact: true }).click();
+  await expect(frame).toHaveText("phone.html");
+  await page.getByRole("button", { name: "Switch conversation", exact: true }).click();
+  await expect(frame).toHaveText("tablet.html");
+  await page.getByRole("button", { name: "Switch conversation", exact: true }).click();
+  await expect(frame).toHaveText("phone.html");
+  await expect(page.getByRole("button", { name: "Include frame image", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await frame.click();
+  await expect(frame).toHaveCount(0);
+  await page.getByRole("button", { name: "Switch conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Switch conversation", exact: true }).click();
+  await expect(frame).toHaveCount(0);
+  await page.getByRole("button", { name: "Use current selection", exact: true }).click();
+  await expect(frame).toHaveText("tablet.html");
+  check("frame context follows its own workspace, freezes on Send, restores on reconnect and stays removable with an optional image", true);
   await expect(tag).toBeVisible();
   await page.mouse.move(900, 20);
   await page
