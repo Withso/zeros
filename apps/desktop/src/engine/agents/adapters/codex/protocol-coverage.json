@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "codexProtocolVersion": "0.154.0",
+  "codexProtocolVersion": "0.160.0",
   "clientRequests": {
     "handled": [
       "initialize",
@@ -41,6 +41,12 @@
       "userVerification/enroll",
       "userVerification/verify",
       "userVerification/delete",
+      "userVerification/cancel",
+      "thread/attachment/add",
+      "thread/attachment/list",
+      "thread/attachment/remove",
+      "memory/status",
+      "rollout/compress",
       "thread/archive",
       "thread/delete",
       "thread/unsubscribe",
@@ -52,7 +58,6 @@
       "thread/unarchive",
       "thread/shellCommand",
       "thread/backgroundTerminals/clean",
-      "thread/rollback",
       "thread/search",
       "thread/searchOccurrences",
       "thread/loaded/list",
@@ -115,6 +120,9 @@
       "windowsSandbox/setupStart",
       "windowsSandbox/readiness",
       "account/logout",
+      "account/gatewayOAuth/read",
+      "account/gatewayOAuth/login",
+      "account/gatewayOAuth/cancel",
       "account/rateLimitResetCredit/consume",
       "account/usage/read",
       "account/workspaceMessages/read",
@@ -239,6 +247,8 @@
       "thread/closed"
     ],
     "forwarded": [
+      "thread/attachment/updated",
+      "account/gatewayOAuth/changed",
       "thread/archived",
       "thread/unarchived",
       "skills/changed",

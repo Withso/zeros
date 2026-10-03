@@ -5108,6 +5108,38 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
+  it.each(["claude-sonnet-5-5", "sonnet"])("discoverModels does not infer Sonnet 5.5 Ultracode from xhigh (%s)", async (value) => {
+    const levels = ["low", "medium", "high", "xhigh", "max"];
+    const { queryFn } = makeScriptedQuery(
+      [[initMsg("sdk-sonnet-55"), resultOk("sdk-sonnet-55")]],
+      {
+        supportedModels: [{
+          value,
+          resolvedModel: "claude-sonnet-5-5",
+          displayName: "Sonnet",
+          supportsEffort: true,
+          supportedEffortLevels: levels,
+          supportsFastMode: false,
+        }],
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] });
+      await tick();
+      await tick();
+      expect((await adapter.initialize())._meta?.models).toContainEqual({
+        value: "claude-sonnet-5-5",
+        label: "Sonnet",
+        effortLevels: levels,
+        supportsFast: false,
+      });
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
   it("discoverModels advertises unsupported Fast explicitly", async () => {
     const { queryFn } = makeScriptedQuery(
       [[initMsg("sdk-1"), resultOk("sdk-1")]],

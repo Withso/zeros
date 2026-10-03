@@ -51,6 +51,9 @@ describe("modelContextTokens", () => {
     // 128,000 max output. This resolver budgets prompt-side attachments only;
     // tokenUsage.modelContextWindow remains authoritative once Codex reports it.
     expect(modelContextTokens("gpt-6-astra")).toBe(1_050_000);
+    expect(modelContextTokens("gpt-6.1-sol")).toBe(1_050_000);
+    expect(modelContextTokens("gpt-6-sol")).toBe(1_050_000);
+    expect(modelContextTokens("gpt-6-luna")).toBe(1_050_000);
     expect(modelContextTokens("gpt-5.5")).toBe(256_000);
     // The `^gpt-5` catch-all answers for the curated 5.6 ids. Not independently
     // verifiable in-repo (codex ships no static per-model context table) — the
@@ -59,6 +62,9 @@ describe("modelContextTokens", () => {
     expect(modelContextTokens("gpt-5.6-terra")).toBe(256_000);
     expect(modelContextTokens("gpt-5.6-luna")).toBe(256_000);
     expect(modelContextTokens("composer-2.5")).toBe(200_000);
+    // Grok 4.7 advertises 256K and 500K context parameters. Use the smaller
+    // window for attachments until the exact live variant is known.
+    expect(modelContextTokens("grok-4.7")).toBe(256_000);
   });
 
   it("leaves Cursor Grok on the conservative fallback (nothing to verify against)", () => {
@@ -89,7 +95,7 @@ describe("modelContextTokens", () => {
 
   it("ANTI-ROT: no curated model silently lands on the unknown-model fallback", () => {
     // The original failure mode was a NEW model nobody added a row for. Walk
-    // the real catalog so that can't pass CI again. Cursor Auto and the two Grok
+    // the real catalog so that can't pass CI again. Cursor Auto and the Grok
     // versions are explicit documented exceptions above; do not skip every
     // liveRequired row, because that would let a new model evade this gate.
     const fallback = modelContextTokens("totally-unknown-model");

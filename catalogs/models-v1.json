@@ -1,7 +1,7 @@
 {
   "$schema": "./models-v1.schema.json",
-  "version": 11,
-  "updatedAt": "2026-09-05",
+  "version": 12,
+  "updatedAt": "2026-10-03",
   "notes": "Curated model-picker source of truth. See catalogs/README.md for capability precedence, compatibility contracts, runtime context handling, verification, and update requirements.",
   "families": {
     "claude": [
@@ -20,6 +20,13 @@
         "minCliVersion": "2.1.170"
       },
       {
+        "value": "claude-opus-5-5[1m]",
+        "label": "Claude Opus 5.5",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": true,
+        "minCliVersion": "2.1.280"
+      },
+      {
         "value": "claude-opus-5[1m]",
         "label": "Claude Opus 5",
         "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
@@ -31,6 +38,13 @@
         "label": "Claude Opus 4.8",
         "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
         "supportsFast": true
+      },
+      {
+        "value": "claude-sonnet-5-5[1m]",
+        "label": "Claude Sonnet 5.5",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "supportsFast": false,
+        "minCliVersion": "2.1.284"
       },
       {
         "value": "claude-sonnet-5[1m]",
@@ -51,6 +65,24 @@
         "value": "gpt-6-astra",
         "label": "GPT-6 Astra",
         "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": true
+      },
+      {
+        "value": "gpt-6.1-sol",
+        "label": "GPT-6.1 Sol",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": true
+      },
+      {
+        "value": "gpt-6-sol",
+        "label": "GPT-6 Sol",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": true
+      },
+      {
+        "value": "gpt-6-luna",
+        "label": "GPT-6 Luna",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max"],
         "supportsFast": true
       },
       {
@@ -87,8 +119,14 @@
         "supportsFast": true
       },
       {
+        "value": "grok-4.7",
+        "label": "Grok 4.7",
+        "effortLevels": ["low", "medium", "high", "xhigh"],
+        "supportsFast": true
+      },
+      {
         "value": "grok-4.6",
-        "label": "Cursor Grok 4.6",
+        "label": "Grok 4.6",
         "effortLevels": ["low", "medium", "high", "xhigh"],
         "supportsFast": true
       },
@@ -127,7 +165,9 @@
       "default": "claude-opus-4-8",
       "opus-4.8": "claude-opus-4-8",
       "opus-5": "claude-opus-5",
+      "opus-5.5": "claude-opus-5-5",
       "sonnet-5": "claude-sonnet-5",
+      "sonnet-5.5": "claude-sonnet-5-5",
       "fable-5.1": "claude-fable-5-1"
     },
     "codex": {},

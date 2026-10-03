@@ -24,7 +24,7 @@ protocol.
 
 ## Pin and generated bindings
 
-`@openai/codex`, `package.json#codexProtocolVersion`, and the generated tree at
+The desktop/worker `@openai/codex` dependency, `package.json#codexProtocolVersion`, and the generated tree at
 `apps/desktop/src/engine/agents/adapters/codex/generated/` move together. Run
 `pnpm codegen:codex` only as part of an intentional pin upgrade. The pinned
 Codex CLI generates TypeScript and JSON Schema into a sibling staging tree;
@@ -35,6 +35,14 @@ intact. Generated files are not edited by hand.
 `pnpm check:codex-pin` verifies both the pin/generated-schema relationship and
 the compatibility manifest. A regenerated method cannot silently appear or
 disappear without review.
+
+The control-plane authentication keeper is independently qualified at 0.154.0
+while the interactive runtime is 0.160.0. Its version participates in encrypted
+cache authentication and a database constraint. `check:codex-pin` checks that
+package against `CODEX_AUTH_RUNTIME_VERSION`, not the desktop protocol version;
+Renovate excludes it from routine agent upgrades. A keeper upgrade requires an
+explicit cache/schema migration and native renewal qualification. See
+[cloud agent authentication](cloud-workspace/agent-authentication-and-language-tools.md#codex-subscription-renewal).
 
 ## Compatibility classifications
 
@@ -60,19 +68,18 @@ every classified method has a behavioral implementation or test.
 - Notification `forwarded`: generated typed subscription is available, but no
   canonical or product behavior is claimed.
 
-At the 0.154.0 pin this covers 254 methods: 160 client requests, 11 server
-requests, and 83 server notifications. The four `userVerification/*` client
+At the 0.160.0 pin this covers 264 methods: 168 client requests, 11 server
+requests, and 85 server notifications. The five `userVerification/*` client
 methods are generated-only: Zeros does not expose native identity verification.
-Relative to 0.149.0, the five client requests added in 0.153.4
-(`plugin/reconcile`, `turn/settings/update`, `thread/timeline/list`,
-and the MCP event-stream start/stop pair) remain generated-only because Zeros
-does not expose those provider-owned product surfaces. There are no new
-server-initiated request methods. The six new notifications—the MCP event
-stream, two auth-recovery lifecycle events, and three experimental realtime
-item events—are available through the typed engine subscription without a
-canonical renderer claim.
+Relative to 0.154.0, `userVerification/cancel`, the three `thread/attachment/*`
+requests, `memory/status`, `rollout/compress`, and the three
+`account/gatewayOAuth/*` requests are generated-only. The retired
+`thread/rollback` method is removed. There are no new server-initiated request
+methods. `thread/attachment/updated` and `account/gatewayOAuth/changed` are
+available through typed engine subscriptions without a canonical renderer
+claim. Earlier generated-only product surfaces retain their classifications.
 
-Two existing server requests did change shape. Command-execution approvals now
+The 0.154.0 upgrade changed two existing server request shapes. Command-execution approvals
 distinguish terminal-input callbacks with `kind: "writeStdin"` and a separate
 `approvalId`; the approval card preserves that identity and labels the action
 as terminal input. MCP elicitation accepts the new `openaiForm` spelling through
@@ -80,6 +87,22 @@ the same validated, fail-closed form path as `openai/form`. Run
 `pnpm check:codex-coverage` for the offline drift check.
 
 ## Transcript fidelity
+
+### 0.160.0 compatibility
+
+The native initialization/model-list smoke and executor/MCP isolation fixtures
+run the currently declared binary. Fixtures must resolve the package's native
+runtime instead of naming a versioned pnpm store path, which can accidentally
+test an older package left on disk.
+
+New gateway OAuth, workspace-routing, attachment and MCP App presentation
+metadata stays within the generated provider boundary. It does not authorize
+host execution, add a renderer surface, or change Zeros conversation ownership.
+The new optional turn plugin list is left unset; omitted values preserve native
+configuration. Deprecated `friendly`/`pragmatic` personality values no longer
+select a style upstream; Zeros does not set them. The user-verification
+elicitation's added `_meta` field does not change its existing cancellation
+behavior.
 
 ### 0.154.0 compatibility
 

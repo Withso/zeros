@@ -75,10 +75,10 @@ const MODEL_CONTEXT_TOKENS: Array<[RegExp, number]> = [
   // these numbers are NOT independently verifiable from inside this repo —
   // the authoritative figure is `tokenUsage.modelContextWindow`, which the
   // codex adapter already reports to the gauge at runtime.
-  // GPT-6 Astra's official model metadata publishes a 1,050,000-token context
-  // window (128,000 max output). This is the pre-runtime attachment fallback;
-  // a live tokenUsage.modelContextWindow remains authoritative.
-  [/^gpt-6-astra(?:$|-)/i, 1_050_000],
+  // Official GPT-6 Astra / Sol / Luna and GPT-6.1 Sol metadata publishes a
+  // 1,050,000-token window (128,000 max output). Live native context usage
+  // remains authoritative; these are pre-runtime attachment fallbacks.
+  [/^gpt-(?:6-(?:astra|sol|luna)|6\.1-sol)(?:$|-)/i, 1_050_000],
   [/gpt-5\.5|gpt-5\.4/i, 256_000],
   [/gpt-5\.3-codex|gpt-5\.3/i, 200_000],
   [/gpt-5-nano/i, 128_000],
@@ -89,6 +89,9 @@ const MODEL_CONTEXT_TOKENS: Array<[RegExp, number]> = [
   // nothing to verify against and a guessed constant could over-attach.
   // It resolves to the conservative FALLBACK_CONTEXT_TOKENS instead.
   [/composer-2|composer-1\.5/i, 200_000],
+  // SDK discovery offers Grok 4.7's 256K and 500K context variants. Budget
+  // against the smaller supported window before the live variant is known.
+  [/^grok-4\.7(?:$|-)/i, 256_000],
 ];
 
 /** Resolve the picked model's context window. Returns the fallback

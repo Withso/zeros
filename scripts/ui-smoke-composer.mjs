@@ -544,8 +544,7 @@ try {
   const catalogRow = (label) =>
     catalog()
       .locator("[data-model-catalog-item]")
-      .filter({ hasText: label })
-      .first();
+      .filter({ has: page.getByText(label, { exact: true }) });
   const catalogEditButton = (label) =>
     catalogRow(label).getByRole("button", {
       name: `Edit settings for ${label}`,
@@ -752,6 +751,9 @@ try {
     "active model row shows default High effort",
     ((await catalogRow("Opus 5").textContent()) ?? "").includes("High"),
   );
+  for (const label of ["Opus 5.5", "Sonnet 5.5", "GPT-6 Sol", "GPT-6.1 Sol", "GPT-6 Luna", "Grok 4.7"]) {
+    check(`${label} appears once in the existing model catalog`, (await catalogRow(label).count()) === 1);
+  }
   const claudeGroup = catalog().getByRole("group", { name: "Claude Code" });
   // Read related geometry in one browser frame. Three separate boundingBox
   // calls can straddle the sidecar's entrance animation on a busy machine,
@@ -1187,7 +1189,7 @@ try {
     .getByRole("group", { name: "Cursor" })
     .locator("[data-model-section-title]")
     .hover();
-  const cursorName = catalogRow("Cursor Grok 4.6").locator("[data-model-name]");
+  const cursorName = catalogRow("Grok 4.6").locator("[data-model-name]");
   const cursorNameAtRest = await cursorName.evaluate((name) => ({
     clientWidth: name.clientWidth,
     scrollWidth: name.scrollWidth,
@@ -1198,9 +1200,9 @@ try {
     JSON.stringify(cursorNameAtRest),
   );
   const cursorRowHeightBeforeHover = await catalogRow(
-    "Cursor Grok 4.6",
+    "Grok 4.6",
   ).evaluate((row) => row.getBoundingClientRect().height);
-  const cursorActionOverlay = catalogRow("Cursor Grok 4.6").locator(
+  const cursorActionOverlay = catalogRow("Grok 4.6").locator(
     "[data-model-row-actions]",
   );
   const cursorActionLayout = await cursorActionOverlay
@@ -1209,9 +1211,9 @@ try {
       right: getComputedStyle(overlay).right,
     }))
     .catch(() => null);
-  await catalogRow("Cursor Grok 4.6").hover();
+  await catalogRow("Grok 4.6").hover();
   const cursorRowHeightAfterHover = await catalogRow(
-    "Cursor Grok 4.6",
+    "Grok 4.6",
   ).evaluate((row) => row.getBoundingClientRect().height);
   check(
     "hover actions overlay long labels without reflowing the row",

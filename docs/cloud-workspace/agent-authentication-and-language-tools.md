@@ -34,6 +34,13 @@ JWT claims does not establish provider authentication; the pinned provider
 endpoint still validates tokens. Expired access may be imported with its strict
 native cache, but cannot enter an execution until successfully renewed.
 
+The authentication-only keeper remains qualified at Codex 0.154.0 independently
+of the desktop/worker model runtime (currently 0.160.0). Its version is part of
+the encrypted cache's authenticated data and the database's runtime constraint;
+a routine dependency bump cannot migrate that contract. The package declaration
+must match `CODEX_AUTH_RUNTIME_VERSION`. Upgrade it only with an explicit
+cache/schema migration and native renewal qualification.
+
 Codex 0.154.0 runs briefly as an authentication-only process with a private
 0700 home and 0600 native cache. Its fixed RPC sequence is `initialize`,
 `initialized`, and managed `account/read` with `refreshToken: true`. It receives

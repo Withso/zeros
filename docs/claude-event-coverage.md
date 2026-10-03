@@ -1,7 +1,7 @@
 # Claude SDK event coverage
 
-Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.274** and its
-bundled CLI **2.1.274**. The installed `sdk.d.ts` and wrapper are the contract;
+Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.288** and its
+bundled CLI **2.1.288**. The installed `sdk.d.ts` and wrapper are the contract;
 online documentation can describe a different version.
 
 The public `SDKMessage` union has 39 member aliases and 42 distinct type/subtype
@@ -21,7 +21,7 @@ the table and native fixtures whenever the pinned SDK changes.
 | Native event | Disposition | Consumer and supported behavior / limitation |
 | --- | --- | --- |
 | `assistant` | handled | Translator/transcript state: text, Thinking, tool invocations, parent ownership, partial/completed block reconciliation, errors, supersedes, native context usage and steering receipts. A completed block is not a completed turn. |
-| `user` | handled | Translator: correlate tool results, rich content and artifacts by native tool ID and parent; user echoes do not create duplicate user prompts. Includes `SDKUserMessageReplay`; replayed results retain one durable row. |
+| `user` | handled | Translator: correlate tool results, rich content and artifacts by native tool ID and parent; user echoes do not create duplicate user prompts. A single-result `detachedToolCall: true` acknowledgement retains unresolved work until its later native result. Includes `SDKUserMessageReplay`; replayed results retain one durable row. |
 | `result/success` | handled | Translator and adapter: final answer, terminal reason, authoritative error details even on `is_error`, cumulative usage deltas and exact-once send settlement. |
 | `result/error_during_execution` | handled | Native errors and codes feed existing failure/recovery classification; never infer success from EOF or subtype alone. |
 | `result/error_max_turns` | handled | Existing terminal reason and turn settlement; preserve provider explanation and usage. |
@@ -200,3 +200,20 @@ removal of an append. The native preset and model-dependent default tools remain
 SDK-owned. Older wrappers ignore this optional property and already render fresh
 prompts. Regression entry points include the Claude adapter, translator, usage,
 and shared provider-error suites.
+
+The **0.3.288** audit retains the same 39 public aliases and 42 discriminators.
+The new `provider_not_allowed` startup reason identifies managed provider policy;
+it must outrank incidental sign-in text or nested authentication errors and must
+not invalidate the account's authentication. Existing bounded text/results
+remain available when oversized MCP `structuredContent` is omitted upstream.
+Additional remote latency telemetry and unused control APIs do not create new
+transcript rows or usage totals.
+
+Since 0.3.287, a WebFetch/WebSearch call interrupted by priority-now steering can
+emit `tool_use_result: { detachedToolCall: true }` before its real result. Only a
+single-result envelope can attribute this marker. Keep the native tool unresolved
+and retain its process across turn results; a later result settles the same
+parent-scoped row. A native error still wins. Replayed acknowledgements cannot
+reopen completed/failed tools, and Stop, process replacement, or invocation
+retraction releases the retained work. `detached-tool-results.test.ts` covers
+these sequences alongside the adapter's existing process-retention tests.
