@@ -15,6 +15,7 @@ overrides:
   js-yaml: 4.3.2
   nanoid: 3.3.18
   qs: 6.16.0
+  undici@5.29.0>@fastify/busboy: 3.2.1
 
 patchedDependencies:
   '@anthropic-ai/sandbox-runtime@0.0.76':
@@ -1448,9 +1449,8 @@ packages:
     resolution: {integrity: sha512-43/qtrDUokr7LJqoF2c3+RInu/t4zfrpYdoSDfYyhg52rwLV6TnOvdG4fXm7IkSB3wErkcmJS9iEhjVtOSEjjA==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
 
-  '@fastify/busboy@2.1.1':
-    resolution: {integrity: sha512-vBZP4NlzfOlerQTnba4aqZoMhE/a9HY7HRqoOPaETQcSQuWEIyZMHGfVu6w9wGtGK5fED5qRs2DteVCjOH60sA==}
-    engines: {node: '>=14'}
+  '@fastify/busboy@3.2.1':
+    resolution: {integrity: sha512-tgK4O+57iz5ycYNGXE5ZWj1ES03lD2XnnBYWSbU/3wYZRMQzCUq7Ycds/RdyBZQeL5MU4fxBt6lzbIWf/Bickw==}
 
   '@floating-ui/core@1.7.5':
     resolution: {integrity: sha512-1Ih4WTWyw0+lKyFMcBHGbb5U5FtuHJuujoyyr5zTaWS5EYMeT6Jb2AuDeftsCsEuchO+mM2ij5+q9crhydzLhQ==}
@@ -8126,7 +8126,7 @@ snapshots:
       '@eslint/core': 0.17.0
       levn: 0.4.1
 
-  '@fastify/busboy@2.1.1': {}
+  '@fastify/busboy@3.2.1': {}
 
   '@floating-ui/core@1.7.5':
     dependencies:
@@ -13881,7 +13881,7 @@ snapshots:
 
   undici@5.29.0:
     dependencies:
-      '@fastify/busboy': 2.1.1
+      '@fastify/busboy': 3.2.1
 
   undici@6.25.0: {}
 
