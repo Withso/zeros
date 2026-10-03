@@ -55,8 +55,11 @@ jobs:
           pnpm --dir apps/control-plane install --frozen-lockfile
       - name: Install contained-execution runtime
         uses: ./.github/actions/contained-execution-runtime
-      - name: Install Playwright Chromium headless shell
-        run: pnpm exec playwright install --with-deps --only-shell chromium
+      - name: Verify hosted Chrome for preview qualification
+        # The preview smoke launches /usr/bin/google-chrome explicitly. The
+        # sandbox contract/runtime suites do not need a downloaded browser;
+        # Playwright 1.59.1 has no headless-shell artifact for Ubuntu 26.04.
+        run: google-chrome --version
       - name: Verify provider artifacts and sandbox enforcement
         run: |
           pnpm check:runtime-pins
