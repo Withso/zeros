@@ -16,7 +16,7 @@ import { CLOUD_NATIVE_HISTORY_ROOT } from "../../../apps/desktop/src/engine/agen
 import { readCloudAgentRuntimeAttestation } from "../../../apps/desktop/src/engine/cloud-runtime-attestation";
 import { NativeToolEvidence } from "../lib/native-tool-evidence";
 import { NativeQuestionEvidence } from "../lib/native-question-evidence";
-import { parseNativeQualificationInput, nativeQualificationPermission } from "../lib/native-qualification-input";
+import { parseNativeQualificationInput, nativeQualificationPermission, nativeQualificationQuestion } from "../lib/native-qualification-input";
 import { nativeMcpCanarySource } from "../lib/native-mcp-canary";
 import { captureNativeMcpTurn, failureSignature, forkDestinationBinding, qualificationPhrase, rawSecretObserver, runNativeMcpQualification } from "../lib/native-qualification-steps";
 import type { NativeQualificationPhase } from "../lib/native-qualification-diagnostics";
@@ -129,7 +129,7 @@ async function main() {
       return { leaseId: request.leaseId, credentialVersion,nativeCapabilities, expiresAt: new Date(Date.now() + 45_000).toISOString() };
     },
   });
-  let execution: CloudProviderExecution | undefined, reply = "", binding: ProviderBinding | undefined;
+  let execution: CloudProviderExecution | undefined, reply = "", binding: ProviderBinding | undefined, firstSessionId: string | undefined = undefined;
   let confirmedMode: string | undefined;
   let tools = new NativeToolEvidence();
   gateway = new AgentGateway({
@@ -177,7 +177,10 @@ async function main() {
       },
       onQuestionRequest(_agent, id, request) {
         questions.observe(request);
-        activity.questions++; failed = true; gateway?.answerQuestion(id, { outcome: { outcome: "dismissed" } });
+        activity.questions++;
+        const response = nativeQualificationQuestion(request, { provider, phase, sessionId: firstSessionId, tools });
+        if (response.outcome.outcome !== "answered") failed = true;
+        if (!gateway?.answerQuestion(id, response)) failed = true;
       },
     },
   });
@@ -200,6 +203,7 @@ async function main() {
   wroteMcpConfig = true;
   phase = "native-start";
   const first = await bounded(gateway.newSession(provider, options));
+  firstSessionId = first.sessionId;
   assert.equal(first.modes?.currentModeId, initialMode);
   binding = first.providerBinding ?? binding;
   assert(execution);
@@ -338,7 +342,7 @@ try{
     if(nativeCapabilities.connectedApps) {
       phase="native-apps";
       const inventory=await bounded(gateway.readSessionToolInventory(provider,first.sessionId,workspace));
-      assert.equal(inventory.groups.find(group=>group.kind==="apps")?.state,"ready");checks.push("nativeApps");
+      assert.equal(inventory.groups?.find(group=>group.kind==="apps")?.state,"ready");checks.push("nativeApps");
     }
   }
   const sourceBinding=binding;

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { captureNativeMcpTurn } from "../cloud-workspace-validation/lib/native-qualification-steps";
 import { NativeToolEvidence } from "../cloud-workspace-validation/lib/native-tool-evidence";
 import { NativeQuestionEvidence } from "../cloud-workspace-validation/lib/native-question-evidence";
+import { nativeQualificationQuestion } from "../cloud-workspace-validation/lib/native-qualification-input";
 
 // Exercise the entrypoint's actual callbacks without loading its private input
 // or running a provider. The separate redaction suite owns notification wiring.
@@ -39,10 +40,11 @@ describe("qualification diagnostic consumers", () => {
     expect(JSON.stringify(context.initialMcpToolEvidence)).not.toContain("private");
   });
 
-  it("counts the canonical question while preserving the failed latch and dismissed answer", () => {
+  it("counts an unrelated canonical question while preserving the failed latch and dismissed answer", () => {
     expect(questionCallback).not.toBe("");
     const questions = new NativeQuestionEvidence(), answerQuestion = vi.fn();
-    const context = { questions, activity: { questions: 0 }, failed: false, gateway: { answerQuestion } };
+    const context = { questions, activity: { questions: 0 }, failed: false, gateway: { answerQuestion },
+      nativeQualificationQuestion, provider: "codex", phase: "native-mcp-prompt", firstSessionId: "private-session", tools: new NativeToolEvidence() };
     const callbacks = runInNewContext(javascript(`({ ${questionCallback} })`), context, { timeout: 1000 });
     callbacks.onQuestionRequest("codex", "private-resolver", { source: "native_rpc", blocking: true, allowDecline: true,
       questionId: "private-question", questions: [{ prompt: "synthetic private prompt" }] });
