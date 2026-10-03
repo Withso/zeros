@@ -124,6 +124,70 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 describe("change-line read concurrency", () => {
+  it("collapses refresh bursts to one running read and one latest follow-up per workspace", async () => {
+    let finishFirst!: (counts: {
+      additions: number;
+      deletions: number;
+    }) => void;
+    gitChangeLineCounts
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFirst = resolve;
+          }),
+      )
+      .mockResolvedValue({ additions: 7, deletions: 2 });
+
+    const first = changeLineCountsForGeneration("ws-a", 1);
+    await flushMicrotasks();
+    const refreshes = Array.from({ length: 30 }, (_, index) =>
+      changeLineCountsForGeneration("ws-a", index + 2),
+    );
+    const other = changeLineCountsForGeneration("ws-b", 1);
+    await flushMicrotasks();
+    const startedBeforeCompletion = gitChangeLineCounts.mock.calls.map(
+      ([id]) => id,
+    );
+
+    finishFirst({ additions: 1, deletions: 0 });
+    await Promise.all([first, other, ...refreshes]);
+
+    expect(startedBeforeCompletion).toEqual(["ws-a", "ws-b"]);
+    expect(gitChangeLineCounts.mock.calls.map(([id]) => id)).toEqual([
+      "ws-a",
+      "ws-b",
+      "ws-a",
+    ]);
+    expect(new Set(refreshes).size).toBe(1);
+    await expect(refreshes.at(-1)).resolves.toEqual({
+      additions: 7,
+      deletions: 2,
+    });
+  });
+
+  it("runs only the latest queued refresh after a slow read fails", async () => {
+    let failFirst!: (reason: Error) => void;
+    gitChangeLineCounts
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            failFirst = reject;
+          }),
+      )
+      .mockResolvedValue({ additions: 5, deletions: 1 });
+    const first = changeLineCountsForGeneration("ws-a", 1).catch(() => null);
+    await flushMicrotasks();
+    const refreshes = [2, 3, 4].map((generation) =>
+      changeLineCountsForGeneration("ws-a", generation),
+    );
+    failFirst(new Error("Request timeout: WORKSPACE_REQUEST"));
+    await first;
+    await expect(Promise.all(refreshes)).resolves.toEqual(
+      Array(3).fill({ additions: 5, deletions: 1 }),
+    );
+    expect(gitChangeLineCounts).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps a whole strip's cold start off one spawn storm", async () => {
     // Every visible tab probes at once on mount; only a few may reach the
     // engine before the rest have to wait for a slot.

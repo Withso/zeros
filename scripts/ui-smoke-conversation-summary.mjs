@@ -415,7 +415,7 @@ export async function runConversationSummarySmoke({
   );
 
   await verify(
-    "a late diff response cannot overwrite the last confirmed totals on return",
+    "slow diff refreshes coalesce and preserve the last confirmed totals on return",
     async () => {
       const counts = () => page.locator("[data-summary-change-counts]");
       const reads = () =>
@@ -430,8 +430,19 @@ export async function runConversationSummarySmoke({
       await page.evaluate(() => window.__summaryHarness.delayLines());
       await expect.poll(reads).toBe(before + 1);
       await page.evaluate(() => window.__summaryHarness.changeLines(8, 0));
-      await expect(counts()).toHaveText("+8");
+      // The newer generation waits behind the existing read, so the confirmed
+      // totals stay visible without starting another concurrent Git scan.
+      await page.evaluate(
+        () =>
+          new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          ),
+      );
+      expect(await reads()).toBe(before + 1);
+      await expect(counts()).toHaveText("+54364−3");
       await page.evaluate(() => window.__summaryHarness.releaseLines());
+      await expect(counts()).toHaveText("+8");
+      expect(await reads()).toBe(before + 2);
       await page.evaluate(() => window.__summaryHarness.switchFolder("b"));
       await expect(counts()).toHaveText("−7");
       await page.evaluate(() => {
