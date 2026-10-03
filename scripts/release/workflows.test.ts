@@ -19,6 +19,9 @@ describe("cloud backend provisioning workflow", () => {
     expect(text).toContain("type: boolean\n        default: false");
     expect(job(text, "provision")).toContain("CLOUD_PROVISION_CONFIRM: ${{ inputs.confirm }}");
     expect(job(text, "provision")).toContain("CLOUD_PROVISION_ENABLE_CLOUD: ${{ inputs.enable_cloud }}");
+    expect(text).toContain("adopt_base_worker:");
+    for (const line of ["CLOUD_PROVISION_ADOPT_BASE_WORKER: ${{ inputs.adopt_base_worker }}", "ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}",
+      "BOAT_BASE_SNAPSHOT: ${{ vars.BOAT_BASE_SNAPSHOT }}"]) expect(job(text, "provision")).toContain(line);
   });
   it("takes exactly one Production approval before accessing channel secrets", () => {
     const text = workflow("cloud-provision"), approve = job(text, "approve"), provision = job(text, "provision");

@@ -253,12 +253,17 @@ has these sources (all output is names/status only):
 | `CLOUD_WORKSPACE_SECRET_KEYS_JSON`, `CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION` | Generated once, version `1`; settings, setup and agent-credential encryption share this ring |
 | `CLOUD_WORKSPACE_OBJECT_KEYS_JSON`, `CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION` | Independently generated once, version `1`; durable-object encryption |
 | `CLOUD_CODEX_REFRESH_FINGERPRINT_KEYS_JSON`, `CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION` | Independently generated once, version `1`; Codex renewal/security fingerprints, never a native refresh token |
-| `CLOUD_WORKSPACES_ENABLED`, `CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED`, `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` | Initially all `false`; preserve existing enabled/paused states on repeat apply; set all `true` only on an explicit, qualified `enable_cloud` apply |
+| `CLOUD_WORKSPACES_ENABLED`, `CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED`, `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` | Initially all `false`; preserve existing enabled/paused states on repeat apply; set all `true` only on an explicit `enable_cloud` apply with a selected tuple, qualified unless `ZEROS_WORKER_PROMOTION` is off |
 | `EMAIL_FROM`, `OPERATIONS_ALERT_EMAIL` | Constants `Zeros <notifications@zeros.build>`, `alert@zeros.build` |
-| `CLOUD_WORKSPACE_PROVIDER`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, `ZEROS_CLOUD_SOURCE_COMMIT`, `ZEROS_CLOUD_IMAGE_ARCHITECTURE`, `CLOUD_WORKSPACE_STORAGE_MIB` | Worker lane's complete qualified six-field tuple; provisioning never writes any of these fields |
+| `CLOUD_WORKSPACE_PROVIDER`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, `ZEROS_CLOUD_SOURCE_COMMIT`, `ZEROS_CLOUD_IMAGE_ARCHITECTURE`, `CLOUD_WORKSPACE_STORAGE_MIB` | Worker lane's complete six-field tuple. Provisioning writes them only for `adopt_base_worker` while worker promotion is off and the channel has no tuple: it copies the tuple Alpha serves when that image is the channel's `BOAT_BASE_SNAPSHOT`. It never completes a partial tuple or replaces a selected one |
 | `ZEROS_RELEASE_CANARIES_ENABLED`, `RUNTIME_QUALIFICATION_ACTOR_USER_ID`, `WORKER_CANARY_ORGANIZATION_ID`, `WORKER_CANARY_REPOSITORY` | Optional existing GitHub environment variables; missing ones are reported `missing-input`, not invented |
 | `WORKER_CANARY_ADMISSION_TOKEN`, `WORKER_ADMISSION_CONFIG_JSON` | Optional existing GitHub environment secrets, also installed server-side; required and validated when release canaries are enabled |
 | Existing `DATABASE_URL`, authentication/WorkOS configuration, `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_SLUG`, `GITHUB_OAUTH_CALLBACK_URL`, `GITHUB_APP_PRIVATE_KEY` | Kept Railway-only; the enabled API requires a valid RSA private key and complete GitHub registration |
+
+While `ZEROS_WORKER_PROMOTION` is off, apply with `enable_cloud` and
+`adopt_base_worker` to turn on a channel's cloud with the shared base image.
+The next release deploys those variables. Agents in cloud workspaces still run
+only on images with recorded runtime qualifications for that channel.
 
 Engine protocol/port/heartbeat, setup deadlines and operation/archive/reconcile
 limits retain existing validated values or the boot loader's defaults. Managed
