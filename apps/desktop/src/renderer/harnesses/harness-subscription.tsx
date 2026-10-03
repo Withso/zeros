@@ -300,7 +300,10 @@ RuntimeClient.prototype.send = (message) => {
 const executionAccounts = new Map<string, string>();
 RuntimeClient.prototype.request = async function <
   T extends BridgeMessage = BridgeMessage,
->(message: Partial<BridgeMessage> & { type: string }): Promise<T> {
+>(
+  message: Partial<BridgeMessage> & { type: string },
+  options?: Parameters<RuntimeClient["request"]>[1],
+): Promise<T> {
   const request = message as unknown as {
     type: string;
     loginProvider?: string;
@@ -320,10 +323,17 @@ RuntimeClient.prototype.request = async function <
     }));
   }
   if (queueFixture && request.type === "AGENT_STEER") {
-    return new Promise<T>((resolve) => queueSteers.set(request.sessionId, (outcome) => {
-      queueSteers.delete(request.sessionId);
-      resolve({ type: "AGENT_STEERED", sessionId: request.sessionId, outcome } as unknown as T);
-    }));
+    return new Promise<T>((resolve, reject) => {
+      const timeoutMs = typeof options === "number" ? options : options?.timeoutMs ?? 5_000;
+      const timer = timeoutMs > 0
+        ? window.setTimeout(() => reject(new Error("Request timeout: AGENT_STEER")), timeoutMs)
+        : undefined;
+      queueSteers.set(request.sessionId, (outcome) => {
+        window.clearTimeout(timer);
+        queueSteers.delete(request.sessionId);
+        resolve({ type: "AGENT_STEERED", sessionId: request.sessionId, outcome } as unknown as T);
+      });
+    });
   }
   if (request.type === "AGENT_LIST_AGENTS")
     return { type: "AGENT_AGENTS_LIST", agents: registry() } as unknown as T;

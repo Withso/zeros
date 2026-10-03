@@ -20,7 +20,7 @@ const handlers = new Map<string, string>();
 function visit(node: ts.Node): void {
   if (
     ts.isVariableDeclaration(node) &&
-    ["saveQueuedEdit", "sendNowQueued"].includes(node.name.getText(ast))
+    ["saveQueuedEdit", "sendNowQueued", "deleteQueued"].includes(node.name.getText(ast))
   ) {
     handlers.set(node.name.getText(ast), `const ${node.getText(ast)};`);
   }
@@ -43,6 +43,7 @@ function fixture() {
     queueSelectedRef: { current: "queued-1" },
     queueSaveInFlightRef: { current: false },
     queueEditGenerationRef: { current: 0 },
+    queuedMessages: [{ id: "queued-1" }, { id: "queued-2" }],
     serializeComposerState: () => structuredClone(draft),
     isSubmittedComposerDocument,
     browserPickerSelection: null,
@@ -61,22 +62,66 @@ function fixture() {
     session: {
       editQueued: vi.fn(),
       steerQueued: vi.fn().mockResolvedValue(true),
+      removeQueued: vi.fn(),
+      releaseQueue: vi.fn(),
     },
     setQueueSelectedId: vi.fn(),
     toast: { error: vi.fn(), warning: vi.fn() },
   };
   const bind = new Function(
     "environment",
-    `const { ${Object.keys(environment).join(", ")} } = environment;\n${code}\nreturn { saveQueuedEdit, sendNowQueued };`,
+    `const { ${Object.keys(environment).join(", ")} } = environment;\n${code}\nreturn { saveQueuedEdit, sendNowQueued, deleteQueued };`,
   );
   const actions = bind(environment) as {
     saveQueuedEdit: () => Promise<boolean>;
     sendNowQueued: (id: string) => Promise<void>;
+    deleteQueued: (id: string) => void;
   };
   return { ...environment, ...actions, draft };
 }
 
 describe("saving a queued edit before Send now", () => {
+  it("removes the edited message before releasing an idle queue", () => {
+    const f = fixture();
+    const pending = new Set(["queued-1", "queued-2"]);
+    const dispatched: string[] = [];
+    f.session.removeQueued.mockImplementation(id => pending.delete(id));
+    f.exitQueuedEdit.mockImplementation(() => {
+      const next = pending.values().next().value;
+      if (next) dispatched.push(next);
+    });
+    f.deleteQueued("queued-1");
+    expect(dispatched).toEqual(["queued-2"]);
+    expect(f.session.removeQueued).toHaveBeenCalledExactlyOnceWith("queued-1");
+  });
+
+  it("keeps the queue held until Send now has selected the saved edit", async () => {
+    const f = fixture();
+    const dispatched: string[] = [];
+    let selected = "earlier message";
+    f.session.releaseQueue.mockImplementation(() => { dispatched.push(selected); });
+    f.exitQueuedEdit.mockImplementation((releaseQueue = true) => {
+      if (releaseQueue) f.session.releaseQueue();
+    });
+    f.session.steerQueued.mockImplementation(async id => { selected = id; return true; });
+    await f.sendNowQueued("queued-1");
+    expect(dispatched).toEqual(["queued-1"]);
+    expect(f.session.releaseQueue).toHaveBeenCalledOnce();
+  });
+
+  it("releases the edit hold before awaiting native delivery", async () => {
+    const f = fixture();
+    let deliver!: (value: boolean) => void;
+    f.session.steerQueued.mockImplementation(() => new Promise(resolve => { deliver = resolve; }));
+    const pending = f.sendNowQueued("queued-1");
+    await vi.waitFor(() => expect(f.session.steerQueued).toHaveBeenCalledOnce());
+    expect(f.session.releaseQueue).toHaveBeenCalledOnce();
+    // A later edit can acquire its own hold while this receipt is pending.
+    deliver(true);
+    await pending;
+    expect(f.session.releaseQueue).toHaveBeenCalledOnce();
+  });
+
   it.each(["typing", "attachment replacement", "switch", "cancel", "cancel and reopen"])(
     "preserves the current editor when %s occurs during attachment preparation",
     async (change) => {

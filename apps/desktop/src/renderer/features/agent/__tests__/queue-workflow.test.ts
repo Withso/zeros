@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SendQueue } from "../send-queue";
 import * as lifecycle from "../session-reload-lifecycle";
 
@@ -124,10 +124,21 @@ function setup(agentId = "claude", status = "streaming") {
     },
     steerQueuedRef: { current: null },
     bridge: {
-      request: (message: Record<string, unknown>) =>
-        new Promise((resolve, reject) =>
-          requests.push({ message, resolve, reject }),
-        ),
+      request: (
+        message: Record<string, unknown>,
+        options: { timeoutMs?: number } = {},
+      ) =>
+        new Promise((resolve, reject) => {
+          const timeoutMs = options.timeoutMs ?? 5_000;
+          const timer = timeoutMs > 0
+            ? setTimeout(() => reject(new Error("bridge timeout")), timeoutMs)
+            : undefined;
+          requests.push({
+            message,
+            resolve: (value) => { clearTimeout(timer); resolve(value); },
+            reject: (error) => { clearTimeout(timer); reject(error); },
+          });
+        }),
       send: vi.fn(),
     },
     loadedBackgroundTaskState: () => ({}),
@@ -164,9 +175,57 @@ function setup(agentId = "claude", status = "streaming") {
   };
 }
 
+afterEach(() => vi.useRealTimers());
+
 describe.each(["claude", "codex", "cursor"])(
   "%s queue and Stop workflow",
   (agentId) => {
+    it("waits for slow native delivery without pausing or losing the receipt", async () => {
+      vi.useFakeTimers();
+      const h = setup(agentId);
+      const settled = vi.fn();
+      const pending = h.actions.steerQueued("chat", "C").then(settled);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).not.toHaveBeenCalled();
+      expect(h.queue.isPaused("chat")).toBe(false);
+      expect(h.store.sessions.chat.messages.find((m: { id: string }) => m.id === "C"))
+        .toMatchObject({ queued: true, queuedDelivery: "sending" });
+      // Other follow-ups remain editable/deletable while native delivery waits.
+      h.actions.editQueued("chat", "B", { text: "edited B" });
+      h.actions.removeQueued("chat", "D");
+      await h.actions.steerQueued("chat", "C");
+      expect(h.requests).toHaveLength(1);
+
+      h.requests[0]!.resolve({ type: "AGENT_STEERED", outcome: "delivered", turnId: "A" });
+      await pending;
+      expect(settled).toHaveBeenCalledExactlyOnceWith(true);
+      expect(h.store.sessions.chat.messages.find((m: { id: string }) => m.id === "C"))
+        .toMatchObject({ queued: false, queuedDelivery: undefined, steeredTurnId: "A" });
+      await h.finish();
+      expect(h.sent.map(args => args[1])).toEqual(["edited B"]);
+    });
+
+    it("restores edit and delete after Stop returns a delayed instruction to the queue", async () => {
+      vi.useFakeTimers();
+      const h = setup(agentId);
+      const pending = h.actions.steerQueued("chat", "C");
+      await vi.advanceTimersByTimeAsync(60_000);
+      await h.actions.cancel("chat");
+      await h.finish();
+      h.requests[0]!.resolve({ type: "AGENT_STEERED", outcome: "queued" });
+      expect(await pending).toBe(true);
+      expect(h.queue.isPaused("chat")).toBe(true);
+      expect(h.queue.get("chat")!.map(entry => entry.bubbleId)).toEqual(["B", "C", "D"]);
+      expect(h.store.sessions.chat.messages.find((m: { id: string }) => m.id === "C"))
+        .toMatchObject({ queued: true, queuedDelivery: undefined });
+      h.actions.editQueued("chat", "C", { text: "edited C" });
+      expect(h.queue.get("chat")!.find(entry => entry.bubbleId === "C")!.args[1]).toBe("edited C");
+      h.actions.removeQueued("chat", "C");
+      expect(h.queue.get("chat")!.map(entry => entry.bubbleId)).toEqual(["B", "D"]);
+      expect(h.sent).toEqual([]);
+    });
+
     it("does not steer after Stop while a composer mode selection is pending", async () => {
       const h = setup(agentId);
       let confirm!: () => void;

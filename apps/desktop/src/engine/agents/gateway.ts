@@ -6227,7 +6227,14 @@ export class AgentGateway {
     if (!steer) {
       throw new Error(`agent ${adapter.agentId} does not support steering`);
     }
-    const instruction = await this.sessionTools.preparePrompt(sessionId);
+    let instruction: string | undefined;
+    try {
+      instruction = await this.sessionTools.preparePrompt(sessionId);
+    } catch {
+      // Preparation failed or was cancelled before native dispatch. Delivery
+      // is known not to have happened, so preserve editable queue ownership.
+      return "queued";
+    }
     if (isCurrent && !isCurrent()) return "queued";
     return steer({ sessionId, prompt: instruction ? [{ type: "text", text: instruction }, ...prompt] : prompt });
   }

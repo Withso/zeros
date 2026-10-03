@@ -2276,6 +2276,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           if (resultBelongsToTurn) state.usageOwnerTurnId = usageTurnId;
           const accountedUsage = owners.size > 1 ? undefined
             : state.usageLedger.add(usageTurnId, state.translator.turnUsage, "estimated");
+          if (!m.parent_tool_use_id && typeof m.queued_turn_count === "number" && m.queued_turn_count > 0) {
+            // New queued-work evidence supersedes an earlier empty result,
+            // including autonomous acknowledgements that return below.
+            for (const receipt of state.pendingSteers.values()) {
+              if (receipt.completionTimer) clearTimeout(receipt.completionTimer);
+              delete receipt.completionTimer;
+            }
+          }
           if (backgroundAcknowledgement) {
             this.refreshIdleTeardown(state);
             continue;

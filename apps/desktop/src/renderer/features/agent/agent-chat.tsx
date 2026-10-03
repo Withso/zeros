@@ -3886,7 +3886,7 @@ export function AgentChat({
 
   /** Leave queued-edit mode. Restores the stashed pre-edit draft, releases
    *  the provider-side queue hold, and hands focus back to the composer. */
-  const exitQueuedEdit = () => {
+  const exitQueuedEdit = (releaseQueue = true) => {
     if (editingQueuedRef.current == null) return;
     queueEditGenerationRef.current++;
     editingQueuedRef.current = null;
@@ -3896,7 +3896,7 @@ export function AgentChat({
       queueStashRef.current ?? { json: null, attachments: [] },
     );
     queueStashRef.current = null;
-    session.releaseQueue?.();
+    if (releaseQueue) session.releaseQueue?.();
     // setContent doesn't emit an editor change — re-sync the live draft to
     // the restored content explicitly.
     updateLiveDraftRef.current();
@@ -3937,7 +3937,7 @@ export function AgentChat({
   /** Persist the composer's content back onto the queued entry (Enter /
    *  tick). Runs the SAME pipeline as a fresh send — mention expansion +
    *  attachment encoding — so nothing degrades through an edit. */
-  const saveQueuedEdit = async (): Promise<boolean> => {
+  const saveQueuedEdit = async (releaseQueue = true): Promise<boolean> => {
     const id = editingQueuedRef.current;
     if (!id || queueSaveInFlightRef.current) return false;
     const generation = queueEditGenerationRef.current;
@@ -3994,14 +3994,16 @@ export function AgentChat({
     } finally {
       queueSaveInFlightRef.current = false;
     }
-    exitQueuedEdit();
+    exitQueuedEdit(releaseQueue);
     return true;
   };
 
   const deleteQueued = (id: string) => {
     const idx = queuedMessages.findIndex((m) => m.id === id);
-    if (editingQueuedRef.current === id) exitQueuedEdit();
+    // Remove while the edit hold still owns the queue. Releasing first can
+    // dispatch this very message if the running turn finished during editing.
     session.removeQueued?.(id);
+    if (editingQueuedRef.current === id) exitQueuedEdit();
     // The row's staged files deliberately STAY in the context graph — the
     // graph is append-only (context-graph-staging.ts): deleting the message
     // withdraws the prompt, not the workspace's record of its files. Only
@@ -4019,8 +4021,17 @@ export function AgentChat({
    *  when idle. Sending the row that's being edited saves the edit first, so
    *  what's dispatched is what the user sees in the composer. */
   const sendNowQueued = async (id: string) => {
-    if (editingQueuedRef.current === id && !(await saveQueuedEdit())) return;
-    const ok = await session.steerQueued?.(id);
+    const wasEditing = editingQueuedRef.current === id;
+    if (wasEditing && !(await saveQueuedEdit(false))) return;
+    let delivery: Promise<boolean> | undefined;
+    try {
+      // Select the edited message before releasing the hold, otherwise an
+      // idle queue can drain its earlier head (or this row) before Send now.
+      delivery = session.steerQueued?.(id);
+    } finally {
+      if (wasEditing) session.releaseQueue?.();
+    }
+    const ok = await delivery;
     if (ok === false) {
       toast.error("Couldn't send now", {
         description:
@@ -5063,7 +5074,7 @@ export function AgentChat({
                       <span>Editing queued message</span>
                       <button
                         type="button"
-                        onClick={exitQueuedEdit}
+                        onClick={() => exitQueuedEdit()}
                         className="text-fg2 hover:text-fg1 shrink-0 transition-colors"
                       >
                         Cancel

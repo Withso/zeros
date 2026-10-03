@@ -6067,6 +6067,31 @@ describe("ClaudeSdkAdapter.steer", () => {
     } finally { await adapter.dispose(); vi.useRealTimers(); }
   });
 
+  it("clears a finished-result grace when Claude reports queued work again", async () => {
+    vi.useFakeTimers();
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("A")] as never });
+      await flushMicrotasks();
+      const settled = vi.fn();
+      const steer = adapter.steer({ sessionId: session.sessionId, prompt: [textBlock("C")] as never }).then(settled);
+      await flushMicrotasks();
+      const uuid = live.inputsSeen[1]!.uuid;
+      live.push({ ...resultOk("queued-again"), queued_turn_count: 0 });
+      await turn;
+      await vi.advanceTimersByTimeAsync(100);
+      live.push({ ...resultOk("queued-again"), result: "", num_turns: 0, result_index: 1, queued_turn_count: 1 });
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(settled).not.toHaveBeenCalled();
+      live.push({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+      await steer;
+      expect(settled).toHaveBeenCalledExactlyOnceWith("delivered");
+    } finally { await adapter.dispose(); vi.useRealTimers(); }
+  });
+
   it("removes steering that the wrapper has not yet pulled before Stop", async () => {
     let releaseInput!: () => void;
     const inputGate = new Promise<void>((resolve) => { releaseInput = resolve; });

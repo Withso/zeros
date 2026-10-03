@@ -20,6 +20,31 @@ function resource() {
 }
 
 describe("session tool ownership", () => {
+  it("isolates cancelled preparation and resumes only for a new prompt", async () => {
+    let finish!: (value: string) => void;
+    const first = {
+      ...resource(),
+      preparePrompt: vi.fn(() => new Promise<string>(resolve => { finish = resolve; })),
+    };
+    const second = { ...resource(), preparePrompt: vi.fn(async () => "other instructions") };
+    const registry = new AgentSessionToolRegistry(async ({ executionId }) => executionId === "one" ? first : second);
+    await registry.admit({ executionId: "one", cwd: "/a" }, [], {});
+    await registry.admit({ executionId: "two", cwd: "/b" }, [], {});
+    const pending = registry.preparePrompt("one");
+    const rejected = expect(pending).rejects.toThrow(/abort/i);
+    await vi.waitFor(() => expect(first.preparePrompt).toHaveBeenCalledOnce());
+    registry.cancel("one");
+    await rejected;
+    await expect(registry.preparePrompt("one")).rejects.toThrow(/abort/i);
+    await expect(registry.preparePrompt("two")).resolves.toBe("other instructions");
+    finish("obsolete instructions");
+    first.preparePrompt.mockResolvedValue("new instructions");
+    registry.beginPrompt("one");
+    await expect(registry.preparePrompt("one")).resolves.toBe("new instructions");
+    expect(first.preparePrompt).toHaveBeenCalledTimes(2);
+    await registry.dispose();
+  });
+
   it("merges a reserved product server with ordinary user MCP and keeps credentials per execution", async () => {
     const tools = resource();
     const factory = vi.fn(async () => tools);
