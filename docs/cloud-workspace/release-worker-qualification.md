@@ -435,6 +435,9 @@ the new run still requires all three agents to qualify and its own strict
 cleanup before publication. Explicit `--reconcile-storage` remains available.
 Beta and Production retain their automatic historical recovery. Restore the
 Alpha recovery pass when the deferred cleanup work is addressed.
+Before a fresh builder reservation, an acknowledged failed image build still
+occupying this owner's compute slot may be observed on demand as described
+below. This does not resume the historical storage/canary scan.
 An authenticated unstarted allocation saved before its resource row exists is
 nonexecuted history, including a superseded run or truthful empty cleanup after
 admission denial. Scanning it never releases admission or fabricates cleanup or
@@ -499,6 +502,21 @@ The normal worker also performs this bounded reconciliation before preflight;
 no new scheduler, pruning policy or automatic erasure claim is added.
 
 ### Release-owned builder retirement receipts
+
+An unsuccessful build that never requested capture has no publishable image.
+Its compute slot can be released after validating the original owning
+lease/account/run/source, acknowledged credential-free creation, retained
+source archive identity, acknowledged deletion operation, sandbox GET 404 and
+named-image GET 404. The separate `failed-build-unavailable` proof is saved
+before its compute-terminal marker and ordinary admission release. A blocked
+storage operation remains pending/unmeasured with `builder.deleted:false`;
+the unused name reservation is released because capture was never dispatched.
+The proof cannot satisfy the image-cleanup or publication schemas. Candidate,
+capture or uncertain-create records remain ineligible. Diagnostics and original
+storage history are retained, and recovery never replays an acknowledged DELETE.
+The encrypted owning journal keeps only the latest attestation command receipt;
+large responses retain bounded excerpts and their complete digest. Public
+errors identify the failed stage without printing the private command output.
 
 An image builder may contain committed application source, previous base/source
 content, build/cache/log data and synthetic Setup fixtures. Sanitation does not

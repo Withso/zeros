@@ -72,6 +72,33 @@ export const WorkerBuilderCleanupSchema = z.discriminatedUnion("kind", [
       Date.parse(result.storage.expectedBy) <= Date.parse(result.operationObservedAt) + 6 * 3600_000 + 5000);
 });
 export type WorkerBuilderCleanup = z.infer<typeof WorkerBuilderCleanupSchema>;
+
+// A failed, uncaptured build can stop using compute without qualifying an
+// image. This proof is deliberately outside WorkerBuilderCleanupSchema.
+export const WorkerFailedBuildProvenanceSchema = z.object({ scope: creationScope,
+  creation: WorkerBuilderProvenanceSchema.shape.creation, source: WorkerBuilderProvenanceSchema.shape.source,
+}).strict().refine(proof => proof.scope.owner === workerOwner(proof.scope.channel) &&
+  proof.creation.body.from === proof.scope.protectedBaseSnapshot && proof.creation.bodySha256 === hash(proof.creation.body) &&
+  proof.source.commit === proof.scope.sourceSha && proof.source.parent === proof.scope.sourceSha &&
+  Date.parse(proof.creation.requestedAt) <= Date.parse(proof.creation.createdAt) &&
+  Date.parse(proof.creation.billingObservedAt) >= Date.parse(proof.creation.requestedAt));
+export const WorkerFailedBuildRetirementSchema = z.object({ version: z.literal(1), kind: z.literal("failed-build-unavailable"),
+  provenance: WorkerFailedBuildProvenanceSchema, provenanceSha256: digest, snapshotName,
+  operation: z.union([pendingOperation, completedOperation]), operationObservedAt: timestamp,
+  unavailableObservedAt: timestamp, snapshotAbsentObservedAt: timestamp,
+  storage: z.object({ status: z.enum(["pending", "completed"]), physicalBytes: z.literal("unmeasured") }).strict(),
+}).strict().refine(result => result.provenanceSha256 === hash(result.provenance) &&
+  result.operation.targetId === result.provenance.creation.sandboxId &&
+  result.snapshotName === workerSnapshotName(result.provenance.scope, hash([result.provenance.scope.sourceSha, result.provenance.scope.runId])) &&
+  Date.parse(result.operationObservedAt) >= Date.parse(result.provenance.creation.billingObservedAt) &&
+  Date.parse(result.unavailableObservedAt) >= Date.parse(result.operationObservedAt) &&
+  Date.parse(result.snapshotAbsentObservedAt) >= Date.parse(result.unavailableObservedAt) &&
+  (result.operation.status === "completed"
+    ? result.storage.status === "completed" && Date.parse(result.operation.completedAt) >= Date.parse(result.provenance.creation.requestedAt) &&
+      Date.parse(result.operation.completedAt) <= Date.parse(result.operationObservedAt)
+    : result.storage.status === "pending" && (result.operation.stage !== "waiting_for_uploads" || result.operation.expectedBy !== null &&
+      Date.parse(result.operation.expectedBy) >= Date.parse(result.provenance.creation.requestedAt) &&
+      Date.parse(result.operation.expectedBy) <= Date.parse(result.operationObservedAt) + 6 * 3600_000 + 5000)));
 export const WorkerCleanupSchema = z.object({ credentialCanaryResourcesDeleted: z.literal(true), imageBuilder: WorkerBuilderCleanupSchema }).strict();
 export type WorkerCleanup = z.infer<typeof WorkerCleanupSchema>;
 export const WorkerDeferredCleanupSchema = z.object({ credentialCanaryResourcesDeleted: z.literal(false), imageBuilder: WorkerBuilderCleanupSchema,

@@ -9,6 +9,8 @@ import { WorkerBuilderCleanupSchema, WorkerBuilderProvenanceSchema, WorkerCandid
   WorkerBuilderScopeSchema as creationScope, WorkerBuilderCompletedOperationSchema as completedOperation,
   WorkerBuilderPendingOperationSchema as pendingOperation, type WorkerBuilderCleanup, type WorkerBuilderProvenance } from "./worker-builder-contracts";
 import { assertHistoricalWorkerNameRetirement } from "./worker-named-retirement";
+import { WorkerFailedBuildProvenanceSchema, WorkerFailedBuildRetirementSchema } from "./worker-builder-contracts";
+import { releaseHostedAdmission } from "../dev-environment/hosted-admission.mjs";
 export * from "./worker-builder-contracts";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -20,7 +22,7 @@ function accountBinding(profile: any) {
   requireCheck(values.every(value => typeof value === "string" && value.length > 0), "Worker builder account provenance is missing");
   return hash(values);
 }
-async function ownedScope(config: PromotionConfig, context: Context, retiredName = false) {
+function releaseScope(config: PromotionConfig, context: Context) {
   const { lease, record, profile } = context, state = lease.state;
   const run = state?.releaseRuns?.find((value: any) => value.runId === config.runId);
   requireCheck(state?.owner === workerOwner(config.channel) && state.identity === hash(["release-worker", config.repository, config.channel]) &&
@@ -30,18 +32,23 @@ async function ownedScope(config: PromotionConfig, context: Context, retiredName
   const scope = creationScope.safeParse({ repository: config.repository, channel: config.channel, runId: config.runId, runAttempt: config.runAttempt,
     sourceSha: config.sourceSha, inputsSha256: record.inputsSha256, owner: state.owner, generation: state.generation,
     accountBinding: accountBinding(profile), protectedBaseSnapshot: profile.boat.baseSnapshot });
-  requireCheck(scope.success && context.readAdmission, "Worker builder admission provenance is missing");
+  requireCheck(scope.success, "Worker builder admission provenance is missing");
+  return scope.data;
+}
+async function ownedScope(config: PromotionConfig, context: Context, retiredName = false) {
+  const { lease, record, profile } = context, state = lease.state, scope = releaseScope(config, context);
+  requireCheck(context.readAdmission, "Worker builder admission provenance is missing");
   const ledger = await context.readAdmission();
   if (retiredName) {
     await lease.fence();
     assertHistoricalWorkerNameRetirement(state, ledger?.state, profile, record, (context.now ?? Date.now)());
-    return scope.data;
+    return scope;
   }
-  requireCheck(ledger?.state?.version === 1 && ledger.state.owner === "account-admission" && ledger.state.account === scope.data.accountBinding &&
+  requireCheck(ledger?.state?.version === 1 && ledger.state.owner === "account-admission" && ledger.state.account === scope.accountBinding &&
     ledger.state.reservations?.some((row: any) => row.kind === "builder" && row.owner === state.owner && row.generation === state.generation &&
       row.computeId === `snapshot:${record.snapshotId}` && row.snapshotName === record.snapshotId && !row.snapshotReleasedAt),
     "Worker builder admission ownership is unconfirmed");
-  return scope.data;
+  return scope;
 }
 export async function releaseBuilderCreationScope(config: PromotionConfig, context: Context) {
   return ownedScope(config, context);
@@ -129,6 +136,108 @@ function validObservation(value: unknown, now: number) {
     "Worker builder cleanup observation is invalid");
   return parsed.data;
 }
+
+function failedBuildProvenance(config: PromotionConfig, context: Context) {
+  const { record, lease } = context, expected = releaseScope(config, context), builder = record.builder;
+  requireCheck(record.candidate === undefined && record.qualified !== true && record.snapshotRequested !== true &&
+    record.snapshotCreate === undefined && record.builderProvenance === undefined && builder?.cleanup === undefined &&
+    record.builderCreate?.phase === "acknowledged" && builder.billingOrgConfirmed === true &&
+    builder.accountBinding === expected.accountBinding && Number.isFinite(record.builderIntent?.at),
+    "Worker failed builder must have an acknowledged creation and no capture or candidate");
+  const original = creationScope.safeParse(record.builderIntent.scope);
+  requireCheck(original.success && Object.keys(expected).every(key => key === "runAttempt"
+    ? Number(original.data.runAttempt) <= Number(expected.runAttempt)
+    : original.data[key as keyof typeof expected] === expected[key as keyof typeof expected]), "Worker failed builder original scope changed");
+  const prefix = config.sourceSha.slice(0, 12), source = jsonProof(record, `${prefix}/source.json`), created = jsonProof(record, "builder.json");
+  const proof = WorkerFailedBuildProvenanceSchema.safeParse({ scope: original.data,
+    creation: { sandboxId: created.id, key: record.builderIntent.key, requestedAt: new Date(record.builderIntent.at).toISOString(),
+      createdAt: created.createdAt, body: record.builderIntent.body, bodySha256: hash(record.builderIntent.body),
+      billingOrgConfirmed: builder.billingOrgConfirmed, billingObservedAt: builder.billingObservedAt },
+    source: { commit: source.commit, parent: source.parent, tree: source.tree, archiveSha256: source.archiveSha256, exactMergedCommit: source.exactMergedCommit } });
+  requireCheck(proof.success && proof.data.creation.sandboxId === builder.id && created.from === proof.data.creation.body.from &&
+    created.type === proof.data.creation.body.type &&
+    !lease.state.resources.images.some((image: any) => image !== record && image.builder?.id === builder.id) &&
+    !lease.state.releaseRuns.some((run: any) => run.canaries?.some((job: any) => job.target?.id === builder.id)),
+    "Worker failed builder original creation/source provenance is invalid");
+  return proof.data;
+}
+function savedFailedBuild(config: PromotionConfig, context: Context) {
+  const parsed = WorkerFailedBuildRetirementSchema.safeParse(context.record.builder?.failedBuildRetirement), now = (context.now ?? Date.now)();
+  requireCheck(parsed.success && parsed.data.provenanceSha256 === hash(failedBuildProvenance(config, context)) &&
+    parsed.data.operation.id === context.record.builder.deletionOperationId && parsed.data.snapshotName === context.record.snapshotId &&
+    Date.parse(parsed.data.snapshotAbsentObservedAt) <= now + 5000,
+    "Worker failed builder retained retirement proof changed");
+  return parsed.data;
+}
+/** Retire only compute for an uncaptured failed build. Never issue an image
+ * cleanup/publication proof or discard its diagnostic and storage history. */
+export async function retireFailedReleaseBuilder(config: PromotionConfig, context: Context, observeOnly = false) {
+  const { lease, record, request } = context, builder = record.builder, now = context.now ?? Date.now;
+  const proof = failedBuildProvenance(config, context);
+  requireCheck(context.readAdmission, "Worker failed builder admission is missing");
+  const ledger = (await context.readAdmission())?.state;
+  requireCheck(ledger?.version === 1 && ledger.owner === "account-admission" && ledger.account === proof.scope.accountBinding &&
+    Array.isArray(ledger.reservations), "Worker failed builder admission account changed");
+  if (builder.failedBuildRetirement !== undefined) savedFailedBuild(config, context);
+  const held = ledger.reservations.find((row: any) => row.kind === "builder" && row.owner === proof.scope.owner &&
+    row.generation === proof.scope.generation && row.computeId === `snapshot:${record.snapshotId}` && row.snapshotName === record.snapshotId);
+  requireCheck(held && !held.snapshotReleasedAt || !held && builder.retiredAt && builder.failedBuildRetirement,
+    "Worker failed builder original reservation is missing");
+  requireCheck(!builder.deleteRequested || operationId.safeParse(builder.deletionOperationId).success,
+    "Worker failed builder deletion response was lost; retain its hold");
+  requireCheck(!builder.deletionOperationId || builder.deleteRequested === true && operationId.safeParse(builder.deletionOperationId).success,
+    "Worker failed builder deletion acknowledgement is invalid");
+  await lease.fence();
+  if (!builder.deletionOperationId) {
+    requireCheck(!observeOnly && !builder.deleted && !builder.retiredAt, "Worker failed builder deletion acknowledgement is missing");
+    builder.deleteRequested = true; await lease.save(); await lease.fence();
+    const response = await request("DELETE", `/sandboxes/${builder.id}`, { headers: { "x-ascii-confirm-delete": builder.id } }), operation = response.body?.operation;
+    requireCheck(response.status >= 200 && response.status < 300 && operationId.safeParse(operation?.id).success &&
+      operation.kind === "sandbox" && operation.targetId === builder.id, "Worker failed builder deletion is unconfirmed");
+    builder.deletionOperationId = operation.id; builder.deletionAcceptedAt = new Date(now()).toISOString(); await lease.save();
+  }
+  const polling = { signal: lease.signal, timeout: observeOnly ? 0 : 300_000 };
+  const result = await pollProvider("Worker failed builder retirement", async () => {
+    const response = await request("GET", `/deletion-operations/${builder.deletionOperationId}`), operation = response.body?.operation;
+    requireCheck(response.status === 200 && operation?.id === builder.deletionOperationId && operation.kind === "sandbox" && operation.targetId === builder.id,
+      "Worker failed builder deletion proof changed");
+    if (["pending", "processing"].includes(operation.status)) return false;
+    const parsed = operation.status === "completed"
+      ? completedOperation.safeParse({ id: operation.id, kind: operation.kind, targetId: operation.targetId, status: operation.status, completedAt: operation.completedAt })
+      : pendingOperation.safeParse({ id: operation.id, kind: operation.kind, targetId: operation.targetId, status: operation.status,
+        stage: operation.stage, expectedBy: operation.expectedBy ?? null });
+    requireCheck(parsed.success, "Worker failed builder deletion operation is invalid");
+    const operationObservedAt = new Date(now()).toISOString();
+    requireCheck((await request("GET", `/sandboxes/${builder.id}`)).status === 404, "Worker failed builder remains available");
+    const unavailableObservedAt = new Date(now()).toISOString();
+    requireCheck((await request("GET", `/named-snapshots/${record.snapshotId}`)).status === 404, "Worker failed builder unexpectedly has a named image");
+    const result = WorkerFailedBuildRetirementSchema.safeParse({ version: 1, kind: "failed-build-unavailable", provenance: proof,
+      provenanceSha256: hash(proof), snapshotName: record.snapshotId, operation: parsed.data, operationObservedAt, unavailableObservedAt,
+      snapshotAbsentObservedAt: new Date(now()).toISOString(), storage: { status: parsed.data.status === "completed" ? "completed" : "pending", physicalBytes: "unmeasured" } });
+    requireCheck(result.success, "Worker failed builder retirement observation is invalid");
+    return result.data;
+  }, polling);
+  await lease.fence();
+  builder.failedBuildRetirement = result; await lease.save();
+  builder.deleted = result.operation.status === "completed"; builder.retiredAt ??= result.unavailableObservedAt; await lease.save();
+}
+
+/** Only an acknowledged failed build still occupying this owner's compute
+ * slot is observed on demand. This does not resume historical storage scans. */
+export async function reconcileFailedReleaseBuilderHolds(config: PromotionConfig, context: Omit<Context, "record">, store: any) {
+  requireCheck(context.readAdmission, "Worker failed builder admission is missing");
+  const ledger = (await context.readAdmission())?.state, state = context.lease.state;
+  requireCheck(ledger?.account === accountBinding(context.profile) && Array.isArray(ledger?.reservations), "Worker failed builder admission account changed");
+  for (const row of ledger.reservations.filter((row: any) => row.kind === "builder" && !row.releasedAt && row.owner === state.owner && row.generation === state.generation)) {
+    const record = state.resources.images.find((image: any) => row.computeId === `snapshot:${image.snapshotId}` && row.snapshotName === image.snapshotId);
+    if (!record || record.purpose !== "release-worker" || record.candidate || record.snapshotRequested || record.snapshotCreate ||
+      !record.builder?.deleteRequested || !record.builder?.deletionOperationId) continue;
+    const original = { ...config, runId: record.releaseRunId, sourceSha: record.sourceCommit, runAttempt: record.builderIntent?.scope?.runAttempt };
+    await retireFailedReleaseBuilder(original, { ...context, record }, true);
+    await releaseHostedAdmission(store, context.lease, context.profile);
+  }
+}
+
 export async function retireReleaseBuilder(config: PromotionConfig, context: Context, options: { observeOnly?: boolean; historical?: boolean } = {}) {
   const { lease, record, request } = context, builder = record.builder, now = context.now ?? Date.now;
   const retiredName = options.observeOnly === true && options.historical === true && record.snapshotNameRetirement !== undefined;
@@ -202,7 +311,11 @@ export async function reconcileReleaseBuilderRetentions(config: PromotionConfig,
   const maxRecords = options.maxRecords ?? 16, budgetMs = options.budgetMs ?? 15_000, now = context.now ?? Date.now;
   requireCheck(Number.isSafeInteger(maxRecords) && maxRecords > 0 && maxRecords <= 100 && Number.isFinite(budgetMs) && budgetMs >= 100,
     "Worker builder retention observation budget is invalid");
+  const failed = (context.lease.state.resources.images ?? []).filter((record: any) => record.builder?.failedBuildRetirement !== undefined);
+  for (const record of failed) savedFailedBuild({ ...config, sourceSha: record.sourceCommit, runId: record.releaseRunId,
+    runAttempt: record.builderIntent?.scope?.runAttempt }, { ...context, record });
   const pending = (context.lease.state.resources.images ?? []).filter((record: any) => !record.builder?.deleted &&
+    record.builder?.failedBuildRetirement === undefined &&
     (record.builder?.retiredAt || record.builder?.cleanup) && (record.purpose === "release-worker" || record.releaseRunId !== undefined ||
       record.builder?.cleanup?.provenance?.purpose === "release-worker"))
     .sort((left: any, right: any) => (Date.parse(left.builder.lastReconcileAt) || 0) - (Date.parse(right.builder.lastReconcileAt) || 0));
