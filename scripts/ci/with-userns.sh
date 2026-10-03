@@ -4,11 +4,11 @@
 # ──────────────────────────────────────────────────────────
 #
 # The contained-execution (ZSR) suites nest a second capability-bearing user
-# namespace inside bubblewrap. Ubuntu's bwrap AppArmor profile deliberately
-# strips those nested capabilities, so the pinned runtime's documented host
-# prerequisite is satisfied ONLY for the command passed here and restored the
-# moment it returns — a job-wide relaxation would leave every later step
-# (including third-party actions) running with the restriction lifted.
+# namespace inside bubblewrap. Ubuntu restricts those nested capabilities with
+# a sysctl and, on 26.04, an independently enforced bwrap AppArmor profile. The
+# pinned runtime's documented host prerequisite is satisfied ONLY for the
+# command passed here; both controls are restored when it returns. Production
+# image policy is separate and is never changed by this CI helper.
 #
 # Usage: bash scripts/ci/with-userns.sh pnpm test:git
 #
@@ -30,8 +30,37 @@ if ! restriction=$(sysctl -n "$KEY" 2>/dev/null); then
   exec "$@"
 fi
 
-restore() { sudo sysctl -q -w "$KEY=$restriction"; }
+BWRAP_APPARMOR_PROFILE=/etc/apparmor.d/bwrap-userns-restrict
+restore_bwrap_profile=0
+restore() {
+  local restore_status=0
+  if [ "$restore_bwrap_profile" = "1" ]; then
+    sudo apparmor_parser --replace --skip-cache "$BWRAP_APPARMOR_PROFILE" || restore_status=$?
+  fi
+  # Restore the sysctl even when restoring the profile failed. Either failure
+  # must fail the step, including after an otherwise successful test command.
+  sudo sysctl -q -w "$KEY=$restriction" || restore_status=$?
+  return "$restore_status"
+}
 trap restore EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if sudo test -f "$BWRAP_APPARMOR_PROFILE"; then
+  loaded_profiles=$(sudo cat /sys/kernel/security/apparmor/profiles)
+  if printf '%s\n' "$loaded_profiles" | grep -qx 'bwrap (enforce)' &&
+     printf '%s\n' "$loaded_profiles" | grep -qx 'unpriv_bwrap (enforce)'; then
+    # The 26.04 profile stacks unpriv_bwrap on every bwrap child and explicitly
+    # denies capabilities, independently of the sysctl. Keep --cap-drop ALL in
+    # the runtime; suspend only this extra host restriction for the test.
+    # Mark restoration first because the parser may fail after partial removal.
+    restore_bwrap_profile=1
+    sudo apparmor_parser --remove --skip-cache "$BWRAP_APPARMOR_PROFILE"
+  elif printf '%s\n' "$loaded_profiles" | grep -Eq '^(bwrap|unpriv_bwrap) \('; then
+    echo "with-userns: unexpected bwrap AppArmor state; refusing to change it" >&2
+    exit 1
+  fi
+fi
 
 sudo sysctl -q -w "$KEY=0"
 applied=$(sysctl -n "$KEY")
