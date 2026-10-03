@@ -253,19 +253,18 @@ d("sanitized organization images (fake Boat only)", () => {
       1,
     );
   });
-  it("honors all ten named slots including release images", async () => {
-    for (let i = 0; i < 10; i++)
+  it("lets the provider accept a capture beyond ten names after a plan upgrade", async () => {
+    for (let i = 0; i < 20; i++)
       driver.snapshots.set(`release-${i}`, {
         name: `release-${i}`,
         id: `snapshot-${i}`,
         source: "release",
         ready: true,
       });
-    await expect(build()).rejects.toMatchObject({
-      code: "cloud_computer_snapshot_limit",
-    });
+    await expect(build()).resolves.toBeDefined();
     expect(driver.creates).toEqual([]);
-    expect(driver.snapshots.size).toBe(10);
+    await drain();
+    expect(driver.snapshots.size).toBe(21);
   });
   it("counts another organization's pending reservation before the provider has captured it", async () => {
     for (let i = 0; i < 9; i++) driver.snapshots.set(`release-${i}`, { name: `release-${i}`, id: `snapshot-${i}`, source: "release", ready: true });
@@ -273,7 +272,10 @@ d("sanitized organization images (fake Boat only)", () => {
     fixture = await seedReadyCloudWorkspace(pool);
     await service.save(fixture.organizationId, fixture.userId, { expectedRevision: 0, operationId: randomUUID(),
       document: { repositories: [], installScript: "true", timeoutSeconds: 30 }, sources: [] });
-    await expect(build()).rejects.toMatchObject({ code: "cloud_computer_snapshot_limit" });
+    const assertCapacity = vi.fn(async (_names: string[]) => {});
+    Object.assign(driver, { assertCapacity });
+    await expect(build()).resolves.toBeDefined();
+    expect(new Set(assertCapacity.mock.calls[0]![0]).size).toBe(10);
     expect(driver.creates).toEqual([]);
   });
   it("does not let the previous workspace worker mark an image build complete", async () => {

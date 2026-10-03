@@ -5,7 +5,7 @@ import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import type { CloudWorkspaceProvisioningProfile } from "../config.js";
 import { BoatCreateRejectedError, type BoatApiClient } from "./boat-client.js";
-import type { CloudProviderCreateInput } from "./provider.js";
+import { CloudProviderError, type CloudProviderCreateInput } from "./provider.js";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const attestation = z.object({
@@ -26,6 +26,7 @@ export class ComputerImageError extends Error {
   }
 }
 export function computerImageFailure(error: unknown): string {
+  if (error instanceof CloudProviderError && ["provider_rate_limited", "provider_budget_exhausted"].includes(error.code)) return error.code;
   return error instanceof ComputerImageError
     ? error.code
     : "image_build_failed";
@@ -47,12 +48,6 @@ export function assertComputerImageAttestation(
     imageContract: parsed.data.metadata.build.imageContractSha256,
     sha256: createHash("sha256").update(JSON.stringify(value)).digest("hex"),
   };
-}
-export function availableComputerImageSlots(
-  inventory: string[],
-  reservations: string[],
-) {
-  return Math.max(0, 10 - new Set([...inventory, ...reservations]).size);
 }
 export type ComputerImage = {
   id: string;
@@ -156,19 +151,11 @@ export async function reserveComputerImageSlot(
   ).rows;
   if (driver.assertCapacity) {
     try { await driver.assertCapacity([...inventory.map(row => row.name), ...reservations.map(row => row.snapshot_name)]); }
-    catch { throw new HttpError(409, "cloud_computer_capacity_reached", "Image capacity reached. Custom and Dev images share a limited pool; release and rollback slots are reserved."); }
+    catch (error) {
+      if (error instanceof CloudProviderError) throw error;
+      throw new HttpError(409, "cloud_computer_capacity_reached", "Image building is busy or its shared account admission is unavailable. Retry after the current build finishes.");
+    }
   }
-  if (
-    availableComputerImageSlots(
-      inventory.map((row) => row.name),
-      reservations.map((row) => row.snapshot_name),
-    ) < 1
-  )
-    throw new HttpError(
-      409,
-      "cloud_computer_snapshot_limit",
-      "All ten image slots are in use or reserved. Retire an unreferenced image before building.",
-    );
 }
 
 /** Always require fresh exact-image agent qualification. Runtime attestation

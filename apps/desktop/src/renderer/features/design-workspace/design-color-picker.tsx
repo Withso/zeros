@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Pipette } from "lucide-react";
 
 import {
@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
+import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import {
   InspectorIconButton,
   keepDesignPopoverWhileEditing,
@@ -49,7 +50,7 @@ interface DesignColorPickerProps extends DesignColorCallbacks {
 const FALLBACK_COLOR: DesignHsvaColor = { h: 0, s: 0, v: 0, a: 1 };
 
 interface DesignEyeDropper {
-  open(): Promise<{ sRGBHex: string }>;
+  open(options?: { signal?: AbortSignal }): Promise<{ sRGBHex: string }>;
 }
 
 type DesignEyeDropperConstructor = new () => DesignEyeDropper;
@@ -214,36 +215,79 @@ export function DesignColorPanel({
   );
   const formatRef = useRef(format);
   formatRef.current = format;
+  const hsvaRef = useRef(hsva);
+  hsvaRef.current = hsva;
+  const valueInputRef = useRef<HTMLInputElement | null>(null);
+  const alphaInputRef = useRef<HTMLInputElement | null>(null);
+  const valueDirtyRef = useRef(false);
+  const alphaDirtyRef = useRef(false);
+  const [alphaDraft, setAlphaDraft] = useState(() =>
+    String(Math.round(hsva.a * 100)),
+  );
   const [sampling, setSampling] = useState(false);
   const baselineRef = useRef(value);
+  const confirmedValueRef = useRef(value);
+  const pendingValuesRef = useRef<Array<{ id: number; value: string; key: string }>>([]);
+  const sequenceRef = useRef(0);
   const previewingRef = useRef(false);
   const skipBlurCommitRef = useRef(false);
   const draggingRef = useRef(false);
+  const gestureCancelRef = useRef<(() => void) | null>(null);
+  const samplingAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
   /** Track bounds are read once per gesture, not on every pointer move. */
   const boundsRef = useRef<DOMRect | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
-  // A confirmed value that lands while the user is not mid-gesture (a commit
-  // reply, another selection) becomes the new baseline. The chosen notation
-  // stays, and a reply that matches the thumbs keeps their hue and saturation,
-  // which RGB cannot carry for greys.
   useEffect(() => {
-    if (draggingRef.current) return;
-    if (
-      rootRef.current?.contains(document.activeElement) &&
-      document.activeElement instanceof HTMLInputElement
-    ) {
-      return;
-    }
-    baselineRef.current = value;
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      gestureCancelRef.current?.();
+      samplingAbortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!disabled) return;
+    gestureCancelRef.current?.();
+    samplingAbortRef.current?.abort();
+  }, [disabled]);
+
+  const adoptColorValue = React.useCallback((nextValue: string) => {
+    baselineRef.current = nextValue;
     previewingRef.current = false;
-    setDraft(colorValueText(value, formatRef.current));
-    setHsva((current) =>
-      sameDesignColor(formatDesignColor(hsvaToRgba(current)), value)
-        ? current
-        : hsvaFromValue(value),
+    const current = hsvaRef.current;
+    const next = sameDesignColor(formatDesignColor(hsvaToRgba(current)), nextValue)
+      ? current : hsvaFromValue(nextValue);
+    hsvaRef.current = next;
+    setHsva(next);
+    // Preserve the active text draft. Its unedited channels still advance to
+    // the latest accepted color, so an opacity edit cannot restore stale RGB.
+    if (document.activeElement !== valueInputRef.current)
+      setDraft(colorValueText(nextValue, formatRef.current));
+    if (document.activeElement !== alphaInputRef.current)
+      setAlphaDraft(String(Math.round(next.a * 100)));
+  }, []);
+
+  // A confirmation can arrive while either text field owns focus. Acknowledge
+  // earlier saves without replacing a newer accepted color; external changes
+  // still become the baseline while each raw input retains its own draft.
+  useLayoutEffect(() => {
+    if (draggingRef.current) return;
+    const key = colorInputKey(value);
+    const previousKey = colorInputKey(confirmedValueRef.current);
+    confirmedValueRef.current = value;
+    const acknowledged = pendingValuesRef.current.findIndex(
+      (entry) => entry.key === key,
     );
-  }, [value]);
+    if (acknowledged >= 0) pendingValuesRef.current.splice(0, acknowledged + 1);
+    else if (key === previousKey && pendingValuesRef.current.length > 0) return;
+    else pendingValuesRef.current = [];
+    if (pendingValuesRef.current.length === 0) adoptColorValue(value);
+  }, [adoptColorValue, value]);
 
   const formatted = useMemo(
     () => formatDesignColorNotation(hsvaToRgba(hsva), format),
@@ -256,8 +300,10 @@ export function DesignColorPanel({
 
   const previewHsva = (next: DesignHsvaColor): string => {
     const nextValue = formatDesignColorNotation(hsvaToRgba(next), format);
+    hsvaRef.current = next;
     setHsva(next);
     setDraft(designColorValueText(hsvaToRgba(next), format));
+    setAlphaDraft(String(Math.round(next.a * 100)));
     previewingRef.current = true;
     safePreview(onPreview, nextValue);
     return nextValue;
@@ -266,8 +312,13 @@ export function DesignColorPanel({
   const cancelPreview = () => {
     if (previewingRef.current) safeCancel(onCancelPreview);
     previewingRef.current = false;
+    valueDirtyRef.current = false;
+    alphaDirtyRef.current = false;
     setDraft(colorValueText(baselineRef.current, formatRef.current));
-    setHsva(hsvaFromValue(baselineRef.current));
+    const restored = hsvaFromValue(baselineRef.current);
+    hsvaRef.current = restored;
+    setHsva(restored);
+    setAlphaDraft(String(Math.round(restored.a * 100)));
   };
 
   const commitValue = (nextValue: string) => {
@@ -280,30 +331,59 @@ export function DesignColorPanel({
       cancelPreview();
       return;
     }
-    const previousBaseline = baselineRef.current;
+    const id = ++sequenceRef.current;
+    pendingValuesRef.current.push({ id, value: next, key: colorInputKey(next) });
     baselineRef.current = next;
     previewingRef.current = false;
     setDraft(colorValueText(next, formatRef.current));
     void Promise.resolve(onCommit(next)).catch(() => {
-      // A rejected write leaves the confirmed value in place, so the same
-      // color must be committable again rather than deduplicated away.
-      if (baselineRef.current === next) baselineRef.current = previousBaseline;
-      setDraft(colorValueText(previousBaseline, formatRef.current));
-      setHsva(hsvaFromValue(previousBaseline));
+      if (!mountedRef.current) return;
+      const index = pendingValuesRef.current.findIndex((entry) => entry.id === id);
+      if (index < 0) return;
+      const latest = index === pendingValuesRef.current.length - 1;
+      pendingValuesRef.current.splice(index, 1);
+      if (latest)
+        adoptColorValue(pendingValuesRef.current.at(-1)?.value ?? confirmedValueRef.current);
     });
   };
 
   /** Typed text is authored only when it reads as a color; a bare hex keeps
    * the current opacity. Anything else reverts without a write. */
   const commitTyped = (text: string) => {
-    const next = designColorFromHexInput(text, hsvaToRgba(hsva));
+    const next = designColorFromHexInput(text, hsvaToRgba(hsvaRef.current));
     if (!next) {
       setDraft(colorValueText(baselineRef.current, formatRef.current));
       return;
     }
     const parsed = readDesignColor(next);
-    if (parsed) setHsva(rgbaToHsva(parsed));
+    if (parsed) {
+      hsvaRef.current = rgbaToHsva(parsed);
+      setHsva(hsvaRef.current);
+      setAlphaDraft(String(Math.round(parsed.a * 100)));
+    }
     commitValue(next);
+  };
+
+  const commitTypedDraft = () => {
+    const dirty = valueDirtyRef.current;
+    valueDirtyRef.current = false;
+    if (dirty) commitTyped(draft);
+    else setDraft(colorValueText(baselineRef.current, formatRef.current));
+  };
+
+  const commitAlphaDraft = () => {
+    const dirty = alphaDirtyRef.current;
+    alphaDirtyRef.current = false;
+    const opacity = Number.parseFloat(alphaDraft);
+    if (!dirty || !Number.isFinite(opacity)) {
+      setAlphaDraft(String(Math.round(hsvaRef.current.a * 100)));
+      return;
+    }
+    const next = { ...hsvaRef.current, a: clamp(opacity / 100, 0, 1) };
+    hsvaRef.current = next;
+    setHsva(next);
+    setAlphaDraft(String(Math.round(next.a * 100)));
+    commitValue(formatDesignColorNotation(hsvaToRgba(next), formatRef.current));
   };
 
   const commitOnBlur = (commit: () => void) => {
@@ -317,9 +397,8 @@ export function DesignColorPanel({
   if (panelRef) {
     panelRef.current = {
       flush: () => {
-        if (draft !== colorValueText(baselineRef.current, format)) {
-          commitTyped(draft);
-        }
+        if (valueDirtyRef.current) commitTypedDraft();
+        if (alphaDirtyRef.current) commitAlphaDraft();
       },
       cancel: () => {
         skipBlurCommitRef.current = true;
@@ -358,43 +437,58 @@ export function DesignColorPanel({
     commitValue(formatDesignColorNotation(hsvaToRgba(next), format));
 
   const trackHandlers = (
-    read: (element: HTMLElement, event: React.PointerEvent) => DesignHsvaColor,
+    read: (
+      element: HTMLElement,
+      event: Pick<PointerEvent, "clientX" | "clientY">,
+    ) => DesignHsvaColor,
   ) => ({
     onPointerDown: (event: React.PointerEvent<HTMLElement>) => {
-      if (disabled) return;
+      if (disabled || event.button !== 0 || !event.isPrimary) return;
+      gestureCancelRef.current?.();
       event.preventDefault();
-      event.currentTarget.setPointerCapture(event.pointerId);
+      const target = event.currentTarget;
       draggingRef.current = true;
-      boundsRef.current = event.currentTarget.getBoundingClientRect();
-      previewHsva(read(event.currentTarget, event));
-    },
-    onPointerMove: (event: React.PointerEvent<HTMLElement>) => {
-      if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-      previewHsva(read(event.currentTarget, event));
-    },
-    onPointerUp: (event: React.PointerEvent<HTMLElement>) => {
-      if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-      const next = read(event.currentTarget, event);
-      event.currentTarget.releasePointerCapture(event.pointerId);
-      draggingRef.current = false;
-      boundsRef.current = null;
-      previewHsva(next);
-      commitHsva(next);
-    },
-    onPointerCancel: () => {
-      draggingRef.current = false;
-      boundsRef.current = null;
-      cancelPreview();
+      boundsRef.current = target.getBoundingClientRect();
+      let latest = read(target, event);
+      previewHsva(latest);
+      gestureCancelRef.current = beginDesignPointerGesture({
+        target,
+        pointerId: event.pointerId,
+        cursor: getComputedStyle(target).cursor,
+        onMove: (pointerEvent) => {
+          latest = read(target, pointerEvent);
+          previewHsva(latest);
+        },
+        onFinish: () => {
+          gestureCancelRef.current = null;
+          draggingRef.current = false;
+          boundsRef.current = null;
+          commitHsva(latest);
+        },
+        onCancel: () => {
+          gestureCancelRef.current = null;
+          draggingRef.current = false;
+          boundsRef.current = null;
+          cancelPreview();
+        },
+      });
     },
   });
 
   const sample = () => {
     const EyeDropper = eyeDropperConstructor();
-    if (!EyeDropper) return;
+    if (!EyeDropper || disabled || samplingAbortRef.current) return;
+    const controller = new AbortController();
+    samplingAbortRef.current = controller;
     setSampling(true);
     void new EyeDropper()
-      .open()
+      .open({ signal: controller.signal })
       .then(({ sRGBHex }) => {
+        // Sampling can finish after closing the picker or replacing its layer.
+        // Even when native sampling cannot abort, a retired picker must never
+        // dispatch that late result.
+        if (controller.signal.aborted || !mountedRef.current || disabledRef.current)
+          return;
         const parsed = parseDesignColor(sRGBHex);
         if (!parsed) return;
         previewHsva(rgbaToHsva(parsed));
@@ -402,6 +496,7 @@ export function DesignColorPanel({
         onSampled?.();
       })
       .catch((error: unknown) => {
+        if (controller.signal.aborted || !mountedRef.current) return;
         // Native sampling rejects with AbortError when the user presses
         // Escape; the authored color remains untouched.
         if (
@@ -413,7 +508,11 @@ export function DesignColorPanel({
           cancelPreview();
         }
       })
-      .finally(() => setSampling(false));
+      .finally(() => {
+        if (samplingAbortRef.current === controller)
+          samplingAbortRef.current = null;
+        if (mountedRef.current) setSampling(false);
+      });
   };
 
   return (
@@ -584,6 +683,7 @@ export function DesignColorPanel({
         </Select>
         <div className="zd-field">
           <input
+            ref={valueInputRef}
             value={draft}
             className="pl-2"
             aria-label={`${label} value`}
@@ -593,9 +693,11 @@ export function DesignColorPanel({
             onChange={(event) => {
               // Typed text stays a draft: the canvas and the thumbs hear about
               // it on Enter or on blur, not on every character.
+              valueDirtyRef.current = true;
               setDraft(event.currentTarget.value);
             }}
-            onBlur={() => commitOnBlur(() => commitTyped(draft))}
+            onFocus={() => { valueDirtyRef.current = false; }}
+            onBlur={() => commitOnBlur(commitTypedDraft)}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
@@ -611,21 +713,18 @@ export function DesignColorPanel({
           />
           <span className="bg-border2 h-4 w-px shrink-0" aria-hidden="true" />
           <input
-            value={String(Math.round(hsva.a * 100))}
+            ref={alphaInputRef}
+            value={alphaDraft}
             className="zd-field-fixed w-9 text-right"
             inputMode="numeric"
             aria-label={`${label} opacity value`}
             disabled={disabled}
             onChange={(event) => {
-              const opacity = clamp(
-                Number.parseFloat(event.currentTarget.value) / 100,
-                0,
-                1,
-              );
-              if (!Number.isFinite(opacity)) return;
-              setHsva({ ...hsva, a: opacity });
+              alphaDirtyRef.current = true;
+              setAlphaDraft(event.currentTarget.value);
             }}
-            onBlur={() => commitOnBlur(() => commitValue(formatted))}
+            onFocus={() => { alphaDirtyRef.current = false; }}
+            onBlur={() => commitOnBlur(commitAlphaDraft)}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();

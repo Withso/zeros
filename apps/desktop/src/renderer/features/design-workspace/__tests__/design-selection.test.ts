@@ -36,6 +36,7 @@ import {
   selectDesignFrame,
   selectDesignNode,
   selectDesignNodes,
+  selectDesignNodesInRect,
   selectDesignNodeAtLocation,
   selectDesignFrameBodyAtLocation,
   setDesignNodeVisibility,
@@ -53,6 +54,7 @@ import {
 import {
   designWorkspaceView,
   resetDesignWorkspaceUiForTests,
+  useDesignWorkspaceUiStore,
 } from "../state/design-workspace-ui";
 import {
   designFrameDisclosure,
@@ -969,6 +971,83 @@ describe("design selection workflows", () => {
       { x: 0, y: 0, width: 400, height: 400 },
       "main",
     );
+  });
+
+  it.each([
+    "node", "frame", "directory", "runtime", "source", "inactive",
+  ] as const)(
+    "ignores a pending marquee when its %s owner changes",
+    async (change) => {
+      let release!: (result: DesignRuntimeNodeDetails[]) => void;
+      const runtime = {
+        sourceVersion: FRAME.sourceVersion,
+        isActive: vi.fn(() => true),
+        getElementsInRect: vi.fn(
+          () => new Promise<DesignRuntimeNodeDetails[]>((resolve) => {
+            release = resolve;
+          }),
+        ),
+      };
+      mocks.designFrameRuntime.mockReturnValue(runtime);
+      const pending = selectDesignNodesInRect({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        rect: { x: 0, y: 0, width: 400, height: 400 },
+      });
+      if (change === "node") {
+        await selectDesignNode({
+          workspaceId: "workspace-a",
+          folder: "/design/a",
+          frame: FRAME,
+          nodeId: "copy",
+          details: details("copy"),
+        });
+      } else if (change === "frame") {
+        await selectDesignFrame("workspace-a", { ...FRAME, file: "other.html" });
+      } else if (change === "directory") {
+        useDesignWorkspaceUiStore
+          .getState()
+          .bindDirectory("workspace-a", "other-directory");
+      } else if (change === "runtime") {
+        mocks.designFrameRuntime.mockReturnValue({ ...runtime });
+      } else if (change === "source") {
+        runtime.sourceVersion = "2".repeat(24);
+      } else {
+        runtime.isActive.mockReturnValue(false);
+      }
+      const before = designWorkspaceView("workspace-a");
+      const writes = mocks.designSetSelection.mock.calls.length;
+      release([details("heading")]);
+      expect(await pending).toBeNull();
+      expect(designWorkspaceView("workspace-a")).toBe(before);
+      expect(mocks.designSetSelection).toHaveBeenCalledTimes(writes);
+    },
+  );
+
+  it("adds a current marquee to its own frame selection without leaking another workspace", async () => {
+    const getElementsInRect = vi.fn(async () => [details("heading")]);
+    mocks.designFrameRuntime.mockReturnValue({ getElementsInRect });
+    await selectDesignNodes({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeIds: ["copy"],
+      details: [details("copy")],
+    });
+    await selectDesignFrame("workspace-b", { ...FRAME, file: "other.html" });
+    await selectDesignNodesInRect({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      rect: { x: 0, y: 0, width: 400, height: 400 },
+      additive: true,
+    });
+    expect(designWorkspaceView("workspace-a").selectedNodeIds).toEqual([
+      "heading",
+      "copy",
+    ]);
+    expect(designWorkspaceView("workspace-b").selectedFrame).toBe("other.html");
   });
 
   it("collapses an additive selection when its primary layer is clicked", async () => {

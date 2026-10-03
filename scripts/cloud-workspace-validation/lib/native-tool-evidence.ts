@@ -27,7 +27,7 @@ export function nativeChallengeCommand(value: unknown, files: CoreChallengeFiles
   return null;
 }
 
-/** Consumes the ordinary provider transcript projection. An MCP row or model
+/** Consumes canonical tool updates at the caller's observation boundary. An MCP row or model
  * claim cannot qualify native execution; callers also verify effects on disk
  * independently before accepting the resulting evidence. */
 export class NativeToolEvidence {
@@ -63,6 +63,29 @@ export class NativeToolEvidence {
           tool.title === `mcp__${server}__${name}` || tool.title === `${server}.${name}`) return;
     }
     throw new Error("Qualification lacks a successful native MCP tool call");
+  }
+  /** The exact owned canary, using assertMcp's unchanged row predicate. These
+   * counts describe the qualification accumulator, not tool discovery or a
+   * provider response. The summary contains no row identity, title, input or output. */
+  canaryMcpSummary() {
+    const matched = { rows: 0, completed: 0, failed: 0, pending: 0, unknownStatus: 0, nativeId: 0, missingNativeId: 0, successful: 0 };
+    for (const tool of this.records.values()) {
+      const input = record(tool.rawInput);
+      if (!((input.server === "zeros-qualification" && input.tool === "probe") ||
+          (input.providerIdentifier === "zeros-qualification" && input.toolName === "probe") ||
+          tool.title === "mcp__zeros-qualification__probe" || tool.title === "zeros-qualification.probe")) continue;
+      matched.rows++;
+      switch (tool.status) {
+        case "completed": matched.completed++; break;
+        case "failed": matched.failed++; break;
+        case "pending": case "in_progress": matched.pending++; break;
+        default: matched.unknownStatus++;
+      }
+      const nativeId = typeof tool.nativeToolCallId === "string" && !!tool.nativeToolCallId;
+      if (nativeId) matched.nativeId++; else matched.missingNativeId++;
+      if (tool.status === "completed" && nativeId) matched.successful++;
+    }
+    return { version: 1 as const, events: Math.min(this.events, 2048), overflowed: this.events > 2048, uniqueRows: this.records.size, matched };
   }
   assertEffects(_provider: string, files: CoreChallengeFiles, _marker: string): void {
     const evidence = this.summary(files);

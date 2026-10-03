@@ -310,9 +310,8 @@ describe("design workspace interaction wiring", () => {
     expect(source).not.toContain(
       'key={`${selectedFrame?.sourceVersion ?? "none"}',
     );
-    expect(source).toContain(
-      'key={`${workspaceId ?? "none"}:${selectedFrame?.file ?? "none"}:${selectedNodeDetails?.oid ?? "frame"}`}',
-    );
+    expect(source).toContain("key={motionOverlayOwner}");
+    expect(source).toContain('snapshot?.directoryId ?? view.directoryId ?? ""');
   });
 
   it("keeps style generations mounted and live-buffers structural navigation", () => {

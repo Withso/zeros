@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { ensureDevImage } from "../dev-environment/hosted-image.mjs";
 import { newHostedGeneration } from "../dev-environment/hosted-state.mjs";
+import { DevProviderError } from "../dev-environment/provider-http.mjs";
 
 const kit = vi.hoisted(() => ({ main: vi.fn() }));
 vi.mock("../cloud-workspace-validation/boat-image/boat-image.ts", () => ({ ...kit, TEMPLATES: "unused" }));
@@ -50,12 +51,31 @@ function fixture() {
 }
 
 describe("Dev image state after remote archive", () => {
-  it("reports snapshot capacity without exposing arbitrary provider diagnostics", async () => {
+  it("does not mislabel an old local kit ceiling or arbitrary output as a current provider quota", async () => {
     const f = fixture();
     kit.main.mockRejectedValue(new Error("The account already holds 10 named snapshots; delete an unused one first"));
-    await expect(ensureDevImage(f.lease,f.profile,f.source,f.directory,{})).rejects.toThrow(/Boat.*snapshot.*limit/i);
+    await expect(ensureDevImage(f.lease,f.profile,f.source,f.directory,{})).rejects.not.toThrow(/Boat.*snapshot.*limit/i);
     kit.main.mockRejectedValue(new Error("secret-fixture-must-not-appear"));
     await expect(ensureDevImage(f.lease,f.profile,f.source,f.directory,{})).rejects.not.toThrow(/secret-fixture/);
+  });
+
+  it.each([{ status: 402, code: "provider_budget_exhausted" }, { status: 429, code: "provider_rate_limited" }])("keeps HTTP $status through the real kit and hosted wrapper without releasing an uncertain create", async ({ status, code }) => {
+    const f = fixture();
+    const actual = await vi.importActual<typeof import("../cloud-workspace-validation/boat-image/boat-image")>("../cloud-workspace-validation/boat-image/boat-image.ts");
+    kit.main.mockImplementation(actual.main);
+    const fetcher = vi.fn(async (url: string) => {
+      if (url.includes("/limits?")) return Response.json({ creditUsedSeconds: 0 });
+      if (url.endsWith("/sandboxes")) return Response.json({ message: "synthetic-private-canary" }, { status });
+      throw new Error("Unexpected provider request");
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const error = await ensureDevImage(f.lease, f.profile, f.source, f.directory, {}).catch(error => error);
+    expect(error).toBeInstanceOf(DevProviderError); expect(error).toMatchObject({ status, code });
+    expect(String(error)).not.toContain("synthetic-private-canary");
+    const record = f.state.resources.images[0];
+    expect(record.builderCreate).toMatchObject({ phase: "uncertain", outcome: status });
+    expect(record.builderIntent).toBeDefined(); expect(record.builder).toBeUndefined();
+    expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/sandboxes"))).toHaveLength(1);
   });
 
   it("does not reuse a retired builder left on another device for identical source inputs", async () => {

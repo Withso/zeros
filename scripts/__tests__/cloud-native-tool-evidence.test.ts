@@ -64,3 +64,88 @@ describe("native workspace qualification evidence", () => {
     expect(nativeChallengeCommand(`cat /srv/zeros/workspace/${files.challenge}`, files)).toBe("read");
   });
 });
+
+const emptyMcpSummary = () => ({ version: 1, events: 0, overflowed: false, uniqueRows: 0,
+  matched: { rows: 0, completed: 0, failed: 0, pending: 0, unknownStatus: 0, nativeId: 0, missingNativeId: 0, successful: 0 } });
+const exactProbe = { server: "zeros-qualification", tool: "probe" };
+
+describe("bounded exact canary MCP diagnostics", () => {
+  it("distinguishes no notifications, other tools and ignored malformed row identities", () => {
+    const evidence = new NativeToolEvidence();
+    expect(evidence.canaryMcpSummary()).toEqual(emptyMcpSummary());
+    evidence.observe({ sessionUpdate: "agent_message_chunk", content: { text: "synthetic private prose" } });
+    evidence.observe({ sessionUpdate: "tool_call", toolCallId: "other", nativeToolCallId: "native-other", status: "completed",
+      rawInput: { server: "other-server", tool: "probe" } });
+    evidence.observe({ sessionUpdate: "tool_call_update", toolCallId: "other", status: "completed" });
+    for (const toolCallId of [undefined, "", "x".repeat(513), { private: "synthetic private identity" }])
+      evidence.observe({ sessionUpdate: "tool_call", toolCallId, nativeToolCallId: "native-invalid", status: "completed", rawInput: exactProbe });
+    expect(evidence.canaryMcpSummary()).toEqual({ ...emptyMcpSummary(), events: 6, uniqueRows: 1 });
+    expect(() => evidence.assertMcp("zeros-qualification", "probe")).toThrow();
+  });
+  it.each([
+    { rawInput: exactProbe, title: "zeros-qualification: probe" },
+    { rawInput: { providerIdentifier: "zeros-qualification", toolName: "probe" } },
+    { title: "mcp__zeros-qualification__probe" },
+    { title: "zeros-qualification.probe" },
+  ])("recognizes completion-only exact evidence without retaining its identity or payload", fields => {
+    const evidence = new NativeToolEvidence();
+    evidence.observe({ sessionUpdate: "tool_call_update", toolCallId: "canonical-private-id", nativeToolCallId: "native-private-id",
+      status: "completed", rawOutput: "synthetic private output", ...fields });
+    expect(evidence.canaryMcpSummary()).toEqual({ ...emptyMcpSummary(), events: 1, uniqueRows: 1,
+      matched: { ...emptyMcpSummary().matched, rows: 1, completed: 1, nativeId: 1, successful: 1 } });
+    expect(() => evidence.assertMcp("zeros-qualification", "probe")).not.toThrow();
+    const serialized = JSON.stringify(evidence.canaryMcpSummary());
+    for (const privateValue of ["private", "zeros-qualification", "probe", "rawInput", "rawOutput", "title"]) expect(serialized).not.toContain(privateValue);
+  });
+  it("merges defined update fields into unique rows and leaves frozen snapshots independent", () => {
+    const evidence = new NativeToolEvidence();
+    evidence.observe({ sessionUpdate: "tool_call", toolCallId: "probe", status: "in_progress", rawInput: exactProbe });
+    const pending = evidence.canaryMcpSummary();
+    expect(pending.matched).toEqual({ ...emptyMcpSummary().matched, rows: 1, pending: 1, missingNativeId: 1 });
+    evidence.observe({ sessionUpdate: "tool_call_update", toolCallId: "probe", nativeToolCallId: "native-probe", status: "completed", rawInput: null });
+    evidence.observe({ sessionUpdate: "tool_call_update", toolCallId: "probe", nativeToolCallId: undefined, status: "completed" });
+    expect(evidence.canaryMcpSummary()).toEqual({ ...emptyMcpSummary(), events: 3, uniqueRows: 1,
+      matched: { ...emptyMcpSummary().matched, rows: 1, completed: 1, nativeId: 1, successful: 1 } });
+    expect(pending.matched.successful).toBe(0);
+    expect(pending.matched.pending).toBe(1);
+    evidence.observe({ sessionUpdate: "tool_call_update", toolCallId: "probe", status: "failed" });
+    expect(evidence.canaryMcpSummary().matched).toEqual({ ...emptyMcpSummary().matched, rows: 1, failed: 1, nativeId: 1 });
+    expect(() => evidence.assertMcp("zeros-qualification", "probe")).toThrow();
+  });
+  it("separates failed, pending, unknown-status and completed-without-native-id exact rows", () => {
+    const evidence = new NativeToolEvidence();
+    for (const [index, status] of ["failed", "pending", "in_progress", undefined, "private-status", "completed"].entries())
+      evidence.observe({ sessionUpdate: "tool_call_update", toolCallId: `row-${index}`, status,
+        nativeToolCallId: index < 5 ? `native-${index}` : "", rawInput: exactProbe });
+    evidence.observe({ sessionUpdate: "tool_call_update", toolCallId: "malformed-native-id", status: "completed",
+      nativeToolCallId: { private: "synthetic private identity" }, rawInput: exactProbe });
+    expect(evidence.canaryMcpSummary()).toEqual({ ...emptyMcpSummary(), events: 7, uniqueRows: 7,
+      matched: { rows: 7, completed: 2, failed: 1, pending: 2, unknownStatus: 2, nativeId: 5, missingNativeId: 2, successful: 0 } });
+    expect(() => evidence.assertMcp("zeros-qualification", "probe")).toThrow();
+  });
+  it("uses the original exact predicate and whole-field composition for malformed or nonmatching input", () => {
+    const evidence = new NativeToolEvidence();
+    for (const [index, fields] of [
+      { rawInput: { server: "zeros-qualification", tool: "probe-extra" } },
+      { rawInput: { server: "zeros-qualification-extra", tool: "probe" } },
+      { title: "zeros-qualification: probe" },
+      { title: "mcp__zeros-qualification__probe-extra" },
+      { rawInput: [exactProbe] },
+      { rawInput: { private: { ...exactProbe, output: "synthetic private text" } } },
+    ].entries()) evidence.observe({ sessionUpdate: "tool_call", toolCallId: `other-${index}`,
+      nativeToolCallId: "native-other", status: "completed", ...fields });
+    evidence.observe({ sessionUpdate: "tool_call", toolCallId: "replaced", nativeToolCallId: "native-replaced", status: "completed", rawInput: exactProbe });
+    evidence.observe({ sessionUpdate: "tool_call_update", toolCallId: "replaced", rawInput: { tool: "probe" } });
+    expect(evidence.canaryMcpSummary()).toEqual({ ...emptyMcpSummary(), events: 8, uniqueRows: 7 });
+    expect(() => evidence.assertMcp("zeros-qualification", "probe")).toThrow();
+  });
+  it("bounds the diagnostic after the existing event-limit rejection without changing that rejection", () => {
+    const evidence = new NativeToolEvidence();
+    for (let index = 0; index < 2048; index++) evidence.observe({ sessionUpdate: "tool_call_update", toolCallId: `bounded-${index}`,
+      nativeToolCallId: "native-bounded", status: "failed", rawInput: exactProbe });
+    expect(() => evidence.observe({ sessionUpdate: "tool_call_update", toolCallId: "overflow", rawInput: exactProbe })).toThrow("exceeded its bound");
+    expect(evidence.canaryMcpSummary()).toEqual({ version: 1, events: 2048, overflowed: true, uniqueRows: 2048,
+      matched: { rows: 2048, completed: 0, failed: 2048, pending: 0, unknownStatus: 0, nativeId: 2048, missingNativeId: 0, successful: 0 } });
+    expect(() => evidence.assertMcp("zeros-qualification", "probe")).toThrow();
+  });
+});
