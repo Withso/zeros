@@ -52,6 +52,15 @@ function fixture(hosted = true) {
     fs.mkdirSync(path.join(root, "scripts/dev-environment"), { recursive: true });
     for (const file of ["hook.sh", "toolchain.sh"]) fs.copyFileSync(path.join(repository, "scripts/dev-environment", file), path.join(root, "scripts/dev-environment", file));
     fs.writeFileSync(path.join(root, "scripts/dev-environment/hosted-launcher.mjs"), "");
+    fs.writeFileSync(path.join(root, "scripts/dev-environment/hosted-entry.mjs"), "");
+    fs.writeFileSync(path.join(root, "scripts/dev-environment/dependencies.mjs"), `
+      import { spawnSync } from 'node:child_process';
+      if (process.argv[2] !== '--install') process.exit(88);
+      for (const [command, ...args] of [['pnpm', 'install', '--frozen-lockfile'], ['pnpm', '--dir', 'apps/control-plane', 'install', '--frozen-lockfile'], ['npm', '--prefix', 'apps/web', 'ci']]) {
+        const result = spawnSync(command, args, { stdio: 'inherit' });
+        if (result.status !== 0) process.exit(result.status ?? 1);
+      }
+    `);
     fs.mkdirSync(path.join(root, ".context/zeros-dev"), { recursive: true });
     fs.writeFileSync(path.join(root, ".context/zeros-dev/owner.json"), "{}");
   }
@@ -198,6 +207,24 @@ it.each([200, 404, 403])("uses injected cloud credentials for Node-free archive 
 });
 
 describe("shared hooks on old branches", () => {
+  it.each(["dev", "backend"])("runs Setup before %s on hosted branches that predate automatic dependency preparation", action => {
+    const f = fixture();
+    fs.rmSync(path.join(f.root, "scripts/dev-environment/hosted-entry.mjs"));
+    const result = f.run(scripts.run[action].command);
+    expect(result.status, result.stderr).toBe(0);
+    expect(f.log()).toEqual([
+      "pnpm install --frozen-lockfile",
+      "pnpm --dir apps/control-plane install --frozen-lockfile",
+      "npm --prefix apps/web ci",
+      action === "dev" ? "pnpm electron:dev" : "pnpm dev:backend",
+    ]);
+  });
+  it("does not launch an older hosted checkout after its dependency install fails", () => {
+    const f = fixture();
+    fs.rmSync(path.join(f.root, "scripts/dev-environment/hosted-entry.mjs"));
+    expect(f.run(scripts.run.dev.command, 23).status).toBe(23);
+    expect(f.log()).toEqual(["pnpm install --frozen-lockfile"]);
+  });
   it("does not assume absence when an old cloud checkout has only an injected profile", () => {
     const f = fixture(false), bin = path.join(f.home, ".zeros-dev/tools/bin");
     fs.writeFileSync(path.join(bin, "python3"), "#!/bin/sh\nexit 10\n", { mode: 0o755 });
