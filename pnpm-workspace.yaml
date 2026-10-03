@@ -31,9 +31,9 @@ onlyBuiltDependencies:
 # same change as an Electron major-version update.
 overrides:
   node-abi: "^4.33.0"
-  # Transitive security floors. Each version stays within the consuming
-  # package's supported range; keep the override until its parent lock entry
-  # naturally resolves to an equal or newer release.
+  # Transitive security floors. Compatibility exceptions are documented beside
+  # their entries; keep each override until its parent lock entry naturally
+  # resolves to an equal or newer release.
   "@hono/node-server": "2.1.0"
   body-parser: "2.3.0"
   fast-uri: "3.1.7"
@@ -43,6 +43,10 @@ overrides:
   js-yaml: "4.3.2"
   nanoid: "3.3.18"
   qs: "6.16.0"
+  # Undici 5 declares Busboy 2; 3.2.1 fixes prototype-named multipart headers.
+  # Keep this exception scoped to Cursor's exact Undici dependency. The field/
+  # file constructor and event contract is exercised through Response.formData.
+  "undici@5.29.0>@fastify/busboy": "3.2.1"
 
 # Accepted undici advisories — reviewed 2026-09-04. Those entries share the same
 # story: the ONLY undici in the production graph is

@@ -67,8 +67,21 @@ export async function runDesignColorGestureCancellationSmoke({ page, check }) {
   };
 
   for (const cancellation of ["capture", "blur", "escape"]) {
+    await opacity.evaluate((element) => {
+      element.removeAttribute("data-smoke-pointer-captured");
+      element.addEventListener(
+        "gotpointercapture",
+        () => element.setAttribute("data-smoke-pointer-captured", "true"),
+        { once: true },
+      );
+    });
     await page.mouse.move(start.x, start.y);
     await page.mouse.down();
+    // Chromium applies pending capture on the next pointer event. Releasing
+    // it before then emits no lostpointercapture, so establish a real drag.
+    await page.mouse.move(start.x + 1, start.y);
+    await page.mouse.move(start.x, start.y);
+    await expect(opacity).toHaveAttribute("data-smoke-pointer-captured", "true");
     await expect(value).toHaveValue(/^(?:49|50|51)$/);
     if (cancellation === "capture")
       await opacity.evaluate((element) => element.releasePointerCapture(1));
@@ -77,7 +90,10 @@ export async function runDesignColorGestureCancellationSmoke({ page, check }) {
     else await page.keyboard.press("Escape");
     await page.mouse.up();
     await expect(panel).toBeVisible();
-    await expect(value).toHaveValue("100");
+    await expect(
+      value,
+      `${cancellation} cancellation restores opacity`,
+    ).toHaveValue("100");
     await expect
       .poll(() => runtimeStyle(page, "home-heading", "color"))
       .toBe("rgb(0, 0, 0)");
