@@ -85,7 +85,7 @@ export async function reconcileWorkerNativeStorage(env: NodeJS.ProcessEnv) {
       const core = nativeAgentCanary(lease, admission.profile, devBoatClient({ apiKey: env.BOAT_API_KEY }, signal),
         { release: () => releaseHostedAdmission(store, lease, admission.profile) },
         { strictCleanup: true, releaseStorageDeferral: true, cleanupTimeoutMs: 0 });
-      return reconcileReleaseCanaryRetirements(config, actorUserId, lease, core, broker.retire, { signal, maxRecords: 1 });
+      return reconcileReleaseCanaryRetirements(config, actorUserId, lease, core, broker.retire, { signal });
     }, { create: false });
     requireCheck(typeof result === "number" || result?.absent === true, "Release native storage reconciliation result is unconfirmed");
     return typeof result === "number" ? result : 0;
@@ -116,11 +116,18 @@ export async function executeWorkerPromotion(env: NodeJS.ProcessEnv, inputsSha25
       const release = () => releaseHostedAdmission(store, lease, profile);
       const current = async () => { await github.assertRequiredChecks(); await github.assertCurrent(); await assertWorkerApi(config); await lease.fence(); };
       await current();
-      await reconcileReleaseBuilderRetentions(config, { lease, profile, request, readAdmission: () => store.readAdmission() });
-      const recoverySignal = AbortSignal.any([lease.signal, AbortSignal.timeout(15_000)]);
-      const historical = nativeAgentCanary(lease, profile, devBoatClient({ apiKey: env.BOAT_API_KEY }, recoverySignal), { release },
-        { strictCleanup: true, releaseStorageDeferral: true, cleanupTimeoutMs: 0 });
-      await reconcileReleaseCanaryRetirements(config, execution.actorUserId, lease, historical, broker.retire, { signal: recoverySignal, maxRecords: 1 });
+      requireCheck(state.owner === workerOwner(config.channel) && Array.isArray(runs) && runs.length <= 100 &&
+        Array.isArray(state.resources.images), "Release canary historical ownership is unconfirmed");
+      // Temporarily defer earlier test-machine recovery for Alpha publication.
+      // Preserve the entire journal and admission holds; this run still uses
+      // the normal exact-source qualification and strict cleanup below.
+      if (config.channel !== "alpha") {
+        await reconcileReleaseBuilderRetentions(config, { lease, profile, request, readAdmission: () => store.readAdmission() });
+        const recoverySignal = AbortSignal.any([lease.signal, AbortSignal.timeout(15_000)]);
+        const historical = nativeAgentCanary(lease, profile, devBoatClient({ apiKey: env.BOAT_API_KEY }, recoverySignal), { release },
+          { strictCleanup: true, releaseStorageDeferral: true, cleanupTimeoutMs: 0 });
+        await reconcileReleaseCanaryRetirements(config, execution.actorUserId, lease, historical, broker.retire, { signal: recoverySignal });
+      }
       const credentials = await broker.preflight(), releaseCanaryBindings = [...credentials.values()];
       let run = runs.find((value: any) => value.runId === config.runId);
       if (!run) {
