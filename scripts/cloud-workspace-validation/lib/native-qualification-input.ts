@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { CloudAgentAccessMaterialSchema, CloudAgentExecutionLeaseSchema } from "@zeros/protocol/cloud-agent-execution";
-import type { RequestPermissionResponse } from "../../../apps/desktop/src/engine/agents/types";
-import { nativeChallengeCommand } from "./native-tool-evidence";
+import type { QuestionResponse, RequestPermissionResponse } from "../../../apps/desktop/src/engine/agents/types";
+import { nativeChallengeCommand, type NativeToolEvidence } from "./native-tool-evidence";
+import type { NativeQualificationPhase } from "./native-qualification-diagnostics";
 
 const schema = z.object({
   version: z.literal(1),
@@ -28,6 +29,29 @@ export function parseNativeQualificationInput(value: unknown, now = Date.now()) 
       throw new Error("Invalid private native qualification input");
   } else if (renewedCodex) throw new Error("Invalid private native qualification input");
   return parsed.data;
+}
+
+/** Codex presents MCP tool consent as a question. The isolated canary may
+ * answer only its own pending, argument-free probe, once and without persistence. */
+export function nativeQualificationQuestion(value: unknown, context: {
+  provider: string; phase: NativeQualificationPhase; sessionId: string | undefined; tools: NativeToolEvidence;
+}): QuestionResponse {
+  const dismissed: QuestionResponse = { outcome: { outcome: "dismissed" } };
+  if (context.provider !== "codex" || context.phase !== "native-mcp-prompt" || !context.sessionId) return dismissed;
+  const request = z.object({
+    sessionId: z.literal(context.sessionId), source: z.literal("native_rpc"), blocking: z.literal(true), allowDecline: z.literal(true),
+    nativeRequestId: z.string().min(1).max(512), toolCallId: z.string().min(1).max(512),
+    questions: z.tuple([z.object({
+      id: z.literal("__zeros_confirm__"), presentation: z.literal("one_click_approval"), approvalKind: z.literal("tool"),
+      approvalTarget: z.never().optional(), multiSelect: z.literal(false), allowOther: z.literal(false),
+      options: z.array(z.object({ id: z.enum(["accept", "accept_session", "accept_always"]), externalAction: z.never().optional() })).min(1).max(3),
+    })]),
+  }).safeParse(value);
+  if (!request.success) return dismissed;
+  const question = request.data.questions[0], choices = question.options.map(option => option.id);
+  if (!choices.includes("accept") || new Set(choices).size !== choices.length ||
+    !context.tools.consumeCanaryMcpApproval(request.data.toolCallId, request.data.nativeRequestId)) return dismissed;
+  return { outcome: { outcome: "answered", answers: [{ questionId: question.id, selectedOptionIds: ["accept"] }] } };
 }
 
 /** The unattended canary acts only on its own challenge. Never turn a native
