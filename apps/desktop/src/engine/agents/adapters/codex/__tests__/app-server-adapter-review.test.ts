@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const runtime = vi.hoisted(() => ({
+  listeners: new Map<string, Set<(params: unknown) => void>>(),
   runTurn: vi.fn(async () => ({
     turnId: "turn-normal",
     status: "completed" as const,
@@ -56,7 +57,12 @@ vi.mock("../app-server", () => ({
     interruptTurn: runtime.interruptTurn,
     respondToPermission: vi.fn(),
     respondToUserInput: vi.fn(),
-    onNotification: vi.fn(() => () => {}),
+    onNotification: vi.fn((method: string, handler: (params: unknown) => void) => {
+      const listeners = runtime.listeners.get(method) ?? new Set();
+      listeners.add(handler);
+      runtime.listeners.set(method, listeners);
+      return () => listeners.delete(handler);
+    }),
     request: vi.fn(async () => ({})),
     requestTyped: runtime.requestTyped,
     dispose: vi.fn(async () => {}),
@@ -78,19 +84,20 @@ import { CodexAppServerAdapter } from "../app-server-adapter";
 
 describe("Codex native review command", () => {
   beforeEach(() => {
+    runtime.listeners.clear();
     runtime.runTurn.mockClear();
     runtime.runReview.mockClear();
     runtime.interruptTurn.mockClear();
     runtime.requestTyped.mockClear();
   });
 
-  const adapter = () =>
+  const adapter = (onSessionUpdate = vi.fn()) =>
     new CodexAppServerAdapter({
       projectRoot: "/tmp/proj",
       mcpServers: [],
       sessionDirRoot: "/tmp/sessions",
       emit: {
-        onSessionUpdate: vi.fn(),
+        onSessionUpdate,
         onPermissionRequest: vi.fn(),
         onQuestionRequest: vi.fn(),
         onAgentStderr: vi.fn(),
@@ -153,6 +160,33 @@ describe("Codex native review command", () => {
     expect(
       runtime.requestTyped.mock.invocationCallOrder[0],
     ).toBeLessThan(runtime.runReview.mock.invocationCallOrder[0]);
+    await instance.dispose();
+  });
+
+  it("delivers the native exit review text before the review prompt resolves", async () => {
+    const onSessionUpdate = vi.fn();
+    const instance = adapter(onSessionUpdate);
+    const created = await instance.newSession({ cwd: "/tmp/proj" });
+    runtime.runReview.mockImplementationOnce(async (_params, options) => {
+      const notify = (method: string, params: unknown) => {
+        for (const handler of runtime.listeners.get(method) ?? []) handler(params);
+      };
+      options?.onTurnStarted?.("turn-review");
+      notify("turn/started", { threadId: "thread-exact", turn: { id: "turn-review", status: "inProgress" } });
+      for (const type of ["enteredReviewMode", "exitedReviewMode"]) {
+        const params = { threadId: "thread-exact", turnId: "turn-review",
+          item: { id: "turn-review", type, review: type === "exitedReviewMode" ? "Native review completed." : "current changes" } };
+        notify("item/started", params);
+        notify("item/completed", params);
+      }
+      notify("turn/completed", { threadId: "thread-exact", turn: { id: "turn-review", status: "completed" } });
+      return { turnId: "turn-review", status: "completed", raw: {} };
+    });
+    await expect(instance.prompt({ sessionId: created.session.sessionId, prompt: [{ type: "text", text: "/review" }] }))
+      .resolves.toMatchObject({ stopReason: "end_turn" });
+    expect(onSessionUpdate.mock.calls.flatMap(([, notification]) =>
+      notification.update.sessionUpdate === "agent_message_chunk" ? [notification.update.content.text] : []))
+      .toEqual(["Native review completed."]);
     await instance.dispose();
   });
 
