@@ -429,6 +429,12 @@ succeeded or an audit response was lost. The local terminal marker and retired
 flag are saved together after acknowledgment. Later guarded executions observe
 at most 16 historical canaries within a 15-second budget before fresh preflight;
 they never allocate, rebuild, reupload, prune images or release holds by age.
+Alpha publication temporarily skips the automatic historical builder and native
+canary recovery pass. It retains the complete journal and account reservations;
+the new run still requires all three agents to qualify and its own strict
+cleanup before publication. Explicit `--reconcile-storage` remains available.
+Beta and Production retain their automatic historical recovery. Restore the
+Alpha recovery pass when the deferred cleanup work is addressed.
 An authenticated unstarted allocation saved before its resource row exists is
 nonexecuted history, including a superseded run or truthful empty cleanup after
 admission denial. Scanning it never releases admission or fabricates cleanup or

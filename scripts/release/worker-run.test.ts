@@ -128,6 +128,30 @@ describe("worker runner first-generation recovery ordering", () => {
     expect(test.preflight).toHaveBeenCalledOnce(); expect(test.saved().resources.images).toEqual([record]);
     expect(test.saved().releaseRuns).toEqual([test.run]); expect(test.registry.writeAdmission).not.toHaveBeenCalled();
   });
+  it.each(["image builder", "native canary"])("defers prior Alpha %s recovery without observing or clearing its retained state", async kind => {
+    const test = fixture("alpha"), id = "88888888-8888-4888-8888-888888888888";
+    const builder = { id: "bx_previous", deleteRequested: true, deleted: false,
+      deletionOperationId: `bdop_${"c".repeat(32)}`, retiredAt: new Date(Date.now() - 10_000).toISOString() };
+    const record = kind === "image builder"
+      ? { purpose: "release-worker", releaseRunId: test.run.runId, sourceCommit: test.run.sourceSha, snapshotId: "synthetic-old-image", builder }
+      : { purpose: "native-agent-qualification", agentQualificationId: id, sourceCommit: test.run.sourceSha, sourceImage: "synthetic-old-image", nativeDispatchStarted: true, builder };
+    if (kind === "native canary") test.run.canaries.push({ ...workerConnections()[0], id, startedAt: Date.now() - 20_000,
+      phase: "starting", qualificationProfile: "full", image: { snapshotId: "synthetic-old-image", sourceCommit: test.run.sourceSha, buildSha256: "b".repeat(64) } });
+    test.state.resources.images = [record]; test.state.releaseRuns.push(test.run);
+    const retained = structuredClone({ images: test.state.resources.images, runs: test.state.releaseRuns });
+    await expect(test.execute()).rejects.toThrow("Release canary designation missing for claude-setup-token");
+    expect(test.preflight).toHaveBeenCalledOnce(); expect(test.fetcher).toHaveBeenCalledTimes(3);
+    expect(test.saved().resources.images).toEqual(retained.images); expect(test.saved().releaseRuns).toEqual(retained.runs);
+    expect(test.saved()).not.toHaveProperty("lease"); expect(test.registry.writeAdmission).not.toHaveBeenCalled();
+  });
+  it.each(["beta", "production"] as const)("keeps %s historical recovery before fresh preflight", async channel => {
+    const test = fixture(channel);
+    test.state.resources.images = [{ purpose: "release-worker", releaseRunId: test.run.runId, sourceCommit: test.run.sourceSha,
+      snapshotId: "synthetic-old-image", builder: { id: "bx_previous", retiredAt: new Date(Date.now() - 10_000).toISOString() } }];
+    test.state.releaseRuns.push(test.run);
+    await expect(test.execute()).rejects.toThrow("Worker builder retained storage is unconfirmed");
+    expect(test.preflight).not.toHaveBeenCalled(); expect(test.registry.writeAdmission).not.toHaveBeenCalled();
+  });
   it("refuses a different authenticated owner before any recovery or broker preflight", async () => {
     const test = fixture(); test.state.owner = workerOwner("beta");
     await expect(test.execute()).rejects.toThrow("ownership receipt");
