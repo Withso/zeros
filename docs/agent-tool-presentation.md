@@ -109,6 +109,13 @@ output; equal text in unrelated messages is not a deduplication key.
 | Codex    | Item IDs identify streamed items; completed items provide authoritative snapshots. Command actions describe operations within a command execution, whose result is aggregated.                                             | Use native file actions without splitting one result into invented per-file outputs. Preserve the original command for recovery and inspection. |
 | Cursor   | Native call IDs correlate callback and stream delivery. Shell wrappers can report success while the inner command has a failing exit code. Child transcript tool results refer to native tool IDs.                         | Merge delivery for each call, retain error text, and never infer completion from a wrapper or a child tool-use record alone.                    |
 
+Claude's single-result `tool_use_result: { detachedToolCall: true }` is a running
+web-tool acknowledgement, not its output. Keep the same native tool row open
+across the intervening turn and retain the process until the real result.
+Terminal errors still settle; ambiguous batched envelopes cannot attribute the
+marker. Stop/process replacement and invocation retraction release retention,
+and late acknowledgements cannot reopen a settled tool.
+
 The Claude frame behavior is documented in the
 [SDK streaming message flow](https://code.claude.com/docs/en/agent-sdk/streaming-output#message-flow).
 Codex documents command actions, aggregated results and authoritative completed

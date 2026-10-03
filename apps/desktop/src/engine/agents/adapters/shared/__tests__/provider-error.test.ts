@@ -223,6 +223,7 @@ describe("Claude startup reason recovery", () => {
     ["gateway_signin_required", "auth-required", /sign in/i],
     ["gateway_access_denied", "protocol-error", /administrator/i],
     ["org_pin_api_key_conflict", "protocol-error", /credential/i],
+    ["provider_not_allowed", "protocol-error", /provider.*administrator/i],
     ["org_verify_failed", "protocol-error", /organization/i],
     ["org_pin_mismatch", "protocol-error", /organization/i],
     ["managed_settings_invalid", "protocol-error", /administrator/i],

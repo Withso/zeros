@@ -38,6 +38,12 @@
       "automerge": false
     },
     {
+      "description": "The control-plane Codex package is an auth-only keeper with a separately qualified runtime pin. That version is authenticated cache data and constrained by the database schema. Upgrading it requires an explicit cache migration and renewal qualification; desktop/worker model updates must not change it through the agent-CLI group.",
+      "matchPackageNames": ["@openai/codex"],
+      "matchFileNames": ["apps/control-plane/package.json"],
+      "enabled": false
+    },
+    {
       "description": "Zeros Sandbox Runtime is a security boundary, exact-pinned to a reviewed upstream commit and a digest-pinned local patch. A version bump must refresh the patch/provenance and pass packaging, license, attack, parity, and deployed-image qualification; it is therefore isolated in its own weekly, never-auto-merged PR.",
       "matchPackageNames": ["@anthropic-ai/sandbox-runtime"],
       "enabled": true,

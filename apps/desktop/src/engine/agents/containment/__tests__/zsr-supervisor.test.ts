@@ -210,7 +210,17 @@ describe.skipIf(process.platform !== "linux")(
       // Kernel enforcement is exercised separately by check:zsr:runtime.
       await writeFile(
         capture,
-        "#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)));\n",
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const fromFile = args.indexOf("--args");
+if (fromFile !== -1) {
+  const mounts = fs.readFileSync(Number(args[fromFile + 1]), "utf8").split("\\0");
+  if (mounts.at(-1) === "") mounts.pop();
+  args.splice(fromFile, 2, ...mounts);
+}
+console.log(JSON.stringify(args));
+`,
         { mode: 0o700 },
       );
     });
@@ -407,6 +417,139 @@ describe.skipIf(process.platform !== "linux")(
         ["--ro-bind", denied, denied].join("\n"),
       );
       expect(args).not.toContain(file);
+    });
+
+    it("restores a write path read-only when a broader write deny reapplies its read mask", async () => {
+      const denied = path.join(root, "private");
+      const island = path.join(denied, "worker");
+      await mkdir(island, { recursive: true });
+      const args = await argumentsFor({
+        hostParity: true,
+        readConfig: { denyOnly: [denied], allowWithinDeny: [island] },
+        writeConfig: { allowOnly: [root, island], denyWithinAllow: [root] },
+      });
+      const finalRestore = args.reduce(
+        (last, arg, index) =>
+          (arg === "--bind" || arg === "--ro-bind") && args[index + 2] === island
+            ? index
+            : last,
+        -1,
+      );
+      expect(finalRestore).toBeGreaterThan(-1);
+      expect(args[finalRestore]).toBe("--ro-bind");
+    });
+
+    it.each([false, true])(
+      "retains a nested write deny after restoring an island through a read mask (existing: %s)",
+      async (existing) => {
+        const privateRoot = path.join(root, "private");
+        const island = path.join(privateRoot, "sessions", "worker");
+        const denied = path.join(island, "authority.json");
+        await mkdir(island, { recursive: true });
+        if (existing) await writeFile(denied, "protected");
+        const args = await argumentsFor({
+          hostParity: true,
+          readConfig: { denyOnly: [privateRoot], allowWithinDeny: [island] },
+          writeConfig: {
+            allowOnly: [root, island],
+            denyWithinAllow: [root, denied],
+            allowWithinDeny: [island],
+          },
+        });
+        const finalRestore = args.reduce(
+          (last, arg, index) =>
+            arg === "--bind" && args[index + 2] === island ? index : last,
+          -1,
+        );
+        expect(finalRestore).toBeGreaterThan(-1);
+        const denyAfterRestore = args.findIndex(
+          (arg, index) =>
+            index > finalRestore &&
+            arg === "--ro-bind" &&
+            args[index + 2] === denied,
+        );
+        expect(denyAfterRestore).toBeGreaterThan(finalRestore);
+      },
+    );
+
+    it.skipIf(spawnSync("bwrap", ["--version"]).status !== 0).each([false, true])(
+      "enforces writable exceptions and nested denies in the kernel (existing: %s)",
+      async (existing) => {
+        const privateRoot = path.join(root, "private");
+        const island = path.join(privateRoot, "sessions", "worker");
+        const denied = path.join(island, "authority.json");
+        const secret = path.join(privateRoot, "secret.txt");
+        await mkdir(island, { recursive: true });
+        if (existing) await writeFile(denied, "protected");
+        await writeFile(secret, "private");
+        const probe = `
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const [island, denied, secret] = process.argv.slice(1);
+          fs.writeFileSync(path.join(island, "allowed.txt"), "allowed");
+          let writeDenied = false;
+          try { fs.writeFileSync(denied, "changed"); } catch { writeDenied = true; }
+          let readDenied = false;
+          try { readDenied = fs.readFileSync(secret, "utf8") !== "private"; }
+          catch { readDenied = true; }
+          if (!writeDenied || !readDenied) process.exit(42);
+        `;
+        const command = [process.execPath, "-e", probe, island, denied, secret]
+          .map((word) => `'${word.replaceAll("'", "'\\''")}'`)
+          .join(" ");
+        const args = await argumentsFor({
+          command,
+          hostParity: true,
+          readConfig: { denyOnly: [privateRoot], allowWithinDeny: [island] },
+          writeConfig: {
+            allowOnly: [root, island],
+            denyWithinAllow: [root, denied],
+            allowWithinDeny: [island],
+          },
+        });
+        // Like the supervisor, strip ambient VM capabilities before bwrap.
+        // Ordinary desktop/CI users have none and need no privileged setup.
+        const status = await readFile("/proc/self/status", "utf8");
+        const effectiveCaps = /^CapEff:\s+([a-f\d]+)$/m.exec(status)?.[1] ?? "0";
+        const result = BigInt(`0x${effectiveCaps}`) === 0n
+          ? spawnSync("bwrap", args, { encoding: "utf8" })
+          : spawnSync("setpriv", [
+              "--no-new-privs", "--bounding-set=-all", "--inh-caps=-all",
+              "--ambient-caps=-all", "bwrap", ...args,
+            ], { encoding: "utf8" });
+        expect(result.status, result.stderr).toBe(0);
+        expect(await readFile(path.join(island, "allowed.txt"), "utf8")).toBe("allowed");
+        if (existing) expect(await readFile(denied, "utf8")).toBe("protected");
+      },
+    );
+
+    function oversizedDenies() {
+      return Array.from({ length: 800 }, (_, index) =>
+        path.join(root, `private-${index}-${"x".repeat(180)}`),
+      );
+    }
+
+    it("preserves every deny in an isolated profile too large for one shell argument", async () => {
+      const denied = oversizedDenies();
+      const args = await argumentsFor({
+        writeConfig: { allowOnly: [root], denyWithinAllow: denied },
+      });
+      const destinations = new Set(
+        args.flatMap((arg, index) => arg === "--ro-bind" ? [args[index + 2]] : []),
+      );
+      expect(denied.every((destination) => destinations.has(destination))).toBe(true);
+    });
+
+    it("refuses an oversized host-parity profile without exposing a supervisor descriptor", async () => {
+      await expect(wrapCommandWithSandboxLinux({
+        command: "true",
+        hostParity: true,
+        needsNetworkRestriction: false,
+        allowAllUnixSockets: true,
+        disableMandatoryWriteProtection: true,
+        writeConfig: { allowOnly: [root], denyWithinAllow: oversizedDenies() },
+        bwrapPath: capture,
+      })).rejects.toThrow(/host.parity.*descriptor/i);
     });
   },
 );
