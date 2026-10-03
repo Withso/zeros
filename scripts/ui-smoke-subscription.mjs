@@ -444,6 +444,7 @@ export async function runUsageSmoke({ page, check }) {
 
 export async function runQueueSmoke({ page, check }) {
   const base = new URL(page.url()).origin;
+  await page.clock.install();
   for (const provider of ["claude", "codex", "cursor"]) {
     await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-subscription.html?queue=${provider}`);
     const prompt = page.getByLabel("Message", { exact: true });
@@ -468,11 +469,14 @@ export async function runQueueSmoke({ page, check }) {
     await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B","D"]');
     await expect(page.locator("[data-queued-id]")).toHaveCount(0);
     await send("E"); await action("E", "Send now");
+    await page.clock.fastForward(60_000);
     await expect(row("E").getByRole("button", { name: "Sending…", exact: true })).toBeDisabled();
     await expect(row("E").getByRole("button", { name: "Edit", exact: true })).toBeDisabled();
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     await page.getByRole("button", { name: "Return to queue", exact: true }).click();
     await expect(row("E").getByRole("button", { name: "Send now", exact: true })).toBeEnabled();
+    await expect(row("E").getByRole("button", { name: "Edit", exact: true })).toBeEnabled();
+    await expect(row("E").getByRole("button", { name: "Delete", exact: true })).toBeEnabled();
     await expect(page.getByRole("button", { name: /1 queued message.*Paused/ })).toBeVisible();
     await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B","D"]');
     // A newly composed message also releases Stop and drains remaining work.
@@ -480,6 +484,14 @@ export async function runQueueSmoke({ page, check }) {
     await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B","D","F"]');
     await page.getByRole("button", { name: "Finish turn", exact: true }).click();
     await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B","D","F","E"]');
-    check(`${provider}: Stop preserves edits; selected C resumes C → B → D; late steering keeps Stop paused`, true);
+    await send("G"); await action("G", "Send now");
+    await page.clock.fastForward(60_000);
+    await page.getByRole("button", { name: "Confirm delivery", exact: true }).click();
+    await expect(row("G")).toHaveCount(0);
+    await send("H"); await action("H", "Edit"); await prompt.fill("edited H");
+    await page.getByRole("button", { name: "Save message", exact: true }).click();
+    await action("edited H", "Delete");
+    await expect(page.locator("[data-queued-id]")).toHaveCount(0);
+    check(`${provider}: slow steering settles; Stop restores edit/delete; selected sends preserve FIFO`, true);
   }
 }

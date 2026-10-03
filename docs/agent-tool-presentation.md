@@ -609,13 +609,19 @@ Current entry points:
   show `Paused` in its header rather than introducing a separate queue surface.
 - Mid-turn Send now keeps the row in its original queue position while delivery
   is pending. Disable editing/deletion and repeated submission until the receipt
-  arrives. `delivered` promotes that exact row into its accepting turn;
+  arrives; other queued rows remain editable/deletable. Native consumption may
+  wait behind a long-running tool, so the steering bridge request has no response
+  timer. Stop, provider disposal and transport disconnect still settle it.
+  `delivered` promotes that exact row into its accepting turn;
   `queued` proves it was not consumed and schedules the selected message next.
   If Stop occurred during delivery, retain its original FIFO position and pause.
   `interrupted` means consumption was uncertain: preserve the attempted message
   in its original turn, pause the queue, explain the uncertainty, and never
   automatically inject it again. Do not represent
   local buffering or a missing reply as successful delivery.
+- Deleting an edited row removes it before releasing the edit hold. Send now
+  saves and selects the edited row before releasing that hold, so an idle queue
+  cannot dispatch the deleted message or an earlier follow-up in its place.
 - Lost bridge replies retain the same steering attempt ID. `Retry delivery`
   retrieves the engine receipt, including after the original turn ended; it must
   not issue a second native instruction. The bounded receipt ledger retains all

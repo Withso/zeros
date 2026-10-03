@@ -4615,9 +4615,11 @@ export function AgentSessionsProvider({
             attemptId: route.attemptId,
             ...(bubble ? { bubble } : {}),
           },
-          // Bounded: an engine that predates AGENT_STEER drops the frame
-          // (no reply), and the queued message must resurface promptly.
-          { timeoutMs: 15_000 },
+          // This receipt waits for native consumption, which can take longer
+          // than a control RPC while a tool is running. Keep the request alive
+          // until the provider settles it (including Stop/disposal); an actual
+          // disconnect still rejects and preserves the attempt for safe retry.
+          { timeoutMs: 0 },
         );
         if (!ownsEntry()) return false;
         if (resp.type === "AGENT_ERROR") {
