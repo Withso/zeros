@@ -45,7 +45,10 @@ export function promotionConfig(env: NodeJS.ProcessEnv, options: { migrations?: 
   const cloudRequired = env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true";
   requireCheck(!cloudRequired || ["boat", "daytona"].includes(env.CLOUD_WORKSPACE_PROVIDER ?? ""), "Cloud releases require an explicit managed provider");
   requireCheck(/^\d+$/.test(env.GITHUB_RUN_ID ?? "") && /^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? ""), "Run identity is required");
-  return { ...source, ...expected, cloudRequired, provider: env.CLOUD_WORKSPACE_PROVIDER,
+  // With worker promotion off, a cloud-enabled desktop ships on the API's
+  // current worker state (possibly none or unqualified); hosted services still gate it.
+  const requireQualifiedWorker = cloudRequired && env.ZEROS_WORKER_PROMOTION === "enabled";
+  return { ...source, ...expected, cloudRequired, requireQualifiedWorker, provider: env.CLOUD_WORKSPACE_PROVIDER,
     runId: env.GITHUB_RUN_ID!, runAttempt: env.GITHUB_RUN_ATTEMPT!,
     projectId: env.RAILWAY_PROJECT_ID!, environmentId: env.RAILWAY_ENVIRONMENT_ID!, serviceId: env.RAILWAY_SERVICE_ID!,
     organization: env.PLANETSCALE_ORG!, database: env.PLANETSCALE_DATABASE!, databaseBranch: env.PLANETSCALE_BRANCH!,

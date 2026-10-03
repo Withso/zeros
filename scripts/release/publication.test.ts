@@ -4,7 +4,7 @@ import { reusableWorker } from "./worker-reuse";
 import { channelBaseline, migrationManifest } from "./source";
 
 const sha = "a".repeat(40), later = "b".repeat(40), digest = "c".repeat(64);
-const candidate = { channel: "alpha" as const, sourceSha: sha, branch: "main", repository: "example/zeros", runId: "1", cloudRequired: true, provider: "boat" };
+const candidate = { channel: "alpha" as const, sourceSha: sha, branch: "main", repository: "example/zeros", runId: "1", cloudRequired: true, requireQualifiedWorker: true, provider: "boat" };
 const worker = { provider: "boat", imageRef: `boat:zeros-alpha-fixture@sha256:${digest}`, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096 };
 const backend = { version: 1, ready: true, sourceSha: sha, channel: "alpha", maintenance: false,
   migrations: { state: "current", head: "0112_test.sql", expectedHead: "0112_test.sql", manifestSha256: digest },
@@ -30,14 +30,14 @@ describe("V6 publication-time proof", () => {
     await expect(publicationGate(candidate, { ...deps(), receipt: async () => ({ ...receipt, runId: "2" }) })).rejects.toThrow();
   });
   it("a cloud-disabled desktop needs no worker, even beside an API running unqualified cloud", async () => {
-    const desktop = { ...candidate, cloudRequired: false, provider: undefined };
+    const desktop = { ...candidate, cloudRequired: false, requireQualifiedWorker: false, provider: undefined };
     const unqualified = { ...backend, workerQualified: false, worker: { ...worker, sourceSha: later } };
     const hash = async (source: string) => source === sha ? digest : "d".repeat(64);
     expect(await reusableWorker(desktop, unqualified, hash)).toBeUndefined();
     await expect(reusableWorker(desktop, { ...backend, channel: "beta" }, hash)).rejects.toThrow("Current channel readiness is unavailable");
   });
   it("refuses a receipt made under another desktop cloud decision", async () => {
-    await expect(publicationGate({ ...candidate, cloudRequired: false }, deps())).rejects.toThrow("desktop cloud capability");
+    await expect(publicationGate({ ...candidate, cloudRequired: false, requireQualifiedWorker: false }, deps())).rejects.toThrow("desktop cloud capability");
     const { cloudRequired: _omitted, ...legacy } = receipt;
     await expect(publicationGate(candidate, { ...deps(), receipt: async () => legacy })).rejects.toThrow("desktop cloud capability");
   });
@@ -46,6 +46,24 @@ describe("V6 publication-time proof", () => {
     expect(() => assertBuildCapability("true", true)).not.toThrow();
     for (const [built, required] of [["true", false], ["false", true], [undefined, false], ["", false], ["yes", true]] as const)
       expect(() => assertBuildCapability(built, required)).toThrow("signed desktop");
+  });
+  it("publishes a cloud-enabled desktop without a qualified worker while worker promotion is off", async () => {
+    const advisory = { ...candidate, requireQualifiedWorker: false };
+    // Beta/Production: the API has cloud off and no worker yet.
+    const disabled = { ...backend, cloud: { enabled: false, ready: true, state: "disabled" }, worker: null, workerQualified: false };
+    // Alpha: the API keeps an unqualified worker from an earlier image build.
+    const unqualified = { ...backend, workerQualified: false, worker: { ...worker, sourceSha: later } };
+    for (const current of [disabled, unqualified]) {
+      const receipted = { ...receipt, backend: current };
+      await expect(publicationGate(advisory, { ...deps(), receipt: async () => receipted, identity: async () => current })).resolves.toBeUndefined();
+      // The receipt binding, Pages and API source checks still apply.
+      await expect(publicationGate(advisory, { ...deps(), receipt: async () => receipted, identity: async () => ({ ...current, sourceSha: later }) })).rejects.toThrow();
+      await expect(publicationGate(advisory, { ...deps(), receipt: async () => receipted, identity: async () => current,
+        page: async surface => ({ version: 1, commitSha: later, surface }) })).rejects.toThrow();
+      await expect(publicationGate(candidate, { ...deps(), receipt: async () => receipted, identity: async () => current })).rejects.toThrow("cloud qualification");
+      expect(await reusableWorker(advisory, current, async () => digest)).toBeUndefined();
+      await expect(reusableWorker(candidate, current, async () => digest)).rejects.toThrow();
+    }
   });
   it("enabled reuse requires affirmative current qualification", async () => {
     for (const workerQualified of [false, undefined])

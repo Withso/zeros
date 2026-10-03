@@ -1192,7 +1192,9 @@ Owner setup, once per channel before **enabling** the controller:
 
 `cloud-worker-promotion.yml` supports dispatch and `workflow_call`, shares the
 hosted mutation lock, and uses `ZEROS_WORKER_PROMOTION=enabled` as its separate
-switch. Plans remain mutation-free and never issue success receipts. Execution
+switch. With the switch off, hosted promotion and publication do not require a
+qualified worker even for a cloud-enabled desktop; the API keeps its current
+worker tuple and the hosted services gate is unchanged. Plans remain mutation-free and never issue success receipts. Execution
 requires a clean exact-event-SHA checkout, successful exact-SHA Preflight and
 CodeQL, the new exact-SHA API/current schema and trusted pre-worker services
 receipt (API, Pages and WorkOS). The supported broker uses only explicitly
