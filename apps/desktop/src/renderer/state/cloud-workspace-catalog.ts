@@ -347,10 +347,8 @@ export function clearCloudWorkspaceCatalog(): void {
   rebuild(hadDocuments);
 }
 
-const lifecycleIntents = new Map<
-  string,
-  { id: string; task?: Promise<CloudWorkspaceDocument> }
->();
+type LifecycleIntent = { id: string; task?: Promise<CloudWorkspaceDocument>; owner?: number; generation?: number };
+const lifecycleIntents = new Map<string, LifecycleIntent>();
 function settleLifecycleIntents(doc: CloudWorkspaceDocument): void {
   const operation = ["ready", "busy"].includes(doc.status)
     ? "wake"
@@ -370,14 +368,31 @@ export async function manageCloudWorkspace(
   operation: "wake" | "stop" | "archive" | "delete",
   wait = false,
 ): Promise<CloudWorkspaceDocument> {
-  const key = `${epoch}:${cloudWorkspaceKey(target)}:${operation}`;
-  const intent = lifecycleIntents.get(key) ?? { id: crypto.randomUUID() };
+  const workspaceKey = cloudWorkspaceKey(target);
+  const key = `${epoch}:${workspaceKey}:${operation}`;
+  const owner = operation === "wake"
+    ? detailOwnerGenerations.get(workspaceKey) ?? ++nextDetailOwnerGeneration : undefined;
+  if (owner !== undefined) detailOwnerGenerations.set(workspaceKey, owner);
+  const generation = cloudWorkspaceDocument(target)?.generation.number;
+  const previous = lifecycleIntents.get(key);
+  const intent: LifecycleIntent = previous && (operation !== "wake" || previous.owner === owner && previous.generation === generation)
+    ? previous : { id: crypto.randomUUID(), owner, generation };
   if (intent.task) return intent.task;
   const version = epoch;
   const task = (async () => {
     let doc = await changeCloudWorkspaceLifecycle(target, operation, intent.id);
     if (version !== epoch) throw new Error("Cloud account changed");
+    if (operation === "wake") {
+      if (detailOwnerGenerations.get(workspaceKey) !== owner)
+        throw new Error("Cloud workspace was removed while waking");
+      if (doc.id !== target.workspaceId || doc.organizationId !== target.organizationId)
+        throw new Error("Cloud wake returned a different workspace");
+      const current = cloudWorkspaceDocument(target);
+      if (generation !== undefined && (doc.generation.number !== generation || current?.generation.number !== generation))
+        throw new Error("Cloud workspace generation changed while waking");
+    }
     acceptCloudWorkspaceDocument(doc);
+    if (operation === "wake") doc = cloudWorkspaceDocument(target)!;
     const terminal =
       operation === "wake"
         ? ["ready", "busy"]

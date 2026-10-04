@@ -3002,10 +3002,20 @@ export function createCloudWorkspaceRoutes(
     });
 
     const result = await withSystemTx(pool, async (tx) => {
-      await requireOrganizationMembership(tx, orgId, user.id);
+      // A workspace guest has exact run authority, not tenant membership or
+      // cleanup authority. Keep withdrawal/management on their existing path.
+      if (operation !== "wake") await requireOrganizationMembership(tx, orgId, user.id);
       await lockCloudOrganization(tx, orgId);
       let workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, user.id);
-      await authorizeCloudWorkspaceCleanup(tx,{organizationId:orgId,workspaceId,actorUserId:user.id});
+      if (operation === "wake") {
+        await authorizeCloudWorkspaceActor(tx,{organizationId:orgId,workspaceId,actorUserId:user.id,capability:"run"});
+        // Ordinary use may wake sleeping compute or join an existing start.
+        // Restoring archives and retrying failed lifecycle work remain managed.
+        if (!["stopped", "waking", "provisioning", "setting_up", "ready", "busy"].includes(workspace.status))
+          await authorizeCloudWorkspaceActor(tx,{organizationId:orgId,workspaceId,actorUserId:user.id,capability:"manage"});
+      } else {
+        await authorizeCloudWorkspaceCleanup(tx,{organizationId:orgId,workspaceId,actorUserId:user.id});
+      }
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
         assertIdempotencyMatch(existing, workspaceId, digest,user.id);
@@ -3027,7 +3037,6 @@ export function createCloudWorkspaceRoutes(
         );
       }
       if (operation === "wake") {
-        await authorizeCloudWorkspaceActor(tx,{organizationId:orgId,workspaceId,actorUserId:user.id,capability:"manage"});
         await requireGenerationRuntime(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation },
           config?.runtime?.qualificationMode ?? cloudRuntimeQualificationMode());
         const quarantined = await tx.query(`SELECT 1 FROM cloud_workspace_restore_incidents

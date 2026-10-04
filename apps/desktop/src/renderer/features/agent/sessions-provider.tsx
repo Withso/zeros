@@ -62,7 +62,11 @@ import type {
 } from "../../platform/bridge/messages";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
-import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
+import { useInternalFeatureActive } from "../settings/internal-features";
+import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { CloudSendPreparation } from "./cloud-send-preparation";
 import { chatChangeTargets } from "../../state/chat-change-targets";
 import { BackgroundTaskSnapshots, loadedBackgroundTaskState } from "./background-task-state";
 import { cloudSessionMetadata } from "./cloud-session-metadata";
@@ -458,6 +462,7 @@ export function AgentSessionsProvider({
   children: React.ReactNode;
 }) {
   const bridge = useBridge();
+  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
 
   // Helper: snapshot the store. Used inside async actions to bypass
   // React's closure capture problem (state read pre-await is stale).
@@ -1338,6 +1343,29 @@ export function AgentSessionsProvider({
    *  send is still parked on a session rebuild / resume and has therefore not
    *  reached the engine yet. See bumpCancelGeneration. */
   const cancelGenerationsRef = useRef(new Map<string, number>());
+  const cloudSendPreparationRef = useRef(new CloudSendPreparation());
+  useEffect(() => () => cloudSendPreparationRef.current.clear(), [bridge, cloudComputerV2]);
+  const prepareForSend = useCallback<SessionsActions["prepareForSend"]>((chatId) => {
+    if (!cloudComputerV2) return null;
+    const current = () => {
+      // Never fall back to the active folder: a hidden chat can own an
+      // explicit send while the user navigates to another workspace.
+      const folder = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.folder ??
+        getStore().sessions[chatId]?.cwd;
+      const target = parseCloudWorkspaceKey(folder);
+      return target && folder ? {
+        folder, account: cloudCatalogGeneration(),
+        generation: cloudWorkspaceDocument(target)?.generation.number,
+        cancellation: cancelGeneration(cancelGenerationsRef.current, chatId),
+      } : undefined;
+    };
+    const owner = current();
+    if (!owner) return null;
+    if (!(bridge instanceof WorkspaceRuntimeClient)) return Promise.reject(new Error("Cloud workspace connection is unavailable"));
+    const target = parseCloudWorkspaceKey(owner.folder)!;
+    return cloudSendPreparationRef.current.prepare(chatId, owner,
+      signal => bridge.openWorkspace(target, { signal }), current);
+  }, [bridge, cloudComputerV2, getStore]);
 
   /** Dispose only the exact route returned by a create/load that completed
    * after its renderer operation was cancelled. Deliberately omit chatId: a
@@ -2205,6 +2233,8 @@ export function AgentSessionsProvider({
       autoAction,
     ) => {
       if (!bridge) return;
+      const preparation = prepareForSend(chatId);
+      if (preparation) await preparation;
       // Atomic lock — fix #8. Two synchronous Enter presses both
       // observed `status !== "streaming"` before either could flip
       // it; the second prompt overrode the first's pendingTurn and
@@ -3810,6 +3840,7 @@ export function AgentSessionsProvider({
       pauseQueue,
       evictUnretainedTranscripts,
       persistAuthPrompt,
+      prepareForSend,
     ],
   );
   sendPromptRef.current = sendPrompt;
@@ -3824,6 +3855,7 @@ export function AgentSessionsProvider({
       // cannot be conditional on having one. It is a local counter bump; no
       // bridge is needed to make the in-flight send read it.
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
+      cloudSendPreparationRef.current.cancel(chatId);
       getStore().setPendingLocalTurn(chatId, null);
       // Stop pauses follow-ups, including messages whose steering receipt is
       // still pending. Keep their original payloads/order so they remain editable.
@@ -5689,7 +5721,7 @@ export function AgentSessionsProvider({
   const getCloseActivity = useCallback<SessionsActions["getCloseActivity"]>(
     (chatId) =>
       closeActivityForSession(getStore().sessions[chatId], {
-        localSendInFlight: sendingChatsRef.current.has(chatId),
+        localSendInFlight: sendingChatsRef.current.has(chatId) || cloudSendPreparationRef.current.has(chatId),
         queuedCount: sendQueueRef.current.get(chatId)?.length ?? 0,
       }),
     [getStore],
@@ -5698,6 +5730,7 @@ export function AgentSessionsProvider({
     cancelGeneration(cancelGenerationsRef.current, chatId), []);
 
   const disposeAll = useCallback<SessionsActions["disposeAll"]>(() => {
+    cloudSendPreparationRef.current.clear();
     getStore().clearAll();
     prebindDirtySessionsRef.current.clear();
     prebindGoalSnapshotsRef.current.clear();
@@ -5721,6 +5754,7 @@ export function AgentSessionsProvider({
       // before any bridge/route guard so a prompt still awaiting create/load
       // cannot dispatch after the tab has disappeared.
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
+      cloudSendPreparationRef.current.cancel(chatId);
       const slot = getStore().sessions[chatId];
       prebindDirtySessionsRef.current.delete(chatId);
       clearPrebindGoalSnapshotsForChat(prebindGoalSnapshotsRef.current, chatId);
@@ -5781,6 +5815,7 @@ export function AgentSessionsProvider({
       getSession,
       getCloseActivity,
       getSendGeneration,
+      prepareForSend,
       listAgents,
       initAgent,
       ensureSession,
@@ -5822,6 +5857,7 @@ export function AgentSessionsProvider({
       getCloseActivity,
       getSendGeneration,
       listAgents,
+      prepareForSend,
       initAgent,
       ensureSession,
       sendPrompt,

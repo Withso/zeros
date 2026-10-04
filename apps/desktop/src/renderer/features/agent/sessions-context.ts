@@ -84,6 +84,9 @@ export interface SessionsActions {
   getSession(chatId: string): AgentSessionState | undefined;
   /** Cancellation/close epoch for explicit retry preparation before send. */
   getSendGeneration(chatId: string): number;
+  /** Explicit send only: obtain fresh cloud admission before session work.
+   * Local and gated-off callers need no preparation. Stop/close cancels it. */
+  prepareForSend(chatId: string): Promise<void> | null;
   /** Fresh close-boundary work snapshot. Includes local sends still awaiting a
    * route, adopted provider turns, active background work, and queued prompts. */
   getCloseActivity(chatId: string): {

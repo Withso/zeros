@@ -69,6 +69,33 @@ beforeEach(() => {
   api.projects.mockReturnValue([]);
 });
 describe("cloud workspace catalog ownership", () => {
+  it.each(["account", "removed", "generation", "target"])("rejects a late wake response after its %s changes", async reason => {
+    acceptCloudWorkspaceDocument(doc(1, "stopped"));
+    let finish!: (document: CloudWorkspaceDocument) => void;
+    api.lifecycle.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const waking = manageCloudWorkspace(target, "wake");
+    const rejected = expect(waking).rejects.toThrow(/changed|removed|different/i);
+    if (reason === "account") clearCloudWorkspaceCatalog();
+    if (reason === "removed") {
+      api.list.mockResolvedValue([]);
+      await refreshCloudWorkspaceCatalog();
+    }
+    if (reason === "generation") acceptCloudWorkspaceDocument({ ...doc(3), generation: { ...doc(3).generation, number: 2 } });
+    finish({ ...doc(2, "waking"), ...(reason === "target" ? { organizationId: "33333333-3333-4333-8333-333333333333" } : {}) });
+    await rejected;
+    if (["account", "removed"].includes(reason)) expect(cloudWorkspaceDocument(target)).toBeUndefined();
+    if (reason === "generation") expect(cloudWorkspaceDocument(target)?.generation.number).toBe(2);
+    if (reason === "target") expect(getCloudProjects()).toHaveLength(1);
+  });
+  it("returns a newer stop instead of the late wake receipt", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "stopped"));
+    let finish!: (document: CloudWorkspaceDocument) => void;
+    api.lifecycle.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const waking = manageCloudWorkspace(target, "wake");
+    acceptCloudWorkspaceDocument(doc(3, "stopping"));
+    finish(doc(2, "waking"));
+    expect((await waking).status).toBe("stopping");
+  });
   it("sends recover to the generation recovery route with its exact checkpoint", async () => {
     const recovery = { sourceGeneration: 1, checkpointId: "33333333-3333-4333-8333-333333333333" };
     api.recover.mockResolvedValue(doc(2, "ready"));

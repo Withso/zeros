@@ -1668,6 +1668,90 @@ d("cloud workspace API contracts", () => {
     expect((await pool.query("SELECT 1 FROM team_members WHERE team_id=$1 AND user_id=$2",[teamId,outsider.id])).rowCount).toBe(0);
   });
 
+  const stoppedSharedWorkspace = async (role: "viewer" | "prompter" | "developer", guest = false) => {
+    const created = await createWorkspace();
+    expect(created.response.status).toBe(202);
+    const workspaceId = created.body.workspace.id as string;
+    await withSystemTx(pool, async tx => {
+      await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [orgId]);
+      await tx.query("UPDATE cloud_workspaces SET single_member_mode=false,status='stopped',desired_state='stopped' WHERE id=$1", [workspaceId]);
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1", [workspaceId]);
+      await tx.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$2,observed_state='stopped' WHERE workspace_id=$1", [workspaceId, `sandbox-${workspaceId}`]);
+      if (guest) {
+        await tx.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,expires_at)
+          VALUES($1,$2,$3,$4,$5,now()+interval '1 hour')`, [randomUUID(), workspaceId, orgId, outsider.id, role]);
+      } else {
+        await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [orgId, outsider.id]);
+        await tx.query("INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,$4)", [workspaceId, orgId, outsider.id, role]);
+      }
+      if (role !== "viewer") await reserveWriterSlot(tx, workspaceId, { userId: outsider.id });
+    });
+    actor = outsider;
+    return workspaceId;
+  };
+
+  it.each([
+    ["prompter", false], ["developer", false], ["prompter", true], ["developer", true],
+  ] as const)("lets a run-authorized %s wake with guest=%s while keeping cleanup separate", async (role, guest) => {
+    const workspaceId = await stoppedSharedWorkspace(role, guest);
+    const endpoint = `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}`;
+    const key = randomUUID();
+    const before = (await generationPin(workspaceId)).rows;
+    const response = await request(`${endpoint}/wake`, { method: "POST", key });
+    expect(response.status).toBe(202);
+    const result = await response.json();
+    expect(result.workspace).toMatchObject({ id: workspaceId, status: "waking", ownerUserId: owner.id });
+    expect(result.workspace.capabilities).toMatchObject({ canWrite: true, canManage: false });
+    const replay = await request(`${endpoint}/wake`, { method: "POST", key });
+    expect(replay.status).toBe(200);
+    expect((await replay.json()).intent.id).toBe(result.intent.id);
+    expect((await generationPin(workspaceId)).rows).toEqual(before);
+    expect((await pool.query(`SELECT requested_by FROM cloud_workspace_lifecycle_intents
+      WHERE workspace_id=$1 AND operation='wake'`, [workspaceId])).rows).toEqual([{ requested_by: outsider.id }]);
+    expect((await pool.query(`SELECT billing_owner_user_id FROM workspace_billing_epochs
+      WHERE workspace_id=$1 ORDER BY billing_epoch DESC LIMIT 1`, [workspaceId])).rows).toEqual([{ billing_owner_user_id: owner.id }]);
+    for (const operation of ["stop", "archive", "delete"] as const) {
+      const denied = await request(`${endpoint}${operation === "delete" ? "" : `/${operation}`}`, {
+        method: operation === "delete" ? "DELETE" : "POST", key: randomUUID(),
+      });
+      expect(denied.status).toBeGreaterThanOrEqual(400);
+    }
+    if (guest) {
+      expect((await request(`/v1/organizations/${orgId}/cloud-workspaces`)).status).toBe(404);
+      await pool.query("UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1 WHERE workspace_id=$1", [workspaceId]);
+      expect((await request(`${endpoint}/wake`, { method: "POST", key })).status).toBe(404);
+    }
+  });
+
+  it.each(["viewer", "expired", "revoked", "no-slot", "other-workspace"])("does not wake for a %s guest", async restriction => {
+    const workspaceId = await stoppedSharedWorkspace(restriction === "viewer" ? "viewer" : "developer", true);
+    if (restriction === "expired") await pool.query("UPDATE cloud_workspace_guest_grants SET expires_at=now()-interval '1 second' WHERE workspace_id=$1", [workspaceId]);
+    if (restriction === "revoked") await pool.query("UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1 WHERE workspace_id=$1", [workspaceId]);
+    if (restriction === "no-slot") await withSystemTx(pool, tx => tx.query("DELETE FROM cloud_workspace_writer_slots WHERE workspace_id=$1 AND user_id=$2", [workspaceId, outsider.id]));
+    let targetId = workspaceId;
+    if (restriction === "other-workspace") {
+      actor = owner;
+      targetId = (await createWorkspace()).body.workspace.id;
+      actor = outsider;
+    }
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${targetId}/wake`, { method: "POST", key: randomUUID() });
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE operation='wake'")).rowCount).toBe(0);
+  });
+
+  it.each(["sponsor", "quota"])("retains %s admission for a guest wake", async restriction => {
+    const workspaceId = await stoppedSharedWorkspace("developer", true);
+    if (restriction === "sponsor") {
+      await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [owner.id]);
+      await pool.query("UPDATE account_entitlements SET status='expired',revision=revision+1 WHERE user_id=$1", [owner.id]);
+    } else {
+      await pool.query("UPDATE cloud_workspace_quotas SET max_running_workspaces=1,max_cpu_millicores=1 WHERE org_id=$1", [orgId]);
+    }
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/wake`, { method: "POST", key: randomUUID() });
+    expect(response.status).toBe(restriction === "sponsor" ? 403 : 409);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='wake'", [workspaceId])).rowCount).toBe(0);
+  });
+
   it("requires a new workspace or checkpoint recovery after a conclusively rejected allocation", async () => {
     const created = await createWorkspace();
     expect(created.response.status).toBe(202);

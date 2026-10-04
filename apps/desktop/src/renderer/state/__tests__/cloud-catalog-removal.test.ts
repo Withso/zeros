@@ -3,6 +3,7 @@ const harness = vi.hoisted(() => ({
   effects: [] as Array<() => void | (() => void)>,
   list: vi.fn(),
 }));
+vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => false }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useEffect: (effect: () => void | (() => void)) =>
