@@ -302,3 +302,16 @@ credentials: `R/bin/node R/lib/zeros/runtime-self-test.mjs`. Checks (closed name
 `pty_load`, `claude_version`, `codex_version`, `cursor_load`, `engine_load`, `supervisor_idle` (base status reports
 idle with currentRuntimeId = R's id), plus a containment smoke if it can run without credentials (`containment_smoke`).
 Prints exactly one closed diagnostic line (component `qualification`, stage `self_test`).
+
+## 22. Boat persistence constraints (measured 2026-10-04; binding for every in-VM component)
+1. **Restore is not a reboot.** Boat restores the saved filesystem onto an already-booted VM and then starts
+   ENABLED units. Early-boot services (apparmor.service profile loading, systemd-sysctl, systemd-tmpfiles-setup,
+   sysusers, modules-load, udev) have already run before our files exist; zeros-boot must re-apply what we need.
+2. **Directory renames lose their contents across stop/resume.** Measured: a directory created and then renamed
+   (`mv`/`os.rename`) persists after stop→resume but EMPTY; renamed regular files and never-renamed directories
+   persist. Therefore no persistent component may publish data by renaming a directory. Installer rule: extract
+   directly into the final `R = /opt/zeros-infra/<runtimeId>` (fresh, unique path) with an `.incomplete` marker
+   file; verify; write the receipt (atomic FILE rename is fine); remove the marker; switch `current` with an atomic
+   symlink-file rename. A runtime directory with a marker or without a matching receipt is deleted and re-extracted.
+   Same rule for templates/builds/setup helpers. Possible impact on user workloads (package managers renaming
+   directories) is under investigation (Phase E) and should be reported to Boat.
