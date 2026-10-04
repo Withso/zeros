@@ -202,6 +202,7 @@ export type CloudWorkspaceBackendConfig = {
    * legacy flat endpoint/target is used only when Daytona is the default. */
   daytonaConnection?: { apiUrl: string; target: string };
   boat?: { accountScope: string; ttlSeconds: number | null; billingOrg: string };
+  computerMaxConcurrentBuilds?: number;
   computePolicy?: import("./cloud-workspaces/compute-leases.js").ManagedComputePolicy;
   apiKey: string;
   apiUrl: string;
@@ -366,6 +367,7 @@ export type SelectedCloudWorker = {
 const CloudWorkspaceEnvSchema = z.object({
   CLOUD_WORKSPACES_ENABLED: z.literal("true"),
   CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
+  CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: z.coerce.number().int().min(1).max(32).default(2),
   // Managed Boat Linux VMs are the default; Daytona must be selected explicitly.
   CLOUD_WORKSPACE_PROVIDER: z.enum(["daytona", "boat"]).default("boat"),
   DAYTONA_API_KEY: z.string().trim().min(16).max(4096).optional(),
@@ -1569,6 +1571,7 @@ function loadCloudWorkspaceConfig(
     autoArchiveMinutes: value.CLOUD_WORKSPACE_AUTO_ARCHIVE_MINUTES,
     reconcileIntervalMs: value.CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS,
     backgroundWorkersEnabled: value.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED === "true",
+    computerMaxConcurrentBuilds: value.CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS,
     providerCredentialKeys,
     settingsSecretEncryptionKeys,
     ...(codexRefreshFingerprints?{codexRefreshFingerprints}:{}),

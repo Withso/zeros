@@ -66,6 +66,7 @@ const PinsSchema = z
     repositoryManifest: CloudComputerV2RepositoryManifestSchema,
   })
   .strict();
+const StagePinsSchema = PinsSchema.partial({ repositoryManifest: true });
 const CompletionSchema = PinsSchema.extend({
   template: z
     .object({
@@ -120,6 +121,7 @@ type Build = {
   created_at: Date;
   started_at: Date | null;
   completed_at: Date | null;
+  deadline_at: Date | null;
   template_state: CloudComputerV2TemplateState | null;
 };
 type EnvironmentRef = {
@@ -152,6 +154,7 @@ export type CloudComputerV2WorkerResult = {
 export type CloudComputerV2Claim = {
   organizationId: string;
   workerFence: number;
+  deadlineAt: string;
   build: CloudComputerV2BuildSummary;
   config: {
     id: string;
@@ -362,7 +365,7 @@ export class DatabaseCloudComputerV2Service {
   ) {
     this.maxConcurrentBuilds = parse(
       z.number().int().min(1).max(32),
-      options.maxConcurrentBuilds ?? 2,
+      options.maxConcurrentBuilds ?? config.computerMaxConcurrentBuilds ?? 2,
     );
     // C3 supplies a streaming literal/token filter before persisting output.
     // Until then, the default fails closed for arbitrary root-script output.
@@ -1378,34 +1381,56 @@ export class DatabaseCloudComputerV2Service {
   }
   /** No allocation: a global DB lock makes the running-count cap atomic across
    * API processes. Take the org lock before locking its build, as all writers do. */
-  async claimNextBuild(fence: number): Promise<CloudComputerV2Claim | null> {
+  async claimNextBuild(fence: number, builder?: {
+    selectRuntime: (tx: Tx) => Promise<{ baseImageId: string; runtimeId: string } | null>;
+    accountScope: string; billingOrg: string; namePrefix?: string;
+  }): Promise<CloudComputerV2Claim | null> {
     const workerFence = parse(positive, fence);
     return withSystemTx(this.pool, async (tx) => {
       await tx.query("SELECT pg_advisory_xact_lock(62173)");
       const running = (
         await tx.query<{ count: string }>(
-          "SELECT count(*) FROM cloud_computer_v2_builds WHERE state='running'",
+          `SELECT count(*) FROM cloud_computer_v2_builds build LEFT JOIN cloud_computer_templates template ON template.build_id=build.id
+           WHERE build.state='running' OR (template.builder_operation_key IS NOT NULL AND template.stopped_at IS NULL
+             AND template.cleanup_confirmed_at IS NULL)`,
         )
       ).rows[0]!;
       if (Number(running.count) >= this.maxConcurrentBuilds) return null;
       const candidate = (
         await tx.query<{ id: string }>(
-          "SELECT id FROM cloud_computer_v2_builds WHERE state='queued' ORDER BY created_at,id LIMIT 1",
+          `SELECT build.id FROM cloud_computer_v2_builds build WHERE build.state='queued' AND NOT EXISTS (
+            SELECT 1 FROM cloud_computer_templates template WHERE template.org_id=build.org_id
+            AND template.builder_operation_key IS NOT NULL AND template.stopped_at IS NULL AND template.cleanup_confirmed_at IS NULL
+          ) ORDER BY build.created_at,build.id LIMIT 1`,
         )
       ).rows[0];
       if (!candidate) return null;
       const { build } = await this.lockedBuild(tx, candidate.id);
       if (build.state !== "queued") return null;
       const config = await configuration(tx, build.org_id, build.config_id);
+      const selected = builder ? await builder.selectRuntime(tx) : undefined;
+      if (selected === null) {
+        await tx.query("UPDATE cloud_computer_v2_builds SET state='failed',error_code='runtime_unavailable',completed_at=now() WHERE id=$1", [build.id]);
+        return null;
+      }
+      const runtimePin = selected === undefined ? undefined : parse(StagePinsSchema, selected);
       await tx.query(
         `UPDATE cloud_computer_v2_builds SET state='running',stage='allocating',worker_fence=$2,
-        started_at=now(),deadline_at=now()+interval '30 minutes' WHERE id=$1`,
-        [build.id, workerFence],
+        started_at=now(),deadline_at=now()+interval '30 minutes',base_image_id=$3,runtime_id=$4 WHERE id=$1`,
+        [build.id, workerFence, runtimePin?.baseImageId ?? null, runtimePin?.runtimeId ?? null],
       );
+      if (builder) {
+        const name = parse(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), `${builder.namePrefix ?? "zeros-computer"}-${build.id}`);
+        await tx.query(`INSERT INTO cloud_computer_templates(build_id,org_id,account_scope,billing_org,builder_operation_key,builder_name,allocation_requested_at)
+          VALUES($1,$2,$3,$4,$5,$6,clock_timestamp())`,
+        [build.id, build.org_id, parse(identifier, builder.accountScope), parse(identifier, builder.billingOrg), `computer-build:${build.id}`, name]);
+      }
+      const claimed = await buildRow(tx, build.org_id, build.id);
       return {
         organizationId: build.org_id,
         workerFence,
-        build: summary(await buildRow(tx, build.org_id, build.id)),
+        deadlineAt: claimed.deadline_at!.toISOString(),
+        build: summary(claimed),
         config: {
           id: config.id,
           installScript: config.install_script,
@@ -1446,12 +1471,12 @@ export class DatabaseCloudComputerV2Service {
     buildId: string,
     fence: number,
     value: CloudComputerV2BuildStage,
-    pins?: z.infer<typeof PinsSchema>,
+    pins?: z.infer<typeof StagePinsSchema>,
   ): Promise<CloudComputerV2WorkerResult> {
     const id = uuid(buildId),
       workerFence = parse(positive, fence),
       stage = parse(CloudComputerV2BuildStageSchema, value);
-    const identity = pins === undefined ? undefined : parse(PinsSchema, pins);
+    const identity = pins === undefined ? undefined : parse(StagePinsSchema, pins);
     if (stage === "queued" || stage === "done")
       throw new HttpError(422, "invalid_input", "Invalid running build stage.");
     return withSystemTx(this.pool, async (tx) => {
@@ -1462,13 +1487,14 @@ export class DatabaseCloudComputerV2Service {
       )
         return { applied: false, state: build.state };
       if (identity) {
-        await this.verifyManifest(tx, build, identity.repositoryManifest);
+        if (identity.repositoryManifest !== undefined)
+          await this.verifyManifest(tx, build, identity.repositoryManifest);
         if (
           (build.base_image_id !== null &&
             build.base_image_id !== identity.baseImageId) ||
           (build.runtime_id !== null &&
             build.runtime_id !== identity.runtimeId) ||
-          (build.repository_manifest !== null &&
+          (identity.repositoryManifest !== undefined && build.repository_manifest !== null &&
             canonical(build.repository_manifest) !==
               canonical(identity.repositoryManifest))
         )
@@ -1491,7 +1517,7 @@ export class DatabaseCloudComputerV2Service {
           stage,
           identity?.baseImageId ?? null,
           identity?.runtimeId ?? null,
-          identity ? JSON.stringify(identity.repositoryManifest) : null,
+          identity?.repositoryManifest === undefined ? null : JSON.stringify(identity.repositoryManifest),
         ],
       );
       return { applied: true, state: build.state };
@@ -1504,6 +1530,7 @@ export class DatabaseCloudComputerV2Service {
     buildId: string,
     fence: number,
     value: z.infer<typeof CompletionSchema>,
+    validateRuntime?: (tx: Tx) => Promise<boolean>,
   ): Promise<CloudComputerV2WorkerResult> {
     const id = uuid(buildId),
       workerFence = parse(positive, fence),
@@ -1515,6 +1542,17 @@ export class DatabaseCloudComputerV2Service {
         Number(build.worker_fence) !== workerFence
       )
         return { applied: false, state: build.state, activated: false };
+      // The sweep is recovery, not the authority for the deadline. A late
+      // worker must not publish between expiry and the next sweep.
+      const expired = (await tx.query<{ expired: boolean }>(
+        "SELECT deadline_at<=clock_timestamp() AS expired FROM cloud_computer_v2_builds WHERE id=$1", [id],
+      )).rows[0]!.expired;
+      const failExpired = async (): Promise<CloudComputerV2WorkerResult> => {
+        await tx.query("UPDATE cloud_computer_v2_builds SET state='failed',error_code='build_timeout',completed_at=now(),worker_fence=worker_fence+1 WHERE id=$1", [id]);
+        await tx.query("UPDATE cloud_computer_templates SET state='quarantined' WHERE build_id=$1 AND state='pending'", [id]);
+        return { applied: true, state: "failed", activated: false };
+      };
+      if (expired) return failExpired();
       const config = await this.verifyManifest(
         tx,
         build,
@@ -1530,7 +1568,8 @@ export class DatabaseCloudComputerV2Service {
         build.repository_manifest !== null &&
         canonical(build.repository_manifest) ===
           canonical(input.repositoryManifest) &&
-        config.environment.every((ref) => ref.available);
+        config.environment.every((ref) => ref.available) &&
+        (validateRuntime === undefined || await validateRuntime(tx));
       if (eligible && build.stage !== "capture_confirmed")
         throw new HttpError(
           409,
@@ -1554,10 +1593,13 @@ export class DatabaseCloudComputerV2Service {
           );
       }
       const state = eligible ? "succeeded" : "superseded";
-      await tx.query(
-        "UPDATE cloud_computer_v2_builds SET state=$2,stage='done',completed_at=now() WHERE id=$1",
+      const completed = await tx.query(
+        "UPDATE cloud_computer_v2_builds SET state=$2,stage='done',completed_at=now() WHERE id=$1 AND deadline_at>clock_timestamp()",
         [id, state],
       );
+      // Registry eligibility may wait for a concurrent revocation transaction.
+      // Recheck the clock in the completion write after those locks resolve.
+      if (!completed.rowCount) return failExpired();
       const existing = (
         await tx.query<{
           provider_resource_id: string | null;

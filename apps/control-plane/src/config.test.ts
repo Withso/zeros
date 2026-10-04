@@ -894,6 +894,14 @@ describe("cloud workspace backend configuration", () => {
     for(const enabled of ["true", "false"])expect(()=>loadConfig({...cloudEnv(), CLOUD_WORKSPACES_ENABLED:enabled, CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED:"typo"})).toThrow(/BACKGROUND_WORKERS_ENABLED/);
   });
 
+  it("validates the global Cloud Computer build cap", () => {
+    expect(loadConfig(cloudEnv()).cloudWorkspaces?.computerMaxConcurrentBuilds).toBe(2);
+    expect(loadConfig({ ...cloudEnv(), CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: "4" }).cloudWorkspaces?.computerMaxConcurrentBuilds).toBe(4);
+    for (const value of ["0", "33", "1.5", "unbounded"]) {
+      expect(() => loadConfig({ ...cloudEnv(), CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: value })).toThrow(/CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS/);
+    }
+  });
+
   it("loads one pinned Daytona provider contract behind the gate", () => {
     expect(loadConfig(cloudEnv()).cloudWorkspaces).toEqual({
       runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full", qualificationEnabled: false },
@@ -912,6 +920,7 @@ describe("cloud workspace backend configuration", () => {
       autoArchiveMinutes: 10_080,
       reconcileIntervalMs: 5_000,
       backgroundWorkersEnabled: true,
+      computerMaxConcurrentBuilds: 2,
       access: {
         allowedSshHosts: ["ssh.app.daytona.io"],
         allowedPreviewHostSuffixes: ["proxy.daytona.work"],
