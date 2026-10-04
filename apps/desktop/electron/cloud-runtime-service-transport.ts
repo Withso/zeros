@@ -4,13 +4,17 @@ import { Duplex } from "node:stream";
 import WebSocket, { type RawData } from "ws";
 import {
   CloudWorkspaceAccessClientError,
+  boundedJson,
   safeBaseUrl,
 } from "./cloud-workspace-access-client";
 import type { CloudRuntimeServiceAccess } from "./cloud-runtime-service-client";
 
 const FRAME_BYTES = 64 * 1024;
 const TRANSFER_BYTES = 256 * 1024 * 1024;
-const MAX_CONNECTIONS = 8;
+// Match the control-plane relay's per-grant stream limit. Authority checks
+// use HTTP and do not reserve a stream or connect to the forwarded application.
+const MAX_CONNECTIONS = 4;
+const AUTHORITY_MS = 10_000;
 export type CloudSshIntroduction = {
   version: 1;
   kind: "ssh";
@@ -96,6 +100,7 @@ function buffer(data: RawData): Buffer {
 function unavailable(): Error {
   return new Error("Cloud service connection is unavailable or closed.");
 }
+class CapacityError extends Error {}
 
 /** Main-process byte relay. All authentication stays in HTTP headers, and both
  * backpressure and size/deadline limits apply independently of remote behavior. */
@@ -110,11 +115,7 @@ export class CloudRuntimeServiceTransport {
     );
   }
 
-  async open(
-    access: CloudRuntimeServiceAccess,
-    signal?: AbortSignal,
-  ): Promise<CloudServiceConnection> {
-    if (this.disposed || signal?.aborted) throw unavailable();
+  private endpoint(access: CloudRuntimeServiceAccess): URL {
     const expected = new URL(
       `/v1/cloud-workspaces/services/${access.grant.kind}/${access.grant.id}`,
       this.baseUrl,
@@ -128,6 +129,33 @@ export class CloudRuntimeServiceTransport {
       !/^zsh_[A-Za-z0-9_-]{43}$/.test(access.transport.capability)
     )
       throw new Error("Cloud service transport is invalid.");
+    return expected;
+  }
+
+  private async checkAuthority(access: CloudRuntimeServiceAccess, signal: AbortSignal): Promise<number> {
+    const url = this.endpoint(access);
+    url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+    const started = Date.now();
+    const response = await fetch(url, {
+      signal, redirect: "error", credentials: "omit", referrerPolicy: "no-referrer",
+      headers: { "x-zeros-runtime-service": access.transport.capability, "cache-control": "no-store" },
+    });
+    if (response.status !== 200) {
+      await response.body?.cancel();
+      throw unavailable();
+    }
+    const value = await boundedJson(response) as { expiresAtMs?: unknown } | null;
+    if (!value || Object.keys(value).join(",") !== "expiresAtMs" ||
+        typeof value.expiresAtMs !== "number" || !Number.isSafeInteger(value.expiresAtMs)) throw unavailable();
+    return Math.min(value.expiresAtMs, started + AUTHORITY_MS, Date.parse(access.grant.expiresAt));
+  }
+
+  async open(
+    access: CloudRuntimeServiceAccess,
+    signal?: AbortSignal,
+  ): Promise<CloudServiceConnection> {
+    if (this.disposed || signal?.aborted) throw unavailable();
+    const expected = this.endpoint(access);
     const remaining = Date.parse(access.grant.expiresAt) - Date.now();
     if (
       !Number.isFinite(remaining) ||
@@ -221,6 +249,13 @@ export class CloudRuntimeServiceTransport {
       signal?.addEventListener("abort", abort, { once: true });
       stream.on("error", abort);
       socket.on("error", abort);
+      socket.once("unexpected-response", (_request, response) => {
+        const error = response.statusCode === 429
+          ? new CapacityError("Cloud service connection capacity is full.")
+          : unavailable();
+        response.destroy();
+        fail(error);
+      });
       socket.once("open", () => {
         if (socket.protocol !== "zeros.service.v1") fail();
       });
@@ -289,6 +324,10 @@ export class CloudRuntimeServiceTransport {
     let stopped = false,
       finishClosed!: () => void,
       stopping: Promise<void> | undefined;
+    const authorityAbort = new AbortController();
+    let authorityExpiresAt = Date.now() + AUTHORITY_MS, checking = false;
+    let authorityTimer: ReturnType<typeof setTimeout> | undefined;
+    let authorityDeadline: ReturnType<typeof setTimeout> | undefined;
     const closed = new Promise<void>((resolve) => {
       finishClosed = resolve;
     });
@@ -320,9 +359,11 @@ export class CloudRuntimeServiceTransport {
           socket.pipe(connection.stream).pipe(socket);
           socket.resume();
         },
-        () => {
+        (error: unknown) => {
           // A stale grant is never renewed implicitly after wake/revocation.
-          if (!stopped && !client.abort.signal.aborted) void stop();
+          // Capacity rejection affects this connection only, including when
+          // another client or the relay's global limit consumed the slot.
+          if (!stopped && !client.abort.signal.aborted && !(error instanceof CapacityError)) void stop();
           socket.destroy();
         },
       );
@@ -331,6 +372,9 @@ export class CloudRuntimeServiceTransport {
       if (stopping) return stopping;
       stopped = true;
       clearTimeout(deadline);
+      clearTimeout(authorityTimer);
+      clearTimeout(authorityDeadline);
+      authorityAbort.abort();
       for (const [socket, client] of clients) {
         client.abort.abort();
         socket.destroy();
@@ -350,10 +394,38 @@ export class CloudRuntimeServiceTransport {
       Math.max(0, Date.parse(access.grant.expiresAt) - Date.now()),
     );
     deadline.unref();
+    const checkAuthority = async () => {
+      if (stopped || checking) return;
+      checking = true;
+      try {
+        const expires = await this.checkAuthority(access, authorityAbort.signal);
+        if (stopped) return;
+        if (Date.now() >= authorityExpiresAt || !Number.isFinite(expires) || expires <= Date.now()) {
+          await stop();
+          return;
+        }
+        authorityExpiresAt = expires;
+        clearTimeout(authorityDeadline);
+        authorityDeadline = setTimeout(() => void stop(), expires - Date.now());
+        authorityDeadline.unref();
+        authorityTimer = setTimeout(() => void checkAuthority(), Math.max(1, Math.min(5_000, (expires - Date.now()) / 2)));
+        authorityTimer.unref();
+      } catch {
+        await stop();
+      } finally {
+        checking = false;
+      }
+    };
+    // Retire even if an idle listener's check hangs. Application EOF does not
+    // signal authority retirement; this independent lease governs the listener.
+    authorityDeadline = setTimeout(() => void stop(), AUTHORITY_MS);
+    authorityDeadline.unref();
     server.on("error", () => {
       if (server.listening) void stop();
     });
     try {
+      await checkAuthority();
+      if (stopped || this.disposed) throw unavailable();
       const observedPort = await new Promise<number>((resolve, reject) => {
         const failed = (error: NodeJS.ErrnoException) =>
           reject(

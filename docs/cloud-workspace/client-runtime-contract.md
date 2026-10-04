@@ -536,6 +536,11 @@ issues native access independently of provider SSH administration APIs:
   `protocol:"zeros.service.v1"`. Connect with that header; browser clients offer
   `zeros.service.v1` and `zeros.authorization.<capability>` as subprotocols.
   Only the public protocol is selected. Capabilities never belong in URLs.
+- `GET /v1/cloud-workspaces/services/:kind/:grant` with the same capability header
+  checks current grant, device, actor, epoch and engine authority without opening
+  a provider/application connection or consuming a relay slot. Its noncacheable
+  response is `{expiresAtMs:number}` (at most ten seconds of authority), or 401.
+  This route uses native capability authentication, independently of account JWTs.
 - The first text frame is a version-1 introduction. For SSH it includes the
   ephemeral Ed25519 `publicKey` and unprefixed SHA-256/base64 `hostKeySha256`;
   verify the SSH host key against this authenticated introduction and use the
@@ -598,9 +603,15 @@ Port forwarding binds only the requested Mac `127.0.0.1` application port.
 Each local connection opens a native binary stream under the same port-scoped
 grant; listener collisions fail visibly and cannot displace another listener.
 The client splits writes at the 64 KiB frame boundary, honors backpressure and
-bounds transfers, connections and expiry. It rejects remote port 22222 and the
+limits each forward to four concurrent connections, matching the relay. Excess
+clients, including relay 429 responses, are refused individually. It rejects remote port 22222 and the
 default engine port 39393 before signing; the backend also rejects configured
-engine/service ports. A refused admission closes the local listener. No wake,
+engine/service ports. Non-capacity admission failures close the local listener.
+An independent read-only check renews listener authority at most every five
+seconds, including while idle. Revocation or failure to revalidate within the
+existing ten-second bound closes the listener and retires its broker row;
+ordinary application EOF leaves it available. Older control planes without the
+authority-check route fail closed. No wake,
 retry, persisted config or account change silently reissues service authority.
 
 Closing an SSH connection or explicitly closing a forwarding listener stops

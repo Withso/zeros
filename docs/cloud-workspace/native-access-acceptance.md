@@ -120,6 +120,10 @@ lsof -nP -iTCP:45173 -sTCP:LISTEN -Fn
 The listener must be `127.0.0.1:45173`, with no wildcard or LAN binding. Open
 several simultaneous local connections and verify isolation. Test these cases:
 
+- Hold four healthy echo connections open and attempt a fifth. Only the fifth
+  must be refused; the first four must still exchange bytes. Close one and
+  verify a new connection succeeds. Ordinary application EOF must leave the
+  forward available while its grant authority remains current.
 - Request another forward on 45173. It must report a collision, preserve the
   first forward, and retire the failed attempt's grant. Choose 45174 to open a
   second independent forward; closing one must leave the other working.
@@ -135,6 +139,11 @@ several simultaneous local connections and verify isolation. Test these cases:
   within the backend's ten-second authority deadline and reject its unused
   commands; device B remains usable. Rotate a device key and repeat with the
   old key's handles. Re-enrollment must not revive them.
+- Revoke A once with an established TCP stream and once with an unused forward.
+  Within ten seconds both cases must remove the access row, close the listener,
+  and allow another local process to bind the port. No new client connection may
+  be needed to discover revocation. Stall grant-status requests and verify the
+  listener also closes by its existing authority deadline.
 
 ## Lifecycle, renderer and cleanup
 

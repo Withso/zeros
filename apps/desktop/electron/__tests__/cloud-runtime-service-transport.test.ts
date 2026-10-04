@@ -1,10 +1,12 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
+import { createServer as httpServer } from "node:http";
 import { createServer as tcpServer, connect } from "node:net";
 import { WebSocketServer } from "ws";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudRuntimeServiceTransport } from "../cloud-runtime-service-transport";
 import type { CloudRuntimeServiceAccess } from "../cloud-runtime-service-client";
+import { CloudWorkspaceAccessBroker, type CloudWorkspaceAccessBrokerApi } from "../cloud-workspace-access-broker";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -33,18 +35,43 @@ function sshIntro() {
 async function fixture(
   intro: unknown = { version: 1, kind: "tunnel" },
   binary = false,
+  authorityLeaseMs = 10_000,
 ) {
+  const authority = { revoked: false, status: 200, stalled: false, checks: 0 };
+  const http = httpServer((request, response) => {
+    authority.checks++;
+    if (authority.stalled) return;
+    const authorized = request.headers["x-zeros-runtime-service"] === `zsh_${"a".repeat(43)}`;
+    response.writeHead(authority.revoked || !authorized ? 401 : authority.status, { "content-type": "application/json", "cache-control": "no-store" });
+    response.end(JSON.stringify({ expiresAtMs: Date.now() + authorityLeaseMs }));
+  });
   const server = new WebSocketServer({
-    host: "127.0.0.1",
-    port: 0,
+    noServer: true,
     handleProtocols: () => "zeros.service.v1",
   });
-  await once(server, "listening");
+  const admissions = { accepted: 0, capacityRejected: 0, rejectNext: false };
+  http.on("upgrade", (request, socket, head) => {
+    if (authority.revoked || admissions.rejectNext || server.clients.size >= 4) {
+      const status = authority.revoked ? 401 : 429;
+      if (status === 429) admissions.capacityRejected++;
+      admissions.rejectNext = false;
+      socket.end(`HTTP/1.1 ${status} Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      return;
+    }
+    server.handleUpgrade(request, socket, head, client => {
+      admissions.accepted++;
+      server.emit("connection", client, request);
+    });
+  });
+  http.listen(0, "127.0.0.1");
+  await once(http, "listening");
   cleanups.push(async () => {
     for (const socket of server.clients) socket.terminate();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    http.closeAllConnections();
+    await new Promise<void>((resolve) => http.close(() => resolve()));
   });
-  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const origin = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   const transport = new CloudRuntimeServiceTransport({
     baseUrl: origin,
     allowInsecureLoopback: true,
@@ -79,10 +106,126 @@ async function fixture(
       if (isBinary) socket.send(bytes, { binary: true });
     });
   });
-  return { server, origin, transport, access };
+  return { server, origin, transport, access, authority, admissions };
+}
+
+async function availablePort() {
+  const server = tcpServer();
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const port = (server.address() as { port: number }).port;
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  return port;
+}
+
+async function assertRebindable(port: number) {
+  const server = tcpServer();
+  server.listen(port, "127.0.0.1");
+  await once(server, "listening");
+  await new Promise<void>(resolve => server.close(() => resolve()));
 }
 
 describe("native service streams", () => {
+  it.each(["idle", "established"])("retires a revoked %s listener, its broker row and its local port", async mode => {
+    const f = await fixture(undefined, false, 200);
+    const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: f.access.grant.workspaceId };
+    const revoke = vi.fn(async () => {});
+    const broker = new CloudWorkspaceAccessBroker({
+      api: {} as CloudWorkspaceAccessBrokerApi,
+      getAccountSessionKey: () => "account/session",
+      getAccessToken: async () => "test-account-token",
+      nativeServices: {
+        api: { issue: async () => f.access, revoke },
+        readDeviceIdentity: () => ({ deviceId: f.access.grant.deviceId, keyVersion: 1 }),
+        prepareSsh: async () => { throw new Error("unused"); },
+        startTunnel: (access, port) => f.transport.startTunnel(access, port),
+      },
+    });
+    cleanups.push(() => broker.dispose());
+    const port = await availablePort();
+    await broker.startTunnel({ ...target, remotePort: 4173, localPort: port });
+    const list = () => broker.listServices({ ...target, ...broker.serviceContext() });
+    expect(list()).toHaveLength(1);
+    if (mode === "established") {
+      const socket = connect({ host: "127.0.0.1", port });
+      const data = once(socket, "data");
+      socket.write("before-revocation");
+      await data;
+    }
+    f.authority.revoked = true;
+    for (const socket of f.server.clients) socket.terminate();
+    await vi.waitFor(() => expect(list()).toHaveLength(0), { timeout: 1500 });
+    expect(revoke).toHaveBeenCalledWith("test-account-token", { ...target, grantId: f.access.grant.id });
+    await assertRebindable(port);
+  });
+
+  it("keeps four healthy connections and refuses only the fifth", async () => {
+    const f = await fixture();
+    const handle = await f.transport.startTunnel(f.access, 0);
+    const clients = [];
+    for (let index = 0; index < 4; index++) {
+      const socket = connect({ host: "127.0.0.1", port: handle.localPort });
+      socket.on("error", () => {});
+      const data = once(socket, "data");
+      socket.write("healthy");
+      await data;
+      clients.push(socket);
+    }
+    const fifth = connect({ host: "127.0.0.1", port: handle.localPort });
+    fifth.on("error", () => {});
+    await new Promise<void>(resolve => fifth.once("close", () => resolve()));
+    expect(clients.every(socket => !socket.destroyed)).toBe(true);
+    expect(f.admissions.accepted).toBe(4);
+    expect(f.admissions.capacityRejected).toBe(0);
+    for (const socket of clients) {
+      const data = once(socket, "data");
+      socket.write("still-healthy");
+      expect((await data)[0].toString()).toBe("still-healthy");
+    }
+  });
+
+  it("keeps the listener and healthy clients after a relay capacity rejection", async () => {
+    const f = await fixture();
+    const handle = await f.transport.startTunnel(f.access, 0);
+    const first = connect({ host: "127.0.0.1", port: handle.localPort });
+    first.on("error", () => {});
+    const data = once(first, "data"); first.write("first"); await data;
+    f.admissions.rejectNext = true;
+    const excess = connect({ host: "127.0.0.1", port: handle.localPort });
+    excess.on("error", () => {});
+    await new Promise<void>(resolve => excess.once("close", () => resolve()));
+    expect(first.destroyed).toBe(false);
+    const secondData = once(first, "data"); first.write("retained");
+    expect((await secondData)[0].toString()).toBe("retained");
+    const next = connect({ host: "127.0.0.1", port: handle.localPort });
+    const nextData = once(next, "data"); next.write("new");
+    expect((await nextData)[0].toString()).toBe("new");
+  });
+
+  it("retires an idle listener when revalidation stalls past its bounded authority", async () => {
+    const f = await fixture(undefined, false, 200);
+    const handle = await f.transport.startTunnel(f.access, 0);
+    f.authority.stalled = true;
+    let retired = false;
+    void handle.closed.then(() => { retired = true; });
+    await vi.waitFor(() => expect(retired).toBe(true), { timeout: 1500 });
+    await assertRebindable(handle.localPort);
+  });
+
+  it("keeps the listener after ordinary application EOF while authority is current", async () => {
+    const f = await fixture(undefined, false, 200);
+    const handle = await f.transport.startTunnel(f.access, 0);
+    const socket = connect({ host: "127.0.0.1", port: handle.localPort });
+    const data = once(socket, "data"); socket.write("normal"); await data;
+    const ended = once(socket, "end");
+    for (const remote of f.server.clients) remote.terminate();
+    await ended;
+    const next = connect({ host: "127.0.0.1", port: handle.localPort });
+    const nextData = once(next, "data"); next.write("still-current");
+    expect((await nextData)[0].toString()).toBe("still-current");
+    await vi.waitFor(() => expect(f.authority.checks).toBeGreaterThan(1));
+  });
+
   it("consumes the introduction, carries the grant only in a header, and relays binary TCP bytes", async () => {
     const { server, transport, access } = await fixture();
     const upgrade = once(server, "connection");
