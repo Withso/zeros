@@ -243,7 +243,7 @@ Python bootstrap tests consume them.
   archive bytes 1..2 GiB; expandedBytes 1..4 GiB (individual empty files allowed); inventory entries
   ≤ 250,000; manifest ≤ 64 MiB; per-entry PAX payload ≤ 16 KiB; path and symlink-target ≤ 4,096 UTF-8 bytes,
   no NUL/backslash/CR/LF; symlink resolution ≤ 64 steps; nodeModulesAbi and engineProtocolVersion 1..65,535;
-  agent version strings `^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$`; path depth ≤ 128 components.
+  agent version strings `^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$`; path depth ≤ 128 components; symlink expansion ≤ 4,096 pending path components during resolution.
 - Installer receipt `fileCount` = number of REGULAR files (equals the producer's regular-file count);
   `expandedBytes` = sum of regular file sizes.
 
