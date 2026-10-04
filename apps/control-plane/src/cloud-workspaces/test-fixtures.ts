@@ -4,6 +4,9 @@ import type pg from "pg";
 
 import { withSystemTx, type Tx } from "../db.js";
 import { ensureUser } from "../auth.js";
+import { seedRuntimeGeneration, runtimeWitness } from "./runtime-test-fixtures.js";
+import { cloudRuntimePinValues } from "./runtime-selection.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 /** Explicit owner-only fixture setup. Production application transactions
  * cannot grant personal Pro. Keep that distinction visible in integration tests. */
@@ -216,7 +219,7 @@ export async function seedReadyProCloudWorkspace(pool:pg.Pool,options:{ownerUser
  * edge instead of relying on legacy migration backfills. */
 export async function seedReadyCloudWorkspace(
   pool: pg.Pool,
-  options: {ownerUserId?:string} = {},
+  options: {ownerUserId?:string; runtimeV4?: boolean} = {},
 ): Promise<ReadyCloudWorkspaceFixture> {
   const userId = options.ownerUserId ?? randomUUID();
   const organizationId = randomUUID();
@@ -322,14 +325,15 @@ export async function seedReadyCloudWorkspace(
          FROM organization_entitlements WHERE org_id = $2`,
       [workspaceId, organizationId, userId],
     );
-    providerConnectionId = await seedHostedCloudWorkspaceProviderConnection(
+    const runtime = options.runtimeV4 ? await seedRuntimeGeneration(tx, { workspaceId, organizationId, ownerUserId: userId }) : null;
+    providerConnectionId = runtime?.providerConnectionId ?? await seedHostedCloudWorkspaceProviderConnection(
       tx,
       {
         organizationId,
         createdBy: userId,
       },
     );
-    await tx.query(
+    if (!runtime) await tx.query(
       `INSERT INTO cloud_workspace_generations (
          workspace_id, generation, org_id, provider, image_ref, architecture,
          cpu_millicores, memory_mib, storage_mib, source_commit, created_by,
@@ -369,8 +373,8 @@ export async function seedReadyCloudWorkspace(
       `INSERT INTO cloud_workspace_provider_bindings (
          workspace_id, generation, org_id, provider,
          provider_resource_id, observed_state, last_observed_at
-       ) VALUES ($1, 1, $2, 'daytona', $3, 'running', now())`,
-      [workspaceId, organizationId, `sandbox-${workspaceId}`],
+       ) VALUES ($1, 1, $2, $4, $3, 'running', now())`,
+      [workspaceId, organizationId, `sandbox-${workspaceId}`, runtime ? "boat" : "daytona"],
     );
     await tx.query(
       `INSERT INTO workspace_executions (
@@ -392,14 +396,17 @@ export async function seedReadyCloudWorkspace(
          id, workspace_id, generation, org_id, account_user_id, purpose,
          audience, token_hash, account_revision, authorization_revision,
          expires_at, consumed_at, setup_run_id, setup_execution_fence
-       ) VALUES ($1, $2, 1, $3, $4, 'engine-connect', 'fixture', $5,
-                 1, 1, now() + interval '10 minutes', now(), NULL, NULL)`,
+       ) VALUES ($1, $2, 1, $3, $4, $6, 'fixture', $5,
+                 1, 1, now() + interval '10 minutes', now(), $7, $8)`,
       [
         registrationGrantId,
         workspaceId,
         organizationId,
         userId,
         createHash("sha256").update(randomUUID()).digest(),
+        runtime ? "setup" : "engine-connect",
+        runtime ? setupRunId : null,
+        runtime ? 1 : null,
       ],
     );
     await tx.query(
@@ -408,8 +415,9 @@ export async function seedReadyCloudWorkspace(
          setup_execution_fence, registration_grant_id, protocol_version,
          state, bridge_token_hash, heartbeat_token_hash, registered_at,
          last_heartbeat_at, lease_expires_at
-       ) VALUES ($1, $2, 1, $3, $4, $5, 1, $6, 11, 'ready', $7, $8,
-                 now(), now(), now() + interval '10 minutes')`,
+         ${runtime ? ", runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id, runtime_profile, runtime_engine_protocol_version, runtime_installer_receipt_sha256, runtime_boot_id, runtime_supervisor_session_id" : ""}
+       ) VALUES ($1, $2, 1, $3, $4, $5, 1, $6, $9, 'ready', $7, $8,
+                 now(), now(), now() + interval '10 minutes' ${runtime ? ", $10,$11,$12,$13,$14,$15,$16,$17,$18" : ""})`,
       [
         engineInstanceId,
         workspaceId,
@@ -419,6 +427,8 @@ export async function seedReadyCloudWorkspace(
         registrationGrantId,
         createHash("sha256").update(bridgeToken).digest(),
         createHash("sha256").update(heartbeatToken).digest(),
+        runtime ? CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION : 11,
+        ...(runtime ? [...cloudRuntimePinValues(runtime.pin), runtimeWitness.installerReceiptSha256, runtimeWitness.bootId, runtimeWitness.supervisorSessionId] : []),
       ],
     );
   });

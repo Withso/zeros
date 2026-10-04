@@ -16,3 +16,4 @@ export * from "./browser-tools";
 export * from "./code-review";
 export * from "./cloud-runtime-bundle";
 export * from "./cloud-computer-tools";
+export * from "./cloud-runtime-lifecycle";

@@ -27,6 +27,8 @@ import { reserveWriterSlot } from "./pro-sharing.js";
 import { DatabaseProMonthlyAllowance } from "./pro-allowance.js";
 import { runtimeBase, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { CloudWorkspaceReconciler } from "./reconciler.js";
+import type { CloudWorkspaceProvider } from "./provider.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -156,7 +158,92 @@ d("cloud workspace API contracts", () => {
   });
   const generationPin = (workspaceId: string) => pool.query(`SELECT image_ref, source_commit, architecture, storage_mib,
     runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id, runtime_profile,
-    runtime_engine_protocol_version FROM cloud_workspace_generations WHERE workspace_id=$1`, [workspaceId]);
+    runtime_engine_protocol_version FROM cloud_workspace_generations WHERE workspace_id=$1 ORDER BY generation`, [workspaceId]);
+
+  async function createV4LifecycleWorkspace(status: "ready" | "stopped" = "ready") {
+    await seedV4();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, v4Config());
+    const created = await request(`/v1/organizations/${orgId}/cloud-workspaces`, {
+      method: "POST", key: randomUUID(), body: createBody(),
+    });
+    expect(created.status).toBe(202);
+    const workspace = (await created.json()).workspace;
+    await withSystemTx(pool, async tx => {
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1", [workspace.id]);
+      await tx.query("UPDATE cloud_workspaces SET status=$2,desired_state=$3 WHERE id=$1", [workspace.id, status, status === "ready" ? "running" : "stopped"]);
+      await tx.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$2,observed_state=$3 WHERE workspace_id=$1", [workspace.id, `sandbox-${workspace.id}`, status === "ready" ? "running" : "stopped"]);
+    });
+    return workspace;
+  }
+
+  it("refuses wake of a revoked runtime with an explicit upgrade result", async () => {
+    const workspace = await createV4LifecycleWorkspace("stopped");
+    const saved = (await generationPin(workspace.id)).rows;
+    await withSystemTx(pool, async tx => {
+      await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 });
+      await tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [workspace.generation.runtime.runtimeId]);
+    });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}/wake`, { method: "POST", key: randomUUID() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_revoked", message: expect.stringContaining("upgrade") } });
+    expect((await generationPin(workspace.id)).rows).toEqual(saved);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='wake'", [workspace.id])).rowCount).toBe(0);
+  });
+
+  it("copies every v4 pin and the saved base through ordinary generation replacement", async () => {
+    const workspace = await createV4LifecycleWorkspace();
+    const saved = (await generationPin(workspace.id)).rows[0];
+    await withSystemTx(pool, async tx => {
+      await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 });
+      await seedRuntimeBase(tx, { ...runtimeBase, id: "zeros-v2-test-new-base", imageRef: "boat:zeros-v2-test-new-base" }, new Date(Date.now() + 1_000));
+    });
+    configureApp(false, { ...v4Config(), runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full" } });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}/generations`, {
+      method: "POST", key: randomUUID(), body: { operation: "upgrade" },
+    });
+    expect(response.status).toBe(202);
+    expect((await generationPin(workspace.id)).rows).toEqual([saved, saved]);
+  });
+
+  it("rechecks a revoked pin before the reconciler dispatches an accepted wake", async () => {
+    const workspace = await createV4LifecycleWorkspace("stopped");
+    const path = `/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}`;
+    expect((await request(`${path}/wake`, { method: "POST", key: randomUUID() })).status).toBe(202);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [workspace.generation.runtime.runtimeId]));
+    const providerCall = vi.fn(async () => { throw new Error("A revoked runtime must not contact its provider"); });
+    const provider: CloudWorkspaceProvider = { name: "boat", find: providerCall, inspect: providerCall,
+      create: providerCall, start: providerCall, stop: providerCall, archive: providerCall, delete: providerCall, async *listManaged() {} };
+    expect(await new CloudWorkspaceReconciler({ pool, provider, intervalMs: 1000 }).runOnce()).toBe(true);
+    expect(providerCall).not.toHaveBeenCalled();
+    expect((await (await request(path)).json()).workspace.error).toMatchObject({ code: "cloud_runtime_revoked", message: expect.stringContaining("upgrade") });
+  });
+
+  it("selects a same-base runtime once and replays it after the channel advances", async () => {
+    const workspace = await createV4LifecycleWorkspace();
+    const original = (await generationPin(workspace.id)).rows[0];
+    const next = await withSystemTx(pool, async tx => {
+      const runtime = await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 });
+      await seedRuntimeBase(tx, { ...runtimeBase, id: "zeros-v2-test-new-base", imageRef: "boat:zeros-v2-test-new-base",
+        compatibilityId: `bc1-${"8".repeat(64)}` }, new Date(Date.now() + 1_000));
+      return runtime;
+    });
+    const path = `/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}/runtime-upgrade`;
+    const body = { expectedGeneration: 1, operationId: randomUUID() };
+    const response = await request(path, { method: "POST", body });
+    expect(response.status).toBe(202);
+    const accepted = await response.json();
+    expect(accepted).toEqual({ operationId: body.operationId, sourceGeneration: 1, generation: 2,
+      runtimeId: next.pin.runtimeId, transitionId: expect.any(String), unchanged: false });
+    expect((await generationPin(workspace.id)).rows).toEqual([original, { ...original,
+      runtime_id: next.pin.runtimeId, runtime_manifest_sha256: next.pin.manifestSha256 }]);
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "3", releaseOrder: 3 }));
+    const replay = await request(path, { method: "POST", body });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(await replay.json()).toEqual(accepted);
+    expect((await generationPin(workspace.id)).rows).toHaveLength(2);
+  });
 
   it("pins the latest eligible runtime under the create lock and replays the saved pin after the head advances", async () => {
     await seedV4();

@@ -5,7 +5,8 @@ import type pg from "pg";
 import { audit } from "../audit.js";
 import { withSystemTx, type Tx } from "../db.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
-import { cloudRuntimePin, cloudRuntimePinValues, loadPinnedCloudRuntime, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
+import { cloudRuntimePin, cloudRuntimePinValues, requirePinnedCloudRuntime, CloudRuntimeError, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
+import { publicCloudError } from "./public-contract.js";
 import type { CloudRuntimeWitnessRow } from "./runtime-contract.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 import { advanceCloudAutomaticRecovery, classifyCloudRestoreEvidence, enqueueCloudAutomaticRecovery, recordCloudRestoreEvidence } from "./automatic-recovery.js";
@@ -218,6 +219,7 @@ export function cloudWorkspaceSetupReadinessMatches(
 }
 
 function safeFailure(error: unknown): SafeSetupFailure {
+  if (error instanceof CloudRuntimeError) return { code: error.code, retryable: false };
   if (error instanceof CloudWorkspaceSetupError) {
     return {
       code: /^[a-z][a-z0-9_]{0,127}$/.test(error.code)
@@ -853,8 +855,7 @@ export class CloudWorkspaceSetupWorker {
       const registeredIdentity = registeredEngine?.rows[0];
       const registeredPin = registeredIdentity ? cloudRuntimePin(registeredIdentity) : null;
       const expectedPin = cloudRuntimePinValues(setup.runtime);
-      const runtimeEligible = cloudRuntimePinValues(registeredPin).every((value, index) => value === expectedPin[index]) &&
-        (!registeredPin || !!await loadPinnedCloudRuntime(tx, registeredPin, cloudRuntimeQualificationMode()));
+      const runtimeEligible = cloudRuntimePinValues(registeredPin).every((value, index) => value === expectedPin[index]);
       const eligible = runtimeEligible &&
         current?.current_generation === setup.generation &&
         current.authority_live &&
@@ -877,6 +878,9 @@ export class CloudWorkspaceSetupWorker {
         return false;
       }
 
+      // Revocation after execution is a terminal runtime refusal too. Keep its
+      // actionable error instead of cancelling an otherwise current setup.
+      if (registeredPin) await requirePinnedCloudRuntime(tx, registeredPin, cloudRuntimeQualificationMode());
       await revokeSetupExecutionGrants(tx, setup);
       await retireCloudWorkspaceEngineInstances(tx, {
         ...setup,
@@ -958,6 +962,8 @@ export class CloudWorkspaceSetupWorker {
     setup: ClaimedSetup,
     failure: SafeSetupFailure,
   ): Promise<boolean> {
+    const message = failure.code === "cloud_runtime_revoked" || failure.code === "cloud_runtime_unavailable"
+      ? publicCloudError(failure.code).message : "Cloud workspace setup did not complete";
     return withSystemTx(this.pool, async (tx) => {
       await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [setup.organizationId]);
       const workspace = await tx.query<{
@@ -1081,7 +1087,7 @@ export class CloudWorkspaceSetupWorker {
         organizationId: setup.organizationId,
         candidateGeneration: setup.generation,
         errorCode: failure.code,
-        errorMessage: "Cloud workspace setup did not complete",
+        errorMessage: message,
       });
       const recovering = !rolledBack && this.recoveryConfig && await enqueueCloudAutomaticRecovery(tx, setup);
       if (!rolledBack && !recovering) {
@@ -1089,17 +1095,17 @@ export class CloudWorkspaceSetupWorker {
           `UPDATE cloud_workspaces
            SET status = 'failed', version = version + 1,
                last_error_code = $2,
-               last_error_message = 'Cloud workspace setup did not complete',
+               last_error_message = $3,
                updated_at = now()
            WHERE id = $1`,
-          [setup.workspaceId, failure.code],
+          [setup.workspaceId, failure.code, message],
         );
         await failCloudWorkspaceGenerationRollback(tx, {
           workspaceId: setup.workspaceId,
           organizationId: setup.organizationId,
           sourceGeneration: setup.generation,
           errorCode: failure.code,
-          errorMessage: "Cloud workspace setup did not complete",
+          errorMessage: message,
         });
         await retireCloudWorkspaceRuntimeAccess(tx, {
           workspaceId: setup.workspaceId,
@@ -1196,9 +1202,10 @@ export class CloudWorkspaceSetupWorker {
     // regression must not make process shutdown or lease recovery hang forever.
     // Admission expiry and the execution fence make a late ignored command
     // unable to publish readiness after this bounded side wins the race.
-    const execution = Promise.resolve().then(() =>
-      this.executor.execute(setup, controller.signal),
-    );
+    const execution = Promise.resolve().then(async () => {
+      if (setup.runtime) await withSystemTx(this.pool, tx => requirePinnedCloudRuntime(tx, setup.runtime!, cloudRuntimeQualificationMode()));
+      return this.executor.execute(setup, controller.signal);
+    });
     try {
       result = await Promise.race([execution, aborted]);
     } catch (error) {
@@ -1240,11 +1247,12 @@ export class CloudWorkspaceSetupWorker {
       });
       return;
     }
-    await this.recordSuccess(
-      setup,
-      result.readiness,
-      this.executionLog(result),
-    );
+    try {
+      await this.recordSuccess(setup, result.readiness, this.executionLog(result));
+    } catch (error) {
+      if (!(error instanceof CloudRuntimeError)) throw error;
+      await this.recordFailure(setup, safeFailure(error));
+    }
   }
 
   async runOnce(): Promise<boolean> {

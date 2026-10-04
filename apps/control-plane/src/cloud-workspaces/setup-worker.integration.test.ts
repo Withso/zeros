@@ -596,7 +596,28 @@ d("cloud workspace setup worker", () => {
       runtime_installer_receipt_sha256: runtimeWitness.installerReceiptSha256, runtime_boot_id: runtimeWitness.bootId,
       runtime_supervisor_session_id: runtimeWitness.supervisorSessionId });
   });
-  it("does not publish v4 readiness after a pinned qualification is revoked", async () => {
+  it("fails a revoked v4 setup retry before executing the installer", async () => {
+    const seeded = await seedSetup({ v4: true });
+    const executor = new FakeExecutor([
+      async () => { throw new CloudWorkspaceSetupError("setup_repository_unavailable", "retry fixture", true); },
+      async execution => registeredSuccessfulSetup(execution, "must not execute"),
+    ]);
+    const instance = worker(executor);
+    await instance.runOnce();
+    await withSystemTx(pool, async tx => {
+      await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 });
+      await tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [runtimeWitness.runtimeId]);
+      await tx.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now() WHERE id=$1", [seeded.setupRunId]);
+    });
+    await instance.runOnce();
+    expect(executor.calls).toHaveLength(1);
+    expect((await pool.query("SELECT state,error_code FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0])
+      .toEqual({ state: "failed", error_code: "cloud_runtime_revoked" });
+    expect((await pool.query("SELECT last_error_code,last_error_message FROM cloud_workspaces WHERE id=$1", [seeded.workspaceId])).rows[0])
+      .toMatchObject({ last_error_code: "cloud_runtime_revoked", last_error_message: expect.stringContaining("upgrade") });
+  });
+
+  it("reports a revoked v4 pin when its qualification is revoked during setup", async () => {
     const seeded = await seedSetup({ v4: true });
     const executor = new FakeExecutor([async execution => {
       const result = await registeredSuccessfulSetup(execution, "setup complete");
@@ -607,7 +628,9 @@ d("cloud workspace setup worker", () => {
     await worker(executor).runOnce();
     expect((await pool.query("SELECT 1 FROM cloud_workspace_setup_attestations WHERE setup_run_id=$1", [seeded.setupRunId])).rowCount).toBe(0);
     expect((await pool.query("SELECT state,error_code FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0])
-      .toEqual({ state: "cancelled", error_code: "setup_publish_ineligible" });
+      .toEqual({ state: "failed", error_code: "cloud_runtime_revoked" });
+    expect((await pool.query("SELECT status,last_error_code,last_error_message FROM cloud_workspaces WHERE id=$1", [seeded.workspaceId])).rows[0])
+      .toMatchObject({ status: "failed", last_error_code: "cloud_runtime_revoked", last_error_message: expect.stringContaining("upgrade") });
   });
 
   it("retries a failed setup after an engine identity was already issued", async () => {
