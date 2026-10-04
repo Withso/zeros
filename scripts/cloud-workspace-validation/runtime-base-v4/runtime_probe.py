@@ -22,8 +22,8 @@ def probe_failure(error):
 
 
 def probe(b, app, rid, cold_hash):
-    app.base()
     app.wait_ready()
+    app.base()
     deadline = time.monotonic() + 30
     while not pathlib.Path(b.ACTIVE).exists() and time.monotonic() < deadline:
         time.sleep(.2)

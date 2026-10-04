@@ -736,6 +736,9 @@ class Bootstrap:
                 os.close(fd)
 
     def base(self):
+        # A wake can reach any entry point while Boat is still restoring the
+        # protected base files. Gate verification as well as bind creation.
+        self.wait_hydration()
         raw = self.read("/opt/zeros-bootstrap/compatibility.json", 256 * 1024, 0o444)
         value = strict_json(raw, "base_compatibility")
         shape(value, ("arch", "artifactHostSuffixes", "bootstrapProtocolVersion", "glibc", "os", "protectedFiles",

@@ -56,12 +56,20 @@ class LiveProbeTests(unittest.TestCase):
                  mock.patch.object(runtime.time, "sleep", side_effect=sleep), \
                  mock.patch.object(runtime.subprocess, "run", return_value=types.SimpleNamespace(stdout=b'{"node":"22.23.1","abi":"127"}')) as run:
                 result = runtime.probe(b, app, "fixture", False)
-            self.assertEqual(events, ["base", "ready", "verify"])
+            self.assertEqual(events, ["ready", "base", "verify"])
             self.assertGreater(clock[0], 401)
             self.assertEqual(result["fullRehashMs"], 2000)
             self.assertEqual(result["fileCount"], 1)
             self.assertEqual(result["previous"], None)
             self.assertEqual(run.call_args.kwargs["timeout"], 10)
+
+    def test_persistence_probe_checks_base_only_after_unit_readiness(self):
+        events = []
+        app = types.SimpleNamespace(wait_ready=lambda: events.append("ready"), base=lambda: events.append("base"),
+                                    persistence=mock.Mock(side_effect=RuntimeError("stop after preflight")))
+        with self.assertRaises(RuntimeError):
+            persistence.probe(app, "cold")
+        self.assertEqual(events, ["ready", "base"])
 
     def test_both_probe_entrypoints_retain_original_failure_even_if_private_logger_fails(self):
         for module, argument in ((runtime, "fixture"), (persistence, "verify")):

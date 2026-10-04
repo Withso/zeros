@@ -119,6 +119,15 @@ most 480 seconds. Fresh builders without this provider state proceed immediately
 The pre-bind check also rejects opened FUSE or detached sources, and every
 subsequent verification explicitly rejects FUSE-backed binds.
 
+The same hydration gate runs at the start of `Bootstrap.base()`, before any
+compatibility/protected-file read or ownership check. It covers direct base
+verification, boot, installation, dispatch and status, including setup invoked
+immediately after a wake. The separate pre-bind guard remains. Once hydration
+finishes, the existing strict verification runs unchanged; timeout and persistent
+corruption still fail closed. The orchestrator's `b31b2348` live run identified
+this earlier boundary: a runtime probe reached `app.base()` during lazy restore,
+before its unit-readiness wait.
+
 The value-free `persistence_hydration_wait`, `persistence_hydration_ready` and
 `persistence_hydration_timeout` journal events report only elapsed seconds.
 A stalled restore exits with the closed `timeout` check (124, `timedOut: true`)
@@ -394,14 +403,16 @@ parent's wait assertion. The two scripts are operator payloads, not installed
 base assets. A provider timeout or killed probe may have no Python evidence;
 the named step still records the closed transport failure.
 
-Both post-resume probes call `app.wait_ready()` before inspecting runtime or
-persistence state. That waits for completed boot, hydration and host cgroup
+Both post-resume probes call `app.wait_ready()` before `app.base()` or inspecting
+runtime/persistence state. That waits for completed boot, hydration and host cgroup
 initialization. Only afterward does the runtime probe start its separate
 30-second wait for `active-runtime.json`, followed by full hashing and a
 10-second Node version check. The remote command allows 600 seconds total.
 A local regression simulates a 400-second hydration wait before the active
-descriptor arrives. These waits and the live sequence are unchanged; a future
-failure can now distinguish a probe assertion, Node timeout and transport timeout.
+descriptor arrives. Another covers each bootstrap entry point while protected
+files are incomplete, the marker is absent and FUSE is active; verification starts
+only after restoration completes. Timeout bounds remain unchanged. Named evidence
+distinguishes a probe assertion, Node timeout and transport timeout.
 
 After interruption or failure, use the **same state directory**:
 

@@ -92,6 +92,7 @@ def probe(app, phase):
     assert phase in ("cold", "seed", "rename", "verify")
     # This waits for the enabled units. Do not repair/start them in the probe.
     app.wait_ready()
+    app.base()
     record = app.persistence()
     aliases = [app.path(name).stat() for name in ("/srv/zeros/files/repos", "/srv/zeros/repos")]
     assert (aliases[0].st_dev, aliases[0].st_ino) == (aliases[1].st_dev, aliases[1].st_ino)
@@ -146,7 +147,6 @@ def main(phase):
         bootstrap = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(bootstrap)
         app = bootstrap.Bootstrap()
-        app.base()
         result = probe(app, phase)
         assert result["bindFilesystem"] == "ext4"  # Boat must have retired ascii-lazyfs.
         print(json.dumps(result, separators=(",", ":")), flush=True)

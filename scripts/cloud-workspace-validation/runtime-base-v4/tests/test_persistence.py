@@ -39,6 +39,76 @@ class PersistenceTests(unittest.TestCase):
             target /= ".zeros-persist"
         return b.parse_mountinfo(f"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 0:55 / {target} rw - {filesystem} ascii-lazyfs rw\n".encode())
 
+    def test_every_entrypoint_waits_for_hydration_before_any_base_file_read(self):
+        self.install()  # Dispatch has a selected runtime; no waiting loop or real exec.
+        lazy = self.root / "var/lib/ascii-lazy"
+        lazy.mkdir(parents=True)
+        protected = self.root / "opt/zeros-bootstrap/protected"
+        original_read = self.app.read
+        actions = {"base": self.app.base, "boot": self.app.boot, "install": self.install,
+                   "dispatch": self.app.dispatch, "status": self.app.status}
+        for name, action in actions.items():
+            with self.subTest(entrypoint=name):
+                (lazy / "hydration-done").unlink(missing_ok=True)
+                protected.chmod(0o755)
+                protected.write_bytes(b"partially restored")
+                clock, reads = [0], []
+
+                def sleep(seconds):
+                    self.assertEqual(reads, [])
+                    clock[0] += seconds
+                    (lazy / "hydration-done").touch()
+                    if clock[0] >= 3:
+                        protected.write_bytes(b"base-owned")
+                        protected.chmod(0o555)
+
+                def read(*args, **kwargs):
+                    reads.append(clock[0])
+                    self.assertGreaterEqual(clock[0], 3, "base file opened during lazy restore")
+                    return original_read(*args, **kwargs)
+
+                with mock.patch.object(self.mounts, "table", side_effect=lambda:
+                                       self.hydration_table("fuse" if clock[0] < 3 else "ext4")), \
+                     mock.patch.object(b.time, "monotonic", side_effect=lambda: clock[0]), \
+                     mock.patch.object(b.time, "sleep", side_effect=sleep), \
+                     mock.patch.object(self.app, "read", side_effect=read), \
+                     mock.patch.object(b.os, "execve"), contextlib.redirect_stdout(io.StringIO()), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    action()
+                self.assertTrue(reads)
+                self.assertEqual(clock[0], 3)
+
+    def test_base_hydration_timeout_never_opens_a_protected_file(self):
+        lazy = self.root / "var/lib/ascii-lazy"
+        lazy.mkdir(parents=True)
+        clock = [0]
+        def sleep(seconds):
+            clock[0] += seconds
+        with mock.patch.object(self.mounts, "table", return_value=self.hydration_table()), \
+             mock.patch.object(b.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(b.time, "sleep", side_effect=sleep), \
+             mock.patch.object(self.app, "read") as read, contextlib.redirect_stderr(io.StringIO()), \
+             self.assertRaises(b.Failure) as failure:
+            self.app.base()
+        self.assertEqual(failure.exception.checks, ["timeout"])
+        self.assertEqual(failure.exception.code, 124)
+        read.assert_not_called()
+
+    def test_base_still_rejects_corruption_after_hydration_completes(self):
+        lazy = self.root / "var/lib/ascii-lazy"
+        lazy.mkdir(parents=True)
+        (lazy / "hydration-done").touch()
+        protected = self.root / "opt/zeros-bootstrap/protected"
+        protected.chmod(0o755)
+        protected.write_bytes(b"corrupt after hydration")
+        protected.chmod(0o555)
+        with mock.patch.object(self.mounts, "table", return_value=self.hydration_table("ext4")), \
+             mock.patch.object(b.time, "sleep") as sleep, contextlib.redirect_stderr(io.StringIO()):
+            code, output = self.cli(["status"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output)["failedChecks"], ["base_compatibility"])
+        sleep.assert_not_called()
+
     def test_hydration_waits_for_marker_and_no_fuse_before_opening_home_or_binding(self):
         lazy = self.root / "var/lib/ascii-lazy"
         lazy.mkdir(parents=True)
@@ -68,13 +138,14 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(opened, [3])
         self.assertEqual(len(self.mounts.calls), 4)
-        self.assertEqual(json.loads(errors.getvalue().splitlines()[-1]),
-                         {"event": "persistence_hydration_ready", "waitedSeconds": 3})
+        self.assertIn({"event": "persistence_hydration_ready", "waitedSeconds": 3},
+                      [json.loads(line) for line in errors.getvalue().splitlines()])
         self.app.require_persistence()
 
     def test_hydration_timeout_is_closed_and_publishes_no_readiness_or_mounts(self):
         lazy = self.root / "var/lib/ascii-lazy"
         lazy.mkdir(parents=True)
+        self.record.unlink()  # Model the new boot's empty /run before preflight.
         for marker, filesystem in ((False, "ext4"), (True, "fuse")):
             with self.subTest(marker=marker, filesystem=filesystem):
                 if marker:
@@ -557,6 +628,7 @@ with app.directory('/run/zeros', create=True, mode=0o700):
     pass
 app.atomic(b.PERSIST_RECORD, b.packed(record))
 app.wait_ready = app.require_persistence
+app.base = lambda: None  # Mount-only fixture; no installed base or systemd.
 assert probe.probe(app, 'cold')['repoAliases']
 assert probe.probe(app, 'seed')['templateIdentityCleared']
 assert not app.path('/etc/machine-id').read_bytes()
