@@ -14,7 +14,7 @@ import {
   cloudScopedId,
   cloudWorkspaceKey,
 } from "../platform/bridge/cloud-workspace-key";
-import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog } from "../state/cloud-workspace-catalog";
+import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudWorkspaceDetails } from "../state/cloud-workspace-catalog";
 import { useWorkspaceDispatch, useWorkspaceStore, type ChatThread } from "../state/store";
 import type { CloudWorkspaceActorRole, CloudWorkspaceDocument } from "../platform/cloud-workspaces";
 import { acceptOrganizationSnapshot, clearTeamStore } from "../features/team/team-store";
@@ -99,6 +99,8 @@ if (sharingFixture) {
   };
   Object.assign(window, { cloudWorkspaceSharingFixture: {
     get document() { return fixtureDocument; },
+    get details() { return cloudWorkspaceDetails.peekSnapshot(folder).data; },
+    invalidateDetails() { cloudWorkspaceDetails.invalidate(folder); },
     setPage(page: "workspace" | "dashboard") { useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page }); },
     publishSharing(sharingMode: "private" | "organization", accessRevision: number) {
       fixtureDocument = { ...fixtureDocument, sharingMode, accessRevision, version: fixtureDocument.version + 1 };

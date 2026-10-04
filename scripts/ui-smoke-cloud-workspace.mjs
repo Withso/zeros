@@ -101,6 +101,8 @@ export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }
   let used = 9;
   let invitations = [];
   let conflictNextSharing = false;
+  let ownerOnly = false;
+  let preservedPrivate = false;
   const sharingWrites = [];
   let collaboratorReads = 0;
   const writers = () => ({ limit: 10, used, available: 10 - used });
@@ -112,26 +114,29 @@ export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }
     if (url.pathname.endsWith("/collaborators") && request.method() === "GET") {
       collaboratorReads++;
       return reply({ workspaceId, organizationId, accessRevision: document.accessRevision, writers: writers(),
-        members: url.searchParams.has("memberCursor")
+        members: preservedPrivate ? [{ userId: ownerId, displayName: "Fixture owner", role: "owner" }] : url.searchParams.has("memberCursor")
           ? [{ userId: developerId, displayName: "Assigned developer", role: "developer" }]
           : [{ userId: ownerId, displayName: "Fixture owner", role: "owner" }, { userId: viewerId, displayName: "Organization viewer", role: "viewer" }],
-        guests: [{ id: invitationId, userId: prompterId, displayName: "Invited prompter", role: "prompter", revision: 1, expiresAt }],
-        invitations, guestCursor: null, invitationCursor: null, memberCursor: url.searchParams.has("memberCursor") ? null : viewerId });
+        guests: preservedPrivate ? [] : [{ id: invitationId, userId: prompterId, displayName: "Invited prompter", role: "prompter", revision: 1, expiresAt }],
+        invitations, guestCursor: null, invitationCursor: null, memberCursor: preservedPrivate || url.searchParams.has("memberCursor") ? null : viewerId });
     }
     if (url.pathname.endsWith("/sharing") && request.method() === "PATCH") {
       const body = request.postDataJSON();
       sharingWrites.push(body);
+      expect(body.expectedRevision).toBe(document.accessRevision);
       const next = { sharingMode: conflictNextSharing ? "organization" : body.sharingMode, accessRevision: document.accessRevision + 1 };
       await page.evaluate(next => window.cloudWorkspaceSharingFixture.publishSharing(next.sharingMode, next.accessRevision), next);
       if (conflictNextSharing) {
         conflictNextSharing = false;
         return reply({ error: { code: "cloud_workspace_access_conflict", message: "Workspace sharing changed" } }, 409);
       }
+      ownerOnly = false;
       return reply(next);
     }
     if (url.pathname.endsWith("/invitations") && request.method() === "POST") {
       expect(request.postDataJSON()).toEqual({ email: "guest@example.test", role: "developer" });
       expect(request.headers()["idempotency-key"]).toBeTruthy();
+      if (ownerOnly) return reply({ error: { code: "cloud_workspace_sharing_required", message: "Enable workspace collaboration before inviting guests" } }, 409);
       used++;
       invitations = [{ id: invitationId, role: "developer", expiresAt, deliveryState: "queued" }];
       return reply({ invitation: { id: invitationId, expiresAt }, replayed: false }, 201);
@@ -210,6 +215,73 @@ export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }
   await button.click();
   await expect(details.getByRole("region", { name: "Workspace sharing", exact: true })).toHaveCount(0);
   expect(collaboratorReads).toBe(hiddenReads);
-  await page.unroute("https://api.example.test/v1/cloud-workspaces/**");
+  // Preserved owner-only workspaces start Private. Selecting that same scope
+  // is a no-op; enabling collaboration must be an explicit versioned write.
+  ownerOnly = true; preservedPrivate = true; used = 1;
+  await page.goto(`${harnessBase}/harness-cloud-workspace.html?sharing=1`);
+  await page.evaluate(() => window.cloudWorkspaceSharingFixture.publishSharing("private", 2));
+  await button.click();
+  await details.getByRole("button", { name: "Manage sharing", exact: true }).click();
+  await details.getByRole("textbox", { name: "Collaborator email", exact: true }).fill("guest@example.test");
+  await details.getByRole("combobox", { name: "Invitation role", exact: true }).click();
+  await page.getByRole("option", { name: "Developer", exact: true }).click();
+  await details.getByRole("button", { name: "Invite", exact: true }).click();
+  await expect(page.getByText("Enable workspace collaboration before inviting guests", { exact: true })).toBeVisible();
+  expect(invitations).toEqual([]);
+  const beforeEnable = sharingWrites.length;
+  await details.getByRole("combobox", { name: "Workspace sharing scope", exact: true }).click();
+  await page.getByRole("option", { name: "Private", exact: true }).click();
+  expect(sharingWrites.length).toBe(beforeEnable);
+  await details.getByRole("button", { name: "Enable collaboration", exact: true }).click();
+  await expect(details.getByRole("button", { name: "Invite", exact: true })).toBeEnabled();
+  expect(sharingWrites.at(-1)).toEqual({ sharingMode: "private", expectedRevision: 2 });
+  await details.getByRole("button", { name: "Invite", exact: true }).click();
+  await expect(details.getByText("2 / 10 writer slots used", { exact: true })).toBeVisible();
+  await expect(details.getByRole("combobox", { name: "Workspace sharing scope", exact: true })).toContainText("Private");
+  check("Preserved owner-only private workspaces enable collaboration with exact CAS and invite without changing scope", true);
+  await page.unrouteAll({ behavior: "wait" });
   check("Staff sharing respects roles, writer slots, pagination, CAS, account switches and inactive surfaces", true);
+  await runCloudWorkspaceSharingWarmingSmoke({ page, check, harnessBase });
+}
+
+export async function runCloudWorkspaceSharingWarmingSmoke({ page, check, harnessBase }) {
+  for (const departure of ["hidden", "unmounted", "account replaced", "visible"]) {
+    let collaboratorReads = 0;
+    let detailsRequested = false;
+    let releaseDetails;
+    const heldDetails = new Promise(resolve => { releaseDetails = resolve; });
+    await page.mouse.move(0, 0);
+    await page.goto(`${harnessBase}/harness-cloud-workspace.html?sharing=1`);
+    await page.route("https://api.example.test/v1/cloud-workspaces/**", async route => {
+      if (new URL(route.request().url()).pathname.endsWith("/collaborators")) {
+        collaboratorReads++;
+        return route.fulfill({ status: 500, json: { error: { code: "fixture_read_failed", message: "Fixture read failed" } } });
+      }
+      const document = await page.evaluate(() => window.cloudWorkspaceSharingFixture.document);
+      detailsRequested = true;
+      await heldDetails;
+      return route.fulfill({ json: { workspace: { ...document, version: document.version + 1 } } });
+    });
+    await page.evaluate(() => {
+      window.cloudWorkspaceSharingFixture.setPage("workspace");
+      window.cloudWorkspaceSharingFixture.invalidateDetails();
+    });
+    const failedWarm = page.waitForResponse(response => response.url().includes("/collaborators"));
+    await page.getByRole("button", { name: "Cloud workspace details", exact: true }).hover();
+    await (await failedWarm).finished();
+    await expect.poll(() => detailsRequested).toBe(true);
+    expect(collaboratorReads).toBe(1);
+    if (departure === "hidden") await page.evaluate(() => window.cloudWorkspaceSharingFixture.setPage("dashboard"));
+    else if (departure !== "visible") await page.getByRole("button", { name: departure === "unmounted" ? "Local fixture" : "Owner fixture", exact: true }).click();
+    const response = page.waitForResponse(reply => !reply.url().includes("/collaborators") && reply.url().includes("/v1/cloud-workspaces/"));
+    releaseDetails();
+    await (await response).finished();
+    if (departure !== "account replaced") await expect.poll(() => page.evaluate(() => window.cloudWorkspaceSharingFixture.details?.version)).toBe(2);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect(collaboratorReads).toBe(departure === "visible" ? 2 : 1);
+    await expect(page.getByRole("dialog", { name: "Cloud workspace details" })).toHaveCount(0);
+    await page.unrouteAll({ behavior: "wait" });
+    check(departure === "visible" ? "Delayed details response still warms collaborators for the current visible owner" :
+      `Delayed details response leaves collaborator reads inert after the sharing surface is ${departure}`, true);
+  }
 }

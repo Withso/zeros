@@ -92,6 +92,14 @@ describe("staff sharing controls", () => {
       expect(html).not.toContain("Remove assignment for You");
     }
   });
+  it("offers explicit collaboration enablement while preserving private scope", () => {
+    workspace.sharingMode = "private";
+    expect(render(true)).toContain("Enable collaboration");
+    state.data!.accessRevision = 3;
+    expect(render(true)).toContain('<button disabled="">Enable collaboration</button>');
+    workspace.sharingMode = "organization";
+    expect(render(true)).not.toContain("Enable collaboration");
+  });
   it("respects full writer slots and the invited prompter role without offering unsupported assignments", () => {
     state.data!.writers = { limit: 10, used: 10, available: 0 };
     state.data!.guests = [{ id: userId, userId, role: "prompter", displayName: "Fixture prompter", revision: 1, expiresAt: "2026-11-01T00:00:00Z" }];

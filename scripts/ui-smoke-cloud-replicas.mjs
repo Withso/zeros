@@ -76,6 +76,7 @@ export async function runCloudReplicaSmoke({ page, check, harnessBase }) {
   await page.clock.fastForward(31_000);
   expect((await calls()).length).toBe(hiddenCalls);
   await page.evaluate(() => window.cloudReplicaHarness.show());
+  await trigger.click();
   await expect(sync).toContainText("In sync");
 
   await sync.getByRole("button", { name: "Remove…", exact: true }).click();
@@ -105,6 +106,7 @@ export async function runCloudReplicaSmoke({ page, check, harnessBase }) {
       await page.evaluate(() => window.cloudReplicaHarness.hide());
       await expect(sync).toHaveCount(0);
       await page.evaluate(() => window.cloudReplicaHarness.show());
+      await trigger.click();
     } else {
       await page.evaluate(() => window.cloudReplicaHarness.canEdit(false));
       await expect(sync).toContainText("edit access");

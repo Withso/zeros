@@ -120,6 +120,9 @@ panel reuses the existing sharing, invitation, assignment and revocation APIs:
 - Scope updates send the document's exact `accessRevision` as
   `expectedRevision`. A conflict refreshes metadata and requires a new explicit
   action; it never retries the write automatically.
+- For preserved owner-only private workspaces, use **Enable collaboration**
+  before inviting. This explicitly submits Private with the current CAS revision
+  and keeps the scope private; reselecting Private alone does not enable sharing.
 - Account-funded organization scope gives eligible unassigned members viewer
   access. Private scope retains the owner and explicit assignments/guest grants;
   it withdraws default organization discovery. Removing an assignment while

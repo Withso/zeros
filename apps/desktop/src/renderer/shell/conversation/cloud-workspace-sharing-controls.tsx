@@ -134,6 +134,13 @@ export function CloudWorkspaceSharingManager({ workspace, active }: { workspace:
           <p className="text-fg3 text-xs">{data.writers
             ? "Private keeps the owner and explicitly assigned collaborators. Organization members retain viewer access while shared."
             : "Existing organization-funded access rules apply. The listed roles reflect current workspace authority."}</p>
+          {workspace.sharingMode === "private" && <>
+            <p className="text-fg3 text-xs">For an owner-only workspace, enable collaboration before inviting. The scope stays private.</p>
+            <Button size="sm" disabled={disabled} onClick={() => run(
+              () => setCloudWorkspaceSharing(target, "private", workspace.accessRevision!), "Collaboration enabled")}>
+              Enable collaboration
+            </Button>
+          </>}
           <form className="space-y-2" onSubmit={event => {
             event.preventDefault();
             if (!email.trim() || disabled || invitationRole !== "viewer" && noWriterSlot) return;

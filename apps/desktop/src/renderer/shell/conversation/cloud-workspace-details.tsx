@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Activity,
   Clock,
@@ -38,7 +38,7 @@ import { useNativeRuntime } from "../../platform/runtime";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import { warmCloudWorkspaceReplicas } from "../../state/cloud-replica-cache";
 import { CloudWorkspaceSyncControls } from "./cloud-workspace-sync-controls";
-import { warmCloudWorkspaceCollaboration } from "../../state/cloud-workspace-collaboration-cache";
+import { cloudWorkspaceCollaborationKey, cloudWorkspaceCollaborationOwner, warmCloudWorkspaceCollaboration } from "../../state/cloud-workspace-collaboration-cache";
 import { CloudWorkspaceSharingControls } from "./cloud-workspace-sharing-controls";
 
 export function cloudStatusLabel(status: string): string {
@@ -163,6 +163,10 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   const native = useNativeRuntime().ready;
   const surfaceActive = useWorkspaceStore(state => state.activePage === "workspace");
   const sharingActive = useInternalFeatureActive("cloudComputerV2");
+  const mounted = useRef(false);
+  const warmSurface = useRef({ key, active: sharingActive && surfaceActive });
+  warmSurface.current = { key, active: sharingActive && surfaceActive };
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { if (!surfaceActive) setOpen(false); }, [surfaceActive]);
   const details = useCachedRead(
     cloudWorkspaceDetails,
@@ -174,13 +178,19 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   const warm = () => {
     if (!surfaceActive) return;
     if (nativeAccessEnabled && target) void warmCloudServiceAccess(target).catch(() => {});
+    const owner = sharingActive ? cloudWorkspaceCollaborationOwner(target!) : null;
+    const ownerKey = owner ? cloudWorkspaceCollaborationKey(owner) : null;
     if (sharingActive) warmCloudWorkspaceCollaboration(target!);
     void cloudWorkspaceDetails
       .load(key, () => refreshCloudWorkspace(parseCloudWorkspaceKey(key)!), {
         maxAgeMs: 10_000,
       })
       .then(workspace => {
-        if (sharingActive) warmCloudWorkspaceCollaboration(target!);
+        if (mounted.current && warmSurface.current.active && warmSurface.current.key === key && ownerKey) {
+          const currentOwner = cloudWorkspaceCollaborationOwner(target!);
+          if (currentOwner && cloudWorkspaceCollaborationKey(currentOwner) === ownerKey)
+            warmCloudWorkspaceCollaboration(target!);
+        }
         if (syncEnabled && native && surfaceActive && me?.user.id && workspace.capabilities.canEdit === true) {
           return warmCloudWorkspaceReplicas(me.user.id, parseCloudWorkspaceKey(key)!);
         }
