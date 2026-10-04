@@ -180,3 +180,11 @@ Checks include: `input_schema`, `input_too_large`, `artifact_host`, `artifact_ex
   directory not writable by group/other with no symlink in its ancestry; otherwise fail closed.
   No environment-variable or argument override. Launchers always start such children with the
   concrete `R/bin/node` path (never `/zeros/...` or `/opt/zeros/current/...`).
+
+## 13. Environment image refs for v4 generations (2026-10-04)
+A v4 generation (complete runtime pin) has `image_ref` equal to EITHER the pinned base's registered
+`image_ref` (workspace created from the base) OR an org template ref `boat-template:<boatSandboxId>`
+(`^boat-template:[A-Za-z0-9_-]{1,128}$`, workspace forked from a Cloud Computer template, Phase C).
+In both cases the pinned base row must exist and match provider/source_commit/architecture/storage_mib.
+Template provenance (which build/template, org) is validated by Phase C's sidecar
+(`cloud_workspace_computer_sources`) — B1 only admits the ref format.
