@@ -11,6 +11,8 @@ import {materializeMcpServerRegistrations} from "./mcp-registration";
 import { readCloudRepositoryMcp, cloudCodexMcpServer, freezeCloudSnapshot } from "./cloud-mcp";
 import { CloudCustomizationRedactor } from "./cloud-customization-redaction";
 import {CloudBackgroundExecution} from "./cloud-background-execution";
+import {CloudComputerMcpServer} from "./cloud-computer-tools";
+import {CLOUD_COMPUTER_TOOLS_SERVER} from "@zeros/protocol/cloud-computer-tools";
 
 export type CloudAgentSelection=Omit<CloudAgentExecutionAdmission,"executionId"|"provider"|"customization">;
 export type CloudProviderExecution={
@@ -60,6 +62,13 @@ export function createCloudAgentExecutionFactory(options:{
       lease.assertLive();
       const productServers=materializeMcpServerRegistrations(productTools?.servers??[],productTools?.env??{});
       if(productServers.some(server=>server.transport==="stdio"))throw new Error("Cloud product tools require a scoped remote transport");
+      if(productServers.some(server=>server.name===CLOUD_COMPUTER_TOOLS_SERVER))throw new Error("Cloud Computer tools require private execution admission");
+      if(lease.computerToolsVersion===1){
+        if(resolveCloudRuntime().profile!=="v4")throw new Error("Update the cloud runtime to configure this computer.");
+        const ownedLease=lease;
+        const computer=await lease.launch(()=>CloudComputerMcpServer.start(ownedLease));
+        productServers.push(computer.registration);
+      }
       const userServers=lease.customization?.servers.map(({server})=>admission.provider==="codex"?cloudCodexMcpServer(server):server)??[];
       if(userServers.some(server=>productServers.some(product=>product.name===server.name)))throw new Error("Cloud MCP server name conflicts with a product tool");
       const owned=lease;
@@ -88,6 +97,7 @@ export function createCloudAgentExecutionFactory(options:{
         revoke:()=>owned.close(),stopAndProve:()=>owned.close(),
       };
       redactor=coordinator.redactor??redactor;
+      redactor.addSecrets(productServers.flatMap(server=>server.transport==="stdio"?[]:Object.values(server.headers??{})));
       const background=new CloudBackgroundExecution(lease,conversationId,()=>coordinator.hasBackgroundServers());
       admitted.set(boundary,{lease,tools,coordinator,background,productServers:freezeCloudSnapshot(structuredClone(productServers)),userServers:freezeCloudSnapshot(structuredClone(userServers)),redactor});
       return {boundary,env:coordinator.environment(),authorityId:lease.authorityId};

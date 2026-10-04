@@ -2222,6 +2222,7 @@ export class DeletionLifecycleProcessor {
       // Sources precede generations; logs/receipts/templates precede builds;
       // the deferred head pointers disappear before their configurations.
       for (const table of [
+        "cloud_computer_admin_workspaces",
         "cloud_workspace_computer_sources",
         "cloud_computer_build_logs",
         "cloud_computer_v2_operations",

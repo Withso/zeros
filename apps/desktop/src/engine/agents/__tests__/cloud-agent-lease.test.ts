@@ -35,7 +35,7 @@ describe("private agent execution lifetime",()=>{
     f.request.mockResolvedValueOnce({ ...f.grant, gitAuthor: author });
     const lease = await CloudAgentLease.admit(admission, f.request, new AbortController().signal, { onRetirementFailure: vi.fn() }, f.time);
     try {
-      expect(f.request).toHaveBeenCalledWith({ kind: "admit", admission, includeGitAuthor: true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1 }, expect.any(AbortSignal));
+      expect(f.request).toHaveBeenCalledWith({ kind: "admit", admission, includeGitAuthor: true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1,computerToolsVersion:1 }, expect.any(AbortSignal));
       expect(lease.gitAuthor).toEqual(author);
       author.name = "Changed outside the lease";
       expect(lease.gitAuthor?.name).toBe("Member"); expect(Object.isFrozen(lease.gitAuthor)).toBe(true);

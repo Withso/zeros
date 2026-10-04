@@ -35,6 +35,7 @@ import {
   type SettingsLayerName,
 } from "../settings/schema";
 import type { McpServerRegistration } from "./types";
+import { CLOUD_COMPUTER_TOOLS_SERVER } from "@zeros/protocol/cloud-computer-tools";
 
 /** De-duplicate the MCP registry, FIRST-WINS (registry order = precedence,
  *  so a Zeros "shared" entry placed ahead of a later dupe wins). Two kinds
@@ -135,7 +136,7 @@ export function mcpServersFromSettings(
   const out: McpServerRegistration[] = [];
   for (const entry of raw) {
     const parsed = mcpServerSchema.safeParse(entry);
-    if (!parsed.success || parsed.data.enabled === false) continue;
+    if (!parsed.success || parsed.data.enabled === false || parsed.data.name === CLOUD_COMPUTER_TOOLS_SERVER) continue;
     // Gateway-managed (auth:"oauth"|"header") servers are fronted by the gateway,
     // not injected directly — keep them out of the direct registry (mirrors the
     // resolveMcpServers partition).
@@ -410,6 +411,10 @@ function composeMcpRegistry(
       const parsed = mcpServerSchema.safeParse(entry);
       if (!parsed.success) continue;
       const s = parsed.data;
+      if (s.name === CLOUD_COMPUTER_TOOLS_SERVER) {
+        warnings.push("mcp.servers: cloud-computer is reserved for admitted admin workspace executions");
+        continue;
+      }
       // Gateway-managed (auth:"oauth"|"header") servers are NOT injected
       // directly — the global gateway brokers auth + fronts them. Partition
       // them out (same name/url dedup namespace as direct servers, so a name

@@ -132,6 +132,17 @@ d("private provider execution leases",()=>{
     await expect(service.background(engine(),f.lease.leaseId,{...retain,snapshot:{...f.snapshot,tasks:[]}})).rejects.toMatchObject({status:409});
     await expect(service.background(engine(),f.lease.leaseId,{kind:"read",conversationId:"another-chat"})).rejects.toThrow();
   });
+  it("does not advertise computer tools from an ordinary workspace admission opt-in",async()=>{
+    const result=await service.admit(engine(),admission(),false,undefined,undefined,1);
+    expect(result).not.toHaveProperty("computerToolsVersion");
+  });
+  it("requires a runtime update for a marked legacy execution and rolls back its admission",async()=>{
+    await pool.query(`INSERT INTO cloud_computer_admin_workspaces(workspace_id,org_id,creator_user_id)
+      VALUES($1,$2,$3)`,[fixture.workspaceId,fixture.organizationId,fixture.userId]);
+    await expect(service.admit(engine(),admission(),false,undefined,undefined,1))
+      .rejects.toMatchObject({status:409,code:"cloud_computer_tools_update_required"});
+    expect((await pool.query("SELECT 1 FROM cloud_agent_execution_leases")).rowCount).toBe(0);
+  });
   it("freezes legacy hosted Dev material when the persistent owner is enabled",async()=>{
     const generation=randomUUID();
     for(const [name,value] of Object.entries({ZEROS_DEPLOY_ENV:'dev',ZEROS_DEV_ENVIRONMENT:'hosted',ZEROS_DEV_CONNECTIONS_ENABLED:'true',ZEROS_DEV_GENERATION:generation,

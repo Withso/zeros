@@ -18,6 +18,9 @@ import {openCloudAgentCredential,type CloudAgentCredentialKind,type CloudAgentCr
 import {CloudBackgroundOperationSchema,readCloudBackgroundTasks,writeCloudBackgroundTasks} from "./agent-background-tasks.js";
 import {cloudRuntimeQualificationMode} from "./runtime-config.js";
 import {runtimeCredentialQualificationJoin} from "./runtime-selection.js";
+import {adminComputerToolsVersion,computerToolsRejected} from "./computer-admin-workspaces.js";
+import {CloudComputerToolExecutionRequestSchema} from "./computer-tools-contract.js";
+import {ComputerToolConflictError,executeComputerTool,type ComputerToolsDependencies} from "./computer-tools.js";
 
 const uuid=z.string().uuid(),identity=z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
 export const CloudAgentExecutionAdmissionSchema=z.object({executionId:identity,delegationId:uuid,provider:z.enum(["claude","cursor","codex"]),model:CloudAgentModelSchema,
@@ -176,7 +179,8 @@ export async function assertCloudAgentExecutionActor(tx:Tx,scope:EngineScope,exe
  * a qualified provider/image. It cannot substitute the compute sponsor. */
 export class DatabaseCloudAgentExecutionService {
   constructor(private readonly pool:pg.Pool,private readonly encryption:CloudAgentCredentialKeys,private readonly workosEnabled:boolean,
-    private readonly codexRenewal=new DatabaseCodexAuthRenewal(pool,encryption)){}
+    private readonly codexRenewal=new DatabaseCodexAuthRenewal(pool,encryption),
+    private readonly computerTools?:ComputerToolsDependencies){}
 
   private transaction<T>(operation:(tx:Tx)=>Promise<T>){
     return withCloudAgentCredentialRetry(()=>withSystemTx(this.pool,operation));
@@ -226,7 +230,7 @@ export class DatabaseCloudAgentExecutionService {
     });
   }
 
-  async admit(scope:EngineScope,value:unknown,includeGitAuthor=false,nativeCapabilitiesVersion?:1,backgroundTasksVersion?:1){
+  async admit(scope:EngineScope,value:unknown,includeGitAuthor=false,nativeCapabilitiesVersion?:1,backgroundTasksVersion?:1,computerToolsVersion?:1){
     const parsed=CloudAgentExecutionAdmissionSchema.safeParse(value);if(!parsed.success)rejected();const input=parsed.data;
     const dev=devConnectionRuntime(this.pool,this.encryption);
     if(dev)await dev.consumeInvalidations();
@@ -274,7 +278,16 @@ export class DatabaseCloudAgentExecutionService {
         if(!bounded)rejected();publishedExpiry=bounded.expires_at;
       }
       const authorityId=this.authority(scope,input,actor,binding,customization?.digest);
+      const computerVersion=await adminComputerToolsVersion(tx,scope,actor.actorUserId,binding.kind);
+      if(computerVersion&&(!this.computerTools||computerToolsVersion!==1))
+        throw new HttpError(409,"cloud_computer_tools_update_required","Update the cloud runtime to configure this computer.");
+      // The staff/marker/runtime checks can wait; never publish an expired lease.
+      if(computerVersion){
+        await this.publicationAuthority(tx,scope,input,actor,!!previous);
+        if(!(await tx.query("SELECT 1 FROM cloud_agent_execution_leases WHERE id=$1 AND released_at IS NULL AND expires_at>clock_timestamp()",[leaseId])).rowCount)rejected();
+      }
       return {leaseId,authorityId,expiresAt:publishedExpiry.toISOString(),credentialVersion:binding.current_version,
+        ...(computerVersion?{computerToolsVersion:computerVersion}:{}),
         ...(backgroundTasksVersion===1&&(!previous||previous.background_enabled)?{backgroundTasksVersion:1 as const}:{}),
         credentialKind:binding.kind,provider:input.provider,model:input.model,material,...(nativeCapabilitiesVersion===1&&binding.native_capabilities?{nativeCapabilities:binding.native_capabilities}:{}),...(customization?{customization}:{}),
         ...(includeGitAuthor?{gitAuthor:await readGithubGitAuthor(tx,actor.actorUserId)}:{})};
@@ -402,6 +415,59 @@ export class DatabaseCloudAgentExecutionService {
         WHERE task.lease_id=lease.id AND lease.id=$1 AND lease.workspace_id=$2 AND lease.org_id=$3 AND lease.engine_instance_id=$4 AND lease.generation=$5`,
         [leaseId,scope.workspaceId,scope.organizationId,scope.engineInstanceId,scope.generation]);
       return {released:true};
+    });
+  }
+
+  async computerTool(scope:EngineScope,value:unknown){
+    const parsed=CloudComputerToolExecutionRequestSchema.safeParse(value);if(!parsed.success)rejected();
+    const request=parsed.data;
+    const dev=devConnectionRuntime(this.pool,this.encryption);if(dev)await dev.consumeInvalidations();
+    return this.transaction(async tx=>{
+      await assertCurrentCloudEngineAuthority(tx,{...scope,workosEnabled:this.workosEnabled});
+      const lease=(await tx.query<Lease>(`SELECT * FROM cloud_agent_execution_leases
+        WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND engine_instance_id=$4 AND generation=$5
+          AND released_at IS NULL AND expires_at>clock_timestamp()
+          AND (background_deadline IS NULL OR background_deadline>clock_timestamp()) FOR UPDATE`,
+        [request.leaseId,scope.workspaceId,scope.organizationId,scope.engineInstanceId,scope.generation])).rows[0];
+      if(!lease)rejected();
+      const input=leaseAdmission(lease),actor=await source(tx,scope,input,lease.actor_source_session_id);
+      // Recheck the admitted consent/revision without opening credential values.
+      // The admin check below shares admission/renewal's complete runtime
+      // qualification predicate and always requires MCP qualification.
+      const consent=(await tx.query<{
+        kind:string;owner_user_id:string;owner_fingerprint:string;grantee_fingerprint:string;compute_fingerprint:string;compute_trust:string;
+      }>(`SELECT credential.kind,credential.owner_user_id,delegation.owner_fingerprint,delegation.grantee_fingerprint,
+          delegation.compute_fingerprint,delegation.compute_trust
+        FROM cloud_agent_credentials credential
+        JOIN cloud_agent_credential_versions material ON material.credential_id=credential.id AND material.version=credential.current_version
+        JOIN cloud_agent_credential_delegations delegation ON delegation.credential_id=credential.id AND delegation.credential_revision=credential.revision
+        WHERE credential.id=$1 AND credential.revision=$2 AND delegation.id=$3
+          AND delegation.workspace_id=$4 AND delegation.org_id=$5 AND delegation.grantee_user_id=$6
+          AND credential.revoked_at IS NULL AND delegation.revoked_at IS NULL
+          AND delegation.expires_at>clock_timestamp() AND $7=ANY(delegation.models)
+          AND (material.material_expires_at IS NULL OR material.material_expires_at>clock_timestamp())
+        FOR SHARE OF credential,delegation,material SKIP LOCKED`,
+        [lease.credential_id,lease.credential_revision,lease.delegation_id,scope.workspaceId,scope.organizationId,actor.actorUserId,lease.model])).rows[0];
+      if(!consent||!consent.kind.startsWith(`${lease.provider}-`)||consent.grantee_fingerprint!==actor.fingerprint)rejected();
+      const compute=await readCloudAgentComputeTrust(tx,scope.workspaceId);
+      const owner=await authorizeCloudWorkspaceActor(tx,{...scope,actorUserId:consent.owner_user_id,capability:"run"});
+      if(!compute||compute.fingerprint!==consent.compute_fingerprint||compute.trust!==consent.compute_trust||owner.fingerprint!==consent.owner_fingerprint)rejected();
+      if(await adminComputerToolsVersion(tx,scope,actor.actorUserId,consent.kind)!==1||!this.computerTools)computerToolsRejected();
+      if(lease.customization_digest)await validateCustomizationSnapshot(tx,lease.id,actor.actorUserId);
+      const recheck=async()=>{
+        await this.publicationAuthority(tx,scope,input,actor,true);
+        if(!(await tx.query(`SELECT 1 FROM cloud_agent_execution_leases WHERE id=$1 AND released_at IS NULL
+          AND expires_at>clock_timestamp() AND (background_deadline IS NULL OR background_deadline>clock_timestamp())`,[lease.id])).rowCount)rejected();
+      };
+      try{
+        const result=await executeComputerTool(tx,{orgId:scope.organizationId,actorUserId:actor.actorUserId},request,this.computerTools);
+        await recheck();return result;
+      }catch(error){
+        // An authorized CAS conflict remains a typed 409, but never leaks head
+        // metadata after its execution deadline elapsed while waiting.
+        if(error instanceof ComputerToolConflictError)await recheck();
+        throw error;
+      }
     });
   }
 }

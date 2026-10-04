@@ -1,6 +1,7 @@
 import {z} from "zod";
 import { CloudRepositoryMcpSchema, CloudCustomizationSnapshotSchema } from "./cloud-customization";
 import type { CloudCustomizationOperation } from "./cloud-customization";
+import type { CloudComputerToolExecutionRequest } from "./cloud-computer-tools";
 
 export const CloudGitAuthorSchema=z.object({
   name:z.string().min(1).max(256).regex(/^[^\x00-\x1f\x7f<>]+$/),
@@ -73,6 +74,7 @@ export const CloudAgentExecutionLeaseSchema=z.object({leaseId:uuid,expiresAt:z.i
   nativeCapabilities:CloudNativeCapabilitiesSchema.optional(),
   rotation:z.object({authorityId:z.string().regex(/^[a-f0-9]{64}$/),material:codexAccess}).strict().optional()}).strict();
 export const CloudAgentExecutionAuthoritySchema=CloudAgentExecutionLeaseSchema.extend({authorityId:z.string().regex(/^[a-f0-9]{64}$/),
+  computerToolsVersion:z.literal(1).optional(),
   backgroundTasksVersion:z.literal(1).optional(),
   credentialKind:z.enum(["claude-api-key","claude-setup-token","cursor-api-key","codex-api-key","codex-chatgpt"]),
   provider:CloudAgentProviderSchema,model:z.string().min(1).max(256),material:CloudAgentAccessMaterialSchema,
@@ -85,7 +87,8 @@ export type CloudAgentAccessMaterial=z.infer<typeof CloudAgentAccessMaterialSche
 export type CloudAgentExecutionAuthority=z.infer<typeof CloudAgentExecutionAuthoritySchema>;
 export type CloudAgentExecutionLease=z.infer<typeof CloudAgentExecutionLeaseSchema>;
 export const CloudAgentActionAuthoritySchema=z.object({authorized:z.literal(true),executionId:identity,actorSessionId:uuid}).strict();
-export type CloudAgentExecutionRequest={kind:"admit";admission:CloudAgentExecutionAdmission;includeGitAuthor?:boolean;nativeCapabilitiesVersion?:1;backgroundTasksVersion?:1}|{kind:"validate";leaseId:string;renew?:boolean;credentialVersion?:number;nativeCapabilitiesVersion?:1}|
+export type CloudAgentExecutionRequest={kind:"admit";admission:CloudAgentExecutionAdmission;includeGitAuthor?:boolean;nativeCapabilitiesVersion?:1;backgroundTasksVersion?:1;computerToolsVersion?:1}|{kind:"validate";leaseId:string;renew?:boolean;credentialVersion?:number;nativeCapabilitiesVersion?:1}|
+  CloudComputerToolExecutionRequest|
   {kind:"refresh-codex";leaseId:string;credentialVersion:number;nativeCapabilitiesVersion?:1}|{kind:"release";leaseId:string}|
   {kind:"background";leaseId:string;operation:CloudBackgroundOperation}|
   {kind:"authorize-action";executionId:string;actorSessionId:string}|
