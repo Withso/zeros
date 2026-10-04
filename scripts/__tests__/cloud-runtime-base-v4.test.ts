@@ -377,8 +377,13 @@ sys.stdout.buffer.write(out.getvalue())`]);
     expect(request.mock.calls.filter(([, options]) => options?.method === "DELETE")).toHaveLength(3);
     for (const id of ["bx_v4test1", "bx_v4test2"]) {
       const journal = path.join(profile.stateDir, "private", `m2-build-${"1".repeat(32)}`, id, "journal.log");
-      expect(fs.statSync(journal).mode & 0o777).toBe(0o600);
-      expect(fs.readFileSync(journal, "utf8")).toBe("fixture evidence\n");
+      const fd = fs.openSync(journal, "r");
+      try {
+        expect(fs.fstatSync(fd).mode & 0o777).toBe(0o600);
+        expect(fs.readFileSync(fd, "utf8")).toBe("fixture evidence\n");
+      } finally {
+        fs.closeSync(fd);
+      }
     }
     const probes = f.requests.filter(request => request.route.endsWith("/commands") && request.body.command.includes('ARTIFACT = "journal"'));
     expect(probes).toHaveLength(keep ? 4 : 2);
