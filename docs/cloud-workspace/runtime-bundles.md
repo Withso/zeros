@@ -4,9 +4,10 @@ V4 separates the immutable engine runtime from the Boat base image. The schemas
 in [cloud-runtime-bundle.ts](../../packages/protocol/src/cloud-runtime-bundle.ts),
 migration `0124_cloud_runtime_registry.sql`, and their tests are authoritative.
 This is the internal Alpha contract. The control plane implements OIDC
-publication, base registration, and staff registry operations. Workspace
-selection, installation, qualification workers and lifecycle services are
-separate changes.
+publication, base registration, and staff registry operations. It selects and
+pins runtimes at creation, admits installation, and binds redemption,
+registration and readiness to that pin. The base installer, qualification workers
+and generation upgrade/recovery services have their own implementation boundaries.
 
 ## Identity and installed layout
 
@@ -170,10 +171,9 @@ retaining the existing live setup/engine readiness checks. Engine pins/witnesses
 and every setup attestation are immutable after insertion.
 
 NULL pins continue to mean legacy, never “latest”. Old rows are not backfilled.
-Revoked registry records remain referenced for audit and retirement. Workspace
-admission/qualification checks, newest compatible selection, explicit upgrades
-and copying pins across lifecycle transitions belong to later services; these
-schemas grant none of that authority. Browser diagnostics accept v3 and v4
+Revoked registry records remain referenced for audit and retirement. Explicit
+upgrades and copying pins across generation transitions belong to the lifecycle
+services; the registry schemas grant none of that authority. Browser diagnostics accept v3 and v4
 profiles, with missing/unknown reports unavailable. Shipping capture Chromium
 does not qualify native provider Browser access.
 
@@ -289,3 +289,56 @@ Local verification uses the artifact/OIDC/route suites, including the
 database-backed publication suite with `TEST_DATABASE_URL` pointing at a
 disposable PostgreSQL 18 database. Live OIDC publication belongs to the Alpha
 CI integration, and disposable-VM smoke qualification belongs to its worker.
+
+## Control-plane admission
+
+| Variable | Default | Behavior |
+| --- | --- | --- |
+| `CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE` | `legacy` | `v4` opts eligible new managed Boat workspaces into runtime selection. |
+| `CLOUD_RUNTIME_V4_STAFF_ONLY` | `true` | V4 creation requires the `developer` or `platform_owner` staff role. |
+| `CLOUD_RUNTIME_QUALIFICATION_MODE` | `full` | `full` requires full evidence; `smoke` accepts smoke or full evidence for selection and credential admission. |
+
+The configured base is the newest approved, non-revoked base image. A revoked
+compatibility contract on that base closes admission rather than selecting an
+older base. Its Alpha head is the highest confirmed, non-revoked `release_order`
+whose bundle is not revoked, uses the deployed engine protocol, and has enabled,
+non-revoked qualifications for all of `claude-setup-token`, `codex-chatgpt`, and
+`cursor-api-key` for that base's compatibility ID and the configured evidence
+mode. MCP approval is checked independently when a credential path requires it.
+
+Create reselects under the organization lock and saves base provenance and all
+six runtime fields in the generation transaction, without provider or artifact
+I/O. No eligible head returns HTTP 409 `cloud_runtime_unavailable` before
+allocation. Workspace responses include the saved six-field `generation.runtime`
+only for v4. Idempotent replay, wake and setup retry retain the saved pin even
+after the head advances or new v4 creation is disabled. Existing selected legacy
+organization images and delegated provider connections retain their current path;
+Cloud Computer v2 template forks belong to Phase C.
+
+V4 setup checks the base status and compatibility ID, requiring `idle` or
+`waiting_for_runtime`. The existing pinned SSH transport delivers a maximum
+64 KiB encoded installer input containing the descriptor, a 15-minute artifact
+GET capability and the unchanged nested setup payload. Legacy input remains
+bounded to 48 KiB. Artifact URLs never enter workspace responses, persisted
+setup logs, grants or errors. The helper result uses the existing parser and the
+final installer diagnostic must also confirm success.
+Publication and setup share one artifact store from `CLOUD_WORKSPACE_S3_*`;
+without that store v4 setup rejects with `cloud_runtime_unavailable`. Delivery
+remains enabled for saved v4 generations when new v4 creation is disabled.
+
+The v4 helper redeems the existing setup admission with a strict `runtime`
+witness: runtime ID, manifest digest, base compatibility ID, installer receipt
+digest, boot ID and supervisor session ID. Legacy redemption rejects that field;
+v4 requires it. Redemption compares the first three with the generation and
+inserts all nine engine identity columns atomically. Registration must repeat
+the exact witness using the v4 `agentRuntime` union; its registration grant keeps
+`purpose = 'setup'` and the existing run/fence binding. Readiness copies the
+registered engine's nine fields into the setup attestation under the existing
+grant-before-engine lock order.
+
+Every fresh setup, registration and readiness publication rechecks the pinned
+runtime's current qualifications and revocation state. Credential discovery,
+execution and renewal share the exact per-kind v4 qualification join, including
+evidence mode and independent MCP/native-capability requirements. V3 retains its
+provider/image/contract join. Revocation closes new admissions without choosing a
+different runtime; existing in-flight credentials retain their lease deadlines.

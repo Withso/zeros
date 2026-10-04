@@ -27,6 +27,8 @@ import {
   type CloudWorkspaceSetupReadiness,
   type CloudWorkspaceSetupResult,
 } from "./setup-worker.js";
+import { runtimeBase, runtimeWitness, seedRuntimeGeneration, seedRuntimeBundle } from "./runtime-test-fixtures.js";
+import { cloudRuntimePinValues } from "./runtime-selection.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -154,12 +156,14 @@ d("cloud workspace setup worker", () => {
   });
 
   const seedSetup = async (input?: {
+    v4?: boolean;
     state?: "queued" | "running";
     claimCount?: number;
     executionFence?: number;
     leaseOwner?: string | null;
     leaseExpired?: boolean;
   }) => {
+    if (input?.v4) await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     const workspaceId = randomUUID();
     const settingsSnapshot = { schemaVersion: 1, values: {} };
     const result = await withSystemTx(pool, async (tx) => {
@@ -183,6 +187,8 @@ d("cloud workspace setup worker", () => {
         organizationId,
         ownerUserId: ownerId,
       });
+      if (input?.v4) await seedRuntimeGeneration(tx, { workspaceId, organizationId, ownerUserId: ownerId });
+      else {
       await tx.query(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
@@ -198,6 +204,7 @@ d("cloud workspace setup worker", () => {
           canonical.providerConnectionId,
         ],
       );
+      }
       const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(
         tx,
         {
@@ -227,8 +234,8 @@ d("cloud workspace setup worker", () => {
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider,
            provider_resource_id, observed_state, last_observed_at
-         ) VALUES ($1, 1, $2, 'daytona', $3, 'running', now())`,
-        [workspaceId, organizationId, `sandbox-${workspaceId}`],
+         ) VALUES ($1, 1, $2, $4, $3, 'running', now())`,
+        [workspaceId, organizationId, `sandbox-${workspaceId}`, input?.v4 ? 'boat' : 'daytona'],
       );
       const state = input?.state ?? "queued";
       const running = state === "running";
@@ -430,9 +437,10 @@ d("cloud workspace setup worker", () => {
            setup_run_id, setup_execution_fence, registration_grant_id,
            protocol_version, state, bridge_token_hash,
            heartbeat_token_hash, registered_at, last_heartbeat_at,
-           lease_expires_at
+           lease_expires_at, runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id,
+           runtime_profile, runtime_engine_protocol_version, runtime_installer_receipt_sha256, runtime_boot_id, runtime_supervisor_session_id
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ready',
-                   $10, $11, now(), now(), now() + interval '2 minutes')`,
+                   $10, $11, now(), now(), now() + interval '2 minutes', $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
         [
           result.readiness.engine.instanceId,
           execution.workspaceId,
@@ -445,11 +453,50 @@ d("cloud workspace setup worker", () => {
           CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
           createHash("sha256").update(randomUUID()).digest(),
           createHash("sha256").update(randomUUID()).digest(),
+          ...cloudRuntimePinValues(execution.runtime),
+          ...(execution.runtime ? [runtimeWitness.installerReceiptSha256, runtimeWitness.bootId, runtimeWitness.supervisorSessionId] : [null, null, null]),
         ],
       );
     });
     return result;
   };
+
+  it("retains a v4 generation pin across retries and persists its registered nine-field witness at readiness", async () => {
+    const seeded = await seedSetup({ v4: true });
+    const executor = new FakeExecutor([
+      async () => { throw new CloudWorkspaceSetupError("setup_repository_unavailable", "retry fixture", true); },
+      async execution => registeredSuccessfulSetup(execution, "v4 setup completed"),
+    ]);
+    const instance = worker(executor);
+    await instance.runOnce();
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 }));
+    await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now() WHERE id=$1", [seeded.setupRunId]);
+    await instance.runOnce();
+    expect(executor.calls[0]?.runtime).toEqual(executor.calls[1]?.runtime);
+    expect(executor.calls[1]?.runtime).toMatchObject({ runtimeId: runtimeWitness.runtimeId, baseImageId: runtimeBase.id });
+    const saved = (await pool.query(`SELECT attestation.runtime_id, attestation.runtime_manifest_sha256,
+      attestation.runtime_base_image_id, attestation.runtime_base_compatibility_id, attestation.runtime_profile,
+      attestation.runtime_engine_protocol_version, attestation.runtime_installer_receipt_sha256, attestation.runtime_boot_id,
+      attestation.runtime_supervisor_session_id FROM cloud_workspace_setup_attestations attestation WHERE setup_run_id=$1`, [seeded.setupRunId])).rows[0];
+    expect(saved).toEqual({ runtime_id: runtimeWitness.runtimeId, runtime_manifest_sha256: runtimeWitness.manifestSha256,
+      runtime_base_image_id: runtimeBase.id, runtime_base_compatibility_id: runtimeBase.compatibilityId,
+      runtime_profile: "zeros-cloud-worker-v4", runtime_engine_protocol_version: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+      runtime_installer_receipt_sha256: runtimeWitness.installerReceiptSha256, runtime_boot_id: runtimeWitness.bootId,
+      runtime_supervisor_session_id: runtimeWitness.supervisorSessionId });
+  });
+  it("does not publish v4 readiness after a pinned qualification is revoked", async () => {
+    const seeded = await seedSetup({ v4: true });
+    const executor = new FakeExecutor([async execution => {
+      const result = await registeredSuccessfulSetup(execution, "setup complete");
+      await withSystemTx(pool, tx => tx.query(`UPDATE cloud_runtime_qualifications SET enabled=false,mcp_qualified=false,revoked_at=now()
+        WHERE runtime_id=$1 AND credential_kind='codex-chatgpt'`, [runtimeWitness.runtimeId]));
+      return result;
+    }]);
+    await worker(executor).runOnce();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_setup_attestations WHERE setup_run_id=$1", [seeded.setupRunId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT state,error_code FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0])
+      .toEqual({ state: "cancelled", error_code: "setup_publish_ineligible" });
+  });
 
   it("retries a failed setup after an engine identity was already issued", async () => {
     const seeded = await seedSetup();

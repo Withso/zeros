@@ -22,6 +22,8 @@ export interface CloudWorkspaceCommandRunner {
       command: string;
       cwd?: string;
       env?: Readonly<Record<string, string>>;
+      /** Coordinator-only v4 base pin; never sent in provider command text. */
+      runtimeBaseCompatibilityId?: string;
       timeoutSeconds: number;
     },
     signal: AbortSignal,

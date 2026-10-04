@@ -27,6 +27,7 @@ import {
   seedCanonicalWorkspaceSettingsVersion,
 } from "./test-fixtures.js";
 import type { CloudWorkspaceSetupExecution } from "./setup-worker.js";
+import { runtimeBase, runtimeWitness, seedRuntimeGeneration } from "./runtime-test-fixtures.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -141,8 +142,11 @@ d("cloud workspace setup material redemption", () => {
     await pool.end();
   });
 
-  beforeEach(async () => {
+  async function seedMaterials(v4 = false) {
     await resetMigratedTestDatabase(pool);
+    // These tests isolate setup authority; funded compute leases have their
+    // own integration suite. Only this disposable test database is configured.
+    if (v4) await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
 
     const accountUserId = randomUUID();
     const accountEmail = `setup-materials-${accountUserId}@example.test`;
@@ -245,6 +249,8 @@ d("cloud workspace setup material redemption", () => {
         organizationId,
         ownerUserId: accountUserId,
       });
+      const runtime = v4 ? await seedRuntimeGeneration(tx, { workspaceId, organizationId, ownerUserId: accountUserId }) : null;
+      if (!v4) {
       await tx.query(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
@@ -260,12 +266,13 @@ d("cloud workspace setup material redemption", () => {
           canonical.providerConnectionId,
         ],
       );
+      }
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider,
            provider_resource_id, observed_state
-         ) VALUES ($1, 1, $2, 'daytona', $3, 'running')`,
-        [workspaceId, organizationId, `sandbox-${workspaceId}`],
+         ) VALUES ($1, 1, $2, $4, $3, 'running')`,
+        [workspaceId, organizationId, `sandbox-${workspaceId}`, v4 ? 'boat' : 'daytona'],
       );
       const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(
         tx,
@@ -345,12 +352,12 @@ d("cloud workspace setup material redemption", () => {
         attempt: 1,
         executionFence: 5,
         provider: {
-          name: "daytona",
+          name: v4 ? "boat" : "daytona",
           resourceId: `sandbox-${workspaceId}`,
         },
         image: {
-          ref: "snapshot-pinned-id",
-          sourceCommit: "a".repeat(40),
+          ref: v4 ? runtimeBase.imageRef : "snapshot-pinned-id",
+          sourceCommit: v4 ? runtimeBase.sourceCommit : "a".repeat(40),
         },
         repository: {
           forge: "github.com",
@@ -364,6 +371,7 @@ d("cloud workspace setup material redemption", () => {
           snapshot: settings,
           sha256: settingsDigest.rows[0]!.digest,
         },
+        ...(runtime ? { runtime: runtime.pin } : {}),
       } satisfies CloudWorkspaceSetupExecution;
     });
 
@@ -403,7 +411,8 @@ d("cloud workspace setup material redemption", () => {
         clientId: "client_desktop_example",
       },
     });
-  });
+  }
+  beforeEach(() => seedMaterials());
 
   function redemptionInput() {
     const execution = seed.execution;
@@ -423,6 +432,84 @@ d("cloud workspace setup material redemption", () => {
       },
     };
   }
+
+  const outcome = (promise: Promise<unknown>) => promise.then(() => "accepted", error => error.code);
+
+  it("rejects an installation witness on a legacy generation", async () => {
+    expect(await outcome(service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness })))
+      .toBe("setup_admission_rejected");
+    expect(github.mint).not.toHaveBeenCalled();
+  });
+  it("requires an exact v4 installation witness before materials or engine creation", async () => {
+    await seedMaterials(true);
+    for (const runtime of [undefined, { ...runtimeWitness, manifestSha256: "b".repeat(64) },
+      { ...runtimeWitness, runtimeId: `r1-${"b".repeat(64)}`, manifestSha256: "b".repeat(64) },
+      { ...runtimeWitness, baseCompatibilityId: `bc1-${"c".repeat(64)}` },
+      { ...runtimeWitness, installerReceiptSha256: "invalid" }, { ...runtimeWitness, bootId: "invalid" },
+      { ...runtimeWitness, supervisorSessionId: "invalid" }]) {
+      expect(await outcome(service.redeem({ ...redemptionInput(), materialVersion: 2, ...(runtime ? { runtime } : {}) })))
+        .toBe("setup_admission_rejected");
+    }
+    expect(github.mint).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_engine_instances")).rowCount).toBe(0);
+  });
+  it("persists all nine v4 fields at redemption and rejects every differing registration identity", async () => {
+    await seedMaterials(true);
+    const materials = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
+    const row = (await pool.query("SELECT * FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0];
+    expect(row).toMatchObject({ state: "starting", runtime_id: runtimeWitness.runtimeId,
+      runtime_manifest_sha256: runtimeWitness.manifestSha256, runtime_base_image_id: runtimeBase.id,
+      runtime_base_compatibility_id: runtimeBase.compatibilityId, runtime_profile: "zeros-cloud-worker-v4",
+      runtime_engine_protocol_version: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+      runtime_installer_receipt_sha256: runtimeWitness.installerReceiptSha256,
+      runtime_boot_id: runtimeWitness.bootId, runtime_supervisor_session_id: runtimeWitness.supervisorSessionId,
+      agent_runtime_profile: null, agent_runtime_contract_sha256: null });
+    const input = { token: materials.engine.registration.token, workspaceId: seed.execution.workspaceId,
+      organizationId: seed.execution.organizationId, generation: seed.execution.generation, setupRunId: seed.execution.setupRunId,
+      executionFence: seed.execution.executionFence, engineInstanceId: materials.engine.instanceId,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2 as const };
+    const identity = { ...runtimeWitness, profile: "zeros-cloud-worker-v4" as const };
+    const variants = [undefined, { profile: "zeros-cloud-worker-v3" as const, contractSha256: "a".repeat(64) },
+      { ...identity, runtimeId: `r1-${"b".repeat(64)}`, manifestSha256: "b".repeat(64) },
+      { ...identity, manifestSha256: "b".repeat(64) }, { ...identity, baseCompatibilityId: `bc1-${"d".repeat(64)}` },
+      { ...identity, installerReceiptSha256: "f".repeat(64) }, { ...identity, bootId: randomUUID() },
+      { ...identity, supervisorSessionId: randomUUID() }];
+    for (const agentRuntime of variants) {
+      expect(await outcome(service.registerEngine({ ...input, ...(agentRuntime ? { agentRuntime } : {}) })))
+        .toBe("engine_registration_rejected");
+    }
+    // Failed comparisons roll back grant consumption; the exact witness can register once.
+    expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity }))).toBe("accepted");
+    expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity }))).toBe("engine_registration_rejected");
+  });
+  it.each(["before redemption", "during repository mint"])("rejects runtime revocation %s without releasing materials", async stage => {
+    await seedMaterials(true);
+    const revoke = () => withSystemTx(pool, tx => tx.query(
+      "UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [runtimeWitness.runtimeId]));
+    if (stage === "before redemption") await revoke();
+    else {
+      const mint = vi.mocked(github.mint).getMockImplementation()!;
+      vi.mocked(github.mint).mockImplementationOnce(async input => { await revoke(); return mint(input); });
+    }
+    expect(await outcome(service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness })))
+      .toBe(stage === "before redemption" ? "setup_admission_rejected" : "setup_authority_changed");
+    if (stage === "before redemption") expect(github.mint).not.toHaveBeenCalled();
+    else expect(github.revoke).toHaveBeenCalledOnce();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_engine_instances WHERE revoked_at IS NULL")).rowCount).toBe(0);
+  });
+  it("rechecks the saved runtime qualification before consuming its registration grant", async () => {
+    await seedMaterials(true);
+    const materials = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
+    await withSystemTx(pool, tx => tx.query(`UPDATE cloud_runtime_qualifications SET enabled=false,mcp_qualified=false,revoked_at=now()
+      WHERE runtime_id=$1 AND credential_kind='codex-chatgpt'`, [runtimeWitness.runtimeId]));
+    expect(await outcome(service.registerEngine({ token: materials.engine.registration.token,
+      workspaceId: seed.execution.workspaceId, organizationId: seed.execution.organizationId,
+      generation: seed.execution.generation, setupRunId: seed.execution.setupRunId,
+      executionFence: seed.execution.executionFence, engineInstanceId: materials.engine.instanceId,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2,
+      agentRuntime: { ...runtimeWitness, profile: "zeros-cloud-worker-v4" } }))).toBe("engine_registration_rejected");
+    expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0].state).toBe("starting");
+  });
 
   it("returns generation-pinned resources only to version-2 material consumers", async () => {
     const materials = await service.redeem({

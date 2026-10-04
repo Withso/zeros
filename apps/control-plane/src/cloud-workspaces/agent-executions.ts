@@ -16,6 +16,8 @@ import {readCloudAgentComputeTrust} from "./agent-compute-trust.js";
 import {DatabaseCodexAuthRenewal} from "./codex-auth-renewal.js";
 import {openCloudAgentCredential,type CloudAgentCredentialKind,type CloudAgentCredentialKeys} from "./agent-credential-envelope.js";
 import {CloudBackgroundOperationSchema,readCloudBackgroundTasks,writeCloudBackgroundTasks} from "./agent-background-tasks.js";
+import {cloudRuntimeQualificationMode} from "./runtime-config.js";
+import {runtimeCredentialQualificationJoin} from "./runtime-selection.js";
 
 const uuid=z.string().uuid(),identity=z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
 export const CloudAgentExecutionAdmissionSchema=z.object({executionId:identity,delegationId:uuid,provider:z.enum(["claude","cursor","codex"]),model:CloudAgentModelSchema,
@@ -107,16 +109,13 @@ async function credentialBinding(tx:Tx,scope:EngineScope,input:Admission,actor:N
       JOIN cloud_workspace_engine_instances engine ON engine.id=$5 AND engine.workspace_id=delegation.workspace_id AND engine.org_id=delegation.org_id
         AND engine.generation=$6 AND engine.actor_protocol_version=2
       JOIN cloud_workspace_generations generation ON generation.workspace_id=engine.workspace_id AND generation.org_id=engine.org_id AND generation.generation=engine.generation
-      JOIN cloud_agent_runtime_qualifications qualification ON qualification.provider=generation.provider::text AND qualification.image_ref=generation.image_ref
-        AND qualification.runtime_contract_sha256=engine.agent_runtime_contract_sha256 AND qualification.profile=engine.agent_runtime_profile
-        AND qualification.credential_kind=credential.kind AND qualification.enabled
-        AND (NOT $8::boolean OR qualification.mcp_qualified)
+      ${runtimeCredentialQualificationJoin("$10", "$8::boolean")}
         AND ($9::text IS NULL OR (qualification.native_capabilities->>'version'='1' AND qualification.native_capabilities->>$9='true'))
       WHERE delegation.id=$1 AND delegation.workspace_id=$2 AND delegation.org_id=$3 AND delegation.grantee_user_id=$4
         AND credential.revoked_at IS NULL AND delegation.revoked_at IS NULL AND delegation.expires_at>clock_timestamp()+interval '5 seconds'
         AND $7=ANY(delegation.models)
       FOR SHARE OF delegation,material`,
-    [input.delegationId,scope.workspaceId,scope.organizationId,actor.actorUserId,scope.engineInstanceId,scope.generation,input.model,!!input.customization,actor.nativeCapability??null])).rows[0];
+    [input.delegationId,scope.workspaceId,scope.organizationId,actor.actorUserId,scope.engineInstanceId,scope.generation,input.model,!!input.customization,actor.nativeCapability??null,cloudRuntimeQualificationMode()])).rows[0];
     if(!row||(!allowStale&&!row.material_ready))rejected();
     if(!row.kind.startsWith(`${input.provider}-`))rejected();
     const compute=await readCloudAgentComputeTrust(tx,scope.workspaceId);

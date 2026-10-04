@@ -6,6 +6,7 @@ import { CLOUD_ACTOR_ADMISSION_PATH, CLOUD_ACTOR_TOKEN_PATTERN } from "./actor-s
 import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
+import { CloudRuntimeWitnessSchema, CloudAgentRuntimeSchema } from "./runtime-contract.js";
 import { createCloudCommandRoutes } from "./command-routes.js";
 import type { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { createCloudEventRoutes } from "./event-routes.js";
@@ -93,6 +94,7 @@ const BLOB_BODY_BYTES = 64 * 1024 * 1024;
 const SetupAdmissionBody = z
   .object({
     materialVersion: z.literal(2).optional(),
+    runtime: CloudRuntimeWitnessSchema.optional(),
     workspaceId: UUID,
     organizationId: UUID,
     generation: POSITIVE_INTEGER,
@@ -120,7 +122,7 @@ const EngineRegistrationBody = z
     engineInstanceId: UUID,
     protocolVersion: POSITIVE_INTEGER.max(65_535),
     actorProtocolVersion: z.literal(2).optional(),
-    agentRuntime:z.object({profile:z.literal("zeros-cloud-worker-v3"),contractSha256:z.string().regex(/^[a-f0-9]{64}$/)}).strict().optional(),
+    agentRuntime: CloudAgentRuntimeSchema.optional(),
   })
   .strict();
 

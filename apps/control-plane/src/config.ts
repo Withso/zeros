@@ -24,6 +24,7 @@ import { validateDatabaseConnections } from "./database-config.js";
 import { developmentIdentity, type DevelopmentIdentity } from "./development-environment.js";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
+import { loadCloudRuntimeConfig, type CloudRuntimeConfig } from "./cloud-workspaces/runtime-config.js";
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
 import { validateReleaseLedgerUrl } from "./client-compatibility.js";
@@ -189,6 +190,7 @@ export type FeedbackBackendConfig = {
 };
 
 export type CloudWorkspaceBackendConfig = {
+  runtime?: CloudRuntimeConfig;
   /** Managed default only. Explicit customer connections select independently. */
   provider: CloudWorkspaceProviderName;
   providerProfiles?: Readonly<
@@ -1085,6 +1087,7 @@ function loadCloudWorkspaceConfig(
   env: NodeJS.ProcessEnv,
   github: GithubBackendConfig | null,
 ): CloudWorkspaceBackendConfig | null {
+  const runtime = loadCloudRuntimeConfig(env);
   const enabled = env.CLOUD_WORKSPACES_ENABLED?.trim().toLowerCase();
   const backgroundEnabled = env.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED?.trim().toLowerCase();
   if (backgroundEnabled && backgroundEnabled !== "true" && backgroundEnabled !== "false") {
@@ -1516,6 +1519,7 @@ function loadCloudWorkspaceConfig(
     };
   }
   return {
+    runtime,
     provider: value.CLOUD_WORKSPACE_PROVIDER,
     ...(value.CLOUD_WORKSPACE_PROVIDER === "boat"
       ? {
