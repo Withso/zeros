@@ -23,9 +23,8 @@ def build(node_archive, node_sha256, source_commit, variant, output):
         node = archive.getmember('node-v22.23.1-linux-x64/bin/node')
         assert node.isfile() and 0 < node.size < 256 * 1024**2
         data = archive.extractfile(node).read()
-    closed = {'schema': 'zeros.diagnostic/v1', 'component': 'setup', 'stage': 'done', 'ok': True,
-              'exitCode': 0, 'timedOut': False, 'failedChecks': []}
-    setup = "import fs from 'node:fs';\nconst p=JSON.parse(Buffer.from(fs.readFileSync(0,'utf8'),'base64url').toString());\nif(p.synthetic!==true) process.exit(7);\nconsole.log(" + json.dumps(json.dumps(closed, separators=(',', ':'))) + ");\n"
+    result = {'version': 1, 'audience': 'zeros-cloud-workspace-setup-result-v1', 'outcome': 'ready'}
+    setup = "import fs from 'node:fs';\nconst p=JSON.parse(Buffer.from(fs.readFileSync(0,'utf8'),'base64url').toString());\nif(p.synthetic!==true) process.exit(7);\nprocess.stdout.write(" + json.dumps(json.dumps(result, separators=(',', ':'))) + ");\n"
     contents = {'bin/node': data, 'bin/start-engine.sh': b'#!/bin/sh\nexit 0\n',
                 'bin/cloud-engine-namespace': b'#!/bin/sh\nexit 1\n',
                 'bin/cloud-process-supervisor': b'#!/bin/sh\nexit 1\n',
@@ -39,7 +38,11 @@ def build(node_archive, node_sha256, source_commit, variant, output):
         for parent in Path(name).parents:
             if str(parent) != '.':
                 entries[str(parent)] = {'path': str(parent), 'type': 'dir', 'mode': '0755'}
-    manifest = json.loads((Path(__file__).parent / 'fixtures/manifest.json').read_text())
+    entries['worker/variant-link.txt'] = {'path': 'worker/variant-link.txt', 'type': 'symlink', 'target': 'variant.txt'}
+    tests = Path(__file__).resolve().parent
+    shared = tests.parents[3] / 'packages/protocol/src/__tests__/fixtures/cloud-runtime'
+    fixtures = shared if shared.is_dir() else tests / 'fixtures/cloud-runtime'
+    manifest = json.loads((fixtures / 'manifest.valid.json').read_text())
     manifest['source']['commit'] = source_commit
     manifest['files'] = sorted(entries.values(), key=lambda entry: entry['path'].encode())
     manifest_raw = json.dumps(manifest, separators=(',', ':'), sort_keys=True).encode()
@@ -54,8 +57,11 @@ def build(node_archive, node_sha256, source_commit, variant, output):
                 archive.addfile(first, io.BytesIO(manifest_raw))
                 for entry in manifest['files']:
                     member = tarfile.TarInfo(entry['path'])
-                    member.mode = int(entry['mode'], 8)
-                    member.type = tarfile.DIRTYPE if entry['type'] == 'dir' else tarfile.REGTYPE
+                    if entry['type'] == 'symlink':
+                        member.mode, member.type, member.linkname = 0o555, tarfile.SYMTYPE, entry['target']
+                    else:
+                        member.mode = int(entry['mode'], 8)
+                        member.type = tarfile.DIRTYPE if entry['type'] == 'dir' else tarfile.REGTYPE
                     member.size = entry.get('size', 0)
                     archive.addfile(member, io.BytesIO(contents.get(entry['path'], b'')))
     payload = path.read_bytes()

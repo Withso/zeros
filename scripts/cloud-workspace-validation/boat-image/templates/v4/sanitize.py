@@ -15,7 +15,17 @@ def sanitize():
     bootstrap = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bootstrap)
     app = bootstrap.Bootstrap()
-    app.base()
+    try:
+        app.base()
+        app.wait_ready()
+        with app.lock('runtime-install.lock'), app.lock('runtime-publication.lock'):
+            return sanitize_base(app)
+    except BaseException as error:
+        app.log_failure(error, stage='sanitize')
+        raise
+
+
+def sanitize_base(app):
     assert json.loads(app.read('/etc/zeros/cloud-worker.json', 4096, 0o444))['version'] == 4
     assert app.current() is None and app.current('previous') is None
     assert set(os.listdir('/opt/zeros-infra')) <= {'.staging'} and not os.listdir('/opt/zeros-infra/.staging')

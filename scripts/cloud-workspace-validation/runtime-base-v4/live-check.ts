@@ -8,7 +8,7 @@ import path from "node:path";
 import { parseEnv } from "node:util";
 import { boatAuthorizedKeyCommand, openBoatBootstrapChannel, parseBoatHostKey, parseBoatSshEndpoint } from "../../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
 import { builderCommand, type KitDeps } from "../boat-image/boat-image";
-import { BaseFailure, buildBase, countStart, parseProbe, pythonProbe, remote, requireBase, saveJson, waitSandbox } from "../boat-image/runtime-base-v4";
+import { BaseFailure, buildBase, parseProbe, pythonProbe, remote, requireBase, resumeOwned, saveJson, waitSandbox } from "../boat-image/runtime-base-v4";
 
 type R2 = { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string };
 const hash = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
@@ -56,7 +56,7 @@ export function signedHeaders(r2: R2, method: string, key: string, payload: Buff
   return headers;
 }
 
-async function objectRequest(r2: R2, method: "PUT" | "DELETE" | "HEAD", key: string, payload = Buffer.alloc(0)) {
+async function objectRequest(r2: R2, method: "PUT" | "DELETE" | "HEAD", key: string, payload: Buffer = Buffer.alloc(0)) {
   requireBase(/^runtime-test\/zeros-v2-test-[a-z0-9-]+\/[abc]\.tar\.gz$/.test(key), "validate_input", "input_schema");
   try {
     const response = await fetch(`${r2.endpoint}${resource(r2, key)}`, { method, headers: signedHeaders(r2, method, key, payload),
@@ -67,6 +67,21 @@ async function objectRequest(r2: R2, method: "PUT" | "DELETE" | "HEAD", key: str
 }
 
 const objectsFile = (deps: KitDeps) => path.join(deps.stateDir, "r2-objects.json");
+export async function uploadLiveObject(deps: KitDeps, r2: R2, key: string, payload: Buffer) {
+  const objects: { key: string; deleted: boolean }[] = fs.existsSync(objectsFile(deps)) ? JSON.parse(fs.readFileSync(objectsFile(deps), "utf8")) : [];
+  requireBase(!objects.some(object => object.key === key), "install", "input_schema");
+  objects.push({ key, deleted: false });
+  saveJson(objectsFile(deps), objects); // Retain successful and ambiguous PUTs for cleanup.
+  const status = await objectRequest(r2, "PUT", key, payload);
+  if ([400, 401, 403, 404, 405, 411, 412, 413, 415, 422, 429].includes(status)) {
+    // A definitive create-only rejection conveys no ownership of the object
+    // already at this key. In particular, 412 must never authorize DELETE.
+    objects.pop();
+    saveJson(objectsFile(deps), objects);
+  }
+  requireBase(status >= 200 && status < 300, "install", "provider_request");
+}
+
 export async function cleanupLiveObjects(deps: KitDeps) {
   if (!fs.existsSync(objectsFile(deps))) return [];
   const objects: { key: string; deleted: boolean }[] = JSON.parse(fs.readFileSync(objectsFile(deps), "utf8"));
@@ -133,7 +148,7 @@ export async function syntheticArchives(deps: KitDeps) {
 const INSTALL_CHECKS = new Set(["input_schema", "input_too_large", "artifact_host", "artifact_expired", "insufficient_space", "cache_conflict",
   "http_status", "download_truncated", "archive_digest", "archive_size", "manifest_digest", "manifest_schema", "bootstrap_protocol",
   "archive_paths", "archive_member_type", "file_inventory", "file_digest", "file_mode", "symlink_escape", "root_ownership", "hard_link",
-  "pointer_publish", "host_start", "setup_exit", "timeout", "process_signal", "diagnostic_missing", "lock_busy", "base_compatibility", "cgroup_controllers", "cgroup_retired"]);
+  "pointer_publish", "host_start", "setup_exit", "timeout", "process_signal", "diagnostic_missing", "lock_busy", "base_compatibility", "cgroup_retired"]);
 
 export async function installOverSsh(deps: KitDeps, id: string, value: unknown) {
   const signal = AbortSignal.timeout(1_260_000);
@@ -210,7 +225,7 @@ try:
  assert versions=={'node':'22.23.1','abi':'127'}
  print(json.dumps({'runtimeId':rid,'previous':app.current('previous'),'bootId':app.boot_id(),
    'sessionId':active['supervisorSessionId'],'fullRehashMs':elapsed,'coldCache':cold,
-   'fileCount':len(manifest['files']),'expandedBytes':sum(e.get('size',0) for e in manifest['files']),
+   'fileCount':sum(e['type']=='file' for e in manifest['files']),'expandedBytes':sum(e.get('size',0) for e in manifest['files']),
    'node':versions['node'],'abi':127}))
 except BaseException:
  code=1
@@ -237,19 +252,15 @@ export async function liveCheck(options: Map<string, string>, deps: KitDeps) {
     try {
       const { directory, nodeArchiveSha256 } = await syntheticArchives(profile);
       const state = JSON.parse(fs.readFileSync(path.join(profile.stateDir, "state.json"), "utf8"));
-      const objects: { key: string; deleted: boolean }[] = [];
       requireBase(!fs.existsSync(objectsFile(profile)), "install", "input_schema");
       const descriptors: Record<string, any> = {};
       for (const variant of ["a", "b", "c"]) {
         const key = `runtime-test/zeros-v2-test-${state.attemptHex}/${variant}.tar.gz`;
-        objects.push({ key, deleted: false });
-        saveJson(objectsFile(profile), objects); // Includes an ambiguous PUT in later cleanup.
-        const status = await objectRequest(r2, "PUT", key, fs.readFileSync(path.join(directory, `${variant}.tar.gz`)));
-        requireBase(status < 300, "install", "provider_request");
+        await uploadLiveObject(profile, r2, key, fs.readFileSync(path.join(directory, `${variant}.tar.gz`)));
         descriptors[variant] = JSON.parse(fs.readFileSync(path.join(directory, `${variant}.json`), "utf8"));
       }
       const install = async (variant: string, setup = false) => {
-        const key = objects.find(object => object.key.endsWith(`/${variant}.tar.gz`))!.key;
+        const key = `runtime-test/zeros-v2-test-${state.attemptHex}/${variant}.tar.gz`;
         // URLs are minted immediately before transport and are never written
         // to the ledger, passed in command arguments, or sent in provider exec.
         return installOverSsh(profile, sandboxId, { schema: "zeros.runtime-install/v1", purpose: setup ? "workspace-setup" : "build",
@@ -263,8 +274,7 @@ export async function liveCheck(options: Map<string, string>, deps: KitDeps) {
       const clone = { ...profile, stateDir: path.join(profile.stateDir, "verification") };
       await builderCommand("stop", new Map(), [], clone);
       await waitSandbox(profile, sandboxId, "archived");
-      countStart(profile);
-      await builderCommand("resume", new Map([["--max-used-hours", String(maxUsedHours)]]), [], clone);
+      await resumeOwned(profile, clone, maxUsedHours);
       await waitSandbox(profile, sandboxId);
       // Dispatch runs automatically; do not repair/start units in the proof.
       const resumed = await probeRuntime(profile, sandboxId, descriptors.a.runtimeId, true);

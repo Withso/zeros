@@ -11,9 +11,16 @@ import re
 import stat
 import subprocess
 import sys
-import time
 
 sys.dont_write_bytecode = True
+
+
+def verify_protected_ancestry(app):
+    # Check every protected path, including its root and all intermediate
+    # directories, with the bootstrap's no-follow ownership/mode checks.
+    for entry in app.compat['protectedFiles']:
+        with app.directory(entry['path'].rsplit('/', 1)[0] or '/'):
+            pass
 
 
 def verify():
@@ -21,7 +28,17 @@ def verify():
     bootstrap = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bootstrap)
     app = bootstrap.Bootstrap()
+    try:
+        return verify_host(bootstrap, app)
+    except BaseException as error:
+        app.log_failure(error, stage='verify')
+        raise
+
+
+def verify_host(bootstrap, app):
     app.base()
+    app.wait_ready()
+    verify_protected_ancestry(app)
     require = bootstrap.require
     marker = json.loads(app.read('/etc/zeros/cloud-worker.json', 4096, 0o444))
     require(marker == {'backend': 'cloud-worker', 'gid': 10001, 'profile': 'zeros-cloud-worker-v4', 'uid': 10001, 'version': 4}, 'base_compatibility')
@@ -46,13 +63,6 @@ def verify():
     require(stat.S_IMODE(Path('/run/zeros').stat().st_mode) == 0o700 and Path('/run/zeros').stat().st_uid == 0, 'root_ownership')
     require('zeros-cloud-engine (unconfined)' in Path('/sys/kernel/security/apparmor/profiles').read_text(), 'apparmor')
     for unit in ('zeros-boot.service', 'zeros-host.service'):
-        deadline = time.monotonic() + 30
-        while True:
-            result = subprocess.run(['/usr/bin/systemctl', 'is-active', '--quiet', unit], env=bootstrap.ENV, capture_output=True, timeout=5)
-            if result.returncode == 0 or time.monotonic() >= deadline:
-                break
-            time.sleep(0.2)
-        require(result.returncode == 0, 'host_start')
         enabled = subprocess.run(['/usr/bin/systemctl', 'is-enabled', '--quiet', unit], env=bootstrap.ENV, capture_output=True)
         require(enabled.returncode == 0, 'host_start')
     props = subprocess.run(['/usr/bin/systemctl', 'show', '--property=DelegateSubgroup,KillMode,ControlGroup,MainPID', 'zeros-host.service'],

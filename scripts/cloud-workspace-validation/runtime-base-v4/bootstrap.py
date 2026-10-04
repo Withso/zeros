@@ -6,6 +6,7 @@ installation root, base policy, or cgroup. The injectable root/host/clock are fo
 rootless unit tests; the CLI always uses the physical host and root ownership.
 """
 import base64
+from collections import deque
 import contextlib
 import datetime
 import errno
@@ -30,10 +31,13 @@ import urllib.parse
 import uuid
 
 MAX_INPUT = 64 * 1024
+MAX_SETUP_OUTPUT = 256 * 1024  # Existing Boat setup transport's stdout bound.
 MAX_ARCHIVE = 2 * 1024**3
 MAX_EXPANDED = 4 * 1024**3
 MAX_MANIFEST = 64 * 1024**2
 MAX_ENTRIES = 250_000
+MAX_PATH_DEPTH = 128
+MAX_LINK_COMPONENTS = 4096
 RESERVE = 512 * 1024**2
 CHUNK = 1024 * 1024
 HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -44,6 +48,10 @@ INFRA = "/opt/zeros-infra"
 FACADE = "/opt/zeros"
 RECEIPTS = "/srv/zeros/runtime-installs"
 ACTIVE = "/run/zeros/active-runtime.json"
+PRIVATE_FAILURES = "/run/zeros/bootstrap-failures.jsonl"
+FACADE_LINKS = (("/zeros", FACADE), (FACADE + "/bin", "current/bin"),
+                (FACADE + "/worker", "current/worker"), (FACADE + "/manifest.json", "current/manifest.json"),
+                (FACADE + "/logs", "/srv/zeros/log"), (FACADE + "/state", "/srv/zeros/state"))
 CGROUP = "/sys/fs/cgroup/system.slice/zeros-host.service"
 ENTRYPOINTS = {"node": "bin/node", "setup": "lib/zeros/setup-cloud-workspace.mjs",
                "startEngine": "bin/start-engine.sh", "supervisor": "lib/zeros/cloud-worker-supervisor.mjs",
@@ -51,18 +59,30 @@ ENTRYPOINTS = {"node": "bin/node", "setup": "lib/zeros/setup-cloud-workspace.mjs
 STAGES = ("validate_input", "lock", "check_space", "check_cache", "download", "verify_archive",
           "verify_manifest", "extract", "verify_tree", "publish_receipt", "switch_pointer",
           "start_host", "run_setup", "done")
-CHECKS = frozenset(("input_schema", "input_too_large", "artifact_host", "artifact_expired",
+INSTALLER_CHECKS = frozenset(("input_schema", "input_too_large", "artifact_host", "artifact_expired",
     "insufficient_space", "cache_conflict", "http_status", "download_truncated", "archive_digest",
     "archive_size", "manifest_digest", "manifest_schema", "bootstrap_protocol", "archive_paths",
     "archive_member_type", "file_inventory", "file_digest", "file_mode", "symlink_escape",
     "root_ownership", "hard_link", "pointer_publish", "host_start", "setup_exit", "timeout",
-    "process_signal", "diagnostic_missing", "lock_busy", "base_compatibility", "uid_map",
-    "apparmor", "cgroup_controllers", "cgroup_retired", "generation_pin", "actor_session",
-    "credential_consent", "native_turn", "native_mcp", "lease_revoked", "ssh_key_revoked",
-    "workspace_deleted"))
+    "process_signal", "diagnostic_missing", "lock_busy", "base_compatibility", "cgroup_retired"))
+CHECKS = INSTALLER_CHECKS | frozenset(("uid_map", "apparmor", "cgroup_controllers"))
 STAGE_CHECK = dict(zip(STAGES, ("input_schema", "lock_busy", "insufficient_space", "cache_conflict",
     "http_status", "archive_digest", "manifest_schema", "archive_paths", "file_inventory",
     "cache_conflict", "pointer_publish", "host_start", "setup_exit", "diagnostic_missing")))
+
+
+def failure_sites(frame):
+    """Source locations only: never frame locals, source text or input paths."""
+    sites = []
+    while frame is not None and len(sites) < 12:
+        name = os.path.basename(frame.f_code.co_filename)
+        source = {"bootstrap.py": "bootstrap", "verify.py": "verify", "sanitize.py": "sanitize", "<stdin>": "probe"}.get(name)
+        if source:
+            function = frame.f_code.co_name
+            sites.append({"source": source, "function": function if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,80}", function) else "anonymous",
+                          "line": frame.f_lineno})
+        frame = frame.f_back
+    return sites
 
 
 class Failure(Exception):
@@ -72,6 +92,7 @@ class Failure(Exception):
             self.checks = ["diagnostic_missing"]
         self.code = code
         self.timed_out = timed_out
+        self.sites = failure_sites(sys._getframe(1))
         super().__init__(self.checks[0])
 
 
@@ -124,8 +145,9 @@ def timestamp(value, check):
 
 
 def safe_path(path, check="archive_paths"):
-    require(type(path) is str and 0 < len(path.encode("utf-8")) <= 4096 and
-            "\0" not in path and all(part not in ("", ".", "..") for part in path.split("/")), check)
+    require(type(path) is str and re.search(r"[\0\\\r\n\ud800-\udfff]", path) is None and
+            0 < len(path.encode("utf-8")) <= 4096 and len(path.split("/")) <= MAX_PATH_DEPTH and
+            all(part not in ("", ".", "..") for part in path.split("/")), check)
     return path
 
 
@@ -192,17 +214,36 @@ def validate_input(raw, compat, now):
 
 def validate_links(files):
     inventory = {entry["path"]: entry for entry in files}
+    links = {}
     for entry in files:
         if entry["type"] != "symlink":
             continue
         target = entry["target"]
-        require(type(target) is str and 0 < len(target.encode("utf-8")) <= 4096 and
-                not target.startswith("/") and "\0" not in target, "symlink_escape")
-        pending = entry["path"].split("/")[:-1] + target.split("/")
-        resolved, seen = [], set()
-        steps = 0
+        require(type(target) is str and re.search(r"[\0\\\r\n\ud800-\udfff]", target) is None and
+                0 < len(target.encode("utf-8")) <= 4096 and not target.startswith("/"), "symlink_escape")
+        parts = target.split("/")
+        depth = len(entry["path"].split("/")) - 1
+        # Lexical containment is independent of resolution through other
+        # inventory links. A deep alias cannot make a lexical escape valid.
+        for part in parts:
+            if part == "..":
+                require(depth > 0, "symlink_escape")
+                depth -= 1
+            elif part not in ("", "."):
+                depth += 1
+        links[entry["path"]] = parts
+    for name, parts in links.items():
+        pending = deque(name.split("/")[:-1] + parts)
+        components = len(pending)
+        require(components <= MAX_LINK_COMPONENTS, "symlink_escape")
+        resolved, resolving = [], {name}
+        steps = 1  # Include the link whose target we are resolving.
         while pending:
-            part = pending.pop(0)
+            part = pending.popleft()
+            if isinstance(part, tuple):
+                resolving.remove(part[0])
+                continue
+            components -= 1
             if part in ("", "."):
                 continue
             if part == "..":
@@ -213,15 +254,18 @@ def validate_links(files):
             item = inventory.get(candidate)
             require(item is not None, "symlink_escape")
             if item["type"] == "symlink":
-                state = (candidate, tuple(pending))
-                require(state not in seen and steps < 256, "symlink_escape")
-                seen.add(state)
+                require(candidate not in resolving and steps < 64, "symlink_escape")
+                resolving.add(candidate)
                 steps += 1
-                link = item["target"]
-                require(type(link) is str and not link.startswith("/") and "\0" not in link, "symlink_escape")
-                pending = link.split("/") + pending
+                link = links[candidate]
+                components += len(link)
+                require(components <= MAX_LINK_COMPONENTS, "symlink_escape")
+                # A marker retires only this expansion. Store link identities,
+                # never copies of the growing unresolved suffix.
+                pending.appendleft((candidate,))
+                pending.extendleft(reversed(link))
             else:
-                require(not pending or item["type"] == "dir", "symlink_escape")
+                require(not components or item["type"] == "dir", "symlink_escape")
                 resolved.append(part)
 
 
@@ -231,12 +275,14 @@ def validate_manifest(raw, descriptor, compat):
     value = strict_json(raw, "manifest_schema")
     shape(value, ("agents", "entrypoints", "files", "platform", "protocols", "schema", "source"), check="manifest_schema")
     require(value["schema"] in compat["supportedManifestSchemas"] and value["schema"] == "zeros.runtime-manifest/v1", "manifest_schema")
-    require(value["entrypoints"] == ENTRYPOINTS, "manifest_schema")
+    entrypoints = value["entrypoints"]
+    shape(entrypoints, ("node", "setup", "startEngine", "supervisor"), ("selfTest",), check="manifest_schema")
+    require(all(target == ENTRYPOINTS[name] for name, target in entrypoints.items()), "manifest_schema")
     shape(value["agents"], ("claude", "codex", "cursor"), check="manifest_schema")
     for agent, fields in (("claude", ("cli", "sdk")), ("codex", ("package",)), ("cursor", ("sdk",))):
         shape(value["agents"][agent], fields, check="manifest_schema")
         for version in value["agents"][agent].values():
-            text_match(version, r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", "manifest_schema")
+            text_match(version, r"[0-9A-Za-z][0-9A-Za-z.-]{0,63}", "manifest_schema")
     platform = value["platform"]
     shape(platform, ("arch", "libc", "minGlibc", "node", "nodeModulesAbi", "os"), check="manifest_schema")
     require(platform["arch"] == "x64" and platform["libc"] == "glibc" and platform["os"] == "linux" and
@@ -275,8 +321,8 @@ def validate_manifest(raw, descriptor, compat):
             text_match(entry["sha256"], HEX, "manifest_schema")
             expanded += entry["size"]
         inventory[name] = entry
-    require(expanded == descriptor["expandedBytes"] and expanded <= MAX_EXPANDED, "file_inventory")
-    for name in ENTRYPOINTS.values():
+    require(expanded == descriptor["expandedBytes"] and 1 <= expanded <= MAX_EXPANDED, "file_inventory")
+    for name in entrypoints.values():
         require(inventory.get(name, {}).get("type") == "file", "file_inventory")
     require(int(inventory["bin/node"]["mode"], 8) & 0o100, "file_mode")
     validate_links(files)
@@ -381,7 +427,7 @@ def archive_members(file):
                     raise Failure("archive_member_type") from None
                 require(info.uid == 0 and info.gid == 0 and not info.uname and not info.gname, "root_ownership")
                 require(info.mtime == 0 and info.devmajor == 0 and info.devminor == 0, "archive_member_type")
-                require(not info.mode & 0o7000, "file_mode")
+                require(info.issym() or not info.mode & 0o7000, "file_mode")
                 if info.type == tarfile.XHDTYPE:
                     require(count > 0 and pax is None and 0 < info.size <= 16384, "archive_member_type")
                     pax = pax_records(read_exact(stream, info.size))
@@ -488,6 +534,38 @@ class Bootstrap:
                 except FileNotFoundError:
                     pass
 
+    def log_failure(self, error, stage=None):
+        """Bounded root-only assertion evidence; the public diagnostic is unchanged."""
+        try:
+            name = type(error).__name__
+            allowed = {"Failure", "OSError", "FileNotFoundError", "PermissionError", "TimeoutError", "ValueError",
+                       "TypeError", "KeyError", "AssertionError", "RuntimeError"}
+            sites = error.sites if isinstance(error, Failure) else []
+            if not sites and error.__traceback__ is not None:
+                traceback = error.__traceback__
+                while traceback.tb_next is not None:
+                    traceback = traceback.tb_next
+                sites = failure_sites(traceback.tb_frame)
+            value = {"schema": "zeros.bootstrap-private-failure/v1", "stage": stage or self.stage,
+                     "error": name if name in allowed else "Exception", "sites": sites,
+                     "failedChecks": error.checks if isinstance(error, Failure) else ["diagnostic_missing"]}
+            require(value["stage"] in (*STAGES, "verify", "sanitize"), "diagnostic_missing")
+            with self.directory("/run/zeros", create=True, mode=0o700) as directory:
+                require(stat.S_IMODE(os.fstat(directory).st_mode) == 0o700, "file_mode")
+            with self.lock("diagnostic.lock"):
+                try:
+                    previous = self.read(PRIVATE_FAILURES, 65536, 0o600)
+                except FileNotFoundError:
+                    previous = b""
+                line = packed(value) + b"\n"
+                if len(previous) + len(line) > 65536:
+                    previous = previous[-32768:].partition(b"\n")[2]
+                self.atomic(PRIVATE_FAILURES, previous + line)
+            return True
+        except (OSError, Failure, ValueError):
+            # Evidence must not mask the original failure or prevent cleanup.
+            return False
+
     def unlink(self, absolute):
         parent, name = absolute.rsplit("/", 1)
         with self.directory(parent) as directory:
@@ -567,10 +645,22 @@ class Bootstrap:
                                (RECEIPTS, 0o700), ("/opt/zeros/sessions", 0o700), ("/run/zeros", 0o700)):
             with self.directory(absolute, create=True, mode=mode) as fd:
                 require(stat.S_IMODE(os.fstat(fd).st_mode) == mode, "file_mode")
-        for name, target in (("/zeros", FACADE), (FACADE + "/bin", "current/bin"),
-                             (FACADE + "/worker", "current/worker"), (FACADE + "/manifest.json", "current/manifest.json"),
-                             (FACADE + "/logs", "/srv/zeros/log"), (FACADE + "/state", "/srv/zeros/state")):
+        for name, target in FACADE_LINKS:
             self.link(name, target)
+
+    def wait_ready(self):
+        # A command-ready VM and an active Type=simple host do not imply that
+        # the boot oneshot has completed. Probe only after that boundary.
+        self.host.wait_ready()
+        with self.lock("runtime-publication.lock"):
+            require(self.read("/run/zeros/boot-id", 64, 0o600).decode() == self.boot_id(), "host_start")
+            require(self.epoch() > 0, "pointer_publish")
+            for absolute, target in FACADE_LINKS:
+                parent, name = absolute.rsplit("/", 1)
+                with self.directory(parent or "/") as directory:
+                    st = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    require(stat.S_ISLNK(st.st_mode) and st.st_uid == self.uid and st.st_gid == self.gid, "pointer_publish")
+                    require(os.readlink(name, dir_fd=directory) == target, "pointer_publish")
 
     def current(self, name="current"):
         with self.directory(FACADE) as directory:
@@ -599,31 +689,34 @@ class Bootstrap:
         expected["manifest.json"] = {"type": "file", "mode": "0444", "size": len(raw), "sha256": sha(raw)}
         seen = set()
 
-        def visit(directory, prefix=""):
-            for name in os.listdir(directory):
-                relative = prefix + name
-                entry = expected.get(relative)
-                require(entry is not None, "file_inventory")
-                st = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                self.check_stat(st, entry)
-                seen.add(relative)
-                if entry["type"] == "symlink":
-                    require(os.readlink(name, dir_fd=directory) == entry["target"], "symlink_escape")
-                    continue
-                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC |
-                             (os.O_DIRECTORY if entry["type"] == "dir" else 0), dir_fd=directory)
-                try:
-                    self.check_stat(os.fstat(fd), entry)
-                    require(not any(n in os.listxattr(fd) for n in ("security.capability", "system.posix_acl_access", "system.posix_acl_default")), "file_mode")
-                    if entry["type"] == "dir":
-                        visit(fd, relative + "/")
-                    elif full or relative == "manifest.json" or relative.startswith(("bin/", "lib/zeros/", "worker/dist-engine/")):
-                        with os.fdopen(os.dup(fd), "rb") as stream:
-                            require(consume(stream, entry["size"]) == entry["sha256"], "file_digest")
-                finally:
-                    os.close(fd)
-        with self.directory(root) as directory:
-            visit(directory)
+        pending = [""]
+        while pending:
+            prefix = pending.pop()
+            # Reopen through checked directory descriptors, keeping both the
+            # Python stack and number of open descriptors independent of depth.
+            with self.directory(root + ("/" + prefix[:-1] if prefix else "")) as directory:
+                for name in os.listdir(directory):
+                    relative = prefix + name
+                    entry = expected.get(relative)
+                    require(entry is not None, "file_inventory")
+                    st = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    self.check_stat(st, entry)
+                    seen.add(relative)
+                    if entry["type"] == "symlink":
+                        require(os.readlink(name, dir_fd=directory) == entry["target"], "symlink_escape")
+                        continue
+                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC |
+                                 (os.O_DIRECTORY if entry["type"] == "dir" else 0), dir_fd=directory)
+                    try:
+                        self.check_stat(os.fstat(fd), entry)
+                        require(not any(n in os.listxattr(fd) for n in ("security.capability", "system.posix_acl_access", "system.posix_acl_default")), "file_mode")
+                        if entry["type"] == "dir":
+                            pending.append(relative + "/")
+                        elif full or relative == "manifest.json" or relative.startswith(("bin/", "lib/zeros/", "worker/dist-engine/")):
+                            with os.fdopen(os.dup(fd), "rb") as stream:
+                                require(consume(stream, entry["size"]) == entry["sha256"], "file_digest")
+                    finally:
+                        os.close(fd)
         require(seen == expected.keys(), "file_inventory")
 
     def manifest_for(self, runtime_id, descriptor=None):
@@ -648,7 +741,7 @@ class Bootstrap:
         require(value["schema"] == "zeros.runtime-install-receipt/v1" and value["runtimeId"] == runtime_id and
                 value["manifestSha256"] == runtime_id[3:] and value["baseCompatibilityId"] == self.compat_id and
                 type(value["bootstrapVersion"]) is int and value["bootstrapVersion"] == 1 and
-                type(value["fileCount"]) is int and value["fileCount"] == len(manifest["files"]) and
+                type(value["fileCount"]) is int and value["fileCount"] == sum(e["type"] == "file" for e in manifest["files"]) and
                 type(value["expandedBytes"]) is int and value["expandedBytes"] == sum(e.get("size", 0) for e in manifest["files"]), "cache_conflict")
         text_match(value["archiveSha256"], HEX, "cache_conflict")
         timestamp(value["installedAt"], "cache_conflict")
@@ -669,7 +762,8 @@ class Bootstrap:
     def publish_receipt(self, descriptor, manifest):
         self.stage = "publish_receipt"
         value = {"archiveSha256": descriptor["archiveSha256"], "baseCompatibilityId": self.compat_id,
-                 "bootstrapVersion": 1, "expandedBytes": descriptor["expandedBytes"], "fileCount": len(manifest["files"]),
+                 "bootstrapVersion": 1, "expandedBytes": descriptor["expandedBytes"],
+                 "fileCount": sum(e["type"] == "file" for e in manifest["files"]),
                  "installedAt": self.now().isoformat().replace("+00:00", "Z"), "manifestSha256": descriptor["manifestSha256"],
                  "runtimeId": descriptor["runtimeId"], "schema": "zeros.runtime-install-receipt/v1"}
         raw = packed(value)
@@ -694,7 +788,7 @@ class Bootstrap:
             kind = "file" if info.isfile() else "dir" if info.isdir() else "symlink"
             require(kind == expected["type"], "archive_member_type")
             if kind == "symlink":
-                require(info.linkname == expected["target"] and info.mode == 0o777, "symlink_escape")
+                require(info.linkname == expected["target"], "symlink_escape")
             else:
                 require(info.mode == mode_number(expected["mode"]), "file_mode")
             require(info.size == expected.get("size", 0), "file_inventory")
@@ -741,23 +835,33 @@ class Bootstrap:
         self.fault("stage_fsynced")
 
     def clean_staging(self):
-        def remove(directory, name):
-            st = os.stat(name, dir_fd=directory, follow_symlinks=False)
-            require(st.st_uid == self.uid and st.st_gid == self.gid, "root_ownership")
-            if stat.S_ISDIR(st.st_mode):
-                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
-                try:
-                    os.fchmod(fd, 0o700)
-                    for child in os.listdir(fd):
-                        remove(fd, child)
-                finally:
-                    os.close(fd)
-                os.rmdir(name, dir_fd=directory)
-            else:
-                os.unlink(name, dir_fd=directory)
-        with self.directory(INFRA + "/.staging") as directory:
-            for name in os.listdir(directory):
-                remove(directory, name)
+        root = INFRA + "/.staging"
+        with self.directory(root) as directory:
+            pending = [(name, False) for name in os.listdir(directory)]
+        # Do not apply admission depth limits to cleanup: a prior version may
+        # have left deeper partial trees. This postorder walk never recurses or
+        # follows a symlink and has a constant open-descriptor count.
+        while pending:
+            relative, visited = pending.pop()
+            parent, _, name = relative.rpartition("/")
+            with self.directory(root + ("/" + parent if parent else "")) as directory:
+                st = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                require(st.st_uid == self.uid and st.st_gid == self.gid, "root_ownership")
+                if stat.S_ISDIR(st.st_mode):
+                    if visited:
+                        os.rmdir(name, dir_fd=directory)
+                    else:
+                        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+                        try:
+                            self.owner(os.fstat(fd))
+                            os.fchmod(fd, 0o700)
+                            pending.append((relative, True))
+                            pending.extend((relative + "/" + child, False) for child in os.listdir(fd))
+                        finally:
+                            os.close(fd)
+                else:
+                    os.unlink(name, dir_fd=directory)
+        with self.directory(root) as directory:
             os.fsync(directory)
 
     def install(self, encoded_input):
@@ -769,6 +873,11 @@ class Bootstrap:
         # The SSH command owns setup.lock exactly once. This separate lock also
         # serializes boot reconciliation and direct root invocations.
         with self.lock("runtime-install.lock"):
+            if os.path.lexists(self.path(RECEIPTS + "/switch-intent.json")):
+                self.stage = "switch_pointer"
+                self.host.stop()
+                with self.lock("runtime-publication.lock"):
+                    self.reconcile()
             self.clean_staging()
             descriptor = value["runtime"]
             runtime_id = descriptor["runtimeId"]
@@ -812,9 +921,12 @@ class Bootstrap:
             self.host.start(self, runtime_id)
             if value["purpose"] == "workspace-setup":
                 self.stage = "run_setup"
-                code, checks = self.host.setup(str(self.path(destination)), value["setup"])
+                try:
+                    code, checks = self.host.setup(str(self.path(destination)), value["setup"])
+                except Failure as error:
+                    raise Failure("setup_exit", code=error.code, timed_out=error.timed_out) from None
                 if code != 0 or checks:
-                    raise Failure("setup_exit", code=code or 1, checks=checks, timed_out="timeout" in checks)
+                    raise Failure("setup_exit", code=code or 1, timed_out="timeout" in checks)
             self.stage = "done"
             return 0
 
@@ -963,6 +1075,29 @@ class Bootstrap:
 
 
 class SystemHost:
+    def wait_ready(self, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                result = subprocess.run(["/usr/bin/systemctl", "show", "--property=Id,ActiveState,SubState,Result,ExecMainStatus",
+                                         "zeros-boot.service", "zeros-host.service"], env=ENV, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=False)
+            except subprocess.TimeoutExpired:
+                raise Failure("timeout", code=124, timed_out=True) from None
+            require(result.returncode == 0 and len(result.stdout) <= 4096, "host_start")
+            units = {}
+            for block in result.stdout.decode("ascii", "strict").strip().split("\n\n"):
+                fields = dict(line.split("=", 1) for line in block.splitlines())
+                units[fields["Id"]] = fields
+            require(set(units) == {"zeros-boot.service", "zeros-host.service"}, "host_start")
+            require(all(unit["ActiveState"] != "failed" for unit in units.values()), "host_start")
+            boot, host = units["zeros-boot.service"], units["zeros-host.service"]
+            if boot["ActiveState"] == host["ActiveState"] == "active" and boot["SubState"] == "exited" and host["SubState"] == "running":
+                require(all(unit["Result"] == "success" and unit["ExecMainStatus"] == "0" for unit in units.values()), "host_start")
+                return
+            time.sleep(0.2)
+        raise Failure("timeout", code=124, timed_out=True)
+
     @staticmethod
     def control(*args):
         try:
@@ -1024,10 +1159,14 @@ class SystemHost:
 
 
 def run_setup(command, payload, timeout=1100):
-    """Bounded stdin/stdout; stderr and arbitrary child output never escape."""
+    """Preserve the legacy helper stdout bytes; its result belongs to the CP.
+
+    The verified helper has no new diagnostic obligation. Only its exit status
+    affects the outer installer diagnostic; stderr is never forwarded.
+    """
     child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              env=ENV, start_new_session=True)
-    tail = b""
+    output_bytes, last_byte = 0, b""
     remaining = payload.encode("ascii")
     deadline = time.monotonic() + timeout
     try:
@@ -1051,7 +1190,12 @@ def run_setup(command, payload, timeout=1100):
                             child.stdin.close()
                     else:
                         part = os.read(child.stdout.fileno(), 8192)
-                        tail = (tail + part)[-8192:]
+                        output_bytes += len(part)
+                        require(output_bytes <= MAX_SETUP_OUTPUT, "setup_exit")
+                        if part:
+                            sys.stdout.buffer.write(part)
+                            sys.stdout.buffer.flush()
+                            last_byte = part[-1:]
                         if not part:
                             selector.unregister(child.stdout)
                 if child.poll() is not None and child.stdin.closed is False:
@@ -1061,26 +1205,9 @@ def run_setup(command, payload, timeout=1100):
                 code = child.wait(timeout=max(0.01, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 raise Failure("timeout", code=124, timed_out=True) from None
-        checks = []
         if code < 0:
-            checks.append("process_signal")
-            code = 128 - code
-        try:
-            inner = strict_json(tail.rstrip(b"\n").split(b"\n")[-1], "diagnostic_missing")
-            shape(inner, ("schema", "component", "stage", "ok", "exitCode", "timedOut", "failedChecks"), check="diagnostic_missing")
-            require(inner["schema"] == "zeros.diagnostic/v1" and inner["component"] in ("setup", "attester") and
-                    type(inner["ok"]) is bool and type(inner["timedOut"]) is bool and
-                    type(inner["exitCode"]) is int and inner["exitCode"] == code and
-                    type(inner["failedChecks"]) is list and len(inner["failedChecks"]) <= 32 and
-                    all(type(c) is str and c in CHECKS for c in inner["failedChecks"]), "diagnostic_missing")
-            checks.extend(inner["failedChecks"])
-            if inner["timedOut"]:
-                checks.append("timeout")
-            if not inner["ok"]:
-                checks.append("setup_exit")
-        except Failure:
-            checks.append("diagnostic_missing")
-        return code, list(dict.fromkeys(checks))
+            return 128 - code, ["process_signal"]
+        return code, []
     finally:
         # The setup helper's descendants cannot outlive a failed/cancelled
         # transport. Workload cgroups are retired by the verified helper/host.
@@ -1091,12 +1218,20 @@ def run_setup(command, payload, timeout=1100):
         child.wait()
         child.stdin.close()
         child.stdout.close()
+        if last_byte and last_byte != b"\n":
+            # The legacy helper does not append a newline. Its exact output is
+            # the prefix; this delimiter starts the final installer line.
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
 
 
 def diagnostic(component, stage, code, failure=None):
+    checks = failure.checks if failure else []
+    if component == "installer" and not set(checks) <= INSTALLER_CHECKS:
+        checks = ["diagnostic_missing"]
     value = {"schema": "zeros.diagnostic/v1", "component": component, "stage": stage if stage in STAGES else "validate_input",
              "ok": failure is None, "exitCode": code, "timedOut": bool(failure and failure.timed_out),
-             "failedChecks": failure.checks if failure else []}
+             "failedChecks": checks}
     print(packed(value).decode(), flush=True)
 
 
@@ -1138,6 +1273,8 @@ def main(argv):
         failure, code = Failure(STAGE_CHECK.get(app.stage, "diagnostic_missing")), 1
     finally:
         signal.alarm(0)
+    if failure is not None:
+        app.log_failure(failure)
     diagnostic(component, app.stage, code, failure)
     return code
 

@@ -4,13 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sshBoundary from "../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
-import { builderCommand, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
-import { basePayload, closedFailure, parseProbe, v4Command } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
-import { installOverSsh, presignGet, signedHeaders } from "../cloud-workspace-validation/runtime-base-v4/live-check";
+import { builderCommand, KitError, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
+import { basePayload, closedFailure, parseProbe, resumeOwned, v4Command, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
+import { cleanupLiveObjects, installOverSsh, presignGet, signedHeaders, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
 
 const scratch: string[] = [];
 const temp = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-base-v4-")); scratch.push(dir); return dir; };
-afterEach(() => { vi.restoreAllMocks(); for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const BASE = path.join(ROOT, "scripts/cloud-workspace-validation/runtime-base-v4");
 
@@ -56,7 +56,7 @@ function fullKit(failColdBoot = false) {
     if (method === "PATCH") return { status: 200, body: {} };
     if (route.startsWith("/sandboxes/") && !route.endsWith("/commands")) {
       if (method === "DELETE") { machines.delete(id); return { status: 202, body: {} }; }
-      return { status: machines.has(id) ? 200 : 404, body: { sandbox: { id, state: "ready" } } };
+      return { status: machines.has(id) ? 200 : 404, body: { sandbox: { id, state: "ready", team: { id: d.billingOrg } } } };
     }
     if (route === "/named-snapshots" && method === "GET") return { status: 200, body: { snapshots: [] } };
     if (route === "/named-snapshots" && method === "POST") {
@@ -72,6 +72,11 @@ function fullKit(failColdBoot = false) {
     }
     if (route.endsWith("/commands")) {
       const command: string = body.command;
+      if (command.includes("zeros.base-private-evidence/v1")) {
+        const artifact = /ARTIFACT = "([a-z-]+)"/.exec(command)![1];
+        return { status: 200, body: { exitCode: 0, stdout: JSON.stringify({ schema: "zeros.base-private-evidence/v1", artifact,
+          outcome: "captured", data: Buffer.from("fixture evidence\n").toString("base64") }) } };
+      }
       const stage = command.includes("def verify()") ? "verify" : command.includes("def sanitize()") ? "sanitize" : "build";
       const fail = failColdBoot && stage === "verify" && id.endsWith("2");
       const value = stage === "verify" ? { schema: "zeros.base-verification/v1", baseCompatibilityId: `bc1-${"a".repeat(64)}`,
@@ -88,7 +93,69 @@ function fullKit(failColdBoot = false) {
   return { d, requests, machines, getSnapshot: () => snapshot };
 }
 
+function seedState(d: KitDeps, overrides = {}) {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: d.repoRoot, encoding: "utf8" }).trim();
+  const state = { schema: "zeros.base-kit-state/v1", sourceCommit: commit, billingOrg: d.billingOrg,
+    sourceSha256: basePayload(d.repoRoot, commit, "1".repeat(32)).sourceSha256, attemptHex: "1".repeat(32),
+    name: "zeros-v2-test-base-v4-1", maxUsedHours: 2, starts: 1, phase: "building", ...overrides };
+  const directory = path.join(d.stateDir, "runtime-base-v4");
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, "state.json"), JSON.stringify(state));
+  return { ...d, stateDir: directory };
+}
+
 describe("runtime-base-v4 profile", () => {
+  it.each(["ready", "idle", "running"])("accepts Boat %s as command-ready", async state => {
+    vi.useFakeTimers();
+    const d = deps();
+    d.boat = vi.fn().mockResolvedValue({ status: 200, body: { sandbox: { id: "bx_fixture", state, team: { id: d.billingOrg } } } });
+    let outcome: unknown = "pending";
+    const pending = waitSandbox(d, "bx_fixture").then(() => { outcome = "ready"; }, error => { outcome = closedFailure(error); });
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(outcome).toBe("ready");
+    expect(d.boat).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["error", "cancelled", "archived"])("rejects terminal Boat %s before the readiness timeout", async state => {
+    vi.useFakeTimers();
+    const d = deps();
+    d.boat = vi.fn().mockResolvedValue({ status: 200, body: { sandbox: { id: "bx_fixture", state, team: { id: d.billingOrg } } } });
+    let outcome: unknown;
+    const pending = waitSandbox(d, "bx_fixture").catch(error => { outcome = closedFailure(error); });
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(outcome).toMatchObject({ stage: "create", timedOut: false, failedChecks: ["provider_request"] });
+    expect(d.boat).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits through command-ready states when archival is requested", async () => {
+    vi.useFakeTimers();
+    const d = deps();
+    d.boat = vi.fn()
+      .mockResolvedValueOnce({ status: 200, body: { sandbox: { id: "bx_fixture", state: "idle", team: { id: d.billingOrg } } } })
+      .mockResolvedValueOnce({ status: 200, body: { sandbox: { id: "bx_fixture", state: "archived", team: { id: d.billingOrg } } } });
+    const pending = waitSandbox(d, "bx_fixture", "archived");
+    await vi.runAllTimersAsync();
+    await expect(pending).resolves.toBeUndefined();
+    expect(d.boat).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports only safe exception identities to stderr while keeping the stdout diagnostic closed", () => {
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const missing = Object.assign(new Error("private-canary dependency path and URL"), { code: "ERR_MODULE_NOT_FOUND" });
+    const diagnostic = closedFailure(missing);
+    expect(diagnostic).toMatchObject({ stage: "validate_input", failedChecks: ["diagnostic_missing"] });
+    expect(stderr).toHaveBeenLastCalledWith("[boat-image] Error (ERR_MODULE_NOT_FOUND)");
+    closedFailure(new KitError("private-canary"));
+    expect(stderr).toHaveBeenLastCalledWith("[boat-image] KitError");
+    closedFailure({ name: "private-canary", code: "private-canary", message: "private-canary" });
+    expect(stderr).toHaveBeenLastCalledWith("[boat-image] UnknownError");
+    expect(JSON.stringify(stderr.mock.calls) + JSON.stringify(diagnostic)).not.toContain("private-canary");
+    expect(stdout).not.toHaveBeenCalled();
+  });
+
   it("creates from stock with the kit's budget and idempotency journal", async () => {
     const d = deps();
     const options = new Map([["--profile", "runtime-base-v4"], ["--max-used-hours", "2"]]);
@@ -110,6 +177,65 @@ describe("runtime-base-v4 profile", () => {
     const d = deps();
     await expect(v4Command("cleanup", new Map(), [], d)).resolves.toMatchObject({ sandboxes: [], objects: [], snapshot: "not_created" });
     expect(d.calls).toHaveLength(0);
+  });
+
+  it.each([null, { id: "another-org" }, undefined])("rejects a recorded builder whose observed wallet is %j before upload", async team => {
+    const f = fullKit(), original = f.d.boat;
+    const profile = seedState(f.d);
+    fs.writeFileSync(path.join(profile.stateDir, "builder.json"), JSON.stringify({ id: "bx_v4test1" }));
+    f.machines.add("bx_v4test1");
+    f.d.boat = async (method, route, options) => {
+      const response = await original(method, route, options);
+      if (method === "GET" && route === "/sandboxes/bx_v4test1" && response.status === 200) response.body.sandbox.team = team;
+      return response;
+    };
+    await expect(v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d))
+      .rejects.toMatchObject({ diagnostic: { stage: "create", failedChecks: ["provider_request"] } });
+    expect(f.requests.filter(request => request.method === "PUT")).toHaveLength(0);
+    expect(f.requests.filter(request => request.method === "POST" && request.route === "/sandboxes")).toHaveLength(0);
+  });
+
+  it("binds saved build state to its billing organization before contacting the provider", async () => {
+    const f = fullKit();
+    seedState(f.d, { billingOrg: "another-org" });
+    await expect(v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d))
+      .rejects.toMatchObject({ diagnostic: { failedChecks: ["provider_request"] } });
+    expect(f.requests).toHaveLength(0);
+  });
+
+  it("rechecks a verification VM's wallet before spending a resume start", async () => {
+    const f = fullKit();
+    const profile = seedState(f.d);
+    const clone = { ...profile, stateDir: path.join(profile.stateDir, "verification") };
+    fs.mkdirSync(clone.stateDir);
+    fs.writeFileSync(path.join(clone.stateDir, "builder.json"), JSON.stringify({ id: "bx_v4test2" }));
+    profile.boat = vi.fn().mockResolvedValue({ status: 200, body: { sandbox: { id: "bx_v4test2", state: "archived", team: null } } });
+    clone.boat = profile.boat;
+    await expect(resumeOwned(profile, clone, 2)).rejects.toMatchObject({ diagnostic: { failedChecks: ["provider_request"] } });
+    expect(profile.boat).toHaveBeenCalledExactlyOnceWith("GET", "/sandboxes/bx_v4test2");
+    expect(JSON.parse(fs.readFileSync(path.join(profile.stateDir, "state.json"), "utf8")).starts).toBe(1);
+  });
+
+  it("recovers a deletion interrupted after acceptance and before absence was confirmed", async () => {
+    const f = fullKit(), replay = temp();
+    const profile = seedState(f.d);
+    fs.writeFileSync(path.join(profile.stateDir, "builder.json"), JSON.stringify({ id: "bx_v4test1" }));
+    let accepted = false;
+    f.d.boat = async (method, route) => {
+      if (method === "DELETE") { accepted = true; return { status: 202, body: {} }; }
+      if (method === "GET" && route === "/sandboxes/bx_v4test1" && accepted) {
+        // Persist exactly what SIGKILL would leave before the first GET reply.
+        fs.cpSync(f.d.stateDir, replay, { recursive: true });
+        return { status: 404, body: {} };
+      }
+      return { status: 200, body: { sandbox: { id: "bx_v4test1", team: { id: f.d.billingOrg }, state: "idle" } } };
+    };
+    await v4Command("cleanup", new Map(), [], f.d);
+    expect(fs.existsSync(path.join(replay, "runtime-base-v4/builder.json"))).toBe(false);
+    const retry = { ...f.d, stateDir: replay, boat: vi.fn().mockResolvedValue({ status: 404, body: {} }) };
+    await expect(v4Command("cleanup", new Map(), [], retry)).resolves.toMatchObject({ confirmed: true, sandboxes: ["bx_v4test1"] });
+    expect(retry.boat).toHaveBeenCalledWith("GET", "/sandboxes/bx_v4test1");
+    expect(fs.existsSync(path.join(replay, "runtime-base-v4/pending-delete.json"))).toBe(false);
   });
 
   it("completes a stock build and cold clone, retains only the named base and confirms deletion", async () => {
@@ -153,6 +279,76 @@ describe("runtime-base-v4 profile", () => {
     expect(f.getSnapshot()).toBeUndefined();
     expect(f.machines.size).toBe(0);
   }, 30_000);
+
+  it("retains bounded private evidence before deleting a failed builder without printing it", async () => {
+    const f = fullKit(), original = f.d.boat;
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const evidence = path.join(f.d.stateDir, "runtime-base-v4/private/m2-build-" + "1".repeat(32), "bx_v4test1");
+    let retainedBeforeDelete = false;
+    f.d.boat = async (method, route, options) => {
+      const command = (options?.body as any)?.command ?? "";
+      if (command.includes("zeros.base-private-evidence/v1")) {
+        const artifact = /ARTIFACT = "([a-z-]+)"/.exec(command)![1];
+        const tail = ("ordinary build output\n".repeat(2000) + "AssertionError pointer_publish\n" +
+          "https://private-canary.test/path?token=secret-canary\ntoken=secret-canary\n").slice(-32768);
+        return { status: 200, body: { exitCode: 0, stdout: JSON.stringify({ schema: "zeros.base-private-evidence/v1", artifact,
+          outcome: "captured", data: Buffer.from(tail).toString("base64") }) } };
+      }
+      if (method === "DELETE" && route === "/sandboxes/bx_v4test1") retainedBeforeDelete = fs.existsSync(path.join(evidence, "build.log"));
+      const result = await original(method, route, options);
+      if (command.includes("'result.json'")) {
+        result.body.stdout = JSON.stringify({ finished: true, code: 1, passed: false, retired: true }) + "\n" +
+          JSON.stringify({ schema: "zeros.diagnostic/v1", component: "base", stage: "build", ok: true, exitCode: 0, timedOut: false, failedChecks: [] });
+      }
+      return result;
+    };
+    await expect(v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d))
+      .rejects.toMatchObject({ diagnostic: { stage: "build", failedChecks: ["build_exit"] } });
+    expect(retainedBeforeDelete).toBe(true);
+    expect(f.machines.size).toBe(0);
+    expect(fs.statSync(evidence).mode & 0o777).toBe(0o700);
+    for (const name of ["build.log", "systemd-status.log", "journal.log", "bootstrap-failures.jsonl"]) {
+      const file = path.join(evidence, name), content = fs.readFileSync(file, "utf8");
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      expect(Buffer.byteLength(content)).toBeLessThanOrEqual(32768);
+      expect(content).toContain("AssertionError pointer_publish");
+      expect(content).not.toMatch(/private-canary|secret-canary/);
+    }
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
+  it("keeps the pre-sanitation build log when a later probe fails after its remote deletion", async () => {
+    const f = fullKit(true), original = f.d.boat;
+    let sanitized = false;
+    f.d.boat = async (method, route, options) => {
+      const command = (options?.body as any)?.command ?? "";
+      const result = await original(method, route, options);
+      if (command.includes("def sanitize()")) sanitized = true;
+      if (command.includes("zeros.base-private-evidence/v1") && command.includes('ARTIFACT = "build"')) {
+        result.body.stdout = JSON.stringify({ schema: "zeros.base-private-evidence/v1", artifact: "build",
+          outcome: sanitized ? "absent" : "captured", data: sanitized ? "" : Buffer.from("build evidence retained\n").toString("base64") });
+      }
+      return result;
+    };
+    await expect(v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d)).rejects.toThrow();
+    const file = path.join(f.d.stateDir, "runtime-base-v4/private/m2-build-" + "1".repeat(32), "bx_v4test1/build.log");
+    expect(fs.readFileSync(file, "utf8")).toBe("build evidence retained\n");
+  });
+
+  it("still cleans up and preserves the original failure when private evidence capture is unavailable", async () => {
+    const f = fullKit(true), original = f.d.boat;
+    f.d.boat = async (method, route, options) => {
+      if ((options?.body as any)?.command?.includes("zeros.base-private-evidence/v1")) throw new Error("private-canary capture unavailable");
+      return original(method, route, options);
+    };
+    await expect(v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d))
+      .rejects.toMatchObject({ diagnostic: { stage: "verify", failedChecks: ["host_start"] } });
+    expect(f.machines.size).toBe(0);
+    const file = path.join(f.d.stateDir, "runtime-base-v4/private/m2-build-" + "1".repeat(32), "bx_v4test1/capture.json");
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toMatchObject({ build: "unavailable", journal: "unavailable" });
+  });
 
   it("does not overwrite or delete an already named snapshot", async () => {
     const f = fullKit(), original = f.d.boat;
@@ -216,6 +412,33 @@ describe("runtime-base-v4 profile", () => {
     expect(signedHeaders(r2, "DELETE", key, Buffer.alloc(0), now)["if-none-match"]).toBeUndefined();
   });
 
+  it("does not delete an occupied object after a create-only upload returns 412", async () => {
+    const d = deps();
+    const r2 = { endpoint: `https://${"a".repeat(32)}.r2.cloudflarestorage.com`, bucket: "zeros-cloud-workspaces-alpha",
+      accessKeyId: "fixture-access", secretAccessKey: "fixture-secret" };
+    const request = vi.fn().mockResolvedValue(new Response(null, { status: 412 }));
+    vi.stubGlobal("fetch", request);
+    await expect(uploadLiveObject(d, r2, "runtime-test/zeros-v2-test-fixture/a.tar.gz", Buffer.from("fixture")))
+      .rejects.toMatchObject({ diagnostic: { failedChecks: ["provider_request"] } });
+    await expect(cleanupLiveObjects(d)).resolves.toEqual([]);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0][1].method).toBe("PUT");
+  });
+
+  it.each(["success", "ambiguous"])("retains cleanup ownership after a %s object upload", async outcome => {
+    const d = deps();
+    const r2 = { endpoint: `https://${"a".repeat(32)}.r2.cloudflarestorage.com`, bucket: "zeros-cloud-workspaces-alpha",
+      accessKeyId: "fixture-access", secretAccessKey: "fixture-secret" };
+    const request = outcome === "success" ? vi.fn().mockResolvedValue(new Response(null, { status: 200 }))
+      : vi.fn().mockRejectedValue(new Error("uncertain response"));
+    vi.stubGlobal("fetch", request);
+    const operation = uploadLiveObject(d, r2, "runtime-test/zeros-v2-test-fixture/a.tar.gz", Buffer.from("fixture"));
+    if (outcome === "success") await operation;
+    else await expect(operation).rejects.toThrow();
+    expect(JSON.parse(fs.readFileSync(path.join(d.stateDir, "r2-objects.json"), "utf8")))
+      .toEqual([{ key: "runtime-test/zeros-v2-test-fixture/a.tar.gz", deleted: false }]);
+  });
+
   it("rejects non-test names, extra arguments and missing budgets before allocation", async () => {
     const d = deps();
     for (const options of [new Map(), new Map([["--name", "unscoped-base"], ["--max-used-hours", "2"]]),
@@ -235,6 +458,11 @@ describe("runtime-base-v4 profile", () => {
       expect(spawnSync("bash", ["-n"], { input: file.data }).status).toBe(0);
     }
     expect(payload.files.find(file => file.name === "build.sh")!.data.toString()).not.toContain("{{");
+    const build = payload.files.find(file => file.name === "build.sh")!.data.toString();
+    expect(build).toMatch(/^chown root:root \/opt$/m);
+    expect(build).toMatch(/^chmod 0755 \/opt$/m);
+    expect(build.indexOf("chown root:root /opt")).toBeLessThan(build.indexOf("/opt/zeros-bootstrap"));
+    expect(build).not.toMatch(/chown[^\n]*(?:-R|\/opt\/\*)/);
   });
 
   it("accepts only bounded closed diagnostic output from remote commands", () => {

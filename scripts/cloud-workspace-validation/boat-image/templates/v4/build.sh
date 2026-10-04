@@ -28,6 +28,11 @@ apt-get install -y --no-install-recommends \
   fonts-noto-color-emoji fonts-unifont libfontconfig1 libfreetype6 xfonts-cyrillic xfonts-scalable \
   fonts-liberation fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf
 
+# Boat stock owns /opt as user:user. Protect the bootstrap's ancestry without
+# changing ownership of any provider-managed children under /opt or /usr/local.
+chown root:root /opt
+chmod 0755 /opt
+
 install -d -o root -g root -m 0755 /srv/zeros /srv/zeros/home /srv/zeros/files
 groupadd --gid 10001 zeros-agent
 useradd --uid 10001 --gid 10001 --no-create-home --home-dir /srv/zeros/home/agent --shell /bin/bash zeros-agent

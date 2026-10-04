@@ -21,13 +21,20 @@ Archive bytes and SHA-256 are checked before parsing. Raw ustar/PAX headers are
 inspected before writing; only per-entry `path` and `linkpath` PAX records are
 accepted. Inventory, hashes, modes, ownership, links and extended attributes are
 checked through no-follow directory descriptors. Symlinks are created last.
+Symlink header permission bits are ignored; their type and confined target
+remain mandatory. Paths and link targets are at most 4,096 UTF-8 bytes and
+reject NUL, backslash, CR and LF. Inventory paths have at most 128 components;
+link resolution is bounded to 64 links and checks lexical containment separately.
+Verification and staging cleanup are iterative, including cleanup of deeper
+partial trees left by an earlier installer. Every listed entrypoint must be a
+regular file; `selfTest` may be omitted. Receipt `fileCount` counts regular files.
 Files/directories are flushed before the runtime directory is renamed. A cached
 runtime is fully re-hashed; a missing receipt is reconstructed only from the
 fresh descriptor after complete verification. A conflicting cache fails closed.
 
 Publication stops the host and confirms cgroup retirement before journaling the
 old/new pointers and switching `current`. `previous` keeps the prior runtime.
-Boot reconciles interrupted publication to verified bytes; it never grants
+Boot and installation retries reconcile interrupted publication to verified bytes; they never grant
 permission to start an old engine against a new generation. Dispatch checks all
 file stats and hashes `bin/`, `lib/zeros/`, `worker/dist-engine/` and the manifest,
 then publishes a fresh boot/session descriptor and execs the supervisor. An
@@ -36,9 +43,18 @@ empty base keeps the host alive in `waiting_for_runtime`.
 Every installer/boot exit emits a closed diagnostic. The status probe is the
 contract's exception: exactly one `zeros.base-status/v1` JSON line. A killed
 process cannot emit a diagnostic; its transport must classify the signal or
-missing diagnostic. Setup output is bounded and parsed, never forwarded raw;
-the installer preserves known failed checks and mirrors the helper's nonzero
-exit code. The helper's successful closed diagnostic is required for success.
+missing diagnostic. For workspace setup, the helper's stdout passes through
+unchanged within the existing 256 KiB Boat setup bound. A newline separator is
+added if the helper did not end its output with one, then exactly one final
+installer diagnostic follows. The helper needs no new diagnostic format.
+Its nonzero exit code is mirrored with stage `run_setup` and only `setup_exit`;
+nested checks never enter the installer's vocabulary. Before the helper runs,
+failures print only the installer diagnostic. Helper stderr is withheld.
+
+Bootstrap failures also record the fixed source/function/line of each assertion
+in `/run/zeros/bootstrap-failures.jsonl` (root-only 0600, at most 64 KiB). This
+distinguishes assertions with the same public check without putting paths,
+inputs, exception messages or URLs in the closed diagnostic.
 
 ## Local checks
 
@@ -50,9 +66,11 @@ pnpm check:actions
 
 Tests use an injected temporary root, host adapter, clock and downloader. These
 are Python APIs only; production has no test flags or environment overrides.
-The local `tests/fixtures/manifest.json` mirrors the approved contract. B1's
-golden fixtures were not present on `origin/main` when this implementation was
-started; replace the mirror with the shared fixtures when B1 is merged.
+Tests consume B1's golden fixtures from `cloud-v2/b1-runtime-contracts`, including
+the §16 installer checks. A verbatim pinned snapshot and its source commit are
+under `tests/fixtures/`; tests automatically prefer the shared protocol fixture
+directory after B1 merges. The fixture README describes the additional lexical
+escape case and raw-digest checks for changes to canonical serialization.
 
 ## Scripted Alpha verification (operator runbook)
 
@@ -89,14 +107,22 @@ the journal refuses more than ten):
    exact UIDs/groups/subids, bootstrap, units, tmpfiles and AppArmor. Fill the
    compatibility protected-file hashes and base provenance. An owned cgroup
    bounds the build to 20 minutes. The kit records create intent before POST.
+   Build state is bound to `BOAT_BILLING_ORG`; each adopted builder/verification
+   VM and each resume revalidates Boat's `team.id`. `ready`, `idle` and `running`
+   are command-ready states. Error, cancellation and unexpected archival fail
+   closed. Only `/opt` itself is normalized to root ownership/mode 0755;
+   provider-managed children keep their original ownership.
 2. Sanitize and verify the builder; save the previously unused snapshot name.
    Capture `systemd`, glibc, kernel, Python, architecture and measured snapshot
    bytes. Cold boot a disposable clone and verify `/zeros`, enabled/active
    units, delegated cgroups, the exact host marker, empty runtime/private state,
    and `waiting_for_runtime`. Cold-boot checks do not start or repair units.
+   Sanitation and verification wait for both units to be active and the boot
+   oneshot to complete before reading the facade or cleaning session state.
 3. Fetch official Node 22.23.1 and verify its published SHA-256. Build three
-   deterministic synthetic archives containing that Node and idle/success
-   stubs. Upload create-only objects under
+   deterministic synthetic archives containing that Node, idle/success
+   stubs and a symlink with a 0555 archive header. The setup stub prints the
+   legacy result shape. Upload create-only objects under
    `runtime-test/zeros-v2-test-<attempt>/`; mint each GET immediately before
    SSH stdin delivery. Install A with the nested setup stub, verify the receipt
    and active descriptor, stop/resume the VM, and verify the new boot/session
@@ -127,11 +153,29 @@ pnpm tsx scripts/cloud-workspace-validation/boat-image/boat-image.ts runtime-bas
 
 Cleanup replays only unresolved create identities within the kit's 23-hour
 window, never scans/deletes unrelated account resources, and fails closed when
-absence cannot be confirmed. Do not delete the state directory while cleanup
+absence cannot be confirmed. A durable `pending-delete.json` retains each VM ID
+until GET returns 404, including when the process dies after DELETE acceptance.
+Definitively rejected R2 PUTs (including 412) grant no cleanup ownership of the
+existing object; successful and ambiguous PUTs remain cleanup-owned. Old state
+without a billing-organization binding can be used for deletion, not a new build.
+Do not delete the state directory while cleanup
 is pending. Once confirmed, retry with a fresh state directory and name
 `zeros-v2-test-base-v4-2`; include the previous attempt's starts in the overall
 ten-start budget. Send the receipt and closed diagnostics to the orchestrator
 for review; neither raw command logs nor URLs/keys belong in the report.
+
+Before deleting a failed builder or verification VM, the kit keeps bounded,
+redacted tails of the build log, both units' systemctl status and journal, and
+the bootstrap assertion log under
+`$ZEROS_BOAT_IMAGE_STATE_DIR/runtime-base-v4/private/m2-build-<attempt>/<sandboxId>/`.
+Directories are 0700; files are 0600 and at most 32 KiB each. `capture.json`
+records availability with fixed labels. The build log is captured before
+sanitation removes its remote copy. Capture failure never prevents cleanup or
+replaces the original failure. These files are not printed or uploaded by the
+workflow; inspect them locally and report only the relevant closed checks/sites.
+Unexpected top-level kit failures additionally print only an allowlisted error
+class/code to stderr (for example `Error (ERR_MODULE_NOT_FOUND)`), with no message
+or stack; the final stdout diagnostic remains closed.
 
 For a base-only build (also the manual `Cloud runtime base` workflow), replace
 `live-check` with `build`. This requires only Boat credentials and proves the

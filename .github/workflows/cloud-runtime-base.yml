@@ -69,7 +69,9 @@ jobs:
             ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/cleanup.json
             ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/state.json
             ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/builder*.json
+            ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/pending-delete.json
             ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/verification/builder*.json
+            ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/verification/pending-delete.json
             ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/*/snapshot-ledger.json
           if-no-files-found: warn
           retention-days: 30

@@ -4,8 +4,10 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { parseEnv } from "node:util";
+import { redactLogSecrets } from "../../../packages/protocol/src/scrub";
 import {
-  assertBudget, builderCommand, cleanCheckoutCommit, fillTemplate, namedSnapshotInventory,
+  assertBudget, builderCommand, cleanCheckoutCommit, fillTemplate, KitError, namedSnapshotInventory,
   type BoatResponse, type KitDeps,
 } from "./boat-image";
 
@@ -38,13 +40,24 @@ export class BaseFailure extends Error {
     if (!this.diagnostic.failedChecks.length) this.diagnostic.failedChecks = ["diagnostic_missing"];
   }
 }
-export const closedFailure = (error: unknown): ClosedDiagnostic =>
-  (error instanceof BaseFailure ? error : new BaseFailure("validate_input", "diagnostic_missing")).diagnostic;
+const ERROR_NAMES = new Set(["Error", "TypeError", "SyntaxError", "RangeError", "ReferenceError", "AggregateError", "AbortError", "TimeoutError"]);
+const ERROR_CODES = new Set(["ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED", "ERR_REQUIRE_ESM",
+  "ENOENT", "EACCES", "EPERM", "ENOSPC", "EPIPE", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT"]);
+export function closedFailure(error: unknown): ClosedDiagnostic {
+  if (error instanceof BaseFailure) return error.diagnostic;
+  // Error messages, stacks and arbitrary names/codes can contain credentials.
+  // Only fixed error identities supplement the closed stdout diagnostic.
+  const detail = error as { name?: unknown; code?: unknown } | null;
+  const name = error instanceof KitError ? "KitError" : typeof detail?.name === "string" && ERROR_NAMES.has(detail.name) ? detail.name : "UnknownError";
+  const code = typeof detail?.code === "string" && ERROR_CODES.has(detail.code) ? ` (${detail.code})` : "";
+  console.error(`[boat-image] ${name}${code}`);
+  return new BaseFailure("validate_input", "diagnostic_missing").diagnostic;
+}
 export function requireBase(ok: unknown, stage: string, check: string): asserts ok {
   if (!ok) throw new BaseFailure(stage, check);
 }
 
-/** The only files retained locally are value-free identities and receipts. */
+/** Journals and receipts contain closed identities; evidence is stored separately. */
 export function saveJson(file: string, value: unknown) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temp = `${file}.tmp`;
@@ -88,6 +101,79 @@ const builder = (deps: KitDeps): string | undefined => {
   requireBase(typeof id === "string" && /^bx_[a-z0-9]+$/.test(id), "create", "provider_request");
   return id;
 };
+const pendingDelete = (deps: KitDeps): string | undefined => {
+  const file = path.join(deps.stateDir, "pending-delete.json");
+  if (!fs.existsSync(file)) return undefined;
+  const value = read(file);
+  requireBase(value?.schema === "zeros.base-delete/v1" && typeof value.id === "string" && /^bx_[a-z0-9]+$/.test(value.id),
+    "cleanup", "cleanup_pending");
+  requireBase(!builder(deps) || builder(deps) === value.id, "cleanup", "cleanup_pending");
+  return value.id;
+};
+function removeStateFile(file: string) {
+  fs.rmSync(file, { force: true });
+  const parent = fs.openSync(path.dirname(file), "r");
+  try { fs.fsyncSync(parent); } finally { fs.closeSync(parent); }
+}
+
+const EVIDENCE_FILES = { build: "build.log", systemd: "systemd-status.log", journal: "journal.log", bootstrap: "bootstrap-failures.jsonl" } as const;
+type EvidenceKind = keyof typeof EVIDENCE_FILES;
+const EVIDENCE_LIMIT = 32768;
+
+function privateEvidence(deps: KitDeps, input: Buffer) {
+  // These files stay local, but redact credential forms, URLs and any actual
+  // Alpha/test values available to the operator before persisting them.
+  const envFile = path.join(deps.repoRoot, ".env.agent");
+  const env = { ...process.env, ...(fs.existsSync(envFile) ? parseEnv(fs.readFileSync(envFile, "utf8")) : {}) };
+  let value = input.toString("utf8");
+  for (const [key, secret] of Object.entries(env)) {
+    if (secret && secret.length >= 4 && /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|DSN|DATABASE_URL/i.test(key)) {
+      value = value.split(secret).join("[redacted]");
+    }
+  }
+  value = redactLogSecrets(value)
+    .replace(/https?:\/\/[^\s<>"']+/gi, "[url]")
+    .replace(/\b(?:condw_|sk_|sk-|ghs_|gho_|ghp_|ghu_|github_pat_)[A-Za-z0-9._-]+/g, "[redacted]")
+    .replace(/[A-Za-z0-9_+/=-]{32,}/g, "[redacted]")
+    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  return Buffer.from(value).subarray(-EVIDENCE_LIMIT);
+}
+
+async function retainEvidence(deps: KitDeps, id: string, state: BaseState, kinds: EvidenceKind[] = ["build", "systemd", "journal", "bootstrap"]) {
+  const directory = path.join(deps.stateDir, "private", `m2-build-${state.attemptHex}`, id);
+  const outcomes: Partial<Record<EvidenceKind, string>> = {};
+  try {
+    // A wrong-wallet create is deletable from our ownership journal, but it
+    // must not run even an evidence probe on that account.
+    await sandboxInWallet(deps, id);
+    for (const kind of kinds) {
+      outcomes[kind] = "unavailable";
+      try {
+        const program = fillTemplate("v4/evidence.py", { ARTIFACT: kind, ATTEMPT: `m2-build-${state.attemptHex}` });
+        const reply = await remote(deps, id, pythonProbe(program, "cleanup"), 15);
+        requireBase(reply.status === 200 && reply.body?.exitCode === 0 && typeof reply.body.stdout === "string" &&
+          Buffer.byteLength(reply.body.stdout) <= 65_536 && !reply.body.stdoutTruncated, "cleanup", "diagnostic_missing");
+        const result = JSON.parse(reply.body.stdout);
+        requireBase(result?.schema === "zeros.base-private-evidence/v1" && result.artifact === kind &&
+          ["captured", "absent", "unavailable"].includes(result.outcome) && typeof result.data === "string" &&
+          /^[A-Za-z0-9+/]*={0,2}$/.test(result.data), "cleanup", "diagnostic_missing");
+        const data = Buffer.from(result.data, "base64");
+        requireBase(data.length <= EVIDENCE_LIMIT && data.toString("base64") === result.data, "cleanup", "diagnostic_missing");
+        outcomes[kind] = result.outcome;
+        if (result.outcome !== "captured") continue; // Preserve a pre-sanitation log.
+        const scrubbed = privateEvidence(deps, data);
+        fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+        fs.chmodSync(directory, 0o700);
+        const file = path.join(directory, EVIDENCE_FILES[kind]);
+        const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o600);
+        try { fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, scrubbed); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      } catch { outcomes[kind] = "unavailable"; }
+    }
+  } catch {
+    for (const kind of kinds) outcomes[kind] = "unavailable";
+  }
+  try { saveJson(path.join(directory, "capture.json"), outcomes); } catch { /* Never prevent VM deletion. */ }
+}
 
 export type Payload = { files: { name: string; data: Buffer; sha256: string }[]; sourceSha256: string; attempt: string; scriptSha256: string };
 export function basePayload(root: string, commit: string, attemptHex: string): Payload {
@@ -188,14 +274,19 @@ print(json.dumps({'finished':result is not None, **({key:result[key] for key in 
   throw new BaseFailure("build", "timeout", 124);
 }
 
-export async function waitSandbox(deps: KitDeps, id: string, desired = "ready") {
+async function sandboxInWallet(deps: KitDeps, id: string) {
+  const response = await deps.boat("GET", `/sandboxes/${id}`);
+  requireBase(response.status === 200 && response.body?.sandbox?.id === id && response.body.sandbox.team?.id === deps.billingOrg,
+    "create", "provider_request");
+  return response.body.sandbox;
+}
+
+export async function waitSandbox(deps: KitDeps, id: string, desired: "ready" | "archived" = "ready") {
   const deadline = Date.now() + 180_000;
   while (Date.now() < deadline) {
-    const response = await deps.boat("GET", `/sandboxes/${id}`);
-    requireBase(response.status === 200 && response.body?.sandbox?.id === id, "create", "provider_request");
-    const state = response.body.sandbox.state;
-    if (state === desired) return;
-    requireBase(!["failed", "deleted", "error"].includes(state), "create", "provider_request");
+    const state = (await sandboxInWallet(deps, id)).state;
+    if (state === desired || (desired === "ready" && ["idle", "running"].includes(state))) return;
+    requireBase(!["error", "cancelled"].includes(state) && !(desired === "ready" && state === "archived"), "create", "provider_request");
     await delay(2000);
   }
   throw new BaseFailure("create", "timeout", 124);
@@ -220,6 +311,7 @@ export async function verifyBase(deps: KitDeps, id: string) {
 
 type BaseState = {
   schema: "zeros.base-kit-state/v1"; sourceCommit: string; sourceSha256: string; attemptHex: string;
+  billingOrg?: string; // Old unbound journals remain usable for deletion only.
   name: string; maxUsedHours: number; starts: number; phase: "new" | "building" | "built" | "saved" | "verified" | "done";
   proof?: Awaited<ReturnType<typeof verifyBase>>; coldProof?: Awaited<ReturnType<typeof verifyBase>>;
   snapshot?: { id: string; sizeBytes: number }; live?: unknown; keepSnapshot?: boolean;
@@ -234,6 +326,7 @@ const loadState = (deps: KitDeps): BaseState => {
 
 export function countStart(deps: KitDeps) {
   const state = loadState(deps);
+  requireBase(state.billingOrg === deps.billingOrg, "create", "provider_request");
   requireBase(state.starts < MAX_STARTS, "create", "start_budget");
   state.starts += 1;
   saveJson(stateFile(deps), state);
@@ -247,8 +340,13 @@ function updateState(deps: KitDeps, value: Partial<BaseState>) {
 
 async function createOwned(deps: KitDeps, target: KitDeps, from?: string) {
   const state = loadState(deps);
+  requireBase(state.billingOrg === deps.billingOrg && target.billingOrg === deps.billingOrg, "create", "provider_request");
+  requireBase(!pendingDelete(target), "cleanup", "cleanup_pending");
   let id = builder(target);
-  if (id) return id;
+  if (id) {
+    await sandboxInWallet(target, id);
+    return id;
+  }
   if (!fs.existsSync(path.join(target.stateDir, "builder-intent.json"))) countStart(deps);
   const options = new Map([["--max-used-hours", String(state.maxUsedHours)],
     ...(from ? [["--from", from]] : [["--profile", PROFILE]])] as [string, string][]);
@@ -256,6 +354,7 @@ async function createOwned(deps: KitDeps, target: KitDeps, from?: string) {
     await builderCommand("create", options, [], target);
     id = builder(target);
     requireBase(id, "create", "provider_request");
+    await sandboxInWallet(target, id);
     const named = await deps.boat("PATCH", `/sandboxes/${id}`, {
       body: { name: `zeros-v2-test-${from ? "verify" : "builder"}-${state.attemptHex.slice(0, 12)}` },
     });
@@ -265,6 +364,19 @@ async function createOwned(deps: KitDeps, target: KitDeps, from?: string) {
     if (error instanceof BaseFailure) throw error;
     throw new BaseFailure("create", "provider_request");
   }
+}
+
+export async function resumeOwned(deps: KitDeps, target: KitDeps, maxUsedHours: number) {
+  const state = loadState(deps);
+  requireBase(state.billingOrg === deps.billingOrg && target.billingOrg === deps.billingOrg && state.maxUsedHours === maxUsedHours,
+    "resume", "provider_request");
+  requireBase(!pendingDelete(target), "cleanup", "cleanup_pending");
+  const id = builder(target);
+  requireBase(id, "resume", "provider_request");
+  requireBase((await sandboxInWallet(target, id)).state === "archived", "resume", "provider_request");
+  await assertBudget(deps, maxUsedHours);
+  countStart(deps);
+  await builderCommand("resume", new Map([["--max-used-hours", String(maxUsedHours)]]), [], target);
 }
 
 async function waitSnapshot(deps: KitDeps, id: string, state: BaseState) {
@@ -310,7 +422,7 @@ export async function cleanupBase(deps: KitDeps, keepSnapshot: boolean) {
   const deleted: string[] = [];
   const failures: string[] = [];
   for (const target of [cloneDeps(deps), deps]) {
-    if (!builder(target) && fs.existsSync(path.join(target.stateDir, "builder-intent.json"))) {
+    if (!pendingDelete(target) && !builder(target) && fs.existsSync(path.join(target.stateDir, "builder-intent.json"))) {
       try { await createOwned(deps, target, target === deps ? undefined : state.name); }
       catch { failures.push("cleanup_pending"); }
     }
@@ -333,25 +445,39 @@ export async function cleanupBase(deps: KitDeps, keepSnapshot: boolean) {
     } catch { failures.push("cleanup_pending"); }
   }
   for (const target of [cloneDeps(deps), deps]) {
-    const id = builder(target);
+    const pending = pendingDelete(target);
+    const id = pending ?? builder(target);
     if (!id) continue;
     try {
-      // The shared kit refuses to delete a source of an unresolved snapshot.
-      await builderCommand("delete", new Map(), [], target);
-      const deadline = Date.now() + 180_000;
       let absent = false;
-      while (Date.now() < deadline) {
+      if (pending) {
+        const observed = await deps.boat("GET", `/sandboxes/${id}`);
+        absent = observed.status === 404;
+        requireBase(absent || (observed.status === 200 && observed.body?.sandbox?.id === id), "cleanup", "cleanup_pending");
+      }
+      if (!absent) {
+        if (!keepSnapshot) await retainEvidence(deps, id, state);
+        // Keep this separate from the legacy builder journal: its delete
+        // command removes builder.json as soon as DELETE is accepted.
+        saveJson(path.join(target.stateDir, "pending-delete.json"), { schema: "zeros.base-delete/v1", id });
+        if (!builder(target)) saveJson(path.join(target.stateDir, "builder.json"), { id, ...(target === deps ? {} : { from: state.name }) });
+        // The shared kit still guards sources of unresolved snapshots.
+        await builderCommand("delete", new Map(), [], target);
+      }
+      const deadline = Date.now() + 180_000;
+      while (!absent && Date.now() < deadline) {
         const observed = await deps.boat("GET", `/sandboxes/${id}`);
         if (observed.status === 404) { absent = true; break; }
         requireBase(observed.status === 200, "cleanup", "cleanup_pending");
         await delay(2000);
       }
       requireBase(absent, "cleanup", "cleanup_pending");
+      // Only a confirmed GET 404 retires the durable deletion identity.
+      removeStateFile(path.join(target.stateDir, "builder.json"));
+      removeStateFile(path.join(target.stateDir, "builder-intent.json"));
+      removeStateFile(path.join(target.stateDir, "pending-delete.json"));
       deleted.push(id);
     } catch {
-      // Keep the identity for the next cleanup even if DELETE was accepted but
-      // its eventual absence has not yet been observed.
-      saveJson(path.join(target.stateDir, "builder.json"), { id, ...(target === deps ? {} : { from: state.name }) });
       failures.push("cleanup_pending");
     }
   }
@@ -373,13 +499,14 @@ export async function buildBase(options: Map<string, string>, deps: KitDeps, liv
   let state: BaseState;
   if (fs.existsSync(stateFile(deps))) {
     state = loadState(deps);
+    requireBase(state.billingOrg === deps.billingOrg, "create", "provider_request");
     requireBase(state.sourceCommit === commit && state.name === name && state.maxUsedHours === maxUsedHours,
       "validate_input", "source_commit");
     requireBase(state.phase !== "done", "validate_input", "source_commit");
     requireBase(state.keepSnapshot !== true, "validate_input", "source_commit");
   } else {
     const attemptHex = deps.randomHex();
-    state = { schema: "zeros.base-kit-state/v1", sourceCommit: commit, sourceSha256: basePayload(deps.repoRoot, commit, attemptHex).sourceSha256,
+    state = { schema: "zeros.base-kit-state/v1", billingOrg: deps.billingOrg, sourceCommit: commit, sourceSha256: basePayload(deps.repoRoot, commit, attemptHex).sourceSha256,
       attemptHex, name, maxUsedHours, starts: 0, phase: "new" };
     saveJson(stateFile(deps), state);
   }
@@ -403,6 +530,9 @@ export async function buildBase(options: Map<string, string>, deps: KitDeps, liv
       stage = "build";
       await waitBuild(deps, id, payload.attempt);
       checkpoint();
+      // Sanitization removes the owned job directory. Retain its bounded tail
+      // now so a later verification failure still has the build evidence.
+      await retainEvidence(deps, id, state, ["build"]);
       stage = "sanitize";
       const sanitation = parseProbe(await remote(deps, id, pythonProbe(fillTemplate("v4/sanitize.py", {}), "sanitize")), "sanitize");
       requireBase(sanitation?.clean === true, "sanitize", "private_state");
