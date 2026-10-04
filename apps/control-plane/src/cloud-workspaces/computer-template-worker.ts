@@ -16,6 +16,7 @@ import {
   type TemplateAllocation,
 } from "./computer-template-capacity.js";
 import { ComputerTemplateLogRedactor } from "./computer-template-logs.js";
+import { computerTemplateBuilderIntent } from "./computer-template-boat.js";
 import type {
   BuilderFixedCommand,
   BuilderVm,
@@ -115,7 +116,7 @@ function result<T>(
   error: CloudComputerV2BuildError,
 ): T {
   try {
-    if (Buffer.byteLength(stdout) > 262_144) throw new Error();
+    if (Buffer.byteLength(stdout) > 65_536) throw new Error();
     const lines = stdout.trim().split("\n");
     if (
       lines.length === 2 &&
@@ -208,6 +209,7 @@ export class ComputerTemplateWorker {
     for (let index = 0; index < this.concurrency && !this.stopping; index++) {
       let runtime: ComputerTemplateRuntime | null = null;
       const claim = await this.deps.service.claimNextBuild(++this.fence, {
+        operations: this.deps.operations,
         accountScope: this.deps.accountScope,
         billingOrg: this.deps.billingOrg,
         ...(this.deps.namePrefix ? { namePrefix: this.deps.namePrefix } : {}),
@@ -303,13 +305,11 @@ export class ComputerTemplateWorker {
     // allocation after the provider's 23-hour idempotency safety window.
     if (Date.now() - row.allocation_requested_at.getTime() >= 23 * 60 * 60_000)
       throw new BuildFailure("allocation_failed");
-    return this.deps.vms.create({
-      purpose: "computer-build",
-      source: { kind: "base", baseImageId: row.base_image_id },
+    return this.deps.vms.create(computerTemplateBuilderIntent({
+      baseImageId: row.base_image_id,
       name: row.builder_name,
       operationKey: row.builder_operation_key,
-      ttlSeconds: 1800,
-    });
+    }));
   }
   private async build(
     claim: CloudComputerV2Claim,

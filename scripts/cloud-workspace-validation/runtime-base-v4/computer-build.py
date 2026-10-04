@@ -28,6 +28,10 @@ import uuid
 
 sys.dont_write_bytecode = True
 MAX_INPUT = 262_144
+MAX_OUTPUT = 65_536
+# B7 bounds the last diagnostic line to 4096 bytes. Reserve it and both newlines
+# before selecting log chunks; JSON escaping can expand a raw chunk sixfold.
+MAX_RESULT = MAX_OUTPUT - 4096 - 2
 MAX_LOG = 1_048_576
 LINE_LIMIT = 8192
 REDACTED = "[redacted]"
@@ -210,12 +214,21 @@ class InstallStore:
 
     def status(self, after):
         value = self.read()
-        chunks = [row for row in value["chunks"] if row["seq"] > after][:8]
-        # Do not report completion until this reader has drained the final logs.
-        drained = not chunks or chunks[-1]["seq"] == value["seq"]
-        return {"schema": "zeros.computer-install/v1", **self.identity, "state": value["state"] if drained else "running",
-                "exitCode": value["exitCode"] if drained else None, "timedOut": value["timedOut"] if drained else False,
-                "chunks": chunks, "nextAfter": chunks[-1]["seq"] if chunks else after, "truncated": value["truncated"]}
+        def response(chunks):
+            # Do not report completion until this reader drains the final logs.
+            drained = not chunks or chunks[-1]["seq"] == value["seq"]
+            return {"schema": "zeros.computer-install/v1", **self.identity, "state": value["state"] if drained else "running",
+                    "exitCode": value["exitCode"] if drained else None, "timedOut": value["timedOut"] if drained else False,
+                    "chunks": chunks, "nextAfter": chunks[-1]["seq"] if chunks else after, "truncated": value["truncated"]}
+        chunks = []
+        for row in (row for row in value["chunks"] if row["seq"] > after):
+            if len(chunks) == 8: break
+            candidate = [*chunks, row]
+            if len(packed(response(candidate))) > MAX_RESULT:
+                require(chunks, "output_limit")
+                break
+            chunks = candidate
+        return response(chunks)
 
 
 def kill_group(process):
@@ -791,7 +804,9 @@ def main():
         value = strict_json(raw)
         method = getattr(ComputerBuild(), sys.argv[1].replace("-", "_"))
         result = method(value)
-        print(packed(result).decode(), flush=True)
+        encoded = packed(result)
+        require(len(encoded) <= MAX_RESULT, "output_limit")
+        print(encoded.decode(), flush=True)
         code, checks = 0, []
     except Failure as error:
         checks = ["tcb_modified" if stage == "integrity" else error.check]

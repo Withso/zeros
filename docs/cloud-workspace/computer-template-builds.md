@@ -1,8 +1,10 @@
 # Cloud Computer template builds
 
-Status: C3 worker and helpers, **pending integration** with B4, B5b, B7 and B10.
-The control-plane entrypoint does not start this worker yet. Its database tests
-use the real C1 service with injected builder, runtime and GitHub doubles.
+Status: C3 uses the real B7 builder/journal and B5b runtime selection. Base
+payload integration and B10 restore qualification remain pending. The
+control-plane entrypoint does not start this worker yet. Tests cover C1 and the
+B7 database journal, the actual adapter/helper transport, and fake provider and
+GitHub boundaries.
 This document describes the internal Alpha path; the legacy image worker is
 unchanged. No live qualification is claimed by these tests.
 
@@ -12,7 +14,10 @@ unchanged. No live qualification is claimed by these tests.
 the contracts §20 builder API through `computer-template-boat.ts`. It never
 implements Boat allocation or SSH. C1's `claimNextBuild(fence, builder)` takes
 the existing global and organization locks, selects and stores the base/runtime
-pin, and records allocation intent before returning. The accepted repository
+pin, and calls `prepareBuilderVmOperation(..., tx)` before inserting the capacity
+record. Both journals commit atomically, without provider I/O. Cancellation or
+expiry before the first create closes the prepared intent, rejects a late
+creator, and frees capacity; a failed preparation rolls back the claim. The accepted repository
 manifest is added independently after clones finish. The public C1 request and
 response shapes stay unchanged except for the closed `tcb_modified` error.
 
@@ -34,7 +39,7 @@ separate snapshot operation.
 Running builds have a 30-minute deadline; time in the queue does not count.
 Installer, repository and integrity calls also have bounded transport timeouts.
 Recipes have the accepted 1–900 second limit. Creation uses a finite 1800-second
-TTL and a stable `computer-build:<buildId>` operation key. B7 must enforce its
+TTL and a stable `computer-build:<buildId>` operation key. B7 enforces its
 phase deadlines and TTL policy. Provider names use the shared bounded
 `computerTemplateBuilderName`: `zeros-v2-cc-<short-build-id>` by default, at most
 62 lowercase ASCII characters. Full build IDs remain in the operation key.
@@ -86,12 +91,14 @@ These commands execute isolated Python as root with a fixed subcommand. JSON
 arrives only on pinned SSH stdin (maximum 256 KiB). The runtime installer instead
 receives contracts §5 base64url-encoded JSON, with `purpose: "build"`, the exact
 descriptor and a presigned GET URL expiring in 900 seconds. Its input is limited
-to 64 KiB. Every helper ends with a closed `zeros.diagnostic/v1` line. B7 must
-return the bounded stdout **and** parsed last diagnostic. The pending B7
-integration must reduce each escaped log batch plus diagnostic to its real
-64 KiB output limit, accept computer-command stdin and parse the four command
-diagnostics. The current injected adapter does not establish that transport
-compatibility. Raw errors, stdin and URLs are never infrastructure logs.
+to 64 KiB. Every helper ends with a closed `zeros.diagnostic/v1` line. B7
+returns the bounded stdout **and** parsed last diagnostic, with the command
+stage and closed failure checks validated. Computer-command stdin is accepted
+only for a computer-build VM. Poll batches are measured after JSON escaping,
+reserving 4096 bytes for the diagnostic and both newlines within the real
+64 KiB transport limit. The adapter/helper test executes the actual Python
+entrypoint through B7's pinned-SSH channel fixture and drains escaped/multibyte
+logs over multiple polls. Raw errors, stdin and URLs are never infrastructure logs.
 
 Cloning mints exactly one immutable repository ID with `contents:read` using
 the existing GitHub broker. The worker rechecks the organization's active
@@ -132,7 +139,8 @@ Alpha. Secondary-repository recovery remains outside the Alpha checkpoint.
 Stdout and stderr are redacted separately before spooling and again before CP
 persistence. Literal prefixes are withheld across chunk boundaries; token/URL
 patterns see bounded complete lines. Lines/chunks are limited to 8192 UTF-8
-bytes, helper responses to eight chunks, and each retained build log to 1 MiB.
+bytes, helper responses to at most eight chunks within the encoded response
+budget, and each retained build log to 1 MiB.
 C1 supplies monotonic cursor reads and explicit truncation. No raw script output
 enters the provider diagnostics. Deliberate encoding by a root administrator
 remains outside the known-value redaction guarantee.
@@ -162,40 +170,35 @@ data. B10 also owns the workspace-time `/srv/zeros/repos` bind outside a build
 and regeneration of the empty machine-id after restore. C3 keeps emptying
 machine-id during sanitation and does not change base boot files.
 
-## Pending integration checklist
+## Integration and remaining enablement
 
-1. B4: add both helpers to the base payload, installer loop and protected-file
+`createComputerTemplateBoatAdapters` constructs the account-scoped
+`DatabaseBuilderVmOperationStore`, real `BoatCloudBuilderVms`, and B5b selector.
+Pass its `operations`, `vms` and `runtime` together to the worker. Runtime
+selection happens inside the claim transaction; completion calls
+`loadPinnedCloudRuntime` on the original tuple without selecting a new head.
+Construction does not allocate or start a worker. C3's additive migration is
+0128; B7 owns 0126 and D2 reserves 0127.
+
+Before enabling the worker:
+
+1. Base payload: install both helpers and add them to the protected-file
    inventory; rebuild/register/qualify the base through the existing operator
-   flow. The C3 change does not edit the in-flight B4 packaging files.
-2. B7: replace the structural types in `computer-template-boat.ts` with imports
-   from `cloud-builder-vm.ts`; spread `COMPUTER_TEMPLATE_FIXED_COMMANDS` into the
-   same closed allowlist; accept their stdin in `runFixed` and parse their
-   diagnostics in `cloud-builder-commands.ts`. Inject the same account-scoped
-   `BuilderVmOperationStore` used by the VM adapter (`find` and
-   `closeUnallocatedCreate`); use B7's account/wallet checks, pinned-SSH stdin
-   and key-revocation path. Bound actual JSON-escaped batches plus diagnostics
-   to 64 KiB and add an adapter/helper transport test. Do not add shell
-   interpolation. When #290 lands, renumber C3's unmerged migration to 0127.
-3. B5b: adapt `selectCloudRuntime(tx, qualificationMode)` to
-   `{ baseImageId: selected.pin.baseImageId,
-baseCompatibilityId: selected.pin.baseCompatibilityId,
-descriptor: selected.descriptor, objectKey: selected.objectKey }`.
-   It selects the newest approved base and qualified Alpha channel head under
-   the claim transaction. For `validate(tx, runtime)`, call
-   `loadPinnedCloudRuntime(tx, { runtimeId, manifestSha256, baseImageId,
-baseCompatibilityId, profile: "zeros-cloud-worker-v4", engineProtocolVersion },
-qualificationMode)` and return whether the pinned tuple remains eligible.
-   Never select a new head at completion. Pass the shared artifact store's
-   `presignGet`; do not implement another signer.
-4. Entrypoint: give C1 `sanitizeLog: sanitizeComputerTemplateLog`, then construct
-   the worker with the real GitHub broker and the adapters above. Start/stop it
-   only in the existing Alpha/background-worker role, passing account scope,
-   wallet and the configured build cap. Until this connection is made, v2
-   requests queue without running; do not enable the new path for users.
-5. Rerun DB-backed worker/C1 tests, B4's real bootstrap tests, B7's allowlist/SSH
-   tests and the live runbook below before claiming the integrated path works.
-6. B10: qualify the §23 persistent binds, the workspace-time `/srv/zeros/repos`
+   flow. Coordinate that base change with B10; C3 does not edit base boot files.
+2. Entrypoint: give C1 `sanitizeLog: sanitizeComputerTemplateLog`, then construct
+   the worker with the real GitHub broker, shared artifact store's `presignGet`
+   and `createComputerTemplateBoatAdapters`. Start/stop it only in the existing
+   Alpha/background-worker role, passing account scope, wallet and the configured
+   build cap. Until connected, v2 requests queue without running.
+3. Run the Alpha runbook below against the registered base. No live qualification
+   is claimed by the local adapter, bootstrap or database tests.
+4. B10: qualify the §23 persistent binds, the workspace-time `/srv/zeros/repos`
    bind and empty-machine-id regeneration through an actual template restore.
+
+The projection suite uses the actual Linux launcher and native namespaces. CI
+runs it through `scripts/ci/with-userns.sh`; missing sudo/bubblewrap support is a
+failure on Linux CI, not a silent loss of security coverage. The root-owned
+fixture remains private; only the elevated helper changes into it.
 
 The C6 deletion/retention track must also coordinate final organization erasure
 with provider cleanup before this worker is enabled on a shared database. C1's
@@ -207,8 +210,9 @@ That lifecycle integration is outside this worker/helper change.
 
 The executable runbook is
 `scripts/cloud-workspace-validation/computer-template-live-check.mts`. Its adapter
-factory is deliberately pending B4/B5b/B7, just like the entrypoint. Do not run
-it with test doubles or before all six integration steps above are complete.
+factory supplies the Alpha credentials and disposable local fixtures. Use
+`createComputerTemplateBoatAdapters` for B7/B5b, never test doubles. Do not run
+it before base payload registration and the enablement prerequisites above.
 
 Prepare in the orchestrator's credential-bearing workspace:
 
@@ -224,10 +228,10 @@ Prepare in the orchestrator's credential-bearing workspace:
    base/runtime/qualification records; never register/revoke shared Alpha rows.
    Reuse an authorized Alpha test GitHub installation and a small private test
    repository, with that admin's local source proof and organization connection.
-   Return the real B7 builder, GitHub broker and shared artifact store, and B5b's
-   selector over the seeded local registry. Set `deps.namePrefix` to the supplied
+   Return `createComputerTemplateBoatAdapters` over the seeded local registry,
+   the real GitHub broker and shared artifact store. Set `deps.namePrefix` to the supplied
    bounded prefix (it contains a short run ID; the full run ID stays in the
-   report). Include the B7 operation-store adapter in `deps.operations`. The
+   report). Include the returned B7 store in `deps.operations`. The
    factory must not allocate VMs, log credentials or start background
    workers. Only this harness may enqueue work in its fresh local database.
 3. Factory `close({cleanupConfirmed})` closes connections and drops the local

@@ -35,6 +35,12 @@ const helper = path.resolve(
 );
 
 describe("computer template repository projection", () => {
+  it.skipIf(process.platform !== "linux" || !process.env.CI)(
+    "requires native namespace coverage on Linux CI",
+    () => {
+      expect(nativeNamespaces, "Run through scripts/ci/with-userns.sh with sudo and bubblewrap installed").toBe(true);
+    },
+  );
   it.skipIf(!nativeNamespaces).each([
     {
       name: "empty repository selection",
@@ -166,6 +172,7 @@ describe("computer template repository projection", () => {
           `import importlib.util, os, pathlib, sys
 spec=importlib.util.spec_from_file_location("computer_build", sys.argv[1])
 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+os.chdir(sys.argv[2])
 app=module.ComputerBuild(pathlib.Path("."))
 git=app.git
 def local_git(args, cwd, environment=None, timeout=60):
@@ -248,8 +255,9 @@ if (${JSON.stringify(error)}) {
         ]);
         execFileSync(
           "sudo",
-          ["-n", "/usr/bin/python3", "-B", tree.physical("/clone.py"), helper],
-          { cwd: tree.directory, stdio: "pipe" },
+          ["-n", "/usr/bin/python3", "-B", tree.physical("/clone.py"), helper, tree.directory],
+          // Enter the root-owned 0700 fixture only after sudo has changed UID.
+          { stdio: "pipe" },
         );
         execFileSync("sudo", [
           "-n",

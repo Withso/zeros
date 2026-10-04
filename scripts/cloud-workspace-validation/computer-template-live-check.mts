@@ -1,5 +1,6 @@
 /** Operator runbook, never imported by the control-plane entrypoint.
- * Pending integration: the operator supplies B4/B5b/B7 adapters after they land.
+ * The operator supplies the Alpha fixture using createComputerTemplateBoatAdapters
+ * after registering the base-owned helpers and qualifying B10 restore behavior.
  * Only the disposable LOCAL database may be mutated. Provider credentials are
  * read from .env.agent and passed in memory to the Alpha adapter factory. */
 import { randomUUID } from "node:crypto";

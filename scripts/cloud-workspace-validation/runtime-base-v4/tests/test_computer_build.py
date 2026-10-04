@@ -109,6 +109,10 @@ class Fixture(unittest.TestCase):
     def write(self, path, text, mode=0o644):
         value = self.root / path.lstrip("/")
         value.parent.mkdir(parents=True, exist_ok=True)
+        # Fixtures include read-only protected files. Replace through the owned
+        # parent so tampering tests also exercise verification without root.
+        if value.exists() or value.is_symlink():
+            value.unlink()
         value.write_bytes(text.encode() if isinstance(text, str) else text)
         value.chmod(mode)
         return value
@@ -348,6 +352,27 @@ class FakeHost:
 
 
 class Install(unittest.TestCase):
+    def test_poll_bounds_escaped_batches_including_the_final_diagnostic(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = build.InstallStore(Path(root), JOB)
+            store.initialize("test")
+            text = ('\\"\t\n' * 8192) + ('🙂' * 8192)
+            store.append("stdout", text)
+            store.finish(0, False)
+            diagnostic = build.packed({"schema": "zeros.diagnostic/v1", "component": "build", "stage": "install",
+                                      "ok": True, "exitCode": 0, "timedOut": False, "failedChecks": []})
+            after, result = 0, []
+            for _ in range(32):
+                status = store.status(after)
+                self.assertLessEqual(len(build.packed(status)) + len(diagnostic) + 2, 65536)
+                result.extend(row["text"] for row in status["chunks"])
+                if status["state"] == "succeeded": break
+                self.assertGreater(status["nextAfter"], after)
+                self.assertIsNone(status["exitCode"])
+                after = status["nextAfter"]
+            else: self.fail("bounded log polling did not complete")
+            self.assertEqual("".join(result), text)
+
     def test_install_script_enters_a_private_logical_repository_namespace(self):
         args = build.SystemHost().install_command(JOB["buildId"], 900)
         self.assertIn("--property=WorkingDirectory=/", args)

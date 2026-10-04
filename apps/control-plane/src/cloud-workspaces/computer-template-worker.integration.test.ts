@@ -22,6 +22,7 @@ import type {
   ComputerTemplateRuntime,
 } from "./computer-template-boat.js";
 import { seedComputerTemplateRuntime } from "./computer-template-test-fixtures.js";
+import { memoryBuilderOperations } from "./cloud-builder-vm-test-fixtures.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const runtime: ComputerTemplateRuntime = {
@@ -50,13 +51,6 @@ const diagnostic = (stage: string, component = "build", ok = true) => ({
   timedOut: false,
   failedChecks: ok ? [] : ["tcb_modified"],
 });
-type Operation = {
-  operation_key: string;
-  purpose: BuilderVm["purpose"];
-  intent: Parameters<CloudBuilderVms["create"]>[0];
-  sandbox_id: string | null;
-  create_dispatched_at: Date | null;
-};
 
 database("Cloud Computer template worker", () => {
   let pool: pg.Pool, service: DatabaseCloudComputerV2Service;
@@ -76,25 +70,15 @@ database("Cloud Computer template worker", () => {
     modified: boolean,
     pollHook: (() => Promise<void>) | null;
   let inputs: Array<{ command: string; value: Record<string, any> }>;
-  let operationRows: Map<string, Operation>;
-  let operations: {
-    find: ReturnType<typeof vi.fn>;
-    closeUnallocatedCreate: ReturnType<typeof vi.fn>;
-  };
-  const recordOperation = (
-    input: Operation["intent"],
+  let operations: ReturnType<typeof memoryBuilderOperations>;
+  const recordOperation = async (
+    input: Parameters<CloudBuilderVms["create"]>[0],
     sandboxId: string | null,
     dispatched = true,
   ) => {
-    const row: Operation = {
-      operation_key: input.operationKey,
-      purpose: input.purpose,
-      intent: input,
-      sandbox_id: sandboxId,
-      create_dispatched_at: dispatched ? new Date() : null,
-    };
-    operationRows.set(input.operationKey, row);
-    return row;
+    if (dispatched) await operations.beginCreateAttempt(input.operationKey, randomUUID());
+    if (sandboxId) await operations.bind(input.operationKey, sandboxId);
+    return operations.find(input.operationKey);
   };
 
   beforeAll(() => {
@@ -121,14 +105,8 @@ database("Cloud Computer template worker", () => {
     modified = false;
     pollHook = null;
     inputs = [];
-    operationRows = new Map();
-    operations = {
-      find: vi.fn(async (key: string) => operationRows.get(key) ?? null),
-      closeUnallocatedCreate: vi.fn(async (key: string) => {
-        const row = operationRows.get(key);
-        return Boolean(row && !row.sandbox_id && !row.create_dispatched_at);
-      }),
-    };
+    operations = memoryBuilderOperations();
+    vi.spyOn(operations, "closeUnallocatedCreate");
     selectRuntime = vi.fn(async () => runtime);
     validateRuntime = vi.fn(async () => true);
     create = vi.fn(async (input) => {
@@ -141,7 +119,7 @@ database("Cloud Computer template worker", () => {
         base_image_id: runtime.baseImageId,
         runtime_id: runtime.descriptor.runtimeId,
       });
-      recordOperation(input, "zeros-v2-test-builder");
+      await recordOperation(input, "zeros-v2-test-builder");
       return {
         sandboxId: "zeros-v2-test-builder",
         purpose: input.purpose,
@@ -357,6 +335,7 @@ database("Cloud Computer template worker", () => {
     async (namePrefix) => {
       const requested = await request();
       await service.claimNextBuild(7, {
+        operations,
         selectRuntime: async () => ({
           baseImageId: runtime.baseImageId,
           runtimeId: runtime.descriptor.runtimeId,
@@ -454,7 +433,7 @@ database("Cloud Computer template worker", () => {
     async (failure) => {
       const build = await request();
       create.mockImplementation(async (input) => {
-        recordOperation(input, "zeros-v2-test-builder");
+        await recordOperation(input, "zeros-v2-test-builder");
         throw new Error(failure);
       });
       await worker.tick();
@@ -486,7 +465,7 @@ database("Cloud Computer template worker", () => {
   it("releases capacity only after the operation journal closes a confirmed non-allocation", async () => {
     await request();
     create.mockImplementation(async (input) => {
-      recordOperation(input, null, false);
+      await recordOperation(input, null, false);
       throw new Error("closed admission failure before dispatch");
     });
     await worker.tick();
@@ -519,7 +498,8 @@ database("Cloud Computer template worker", () => {
     async (journalState) => {
       await request();
       create.mockImplementation(async (input) => {
-        if (journalState === "dispatched") recordOperation(input, null);
+        if (journalState === "dispatched") await recordOperation(input, null);
+        else operations.rows.delete(input.operationKey); // Simulate a genuinely missing journal.
         throw new Error("unknown allocation result");
       });
       await worker.tick();
@@ -544,6 +524,7 @@ database("Cloud Computer template worker", () => {
   it("fences an expired worker, reconciles an unknown create with the original key, and deletes it", async () => {
     await request();
     const claim = await service.claimNextBuild(7, {
+      operations,
       selectRuntime: async () => ({
         baseImageId: runtime.baseImageId,
         runtimeId: runtime.descriptor.runtimeId,
@@ -558,7 +539,7 @@ database("Cloud Computer template worker", () => {
       )
     ).rows[0];
     const key = allocation.builder_operation_key;
-    recordOperation(
+    await recordOperation(
       {
         purpose: "computer-build",
         source: { kind: "base", baseImageId: runtime.baseImageId },
@@ -573,7 +554,7 @@ database("Cloud Computer template worker", () => {
       [claim!.build.id],
     );
     create.mockImplementation(async (input) => {
-      recordOperation(input, "zeros-v2-test-builder");
+      await recordOperation(input, "zeros-v2-test-builder");
       // Replayed allocation can bind the ID and still fail readiness because
       // the expired VM is already archived. Deletion must bypass readiness.
       throw new Error("builder_stopped");
@@ -809,10 +790,9 @@ database("Cloud Computer template worker", () => {
 
   it("does not stop an unrelated VM returned with a mismatched allocation identity", async () => {
     await request();
-    create.mockResolvedValue({
-      sandboxId: "unrelated-resource",
-      purpose: "runtime-qualification",
-      operationKey: "foreign-operation",
+    create.mockImplementation(async input => {
+      await recordOperation(input, null);
+      return { sandboxId: "unrelated-resource", purpose: "runtime-qualification", operationKey: "foreign-operation" };
     });
     await worker.tick();
     expect((await read()).latestBuild).toMatchObject({

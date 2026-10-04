@@ -33,7 +33,7 @@ export async function seedComputerTemplateRuntime(pool: pg.Pool) {
     );
     await tx.query(
       `INSERT INTO cloud_runtime_base_images(base_image_id,provider,image_ref,base_compatibility_id,source_commit,image_build_sha256,architecture,storage_mib,approved_at)
-      VALUES($1,'boat','boat:zeros-v2-test-base',$2,$3,$4,'linux/amd64',20480,now())`,
+      VALUES($1,'boat','boat:zeros-v2-test-base@sha256:' || $4,$2,$3,$4,'linux/amd64',20480,now())`,
       [
         value.baseImageId,
         value.baseCompatibilityId,

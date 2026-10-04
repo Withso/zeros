@@ -68,6 +68,7 @@ const buildFailureMessages: Record<CloudComputerV2BuildError, string> = {
   repository_clone_failed: "A repository could not be cloned.",
   install_failed: "The install script failed. Review its build log.",
   integrity_failed: "Protected file verification failed.",
+  tcb_modified: "The install script changed protected system files.",
   sanitation_failed: "Build credential cleanup failed.",
   template_stop_failed: "The template could not be stopped safely.",
   template_capture_failed: "The template could not be captured.",

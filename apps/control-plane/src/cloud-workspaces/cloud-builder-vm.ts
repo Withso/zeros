@@ -6,7 +6,7 @@ import { withSystemTx, type Tx } from "../db.js";
 import { assertHostedDevAdmission } from "../development-environment.js";
 import { BOAT_BILLING_ORG_PATTERN, BOAT_RESOURCE_ID_PATTERN, BoatCreateRejectedError, type BoatApiClient } from "./boat-client.js";
 import { executeBoatPinnedSsh, type BoatBootstrapChannel } from "./boat-pinned-ssh.js";
-import { BUILDER_BASE_STATUS_COMMAND, builderFixedCommand, parseBuilderDiagnostic, type BuilderFixedCommand, type ClosedDiagnostic } from "./cloud-builder-commands.js";
+import { BUILDER_BASE_STATUS_COMMAND, COMPUTER_TEMPLATE_MAX_INPUT_BYTES, builderFixedCommand, isComputerBuilderCommand, parseBuilderDiagnostic, type BuilderFixedCommand, type ClosedDiagnostic } from "./cloud-builder-commands.js";
 import { builderOperationConflict, type BuilderVmIntent, type BuilderVmOperation, type BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
 import { CloudProviderError } from "./provider.js";
 import { RuntimeBaseStatusSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES } from "./runtime-contract.js";
@@ -197,6 +197,13 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
         const expiry = Date.parse(parsed.data.artifact.expiresAt);
         if (expiry <= this.now() || expiry > this.now() + 900_000) fail("command_invalid");
       } catch { fail("command_invalid"); }
+    } else if (isComputerBuilderCommand(command)) {
+      if (vm.purpose !== "computer-build" || !Buffer.isBuffer(input) || input.length === 0 ||
+          input.length > COMPUTER_TEMPLATE_MAX_INPUT_BYTES) fail("command_invalid");
+      stdin = input.toString("utf8");
+      if (!Buffer.from(stdin, "utf8").equals(input)) fail("command_invalid");
+      // The fixed base helper validates its own strict JSON schema. Credentials
+      // remain on pinned SSH stdin and never enter a provider command or env.
     } else if (input !== undefined || command !== "runtime-self-test") fail("command_invalid");
     const runtime = command === "runtime-self-test" ? await this.baseStatus(vm) : null;
     if (runtime && runtime.hostState !== "idle") fail("builder_stopped");

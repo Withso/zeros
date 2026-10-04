@@ -21,6 +21,9 @@ import {
 import { sanitizeCloudWorkspaceSetupLog } from "./setup-log.js";
 import { CreateComputerConfigurationArgumentsSchema } from "./computer-tools-contract.js";
 import { computerTemplateBuilderName } from "./computer-template-name.js";
+import { computerTemplateBuilderIntent } from "./computer-template-boat.js";
+import { builderVmBaseSnapshot, prepareBuilderVmOperation } from "./cloud-builder-vm.js";
+import type { BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
 import {
   CLOUD_COMPUTER_V2_MAX_LOG_BYTES,
   CLOUD_COMPUTER_V2_MAX_LOG_ROW_BYTES,
@@ -1384,6 +1387,7 @@ export class DatabaseCloudComputerV2Service {
    * API processes. Take the org lock before locking its build, as all writers do. */
   async claimNextBuild(fence: number, builder?: {
     selectRuntime: (tx: Tx) => Promise<{ baseImageId: string; runtimeId: string } | null>;
+    operations: BuilderVmOperationStore;
     accountScope: string; billingOrg: string; namePrefix?: string;
   }): Promise<CloudComputerV2Claim | null> {
     const workerFence = parse(positive, fence);
@@ -1422,9 +1426,22 @@ export class DatabaseCloudComputerV2Service {
       );
       if (builder) {
         const name = computerTemplateBuilderName(build.id, builder.namePrefix);
+        const intent = computerTemplateBuilderIntent({
+          baseImageId: runtimePin!.baseImageId!, name, operationKey: `computer-build:${build.id}`,
+        });
+        // Commit the capacity hold and closable intent together. Resolve the
+        // pinned base through this transaction; preparation has no provider I/O.
+        await prepareBuilderVmOperation(builder.operations, intent, async () => {
+          const base = (await tx.query<{ image_ref: string }>(`SELECT base.image_ref FROM cloud_runtime_base_images base
+            JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
+            WHERE base.base_image_id=$1 AND base.provider='boat' AND base.approved_at<=clock_timestamp()
+              AND base.revoked_at IS NULL AND contract.revoked_at IS NULL FOR SHARE OF base,contract`,
+          [runtimePin!.baseImageId])).rows[0];
+          return builderVmBaseSnapshot(base?.image_ref ?? "");
+        }, tx);
         await tx.query(`INSERT INTO cloud_computer_templates(build_id,org_id,account_scope,billing_org,builder_operation_key,builder_name,allocation_requested_at)
           VALUES($1,$2,$3,$4,$5,$6,clock_timestamp())`,
-        [build.id, build.org_id, parse(identifier, builder.accountScope), parse(identifier, builder.billingOrg), `computer-build:${build.id}`, name]);
+        [build.id, build.org_id, parse(identifier, builder.accountScope), parse(identifier, builder.billingOrg), intent.operationKey, intent.name]);
       }
       const claimed = await buildRow(tx, build.org_id, build.id);
       return {

@@ -1,94 +1,52 @@
-/** The structural §20 builder-VM contract. C3 does not implement SSH or Boat
- * allocation: the B7 cloud-builder-vm adapter is injected by the entrypoint. */
-export type BuilderVm = {
-  sandboxId: string;
-  purpose: "runtime-qualification" | "computer-build";
-  operationKey: string;
-};
-export type BuilderFixedCommand =
-  | "install-runtime"
-  | "runtime-self-test"
-  | `computer:${string}`;
-export type ClosedDiagnostic = {
-  schema: "zeros.diagnostic/v1";
-  component: string;
-  stage: string;
-  ok: boolean;
-  exitCode: number | null;
-  timedOut: boolean;
-  failedChecks: string[];
-};
-export interface CloudBuilderVms {
-  create(input: {
-    purpose: BuilderVm["purpose"];
-    source:
-      | { kind: "base"; baseImageId: string }
-      | { kind: "template"; templateId: string };
-    name: string;
-    operationKey: string;
-    ttlSeconds: number;
-  }): Promise<BuilderVm>;
-  baseStatus(
-    vm: BuilderVm,
-  ): Promise<{
-    schema: "zeros.base-status/v1";
-    baseCompatibilityId: string;
-    bootId: string;
-    currentRuntimeId: string | null;
-    hostState: "idle" | "waiting_for_runtime" | "stopped" | "failed";
-  }>;
-  runFixed(
-    vm: BuilderVm,
-    command: BuilderFixedCommand,
-    input?: Buffer,
-    opts?: { timeoutMs?: number },
-  ): Promise<{
-    exitCode: number;
-    stdout: string;
-    diagnostic: ClosedDiagnostic | null;
-  }>;
-  stop(vm: BuilderVm): Promise<{ archived: true }>;
-  delete(vm: BuilderVm): Promise<void>;
-}
-/** Structural subset of B7's BuilderVmOperationStore until that module lands.
- * closeUnallocatedCreate atomically fences future dispatch and returns true
- * only when its attempt journal proves no allocation can exist. A missing row
- * or an unresolved dispatch is not proof of non-allocation. */
-export interface BuilderVmOperations {
-  find(operationKey: string): Promise<{
-    operation_key: string;
-    purpose: BuilderVm["purpose"];
-    sandbox_id: string | null;
-    create_dispatched_at: Date | null;
-  } | null>;
-  closeUnallocatedCreate(operationKey: string): Promise<boolean>;
+import type pg from "pg";
+import type { Tx } from "../db.js";
+import type { BoatApiClient } from "./boat-client.js";
+import { BoatCloudBuilderVms, builderVmSourceResolver } from "./cloud-builder-vm.js";
+import { DatabaseBuilderVmOperationStore, type BuilderVmIntent } from "./cloud-builder-vm-store.js";
+import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
+import { loadPinnedCloudRuntime, selectCloudRuntime } from "./runtime-selection.js";
+import type { RuntimeDescriptor } from "./runtime-contract.js";
+
+export type { BuilderVm, BuilderFixedCommand, ClosedDiagnostic, CloudBuilderVms } from "./cloud-builder-vm.js";
+export type { BuilderVmOperationStore as BuilderVmOperations } from "./cloud-builder-vm-store.js";
+export { COMPUTER_TEMPLATE_FIXED_COMMANDS } from "./cloud-builder-commands.js";
+
+/** Claim preparation and every create/replay use the same immutable intent. */
+export function computerTemplateBuilderIntent(input: {
+  baseImageId: string; name: string; operationKey: string;
+}): BuilderVmIntent {
+  return { purpose: "computer-build", source: { kind: "base", baseImageId: input.baseImageId },
+    name: input.name, operationKey: input.operationKey, ttlSeconds: 1800 };
 }
 export type ComputerTemplateRuntime = {
   baseImageId: string;
   baseCompatibilityId: string;
   objectKey: string;
-  descriptor: {
-    runtimeId: string;
-    manifestSha256: string;
-    archiveSha256: string;
-    archiveBytes: number;
-    expandedBytes: number;
-    sourceCommit: string;
-    nodeModulesAbi: number;
-    bootstrapProtocolVersion: 1;
-    engineProtocolVersion: number;
-  };
+  descriptor: RuntimeDescriptor;
 };
 
-/** Registration for B7's closed fixed-command allowlist. No input is ever
- * interpolated into these commands; all documents arrive on pinned SSH stdin. */
-export const COMPUTER_TEMPLATE_FIXED_COMMANDS = {
-  "computer:clone-repos":
-    "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py clone-repos",
-  "computer:run-install":
-    "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py run-install",
-  "computer:verify-tcb":
-    "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py verify-tcb",
-  "computer:sanitize":
-    "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py sanitize",
-} as const;
+/** Real B7/B5b dependencies for the worker and operator runbook. Construction
+ * performs no I/O and does not start a background worker. */
+export function createComputerTemplateBoatAdapters(input: {
+  pool: pg.Pool; client: Pick<BoatApiClient, "request">;
+  accountScope: string; billingOrg: string; qualificationMode: CloudRuntimeQualificationMode;
+}) {
+  const operations = new DatabaseBuilderVmOperationStore(input.pool, input.accountScope);
+  const vms = new BoatCloudBuilderVms({ client: input.client, billingOrg: input.billingOrg, operations,
+    resolveSource: builderVmSourceResolver(input.pool) });
+  const runtime = {
+    async select(tx: Tx): Promise<ComputerTemplateRuntime | null> {
+      const selected = await selectCloudRuntime(tx, input.qualificationMode);
+      return selected ? { baseImageId: selected.pin.baseImageId, baseCompatibilityId: selected.pin.baseCompatibilityId,
+        descriptor: selected.descriptor, objectKey: selected.objectKey } : null;
+    },
+    async validate(tx: Tx, pinned: ComputerTemplateRuntime): Promise<boolean> {
+      return await loadPinnedCloudRuntime(tx, {
+        baseImageId: pinned.baseImageId, baseCompatibilityId: pinned.baseCompatibilityId,
+        runtimeId: pinned.descriptor.runtimeId, manifestSha256: pinned.descriptor.manifestSha256,
+        engineProtocolVersion: pinned.descriptor.engineProtocolVersion, profile: "zeros-cloud-worker-v4",
+      }, input.qualificationMode) !== null;
+    },
+  };
+  return { operations, vms, runtime };
+}
