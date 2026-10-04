@@ -254,3 +254,20 @@ then (2) exactly one final line: the installer's closed diagnostic (§9/§16). T
 as on the legacy path and additionally requires the final installer diagnostic with `ok: true`. On failures before
 the helper runs, only the installer diagnostic is printed. The installer never rewrites or drops helper output and
 never forwards helper checks into its own diagnostic (§16).
+
+## 19. Runtime artifact store module (B5a owns; B5b consumes) — 2026-10-04
+`apps/control-plane/src/cloud-workspaces/runtime-artifact-store.ts`:
+```ts
+export type RuntimeArtifactStore = {
+  presignCreatePut(objectKey: string, bytes: number): Promise<{ url: string; expiresAt: string; headers: Record<string, string> }>;
+  head(objectKey: string): Promise<{ exists: boolean; bytes: number | null }>;
+  presignGet(objectKey: string, ttlSeconds: number): Promise<{ url: string; expiresAt: string }>; // ttl ≤ 900
+};
+export function runtimeArtifactObjectKey(runtimeId: string, archiveSha256: string): string; // runtime/v1/<id>/<sha>.tar.gz
+export function createRuntimeArtifactStore(config: RuntimeArtifactStoreConfig): RuntimeArtifactStore | null; // null when S3 not configured
+```
+Production wiring: B5a constructs ONE store in `apps/control-plane/src/index.ts` (from the existing
+CLOUD_WORKSPACE_S3_* config) and passes it to the publication routes; B5b adds a constructor/dependency parameter
+`runtimeArtifacts: RuntimeArtifactStore | null` to the Boat setup executor/runner and passes the same instance in
+index.ts (rebase conflict there is expected and trivial). v4 setup with a null store fails closed
+(`cloud_runtime_unavailable`).
