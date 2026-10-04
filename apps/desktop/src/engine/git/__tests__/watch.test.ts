@@ -284,9 +284,15 @@ describe("startGitWatcher", () => {
     watchers.push(watcher);
     await watcher.ready;
     changes.length = 0;
+    // Recursive removal can report a Git-state change before the root disappears.
+    // Force that ordering so an earlier notification cannot stand in for deletion.
+    await rm(join(root, ".git", "HEAD"));
+    await waitFor(() => changes.some((change) => change.workspaceIds.includes("missing-folder")));
+    expect(changes).toContainEqual({ workspaceIds: ["missing-folder"], coarse: false });
     await rm(root, { recursive: true });
-    await waitFor(() => changes.some((change) => change.workspaceIds.includes("missing-folder")), 1500);
-    expect(changes).toContainEqual(expect.objectContaining({ workspaceIds: ["missing-folder"], coarse: false, worktreeChanged: true }));
+    await vi.waitFor(() => {
+      expect(changes).toContainEqual(expect.objectContaining({ workspaceIds: ["missing-folder"], coarse: false, worktreeChanged: true }));
+    }, { timeout: 1500 });
   });
 
   it("invalidates on a plain working-tree create that never touches .git", async () => {
