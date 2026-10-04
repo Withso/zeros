@@ -6,6 +6,8 @@ from `main`, not from this branch; read these files with
 
 Reading order and authority:
 1. `design-amendments.md` — orchestrator amendments; OVERRIDE the designs where they conflict.
+   `contracts.md` — exact shared Phase B data contracts (manifest, archive, descriptor, installer
+   input, receipts, active-runtime descriptor, base compatibility, closed diagnostics).
 2. `design-b-runtime.md` — Phase B: runtime bundles, v4 base, `/zeros` facade, admission, pins.
 3. `design-cd-computer.md` — Phase C (Cloud Computer v2) and Phase D (admin workspace + tools).
 4. `plan.md` — approved plan; §8 locked product decisions, §9 internal-first phases.
