@@ -3,8 +3,10 @@
 V4 separates the immutable engine runtime from the Boat base image. The schemas
 in [cloud-runtime-bundle.ts](../../packages/protocol/src/cloud-runtime-bundle.ts),
 migration `0124_cloud_runtime_registry.sql`, and their tests are authoritative.
-This is the internal Alpha contract; registration, selection, publication,
-installation, qualification workers and lifecycle services are separate changes.
+This is the internal Alpha contract. The control plane implements OIDC
+publication, base registration, and staff registry operations. Workspace
+selection, installation, qualification workers and lifecycle services are
+separate changes.
 
 ## Identity and installed layout
 
@@ -168,8 +170,8 @@ retaining the existing live setup/engine readiness checks. Engine pins/witnesses
 and every setup attestation are immutable after insertion.
 
 NULL pins continue to mean legacy, never “latest”. Old rows are not backfilled.
-Revoked registry records remain referenced for audit and retirement. Online
-revocation/qualification checks, newest compatible selection, explicit upgrades
+Revoked registry records remain referenced for audit and retirement. Workspace
+admission/qualification checks, newest compatible selection, explicit upgrades
 and copying pins across lifecycle transitions belong to later services; these
 schemas grant none of that authority. Browser diagnostics accept v3 and v4
 profiles, with missing/unknown reports unavailable. Shipping capture Chromium
@@ -181,3 +183,109 @@ record the digest of their exact bytes. TypeScript and the Python bootstrap can
 consume the same inputs. Database behavior is covered by
 [runtime-schema.integration.test.ts](../../apps/control-plane/src/cloud-workspaces/runtime-schema.integration.test.ts)
 against a disposable PostgreSQL 18 database with `TEST_DATABASE_URL` set.
+
+## Publication and operator API
+
+Publication is disabled by default and can be enabled only on Alpha. The
+control plane verifies GitHub Actions OIDC with `jose` and a cached GitHub JWKS
+at `https://token.actions.githubusercontent.com/.well-known/jwks`. It requires
+RS256, issuer `https://token.actions.githubusercontent.com`, the configured
+audience, a case-insensitive repository match, `ref=refs/heads/main`, an exact
+`workflow_ref`, and the configured environment. Runtime publication accepts
+only the `release-alpha.yml` workflow with event `push`; base registration
+accepts only `cloud-runtime-base.yml` with event `workflow_dispatch`. Each
+workflow ref includes the configured repository and `@refs/heads/main` suffix.
+Run ID, number, attempt and source SHA come from verified claims. Body run
+values and runtime/base source commits must agree with those claims.
+Issued-at times may be at most 60 seconds ahead of the control plane's clock;
+token expiration remains enforced independently.
+
+| Environment variable | Default / behavior |
+| --- | --- |
+| `CLOUD_RUNTIME_PUBLICATION_ENABLED` | `false`; the three CI endpoints return 404 before auth or database work |
+| `CLOUD_RUNTIME_OIDC_AUDIENCE` | `zeros-control-plane-<deployment channel>` |
+| `CLOUD_RUNTIME_OIDC_REPOSITORY` | `Withso/zeros`; its spelling also determines the exact workflow ref |
+| `CLOUD_RUNTIME_OIDC_ENVIRONMENT` | `alpha`; an explicit empty value disables the optional environment check |
+| `CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE` | `legacy`; `legacy\|v4` is reported in release identity; workspace selection is implemented separately |
+
+Enabling publication requires the existing CP-held
+`CLOUD_WORKSPACE_S3_ENDPOINT`, `CLOUD_WORKSPACE_S3_BUCKET`,
+`CLOUD_WORKSPACE_S3_ACCESS_KEY_ID`, and `CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY`.
+`CLOUD_WORKSPACE_S3_REGION` defaults to `auto`. These credentials stay on the
+control plane; GitHub receives only an expiring upload capability. This block
+can be configured independently of workspace provisioning and ciphertext
+encryption keys. The endpoint must be an HTTPS origin without credentials,
+path, query or fragment.
+
+The separate runtime artifact adapter uses only
+`runtime/v1/<runtimeId>/<archiveSha256>.tar.gz` in that bucket. It does not use
+`CLOUD_WORKSPACE_S3_KEY_PREFIX` or workspace ciphertext deletion/encryption
+semantics. `presignCreatePut(objectKey, bytes)` signs `If-None-Match: *` and the
+exact `Content-Length`, and returns the required headers. The caller must send
+every returned header unchanged. PUT capabilities expire after 900 seconds;
+`presignGet(objectKey, ttlSeconds)` permits 1–900 seconds. `head(objectKey)`
+returns only existence and validated byte length. URLs never enter database
+rows, diagnostics, errors or logs. Existing object bytes cannot be replaced
+through a publication capability.
+
+`createRuntimeArtifactStore({s3})` returns the adapter or null when S3 is not
+configured; `runtimeArtifactObjectKey(runtimeId, archiveSha256)` validates and
+constructs its key. A missing object returns `{exists:false,bytes:null}`.
+`index.ts` constructs one runtime artifact store from the CP-held S3 config and
+passes it into the publication routes. Workspace runtime setup can consume the
+same instance separately.
+
+All three CI endpoints accept strict JSON, use
+`Authorization: Bearer <GitHub Actions OIDC JWT>`, return `Cache-Control:
+no-store`, cap requests at 192 KiB and return closed error codes. Existing
+maintenance and controlled-migration barriers still apply.
+
+| Endpoint | Request and result |
+| --- | --- |
+| `POST /internal/v1/runtime-bundles/publications` | `{descriptor, manifestHeader, releaseOrder, githubRunId, githubRunAttempt}` → `{objectKey, upload:{url,expiresAt,headers}\|null}`. `manifestHeader` is the manifest without `files`; `upload` is null only when HEAD reports the exact advertised size. No registry row is inserted. |
+| `POST /internal/v1/runtime-bundles/publications/complete` | **The same full request** → `{runtimeId,registered:true}`. The endpoint is stateless: it needs neither a prior call nor pending metadata. It revalidates descriptor/header/claims, HEADs the derived key, requires exact bytes, then inserts or validates the bundle and Alpha channel release atomically in system context. |
+| `POST /internal/v1/runtime-bases` | `{baseImageId,imageRef,sourceCommit,imageBuildSha256,storageMib,compatibilityRawB64,compatibilitySha256,compatibility?}` → `{baseImageId,baseCompatibilityId}`. `imageRef` uses `boat:<snapshot>@sha256:<imageBuildSha256>`. Canonical standard base64 decodes to at most 64 KiB of strict UTF-8 JSON; SHA-256 covers those original bytes. An optional parsed `compatibility` echo must agree with them. Contract and approved base image are inserted atomically. |
+
+The descriptor's runtime ID must equal `r1-<manifestSha256>`, its header source,
+ABI and protocol fields must agree, and registry byte counts must be positive
+safe integers. An exact replay preserves registration, approval and
+confirmation timestamps; conflicting immutable identities return 409. Missing
+or short/long artifacts cannot register a bundle. Completion sets the parent
+release's `confirmed_at` only once; the publishing job must run after hosted
+promotion succeeds. An identical rerun with the same run ID and number may
+use an equal or later verified attempt, preserving the first stored attempt
+as provenance, the release order and all registration timestamps. Completion
+retries smoke enqueue after a lost response or post-commit scheduling failure.
+An attempt older than the first stored attempt, different content/run/order,
+or a revoked identity still conflicts. A later release run may reference an
+identical bundle. Registration does not verify archive contents by downloading them;
+the installer verifies the archive and manifest digests before execution.
+
+After commit, completion calls `enqueueRuntimeSmokeQualification(runtimeId)`.
+Until the B7 worker is configured the hook returns `not_configured` and creates
+no qualification. Scheduling failures return a closed 503 after registration;
+retrying completion preserves the committed identity and retries the hook.
+The worker must make enqueue idempotent and recheck revocation. A registered
+runtime alone is never a qualified channel head.
+
+Staff endpoints use ordinary account authentication and the server's current
+`developer` or `platform_owner` role. `support_admin` and ordinary users receive
+404. These routes remain usable when CI publication is disabled:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /v1/internal/cloud-runtime/status` | Lists up to 100 bases, the last 20 runtimes, their kind/profile/approval/MCP/evidence-mode/timestamp metadata, and the current channel's last 20 releases. It lists releases until the separate selection service supplies channel-head eligibility. |
+| `POST /v1/internal/cloud-runtime/runtimes/:runtimeId/revoke` | Sets the bundle and all its qualifications' `revoked_at`, disables qualification/MCP approval, preserves existing revocation timestamps, and emits an audit line with only runtime ID and acting staff role. Registry identities and saved pins remain intact. |
+
+`GET /v1/release-identity` retains all v1 fields and readiness behavior. Optional
+`runtimeV4` metadata reports the configured new-workspace profile, newest
+approved non-revoked base ID/compatibility/source, newest registered runtime
+ID/source/revocation, and enabled/MCP-qualified/smoke kind counts for that
+runtime/base pair. It exposes no credentials or qualification evidence. An
+unreadable registry omits that optional metadata; unfinished qualification
+cannot delay existing release readiness.
+
+Local verification uses the artifact/OIDC/route suites, including the
+database-backed publication suite with `TEST_DATABASE_URL` pointing at a
+disposable PostgreSQL 18 database. Live OIDC publication belongs to the Alpha
+CI integration, and disposable-VM smoke qualification belongs to its worker.

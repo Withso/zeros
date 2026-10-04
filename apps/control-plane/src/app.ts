@@ -82,8 +82,10 @@ import {
 import { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService, releaseCanaryConfiguration, releaseCanaryDesignationConfiguration } from "./cloud-workspaces/release-canaries.js";
 import { createReleaseCanaryAdmissionRoutes, createReleaseCanaryDesignationRoutes } from "./cloud-workspaces/release-canary-routes.js";
 import { cloudAgentCredentialKeys } from "./cloud-workspaces/agent-credentials.js";
+import { createRuntimePublicationRoutes, createRuntimeStaffRoutes, RUNTIME_STAFF_PATH, type RuntimePublicationDependencies } from "./cloud-workspaces/runtime-publication-routes.js";
 
 export type CreateAppDependencies = {
+  runtimePublication?: RuntimePublicationDependencies;
   releaseCanaries?: DatabaseReleaseCanaryService;
   releaseCanaryDesignations?: DatabaseReleaseCanaryDesignationService;
   clientCompatibility?: ClientCompatibility;
@@ -119,6 +121,9 @@ function isCloudWorkspaceApiPath(requestPath: string): boolean {
     requestPath === "/internal/v2/cloud-workspaces" ||
     requestPath.startsWith("/internal/v2/cloud-workspaces/") ||
     requestPath.startsWith("/internal/v1/release-canaries/") ||
+    requestPath === "/internal/v1/runtime-bases" ||
+    requestPath.startsWith("/internal/v1/runtime-bundles/") ||
+    requestPath.startsWith("/v1/internal/cloud-runtime/") ||
     /^\/v1\/organizations\/[^/]+\/(?:cloud-workspaces|cloud-workspace-management|cloud-compute-credits|agent-connections)(?:\/|$)/u.test(
       requestPath,
     )
@@ -189,6 +194,14 @@ export function createApp(
       );
     });
   }
+  // CI has its own GitHub Actions issuer and workflow authority. Account JWTs
+  // cannot publish artifacts; staff operations remain behind account auth.
+  app.route("/", createRuntimePublicationRoutes(config, pool, dependencies.runtimePublication));
+  app.use(`${RUNTIME_STAFF_PATH}/*`, async (c, next) => {
+    c.header("Cache-Control", "no-store");
+    c.header("Pragma", "no-cache");
+    await next();
+  });
   const workosProvider =
     config.auth.provider === "workos" && config.workos
       ? (dependencies.workosProvider ??
@@ -548,6 +561,7 @@ export function createApp(
   // spam mutations or flood the audit log. Runs AFTER auth so it keys on the
   // verified user id, not the IP.
   app.use("/v1/*", rateLimit("global", 240, 60_000));
+  app.route("/", createRuntimeStaffRoutes(config, pool));
   if (releaseCanaryDesignations) app.route("/", createReleaseCanaryDesignationRoutes(releaseCanaryDesignations));
 
   // The larger fork-blob budget is available only after bearer verification

@@ -16,6 +16,44 @@ function harness(overrides: Partial<Config> = {}, ledger: Array<{ name: string; 
   return { app, readLedger };
 }
 describe("public release readiness", () => {
+  it("adds optional v4 metadata without changing any v1 readiness field", async () => {
+    const legacy = await (await harness().app.request("/v1/release-identity")).json();
+    const runtimeV4 = { newWorkspaceProfile: "v4" as const,
+      newestApprovedBase: { baseImageId: "zeros-v2-test-base", baseCompatibilityId: `bc1-${"c".repeat(64)}`, sourceCommit: "b".repeat(40) },
+      newestRegisteredRuntime: { runtimeId: `r1-${"d".repeat(64)}`, sourceCommit: sha, revoked: false },
+      qualificationSummary: { enabledKinds: 0, mcpQualifiedKinds: 0, smokeKinds: 0 } };
+    const readRuntimeIdentity = vi.fn(async () => runtimeV4);
+    const app = createReleaseIdentityRoutes({ ...config, cloudWorkspaceNewRuntimeProfile: "v4", cloudRuntimePublication: {
+      enabled: true, audience: "zeros-control-plane-alpha", repository: "Withso/zeros", environment: "alpha", s3: null,
+    } }, {} as pg.Pool, { sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest, readRuntimeIdentity });
+    const response = await app.request("/v1/release-identity");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ...legacy, runtimeV4 });
+    expect(readRuntimeIdentity).toHaveBeenCalledOnce();
+  });
+
+  it("omits unreadable v4 metadata without making v1 readiness depend on qualification", async () => {
+    const app = createReleaseIdentityRoutes({ ...config, cloudRuntimePublication: {
+      enabled: false, audience: "zeros-control-plane-alpha", repository: "Withso/zeros", environment: "alpha", s3: null,
+    } }, {} as pg.Pool, { sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest,
+      readRuntimeIdentity: async () => { throw new Error("https://private.example.test?token=private-sentinel"); } });
+    const response = await app.request("/v1/release-identity");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).not.toHaveProperty("runtimeV4");
+    expect(body).toMatchObject({ version: 1, ready: true });
+    expect(JSON.stringify(body).includes("private")).toBe(false);
+  });
+
+  it("does not query the runtime registry while migrations are pending", async () => {
+    const readRuntimeIdentity = vi.fn();
+    const app = createReleaseIdentityRoutes({ ...config, cloudRuntimePublication: {
+      enabled: false, audience: "zeros-control-plane-alpha", repository: "Withso/zeros", environment: "alpha", s3: null,
+    } }, {} as pg.Pool, { sourceSha: sha, readManifest: async () => manifest, readLedger: async () => [], readRuntimeIdentity });
+    expect((await app.request("/v1/release-identity")).status).toBe(503);
+    expect(readRuntimeIdentity).not.toHaveBeenCalled();
+  });
+
   it("requires the enabled three-kind MCP-qualified matrix on one exact runtime contract", () => {
     const rows = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"].map(credential_kind => ({
       credential_kind, runtime_contract_sha256: "c".repeat(64), profile: "zeros-cloud-worker-v3", enabled: true, mcp_qualified: true }));
