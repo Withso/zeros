@@ -1,11 +1,15 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   chmod,
   link,
   mkdir,
   mkdtemp,
+  open,
   readFile,
+  readdir,
+  rename,
   rm,
+  stat,
   symlink,
   truncate,
   writeFile,
@@ -20,6 +24,7 @@ import {
   createManifest,
   descriptorSchema,
   inventoryTree,
+  NODE_VERSION,
   parseManifest,
   sha256,
   validateFiles,
@@ -35,8 +40,14 @@ import { verifyRuntimeArchive } from "../cloud-workspace-validation/runtime-bund
 import {
   buildEnvironment,
   elfVersionNeeds,
+  prepareToolchain,
   versionAtMost,
 } from "../cloud-workspace-validation/runtime-bundle/toolchain";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
 
 const temporary: string[] = [];
 
@@ -79,6 +90,40 @@ describe("Linux toolchain contract", () => {
       else process.env[key] = previous;
     }
   });
+
+  it.each([false, true])(
+    "persists a Node download only after its official checksum matches (valid: %s)",
+    async (valid) => {
+      const work = await mkdtemp(
+        path.join(os.tmpdir(), "zeros-toolchain-unit-"),
+      );
+      temporary.push(work);
+      const name = `node-v${NODE_VERSION}-linux-x64.tar.xz`;
+      const base = `https://nodejs.org/dist/v${NODE_VERSION}/`;
+      const trusted = "authenticated fixture, deliberately not a tar archive";
+      const received = valid ? trusted : "modified download";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          if (url === `${base}SHASUMS256.txt`)
+            return new Response(`${sha256(Buffer.from(trusted))}  ${name}\n`);
+          if (url === base + name) return new Response(received);
+          throw new Error("unexpected download");
+        }),
+      );
+      await expect(
+        prepareToolchain(work, buildEnvironment(work)),
+      ).rejects.toThrow(valid ? /node_extract/ : /node_checksum/);
+      const tools = path.join(work, "tools");
+      if (valid) {
+        // Extraction fails on the synthetic payload, after the verified write.
+        expect(await readFile(path.join(tools, name), "utf8")).toBe(trusted);
+        expect((await stat(path.join(tools, name))).mode & 0o777).toBe(0o600);
+      } else {
+        expect(await readdir(tools)).toEqual([]);
+      }
+    },
+  );
 });
 
 async function fixture() {
@@ -135,6 +180,8 @@ async function writeManifestOnlyArchive(archivePath: string, bytes: Buffer) {
 }
 
 afterEach(async () => {
+  vi.mocked(open).mockReset();
+  vi.unstubAllGlobals();
   await Promise.all(
     temporary
       .splice(0)
@@ -676,6 +723,46 @@ describe("shared producer/consumer limits", () => {
 });
 
 describe("runtime archive", () => {
+  it("rejects archive symlinks instead of following them", async () => {
+    const { root, directory, bytes } = await fixture();
+    const original = path.join(directory, "original.tar.gz");
+    await writeRuntimeArchive(root, bytes, original);
+    const archivePath = path.join(directory, "linked.tar.gz");
+    await symlink(original, archivePath);
+    await expect(verifyRuntimeArchive({ archivePath })).rejects.toThrow();
+  });
+
+  it("checks that the opened archive is a regular file before reading", async () => {
+    const { directory } = await fixture();
+    await expect(
+      verifyRuntimeArchive({ archivePath: directory }),
+    ).rejects.toThrow(/archive_member_type/);
+  });
+
+  it("hashes and verifies the opened archive when its path is replaced", async () => {
+    const { root, directory, bytes, manifest } = await fixture();
+    const archivePath = path.join(directory, "original.tar.gz");
+    await writeRuntimeArchive(root, bytes, archivePath);
+    const expectedDigest = sha256(await readFile(archivePath));
+    const originalOpen = (
+      await vi.importActual<typeof import("node:fs/promises")>(
+        "node:fs/promises",
+      )
+    ).open;
+    vi.mocked(open).mockImplementationOnce(async (filename, flags, mode) => {
+      const file = await originalOpen(filename, flags, mode);
+      await rename(archivePath, path.join(directory, "opened.tar.gz"));
+      await writeFile(archivePath, "replacement path contents");
+      return file;
+    });
+    const verified = await verifyRuntimeArchive({ archivePath });
+    expect(verified.manifest).toEqual(manifest);
+    expect(verified.descriptor.archiveSha256).toBe(expectedDigest);
+    expect(await readFile(archivePath, "utf8")).toBe(
+      "replacement path contents",
+    );
+  });
+
   it.each([
     [0, false],
     [1, true],

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { constants, type ReadStream } from "node:fs";
 import {
   chmod,
   lstat,
@@ -8,7 +8,6 @@ import {
   open,
   readFile,
   rm,
-  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -28,7 +27,6 @@ import {
   MAX_PAX_BYTES,
   parseManifest,
   sha256,
-  sha256File,
   validMode,
   validPath,
   type ManifestEntry,
@@ -225,38 +223,62 @@ export async function verifyRuntimeArchive(options: {
   manifestBytes: Buffer;
   descriptor: RuntimeDescriptor;
 }> {
-  const archiveInfo = await stat(options.archivePath);
-  check(
-    archiveInfo.size >= 1 && archiveInfo.size <= MAX_ARCHIVE_BYTES,
-    "archive_size",
+  const file = await open(
+    options.archivePath,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
-  const archiveSha256 = await sha256File(options.archivePath);
-  const file = await open(options.archivePath, "r");
+  let compressed: ReadStream | undefined;
+  const uncompressed = createGunzip();
+  let created = false;
   try {
+    const archiveInfo = await file.stat();
+    check(archiveInfo.isFile(), "archive_member_type");
+    check(
+      archiveInfo.size >= 1 && archiveInfo.size <= MAX_ARCHIVE_BYTES,
+      "archive_size",
+    );
+    // Pin all checks and reads to this descriptor, even if its path is replaced.
+    const archiveHash = createHash("sha256");
+    const block = Buffer.alloc(64 * 1024);
+    let archiveBytes = 0;
+    while (true) {
+      const { bytesRead } = await file.read(
+        block,
+        0,
+        block.length,
+        archiveBytes,
+      );
+      if (bytesRead === 0) break;
+      archiveBytes += bytesRead;
+      check(archiveBytes <= MAX_ARCHIVE_BYTES, "archive_size");
+      archiveHash.update(block.subarray(0, bytesRead));
+    }
+    check(archiveBytes === archiveInfo.size, "archive_size");
+    const archiveSha256 = archiveHash.digest("hex");
     const { buffer, bytesRead } = await file.read(Buffer.alloc(10), 0, 10, 0);
     check(
       bytesRead === 10 &&
         buffer.equals(Buffer.from([31, 139, 8, 0, 0, 0, 0, 0, 2, 3])),
       "gzip_header",
     );
-  } finally {
-    await file.close();
-  }
-  if (options.descriptor) {
-    check(
-      descriptorSchema.safeParse(options.descriptor).success,
-      "descriptor_schema",
-    );
-    check(archiveSha256 === options.descriptor.archiveSha256, "archive_digest");
-    check(archiveInfo.size === options.descriptor.archiveBytes, "archive_size");
-  }
-  const compressed = createReadStream(options.archivePath);
-  const uncompressed = createGunzip();
-  compressed.on("error", (error) => uncompressed.destroy(error));
-  compressed.pipe(uncompressed);
-  const reader = new TarReader(uncompressed);
-  let created = false;
-  try {
+    if (options.descriptor) {
+      check(
+        descriptorSchema.safeParse(options.descriptor).success,
+        "descriptor_schema",
+      );
+      check(
+        archiveSha256 === options.descriptor.archiveSha256,
+        "archive_digest",
+      );
+      check(
+        archiveInfo.size === options.descriptor.archiveBytes,
+        "archive_size",
+      );
+    }
+    compressed = file.createReadStream({ start: 0, autoClose: false });
+    compressed.on("error", (error) => uncompressed.destroy(error));
+    compressed.pipe(uncompressed);
+    const reader = new TarReader(uncompressed);
     const first = parseHeader((await reader.read(512))!);
     check(
       first.path === "manifest.json" &&
@@ -391,8 +413,9 @@ export async function verifyRuntimeArchive(options: {
       await rm(options.extractTo, { recursive: true, force: true });
     throw error;
   } finally {
-    compressed.destroy();
+    compressed?.destroy();
     uncompressed.destroy();
+    await file.close();
   }
 }
 

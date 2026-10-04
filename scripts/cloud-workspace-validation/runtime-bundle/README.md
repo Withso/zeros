@@ -48,6 +48,12 @@ Protocol/ABI integers are 1–65,535; agent versions use the shared 64-character
 ASCII grammar. Compressed output is bounded while streaming, and the verifier
 checks archive size before hashing or decompressing it.
 
+Archive verification opens one regular file with `O_NOFOLLOW` and uses its
+descriptor for metadata checks, hashing and decompression, so path replacement
+cannot substitute a different archive between those operations. Node download
+bytes remain in memory until their SHA-256 matches the pinned distribution's
+official HTTPS `SHASUMS256.txt` entry; only verified bytes are written to disk.
+
 The payload preserves the production pnpm graph, installed Linux x64 optional
 SDK packages, peers and workspace packages, plus `tsx` and TypeScript. Its
 source slices and single append-only helper inventory live in `closure.ts`.

@@ -119,6 +119,8 @@ export async function prepareToolchain(
   );
   const archive = await download(base + name, 128 * 1024 * 1024);
   const nodeArchiveSha256 = sha256(archive);
+  // Keep downloaded bytes in memory until the pinned Node distribution's
+  // official HTTPS SHASUMS256 entry authenticates them; only then persist them.
   check(nodeArchiveSha256 === lines[0].slice(0, 64), "node_checksum");
   await writeFile(path.join(tools, name), archive, { flag: "wx", mode: 0o600 });
   await runTool(
