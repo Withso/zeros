@@ -160,7 +160,9 @@ export function useStickyBottom(
       const reachedReadingTarget = readingTarget !== undefined && Math.abs(
         scrollEl.scrollTop - Math.max(0, Math.min(readingTarget, scrollEl.scrollHeight - scrollEl.clientHeight)),
       ) <= 1;
-      if (readingNavigationRef.current && (!atBottom || insetRef.current > 0 || reachedReadingTarget)) {
+      const enteringCheckpointTail = insetRef.current > 0 && readingTarget !== undefined &&
+        readingTarget >= scrollEl.scrollHeight - insetRef.current - scrollEl.clientHeight;
+      if (readingNavigationRef.current && (!atBottom || enteringCheckpointTail || reachedReadingTarget)) {
         readingNavigationRef.current = false;
       }
       // A single layout burst can outgrow the remaining checkpoint blank

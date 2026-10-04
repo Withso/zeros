@@ -157,4 +157,19 @@ export async function runStickyBottomSmoke({ page, check }) {
   await grow();
   await expect.poll(gap).toBeLessThanOrEqual(1);
   check("Next-message navigation already at the tail preserves following", true);
+
+  await page.getByRole("button", { name: "Jump to: Latest prompt", exact: true }).press("Enter");
+  await expect.poll(tailOffset).toBeGreaterThanOrEqual(0);
+  await expect.poll(tailOffset).toBeLessThanOrEqual(16);
+  await page.waitForTimeout(800);
+  await page.evaluate(() => {
+    [...document.querySelectorAll("button")].find(button => button.textContent === "Jump to start").click();
+    requestAnimationFrame(() => {
+      const body = document.querySelector('[data-testid="body"]');
+      body.style.height = `${Number.parseFloat(body.style.height) + 900}px`;
+    });
+  });
+  await expect.poll(() => scroller.evaluate(el => el.scrollTop)).toBe(0);
+  await expect(atBottom).toHaveText("false");
+  check("Upward navigation out of checkpoint blank space survives concurrent growth", true);
 }
