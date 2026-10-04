@@ -10,6 +10,8 @@ import { serve } from "@hono/node-server";
 import {cloudAgentCredentialKeys} from "./cloud-workspaces/agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./cloud-workspaces/agent-executions.js";
 import {DatabaseCloudComputerV2Service} from "./cloud-workspaces/computer-v2.js";
+import { createComputerTemplateWorker } from "./cloud-workspaces/computer-template-worker-factory.js";
+import { sanitizeComputerTemplateLog } from "./cloud-workspaces/computer-template-logs.js";
 import {createRepositorySetupScriptWriter} from "./cloud-workspaces/computer-repository-setup.js";
 import { S3Client } from "@aws-sdk/client-s3";
 import { Agent as HttpsAgent } from "node:https";
@@ -121,6 +123,7 @@ let stopCloudReconciler = async () => {};
 let stopCloudProAllowances = async () => {};
 let stopCloudSetupWorker = async () => {};
 let stopCloudComputerBuildWorker = async () => {};
+let stopCloudComputerTemplateWorker = async () => {};
 let stopCloudRuntimeQualificationWorker = async () => {};
 let stopCloudComputerTemplateRetentionWorker = async () => {};
 let stopCloudAccessRevocationWorker = async () => {};
@@ -229,6 +232,9 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     outboxDeliveryEnabled: cloud.outbox !== null,
   });
   const github = new GithubCloudWorkspaceCredentialBroker(config.github!);
+  const computerV2 = new DatabaseCloudComputerV2Service(pool, cloud, { sanitizeLog: sanitizeComputerTemplateLog });
+  const computerTemplateWorker = migrationResult.status.state !== "controlled_migration_pending"
+    ? createComputerTemplateWorker(config, pool, runtimeArtifacts, github, computerV2) : null;
   cloudWorkspaceRepositoryResolver = new GithubCloudWorkspaceRepositoryResolver(
     { credential: github },
   );
@@ -464,7 +470,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     });
     cloudWorkspaceInternalSetupService = {
       ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos",undefined,
-        {computer:new DatabaseCloudComputerV2Service(pool,cloud),updateRepositorySetupScript:createRepositorySetupScriptWriter(pool)}, {
+        {computer:computerV2,updateRepositorySetupScript:createRepositorySetupScriptWriter(pool)}, {
           secretEncryptionKeys:cloud.settingsSecretEncryptionKeys,currentSecretEncryptionKeyVersion:cloud.currentSettingsSecretEncryptionKeyVersion,setupSecretKeyV1:cloud.settingsSecretKeyV1,
         })}:{}),
       commands: new DatabaseCloudWorkspaceCommandService({ pool, workosEnabled: config.auth.provider === "workos" }),
@@ -579,6 +585,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
 
     if (setupWorker) { stopCloudSetupWorker = setupWorker.start(); stopCloudComputerBuildWorker = createCloudComputerBuildWorker(pool, cloud).start(); }
     if (runtimeQualificationWorker) stopCloudRuntimeQualificationWorker = runtimeQualificationWorker.start();
+    if (computerTemplateWorker) stopCloudComputerTemplateWorker = computerTemplateWorker.start();
     if (
       config.deploymentChannel === "alpha" &&
       cloud.provider === "boat" &&
@@ -691,6 +698,7 @@ function shutdown(signal: string): void {
     githubWriteCleanupPending,
     stopCloudSetupWorker(),
     stopCloudComputerBuildWorker(),
+    stopCloudComputerTemplateWorker(),
     stopCloudRuntimeQualificationWorker(),
     stopCloudComputerTemplateRetentionWorker(),
     stopCloudAccessRevocationWorker(),

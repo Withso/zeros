@@ -1,8 +1,8 @@
 # Cloud Computer template builds
 
-Status: C3 uses the real B7 builder/journal and B5b runtime selection. Base
-payload integration and B10 restore qualification remain pending. The
-control-plane entrypoint does not start this worker yet. Tests cover C1 and the
+Status: C3 uses the real B7 builder/journal and B5b runtime selection. The Alpha
+control-plane entrypoint starts template builds when Boat and runtime artifacts
+are configured. Tests cover factory startup and shutdown, C1 and the
 B7 database journal, the actual adapter/helper transport, and fake provider and
 GitHub boundaries.
 This document describes the internal Alpha path; the legacy image worker is
@@ -180,19 +180,27 @@ selection happens inside the claim transaction; completion calls
 Construction does not allocate or start a worker. C3's additive migration is
 0128; B7 owns 0126 and D2 reserves 0127.
 
-Before enabling the worker:
+`createComputerTemplateWorker` supplies those adapters, the production GitHub
+broker and runtime artifact store, the configured build cap, and a shared C1
+service with `sanitizeComputerTemplateLog`. It returns null outside Alpha or
+without Boat settings or runtime artifacts. The runtime qualification worker's
+enablement flag does not gate template builds; its configured qualification
+mode still governs runtime selection and validation.
+
+`index.ts` constructs the worker outside database maintenance and pending
+controlled migrations, starts it with the other cloud background workers, and
+awaits its stop callback before closing the database pool on shutdown. The
+existing background-worker pause switch also pauses template builds. No new
+environment flags are required.
+
+Live qualification remains an operator task:
 
 1. Base payload: install both helpers and add them to the protected-file
    inventory; rebuild/register/qualify the base through the existing operator
    flow. Coordinate that base change with B10; C3 does not edit base boot files.
-2. Entrypoint: give C1 `sanitizeLog: sanitizeComputerTemplateLog`, then construct
-   the worker with the real GitHub broker, shared artifact store's `presignGet`
-   and `createComputerTemplateBoatAdapters`. Start/stop it only in the existing
-   Alpha/background-worker role, passing account scope, wallet and the configured
-   build cap. Until connected, v2 requests queue without running.
-3. Run the Alpha runbook below against the registered base. No live qualification
+2. Run the Alpha runbook below against the registered base. No live qualification
    is claimed by the local adapter, bootstrap or database tests.
-4. B10: qualify the §23 persistent binds, the workspace-time `/srv/zeros/repos`
+3. B10: qualify the §23 persistent binds, the workspace-time `/srv/zeros/repos`
    bind and empty-machine-id regeneration through an actual template restore.
 
 The projection suite uses the actual Linux launcher and native namespaces. CI
@@ -200,11 +208,10 @@ runs it through `scripts/ci/with-userns.sh`; missing sudo/bubblewrap support is 
 failure on Linux CI, not a silent loss of security coverage. The root-owned
 fixture remains private; only the elevated helper changes into it.
 
-The C6 deletion/retention track must also coordinate final organization erasure
-with provider cleanup before this worker is enabled on a shared database. C1's
-`deletion-lifecycle.ts` final-erasure loop currently removes v2 template/build
-records; C3's allocation journal must survive until VM deletion is confirmed.
-That lifecycle integration is outside this worker/helper change.
+The [template retention worker](computer-template-retention.md) owns ready-template
+retirement and organization erasure checks. Final erasure requires provider
+cleanup evidence before removing template/build journals; failed-build cleanup
+remains owned by the template build worker.
 
 ## Alpha live runbook (not run for this PR)
 
