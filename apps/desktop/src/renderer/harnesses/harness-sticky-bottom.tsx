@@ -8,6 +8,7 @@ import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useStickyBottom } from "../features/agent/use-sticky-bottom";
 
+const short = new URLSearchParams(location.search).has("short");
 const contained = new URLSearchParams(location.search).has("contained");
 
 function Fixture() {
@@ -51,7 +52,7 @@ function Fixture() {
             <div style={{ height: 600 + index * 30 }}>Historical turn {index + 1}</div>
           </div>
         ))}
-        <div data-testid="body" data-checkpoint-id="start" style={{ height: 6000 }}>Synthetic transcript<div style={{ height: 3000 }} /><div data-checkpoint-id="middle">Middle prompt</div></div>
+        <div data-testid="body" data-checkpoint-id="start" style={{ height: short ? 200 : 6000 }}>Synthetic transcript{!short && <><div style={{ height: 3000 }} /><div data-checkpoint-id="middle">Middle prompt</div></>}</div>
         <div style={{ height: revision * 100 }} />
         <div data-testid="tail" data-checkpoint-id="tail">Latest response</div>
         <button onClick={() => setExpanded(value => !value)}>Toggle detail</button>
@@ -60,7 +61,7 @@ function Fixture() {
       </div>
     </div>
     {new URLSearchParams(location.search).has("rail") && <CheckpointRail active={active} scrollEl={el}
-      checkpoints={[{ id: "start", text: "Start prompt" }, { id: "middle", text: "Middle prompt" }, { id: "tail", text: "Latest prompt" }]}
+      checkpoints={[{ id: "start", text: "Start prompt" }, ...(!short ? [{ id: "middle", text: "Middle prompt" }] : []), { id: "tail", text: "Latest prompt" }]}
       bottomSpacerPx={inset} onBottomSpacerChange={setInset} />}
     </div>
   </>;

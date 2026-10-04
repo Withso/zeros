@@ -161,6 +161,9 @@ export function useStickyBottom(
         scrollEl.scrollTop - Math.max(0, Math.min(readingTarget, scrollEl.scrollHeight - scrollEl.clientHeight)),
       ) <= 1;
       const enteringCheckpointTail = insetRef.current > 0 && readingTarget !== undefined &&
+        // A short chat's content tail can be above zero. Home still means
+        // reading upward out of its spacer, not following new output.
+        readingTarget >= scrollEl.scrollTop &&
         readingTarget >= scrollEl.scrollHeight - insetRef.current - scrollEl.clientHeight;
       if (readingNavigationRef.current && (!atBottom || enteringCheckpointTail || reachedReadingTarget)) {
         readingNavigationRef.current = false;
