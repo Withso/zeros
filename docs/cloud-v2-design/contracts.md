@@ -167,3 +167,16 @@ Checks include: `input_schema`, `input_too_large`, `artifact_host`, `artifact_ex
   `R/bin/node R/lib/zeros/runtime-self-test.mjs` (root, no input) → runs engine/native/containment
   self-checks that need no model credentials and prints one closed diagnostic line
   (component `qualification`). B3 includes it in the bundle when present; B7 implements it.
+
+## 12. Host marker and child-helper path derivation (answers to B2, 2026-10-04)
+- v4 host marker `/etc/zeros/cloud-worker.json` (base-owned, written by the B4 base build; it
+  cannot name runtime paths because R changes per installed runtime) contains exactly:
+  `{"backend":"cloud-worker","gid":10001,"profile":"zeros-cloud-worker-v4","uid":10001,"version":4}`.
+  The engine's read-only projected marker adds the concrete `toolchain` paths derived from the
+  active runtime descriptor (§7).
+- Children launched inside restricted views (coordinator/agent views that cannot see
+  `/etc/zeros` or `/run/zeros`) derive R from their pinned executable: `process.execPath` must be
+  exactly `R/bin/node` where R matches `/opt/zeros-infra/r1-<64 hex>`, is a real root-owned
+  directory not writable by group/other with no symlink in its ancestry; otherwise fail closed.
+  No environment-variable or argument override. Launchers always start such children with the
+  concrete `R/bin/node` path (never `/zeros/...` or `/opt/zeros/current/...`).
