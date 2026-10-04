@@ -21,7 +21,8 @@ vi.mock("../../team/team-store", () => ({
   getOrganizationStoreGeneration: () => transport.epoch,
   getTeamStoreState: () => ({ me: { user: { id: transport.user } } }),
 }));
-vi.mock("../../../platform/cloud-workspaces", () => ({
+vi.mock("../../../platform/cloud-workspaces", async (original) => ({
+  ...(await original<typeof import("../../../platform/cloud-workspaces")>()),
   cloudAccountRequest: transport.request,
 }));
 vi.mock("../../../platform/cloud-github", () => ({

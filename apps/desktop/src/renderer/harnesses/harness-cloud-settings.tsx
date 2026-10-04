@@ -35,6 +35,8 @@ import {
 } from "@zeros/protocol/provider-auth";
 import { Button, TooltipProvider } from "../shared/ui/primitives";
 import { setSetting } from "../platform/settings";
+import { selectActiveFolder, useWorkspaceStore } from "../state/workspace-store";
+import { CloudComputerAdminBadge } from "../features/settings/cloud-computer-admin-badge";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const organizationB = "33333333-3333-4333-8333-333333333333";
@@ -219,6 +221,12 @@ setActiveBridge({
   },
 } as unknown as RuntimeClient);
 installAccount(userA);
+const destinations: Array<{ page: string; folder: string | null; chatId: string | null }> = [];
+if (computerV2Mode) {
+  useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+  useWorkspaceStore.subscribe(state => destinations.push({ page: state.activePage, folder: selectActiveFolder(state), chatId: state.activeChatId }));
+  Object.assign(window, { cloudComputerDestinations: destinations });
+}
 function setOrganizationRole(role: "admin" | "member") {
   const me = getTeamStoreState().me;
   if (!me) return;
@@ -239,6 +247,9 @@ function Harness() {
   const [githubOpen, setGithubOpen] = useState(false);
   const organization = useActiveOrganization(),
     { me } = useTeams();
+  const folder = useWorkspaceStore(selectActiveFolder);
+  const chatId = useWorkspaceStore(state => state.activeChatId);
+  const workspaceOpen = useWorkspaceStore(state => state.activePage === "workspace");
   return (
     <TooltipProvider>
       <main className="bg-bg1 text-fg1 min-h-screen p-8">
@@ -294,14 +305,23 @@ function Harness() {
           <Button onClick={() => setSection("providers")}>
             Agents section
           </Button>
-          <Button onClick={() => setSection("computer")}>
+          <Button onClick={() => {
+            useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+            setSection("computer");
+          }}>
             Computer section
           </Button>
           <Button onClick={() => setSection("github")}>GitHub section</Button>
         </div>
+        {computerV2Mode && workspaceOpen && folder && (
+          <output aria-label="Opened admin workspace" data-folder={folder} data-chat-id={chatId} className="mb-6 flex items-center gap-2">
+            <span>Untitled conversation</span>
+            <CloudComputerAdminBadge folder={folder} />
+          </output>
+        )}
         {section === "providers" && <ProvidersPanel surfaceActive={active} />}
         {section === "computer" && (
-          <CloudComputerPanel surfaceActive={active} />
+          <CloudComputerPanel surfaceActive={active && !workspaceOpen} />
         )}
         {section === "github" && organization && me && (
           <CloudGithubSection

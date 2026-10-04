@@ -52,6 +52,7 @@ import {
   cloudComputerV2Stages,
 } from "./cloud-computer-v2-log";
 import { CloudComputerV2History } from "./cloud-computer-v2-history";
+import { CloudComputerV2AdminAction } from "./cloud-computer-v2-admin-action";
 import {
   startCloudComputerV2Polling,
   useCloudComputerV2Visible,
@@ -458,12 +459,13 @@ function CloudComputerV2Form({
             </Button>
           </SettingsRow>
         </SettingsList>
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" disabled>
-            Configure with an agent
-          </Button>
-          <span className="text-fg3 text-xs">Coming soon</span>
-        </div>
+        <CloudComputerV2AdminAction
+          scopeKey={scopeKey}
+          activeBuild={snapshot.active}
+          canManage={canManage}
+          active={active}
+          disabled={busy}
+        />
         {snapshot.unbuiltChanges && (
           <div
             className="bg-bg2 flex items-center justify-between gap-3 rounded-md p-3"

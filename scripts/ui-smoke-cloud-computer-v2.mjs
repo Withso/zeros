@@ -3,6 +3,7 @@ import { expect } from "@playwright/test";
 const orgA = "11111111-1111-4111-8111-111111111111";
 const orgB = "33333333-3333-4333-8333-333333333333";
 const installation = "22222222-2222-4222-8222-222222222222";
+const adminUser = "44444444-4444-4444-8444-444444444444";
 const now = "2026-10-04T10:00:00.000Z";
 const base = () => ({
   state: "not_built",
@@ -47,6 +48,7 @@ export const cloudComputerV2ReviewRegressions = [
   "history-conflict",
   "history-hidden-conflict",
   "external-first-build",
+  "admin-flow",
 ];
 
 // Real settings, dispatcher and dialog. Only the authenticated API is mocked;
@@ -70,6 +72,8 @@ export async function runCloudComputerV2Smoke({
   const olderPages = new Map();
   const incompleteLogs = new Set();
   const requests = [];
+  const adminWorkspaces = new Map(), adminReceipts = new Map();
+  let heldAdmin = null, holdNextAdmin = false, failNextAdmin = false;
   let conflictNextSave = false,
     heldState = null,
     holdNextState = false,
@@ -150,6 +154,32 @@ export async function runCloudComputerV2Smoke({
       result = cursor
         ? { ...computer, history: olderPages.get(cursor) }
         : computer;
+    } else if (path === `${root}/admin-workspaces`) {
+      if (input.expectedActiveVersion !== computer.active?.version)
+        return reply({ error: { code: "cloud_computer_changed", message: "Review the active version." } }, 409);
+      const key = JSON.stringify([org, input.expectedActiveVersion]);
+      const existing = adminWorkspaces.get(key);
+      const workspace = existing ?? {
+        id: `99999999-9999-4999-8999-${String(input.expectedActiveVersion).padStart(12, "0")}`,
+        organizationId: org, teamId: org, name: "Private configuration", createdBy: adminUser, ownerUserId: adminUser,
+        adminWorkspace: { creatorUserId: adminUser }, placement: "cloud", status: "provisioning",
+        capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+        repository: { forge: "github.com", owner: "example", name: "project", revision: "refs/heads/main" },
+        generation: { number: 1, architecture: "x86_64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 }, observedState: "provisioning", lastObservedAt: null },
+        version: 1, error: null, createdAt: now, updatedAt: now, deletedAt: null,
+      };
+      adminWorkspaces.set(key, workspace);
+      result = adminReceipts.get(input.operationId) ?? { workspace, reused: Boolean(existing), replayed: false };
+      adminReceipts.set(input.operationId, result);
+      if (holdNextAdmin) {
+        holdNextAdmin = false;
+        heldAdmin = { route, result: structuredClone(result) };
+        return;
+      }
+      if (failNextAdmin) {
+        failNextAdmin = false;
+        return route.abort("failed");
+      }
     } else if (path.startsWith(`${root}/`)) {
       const rowId = path.match(/\/builds\/([^/]+)/)?.[1];
       const history = [
@@ -355,6 +385,10 @@ export async function runCloudComputerV2Smoke({
       history: { builds: [latest], nextCursor: "older-v1" },
     });
     olderPages.set("older-v1", { builds: [build(1)], nextCursor: null });
+  }
+  if (regression === "admin-flow") {
+    const first = build(1);
+    Object.assign(states.get(orgA), { state: "active", revision: 1, active: first, latestBuild: first, history: { builds: [first], nextCursor: null } });
   }
 
   await page.goto(`${harnessBase}/harness-cloud-settings.html?computer-v2`);
@@ -604,6 +638,88 @@ export async function runCloudComputerV2Smoke({
           : "Older same-revision history revalidates on Refresh and confirms the affected build after an action conflict",
         true,
       );
+    } else if (regression === "admin-flow") {
+      const configure = () => button("Configure with an agent");
+      const destination = page.getByLabel("Opened admin workspace", { exact: true });
+      await expect(configure()).toBeEnabled();
+      await configure().hover();
+      await configure().focus();
+      expect(writes("/admin-workspaces")).toHaveLength(0);
+      await configure().click();
+      await expect(destination).toBeVisible();
+      await expect(destination.getByText("Admin", { exact: true })).toBeVisible();
+      const firstFolder = await destination.getAttribute("data-folder");
+      const firstChat = await destination.getAttribute("data-chat-id");
+      const published = await page.evaluate(() => window.cloudComputerDestinations.filter(row => row.page === "workspace"));
+      expect(published).toEqual([{ page: "workspace", folder: firstFolder, chatId: firstChat }]);
+      expect(writes("/admin-workspaces")[0].input).toMatchObject({ expectedActiveVersion: 1 });
+      await button("Computer section").click();
+      await configure().click();
+      await expect(destination).toBeVisible();
+      await expect(destination).toHaveAttribute("data-folder", firstFolder);
+      expect(await destination.getAttribute("data-chat-id")).not.toBe(firstChat);
+      expect(adminWorkspaces.size).toBe(1);
+      const second = build(2);
+      Object.assign(current, { revision: 2, active: second, latestBuild: second, history: { builds: [second, current.active], nextCursor: null } });
+      await button("Computer section").click();
+      await button("Refresh Cloud Computer").click();
+      await expect(page.getByText("Active v2", { exact: true })).toBeVisible();
+      await configure().click();
+      await expect(destination).toBeVisible();
+      expect(await destination.getAttribute("data-folder")).not.toBe(firstFolder);
+      expect(writes("/admin-workspaces").at(-1).input.expectedActiveVersion).toBe(2);
+      expect(adminWorkspaces.size).toBe(2);
+      await expect(button("New admin workspace")).toHaveCount(0);
+
+      await button("Computer section").click();
+      holdNextAdmin = true;
+      await configure().click();
+      await expect.poll(() => Boolean(heldAdmin)).toBe(true);
+      await button("Toggle settings activity").click();
+      await button("Toggle settings activity").click();
+      await heldAdmin.route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(heldAdmin.result) });
+      heldAdmin = null;
+      await expect(configure()).toBeEnabled();
+      await expect(destination).toHaveCount(0);
+
+      await button("Computer section").click();
+      holdNextAdmin = true;
+      await configure().click();
+      await expect.poll(() => Boolean(heldAdmin)).toBe(true);
+      await button("Toggle settings activity").click();
+      await button("Organization member").click();
+      const hiddenReads = requests.filter(row => row.method === "GET").length;
+      await heldAdmin.route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(heldAdmin.result) });
+      heldAdmin = null;
+      await page.clock.runFor(5000);
+      await expect(destination).toHaveCount(0);
+      expect(requests.filter(row => row.method === "GET")).toHaveLength(hiddenReads);
+      await button("Toggle settings activity").click();
+      await expect(configure()).toBeDisabled();
+      await button("Organization admin").click();
+      await expect(configure()).toBeEnabled();
+
+      holdNextAdmin = true;
+      await configure().click();
+      await expect.poll(() => Boolean(heldAdmin)).toBe(true);
+      await button("Organization B").click();
+      await expect(page.getByText("Not built yet", { exact: true })).toBeVisible();
+      await heldAdmin.route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(heldAdmin.result) });
+      heldAdmin = null;
+      await page.clock.runFor(1000);
+      await expect(destination).toHaveCount(0);
+      await expect(configure()).toBeDisabled();
+      await button("Organization A").click();
+      await expect(configure()).toBeEnabled();
+      failNextAdmin = true;
+      await configure().click();
+      await expect(page.getByRole("alert")).toContainText("Could not open the admin workspace");
+      const lostOperation = writes("/admin-workspaces").at(-1).input.operationId;
+      await configure().click();
+      await expect(destination).toBeVisible();
+      expect(writes("/admin-workspaces").at(-1).input.operationId).toBe(lostOperation);
+      expect(adminWorkspaces.size).toBe(2);
+      check("Configure shares creator reuse, follows a newly active version, publishes a fresh conversation atomically, and fences hidden/role/org races and lost replies", true);
     } else if (regression === "external-first-build") {
       await expect(
         page.getByText("Not built yet", { exact: true }),
@@ -709,7 +825,7 @@ export async function runCloudComputerV2Smoke({
   await expect(
     page.getByRole("button", { name: "Configure with an agent", exact: true }),
   ).toBeDisabled();
-  await expect(page.getByText("Coming soon", { exact: true })).toBeVisible();
+  await expect(page.getByText("Build computer before configuring it with an agent.", { exact: true })).toBeVisible();
 
   await page
     .getByRole("button", { name: "Open GitHub create", exact: true })

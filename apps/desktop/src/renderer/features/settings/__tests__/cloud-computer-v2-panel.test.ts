@@ -44,7 +44,8 @@ vi.mock("../internal-features", () => ({
     state.feature &&
     (state.role === "developer" || state.role === "platform_owner"),
 }));
-vi.mock("../../../platform/cloud-workspaces", () => ({
+vi.mock("../../../platform/cloud-workspaces", async (original) => ({
+  ...(await original<typeof import("../../../platform/cloud-workspaces")>()),
   cloudAccountRequest: vi.fn(),
 }));
 vi.mock("../../../state/use-cached-read", () => ({
@@ -111,7 +112,7 @@ describe("Cloud Computer v2 settings states", () => {
     expect(html).not.toContain(">Save draft<");
     expect(html).toMatch(/<button[^>]*disabled[^>]*>Build computer<\/button>/);
   });
-  it("offers the first default build in one action and keeps the Phase D control disabled", () => {
+  it("offers the first default build in one action and explains why agent configuration is disabled", () => {
     const html = render();
     expect(html).toContain("Not built yet");
     expect(html).toContain("Build computer");
@@ -119,8 +120,45 @@ describe("Cloud Computer v2 settings states", () => {
     expect(html).toMatch(
       /<button[^>]*disabled[^>]*>Configure with an agent<\/button>/,
     );
-    expect(html).toContain("Coming soon");
+    expect(html).toContain(
+      "Build computer before configuring it with an agent",
+    );
     expect(html).not.toContain(">Activate<");
+  });
+
+  it("enables agent configuration only for a successful ready active version and current org admins", () => {
+    state.snapshot = computerState({
+      state: "active",
+      active: computerBuild(),
+    });
+    expect(render()).toMatch(
+      /<button(?![^>]* disabled="")[^>]*>Configure with an agent<\/button>/,
+    );
+    for (const active of [
+      computerBuild({ state: "running" }),
+      computerBuild({ templateState: "retired" }),
+      null,
+    ]) {
+      state.snapshot = computerState({ active });
+      expect(render()).toMatch(
+        /<button[^>]* disabled=""[^>]*>Configure with an agent<\/button>/,
+      );
+    }
+    state.snapshot = computerState({
+      active: computerBuild(),
+      canManage: false,
+    });
+    expect(render()).toMatch(
+      /<button[^>]* disabled=""[^>]*>Configure with an agent<\/button>/,
+    );
+    state.snapshot = computerState({ active: computerBuild() });
+    state.organizationRole = "member";
+    expect(render()).toMatch(
+      /<button[^>]* disabled=""[^>]*>Configure with an agent<\/button>/,
+    );
+    expect(render(false)).toMatch(
+      /<button[^>]* disabled=""[^>]*>Configure with an agent<\/button>/,
+    );
   });
 
   it("shows progress, cursor logs and cancel while retaining the active version", () => {
