@@ -2,6 +2,8 @@
 Description=Verified Zeros runtime host
 Requires=zeros-boot.service
 After=zeros-boot.service network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -9,7 +11,8 @@ User=root
 UMask=0077
 ExecStart=/opt/zeros-bootstrap/dispatch.sh
 Restart=on-failure
-RestartSec=2
+RestartSec=5
+RestartPreventExitStatus=65
 KillMode=control-group
 TimeoutStopSec=20
 SendSIGKILL=yes

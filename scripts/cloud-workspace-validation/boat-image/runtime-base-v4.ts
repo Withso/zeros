@@ -43,14 +43,22 @@ export class BaseFailure extends Error {
 const ERROR_NAMES = new Set(["Error", "TypeError", "SyntaxError", "RangeError", "ReferenceError", "AggregateError", "AbortError", "TimeoutError"]);
 const ERROR_CODES = new Set(["ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED", "ERR_REQUIRE_ESM",
   "ENOENT", "EACCES", "EPERM", "ENOSPC", "EPIPE", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT"]);
-export function closedFailure(error: unknown): ClosedDiagnostic {
-  if (error instanceof BaseFailure) return error.diagnostic;
+function logErrorIdentity(error: unknown) {
   // Error messages, stacks and arbitrary names/codes can contain credentials.
   // Only fixed error identities supplement the closed stdout diagnostic.
   const detail = error as { name?: unknown; code?: unknown } | null;
   const name = error instanceof KitError ? "KitError" : typeof detail?.name === "string" && ERROR_NAMES.has(detail.name) ? detail.name : "UnknownError";
   const code = typeof detail?.code === "string" && ERROR_CODES.has(detail.code) ? ` (${detail.code})` : "";
   console.error(`[boat-image] ${name}${code}`);
+}
+function wrapFailure(error: unknown, stage: string, check: string): BaseFailure {
+  if (error instanceof BaseFailure) return error;
+  logErrorIdentity(error);
+  return new BaseFailure(stage, check);
+}
+export function closedFailure(error: unknown): ClosedDiagnostic {
+  if (error instanceof BaseFailure) return error.diagnostic;
+  logErrorIdentity(error);
   return new BaseFailure("validate_input", "diagnostic_missing").diagnostic;
 }
 export function requireBase(ok: unknown, stage: string, check: string): asserts ok {
@@ -201,7 +209,7 @@ export async function remote(deps: KitDeps, id: string, program: string, timeout
     "validate_input", "input_schema");
   try {
     return await deps.boat("POST", `/sandboxes/${id}/commands`, { body: { command: program, timeoutSeconds: timeout }, timeoutMs: (timeout + 30) * 1000 });
-  } catch { throw new BaseFailure("build", "provider_request"); }
+  } catch (error) { throw wrapFailure(error, "build", "provider_request"); }
 }
 
 export function pythonProbe(program: string, stage: string): string {
@@ -315,6 +323,7 @@ type BaseState = {
   name: string; maxUsedHours: number; starts: number; phase: "new" | "building" | "built" | "saved" | "verified" | "done";
   proof?: Awaited<ReturnType<typeof verifyBase>>; coldProof?: Awaited<ReturnType<typeof verifyBase>>;
   snapshot?: { id: string; sizeBytes: number }; live?: unknown; keepSnapshot?: boolean;
+  keptOnFailure?: { sandboxes: string[] };
 };
 const loadState = (deps: KitDeps): BaseState => {
   const value = read(stateFile(deps));
@@ -361,8 +370,7 @@ async function createOwned(deps: KitDeps, target: KitDeps, from?: string) {
     requireBase(named.status === 200, "create", "provider_request");
     return id;
   } catch (error) {
-    if (error instanceof BaseFailure) throw error;
-    throw new BaseFailure("create", "provider_request");
+    throw wrapFailure(error, "create", "provider_request");
   }
 }
 
@@ -484,6 +492,9 @@ export async function cleanupBase(deps: KitDeps, keepSnapshot: boolean) {
   const previous = fs.existsSync(path.join(deps.stateDir, "cleanup.json")) ? read(path.join(deps.stateDir, "cleanup.json")) : { sandboxes: [] };
   const result = { sandboxes: [...new Set([...previous.sandboxes, ...deleted])], snapshot: snapshotState, confirmed: failures.length === 0 };
   saveJson(path.join(deps.stateDir, "cleanup.json"), result);
+  if (state.keptOnFailure) updateState(deps, { keptOnFailure: result.confirmed ? undefined : {
+    sandboxes: state.keptOnFailure.sandboxes.filter(id => !result.sandboxes.includes(id)),
+  } });
   if (failures.length) throw new BaseFailure("cleanup", "cleanup_pending");
   return result;
 }
@@ -491,11 +502,13 @@ export async function cleanupBase(deps: KitDeps, keepSnapshot: boolean) {
 export type LiveCheck = (deps: KitDeps, sandboxId: string, maxUsedHours: number) => Promise<unknown>;
 export async function buildBase(options: Map<string, string>, deps: KitDeps, liveCheck?: LiveCheck) {
   const name = options.get("--name"), maxUsedHours = Number(options.get("--max-used-hours"));
+  const keepOnFailure = !!liveCheck && options.get("--keep-on-failure") === "true";
   requireBase(name && NAME.test(name) && Number.isFinite(maxUsedHours) && maxUsedHours > 0 &&
-    [...options.keys()].every(key => ["--name", "--max-used-hours"].includes(key)), "validate_input", "input_schema");
+    [...options.keys()].every(key => ["--name", "--max-used-hours"].includes(key) || key === "--keep-on-failure" && keepOnFailure),
+    "validate_input", "input_schema");
   let commit: string;
   try { commit = cleanCheckoutCommit(deps.repoRoot); }
-  catch { throw new BaseFailure("validate_input", "source_commit"); }
+  catch (error) { throw wrapFailure(error, "validate_input", "source_commit"); }
   let state: BaseState;
   if (fs.existsSync(stateFile(deps))) {
     state = loadState(deps);
@@ -577,10 +590,18 @@ export async function buildBase(options: Map<string, string>, deps: KitDeps, liv
     updateState(deps, { keepSnapshot: true });
     success = true;
   } catch (error) {
-    if (error instanceof BaseFailure) throw error;
-    throw new BaseFailure(stage, "provider_request");
+    throw wrapFailure(error, stage, "provider_request");
   } finally {
-    try { await cleanupBase(deps, success); }
+    try {
+      if (!success && keepOnFailure) {
+        const sandboxes = [...new Set([cloneDeps(deps), deps].map(target => pendingDelete(target) ?? builder(target))
+          .filter((id): id is string => id !== undefined))];
+        state = updateState(deps, { keptOnFailure: { sandboxes } });
+        for (const id of sandboxes) await retainEvidence(deps, id, state);
+      } else {
+        await cleanupBase(deps, success);
+      }
+    }
     finally { process.off("SIGTERM", cancel); process.off("SIGINT", cancel); }
   }
   return finishReceipt(deps);

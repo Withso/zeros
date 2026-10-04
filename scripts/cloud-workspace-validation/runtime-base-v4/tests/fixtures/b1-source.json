@@ -1,5 +1,5 @@
 {
-  "branch": "cloud-v2/b1-runtime-contracts",
-  "commit": "70e09312b566567494f3ced2a461e6abf894f88c",
+  "branch": "main",
+  "commit": "d04f1a86e14d1a07dfb2ae7dbaca249c4b6919c3",
   "path": "packages/protocol/src/__tests__/fixtures/cloud-runtime/"
 }

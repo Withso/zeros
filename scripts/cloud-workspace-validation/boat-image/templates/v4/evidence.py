@@ -75,7 +75,7 @@ try:
         data = command_tail(['/usr/bin/systemctl', '--no-pager', '--full', '--lines=64', 'status',
                              'zeros-boot.service', 'zeros-host.service'])
     elif ARTIFACT == 'journal':
-        data = command_tail(['/usr/bin/journalctl', '--no-pager', '--lines=400',
+        data = command_tail(['/usr/bin/journalctl', '--no-pager', '--lines=200',
                              '--unit=zeros-boot.service', '--unit=zeros-host.service'])
     else:
         raise ValueError()

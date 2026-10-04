@@ -546,6 +546,7 @@ export function parseArgs(argv: string[]) {
   const operands: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     if (!rest[i].startsWith("--")) operands.push(rest[i]);
+    else if (command === "runtime-base-v4" && action === "live-check" && rest[i] === "--keep-on-failure") options.set(rest[i], "true");
     else if (rest[i + 1] === undefined || rest[i + 1].startsWith("--")) throw new KitError(`${rest[i]} needs a value`);
     else options.set(rest[i], rest[++i]);
   }

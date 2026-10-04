@@ -249,6 +249,7 @@ export async function liveCheck(options: Map<string, string>, deps: KitDeps) {
   const r2 = credentials(deps.repoRoot); // Reject missing/wrong-channel material before allocating anything.
   return buildBase(options, deps, async (profile, sandboxId, maxUsedHours) => {
     let evidence: Record<string, unknown>;
+    let success = false;
     try {
       const { directory, nodeArchiveSha256 } = await syntheticArchives(profile);
       const state = JSON.parse(fs.readFileSync(path.join(profile.stateDir, "state.json"), "utf8"));
@@ -292,10 +293,13 @@ export async function liveCheck(options: Map<string, string>, deps: KitDeps) {
         "install", "runtime_switch");
       evidence = { mode: "synthetic", agentQualified: false, sandboxId, nodeArchiveSha256,
         firstInstall, first, resumed, secondInstall, second, corruptedInstall, currentUnchanged: true };
+      success = true;
     } finally {
-      // Even an uncertain upload is deleted, with HEAD confirming absence.
-      await cleanupLiveObjects(profile);
-      fs.rmSync(path.join(profile.stateDir, "synthetic"), { recursive: true, force: true });
+      if (success || options.get("--keep-on-failure") !== "true") {
+        // Even an uncertain upload is deleted, with HEAD confirming absence.
+        await cleanupLiveObjects(profile);
+        fs.rmSync(path.join(profile.stateDir, "synthetic"), { recursive: true, force: true });
+      }
     }
     return { ...evidence!, objects: JSON.parse(fs.readFileSync(objectsFile(profile), "utf8")) };
   });

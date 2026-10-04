@@ -53,6 +53,8 @@ FACADE_LINKS = (("/zeros", FACADE), (FACADE + "/bin", "current/bin"),
                 (FACADE + "/worker", "current/worker"), (FACADE + "/manifest.json", "current/manifest.json"),
                 (FACADE + "/logs", "/srv/zeros/log"), (FACADE + "/state", "/srv/zeros/state"))
 CGROUP = "/sys/fs/cgroup/system.slice/zeros-host.service"
+HOST_LIMITS = (("cpu.max", "100000 100000"), ("memory.max", str(512 * 1024**2)),
+               ("pids.max", "256"), ("memory.oom.group", "1"))
 ENTRYPOINTS = {"node": "bin/node", "setup": "lib/zeros/setup-cloud-workspace.mjs",
                "startEngine": "bin/start-engine.sh", "supervisor": "lib/zeros/cloud-worker-supervisor.mjs",
                "selfTest": "lib/zeros/runtime-self-test.mjs"}
@@ -66,23 +68,47 @@ INSTALLER_CHECKS = frozenset(("input_schema", "input_too_large", "artifact_host"
     "root_ownership", "hard_link", "pointer_publish", "host_start", "setup_exit", "timeout",
     "process_signal", "diagnostic_missing", "lock_busy", "base_compatibility", "cgroup_retired"))
 CHECKS = INSTALLER_CHECKS | frozenset(("uid_map", "apparmor", "cgroup_controllers"))
+PERMANENT_DISPATCH_CHECKS = frozenset(("base_compatibility", "bootstrap_protocol", "manifest_digest", "manifest_schema",
+    "archive_paths", "file_inventory", "file_digest", "file_mode", "symlink_escape", "root_ownership", "hard_link",
+    "cache_conflict", "pointer_publish", "cgroup_controllers"))
 STAGE_CHECK = dict(zip(STAGES, ("input_schema", "lock_busy", "insufficient_space", "cache_conflict",
     "http_status", "archive_digest", "manifest_schema", "archive_paths", "file_inventory",
     "cache_conflict", "pointer_publish", "host_start", "setup_exit", "diagnostic_missing")))
+
+
+def failure_site(frame, line):
+    name = os.path.basename(frame.f_code.co_filename)
+    source = {"bootstrap.py": "bootstrap", "verify.py": "verify", "sanitize.py": "sanitize", "<stdin>": "probe"}.get(name)
+    if source:
+        function = frame.f_code.co_name
+        return {"source": source, "function": function if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,80}", function) else "anonymous",
+                "line": line}
 
 
 def failure_sites(frame):
     """Source locations only: never frame locals, source text or input paths."""
     sites = []
     while frame is not None and len(sites) < 12:
-        name = os.path.basename(frame.f_code.co_filename)
-        source = {"bootstrap.py": "bootstrap", "verify.py": "verify", "sanitize.py": "sanitize", "<stdin>": "probe"}.get(name)
-        if source:
-            function = frame.f_code.co_name
-            sites.append({"source": source, "function": function if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,80}", function) else "anonymous",
-                          "line": frame.f_lineno})
+        site = failure_site(frame, frame.f_lineno)
+        if site:
+            sites.append(site)
         frame = frame.f_back
     return sites
+
+
+def exception_sites(error):
+    # Traceback line numbers preserve the raising site even after the caller
+    # reaches its exception handler. Unrelated library frames are excluded.
+    sites = deque(maxlen=12)
+    trace = error.__traceback__
+    while trace is not None:
+        site = failure_site(trace.tb_frame, trace.tb_lineno)
+        # Report the enclosing named function for compiler-generated
+        # comprehensions; their anonymous names hide the useful call site.
+        if site and trace.tb_frame.f_code.co_name not in ("<genexpr>", "<listcomp>", "<dictcomp>", "<setcomp>"):
+            sites.appendleft(site)
+        trace = trace.tb_next
+    return list(sites)
 
 
 class Failure(Exception):
@@ -537,18 +563,17 @@ class Bootstrap:
     def log_failure(self, error, stage=None):
         """Bounded root-only assertion evidence; the public diagnostic is unchanged."""
         try:
-            name = type(error).__name__
+            cause = error.__cause__ if isinstance(error, Failure) and error.__cause__ is not None else error
+            name = type(cause).__name__
             allowed = {"Failure", "OSError", "FileNotFoundError", "PermissionError", "TimeoutError", "ValueError",
-                       "TypeError", "KeyError", "AssertionError", "RuntimeError"}
-            sites = error.sites if isinstance(error, Failure) else []
-            if not sites and error.__traceback__ is not None:
-                traceback = error.__traceback__
-                while traceback.tb_next is not None:
-                    traceback = traceback.tb_next
-                sites = failure_sites(traceback.tb_frame)
+                       "TypeError", "KeyError", "AssertionError", "RuntimeError", "NotADirectoryError", "IsADirectoryError",
+                       "FileExistsError", "BlockingIOError", "InterruptedError", "BrokenPipeError"}
+            sites = cause.sites if isinstance(cause, Failure) else exception_sites(cause)
             value = {"schema": "zeros.bootstrap-private-failure/v1", "stage": stage or self.stage,
                      "error": name if name in allowed else "Exception", "sites": sites,
                      "failedChecks": error.checks if isinstance(error, Failure) else ["diagnostic_missing"]}
+            if isinstance(cause, OSError) and type(cause.errno) is int and cause.errno in errno.errorcode:
+                value["errno"] = {"name": errno.errorcode[cause.errno], "number": cause.errno}
             require(value["stage"] in (*STAGES, "verify", "sanitize"), "diagnostic_missing")
             with self.directory("/run/zeros", create=True, mode=0o700) as directory:
                 require(stat.S_IMODE(os.fstat(directory).st_mode) == 0o700, "file_mode")
@@ -649,8 +674,8 @@ class Bootstrap:
             self.link(name, target)
 
     def wait_ready(self):
-        # A command-ready VM and an active Type=simple host do not imply that
-        # the boot oneshot has completed. Probe only after that boundary.
+        # Wait for the boot oneshot and dispatch's cgroup initialization;
+        # an active Type=simple unit alone does not acknowledge either.
         self.host.wait_ready()
         with self.lock("runtime-publication.lock"):
             require(self.read("/run/zeros/boot-id", 64, 0o600).decode() == self.boot_id(), "host_start")
@@ -914,6 +939,12 @@ class Bootstrap:
                             os.fsync(source)
                         self.fault("runtime_renamed")
                         self.publish_receipt(descriptor, manifest)
+                        # Exercise the same installed-tree/receipt path as
+                        # dispatch before publishing current. Full hashes were
+                        # already checked in staging; keep dispatch's closure
+                        # recheck here so a post-rename I/O failure cannot switch.
+                        self.stage = "verify_tree"
+                        self.verify_runtime(runtime_id, full=False, descriptor=descriptor)
                 finally:
                     self.clean_staging()
             self.switch(runtime_id)
@@ -1109,9 +1140,21 @@ class SystemHost:
             boot, host = units["zeros-boot.service"], units["zeros-host.service"]
             if boot["ActiveState"] == host["ActiveState"] == "active" and boot["SubState"] == "exited" and host["SubState"] == "running":
                 require(all(unit["Result"] == "success" and unit["ExecMainStatus"] == "0" for unit in units.values()), "host_start")
-                return
+                if self.cgroup_ready():
+                    return
             time.sleep(0.2)
         raise Failure("timeout", code=124, timed_out=True)
+
+    @staticmethod
+    def cgroup_ready():
+        scope = Path(CGROUP)
+        try:
+            return (not (scope / "cgroup.procs").read_text().strip() and
+                    {"cpu", "memory", "pids"} <= set((scope / "cgroup.subtree_control").read_text().split()) and
+                    all((scope / "host" / name).read_text().strip() == value for name, value in HOST_LIMITS))
+        except FileNotFoundError:
+            # Controller files may not exist until dispatch enables them.
+            return False
 
     @staticmethod
     def control(*args):
@@ -1146,12 +1189,12 @@ class SystemHost:
         require(not (scope / "cgroup.procs").read_text().strip(), "cgroup_controllers")
         require({"cpu", "memory", "pids"} <= set((scope / "cgroup.controllers").read_text().split()), "cgroup_controllers")
         (scope / "cgroup.subtree_control").write_text("+cpu +memory +pids")
-        for name, value in (("cpu.max", "100000 100000"), ("memory.max", str(512 * 1024**2)),
-                            ("pids.max", "256"), ("memory.oom.group", "1")):
+        for name, value in HOST_LIMITS:
             (scope / "host" / name).write_text(value)
         return CGROUP
 
     def start(self, app, runtime_id):
+        require(self.control("reset-failed").returncode == 0, "host_start")
         require(self.control("start").returncode == 0, "host_start")
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
@@ -1281,11 +1324,17 @@ def main(argv):
             return 0  # The status probe contract is exactly one JSON line.
     except Failure as error:
         failure, code = error, error.code
+        if argv == ["dispatch"] and code == 1 and set(error.checks) <= PERMANENT_DISPATCH_CHECKS:
+            # EX_DATAERR is excluded from systemd restarts. The unit remains
+            # failed and retains its closed diagnostic until an explicit start.
+            failure.code = code = 65
     except OSError as error:
         failure = Failure("insufficient_space" if error.errno == errno.ENOSPC else STAGE_CHECK.get(app.stage, "diagnostic_missing"))
+        failure.__cause__ = error
         code = 1
-    except BaseException:
+    except BaseException as error:
         failure, code = Failure(STAGE_CHECK.get(app.stage, "diagnostic_missing")), 1
+        failure.__cause__ = error
     finally:
         signal.alarm(0)
     if failure is not None:

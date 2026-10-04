@@ -1,16 +1,17 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sshBoundary from "../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
-import { builderCommand, KitError, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
-import { basePayload, closedFailure, parseProbe, resumeOwned, v4Command, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
+import { builderCommand, KitError, main, parseArgs, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
+import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, resumeOwned, v4Command, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
 import { cleanupLiveObjects, installOverSsh, presignGet, signedHeaders, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
 
 const scratch: string[] = [];
 const temp = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-base-v4-")); scratch.push(dir); return dir; };
-afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const BASE = path.join(ROOT, "scripts/cloud-workspace-validation/runtime-base-v4");
 
@@ -156,6 +157,37 @@ describe("runtime-base-v4 profile", () => {
     expect(stdout).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { at: "budget", error: Object.assign(new TypeError("private-canary"), { code: "ECONNRESET" }), identity: "TypeError (ECONNRESET)", stage: "create" },
+    { at: "create", error: new KitError("private-canary"), identity: "KitError", stage: "create" },
+    { at: "remote", error: Object.assign(new Error("private-canary"), { code: "ERR_MODULE_NOT_FOUND" }), identity: "Error (ERR_MODULE_NOT_FOUND)", stage: "build" },
+  ])("retains safe error identity through the build CLI failure path at $at", async ({ at, error, identity, stage }) => {
+    const f = fullKit(), original = f.d.boat;
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    let injected = false;
+    f.d.boat = async (method, route, options) => {
+      if (!injected && (at === "budget" && route.startsWith("/limits") ||
+          at === "create" && method === "PATCH" || at === "remote" && route.endsWith("/commands"))) {
+        injected = true;
+        throw error;
+      }
+      return original(method, route, options);
+    };
+    // Follow the real CLI's catch path with the exception produced by buildBase,
+    // including its provider wrappers and cleanup, rather than a direct error.
+    await v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d)
+      .catch(failure => console.log(JSON.stringify(closedFailure(failure))));
+    expect(injected).toBe(true);
+    expect(stderr).toHaveBeenCalledExactlyOnceWith(`[boat-image] ${identity}`);
+    expect(stdout).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      schema: "zeros.diagnostic/v1", component: "base", stage, ok: false, exitCode: 1, timedOut: false, failedChecks: ["provider_request"],
+    }));
+    expect(JSON.stringify([...stderr.mock.calls, ...stdout.mock.calls])).not.toContain("private-canary");
+    expect(f.machines.size).toBe(0);
+    if (at === "budget") expect(f.requests).toHaveLength(0);
+  });
+
   it("creates from stock with the kit's budget and idempotency journal", async () => {
     const d = deps();
     const options = new Map([["--profile", "runtime-base-v4"], ["--max-used-hours", "2"]]);
@@ -262,6 +294,79 @@ describe("runtime-base-v4 profile", () => {
     const cleanup = JSON.parse(fs.readFileSync(path.join(f.d.stateDir, "runtime-base-v4/cleanup.json"), "utf8"));
     expect(cleanup).toMatchObject({ confirmed: true, snapshot: "deleted", sandboxes: ["bx_v4test2", "bx_v4test1"] });
   }, 30_000);
+
+  it("accepts the retention flag only for the operator live-check command", async () => {
+    const parsed = parseArgs(["runtime-base-v4", "live-check", "--keep-on-failure", "--name", "zeros-v2-test-base-v4-1"]);
+    expect(parsed.options.get("--keep-on-failure")).toBe("true");
+    expect(parsed.operands).toEqual([]);
+    expect(() => parseArgs(["builder", "create", "--keep-on-failure"])).toThrow(KitError);
+    const d = deps();
+    await expect(v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"], ["--keep-on-failure", "true"]]), [], d))
+      .rejects.toMatchObject({ diagnostic: { stage: "validate_input", failedChecks: ["input_schema"] } });
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it.each([false, true])("keeps live-check failure resources only when explicitly requested: %s", async keep => {
+    const f = fullKit();
+    vi.stubEnv("ZEROS_R2_ALPHA_ENDPOINT", `https://${"a".repeat(32)}.r2.cloudflarestorage.com`);
+    vi.stubEnv("ZEROS_R2_ALPHA_BUCKET", "zeros-cloud-workspaces-alpha");
+    vi.stubEnv("ZEROS_R2_ALPHA_ACCESS_KEY_ID", "fixture-access");
+    vi.stubEnv("ZEROS_R2_ALPHA_SECRET_ACCESS_KEY", "fixture-secret");
+    const archive = execFileSync("python3", ["-I", "-c", `import io,sys,tarfile
+out=io.BytesIO()
+with tarfile.open(fileobj=out,mode='w:xz') as archive:
+ node=tarfile.TarInfo('node-v22.23.1-linux-x64/bin/node')
+ node.size=4
+ archive.addfile(node,io.BytesIO(b'test'))
+sys.stdout.buffer.write(out.getvalue())`]);
+    const digest = createHash("sha256").update(archive).digest("hex");
+    const request = vi.fn(async (url: string, options?: RequestInit) => {
+      if (url.endsWith("/SHASUMS256.txt")) return new Response(`${digest}  node-v22.23.1-linux-x64.tar.xz\n`);
+      if (url.endsWith("/node-v22.23.1-linux-x64.tar.xz")) return new Response(new Uint8Array(archive));
+      if (options?.method === "PUT" || options?.method === "DELETE") return new Response(null, { status: 200 });
+      if (options?.method === "HEAD") return new Response(null, { status: 404 });
+      throw new Error("unexpected fixture request");
+    });
+    vi.stubGlobal("fetch", request);
+    vi.spyOn(sshBoundary, "openBoatBootstrapChannel").mockRejectedValue(new Error("private-canary"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(main(["runtime-base-v4", "live-check", "--name", "zeros-v2-test-base-v4-1", "--max-used-hours", "2",
+      ...(keep ? ["--keep-on-failure"] : [])], f.d)).rejects.toMatchObject({ diagnostic: { stage: "install", failedChecks: ["provider_request"] } });
+    const profile = profileDeps(f.d);
+    const stateFile = path.join(profile.stateDir, "state.json");
+    if (keep) {
+      expect(JSON.parse(fs.readFileSync(stateFile, "utf8")).keptOnFailure).toEqual({ sandboxes: ["bx_v4test2", "bx_v4test1"] });
+      expect(fs.statSync(stateFile).mode & 0o777).toBe(0o600);
+      expect(f.machines.size).toBe(2);
+      expect(f.getSnapshot()).toBeDefined();
+      expect(f.requests.filter(request => request.method === "DELETE")).toHaveLength(0);
+      expect(request.mock.calls.filter(([, options]) => options?.method === "DELETE")).toHaveLength(0);
+      expect(fs.existsSync(path.join(profile.stateDir, "cleanup.json"))).toBe(false);
+      expect(fs.existsSync(path.join(profile.stateDir, "synthetic"))).toBe(true);
+      expect(JSON.parse(fs.readFileSync(path.join(profile.stateDir, "r2-objects.json"), "utf8")).every((object: any) => !object.deleted)).toBe(true);
+      await expect(v4Command("cleanup", new Map(), [], f.d)).resolves.toMatchObject({ confirmed: true, snapshot: "deleted" });
+    }
+    expect(f.machines.size).toBe(0);
+    expect(f.getSnapshot()).toBeUndefined();
+    expect(JSON.parse(fs.readFileSync(stateFile, "utf8")).keptOnFailure).toBeUndefined();
+    expect(request.mock.calls.filter(([, options]) => options?.method === "DELETE")).toHaveLength(3);
+    for (const id of ["bx_v4test1", "bx_v4test2"]) {
+      const journal = path.join(profile.stateDir, "private", `m2-build-${"1".repeat(32)}`, id, "journal.log");
+      expect(fs.statSync(journal).mode & 0o777).toBe(0o600);
+      expect(fs.readFileSync(journal, "utf8")).toBe("fixture evidence\n");
+    }
+    const probes = f.requests.filter(request => request.route.endsWith("/commands") && request.body.command.includes('ARTIFACT = "journal"'));
+    expect(probes).toHaveLength(keep ? 4 : 2);
+    for (const probe of probes) expect(probe.body.command).toContain("'--lines=200'");
+  }, 30_000);
+
+  it("still cleans up a successful operator run when keep-on-failure is enabled", async () => {
+    const f = fullKit();
+    await expect(buildBase(new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"], ["--keep-on-failure", "true"]]),
+      profileDeps(f.d), async () => ({ mode: "synthetic" }))).resolves.toMatchObject({ cleanup: { confirmed: true, snapshot: "retained" } });
+    expect(f.machines.size).toBe(0);
+    expect(f.getSnapshot()).toBeDefined();
+  });
 
   it("preserves owned builder timeouts and cleans up before returning a closed failure", async () => {
     const f = fullKit(), original = f.d.boat;
@@ -480,7 +585,8 @@ describe("runtime-base-v4 profile", () => {
   it("keeps marker, units, facade and wrappers on the approved contracts", () => {
     expect(JSON.parse(fs.readFileSync(path.join(BASE, "cloud-worker.json"), "utf8"))).toEqual({ backend: "cloud-worker", gid: 10001, profile: "zeros-cloud-worker-v4", uid: 10001, version: 4 });
     const host = fs.readFileSync(path.join(BASE, "zeros-host.service"), "utf8");
-    for (const line of ["Delegate=cpu memory pids", "DelegateSubgroup=host", "KillMode=control-group", "TimeoutStopSec=20", "Restart=on-failure"]) expect(host).toContain(line);
+    for (const line of ["Delegate=cpu memory pids", "DelegateSubgroup=host", "KillMode=control-group", "TimeoutStopSec=20", "Restart=on-failure",
+      "RestartSec=5", "RestartPreventExitStatus=65", "StartLimitIntervalSec=60", "StartLimitBurst=3"]) expect(host).toContain(line);
     expect(fs.readFileSync(path.join(BASE, "zeros.conf"), "utf8")).toContain("L /zeros - - - - /opt/zeros");
     for (const name of ["boot.sh", "dispatch.sh", "install-runtime.sh"]) {
       const file = path.join(BASE, name);

@@ -28,7 +28,10 @@ link resolution is bounded to 64 links and checks lexical containment separately
 Verification and staging cleanup are iterative, including cleanup of deeper
 partial trees left by an earlier installer. Every listed entrypoint must be a
 regular file; `selfTest` may be omitted. Receipt `fileCount` counts regular files.
-Files/directories are flushed before the runtime directory is renamed. A cached
+Files/directories are flushed before the runtime directory is renamed. Before
+switching `current`, the installer also runs dispatch's installed-tree and
+receipt verifier against the final location, retaining full hashing in staging.
+A cached
 runtime is fully re-hashed; a missing receipt is reconstructed only from the
 fresh descriptor after complete verification. A conflicting cache fails closed.
 
@@ -39,6 +42,13 @@ permission to start an old engine against a new generation. Dispatch checks all
 file stats and hashes `bin/`, `lib/zeros/`, `worker/dist-engine/` and the manifest,
 then publishes a fresh boot/session descriptor and execs the supervisor. An
 empty base keeps the host alive in `waiting_for_runtime`.
+
+Deterministic dispatch verification failures exit 65 and are excluded from
+automatic restarts. Other failures have a five-second delay and a three-start
+limit within 60 seconds. The status probe then reports `hostState=failed` in
+its existing schema; the closed check is in the unit's final diagnostic and
+private failure record. A later verified install explicitly resets the unit's
+failed/start-limit state before starting its selected runtime.
 
 Every installer/boot exit emits a closed diagnostic. The status probe is the
 contract's exception: exactly one `zeros.base-status/v1` JSON line. A killed
@@ -55,6 +65,9 @@ Bootstrap failures also record the fixed source/function/line of each assertion
 in `/run/zeros/bootstrap-failures.jsonl` (root-only 0600, at most 64 KiB). This
 distinguishes assertions with the same public check without putting paths,
 inputs, exception messages or URLs in the closed diagnostic.
+For an OS error it retains the original allowlisted exception class, numeric
+and symbolic errno, and innermost bootstrap function/line from the traceback.
+The public diagnostic still uses the same closed stage/check mapping.
 
 ## Boat restore and early-boot dependencies
 
@@ -72,7 +85,10 @@ bounded to 30 seconds, suppresses command stdout/stderr, and fails with the
 closed bootstrap check `apparmor` if execution, loading or timeout fails.
 `zeros-host.service` requires this oneshot to complete successfully.
 Sanitation and verification wait for boot `active/exited` and host
-`active/running` before probing the loaded policy or facade.
+`active/running`, an empty delegation parent, enabled CPU/memory/PID controllers,
+and all four dispatch-written host limits before probing the policy or facade.
+This gate polls for at most 30 seconds; systemd's `active` state alone can
+precede a `Type=simple` service's initialization.
 
 The base dependency audit is:
 
@@ -94,11 +110,15 @@ pnpm check:actions
 
 Tests use an injected temporary root, host adapter, clock and downloader. These
 are Python APIs only; production has no test flags or environment overrides.
-Tests consume B1's golden fixtures from `cloud-v2/b1-runtime-contracts`, including
-the §16 installer checks. A verbatim pinned snapshot and its source commit are
+Tests consume B1's golden fixtures from its merge in PR #280, including the
+§16 installer checks and §17 boundary cases. A verbatim pinned snapshot and its source commit are
 under `tests/fixtures/`; tests automatically prefer the shared protocol fixture
-directory after B1 merges. The fixture README describes the additional lexical
-escape case and raw-digest checks for changes to canonical serialization.
+directory when present and exercise both selection paths. Each manifest uses
+its own matching descriptor; shared-schema ABI limits remain distinct from
+the base's ABI pin. The fixture README describes the additional lexical escape
+case and raw-digest checks for changes to canonical serialization. The live
+synthetic generator is exercised through install, a fresh dispatcher, and
+boot followed by dispatch, with additional executable-directory symlink cases.
 
 ## Scripted Alpha verification (operator runbook)
 
@@ -145,8 +165,9 @@ the journal refuses more than ten):
    bytes. Cold boot a disposable clone and verify `/zeros`, enabled/active
    units, delegated cgroups, the exact host marker, empty runtime/private state,
    and `waiting_for_runtime`. Cold-boot checks do not start or repair units.
-   Sanitation and verification wait for both units to be active and the boot
-   oneshot to complete before reading the facade or cleaning session state.
+   Sanitation and verification wait for both units to be active, the boot
+   oneshot to complete, and dispatch's cgroup limits before reading the facade
+   or cleaning session state.
 3. Fetch official Node 22.23.1 and verify its published SHA-256. Build three
    deterministic synthetic archives containing that Node, idle/success
    stubs and a symlink with a 0555 archive header. The setup stub prints the
@@ -179,6 +200,23 @@ pnpm tsx scripts/cloud-workspace-validation/boat-image/boat-image.ts runtime-bas
 pnpm tsx scripts/cloud-workspace-validation/boat-image/boat-image.ts runtime-base-v4 cleanup
 ```
 
+For an operator debugging a failure, add the bare `--keep-on-failure` flag to
+`live-check` (it is unavailable on `build` and is not used by the workflow):
+
+```sh
+pnpm tsx scripts/cloud-workspace-validation/boat-image/boat-image.ts runtime-base-v4 live-check \
+  --name zeros-v2-test-base-v4-2 --max-used-hours "$ZEROS_BASE_MAX_USED_HOURS" --keep-on-failure
+```
+
+On failure the final stdout diagnostic remains closed, private evidence is
+captured, and `state.json` records `keptOnFailure.sandboxes`. The builder,
+verification VM, candidate snapshot, owned R2 objects and local synthetic
+archives remain available for inspection. Temporary SSH keys are still revoked.
+Use `status` to see the retained IDs, inspect private evidence locally, then
+run the existing `cleanup` command above to delete owned objects/snapshot/VMs
+and confirm their absence. The retention marker is cleared after VM/snapshot
+cleanup succeeds. Successful runs perform normal cleanup even with the flag.
+
 Cleanup replays only unresolved create identities within the kit's 23-hour
 window, never scans/deletes unrelated account resources, and fails closed when
 absence cannot be confirmed. A durable `pending-delete.json` retains each VM ID
@@ -193,7 +231,8 @@ ten-start budget. Send the receipt and closed diagnostics to the orchestrator
 for review; neither raw command logs nor URLs/keys belong in the report.
 
 Before deleting a failed builder or verification VM, the kit keeps bounded,
-redacted tails of the build log, both units' systemctl status and journal, and
+redacted tails of the build log, both units' systemctl status, the last 200
+journal lines for `zeros-host.service`/`zeros-boot.service`, and
 the bootstrap assertion log under
 `$ZEROS_BOAT_IMAGE_STATE_DIR/runtime-base-v4/private/m2-build-<attempt>/<sandboxId>/`.
 Directories are 0700; files are 0600 and at most 32 KiB each. `capture.json`
@@ -201,7 +240,7 @@ records availability with fixed labels. The build log is captured before
 sanitation removes its remote copy. Capture failure never prevents cleanup or
 replaces the original failure. These files are not printed or uploaded by the
 workflow; inspect them locally and report only the relevant closed checks/sites.
-Unexpected top-level kit failures additionally print only an allowlisted error
+Unexpected kit failures, including wrapped build/provider exceptions, print only an allowlisted error
 class/code to stderr (for example `Error (ERR_MODULE_NOT_FOUND)`), with no message
 or stack; the final stdout diagnostic remains closed.
 

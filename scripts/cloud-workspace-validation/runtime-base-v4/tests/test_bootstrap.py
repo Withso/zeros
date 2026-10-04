@@ -7,6 +7,7 @@ import base64
 import copy
 import contextlib
 import datetime
+import errno
 import gzip
 import hashlib
 import importlib.util
@@ -26,7 +27,14 @@ from unittest import mock
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
 SHARED_FIXTURES = HERE.parents[3] / "packages/protocol/src/__tests__/fixtures/cloud-runtime"
-GOLDEN = SHARED_FIXTURES if SHARED_FIXTURES.is_dir() else HERE / "fixtures/cloud-runtime"
+
+
+def golden_directory(repo_root=HERE.parents[3]):
+    shared = repo_root / "packages/protocol/src/__tests__/fixtures/cloud-runtime"
+    return shared if shared.is_dir() else HERE / "fixtures/cloud-runtime"
+
+
+GOLDEN = golden_directory()
 SPEC = importlib.util.spec_from_file_location("bootstrap", HERE.parent / "bootstrap.py")
 b = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(b)
@@ -121,6 +129,16 @@ def units(boot="active", boot_sub="exited", host="active", host_sub="running", r
             f"Id=zeros-host.service\nActiveState={host}\nSubState={host_sub}\nResult=success\nExecMainStatus=0\n").encode()
 
 
+def cgroup_fixture(root):
+    scope = root / "sys/fs/cgroup/system.slice/zeros-host.service"
+    (scope / "host").mkdir(parents=True)
+    for name, value in (("cgroup.procs", ""), ("cgroup.subtree_control", "cpu memory pids"),
+                        ("host/cpu.max", "100000 100000"), ("host/memory.max", "536870912"),
+                        ("host/pids.max", "256"), ("host/memory.oom.group", "1")):
+        (scope / name).write_text(value + "\n")
+    return scope
+
+
 class FakeHost:
     def __init__(self):
         self.calls = []
@@ -131,6 +149,9 @@ class FakeHost:
 
     def load_apparmor(self):
         pass
+
+    def cgroup(self):
+        return b.CGROUP
 
     def stop(self):
         self.calls.append("stop")
@@ -271,6 +292,7 @@ class BootstrapTests(unittest.TestCase):
 
     def test_base_probe_waits_for_completed_boot_before_reading_metadata_or_facade(self):
         verifier = template("verify.py")
+        scope = cgroup_fixture(self.root)
         (self.root / "zeros").unlink()
         self.app.host = b.SystemHost()
         replies = [units(boot="activating", boot_sub="start", host="inactive", host_sub="dead"),
@@ -304,14 +326,52 @@ class BootstrapTests(unittest.TestCase):
         injected = types.SimpleNamespace(Bootstrap=lambda: self.app, require=b.require, ENV=b.ENV, CGROUP=b.CGROUP)
         with mock.patch.object(verifier.importlib.util, "spec_from_file_location", return_value=mock.Mock()), \
              mock.patch.object(verifier.importlib.util, "module_from_spec", return_value=injected), \
+             mock.patch.object(b, "CGROUP", str(scope)), \
              mock.patch.object(b.subprocess, "run", side_effect=probe), \
              mock.patch.object(b.time, "sleep", side_effect=boot_finishes), \
              mock.patch.object(self.app, "read", side_effect=read):
             with self.assertRaises(MetadataReached):
                 verifier.verify()
 
+    def test_active_host_readiness_waits_for_dispatch_cgroup_initialization(self):
+        self.app.host = b.SystemHost()
+        scope = cgroup_fixture(self.root)
+        pending = (("cgroup.procs", "123"), ("cgroup.subtree_control", "cpu"),
+                   ("host/cpu.max", "max 100000"), ("host/memory.max", "max"),
+                   ("host/pids.max", "max"), ("host/memory.oom.group", "0"), ("host/pids.max", None))
+        for name, value in pending:
+            with self.subTest(predicate=name, initial=value):
+                target = scope / name
+                ready = target.read_text()
+                if value is None:
+                    target.unlink()
+                else:
+                    target.write_text(value + "\n")
+                with mock.patch.object(b, "CGROUP", str(scope)), \
+                     mock.patch.object(b.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=units())) as command, \
+                     mock.patch.object(b.time, "sleep", side_effect=lambda _seconds: target.write_text(ready)) as wait:
+                    self.app.wait_ready()
+                    wait.assert_called_once_with(0.2)
+                    self.assertEqual(command.call_count, 2, "active units are not sufficient before dispatch writes its limits")
+
+    def test_active_host_that_never_initializes_times_out_before_metadata_is_read(self):
+        self.app.host = b.SystemHost()
+        scope = cgroup_fixture(self.root)
+        (scope / "host/memory.max").write_text("max\n")
+        with mock.patch.object(b, "CGROUP", str(scope)), \
+             mock.patch.object(b.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=units())), \
+             mock.patch.object(b.time, "sleep"), mock.patch.object(b.time, "monotonic", side_effect=[0, 0, 30]), \
+             mock.patch.object(self.app, "read", wraps=self.app.read) as read:
+            with self.assertRaises(b.Failure) as caught:
+                self.app.wait_ready()
+            self.assertEqual(caught.exception.checks, ["timeout"])
+            self.assertEqual(caught.exception.code, 124)
+            self.assertTrue(caught.exception.timed_out)
+            read.assert_not_called()
+
     def test_base_readiness_rejects_failed_boot_and_malformed_facade(self):
         self.app.host = b.SystemHost()
+        scope = cgroup_fixture(self.root)
         with mock.patch.object(b.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=units(boot="failed", result="exit-code", code=1))) as command:
             with self.assertRaises(b.Failure) as caught:
                 self.app.wait_ready()
@@ -319,7 +379,8 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(command.call_count, 1)
         (self.root / "zeros").unlink()
         (self.root / "zeros").symlink_to("/unexpected")
-        with mock.patch.object(b.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=units())):
+        with mock.patch.object(b, "CGROUP", str(scope)), \
+             mock.patch.object(b.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=units())):
             with self.assertRaises(b.Failure) as caught:
                 self.app.wait_ready()
             self.assertEqual(caught.exception.checks, ["pointer_publish"])
@@ -385,7 +446,42 @@ class BootstrapTests(unittest.TestCase):
         for line in log.read_bytes().splitlines():
             json.loads(line)
 
-    def test_live_synthetic_generator_builds_deterministic_installable_archives(self):
+    def test_private_oserror_evidence_retains_errno_and_original_bootstrap_site(self):
+        self.install()
+        with mock.patch.object(b.os, "listxattr", side_effect=OSError(errno.EIO, "private-canary", "/private-canary")):
+            code, output = self.cli(["dispatch"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output), {"schema": "zeros.diagnostic/v1", "component": "bootstrap",
+            "stage": "verify_tree", "ok": False, "exitCode": 1, "timedOut": False, "failedChecks": ["file_inventory"]})
+        log = self.root / "run/zeros/bootstrap-failures.jsonl"
+        evidence = json.loads(log.read_bytes().splitlines()[-1])
+        self.assertEqual(evidence["error"], "OSError")
+        self.assertEqual(evidence["errno"], {"name": "EIO", "number": errno.EIO})
+        self.assertEqual(evidence["failedChecks"], ["file_inventory"])
+        self.assertEqual(evidence["sites"][0]["function"], "verify_tree")
+        self.assertEqual(evidence["sites"][0]["source"], "bootstrap")
+        self.assertGreater(evidence["sites"][0]["line"], 0)
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(b"private-canary", log.read_bytes() + output)
+
+    def assert_fresh_dispatch(self, runtime_id, boot=False):
+        boot_id = "22222222-2222-4222-8222-222222222222" if boot else BOOT
+        dispatcher = b.Bootstrap(self.root, uid=os.getuid(), gid=os.getgid(), host=FakeHost(), boot_id=lambda: boot_id)
+        if boot:
+            dispatcher.boot()
+        dispatcher.unlink(b.ACTIVE)
+        with mock.patch.object(b.os, "execve") as execute, contextlib.redirect_stdout(io.StringIO()) as output:
+            dispatcher.dispatch()
+        root = b.INFRA + "/" + runtime_id
+        execute.assert_called_once_with(root + "/bin/node", [root + "/bin/node", root + "/lib/zeros/cloud-worker-supervisor.mjs"], b.ENV)
+        self.assertEqual(json.loads(output.getvalue())["ok"], True)
+        active = json.loads(dispatcher.path(b.ACTIVE).read_bytes())
+        self.assertEqual(active["runtimeId"], runtime_id)
+        self.assertEqual(active["bootId"], boot_id)
+        receipt = dispatcher.path(b.RECEIPTS + "/" + runtime_id + ".json").read_bytes()
+        self.assertEqual(active["installerReceiptSha256"], digest(receipt))
+
+    def test_live_synthetic_generator_installs_and_dispatches_before_and_after_boot(self):
         spec = importlib.util.spec_from_file_location("synthetic_runtime", HERE / "synthetic_runtime.py")
         synthetic = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(synthetic)
@@ -416,6 +512,77 @@ class BootstrapTests(unittest.TestCase):
             self.app.verify_runtime(descriptor["runtimeId"], full=True)
             runtime_ids.append(descriptor["runtimeId"])
         self.assertEqual(len(set(runtime_ids)), 3)
+        self.assert_fresh_dispatch(runtime_ids[-1])
+        self.assert_fresh_dispatch(runtime_ids[-1], boot=True)
+
+    def test_dispatch_handles_symlinks_in_each_executable_inventory_directory(self):
+        def add_links(manifest):
+            manifest["files"].extend([
+                {"path": "bin/node-alias", "type": "symlink", "target": "node"},
+                {"path": "bin/lib-alias", "type": "symlink", "target": "../lib"},
+                {"path": "lib/zeros/setup-alias.mjs", "type": "symlink", "target": "setup-cloud-workspace.mjs"},
+                {"path": "worker/dist-engine/cli-alias.js", "type": "symlink", "target": "cli.js"},
+                {"path": "worker/dist-engine/directory-alias", "type": "symlink", "target": "."},
+            ])
+            manifest["files"].sort(key=lambda entry: entry["path"].encode())
+        self.payload, self.value, self.manifest = fixture(change=add_links)
+        self.install()
+        self.assert_fresh_dispatch(self.value["runtime"]["runtimeId"])
+        self.assert_fresh_dispatch(self.value["runtime"]["runtimeId"], boot=True)
+
+    def test_installer_checks_the_published_tree_before_switching_current(self):
+        self.install()
+        previous = self.app.current()
+        self.payload, self.value, self.manifest = fixture(extra={"worker/new.txt": b"next runtime"})
+        destination = str(self.runtime())
+        original = b.os.listxattr
+
+        def installed_only_error(fd):
+            if os.readlink(f"/proc/self/fd/{fd}").startswith(destination + "/"):
+                raise OSError(errno.EIO, "private-canary")
+            return original(fd)
+
+        with mock.patch.object(b.os, "listxattr", side_effect=installed_only_error):
+            with self.assertRaises(OSError):
+                self.install()
+        self.assertEqual(self.app.current(), previous)
+        self.assertEqual(self.app.stage, "verify_tree")
+        self.app.verify_runtime(previous)
+
+    def test_dispatch_verification_failure_prevents_restart_and_reports_failed_host(self):
+        self.install()
+        node = self.runtime() / "bin/node"
+        node.chmod(0o755)
+        node.write_bytes(b"x" * node.stat().st_size)
+        node.chmod(0o555)
+        with mock.patch.object(b.os, "execve") as execute:
+            code, output = self.cli(["dispatch"])
+        execute.assert_not_called()
+        self.assertEqual(code, 65)
+        self.assertEqual(json.loads(output), {"schema": "zeros.diagnostic/v1", "component": "bootstrap",
+            "stage": "verify_tree", "ok": False, "exitCode": 65, "timedOut": False, "failedChecks": ["file_digest"]})
+        self.app.host = b.SystemHost()
+        with mock.patch.object(b.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=b"failed\n")):
+            status_code, status = self.cli(["status"])
+        self.assertEqual(status_code, 0)
+        self.assertEqual(json.loads(status)["hostState"], "failed")
+        evidence = json.loads((self.root / "run/zeros/bootstrap-failures.jsonl").read_bytes().splitlines()[-1])
+        self.assertEqual(evidence["failedChecks"], ["file_digest"])
+
+    def test_install_host_start_resets_an_exhausted_restart_budget(self):
+        self.install()
+        limited = True
+
+        def control(action, *_args):
+            nonlocal limited
+            if action == "reset-failed":
+                limited = False
+            return mock.Mock(returncode=1 if action == "start" and limited else 0, stdout=b"active\n")
+
+        host = b.SystemHost()
+        with mock.patch.object(host, "control", side_effect=control):
+            host.start(self.app, self.app.current())
+        self.assertFalse(limited)
 
     def test_install_receipt_active_and_cache_rehash(self):
         self.assertEqual(self.install(), 0)
@@ -468,8 +635,21 @@ class BootstrapTests(unittest.TestCase):
                     self.assertEqual(value["failedChecks"], [check])
 
     def test_b1_golden_descriptors_inputs_manifests_and_diagnostics(self):
-        catalog = json.loads((GOLDEN / "cases.json").read_bytes())
-        descriptor = json.loads((GOLDEN / "descriptor.valid.json").read_bytes())
+        self.assert_golden_contracts(GOLDEN)
+
+    def test_b1_golden_harness_exercises_shared_directory_and_fallback(self):
+        repository = self.root / "fixture-repository"
+        fallback = HERE / "fixtures/cloud-runtime"
+        self.assertEqual(golden_directory(repository), fallback)
+        self.assert_golden_contracts(golden_directory(repository))
+        shared = repository / "packages/protocol/src/__tests__/fixtures/cloud-runtime"
+        shutil.copytree(fallback, shared)
+        self.assertEqual(golden_directory(repository), shared)
+        self.assert_golden_contracts(golden_directory(repository))
+
+    def assert_golden_contracts(self, directory):
+        catalog = json.loads((directory / "cases.json").read_bytes())
+        descriptor = json.loads((directory / "descriptor.valid.json").read_bytes())
         # Admission owns canonical serialization. The base checks its pinned
         # raw digest, including these byte-only changes, without reserializing.
         changed_bytes = {"manifest.invalid-newline.json", "manifest.invalid-key-order.json",
@@ -479,15 +659,31 @@ class BootstrapTests(unittest.TestCase):
             kind = case["contract"]
             if kind not in {"manifest", "descriptor", "install", "diagnostic"}:
                 continue
-            with self.subTest(fixture=case["file"]):
+            with self.subTest(directory=directory.name, fixture=case["file"]):
                 consumed.add(kind)
-                raw = (GOLDEN / case["file"]).read_bytes()
+                raw = (directory / case["file"]).read_bytes()
                 value = json.loads(raw)
                 if kind == "manifest":
                     self.assertEqual(digest(raw), case["manifestSha256"])
                     desc = dict(descriptor)
+                    desc.update(expandedBytes=sum(entry.get("size", 0) for entry in value["files"] if entry["type"] == "file"),
+                                sourceCommit=value["source"]["commit"], nodeModulesAbi=value["platform"]["nodeModulesAbi"],
+                                bootstrapProtocolVersion=value["protocols"]["bootstrap"], engineProtocolVersion=value["protocols"]["engine"])
                     if case["file"] not in changed_bytes:
                         desc.update(manifestSha256=case["manifestSha256"], runtimeId="r1-" + case["manifestSha256"])
+                    if case["valid"]:
+                        b.validate_descriptor(desc)
+                        if value["platform"]["nodeModulesAbi"] != 127:
+                            # Shared-schema ABI bounds do not change this base's
+                            # Node 22 ABI pin. Check the rejection, then exercise
+                            # the remaining boundary fields with that pin alone
+                            # normalized and its raw digest recomputed.
+                            with self.assertRaises(b.Failure) as caught:
+                                b.validate_manifest(raw, desc, self.app.compat)
+                            self.assertEqual(caught.exception.checks, ["manifest_schema"])
+                            value["platform"]["nodeModulesAbi"] = 127
+                            raw = canonical(value)
+                            desc.update(nodeModulesAbi=127, manifestSha256=digest(raw), runtimeId="r1-" + digest(raw))
                     operation = lambda: b.validate_manifest(raw, desc, self.app.compat)
                 elif kind == "descriptor":
                     operation = lambda: b.validate_descriptor(value)
