@@ -42,7 +42,7 @@ describe("v4 runtime launch containment", () => {
         let readable=false;try{readable=fs.readFileSync('/tmp/actor-'+other+'/private','utf8')==='fixture';}catch(e){if(e.code!=='EACCES')throw e;}
         if(readable!==(uid===other))process.exit(21);
       }
-      for(const file of ['/run/zeros/active-runtime.json','/srv/zeros/state/private','/proc/1/environ']){
+      for(const file of ['/run/zeros/active-runtime.json','/srv/zeros/state/private','/proc/1/environ','/srv/zeros/.zeros-setup/seed/private']){
         try{fs.readFileSync(file);process.exit(22);}catch(e){if(!['EACCES','EPERM','ENOENT','ESRCH'].includes(e.code))throw e;}
       }
       try{process.setuid(0);process.exit(23);}catch{}
@@ -52,8 +52,10 @@ describe("v4 runtime launch containment", () => {
         const {resolveCloudRuntime,hasCloudEngineUserNamespace}=await import(${JSON.stringify(resolver)});
         const runtime=resolveCloudRuntime();
         if(runtime.profile!=='v4'||!hasCloudEngineUserNamespace(4))throw new Error('profile');
-        for(const file of ['/opt/zeros-bootstrap','/srv/zeros/runtime-installs','/root','/run/zeros/cloud-worker-supervisor.sock'])
+        for(const file of ['/opt/zeros-bootstrap','/srv/zeros/runtime-installs','/root','/home/user','/srv/zeros/setup','/run/zeros/cloud-worker-supervisor.sock'])
           if(fs.existsSync(file))throw new Error('host exposure');
+        if(fs.readFileSync('/srv/zeros/repos/example/project/contents','utf8')!=='persistent repository')throw new Error('repos projection');
+        if(fs.existsSync('/srv/zeros/.zeros-setup/seed/private'))throw new Error('setup exposure');
         for(const uid of [0,10001,10002,10004]){
           const directory='/tmp/actor-'+uid;fs.mkdirSync(directory,{mode:0o700});fs.chownSync(directory,uid,uid);
           fs.writeFileSync(directory+'/private','fixture',{mode:0o600});fs.chownSync(directory+'/private',uid,uid);
@@ -65,6 +67,9 @@ describe("v4 runtime launch containment", () => {
         process.stdout.write('v4 actors isolated');
       })().catch(e=>{process.stderr.write(e.message);process.exitCode=1;});`);
     for(const directory of ["/srv/zeros/files/workspace","/srv/zeros/state","/srv/zeros/home/agent","/srv/zeros/home/capture","/run/zeros/engine","/run/zeros/view/settings",`${view}/facade/sessions`,`${view}/etc`])tree.mkdir(directory);
+    tree.mkdir("/home/user/.zeros-persist/files/workspace");
+    tree.write("/home/user/.zeros-persist/files/repos/example/project/contents", "persistent repository");
+    tree.write("/home/user/.zeros-persist/files/.zeros-setup/seed/private", "private setup seed", 0o600);
     tree.write("/srv/zeros/state/private","fixture",0o600);
     for(const name of ["policy.json","registries.conf"])tree.write(`/etc/containers/${name}`,"{}");
     tree.write(`${view}/etc/cloud-worker.json`,{...tree.marker,toolchain:{node:runtime.node,supervisor:`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`,bwrap:"/usr/bin/bwrap",setpriv:"/usr/bin/setpriv"}});
@@ -73,7 +78,8 @@ describe("v4 runtime launch containment", () => {
     const args=cloudEngineViewArguments("serve",4,runtime,view);
     for(let i=0;i<args.length;i++)if(["--bind","--ro-bind"].includes(args[i])){
       const source=args[i+1];
-      if(source.startsWith("/srv/zeros")||source.startsWith("/run/zeros")||source.startsWith("/etc/containers")||source===runtime.root)args[i+1]=tree.physical(source);
+      if(source==="/srv/zeros/files")args[i+1]=tree.physical("/home/user/.zeros-persist/files");
+      else if(source.startsWith("/srv/zeros")||source.startsWith("/run/zeros")||source.startsWith("/etc/containers")||source===runtime.root)args[i+1]=tree.physical(source);
     }
     // All ownership changes are confined to the injectable fixture tree.
     // Never follow its intentional facade symlinks onto the host filesystem.
@@ -96,6 +102,8 @@ describe("v4 runtime launch containment", () => {
     expect(mounts).toContainEqual(["--ro-bind", `${view}/etc`, "/etc/zeros"]);
     expect(mounts).toContainEqual(["--ro-bind", `${view}/active-runtime.json`, "/run/zeros/active-runtime.json"]);
     expect(mounts).toContainEqual(["--ro-bind", `${view}/facade`, "/opt/zeros"]);
+    expect(args.join("\n")).toContain("--tmpfs\n/srv/zeros/.zeros-setup\n--chmod\n0000\n/srv/zeros/.zeros-setup\n--remount-ro\n/srv/zeros/.zeros-setup");
+    expect(mounts.some(([, source]: string[]) => source.startsWith("/home/user"))).toBe(false);
     for (const forbidden of ["/zeros", "/opt/zeros", "/opt/zeros-infra", "/opt/zeros-bootstrap", "/srv/zeros/runtime-installs", "/run/zeros", "/etc/zeros"])
       expect(mounts.some(([, source]: string[]) => source === forbidden)).toBe(false);
     expect(args.slice(-3)).toEqual([runtime.engineNamespace, "--runtime-id", runtime.profile === "v4" ? runtime.runtimeId : ""]);

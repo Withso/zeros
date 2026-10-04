@@ -258,9 +258,12 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime()) {
   privateDirectory("/srv/zeros/state", 10003, 10003, 0o700);
   rootPath(runtimeLayout.engineFilesRoot, true);
   privateDirectory(runtimeLayout.attachmentTemporaryRoot, 10003, 10003, 0o700);
+  if (profile.version === 4)
+    privateDirectory(path.join(runtimeLayout.engineFilesRoot, ".zeros-setup"), 0, 10001, 0o710);
   const files = readdirSync(runtimeLayout.engineFilesRoot);
   if (files.some(name =>
-    !["workspace", "attachment-staging", "state", "home", "managed-settings", ...(profile.version === 4 ? ["repos"] : [])].includes(name)))
+    !["workspace", "attachment-staging", "state", "home", "managed-settings",
+      ...(profile.version === 4 ? ["repos", ".zeros-setup"] : [])].includes(name)))
     throw new Error("Unexpected cloud engine file projection");
   if (profile.version === 4 && files.includes("repos"))
     verifyComputerRepositoryProjection(path.join(runtimeLayout.engineFilesRoot, "repos"));

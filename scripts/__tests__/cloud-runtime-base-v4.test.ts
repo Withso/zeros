@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sshBoundary from "../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
 import { builderCommand, KitError, main, parseArgs, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
 import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, resumeOwned, v4Command, verifyBase, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
-import { cleanupLiveObjects, installOverSsh, presignGet, signedHeaders, syntheticArchives, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
+import { cleanupLiveObjects, installOverSsh, presignGet, probePersistence, signedHeaders, syntheticArchives, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
 
 const scratch: string[] = [];
 const temp = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-base-v4-")); scratch.push(dir); return dir; };
@@ -109,6 +109,33 @@ function seedState(d: KitDeps, overrides = {}) {
 }
 
 describe("runtime-base-v4 profile", () => {
+  it.each(["cold", "seed", "rename", "verify"] as const)("checks bounded persistence evidence in phase %s", async phase => {
+    const d = deps(), renamed = phase === "rename" || phase === "verify";
+    const proof = { schema: "zeros.persistence-probe/v1", phase, bindCount: 4, repoAliases: true,
+      machineIdPresent: phase !== "seed", templateIdentityCleared: phase === "seed", renames: renamed ? 2 : 0, oldPathsAbsent: renamed,
+      ignoredPrivateField: "private-canary" };
+    d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 0, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
+      schema: "zeros.diagnostic/v1", component: "base", stage: "resume", ok: true, exitCode: 0, timedOut: false, failedChecks: [],
+    }) } });
+    const result = await probePersistence(d, "bx_fixture", phase);
+    expect(result).toMatchObject({ phase, bindCount: 4, repoAliases: true, renames: renamed ? 2 : 0 });
+    expect(JSON.stringify(result)).not.toContain("private-canary");
+    expect(d.boat).toHaveBeenCalledWith("POST", "/sandboxes/bx_fixture/commands", expect.objectContaining({
+      body: expect.objectContaining({ command: expect.stringContaining(`main("${phase}")`) }),
+    }));
+  });
+
+  it.each([{ bindCount: 3 }, { repoAliases: false }, { machineIdPresent: false }, { renames: 1 }, { oldPathsAbsent: false }])(
+    "rejects incomplete final persistence evidence %j", async corrupt => {
+      const d = deps();
+      const proof = { schema: "zeros.persistence-probe/v1", phase: "verify", bindCount: 4, repoAliases: true,
+        machineIdPresent: true, templateIdentityCleared: false, renames: 2, oldPathsAbsent: true, ...corrupt };
+      d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 0, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
+        schema: "zeros.diagnostic/v1", component: "base", stage: "resume", ok: true, exitCode: 0, timedOut: false, failedChecks: [],
+      }) } });
+      await expect(probePersistence(d, "bx_fixture", "verify")).rejects.toMatchObject({ diagnostic: { stage: "resume", failedChecks: ["base_compatibility"] } });
+    });
+
   it.each(["ready", "idle", "running"])("accepts Boat %s as command-ready", async state => {
     vi.useFakeTimers();
     const d = deps();

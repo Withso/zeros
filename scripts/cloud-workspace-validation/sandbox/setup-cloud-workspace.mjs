@@ -1753,7 +1753,8 @@ export function recoverInterruptedCloudWorkspaceClone({
 }
 
 async function cloneRepository(material,profile) {
-  const workspace = runtimeLayout.root;
+  const { stagingParent: workspace, seededRepositoryBackup } = clonePaths(profile);
+  if (profile.version === 4) assertRootDirectory(workspace, 0o710, WORKER_GID);
   const workspaceStat = lstatSync(workspace);
   if (
     !workspaceStat.isDirectory() ||
@@ -1761,7 +1762,7 @@ async function cloneRepository(material,profile) {
     workspaceStat.uid !== 0 ||
     (workspaceStat.mode & 0o022) !== 0 ||
     realpathSync(workspace) !== workspace ||
-    existsSync(SEEDED_REPOSITORY_BACKUP)
+    existsSync(seededRepositoryBackup)
   ) {
     throw failure("image_contract_invalid");
   }
@@ -1848,16 +1849,16 @@ async function cloneRepository(material,profile) {
       ) {
         throw failure("image_contract_invalid");
       }
-      renameSync(TARGET_REPOSITORY, SEEDED_REPOSITORY_BACKUP);
+      renameSync(TARGET_REPOSITORY, seededRepositoryBackup);
     }
     try {
       renameSync(repositoryDirectory, TARGET_REPOSITORY);
     } catch (error) {
       if (
-        existsSync(SEEDED_REPOSITORY_BACKUP) &&
+        existsSync(seededRepositoryBackup) &&
         !existsSync(TARGET_REPOSITORY)
       ) {
-        renameSync(SEEDED_REPOSITORY_BACKUP, TARGET_REPOSITORY);
+        renameSync(seededRepositoryBackup, TARGET_REPOSITORY);
       }
       throw error;
     }
@@ -1865,6 +1866,16 @@ async function cloneRepository(material,profile) {
   } finally {
     rmSync(stagingRoot, { recursive: true, force: true });
   }
+}
+
+function clonePaths(profile) {
+  if (profile.version !== 4)
+    return { stagingParent: runtimeLayout.root, seededRepositoryBackup: SEEDED_REPOSITORY_BACKUP };
+  // Both staging and the seed must share the checkout's bind mount. Root
+  // controls this parent's entries; the agent group can only traverse it to
+  // the per-operation 0700 repository/home. The engine view masks the parent.
+  const stagingParent = path.join(runtimeLayout.engineFilesRoot, ".zeros-setup");
+  return { stagingParent, seededRepositoryBackup: path.join(stagingParent, "seed") };
 }
 
 async function stringifyManagedSettings(values) {
@@ -1886,6 +1897,7 @@ async function stringifyManagedSettings(values) {
 }
 
 export async function prepareRepositoryAndSettings(material, profile, stringify = stringifyManagedSettings) {
+  const { seededRepositoryBackup } = clonePaths(profile);
   const journalFile = path.join(profile.setupDirectory, "repository.json");
   const managedSettings = path.join(
     profile.managedSettingsDirectory,
@@ -1914,14 +1926,14 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   // different checkout. Fresh clones validate their pin before recovery.
   const completedSetup = journal !== null &&
     journal.commandsCompleted === material.settings.setupCommands.length;
-  if (!journal) recoverInterruptedCloudWorkspaceClone();
+  if (!journal) recoverInterruptedCloudWorkspaceClone({ seededRepositoryBackup });
   let commit = await repositoryIdentity(
     TARGET_REPOSITORY,
     runtimeLayout.agentHome,
     material.repository.cloneUrl,
   );
   if (!journal) {
-    if (existsSync(SEEDED_REPOSITORY_BACKUP)) {
+    if (existsSync(seededRepositoryBackup)) {
       if (!commit) throw failure("image_contract_invalid");
     } else {
       commit = await cloneRepository(material,profile);

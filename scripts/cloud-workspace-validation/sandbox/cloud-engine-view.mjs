@@ -76,6 +76,10 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
     // Broker authority remains outside this projection.
     runtimeLayout.engineFilesRoot,
     "/srv/zeros",
+    // v4 setup must stage within the files bind to avoid EXDEV and retain
+    // Boat persistence. Its private seed/home are never engine-visible.
+    ...(version === 4 ? ["--tmpfs", "/srv/zeros/.zeros-setup", "--chmod", "0000", "/srv/zeros/.zeros-setup",
+      "--remount-ro", "/srv/zeros/.zeros-setup"] : []),
     "--bind",
     "/srv/zeros/state",
     "/srv/zeros/state",

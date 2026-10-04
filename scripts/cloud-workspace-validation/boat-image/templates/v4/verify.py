@@ -83,7 +83,11 @@ def verify_host(bootstrap, app):
     require(not os.path.lexists('/opt/zeros/previous') and not os.path.lexists(bootstrap.ACTIVE), 'cache_conflict')
     require(set(os.listdir('/opt/zeros-infra')) <= {'.staging'} and not os.listdir('/opt/zeros-infra/.staging') and
             not os.listdir('/srv/zeros/runtime-installs'), 'cache_conflict')
-    for name in ('/srv/zeros/files', '/srv/zeros/setup', '/srv/zeros/log', '/srv/zeros/home/agent', '/srv/zeros/home/capture'):
+    require(set(os.listdir('/srv/zeros/files')) == {'repos', '.zeros-setup', 'state', 'home', 'managed-settings'}, 'base_compatibility')
+    require(set(os.listdir('/srv/zeros/files/home')) == {'agent', 'capture'}, 'base_compatibility')
+    for name in ('state', 'managed-settings', 'home/agent', 'home/capture'):
+        require(not os.listdir('/srv/zeros/files/' + name), 'base_compatibility')
+    for name in ('/srv/zeros/files/repos', '/srv/zeros/files/.zeros-setup', '/srv/zeros/repos', '/srv/zeros/setup', '/srv/zeros/log', '/srv/zeros/home/agent', '/srv/zeros/home/capture'):
         require(not os.listdir(name), 'base_compatibility')
     require(set(os.listdir('/srv/zeros/state')) <= {'workspaces'} and not os.listdir('/srv/zeros/state/workspaces'), 'base_compatibility')
     private = ('.ssh/authorized_keys', '.git-credentials', '.netrc', '.npmrc', '.pypirc', '.bash_history', '.zsh_history',

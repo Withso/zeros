@@ -207,6 +207,7 @@ try:
  spec.loader.exec_module(b)
  app=b.Bootstrap()
  app.base()
+ app.wait_ready()
  rid=${JSON.stringify(runtimeId)}
  deadline=time.monotonic()+30
  while not pathlib.Path(b.ACTIVE).exists() and time.monotonic()<deadline:
@@ -252,6 +253,18 @@ sys.exit(code)`;
     fileCount: result.fileCount as number, expandedBytes: result.expandedBytes as number, node: "22.23.1", abi: 127 };
 }
 
+export async function probePersistence(deps: KitDeps, id: string, phase: "cold" | "seed" | "rename" | "verify") {
+  requireBase(["cold", "seed", "rename", "verify"].includes(phase), "validate_input", "input_schema");
+  const program = fs.readFileSync(path.join(deps.repoRoot, "scripts/cloud-workspace-validation/runtime-base-v4/persistence_probe.py"), "utf8");
+  const result = parseProbe(await remote(deps, id, pythonProbe(`${program}\nmain(${JSON.stringify(phase)})`, "resume"), 120), "resume");
+  const renamed = phase === "rename" || phase === "verify";
+  requireBase(result?.schema === "zeros.persistence-probe/v1" && result.phase === phase && result.bindCount === 4 &&
+    result.repoAliases === true && result.machineIdPresent === (phase !== "seed") && result.templateIdentityCleared === (phase === "seed") &&
+    result.renames === (renamed ? 2 : 0) && result.oldPathsAbsent === renamed, "resume", "base_compatibility");
+  return { phase, bindCount: 4, repoAliases: true, machineIdPresent: phase !== "seed", templateIdentityCleared: phase === "seed",
+    renames: renamed ? 2 : 0, oldPathsAbsent: renamed };
+}
+
 export async function liveCheck(options: Map<string, string>, deps: KitDeps) {
   const r2 = credentials(deps.repoRoot); // Reject missing/wrong-channel material before allocating anything.
   return buildBase(options, deps, async (profile, sandboxId, maxUsedHours) => {
@@ -279,14 +292,25 @@ export async function liveCheck(options: Map<string, string>, deps: KitDeps) {
       requireBase(firstInstall.ok && firstInstall.exitCode === 0 && !firstInstall.failedChecks.length, "install", "runtime_install");
       const first = await probeRuntime(profile, sandboxId, descriptors.a.runtimeId);
       requireBase(first.previous === null, "install", "runtime_switch");
+      const coldPersistence = await probePersistence(profile, sandboxId, "cold");
+      const seededPersistence = await probePersistence(profile, sandboxId, "seed");
       const clone = { ...profile, stateDir: path.join(profile.stateDir, "verification") };
-      await builderCommand("stop", new Map(), [], clone);
-      await waitSandbox(profile, sandboxId, "archived");
-      await resumeOwned(profile, clone, maxUsedHours);
-      await waitSandbox(profile, sandboxId);
+      const stopAndResume = async () => {
+        await builderCommand("stop", new Map(), [], clone);
+        await waitSandbox(profile, sandboxId, "archived");
+        await resumeOwned(profile, clone, maxUsedHours);
+        await waitSandbox(profile, sandboxId);
+      };
+      await stopAndResume();
       // Dispatch runs automatically; do not repair/start units in the proof.
       const resumed = await probeRuntime(profile, sandboxId, descriptors.a.runtimeId, true);
       requireBase(resumed.bootId !== first.bootId && resumed.sessionId !== first.sessionId && resumed.previous === null,
+        "resume", "boot_reconciliation");
+      const renamedPersistence = await probePersistence(profile, sandboxId, "rename");
+      await stopAndResume();
+      const verifiedPersistence = await probePersistence(profile, sandboxId, "verify");
+      const afterRenameResume = await probeRuntime(profile, sandboxId, descriptors.a.runtimeId);
+      requireBase(afterRenameResume.bootId !== resumed.bootId && afterRenameResume.sessionId !== resumed.sessionId && afterRenameResume.previous === null,
         "resume", "boot_reconciliation");
       const secondInstall = await install("b");
       requireBase(secondInstall.ok && secondInstall.exitCode === 0 && !secondInstall.failedChecks.length, "install", "runtime_install");
@@ -299,7 +323,8 @@ export async function liveCheck(options: Map<string, string>, deps: KitDeps) {
       requireBase(afterCorrupt.previous === descriptors.a.runtimeId && afterCorrupt.sessionId === second.sessionId,
         "install", "runtime_switch");
       evidence = { mode: "synthetic", agentQualified: false, sandboxId, nodeArchiveSha256,
-        firstInstall, first, resumed, secondInstall, second, corruptedInstall, currentUnchanged: true };
+        firstInstall, first, resumed, afterRenameResume, secondInstall, second, corruptedInstall, currentUnchanged: true,
+        persistence: [coldPersistence, seededPersistence, renamedPersistence, verifiedPersistence] };
       success = true;
     } finally {
       if (success || options.get("--keep-on-failure") !== "true") {
