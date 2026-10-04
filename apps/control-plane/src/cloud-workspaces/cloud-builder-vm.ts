@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import type pg from "pg";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import { assertHostedDevAdmission } from "../development-environment.js";
-import { BOAT_BILLING_ORG_PATTERN, BOAT_RESOURCE_ID_PATTERN, type BoatApiClient } from "./boat-client.js";
+import { BOAT_BILLING_ORG_PATTERN, BOAT_RESOURCE_ID_PATTERN, BoatCreateRejectedError, type BoatApiClient } from "./boat-client.js";
 import { executeBoatPinnedSsh, type BoatBootstrapChannel } from "./boat-pinned-ssh.js";
 import { BUILDER_BASE_STATUS_COMMAND, builderFixedCommand, parseBuilderDiagnostic, type BuilderFixedCommand, type ClosedDiagnostic } from "./cloud-builder-commands.js";
 import { builderOperationConflict, type BuilderVmIntent, type BuilderVmOperation, type BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
@@ -56,6 +56,37 @@ export class BuilderVmError extends Error {
 function fail(check: BuilderVmError["check"]): never { throw new BuilderVmError(check); }
 const vmFor = (row: BuilderVmOperation): BuilderVm => ({ sandboxId: row.sandbox_id!, purpose: row.purpose, operationKey: row.operation_key });
 
+export function builderVmBaseSnapshot(imageRef: string) {
+  const name = /^boat:([a-z0-9][a-z0-9-]{0,62})@sha256:[a-f0-9]{64}$/.exec(imageRef)?.[1];
+  if (!name) fail("source_unavailable");
+  return name;
+}
+
+/** Prepare without provider I/O. Qualification uses the claim transaction so
+ * an overdue claim always has an intent that reconciliation can fence. */
+export async function prepareBuilderVmOperation(operations: BuilderVmOperationStore, value: BuilderVmIntent,
+  resolveSource: (source: BuilderVmSource) => Promise<string>, tx?: Tx): Promise<BuilderVmOperation> {
+  const parsed = intentSchema.safeParse(value);
+  if (!parsed.success) fail("input_schema");
+  const input = parsed.data;
+  const row = await operations.find(input.operationKey, tx);
+  // As in BoatWorkspaceProvider, the versioned digest excludes legacy writers
+  // from tracked intents while old, untracked intents retain their exact key.
+  const digest = createHash("sha256").update(JSON.stringify(row && !row.create_attempts_tracked
+    ? input : { ...input, createAttemptJournalVersion: 1 })).digest("hex");
+  if (row) {
+    if (row.request_sha256 !== digest) builderOperationConflict();
+    return row;
+  }
+  const source = await resolveSource(input.source);
+  if (input.source.kind === "base" ? !/^[a-z0-9][a-z0-9-]{0,62}$/.test(source) : !BOAT_RESOURCE_ID_PATTERN.test(source)) fail("source_unavailable");
+  return operations.prepare(input, digest, {
+    path: input.source.kind === "base" ? "/sandboxes" : `/sandboxes/${source}/fork`,
+    body: { ...(input.source.kind === "base" ? { from: source } : {}), name: input.name,
+      type: "default", ttlSeconds: input.ttlSeconds, noEnv: true, env: {}, snapshots: input.purpose === "computer-build" },
+  }, tx);
+}
+
 /** Resolves only approved registry bases. C3 supplies an authorized, pinned
  * template resolver; this module never guesses an org's active template. */
 export function builderVmSourceResolver(pool: pg.Pool, template?: (id: string) => Promise<string>) {
@@ -70,9 +101,7 @@ export function builderVmSourceResolver(pool: pg.Pool, template?: (id: string) =
        JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
        WHERE base.base_image_id=$1 AND base.revoked_at IS NULL AND contract.revoked_at IS NULL
          AND base.provider='boat' AND base.approved_at<=clock_timestamp()`, [source.baseImageId])).rows[0]);
-    const name = /^boat:([a-z0-9][a-z0-9-]{0,62})@sha256:[a-f0-9]{64}$/.exec(image?.image_ref ?? "")?.[1];
-    if (!name) fail("source_unavailable");
-    return name;
+    return builderVmBaseSnapshot(image?.image_ref ?? "");
   };
 }
 
@@ -98,41 +127,37 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
   }
 
   async create(value: BuilderVmIntent): Promise<BuilderVm> {
-    const parsed = intentSchema.safeParse(value);
-    if (!parsed.success) fail("input_schema");
-    const input = parsed.data;
-    const digest = createHash("sha256").update(JSON.stringify(input)).digest("hex");
-    let row = await this.options.operations.find(input.operationKey);
-    if (row && row.request_sha256 !== digest) builderOperationConflict();
-    if (!row) {
-      const source = await this.options.resolveSource(input.source);
-      if (input.source.kind === "base" ? !/^[a-z0-9][a-z0-9-]{0,62}$/.test(source) : !BOAT_RESOURCE_ID_PATTERN.test(source)) fail("source_unavailable");
-      row = await this.options.operations.prepare(input, digest, {
-        path: input.source.kind === "base" ? "/sandboxes" : `/sandboxes/${source}/fork`,
-        body: { ...(input.source.kind === "base" ? { from: source } : {}), name: input.name,
-          type: "default", ttlSeconds: input.ttlSeconds, noEnv: true, env: {}, snapshots: input.purpose === "computer-build" },
-      });
-    }
-    if (!["creating", "ready"].includes(row.state)) builderOperationConflict();
+    let row = await prepareBuilderVmOperation(this.options.operations, value, this.options.resolveSource);
+    const input = row.intent;
+    if (row.create_closed_at || !["creating", "ready"].includes(row.state)) builderOperationConflict();
     const deadline = this.now() + this.lifecycleTimeoutMs;
     if (!row.sandbox_id) {
       const age = this.now() - new Date(row.created_at).getTime();
       if (age < -60_000 || age >= CREATE_RETRY_WINDOW_MS) fail("provider_unavailable");
       assertHostedDevAdmission(process.env, input.ttlSeconds);
-      row = await this.options.operations.dispatch(input.operationKey);
-      if (!row.sandbox_id) {
-        const reply = await this.retry(() => this.options.client.request(row!.provider_request.path, {
-          method: "POST", body: row!.provider_request.body, idempotencyKey: row!.operation_key,
-          signal: AbortSignal.timeout(Math.max(1, deadline - this.now())), timeoutMs: 120_000,
-        }), deadline);
+      row = await this.retry(async () => {
+        const attemptId = randomUUID();
+        const dispatch = await this.options.operations.beginCreateAttempt(input.operationKey, attemptId);
+        if (dispatch.sandbox_id) return dispatch;
+        let reply: Record<string, unknown>;
+        try {
+          reply = await this.options.client.request(dispatch.provider_request.path, {
+            method: "POST", body: dispatch.provider_request.body, idempotencyKey: dispatch.operation_key,
+            signal: AbortSignal.timeout(Math.max(1, deadline - this.now())), timeoutMs: 120_000,
+          });
+        } catch (error) {
+          if (error instanceof BoatCreateRejectedError)
+            await this.options.operations.recordCreateRejection(input.operationKey, attemptId, error.createRejectionCode);
+          throw error;
+        }
         const nested = (reply.sandbox as { id?: unknown } | undefined)?.id;
         const id = nested ?? reply.sandboxId;
         if (typeof id !== "string" || !BOAT_RESOURCE_ID_PATTERN.test(id) ||
-            row.provider_request.path === `/sandboxes/${id}/fork`) fail("provider_response");
+            dispatch.provider_request.path === `/sandboxes/${id}/fork`) fail("provider_response");
         // Bind before wallet/readiness validation so every failure can clean up.
         await this.options.operations.bind(input.operationKey, id);
-        row = { ...row, sandbox_id: id };
-      }
+        return { ...dispatch, sandbox_id: id };
+      }, deadline);
     }
     const vm = vmFor(row);
     for (;;) {

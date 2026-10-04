@@ -4,10 +4,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, constants, fchmodSync, fchownSync, lstatSync, mkdirSync, mkdtempSync, openSync,
+  readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 
 export const RUNTIME_SELF_TEST_CHECKS = Object.freeze([
   "node_abi", "sqlite_query", "pty_load", "claude_version", "codex_version",
@@ -103,6 +105,54 @@ function command(executable, args, environment, timeout = 20_000, maxBuffer = MA
   return child.stdout;
 }
 
+function prepareSelfTestLayout() {
+  // B4 sanitizes files to an empty root-owned parent; qualification installation
+  // deliberately skips workspace setup. Never import/move a legacy workspace.
+  for (let directory = runtimeLayout.engineFilesRoot; ; directory = path.dirname(directory)) {
+    const metadata = lstatSync(directory);
+    assert(metadata.isDirectory() && !metadata.isSymbolicLink() && metadata.uid === 0 && !(metadata.mode & 0o022));
+    assert.equal(realpathSync(directory), directory);
+    if (directory === "/") break;
+  }
+  try { lstatSync(path.join(runtimeLayout.root, "workspace")); assert.fail(); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  // Boat does not preserve directory contents across rename. Create the
+  // credential-free scratch and mount points at final paths (contracts §22).
+  // These are the established image-layout owners/modes; the real launcher
+  // revalidates the projection before entering the engine view.
+  const emptyDirectory = (directory, uid, allowed = []) => {
+    try {
+      mkdirSync(directory, { mode: 0o700 });
+      const fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fchownSync(fd, uid, uid); fchmodSync(fd, 0o755); }
+      finally { closeSync(fd); }
+    } catch (error) { if (error.code !== "EEXIST") throw error; }
+    const metadata = lstatSync(directory);
+    assert(metadata.isDirectory() && !metadata.isSymbolicLink() && metadata.uid === uid && metadata.gid === uid);
+    assert.equal(metadata.mode & 0o777, 0o755);
+    assert.equal(realpathSync(directory), directory);
+    assert(readdirSync(directory).every(name => allowed.includes(name)));
+  };
+  emptyDirectory(path.join(runtimeLayout.engineFilesRoot, "home"), 0, ["agent", "capture"]);
+  for (const name of ["state", "managed-settings", "home/agent", "home/capture"])
+    emptyDirectory(path.join(runtimeLayout.engineFilesRoot, name), 0);
+  emptyDirectory(runtimeLayout.repository, 10001);
+}
+
+export function runtimeContainmentSmoke(runtime, environment) {
+  prepareSelfTestLayout();
+  // Keep only loopback usable in this otherwise disconnected namespace so
+  // the existing local gateway/service probes can exercise their sockets.
+  command("/usr/bin/python3", ["-I", "-c",
+    "import socket,fcntl,struct; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); fcntl.ioctl(s,0x8914,struct.pack('16sH14x',b'lo',1)); s.close()"], environment);
+  // The fixed launcher runs W/scripts/.../qualify-cloud-engine.mjs inside
+  // the v4 engine view, including its ZSR/capture/service/actor probes.
+  // Manifest/receipt identity is checked separately; this neither consumes
+  // workspace admission nor starts a model session.
+  const stdout = command(runtime.node, [`${runtime.root}/lib/zeros/cloud-engine-launcher.mjs`, "--qualify"], environment, 330_000, 8 * 1024 * 1024);
+  return containmentSmokePassed(stdout);
+}
+
 async function installedRuntime() {
   // B2's single selector reads only the base-owned active descriptor. No argv,
   // cwd, facade, environment or source-checkout fallback can select a runtime.
@@ -173,18 +223,7 @@ async function offlineChecks(environment) {
       const stdout = command("/usr/bin/python3", ["-I", "/opt/zeros-bootstrap/bootstrap.py", "status"], environment, 30_000);
       return supervisorIsIdle(JSON.parse(stdout), runtime);
     },
-    containment_smoke() {
-      // Keep only loopback usable in this otherwise disconnected namespace so
-      // the existing local gateway/service probes can exercise their sockets.
-      command("/usr/bin/python3", ["-I", "-c",
-        "import socket,fcntl,struct; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); fcntl.ioctl(s,0x8914,struct.pack('16sH14x',b'lo',1)); s.close()"], environment);
-      // The fixed launcher runs W/scripts/.../qualify-cloud-engine.mjs inside
-      // the v4 engine view, including its ZSR/capture/service/actor probes.
-      // Manifest/receipt identity is checked above; workspace attestation is
-      // separate. This neither consumes admission nor starts a model session.
-      const stdout = command(runtime.node, [`${runtime.root}/lib/zeros/cloud-engine-launcher.mjs`, "--qualify"], environment, 330_000, 8 * 1024 * 1024);
-      return containmentSmokePassed(stdout);
-    },
+    containment_smoke: () => runtimeContainmentSmoke(runtime, environment),
   });
 }
 

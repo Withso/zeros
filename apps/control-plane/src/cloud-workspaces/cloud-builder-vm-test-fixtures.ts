@@ -20,6 +20,7 @@ export const diagnostic = (component = "qualification", failedChecks: string[] =
 
 export function memoryBuilderOperations(): BuilderVmOperationStore & { rows: Map<string, BuilderVmOperation> } {
   const rows = new Map<string, BuilderVmOperation>();
+  const attempts = new Map<string, Map<string, string | null>>();
   const row = (key: string) => rows.get(key) ?? builderOperationConflict();
   return {
     rows,
@@ -29,12 +30,35 @@ export function memoryBuilderOperations(): BuilderVmOperationStore & { rows: Map
       if (existing) { if (existing.request_sha256 !== digest) builderOperationConflict(); return existing; }
       const value: BuilderVmOperation = { operation_key: intent.operationKey, purpose: intent.purpose, request_sha256: digest,
         intent, provider_request: request, state: "creating", sandbox_id: null, deletion_operation_id: null,
-        created_at: new Date(), create_dispatched_at: null };
+        created_at: new Date(), create_dispatched_at: null, create_attempts_tracked: true, create_closed_at: null };
       rows.set(intent.operationKey, value);
+      attempts.set(intent.operationKey, new Map());
       return value;
     },
-    async dispatch(key) { row(key).create_dispatched_at ??= new Date(); return row(key); },
-    async bind(key, id) { if (row(key).sandbox_id && row(key).sandbox_id !== id) builderOperationConflict(); row(key).sandbox_id = id; },
+    async beginCreateAttempt(key, id) {
+      const current = row(key);
+      if (current.create_closed_at || !["creating", "ready"].includes(current.state)) builderOperationConflict();
+      if (current.sandbox_id) return current;
+      if (attempts.get(key)!.has(id)) builderOperationConflict();
+      attempts.get(key)!.set(id, null);
+      current.create_dispatched_at ??= new Date();
+      return current;
+    },
+    async recordCreateRejection(key, id, code) {
+      const previous = attempts.get(key)?.get(id);
+      if (previous === undefined || (previous !== null && previous !== code)) builderOperationConflict();
+      attempts.get(key)!.set(id, code);
+    },
+    async closeUnallocatedCreate(key) {
+      const current = rows.get(key);
+      if (!current || current.sandbox_id || !current.create_attempts_tracked || [...attempts.get(key)!.values()].includes(null)) return false;
+      current.create_closed_at ??= new Date();
+      return true;
+    },
+    async bind(key, id) {
+      if (row(key).create_closed_at || (row(key).sandbox_id && row(key).sandbox_id !== id)) builderOperationConflict();
+      row(key).sandbox_id = id;
+    },
     async state(key, state) { row(key).state = state; },
     async deletion(key, id) { row(key).deletion_operation_id = id; },
   };
@@ -45,7 +69,7 @@ export function builderFixture(operations: BuilderVmOperationStore = memoryBuild
   const state = {
     sandboxId: BUILDER_SANDBOX, states: ["running"], wallet: BUILDER_WALLET, hostState: "waiting_for_runtime", runtimeId: null as string | null,
     baseCompatibilityId: runtimeBase.compatibilityId, deleted: false, deletionStatus: "completed", deleteRequests: 0,
-    createRepliesLost: 0, creates: 0, allocations: new Set<string>(), failChecks: [] as string[],
+    createRepliesLost: 0, createRefused: false, creates: 0, allocations: new Set<string>(), failChecks: [] as string[],
     sshOutput: null as string | null, sshExit: 0, stdoutTruncated: false,
   };
   const operation = () => ({ id: `bdop_${"d".repeat(32)}`, kind: "sandbox", targetId: state.sandboxId, status: state.deletionStatus });
@@ -57,6 +81,10 @@ export function builderFixture(operations: BuilderVmOperationStore = memoryBuild
     const method = init?.method ?? "GET";
     if (method === "POST" && (route === "/sandboxes" || route.endsWith("/fork"))) {
       state.creates++;
+      if (state.createRefused && state.createRepliesLost <= 0) return response({
+        type: "sandbox.error", status: 429, code: "trial_compute_limit_reached", requestId: "req_zeros-v2-test-refusal",
+        error: { status: 429, code: "trial_compute_limit_reached" },
+      }, 429);
       state.allocations.add(new Headers(init?.headers).get("idempotency-key")!);
       if (state.createRepliesLost-- > 0) throw new Error("private provider error");
       return response({ sandbox: { id: state.sandboxId } });

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -100,6 +100,140 @@ const url = process.env.TEST_DATABASE_URL;
     boat.state.deletionStatus = "completed";
     await makeWorker().tick();
     expect((await runs())[0]).toMatchObject({ state: "failed", cleanup_confirmed_at: expect.any(Date), diagnostic: { timedOut: true } });
+    expect(await qualifications()).toHaveLength(0);
+  });
+
+  it("closes a certified create refusal and releases the global slot without replaying it", async () => {
+    boat.state.createRefused = true;
+    const { runId } = await worker.enqueue(runtimeId);
+    const second = await withSystemTx(pool, async tx => (await seedRuntimeBundle(tx, { digit: "d", releaseOrder: 2, kinds: [] })).descriptor.runtimeId);
+    await worker.enqueue(second);
+    await worker.tick();
+    expect((await runs())[0]).toMatchObject({ state: "failed", sandbox_id: null,
+      cleanup_confirmed_at: expect.any(Date), diagnostic: { stage: "allocate", ok: false } });
+    expect(boat.state.creates).toBe(1);
+    expect(boat.state.allocations.size).toBe(0);
+    expect(boat.state.deleteRequests).toBe(0);
+    expect(await qualifications()).toHaveLength(0);
+    expect(await operations.find(runIntent(runId!).operationKey)).toMatchObject({ create_closed_at: expect.any(Date) });
+    await expect(boat.vms.create(runIntent(runId!))).rejects.toMatchObject({ code: "provider_operation_conflict" });
+    await expect(operations.bind(runIntent(runId!).operationKey, BUILDER_SANDBOX)).rejects.toMatchObject({ code: "provider_operation_conflict" });
+    await expect(withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_builder_vm_create_attempts
+      (account_scope,operation_key,attempt_id) VALUES ('zeros-v2-test-account',$1,$2)`,
+    [runIntent(runId!).operationKey, randomUUID()]))).rejects.toMatchObject({ code: "55000" });
+    await expect(withSystemTx(pool, tx => tx.query(`UPDATE cloud_builder_vm_operations SET create_closed_at=NULL WHERE operation_key=$1`,
+      [runIntent(runId!).operationKey]))).rejects.toMatchObject({ code: "55000" });
+    boat.state.createRefused = false;
+    await makeWorker().tick();
+    expect((await runs()).map(run => run.state)).toEqual(["failed", "succeeded"]);
+    expect((await qualifications()).every(row => row.runtime_id === second)).toBe(true);
+    expect(await qualifications()).toHaveLength(5);
+  });
+
+  it("retains an ambiguous attempt when a later request is certified refused", async () => {
+    boat.state.createRepliesLost = 1;
+    boat.state.createRefused = true;
+    const { runId } = await worker.enqueue(runtimeId);
+    await worker.tick();
+    expect(boat.state.allocations.size).toBe(1);
+    expect((await runs())[0]).toMatchObject({ state: "running", sandbox_id: null, cleanup_confirmed_at: null });
+    expect(await operations.find(runIntent(runId!).operationKey)).toMatchObject({ create_closed_at: null });
+    const attempts = await withSystemTx(pool, async tx => (await tx.query(`SELECT rejection_code FROM cloud_builder_vm_create_attempts
+      WHERE operation_key=$1 ORDER BY dispatched_at`, [runIntent(runId!).operationKey])).rows);
+    expect(attempts[0]).toEqual({ rejection_code: null });
+    expect(attempts.slice(1).length).toBeGreaterThan(0);
+    expect(attempts.slice(1).every(row => row.rejection_code === "trial_compute_limit_reached")).toBe(true);
+    await expect(withSystemTx(pool, tx => tx.query(`UPDATE cloud_builder_vm_operations SET create_closed_at=clock_timestamp()
+      WHERE operation_key=$1`, [runIntent(runId!).operationKey]))).rejects.toMatchObject({ code: "55000" });
+    await expect(withSystemTx(pool, tx => tx.query(`DELETE FROM cloud_builder_vm_create_attempts WHERE operation_key=$1`,
+      [runIntent(runId!).operationKey]))).rejects.toMatchObject({ code: "55000" });
+    await expect(withSystemTx(pool, tx => tx.query(`UPDATE cloud_builder_vm_create_attempts SET rejection_code='limit_reached'
+      WHERE operation_key=$1 AND rejected_at IS NOT NULL`, [runIntent(runId!).operationKey]))).rejects.toMatchObject({ code: "55000" });
+    boat.advance(24 * 60 * 60_000);
+    const dispatched = boat.state.creates;
+    await makeWorker().tick();
+    expect(boat.state.creates).toBe(dispatched);
+    expect((await runs())[0]).toMatchObject({ state: "running", cleanup_confirmed_at: null });
+    expect(await qualifications()).toHaveLength(0);
+  });
+
+  it("does not certify an untracked legacy create from later tracked refusals", async () => {
+    const input = runIntent(randomUUID());
+    const digest = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+    await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_builder_vm_operations
+      (account_scope,operation_key,purpose,request_sha256,intent,provider_request,create_dispatched_at)
+      VALUES ('zeros-v2-test-account',$1,$2,$3,$4,$5,clock_timestamp())`, [input.operationKey, input.purpose, digest,
+      JSON.stringify(input), JSON.stringify({ path: "/sandboxes", body: { from: "zeros-v2-test-base", name: input.name,
+        type: "default", ttlSeconds: 1800, noEnv: true, env: {}, snapshots: false } })]));
+    boat.state.createRefused = true;
+    await expect(boat.vms.create(input)).rejects.toMatchObject({ code: "provider_budget_exhausted" });
+    expect(await operations.closeUnallocatedCreate(input.operationKey)).toBe(false);
+    expect(await operations.find(input.operationKey)).toMatchObject({ request_sha256: digest, create_attempts_tracked: false, create_closed_at: null });
+    await expect(withSystemTx(pool, tx => tx.query(`UPDATE cloud_builder_vm_operations SET create_attempts_tracked=true
+      WHERE operation_key=$1`, [input.operationKey]))).rejects.toMatchObject({ code: "55000" });
+  });
+
+  it("fences a suspended create after another replica closes an expired run", async () => {
+    const { runId } = await worker.enqueue(runtimeId);
+    let release!: () => void;
+    let entered!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const realCreate = boat.vms.create.bind(boat.vms);
+    vi.spyOn(boat.vms, "create").mockImplementationOnce(async input => { entered(); await barrier; return realCreate(input); });
+    const running = worker.tick();
+    await reached;
+    try {
+      await expire(runId!);
+      await makeWorker().tick();
+      expect((await runs())[0]).toMatchObject({ state: "failed", sandbox_id: null, cleanup_confirmed_at: expect.any(Date) });
+    } finally { release(); await running; }
+    expect(boat.state.allocations.size).toBe(0);
+    expect(boat.state.creates).toBe(0);
+    expect(await operations.find(runIntent(runId!).operationKey)).toMatchObject({ sandbox_id: null, create_closed_at: expect.any(Date) });
+    expect((await runs())[0]).toMatchObject({ state: "failed", sandbox_id: null, cleanup_confirmed_at: expect.any(Date) });
+    expect(await qualifications()).toHaveLength(0);
+  });
+
+  it("deletes a bound VM even when saving its identity to a running run is no longer possible", async () => {
+    const { runId } = await worker.enqueue(runtimeId);
+    const realCreate = boat.vms.create.bind(boat.vms);
+    vi.spyOn(boat.vms, "create").mockImplementationOnce(async input => {
+      const builder = await realCreate(input);
+      await withSystemTx(pool, tx => tx.query(`UPDATE cloud_runtime_qualification_runs
+        SET state='failed',finished_at=clock_timestamp() WHERE id=$1`, [runId]));
+      return builder;
+    });
+    await worker.tick();
+    expect(boat.state.deleted).toBe(true);
+    expect(boat.state.deleteRequests).toBe(1);
+    expect(await operations.find(runIntent(runId!).operationKey)).toMatchObject({ state: "deleted", sandbox_id: BUILDER_SANDBOX });
+    expect((await runs())[0]).toMatchObject({ state: "failed", sandbox_id: BUILDER_SANDBOX, cleanup_confirmed_at: expect.any(Date) });
+    expect(await qualifications()).toHaveLength(0);
+  });
+
+  it("keeps an in-flight create uncertain until replay binds and deletes it, including its late response", async () => {
+    const { runId } = await worker.enqueue(runtimeId);
+    let release!: () => void;
+    let entered!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const realFetch = boat.fetcher.getMockImplementation()!;
+    boat.fetcher.mockImplementationOnce(async (...args) => {
+      const response = await realFetch(...args); entered(); await barrier; return response;
+    });
+    const running = worker.tick();
+    await reached;
+    try {
+      expect(await operations.closeUnallocatedCreate(runIntent(runId!).operationKey)).toBe(false);
+      await expire(runId!); await makeWorker().tick();
+      expect((await runs())[0]).toMatchObject({ state: "failed", sandbox_id: BUILDER_SANDBOX, cleanup_confirmed_at: expect.any(Date) });
+    } finally { release(); await running; }
+    expect(boat.state.allocations.size).toBe(1);
+    expect(boat.state.creates).toBe(2);
+    expect(boat.state.deleteRequests).toBe(1);
+    await expect(boat.client.request(`/sandboxes/${BUILDER_SANDBOX}`)).rejects.toMatchObject({ code: "provider_not_found" });
+    expect(await operations.find(runIntent(runId!).operationKey)).toMatchObject({ state: "deleted", sandbox_id: BUILDER_SANDBOX, create_closed_at: null });
     expect(await qualifications()).toHaveLength(0);
   });
 
@@ -237,11 +371,12 @@ const url = process.env.TEST_DATABASE_URL;
     expect(JSON.stringify(status)).not.toContain("private-artifact-value");
   });
 
-  it("forces system-only RLS for both journals and preserves provider identity/retirement", async () => {
+  it("forces system-only RLS for the journals and preserves provider identity/retirement", async () => {
     await worker.tick();
     await withUserTx(pool, randomUUID(), async tx => {
       expect((await tx.query("SELECT * FROM cloud_runtime_qualification_runs")).rows).toEqual([]);
       expect((await tx.query("SELECT * FROM cloud_builder_vm_operations")).rows).toEqual([]);
+      expect((await tx.query("SELECT * FROM cloud_builder_vm_create_attempts")).rows).toEqual([]);
     });
     await expect(withUserTx(pool, randomUUID(), tx => tx.query("INSERT INTO cloud_runtime_qualification_runs (runtime_id) VALUES ($1)", [runtimeId]))).rejects.toMatchObject({ code: "42501" });
     const key = `runtime-qualification.${(await runs())[0].id}`;

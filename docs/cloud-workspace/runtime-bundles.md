@@ -307,7 +307,9 @@ current approved base compatibility. The database permits one running smoke
 globally, including runs awaiting cleanup. Each claim selects the newest
 approved, unrevoked Boat base and records a 25-minute deadline. A failed run is
 not retried automatically for the same runtime/base compatibility; staff may
-retry explicitly.
+retry explicitly. The claim transaction also prepares the builder allocation
+intent, so an expired claim cannot be marked cleaned while a suspended worker
+can still dispatch an unjournalled create.
 
 The worker creates `zeros-v2-qual-<runtime-short>` with a 30-minute provider TTL,
 checks base status, and installs with `purpose:qualification`, a descriptor and
@@ -323,8 +325,12 @@ with a private HOME, minimal environment and a disconnected network namespace
 `cursor_load`, `engine_load`, `supervisor_idle` and `containment_smoke`.
 Containment uses the existing credential-free `qualify-cloud-engine.mjs`
 through R's fixed engine launcher, including identity, workload, capture,
-human-service and actor-tool probes. Workspace setup's v4 attester is a separate
-boundary. The runtime bundle must include this helper and list
+human-service and actor-tool probes. Before launch, the self-test prepares an
+empty worker-owned scratch workspace and the root-owned empty mount points
+under `/srv/zeros/files`. These use the existing image-layout ownership and
+modes, are created directly at their final paths, and are revalidated by the
+launcher. No directory is renamed and R is unchanged. Workspace setup's v4
+attester is a separate boundary. The runtime bundle must include this helper and list
 `entrypoints.selfTest`; a bundle built before it was included fails closed.
 
 Approval happens only after confirmed VM deletion. Success inserts the five
@@ -343,7 +349,15 @@ the provider journal, delete it, verify the deletion receipt and a subsequent
 reconcilers. Unconfirmed cleanup keeps the running slot occupied. A lost create
 reply is recovered with the original idempotency key and exact request; replay
 is bounded to 23 hours so it cannot silently allocate a second VM after the
-provider's idempotency window.
+provider's idempotency window. Every HTTP create attempt is journalled before
+dispatch. A certified Boat refusal is recorded against that attempt alone;
+later refusals never resolve an earlier lost response. If a tracked intent has
+no dispatches, or every attempt was certified rejected, cleanup durably
+closes the intent without allocating a VM and releases the running slot.
+Closure prevents any future dispatch or resource binding. Historical untracked
+intents retain uncertainty. Deleting a bound sandbox remains possible after
+the qualification run becomes terminal; cleanup evidence is recorded only
+after confirmed absence.
 
 The shared `CloudBuilderVms` module also supports authorized template sources
 and graceful stop-to-archived for Cloud Computer builds. Its system-only
@@ -364,8 +378,10 @@ directly. The control-plane worker owns VM cleanup.
    resolver and bundle builder. Enable `CLOUD_RUNTIME_QUALIFICATION_ENABLED`
    on Alpha and resume background workers. For admission checks, also select
    `CLOUD_RUNTIME_QUALIFICATION_MODE=smoke`. Register an approved v4 base and
-   publish a confirmed runtime containing the self-test. Use a fresh runtime
-   without existing full/MCP approvals for this smoke acceptance.
+   publish a confirmed runtime containing the self-test. Start from the sanitized
+   B4 base with `/srv/zeros/files` empty; do not prepopulate its workspace or
+   mount points. Use a fresh runtime without existing full/MCP approvals for
+   this smoke acceptance.
 2. In the private, mode-0600 repository-root `.env.agent`, set the existing
    `ZEROS_ACCOUNT_ACCESS_TOKEN` variable to an Alpha staff account session
    (`developer` or `platform_owner`). Keep its value out of shell arguments,

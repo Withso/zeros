@@ -3,7 +3,7 @@ import { HttpError } from "../authz.js";
 import type { Config } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { BoatApiClient } from "./boat-client.js";
-import { BoatCloudBuilderVms, BuilderVmError, builderVmSourceResolver, type BuilderVm, type CloudBuilderVms } from "./cloud-builder-vm.js";
+import { BoatCloudBuilderVms, BuilderVmError, builderVmBaseSnapshot, builderVmSourceResolver, prepareBuilderVmOperation, type BuilderVm, type CloudBuilderVms } from "./cloud-builder-vm.js";
 import { DatabaseBuilderVmOperationStore, type BuilderVmIntent, type BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
 import { RUNTIME_SMOKE_CHECKS, type ClosedDiagnostic } from "./cloud-builder-commands.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
@@ -117,7 +117,10 @@ export class RuntimeQualificationWorker {
           SET cleanup_lease_until=clock_timestamp()+$2*interval '1 millisecond'
           WHERE id=$1 AND deadline_at<=clock_timestamp() AND (cleanup_lease_until IS NULL OR cleanup_lease_until<=clock_timestamp()) RETURNING *`,
         [running.id, CLEANUP_LEASE_MS])).rows[0];
-        return expired ? { run: expired, reconcile: true } : null;
+        if (!expired) return null;
+        // Also fence pre-upgrade runs that crashed before preparing a journal.
+        await this.prepareOperation(tx, expired);
+        return { run: expired, reconcile: true };
       }
       const base = await newestBase(tx);
       if (!base) return null;
@@ -148,8 +151,19 @@ export class RuntimeQualificationWorker {
       const run = (await tx.query<Run>(`UPDATE cloud_runtime_qualification_runs SET state='running',base_image_id=$2,base_compatibility_id=$3,
         started_at=clock_timestamp(),deadline_at=clock_timestamp()+$4*interval '1 millisecond' WHERE id=$1 RETURNING *`,
       [queued.id, base.base_image_id, base.base_compatibility_id, RUN_MS])).rows[0]!;
+      await this.prepareOperation(tx, run);
       return { run, reconcile: false };
     });
+  }
+
+  private async prepareOperation(tx: Tx, run: Run) {
+    return prepareBuilderVmOperation(this.options.operations!, intent(run), async () => {
+      // The claim selected/locked the approved base. For an expired legacy run,
+      // retain its pinned source even if revoked: cleanup only closes or deletes.
+      const image = (await tx.query<{ image_ref: string }>(`SELECT image_ref FROM cloud_runtime_base_images WHERE base_image_id=$1`,
+        [run.base_image_id])).rows[0];
+      return builderVmBaseSnapshot(image?.image_ref ?? "");
+    }, tx);
   }
 
   private async admitted(run: Run): Promise<{ descriptor: RuntimeDescriptor; objectKey: string }> {
@@ -218,10 +232,10 @@ export class RuntimeQualificationWorker {
     await this.finish(run, result ?? failure("self_test", "diagnostic_missing"));
   }
 
-  private async recordSandbox(run: Run, sandboxId: string) {
+  private async recordSandbox(run: Run, sandboxId: string, allowTerminal = false) {
     await withSystemTx(this.options.pool, async tx => {
       const saved = await tx.query(`UPDATE cloud_runtime_qualification_runs SET sandbox_id=$2
-        WHERE id=$1 AND state='running' AND (sandbox_id IS NULL OR sandbox_id=$2)`, [run.id, sandboxId]);
+        WHERE id=$1 AND ($3 OR state='running') AND (sandbox_id IS NULL OR sandbox_id=$2)`, [run.id, sandboxId, allowTerminal]);
       if (saved.rowCount !== 1) reject("admit", "timeout");
     });
     run.sandbox_id = sandboxId;
@@ -229,15 +243,17 @@ export class RuntimeQualificationWorker {
   private async cleanup(run: Run): Promise<boolean> {
     try {
       let operation = await this.options.operations!.find(operationKey(run));
-      if (!operation && !run.sandbox_id) return true;
+      if (!operation?.sandbox_id && !run.sandbox_id && await this.options.operations!.closeUnallocatedCreate(operationKey(run))) return true;
       if (!operation?.sandbox_id && operation?.create_dispatched_at) {
         try { await this.options.vms!.create(operation.intent); } catch { /* May bind before failing wallet/readiness. */ }
         operation = await this.options.operations!.find(operationKey(run));
       }
       const sandbox = operation?.sandbox_id ?? run.sandbox_id;
-      if (!sandbox) return !operation?.create_dispatched_at;
-      await this.recordSandbox(run, sandbox);
+      if (!sandbox) return await this.options.operations!.closeUnallocatedCreate(operationKey(run));
+      // Provider deletion must not depend on a still-running qualification row.
+      // A late response can arrive after another replica has finished cleanup.
       await this.options.vms!.delete(vm(run, sandbox));
+      await this.recordSandbox(run, sandbox, true);
       return true;
     } catch { return false; }
   }
@@ -249,9 +265,14 @@ export class RuntimeQualificationWorker {
       const base = (await tx.query(`SELECT 1 FROM cloud_runtime_base_images base JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
         WHERE base.base_image_id=$1 AND base.base_compatibility_id=$2 AND base.revoked_at IS NULL AND contract.revoked_at IS NULL FOR SHARE OF base,contract`,
       [run.base_image_id, run.base_compatibility_id])).rowCount;
-      const active = (await tx.query<{ timely: boolean }>(`SELECT deadline_at>clock_timestamp() AS timely FROM cloud_runtime_qualification_runs
-        WHERE id=$1 AND state='running' FOR UPDATE`, [run.id])).rows[0];
+      const active = (await tx.query<{ state: Run["state"]; timely: boolean }>(`SELECT state,deadline_at>clock_timestamp() AS timely FROM cloud_runtime_qualification_runs
+        WHERE id=$1 FOR UPDATE`, [run.id])).rows[0];
       if (!active) return;
+      if (active.state !== "running") {
+        await tx.query(`UPDATE cloud_runtime_qualification_runs SET cleanup_confirmed_at=COALESCE(cleanup_confirmed_at,clock_timestamp())
+          WHERE id=$1 AND state IN ('failed','succeeded')`, [run.id]);
+        return;
+      }
       if (result.ok && (!bundle || !base)) result = failure("admit", "runtime_ineligible");
       if (result.ok && !active.timely) result = failure("admit", "timeout");
       if (result.ok) {
