@@ -50,19 +50,28 @@ describe("agent_attachment_write", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("accepts the active project root and reports idempotent writes", async () => {
+  it("writes to the active project's flat attachment directory and reports idempotent writes", async () => {
     await expect(call(args(trustedRoot))).resolves.toMatchObject({
       relativePath: path.join(
         ".context",
-        "local",
         "attachments",
         "att-1",
         "notes.txt",
       ),
     });
     await expect(call(args(trustedRoot))).resolves.toMatchObject({
+      relativePath: path.join(".context", "attachments", "att-1", "notes.txt"),
       skipped: true,
     });
+    expect(
+      await fs.readFile(
+        path.join(trustedRoot, ".context", "attachments", "att-1", "notes.txt"),
+        "utf8",
+      ),
+    ).toBe("hello");
+    expect(await fs.readdir(path.join(trustedRoot, ".context"))).toEqual([
+      "attachments",
+    ]);
   });
 
   it("accepts chunked files and resolves their completed path through the same trusted IPC", async () => {

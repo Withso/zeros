@@ -7,11 +7,11 @@
 // so this handler moves a base64-encoded attachment into the workspace's
 // context graph:
 //
-//   <cwd>/.context/<scope>/attachments/<attachmentId>/<safeFilename>
+//   <cwd>/.context/attachments/<attachmentId>/<safeFilename>
 //
-// One folder per attachment, exactly one file inside — the layout the Context
-// tab canvas renders and the share checkbox moves between `local/`
-// (gitignored) and `shared/` (committed). EVERY composer attachment lands
+// One folder per attachment, exactly one file inside. Records written by earlier
+// builds under `local/` or `shared/` keep their existing paths. New writes create
+// neither scope folders nor ignore rules. EVERY composer attachment lands
 // here the moment it is staged in the composer — images AND text files / chat
 // transcripts. Write is the ONLY verb: the graph is append-only from the app
 // (2026-08-03(3) — removing a chip from the composer must never delete the
@@ -22,8 +22,8 @@
 // Why store under the chat's cwd instead of a global temp dir?
 //   1. The agent's CLI runs with cwd = chatFolder. Saving here means
 //      `@.context/...` works as a relative path.
-//   2. The user can browse the directory in Finder/VS Code — and the Context
-//      tab — and see what's actually being shipped.
+//   2. The user can browse the directory in Finder/VS Code or the Files viewer
+//      and see what's actually being shipped.
 //   3. The graph belongs to the WORKSPACE (it survives chat deletion and is
 //      force-added into the archive snapshot), so a workspace's context
 //      record outlives any one chat and even the worktree itself.
@@ -53,7 +53,7 @@ const ID_OK = /^[a-zA-Z0-9_-]+$/;
  *  workspace's context graph and return the absolute path. The renderer
  *  calls this the moment an attachment is staged in the composer (and again
  *  from the send path as a cheap idempotent safety net): images so non-vision
- *  agents can Read them by path, text files / transcripts so the Context tab
+ *  agents can Read them by path, text files / transcripts so the Files viewer
  *  shows what was attached.
  *
  *  `chatId` is accepted for provenance but OPTIONAL — the graph is
