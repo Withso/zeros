@@ -38,6 +38,18 @@ d("cloud workspace collaboration HTTP",()=>{
     return openWorkspaceInvitation({nonce:row.nonce,ciphertext:row.ciphertext,authTag:row.auth_tag},
       {invitationId:id,workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,keyVersion:row.key_version},{1:secret}).token;
   }
+  it("binds paginated collaborator metadata to the exact workspace and organization", async () => {
+    expect((await share()).status).toBe(200);
+    const response = await app.request(`${base()}/collaborators?pageSize=1`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({
+      workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
+      accessRevision: 2, guests: [], invitations: [], members: [{ userId: fixture.userId, role: "owner", displayName: expect.any(String) }],
+      guestCursor: null, invitationCursor: null, memberCursor: null,
+    });
+    expect((await app.request(`${base()}/collaborators?pageSize=101`)).status).toBe(422);
+  });
   it("accepts only the verified recipient and exact workspace, without returning or logging its bearer",async()=>{
     expect((await share()).status).toBe(200);
     const key=`http-${randomUUID()}`,created=await invite(key);expect(created.status).toBe(201);

@@ -506,6 +506,7 @@ function iso(value: Date | string | null): string | null {
 
 function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|null) {
   const canWrite=["prompter","developer","manager","owner"].includes(row.actor_role??"");
+  const canEdit=["developer","manager","owner"].includes(row.actor_role??"");
   const canManage=["manager","owner"].includes(row.actor_role??"");
   const policy=config?.computePolicy;
   const minimum=policy?computeMicroUsd(Math.ceil((policy.minimumTtlSeconds+policy.requestMarginSeconds)*Math.max(row.cpu_millicores/4000,row.memory_mib/8192)),policy.secondsPerDollar):null;
@@ -520,9 +521,10 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
     createdBy: row.created_by,
     ownerUserId: row.owner_user_id,
     ...(row.admin_creator_user_id ? { adminWorkspace: { creatorUserId: row.admin_creator_user_id } } : {}),
+    actorRole: row.actor_role,
     sharingMode: row.sharing_mode,
     accessRevision: Number(row.access_revision),
-    capabilities:{canWrite,canManage,canStart:reason===null,startUnavailableReason:reason},
+    capabilities:{canWrite,canEdit,canManage,canStart:reason===null,startUnavailableReason:reason},
     name: row.display_name,
     placement: "cloud" as const,
     status: row.status,

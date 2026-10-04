@@ -86,4 +86,130 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await page.getByRole("button", { name: "Disable internal feature", exact: true }).click();
   await expect(access).toHaveCount(0);
   check("Staff native access uses exact device context, retains snapshots, isolates close and leaves hidden controls inert", true);
+  await runCloudWorkspaceSharingSmoke({ page, check, harnessBase });
+}
+
+export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }) {
+  const workspaceId = "22222222-2222-4222-8222-222222222222";
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+  const ownerId = "33333333-3333-4333-8333-333333333333";
+  const developerId = "44444444-4444-4444-8444-444444444444";
+  const prompterId = "55555555-5555-4555-8555-555555555555";
+  const viewerId = "66666666-6666-4666-8666-666666666666";
+  const invitationId = "77777777-7777-4777-8777-777777777777";
+  const expiresAt = "2026-11-01T00:00:00Z";
+  let used = 9;
+  let invitations = [];
+  let conflictNextSharing = false;
+  const sharingWrites = [];
+  let collaboratorReads = 0;
+  const writers = () => ({ limit: 10, used, available: 10 - used });
+  await page.route("https://api.example.test/v1/cloud-workspaces/**", async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const document = await page.evaluate(() => window.cloudWorkspaceSharingFixture.document);
+    const reply = (body, status = 200) => route.fulfill({ status, json: body });
+    if (url.pathname.endsWith("/collaborators") && request.method() === "GET") {
+      collaboratorReads++;
+      return reply({ workspaceId, organizationId, accessRevision: document.accessRevision, writers: writers(),
+        members: url.searchParams.has("memberCursor")
+          ? [{ userId: developerId, displayName: "Assigned developer", role: "developer" }]
+          : [{ userId: ownerId, displayName: "Fixture owner", role: "owner" }, { userId: viewerId, displayName: "Organization viewer", role: "viewer" }],
+        guests: [{ id: invitationId, userId: prompterId, displayName: "Invited prompter", role: "prompter", revision: 1, expiresAt }],
+        invitations, guestCursor: null, invitationCursor: null, memberCursor: url.searchParams.has("memberCursor") ? null : viewerId });
+    }
+    if (url.pathname.endsWith("/sharing") && request.method() === "PATCH") {
+      const body = request.postDataJSON();
+      sharingWrites.push(body);
+      const next = { sharingMode: conflictNextSharing ? "organization" : body.sharingMode, accessRevision: document.accessRevision + 1 };
+      await page.evaluate(next => window.cloudWorkspaceSharingFixture.publishSharing(next.sharingMode, next.accessRevision), next);
+      if (conflictNextSharing) {
+        conflictNextSharing = false;
+        return reply({ error: { code: "cloud_workspace_access_conflict", message: "Workspace sharing changed" } }, 409);
+      }
+      return reply(next);
+    }
+    if (url.pathname.endsWith("/invitations") && request.method() === "POST") {
+      expect(request.postDataJSON()).toEqual({ email: "guest@example.test", role: "developer" });
+      expect(request.headers()["idempotency-key"]).toBeTruthy();
+      used++;
+      invitations = [{ id: invitationId, role: "developer", expiresAt, deliveryState: "queued" }];
+      return reply({ invitation: { id: invitationId, expiresAt }, replayed: false }, 201);
+    }
+    if (url.pathname.endsWith(`/invitations/${invitationId}`) && request.method() === "DELETE") {
+      used--; invitations = [];
+      return reply({ revoked: true });
+    }
+    if (url.pathname.endsWith(workspaceId) && request.method() === "GET") return reply({ workspace: document });
+    throw new Error(`Unexpected sharing fixture request: ${request.method()} ${url.pathname}`);
+  });
+  await page.goto(`${harnessBase}/harness-cloud-workspace.html?sharing=1`);
+  const button = page.getByRole("button", { name: "Cloud workspace details", exact: true });
+  await button.hover();
+  await expect.poll(() => collaboratorReads).toBe(1);
+  await button.click();
+  const details = page.getByRole("dialog", { name: "Cloud workspace details" });
+  await details.getByRole("button", { name: "Manage sharing", exact: true }).click();
+  await expect(details.getByText("9 / 10 writer slots used", { exact: true })).toBeVisible();
+  expect(collaboratorReads).toBe(1);
+  await expect(details.getByRole("combobox", { name: "Role for You" })).toHaveCount(0);
+  await details.getByRole("button", { name: "More members", exact: true }).click();
+  await expect(details.getByText("Assigned developer", { exact: true })).toBeVisible();
+  await expect(details.getByRole("button", { name: "More members", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: ".context/e5-sharing-ui.png" });
+
+  await details.getByRole("combobox", { name: "Workspace sharing scope", exact: true }).click();
+  await page.getByRole("option", { name: "Private", exact: true }).click();
+  await expect.poll(() => sharingWrites.length).toBe(1);
+  expect(sharingWrites[0]).toEqual({ sharingMode: "private", expectedRevision: 2 });
+  await expect(details.getByRole("combobox", { name: "Workspace sharing scope", exact: true })).toContainText("Private");
+  conflictNextSharing = true;
+  await expect(details.getByRole("combobox", { name: "Workspace sharing scope", exact: true })).toBeEnabled();
+  await details.getByRole("combobox", { name: "Workspace sharing scope", exact: true }).click();
+  await page.getByRole("option", { name: "Organization", exact: true }).click();
+  await expect(page.getByText("Workspace sharing changed", { exact: true })).toBeVisible();
+  expect(sharingWrites).toEqual([{ sharingMode: "private", expectedRevision: 2 }, { sharingMode: "organization", expectedRevision: 3 }]);
+  await expect(details.getByRole("combobox", { name: "Workspace sharing scope", exact: true })).toBeEnabled();
+  await expect(details.getByRole("combobox", { name: "Workspace sharing scope", exact: true })).toContainText("Organization");
+
+  await details.getByRole("textbox", { name: "Collaborator email", exact: true }).fill("guest@example.test");
+  await details.getByRole("combobox", { name: "Invitation role", exact: true }).click();
+  await page.getByRole("option", { name: "Developer", exact: true }).click();
+  await details.getByRole("button", { name: "Invite", exact: true }).click();
+  await expect(details.getByText("10 / 10 writer slots used", { exact: true })).toBeVisible();
+  await expect(details.getByText("All writer slots are in use. Invite a viewer or downgrade a writer first.", { exact: true })).toBeVisible();
+  await details.getByRole("combobox", { name: "Role for Organization viewer", exact: true }).click();
+  await expect(page.getByRole("option", { name: "Developer", exact: true })).toHaveAttribute("aria-disabled", "true");
+  await page.keyboard.press("Escape");
+  await details.getByRole("button", { name: "Cancel invitation", exact: true }).click();
+  await expect(details.getByText("9 / 10 writer slots used", { exact: true })).toBeVisible();
+  await expect(details.getByText("No pending invitations.", { exact: true })).toBeVisible();
+
+  for (const [fixture, role] of [["Developer fixture", "Developer"], ["Prompter fixture", "Prompter"], ["Viewer admin fixture", "Viewer"]]) {
+    const before = collaboratorReads;
+    await page.getByRole("button", { name: fixture, exact: true }).click();
+    await button.click();
+    await expect(details).toContainText(`${role} ·`);
+    await expect(details.getByRole("button", { name: "Manage sharing", exact: true })).toHaveCount(0);
+    await expect(details.getByRole("textbox", { name: "Collaborator email", exact: true })).toHaveCount(0);
+    expect(collaboratorReads).toBe(before);
+    await page.keyboard.press("Escape");
+  }
+  await page.getByRole("button", { name: "Owner fixture", exact: true }).click();
+  await button.click();
+  await details.getByRole("button", { name: "Manage sharing", exact: true }).click();
+  await expect(details.getByRole("textbox", { name: "Collaborator email", exact: true })).toBeVisible();
+  await page.evaluate(() => window.cloudWorkspaceSharingFixture.setPage("dashboard"));
+  await expect(details).toHaveCount(0);
+  const hiddenReads = collaboratorReads;
+  await button.hover();
+  await page.evaluate(() => window.cloudWorkspaceSharingFixture.setPage("workspace"));
+  await expect(details).toHaveCount(0);
+  expect(collaboratorReads).toBe(hiddenReads);
+  await page.getByRole("button", { name: "Flag off", exact: true }).click();
+  await button.click();
+  await expect(details.getByRole("region", { name: "Workspace sharing", exact: true })).toHaveCount(0);
+  expect(collaboratorReads).toBe(hiddenReads);
+  await page.unroute("https://api.example.test/v1/cloud-workspaces/**");
+  check("Staff sharing respects roles, writer slots, pagination, CAS, account switches and inactive surfaces", true);
 }

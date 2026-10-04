@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   Clock,
@@ -38,6 +38,8 @@ import { useNativeRuntime } from "../../platform/runtime";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import { warmCloudWorkspaceReplicas } from "../../state/cloud-replica-cache";
 import { CloudWorkspaceSyncControls } from "./cloud-workspace-sync-controls";
+import { warmCloudWorkspaceCollaboration } from "../../state/cloud-workspace-collaboration-cache";
+import { CloudWorkspaceSharingControls } from "./cloud-workspace-sharing-controls";
 
 export function cloudStatusLabel(status: string): string {
   return (
@@ -160,20 +162,25 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   const syncEnabled = useInternalFeatureActive("cloudComputerV2");
   const native = useNativeRuntime().ready;
   const surfaceActive = useWorkspaceStore(state => state.activePage === "workspace");
+  const sharingActive = useInternalFeatureActive("cloudComputerV2");
+  useEffect(() => { if (!surfaceActive) setOpen(false); }, [surfaceActive]);
   const details = useCachedRead(
     cloudWorkspaceDetails,
     key,
     (value) => refreshCloudWorkspace(parseCloudWorkspaceKey(value)!),
-    { enabled: open, maxAgeMs: 10_000 },
+    { enabled: open && surfaceActive, maxAgeMs: 10_000 },
   );
   if (!key) return null;
   const warm = () => {
+    if (!surfaceActive) return;
     if (nativeAccessEnabled && target) void warmCloudServiceAccess(target).catch(() => {});
+    if (sharingActive) warmCloudWorkspaceCollaboration(target!);
     void cloudWorkspaceDetails
       .load(key, () => refreshCloudWorkspace(parseCloudWorkspaceKey(key)!), {
         maxAgeMs: 10_000,
       })
       .then(workspace => {
+        if (sharingActive) warmCloudWorkspaceCollaboration(target!);
         if (syncEnabled && native && surfaceActive && me?.user.id && workspace.capabilities.canEdit === true) {
           return warmCloudWorkspaceReplicas(me.user.id, parseCloudWorkspaceKey(key)!);
         }
@@ -181,7 +188,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
       .catch(() => {});
   };
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open && surfaceActive} onOpenChange={setOpen}>
       <Tooltip label="Cloud workspace details">
         <PopoverTrigger asChild>
           <Button
@@ -200,7 +207,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
       <PopoverContent
         align="start"
         sideOffset={6}
-        className="w-[360px]"
+        className="max-h-[min(80vh,var(--radix-popover-content-available-height))] w-[360px] overflow-y-auto"
         aria-label="Cloud workspace details"
       >
         {details.data ? (
@@ -222,6 +229,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
             Couldn’t refresh. Showing the last confirmed details.
           </p>
         )}
+        {details.data && sharingActive && <CloudWorkspaceSharingControls workspace={details.data} active={open && surfaceActive} />}
         {details.data?.recovery?.checkpointId && details.data.recovery.state !== "restoring" &&
           (details.data.recovery.state || details.data.status === "failed") &&
           ["failed", "stopped", "archived"].includes(details.data.status) && (
