@@ -34,7 +34,7 @@ import {
   useState,
 } from "react";
 
-import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
+import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT, type ChatScrollNavigation } from "./chat-scroll-navigation";
 
 export interface StickyBottomState {
   /** True when the scroll position is within `threshold` of the
@@ -127,6 +127,7 @@ export function useStickyBottom(
   // scrollend, then resolve the latest geometry (which may have changed).
   const jumpingRef = useRef(false);
   const readingNavigationRef = useRef(false);
+  const readingTargetRef = useRef<number | undefined>(undefined);
   const cancelJumpRef = useRef<() => void>(() => {});
 
   useEffect(() => {
@@ -153,10 +154,23 @@ export function useStickyBottom(
         scrollEl.scrollHeight - insetRef.current - scrollEl.scrollTop -
         scrollEl.clientHeight <= threshold;
       // Scrollend can still belong to the navigation we just interrupted.
-      // Disengage reading intent only after actually leaving the tail; a
-      // later user scroll back to it can then resume ordinary following.
-      if (readingNavigationRef.current && !atBottom) readingNavigationRef.current = false;
-      if (!jumpingRef.current && !readingNavigationRef.current) stickRef.current = atBottom;
+      // Release reading suppression on actual departure or arrival at its
+      // intended target. Checkpoint blank space separately suspends snapping.
+      const readingTarget = readingTargetRef.current;
+      const reachedReadingTarget = readingTarget !== undefined && Math.abs(
+        scrollEl.scrollTop - Math.max(0, Math.min(readingTarget, scrollEl.scrollHeight - scrollEl.clientHeight)),
+      ) <= 1;
+      if (readingNavigationRef.current && (!atBottom || insetRef.current > 0 || reachedReadingTarget)) {
+        readingNavigationRef.current = false;
+      }
+      // A single layout burst can outgrow the remaining checkpoint blank
+      // space before the rail commits its smaller inset. Retain following
+      // through that resize; the first zero-inset pass can catch up.
+      const awaitingSpacerResize = stickRef.current && insetRef.current > 0 &&
+        (resized || geometryChanged);
+      if (!jumpingRef.current && !readingNavigationRef.current && !awaitingSpacerResize) {
+        stickRef.current = atBottom;
+      }
       setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
     };
     let gestureFrame = 0;
@@ -179,13 +193,15 @@ export function useStickyBottom(
     };
     const onNavigation = (event: Event) => {
       cancelJumpRef.current();
-      const follow = (event as CustomEvent<{ follow: boolean }>).detail?.follow === true;
+      const { follow = false, target } = (event as CustomEvent<ChatScrollNavigation>).detail ?? {};
+      readingTargetRef.current = target;
       readingNavigationRef.current = !follow;
       stickRef.current = follow;
       // A navigation can spend its first frame at the old bottom. Unlike a
       // no-motion gesture, it must not re-arm following before it moves.
       if (gestureFrame) cancelAnimationFrame(gestureFrame);
       gestureFrame = 0;
+      if (!follow) measure();
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Enter"].includes(event.key)) {
@@ -256,7 +272,7 @@ export function useStickyBottom(
   const jumpToBottom = useCallback(
     (smooth = true) => {
       if (!scrollEl || !enabledRef.current || scrollEl.clientHeight === 0) return;
-      beginChatScrollNavigation(scrollEl);
+      beginChatScrollNavigation(scrollEl, { follow: true });
       cancelJumpRef.current();
       readingNavigationRef.current = false;
       const target = () => Math.max(

@@ -529,7 +529,7 @@ export const CheckpointRail = memo(function CheckpointRail({
 
       const target = targetTopFor(id);
       if (target === null) return;
-      beginChatScrollNavigation(scrollEl);
+      beginChatScrollNavigation(scrollEl, { target });
 
       // Pin BEFORE the animation: the clicked checkpoint is the
       // selected one from this instant, whatever the spy would derive

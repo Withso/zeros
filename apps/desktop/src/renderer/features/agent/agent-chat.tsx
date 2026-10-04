@@ -2220,7 +2220,7 @@ export function AgentChat({
   useEffect(() => () => settleCancelRef.current(), []);
   const settleScroll = useCallback(
     (el: HTMLElement, computeTarget: () => number, onFinished?: () => void, follow = false) => {
-      beginChatScrollNavigation(el, follow);
+      beginChatScrollNavigation(el, { follow, target: computeTarget() });
       settleCancelRef.current();
       const epoch = settleEpochRef.current + 1;
       settleEpochRef.current = epoch;
@@ -2954,7 +2954,7 @@ export function AgentChat({
         const top = nextTextMessageTarget(el, { direction: "up" });
         if (top !== null) {
           e.preventDefault();
-          beginChatScrollNavigation(el);
+          beginChatScrollNavigation(el, { target: top });
           el.scrollTo({ top, behavior: "smooth" });
         }
         return;
@@ -2963,14 +2963,14 @@ export function AgentChat({
         const top = nextTextMessageTarget(el, { direction: "down" });
         if (top !== null) {
           e.preventDefault();
-          beginChatScrollNavigation(el);
+          beginChatScrollNavigation(el, { target: top });
           el.scrollTo({ top, behavior: "smooth" });
         }
         return;
       }
       if (e.key === "Home") {
         e.preventDefault();
-        beginChatScrollNavigation(el);
+        beginChatScrollNavigation(el, { target: 0 });
         el.scrollTo({ top: 0, behavior: "smooth" });
         return;
       }

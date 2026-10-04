@@ -64,7 +64,7 @@ export const JumpToPromptPill = memo(function JumpToPromptPill({
     const promptTop = promptEl.getBoundingClientRect().top;
     const target = scrollEl.scrollTop + (promptTop - containerTop);
     if (Math.abs(target - scrollEl.scrollTop) < 4) return;
-    beginChatScrollNavigation(scrollEl);
+    beginChatScrollNavigation(scrollEl, { target });
     scrollEl.scrollTo({ top: target, behavior: "smooth" });
   };
 

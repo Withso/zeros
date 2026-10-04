@@ -26,12 +26,17 @@ function Fixture() {
     <button onClick={() => jumpToBottom(false)}>Jump instantly</button>
     <button onClick={() => {
       if (!el) return;
-      beginChatScrollNavigation(el);
+      beginChatScrollNavigation(el, { target: 0 });
       el.scrollTo({ top: 0, behavior: "smooth" });
     }}>Jump to start</button>
     <button onClick={() => {
       if (!el) return;
-      beginChatScrollNavigation(el, true);
+      beginChatScrollNavigation(el, { target: el.scrollHeight });
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }}>Next message</button>
+    <button onClick={() => {
+      if (!el) return;
+      beginChatScrollNavigation(el, { follow: true });
       el.scrollTop = el.scrollHeight;
     }}>Restore latest position</button>
     <button onClick={() => setRevision(value => value + 1)}>Append event</button>

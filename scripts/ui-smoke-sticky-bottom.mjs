@@ -143,4 +143,18 @@ export async function runStickyBottomSmoke({ page, check }) {
   await expect.poll(() => scroller.evaluate(el => el.scrollTop)).toBe(0);
   await expect(atBottom).toHaveText("false");
   check("Upward navigation keeps reading intent when layout grows in its first frame", true);
+
+  await page.getByRole("button", { name: "Jump to: Latest prompt", exact: true }).press("Enter");
+  const tailOffset = () => scroller.evaluate(el => el.querySelector('[data-checkpoint-id="tail"]').getBoundingClientRect().top - el.getBoundingClientRect().top);
+  await expect.poll(tailOffset).toBeGreaterThanOrEqual(0);
+  await expect.poll(tailOffset).toBeLessThanOrEqual(16);
+  await page.waitForTimeout(800);
+  await grow();
+  await expect.poll(gap).toBeLessThanOrEqual(1);
+  check("Following resumes when streaming consumes a checkpoint spacer", true);
+
+  await page.getByRole("button", { name: "Next message", exact: true }).click();
+  await grow();
+  await expect.poll(gap).toBeLessThanOrEqual(1);
+  check("Next-message navigation already at the tail preserves following", true);
 }
