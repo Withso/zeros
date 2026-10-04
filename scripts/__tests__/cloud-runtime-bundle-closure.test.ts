@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import {
   chmod,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -22,7 +23,11 @@ import {
   ROOT_METADATA,
   SOURCE_SLICES,
 } from "../cloud-workspace-validation/runtime-bundle/closure";
-import { inventoryTree } from "../cloud-workspace-validation/runtime-bundle/manifest";
+import {
+  canonicalJson,
+  createManifest,
+  inventoryTree,
+} from "../cloud-workspace-validation/runtime-bundle/manifest";
 
 const temporary: string[] = [];
 async function directory() {
@@ -468,6 +473,100 @@ describe("payload hygiene", () => {
 describe.skipIf(!process.env.ZEROS_RUNTIME_BUNDLE_TEST_DIR)(
   "extracted Linux archive closure",
   () => {
+    it("resolves v4 runtime paths using the isolated probe fixture", async () => {
+      const { runClosureProbes } =
+        await import("../cloud-workspace-validation/runtime-bundle/probe");
+      const toolchain =
+        await import("../cloud-workspace-validation/runtime-bundle/toolchain");
+      const temp = await directory(),
+        runtime = path.join(temp, "runtime");
+      // Resolver-only fixture; the full archive test below checks pinned ABI.
+      for (const name of [
+        "bin/node",
+        "bin/start-engine.sh",
+        "bin/cloud-engine-namespace",
+        "bin/cloud-process-supervisor",
+        "lib/zeros/setup-cloud-workspace.mjs",
+        "lib/zeros/cloud-worker-supervisor.mjs",
+        "worker/dist-engine/cli.js",
+      ]) {
+        await mkdir(path.dirname(path.join(runtime, name)), {
+          recursive: true,
+        });
+        await writeFile(path.join(runtime, name), "", { mode: 0o555 });
+      }
+      await chmod(path.join(runtime, "bin/node"), 0o755);
+      await copyFile(process.execPath, path.join(runtime, "bin/node"));
+      await chmod(path.join(runtime, "bin/node"), 0o555);
+      await chmod(path.join(runtime, "bin/cloud-engine-namespace"), 0o500);
+      await copyFile(
+        "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
+        path.join(runtime, "lib/zeros/cloud-runtime-root.mjs"),
+      );
+      await chmod(
+        path.join(runtime, "lib/zeros/cloud-runtime-root.mjs"),
+        0o555,
+      );
+      await writeFile(
+        path.join(runtime, "manifest.json"),
+        canonicalJson(
+          createManifest(
+            {
+              source: {
+                commit: "a".repeat(40),
+                lockfileSha256: "b".repeat(64),
+              },
+              engineProtocolVersion: 20,
+              agents: {
+                claude: { sdk: "1", cli: "1" },
+                codex: { package: "1" },
+                cursor: { sdk: "1" },
+              },
+            },
+            await inventoryTree(runtime),
+          ),
+        ),
+        { mode: 0o444 },
+      );
+      const probe = path.join(temp, "resolver-probe.cjs");
+      await writeFile(
+        probe,
+        `
+const assert = require("node:assert/strict");
+const { pathToFileURL } = require("node:url");
+const root = process.argv[2];
+(async () => {
+  const { resolveCloudRuntime } = await import(pathToFileURL(root + "/lib/zeros/cloud-runtime-root.mjs").href);
+  const runtime = resolveCloudRuntime();
+  assert.equal(runtime.profile, "v4");
+  assert.equal(runtime.root, root);
+  assert.equal(runtime.node, process.execPath);
+  assert.equal(runtime.helpers.setup, root + "/lib/zeros/setup-cloud-workspace.mjs");
+  console.log(JSON.stringify({ checks: ["runtime_root"] }));
+  console.log(JSON.stringify({ component: "bundle", ok: true, failedChecks: [] }));
+})().catch(() => { process.exitCode = 1; });
+`,
+      );
+      const runTool = toolchain.runTool;
+      const spy = vi
+        .spyOn(toolchain, "runTool")
+        .mockImplementation((command, args, options, failure) => {
+          const replaced = [...args];
+          const mount = replaced.indexOf("/probe.cjs");
+          expect(replaced[mount - 2]).toBe("--ro-bind");
+          replaced[mount - 1] = probe;
+          return runTool(command, replaced, options, failure);
+        });
+      try {
+        await expect(runClosureProbes(runtime)).resolves.toMatchObject({
+          checks: ["runtime_root"],
+          isolation: "mount_namespace_no_network",
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    }, 30_000);
+
     it("checks the descriptor, every file hash and offline probes with no checkout or store", async () => {
       const { verifyBundleDirectory } =
         await import("../cloud-workspace-validation/runtime-bundle/verify");

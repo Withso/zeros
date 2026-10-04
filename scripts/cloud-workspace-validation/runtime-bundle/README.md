@@ -83,6 +83,10 @@ The build always verifies the archive, rehashes its extracted tree, and probes
 it at `/opt/zeros-infra/<runtimeId>` in a mount/network namespace. Only the
 runtime, OS tools/libraries, devices and a read-only proc view are mounted; the
 checkout/store and their parent directories are absent from module resolution.
+The namespace maps payload ownership to root and supplies disposable v4 marker,
+active-runtime and facade fixtures so source imports exercise B2's resolver.
+Their synthetic base/receipt/session identities are never archived and do not
+qualify a real base installation.
 It loads SQLite, PTY, Cursor, engine externals and source qualification modules;
 runs Claude/Codex versions, LSP/compiler shims, engine help and ZSR syntax/ripgrep
 checks; and resolves the pinned browser assets. Browser launch, live provider

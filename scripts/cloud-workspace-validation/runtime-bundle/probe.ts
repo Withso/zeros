@@ -1,8 +1,21 @@
-import { copyFile, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import {
+  copyFile,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { BundleError, check, parseManifest, sha256 } from "./manifest";
+import {
+  BundleError,
+  canonicalJson,
+  check,
+  parseManifest,
+  sha256,
+} from "./manifest";
 import { runTool } from "./toolchain";
 
 export type ClosureReport = {
@@ -16,7 +29,9 @@ export async function runClosureProbes(
   const start = performance.now();
   const manifest = await readFile(path.join(runtime, "manifest.json"));
   parseManifest(manifest);
-  const installed = `/opt/zeros-infra/r1-${sha256(manifest)}`;
+  const manifestSha256 = sha256(manifest);
+  const runtimeId = `r1-${manifestSha256}`;
+  const installed = `/opt/zeros-infra/${runtimeId}`;
   const scratch = await mkdtemp(path.join(os.tmpdir(), "zeros-runtime-probe-"));
   try {
     const script = path.join(scratch, "probe.cjs");
@@ -24,11 +39,47 @@ export async function runClosureProbes(
       fileURLToPath(new URL("./probe.cjs", import.meta.url)),
       script,
     );
+    // Imports that resolve R require the same v4 marker, descriptor and facade
+    // as an installed runtime. These synthetic base/receipt/session identities
+    // exist only in the disposable probe namespace, never in the artifact.
+    const marker = path.join(scratch, "cloud-worker.json");
+    const active = path.join(scratch, "active-runtime.json");
+    await writeFile(
+      marker,
+      canonicalJson({
+        backend: "cloud-worker",
+        gid: 10001,
+        profile: "zeros-cloud-worker-v4",
+        uid: 10001,
+        version: 4,
+      }),
+      { mode: 0o444, flag: "wx" },
+    );
+    await writeFile(
+      active,
+      canonicalJson({
+        schema: "zeros.active-runtime/v1",
+        runtimeId,
+        manifestSha256,
+        root: installed,
+        baseCompatibilityId: `bc1-${"0".repeat(64)}`,
+        installerReceiptSha256: "0".repeat(64),
+        bootId: "00000000-0000-4000-8000-000000000000",
+        supervisorSessionId: "00000000-0000-4000-8000-000000000001",
+        cgroupRoot: "/sys/fs/cgroup/zeros-host.service",
+      }),
+      { mode: 0o600, flag: "wx" },
+    );
     const args = [
       "--inh-caps=-all",
       "--ambient-caps=-all",
       "bwrap",
       "--unshare-user",
+      // Map the builder's ownership to namespace root without host privileges.
+      "--uid",
+      "0",
+      "--gid",
+      "0",
       "--unshare-net",
       "--unshare-ipc",
       "--unshare-uts",
@@ -72,6 +123,33 @@ export async function runClosureProbes(
       "--ro-bind",
       runtime,
       installed,
+      "--dir",
+      "/etc/zeros",
+      "--ro-bind",
+      marker,
+      "/etc/zeros/cloud-worker.json",
+      "--dir",
+      "/run/zeros",
+      "--ro-bind",
+      active,
+      "/run/zeros/active-runtime.json",
+      "--dir",
+      "/opt/zeros",
+      "--symlink",
+      "/opt/zeros",
+      "/zeros",
+      "--symlink",
+      `../zeros-infra/${runtimeId}`,
+      "/opt/zeros/current",
+    );
+    for (const name of ["bin", "worker", "manifest.json"])
+      args.push("--symlink", `current/${name}`, `/opt/zeros/${name}`);
+    for (const [name, target] of [
+      ["logs", "/srv/zeros/log"],
+      ["state", "/srv/zeros/state"],
+    ])
+      args.push("--symlink", target, `/opt/zeros/${name}`);
+    args.push(
       "--ro-bind",
       script,
       "/probe.cjs",
