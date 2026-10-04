@@ -435,6 +435,13 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
 
 ## Colors and readable errors
 
+- Settled root turn failures appear once in the failure card outside the
+  collapsible activity feed, for Claude, Codex and Cursor. Keep native and
+  persisted notices intact for recovery and export; do not repeat them when
+  activity is expanded. The provider turn owns this presentation across steer
+  segments. Before settlement, show the latest terminal notice outside activity
+  until the footer takes over. Feeds without a turn footer remain inspectable,
+  as do recoverable warnings, child errors and individual failed tool results.
 - Claude's native `verification_required` and `cloud_credential_error` remain
   distinct from a Claude sign-in failure, model unavailability and transport
   failure. Preserve the provider's explanation, credential/provider name and
