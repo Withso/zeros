@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -91,7 +91,7 @@ if (process.argv[2] === 'invalid') {
   const quote = word => "'" + word.replaceAll("'", "'\\\\''") + "'";
   const command = await wrapCommandWithSandboxLinux({
     command: [process.execPath, '-e', check].map(quote).join(' '), needsNetworkRestriction: false,
-    hostParity: true, allowAllUnixSockets: true, disableMandatoryWriteProtection: true, bwrapPath: '/usr/bin/bwrap',
+    hostParity: true, allowAllUnixSockets: true, disableMandatoryWriteProtection: true, bwrapPath: '/usr/bin/bwrap', binShell: '/bin/bash',
     readConfig: { denyOnly: policy.denyRead, allowWithinDeny: policy.allowRead },
     writeConfig: { allowOnly: policy.allowWrite, denyWithinAllow: policy.denyWrite,
       allowWithinDeny: policy.allowWrite.filter(candidate => policy.denyWrite.some(denied => candidate.startsWith(denied + '/'))) },
@@ -130,12 +130,15 @@ describe("Cloud Computer engine bind aliases", () => {
       await chmod(config, 0o755);
       const script = path.join(root, "probe.mts");
       await writeFile(script, probe);
-      const args = ["--die-with-parent", "--unshare-pid", "--clearenv", "--setenv", "PATH", "/usr/bin:/bin",
+      const args = ["--die-with-parent", "--unshare-pid", "--clearenv", "--setenv", "PATH", "/probe-bin:/usr/bin:/bin",
         "--setenv", "HOME", "/tmp/home", "--setenv", "ZEROS_DATA_DIR", "/tmp/state",
         "--setenv", "ZEROS_ATTACHMENT_TEMP_DIR", "/srv/zeros/attachment-staging"];
       for (const directory of ["/usr", "/home", "/opt", "/vercel", "/nix"])
         if (existsSync(directory)) args.push("--ro-bind", directory, directory);
       for (const name of ["bin", "sbin", "lib", "lib64"]) args.push("--symlink", `usr/${name}`, `/${name}`);
+      // Node's sandbox shell lookup invokes which; keep distro alternatives
+      // symlinks independent of this probe's private /etc projection.
+      args.push("--ro-bind", realpathSync("/usr/bin/which"), "/probe-bin/which");
       args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
         "--ro-bind", config, "/etc/zeros", "--ro-bind", script, "/probe.mts", "--bind", files, "/srv/zeros");
       if (template) args.push("--bind", primary, "/srv/zeros/workspace");

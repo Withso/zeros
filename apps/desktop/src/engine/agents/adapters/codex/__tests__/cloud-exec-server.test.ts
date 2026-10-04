@@ -65,6 +65,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       abort.abort();return closing??=(async()=>{await Promise.all([...domains].map(domain=>domain.stopAndProve()));})();
     });
     const workloadSpawn=vi.fn(async(request:BoundarySpawnRequest)=>{
+      expect(request.env).toMatchObject({ORG_VALUE:values.ORG_VALUE,REPO_VALUE:values.REPO_VALUE,PERSONAL_VALUE:actor});
       const child=spawn(process.execPath,[helper,nativeBinary],{cwd:root,env:{...request.env},stdio:["pipe","pipe","pipe"],detached:true});
       const exited=new Promise<{code:number|null;signal:string|null}>(resolve=>child.once("close",(code,signal)=>resolve({code,signal})));
       let stopped:Promise<void>|undefined;
@@ -98,15 +99,21 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
         socket!.on("message",receive);socket!.send(JSON.stringify({id,method,params}));
       });
       const config=cloudCodexConfig(execution);
-      await rpc(3,"process/start",{processId:"env-check",argv:["/bin/bash","--noprofile","--norc","-c",'printf "%s\\n" "$ORG_VALUE" "$REPO_VALUE" "$PERSONAL_VALUE" "$ORG_SECRET" "${EMPTY_VALUE-unset}" "${OPENAI_API_KEY-unset}" "${ANTHROPIC_API_KEY-unset}" "${CURSOR_API_KEY-unset}" "${CODEX_API_KEY-unset}" "$HOME" "$LANG"'],cwd:`file://${root}`,env:{},tty:false,
+      // Force distinct output reads with an empty poll between them so a cursor bug cannot hide an admitted layer.
+      await rpc(3,"process/start",{processId:"env-check",argv:["/bin/bash","--noprofile","--norc","-c",'printf "%s\\n" "$ORG_VALUE"; while [ ! -f environment-release ]; do sleep 0.01; done; printf "%s\\n" "$REPO_VALUE" "$PERSONAL_VALUE" "$ORG_SECRET" "${EMPTY_VALUE-unset}" "${OPENAI_API_KEY-unset}" "${ANTHROPIC_API_KEY-unset}" "${CURSOR_API_KEY-unset}" "${CODEX_API_KEY-unset}" "$HOME" "$LANG"'],cwd:`file://${root}`,env:{},tty:false,
         envPolicy:{inherit:config["shell_environment_policy.inherit"],ignoreDefaultExcludes:config["shell_environment_policy.ignore_default_excludes"]??false,
           includeOnly:config["shell_environment_policy.include_only"]??[],exclude:[],set:{}}});
-      let output="",afterSeq:number|null=null,closed=false;
-      type ShellOutput={chunks:{chunk:string}[];nextSeq:number;closed:boolean;exitCode:number|null};
+      let output="",afterSeq:number|null=null,closed=false,released=false;
+      type ShellOutput={chunks:{seq:number;chunk:string}[];nextSeq:number;closed:boolean;exitCode:number|null};
       for(let id=4;id<14&&!closed;id++){
         const result:ShellOutput=await rpc<ShellOutput>(id,"process/read",{processId:"env-check",afterSeq,maxBytes:65536,waitMs:500});
         for(const chunk of result.chunks)output+=Buffer.from(chunk.chunk,"base64").toString("utf8");
-        afterSeq=result.nextSeq;closed=result.closed;
+        if(output&&!released){
+          expect(output).toBe(values.ORG_VALUE+"\n");
+          if(!result.chunks.length){released=true;await writeFile(path.join(root,"environment-release"),"");}
+        }
+        // afterSeq is the last consumed sequence, not the next producer sequence.
+        afterSeq=result.chunks.at(-1)?.seq??afterSeq;closed=result.closed;
         if(closed)expect(result.exitCode).toBe(0);
       }
       expect(closed).toBe(true);
