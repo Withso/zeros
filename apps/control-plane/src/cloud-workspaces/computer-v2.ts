@@ -497,10 +497,9 @@ export class DatabaseCloudComputerV2Service {
     const current = (
       await tx.query<{
         id: string;
-        current_version: string;
         placement: string;
       }>(
-        `SELECT id,current_version,placement FROM secret_bindings
+        `SELECT id,placement FROM secret_bindings
       WHERE org_id=$1 AND owner_kind='organization' AND purpose='environment' AND name=$2 AND state='active' FOR UPDATE`,
         [org, name],
       )
@@ -511,8 +510,19 @@ export class DatabaseCloudComputerV2Service {
         "cloud_computer_environment_unavailable",
         "Environment binding is not available in cloud workspaces.",
       );
-    const bindingId = current?.id ?? randomUUID(),
-      version = current ? integer(current.current_version) + 1 : 1;
+    const bindingId = current?.id ?? randomUUID();
+    // The binding row lock also serializes generic rotation. Draft versions
+    // append independently of current_version, which only rotation publishes.
+    const version = current
+      ? integer(
+          (
+            await tx.query<{ version: string }>(
+              "SELECT coalesce(max(version),0)+1 AS version FROM secret_binding_versions WHERE binding_id=$1 AND org_id=$2",
+              [bindingId, org],
+            )
+          ).rows[0]!.version,
+        )
+      : 1;
     let sealed: ReturnType<typeof sealCloudWorkspaceSecretBinding>;
     try {
       sealed = sealCloudWorkspaceSecretBinding(
@@ -548,11 +558,6 @@ export class DatabaseCloudComputerV2Service {
         user,
       ],
     );
-    if (current)
-      await tx.query(
-        "UPDATE secret_bindings SET current_version=$3,updated_at=now() WHERE id=$1 AND org_id=$2",
-        [bindingId, org, version],
-      );
     // Older versions remain pinned by immutable recipes. Removing or
     // discarding a reference must never invoke security revocation.
     return {

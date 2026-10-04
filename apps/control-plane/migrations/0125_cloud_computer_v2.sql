@@ -160,8 +160,28 @@ CREATE TABLE cloud_computer_v2_operations (
   FOREIGN KEY(build_id,org_id) REFERENCES cloud_computer_v2_builds(id,org_id) ON DELETE RESTRICT
 );
 
+-- Final erasure is the sole exception to immutable-row deletion. The worker
+-- sets transaction-local context after locking and checking its durable lease.
+-- A system flag alone, or a context from another org/expired worker, cannot
+-- authorize deletion; updates remain forbidden even during final erasure.
+CREATE FUNCTION cloud_computer_v2_purge_allowed(p_org_id uuid) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT app_is_system() AND EXISTS (
+    SELECT 1 FROM organizations organization
+    JOIN deletion_requests request ON request.id=organization.deletion_request_id
+    WHERE organization.id=p_org_id AND organization.lifecycle_status='purging'
+      AND request.target_kind='organization' AND request.target_organization_id=p_org_id
+      AND request.state='provider_deleting' AND request.lease_expires_at>clock_timestamp()
+      AND request.id::text=current_setting('app.cloud_computer_v2_purge_request_id',true)
+      AND request.lease_owner=current_setting('app.cloud_computer_v2_purge_worker_id',true)
+      AND request.lease_revision::text=current_setting('app.cloud_computer_v2_purge_lease_revision',true)
+  );
+$$;
 CREATE FUNCTION cloud_computer_v2_config_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF TG_OP='DELETE' AND cloud_computer_v2_purge_allowed(OLD.org_id) THEN
+    RETURN OLD;
+  END IF;
   RAISE EXCEPTION 'Cloud Computer configuration is immutable' USING ERRCODE='23514';
 END;
 $$;
@@ -174,6 +194,16 @@ CREATE TRIGGER cloud_computer_v2_environment_immutable BEFORE UPDATE OR DELETE O
 CREATE TRIGGER cloud_computer_v2_operation_immutable BEFORE UPDATE OR DELETE ON cloud_computer_v2_operations
   FOR EACH ROW EXECUTE FUNCTION cloud_computer_v2_config_immutable();
 CREATE TRIGGER cloud_computer_v2_source_immutable BEFORE UPDATE OR DELETE ON cloud_workspace_computer_sources
+  FOR EACH ROW EXECUTE FUNCTION cloud_computer_v2_config_immutable();
+-- Default privileges grant all DML to zeros_app. These guards enforce the
+-- narrower verbs advertised below without revoking inherited privileges.
+CREATE TRIGGER cloud_computer_v2_head_delete_guard BEFORE DELETE ON cloud_computer_v2_heads
+  FOR EACH ROW EXECUTE FUNCTION cloud_computer_v2_config_immutable();
+CREATE TRIGGER cloud_computer_v2_build_delete_guard BEFORE DELETE ON cloud_computer_v2_builds
+  FOR EACH ROW EXECUTE FUNCTION cloud_computer_v2_config_immutable();
+CREATE TRIGGER cloud_computer_v2_template_delete_guard BEFORE DELETE ON cloud_computer_templates
+  FOR EACH ROW EXECUTE FUNCTION cloud_computer_v2_config_immutable();
+CREATE TRIGGER cloud_computer_v2_log_update_guard BEFORE UPDATE ON cloud_computer_build_logs
   FOR EACH ROW EXECUTE FUNCTION cloud_computer_v2_config_immutable();
 
 -- Children are authored in the same transaction as their immutable parent.
@@ -283,3 +313,4 @@ GRANT SELECT,INSERT ON cloud_computer_v2_configs,cloud_computer_v2_config_reposi
   cloud_computer_environment_refs,cloud_workspace_computer_sources,cloud_computer_v2_operations TO zeros_app;
 GRANT SELECT,INSERT,UPDATE ON cloud_computer_v2_heads,cloud_computer_v2_builds,cloud_computer_templates TO zeros_app;
 GRANT SELECT,INSERT,DELETE ON cloud_computer_build_logs TO zeros_app;
+GRANT EXECUTE ON FUNCTION cloud_computer_v2_purge_allowed(uuid) TO zeros_app;

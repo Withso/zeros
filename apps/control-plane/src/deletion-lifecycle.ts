@@ -2211,6 +2211,31 @@ export class DeletionLifecycleProcessor {
             OR ($2::text IS NOT NULL AND command.provider_object_id = $2)`,
         [organizationId, workosOrganizationId],
       );
+      // Immutable v2 records permit only this final-erasure transaction, with
+      // the organization/request and the current worker lease still locked.
+      await tx.query(
+        `SELECT set_config('app.cloud_computer_v2_purge_request_id', $1, true),
+                set_config('app.cloud_computer_v2_purge_worker_id', $2, true),
+                set_config('app.cloud_computer_v2_purge_lease_revision', $3::text, true)`,
+        [request.id, this.workerId, request.lease_revision],
+      );
+      // Sources precede generations; logs/receipts/templates precede builds;
+      // the deferred head pointers disappear before their configurations.
+      for (const table of [
+        "cloud_workspace_computer_sources",
+        "cloud_computer_build_logs",
+        "cloud_computer_v2_operations",
+        "cloud_computer_templates",
+        "cloud_computer_v2_builds",
+        "cloud_computer_v2_heads",
+        "cloud_computer_v2_config_repositories",
+        "cloud_computer_environment_refs",
+        "cloud_computer_v2_configs",
+      ]) {
+        await tx.query(`DELETE FROM ${table} WHERE org_id = $1`, [
+          organizationId,
+        ]);
+      }
       await tx.query(
         `SELECT public.purge_cloud_workspace_operator_configuration($1)`,
         [request.target_organization_id],

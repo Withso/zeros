@@ -17,7 +17,11 @@ import { withSystemTx, withUserTx } from "../db.js";
 import { createRoutes } from "../routes.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
-import { openCloudWorkspaceSecretBinding } from "./settings.js";
+import {
+  openCloudWorkspaceSecretBinding,
+  resolveDatabaseCloudWorkspaceSettings,
+} from "./settings.js";
+import { DatabaseCloudWorkspaceManagementService } from "./management.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
 import { requireCloudComputerAuthority } from "./computer.js";
 import { createCloudComputerV2Routes } from "./computer-v2-routes.js";
@@ -448,6 +452,195 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
       ).rowCount,
     ).toBe(0);
   });
+  it("keeps draft Save and Discard isolated from published legacy environment settings", async () => {
+    const management = new DatabaseCloudWorkspaceManagementService(
+      pool,
+      config,
+      {
+        workosEnabled: false,
+      },
+    );
+    const bindingId = randomUUID();
+    await management.createSecretBinding({
+      id: bindingId,
+      organizationId: fixture.organizationId,
+      actorUserId: fixture.userId,
+      name: "SETTING",
+      purpose: "environment",
+      placement: "cloud",
+      value: "published-fixture-value",
+    });
+    await management.createEnvironmentProfile({
+      id: randomUUID(),
+      organizationId: fixture.organizationId,
+      actorUserId: fixture.userId,
+      name: "Legacy environment",
+      placement: "cloud",
+      isDefault: true,
+      document: { secretRefs: [{ id: bindingId, name: "SETTING" }] },
+    });
+    const resolve = () =>
+      withSystemTx(pool, async (tx) => {
+        const settings = await resolveDatabaseCloudWorkspaceSettings(tx, {
+          organizationId: fixture.organizationId,
+          repositoryId: fixture.repositoryId,
+          workspaceId: fixture.workspaceId,
+          generation: 1,
+          actorUserId: fixture.userId,
+          isPersonal: false,
+          setupSecretKeyV1: config.settingsSecretKeyV1,
+        });
+        return settings.sourceVersions.secretBindings;
+      });
+    const published = { SETTING: { id: bindingId, version: 1 } };
+    expect(await resolve()).toEqual(published);
+    await save(0, {
+      ...draft,
+      environment: [
+        { op: "set", name: "SETTING", value: "draft-fixture-value" },
+      ],
+    });
+    expect(await resolve()).toEqual(published);
+    expect((await read()).draft.environment).toEqual([
+      { name: "SETTING", set: true },
+    ]);
+    await service.discard(fixture.organizationId, fixture.userId, {
+      expectedRevision: 1,
+    });
+    expect(await resolve()).toEqual(published);
+    expect((await read()).draft.environment).toEqual([]);
+    expect(
+      (await pool.query("SELECT 1 FROM cloud_computer_v2_builds")).rowCount,
+    ).toBe(0);
+
+    // Rotation owns publication and must allocate past the unpublished draft version.
+    expect(
+      await management.rotateSecretBinding({
+        id: bindingId,
+        organizationId: fixture.organizationId,
+        actorUserId: fixture.userId,
+        expectedVersion: 1,
+        value: "rotated-fixture-value",
+      }),
+    ).toMatchObject({ binding: { version: 3 } });
+    expect(await resolve()).toEqual({ SETTING: { id: bindingId, version: 3 } });
+    await save(2, {
+      ...draft,
+      environment: [
+        { op: "set", name: "SETTING", value: "later-draft-fixture-value" },
+      ],
+    });
+    expect(await resolve()).toEqual({ SETTING: { id: bindingId, version: 3 } });
+    expect(
+      (
+        await pool.query(
+          "SELECT version FROM secret_binding_versions WHERE binding_id=$1 ORDER BY version",
+          [bindingId],
+        )
+      ).rows.map((row) => row.version),
+    ).toEqual(["1", "2", "3", "4"]);
+  });
+  it.each(["active", "historical"])(
+    "generic rotation preserves %s computer environment pins and explicit revocation still fences them",
+    async (kind) => {
+      const management = new DatabaseCloudWorkspaceManagementService(
+        pool,
+        config,
+        {
+          workosEnabled: false,
+        },
+      );
+      await save(0, {
+        ...draft,
+        environment: [
+          { op: "set", name: "SETTING", value: "computer-fixture-value" },
+        ],
+      });
+      const first = await successful(1);
+      expect((await read()).draft.environment).toEqual([
+        { name: "SETTING", set: true },
+      ]);
+      const pin = (
+        await pool.query(
+          "SELECT binding_id,binding_version FROM cloud_computer_environment_refs WHERE config_id=$1",
+          [first.configId],
+        )
+      ).rows[0];
+      if (kind === "historical") {
+        await save((await read()).revision, {
+          ...draft,
+          environment: [{ op: "remove", name: "SETTING" }],
+        });
+        await successful((await read()).revision);
+        expect((await read()).previous?.version).toBe(first.version);
+      }
+      expect(
+        await management.rotateSecretBinding({
+          id: pin.binding_id,
+          organizationId: fixture.organizationId,
+          actorUserId: fixture.userId,
+          expectedVersion: 1,
+          value: "rotated-fixture-value",
+        }),
+      ).toMatchObject({
+        binding: { version: 2 },
+        generationsUsingPreviousVersion: 0,
+      });
+      expect(
+        (
+          await pool.query(
+            "SELECT retired_at IS NOT NULL AS retired FROM secret_binding_versions WHERE binding_id=$1 AND version=$2",
+            [pin.binding_id, pin.binding_version],
+          )
+        ).rows[0].retired,
+      ).toBe(false);
+      const activated = await service.activate(
+        fixture.organizationId,
+        fixture.userId,
+        first.version,
+        {
+          expectedRevision: (await read()).revision,
+          operationId: randomUUID(),
+        },
+      );
+      const rebuilt = await service.rebuild(
+        fixture.organizationId,
+        fixture.userId,
+        first.version,
+        {
+          expectedRevision: activated.revision,
+          operationId: randomUUID(),
+        },
+      );
+      expect(rebuilt.build.state).toBe("queued");
+      expect((await read()).draft.environment).toEqual([
+        { name: "SETTING", set: true },
+      ]);
+      await cancel(rebuilt.build.id, rebuilt.revision);
+      await management.revokeSecretBinding({
+        id: pin.binding_id,
+        organizationId: fixture.organizationId,
+        actorUserId: fixture.userId,
+        expectedVersion: 2,
+      });
+      expect((await read()).draft.environment).toEqual([
+        { name: "SETTING", set: false },
+      ]);
+      for (const operation of [
+        service.activate.bind(service),
+        service.rebuild.bind(service),
+      ]) {
+        await expect(
+          operation(fixture.organizationId, fixture.userId, first.version, {
+            expectedRevision: (await read()).revision,
+            operationId: randomUUID(),
+          }),
+        ).rejects.toMatchObject({
+          code: "cloud_computer_environment_unavailable",
+        });
+      }
+    },
+  );
   it("deduplicates secret-bearing builds privately and rejects changed values or actors", async () => {
     const operation = randomUUID(),
       input = {
@@ -1024,6 +1217,43 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
         ),
       ),
     ).rejects.toMatchObject({ code: "23503" });
+  });
+  it("does not allow a system writer to remove the v2 enrollment fence", async () => {
+    await save();
+    await expect(
+      withSystemTx(pool, async (tx) => {
+        expect(
+          (
+            await tx.query(
+              "SELECT current_user AS role,app_is_system() AS system",
+            )
+          ).rows[0],
+        ).toEqual({ role: "zeros_app", system: true });
+        return tx.query("DELETE FROM cloud_computer_v2_heads WHERE org_id=$1", [
+          fixture.organizationId,
+        ]);
+      }),
+    ).rejects.toMatchObject({ code: "23514" });
+    expect((await read()).revision).toBe(1);
+  });
+  it.each([
+    "DELETE FROM cloud_computer_v2_builds WHERE org_id=$1",
+    "DELETE FROM cloud_computer_templates WHERE org_id=$1",
+    "UPDATE cloud_computer_build_logs SET text='rewritten' WHERE org_id=$1",
+  ])("denies restricted system writes: %s", async (statement) => {
+    const request = await build();
+    await service.claimNextBuild(1);
+    expect(
+      await service.appendBuildLog(request.build.id, 1, {
+        stream: "system",
+        stage: "install",
+        text: "fixture output",
+      }),
+    ).toMatchObject({ applied: true });
+    await finish(request.build.id);
+    await expect(
+      withSystemTx(pool, (tx) => tx.query(statement, [fixture.organizationId])),
+    ).rejects.toMatchObject({ code: "23514" });
   });
   it("cannot extend a published config or rewrite a build's accepted identity", async () => {
     const request = await build();
