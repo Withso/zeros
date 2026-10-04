@@ -307,11 +307,35 @@ Prints exactly one closed diagnostic line (component `qualification`, stage `sel
 1. **Restore is not a reboot.** Boat restores the saved filesystem onto an already-booted VM and then starts
    ENABLED units. Early-boot services (apparmor.service profile loading, systemd-sysctl, systemd-tmpfiles-setup,
    sysusers, modules-load, udev) have already run before our files exist; zeros-boot must re-apply what we need.
-2. **Directory renames lose their contents across stop/resume.** Measured: a directory created and then renamed
-   (`mv`/`os.rename`) persists after stop→resume but EMPTY; renamed regular files and never-renamed directories
-   persist. Therefore no persistent component may publish data by renaming a directory. Installer rule: extract
-   directly into the final `R = /opt/zeros-infra/<runtimeId>` (fresh, unique path) with an `.incomplete` marker
-   file; verify; write the receipt (atomic FILE rename is fine); remove the marker; switch `current` with an atomic
-   symlink-file rename. A runtime directory with a marker or without a matching receipt is deleted and re-extracted.
-   Same rule for templates/builds/setup helpers. Possible impact on user workloads (package managers renaming
-   directories) is under investigation (Phase E) and should be reported to Boat.
+2. **Directory renames are reverted across stop/resume everywhere except `/home/user`.** Measured on Boat Alpha/test
+   (5 experiments, 2026-10-04; default VMs and a fork of a stopped template; root fs is ext4 as seen by the guest):
+   - A directory created AND renamed within one session persists correctly (contents intact).
+   - A directory that already existed at the last stop (from a previous session, the base image, or the template a
+     fork came from) and is then renamed/moved (same or different parent) is WRONG after the next stop/resume: the
+     old path comes back with the old contents, and the new path holds only files written after the rename (default
+     VM) or a duplicate (fork). Renamed regular files persist. Observed under /opt, /srv, /usr/local, /var/lib,
+     /usr/share, /root and /home/<other>; independent of owner (root, user, uid 10001).
+   - Under `/home/user` every case persists correctly — including renames made through a bind mount of a
+     `/home/user/...` directory (mounted elsewhere), through a symlink into it, and for uid-10001-owned trees, and in
+     forks of stopped templates. `/home/user/.cache` is NOT persisted at all.
+   - Cost: a template holding 60k files / 236 MB under /home/user stopped in 60 s (baseline ~42 s); a fork of it
+     started in 2.9 s, stopped in 9.7 s and resumed in 3.1 s.
+   Rules: (a) no component may publish by renaming a pre-existing directory (installer: extract in place into the
+   fresh unique `R` with an `.incomplete` marker, receipt by FILE rename, `current` by symlink-file rename; a runtime
+   directory with a marker or without a matching receipt is deleted and re-extracted). (b) **All user/agent-mutable
+   v4 data lives physically under `/home/user/.zeros-persist/` and is bind-mounted at its logical `/srv/zeros/...`
+   path by zeros-boot on every boot/restore, before any other Zeros component runs** (contract §23). Nothing
+   persistent may live under `/home/user/.cache`. Report the rename behavior to Boat.
+
+## 23. Boat-safe persistence layout (v4 base; implements §22 rule b)
+- Physical root `/home/user/.zeros-persist` (root:root 0755, never a symlink). Bind mounts recreated by zeros-boot on
+  EVERY boot and restore (restore is not a reboot), before zeros-host, the installer or any setup/dispatch accepts work:
+  `/srv/zeros/files` ← `/home/user/.zeros-persist/files`, `/srv/zeros/state` ← `.../state`,
+  `/srv/zeros/home` ← `.../home` (plus any other v4 directory that holds user/agent-mutable data; enumerate in the PR).
+  Logical paths are unchanged everywhere (cwd `/srv/zeros/workspace`, repos `/srv/zeros/files/repos/...`).
+- zeros-boot verifies each bind (mount table source/target, root inode identity, ownership/modes) and records the
+  result; any failure is a closed boot diagnostic and the installer/dispatch refuse to run.
+- The agent/engine namespace keeps hiding `/home/user`; the binds remain visible at their `/srv/zeros` paths.
+- zeros-boot regenerates an empty `/etc/machine-id` (templates are sanitized with an empty machine-id).
+- Sanitization (templates) must never delete `/home/user/.zeros-persist`; it cleans only the private state it owns.
+- Fresh v4 bases only; no migration of v3 layouts.
