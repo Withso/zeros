@@ -109,7 +109,12 @@ Explicit preparation always crosses the server wake transaction, including on
 an already connected runtime: it cancels uncommitted capture or waits for a
 committed drain. Afterwards, a healthy connection revalidates its admission with
 an authenticated engine workspace read; a retired connection obtains fresh
-native admission. Only then may ordinary Resume/submission proceed.
+native admission. A list read does not prove the engine has finished unwinding
+capture: Resume/enqueue retry only `CLOUD_WORKSPACE_CHECKPOINTING`, with backoff
+from 250 ms to 2 seconds and one shared 60-second deadline. Every attempt keeps
+the same operation/command identity, payload and expected revision. Cancellation,
+connection retirement or conversation replacement ends the wait; other errors
+retain their existing handling. A lost transport acknowledgement is not retried.
 
 `POST /v1/organizations/:organization/cloud-workspaces/:workspace/wake` accepts
 current run authority for stopped compute, including an exact-workspace guest
@@ -200,7 +205,10 @@ workspace; credentials must not be copied to an implementation workspace.
    loss after dispatch: reconnection must not replay a possibly accepted prompt.
    Also submit to a paused conversation while its real idle checkpoint is
    queued/delivered and its workspace still reports `ready`. Require capture
-   cancellation before Resume, admission revalidation and one execution. For a
+   cancellation before Resume, admission revalidation and one execution. Hold
+   capture across server cancellation: Resume must remain pending until the
+   engine observes cancellation and releases its fence, then enqueue once.
+   Verify the 60-second timeout and cancellation leave no delayed enqueue. For a
    committed capture, require completion of the drain and fresh admission first.
    Retire the connection or request Stop during attachment encoding: a failed
    final preparation must leave the rich draft intact and show an error.

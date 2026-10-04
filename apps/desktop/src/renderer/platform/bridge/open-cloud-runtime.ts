@@ -166,8 +166,9 @@ export async function openCloudRuntime(
         // A committed capture retires this runtime while preparation waits.
         // The caller must obtain a fresh native admission in that case.
         if (released) return false;
-        // Revalidate the still-live admission through an authenticated engine
-        // read after capture cancellation, without disrupting an active turn.
+        // Revalidate the still-live connection and root without disrupting an
+        // active turn. Reads do not prove the capture fence has cleared;
+        // CloudAgentConnection waits on explicit checkpointing rejections.
         const rows = await bridgeWorkspaceList(client, {});
         if (signal.aborted) throw new Error("Cloud workspace open cancelled");
         checkConnection();

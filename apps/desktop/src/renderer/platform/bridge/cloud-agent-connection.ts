@@ -276,18 +276,45 @@ export class CloudAgentConnection {
     return state;
   }
 
-  private async op(op: string, params: WireRecord): Promise<WireRecord> {
-    if (this.closed) throw new Error("Cloud workspace connection closed");
-    const response = await this.client.request(
-      { type: "WORKSPACE_REQUEST", op, params:op==="cloudCommands.request"&&this.nativeCommandsVersion===1?{...params,nativeCommandsVersion:1}:params },
-      30_000,
-    );
-    if (this.closed) throw new Error("Cloud workspace connection closed");
-    if (response.type === "WORKSPACE_ERROR")
-      throw new Error(response.message || "Cloud request failed");
-    const result=record((response as unknown as WireRecord).result);
-    if(op==="cloudCommands.conversation"||op==="cloudCommands.createConversation")this.nativeCommandsVersion=Number(result.nativeCommandsVersion??0);
-    return result;
+  private async op(op: string, params: WireRecord, submission?: {
+    owner: Conversation; signal?: AbortSignal; deadline: number;
+  }): Promise<WireRecord> {
+    const assertCurrent = () => {
+      if (this.closed) throw new Error("Cloud workspace connection closed");
+      submission?.signal?.throwIfAborted();
+      if (submission && this.conversations.get(submission.owner.id) !== submission.owner)
+        throw new Error("Cloud conversation changed before submission");
+    };
+    let backoff = 250;
+    for (;;) {
+      assertCurrent();
+      const remaining = submission ? submission.deadline - Date.now() : 30_000;
+      if (remaining <= 0) throw new Error("The cloud workspace is still checkpointing. Try sending again when it is ready.");
+      const response = await this.client.request(
+        { type: "WORKSPACE_REQUEST", op, params:op==="cloudCommands.request"&&this.nativeCommandsVersion===1?{...params,nativeCommandsVersion:1}:params },
+        submission ? { timeoutMs: Math.min(30_000, remaining), signal: submission.signal } : 30_000,
+      );
+      assertCurrent();
+      if (response.type === "WORKSPACE_ERROR") {
+        // Server cancellation can precede the engine releasing its capture
+        // fence. Only this explicit pre-dispatch rejection is safe to retry;
+        // keep the exact mutation identity, payload and expected revision.
+        if (submission && response.code === "CLOUD_WORKSPACE_CHECKPOINTING") {
+          await new Promise<void>(resolve => {
+            const done = () => { clearTimeout(timer); submission.signal?.removeEventListener("abort", done); resolve(); };
+            const timer = setTimeout(done, Math.max(0, Math.min(backoff, submission.deadline - Date.now())));
+            submission.signal?.addEventListener("abort", done, { once: true });
+            if (submission.signal?.aborted) done();
+          });
+          backoff = Math.min(backoff * 2, 2_000);
+          continue;
+        }
+        throw new Error(response.message || "Cloud request failed");
+      }
+      const result=record((response as unknown as WireRecord).result);
+      if(op==="cloudCommands.conversation"||op==="cloudCommands.createConversation")this.nativeCommandsVersion=Number(result.nativeCommandsVersion??0);
+      return result;
+    }
   }
 
   private owner(message: WireRecord): Conversation | undefined {
@@ -642,6 +669,7 @@ export class CloudAgentConnection {
       } });
     });
     try {
+      const submission = { owner, signal, deadline: Date.now() + 60_000 };
       const observeReceipt = async (): Promise<WireRecord> => {
         const prior = [...queue.pending, ...queue.receipts].find(
           (row) => row.commandId === commandId,
@@ -661,7 +689,7 @@ export class CloudAgentConnection {
                       action: { kind: "resume" },
                     },
                   },
-                }));
+                }, submission));
                 break;
               } catch (error) {
                 if (!(error instanceof Error) || error.message !== "command_conflict" || attempt >= 2 || signal?.aborted)
@@ -707,7 +735,7 @@ export class CloudAgentConnection {
                 },
               },
             },
-          });
+          }, submission);
           // Native completion can arrive before the preceding command's
           // retirement advances the durable queue revision. Keep this send's
           // identity, grant and payload while rebasing only that revision.

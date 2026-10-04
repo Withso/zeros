@@ -5,6 +5,9 @@ import { hasCloudUserProcesses } from "../cloud-idle-stop";
 import { ZerosEngine } from "../zeros-engine";
 import type { CloudCheckpointDirective } from "../cloud-runtime-registration";
 import type { CloudDurabilityAuthority } from "../cloud-durability-runtime";
+import { CloudAgentConnection } from "../../renderer/platform/bridge/cloud-agent-connection";
+import type { RuntimeClient } from "../../renderer/platform/bridge/ws-client";
+import type { WireRecord } from "../../renderer/platform/bridge/cloud-runtime-wire";
 const directive: CloudCheckpointDirective = { id: "idle-checkpoint", reason: "before_stop", deadlineAtMs: Date.now() + 60_000, idleStop: true };
 const authority = {} as CloudDurabilityAuthority;
 function fixture() {
@@ -31,6 +34,77 @@ function fixture() {
 }
 beforeEach(() => { vi.mocked(hasCloudUserProcesses).mockReset().mockResolvedValue(false); });
 describe("idle checkpoint execution", () => {
+  it("retries the same paused submission until a held checkpoint observes server cancellation", async () => {
+    const state = fixture(), conversationId = "11111111-1111-4111-8111-111111111111";
+    let release!: () => void, serverCancelled = false, paused = true, revision = 7, executions = 0;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    state.cloudDurabilityRuntime.checkpoint.mockImplementation(async () => {
+      await held;
+      if (serverCancelled) throw new Error("checkpoint cancelled");
+    });
+    const capture = state.handleCloudCheckpointRequest(directive, authority);
+    const cancelled = expect(capture).rejects.toThrow("checkpoint cancelled");
+    await vi.waitFor(() => expect(state.cloudDurabilityRuntime.checkpoint).toHaveBeenCalledOnce());
+    serverCancelled = true;
+    expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);
+    const queue = () => ({ version: 1, conversationId, revision, paused, pending: [], receipts: [] });
+    type Client = { send: (message: WireRecord) => void };
+    const gate = (ZerosEngine.prototype as unknown as {
+      handleWorkspaceMessage(this: unknown, message: WireRecord, client: Client): Promise<void>;
+    }).handleWorkspaceMessage;
+    const writes: WireRecord[] = [], responses: WireRecord[] = [];
+    const engine = Object.assign(state, {
+      handleWorkspaceMessage: async (message: WireRecord, client: Client, admitted = false) => {
+        if (!admitted) return gate.call(state, message, client);
+        const mutation = ((message.params as WireRecord).request as WireRecord).mutation as WireRecord;
+        if ((mutation.action as WireRecord).kind === "resume") { paused = false; revision++; }
+        else executions++;
+        client.send({ type: "WORKSPACE_RESPONSE", result: queue() });
+      },
+    });
+    const request = vi.fn(async (message: WireRecord): Promise<WireRecord> => {
+      const input = (message.params as WireRecord).request as WireRecord | undefined;
+      if (input?.kind === "mutate") {
+        writes.push(input.mutation as WireRecord);
+        let response!: WireRecord;
+        await engine.handleWorkspaceMessage(message, { send: value => { response = value; } });
+        responses.push(response);
+        return response;
+      }
+      const result = input?.kind === "snapshot" ? queue() : input?.kind === "read" ? {
+        conversationId, commandId: input.commandId, position: 1, state: "succeeded", payload: null,
+        executionId: "execution", generation: 1, resultCode: null,
+        createdAt: "2026-09-26T00:00:00Z", updatedAt: "2026-09-26T00:00:00Z",
+      } : { conversationId, modeRevision: 0 };
+      return { type: "WORKSPACE_RESPONSE", result };
+    });
+    const connection = new CloudAgentConnection({ request, status: "connected" } as unknown as RuntimeClient,
+      "local-main", async () => "22222222-2222-4222-8222-222222222222");
+    connection.restoreAttachments([{ id: conversationId, agentId: "codex", model: "test-model", fast: false, modeRevision: 0 }]);
+    vi.useFakeTimers();
+    try {
+      const message = { type: "AGENT_PROMPT", sessionId: `conversation:${conversationId}`, userMessageId: "held-capture", prompt: [] };
+      let settled = false;
+      const sending = connection.request(message).finally(() => { settled = true; });
+      void sending.catch(() => {});
+      const duplicate = connection.request(message);
+      void duplicate.catch(() => {});
+      await vi.waitFor(() => expect(writes.length).toBeGreaterThan(0));
+      await vi.advanceTimersByTimeAsync(250);
+      expect(responses[0]).toMatchObject({ type: "WORKSPACE_ERROR", code: "CLOUD_WORKSPACE_CHECKPOINTING" });
+      expect(settled).toBe(false);
+      expect(executions).toBe(0);
+      release(); await cancelled;
+      expect(state.cloudRuntimeCheckpointQuiescing).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(sending).resolves.toMatchObject({ type: "AGENT_PROMPT_COMPLETE" });
+      await duplicate;
+      const resumes = writes.filter(write => (write.action as WireRecord).kind === "resume");
+      expect(resumes.length).toBeGreaterThan(1);
+      expect(resumes.every(write => write.operationId === resumes[0].operationId && write.expectedRevision === 7)).toBe(true);
+      expect(executions).toBe(1);
+    } finally { release(); await cancelled; connection.dispose(); vi.useRealTimers(); }
+  });
   it("does not keep an idle VM awake for background PR metadata reconciliation", () => {
     const state = fixture(), maintenance = Promise.resolve(), write = Promise.resolve();
     state.cloudWorkspaceMutations.add(maintenance);
