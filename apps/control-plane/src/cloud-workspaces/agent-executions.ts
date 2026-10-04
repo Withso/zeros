@@ -432,8 +432,8 @@ export class DatabaseCloudAgentExecutionService {
       if(!lease)rejected();
       const input=leaseAdmission(lease),actor=await source(tx,scope,input,lease.actor_source_session_id);
       // Recheck the admitted consent/revision without opening credential values.
-      // V4 qualification is checked below; legacy credential discovery stays
-      // owned by the runtime-admission service.
+      // The admin check below shares admission/renewal's complete runtime
+      // qualification predicate and always requires MCP qualification.
       const consent=(await tx.query<{
         kind:string;owner_user_id:string;owner_fingerprint:string;grantee_fingerprint:string;compute_fingerprint:string;compute_trust:string;
       }>(`SELECT credential.kind,credential.owner_user_id,delegation.owner_fingerprint,delegation.grantee_fingerprint,

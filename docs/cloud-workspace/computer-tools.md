@@ -25,10 +25,12 @@ computer records.
 Engine admission adds `computerToolsVersion: 1` only for this creator in a
 marked workspace with current engineering staff and organization owner/admin
 authority, an exact v4 generation/engine pin, and an enabled MCP qualification
-for that runtime/base/credential tuple. Older marked admissions return
+for that runtime/base/credential tuple. Admission and every tool call share the
+runtime admission/renewal predicate, including bundle, base image and base
+contract revocation, protocol compatibility and qualification evidence mode.
+Older marked admissions return
 `cloud_computer_tools_update_required`; opting in on an ordinary workspace grants
-nothing. Full v4 credential admission remains a prerequisite in the runtime
-admission service.
+nothing.
 
 ## Calls and results
 
@@ -48,7 +50,7 @@ environment variables and repository files do not grant access.
 | `GetComputerConfiguration` | `computerId` | Install script/timeout, revision/latest build, repository names/refs and cloud setup commands/settings versions, environment names/set markers. Repository IDs are Zeros UUIDs; an unmaterialized repository has a null ID. |
 | `CreateComputerConfiguration` | `installScript`, optional `timeoutSeconds`, `expectedRevision`, `previousBuildId` (nullable) | Atomically save the script and queue/replace a build; return `revision`, `buildId`, `version`. Preserve current repositories and exact environment binding versions. |
 | `GetComputerBuildStatus` | `buildId`, optional `after` cursor | Same-org build state/stage/error code, current activation, last 200 redacted lines, cursor, truncation and completion. |
-| `UpdateRepositorySetupScript` | `repositoryId`, `expectedSettingsVersion`, `script`, `timeoutSeconds` | Replace only the selected repository's cloud setup commands; return its settings version without starting a build. |
+| `UpdateRepositorySetupScript` | `repositoryId`, `expectedSettingsVersion`, `script`, `timeoutSeconds` | Replace only the cloud setup commands of a repository in the active or draft configuration; return its settings version without starting a build. |
 
 Arguments and results reject extra fields. Scripts are at most 16 KiB UTF-8 and
 timeouts are 1–900 seconds. Configuration output is bounded to 20 repositories,
@@ -56,6 +58,10 @@ timeouts are 1–900 seconds. Configuration output is bounded to 20 repositories
 provider resource/installation IDs, access URLs, credential material or saved
 environment values. Build logs pass through the existing computer log writer's
 redaction; its default withholds arbitrary script output.
+
+Log output excludes trailing-newline split artifacts before applying the
+200-line cap. Genuine blank lines and unterminated chunk fragments retain their
+sequence/line identities; the polling cursor consumes whole persisted chunks.
 
 Both configuration guards are required: a repository/environment edit can
 advance the revision without changing the latest build. Authorized conflicts
@@ -71,9 +77,14 @@ changing arguments under an existing identity conflicts.
 
 Repository setup uses an injected `updateRepositorySetupScript` function with
 `{orgId, repositoryId, expectedSettingsVersion, operationId, script,
-timeoutSeconds, actorUserId}` and the caller's transaction. The repository
-settings service must preserve unrelated settings and return its original
-receipt on replay. Until that service is wired, the capability flag is false
+timeoutSeconds, actorUserId}` and the caller's transaction. Selection is checked
+against both active and draft configurations under the organization lock. The
+repository settings service must preserve unrelated settings and enforce
+`expectedSettingsVersion` CAS. Setup edits do not replay operation receipts:
+retrying an applied call returns HTTP 409 with
+`{result: {conflict: true, version}}`, where `version` is the current repository
+settings version, even for the same native call identity. Until that service is
+wired, the capability flag is false
 and the tool fails closed; this module does not introduce another settings
 writer.
 

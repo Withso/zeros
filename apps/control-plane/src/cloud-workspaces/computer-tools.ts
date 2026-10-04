@@ -13,7 +13,8 @@ import {
 } from "./computer-tools-contract.js";
 
 /** C4 supplies this function after it merges. It must use the supplied
- * transaction, preserve unrelated settings, and replay operationId receipts. */
+ * transaction, preserve unrelated settings, and enforce expectedSettingsVersion
+ * CAS. operationId identifies the call; setup edits do not replay receipts. */
 export type UpdateRepositorySetupScript = (input: {
   orgId: string; repositoryId: string; expectedSettingsVersion: number; operationId: string;
   script: string; timeoutSeconds: number; actorUserId: string;
@@ -105,9 +106,13 @@ export async function executeComputerTool(tx: Tx, scope: { orgId: string; actorU
         const start = Math.max(after, (bounds.lastSeq ?? 0) - 200);
         const first = await computer.logs(orgId, actorUserId, buildId, { after: start, limit: 100 }, tx);
         const last = await computer.logs(orgId, actorUserId, buildId, { after: first.nextAfter, limit: 100 }, tx);
-        const lines = [...first.entries, ...last.entries].flatMap(entry => entry.text.split(/\r?\n/).map((text, line) => ({
-          seq: entry.seq, line, stream: entry.stream, stage: entry.stage, text,
-        })));
+        const lines = [...first.entries, ...last.entries].flatMap(entry => {
+          const parts = entry.text.split(/\r?\n/);
+          // Only the final split entry is artificial. Keep genuine blank lines
+          // and unterminated fragments; the cursor consumes each chunk once.
+          if (entry.text.endsWith("\n")) parts.pop();
+          return parts.map((text, line) => ({ seq: entry.seq, line, stream: entry.stream, stage: entry.stage, text }));
+        });
         result = {
           buildId: build.id, version: build.version, state: build.state, stage: build.stage, errorCode: build.errorCode,
           activated: (await read()).active?.id === build.id,
@@ -118,7 +123,10 @@ export async function executeComputerTool(tx: Tx, scope: { orgId: string; actorU
       }
       case "UpdateRepositorySetupScript": {
         const state = await read();
-        const selected = await repositories(tx, orgId, state.draft.configId);
+        const selected = [
+          ...await repositories(tx, orgId, state.draft.configId),
+          ...await repositories(tx, orgId, state.active?.configId ?? null),
+        ];
         if (!selected.some(row => row.repositoryId === tool.arguments.repositoryId.toLowerCase()))
           throw new HttpError(403, "forbidden", "Repository is unavailable.");
         if (!updateRepositorySetupScript) throw new HttpError(503, "cloud_computer_setup_unavailable", "Repository setup is unavailable.");
@@ -134,6 +142,11 @@ export async function executeComputerTool(tx: Tx, scope: { orgId: string; actorU
     return parsed.data;
   } catch (error) {
     if (error instanceof HttpError && error.status === 409) {
+      if (tool.name === "UpdateRepositorySetupScript") {
+        const head = (await tx.query<{ current_version: string }>(`SELECT current_version FROM repository_settings_heads
+          WHERE org_id=$1 AND repository_id=$2 AND scope='cloud'`, [orgId, tool.arguments.repositoryId])).rows[0];
+        throw new ComputerToolConflictError(CloudComputerToolConflictSchema.parse({ conflict: true, version: Number(head?.current_version ?? 0) }));
+      }
       const state = await read();
       throw new ComputerToolConflictError(CloudComputerToolConflictSchema.parse({
         conflict: true, revision: state.revision, latestBuildId: state.latestBuild?.id ?? null,

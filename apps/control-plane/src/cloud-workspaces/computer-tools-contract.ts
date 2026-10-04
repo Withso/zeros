@@ -59,11 +59,10 @@ export const CloudComputerToolExecutionRequestSchema = z.object({
 }).strict();
 export type CloudComputerToolExecutionRequest = z.infer<typeof CloudComputerToolExecutionRequestSchema>;
 
-export const CloudComputerToolConflictSchema = z.object({
-  conflict: z.literal(true),
-  revision,
-  latestBuildId: uuid.nullable(),
-}).strict();
+export const CloudComputerToolConflictSchema = z.union([
+  z.object({ conflict: z.literal(true), revision, latestBuildId: uuid.nullable() }).strict(),
+  z.object({ conflict: z.literal(true), version: revision }).strict(),
+]);
 export type CloudComputerToolConflict = z.infer<typeof CloudComputerToolConflictSchema>;
 export const ListComputersResultSchema = z.object({
   computers: z.array(z.object({

@@ -48,4 +48,11 @@ describe("execution-scoped computer tool contracts", () => {
       expect(contract.CloudComputerToolConflictSchema.safeParse({ ...result, message: "private diagnostic" }).success).toBe(false);
     }
   });
+  it("returns the current repository settings version for a setup CAS conflict", () => {
+    for (const contract of [wire, backend]) for (const version of [0, 3]) {
+      const result = { conflict: true, version };
+      expect(contract.CloudComputerToolConflictSchema.parse(result)).toEqual(result);
+      expect(contract.CloudComputerToolConflictSchema.safeParse({ ...result, message: "private diagnostic" }).success).toBe(false);
+    }
+  });
 });

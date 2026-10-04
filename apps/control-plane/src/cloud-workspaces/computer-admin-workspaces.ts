@@ -2,6 +2,8 @@ import { z } from "zod";
 import { HttpError, requireOrganizationCreationCapability, type StaffRole } from "../authz.js";
 import type { Tx } from "../db.js";
 import { requireCloudComputerAuthority } from "./computer.js";
+import { cloudRuntimeQualificationMode } from "./runtime-config.js";
+import { runtimeCredentialQualificationJoin } from "./runtime-selection.js";
 
 const marker = z.object({
   workspaceId: z.string().uuid(), orgId: z.string().uuid(), creatorUserId: z.string().uuid(),
@@ -47,22 +49,14 @@ export async function adminComputerToolsVersion(tx: Tx, scope: {
   if (admin.creator_user_id !== actorUserId) computerToolsRejected();
   await requireAdmin(tx, scope.organizationId, actorUserId);
   const runtime = (await tx.query<{ qualified: boolean }>(`SELECT EXISTS (
-      SELECT 1 FROM cloud_runtime_qualifications qualification
-      JOIN cloud_runtime_bundles bundle ON bundle.runtime_id=qualification.runtime_id AND bundle.revoked_at IS NULL
-      JOIN cloud_runtime_base_images base ON base.base_image_id=generation.runtime_base_image_id
-        AND base.base_compatibility_id=qualification.base_compatibility_id AND base.revoked_at IS NULL
-      WHERE qualification.runtime_id=engine.runtime_id
-        AND qualification.base_compatibility_id=engine.runtime_base_compatibility_id
-        AND qualification.credential_kind=$5 AND qualification.profile='zeros-cloud-worker-v4'
-        AND qualification.enabled AND qualification.mcp_qualified
+      SELECT 1 FROM (SELECT $5::text AS kind) credential
+      ${runtimeCredentialQualificationJoin("$6", "true")}
     ) AS qualified
     FROM cloud_workspace_engine_instances engine JOIN cloud_workspace_generations generation
       ON generation.workspace_id=engine.workspace_id AND generation.org_id=engine.org_id AND generation.generation=engine.generation
     WHERE engine.id=$1 AND engine.workspace_id=$2 AND engine.org_id=$3 AND engine.generation=$4
-      AND engine.runtime_profile='zeros-cloud-worker-v4' AND generation.runtime_profile=engine.runtime_profile
-      AND generation.runtime_id=engine.runtime_id AND generation.runtime_manifest_sha256=engine.runtime_manifest_sha256
-      AND generation.runtime_base_compatibility_id=engine.runtime_base_compatibility_id`,
-  [scope.engineInstanceId, scope.workspaceId, scope.organizationId, scope.generation, credentialKind])).rows[0];
+      AND engine.runtime_profile='zeros-cloud-worker-v4' AND generation.runtime_profile=engine.runtime_profile`,
+  [scope.engineInstanceId, scope.workspaceId, scope.organizationId, scope.generation, credentialKind, cloudRuntimeQualificationMode()])).rows[0];
   if (!runtime) throw new HttpError(409, "cloud_computer_tools_update_required", "Update the cloud runtime to configure this computer.");
   if (!runtime.qualified) computerToolsRejected();
   return 1;

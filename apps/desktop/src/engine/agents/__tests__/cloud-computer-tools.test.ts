@@ -67,6 +67,11 @@ describe("execution-scoped Cloud Computer MCP", () => {
     expect(await f.client.callTool({ name: "CreateComputerConfiguration", arguments: {
       installScript: "echo ready", expectedRevision: 1, previousBuildId: null,
     } })).toMatchObject({ isError: true, structuredContent: conflict });
+    const setupConflict = { conflict: true, version: 3 };
+    f.call.mockResolvedValueOnce(setupConflict as never);
+    expect(await f.client.callTool({ name: "UpdateRepositorySetupScript", arguments: {
+      repositoryId: randomUUID(), expectedSettingsVersion: 1, script: "echo setup", timeoutSeconds: 30,
+    } })).toMatchObject({ isError: true, structuredContent: setupConflict });
     f.call.mockRejectedValueOnce(new Error("private-provider-diagnostic"));
     const error = await f.client.callTool({ name: "ListComputers", arguments: {} });
     expect(error.isError).toBe(true);

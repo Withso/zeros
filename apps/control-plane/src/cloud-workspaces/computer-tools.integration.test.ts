@@ -23,15 +23,9 @@ database("admin workspace computer tools", () => {
   async function initialize(marked = true) {
     await resetMigratedTestDatabase(pool);
     f = await seedComputerToolsFixture(pool, marked);
-    const receipts = new Map<string, { request: string; version: number }>();
     // C4 is injected: this database-backed substitute verifies the narrow
     // transaction contract without introducing a second production writer.
     setup = vi.fn(async (input: Parameters<UpdateRepositorySetupScript>[0], tx: Tx) => {
-      const old = receipts.get(input.operationId);
-      if (old) {
-        if (old.request !== JSON.stringify(input)) throw new HttpError(409, "changed", "Changed");
-        return { version: old.version };
-      }
       const head = (await tx.query<{ current_version: string; document: Record<string, unknown> }>(`SELECT head.current_version,version.document
         FROM repository_settings_heads head JOIN repository_settings_versions version ON version.org_id=head.org_id
           AND version.repository_id=head.repository_id AND version.scope=head.scope AND version.version=head.current_version
@@ -43,7 +37,6 @@ database("admin workspace computer tools", () => {
         JSON.stringify({ ...head?.document, setupCommands: input.script ? [{ command: input.script, timeoutSeconds: input.timeoutSeconds }] : [] }), input.actorUserId]);
       await tx.query(`INSERT INTO repository_settings_heads(org_id,repository_id,scope,current_version) VALUES($1,$2,'cloud',$3)
         ON CONFLICT(org_id,repository_id,scope) DO UPDATE SET current_version=EXCLUDED.current_version`, [input.orgId, input.repositoryId, version]);
-      receipts.set(input.operationId, { request: JSON.stringify(input), version });
       return { version };
     });
     service = new DatabaseCloudAgentExecutionService(pool, f.encryption, false, undefined, { computer: f.computer, updateRepositorySetupScript: setup });
@@ -127,25 +120,97 @@ database("admin workspace computer tools", () => {
     ]);
     expect((await config()).installScript).toBe("later edit");
   });
-  it("keeps setup edits versioned without a build and forwards stable replay identity to C4", async () => {
+  it("uses settings CAS for setup retries without replaying a receipt or starting a build", async () => {
     const tool = { name: "UpdateRepositorySetupScript", arguments: { repositoryId: f.fixture.repositoryId,
       expectedSettingsVersion: 0, script: "echo setup", timeoutSeconds: 30 } } as const;
     expect(await ok(tool, { callId: "setup-replay" })).toEqual({ version: 1 });
-    expect(await ok(tool, { callId: "setup-replay" })).toEqual({ version: 1 });
-    expect((await call(tool)).status).toBe(409);
+    for (const callId of ["setup-replay", "new-setup-call"]) {
+      const conflict = await call(tool, { callId });
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toEqual({ result: { conflict: true, version: 1 } });
+    }
     expect((await call({ ...tool, arguments: { ...tool.arguments, repositoryId: randomUUID() } })).status).toBe(403);
     expect((await config()).revision).toBe(1);
     expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(0);
+    expect((await pool.query("SELECT version FROM repository_settings_versions")).rows).toEqual([{ version: "1" }]);
   });
-  it("returns the last 200 lines and advances the polling cursor", async () => {
+  it("accepts an active-only repository after the draft removes it, and still rejects an unrelated repository", async () => {
+    const accepted = await ok(create());
+    expect((await f.computer.claimNextBuild(1))?.build.id).toBe(accepted.buildId);
+    const pins = { baseImageId: "zeros-v2-test-computer-base", runtimeId: f.runtimeId,
+      repositoryManifest: [{ id: "123", owner: "withso", name: "zeros", sha: "a".repeat(40) }] };
+    await f.computer.markBuildStage(accepted.buildId, 1, "capture_confirmed", pins);
+    expect(await f.computer.completeBuild(accepted.buildId, 1, { ...pins, template: {
+      providerResourceId: null, accountScope: null, billingOrg: null,
+      protectedContractDigest: "f".repeat(64), stoppedAt: new Date().toISOString(),
+    } })).toMatchObject({ state: "succeeded", activated: true });
+    await f.computer.saveDraft(f.fixture.organizationId, f.fixture.userId, {
+      ...f.draft, repositories: [], expectedRevision: (await config()).revision,
+    });
+    expect((await config()).repositories).toEqual([]);
+    expect((await ok(list)).computers[0].activeBuildId).toBe(accepted.buildId);
+    const tool = { name: "UpdateRepositorySetupScript", arguments: { repositoryId: f.fixture.repositoryId,
+      expectedSettingsVersion: 0, script: "echo active setup", timeoutSeconds: 30 } } as const;
+    expect(await ok(tool)).toEqual({ version: 1 });
+    const unrelatedId = randomUUID();
+    await pool.query(`INSERT INTO repositories(id,org_id,forge,forge_repository_id,identity_state,owner_name,repository_name,created_by)
+      VALUES($1,$2,'github.com','456','verified','withso','unrelated',$3)`, [unrelatedId, f.fixture.organizationId, f.fixture.userId]);
+    expect((await call({ ...tool, arguments: { ...tool.arguments, repositoryId: unrelatedId } })).status).toBe(403);
+    expect(setup).toHaveBeenCalledTimes(1);
+  });
+  it.each(["", "\n", "\r\n"])("returns the last 200 log lines for %j chunk endings and advances the cursor", async ending => {
     const accepted = await ok(create());
     // Persisted C1/C3 log input is already redacted; use safe synthetic lines.
     await pool.query(`INSERT INTO cloud_computer_build_logs(build_id,org_id,seq,stream,stage,text)
-      SELECT $1,$2,i,'system','install','safe line '||i FROM generate_series(1,240) i`, [accepted.buildId, f.fixture.organizationId]);
+      SELECT $1,$2,i,'system','install','safe line '||i||$3 FROM generate_series(1,240) i`, [accepted.buildId, f.fixture.organizationId, ending]);
     const status = await ok({ name: "GetComputerBuildStatus", arguments: { buildId: accepted.buildId } });
     expect(status.lines).toHaveLength(200); expect(status.lines[0].text).toBe("safe line 41");
     expect(status).toMatchObject({ cursor: 240, truncated: true });
     expect((await ok({ name: "GetComputerBuildStatus", arguments: { buildId: accepted.buildId, after: status.cursor } })).lines).toEqual([]);
+  });
+  it("preserves blank lines and unterminated chunk fragments across page and polling boundaries", async () => {
+    const accepted = await ok(create());
+    await pool.query(`INSERT INTO cloud_computer_build_logs(build_id,org_id,seq,stream,stage,text)
+      SELECT $1,$2,i,'stdout','install','safe line '||i||chr(10) FROM generate_series(1,98) i`, [accepted.buildId, f.fixture.organizationId]);
+    const append = (seq: number, text: string) => pool.query(`INSERT INTO cloud_computer_build_logs(build_id,org_id,seq,stream,stage,text)
+      VALUES($1,$2,$3,'stdout','install',$4)`, [accepted.buildId, f.fixture.organizationId, seq, text]);
+    await append(99, "split ");
+    await append(100, "line\n");
+    await append(101, "\nlast ");
+    const status = await ok({ name: "GetComputerBuildStatus", arguments: { buildId: accepted.buildId } });
+    expect(status).toMatchObject({ cursor: 101, truncated: false });
+    expect(status.lines).toHaveLength(102);
+    expect(status.lines.slice(-4)).toEqual([
+      { seq: 99, line: 0, stream: "stdout", stage: "install", text: "split " },
+      { seq: 100, line: 0, stream: "stdout", stage: "install", text: "line" },
+      { seq: 101, line: 0, stream: "stdout", stage: "install", text: "" },
+      { seq: 101, line: 1, stream: "stdout", stage: "install", text: "last " },
+    ]);
+    await append(102, "tail\n\n");
+    const next = await ok({ name: "GetComputerBuildStatus", arguments: { buildId: accepted.buildId, after: status.cursor } });
+    expect(next).toMatchObject({ cursor: 102, truncated: false, lines: [
+      { seq: 102, line: 0, stream: "stdout", stage: "install", text: "tail" },
+      { seq: 102, line: 1, stream: "stdout", stage: "install", text: "" },
+    ] });
+    expect((await ok({ name: "GetComputerBuildStatus", arguments: { buildId: accepted.buildId, after: next.cursor } })).lines).toEqual([]);
+  });
+  it("publishes the capability on fresh v4 admission and rechecks it after renewal and base-contract revocation", async () => {
+    const { heartbeatToken, ...scope } = f.scope;
+    const response = await createCloudAgentExecutionRoutes(service).request(CLOUD_AGENT_EXECUTION_PATH, { method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${heartbeatToken}` },
+      body: JSON.stringify({ ...scope, request: { kind: "admit", computerToolsVersion: 1, admission: {
+        executionId: randomUUID(), delegationId: f.initiating.delegationId, provider: "cursor", model: "grok-4.6",
+        source: { kind: "session", actorSessionId: f.initiating.actorSessionId },
+      } } }) });
+    expect(response.status).toBe(200);
+    const { result } = await response.json();
+    expect(result.computerToolsVersion).toBe(1);
+    expect((await ok(list, { leaseId: result.leaseId })).computers).toHaveLength(1);
+    expect(await service.validate(f.scope, result.leaseId, true)).toMatchObject({ leaseId: result.leaseId });
+    await pool.query("UPDATE cloud_runtime_base_contracts SET revoked_at=now() WHERE base_compatibility_id=$1", [f.compatibilityId]);
+    expect((await call(create(), { leaseId: result.leaseId })).status).toBe(403);
+    await expect(service.validate(f.scope, result.leaseId, true)).rejects.toMatchObject({ status: 403 });
+    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(0);
   });
   it("does not grant a capability to an ordinary workspace", async () => {
     await initialize(false);
@@ -177,7 +242,7 @@ database("admin workspace computer tools", () => {
     const otherLease = await f.lease(await f.actor(other.userId));
     expect((await call(list, { leaseId: otherLease.leaseId })).status).toBe(403);
   });
-  it.each(["staff", "role", "membership", "credential", "lease", "expired", "runtime", "mcp"])("rechecks %s loss between calls", async reason => {
+  it.each(["staff", "role", "membership", "credential", "lease", "expired", "runtime", "base-image", "base-contract", "mcp"])("rechecks %s loss between calls", async reason => {
     await ok(list);
     if (reason === "staff") await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [f.fixture.userId]);
     if (reason === "role") await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [f.fixture.organizationId, f.fixture.userId]);
@@ -186,6 +251,8 @@ database("admin workspace computer tools", () => {
     if (reason === "lease") await service.release(f.scope, f.initiating.leaseId);
     if (reason === "expired") await pool.query("UPDATE cloud_agent_execution_leases SET created_at=now()-interval '1 hour',expires_at=now()-interval '1 second' WHERE id=$1", [f.initiating.leaseId]);
     if (reason === "runtime") await pool.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [f.runtimeId]);
+    if (reason === "base-image") await pool.query("UPDATE cloud_runtime_base_images SET revoked_at=now() WHERE base_compatibility_id=$1", [f.compatibilityId]);
+    if (reason === "base-contract") await pool.query("UPDATE cloud_runtime_base_contracts SET revoked_at=now() WHERE base_compatibility_id=$1", [f.compatibilityId]);
     if (reason === "mcp") await pool.query("UPDATE cloud_runtime_qualifications SET enabled=false,mcp_qualified=false,revoked_at=now() WHERE runtime_id=$1", [f.runtimeId]);
     expect([401,403]).toContain((await call(list)).status);
     expect([401,403]).toContain((await call(create())).status);
