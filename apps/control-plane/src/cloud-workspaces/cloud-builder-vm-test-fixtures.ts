@@ -30,7 +30,7 @@ export function memoryBuilderOperations(): BuilderVmOperationStore & { rows: Map
       if (existing) { if (existing.request_sha256 !== digest) builderOperationConflict(); return existing; }
       const value: BuilderVmOperation = { operation_key: intent.operationKey, purpose: intent.purpose, request_sha256: digest,
         intent, provider_request: request, state: "creating", sandbox_id: null, deletion_operation_id: null,
-        created_at: new Date(), create_dispatched_at: null, create_attempts_tracked: true, create_closed_at: null };
+        created_at: new Date(), create_dispatched_at: null, create_closed_at: null };
       rows.set(intent.operationKey, value);
       attempts.set(intent.operationKey, new Map());
       return value;
@@ -51,7 +51,7 @@ export function memoryBuilderOperations(): BuilderVmOperationStore & { rows: Map
     },
     async closeUnallocatedCreate(key) {
       const current = rows.get(key);
-      if (!current || current.sandbox_id || !current.create_attempts_tracked || [...attempts.get(key)!.values()].includes(null)) return false;
+      if (!current || current.sandbox_id || [...attempts.get(key)!.values()].includes(null)) return false;
       current.create_closed_at ??= new Date();
       return true;
     },

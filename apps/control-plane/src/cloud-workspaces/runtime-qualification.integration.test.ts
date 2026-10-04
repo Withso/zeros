@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -157,24 +157,10 @@ const url = process.env.TEST_DATABASE_URL;
     expect(await qualifications()).toHaveLength(0);
   });
 
-  it("does not certify an untracked legacy create from later tracked refusals", async () => {
-    const input = runIntent(randomUUID());
-    const digest = createHash("sha256").update(JSON.stringify(input)).digest("hex");
-    await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_builder_vm_operations
-      (account_scope,operation_key,purpose,request_sha256,intent,provider_request,create_dispatched_at)
-      VALUES ('zeros-v2-test-account',$1,$2,$3,$4,$5,clock_timestamp())`, [input.operationKey, input.purpose, digest,
-      JSON.stringify(input), JSON.stringify({ path: "/sandboxes", body: { from: "zeros-v2-test-base", name: input.name,
-        type: "default", ttlSeconds: 1800, noEnv: true, env: {}, snapshots: false } })]));
-    boat.state.createRefused = true;
-    await expect(boat.vms.create(input)).rejects.toMatchObject({ code: "provider_budget_exhausted" });
-    expect(await operations.closeUnallocatedCreate(input.operationKey)).toBe(false);
-    expect(await operations.find(input.operationKey)).toMatchObject({ request_sha256: digest, create_attempts_tracked: false, create_closed_at: null });
-    await expect(withSystemTx(pool, tx => tx.query(`UPDATE cloud_builder_vm_operations SET create_attempts_tracked=true
-      WHERE operation_key=$1`, [input.operationKey]))).rejects.toMatchObject({ code: "55000" });
-  });
-
   it("fences a suspended create after another replica closes an expired run", async () => {
     const { runId } = await worker.enqueue(runtimeId);
+    const second = await withSystemTx(pool, async tx => (await seedRuntimeBundle(tx, { digit: "d", releaseOrder: 2, kinds: [] })).descriptor.runtimeId);
+    await worker.enqueue(second);
     let release!: () => void;
     let entered!: () => void;
     const barrier = new Promise<void>(resolve => { release = resolve; });
@@ -184,6 +170,8 @@ const url = process.env.TEST_DATABASE_URL;
     const running = worker.tick();
     await reached;
     try {
+      expect(await operations.find(runIntent(runId!).operationKey)).toMatchObject({
+        create_dispatched_at: null, create_closed_at: null, sandbox_id: null });
       await expire(runId!);
       await makeWorker().tick();
       expect((await runs())[0]).toMatchObject({ state: "failed", sandbox_id: null, cleanup_confirmed_at: expect.any(Date) });
@@ -193,6 +181,10 @@ const url = process.env.TEST_DATABASE_URL;
     expect(await operations.find(runIntent(runId!).operationKey)).toMatchObject({ sandbox_id: null, create_closed_at: expect.any(Date) });
     expect((await runs())[0]).toMatchObject({ state: "failed", sandbox_id: null, cleanup_confirmed_at: expect.any(Date) });
     expect(await qualifications()).toHaveLength(0);
+    await makeWorker().tick();
+    expect((await runs()).map(run => run.state)).toEqual(["failed", "succeeded"]);
+    expect((await qualifications()).every(row => row.runtime_id === second)).toBe(true);
+    expect(await qualifications()).toHaveLength(5);
   });
 
   it("deletes a bound VM even when saving its identity to a running run is no longer possible", async () => {
@@ -261,13 +253,6 @@ const url = process.env.TEST_DATABASE_URL;
     expect(boat.state.deleted).toBe(true);
     expect((await runs())[0].state).toBe("failed");
     expect(await qualifications()).toHaveLength(0);
-  });
-
-  it("fails an overdue pre-dispatch crash without creating a VM", async () => {
-    const { runId } = await worker.enqueue(runtimeId); await expire(runId!);
-    await worker.tick();
-    expect(boat.state.creates).toBe(0);
-    expect((await runs())[0].state).toBe("failed");
   });
 
   it("does nothing when disabled, including publication enqueue and timer startup", async () => {

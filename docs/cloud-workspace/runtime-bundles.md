@@ -325,11 +325,13 @@ with a private HOME, minimal environment and a disconnected network namespace
 `cursor_load`, `engine_load`, `supervisor_idle` and `containment_smoke`.
 Containment uses the existing credential-free `qualify-cloud-engine.mjs`
 through R's fixed engine launcher, including identity, workload, capture,
-human-service and actor-tool probes. Before launch, the self-test prepares an
-empty worker-owned scratch workspace and the root-owned empty mount points
-under `/srv/zeros/files`. These use the existing image-layout ownership and
-modes, are created directly at their final paths, and are revalidated by the
-launcher. No directory is renamed and R is unchanged. Workspace setup's v4
+human-service and actor-tool probes. Before launch, the self-test creates the
+worker-owned workspace if missing and the root-owned empty mount points under
+`/srv/zeros/files`. Existing workspace contents are preserved. These paths use
+the existing image-layout ownership and modes, are
+created directly at their final paths, and are revalidated by the launcher.
+The logical data paths may be bind mounts from `/home/user/.zeros-persist`.
+No directory is renamed and R is unchanged. Workspace setup's v4
 attester is a separate boundary. The runtime bundle must include this helper and list
 `entrypoints.selfTest`; a bundle built before it was included fails closed.
 
@@ -351,11 +353,11 @@ reply is recovered with the original idempotency key and exact request; replay
 is bounded to 23 hours so it cannot silently allocate a second VM after the
 provider's idempotency window. Every HTTP create attempt is journalled before
 dispatch. A certified Boat refusal is recorded against that attempt alone;
-later refusals never resolve an earlier lost response. If a tracked intent has
+later refusals never resolve an earlier lost response. If an intent has
 no dispatches, or every attempt was certified rejected, cleanup durably
 closes the intent without allocating a VM and releases the running slot.
-Closure prevents any future dispatch or resource binding. Historical untracked
-intents retain uncertainty. Deleting a bound sandbox remains possible after
+Closure prevents any future dispatch or resource binding. Every builder intent
+tracks attempts from the start. Deleting a bound sandbox remains possible after
 the qualification run becomes terminal; cleanup evidence is recorded only
 after confirmed absence.
 

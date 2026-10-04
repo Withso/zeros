@@ -118,8 +118,6 @@ export class RuntimeQualificationWorker {
           WHERE id=$1 AND deadline_at<=clock_timestamp() AND (cleanup_lease_until IS NULL OR cleanup_lease_until<=clock_timestamp()) RETURNING *`,
         [running.id, CLEANUP_LEASE_MS])).rows[0];
         if (!expired) return null;
-        // Also fence pre-upgrade runs that crashed before preparing a journal.
-        await this.prepareOperation(tx, expired);
         return { run: expired, reconcile: true };
       }
       const base = await newestBase(tx);
@@ -158,8 +156,7 @@ export class RuntimeQualificationWorker {
 
   private async prepareOperation(tx: Tx, run: Run) {
     return prepareBuilderVmOperation(this.options.operations!, intent(run), async () => {
-      // The claim selected/locked the approved base. For an expired legacy run,
-      // retain its pinned source even if revoked: cleanup only closes or deletes.
+      // The claim selected and locked the approved base.
       const image = (await tx.query<{ image_ref: string }>(`SELECT image_ref FROM cloud_runtime_base_images WHERE base_image_id=$1`,
         [run.base_image_id])).rows[0];
       return builderVmBaseSnapshot(image?.image_ref ?? "");

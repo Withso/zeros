@@ -26,7 +26,6 @@ export type BuilderVmOperation = {
   deletion_operation_id: string | null;
   created_at: Date;
   create_dispatched_at: Date | null;
-  create_attempts_tracked: boolean;
   create_closed_at: Date | null;
 };
 
@@ -60,8 +59,8 @@ export class DatabaseBuilderVmOperationStore implements BuilderVmOperationStore 
   async prepare(intent: BuilderVmIntent, sha256: string, request: BuilderProviderRequest, tx?: Tx) {
     const prepare = async (tx: Tx) => {
       await tx.query(`INSERT INTO cloud_builder_vm_operations
-        (account_scope, operation_key, purpose, request_sha256, intent, provider_request, create_attempts_tracked)
-        VALUES ($1,$2,$3,$4,$5,$6,true) ON CONFLICT DO NOTHING`,
+        (account_scope, operation_key, purpose, request_sha256, intent, provider_request)
+        VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
       [this.accountScope, intent.operationKey, intent.purpose, sha256, JSON.stringify(intent), JSON.stringify(request)]);
       const row = (await tx.query<BuilderVmOperation>(`SELECT * FROM cloud_builder_vm_operations
         WHERE account_scope=$1 AND operation_key=$2`, [this.accountScope, intent.operationKey])).rows[0];
@@ -105,7 +104,7 @@ export class DatabaseBuilderVmOperationStore implements BuilderVmOperationStore 
       if (!row || row.sandbox_id) return false;
       if (row.create_closed_at) return true;
       const closed = await tx.query(`UPDATE cloud_builder_vm_operations SET create_closed_at=clock_timestamp()
-        WHERE account_scope=$1 AND operation_key=$2 AND create_attempts_tracked AND sandbox_id IS NULL
+        WHERE account_scope=$1 AND operation_key=$2 AND sandbox_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM cloud_builder_vm_create_attempts
             WHERE account_scope=$1 AND operation_key=$2 AND rejected_at IS NULL)`, [this.accountScope, operationKey]);
       return closed.rowCount === 1;

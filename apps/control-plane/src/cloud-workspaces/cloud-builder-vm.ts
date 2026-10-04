@@ -70,10 +70,7 @@ export async function prepareBuilderVmOperation(operations: BuilderVmOperationSt
   if (!parsed.success) fail("input_schema");
   const input = parsed.data;
   const row = await operations.find(input.operationKey, tx);
-  // As in BoatWorkspaceProvider, the versioned digest excludes legacy writers
-  // from tracked intents while old, untracked intents retain their exact key.
-  const digest = createHash("sha256").update(JSON.stringify(row && !row.create_attempts_tracked
-    ? input : { ...input, createAttemptJournalVersion: 1 })).digest("hex");
+  const digest = createHash("sha256").update(JSON.stringify(input)).digest("hex");
   if (row) {
     if (row.request_sha256 !== digest) builderOperationConflict();
     return row;

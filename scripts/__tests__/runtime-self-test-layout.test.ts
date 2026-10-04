@@ -143,6 +143,29 @@ it("prepares a sanitized B4 layout and reaches the real launcher and qualificati
   expect(vm.directoryRenames).toEqual([]);
 });
 
+it("preserves a populated build workspace while reaching the real qualification helper", () => {
+  const workspace = "/srv/zeros/files/workspace";
+  actual.mkdirSync(mapped(workspace), { mode: 0o755 });
+  actual.chmodSync(mapped(workspace), 0o755);
+  vm.owners.set(workspace, { uid: 10001, gid: 10001 });
+  actual.writeFileSync(mapped(`${workspace}/build-artifact.txt`), "retained build output\n", { mode: 0o640 });
+  actual.mkdirSync(mapped(`${workspace}/source`));
+  actual.writeFileSync(mapped(`${workspace}/source/main.js`), "export default 42;\n");
+  const before = actual.statSync(mapped(workspace));
+
+  expect(smoke(runtime, { PATH: "/usr/bin:/bin", HOME: "/tmp" })).toBe(false);
+
+  expect(qualified).toHaveBeenCalledOnce();
+  expect(actual.readFileSync(mapped(`${workspace}/build-artifact.txt`), "utf8")).toBe("retained build output\n");
+  expect(actual.statSync(mapped(`${workspace}/build-artifact.txt`)).mode & 0o777).toBe(0o640);
+  expect(actual.readFileSync(mapped(`${workspace}/source/main.js`), "utf8")).toBe("export default 42;\n");
+  expect(actual.readdirSync(mapped(workspace)).sort()).toEqual(["build-artifact.txt", "source"]);
+  expect(actual.statSync(mapped(workspace)).ino).toBe(before.ino);
+  expect(actual.statSync(mapped(workspace)).mode & 0o777).toBe(0o755);
+  expect(vm.owners.get(workspace)).toEqual({ uid: 10001, gid: 10001 });
+  expect(vm.directoryRenames).toEqual([]);
+});
+
 it.each(["symlink", "populated-mount", "legacy-workspace"])("refuses %s without reaching qualification or moving directories", kind => {
   if (kind === "symlink") actual.symlinkSync(mapped("/tmp"), mapped("/srv/zeros/files/home"));
   if (kind === "populated-mount") {

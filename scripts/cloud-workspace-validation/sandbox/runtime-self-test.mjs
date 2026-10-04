@@ -116,11 +116,11 @@ function prepareSelfTestLayout() {
   }
   try { lstatSync(path.join(runtimeLayout.root, "workspace")); assert.fail(); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
-  // Boat does not preserve directory contents across rename. Create the
-  // credential-free scratch and mount points at final paths (contracts §22).
+  // Create missing workspace and mount points at their final paths. These
+  // logical paths may be binds from /home/user/.zeros-persist (contracts §22–23).
   // These are the established image-layout owners/modes; the real launcher
   // revalidates the projection before entering the engine view.
-  const emptyDirectory = (directory, uid, allowed = []) => {
+  const prepareDirectory = (directory, uid) => {
     try {
       mkdirSync(directory, { mode: 0o700 });
       const fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
@@ -131,12 +131,16 @@ function prepareSelfTestLayout() {
     assert(metadata.isDirectory() && !metadata.isSymbolicLink() && metadata.uid === uid && metadata.gid === uid);
     assert.equal(metadata.mode & 0o777, 0o755);
     assert.equal(realpathSync(directory), directory);
+  };
+  const emptyMountPoint = (directory, allowed = []) => {
+    prepareDirectory(directory, 0);
     assert(readdirSync(directory).every(name => allowed.includes(name)));
   };
-  emptyDirectory(path.join(runtimeLayout.engineFilesRoot, "home"), 0, ["agent", "capture"]);
+  emptyMountPoint(path.join(runtimeLayout.engineFilesRoot, "home"), ["agent", "capture"]);
   for (const name of ["state", "managed-settings", "home/agent", "home/capture"])
-    emptyDirectory(path.join(runtimeLayout.engineFilesRoot, name), 0);
-  emptyDirectory(runtimeLayout.repository, 10001);
+    emptyMountPoint(path.join(runtimeLayout.engineFilesRoot, name));
+  // Build recipes may populate the workspace; leave their contents intact.
+  prepareDirectory(runtimeLayout.repository, 10001);
 }
 
 export function runtimeContainmentSmoke(runtime, environment) {
