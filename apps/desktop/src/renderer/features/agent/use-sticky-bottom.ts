@@ -15,16 +15,11 @@
 //   - When they scroll back to within threshold, it re-
 //     engages. Returning to bottom always means "follow."
 //
-// The "is the user at bottom" decision is captured BEFORE
-// React commits the next render — via useLayoutEffect plus
-// a ref updated on every scroll event. Without this we'd
-// have a race: new content lands, `scrollHeight` grows,
-// distance-from-bottom suddenly exceeds threshold, and the
-// hook would conclude "user is not at bottom" even though
-// they hadn't moved. Capturing in a ref before the render
-// (i.e. the scroll listener writes to the ref synchronously
-// on the user's actual scroll, never on content growth)
-// fixes this cleanly.
+// Keep reader intent separate from transient layout and smooth-scroll
+// geometry. React content updates and asynchronous layout both follow the
+// tail; a reader gesture cancels that following immediately. A latest jump
+// retains its destination through intermediate scroll events, then resolves
+// the current bottom when the native animation ends.
 //
 // Returns:
 //   isAtBottom — for UI (jump-to-latest pill visibility)
@@ -38,6 +33,8 @@ import {
   useRef,
   useState,
 } from "react";
+
+import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 
 export interface StickyBottomState {
   /** True when the scroll position is within `threshold` of the
@@ -125,67 +122,101 @@ export function useStickyBottom(
   const insetRef = useRef(options.bottomInsetPx ?? 0);
   insetRef.current = options.bottomInsetPx ?? 0;
 
-  // Recompute "at bottom" on BOTH the user's scroll movement AND any
-  // content/viewport size change. The size-change path is the one that's
-  // easy to miss and the source of a real bug: collapsing an expanded tool
-  // card (or any content SHRINK) reduces scrollHeight WITHOUT moving
-  // scrollTop, so the browser fires no scroll event — leaving isAtBottom
-  // stale at `false` and the jump-to-latest button stranded on-screen even
-  // though the user is now flush against the bottom. Observing the resize
-  // closes that gap; it also keeps the flag honest as tokens stream in,
-  // images load, and the composer grows/shrinks the viewport. This mirrors
-  // what the canonical use-stick-to-bottom lib (referenced by the
-  // Conversation primitive) does, and what the sibling JumpToPromptPill
-  // already does for its own visibility.
+  // Native smooth scrolling emits intermediate scroll events. They describe
+  // animation progress, not a reader leaving the tail. Keep that intent until
+  // scrollend, then resolve the latest geometry (which may have changed).
+  const jumpingRef = useRef(false);
+  const readingNavigationRef = useRef(false);
+  const cancelJumpRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     if (!scrollEl || !enabled) return;
-    const measure = () => {
-      // A detached scroller (pane-host reparent mid-workspace-switch) or one
-      // inside a display:none ancestor measures 0/0/0 — "at bottom" by the
-      // arithmetic below, but it's not a reading position, it's the absence
-      // of one. Skipping keeps stickRef honest across hide/reveal cycles so
-      // the reattach restore doesn't mistake every hidden chat for a
-      // tail-follower (the ResizeObserver fires with zero boxes on detach).
-      if (scrollEl.clientHeight === 0 && scrollEl.scrollHeight === 0) return;
-      // Content-relative distance: the inset region doesn't count as
-      // "somewhere lower to go" (it can be NEGATIVE when the viewport
-      // sits inside the blank region — unambiguously at-bottom).
-      const distance =
-        scrollEl.scrollHeight -
-        insetRef.current -
-        scrollEl.scrollTop -
-        scrollEl.clientHeight;
-      const atBottom = distance <= threshold;
-      stickRef.current = atBottom;
-      // Avoid setState if value unchanged — the hook's consumer
-      // re-renders on this value, so spamming it on every wheel
-      // tick during a freely-scrolling read is wasteful.
+    let lastHeight = scrollEl.scrollHeight;
+    let lastViewport = scrollEl.clientHeight;
+    const measure = (resized = false) => {
+      if (!enabledRef.current || scrollEl.clientHeight === 0) return;
+      const geometryChanged =
+        lastHeight !== scrollEl.scrollHeight ||
+        lastViewport !== scrollEl.clientHeight;
+      // Text smoothing, image decoding and content-visibility layout happen
+      // after React's content effect. Follow these resizes too, without
+      // treating them as reader scrolls. A user gesture clears stickRef first.
+      if (
+        (resized || geometryChanged) && stickRef.current &&
+        !jumpingRef.current && insetRef.current === 0
+      ) {
+        scrollEl.scrollTop = scrollEl.scrollHeight;
+      }
+      lastHeight = scrollEl.scrollHeight;
+      lastViewport = scrollEl.clientHeight;
+      const atBottom =
+        scrollEl.scrollHeight - insetRef.current - scrollEl.scrollTop -
+        scrollEl.clientHeight <= threshold;
+      // Scrollend can still belong to the navigation we just interrupted.
+      // Disengage reading intent only after actually leaving the tail; a
+      // later user scroll back to it can then resume ordinary following.
+      if (readingNavigationRef.current && !atBottom) readingNavigationRef.current = false;
+      if (!jumpingRef.current && !readingNavigationRef.current) stickRef.current = atBottom;
       setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
     };
-    scrollEl.addEventListener("scroll", measure, { passive: true });
-
-    // A ResizeObserver on the scroll CONTAINER never fires on content-only
-    // growth — its content-box is pinned by the flex layout. The element
-    // that actually changes height when a tool card expands/collapses is
-    // the content child (ConversationContent, flex-none), so observe that
-    // too. Observing the container as well catches viewport resizes (the
-    // composer growing, the column being dragged narrower). measure() only
-    // reads layout + sets state and never mutates the observed boxes, so
-    // there's no resize feedback loop.
-    let ro: ResizeObserver | undefined;
-    if (typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(() => measure());
-      ro.observe(scrollEl);
-      const content = scrollEl.firstElementChild;
-      if (content) ro.observe(content);
-    }
-
-    // Run once so the initial state matches actual scroll position
-    // (e.g. after a chat-switch hydrates messages and we land at
-    // the bottom — without this the ref stays true regardless).
+    let gestureFrame = 0;
+    const onScroll = () => measure();
+    const onGesture = () => {
+      cancelJumpRef.current();
+      if (readingNavigationRef.current) {
+        scrollEl.scrollTo({ top: scrollEl.scrollTop, behavior: "instant" });
+      }
+      readingNavigationRef.current = false;
+      stickRef.current = false;
+      // A click or a downward wheel at the very end may not emit scroll.
+      // Re-measure after the browser/React handles the gesture so following
+      // does not remain disabled when the reader never actually moved away.
+      if (gestureFrame) cancelAnimationFrame(gestureFrame);
+      gestureFrame = requestAnimationFrame(() => {
+        gestureFrame = 0;
+        measure();
+      });
+    };
+    const onNavigation = (event: Event) => {
+      cancelJumpRef.current();
+      const follow = (event as CustomEvent<{ follow: boolean }>).detail?.follow === true;
+      readingNavigationRef.current = !follow;
+      stickRef.current = follow;
+      // A navigation can spend its first frame at the old bottom. Unlike a
+      // no-motion gesture, it must not re-arm following before it moves.
+      if (gestureFrame) cancelAnimationFrame(gestureFrame);
+      gestureFrame = 0;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Enter"].includes(event.key)) {
+        onGesture();
+      }
+    };
+    scrollEl.addEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onNavigation);
+    scrollEl.addEventListener("scroll", onScroll, { passive: true });
+    scrollEl.addEventListener("wheel", onGesture, { passive: true });
+    scrollEl.addEventListener("touchstart", onGesture, { passive: true });
+    scrollEl.addEventListener("pointerdown", onGesture, { passive: true });
+    scrollEl.addEventListener("click", onGesture, { passive: true });
+    scrollEl.addEventListener("keydown", onKeyDown);
+    const ro = typeof ResizeObserver === "undefined"
+      ? undefined
+      : new ResizeObserver(() => measure(true));
+    ro?.observe(scrollEl);
+    const content = scrollEl.firstElementChild;
+    if (content) ro?.observe(content);
     measure();
     return () => {
-      scrollEl.removeEventListener("scroll", measure);
+      cancelJumpRef.current();
+      if (gestureFrame) cancelAnimationFrame(gestureFrame);
+      readingNavigationRef.current = false;
+      scrollEl.removeEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onNavigation);
+      scrollEl.removeEventListener("scroll", onScroll);
+      scrollEl.removeEventListener("wheel", onGesture);
+      scrollEl.removeEventListener("touchstart", onGesture);
+      scrollEl.removeEventListener("pointerdown", onGesture);
+      scrollEl.removeEventListener("click", onGesture);
+      scrollEl.removeEventListener("keydown", onKeyDown);
       ro?.disconnect();
     };
   }, [scrollEl, threshold, enabled]);
@@ -212,7 +243,7 @@ export function useStickyBottom(
     // content-visibility-collapsed layout would be wrong, and the reveal
     // path (reattach restore) owns the next position.
     if (!enabledRef.current) return;
-    if (!stickRef.current) return;
+    if (!stickRef.current || jumpingRef.current) return;
     if (!scrollEl) return;
     // Snap suspended while a bottom inset is active — see the option
     // doc. (Following resumes automatically: once the inset is gone
@@ -224,25 +255,42 @@ export function useStickyBottom(
 
   const jumpToBottom = useCallback(
     (smooth = true) => {
-      if (!scrollEl) return;
-      // "Latest" is the CONTENT bottom — never the blank inset. The
-      // explicit -clientHeight (instead of passing scrollHeight and
-      // letting the browser clamp) is what makes the inset effective:
-      // with a checkpoint spacer active this lands the answer's tail
-      // flush with the viewport bottom, and the now-hidden spacer is
-      // then collected by the rail's out-of-view rule. With inset 0 it
-      // equals the old clamp target exactly.
-      scrollEl.scrollTo({
-        top: Math.max(
-          0,
-          scrollEl.scrollHeight - insetRef.current - scrollEl.clientHeight,
-        ),
-        behavior: smooth ? "smooth" : "auto",
-      });
-      // Force-stick after a programmatic jump — the user explicitly
-      // asked to follow, even if they were unstuck before.
+      if (!scrollEl || !enabledRef.current || scrollEl.clientHeight === 0) return;
+      beginChatScrollNavigation(scrollEl);
+      cancelJumpRef.current();
+      readingNavigationRef.current = false;
+      const target = () => Math.max(
+        0, scrollEl.scrollHeight - insetRef.current - scrollEl.clientHeight,
+      );
+      const finish = () => {
+        scrollEl.removeEventListener("scrollend", finish);
+        cancelJumpRef.current = () => {};
+        jumpingRef.current = false;
+        if (!enabledRef.current || scrollEl.clientHeight === 0) return;
+        scrollEl.scrollTo({ top: target(), behavior: "instant" });
+        stickRef.current = true;
+        setIsAtBottom(true);
+      };
       stickRef.current = true;
-      setIsAtBottom(true);
+      if (
+        !smooth || Math.abs(scrollEl.scrollTop - target()) <= 1 ||
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ) {
+        finish();
+        return;
+      }
+      jumpingRef.current = true;
+      scrollEl.addEventListener("scrollend", finish);
+      cancelJumpRef.current = () => {
+        scrollEl.removeEventListener("scrollend", finish);
+        cancelJumpRef.current = () => {};
+        jumpingRef.current = false;
+        // Stop the browser animation as well as our eventual correction.
+        scrollEl.scrollTo({ top: scrollEl.scrollTop, behavior: "instant" });
+      };
+      scrollEl.scrollTo({ top: target(), behavior: "smooth" });
+      // isAtBottom describes actual geometry, not the destination. Publishing
+      // true here would let AgentChat trim paged history during the animation.
     },
     [scrollEl],
   );

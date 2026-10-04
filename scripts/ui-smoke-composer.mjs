@@ -68,6 +68,8 @@ import { runCustomizeSmoke } from "./ui-smoke-customize.mjs";
 import { runToolsSmoke } from "./ui-smoke-tools.mjs";
 import { runNativeToolsSmoke } from "./ui-smoke-native-tools.mjs";
 import { runCodexTranscriptSmoke } from "./ui-smoke-codex-transcript.mjs";
+import { runActivityDisclosureSmoke } from "./ui-smoke-activity-disclosure.mjs";
+import { runStickyBottomSmoke } from "./ui-smoke-sticky-bottom.mjs";
 import { runSubscriptionSmoke } from "./ui-smoke-subscription.mjs";
 import { runFolderWorkspaceSmoke, runWorkspaceRecoveryNavigationSmoke } from "./ui-smoke-folder-workspace.mjs";
 import { runFolderReviewSmoke } from "./ui-smoke-folder-review.mjs";
@@ -2632,6 +2634,8 @@ try {
   await runPrActionsSmoke({ page, check });
   // Subscription checks install a context-wide clock that survives navigation.
   // Keep them last so layout checks retain the browser's real animation timing.
+  await runActivityDisclosureSmoke({ page, check });
+  await runStickyBottomSmoke({ page, check });
   await runSubscriptionSmoke({ page, check });
 
   // Whole-run invariant.

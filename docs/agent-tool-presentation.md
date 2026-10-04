@@ -100,6 +100,9 @@ independent.
    Do not key rows by title, output, status, array position, or a generated
    render-time UUID. Native action facets may use the owning call plus their
    native action position/path; these are not additional tool executions.
+   Prepending history must preserve the mounted turn and working-group identity
+   when the older page extends an already visible group or supplies its missing
+   prompt. This includes nested tool and Agent disclosures.
 6. A text block ending, a tool input finishing, a tool finishing and a turn
    finishing are different boundaries. Do not infer one from another.
 7. A confirmed answer remains output when a later reply continues the same

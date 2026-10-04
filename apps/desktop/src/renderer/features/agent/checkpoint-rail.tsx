@@ -216,6 +216,8 @@ function spyAnchorPx(viewportH: number): number {
  *  exactly ON TOP of the strip (left edges flush). */
 const RAIL_WIDTH_PX = 28;
 
+import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
+
 interface CheckpointRailProps {
   /** False while this chat remains mounted in an off-screen retained layer. */
   active?: boolean;
@@ -527,6 +529,7 @@ export const CheckpointRail = memo(function CheckpointRail({
 
       const target = targetTopFor(id);
       if (target === null) return;
+      beginChatScrollNavigation(scrollEl);
 
       // Pin BEFORE the animation: the clicked checkpoint is the
       // selected one from this instant, whatever the spy would derive
@@ -562,6 +565,7 @@ export const CheckpointRail = memo(function CheckpointRail({
       const arm = () => {
         let finished = false;
         const cleanup = () => {
+          scrollEl.removeEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onUserInput);
           scrollEl.removeEventListener("scrollend", onEnd);
           scrollEl.removeEventListener("wheel", onUserInput);
           scrollEl.removeEventListener("pointerdown", onUserInput);
@@ -604,6 +608,7 @@ export const CheckpointRail = memo(function CheckpointRail({
           navigatingRef.current = false;
           cleanup();
         };
+        scrollEl.addEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onUserInput, { once: true });
         scrollEl.addEventListener("scrollend", onEnd, { once: true });
         scrollEl.addEventListener("wheel", onUserInput, {
           once: true,
