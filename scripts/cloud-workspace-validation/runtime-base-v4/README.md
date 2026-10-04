@@ -162,10 +162,14 @@ following links outside the incomplete runtime.
 
 ## Scripted Alpha verification (operator runbook)
 
-Live verification is pending. This workspace has no Alpha Boat/R2 credentials;
-no provider calls, sandbox starts, snapshots or R2 objects were made here.
-Amazon Linux's systemd 252 is not PID 1 and cannot qualify DelegateSubgroup or
-Ubuntu/AppArmor behavior. The commands below perform that remaining proof.
+The orchestrator reported an end-to-end Alpha pass at `37b0d8ad`: stock build,
+snapshot, cold verification, synthetic install A, persistent stop/resume,
+install B with `previous=A`, rejection of corrupted C, and cleanup. Only the
+base snapshot named `zeros-v2-test-base-v4-1` was retained. No provider calls,
+sandbox starts, snapshots or R2 objects were made from this workspace.
+Amazon Linux's local systemd 252 is not PID 1 and cannot qualify
+DelegateSubgroup or Ubuntu/AppArmor behavior. The commands below reproduce
+the operator's live verification.
 
 Use a clean checkout of this PR with `.env.agent` provisioned by the existing
 credential setup. It must contain `BOAT_API_KEY`, `BOAT_BILLING_ORG`,
