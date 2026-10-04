@@ -148,3 +148,22 @@ Checks include: `input_schema`, `input_too_large`, `artifact_host`, `artifact_ex
 `archive_member_type`, `file_inventory`, `file_digest`, `file_mode`, `symlink_escape`,
 `root_ownership`, `hard_link`, `pointer_publish`, `host_start`, `setup_exit`, `timeout`,
 `process_signal`, `diagnostic_missing`.
+
+## 11. Entry points and probes
+- Setup helper (unchanged contract): `<node> <lib>/setup-cloud-workspace.mjs --stdin` reads the
+  existing setup document from stdin. On v4 the installer, after a successful install and host
+  start, runs `R/bin/node R/lib/zeros/setup-cloud-workspace.mjs --stdin` and writes the nested
+  `setup` string of the installer input to its stdin; the installer's exit code mirrors the
+  helper's (plus its own diagnostic).
+- Root supervisor on v4: started ONLY by `zeros-host.service` → `/opt/zeros-bootstrap/dispatch.sh`
+  → `exec R/bin/node R/lib/zeros/cloud-worker-supervisor.mjs` (no arguments; it detects v4 from
+  `/etc/zeros/cloud-worker.json` version 4 and reads `/run/zeros/active-runtime.json` through the
+  B2 resolver). The legacy `ensure-cloud-worker-supervisor.mjs` detached spawn is never used on v4.
+- Base status probe (provider exec, no input, no secrets):
+  `/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status` → exactly one
+  JSON line `{"baseCompatibilityId":"bc1-<hex>","bootId":"<id>","currentRuntimeId":"r1-<hex>"|null,
+  "hostState":"idle"|"waiting_for_runtime"|"stopped"|"failed","schema":"zeros.base-status/v1"}`.
+- Runtime self-test (used by the runtime-smoke qualification, B7):
+  `R/bin/node R/lib/zeros/runtime-self-test.mjs` (root, no input) → runs engine/native/containment
+  self-checks that need no model credentials and prints one closed diagnostic line
+  (component `qualification`). B3 includes it in the bundle when present; B7 implements it.
