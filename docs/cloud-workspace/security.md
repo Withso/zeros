@@ -118,6 +118,13 @@ explicit workspace/state mounts, no supplementary groups, `NoNewPrivs`, and a
 seccomp filter. Its namespace capabilities support ownership-preserving edits
 and sandbox construction without VM-root authority.
 
+The engine view and native transition retain `CAP_SETFCAP` through exec into
+the ZSR supervisor because Linux 5.12+ requires it for nested UID-0 mappings.
+It is confined to the engine user namespace (host UID 10003); inherited
+`NoNewPrivs` prevents file capabilities from adding privilege on exec. Worker,
+capture, coordinator and setup children still drop every capability when they
+enter their nonzero identities.
+
 The root broker retains only fixed setup, attestation and engine lifecycle
 operations. Its socket and setup journals are absent from the engine view.
 Broker ownership uses a lifetime kernel file lock; cgroup retirement drains all

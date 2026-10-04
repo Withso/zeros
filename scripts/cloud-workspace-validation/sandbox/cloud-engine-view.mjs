@@ -137,6 +137,10 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
     "CAP_DAC_OVERRIDE",
     "CAP_CHOWN",
     "CAP_FOWNER",
+    // Nested UID-0 maps require SETFCAP on Linux >=5.12. The native
+    // transition retains it only for namespace root mapped to host UID 10003;
+    // inherited NoNewPrivs prevents file capabilities adding privilege on exec.
+    "CAP_SETFCAP",
   ])
     args.push("--cap-add", capability);
   for (const directory of [
