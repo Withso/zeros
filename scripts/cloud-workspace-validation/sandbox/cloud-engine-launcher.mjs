@@ -26,6 +26,7 @@ import { CloudEngineCgroup } from "./cloud-engine-cgroup.mjs";
 import {
   cloudEngineViewArguments,
   cloudEngineViewEnvironment,
+  cloudEngineWorkspacePaths,
 } from "./cloud-engine-view.mjs";
 import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
 import { resolveCloudRuntime, cloudActiveRuntimeDescriptor } from "./cloud-runtime-root.mjs";
@@ -339,6 +340,8 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
     privateDirectory(`${viewDirectory}/facade/sessions`, 0, 0, 0o700);
     const descriptor = cloudActiveRuntimeDescriptor(runtime);
     publishViewFile(`${viewDirectory}/active-runtime.json`, JSON.stringify(descriptor), 0, 0, 0o444);
+    if (computer) publishViewFile(`${viewDirectory}/etc/cloud-workspace-paths.json`,
+      JSON.stringify(cloudEngineWorkspacePaths(computer.repositoryDirectory)), 0, 0, 0o444);
     publishViewFile(`${viewDirectory}/etc/cloud-worker.json`, JSON.stringify({
       version: 4, backend: "cloud-worker", profile: "zeros-cloud-worker-v4", uid: 10001, gid: 10001,
       toolchain: { node: runtime.node, supervisor: `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`,

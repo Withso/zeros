@@ -73,6 +73,20 @@ read-write at `/srv/zeros/repos/<owner>/<name>`. Secondary clones remain at thei
 build SHAs. Setup and broker authority are outside that projection. Legacy and
 v4-base checkout paths remain unchanged.
 
+The primary also keeps its `/srv/zeros/repos/<owner>/<name>` alias: dependencies,
+virtual environments and shebangs may contain this build-time absolute path.
+The launcher publishes only the admitted path pair to the read-only
+`/etc/zeros/cloud-workspace-paths.json` projection. The engine verifies protected
+marker ownership and that the two physical directories identify the same inode.
+Attachment staging and atomic publication use the repository alias on the
+shared files mount, while authorization and returned paths keep the registered
+workspace path. This avoids cross-bind `EXDEV` without a host workspace mount.
+Actor policy mirrors every read/write grant, deny and nested exception across
+both primary paths; secondary repositories keep their existing access. Linux
+regressions exercise actual bind mounts, chunked and inline publication, Design
+and additional read-only fences, read denial, writable exceptions, and rejection
+of forged or mismatched path metadata.
+
 ## Integration seams
 
 - C3 ([PR #293](https://github.com/Withso/zeros/pull/293)) supplies the ready

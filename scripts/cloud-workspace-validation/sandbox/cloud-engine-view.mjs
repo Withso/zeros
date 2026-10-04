@@ -2,6 +2,14 @@ import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 import { isCloudComputerRepositoryDirectory } from "./cloud-computer-checkout.mjs";
 
+/** Credential-free alias metadata for engine-owned publication and policy.
+ * The launcher supplies only a primary from its validated private admission. */
+export function cloudEngineWorkspacePaths(primaryRepository) {
+  if (!isCloudComputerRepositoryDirectory(primaryRepository)) throw new Error("Invalid cloud engine repository projection");
+  return { schema: "zeros.cloud-workspace-paths/v1", workspaceRoot: "/srv/zeros/workspace",
+    repositoryAlias: `/srv/zeros/${primaryRepository.slice("/srv/zeros/files/".length)}` };
+}
+
 /** Mount inputs are image-owned constants, never paths or commands from an
  * engine request. The host launcher verifies their physical ownership first.
  * Private broker authority, provider login homes and the host shadow/SSH files
