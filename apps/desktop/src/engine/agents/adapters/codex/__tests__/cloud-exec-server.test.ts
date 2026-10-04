@@ -105,7 +105,9 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
           includeOnly:config["shell_environment_policy.include_only"]??[],exclude:[],set:{}}});
       let output="",afterSeq:number|null=null,closed=false,released=false;
       type ShellOutput={chunks:{seq:number;chunk:string}[];nextSeq:number;closed:boolean;exitCode:number|null};
-      for(let id=4;id<14&&!closed;id++){
+      // Codex can report a read before the exited stream is closed; poll to a deadline, not a fixed read count.
+      const readDeadline=Date.now()+20_000;
+      for(let id=4;!closed&&Date.now()<readDeadline;id++){
         const result:ShellOutput=await rpc<ShellOutput>(id,"process/read",{processId:"env-check",afterSeq,maxBytes:65536,waitMs:500});
         for(const chunk of result.chunks)output+=Buffer.from(chunk.chunk,"base64").toString("utf8");
         if(output&&!released){
@@ -115,6 +117,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
         // afterSeq is the last consumed sequence, not the next producer sequence.
         afterSeq=result.chunks.at(-1)?.seq??afterSeq;closed=result.closed;
         if(closed)expect(result.exitCode).toBe(0);
+        else if(!result.chunks.length)await new Promise(resolve=>setTimeout(resolve,20));
       }
       expect(closed).toBe(true);
       const lines=output.split("\n");
