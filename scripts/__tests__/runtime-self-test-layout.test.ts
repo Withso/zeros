@@ -107,7 +107,7 @@ beforeEach(async () => {
     const success = { status: 0, signal: null, stdout: "", stderr: "" };
     if (executable === "/usr/bin/python3") return success;
     if (args[0] === `${runtime.libRoot}/cloud-engine-launcher.mjs` && args[1] === "--qualify") {
-      const view = prepareCloudEngineView(runtime);
+      const view = prepareCloudEngineView(runtime, {}, "qualify");
       try {
         const identity = qualified();
         // The local fake kernel cannot qualify. Reaching the real helper is

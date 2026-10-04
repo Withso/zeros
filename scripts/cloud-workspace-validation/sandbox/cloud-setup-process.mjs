@@ -16,6 +16,7 @@ import {
   cloudCgroupDirectory,
 } from "./cloud-engine-cgroup.mjs";
 import { resolveCloudRuntime, resolveCloudRuntimeChild } from "./cloud-runtime-root.mjs";
+import { cloudComputerHostRepository, isCloudComputerRepositoryDirectory } from "./cloud-computer-checkout.mjs";
 
 const MAX_DOCUMENT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -206,6 +207,9 @@ function worker() {
   // loader, or language variables. Deliver the document again over stdin only
   // after setpriv has dropped the identity and all capabilities.
   const encoded = Buffer.from(JSON.stringify(payload));
+  const repositoryDirectory = privileged ? cloudComputerHostRepository(runtime) :
+    runtime.profile === "v4" ? process.cwd() : runtimeLayout.repository;
+  if (repositoryDirectory !== runtimeLayout.repository && !isCloudComputerRepositoryDirectory(repositoryDirectory)) throw invalid();
   const result = privileged
     ? spawnSync(
         "/usr/bin/setpriv",
@@ -223,7 +227,7 @@ function worker() {
           "--unprivileged",
         ],
         {
-          cwd: "/",
+          cwd: repositoryDirectory,
           env: { ...fixedEnvironment },
           input: encoded,
           stdio: ["pipe", "inherit", "inherit"],
@@ -237,7 +241,7 @@ function worker() {
         {
           // Setup precedes the engine's mount namespace. Its repository is
           // the host path; the logical path exists only inside that view.
-          cwd: runtimeLayout.repository,
+          cwd: repositoryDirectory,
           env: { ...payload.environment, ...fixedEnvironment },
           stdio: ["ignore", "inherit", "inherit"],
           timeout: payload.timeoutMs,

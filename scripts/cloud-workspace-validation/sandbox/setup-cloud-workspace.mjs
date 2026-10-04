@@ -36,6 +36,13 @@ import {
 } from "./attest-cloud-worker.mjs";
 import { runScopedCloudSetup } from "./cloud-setup-process.mjs";
 import {
+  CLOUD_COMPUTER_WORKSPACE_ADMISSION,
+  createCloudComputerWorkspaceAdmission,
+  checkoutCloudComputerPrimary,
+  parseCloudComputerSetup,
+  verifyCloudComputerTemplate,
+} from "./cloud-computer-checkout.mjs";
+import {
   validCloudResourceContract,
   cloudResourcesMeetContract,
   cloudImageReferenceMatchesBuild,
@@ -394,6 +401,7 @@ export function parseCloudWorkspaceSetupMaterials(
       "engine",
       "execution",
       "image",
+      ...(raw.computer === undefined ? [] : ["computer"]),
       ...(raw.recovery === undefined ? [] : ["recovery"]),
       "repository",
       "settings",
@@ -547,6 +555,10 @@ export function parseCloudWorkspaceSetupMaterials(
   ) {
     throw new Error("cloud workspace setup materials are invalid");
   }
+  if (raw.image.ref.startsWith("boat-template:") !== (raw.computer !== undefined) ||
+    (raw.computer !== undefined && raw.version !== 2))
+    throw new Error("cloud workspace setup materials are invalid");
+  if (raw.computer !== undefined) parseCloudComputerSetup(raw.computer, raw.repository);
 
   const document = parseSetupDocument(
     raw.settings.documentB64,
@@ -1941,7 +1953,7 @@ async function stringifyManagedSettings(values) {
 }
 
 export async function prepareRepositoryAndSettings(material, profile, stringify = stringifyManagedSettings) {
-  const { seededRepositoryBackup } = clonePaths(profile);
+  const repositoryDirectory = hostRepository(material);
   const journalFile = path.join(profile.setupDirectory, "repository.json");
   const managedSettings = path.join(
     profile.managedSettingsDirectory,
@@ -1970,18 +1982,8 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   // different checkout. Fresh clones validate their pin before recovery.
   const completedSetup = journal !== null &&
     journal.commandsCompleted === material.settings.setupCommands.length;
-  if (!journal) recoverInterruptedCloudWorkspaceClone({ seededRepositoryBackup });
-  let commit = await repositoryIdentity(
-    TARGET_REPOSITORY,
-    runtimeLayout.agentHome,
-    material.repository.cloneUrl,
-  );
+  const commit = await prepareCloudWorkspaceRepository(material, profile, journal);
   if (!journal) {
-    if (existsSync(seededRepositoryBackup)) {
-      if (!commit) throw failure("image_contract_invalid");
-    } else {
-      commit = await cloneRepository(material,profile);
-    }
     const identity = journalIdentity(material, commit, managedTomlSha256);
     saveJournal(journalFile, identity, material, 0);
     journal = parseJournal(readPhysicalJson(journalFile, 64 * 1024));
@@ -2038,7 +2040,7 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
               command.command,
             ],
             {
-              cwd: TARGET_REPOSITORY,
+              cwd: repositoryDirectory,
               timeoutMs: command.timeoutSeconds * 1_000,
               env: {
                 ...commandEnvironment,
@@ -2077,7 +2079,7 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
     saveJournal(journalFile, identity, material, index + 1);
   }
   const verifiedCommit = await repositoryIdentity(
-    TARGET_REPOSITORY,
+    repositoryDirectory,
     runtimeLayout.agentHome,
     material.repository.cloneUrl,
   );
@@ -2090,6 +2092,59 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
     material,
     material.settings.setupCommands.length,
   );
+  return commit;
+}
+
+function hostRepository(material) {
+  return material.computer ? verifyCloudComputerTemplate(material.computer, material.repository) : TARGET_REPOSITORY;
+}
+
+/** The template branch never visits clone recovery, staging, or the image seed.
+ * Host steps use the physical clone; only the engine mounts the primary alias.
+ * A journaled setup preserves edits and still checks the full journal identity. */
+export async function prepareCloudWorkspaceRepository(material, profile, journal, {
+  readIdentity = () => repositoryIdentity(hostRepository(material), runtimeLayout.agentHome, material.repository.cloneUrl),
+  recoverClone = recoverInterruptedCloudWorkspaceClone,
+  hasSeed = () => existsSync(SEEDED_REPOSITORY_BACKUP),
+  clone = () => cloneRepository(material, profile),
+  checkoutComputer = () => checkoutCloudComputerPrimary(material.computer, material.repository, {
+    git: async (directory, args, token) => {
+      const result = await gitCommand(directory, runtimeLayout.agentHome,
+        ["-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", ...args], token);
+      if (result.code !== 0 || result.signal || result.timedOut || result.overflow)
+        throw failure(args[0] === "fetch" ? "repository_temporarily_unavailable" : "repository_revision_invalid");
+      return result.stdout.trim();
+    },
+  }),
+  restoreCheckpoint = () => restoreCloudWorkspaceCheckpoint(material, hostRepository(material), { uid: profile.engineUid, gid: profile.engineGid }),
+  revokeReadToken = () => revokeCloudComputerReadToken(material),
+} = {}) {
+  if (material.computer) {
+    try {
+      if (!journal) {
+        await checkoutComputer();
+        if (material.recovery) await restoreCheckpoint();
+      }
+      const commit = await readIdentity();
+      if (!commit) throw failure("repository_revision_invalid");
+      return commit;
+    } catch (error) {
+      if (error?.message === "repository_revision_invalid" || error?.message === "image_contract_invalid")
+        throw failure(error.message);
+      throw error;
+    } finally {
+      // No repository hook or engine receives this org read grant. Revocation
+      // must be confirmed before setup proceeds, including on a journal replay.
+      await revokeReadToken();
+    }
+  }
+  if (!journal) recoverClone();
+  let commit = await readIdentity();
+  if (!journal) {
+    if (hasSeed()) {
+      if (!commit) throw failure("image_contract_invalid");
+    } else commit = await clone();
+  }
   return commit;
 }
 
@@ -2553,12 +2608,12 @@ async function waitForReadiness(material) {
   throw failure("engine_readiness_failed");
 }
 
-async function revokeGithubToken(token) {
+async function revokeGithubToken(token, { required = false, fetchImpl = fetch } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   timer.unref?.();
   try {
-    const response = await fetch(GITHUB_REVOKE_URL, {
+    const response = await fetchImpl(GITHUB_REVOKE_URL, {
       method: "DELETE",
       redirect: "error",
       cache: "no-store",
@@ -2571,11 +2626,19 @@ async function revokeGithubToken(token) {
       },
     });
     await response.body?.cancel().catch(() => undefined);
+    if (required && ![204, 401].includes(response.status)) throw failure("repository_temporarily_unavailable");
   } catch {
+    if (required) throw failure("repository_temporarily_unavailable");
     // The installation token is short-lived; failure is safe to retry later.
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function revokeCloudComputerReadToken(material, fetchImpl = fetch) {
+  if (!material.repository.credential.token) return;
+  await revokeGithubToken(material.repository.credential.token, { required: true, fetchImpl });
+  material.repository.credential.token = "";
 }
 
 function readyResult(material, commit, engine) {
@@ -2646,6 +2709,16 @@ async function executeSetup(encoded) {
     record("supervisor");
     const session = await prepareSupervisor();
     supervisorPrepared = true;
+    if (material.computer) {
+      if (RUNTIME.profile !== "v4") throw failure("image_contract_invalid");
+      // The root-only, boot/session-bound document routes all host work and
+      // selects the primary alias for each fresh engine mount namespace.
+      verifyCloudComputerTemplate(material.computer, material.repository);
+      atomicWrite(CLOUD_COMPUTER_WORKSPACE_ADMISSION,
+        `${JSON.stringify(createCloudComputerWorkspaceAdmission(material, RUNTIME))}\n`, { mode: 0o600 });
+      for (const name of ["github-credential.json", "github-credential-refresh.json"])
+        removeRootRuntimeFile(path.join(profile.runtimeDirectory, name), profile.engineUid);
+    }
     // Reject an unqualified image or undersized allocation before running any
     // repository setup hook. Reattest below to mint a fresh launch proof after
     // potentially long hooks; that proof is intentionally short-lived.
@@ -2656,7 +2729,7 @@ async function executeSetup(encoded) {
     record("repository");
     const commit = await prepareRepositoryAndSettings(material, profile);
     record("credential-projection");
-    installGithubProjection(material, profile);
+    if (!material.computer) installGithubProjection(material, profile);
     removeRootRuntimeFile(
       path.join(profile.runtimeDirectory, "github-credential-refresh.json"),
       profile.engineUid,
@@ -2706,7 +2779,7 @@ async function executeSetup(encoded) {
     }
     if (!successful) {
       if (supervisorPrepared) await prepareSupervisor().catch(() => undefined);
-      await revokeGithubToken(material.repository.credential.token);
+      if (material.repository.credential.token) await revokeGithubToken(material.repository.credential.token);
       try {
         if (profile)
           removeRootRuntimeFile(
@@ -2717,6 +2790,7 @@ async function executeSetup(encoded) {
         // Best-effort removal; the token is also revoked/short-lived.
       }
     }
+    if (material.computer) material.repository.credential.token = "";
   }
 }
 

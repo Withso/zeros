@@ -126,6 +126,12 @@ case "$PROFILE_VERSION" in
   *) echo "[start-engine] FATAL: unsupported runtime profile" >&2; exit 1 ;;
 esac
 
+TEMPLATE_WORKSPACE=0
+if [[ "$PROFILE_VERSION" == "4" ]]; then
+  REPO_DIR=$("$RUNTIME" "$RUNTIME_LIB/cloud-computer-checkout.mjs" --host-repository) || exit 1
+  if [[ "$REPO_DIR" != "/srv/zeros/files/workspace" ]]; then TEMPLATE_WORKSPACE=1; fi
+fi
+
 SETUP_BOOT="${ZEROS_CLOUD_SETUP_BOOT:-}"
 if [[ -n "$SETUP_BOOT" && "$SETUP_BOOT" != "1" ]]; then
   echo "[start-engine] FATAL: cloud setup boot marker is invalid" >&2
@@ -183,7 +189,7 @@ if [[ "$SETUP_BOOT" != "1" && ( ! -f ${RUNTIME_DIRECTORY}/cloud-preview-links.js
   echo "[start-engine] FATAL: root-owned cloud preview ingress is unavailable" >&2
   exit 1
 fi
-if [[ ! -f ${RUNTIME_DIRECTORY}/github-credential.json || -L ${RUNTIME_DIRECTORY}/github-credential.json || "$(stat -c '%u:%a:%h' ${RUNTIME_DIRECTORY}/github-credential.json)" != "$ENGINE_UID:600:1" ]]; then
+if [[ "$TEMPLATE_WORKSPACE" != "1" && ( ! -f ${RUNTIME_DIRECTORY}/github-credential.json || -L ${RUNTIME_DIRECTORY}/github-credential.json || "$(stat -c '%u:%a:%h' ${RUNTIME_DIRECTORY}/github-credential.json)" != "$ENGINE_UID:600:1" ) ]]; then
   echo "[start-engine] FATAL: root-owned cloud GitHub credential projection is unavailable" >&2
   exit 1
 fi

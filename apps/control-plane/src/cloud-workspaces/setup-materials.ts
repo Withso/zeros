@@ -28,6 +28,7 @@ import { CloudRuntimeWitnessSchema, CloudAgentRuntimeSchema, cloudRuntimeWitness
   type CloudRuntimeWitness, type CloudAgentRuntime, type CloudRuntimeWitnessRow } from "./runtime-contract.js";
 import { cloudRuntimePin, cloudRuntimePinValues, loadPinnedCloudRuntime, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
+import { computerWorkspaceTemplateManifest, loadComputerWorkspaceSource, resolveComputerRepositoryGrant, resolveComputerWorkspaceSetup, type CloudComputerWorkspaceSource } from "./computer-workspace-source.js";
 
 const SETUP_MATERIALS_AUDIENCE =
   "zeros-cloud-workspace-setup-materials-v1" as const;
@@ -76,6 +77,7 @@ export class CloudWorkspaceSetupMaterialError extends Error {
 }
 
 export interface CloudWorkspaceRepositoryCredentialBroker {
+  mintContentsRead?(input: { installationId: number; repositoryId: number }): Promise<{ token: string; expiresAtMs: number }>;
   mint(input: {
     installationId: number;
     owner: string;
@@ -181,6 +183,7 @@ type ParsedSettings = {
 
 type RedemptionContract = {
   runtime: CloudRuntimePin | null;
+  computer: { source: CloudComputerWorkspaceSource; repositoryId: string; requestedRevision: string } | null;
   accountUserId: string;
   ownerSubject: string;
   imageRef: string;
@@ -922,6 +925,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         repository_owner: string;
         repository_name: string;
         repository_revision: string;
+        requested_repository_revision: string;
         github_installation_id: string | null;
         settings_version: number;
         settings_sha256: string;
@@ -940,6 +944,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
                 g.architecture, g.cpu_millicores, g.memory_mib, g.storage_mib,
                 ss.repository_forge, ss.repository_owner,
                 ss.repository_name, ss.repository_revision,
+                workspace.repository_revision AS requested_repository_revision,
                 ss.github_installation_id, ss.spec_version AS settings_version,
                 encode(ss.settings_snapshot_sha256, 'hex') AS settings_sha256,
                 ss.settings_snapshot::text AS settings_text,
@@ -951,6 +956,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
                 gi.org_id AS installation_org_id,
                 identity.provider_sub AS owner_subject
          FROM cloud_workspace_generations g
+         JOIN cloud_workspaces workspace ON workspace.id=g.workspace_id AND workspace.org_id=g.org_id
          JOIN cloud_workspace_setup_specs ss
            ON ss.workspace_id = g.workspace_id
           AND ss.generation = g.generation AND ss.org_id = g.org_id
@@ -972,6 +978,18 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         ],
       );
       const row = loaded.rows[0];
+      let computer: RedemptionContract["computer"] = null;
+      if (row?.image_ref.startsWith("boat-template:")) {
+        try {
+          if (!row.github_installation_id || !COMMIT_PATTERN.test(row.repository_revision))
+            throw materialError("setup_admission_rejected", false);
+          computer = await resolveComputerWorkspaceSetup(tx, { ...input,
+            owner: row.repository_owner, name: row.repository_name, installationId: row.github_installation_id,
+            requestedRevision: row.requested_repository_revision });
+        } catch {
+          throw materialError("setup_admission_rejected", false);
+        }
+      }
       if (
         !row ||
         !contractMatchesExpected(row, input.expected) ||
@@ -987,7 +1005,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         !row.owner_subject ||
         !safeString(row.owner_subject, 512) ||
         !(
-          row.installation_org_id === input.organizationId ||
+          computer !== null || row.installation_org_id === input.organizationId ||
           row.installation_owner_user_id === accountUserId
         )
       ) {
@@ -1000,7 +1018,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         !await loadPinnedCloudRuntime(tx, pin, cloudRuntimeQualificationMode())) : input.runtime !== undefined) {
         throw materialError("setup_admission_rejected", false);
       }
-      if (row.installation_owner_user_id === accountUserId) {
+      if (!computer && row.installation_owner_user_id === accountUserId) {
         const authorization = await tx.query(
           `SELECT 1 FROM github_authorizations
            WHERE owner_user_id = $1 AND app_variant = 'github.com'`,
@@ -1101,6 +1119,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       );
       return {
         runtime: pin,
+        computer,
         accountUserId,
         ownerSubject: row.owner_subject,
         imageRef: row.image_ref,
@@ -1199,7 +1218,9 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       ]);
     };
     try {
-      repositoryCredential = await this.github.mint({
+      repositoryCredential = contract.computer ? await this.github.mintContentsRead!({
+        installationId: contract.repository.installationId, repositoryId: Number(contract.computer.repositoryId),
+      }) : await this.github.mint({
         installationId: contract.repository.installationId,
         owner: contract.repository.owner,
         repository: contract.repository.name,
@@ -1233,6 +1254,18 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         ) {
           return false;
         }
+        if (contract.computer) {
+          try {
+            const source = await loadComputerWorkspaceSource(tx, input);
+            if (!source || source.buildId !== contract.computer.source.buildId) return false;
+            const grant = await resolveComputerRepositoryGrant(tx, { organizationId: input.organizationId,
+              configId: source.configId, owner: contract.repository.owner, name: contract.repository.name,
+              installationId: contract.repository.installationRowId, repositoryId: contract.computer.repositoryId });
+            if (grant.githubInstallationId !== contract.repository.installationId) return false;
+          } catch {
+            return false;
+          }
+        }
         const current = await tx.query(
           `SELECT 1
            FROM cloud_workspace_engine_instances ei
@@ -1252,7 +1285,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
              AND eg.expires_at > now() AND gi.suspended_at IS NULL
              AND gi.app_variant = 'github.com'
              AND lower(gi.account_login) = lower(ss.repository_owner)
-             AND (gi.org_id = $4 OR (gi.owner_user_id = $7 AND ga.owner_user_id IS NOT NULL))
+             AND ($8::boolean OR gi.org_id = $4 OR (gi.owner_user_id = $7 AND ga.owner_user_id IS NOT NULL))
            FOR UPDATE OF ei`,
           [
             engineInstanceId,
@@ -1262,6 +1295,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
             input.setupRunId,
             input.executionFence,
             contract.accountUserId,
+            contract.computer !== null,
           ],
         );
         if ((current.rowCount ?? 0) !== 1) return false;
@@ -1334,6 +1368,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           ? { resources: contract.resources }
           : {}),
       },
+      ...(contract.computer ? { computer: { template: computerWorkspaceTemplateManifest(contract.computer.source),
+        primaryRepositoryId: contract.computer.repositoryId, requestedRevision: contract.computer.requestedRevision } } : {}),
       repository: {
         forge: contract.repository.forge,
         owner: contract.repository.owner,

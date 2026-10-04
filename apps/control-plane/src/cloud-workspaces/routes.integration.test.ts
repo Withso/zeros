@@ -29,6 +29,9 @@ import { runtimeBase, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
 import type { CloudWorkspaceProvider } from "./provider.js";
+import { ensureCloudComputerIdentity } from "./computer.js";
+import { seedComputerTemplate, computerTestAccount, computerTestWallet } from "./computer-workspace-test-fixtures.js";
+import { copyComputerWorkspaceSource, resolveComputerTemplateFork } from "./computer-workspace-source.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -243,6 +246,270 @@ d("cloud workspace API contracts", () => {
     expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
     expect(await replay.json()).toEqual(accepted);
     expect((await generationPin(workspace.id)).rows).toHaveLength(2);
+  });
+
+  const templateConfig = (): CloudWorkspaceBackendConfig => ({
+    ...v4Config(),
+    runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full" },
+    boat: { accountScope: computerTestAccount, billingOrg: computerTestWallet, ttlSeconds: 1800 },
+  });
+  const seedTemplate = (options: { version?: number; primaryName?: string } = {}) => withSystemTx(pool, tx =>
+    seedComputerTemplate(tx, { organizationId: orgId, ownerUserId: owner.id, installationId, ...options }));
+
+  it("requires an active ready v2 template before lookup or allocation, independently of the base switch", async () => {
+    await seedV4();
+    await withSystemTx(pool, async tx => {
+      await ensureCloudComputerIdentity(tx, orgId, owner.id);
+      await tx.query("INSERT INTO cloud_computer_v2_heads(org_id) VALUES($1)", [orgId]);
+    });
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_computer_build_required" } });
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+    for (const table of ["cloud_workspace_generations", "cloud_workspace_provider_bindings", "cloud_workspace_provider_operations"])
+      expect((await pool.query(`SELECT 1 FROM ${table}`)).rowCount).toBe(0);
+  });
+
+  it("keeps non-engineering creation unchanged for an enrolled v2 org", async () => {
+    await seedV4();
+    await seedTemplate();
+    actor = { ...owner, staffRole: "support_admin" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(202);
+    expect((await generationPin((await response.json()).workspace.id)).rows[0].runtime_id).toBeNull();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources")).rowCount).toBe(0);
+  });
+
+  it("accepts the template/runtime/config/SHA tuple using the org grant and replays it after activation", async () => {
+    await seedV4();
+    const source = await seedTemplate();
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "3", releaseOrder: 2 }));
+    await pool.query("DELETE FROM cloud_github_source_access");
+    // The installation was approved by a different org admin. The member
+    // creating this workspace has no personal installation or GitHub proof.
+    await pool.query("UPDATE github_installations SET owner_user_id=$2 WHERE id=$1", [installationId, outsider.id]);
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const key = randomUUID();
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key, body: createBody() });
+    expect(response.status).toBe(202);
+    const created = await response.json();
+    const workspaceId = created.workspace.id;
+    const saved = (await generationPin(workspaceId)).rows[0];
+    expect(saved).toMatchObject({ image_ref: `boat-template:${source.sourceSandboxId}`, runtime_id: `r1-${"a".repeat(64)}` });
+    expect((await pool.query("SELECT build_id,template_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [workspaceId])).rows)
+      .toEqual([{ build_id: source.buildId, template_id: source.templateId, config_id: source.configId }]);
+    expect((await pool.query("SELECT repository_revision FROM cloud_workspace_setup_specs WHERE workspace_id=$1", [workspaceId])).rows)
+      .toEqual([{ repository_revision: "4".repeat(40) }]);
+    expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros",
+      repositoryId: "123456789", revision: "main" });
+    await seedTemplate({ version: 2 });
+    const replay = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key, body: createBody() });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect((await replay.json()).workspace.generation.runtime).toEqual(created.workspace.generation.runtime);
+    expect((await generationPin(workspaceId)).rows).toEqual([saved]);
+    expect(repositoryResolver.resolve).toHaveBeenCalledOnce();
+  });
+
+  it.each(["revoked", "unqualified", "protocol"])("uses the qualified head when the template runtime is %s", async reason => {
+    await seedV4();
+    await seedTemplate();
+    const head = await withSystemTx(pool, async tx => {
+      if (reason === "revoked") await tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [`r1-${"a".repeat(64)}`]);
+      else {
+        const older = await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2,
+          ...(reason === "unqualified" ? { kinds: ["codex-chatgpt"] } : { engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION - 1 }) });
+        // Accepted build runtime identity is immutable; seed another active version.
+        await seedComputerTemplate(tx, { organizationId: orgId, ownerUserId: owner.id, installationId, version: 2, runtimeId: older.pin.runtimeId });
+      }
+      return seedRuntimeBundle(tx, { digit: "3", releaseOrder: 3 });
+    });
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(202);
+    expect((await response.json()).workspace.generation.runtime).toEqual(head.pin);
+  });
+
+  it.each(["activated", "cleared"])("rejects an active version %s during external resolution before saving a generation", async change => {
+    await seedV4();
+    await seedTemplate();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+    vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+      if (change === "activated") await seedTemplate({ version: 2 });
+      else await pool.query("UPDATE cloud_computer_v2_heads SET active_build_id=NULL WHERE org_id=$1", [orgId]);
+      return resolve(input);
+    });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_computer_changed", message: expect.stringMatching(/refresh/i) } });
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
+  });
+
+  it("retains a ready template when fork acceptance wins the concurrent retirement claim", async () => {
+    await seedV4();
+    const source = await seedTemplate();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const barrier = await pool.connect();
+    let acceptance: ReturnType<typeof request> | undefined;
+    let retirement: Promise<number | null> | undefined;
+    try {
+      await barrier.query("BEGIN");
+      const barrierPid = (await barrier.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      // Pause the final transaction after source selection, before its INSERTs
+      // can commit. The provider is never invoked by this API transaction.
+      await barrier.query("LOCK TABLE cloud_workspace_generations IN SHARE MODE");
+      acceptance = request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+      let acceptancePid = 0;
+      await vi.waitFor(async () => {
+        const waiting = await pool.query(`SELECT pid FROM pg_locks WHERE relation='cloud_workspace_generations'::regclass
+          AND NOT granted AND $1=ANY(pg_blocking_pids(pid))`, [barrierPid]);
+        expect(waiting.rows).toHaveLength(1);
+        acceptancePid = waiting.rows[0].pid;
+      }, { timeout: 5000 });
+      // KEY SHARE conflicts with UPDATE, but not SHARE: enforce C6's exact
+      // head-lock contract, rather than just incidental template-row locking.
+      await expect(withSystemTx(pool, tx => tx.query(
+        "SELECT org_id FROM cloud_computer_v2_heads WHERE org_id=$1 FOR KEY SHARE NOWAIT", [orgId],
+      ))).rejects.toMatchObject({ code: "55P03" });
+      retirement = withSystemTx(pool, async tx => {
+        await tx.query("SELECT org_id FROM cloud_computer_v2_heads WHERE org_id=$1 FOR UPDATE", [orgId]);
+        const claimed = await tx.query(`UPDATE cloud_computer_templates template SET state='retiring'
+          WHERE template.org_id=$1 AND template.build_id=$2 AND template.state='ready'
+          AND NOT EXISTS (SELECT 1 FROM cloud_workspace_computer_sources source
+            WHERE source.org_id=template.org_id AND source.template_id=template.build_id)`, [orgId, source.buildId]);
+        return claimed.rowCount;
+      });
+      await vi.waitFor(async () => {
+        const waiting = await pool.query("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [acceptancePid]);
+        expect(waiting.rows).toHaveLength(1);
+      }, { timeout: 5000 });
+      await barrier.query("COMMIT");
+      expect((await acceptance).status).toBe(202);
+      expect(await retirement).toBe(0);
+      expect((await pool.query(`SELECT template.state FROM cloud_workspace_computer_sources source
+        JOIN cloud_computer_templates template ON template.build_id=source.template_id AND template.org_id=source.org_id
+        WHERE source.org_id=$1`, [orgId])).rows).toEqual([{ state: "ready" }]);
+    } finally {
+      await barrier.query("ROLLBACK");
+      barrier.release();
+      await acceptance?.catch(() => {});
+      await retirement?.catch(() => {});
+    }
+  });
+
+  it("rejects the fork before allocation when the concurrent retirement claim wins", async () => {
+    await seedV4();
+    const source = await seedTemplate();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    let enteredLookup!: () => void, releaseLookup!: () => void;
+    const lookupEntered = new Promise<void>(resolve => { enteredLookup = resolve; });
+    const lookupReleased = new Promise<void>(resolve => { releaseLookup = resolve; });
+    const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+    vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+      enteredLookup();
+      await lookupReleased;
+      return resolve(input);
+    });
+    const retirement = await pool.connect();
+    let acceptance: ReturnType<typeof request> | undefined;
+    try {
+      acceptance = request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+      await lookupEntered;
+      await retirement.query("BEGIN");
+      const retirementPid = (await retirement.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      await retirement.query("SELECT org_id FROM cloud_computer_v2_heads WHERE org_id=$1 FOR UPDATE", [orgId]);
+      releaseLookup();
+      await vi.waitFor(async () => {
+        const waiting = await pool.query("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [retirementPid]);
+        expect(waiting.rows).toHaveLength(1);
+      }, { timeout: 5000 });
+      const claimed = await retirement.query(`UPDATE cloud_computer_templates template SET state='retiring'
+        WHERE template.org_id=$1 AND template.build_id=$2 AND template.state='ready'
+        AND NOT EXISTS (SELECT 1 FROM cloud_workspace_computer_sources source
+          WHERE source.org_id=template.org_id AND source.template_id=template.build_id)`, [orgId, source.buildId]);
+      expect(claimed.rowCount).toBe(1);
+      await retirement.query("COMMIT");
+      const response = await acceptance;
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { code: "cloud_computer_build_required" } });
+      for (const table of ["cloud_workspace_computer_sources", "cloud_workspace_generations", "cloud_workspace_provider_operations"])
+        expect((await pool.query(`SELECT 1 FROM ${table}`)).rowCount).toBe(0);
+      expect((await pool.query("SELECT state FROM cloud_computer_templates WHERE build_id=$1", [source.buildId])).rows)
+        .toEqual([{ state: "retiring" }]);
+    } finally {
+      releaseLookup();
+      await retirement.query("ROLLBACK");
+      retirement.release();
+      await acceptance?.catch(() => {});
+    }
+  });
+
+  it("retains the exact source in the lifecycle copy seam despite a newer active template", async () => {
+    await seedV4();
+    const source = await seedTemplate();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(202);
+    const workspaceId = (await response.json()).workspace.id;
+    await seedTemplate({ version: 2 });
+    const insertCandidate = async (tx: Parameters<typeof copyComputerWorkspaceSource>[0]) => {
+      await tx.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,sandbox_class,
+        architecture,cpu_millicores,memory_mib,storage_mib,source_commit,created_by,provider_connection_id,
+        runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version)
+        SELECT workspace_id,2,org_id,provider,image_ref,sandbox_class,architecture,cpu_millicores,memory_mib,storage_mib,
+        source_commit,created_by,provider_connection_id,runtime_id,runtime_manifest_sha256,runtime_base_image_id,
+        runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version FROM cloud_workspace_generations
+        WHERE workspace_id=$1 AND generation=1`, [workspaceId]);
+      await copyComputerWorkspaceSource(tx, { workspaceId, organizationId: orgId, sourceGeneration: 1, targetGeneration: 2 });
+    };
+    await expect(withSystemTx(pool, async tx => { await insertCandidate(tx); throw new Error("rollback fixture"); })).rejects.toThrow("rollback fixture");
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=2", [workspaceId])).rowCount).toBe(0);
+    await withSystemTx(pool, insertCandidate);
+    expect((await pool.query("SELECT build_id,template_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=2", [workspaceId])).rows)
+      .toEqual([{ build_id: source.buildId, template_id: source.templateId, config_id: source.configId }]);
+    await withSystemTx(pool, tx => copyComputerWorkspaceSource(tx, { workspaceId, organizationId: randomUUID(), sourceGeneration: 1, targetGeneration: 3 }));
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [workspaceId])).rowCount).toBe(2);
+  });
+
+  it("authorizes a fork only from its saved generation and matching provider account/wallet", async () => {
+    await seedV4();
+    const source = await seedTemplate();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(202);
+    const input = { workspaceId: (await response.json()).workspace.id as string, generation: 1,
+      imageRef: `boat-template:${source.sourceSandboxId}`, architecture: "linux/amd64" as const,
+      cpuMillicores: 2000, memoryMiB: 4096, storageMiB: runtimeBase.storageMiB, idempotencyKey: randomUUID() };
+    await seedTemplate({ version: 2 });
+    await expect(resolveComputerTemplateFork(pool, computerTestAccount, computerTestWallet, input)).resolves.toBe(source.sourceSandboxId);
+    for (const override of [{ generation: 2 }, { workspaceId: randomUUID() }, { imageRef: "boat-template:another-template" }])
+      await expect(resolveComputerTemplateFork(pool, computerTestAccount, computerTestWallet, { ...input, ...override }))
+        .rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    await expect(resolveComputerTemplateFork(pool, "another-account", computerTestWallet, input)).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    await expect(resolveComputerTemplateFork(pool, computerTestAccount, "another-wallet", input)).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+  });
+
+  it("rejects a primary absent from the active configuration before GitHub lookup", async () => {
+    await seedV4();
+    await seedTemplate({ primaryName: "other" });
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_computer_repository_not_configured" } });
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
   });
 
   it("pins the latest eligible runtime under the create lock and replays the saved pin after the head advances", async () => {
@@ -692,6 +959,7 @@ d("cloud workspace API contracts", () => {
           webUrl: "https://github.com/withso/zeros",
           defaultBranch: "main",
           visibility: "private" as const,
+          ...("revision" in input ? { resolvedRevision: "4".repeat(40) } : {}),
         };
       }),
     };

@@ -784,6 +784,7 @@ describe("repository layout contracts", () => {
       "runtime-bundles.md",
       "runtime-lifecycle-acceptance.md",
       "security.md",
+      "template-forks.md",
     ];
 
     expect(readdirSync(cloudDocs).sort()).toEqual(expected);

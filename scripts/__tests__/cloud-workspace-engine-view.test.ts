@@ -1,10 +1,29 @@
 import { describe, expect, it } from "vitest";
+import { createCloudRuntimeResolver } from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
+import { cloudRuntimeFixture } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
 import {
   cloudEngineViewArguments,
   cloudEngineViewEnvironment,
 } from "../cloud-workspace-validation/sandbox/cloud-engine-view.mjs";
 
 describe("fixed cloud engine mount and environment contract", () => {
+  it("binds the admitted primary only inside the v4 engine namespace and retains all repos read-write", () => {
+    const tree = cloudRuntimeFixture();
+    try {
+      const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
+      const view = "/run/zeros/view/runtime-11111111-1111-4111-8111-111111111111";
+      const primary = "/srv/zeros/files/repos/fixture/primary";
+      const args = cloudEngineViewArguments("serve", 4, runtime, view, primary);
+      const binds = args.flatMap((arg, index) => arg === "--bind" ? [[args[index + 1], args[index + 2]]] : []);
+      expect(binds).toContainEqual([primary, "/srv/zeros/workspace"]);
+      expect(binds).toContainEqual(["/srv/zeros/files", "/srv/zeros"]);
+      expect(binds.some(([, target]) => target === "/srv/zeros/files/workspace")).toBe(false);
+      for (const invalid of ["/srv/zeros/setup", "/srv/zeros/files/repos/../setup", "/home/user/repo", "/srv/zeros/files/repos/x/.."])
+        expect(() => cloudEngineViewArguments("serve", 4, runtime, view, invalid)).toThrow();
+      expect(() => cloudEngineViewArguments("serve", 3, undefined, undefined, primary)).toThrow();
+      expect(binds.some(([source]) => source === "/home/user" || source === "/srv/zeros/setup" || source === "/run/zeros")).toBe(false);
+    } finally { tree.dispose(); }
+  });
   it("admits only the fixed native qualification entry in the v3 engine view", () => {
     expect(cloudEngineViewArguments("qualify-agent", 3).slice(-2)).toEqual(["--v3", "--qualify-agent"]);
     expect(cloudEngineViewArguments("qualify-agent", 3)).toContain("/opt/zeros");

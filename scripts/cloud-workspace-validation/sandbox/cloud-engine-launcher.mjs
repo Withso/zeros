@@ -29,6 +29,7 @@ import {
 } from "./cloud-engine-view.mjs";
 import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
 import { resolveCloudRuntime, cloudActiveRuntimeDescriptor } from "./cloud-runtime-root.mjs";
+import { readCloudComputerWorkspaceAdmission } from "./cloud-computer-checkout.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 
 function rootPath(file, directory = false) {
@@ -46,6 +47,23 @@ function rootPath(file, directory = false) {
     )
       throw new Error("Unsafe cloud launch source");
     if (current === "/") break;
+  }
+}
+
+export function assertCloudEngineFilesProjection(runtime, {
+  root = runtimeLayout.engineFilesRoot, rootPath: verifyRoot = rootPath,
+} = {}) {
+  verifyRoot(root, true);
+  const names = readdirSync(root);
+  const allowed = ["workspace", "attachment-staging", "state", "home", "managed-settings",
+    ...(runtime.profile === "v4" ? ["repos", ".zeros-setup"] : [])];
+  if (names.some(name => !allowed.includes(name)))
+    throw new Error("Unexpected cloud engine file projection");
+  if (names.includes("repos")) {
+    const repos = path.join(root, "repos"), metadata = lstatSync(repos);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink())
+      throw new Error("Unsafe cloud repository projection");
+    verifyRoot(repos, true);
   }
 }
 
@@ -234,10 +252,19 @@ function verifyComputerRepositoryProjection(directory) {
   }
 }
 
-export function prepareCloudEngineView(runtime = resolveCloudRuntime()) {
+export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source = process.env, operation = "serve") {
   const profile = readCloudHostRuntimeProfile();
   if (![2,3,4].includes(profile.version) || (profile.version === 4) !== (runtime.profile === "v4"))
     throw new Error("Isolated cloud engine profile required");
+  let engineIdentity;
+  if (runtime.profile === "v4" && operation === "serve") {
+    try {
+      const encoded = source.ZEROS_CLOUD_RUNTIME_B64;
+      if (typeof encoded !== "string" || encoded.length > 65536) throw new Error();
+      engineIdentity = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    } catch { throw new Error("Invalid cloud engine scope identity"); }
+  }
+  const computer = readCloudComputerWorkspaceAdmission(runtime, { engineIdentity });
   for (const file of [
     "/usr/bin/bwrap",
     "/usr/bin/setpriv",
@@ -260,19 +287,25 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime()) {
   privateDirectory(runtimeLayout.attachmentTemporaryRoot, 10003, 10003, 0o700);
   if (profile.version === 4)
     privateDirectory(path.join(runtimeLayout.engineFilesRoot, ".zeros-setup"), 0, 10001, 0o710);
-  const files = readdirSync(runtimeLayout.engineFilesRoot);
-  if (files.some(name =>
-    !["workspace", "attachment-staging", "state", "home", "managed-settings",
-      ...(profile.version === 4 ? ["repos", ".zeros-setup"] : [])].includes(name)))
-    throw new Error("Unexpected cloud engine file projection");
-  if (profile.version === 4 && files.includes("repos"))
+  assertCloudEngineFilesProjection(runtime);
+  if (profile.version === 4 && readdirSync(runtimeLayout.engineFilesRoot).includes("repos"))
     verifyComputerRepositoryProjection(path.join(runtimeLayout.engineFilesRoot, "repos"));
   for (const name of ["home", "state", "managed-settings", "home/agent", "home/capture"]) {
     const directory = path.join(runtimeLayout.engineFilesRoot, name);
-    rootPath(directory, true);
+    if (computer) privateDirectory(directory, 0, 0, 0o755);
+    else rootPath(directory, true);
     if (name === "home" ? readdirSync(directory).some(child => !["agent", "capture"].includes(child))
       : readdirSync(directory).length > 0)
       throw new Error("Unexpected cloud engine mount contents");
+  }
+  if (computer) {
+    // This is only an empty target directory. No host bind is installed here.
+    const target = runtimeLayout.repository;
+    try { mkdirSync(target, { mode: 0o755 }); } catch (error) { if (error?.code !== "EEXIST") throw error; }
+    const metadata = lstatSync(target);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || realpathSync(target) !== target ||
+      ![0, 10001].includes(metadata.uid) || readdirSync(target).length)
+      throw new Error("Unsafe cloud primary mount target");
   }
   for (const kind of ["uid", "gid"]) {
     const value = readCloudEngineKernelParameter(`/proc/sys/kernel/overflow${kind}`, 32).toString(
@@ -318,7 +351,9 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime()) {
     const epoch = readPhysical("/opt/zeros/disk-epoch", 64);
     if (!/^[0-9]+\n?$/.test(epoch.toString("utf8"))) throw new Error("Invalid cloud disk epoch");
     publishViewFile(`${viewDirectory}/facade/disk-epoch`, epoch, 0, 0, 0o444);
-    return {...profile, runtime, viewDirectory, releaseView: () => rmSync(viewDirectory, {recursive:true,force:true})};
+    return {...profile, runtime, viewDirectory,
+      ...(computer ? { primaryRepository: computer.repositoryDirectory } : {}),
+      releaseView: () => rmSync(viewDirectory, {recursive:true,force:true})};
   } catch (error) {
     rmSync(viewDirectory, {recursive:true,force:true});
     throw error;
@@ -337,11 +372,11 @@ export async function launchCloudEngine({
   spawnProcess = spawn,
   signals = process,
 } = {}) {
-  const profile=prepare(runtime);
+  const profile=prepare(runtime, source, operation);
   runtime = profile?.runtime ?? runtime;
   let args, environment;
   try {
-    args = cloudEngineViewArguments(operation,profile?.version??2,runtime,profile?.viewDirectory);
+    args = cloudEngineViewArguments(operation,profile?.version??2,runtime,profile?.viewDirectory,profile?.primaryRepository);
     environment = cloudEngineViewEnvironment(source, operation,runtime);
     if (!scope) {
       let instanceId;

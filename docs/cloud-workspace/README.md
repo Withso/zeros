@@ -61,6 +61,8 @@ behavior from release qualification and deferred product surfaces.
   agent accounts, authorized GitHub repositories and Cloud Computer validation.
 - [Computer environment and setup](computer-environment.md) defines v2 generation
   pins, actor-specific environment delivery, repository hooks and the Alpha runbook.
+- [Cloud Computer template forks](template-forks.md) defines staff v2 create
+  admission, saved sources, checkout projections and the Alpha verification runbook.
 - [Agent authentication and language tools](agent-authentication-and-language-tools.md) defines personal consent, native subscription renewal and bounded language services.
 - [MCP and skills](mcp-and-skills.md) defines cloud customization authority and provider configuration.
 - [Computer agent tools](computer-tools.md) defines marked admin workspaces, execution authority and the five computer tools.

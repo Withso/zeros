@@ -1,17 +1,20 @@
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
+import { isCloudComputerRepositoryDirectory } from "./cloud-computer-checkout.mjs";
 
 /** Mount inputs are image-owned constants, never paths or commands from an
  * engine request. The host launcher verifies their physical ownership first.
  * Private broker authority, provider login homes and the host shadow/SSH files
  * have no mount in this view. */
-export function cloudEngineViewArguments(operation = "serve",version=2,runtime=resolveCloudRuntime(),viewDirectory) {
+export function cloudEngineViewArguments(operation = "serve",version=2,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository) {
   if (!["serve", "qualify", "qualify-agent"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
   if(![2,3,4].includes(version)||(version===4)!==(runtime.profile==="v4"))throw new Error("Invalid cloud engine profile version");
   if(operation==="qualify-agent"&&version<3)throw new Error("Native agent qualification requires v3 or v4");
   if(version===4&&(!/^\/run\/zeros\/view\/runtime-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(viewDirectory??"")))
     throw new Error("Invalid cloud engine runtime projection");
+  if (primaryRepository !== undefined && (version !== 4 || !isCloudComputerRepositoryDirectory(primaryRepository)))
+    throw new Error("Invalid cloud engine repository projection");
   const args = [
     "--die-with-parent",
     "--unshare-ipc",
@@ -80,6 +83,9 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
     // Boat persistence. Its private seed/home are never engine-visible.
     ...(version === 4 ? ["--tmpfs", "/srv/zeros/.zeros-setup", "--chmod", "0000", "/srv/zeros/.zeros-setup",
       "--remount-ro", "/srv/zeros/.zeros-setup"] : []),
+    // The source is the admitted host clone. No mount is installed beneath
+    // the host's files bind; this alias belongs only to this engine namespace.
+    ...(primaryRepository ? ["--bind", primaryRepository, "/srv/zeros/workspace"] : []),
     "--bind",
     "/srv/zeros/state",
     "/srv/zeros/state",
