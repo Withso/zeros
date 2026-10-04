@@ -1623,7 +1623,7 @@ d("account, organization, and operator deletion lifecycle", () => {
     ).rejects.toMatchObject({ code: "23514" });
   });
 
-  it("waits for WorkOS organization deletion before erasing tenant data and v2 computer history", async () => {
+  it("waits for WorkOS organization deletion before erasing tenant data, admin markers and v2 computer history", async () => {
     const owner = await signup("OrgPurge");
     await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [
       owner.id,
@@ -1695,6 +1695,12 @@ d("account, organization, and operator deletion lifecycle", () => {
           providerConnectionId,
           randomBytes(32),
         ],
+      );
+      // This is the historical sidecar left after normal workspace deletion.
+      await cloudClient.query(
+        `INSERT INTO cloud_computer_admin_workspaces(workspace_id,org_id,creator_user_id)
+         VALUES($1,$2,$3)`,
+        [workspaceId, organizationId, owner.id],
       );
       await cloudClient.query("COMMIT");
     } finally {
@@ -2089,6 +2095,7 @@ d("account, organization, and operator deletion lifecycle", () => {
       ),
     ).resolves.toMatchObject({ rows: [{ count: 2 }] });
     for (const table of [
+      "cloud_computer_admin_workspaces",
       "cloud_workspace_computer_sources",
       "cloud_computer_build_logs",
       "cloud_computer_v2_operations",

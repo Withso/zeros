@@ -5,6 +5,9 @@ import {CloudNativeBoundary} from "../containment/cloud-native-boundary";
 import type {PreparedBoundary} from "../containment/types";
 import {cloudProviderExecution,createCloudAgentExecutionFactory} from "../cloud-provider-execution";
 import {resolveCloudRuntime} from "../containment/cloud-runtime-root.mjs";
+import {AgentGateway} from "../gateway";
+import type {AgentAdapter} from "../types";
+import {testExecutionBoundary} from "./helpers/test-execution-boundary";
 
 vi.mock("../containment/cloud-native-boundary",()=>({CloudNativeBoundary:{prepare:vi.fn()}}));
 vi.mock("../containment/cloud-runtime-root.mjs",async original=>{
@@ -12,7 +15,7 @@ vi.mock("../containment/cloud-runtime-root.mjs",async original=>{
   return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime)};
 });
 afterEach(()=>vi.resetAllMocks());
-function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="cursor-api-key"){
+function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="cursor-api-key", computerToolsVersion?:1){
   const status:ExecutionBoundaryStatus={version:1,actor:"agent-code",state:"ready",backend:"cloud-worker",
     designProtection:{required:true,enforced:true,protectedDirectoryCount:1},
     parity:{level:"restricted",restrictions:[...CLOUD_NATIVE_PROVIDER_RESTRICTIONS.cursor]},checkedAt:Date.now()};
@@ -22,7 +25,7 @@ function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="c
   vi.mocked(CloudNativeBoundary.prepare).mockResolvedValue(coordinator as unknown as CloudNativeBoundary);
   const leaseId=randomUUID();
   const request=vi.fn(async(input:{kind:string})=>input.kind==="release"?{released:true}:{leaseId,authorityId:"a".repeat(64),
-    expiresAt:new Date(Date.now()+45000).toISOString(),credentialVersion:1,credentialKind,provider,model:"grok-4.6",material:
+    expiresAt:new Date(Date.now()+45000).toISOString(),credentialVersion:1,...(computerToolsVersion?{computerToolsVersion}:{}),credentialKind,provider,model:"grok-4.6",material:
       credentialKind==="claude-setup-token"?{kind:credentialKind,accessToken:"synthetic-setup-token"}:
       credentialKind==="codex-chatgpt"?{kind:credentialKind,accessToken:"synthetic-chatgpt-token",accountId:"synthetic-account",expiresAt:2_100_000_000}:
       {kind:credentialKind,apiKey:"synthetic-provider-key"}});
@@ -32,6 +35,57 @@ function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="c
   return {factory,input,workload,coordinator,controller};
 }
 describe("admitted native cloud diagnostic",()=>{
+  it.each(["claude","codex","cursor"] as const)("composes admitted computer and Design servers for %s and retires both with the execution",async provider=>{
+    vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile:"v4"} as ReturnType<typeof resolveCloudRuntime>);
+    const {factory,input}=fixture(provider,`${provider}-api-key`,1);
+    const result=await factory.prepare({...input,productTools:{env:{DESIGN_AUTH:"Bearer synthetic-design-capability"},servers:[{
+      name:"design-draft",transport:"http",url:"http://127.0.0.1:1234/mcp",headersFromEnv:{Authorization:"DESIGN_AUTH"},
+    }]}});
+    const execution=cloudProviderExecution(result.boundary)!;
+    expect(execution.productServers.map(server=>server.name)).toEqual(["design-draft","cloud-computer"]);
+    const computer=execution.productServers[1]!;
+    if(computer.transport!=="http")throw new Error("Expected HTTP product transport");
+    expect(execution.redactor!.value(computer.headers!.Authorization)).toBe("[redacted]");
+    expect(execution.redactor!.value("synthetic-design-capability")).toBe("[redacted]");
+    expect((await fetch(computer.url)).status).toBe(401);
+    await result.boundary.stopAndProve();
+    expect(execution.lease.signal.aborted).toBe(true);
+    await expect(fetch(computer.url)).rejects.toThrow();
+  });
+  it("keeps computer tools absent without CP admission and rejects a caller-supplied namesake",async()=>{
+    const {factory,input}=fixture();
+    const result=await factory.prepare(input);
+    expect(cloudProviderExecution(result.boundary)!.productServers.some(server=>server.name==="cloud-computer")).toBe(false);
+    await result.boundary.stopAndProve();
+    const another=fixture();
+    await expect(another.factory.prepare({...another.input,productTools:{env:{},servers:[{
+      name:"cloud-computer",transport:"http",url:"http://127.0.0.1:1234/mcp",
+    }]}})).rejects.toThrow("private execution admission");
+  });
+  it("requires v4 even if an older local runtime receives the capability",async()=>{
+    const {factory,input,workload}=fixture("cursor","cursor-api-key",1);
+    await expect(factory.prepare(input)).rejects.toThrow("Update the cloud runtime");
+    expect(workload.stopAndProve).toHaveBeenCalled();
+  });
+  it("retires the computer endpoint through gateway Stop even if native cancellation hangs",async()=>{
+    vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile:"v4"} as ReturnType<typeof resolveCloudRuntime>);
+    const {factory,input}=fixture("cursor","cursor-api-key",1);
+    const result=await factory.prepare(input);
+    const execution=cloudProviderExecution(result.boundary)!;
+    const computer=execution.productServers[0]!;
+    if(computer.transport!=="http")throw new Error("Expected HTTP product transport");
+    const gateway=new AgentGateway({projectRoot:"/w",executionBoundary:testExecutionBoundary(),
+      events:{onSessionUpdate(){},onPermissionRequest(){},onQuestionRequest(){},onAgentStderr(){},onAgentExit(){}}});
+    const state=gateway as unknown as {adapters:Map<string,AgentAdapter>;executionToAgent:Map<string,string>;executionBoundaries:Map<string,PreparedBoundary>};
+    state.adapters.set("cursor",{agentId:"cursor",cancel:()=>new Promise(()=>{})} as unknown as AgentAdapter);
+    state.executionToAgent.set(input.admission.executionId,"cursor");
+    state.executionBoundaries.set(input.admission.executionId,result.boundary);
+    try{
+      await gateway.cancel("cursor",input.admission.executionId);
+      expect(execution.lease.signal.aborted).toBe(true);
+      await expect(fetch(computer.url,{headers:computer.headers})).rejects.toThrow();
+    }finally{await result.boundary.stopAndProve();}
+  });
   it("reports the verified v4 profile for execution and unavailable Browser",async()=>{
     const legacy=resolveCloudRuntime();
     vi.mocked(resolveCloudRuntime).mockReturnValue({...legacy,profile:"v4"} as ReturnType<typeof resolveCloudRuntime>);

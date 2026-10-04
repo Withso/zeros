@@ -1,9 +1,13 @@
 import {CloudAgentExecutionAuthoritySchema,CloudAgentExecutionLeaseSchema,CloudAgentActionAuthoritySchema,CloudBackgroundStateSchema,type CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
 import type {CloudRuntimeAuthority} from "./cloud-runtime-registration";
 import { CloudCustomizationResultSchema } from "@zeros/protocol/cloud-customization";
+import { CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES, CloudComputerToolConflictSchema, CloudComputerToolResultSchemas } from "@zeros/protocol/cloud-computer-tools";
 
 export class CloudAgentExecutionError extends Error{
   constructor(){super("Cloud agent execution authority is unavailable");this.name="CloudAgentExecutionError";}
+}
+export class CloudComputerToolsUpdateRequiredError extends Error {
+  constructor(){super("Update the cloud runtime and control plane to configure this computer.");this.name="CloudComputerToolsUpdateRequiredError";}
 }
 /** Same-origin fixed endpoint and bounded body; provider/driver errors never
  * cross the trusted-engine boundary with token or SQL data attached. */
@@ -17,6 +21,11 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     response=await requestFetch(endpoint,{method:"POST",redirect:"error",signal:AbortSignal.any([signal,AbortSignal.timeout(10_000)]),
       headers:{"content-type":"application/json",authorization:`Bearer ${heartbeatToken}`},body:JSON.stringify({...scope,request})});
   }catch{throw new CloudAgentExecutionError();}
+  if(response.status===422&&request.kind==="admit"&&request.computerToolsVersion===1){
+    await response.body?.cancel().catch(()=>{});
+    const {computerToolsVersion:_version,...previous}=request;
+    return requestCloudAgentExecution(authority,previous,signal,requestFetch);
+  }
   // Older control planes reject unknown request fields before admission. Only
   // that definite schema rejection permits a legacy retry; never retry a
   // timeout or ambiguous credential publication.
@@ -28,14 +37,23 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     if(request.admission.customization)throw new CloudAgentExecutionError();
     return requestCloudAgentExecution(authority,{kind:"admit",admission:request.admission},signal,requestFetch);
   }
-  const limit=response.ok?(request.kind==="background"?256*1024:request.kind==="customization"||(request.kind==="admit"&&request.admission.customization)?1024*1024:40*1024):1024;
-  if(!response.ok||!response.body||Number(response.headers.get("content-length"))>limit){await response.body?.cancel().catch(()=>{});throw new CloudAgentExecutionError();}
+  const typedConflict=response.status===409&&(request.kind==="computer-tool"||request.kind==="admit");
+  const limit=response.ok?(request.kind==="computer-tool"?CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES:request.kind==="background"?256*1024:request.kind==="customization"||(request.kind==="admit"&&request.admission.customization)?1024*1024:40*1024):1024;
+  if((!response.ok&&!typedConflict)||!response.body||Number(response.headers.get("content-length"))>limit){await response.body?.cancel().catch(()=>{});throw new CloudAgentExecutionError();}
   const reader=response.body.getReader();let size=0;const chunks:Uint8Array[]=[];
   try{
     for(;;){const item=await reader.read();if(item.done)break;size+=item.value.byteLength;if(size>limit)throw new CloudAgentExecutionError();chunks.push(item.value);}
     const document:unknown=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(Buffer.concat(chunks)));
+    if(request.kind==="admit"&&response.status===409&&document&&typeof document==="object"&&
+      Object.keys(document).join()==="error"&&(document as {error?:unknown}).error==="cloud_computer_tools_update_required")
+      throw new CloudComputerToolsUpdateRequiredError();
     if(!document||typeof document!=="object"||Array.isArray(document)||Object.keys(document).join()!=="result")throw new CloudAgentExecutionError();
     const value=(document as {result:unknown}).result;
+    if(request.kind==="computer-tool"){
+      const parsed=response.status===409?CloudComputerToolConflictSchema.safeParse(value):CloudComputerToolResultSchemas[request.tool.name].safeParse(value);
+      if(!parsed.success)throw new CloudAgentExecutionError();return parsed.data;
+    }
+    if(!response.ok)throw new CloudAgentExecutionError();
     if(request.kind==="background"){
       const parsed=CloudBackgroundStateSchema.safeParse(value);
       if(!parsed.success||parsed.data.leaseId!==request.leaseId||parsed.data.conversationId!==request.operation.conversationId)throw new CloudAgentExecutionError();
@@ -59,5 +77,5 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     }
     if(!value||typeof value!=="object"||Object.keys(value).join()!=="released"||(value as {released?:unknown}).released!==true)throw new CloudAgentExecutionError();
     return {released:true};
-  }catch{await reader.cancel().catch(()=>{});throw new CloudAgentExecutionError();}finally{reader.releaseLock();}
+  }catch(error){await reader.cancel().catch(()=>{});if(error instanceof CloudComputerToolsUpdateRequiredError)throw error;throw new CloudAgentExecutionError();}finally{reader.releaseLock();}
 }
