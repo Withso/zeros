@@ -214,6 +214,23 @@ in `/opt/zeros/design-browsers`. Preserve the downloaded browser's license and
 third-party credits files when producing or distributing that image. This
 browser is a cloud image dependency; desktop Design capture uses Electron.
 
+### Linux runtime archive
+
+The Cloud v2 runtime builder also ships Node.js 22.23.1 (MIT and bundled
+third-party terms) from the official linux-x64 archive, verified against the
+release's SHASUMS256.txt. Its complete upstream `LICENSE` and archive provenance
+are preserved in `lib/node/` in each runtime. The same archive includes the
+Playwright Chromium, headless-shell and FFmpeg assets with their upstream
+notices and credits, including `LICENSE.headless_shell` and the browser's
+`ABOUT` and Widevine license files.
+
+The Linux archive has a separate, generated `worker/runtime-dependencies.json`
+inventory containing every copied package's actual name, version, license and
+relative location, including installed Linux native variants and the locked
+tsx/TypeScript qualification tools. Package license and NOTICE files remain
+beside the packages. This inventory supplements the desktop license bundle;
+it does not reinterpret the vendor terms governing Claude or Cursor.
+
 ## Maintenance policy
 
 Any change that adds, removes, upgrades, vendors, generates, or packages a
@@ -223,7 +240,7 @@ must be reviewed explicitly; do not infer that an npm package is MIT merely
 because this repository is.
 
 The generated native inventory currently targets the only release architecture,
-macOS arm64. Adding macOS x64, Windows, or Linux packaging must update
+macOS arm64. Adding macOS x64, Windows, or Linux desktop packaging must update
 `PACKAGED_PLATFORM_PACKAGES` in `scripts/generate-third-party-licenses.mjs` and
 add target-specific packaging assertions in the same change.
 

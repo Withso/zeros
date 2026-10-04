@@ -86,6 +86,8 @@
     "check:codex-coverage": "node scripts/codex-protocol-coverage.mjs",
     "check:codex-pin": "node scripts/check-codex-pin.mjs && node scripts/codex-protocol-coverage.mjs",
     "check:runtime-pins": "node scripts/check-runtime-pins.mjs",
+    "cloud:runtime-bundle:build": "tsx scripts/cloud-workspace-validation/runtime-bundle/build.ts",
+    "cloud:runtime-bundle:verify": "tsx scripts/cloud-workspace-validation/runtime-bundle/verify.ts",
     "zsr:qualify": "pnpm build:zsr-supervisor && node scripts/zsr-qualification/run.mjs",
     "check:zsr": "pnpm check:zsr:contracts && pnpm check:zsr:runtime",
     "check:zsr:contracts": "pnpm build:zsr-supervisor && node scripts/run-zsr-contract-tests.mjs",
