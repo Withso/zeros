@@ -119,7 +119,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
       artifacts = {
         head: vi.fn(async (key) => ({
           exists: objects.has(key),
-          bytes: objects.get(key) ?? 0,
+          bytes: objects.get(key) ?? null,
         })),
         presignCreatePut: vi.fn(async (_key, bytes) => ({
           url: "https://objects.example.test/upload",

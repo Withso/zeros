@@ -29,6 +29,9 @@ const fixtures = new URL(
   "../../../../packages/protocol/src/__tests__/fixtures/cloud-runtime/",
   import.meta.url,
 );
+const fixtureCases = JSON.parse(
+  readFileSync(new URL("cases.json", fixtures), "utf8"),
+) as { cases: Array<{ contract: string; file: string; valid: boolean }> };
 const rawManifest = readFileSync(new URL("manifest.valid.json", fixtures));
 const { files: _files, ...manifestHeader } = RuntimeManifestSchema.parse(
   JSON.parse(rawManifest.toString("utf8")),
@@ -143,6 +146,66 @@ const post = (
   });
 
 describe("runtime publication HTTP boundaries", () => {
+  it.each(
+    fixtureCases.cases.filter((entry) => entry.contract === "descriptor"),
+  )("matches the shared descriptor fixture $file", ({ file, valid }) => {
+    const candidate = JSON.parse(readFileSync(new URL(file, fixtures), "utf8"));
+    expect(
+      RuntimePublicationInputSchema.safeParse({
+        ...publicationBody,
+        descriptor: candidate,
+      }).success,
+    ).toBe(valid);
+  });
+
+  it.each(
+    fixtureCases.cases.filter(
+      (entry) => entry.contract === "manifest" && entry.valid,
+    ),
+  )("accepts the shared manifest header from $file", ({ file }) => {
+    const { files: _inventory, ...header } = JSON.parse(
+      readFileSync(new URL(file, fixtures), "utf8"),
+    );
+    expect(
+      RuntimePublicationInputSchema.safeParse({
+        ...publicationBody,
+        manifestHeader: header,
+      }).success,
+    ).toBe(true);
+  });
+
+  it.each([
+    "manifest.invalid-agent-version-build.json",
+    "manifest.invalid-agent-version-long.json",
+    "manifest.invalid-agent-version-line-break.json",
+    "manifest.invalid-node-abi-too-large.json",
+  ])("rejects the shared invalid manifest header from %s", (file) => {
+    const { files: _inventory, ...header } = JSON.parse(
+      readFileSync(new URL(file, fixtures), "utf8"),
+    );
+    expect(
+      RuntimePublicationInputSchema.safeParse({
+        ...publicationBody,
+        manifestHeader: header,
+      }).success,
+    ).toBe(false);
+  });
+
+  it.each(["bin/node\rprivate", "bin/node\nprivate", "é".repeat(2049)])(
+    "rejects entrypoint paths outside the shared encoding and byte bounds",
+    (node) => {
+      expect(
+        RuntimePublicationInputSchema.safeParse({
+          ...publicationBody,
+          manifestHeader: {
+            ...manifestHeader,
+            entrypoints: { ...manifestHeader.entrypoints, node },
+          },
+        }).success,
+      ).toBe(false);
+    },
+  );
+
   it("accepts the B1 descriptor and header golden shapes and rejects extra fields", () => {
     expect(
       RuntimePublicationInputSchema.safeParse(publicationBody).success,
@@ -377,6 +440,46 @@ describe("runtime staff authority", () => {
 describe("runtime router assembly", () => {
   const pool = { connect: vi.fn(), query: vi.fn() } as unknown as pg.Pool;
   const email = { from: null, token: null, apiUrl: "", inviteLinkBase: "" };
+  it("uses the supplied shared artifact store and fails closed without it", async () => {
+    const head = vi.fn(async () => ({ exists: false, bytes: null }));
+    const artifacts: RuntimeArtifactStore = {
+      head,
+      presignCreatePut: vi.fn(),
+      presignGet: vi.fn(),
+    };
+    const verifyOidc = vi.fn(async () => provenance);
+    const app = createApp(config, pool, email, {
+      runtimePublication: { artifacts, verifyOidc },
+    });
+    const response = await post(
+      app,
+      `${RUNTIME_PUBLICATION_PATH}/complete`,
+      publicationBody,
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "runtime_artifact_missing",
+        message: "Runtime artifact is missing",
+      },
+    });
+    expect(head).toHaveBeenCalledExactlyOnceWith(
+      runtimeArtifactObjectKey(descriptor.runtimeId, descriptor.archiveSha256),
+    );
+    const unavailable = createApp(config, pool, email, {
+      runtimePublication: { artifacts: null, verifyOidc },
+    });
+    expect(
+      (
+        await post(
+          unavailable,
+          `${RUNTIME_PUBLICATION_PATH}/complete`,
+          publicationBody,
+        )
+      ).status,
+    ).toBe(503);
+    expect(head).toHaveBeenCalledOnce();
+  });
   it("mounts disabled CI paths before account auth and staff paths after it", async () => {
     const app = createApp(
       {

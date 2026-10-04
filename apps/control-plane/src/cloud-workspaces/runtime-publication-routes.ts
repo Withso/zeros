@@ -39,11 +39,17 @@ const runtimeId = z
   .regex(/^r1-[a-f0-9]{64}$/);
 const positiveInteger = z.number().int().safe().positive();
 const protocolVersion = positiveInteger.max(65_535);
+const maxArchiveBytes = 2 * 1024 ** 3;
+const maxExpandedBytes = 4 * 1024 ** 3;
 const version = z
   .string()
   .min(1)
   .max(128)
   .regex(/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.+-]+)?$/);
+const agentVersion = z
+  .string()
+  .regex(/^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$/)
+  .refine((value) => !/[\r\n]/.test(value));
 const libcVersion = z
   .string()
   .max(32)
@@ -53,9 +59,10 @@ const relativePath = z
   .min(1)
   .refine(
     (value) =>
+      Buffer.byteLength(value, "utf8") <= 4096 &&
       !value.startsWith("/") &&
       !/^[A-Za-z]:/.test(value) &&
-      !/[\\\x00\ud800-\udfff]/u.test(value) &&
+      !/[\\\x00\r\n\ud800-\udfff]/u.test(value) &&
       value
         .split("/")
         .every((part) => part !== "" && part !== "." && part !== ".."),
@@ -66,10 +73,10 @@ const descriptorSchema = z
     runtimeId,
     manifestSha256: sha256,
     archiveSha256: sha256,
-    archiveBytes: positiveInteger,
-    expandedBytes: positiveInteger,
+    archiveBytes: positiveInteger.max(maxArchiveBytes),
+    expandedBytes: positiveInteger.max(maxExpandedBytes),
     sourceCommit: commit,
-    nodeModulesAbi: positiveInteger.max(2_147_483_647),
+    nodeModulesAbi: protocolVersion,
     bootstrapProtocolVersion: z.literal(1),
     engineProtocolVersion: protocolVersion,
   })
@@ -80,9 +87,9 @@ const manifestHeaderSchema = z
   .object({
     agents: z
       .object({
-        claude: z.object({ cli: version, sdk: version }).strict(),
-        codex: z.object({ package: version }).strict(),
-        cursor: z.object({ sdk: version }).strict(),
+        claude: z.object({ cli: agentVersion, sdk: agentVersion }).strict(),
+        codex: z.object({ package: agentVersion }).strict(),
+        cursor: z.object({ sdk: agentVersion }).strict(),
       })
       .strict(),
     entrypoints: z
@@ -91,7 +98,7 @@ const manifestHeaderSchema = z
         setup: relativePath,
         startEngine: relativePath,
         supervisor: relativePath,
-        selfTest: relativePath,
+        selfTest: relativePath.optional(),
       })
       .strict(),
     platform: z
@@ -100,7 +107,7 @@ const manifestHeaderSchema = z
         libc: z.literal("glibc"),
         minGlibc: libcVersion,
         node: version,
-        nodeModulesAbi: positiveInteger.max(2_147_483_647),
+        nodeModulesAbi: protocolVersion,
         os: z.literal("linux"),
       })
       .strict(),
