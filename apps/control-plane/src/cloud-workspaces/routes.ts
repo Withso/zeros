@@ -396,10 +396,17 @@ type ForkIntentRow = {
   completed_at: Date | string | null;
 };
 
-const workspaceSelect = (actorSql="NULL::text") => `
+const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
   SELECT ${actorSql} AS actor_role,cw.id, cw.org_id, cw.team_id, cw.created_by, cw.owner_user_id,
          (SELECT creator_user_id FROM cloud_computer_admin_workspaces admin
-          WHERE admin.workspace_id=cw.id AND admin.org_id=cw.org_id) AS admin_creator_user_id,
+          WHERE admin.workspace_id=cw.id AND admin.org_id=cw.org_id
+            AND (admin.creator_user_id=${actorUserSql} OR EXISTS (
+              SELECT 1 FROM organization_members member JOIN organizations org ON org.id=member.org_id
+              JOIN users account ON account.id=member.user_id
+              WHERE member.org_id=cw.org_id AND member.user_id=${actorUserSql}
+                AND member.role IN ('owner','admin') AND account.staff_role IN ('developer','platform_owner')
+                AND account.auth_status='active' AND account.deleted_at IS NULL
+                AND org.deleted_at IS NULL AND NOT org.is_personal))) AS admin_creator_user_id,
          cw.display_name,
          (SELECT json_build_object(
            'state', coalesce(
@@ -627,7 +634,7 @@ function sameDigest(left: Buffer, right: Buffer): boolean {
 
 async function loadWorkspaceRow(tx:Tx,orgId:string,workspaceId:string,lock=false,actorUserId?:string):Promise<WorkspaceRow>{
   const result = await tx.query<WorkspaceRow>(
-    `${workspaceSelect(actorUserId?"cloud_workspace_actor_role(cw.id,$3)":"NULL::text")}
+    `${workspaceSelect(actorUserId?"cloud_workspace_actor_role(cw.id,$3)":"NULL::text",actorUserId?"$3":"NULL::uuid")}
      WHERE cw.org_id = $1 AND cw.id = $2
      ${lock ? "FOR UPDATE OF cw" : ""}`,
     actorUserId?[orgId,workspaceId,actorUserId]:[orgId,workspaceId],
@@ -1184,7 +1191,7 @@ export function createCloudWorkspaceRoutes(
       }
       return (
         await tx.query<WorkspaceRow>(
-          `${workspaceSelect("cloud_workspace_actor_role(cw.id,$2)")}
+          `${workspaceSelect("cloud_workspace_actor_role(cw.id,$2)","$2")}
            WHERE ($1::uuid IS NULL OR cw.org_id = $1)
              AND (cw.owner_user_id=$2 OR cw.org_id IN (SELECT org_id FROM organization_members WHERE user_id=$2)
                OR cw.id IN (SELECT workspace_id FROM cloud_workspace_guest_grants WHERE user_id=$2 AND revoked_at IS NULL AND expires_at>now()))

@@ -24,6 +24,7 @@ import { createCloudWorkspaceRoutes } from "./routes.js";
 import { sealCloudProviderCredential } from "./provider-connections.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import { reserveWriterSlot } from "./pro-sharing.js";
+import { DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 import { DatabaseProMonthlyAllowance } from "./pro-allowance.js";
 import { runtimeBase, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
@@ -278,6 +279,69 @@ d("cloud workspace API contracts", () => {
         resolvedRevision: /^[a-f0-9]{40}$/.test(input.revision ?? "") ? input.revision! : "4".repeat(40) }));
       return template;
     };
+
+    const shareAdminWorkspace = async () => {
+      await prepareAdmin();
+      const workspace = (await (await createAdmin()).json()).workspace;
+      await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({ workspaceId: workspace.id,
+        organizationId: orgId, actorUserId: owner.id, sharingMode: "organization", expectedRevision: workspace.accessRevision });
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [outsider.id]);
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [orgId, outsider.id]);
+      await pool.query("INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,'viewer')",
+        [workspace.id, orgId, outsider.id]);
+      await pool.query("UPDATE organization_entitlements SET seat_limit=2 WHERE org_id=$1", [orgId]);
+      await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')", [orgId, outsider.id]);
+      return workspace.id as string;
+    };
+    const adminWorkspaceReads = [
+      { name: "organization GET", list: false, path: (id: string) => `/v1/organizations/${orgId}/cloud-workspaces/${id}` },
+      { name: "global GET", list: false, path: (id: string) => `/v1/cloud-workspaces/${id}` },
+      { name: "organization list", list: true, path: (_id: string) => `/v1/organizations/${orgId}/cloud-workspaces` },
+      { name: "global list", list: true, path: (_id: string) => "/v1/cloud-workspaces" },
+    ];
+
+    it.each(adminWorkspaceReads)("omits admin metadata from $name for an authorized non-admin viewer", async ({ path, list }) => {
+      const workspaceId = await shareAdminWorkspace();
+      actor = { ...outsider, staffRole: "developer" };
+      const role = await withSystemTx(pool, async tx =>
+        (await tx.query("SELECT cloud_workspace_actor_role($1,$2) AS role", [workspaceId, outsider.id])).rows[0].role);
+      expect(role).toBe("viewer");
+      const response = await request(path(workspaceId));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const workspace = list ? body.workspaces[0] : body.workspace;
+      expect(workspace.id).toBe(workspaceId);
+      expect(workspace).not.toHaveProperty("adminWorkspace");
+    });
+
+    it("retains metadata for a shared workspace's live engineering admin and creator", async () => {
+      const workspaceId = await shareAdminWorkspace();
+      actor = { ...outsider, staffRole: "developer" };
+      const metadata = { creatorUserId: owner.id };
+      await pool.query("UPDATE organization_members SET role='admin' WHERE org_id=$1 AND user_id=$2", [orgId, outsider.id]);
+      for (const { path, list } of adminWorkspaceReads) {
+        const response = await request(path(workspaceId));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect((list ? body.workspaces[0] : body.workspace).adminWorkspace).toEqual(metadata);
+      }
+      await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [orgId, outsider.id]);
+      for (const { path, list } of adminWorkspaceReads) {
+        const response = await request(path(workspaceId));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(list ? body.workspaces[0] : body.workspace).not.toHaveProperty("adminWorkspace");
+      }
+      actor = owner;
+      await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [owner.id]);
+      await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [orgId, owner.id]);
+      for (const { path, list } of adminWorkspaceReads) {
+        const response = await request(path(workspaceId));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect((list ? body.workspaces[0] : body.workspace).adminWorkspace).toEqual(metadata);
+      }
+    });
 
     it.each([null, "support_admin"] as const)("rejects non-engineering staff (%s) without creating a workspace", async staffRole => {
       await prepareAdmin();
