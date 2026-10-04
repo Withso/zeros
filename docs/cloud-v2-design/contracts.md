@@ -200,7 +200,8 @@ schemas, no-store responses, closed error codes. Idempotent by exact identity; c
   `200 {objectKey: "runtime/v1/<runtimeId>/<archiveSha256>.tar.gz", upload: {url, expiresAt, headers} | null}`
   (`upload` null when the exact object already exists). Presigned create-only PUT for the exact key/size.
 - `POST /internal/v1/runtime-bundles/publications/complete` (same workflow)
-  body `{runtimeId, archiveSha256, releaseOrder, githubRunId, githubRunAttempt}` → CP HEADs the object
+  body `{descriptor, manifestHeader, releaseOrder, githubRunId, githubRunAttempt}` (the SAME descriptor and
+  manifest header as the first call — stateless; no pending table) → CP re-validates identity, HEADs the object
   (exact byte length), inserts/validates the `cloud_runtime_bundles` row and the
   `cloud_runtime_channel_releases` row for channel alpha with `confirmed_at = now()` (the job runs after
   hosted promotion succeeded), then schedules runtime-smoke qualification (B7). → `200 {runtimeId, registered: true}`.
