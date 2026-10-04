@@ -146,14 +146,14 @@ type RecoveryPoint = { id: string; integrity_sha256: Buffer; content_revision: s
 
 // SQL fragments take only fixed caller expressions, never request data. Keep
 // the desktop acknowledgement and worker's lossless decision identical.
-export function cloudRecoveryPointLosslessSql(sourceGenerationSql: string): string {
+export function cloudRecoveryPointLosslessSql(sourceGenerationSql: string, allowBeforeRebuild = false): string {
   return `(checkpoint.generation=${sourceGenerationSql} AND checkpoint.content_revision=head.current_revision
     AND checkpoint.record_revision>=coalesce((SELECT current_revision FROM workspace_record_heads
       WHERE workspace_id=checkpoint.workspace_id AND org_id=checkpoint.org_id),0)
     AND EXISTS (SELECT 1 FROM workspace_checkpoint_requests request
       WHERE request.workspace_id=checkpoint.workspace_id AND request.org_id=checkpoint.org_id
         AND request.generation=${sourceGenerationSql} AND request.checkpoint_id=checkpoint.id AND request.state='succeeded'
-        AND request.reason IN ('before_stop','before_archive'))
+        AND request.reason IN ('before_stop','before_archive'${allowBeforeRebuild ? ",'before_rebuild'" : ""}))
     AND NOT EXISTS (SELECT 1 FROM cloud_workspace_engine_instances engine
       WHERE engine.workspace_id=checkpoint.workspace_id AND engine.generation=${sourceGenerationSql}
         AND engine.registered_at>checkpoint.durable_at)
@@ -164,10 +164,10 @@ export function cloudRecoveryPointLosslessSql(sourceGenerationSql: string): stri
 
 /** Shared by explicit recovery and automatic recovery, under the workspace
  * lock. A periodic snapshot is usable explicitly, but never proves zero loss. */
-export async function requireCloudRecoveryPoint(tx: Tx, input: RecoveryScope): Promise<RecoveryPoint> {
+export async function requireCloudRecoveryPoint(tx: Tx, input: RecoveryScope & { allowBeforeRebuild?: boolean }): Promise<RecoveryPoint> {
   const point = (await tx.query<RecoveryPoint>(`SELECT checkpoint.id,checkpoint.integrity_sha256,checkpoint.content_revision,
       checkpoint.record_revision,checkpoint.durable_at,
-      ${cloudRecoveryPointLosslessSql("$4")} AS lossless
+      ${cloudRecoveryPointLosslessSql("$4", input.allowBeforeRebuild)} AS lossless
     FROM workspace_checkpoints checkpoint
     JOIN workspace_content_heads head ON head.workspace_id=checkpoint.workspace_id AND head.org_id=checkpoint.org_id
       AND head.current_checkpoint_id=checkpoint.id

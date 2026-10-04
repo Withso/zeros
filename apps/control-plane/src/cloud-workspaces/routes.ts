@@ -2709,8 +2709,11 @@ export function createCloudWorkspaceRoutes(
           const head = (await tx.query<{ current_checkpoint_id: string | null }>(
             "SELECT current_checkpoint_id FROM workspace_content_heads WHERE workspace_id=$1 AND org_id=$2", [workspaceId, orgId])).rows[0];
           if (!head?.current_checkpoint_id) throw new HttpError(409, "cloud_recovery_checkpoint_unavailable", "A durable checkpoint is required to upgrade a stopped workspace");
+          // A failed upgrade may leave its source revoked after rollback. Its
+          // completed rebuild capture still fences writes unless newer work
+          // or a later source admission invalidates the shared freshness checks.
           const point = await requireCloudRecoveryPoint(tx, { workspaceId, organizationId: orgId,
-            sourceGeneration: workspace.current_generation, checkpointId: head.current_checkpoint_id });
+            sourceGeneration: workspace.current_generation, checkpointId: head.current_checkpoint_id, allowBeforeRebuild: true });
           if (!point.lossless) throw new HttpError(409, "recovery_acknowledgement_required", "Recover the workspace from its checkpoint before upgrading the runtime");
           upgradeCheckpointId = point.id;
         }

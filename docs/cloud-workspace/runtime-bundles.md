@@ -479,6 +479,10 @@ uses the existing drain/checkpoint/replacement-generation/restore flow. Running
 agents or other active work return 409 `cloud_workspace_busy`; a stale generation
 returns 409 `cloud_generation_changed`. A stopped, archived or failed source
 requires its current lossless final checkpoint before an upgrade can wake it.
+For v4 runtime upgrades, a completed `before_rebuild` capture also qualifies if
+content and record revisions are current and no later source registration or
+setup attestation exists. This permits a new upgrade after a failed candidate
+rolls back to a revoked source; ordinary recovery retains its existing rules.
 The ordinary `/generations` rebuild endpoint preserves v4 runtime pins.
 
 An accepted replacement returns 202 with `{operationId, sourceGeneration,

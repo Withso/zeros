@@ -6,16 +6,19 @@ import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { requireCloudRecoveryPoint } from "./automatic-recovery.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { copyGenerationPins, loadGenerationSource } from "./generation-pins.js";
 import { rollbackCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
 import { DatabaseCloudIdleStop } from "./idle-stop.js";
 import { DatabaseCloudWorkspaceManagementService } from "./management.js";
 import { DatabaseCloudWorkspaceBlobService } from "./object-store.js";
 import { DatabaseCloudWorkspaceContentService } from "./content-record.js";
-import type { CloudProviderResource, CloudWorkspaceProvider } from "./provider.js";
+import { CloudProviderError, type CloudProviderResource, type CloudWorkspaceProvider } from "./provider.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
-import { runtimeBase, seedRuntimeBundle, seedRuntimeBase } from "./runtime-test-fixtures.js";
+import { cloudRuntimePinValues } from "./runtime-selection.js";
+import { runtimeBase, runtimeWitness, seedRuntimeBundle, seedRuntimeBase } from "./runtime-test-fixtures.js";
 import { CloudWorkspaceSetupError, CloudWorkspaceSetupWorker } from "./setup-worker.js";
 import { seedCanonicalCloudWorkspaceAuthority, seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
 
@@ -76,7 +79,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
   async function revoke() {
     await pool.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [(await pin()).runtime!.runtimeId]);
   }
-  async function finalCheckpoint() {
+  async function finalCheckpoint(reason: "before_stop" | "before_rebuild" = "before_stop") {
     const engineScope = { ...scope(), engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
     const objects = new Map<string, Buffer>();
     const blobs = new DatabaseCloudWorkspaceBlobService({ pool, workosEnabled: false, encryptionKeyV1: randomBytes(32).toString("base64url"),
@@ -89,9 +92,13 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     const revision = await content.append({ ...engineScope, expectedRevision: 0, idempotencyKey: randomUUID(), gitBaseCommit: "a".repeat(40), gitHeadRef: null,
       mutations: [{ path: "work.txt", operation: "upsert", entryType: "file", mode: 33188, blobId: file.id, contentSha256: file.plaintextSha256, sizeBytes: 9 }] });
     await pool.query("UPDATE cloud_workspace_engine_instances SET created_at=now()-interval '11 minutes' WHERE id=$1", [fixture.engineInstanceId]);
-    const directive = (await new DatabaseCloudIdleStop(pool,false).request(engineScope,randomUUID()))!;
+    if (reason === "before_rebuild") expect((await upgrade()).status).toBe(202);
+    const directive = reason === "before_stop"
+      ? (await new DatabaseCloudIdleStop(pool,false).request(engineScope,randomUUID()))!
+      : (await pool.query("SELECT id FROM workspace_checkpoint_requests WHERE workspace_id=$1 AND reason='before_rebuild' AND state='queued'", [fixture.workspaceId])).rows[0];
     const checkpoint = await content.commitCheckpoint({ ...engineScope, requestId: directive.id, idempotencyKey: randomUUID(), contentRevision: revision.revision,
-      reason: "before_stop", manifestBlobId: manifest.id, artifactBlobId: null, inclusionPolicy: {}, fileCount: 1, totalBytes: 9, integritySha256: manifest.plaintextSha256 });
+      reason, manifestBlobId: manifest.id, artifactBlobId: null, inclusionPolicy: {}, fileCount: 1, totalBytes: 9, integritySha256: manifest.plaintextSha256 });
+    if (reason === "before_rebuild") return checkpoint.checkpointId;
     await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
     await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked',revoked_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
     await pool.query("UPDATE cloud_workspaces SET status='stopped',desired_state='stopped' WHERE id=$1", [fixture.workspaceId]);
@@ -247,6 +254,91 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect((await pool.query("SELECT current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].current_generation).toBe(1);
     expect((await pool.query("SELECT operation,generation FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='wake'", [fixture.workspaceId])).rows)
       .toEqual([{ operation: "wake", generation: 1 }]);
+  });
+  it.each(["fresh", "later registration"])("retries an upgrade after revoked-source rollback only with a fresh rebuild checkpoint (%s)", async freshness => {
+    const source = await pin(), next = await advanceHead();
+    const checkpointId = await finalCheckpoint("before_rebuild");
+    // Ordinary recovery keeps its existing stop/archive-only lossless rule.
+    expect((await withSystemTx(pool, tx => requireCloudRecoveryPoint(tx, {
+      ...scope(), sourceGeneration: 1, checkpointId,
+    }))).lossless).toBe(false);
+    await drain();
+    let resource: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1,
+      resourceId: `sandbox-${fixture.workspaceId}`, state: "stopped", target: null, metadata: {} };
+    const start = vi.fn(async () => { throw new Error("Revoked source must not wake"); });
+    const provider: CloudWorkspaceProvider = { name: "boat",
+      async find(identity) { return identity.generation === resource.generation ? [resource] : []; },
+      async inspect(id) { return id === resource.resourceId ? resource : null; }, start,
+      async create(input) {
+        if (input.generation === 2) throw new CloudProviderError("provider_resource_failed", "Fixture candidate failed", false);
+        resource = { ...resource, generation: input.generation, resourceId: `replacement-${input.generation}`, state: "running" };
+        return resource;
+      },
+      async stop() { resource = { ...resource, state: "stopped" }; return resource; },
+      archive: start, delete: start, async *listManaged() {},
+    };
+    const reconciler = new CloudWorkspaceReconciler({ pool, provider, intervalMs: 1000 });
+    expect(await reconciler.runOnce()).toBe(true); // Candidate B fails; rollback queues A's wake.
+    expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE workspace_id=$1", [fixture.workspaceId])).rows)
+      .toEqual([{ state: "rolling_back" }]);
+    await revoke();
+    // Keep unrelated candidate cleanup out of this lifecycle assertion.
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+interval '1 hour' WHERE workspace_id=$1 AND operation='delete'", [fixture.workspaceId]);
+    expect(await reconciler.runOnce()).toBe(true);
+    expect(start).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT current_generation,status,last_error_code FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0])
+      .toEqual({ current_generation: 1, status: "failed", last_error_code: "cloud_runtime_revoked" });
+    expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE workspace_id=$1", [fixture.workspaceId])).rows)
+      .toEqual([{ state: "rollback_failed" }]);
+    if (freshness === "later registration") {
+      await pool.query("UPDATE cloud_workspace_engine_instances SET registered_at=now() WHERE id=$1", [fixture.engineInstanceId]);
+    }
+    const response = await upgrade(); // New operationId after the failed attempt.
+    if (freshness !== "fresh") {
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { code: "recovery_acknowledgement_required" } });
+      return;
+    }
+    const accepted = await response.json();
+    expect({ status: response.status, error: accepted.error?.code }).toEqual({ status: 202, error: undefined });
+    expect(accepted).toMatchObject({ sourceGeneration: 1, generation: 3, runtimeId: next.pin.runtimeId });
+    expect(await pin(3)).toEqual({ profile: source.profile, runtime: next.pin });
+    expect(await reconciler.runOnce()).toBe(true); // Drain A, preserving the original checkpoint.
+    expect(await reconciler.runOnce()).toBe(true); // Provision B as generation 3.
+    const worker = new CloudWorkspaceSetupWorker({ pool, intervalMs: 1000, sanitizeLog: value => value,
+      executor: { async execute(execution) {
+        const engineId = randomUUID();
+        await withSystemTx(pool, async tx => {
+          const grant = (await tx.query(`INSERT INTO cloud_workspace_endpoint_grants
+            (workspace_id,generation,org_id,account_user_id,purpose,audience,token_hash,account_revision,authorization_revision,
+             expires_at,consumed_at,setup_run_id,setup_execution_fence)
+            VALUES($1,$2,$3,$4,'setup','https://control.example.test/internal/v1/cloud-workspaces/engine/register',$5,1,1,
+              now()+interval '5 minutes',now(),$6,$7) RETURNING id`,
+          [fixture.workspaceId,execution.generation,fixture.organizationId,fixture.userId,randomBytes(32),execution.setupRunId,execution.executionFence])).rows[0];
+          await tx.query(`INSERT INTO cloud_workspace_engine_instances
+            (id,workspace_id,generation,org_id,account_user_id,setup_run_id,setup_execution_fence,registration_grant_id,
+             protocol_version,state,bridge_token_hash,heartbeat_token_hash,registered_at,last_heartbeat_at,lease_expires_at,
+             runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,
+             runtime_engine_protocol_version,runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'ready',$10,$11,now(),now(),now()+interval '2 minutes',$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+          [engineId,fixture.workspaceId,execution.generation,fixture.organizationId,fixture.userId,execution.setupRunId,
+            execution.executionFence,grant.id,CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,randomBytes(32),randomBytes(32),
+            ...cloudRuntimePinValues(execution.runtime),runtimeWitness.installerReceiptSha256,randomUUID(),randomUUID()]);
+        });
+        return { readiness: { version: 1, setupRunId: execution.setupRunId, workspaceId: fixture.workspaceId,
+          organizationId: fixture.organizationId, generation: execution.generation, executionFence: execution.executionFence,
+          image: { ref: execution.image.ref, sourceCommit: execution.image.sourceCommit! },
+          repository: { revision: execution.repository.revision, commit: "c".repeat(40) },
+          settings: { version: execution.settings.version, sha256: execution.settings.sha256 },
+          engine: { instanceId: engineId, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, health: "ready", durableRecordConnected: true } } };
+      } },
+    });
+    expect(await worker.runOnce()).toBe(true);
+    expect((await pool.query("SELECT current_generation,status,last_error_code FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0])
+      .toEqual({ current_generation: 3, status: "ready", last_error_code: null });
+    expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE id=$1", [accepted.transitionId])).rows[0].state).toBe("succeeded");
+    expect((await pool.query("SELECT recovery_checkpoint_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=3", [fixture.workspaceId])).rows[0].recovery_checkpoint_id).toBe(checkpointId);
+    expect(await pin()).toEqual(source);
   });
   it("rejects stale generation CAS and operationId reuse with a different request", async () => {
     await advanceHead();
