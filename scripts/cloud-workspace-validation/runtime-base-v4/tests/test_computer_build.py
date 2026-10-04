@@ -213,6 +213,57 @@ class Fixture(unittest.TestCase):
         for path in self.root.rglob("*"):
             if path.is_file() and not path.is_symlink(): self.assertNotIn(b"synthetic-clone-credential", path.read_bytes())
 
+    def test_empty_repository_list_does_not_create_repo_projection(self):
+        result = self.app.clone_repos({"schema": "zeros.computer-repositories-input/v1", **JOB, "repositories": []})
+        self.assertEqual(result["repositories"], [])
+        self.assertFalse((self.root / "srv/zeros/files/repos").exists())
+
+    def test_repository_access_with_umask_077_before_and_after_sanitize(self):
+        # The ordinary suite checks exact parent modes. Running this suite as
+        # root also exercises real access from the distinct workspace UID/GID.
+        if os.geteuid() == 0:
+            self.app.repo_uid = self.app.repo_gid = 10001
+            self.assertNotEqual(self.app.uid, self.app.repo_uid)
+        self.root.chmod(0o755)
+        for path in ("/srv", "/srv/zeros", "/srv/zeros/files"):
+            self.mkdir(path).chmod(0o755)
+        document, _, _ = self.repository()
+        original_umask = os.umask(0o077)
+        try:
+            repositories = self.app.clone_repos(document)["repositories"]
+            private = self.root / "run/zeros/computer-build" / JOB["buildId"]
+            self.assertEqual(private.stat().st_mode & 0o7777, 0o700)
+            self.assertEqual(private.stat().st_uid, self.app.uid)
+
+            def accessible():
+                for path in ("srv/zeros/files/repos", "srv/zeros/files/repos/fixture"):
+                    metadata = (self.root / path).stat()
+                    self.assertEqual(metadata.st_mode & 0o7777, 0o755)
+                    self.assertEqual((metadata.st_uid, metadata.st_gid), (self.app.uid, self.app.gid))
+                repo = self.root / "srv/zeros/files/repos/fixture/repo"
+                self.assertEqual(repo.stat().st_uid, self.app.repo_uid)
+                identity = {"user": self.app.repo_uid, "group": self.app.repo_gid, "extra_groups": []} if os.geteuid() == 0 else {}
+                result = subprocess.run([sys.executable, "-I", "-c",
+                    "from pathlib import Path; import sys; p=Path(sys.argv[1]); "
+                    "assert (p/'file').read_text() == 'repository data'; "
+                    "q=p/'workspace-write'; q.write_text('writable'); q.unlink()", str(repo)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, **identity)
+                self.assertEqual(result.returncode, 0, "workspace identity cannot access its checkout")
+
+            accessible()
+            manifest = {"schema": "zeros.computer-template/v1", "buildId": JOB["buildId"], "configId": JOB["buildId"], "baseImageId": "fixture-base",
+                        "runtimeId": RUNTIME, "baseCompatibilityId": self.compatibility, "repositoryManifest": repositories, "protectedContractDigest": self.baseline()}
+            # Sanitation must establish the contract even if a root recipe
+            # tightened the repository parents after cloning.
+            for path in ("srv/zeros/files/repos", "srv/zeros/files/repos/fixture"):
+                (self.root / path).chmod(0o700)
+            self.app.host = FakeHost()
+            self.app.sanitize({"schema": "zeros.computer-sanitation-input/v1", **JOB, "manifest": manifest, "manifestSha256": build.sha(build.packed(manifest))})
+            accessible()
+            self.assertFalse(private.exists())
+        finally:
+            os.umask(original_umask)
+
     def test_lfs_and_escaping_repository_symlinks_fail_closed(self):
         document, _, _ = self.repository(lfs=True)
         with self.assertRaises(build.Failure): self.app.clone_repos(document)
@@ -226,7 +277,7 @@ class Fixture(unittest.TestCase):
             def install_command(self, _identity, _timeout): return ["/usr/bin/bash", "-euo", "pipefail"]
             def drain_install(self, _identity): pass
         self.app.host = LocalHost()
-        self.mkdir("/srv/zeros/files/repos")
+        self.app.clone_repos({"schema": "zeros.computer-repositories-input/v1", **JOB, "repositories": []})
         marker = self.root / "count"
         document = {"schema": "zeros.computer-install-input/v1", **JOB, "action": "start", "after": 0,
                     "script": "printf x >> " + str(marker), "timeoutSeconds": 2, "redactions": []}
@@ -246,6 +297,9 @@ class Fixture(unittest.TestCase):
     def test_sanitize_preserves_repositories_runtime_and_manifest_but_removes_private_state(self):
         document, commit, _ = self.repository()
         repositories = self.app.clone_repos(document)["repositories"]
+        # §23's physical root must survive; sanitation owns explicit private
+        # targets through logical binds, never a recursive /home/user wipe.
+        persistent = self.write("/home/user/.zeros-persist/files/retained", "retained data")
         for path in ("/root/.ssh/id", "/root/.bash_history", "/home/user/.git-credentials", "/srv/zeros/setup/admission", "/srv/zeros/state/workspaces/session",
                      "/srv/zeros/log/script", "/srv/zeros/home/agent/.bash_history", "/srv/zeros/home/capture/session",
                      "/srv/zeros/files/state/private", "/srv/zeros/managed-settings/settings.managed.toml",
@@ -264,6 +318,7 @@ class Fixture(unittest.TestCase):
         self.app.host = FakeHost()
         result = self.app.sanitize({"schema": "zeros.computer-sanitation-input/v1", **JOB, "manifest": manifest, "manifestSha256": build.sha(build.packed(manifest))})
         self.assertTrue(result["clean"])
+        self.assertEqual(persistent.read_text(), "retained data")
         self.assertEqual((self.root / "srv/zeros/files/repos/fixture/repo/file").read_text(), "repository data")
         self.assertEqual((self.root / "opt/zeros-infra" / RUNTIME / "fixture").read_text(), "verified runtime")
         self.assertEqual((self.root / "etc/machine-id").read_bytes(), b"")
@@ -293,6 +348,12 @@ class FakeHost:
 
 
 class Install(unittest.TestCase):
+    def test_install_script_enters_a_private_logical_repository_namespace(self):
+        args = build.SystemHost().install_command(JOB["buildId"], 900)
+        self.assertIn("--property=WorkingDirectory=/", args)
+        self.assertEqual(args[-9:], ["/usr/bin/unshare", "--mount", "--propagation", "private", "--",
+                                    "/usr/bin/python3", "-I", "/opt/zeros-bootstrap/computer-build.py", "install-shell"])
+
     def test_unknown_cgroup_status_is_not_evidence_of_drain(self):
         with patch.object(build, "bounded_command", return_value=(1, b"")):
             with self.assertRaises(build.Failure): build.SystemHost().drain_install(JOB["buildId"])
@@ -306,7 +367,7 @@ class Install(unittest.TestCase):
         for option in ("--property=User=0", "--property=Group=0", "--property=KillMode=control-group", "--property=RuntimeMaxSec=900s", "--property=TasksMax=512",
                        "--property=ReadOnlyPaths=/opt/zeros-bootstrap", "--property=ProtectControlGroups=yes"):
             self.assertIn(option, args)
-        self.assertEqual(args[-3:], ["/usr/bin/bash", "-euo", "pipefail"])
+        self.assertIn("/usr/bin/unshare", args)
 
     def test_script_failure_timeout_and_split_logs(self):
         with tempfile.TemporaryDirectory() as root:

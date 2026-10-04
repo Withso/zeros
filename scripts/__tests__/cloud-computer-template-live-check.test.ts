@@ -19,6 +19,21 @@ const report = () => ({
 });
 
 describe("computer template live runbook boundaries", () => {
+  it("uses a bounded test prefix while retaining the full run identity", async () => {
+    const run = report();
+    const factory = vi.fn<ComputerTemplateAlphaFactory>(async () => {
+      throw new Error("fixture boundary");
+    });
+    await expect(
+      runComputerTemplateLiveCheck(factory, credentials, run, vi.fn()),
+    ).rejects.toThrow("fixture boundary");
+    const input = factory.mock.calls[0]![0];
+    expect(input.runId).toBe(run.runId);
+    expect(input.namePrefix).toMatch(/^zeros-v2-test-c3-[a-z0-9-]+$/);
+    // Reserve a separator and 16 build-ID characters inside B7's 62-byte name.
+    expect(input.namePrefix.length).toBeLessThanOrEqual(45);
+  });
+
   it("rejects a non-Alpha credential file before opening any adapter", async () => {
     const factory = vi.fn<ComputerTemplateAlphaFactory>();
     await expect(

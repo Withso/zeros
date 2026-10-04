@@ -50,6 +50,13 @@ const diagnostic = (stage: string, component = "build", ok = true) => ({
   timedOut: false,
   failedChecks: ok ? [] : ["tcb_modified"],
 });
+type Operation = {
+  operation_key: string;
+  purpose: BuilderVm["purpose"];
+  intent: Parameters<CloudBuilderVms["create"]>[0];
+  sandbox_id: string | null;
+  create_dispatched_at: Date | null;
+};
 
 database("Cloud Computer template worker", () => {
   let pool: pg.Pool, service: DatabaseCloudComputerV2Service;
@@ -69,6 +76,26 @@ database("Cloud Computer template worker", () => {
     modified: boolean,
     pollHook: (() => Promise<void>) | null;
   let inputs: Array<{ command: string; value: Record<string, any> }>;
+  let operationRows: Map<string, Operation>;
+  let operations: {
+    find: ReturnType<typeof vi.fn>;
+    closeUnallocatedCreate: ReturnType<typeof vi.fn>;
+  };
+  const recordOperation = (
+    input: Operation["intent"],
+    sandboxId: string | null,
+    dispatched = true,
+  ) => {
+    const row: Operation = {
+      operation_key: input.operationKey,
+      purpose: input.purpose,
+      intent: input,
+      sandbox_id: sandboxId,
+      create_dispatched_at: dispatched ? new Date() : null,
+    };
+    operationRows.set(input.operationKey, row);
+    return row;
+  };
 
   beforeAll(() => {
     pool = new pg.Pool({
@@ -94,6 +121,14 @@ database("Cloud Computer template worker", () => {
     modified = false;
     pollHook = null;
     inputs = [];
+    operationRows = new Map();
+    operations = {
+      find: vi.fn(async (key: string) => operationRows.get(key) ?? null),
+      closeUnallocatedCreate: vi.fn(async (key: string) => {
+        const row = operationRows.get(key);
+        return Boolean(row && !row.sandbox_id && !row.create_dispatched_at);
+      }),
+    };
     selectRuntime = vi.fn(async () => runtime);
     validateRuntime = vi.fn(async () => true);
     create = vi.fn(async (input) => {
@@ -106,6 +141,7 @@ database("Cloud Computer template worker", () => {
         base_image_id: runtime.baseImageId,
         runtime_id: runtime.descriptor.runtimeId,
       });
+      recordOperation(input, "zeros-v2-test-builder");
       return {
         sandboxId: "zeros-v2-test-builder",
         purpose: input.purpose,
@@ -222,6 +258,7 @@ database("Cloud Computer template worker", () => {
       pool,
       service,
       vms: vm,
+      operations,
       github,
       accountScope: "fixture-account",
       billingOrg: "fixture-wallet",
@@ -315,6 +352,31 @@ database("Cloud Computer template worker", () => {
     ).toContain("package installed");
   });
 
+  it.each([undefined, `zeros-v2-test-c3-${randomUUID()}`])(
+    "claims a bounded B7 sandbox name with prefix %s",
+    async (namePrefix) => {
+      const requested = await request();
+      await service.claimNextBuild(7, {
+        selectRuntime: async () => ({
+          baseImageId: runtime.baseImageId,
+          runtimeId: runtime.descriptor.runtimeId,
+        }),
+        accountScope: "fixture-account",
+        billingOrg: "fixture-wallet",
+        ...(namePrefix ? { namePrefix } : {}),
+      });
+      const row = (
+        await pool.query(
+          "SELECT builder_name,builder_operation_key FROM cloud_computer_templates",
+        )
+      ).rows[0];
+      expect(row.builder_name).toMatch(/^zeros-v2-[a-z0-9][a-z0-9-]{0,52}$/);
+      expect(row.builder_operation_key).toBe(
+        `computer-build:${requested.build.id}`,
+      );
+    },
+  );
+
   it.each([
     ["script failure", "install_failed"],
     ["TCB modification", "tcb_modified"],
@@ -387,6 +449,98 @@ database("Cloud Computer template worker", () => {
     expect(remove).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["error", "cancelled", "wallet_mismatch"])(
+    "deletes the journalled allocation when create fails before returning a VM (%s)",
+    async (failure) => {
+      const build = await request();
+      create.mockImplementation(async (input) => {
+        recordOperation(input, "zeros-v2-test-builder");
+        throw new Error(failure);
+      });
+      await worker.tick();
+      expect((await read()).latestBuild).toMatchObject({
+        state: "failed",
+        errorCode: "allocation_failed",
+      });
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(remove).toHaveBeenCalledWith({
+        sandboxId: "zeros-v2-test-builder",
+        purpose: "computer-build",
+        operationKey: `computer-build:${build.build.id}`,
+      });
+      expect(runFixed).not.toHaveBeenCalled();
+      expect(vm.stop).not.toHaveBeenCalled();
+      expect(
+        (
+          await pool.query(
+            "SELECT provider_resource_id,cleanup_confirmed_at FROM cloud_computer_templates",
+          )
+        ).rows[0],
+      ).toEqual({
+        provider_resource_id: "zeros-v2-test-builder",
+        cleanup_confirmed_at: expect.any(Date),
+      });
+    },
+  );
+
+  it("releases capacity only after the operation journal closes a confirmed non-allocation", async () => {
+    await request();
+    create.mockImplementation(async (input) => {
+      recordOperation(input, null, false);
+      throw new Error("closed admission failure before dispatch");
+    });
+    await worker.tick();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(operations.closeUnallocatedCreate).toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(vm.stop).not.toHaveBeenCalled();
+    expect(
+      (
+        await pool.query(
+          "SELECT provider_resource_id,cleanup_confirmed_at FROM cloud_computer_templates",
+        )
+      ).rows[0],
+    ).toEqual({
+      provider_resource_id: null,
+      cleanup_confirmed_at: expect.any(Date),
+    });
+    const state = await read();
+    await service.build(fixture.organizationId, fixture.userId, {
+      expectedRevision: state.revision,
+      operationId: randomUUID(),
+    });
+    expect((await service.claimNextBuild(10))?.organizationId).toBe(
+      fixture.organizationId,
+    );
+  });
+
+  it.each(["missing", "dispatched"])(
+    "retains the capacity hold when the create journal is %s and non-allocation is unconfirmed",
+    async (journalState) => {
+      await request();
+      create.mockImplementation(async (input) => {
+        if (journalState === "dispatched") recordOperation(input, null);
+        throw new Error("unknown allocation result");
+      });
+      await worker.tick();
+      expect(remove).not.toHaveBeenCalled();
+      expect(vm.stop).not.toHaveBeenCalled();
+      expect(
+        (
+          await pool.query(
+            "SELECT cleanup_confirmed_at FROM cloud_computer_templates",
+          )
+        ).rows[0].cleanup_confirmed_at,
+      ).toBeNull();
+      const state = await read();
+      await service.build(fixture.organizationId, fixture.userId, {
+        expectedRevision: state.revision,
+        operationId: randomUUID(),
+      });
+      expect(await service.claimNextBuild(10)).toBeNull();
+    },
+  );
+
   it("fences an expired worker, reconciles an unknown create with the original key, and deletes it", async () => {
     await request();
     const claim = await service.claimNextBuild(7, {
@@ -398,20 +552,32 @@ database("Cloud Computer template worker", () => {
       billingOrg: "fixture-wallet",
       namePrefix: "zeros-v2-test-computer",
     });
-    const key = (
+    const allocation = (
       await pool.query(
-        "SELECT builder_operation_key FROM cloud_computer_templates",
+        "SELECT builder_operation_key,builder_name FROM cloud_computer_templates",
       )
-    ).rows[0].builder_operation_key;
+    ).rows[0];
+    const key = allocation.builder_operation_key;
+    recordOperation(
+      {
+        purpose: "computer-build",
+        source: { kind: "base", baseImageId: runtime.baseImageId },
+        name: allocation.builder_name,
+        operationKey: key,
+        ttlSeconds: 1800,
+      },
+      null,
+    );
     await pool.query(
       "UPDATE cloud_computer_v2_builds SET deadline_at=now()-interval '1 second' WHERE id=$1",
       [claim!.build.id],
     );
-    create.mockImplementation(async (input) => ({
-      sandboxId: "zeros-v2-test-builder",
-      purpose: input.purpose,
-      operationKey: input.operationKey,
-    }));
+    create.mockImplementation(async (input) => {
+      recordOperation(input, "zeros-v2-test-builder");
+      // Replayed allocation can bind the ID and still fail readiness because
+      // the expired VM is already archived. Deletion must bypass readiness.
+      throw new Error("builder_stopped");
+    });
     await worker.tick();
     expect(await read()).toMatchObject({
       active: null,
@@ -419,6 +585,8 @@ database("Cloud Computer template worker", () => {
     });
     expect(create.mock.calls[0][0].operationKey).toBe(key);
     expect(remove).toHaveBeenCalledTimes(1);
+    expect(runFixed).not.toHaveBeenCalled();
+    expect(vm.stop).not.toHaveBeenCalled();
     expect(
       await service.markBuildStage(claim!.build.id, 7, "runtime"),
     ).toMatchObject({ applied: false });
@@ -483,6 +651,7 @@ database("Cloud Computer template worker", () => {
       pool,
       service,
       vms: vm,
+      operations,
       github,
       accountScope: "fixture-account",
       billingOrg: "fixture-wallet",

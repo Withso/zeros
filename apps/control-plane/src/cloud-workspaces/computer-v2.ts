@@ -20,6 +20,7 @@ import {
 } from "./settings.js";
 import { sanitizeCloudWorkspaceSetupLog } from "./setup-log.js";
 import { CreateComputerConfigurationArgumentsSchema } from "./computer-tools-contract.js";
+import { computerTemplateBuilderName } from "./computer-template-name.js";
 import {
   CLOUD_COMPUTER_V2_MAX_LOG_BYTES,
   CLOUD_COMPUTER_V2_MAX_LOG_ROW_BYTES,
@@ -1420,7 +1421,7 @@ export class DatabaseCloudComputerV2Service {
         [build.id, workerFence, runtimePin?.baseImageId ?? null, runtimePin?.runtimeId ?? null],
       );
       if (builder) {
-        const name = parse(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), `${builder.namePrefix ?? "zeros-computer"}-${build.id}`);
+        const name = computerTemplateBuilderName(build.id, builder.namePrefix);
         await tx.query(`INSERT INTO cloud_computer_templates(build_id,org_id,account_scope,billing_org,builder_operation_key,builder_name,allocation_requested_at)
           VALUES($1,$2,$3,$4,$5,$6,clock_timestamp())`,
         [build.id, build.org_id, parse(identifier, builder.accountScope), parse(identifier, builder.billingOrg), `computer-build:${build.id}`, name]);

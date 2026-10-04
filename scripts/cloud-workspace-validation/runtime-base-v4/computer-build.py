@@ -290,8 +290,9 @@ class SystemHost:
                 "--property=TimeoutStopSec=5s", "--property=RuntimeMaxSec=" + str(timeout) + "s", "--property=TasksMax=512",
                 "--property=MemoryMax=4G", "--property=CPUQuota=200%", "--property=Delegate=no", "--property=UMask=0022",
                 "--property=ReadOnlyPaths=/opt/zeros-bootstrap", "--property=ProtectControlGroups=yes",
-                "--property=WorkingDirectory=/srv/zeros/files/repos", "--setenv=LANG=C.UTF-8", "--setenv=PATH=" + ENVIRONMENT["PATH"],
-                "/usr/bin/bash", "-euo", "pipefail"]
+                "--property=WorkingDirectory=/", "--setenv=LANG=C.UTF-8", "--setenv=PATH=" + ENVIRONMENT["PATH"],
+                "/usr/bin/unshare", "--mount", "--propagation", "private", "--",
+                "/usr/bin/python3", "-I", "/opt/zeros-bootstrap/computer-build.py", "install-shell"]
 
     def drain_install(self, identity):
         unit = "zeros-computer-install-" + identity + ".service"
@@ -386,6 +387,22 @@ class ComputerBuild:
         require(target.stat().st_uid == self.uid and stat.S_IMODE(target.stat().st_mode) == 0o700, "file_metadata")
         return target
 
+    def repository_parent(self, path):
+        # mkdir's requested mode is filtered by the helper's private umask.
+        # Only these checked repository parents are shared with workspace UID
+        # 10001; job/credential directories retain their private 0700 modes.
+        target = self.directory(path)
+        fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fchown(fd, self.uid, self.gid)
+            os.fchmod(fd, 0o755)
+            metadata = os.fstat(fd)
+            require(metadata.st_uid == self.uid and metadata.st_gid == self.gid
+                    and stat.S_IMODE(metadata.st_mode) == 0o755, "repository_metadata")
+        finally:
+            os.close(fd)
+        return target
+
     def git(self, args, cwd, environment=None, timeout=60):
         config = {**ENVIRONMENT, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0",
                   "GIT_LFS_SKIP_SMUDGE": "1", **(environment or {})}
@@ -455,7 +472,8 @@ class ComputerBuild:
         require(value["schema"] == "zeros.computer-repositories-input/v1")
         directory = self.job_directory(value)
         require(type(value["repositories"]) is list and len(value["repositories"]) <= 20)
-        self.directory("/srv/zeros/files/repos")
+        self.directory("/srv/zeros/files")
+        if value["repositories"]: self.repository_parent("/srv/zeros/files/repos")
         manifest, seen, paths = [], set(), set()
         for repository in value["repositories"]:
             shape(repository, ("id", "owner", "name", "ref", "credential"))
@@ -471,6 +489,7 @@ class ComputerBuild:
             require(type(token) is str and 1 <= len(token) <= 4096 and not re.search(r"[\x00-\x20\x7f]", token))
             require(datetime.datetime.fromisoformat(credential["expiresAt"].replace("Z", "+00:00")).timestamp() > time.time() + 30, "repository_access_denied")
             require(not os.path.lexists(self.path(path)), "repository_metadata")
+            self.repository_parent("/srv/zeros/files/repos/" + repository["owner"])
             target = self.directory(path)
             self.git(["init", "--quiet"], target)
             address = directory / "git-credential.sock"
@@ -481,6 +500,29 @@ class ComputerBuild:
             expected = {**repository, **({"sha": ref} if re.fullmatch(r"[a-f0-9]{40}", ref) else {})}
             manifest.append(self.verify_repository(target, expected))
         return {"schema": "zeros.computer-repositories/v1", "buildId": value["buildId"], "repositories": manifest}
+
+    def install_shell(self):
+        # Internal systemd entry, never an SSH command or a JSON-input helper.
+        # unshare makes all propagation private before any bind is installed.
+        require(os.geteuid() == 0 and self.root == Path("/"), "install_namespace")
+        require(os.readlink("/proc/self/ns/mnt") != os.readlink("/proc/1/ns/mnt"), "install_namespace")
+        target = self.repository_parent("/srv/zeros/repos")
+        source = self.path("/srv/zeros/files/repos")
+        if os.path.lexists(source):
+            self.ancestry(source)
+            metadata = source.lstat()
+            require(stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == self.uid and metadata.st_gid == self.gid
+                    and stat.S_IMODE(metadata.st_mode) == 0o755, "repository_metadata")
+            code, _ = bounded_command(["/usr/bin/mount", "--bind", str(source), str(target)], timeout=10)
+            require(code == 0 and os.path.samestat(source.stat(), target.stat()), "install_namespace")
+        else:
+            # An empty recipe still gets the same logical cwd, without adding
+            # an empty repos projection or persisting scratch outside §23.
+            code, _ = bounded_command(["/usr/bin/mount", "-t", "tmpfs", "-o", "mode=0755,size=67108864,nosuid,nodev",
+                                       "tmpfs", str(target)], timeout=10)
+            require(code == 0, "install_namespace")
+        os.chdir(target)
+        os.execve("/usr/bin/bash", ["/usr/bin/bash", "-euo", "pipefail"], ENVIRONMENT)
 
     def run_install(self, value):
         shape(value, ("schema", "buildId", "workerFence", "action", "after"), ("script", "timeoutSeconds", "redactions"))
@@ -507,7 +549,7 @@ class ComputerBuild:
                         os.close(null)
                         try:
                             run_process(self.host.install_command(value["buildId"], value["timeoutSeconds"]), value["script"], value["timeoutSeconds"], store,
-                                        redactor, self.path("/srv/zeros/files/repos"), lambda: self.host.drain_install(value["buildId"]))
+                                        redactor, self.root, lambda: self.host.drain_install(value["buildId"]))
                         except BaseException: store.finish(1, False)
                         os._exit(0)
             return store.status(value["after"])
@@ -614,7 +656,7 @@ class ComputerBuild:
             for line in Path("/proc/self/maps").read_text().splitlines():
                 parts = line.split()
                 if parts[-1].startswith("/"): dependencies.add(parts[-1])
-            for binary in ("/usr/bin/python3", "/usr/bin/bash", "/usr/bin/git", "/usr/bin/sudo", "/usr/bin/systemd-run", "/usr/bin/systemctl", "/usr/bin/ldd"):
+            for binary in ("/usr/bin/python3", "/usr/bin/bash", "/usr/bin/git", "/usr/bin/sudo", "/usr/bin/systemd-run", "/usr/bin/systemctl", "/usr/bin/unshare", "/usr/bin/mount", "/usr/bin/ldd"):
                 dependencies.add(binary); dependencies.add(str(Path(binary).resolve()))
                 _code, output = bounded_command(["/usr/bin/ldd", binary], timeout=10, limit=65536)
                 dependencies.update(re.findall(r"/[^\s()]+", output.decode()))
@@ -680,9 +722,11 @@ class ComputerBuild:
                          "runtimeId": manifest["runtimeId"], "baseCompatibilityId": manifest["baseCompatibilityId"],
                          "action": "verify", "protectedContractDigest": manifest["protectedContractDigest"]})
         require(type(manifest["repositoryManifest"]) is list and len(manifest["repositoryManifest"]) <= 20)
+        if manifest["repositoryManifest"]: self.repository_parent("/srv/zeros/files/repos")
         for repository in manifest["repositoryManifest"]:
             shape(repository, ("id", "owner", "name", "sha"))
             target = self.path(self.repository_identity(repository))
+            self.repository_parent("/srv/zeros/files/repos/" + repository["owner"])
             require(self.verify_repository(target, repository) == repository, "repository_metadata")
         self.host.stop_host()
         self.host.clear_journal()
@@ -734,6 +778,10 @@ def main():
     stage, code, checks = "validate_input", 1, ["input_schema"]
     try:
         require(os.geteuid() == 0 and len(sys.argv) == 2)
+        if sys.argv[1] == "install-shell":
+            stage = "install"
+            ComputerBuild().install_shell()
+            raise Failure("install_exit")
         stages = {"clone-repos": "repositories", "run-install": "install", "verify-tcb": "integrity", "sanitize": "sanitation"}
         require(sys.argv[1] in stages)
         stage = stages[sys.argv[1]]

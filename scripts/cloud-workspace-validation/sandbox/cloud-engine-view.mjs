@@ -71,8 +71,9 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
     "/etc/containers/registries.conf",
     "--bind",
     // One mount permits atomic attachment publication from an engine-private
-    // sibling. The host parent contains only repository/staging and empty
-    // mount points; broker authority remains outside this projection.
+    // sibling. The checked v4 repos/<owner>/<name> subtree is also writable at
+    // /srv/zeros/repos; Files and managed Git still use only the primary root.
+    // Broker authority remains outside this projection.
     runtimeLayout.engineFilesRoot,
     "/srv/zeros",
     "--bind",

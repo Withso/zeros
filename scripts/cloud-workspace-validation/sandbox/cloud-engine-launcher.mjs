@@ -206,6 +206,34 @@ export function prepareCloudEngineAppArmor({
     );
 }
 
+function verifyComputerRepositoryProjection(directory) {
+  const parent = (directory) => {
+    rootPath(directory, true);
+    const metadata = lstatSync(directory);
+    if (metadata.gid !== 0 || (metadata.mode & 0o7777) !== 0o755)
+      throw new Error("Unsafe cloud computer repository parent");
+  };
+  const repositoryName = /^[a-z0-9_.-]{1,100}$/;
+  parent(directory);
+  const owners = readdirSync(directory);
+  if (owners.length > 20) throw new Error("Unexpected cloud computer repository projection");
+  let count = 0;
+  for (const owner of owners) {
+    if (!repositoryName.test(owner)) throw new Error("Unexpected cloud computer repository projection");
+    const ownerDirectory = path.join(directory, owner);
+    parent(ownerDirectory);
+    for (const name of readdirSync(ownerDirectory)) {
+      if (!repositoryName.test(name) || ++count > 20)
+        throw new Error("Unexpected cloud computer repository projection");
+      const repository = path.join(ownerDirectory, name);
+      const metadata = lstatSync(repository);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== 10001 || metadata.gid !== 10001 ||
+        realpathSync(repository) !== repository)
+        throw new Error("Unsafe cloud computer repository projection");
+    }
+  }
+}
+
 export function prepareCloudEngineView(runtime = resolveCloudRuntime()) {
   const profile = readCloudHostRuntimeProfile();
   if (![2,3,4].includes(profile.version) || (profile.version === 4) !== (runtime.profile === "v4"))
@@ -230,9 +258,12 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime()) {
   privateDirectory("/srv/zeros/state", 10003, 10003, 0o700);
   rootPath(runtimeLayout.engineFilesRoot, true);
   privateDirectory(runtimeLayout.attachmentTemporaryRoot, 10003, 10003, 0o700);
-  if (readdirSync(runtimeLayout.engineFilesRoot).some(name =>
-    !["workspace", "attachment-staging", "state", "home", "managed-settings"].includes(name)))
+  const files = readdirSync(runtimeLayout.engineFilesRoot);
+  if (files.some(name =>
+    !["workspace", "attachment-staging", "state", "home", "managed-settings", ...(profile.version === 4 ? ["repos"] : [])].includes(name)))
     throw new Error("Unexpected cloud engine file projection");
+  if (profile.version === 4 && files.includes("repos"))
+    verifyComputerRepositoryProjection(path.join(runtimeLayout.engineFilesRoot, "repos"));
   for (const name of ["home", "state", "managed-settings", "home/agent", "home/capture"]) {
     const directory = path.join(runtimeLayout.engineFilesRoot, name);
     rootPath(directory, true);

@@ -50,6 +50,19 @@ export interface CloudBuilderVms {
   stop(vm: BuilderVm): Promise<{ archived: true }>;
   delete(vm: BuilderVm): Promise<void>;
 }
+/** Structural subset of B7's BuilderVmOperationStore until that module lands.
+ * closeUnallocatedCreate atomically fences future dispatch and returns true
+ * only when its attempt journal proves no allocation can exist. A missing row
+ * or an unresolved dispatch is not proof of non-allocation. */
+export interface BuilderVmOperations {
+  find(operationKey: string): Promise<{
+    operation_key: string;
+    purpose: BuilderVm["purpose"];
+    sandbox_id: string | null;
+    create_dispatched_at: Date | null;
+  } | null>;
+  closeUnallocatedCreate(operationKey: string): Promise<boolean>;
+}
 export type ComputerTemplateRuntime = {
   baseImageId: string;
   baseCompatibilityId: string;

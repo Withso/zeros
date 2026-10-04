@@ -13,6 +13,7 @@ import {
   type ComputerTemplateWorkerDependencies,
 } from "../../apps/control-plane/src/cloud-workspaces/computer-template-worker.js";
 import type { CloudComputerV2Repository } from "../../apps/control-plane/src/cloud-workspaces/computer-v2-contract.js";
+import { computerTemplateBuilderName } from "../../apps/control-plane/src/cloud-workspaces/computer-template-name.js";
 
 export type ComputerTemplateAlphaFixture = {
   channel: "alpha";
@@ -234,8 +235,11 @@ async function cleanup(
   await save();
   for (const [index, row] of resources.entries()) {
     requireCheck(
-      row.builder_name.startsWith(`zeros-v2-test-c3-${report.runId}-`) &&
-        row.builder_operation_key === `computer-build:${row.build_id}`,
+      row.builder_name ===
+        computerTemplateBuilderName(
+          row.build_id,
+          computerTemplateBuilderName(report.runId, "zeros-v2-test-c3"),
+        ) && row.builder_operation_key === `computer-build:${row.build_id}`,
     );
     if (report.resources[index]!.deleted) continue;
     if (!row.provider_resource_id) continue; // Unknown allocation remains pending.
@@ -277,7 +281,10 @@ export async function runComputerTemplateLiveCheck(
     credentials.ZEROS_PLANETSCALE_ALPHA_DATABASE ===
       "zeros-control-plane-alpha",
   );
-  const namePrefix = `zeros-v2-test-c3-${report.runId}`;
+  const namePrefix = computerTemplateBuilderName(
+    report.runId,
+    "zeros-v2-test-c3",
+  );
   const fixture = await factory({
     credentials,
     runId: report.runId,

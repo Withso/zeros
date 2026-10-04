@@ -19,6 +19,7 @@ import { ComputerTemplateLogRedactor } from "./computer-template-logs.js";
 import type {
   BuilderFixedCommand,
   BuilderVm,
+  BuilderVmOperations,
   CloudBuilderVms,
   ComputerTemplateRuntime,
 } from "./computer-template-boat.js";
@@ -83,6 +84,7 @@ export type ComputerTemplateWorkerDependencies = {
   pool: pg.Pool;
   service: DatabaseCloudComputerV2Service;
   vms: CloudBuilderVms;
+  operations: BuilderVmOperations;
   github: {
     mintContentsRead(input: {
       installationId: number;
@@ -696,7 +698,7 @@ export class ComputerTemplateWorker {
       throw new BuildFailure("build_failed");
   }
   private async cleanup(row: TemplateAllocation) {
-    let deleted = false;
+    let confirmed = false;
     let recorded = false;
     let vm: BuilderVm | null = row.provider_resource_id
       ? {
@@ -706,7 +708,51 @@ export class ComputerTemplateWorker {
         }
       : null;
     try {
-      vm ??= await this.create(row);
+      if (!vm) {
+        const find = async () => {
+          const operation = await this.deps.operations.find(
+            row.builder_operation_key,
+          );
+          if (
+            operation &&
+            (operation.purpose !== "computer-build" ||
+              operation.operation_key !== row.builder_operation_key)
+          )
+            throw new Error("Computer builder identity mismatch");
+          return operation;
+        };
+        let operation = await find();
+        if (
+          !operation?.sandbox_id &&
+          (await this.deps.operations.closeUnallocatedCreate(
+            row.builder_operation_key,
+          ))
+        ) {
+          confirmed = true;
+          return;
+        }
+        if (!operation?.sandbox_id && operation?.create_dispatched_at) {
+          // Replay only an uncertain dispatch, using the original key/body.
+          // B7 binds the ID before readiness/wallet checks can reject create.
+          try {
+            await this.create(row);
+          } catch {
+            /* Re-read its durable journal. */
+          }
+          operation = await find();
+        }
+        if (!operation?.sandbox_id) {
+          confirmed = await this.deps.operations.closeUnallocatedCreate(
+            row.builder_operation_key,
+          );
+          return;
+        }
+        vm = {
+          sandboxId: operation.sandbox_id,
+          purpose: operation.purpose,
+          operationKey: operation.operation_key,
+        };
+      }
       if (
         vm.purpose !== "computer-build" ||
         vm.operationKey !== row.builder_operation_key
@@ -715,7 +761,7 @@ export class ComputerTemplateWorker {
       await this.journal.recordVm(row.build_id, vm.operationKey, vm.sandboxId);
       recorded = true;
       await this.deps.vms.delete(vm);
-      deleted = true;
+      confirmed = true;
     } catch {
       if (vm && recorded) {
         try {
@@ -726,7 +772,7 @@ export class ComputerTemplateWorker {
         }
       }
     } finally {
-      await this.journal.cleanupResult(row, deleted);
+      await this.journal.cleanupResult(row, confirmed);
     }
   }
 }

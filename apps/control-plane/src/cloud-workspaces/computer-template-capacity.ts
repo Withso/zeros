@@ -23,8 +23,8 @@ const allocationSql = `SELECT template.*,build.state AS build_state,build.base_i
   FROM cloud_computer_templates template JOIN cloud_computer_v2_builds build ON build.id=template.build_id`;
 
 /** No provider I/O in transactions. A failed/cancelled request remains a
- * capacity hold until positive stop/delete evidence is recorded. C1 claims
- * count these same rows under its global advisory lock. */
+ * capacity hold until positive stop/delete or closed non-allocation evidence
+ * is recorded. C1 counts these same rows under its global advisory lock. */
 export class ComputerTemplateJournal {
   constructor(
     private readonly pool: pg.Pool,
@@ -202,7 +202,7 @@ export class ComputerTemplateJournal {
       return { ...row, cleanup_fence: claimed.cleanup_fence };
     });
   }
-  async cleanupResult(row: TemplateAllocation, deleted: boolean) {
+  async cleanupResult(row: TemplateAllocation, confirmed: boolean) {
     await withSystemTx(this.pool, async (tx) => {
       await this.locked(tx, row.build_id);
       await tx.query(
@@ -212,7 +212,7 @@ export class ComputerTemplateJournal {
         retired_at=CASE WHEN $3 THEN coalesce(retired_at,clock_timestamp()) ELSE retired_at END,
         state=CASE WHEN $3 THEN 'retired' ELSE 'quarantined' END
         WHERE build_id=$1 AND cleanup_fence=$2 AND state<>'ready'`,
-        [row.build_id, row.cleanup_fence, deleted],
+        [row.build_id, row.cleanup_fence, confirmed],
       );
     });
   }
