@@ -76,8 +76,9 @@ AB-7 **PR list (replaces B §9 numbering):**
 - B8 lifecycle pins (wake/retry/recovery copy pins; explicit same-base upgrade), docs, Alpha
   acceptance.
 
-AB-8 Migration numbers: B1 = 0124, B7 = 0125 (if needed). C uses 0126–0127, D uses 0128.
-If `main` gains another migration first, renumber before merge (never edit merged migrations).
+AB-8 Migration numbers are contiguous and assigned in merge order (the sequence check rejects gaps):
+B1 = 0124, C1 = 0125, later PRs take the next free number at merge time and rebase/renumber if main
+moved. Never edit a merged migration.
 
 ## Phase C/D amendments
 
