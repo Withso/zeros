@@ -81,10 +81,24 @@ function gitDirectory(checkout, options) {
   // clone. Even an internal symlink in Git metadata is unnecessary here.
   const forbidden = new Set(["commondir", "gitdir", "objects/info/alternates", "objects/info/http-alternates", "config.worktree"]);
   let count = 0;
+  // Git (including detached automatic maintenance) may remove its own
+  // transient locks during this check; an entry that no longer exists cannot
+  // grant anything. The Git directory itself must still exist.
+  const vanished = error => error?.code === "ENOENT";
   const walk = (current, depth = 0) => {
     if (depth > 128) throw invalid();
-    for (const entry of readdirSync(current, { withFileTypes: true })) {
-      const file = path.join(current, entry.name), stat = lstatSync(file);
+    let entries;
+    try { entries = readdirSync(current, { withFileTypes: true }); } catch (error) {
+      if (depth > 0 && vanished(error)) return;
+      throw error;
+    }
+    for (const entry of entries) {
+      const file = path.join(current, entry.name);
+      let stat;
+      try { stat = lstatSync(file); } catch (error) {
+        if (vanished(error)) continue;
+        throw error;
+      }
       if (++count > 250000 || Buffer.byteLength(file) > 4096 || forbidden.has(path.relative(git, file)) ||
         stat.isSymbolicLink() || !(stat.isDirectory() || stat.isFile()) || stat.uid !== options.workerUid ||
         (stat.mode & 0o6000) || (stat.isFile() && stat.nlink !== 1)) throw invalid();

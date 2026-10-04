@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const manifestRace = vi.hoisted(() => ({ file: "", replacement: "", descriptor: undefined as number | undefined }));
+const manifestRace = vi.hoisted(() => ({ file: "", replacement: "", descriptor: undefined as number | undefined, vanish: "" }));
 vi.mock("node:fs", async original => {
   const actual = await original<typeof import("node:fs")>();
   const replace = () => { actual.renameSync(manifestRace.replacement, manifestRace.file); manifestRace.file = ""; };
   return { ...actual,
     lstatSync: (file: string) => {
+      // Git removes a transient lock between the directory read and this stat.
+      if (manifestRace.vanish && file.endsWith(manifestRace.vanish)) { actual.rmSync(file); manifestRace.vanish = ""; }
       const stat = actual.lstatSync(file);
       if (file === manifestRace.file) replace();
       return stat;
@@ -44,6 +46,7 @@ const directories: string[] = [];
 afterEach(() => {
   manifestRace.file = "";
   manifestRace.descriptor = undefined;
+  manifestRace.vanish = "";
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 function fixture() {
@@ -115,6 +118,17 @@ describe("Cloud Computer fork checkout", () => {
     expect(runGit.mock.calls.every(([, args]) => !JSON.stringify(args).includes(token))).toBe(true);
     expect(readFileSync(path.join(f.source, ".git/config"), "utf8").includes(token)).toBe(false);
     expect(f.git(f.source, ["remote", "get-url", "origin"])).toBe(f.repository.cloneUrl);
+  });
+
+  it("tolerates Git metadata that Git removes while the metadata is checked", async () => {
+    const f = fixture();
+    // Detached automatic maintenance after commit/fetch holds this lock briefly.
+    writeFileSync(path.join(f.source, ".git/objects/maintenance.lock"), "");
+    manifestRace.vanish = path.join(".git", "objects", "maintenance.lock");
+    const git = async (directory: string, args: string[]) => args[0] === "fetch" ? "" : f.git(directory, args);
+    await expect(checkoutCloudComputerPrimary(f.computer, f.repository, { ...f.options, git, verifyOrigin: async () => {} }))
+      .resolves.toBe(f.repository.revision);
+    expect(manifestRace.vanish).toBe("");
   });
 
   it("refuses a checkout whose HEAD differs from the accepted commit", async () => {
