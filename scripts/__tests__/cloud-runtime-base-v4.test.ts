@@ -123,7 +123,7 @@ class Bootstrap:
     d.boat = async (_method, _route, options) => {
       const command = (options!.body as any).command as string;
       const program = command.split("<<'PYV4'\n")[1].replace(/\nPYV4$/, "").replace("/opt/zeros-bootstrap/bootstrap.py", bootstrap);
-      line = program.split("\n").findIndex(value => value.trim() === "app.wait_ready()") + 1;
+      line = program.split("\n").findIndex(value => value.trim() === "return app.wait_ready()") + 1;
       const result = spawnSync("python3", ["-I", "-"], { input: program, encoding: "utf8", timeout: 5000 });
       expect(result.error).toBeUndefined();
       return { status: 200, body: { exitCode: result.status, stdout: result.stdout, stderr: result.stderr } };
