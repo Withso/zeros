@@ -1,5 +1,6 @@
 import { loadQuota, loadUsage, assertGenerationReplacementQuota, createCloudRecoveryTransition, cloudRecoveryPointLosslessSql, type QuotaRow, type UsageRow } from "./automatic-recovery.js";
 import { createCloudComputerRoutes } from "./computer-routes.js";
+import { createCloudComputerV2Routes } from "./computer-v2-routes.js";
 import { createCloudWorkspaceHistoryRoutes } from "./history-routes.js";
 import { authorizeCloudComputerBuild } from "./computer.js";
 import { resolveComputerImage } from "./computer-image.js";
@@ -1048,6 +1049,8 @@ export function createCloudWorkspaceRoutes(
     rateLimit("cloud-workspace-exports", 180, 60_000),
   );
   if (config) {
+    // V2 handlers terminate before the legacy prefix's smaller body/rate limits.
+    app.route("/", createCloudComputerV2Routes(pool, config));
     app.route("/", createCloudComputerRoutes(pool, config, options.workosEnabled === true));
     app.route(
       "/",

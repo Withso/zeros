@@ -2070,7 +2070,19 @@ export class DatabaseCloudWorkspaceManagementService {
           { currentVersion },
         );
       }
-      const version = currentVersion + 1;
+      // V2 computer drafts append unpublished versions under the same binding
+      // lock. Publication must allocate past those pins, not current_version.
+      const version = safeVersion(
+        (
+          await tx.query<{ version: string }>(
+            `SELECT coalesce(max(version), 0) + 1 AS version
+           FROM secret_binding_versions
+           WHERE binding_id = $1 AND org_id = $2`,
+            [input.id, input.organizationId],
+          )
+        ).rows[0]!.version,
+        "secret binding",
+      );
       let sealed;
       try {
         sealed = sealCloudWorkspaceSecretBinding(
@@ -2117,8 +2129,13 @@ export class DatabaseCloudWorkspaceManagementService {
         await tx.query(
           `UPDATE secret_binding_versions
            SET retired_at = coalesce(retired_at, now())
-           WHERE binding_id = $1 AND version = $2`,
-          [input.id, currentVersion],
+           WHERE binding_id = $1 AND version = $2 AND org_id = $3
+             AND NOT EXISTS (
+               SELECT 1 FROM cloud_computer_environment_refs ref
+               WHERE ref.binding_id = $1 AND ref.binding_version = $2
+                 AND ref.org_id = $3
+             )`,
+          [input.id, currentVersion, input.organizationId],
         );
       }
       await audit(

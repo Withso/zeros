@@ -135,6 +135,16 @@ d("organization Cloud Computer lifecycle", () => {
       code: "github_cloud_source_authorization_required",
     });
   });
+  it("returns a v2 conflict for every legacy write after lazy enrollment", async () => {
+    await save();
+    await pool.query("INSERT INTO cloud_computer_v2_heads(org_id) VALUES($1)", [fixture.organizationId]);
+    await expect(save(1)).rejects.toMatchObject({ status: 409, code: "cloud_computer_v2_enabled" });
+    await expect(service.activate(fixture.organizationId, fixture.userId, 1, 1)).rejects.toMatchObject({ code: "cloud_computer_v2_enabled" });
+    await expect(service.rollback(fixture.organizationId, fixture.userId, 1, randomUUID())).rejects.toMatchObject({ code: "cloud_computer_v2_enabled" });
+    await expect(service.build(fixture.organizationId, fixture.userId, { id: randomUUID(), expectedRevision: 1, version: 1 })).rejects.toMatchObject({ code: "cloud_computer_v2_enabled" });
+    await expect(service.cancel(fixture.organizationId, fixture.userId, randomUUID())).rejects.toMatchObject({ code: "cloud_computer_v2_enabled" });
+    await expect(service.read(fixture.organizationId, fixture.userId)).resolves.toMatchObject({ revision: 1 });
+  });
   it("retires legacy ready workspaces without claiming they are attested images", async () => {
     await save();
     const id = await build();
