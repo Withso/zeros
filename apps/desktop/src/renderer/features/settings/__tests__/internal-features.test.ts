@@ -108,6 +108,24 @@ describe("isInternalUser — the staff gate", () => {
 });
 
 describe("internal feature flags", () => {
+  it("keeps Cloud Computer v2 opt-in and limited to current engineering staff", async () => {
+    installLocalStorageStub();
+    const store = await freshStore();
+    signedInAs("developer");
+    expect(store.isInternalFeatureEnabled("cloudComputerV2")).toBe(false);
+    expect(store.isInternalFeatureActive("cloudComputerV2")).toBe(false);
+    store.setInternalFeatureEnabled("cloudComputerV2", true);
+    for (const role of ["developer", "platform_owner"] as const) {
+      signedInAs(role);
+      expect(store.isInternalFeatureActive("cloudComputerV2")).toBe(true);
+    }
+    for (const role of [null, "support_admin"] as const) {
+      signedInAs(role);
+      expect(store.isInternalFeatureActive("cloudComputerV2")).toBe(false);
+    }
+    signedOut();
+    expect(store.isInternalFeatureActive("cloudComputerV2")).toBe(false);
+  });
   it("makes release-check controls discoverable only to platform owners without enabling credential consent", async () => {
     const store = await freshStore();
     for (const role of [null, "developer", "support_admin"] as const) {

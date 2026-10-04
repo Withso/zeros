@@ -17,6 +17,8 @@ export interface CodeTextareaProps {
   /** The shell command being edited. */
   value: string;
   readOnly?: boolean;
+  /** Retained hidden settings editors defer painting and disable save keys. */
+  offscreen?: boolean;
   /** Fires on user edits with the complete command text. */
   onChange?: (value: string) => void;
   /** Optional context rendered above the numbered editor. */
@@ -30,6 +32,7 @@ export interface CodeTextareaProps {
 export function CodeTextarea({
   value,
   readOnly = false,
+  offscreen = false,
   description,
   onChange,
   id,
@@ -51,6 +54,7 @@ export function CodeTextarea({
       <CodeEditor
         value={value}
         readOnly={readOnly}
+        offscreen={offscreen}
         onChange={onChange}
         filePath="command.sh"
         compact

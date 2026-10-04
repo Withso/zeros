@@ -8,6 +8,7 @@ import { ProvidersPanel } from "../features/settings/providers-panel";
 import {
   acceptOrganizationSnapshot,
   clearTeamStore,
+  getTeamStoreState,
 } from "../features/team/team-store";
 import { setActiveOrganizationSelection } from "../features/team/active-team";
 import { clearCloudProviderConnections } from "../features/settings/cloud-provider-connection";
@@ -19,6 +20,13 @@ import { CloudComputerPanel } from "../features/settings/cloud-computer-panel";
 import { CloudGithubSection } from "../features/settings/cloud-github-section";
 import { clearCloudGithub } from "../platform/cloud-github";
 import { clearCloudComputers } from "../features/settings/cloud-computer-client";
+import { clearCloudComputersV2 } from "../features/settings/cloud-computer-v2-client";
+import { setInternalFeatureEnabled } from "../features/settings/internal-features";
+import { OpenGithubProjectDialog } from "../shell/dialogs/open-github-project";
+import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
+import { notifyProjectsChanged } from "../state/use-projects";
+import { ActionsCtx, type SessionsActions } from "../features/agent/sessions-context";
+import { loadAgents } from "../features/agent/agents-cache";
 import { useActiveOrganization, useTeams } from "../features/team/team-store";
 import { cloudGithubRequestSchema } from "@zeros/protocol/github-auth";
 import {
@@ -34,7 +42,12 @@ const installationId = "22222222-2222-4222-8222-222222222222";
 const userA = "44444444-4444-4444-8444-444444444444";
 const userB = "55555555-5555-4555-8555-555555555555";
 let user = userA;
-let platformOwner = false;
+const computerV2Mode = new URLSearchParams(location.search).has("computer-v2");
+let platformOwner = computerV2Mode;
+setInternalFeatureEnabled("cloudComputerV2", computerV2Mode);
+const DispatcherPage = computerV2Mode ? (await import("../shell/dispatcher/dispatcher-modal")).DispatcherPage : null;
+const agents = [{ id: "claude", name: "Claude Code", version: "fixture", description: "", distribution: {}, installed: true, authenticated: true }];
+if (computerV2Mode) await loadAgents(async () => agents);
 function installAccount(next: string) {
   user = next;
   clearTeamStore({ resetSelection: true });
@@ -42,6 +55,7 @@ function installAccount(next: string) {
   clearCloudAgentRegistry();
   clearCloudGithub();
   clearCloudComputers();
+  clearCloudComputersV2();
   const organization = {
     id: organizationId,
     slug: "fixture",
@@ -92,6 +106,17 @@ function installAccount(next: string) {
       },
     ],
   });
+  if (computerV2Mode) {
+    acceptCloudWorkspaceDocument({
+      id: installationId, organizationId, teamId: organizationId, createdBy: user,
+      name: "Fixture cloud workspace", placement: "cloud", status: "stopped", version: 1, error: null,
+      createdAt: "2026-10-04T10:00:00.000Z", updatedAt: "2026-10-04T10:00:00.000Z", deletedAt: null,
+      capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+      repository: { forge: "github.com", owner: "example", name: "project", revision: "refs/heads/main" },
+      generation: { number: 1, architecture: "x86_64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 }, observedState: "stopped", lastObservedAt: null },
+    });
+    notifyProjectsChanged();
+  }
 }
 controlPlane.me = async () => {
   throw new Error("Harness membership refresh unavailable");
@@ -113,6 +138,7 @@ const repository = {
 };
 window.__ZEROS_NATIVE__ = {
   async invoke<T>(command: string, args: unknown): Promise<T> {
+    if (computerV2Mode && command === "cloud_workspace_capability") return { enabled: true } as T;
     if (command === "auth_get_access_token")
       return { access_token: `fixture-${user}` } as T;
     if (command === "auth_get_session_user")
@@ -193,15 +219,42 @@ setActiveBridge({
   },
 } as unknown as RuntimeClient);
 installAccount(userA);
+function setOrganizationRole(role: "admin" | "member") {
+  const me = getTeamStoreState().me;
+  if (!me) return;
+  const update = (organization: (typeof me.teams)[number]) =>
+    organization.id === organizationId
+      ? { ...organization, role }
+      : organization;
+  acceptOrganizationSnapshot({
+    ...me,
+    user: { ...me.user, staffRole: "developer" },
+    teams: me.teams.map(update),
+    organizations: me.organizations?.map(update),
+  });
+}
 function Harness() {
   const [active, setActive] = useState(true);
-  const [section, setSection] = useState("providers");
+  const [section, setSection] = useState(computerV2Mode ? "computer" : "providers");
+  const [githubOpen, setGithubOpen] = useState(false);
   const organization = useActiveOrganization(),
     { me } = useTeams();
   return (
     <TooltipProvider>
       <main className="bg-bg1 text-fg1 min-h-screen p-8">
         <div className="mb-6 flex gap-2">
+          {computerV2Mode && <>
+            <Button onClick={() => setInternalFeatureEnabled("cloudComputerV2", true)}>Enable computer v2</Button>
+            <Button onClick={() => setInternalFeatureEnabled("cloudComputerV2", false)}>Disable computer v2</Button>
+            <Button onClick={() => setGithubOpen(true)}>Open GitHub create</Button>
+            <Button onClick={() => setSection("create")}>Create section</Button>
+            <Button onClick={() => setOrganizationRole("admin")}>
+              Organization admin
+            </Button>
+            <Button onClick={() => setOrganizationRole("member")}>
+              Organization member
+            </Button>
+          </>}
           <Button onClick={() => installAccount(userA)}>Account A</Button>
           <Button onClick={() => installAccount(userB)}>Account B</Button>
           <Button
@@ -258,8 +311,10 @@ function Harness() {
             surfaceActive={active}
           />
         )}
+        {computerV2Mode && DispatcherPage && section === "create" && <DispatcherPage active={active} onOpenProject={() => {}} onOpenGithubProject={() => setGithubOpen(true)} onQuickStart={() => {}} />}
+        {computerV2Mode && <OpenGithubProjectDialog open={githubOpen} onOpenChange={setGithubOpen} />}
       </main>
     </TooltipProvider>
   );
 }
-createRoot(document.getElementById("root")!).render(<Harness />);
+createRoot(document.getElementById("root")!).render(<ActionsCtx.Provider value={{ listAgents: async () => agents } as SessionsActions}><Harness /></ActionsCtx.Provider>);
