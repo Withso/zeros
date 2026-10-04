@@ -243,6 +243,11 @@ export function SidebarRepositoryHeader({
                       <span>Create workspace</span>
                     </DropdownMenuItem>
                     <DropdownMenuItem
+                      onPointerLeave={(event) => {
+                        // Radix retains the closing item during its animation.
+                        // Its hover cleanup must not steal the picker's focus.
+                        if (!menuOpen) event.preventDefault();
+                      }}
                       onSelect={() => {
                         skipMenuFocusReturnRef.current = true;
                         requestCreateFromSource(project.id);
