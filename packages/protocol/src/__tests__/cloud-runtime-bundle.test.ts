@@ -138,6 +138,54 @@ describe("runtime manifest identity and canonical bytes", () => {
       expect(RuntimeRelativePathSchema.safeParse(invalid).success).toBe(false);
   });
 
+  it("bounds the original manifest bytes before decoding", () => {
+    const raw = new Uint8Array(64 * 1024 * 1024 + 1);
+    raw[0] = 0xff;
+    expect(() => parseCanonicalManifest(raw)).toThrow("byte bound");
+    expect(() =>
+      parseCanonicalManifest(raw.subarray(0, 64 * 1024 * 1024)),
+    ).not.toThrow("byte bound");
+  });
+
+  it("accepts 250,000 inventory entries and rejects one more", () => {
+    const manifest = read("manifest.valid.json");
+    manifest.files = [
+      ...manifest.files,
+      ...Array.from({ length: 250_001 - manifest.files.length }, (_, index) => ({
+        mode: "0755",
+        path: `z-entry-${index.toString().padStart(6, "0")}`,
+        type: "dir",
+      })),
+    ];
+    expect(
+      RuntimeManifestSchema.safeParse({
+        ...manifest,
+        files: manifest.files.slice(0, 250_000),
+      }).success,
+    ).toBe(true);
+    expect(RuntimeManifestSchema.safeParse(manifest).success).toBe(false);
+  });
+
+  it("counts symlink steps across completed substitutions", () => {
+    for (const repetitions of [63, 64]) {
+      const manifest = read("manifest.valid.json");
+      manifest.files.push(
+        {
+          path: "alias",
+          target: `${Array.from({ length: repetitions }, () => "worker/repeat").join("/")}/bin/node`,
+          type: "symlink",
+        },
+        { path: "worker/repeat", target: "..", type: "symlink" },
+      );
+      manifest.files.sort((left: { path: string }, right: { path: string }) =>
+        Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)),
+      );
+      expect(RuntimeManifestSchema.safeParse(manifest).success).toBe(
+        repetitions === 63,
+      );
+    }
+  });
+
   it("orders paths by UTF-8 bytes, independently of locale and UTF-16 order", () => {
     const manifest = read("manifest.valid.json");
     manifest.files.push({

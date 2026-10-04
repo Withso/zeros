@@ -32,7 +32,7 @@ integers, and dates are RFC3339. Shared document schemas and exported types are:
 
 | Document / type                                              | Required fields                                                                                                                                                                                                                                                                                                                          |
 | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RuntimeManifest` (`zeros.runtime-manifest/v1`)              | `agents` (Claude CLI/SDK, Codex package, Cursor SDK versions); `entrypoints` (`node`, `setup`, `startEngine`, `supervisor`, `selfTest`); typed `files`; `platform` (`arch:x64`, `libc:glibc`, `minGlibc`, `node`, `nodeModulesAbi`, `os:linux`); `protocols` (`bootstrap:1`, `engine`, `setup:2`); `source` (`commit`, `lockfileSha256`) |
+| `RuntimeManifest` (`zeros.runtime-manifest/v1`)              | `agents` (Claude CLI/SDK, Codex package, Cursor SDK versions); `entrypoints` (`node`, `setup`, `startEngine`, `supervisor`; optional `selfTest`); typed `files`; `platform` (`arch:x64`, `libc:glibc`, `minGlibc`, `node`, `nodeModulesAbi`, `os:linux`); `protocols` (`bootstrap:1`, `engine`, `setup:2`); `source` (`commit`, `lockfileSha256`) |
 | `RuntimeDescriptor`                                          | `runtimeId`, `manifestSha256`, `archiveSha256`, positive `archiveBytes`, `expandedBytes` (sum of regular-file sizes), `sourceCommit`, `nodeModulesAbi`, `bootstrapProtocolVersion:1`, `engineProtocolVersion`                                                                                                                            |
 | `RuntimeInstallInput` (`zeros.runtime-install/v1`)           | `purpose:workspace-setup\|build\|qualification`, `runtime:RuntimeDescriptor`, `artifact:{url,expiresAt}`; `setup` is required only for `workspace-setup` and forbidden for the other purposes                                                                                                                                            |
 | `RuntimeInstallReceipt` (`zeros.runtime-install-receipt/v1`) | `archiveSha256`, `baseCompatibilityId`, `bootstrapVersion:1`, `expandedBytes`, `fileCount`, `installedAt`, `manifestSha256`, `runtimeId`                                                                                                                                                                                                 |
@@ -40,15 +40,26 @@ integers, and dates are RFC3339. Shared document schemas and exported types are:
 | `BaseCompatibility` (`zeros.base-compatibility/v1`)          | `arch:x64`, `artifactHostSuffixes`, `bootstrapProtocolVersion:1`, `glibc`, `os:{id,versionId}`, `protectedFiles:{mode,path,sha256}[]`, `supportedManifestSchemas`, `systemdMin`, `uids:{agent:10001,capture:10002,coordinator:10004,engine:10003}`                                                                                       |
 | `RuntimeBaseStatus` (`zeros.base-status/v1`)                 | `baseCompatibilityId`, `bootId`, nullable `currentRuntimeId`, `hostState:idle\|waiting_for_runtime\|stopped\|failed`                                                                                                                                                                                                                     |
 
+Archive bytes are 1 through 2 GiB; expanded bytes and the sum of regular-file
+sizes are 1 through 4 GiB. Individual regular files may be empty.
+`nodeModulesAbi` and engine protocol versions are integers from 1 through 65,535.
+Agent versions follow `^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$`; Node retains its version
+format. Every listed entrypoint must name a regular inventory file. `selfTest`
+is omitted when its runtime self-test file is absent. Receipt `fileCount` counts
+only regular files, with the same expanded-byte total.
+
 The manifest is recursively sorted by ASCII object key, with JSON.stringify's
 minimal escaping, no whitespace or trailing newline, and no build timestamps,
 hostnames, absolute build paths or run IDs. Inventory paths sort by UTF-8 byte
 order and are unique. Entry types are `dir:{mode,path}`, `file:{mode,path,sha256,size}`
-or `symlink:{path,target}`. Paths are normalized relative POSIX paths: no empty,
-`.` or `..` segments, absolute/drive paths, backslashes, NULs or malformed Unicode.
+or `symlink:{path,target}`. Manifests have at most 250,000 entries and 64 MiB of
+original UTF-8 bytes. Paths and symlink targets have at most 4,096 UTF-8 bytes,
+without NUL, backslash, CR or LF. Paths are normalized relative POSIX paths: no
+empty, `.` or `..` segments, absolute/drive paths or malformed Unicode.
 Modes are four-digit octal without special bits or group/other write. Symlink
 targets are relative and must remain inside R both lexically and after resolving
-links; link cycles and inventory entries under a file/symlink reject.
+links in at most 64 symlink substitutions, including the initial link. Link
+cycles and inventory entries under a file/symlink reject.
 `manifest.json` is the sole inventory exclusion. The builder/installer must also
 compare the inventory with the complete archive and extracted tree.
 
@@ -61,8 +72,10 @@ verification. `runtimeIdFromManifestSha256` validates and derives the ID.
 The archive is deterministic POSIX ustar/pax tar with gzip level 9, gzip mtime 0
 and no filename. `manifest.json` (0444) is first, followed by inventory order.
 Headers use uid/gid/mtime 0 and empty user/group names. Only per-entry PAX
-`path`/`linkpath` records are allowed; no global PAX, hard links, devices, FIFOs,
-sparse files, xattrs, ACLs or capabilities.
+`path`/`linkpath` records are allowed, with at most 16 KiB per PAX payload; no
+global PAX, hard links, devices, FIFOs, sparse files, xattrs, ACLs or capabilities.
+Producers use symlink header mode 0777 or 0555; consumers ignore those mode bits
+and validate the symlink type and target confinement.
 
 ## Installer, runtime root and probes
 

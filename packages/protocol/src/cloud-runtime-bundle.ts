@@ -1,6 +1,14 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { z } from "zod";
 
+const utf8 = new TextEncoder();
+const maxArchiveBytes = 2 * 1024 ** 3;
+const maxExpandedBytes = 4 * 1024 ** 3;
+const maxManifestBytes = 64 * 1024 * 1024;
+const maxManifestEntries = 250_000;
+const maxPathBytes = 4_096;
+const maxSymlinkSteps = 64;
+
 export const RuntimeSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 export const RuntimeIdSchema = z.string().regex(/^r1-[a-f0-9]{64}$/);
 export const BaseCompatibilityIdSchema = z.string().regex(/^bc1-[a-f0-9]{64}$/);
@@ -12,6 +20,10 @@ const version = z
   .min(1)
   .max(128)
   .regex(/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.+-]+)?$/);
+const agentVersion = z
+  .string()
+  .regex(/^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$/)
+  .refine((value) => !/[\r\n]/.test(value), "Invalid agent version");
 const libcVersion = z
   .string()
   .max(32)
@@ -23,9 +35,10 @@ const mode = z.string().regex(/^0[0-7][0145][0145]$/);
 export function isRuntimeRelativePath(value: string): boolean {
   return (
     value.length > 0 &&
+    utf8.encode(value).length <= maxPathBytes &&
     !value.startsWith("/") &&
     !/^[A-Za-z]:/.test(value) &&
-    !/[\\\x00\ud800-\udfff]/u.test(value) &&
+    !/[\\\x00\r\n\ud800-\udfff]/u.test(value) &&
     value
       .split("/")
       .every((segment) => segment !== "" && segment !== "." && segment !== "..")
@@ -46,9 +59,10 @@ const symlinkTarget = z
   .min(1)
   .refine(
     (value) =>
+      utf8.encode(value).length <= maxPathBytes &&
       !value.startsWith("/") &&
       !/^[A-Za-z]:/.test(value) &&
-      !/[\\\x00\ud800-\udfff]/u.test(value),
+      !/[\\\x00\r\n\ud800-\udfff]/u.test(value),
     "Invalid relative symlink target",
   );
 
@@ -61,7 +75,7 @@ export const RuntimeManifestEntrySchema = z.discriminatedUnion("type", [
       mode,
       path: RuntimeRelativePathSchema,
       sha256: RuntimeSha256Schema,
-      size: integer,
+      size: integer.max(maxExpandedBytes),
       type: z.literal("file"),
     })
     .strict(),
@@ -75,7 +89,6 @@ export const RuntimeManifestEntrySchema = z.discriminatedUnion("type", [
 ]);
 export type RuntimeManifestEntry = z.infer<typeof RuntimeManifestEntrySchema>;
 
-const utf8 = new TextEncoder();
 function comparePaths(left: string, right: string): number {
   const a = utf8.encode(left),
     b = utf8.encode(right);
@@ -92,6 +105,7 @@ function resolveManifestPath(
   segments: string[],
   links: Map<string, string>,
   visiting = new Set<string>(),
+  steps = { count: 0 },
 ): string {
   let resolved: string[] = [];
   for (const segment of segments) {
@@ -105,11 +119,14 @@ function resolveManifestPath(
     const path = resolved.join("/"),
       target = links.get(path);
     if (target !== undefined) {
+      if (++steps.count > maxSymlinkSteps)
+        throw new Error("Runtime symlink resolution exceeds its step bound");
       if (visiting.has(path)) throw new Error("Runtime symlink cycle");
       resolved = resolveManifestPath(
         [...resolved.slice(0, -1), ...target.split("/")],
         links,
         new Set([...visiting, path]),
+        steps,
       )
         .split("/")
         .filter(Boolean);
@@ -122,9 +139,9 @@ export const RuntimeManifestSchema = z
   .object({
     agents: z
       .object({
-        claude: z.object({ cli: version, sdk: version }).strict(),
-        codex: z.object({ package: version }).strict(),
-        cursor: z.object({ sdk: version }).strict(),
+        claude: z.object({ cli: agentVersion, sdk: agentVersion }).strict(),
+        codex: z.object({ package: agentVersion }).strict(),
+        cursor: z.object({ sdk: agentVersion }).strict(),
       })
       .strict(),
     entrypoints: z
@@ -133,17 +150,17 @@ export const RuntimeManifestSchema = z
         setup: RuntimeRelativePathSchema,
         startEngine: RuntimeRelativePathSchema,
         supervisor: RuntimeRelativePathSchema,
-        selfTest: RuntimeRelativePathSchema,
+        selfTest: RuntimeRelativePathSchema.optional(),
       })
       .strict(),
-    files: z.array(RuntimeManifestEntrySchema).min(1),
+    files: z.array(RuntimeManifestEntrySchema).min(1).max(maxManifestEntries),
     platform: z
       .object({
         arch: z.literal("x64"),
         libc: z.literal("glibc"),
         minGlibc: libcVersion,
         node: version,
-        nodeModulesAbi: integer.positive(),
+        nodeModulesAbi: protocolVersion,
         os: z.literal("linux"),
       })
       .strict(),
@@ -161,8 +178,10 @@ export const RuntimeManifestSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.files.length > maxManifestEntries) return;
     const entries = new Map<string, RuntimeManifestEntry>();
     const links = new Map<string, string>();
+    let expandedBytes = 0;
     value.files.forEach((entry, index) => {
       if (
         entry.path === "manifest.json" ||
@@ -197,8 +216,23 @@ export const RuntimeManifestSchema = z
           });
       }
       entries.set(entry.path, entry);
+      if (entry.type === "file") expandedBytes += entry.size;
       if (entry.type === "symlink") links.set(entry.path, entry.target);
     });
+    if (expandedBytes < 1 || expandedBytes > maxExpandedBytes)
+      context.addIssue({
+        code: "custom",
+        path: ["files"],
+        message: "Regular file sizes must total 1 through 4 GiB",
+      });
+    for (const [name, path] of Object.entries(value.entrypoints)) {
+      if (path !== undefined && entries.get(path)?.type !== "file")
+        context.addIssue({
+          code: "custom",
+          path: ["entrypoints", name],
+          message: "Listed entrypoints must be regular inventory files",
+        });
+    }
     for (const [index, entry] of value.files.entries()) {
       if (entry.type !== "symlink") continue;
       const segments = [
@@ -207,13 +241,13 @@ export const RuntimeManifestSchema = z
       ];
       try {
         resolveManifestPath(segments, new Map());
-        resolveManifestPath(segments, links);
+        resolveManifestPath(entry.path.split("/"), links);
       } catch {
         context.addIssue({
           code: "custom",
           path: ["files", index, "target"],
           message:
-            "Symlink must resolve inside the runtime without a link cycle",
+            "Symlink must resolve inside the runtime without a cycle in at most 64 steps",
         });
       }
     }
@@ -241,10 +275,10 @@ export const RuntimeDescriptorSchema = z
     runtimeId: RuntimeIdSchema,
     manifestSha256: RuntimeSha256Schema,
     archiveSha256: RuntimeSha256Schema,
-    archiveBytes: integer.positive(),
-    expandedBytes: integer,
+    archiveBytes: integer.positive().max(maxArchiveBytes),
+    expandedBytes: integer.positive().max(maxExpandedBytes),
     sourceCommit,
-    nodeModulesAbi: integer.positive(),
+    nodeModulesAbi: protocolVersion,
     bootstrapProtocolVersion: z.literal(1),
     engineProtocolVersion: protocolVersion,
   })
@@ -311,8 +345,8 @@ export const RuntimeInstallReceiptSchema = z
     archiveSha256: RuntimeSha256Schema,
     baseCompatibilityId: BaseCompatibilityIdSchema,
     bootstrapVersion: z.literal(1),
-    expandedBytes: integer,
-    fileCount: integer.positive(),
+    expandedBytes: integer.positive().max(maxExpandedBytes),
+    fileCount: integer.positive().max(maxManifestEntries),
     installedAt: timestamp,
     manifestSha256: RuntimeSha256Schema,
     runtimeId: RuntimeIdSchema,
@@ -633,6 +667,8 @@ export function parseCanonicalManifest(
   manifestSha256: string;
   runtimeId: string;
 } {
+  if (rawBytes.byteLength > maxManifestBytes)
+    throw new Error("Runtime manifest exceeds its byte bound");
   const manifestSha256 = Array.from(sha256(rawBytes), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
