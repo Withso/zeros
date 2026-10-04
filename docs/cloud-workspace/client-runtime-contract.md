@@ -333,6 +333,80 @@ agent command automatically.
 
 ### Authenticated previews
 
+Native desktop Browser, Run and agent previews use the existing
+`POST .../access/previews` HTTP/HMR grant with `native:true`, `port` (logical
+display metadata), `expiresInMinutes` and an optional
+`target:{executionId,portId}`. Native issuance is engineering-staff-only and
+requires the current Ed25519 device proof. Its `preview.issue` payload is
+`{organizationId,workspaceId,port,target:null|{executionId,portId},expiresInMinutes,idempotencyKey}`.
+Migration 0130 adds nullable `preview_target`, `preview_device_id` and
+`preview_device_key_version`; legacy scalar grants keep their existing shape.
+Both public preview routing and runtime admission check the native device's
+current trusted key. Device rotation/revocation, actor changes, expired grants,
+engine authority loss and generation retirement deny requests and renewals.
+The authoritative generation's provider and accepted runtime pin determine
+whether a scalar preview requires native device admission, even when the caller
+omits `native` and `target`. Only a verified legacy Daytona generation without
+a v4 pin retains the proof-free scalar exception. Existing unbound native
+grants fail at ingress and runtime admission and must be issued again.
+
+The optional `AGENT_BOUNDARY_PORT_OPENED.nativeTarget` carries the same opaque
+execution/listener identity. On v4 the native factory returns bearer-free
+logical URLs with that target. v1–v3 retain the signed-link factory; local
+execution retains its ZSR factory. The runtime resolves opaque identity from
+the current execution boundary, connects only to its actual loopback mapping,
+and checks that mapping during every short HTTP/HMR lease. A missing or changed
+listener fails closed; the display port never selects an agent socket.
+Browser uses the engine's native target response to choose admission; legacy
+signed navigations retain their existing factory. A restored legacy source
+without exact execution/listener identity cannot admit a native target by
+display port. Open the current published listener to create that identity.
+The optional wire field preserves the existing protocol range. Older runtimes
+that cannot interpret opaque targets reject admission rather than selecting a
+scalar listener. Deploy the control plane and a qualified E2 runtime before
+running native agent acceptance.
+
+Electron's `browser:open-cloud-preview` accepts an optional opaque `target`
+beside workspace, logical port, frame name and exact account/device context.
+Only the owned main renderer may invoke it. The Browser mounts a blank frame
+first; after grant issuance, main must find the original frame object and its
+still-current admission request before installing the capability. Replacement,
+revoke, hidden-tab cleanup and account/device changes fence pending responses.
+Native navigation and renewal replace history inside that admitted iframe;
+they never remount it and transfer authority to a new frame.
+Only origin/expiry/access ID return to renderer code. Capability headers stay
+bound to that exact iframe's ancestry; ordinary renderer fetches and external
+browsers receive no authority.
+Header injection covers HTTPS and WSS. Secure WebSocket origins normalize to
+their equivalent HTTPS origin while preserving the exact host, port and frame
+ancestry; sibling frames never inherit HMR authority.
+
+Native preview surfaces use `useInternalFeatureActive("cloudComputerV2")`.
+Browser, Run and agent admission also require the exact workspace's confirmed
+`capabilities.canEdit === true`. They subscribe to that cached authority;
+missing or denied capabilities retire the grant and cancel admission retries.
+The tab retains its semantic workspace and opaque listener identity; human and
+agent tabs with equal display URLs remain separate. Native origins are volatile.
+Active visible frames re-admit five minutes before the 30-minute grant expires;
+hidden frames retire access and do no renewal work. On return they re-admit
+their exact target. A stale response revokes its own grant without replacing
+a successor. The last same-key page remains visible during revalidation.
+Run addresses resolve through the owning Browser's native human-port admission.
+Agent buttons and transcript links carry the exact current execution/port ID.
+Unavailable cloud-local links never open a coincidental Mac-local service.
+Cloud Browser address entry, empty-tab entry and toolbar history publish logical
+tab state before admission. History retains logical URLs and opaque owners,
+not grant origins. Only the admitted HTTPS URL navigates the frame; back,
+forward and reload re-admit their destination without requesting Mac loopback.
+Trusted page links and SPA navigation also enter this logical history, retaining
+the opaque owner and translating the current admitted origin to localhost.
+Path changes retain their current grant; renewal uses the latest logical URL.
+Leaving the preview origin clears preview ownership and resumes ordinary URL
+persistence and reload for the external page.
+
+See [native preview acceptance](native-preview-acceptance.md) for the signed Mac
+Alpha procedure and its C5/B8/B10 prerequisite boundary.
+
 Runtime service admission can request `relativeLease: true`. The control plane
 then includes a `leaseDurationMs` of at most ten seconds. The runtime anchors that
 duration to the beginning of its request and rejects responses that arrive after

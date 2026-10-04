@@ -130,7 +130,7 @@ export interface SessionsActions {
   openBoundaryPort(
     chatId: string,
     portId: string,
-  ): Promise<{ url: string; admissionUrl: string; expiresAt: number }>;
+  ): Promise<{ url: string; admissionUrl: string; expiresAt: number; nativeTarget?: import("@zeros/protocol/containment").CloudAgentPreviewTarget }>;
   respondToPermission(
     chatId: string,
     response: RequestPermissionResponse,

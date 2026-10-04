@@ -1,4 +1,5 @@
 import { loadQuota, loadUsage, assertGenerationReplacementQuota, createCloudRecoveryTransition, requireCloudRecoveryPoint, cloudRecoveryPointLosslessSql, type QuotaRow, type UsageRow } from "./automatic-recovery.js";
+import { CloudAgentPreviewTargetSchema } from "./preview-target.js";
 import { createCloudComputerRoutes } from "./computer-routes.js";
 import { createCloudComputerV2Routes } from "./computer-v2-routes.js";
 import type { CloudComputerV2AdminWorkspaceRequest } from "./computer-v2-contract.js";
@@ -210,6 +211,8 @@ const PreviewAccessSchema = z
   .object({
     port: z.number().int().min(1).max(65_535),
     expiresInMinutes: AccessTtlSchema,
+    target: CloudAgentPreviewTargetSchema.optional(),
+    native: z.literal(true).optional(),
   })
   .strict();
 const EngineClientAdmissionSchema = z.object({actorProtocolVersion:z.literal(2).optional()}).strict();
@@ -1362,6 +1365,8 @@ export function createCloudWorkspaceRoutes(
         : kind === "tunnel"
           ? parse(TunnelAccessSchema, raw)
           : parse(PreviewAccessSchema, raw);
+    if (kind === "preview" && ((body as z.infer<typeof PreviewAccessSchema>).target || (body as z.infer<typeof PreviewAccessSchema>).native))
+      requireOrganizationCreationCapability(user.staffRole);
     // Public transports use the actor-aware Zeros relay. Raw infrastructure
     // SSH destinations remain private to the legacy runtime/operator adapter.
     if(kind!=="preview"){
@@ -1374,8 +1379,13 @@ export function createCloudWorkspaceRoutes(
       accountUserId: user.id,
       kind: "preview",
       remotePort: (body as z.infer<typeof PreviewAccessSchema>).port,
+      ...((body as z.infer<typeof PreviewAccessSchema>).target ? { previewTarget: (body as z.infer<typeof PreviewAccessSchema>).target! } : {}),
+      ...((body as z.infer<typeof PreviewAccessSchema>).native || (body as z.infer<typeof PreviewAccessSchema>).target || c.req.header("x-zeros-device-id") ? { proof: deviceProof(c) } : {}),
       expiresInMinutes: body.expiresInMinutes,
       idempotencyKey: key,
+    }).catch(error => {
+      if (error instanceof WorkspaceReplicaError) throw replicaErrorToHttp(error);
+      throw error;
     });
     return c.json(document, 201);
   };

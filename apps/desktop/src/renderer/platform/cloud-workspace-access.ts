@@ -7,6 +7,7 @@ import type {
   CloudRuntimeConnectionTarget,
   RuntimeConnectionTarget,
 } from "./bridge/ws-client";
+import type { CloudAgentPreviewTarget } from "@zeros/protocol/containment";
 
 export type CloudWorkspaceAccessTarget = {
   organizationId: string;
@@ -53,6 +54,13 @@ export async function warmCloudServiceAccess(target: CloudWorkspaceAccessTarget)
   const context = await cloudServiceContextCache.load(contextKey, () => readCloudServiceContext(contextKey), { maxAgeMs: 5_000 });
   const key = cloudServiceAccessKey(target, context);
   await cloudServiceAccessCache.load(key, () => readCloudServiceAccess(key), { maxAgeMs: 5_000 });
+}
+
+/** Preview intent warms device metadata only; a frame must exist before grant issuance. */
+export async function warmCloudPreviewContext(): Promise<void> {
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+  const key = cloudServiceContextKey();
+  await cloudServiceContextCache.load(key, () => readCloudServiceContext(key), { maxAgeMs: 5_000 });
 }
 
 export function invalidateCloudServiceAccess(target: CloudWorkspaceAccessTarget): void {
@@ -152,10 +160,11 @@ export function closeCloudWorkspaceRuntime(
 /** Mint and install an authenticated preview directly into one Browser iframe.
  * The returned navigation URL is bearer-free; Electron main injects the
  * capability only for requests whose frame ancestry contains `frameName`. */
-export function openCloudWorkspacePreview(
+export async function openCloudWorkspacePreview(
   target: CloudWorkspaceAccessTarget & {
     port: number;
     frameName: string;
+    target?: CloudAgentPreviewTarget;
   },
 ): Promise<
   CloudWorkspaceAccessReceipt & {
@@ -165,5 +174,18 @@ export function openCloudWorkspacePreview(
   }
 > {
   if (!cloudWorkspacePreviewsConfigured()) return Promise.reject(new Error("Cloud workspace preview URLs are not configured for this build"));
-  return nativeInvoke("browser:open-cloud-preview", target);
+  const epoch = getOrganizationStoreGeneration();
+  const contextKey = cloudServiceContextKey();
+  const context = await cloudServiceContextCache.load(contextKey, () => readCloudServiceContext(contextKey), { maxAgeMs: 5_000 });
+  if (epoch !== getOrganizationStoreGeneration()) throw new Error("The cloud preview account changed.");
+  const result = await nativeInvoke<CloudWorkspaceAccessReceipt & { logicalUrl: string; origin: string; admissionUrl: string }>("browser:open-cloud-preview", { ...target, ...context });
+  try {
+    const latest = serviceContextSchema.parse(await nativeInvoke("cloud_workspace_access_context", {}));
+    if (epoch !== getOrganizationStoreGeneration() || JSON.stringify(context) !== JSON.stringify(latest))
+      throw new Error("The cloud preview account or device changed.");
+  } catch (error) {
+    await revokeCloudWorkspaceAccess(result.accessId).catch(() => false);
+    throw error;
+  }
+  return result;
 }

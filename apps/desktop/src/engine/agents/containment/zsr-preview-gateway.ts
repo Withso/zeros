@@ -8,6 +8,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { Duplex } from "node:stream";
+import type { CloudAgentPreviewTarget } from "@zeros/protocol/containment";
 
 const CAPABILITY_QUERY = "__zsr_cap";
 const MAX_URL_BYTES = 16_384;
@@ -27,6 +28,7 @@ export interface PreviewNavigation {
   readonly admissionUrl: string;
   /** Absolute deadline for renewing the browser's volatile admission. */
   readonly expiresAt: number;
+  readonly nativeTarget?: CloudAgentPreviewTarget;
 }
 
 export interface BoundaryPreviewGateway {
@@ -35,7 +37,7 @@ export interface BoundaryPreviewGateway {
 }
 
 export interface BoundaryPreviewGatewayFactory {
-  open(target: ZsrPreviewTarget): Promise<BoundaryPreviewGateway>;
+  open(target: ZsrPreviewTarget, identity?: CloudAgentPreviewTarget): Promise<BoundaryPreviewGateway>;
 }
 
 export interface ZsrPreviewExposure {

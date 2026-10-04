@@ -6,6 +6,15 @@ import {
 } from "../iframe-frame-control";
 
 describe("ordinary Browser iframe controls", () => {
+  it("replaces native preview history inside the admitted frame", async () => {
+    const request = parseBrowserIframeControl({ frameName: "zeros-browser-native", action: "replace", url: "https://preview.example.test/assets" });
+    expect(request).toEqual({ frameName: "zeros-browser-native", action: "replace", url: "https://preview.example.test/assets" });
+    const executeJavaScript = vi.fn(async () => undefined);
+    expect(await controlBrowserIframe({ isDestroyed: () => false, executeJavaScript, reload: () => true }, request!)).toBe(true);
+    expect(executeJavaScript).toHaveBeenCalledWith('location.replace("https://preview.example.test/assets")', true);
+    expect(parseBrowserIframeControl({ frameName: "zeros-browser-native", action: "replace", url: "file:///tmp/unsafe" })).toBeNull();
+  });
+
   it("accepts only a bounded named Browser frame and fixed control action", () => {
     expect(
       parseBrowserIframeControl({

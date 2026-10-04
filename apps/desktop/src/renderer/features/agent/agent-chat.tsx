@@ -22,7 +22,7 @@ import React, {
   useState,
 } from "react";
 import { useOpenChatPreviewInWorkbench } from "@/renderer/shell/workbench/use-open-browser";
-import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
+import { workspacePreviewAvailable, warmCloudPreviewContext } from "../../platform/cloud-workspace-access";
 import { useOpenChatFileInWorkbench, warmChatFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
 import { chatFileOpenCwd } from "@/renderer/shell/workbench/direct-file-open";
 import {
@@ -179,6 +179,7 @@ import {
 } from "./session-tools-cache";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { BoundaryPortsPill } from "./boundary-ports";
+import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
 import { createBrowserTab } from "@/renderer/shell/workbench/tab-model";
 import {
@@ -753,7 +754,9 @@ export function AgentChat({
     [readOnly],
   );
   const openChatPreview = useOpenChatPreviewInWorkbench();
-  const openPreviewUrlThroughRef = useCallback((url: string) => openChatPreview(chatCwdRef.current, url), [openChatPreview]);
+  const chatPreviewRef = useRef({ chatId: chatId ?? "", executionId: session.executionId ?? undefined, ports: session.boundaryPorts ?? undefined });
+  chatPreviewRef.current = { chatId: chatId ?? "", executionId: session.executionId ?? undefined, ports: session.boundaryPorts ?? undefined };
+  const openPreviewUrlThroughRef = useCallback((url: string) => openChatPreview(chatCwdRef.current, url, chatPreviewRef.current), [openChatPreview]);
   const openFileThroughRef = useCallback(
     (path: string) => {
       if (!readOnly) openChatFileRef.current(chatCwdRef.current, path);
@@ -1458,9 +1461,24 @@ export function AgentChat({
   ]);
 
   const openBoundaryPort = session.openBoundaryPort;
+  const cloudPreviewsEnabled = useInternalFeatureActive("cloudComputerV2");
+  const cloudCanEdit = useCloudWorkspaceCanEdit(chatThread?.folder);
+  const cloudPreviewsActive = cloudPreviewsEnabled && cloudCanEdit;
+  const warmBoundaryPreview = useCallback(() => {
+    if (interactive && cloudPreviewsActive && isCloudWorkspace(chatThread?.folder))
+      void warmCloudPreviewContext().catch(() => undefined);
+  }, [interactive, cloudPreviewsActive, chatThread?.folder]);
   const openBoundaryPreview = useCallback(
     (port: ExecutionBoundaryPortStatus) => {
       if (!workspacePreviewAvailable(chatThread?.folder ?? "")) return;
+      if (isCloudWorkspace(chatThread?.folder)) {
+        if (!cloudPreviewsActive || !chatId || !session.executionId) return;
+        dispatch({ type: "ADD_WORKBENCH_TAB", scope: chatThread?.folder, tab: createBrowserTab({
+          url: `http://localhost:${port.port}/`, title: `localhost:${port.port}`,
+          previewSource: { chatId, port: port.port, executionId: session.executionId, portId: port.id },
+        }) });
+        return;
+      }
       void (async () => {
         try {
           if (!openBoundaryPort) {
@@ -1503,7 +1521,7 @@ export function AgentChat({
         }
       })();
     },
-    [chatId, chatThread?.folder, dispatch, nativeReady, openBoundaryPort],
+    [chatId, chatThread?.folder, dispatch, nativeReady, openBoundaryPort, cloudPreviewsActive, session.executionId],
   );
 
   // 2026-05-21: handleAgentSwitch + folderLabel removed. The old
@@ -5255,9 +5273,10 @@ export function AgentChat({
                       (also used in the edit composer). Effort/Fast are part of
                       the model label and edited in its popover. */}
                       {editToolbarPills}
-                      {workspacePreviewAvailable(chatFolder ?? "") && <BoundaryPortsPill
+                      {workspacePreviewAvailable(chatFolder ?? "") && (!isCloudWorkspace(chatFolder) || cloudPreviewsActive) && <BoundaryPortsPill
                         snapshot={session.boundaryPorts}
                         onOpenPort={openBoundaryPreview}
+                        onIntent={warmBoundaryPreview}
                       />}
                     </PromptInputTools>
                     {/* Right cluster: [context ring] [send] (+ save tick while

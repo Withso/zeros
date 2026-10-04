@@ -21,6 +21,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import type { CloudWorkspaceAccessService } from "./access.js";
 import type { CloudWorkspaceRepositoryResolver } from "./github-repositories.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
+import { WorkspaceReplicaError } from "./replicas.js";
 import { sealCloudProviderCredential } from "./provider-connections.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import { reserveWriterSlot } from "./pro-sharing.js";
@@ -132,11 +133,13 @@ d("cloud workspace API contracts", () => {
       key?: string;
       body?: Record<string, unknown>;
       accessCredential?: string;
+      headers?: Record<string, string>;
     },
   ) =>
     app.request(path, {
       method: init?.method ?? "GET",
       headers: {
+        ...init?.headers,
         ...(init?.body ? { "content-type": "application/json" } : {}),
         ...(init?.key ? { "idempotency-key": init.key } : {}),
         ...(init?.accessCredential
@@ -1758,6 +1761,39 @@ d("cloud workspace API contracts", () => {
         headerName: "x-zeros-preview-capability",
       },
     });
+  });
+
+  it("gates native previews by engineering staff and returns a closed proof rejection", async () => {
+    const workspaceId = randomUUID();
+    const path = `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/access/previews`;
+    const target = { executionId: "execution-native", portId: "A".repeat(32) };
+    actor = { ...owner, staffRole: null };
+    const denied = await request(path, { method: "POST", key: randomUUID(),
+      body: { port: 5173, expiresInMinutes: 15, native: true, target } });
+    expect(denied.status).toBe(404);
+    expect(accessService.issue).not.toHaveBeenCalled();
+    actor = { ...owner, staffRole: "developer" };
+    vi.mocked(accessService.issue).mockRejectedValueOnce(new WorkspaceReplicaError("device_proof_rejected", "Device authority changed"));
+    const rejected = await request(path, { method: "POST", key: randomUUID(),
+      body: { port: 5173, expiresInMinutes: 15, native: true, target },
+      headers: { "x-zeros-device-id": DEVICE_ID, "x-zeros-device-key-version": "1",
+        "x-zeros-device-timestamp": String(Date.now()), "x-zeros-device-nonce": "A".repeat(32),
+        "x-zeros-device-signature": Buffer.alloc(64).toString("base64url") } });
+    expect(rejected.status).toBe(403);
+    await expect(rejected.json()).resolves.toMatchObject({ error: { code: "workspace_replica_device_proof_rejected" } });
+    expect(accessService.issue).toHaveBeenCalledWith(expect.objectContaining({ previewTarget: target, proof: expect.objectContaining({ deviceId: DEVICE_ID, keyVersion: 1 }) }));
+  });
+
+  it("forwards a scalar preview device proof even when native and target hints are omitted", async () => {
+    const workspaceId = randomUUID();
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/access/previews`, {
+      method: "POST", key: randomUUID(), body: { port: 5173, expiresInMinutes: 15 },
+      headers: { "x-zeros-device-id": DEVICE_ID, "x-zeros-device-key-version": "1",
+        "x-zeros-device-timestamp": String(Date.now()), "x-zeros-device-nonce": "A".repeat(32),
+        "x-zeros-device-signature": Buffer.alloc(64).toString("base64url") },
+    });
+    expect(response.status).toBe(201);
+    expect(accessService.issue).toHaveBeenCalledWith(expect.objectContaining({ proof: expect.objectContaining({ deviceId: DEVICE_ID, keyVersion: 1 }) }));
   });
 
   it("requires an exact one-time credential when revoking client access", async () => {

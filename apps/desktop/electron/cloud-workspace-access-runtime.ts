@@ -7,7 +7,7 @@ import { CloudWorkspaceAccessClient } from "./cloud-workspace-access-client";
 import { CloudWorkspaceNativeSshRuntime, CloudWorkspaceSshRuntime } from "./cloud-workspace-ssh-runtime";
 import { CloudRuntimeServiceClient } from "./cloud-runtime-service-client";
 import { CloudRuntimeServiceTransport } from "./cloud-runtime-service-transport";
-import { ensureCloudAccessDeviceForMain, readCloudAccessDeviceForMain, signCloudEngineAdmissionForMain, signCloudRuntimeServiceForMain } from "./cloud-replica-host-runtime";
+import { ensureCloudAccessDeviceForMain, readCloudAccessDeviceForMain, signCloudEngineAdmissionForMain, signCloudRuntimeServiceForMain, signCloudPreviewForMain } from "./cloud-replica-host-runtime";
 import { previewFrameAuthorizations } from "./preview-frame-authorizations";
 import {
   getValidAccessTokenForMain,
@@ -141,6 +141,7 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
       fetch: controlPlaneFetch,
       baseUrl: controlPlaneBaseUrl(),
       signEngineAdmission: signCloudEngineAdmissionForMain,
+      signPreview: signCloudPreviewForMain,
       allowInsecureLoopback: IS_DEV,
       ...(hosts ? { allowedSshHosts: hosts } : {}),
       ...(previewHostSuffixes

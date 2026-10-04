@@ -11,6 +11,7 @@ import { AgentGateway } from "../gateway";
 import type { PreparedBoundary } from "../containment/types";
 import type { AgentAdapter } from "../types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
+import { CloudNativePreviewGatewayFactory } from "../containment/cloud-native-preview-gateway";
 
 const temporaryDirectories: string[] = [];
 
@@ -23,6 +24,51 @@ afterEach(async () => {
 });
 
 describe("AgentGateway boundary port publication", () => {
+  it("resolves opaque native identity to its current mapped socket and fences replacements", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-native-port-"));
+    temporaryDirectories.push(root);
+    let latest: ExecutionBoundaryPortsSnapshot | undefined;
+    const gateway = new AgentGateway({
+      projectRoot: root, executionBoundary: testExecutionBoundary(),
+      previewGatewayFactory: new CloudNativePreviewGatewayFactory(),
+      events: {
+        onSessionUpdate: () => {}, onPermissionRequest: () => {},
+        onQuestionRequest: () => {}, onAgentStderr: () => {}, onAgentExit: () => {},
+        onBoundaryPortsChanged: (_agentId, _executionId, snapshot) => { latest = snapshot; },
+      },
+    });
+    const internal = gateway as unknown as {
+      executionBoundaries: Map<string, PreparedBoundary>;
+      prepareExecutionBoundary(executionId: string, cwd: string, root: string, adapter: AgentAdapter,
+        territory: undefined, env: undefined, servers: [], stage: "newSession"): Promise<PreparedBoundary>;
+    };
+    const boundary = await internal.prepareExecutionBoundary("execution-native", root, root,
+      { agentId: "fake" } as AgentAdapter, undefined, undefined, [], "newSession");
+    internal.executionBoundaries.set("execution-native", boundary);
+    try {
+      await boundary.requestPort({ protocol: "tcp", preferredPort: 5173, purpose: "preview" });
+      const original = boundary.activePorts()[0]!;
+      let mappings = [{ ...original, port: 45123 }];
+      boundary.activePorts = () => mappings;
+      const identity = { executionId: "execution-native", portId: latest!.ports[0]!.id };
+      expect(await gateway.openBoundaryPort(identity.executionId, identity.portId)).toMatchObject({
+        url: "http://localhost:5173/", nativeTarget: identity,
+      });
+      const resolved = gateway.resolveNativePreviewTarget(identity)!;
+      expect(resolved.targetPort).toBe(45123);
+      expect(resolved.current()).toBe(true);
+      expect(gateway.resolveNativePreviewTarget({ ...identity, executionId: "another-execution" })).toBeNull();
+      mappings = [{ ...original, port: 45123, leaseId: "replacement-listener" }];
+      expect(resolved.current()).toBe(false);
+      expect(gateway.resolveNativePreviewTarget(identity)).toBeNull();
+      mappings = [{ ...original, port: 45123 }];
+      internal.executionBoundaries.delete(identity.executionId);
+      expect(resolved.current()).toBe(false);
+      expect(gateway.resolveNativePreviewTarget(identity)).toBeNull();
+      internal.executionBoundaries.set(identity.executionId, boundary);
+    } finally { await gateway.dispose(); }
+  });
+
   it("surfaces a rejected host OAuth refresh as authentication-required", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-boundary-auth-"));
     temporaryDirectories.push(root);

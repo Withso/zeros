@@ -183,7 +183,12 @@ export class PreviewFrameAuthorizations {
     this.purge(now);
     let origin: string;
     try {
-      origin = new URL(candidateUrl).origin;
+      const url = new URL(candidateUrl);
+      // HMR uses the same TLS authority as the admitted HTTP application.
+      // URL normalization retains exact host/port matching and frame ancestry.
+      if (url.protocol === "wss:") url.protocol = "https:";
+      if (url.protocol !== "https:" || url.username || url.password) return null;
+      origin = url.origin;
     } catch {
       return null;
     }

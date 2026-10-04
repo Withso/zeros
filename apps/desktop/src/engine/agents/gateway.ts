@@ -3445,7 +3445,7 @@ export class AgentGateway {
   async openBoundaryPort(
     executionId: string,
     portId: string,
-  ): Promise<{ url: string; admissionUrl: string; expiresAt: number }> {
+  ): Promise<import("./containment/zsr-preview-gateway").PreviewNavigation> {
     const boundary = this.executionBoundaries.get(executionId);
     if (!boundary) throw new Error("execution boundary is unavailable");
     const mapping = boundary
@@ -3472,7 +3472,7 @@ export class AgentGateway {
     }
     let gateway = previews.get(portId);
     if (!gateway) {
-      gateway = this.previewGatewayFactory.open(target);
+      gateway = this.previewGatewayFactory.open(target, { executionId, portId });
       previews.set(portId, gateway);
       void gateway.catch(() => {
         if (previews?.get(portId) === gateway) previews.delete(portId);
@@ -3499,6 +3499,22 @@ export class AgentGateway {
       throw new Error("session preview is no longer active");
     }
     return opened.navigation();
+  }
+
+  /** Called only after runtime grant verification. Resolve the current lease,
+   * then retain its identity for short-lease HTTP/HMR renewal checks. */
+  resolveNativePreviewTarget(identity: import("@zeros/protocol/containment").CloudAgentPreviewTarget): import("../transport/cloud-preview-gateway").CloudResolvedPreviewTarget | null {
+    const boundary = this.executionBoundaries.get(identity.executionId);
+    const find = () => boundary?.activePorts().find(candidate =>
+      this.sameOpaquePortId(identity.portId, this.boundaryPortId(identity.executionId, boundary!, candidate.leaseId)));
+    const mapping = find();
+    if (!boundary || !mapping || (mapping.host !== "127.0.0.1" && mapping.host !== "::1")) return null;
+    return {
+      targetHost: mapping.host,
+      targetPort: mapping.port,
+      current: () => this.executionBoundaries.get(identity.executionId) === boundary &&
+        find()?.port === mapping.port && find()?.host === mapping.host,
+    };
   }
 
   private retireMissingBoundaryPreviews(
