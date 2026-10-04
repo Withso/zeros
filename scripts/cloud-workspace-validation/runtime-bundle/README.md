@@ -74,9 +74,10 @@ licenses remain beside their packages and the Linux dependency inventory is
 Chromium, headless-shell and FFmpeg assets with their original notices.
 
 The manifest lists `selfTest` only when B7's regular self-test file is included;
-every listed entrypoint must be a regular inventory file. B7's self-test and
-B2's runtime-root resolver are included when their source files are present.
-This builder does not supply either implementation or publish artifacts.
+every listed entrypoint must be a regular inventory file. B2's runtime-root
+resolver is required and copied from its engine source as a regular file at
+`lib/zeros/cloud-runtime-root.mjs`; B7's self-test is included when present.
+This builder does not implement these helpers or publish artifacts.
 
 The build always verifies the archive, rehashes its extracted tree, and probes
 it at `/opt/zeros-infra/<runtimeId>` in a mount/network namespace. Only the

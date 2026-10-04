@@ -16,8 +16,11 @@ import os from "node:os";
 import path from "node:path";
 import {
   stageDependencyClosure,
+  stageSources,
   scanPayload,
   RUNTIME_HELPERS,
+  ROOT_METADATA,
+  SOURCE_SLICES,
 } from "../cloud-workspace-validation/runtime-bundle/closure";
 import { inventoryTree } from "../cloud-workspace-validation/runtime-bundle/manifest";
 
@@ -311,7 +314,7 @@ describe("pnpm runtime closure", () => {
     ).rejects.toThrow(/native_platform/);
   });
 
-  it("has one helper inventory matching all 19 legacy helpers plus optional future entries", async () => {
+  it("matches the legacy helper set with a required runtime-root resolver and optional self-test", async () => {
     const legacy = await readFile(
       "scripts/cloud-workspace-validation/boat-image/templates/build.sh",
       "utf8",
@@ -321,20 +324,84 @@ describe("pnpm runtime closure", () => {
       RUNTIME_HELPERS.filter(
         (entry) =>
           !entry.optional && entry.target.endsWith(".apparmor") === false,
-      ).map((entry) => path.basename(entry.target)),
-    ).toEqual(names);
-    expect(
-      RUNTIME_HELPERS.some(
-        (entry) =>
-          entry.optional && entry.target === "lib/zeros/cloud-runtime-root.mjs",
-      ),
-    ).toBe(true);
+      )
+        .map((entry) => path.basename(entry.target))
+        .sort(),
+    ).toEqual(names.sort());
+    expect(RUNTIME_HELPERS).toContainEqual({
+      source:
+        "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
+      target: "lib/zeros/cloud-runtime-root.mjs",
+      optional: false,
+    });
     expect(
       RUNTIME_HELPERS.some(
         (entry) =>
           entry.optional && entry.target === "lib/zeros/runtime-self-test.mjs",
       ),
     ).toBe(true);
+  });
+
+  it("stages the runtime-root resolver as a standalone regular file and fails if its source is absent", async () => {
+    const temp = await directory(),
+      source = path.join(temp, "source"),
+      runtime = path.join(temp, "runtime");
+    const resolverSource =
+      "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
+    const contents = await readFile(resolverSource);
+    for (const relative of SOURCE_SLICES)
+      await mkdir(path.join(source, relative), { recursive: true });
+    for (const relative of [
+      ...ROOT_METADATA,
+      ...RUNTIME_HELPERS.filter((entry) => !entry.optional).map(
+        (entry) => entry.source,
+      ),
+      "scripts/cloud-workspace-validation/sandbox/start-engine.sh",
+    ]) {
+      const filename = path.join(source, relative);
+      await mkdir(path.dirname(filename), { recursive: true });
+      await writeFile(filename, "fixture");
+    }
+    await mkdir(path.dirname(path.join(source, resolverSource)), {
+      recursive: true,
+    });
+    await writeFile(path.join(source, resolverSource), contents);
+    await link(
+      path.join(source, resolverSource),
+      path.join(
+        source,
+        "scripts/cloud-workspace-validation/sandbox/cloud-runtime-root.mjs",
+      ),
+    );
+    await stageSources(source, runtime);
+    const resolver = path.join(runtime, "lib/zeros/cloud-runtime-root.mjs");
+    expect(await readFile(resolver)).toEqual(contents);
+    expect((await lstat(resolver)).nlink).toBe(1);
+    expect(await inventoryTree(runtime)).toContainEqual(
+      expect.objectContaining({
+        path: "lib/zeros/cloud-runtime-root.mjs",
+        type: "file",
+        mode: "0555",
+        size: contents.length,
+      }),
+    );
+    await rm(path.join(source, resolverSource));
+    await expect(
+      stageSources(source, path.join(temp, "missing-resolver")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await rm(source, { recursive: true });
+    expect(
+      execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          'import { pathToFileURL } from "node:url"; const resolver = await import(pathToFileURL(process.argv[1]).href); process.stdout.write(String(resolver.cloudProfileIdentityMapVersion(4)));',
+          resolver,
+        ],
+        { cwd: runtime, env: { PATH: "/usr/bin:/bin" }, encoding: "utf8" },
+      ),
+    ).toBe("3");
   });
 });
 
@@ -416,6 +483,13 @@ describe.skipIf(!process.env.ZEROS_RUNTIME_BUNDLE_TEST_DIR)(
       );
       expect(receipt.entryCount).toBe(result.manifest.files.length);
       expect(receipt.fileCount).toBeLessThan(receipt.entryCount);
+      expect(result.manifest.files).toContainEqual(
+        expect.objectContaining({
+          path: "lib/zeros/cloud-runtime-root.mjs",
+          type: "file",
+          mode: "0555",
+        }),
+      );
       expect(result.closure?.checks).toContain("engine_help");
       expect(result.closure?.checks).toContain("sqlite_query");
       expect(result.closure?.checks).toContain("pty_load");

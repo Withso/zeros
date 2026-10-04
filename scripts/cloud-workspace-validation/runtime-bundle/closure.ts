@@ -23,8 +23,8 @@ import {
 } from "./manifest";
 
 const SANDBOX = "scripts/cloud-workspace-validation/sandbox";
-// The sole runtime helper inventory. Later runtime PRs append here; the legacy
-// image kit remains unchanged. Its original 19 helpers are covered by a test.
+// The sole runtime helper inventory. Required entries track the legacy image
+// kit; later runtime PRs append future helpers here.
 export const RUNTIME_HELPERS = [
   ...[
     "runtime-layout.json",
@@ -55,7 +55,7 @@ export const RUNTIME_HELPERS = [
   {
     source: "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
     target: "lib/zeros/cloud-runtime-root.mjs",
-    optional: true,
+    optional: false,
   },
   {
     source: `${SANDBOX}/runtime-self-test.mjs`,
