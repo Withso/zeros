@@ -90,32 +90,29 @@ of forged or mismatched path metadata.
 ## Integration seams
 
 - C3 ([PR #293](https://github.com/Withso/zeros/pull/293)) supplies the ready
-  stopped template and sanitation marker. Its launcher
-  repository projection validation and C5's admitted primary bind must both be
-  retained when resolving the shared launcher changes.
-- C4 ([PR #300](https://github.com/Withso/zeros/pull/300)) attaches organization
-  environment and per-repository setup resolution to
-  `resolveComputerWorkspaceSetup` in
-  `apps/control-plane/src/cloud-workspaces/computer-workspace-source.ts`.
-  It receives the saved config/source, never a later active head. Retain C4's
-  `resolveCloudComputerExecutionEnvironment` call in setup-material redemption
-  when combining these changes. Host hooks use the physical primary path.
-  This change does not implement C4 configuration.
-- B8 ([PR #299](https://github.com/Withso/zeros/pull/299)) must import the helper
-  below and add `await copyComputerWorkspaceSource(tx, input)` after the
-  generation INSERT in `generation-pins.ts`'s `copyGenerationPins`. The API is
-  `copyComputerWorkspaceSource(tx, { workspaceId, organizationId,
-  sourceGeneration, targetGeneration })` in the generation insertion transaction
-  for wake/retry/recovery/upgrade. Tests cover copying the accepted source after
-  activation changes, transaction rollback and organization isolation. This
-  change does not wire that helper into B8's lifecycle implementation.
+  stopped template and sanitation marker. The launcher validates its protected
+  repository parents and checkout ownership before installing the admitted
+  primary bind inside the engine namespace.
+- C4 ([PR #300](https://github.com/Withso/zeros/pull/300)) resolves organization
+  environment through `resolveCloudComputerExecutionEnvironment` during setup
+  redemption, alongside `resolveComputerWorkspaceSetup` for the saved source
+  and org read grant. Both use the accepted config, never a later active head.
+  The primary repository's pinned setup commands retain C4's journal and
+  explicit retry behavior. Both privilege stages of the host setup worker use
+  the admitted physical clone as their working directory.
+- B8 ([PR #299](https://github.com/Withso/zeros/pull/299)) calls
+  `copyComputerWorkspaceSource(tx, input)` immediately after the generation
+  INSERT in `generation-pins.ts`'s `copyGenerationPins`. Explicit recovery,
+  automatic recovery and runtime upgrades copy the accepted build/template/config
+  atomically. Wake and setup retry reuse the existing generation and source.
+  Tests exercise all five paths after activation changes, as well as transaction
+  rollback and organization isolation.
 - B10 ([PR #298](https://github.com/Withso/zeros/pull/298)) owns `/home/user`
-  persistence and its single files bind. Preserve its
-  protected `.zeros-setup` staging validation and engine masking together with
-  the admitted `repos`/primary projection when merging the shared launcher and
-  view files. C5 never uses that staging path for templates and rejects nested
-  host mounts. B10 owns non-template staging and host-owned setup/settings/log
-  publication; those paths are not moved by this change.
+  persistence and its single files bind. The launcher validates protected
+  `.zeros-setup` staging and masks it with an inaccessible read-only mount in
+  the engine view. Base-image setup and interrupted publication use the seed
+  inside that directory. Template setup bypasses staging and rejects nested
+  host mounts. Setup, managed settings and logs keep B10's host-owned layout.
 
 ## Scripted Alpha verification
 
@@ -177,4 +174,4 @@ local Postgres regressions cover missing-template admission, active-version
 races, runtime revocation fallback, lost provider replies, wallet mismatch,
 Git/path escape refusal and private checkout transport. It does not claim
 independent live inspection of provider request bodies or namespace contents,
-nor wake/upgrade coverage owned by B8. macOS engine/UI smoke requires a Mac.
+nor live wake/upgrade coverage. macOS engine/UI smoke requires a Mac.

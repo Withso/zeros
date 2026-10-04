@@ -61,10 +61,11 @@ export function assertCloudEngineFilesProjection(runtime, {
   if (names.some(name => !allowed.includes(name)))
     throw new Error("Unexpected cloud engine file projection");
   if (names.includes("repos")) {
-    const repos = path.join(root, "repos"), metadata = lstatSync(repos);
+    const repos = path.join(root, "repos");
+    verifyRoot(repos, true);
+    const metadata = lstatSync(repos);
     if (!metadata.isDirectory() || metadata.isSymbolicLink())
       throw new Error("Unsafe cloud repository projection");
-    verifyRoot(repos, true);
   }
 }
 

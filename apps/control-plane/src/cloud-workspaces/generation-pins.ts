@@ -3,6 +3,7 @@ import type { CloudWorkspaceProvisioningProfile } from "../config.js";
 import type { Tx } from "../db.js";
 import { cloudRuntimeQualificationMode, type CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { cloudRuntimePin, cloudRuntimePinValues, requirePinnedCloudRuntime, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
+import { copyComputerWorkspaceSource } from "./computer-workspace-source.js";
 
 type GenerationScope = { workspaceId: string; organizationId: string; generation: number };
 
@@ -30,7 +31,7 @@ export async function requireGenerationRuntime(tx: Tx, scope: GenerationScope, m
 
 /** Single generation-copy boundary. Pins must be written in the INSERT: the
  * database forbids even a NULL-to-v4 update. Wake/retry reuse the existing row.
- * C5's Cloud Computer source sidecar belongs here, in the same transaction. */
+ * Copy the accepted Cloud Computer source in the same transaction. */
 export async function copyGenerationPins(tx: Tx, input: {
   workspaceId: string;
   organizationId: string;
@@ -60,4 +61,5 @@ export async function copyGenerationPins(tx: Tx, input: {
   [input.workspaceId, input.targetGeneration, input.organizationId, profile.provider, profile.imageRef, profile.architecture,
     profile.cpuMillicores, profile.memoryMiB, profile.storageMiB, profile.sourceCommit, input.actorUserId,
     input.providerConnectionId, profile.sandboxClass ?? null, input.recoveryCheckpointId ?? null, ...cloudRuntimePinValues(runtime)]);
+  await copyComputerWorkspaceSource(tx, input);
 }

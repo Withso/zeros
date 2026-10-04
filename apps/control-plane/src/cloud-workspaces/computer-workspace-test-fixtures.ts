@@ -14,6 +14,8 @@ export async function seedComputerTemplate(tx: Tx, input: {
   version?: number;
   runtimeId?: string;
   primaryName?: string;
+  sourceSandboxId?: string;
+  environment?: Array<{ name: string; bindingId: string; bindingVersion: number }>;
 }) {
   const version = input.version ?? 1;
   const buildId = randomUUID(), configId = randomUUID();
@@ -21,7 +23,7 @@ export async function seedComputerTemplate(tx: Tx, input: {
     { id: "123456789", owner: "withso", name: input.primaryName ?? "zeros", sha: "1".repeat(40) },
     { id: "987654321", owner: "withso", name: "secondary", sha: "2".repeat(40) },
   ];
-  const sourceSandboxId = `zeros-v2-test-template-${version}`;
+  const sourceSandboxId = input.sourceSandboxId ?? `zeros-v2-test-template-${version}`;
   await ensureCloudComputerIdentity(tx, input.organizationId, input.ownerUserId);
   await tx.query("INSERT INTO cloud_computer_v2_heads(org_id) VALUES($1) ON CONFLICT DO NOTHING", [input.organizationId]);
   await tx.query(`INSERT INTO cloud_computer_v2_configs(id,org_id,install_script,timeout_seconds,metadata_digest,created_by)
@@ -31,6 +33,10 @@ export async function seedComputerTemplate(tx: Tx, input: {
       (config_id,org_id,position,repository_id,repository_owner,repository_name,installation_id)
       VALUES($1,$2,$3,$4,$5,$6,$7)`,
     [configId, input.organizationId, position, repo.id, repo.owner, repo.name, input.installationId]);
+  }
+  for (const binding of input.environment ?? []) {
+    await tx.query(`INSERT INTO cloud_computer_environment_refs(config_id,org_id,name,binding_id,binding_version)
+      VALUES($1,$2,$3,$4,$5)`, [configId,input.organizationId,binding.name,binding.bindingId,binding.bindingVersion]);
   }
   await tx.query(`INSERT INTO cloud_computer_v2_builds
     (id,org_id,version,config_id,accepted_revision,requested_by,operation_id,state,stage,base_image_id,runtime_id,repository_manifest,completed_at)

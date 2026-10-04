@@ -30,7 +30,7 @@ import type { CloudWorkspaceSetupExecution } from "./setup-worker.js";
 import { runtimeBase, runtimeWitness, seedRuntimeGeneration } from "./runtime-test-fixtures.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { consentTestPersonalEnvironment, persistTestComputerSettings, pinTestComputerEnvironment } from "./computer-environment-test-fixtures.js";
-import { resolveDatabaseCloudWorkspaceSettings } from "./settings.js";
+import { resolveDatabaseCloudWorkspaceSettings, sealCloudWorkspaceSecretBinding } from "./settings.js";
 import { seedComputerTemplate } from "./computer-workspace-test-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -145,7 +145,7 @@ d("cloud workspace setup material redemption", () => {
     await pool.end();
   });
 
-  async function seedMaterials(v4 = false, template = false) {
+  async function seedMaterials(v4 = false, template = false, templateEnvironment: Record<string, string> = {}, repositorySettings?: Record<string, unknown>) {
     await resetMigratedTestDatabase(pool);
     // These tests isolate setup authority; funded compute leases have their
     // own integration suite. Only this disposable test database is configured.
@@ -166,7 +166,7 @@ d("cloud workspace setup material redemption", () => {
     };
     await pool.query(`INSERT INTO users(id,email,display_name,staff_role)
       VALUES ($1,$2,'Setup Materials Owner','developer')`, [accountUserId, accountEmail]);
-    const setup = await withSystemTx(pool, async (tx) => {
+    const setup: CloudWorkspaceSetupExecution = await withSystemTx(pool, async (tx) => {
 
       await tx.query(
         `INSERT INTO user_identities (
@@ -229,6 +229,11 @@ d("cloud workspace setup material redemption", () => {
         ownerUserId: accountUserId,
         githubInstallationId: installationId,
       });
+      if (repositorySettings) {
+        await tx.query(`INSERT INTO repository_settings_versions(repository_id,org_id,scope,version,document,created_by)
+          VALUES($1,$2,'cloud',1,$3::jsonb,$4)`, [canonical.repositoryId,organizationId,JSON.stringify(repositorySettings),accountUserId]);
+        await tx.query(`INSERT INTO repository_settings_heads(repository_id,org_id,scope,current_version) VALUES($1,$2,'cloud',1)`, [canonical.repositoryId,organizationId]);
+      }
       await tx.query(
         `INSERT INTO cloud_workspaces (
            id, org_id, team_id, created_by, display_name,
@@ -252,10 +257,21 @@ d("cloud workspace setup material redemption", () => {
         organizationId,
         ownerUserId: accountUserId,
       });
-      const computer = template ? await seedComputerTemplate(tx, { organizationId, ownerUserId: accountUserId, installationId }) : null;
-      const imageRef = computer ? `boat-template:${computer.sourceSandboxId}` : runtimeBase.imageRef;
-      const repositoryRevision = computer ? "4".repeat(40) : "refs/heads/main";
+      const sourceSandboxId = `zeros-v2-test-template-${workspaceId}`;
+      const imageRef = template ? `boat-template:${sourceSandboxId}` : runtimeBase.imageRef;
+      const repositoryRevision = template ? "4".repeat(40) : "refs/heads/main";
       const runtime = v4 ? await seedRuntimeGeneration(tx, { workspaceId, organizationId, ownerUserId: accountUserId, imageRef }) : null;
+      const environment = [];
+      for (const [name, value] of Object.entries(templateEnvironment)) {
+        const bindingId = randomUUID();
+        const sealed = sealCloudWorkspaceSecretBinding(value, { bindingId, organizationId, version: 1, name }, SECRET_KEY);
+        await tx.query(`INSERT INTO secret_bindings(id,org_id,owner_kind,name,purpose,placement,current_version,state)
+          VALUES($1,$2,'organization',$3,'environment','cloud',1,'active')`, [bindingId,organizationId,name]);
+        await tx.query(`INSERT INTO secret_binding_versions(binding_id,org_id,version,key_version,nonce,ciphertext,auth_tag,verifier_scheme,value_verifier,created_by)
+          VALUES($1,$2,1,1,$3,$4,$5,1,$6,$7)`, [bindingId,organizationId,sealed.nonce,sealed.ciphertext,sealed.authTag,sealed.valueVerifier,accountUserId]);
+        environment.push({ name, bindingId, bindingVersion: 1 });
+      }
+      const computer = template ? await seedComputerTemplate(tx, { organizationId, ownerUserId: accountUserId, installationId, sourceSandboxId, environment }) : null;
       if (computer) {
         await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
           VALUES($1,1,$2,$3,$3,$4)`, [workspaceId, organizationId, computer.buildId, computer.configId]);
@@ -396,6 +412,7 @@ d("cloud workspace setup material redemption", () => {
       new AbortController().signal,
     );
     seed = { execution: setup, setupAdmission, secretId };
+    if (template) await refreshTemplateSettings();
 
     github = {
       mintContentsRead: vi.fn(async () => ({ token: "fixture-template-read-token", expiresAtMs: Date.now() + 60 * 60_000 })),
@@ -446,6 +463,32 @@ d("cloud workspace setup material redemption", () => {
   }
 
   const outcome = (promise: Promise<unknown>) => promise.then(() => "accepted", error => error.code);
+
+  async function refreshTemplateSettings() {
+    const fixture = { ...seed.execution, userId: seed.execution.authority.accountUserId };
+    const repositoryId = (await pool.query("SELECT repository_id FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].repository_id;
+    const settings = await withSystemTx(pool, tx => resolveDatabaseCloudWorkspaceSettings(tx, {
+      ...fixture, repositoryId, actorUserId: fixture.userId, isPersonal: false, setupSecretKeyV1: SECRET_KEY,
+    }));
+    const snapshot = await persistTestComputerSettings(pool, fixture, settings);
+    seed.execution.settings = { version: 1, snapshot: settings.resolved.snapshot, sha256: snapshot.sha256 };
+    return { ...fixture, repositoryId };
+  }
+
+  it("redeems template generations with C4's pinned org environment and primary repository hook", async () => {
+    const name = "ORG_TEMPLATE_VALUE", value = "synthetic-template-org-value";
+    await seedMaterials(true, true, { [name]: value }, {
+      values: { env: { REPO_VALUE: "synthetic-repository-value" } },
+      setupCommands: [{ command: "printf primary-hook", timeoutSeconds: 30 }],
+    });
+    const material = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
+    expect(material.settings.setupEnvironment).toEqual([{ name, value }, { name: "REPO_VALUE", value: "synthetic-repository-value" }]);
+    expect(material.settings.setupCommands).toEqual([{ command: "printf primary-hook", timeoutSeconds: 30 }]);
+    expect(material.computer?.primaryRepositoryId).toBe("123456789");
+    const document = Buffer.from(material.settings.documentB64, "base64url").toString("utf8");
+    expect(document).not.toContain(value);
+    expect(document).not.toContain("synthetic-repository-value");
+  });
 
   it("redeems a saved template with the org contents-only grant and fresh engine authority", async () => {
     await seedMaterials(true, true);

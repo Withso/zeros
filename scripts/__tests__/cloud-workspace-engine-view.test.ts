@@ -18,6 +18,9 @@ describe("fixed cloud engine mount and environment contract", () => {
       const binds = args.flatMap((arg, index) => arg === "--bind" ? [[args[index + 1], args[index + 2]]] : []);
       expect(binds).toContainEqual([primary, "/srv/zeros/workspace"]);
       expect(binds).toContainEqual(["/srv/zeros/files", "/srv/zeros"]);
+      expect(args.join("\n")).toContain(
+        "--tmpfs\n/srv/zeros/.zeros-setup\n--chmod\n0000\n/srv/zeros/.zeros-setup\n--remount-ro\n/srv/zeros/.zeros-setup",
+      );
       expect(cloudEngineWorkspacePaths(primary)).toEqual({ schema: "zeros.cloud-workspace-paths/v1",
         workspaceRoot: "/srv/zeros/workspace", repositoryAlias: "/srv/zeros/repos/fixture/primary" });
       expect(binds.some(([, target]) => target === "/srv/zeros/files/workspace")).toBe(false);

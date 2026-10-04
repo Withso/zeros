@@ -120,6 +120,14 @@ it("restores the previous v4 checkout after an interrupted publication without c
   await expect(setup()).resolves.toBe(commit);
 });
 
+it("reuses the v4 seed after publication completed before the journal was written", async () => {
+  await setup();
+  fs.unlinkSync(`${fixture.root}/srv/zeros/setup/repository.json`);
+  const renames = [...fixture.renames];
+  await expect(setup()).resolves.toBe(commit);
+  expect(fixture.renames).toEqual(renames);
+});
+
 it("keeps the legacy staging and seed paths unchanged", async () => {
   await expect(setup(3)).resolves.toBe(commit);
   expect(fs.readFileSync(`${fixture.root}/srv/zeros/.zeros-image-seed/seed`, "utf8")).toBe("original checkout");

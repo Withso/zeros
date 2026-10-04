@@ -158,9 +158,9 @@ export async function loadComputerWorkspaceSource(tx: Tx, input: { workspaceId: 
   return sourceFromRow(tx, input.organizationId, row);
 }
 
-/** C4's environment and per-repository setup resolver attaches here. Resolve
- * from the accepted config/source, with a live org read grant, never the head.
- * No environment or script is read from a template or supplied by its disk. */
+/** Resolve the accepted config/source and live org read grant, never the head.
+ * Setup redemption also resolves C4's environment from this saved source;
+ * neither environment nor scripts come from the template's disk. */
 export async function resolveComputerWorkspaceSetup(tx: Tx, input: {
   workspaceId: string; generation: number; organizationId: string;
   owner: string; name: string; installationId: string; requestedRevision: string;

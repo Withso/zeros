@@ -2104,8 +2104,8 @@ function hostRepository(material) {
  * A journaled setup preserves edits and still checks the full journal identity. */
 export async function prepareCloudWorkspaceRepository(material, profile, journal, {
   readIdentity = () => repositoryIdentity(hostRepository(material), runtimeLayout.agentHome, material.repository.cloneUrl),
-  recoverClone = recoverInterruptedCloudWorkspaceClone,
-  hasSeed = () => existsSync(SEEDED_REPOSITORY_BACKUP),
+  recoverClone = () => recoverInterruptedCloudWorkspaceClone({ seededRepositoryBackup: clonePaths(profile).seededRepositoryBackup }),
+  hasSeed = () => existsSync(clonePaths(profile).seededRepositoryBackup),
   clone = () => cloneRepository(material, profile),
   checkoutComputer = () => checkoutCloudComputerPrimary(material.computer, material.repository, {
     git: async (directory, args, token) => {
