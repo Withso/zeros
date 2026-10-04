@@ -72,14 +72,17 @@ The public diagnostic still uses the same closed stage/check mapping.
 
 ## Boat directory persistence
 
-Boat's measured stop/resume behavior (design contracts §§22–23) reverts a
-directory rename if the directory existed at the preceding stop, except under
-`/home/user`. The old path can return with old contents while the new path is
-empty, partial or duplicated. The same failure occurs on forks of stopped
-templates. Renamed regular files and symlinks persist. Directory renames under
-`/home/user`, including through a bind mount, persist correctly;
-`/home/user/.cache` is not persisted at all. V4 never publishes a runtime by
-renaming a directory.
+Boat incremental snapshots may revert directory renames after idle sleep/wake; tracked as a Boat platform issue.
+
+On restored VMs, renaming a directory containing subdirectories can be fully
+or partially reverted at the next stop/resume, including under `/home/user`
+(hidden or visible, directly or through a bind). An old path can return with old
+contents while the new path is empty, partial or duplicated. Simpler rename
+cases passed the earlier measurements, but do not establish a general guarantee.
+The earlier §§22–23 capture issues also affect forks of stopped templates.
+Renamed regular files and symlinks persisted in those measurements;
+`/home/user/.cache` is not persisted at all. V4 continues to publish runtime
+directories without directory renames. The base cannot repair this Boat issue.
 
 After archive validation, the installer durably creates the root-only 0600
 sidecar `/opt/zeros-infra/<runtimeId>.incomplete` before creating the fresh final
@@ -340,15 +343,19 @@ the journal refuses more than ten):
    legacy result shape. Upload create-only objects under
    `runtime-test/zeros-v2-test-<attempt>/`; mint each GET immediately before
    SSH stdin delivery. Install A with the nested setup stub, verify the receipt
-   and active descriptor. As UID 10001, seed two directory trees under
-   `/srv/zeros/files/zeros-v2-test-persistence`, then clear `/etc/machine-id` to
+   and active descriptor. As UID 10001, seed two rename-test directory trees
+   and an untouched control tree under `/srv/zeros/files/zeros-v2-test-persistence`, then clear `/etc/machine-id` to
    model template sanitation. Stop/resume **with all four binds active**,
    require zeros-boot to complete, zeros-host to become ready, fresh positive
    residue-clearing counts, the restored binds and regenerated ID. Rename one tree in the same parent and the other
    across parents. Write new content after each rename. Stop/resume a second
    time **with the binds still active**, again require fresh positive cleanup
-   counts and ready units, both old paths absent and both old/new contents
-   intact, and recheck all binds and the repo alias. `live.persistence` records
+   counts and ready units, and recheck all binds and the repo alias. The untouched
+   seed must remain intact after both resumes; loss of either original tree's
+   seed before the rename also fails. Check both old paths and both old/new
+   contents after the second resume, recording only these post-resume rename
+   assertions as the accepted Alpha known issue if they fail. Immediate rename
+   checks and unexpected I/O failures remain fatal. `live.persistence` records
    `hostReady`, `residueCleared`, `residueEntries` and `residueMounts` for each
    phase; both resume phases must confirm residue was actually cleared.
    Every persistence probe (cold clone and both resumes) also requires
@@ -370,8 +377,12 @@ boot/session IDs, re-hash milliseconds, four `live.persistence` phase results
 (`cold`, `seed`, `rename`, `verify`) and confirmed cleanup. Each phase records
 only the bind count and boolean/count assertions, never machine-ID bytes. The
 last phase requires `bindCount=4`, `repoAliases=true`, `machineIdPresent=true`,
-`renames=2`, and `oldPathsAbsent=true`. This proves the
-installer/base boundary, not agent qualification or the full B3 native closure.
+`renames=2` and `seedDataIntact=true`. `oldPathsAbsent` reflects the actual result;
+`knownIssues` contains `boat_incremental_directory_rename` only when a final
+rename assertion failed (otherwise it is empty). Alpha accepts that recorded
+issue while keeping every other assertion mandatory. A successful run does not
+establish reliable directory-rename persistence, agent qualification or the
+full B3 native closure.
 `imageBytes` records Boat's `sizeBytes`, the restored content size of the snapshot.
 Do not describe the re-hash as a full production-runtime measurement; report
 the synthetic archive's `expandedBytes` and `fileCount` alongside the timing.
@@ -395,6 +406,13 @@ cleanup have their own records. `<step>-installer.json` retains the validated
 installer stage, `ok`, `exitCode`, `timedOut` and `failedChecks` before SSH key
 revocation; it is also attached to a failing install step. A rejected corrupted
 C with `archive_digest` is the expected result, so that step is marked passed.
+
+`private/live-check/persistence_verify-renames.json` stores six fixed boolean
+checks: old path absent, prior seed content intact and post-rename content intact
+for each of `same_parent` and `cross_parent`. It records both successes and
+failures, with the known-issue code when observed. The immediate rename phase
+has a corresponding `persistence_rename-renames.json` record and requires every
+check to pass. These files are 0600 and contain no paths or file contents.
 
 Runtime and persistence probes retain only the allowlisted exception class and
 innermost line in `runtime_probe.py` or `persistence_probe.py`. This includes

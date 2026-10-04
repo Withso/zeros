@@ -17,6 +17,8 @@ const BASE = path.join(ROOT, "scripts/cloud-workspace-validation/runtime-base-v4
 const compatibilityBytes = fs.readFileSync(path.join(BASE, "compatibility.json"));
 const compatibilityRawB64 = compatibilityBytes.toString("base64");
 const baseCompatibilityId = `bc1-${createHash("sha256").update(compatibilityBytes).digest("hex")}`;
+const renameChecks = () => ({ same_parent_old_absent: true, same_parent_seed_intact: true, same_parent_new_intact: true,
+  cross_parent_old_absent: true, cross_parent_seed_intact: true, cross_parent_new_intact: true });
 
 function deps(): KitDeps & { calls: { method: string; route: string; body: unknown; headers: unknown }[] } {
   const calls: { method: string; route: string; body: unknown; headers: unknown }[] = [];
@@ -205,6 +207,7 @@ class Bootstrap:
     const d = deps(), renamed = phase === "rename" || phase === "verify";
     const proof = { schema: "zeros.persistence-probe/v1", phase, bindCount: 4, repoAliases: true,
       machineIdPresent: phase !== "seed", templateIdentityCleared: phase === "seed", renames: renamed ? 2 : 0, oldPathsAbsent: renamed,
+      seedDataIntact: phase !== "cold", renameChecks: renamed ? renameChecks() : null,
       hostReady: true, bindFilesystem: "ext4", residueCleared: renamed, residueEntries: renamed ? 9 : 0, residueMounts: renamed ? 3 : 0,
       ignoredPrivateField: "private-canary" };
     d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 0, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
@@ -220,6 +223,7 @@ class Bootstrap:
   });
 
   it.each([{ bindCount: 3 }, { repoAliases: false }, { machineIdPresent: false }, { renames: 1 }, { oldPathsAbsent: false },
+    { seedDataIntact: false }, { renameChecks: undefined }, { renameChecks: {} },
     { hostReady: false }, { bindFilesystem: "fuse" }, { bindFilesystem: "xfs" }, { bindFilesystem: undefined },
     { residueCleared: false }, { residueEntries: 0 }, { residueEntries: -1 }, { residueEntries: 1.5 },
     { residueMounts: 0 }, { residueMounts: 5 }])(
@@ -227,12 +231,41 @@ class Bootstrap:
       const d = deps();
       const proof = { schema: "zeros.persistence-probe/v1", phase: "verify", bindCount: 4, repoAliases: true,
         machineIdPresent: true, templateIdentityCleared: false, renames: 2, oldPathsAbsent: true,
+        seedDataIntact: true, renameChecks: { ...renameChecks(), same_parent_seed_intact: false },
         hostReady: true, bindFilesystem: "ext4", residueCleared: true, residueEntries: 9, residueMounts: 3, ...corrupt };
       d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 0, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
         schema: "zeros.diagnostic/v1", component: "base", stage: "resume", ok: true, exitCode: 0, timedOut: false, failedChecks: [],
       }) } });
       await expect(probePersistence(d, "bx_fixture", "verify")).rejects.toMatchObject({ diagnostic: { stage: "resume", failedChecks: ["base_compatibility"] } });
     });
+
+  it.each(["rename", "verify"] as const)("limits the known rename issue to the post-resume phase: %s", async phase => {
+    const d = deps();
+    const checks = { ...renameChecks(), same_parent_old_absent: false, same_parent_seed_intact: false };
+    const proof = { schema: "zeros.persistence-probe/v1", phase, bindCount: 4, repoAliases: true,
+      machineIdPresent: true, templateIdentityCleared: false, renames: 2, oldPathsAbsent: false,
+      seedDataIntact: true, renameChecks: checks,
+      hostReady: true, bindFilesystem: "ext4", residueCleared: true, residueEntries: 9, residueMounts: 3,
+      ignoredPrivateField: "private-canary" };
+    d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 0, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
+      schema: "zeros.diagnostic/v1", component: "base", stage: "resume", ok: true, exitCode: 0, timedOut: false, failedChecks: [],
+    }) } });
+    const operation = runLiveStep(d, `persistence_${phase}`, () => probePersistence(d, "bx_fixture", phase));
+    if (phase === "rename") {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      await expect(operation).rejects.toMatchObject({ diagnostic: { failedChecks: ["base_compatibility"] } });
+    } else {
+      await expect(operation).resolves.toMatchObject({ oldPathsAbsent: false, seedDataIntact: true,
+        knownIssues: ["boat_incremental_directory_rename"] });
+      const file = path.join(d.stateDir, "private/live-check/persistence_verify-renames.json");
+      const evidence = fs.readFileSync(file, "utf8");
+      expect(JSON.parse(evidence)).toEqual({ schema: "zeros.persistence-rename-evidence/v1", step: "persistence_verify",
+        knownIssues: ["boat_incremental_directory_rename"], checks });
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      expect(evidence).not.toContain("private-canary");
+      expect(JSON.parse(fs.readFileSync(path.join(d.stateDir, "private/live-check/persistence_verify.json"), "utf8"))).toMatchObject({ state: "passed" });
+    }
+  });
 
   it.each(["ready", "idle", "running"])("accepts Boat %s as command-ready", async state => {
     vi.useFakeTimers();

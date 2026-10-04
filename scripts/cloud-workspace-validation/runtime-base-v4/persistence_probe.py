@@ -34,29 +34,45 @@ def probe_failure(error):
 
 def tree_operation(phase, root):
     assert phase in ("seed", "rename", "verify")
-    pairs = (("same-before", "same-after"), ("from/move-before", "into/move-after"))
+    pairs = (("same_parent", "same-before", "same-after"), ("cross_parent", "from/move-before", "into/move-after"))
+    control = root / "untouched/nested/seed.txt"
     if phase == "seed":
+        control.parent.mkdir(parents=True)
+        control.write_bytes(b"unrenamed seed data\n")
         (root / "into").mkdir()
-        for before, _ in pairs:
+        for _, before, _ in pairs:
             (root / before / "nested").mkdir(parents=True)
             (root / before / "nested/before.txt").write_text("from the previous session\n")
+        assert control.read_bytes() == b"unrenamed seed data\n"
         return
+    # A rename-specific exception must never hide loss of untouched seed data.
+    assert control.read_bytes() == b"unrenamed seed data\n"
     if phase == "rename":
-        for before, after in pairs:
+        for _, before, after in pairs:
             assert (root / before / "nested/before.txt").read_text() == "from the previous session\n"
             assert not os.path.lexists(root / after)
             (root / before).rename(root / after)
             (root / after / "after.txt").write_text("written after rename\n")
-    for before, after in pairs:
-        assert not os.path.lexists(root / before)
-        assert (root / after / "nested/before.txt").read_text() == "from the previous session\n"
-        assert (root / after / "after.txt").read_text() == "written after rename\n"
+
+    def matches(file, expected):
+        try:
+            return file.read_bytes() == expected
+        except FileNotFoundError:
+            return False  # Known Boat restore behavior, only for renamed trees.
+
+    checks = {}
+    for name, before, after in pairs:
+        checks[name + "_old_absent"] = not os.path.lexists(root / before)
+        checks[name + "_seed_intact"] = matches(root / after / "nested/before.txt", b"from the previous session\n")
+        checks[name + "_new_intact"] = matches(root / after / "after.txt", b"written after rename\n")
+    if phase == "rename":
+        assert all(checks.values())  # Immediate rename behavior stays mandatory.
+    return checks  # Post-resume failures are recorded by the kit as a known issue.
 
 
 def as_agent(uid, gid, phase, root):
     if (os.getuid(), os.getgid()) == (uid, gid):
-        tree_operation(phase, root)  # Rootless test adapter.
-        return
+        return tree_operation(phase, root)  # Rootless test adapter.
     reader, writer = os.pipe()
     try:
         pid = os.fork()
@@ -66,7 +82,8 @@ def as_agent(uid, gid, phase, root):
                 os.setgroups([])
                 os.setgid(gid)
                 os.setuid(uid)
-                tree_operation(phase, root)
+                result = tree_operation(phase, root)
+                os.write(writer, json.dumps(result).encode())
             except BaseException as error:
                 try:
                     # Fixed identities only, well below PIPE_BUF; no child
@@ -79,9 +96,11 @@ def as_agent(uid, gid, phase, root):
         writer = None
         _, status = os.waitpid(pid, 0)
         evidence = os.read(reader, 512)
-        if evidence:
-            raise AgentProbeFailure(json.loads(evidence))
+        result = json.loads(evidence) if evidence else None
+        if isinstance(result, dict) and result.get("schema") == "zeros.live-probe-failure/v1":
+            raise AgentProbeFailure(result)
         assert os.waitstatus_to_exitcode(status) == 0
+        return result
     finally:
         os.close(reader)
         if writer is not None:
@@ -115,6 +134,7 @@ def probe(app, phase):
         # Both stops deliberately keep all binds active. Boot must acknowledge
         # clearing capture residue on this restore, not just hide it by binding.
         assert entries > 0 and mounts > 0
+    rename_checks = None
     if phase != "cold":
         root = app.path("/srv/zeros/files/zeros-v2-test-persistence")
         uid, gid = app.account("agent")
@@ -124,7 +144,7 @@ def probe(app, phase):
         metadata = root.lstat()
         assert stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode)
         assert (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode)) == (uid, gid, 0o700)
-        as_agent(uid, gid, phase, root)
+        rename_checks = as_agent(uid, gid, phase, root)
     if phase == "seed":
         # Model C3's sanitized template identity. The next restore must fill
         # this without relying on stock early-boot services having run again.
@@ -134,8 +154,9 @@ def probe(app, phase):
             "bindFilesystem": filesystems[0],
             "hostReady": True, "residueCleared": entries > 0, "residueEntries": entries, "residueMounts": mounts,
             "machineIdPresent": phase != "seed", "templateIdentityCleared": phase == "seed",
+            "seedDataIntact": phase != "cold", "renameChecks": rename_checks,
             "renames": 2 if phase in ("rename", "verify") else 0,
-            "oldPathsAbsent": phase in ("rename", "verify")}
+            "oldPathsAbsent": rename_checks is not None and rename_checks["same_parent_old_absent"] and rename_checks["cross_parent_old_absent"]}
 
 
 def main(phase):

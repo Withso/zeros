@@ -299,22 +299,39 @@ export async function probeRuntime(deps: KitDeps, id: string, runtimeId: string,
     fileCount: result.fileCount as number, expandedBytes: result.expandedBytes as number, node: "22.23.1", abi: 127 };
 }
 
+const RENAME_CHECKS = ["same_parent_old_absent", "same_parent_seed_intact", "same_parent_new_intact",
+  "cross_parent_old_absent", "cross_parent_seed_intact", "cross_parent_new_intact"] as const;
+
 export async function probePersistence(deps: KitDeps, id: string, phase: "cold" | "seed" | "rename" | "verify") {
   requireBase(["cold", "seed", "rename", "verify"].includes(phase), "validate_input", "input_schema");
   const program = fs.readFileSync(path.join(deps.repoRoot, "scripts/cloud-workspace-validation/runtime-base-v4/persistence_probe.py"), "utf8");
   const result = parseLiveProbe(await remote(deps, id, pythonProbe(`${program}\nmain(${JSON.stringify(phase)})`, "resume"), 600), "resume");
   const renamed = phase === "rename" || phase === "verify";
+  let checks: Record<string, boolean> | null = null;
+  if (renamed) {
+    requireBase(result?.renameChecks && typeof result.renameChecks === "object" && !Array.isArray(result.renameChecks) &&
+      Object.keys(result.renameChecks).length === RENAME_CHECKS.length &&
+      RENAME_CHECKS.every(name => typeof result.renameChecks[name] === "boolean"), "resume", "base_compatibility");
+    checks = Object.fromEntries(RENAME_CHECKS.map(name => [name, result.renameChecks[name] as boolean]));
+    requireBase(phase === "verify" || Object.values(checks).every(Boolean), "resume", "base_compatibility");
+  } else requireBase(result?.renameChecks === null, "resume", "base_compatibility");
+  const oldPathsAbsent = checks !== null && checks.same_parent_old_absent && checks.cross_parent_old_absent;
   requireBase(result?.schema === "zeros.persistence-probe/v1" && result.phase === phase && result.bindCount === 4 &&
     result.repoAliases === true && result.machineIdPresent === (phase !== "seed") && result.templateIdentityCleared === (phase === "seed") &&
-    result.renames === (renamed ? 2 : 0) && result.oldPathsAbsent === renamed && result.hostReady === true && result.bindFilesystem === "ext4" &&
+    result.renames === (renamed ? 2 : 0) && result.oldPathsAbsent === oldPathsAbsent && result.seedDataIntact === (phase !== "cold") &&
+    result.hostReady === true && result.bindFilesystem === "ext4" &&
     Number.isSafeInteger(result.residueEntries) && result.residueEntries >= 0 &&
     Number.isSafeInteger(result.residueMounts) && result.residueMounts >= 0 && result.residueMounts <= 4 &&
     result.residueCleared === (result.residueEntries > 0) && (result.residueMounts > 0) === result.residueCleared &&
     (!renamed || result.residueCleared === true), "resume", "base_compatibility");
+  const knownIssues = phase === "verify" && checks && !Object.values(checks).every(Boolean) ? ["boat_incremental_directory_rename"] : [];
+  if (checks) saveJson(path.join(deps.stateDir, "private", "live-check", `persistence_${phase}-renames.json`), {
+    schema: "zeros.persistence-rename-evidence/v1", step: `persistence_${phase}`, knownIssues, checks,
+  });
   return { phase, bindCount: 4, repoAliases: true, machineIdPresent: phase !== "seed", templateIdentityCleared: phase === "seed",
     hostReady: true, bindFilesystem: "ext4", residueCleared: result.residueCleared as boolean,
     residueEntries: result.residueEntries as number, residueMounts: result.residueMounts as number,
-    renames: renamed ? 2 : 0, oldPathsAbsent: renamed };
+    seedDataIntact: phase !== "cold", knownIssues, renames: renamed ? 2 : 0, oldPathsAbsent };
 }
 
 export async function liveCheck(options: Map<string, string>, deps: KitDeps) {

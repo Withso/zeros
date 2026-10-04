@@ -107,6 +107,8 @@ class LiveProbeTests(unittest.TestCase):
              mock.patch.object(persistence.os, "setgroups"), \
              mock.patch.object(persistence.os, "setgid"), \
              mock.patch.object(persistence.os, "setuid"):
+            persistence.tree_operation("seed", Path(directory))
+            (Path(directory) / "same-before/nested/before.txt").unlink()
             with self.assertRaises(Exception) as stopped:
                 persistence.as_agent(os.getuid() + 1, os.getgid(), "rename", Path(directory))
             result = persistence.probe_failure(stopped.exception)
@@ -114,3 +116,17 @@ class LiveProbeTests(unittest.TestCase):
         expected = next(index + 1 for index, line in enumerate(lines) if 'assert (root / before / "nested/before.txt").read_text()' in line)
         self.assertEqual(result["exception"], "FileNotFoundError")
         self.assertEqual(result["line"], expected)
+
+    def test_agent_child_returns_all_rename_results_without_hiding_missing_files(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(persistence.os, "setgroups"), \
+             mock.patch.object(persistence.os, "setgid"), \
+             mock.patch.object(persistence.os, "setuid"):
+            root = Path(directory)
+            persistence.as_agent(os.getuid() + 1, os.getgid(), "seed", root)
+            persistence.as_agent(os.getuid() + 1, os.getgid(), "rename", root)
+            (root / "same-after/nested/before.txt").unlink()
+            checks = persistence.as_agent(os.getuid() + 1, os.getgid(), "verify", root)
+            self.assertEqual(len(checks), 6)
+            self.assertFalse(checks["same_parent_seed_intact"])
+            self.assertTrue(checks["cross_parent_seed_intact"])

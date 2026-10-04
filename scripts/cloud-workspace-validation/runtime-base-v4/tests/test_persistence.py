@@ -720,8 +720,10 @@ class LiveProbeTests(unittest.TestCase):
         self.assertFalse((self.root / "same-before").exists())
         self.assertFalse((self.root / "from/move-before").exists())
 
-    def test_live_probe_rejects_reverted_duplicated_or_empty_directories(self):
-        for problem in ("reverted", "duplicated", "empty"):
+    def test_live_probe_records_every_rename_assertion_after_restore(self):
+        failures = {"reverted": {"same_parent_old_absent", "same_parent_seed_intact", "same_parent_new_intact"},
+                    "duplicated": {"cross_parent_old_absent"}, "empty": {"cross_parent_seed_intact"}}
+        for problem, expected in failures.items():
             with self.subTest(problem=problem), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 self.probe.tree_operation("seed", root)
@@ -732,8 +734,35 @@ class LiveProbeTests(unittest.TestCase):
                     (root / "from/move-before").mkdir()
                 else:
                     (root / "into/move-after/nested/before.txt").unlink()
-                with self.assertRaises((AssertionError, OSError)):
-                    self.probe.tree_operation("verify", root)
+                checks = self.probe.tree_operation("verify", root)
+                self.assertEqual(len(checks), 6)
+                self.assertEqual({name for name, passed in checks.items() if not passed}, expected)
+                self.assertTrue(all(type(passed) is bool for passed in checks.values()))
+
+    def test_seed_data_loss_stays_fatal_before_and_after_renames(self):
+        for phase in ("rename", "verify"):
+            for problem in ("missing", "changed"):
+                with self.subTest(phase=phase, problem=problem), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.probe.tree_operation("seed", root)
+                    if phase == "verify":
+                        self.probe.tree_operation("rename", root)
+                    control = root / "untouched/nested/seed.txt"
+                    if problem == "missing":
+                        control.unlink()
+                    else:
+                        control.write_text("changed")
+                    with self.assertRaises((AssertionError, FileNotFoundError)):
+                        self.probe.tree_operation(phase, root)
+
+    def test_original_seed_loss_before_rename_and_other_io_errors_remain_fatal(self):
+        self.probe.tree_operation("seed", self.root)
+        (self.root / "same-before/nested/before.txt").unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.probe.tree_operation("rename", self.root)
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("private-canary")), \
+             self.assertRaises(PermissionError):
+            self.probe.tree_operation("verify", self.root)
 
 
 if __name__ == "__main__":
