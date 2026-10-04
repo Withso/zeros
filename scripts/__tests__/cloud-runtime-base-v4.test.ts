@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sshBoundary from "../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
 import { builderCommand, KitError, main, parseArgs, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
 import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, resumeOwned, v4Command, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
-import { cleanupLiveObjects, installOverSsh, presignGet, signedHeaders, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
+import { cleanupLiveObjects, installOverSsh, presignGet, signedHeaders, syntheticArchives, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
 
 const scratch: string[] = [];
 const temp = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-base-v4-")); scratch.push(dir); return dir; };
@@ -306,7 +306,23 @@ describe("runtime-base-v4 profile", () => {
     expect(d.calls).toHaveLength(0);
   });
 
-  it.each([false, true])("keeps live-check failure resources only when explicitly requested: %s", async keep => {
+  it("cancels oversized synthetic downloads through a reader-only stream", async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(64 * 1024 + 1)); },
+      cancel,
+    });
+    // The release compiler's DOM library exposes getReader, not async iteration.
+    Object.defineProperty(body, Symbol.asyncIterator, { value: undefined });
+    const request = vi.fn().mockResolvedValue(new Response(body));
+    vi.stubGlobal("fetch", request);
+    await expect(syntheticArchives(deps())).rejects.toMatchObject({ diagnostic: { stage: "install", failedChecks: ["archive_digest"] } });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
+  });
+
+  it.each([false, true])("keeps live-check failure resources only when explicitly requested after reader-only downloads: %s", async keep => {
     const f = fullKit();
     vi.stubEnv("ZEROS_R2_ALPHA_ENDPOINT", `https://${"a".repeat(32)}.r2.cloudflarestorage.com`);
     vi.stubEnv("ZEROS_R2_ALPHA_BUCKET", "zeros-cloud-workspaces-alpha");
@@ -320,9 +336,18 @@ with tarfile.open(fileobj=out,mode='w:xz') as archive:
  archive.addfile(node,io.BytesIO(b'test'))
 sys.stdout.buffer.write(out.getvalue())`]);
     const digest = createHash("sha256").update(archive).digest("hex");
+    const download = (bytes: Buffer) => {
+      const body = new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new Uint8Array(bytes.subarray(0, 8)));
+        controller.enqueue(new Uint8Array(bytes.subarray(8)));
+        controller.close();
+      } });
+      Object.defineProperty(body, Symbol.asyncIterator, { value: undefined });
+      return new Response(body);
+    };
     const request = vi.fn(async (url: string, options?: RequestInit) => {
-      if (url.endsWith("/SHASUMS256.txt")) return new Response(`${digest}  node-v22.23.1-linux-x64.tar.xz\n`);
-      if (url.endsWith("/node-v22.23.1-linux-x64.tar.xz")) return new Response(new Uint8Array(archive));
+      if (url.endsWith("/SHASUMS256.txt")) return download(Buffer.from(`${digest}  node-v22.23.1-linux-x64.tar.xz\n`));
+      if (url.endsWith("/node-v22.23.1-linux-x64.tar.xz")) return download(archive);
       if (options?.method === "PUT" || options?.method === "DELETE") return new Response(null, { status: 200 });
       if (options?.method === "HEAD") return new Response(null, { status: 404 });
       throw new Error("unexpected fixture request");

@@ -108,12 +108,19 @@ async function fetchBounded(url: string, max: number) {
     requireBase(result.status === 200 && result.body, "install", "provider_request");
     const chunks: Buffer[] = [];
     let bytes = 0;
-    for await (const part of result.body) {
-      bytes += part.length;
-      requireBase(bytes <= max, "install", "archive_digest");
-      chunks.push(Buffer.from(part));
+    const reader = result.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) return Buffer.concat(chunks);
+        bytes += value.byteLength;
+        requireBase(bytes <= max, "install", "archive_digest");
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
     }
-    return Buffer.concat(chunks);
   } catch (error) {
     if (error instanceof BaseFailure) throw error;
     throw new BaseFailure("install", "provider_request");
