@@ -54,6 +54,11 @@ describe("v4 one-use launch proof", () => {
     const tree = fixture(); tree.write(tree.receiptPath, "{}", 0o600);
     consume(tree, false, "receipt_digest");
   });
+  it("burns a proof when B4 marks the runtime incomplete after qualification", () => {
+    const tree = fixture(); tree.write(`${tree.root}.incomplete`, "", 0o600);
+    consume(tree, false, "file_inventory");
+    consume(tree, false);
+  });
   it.each(["owner", "mode", "hardlink", "symlink"])("rejects unsafe proof %s", kind => {
     const tree = fixture();
     if (kind === "owner") tree.owners.set("/run/zeros/.cloud-worker-admission.42.consumed", 10001);

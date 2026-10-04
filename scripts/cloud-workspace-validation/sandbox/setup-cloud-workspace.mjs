@@ -29,6 +29,11 @@ import { createRequire } from "node:module";
 import net from "node:net";
 import path from "node:path";
 import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
+import {
+  CLOUD_V4_IDENTITY_FIELDS,
+  parseCloudV4Document,
+  validV4Diagnostic,
+} from "./attest-cloud-worker.mjs";
 import { runScopedCloudSetup } from "./cloud-setup-process.mjs";
 import {
   validCloudResourceContract,
@@ -2166,6 +2171,24 @@ function installGithubProjection(material, profile, now = Date.now()) {
   });
 }
 
+/** V4 emits a report followed by a closed completion diagnostic. Never admit
+ * a report on its own, ambiguous JSON keys, or extra/truncated child output. */
+function readCloudWorkspaceV4Attestation(result) {
+  try {
+    if (typeof result.stdout !== "string" || Buffer.byteLength(result.stdout) > MAX_PROCESS_OUTPUT_BYTES) return null;
+    const lines = result.stdout.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    if (lines.length !== 2) return null;
+    const diagnostic = parseCloudV4Document(Buffer.from(lines[1]), "diagnostic_missing");
+    if (!validV4Diagnostic(diagnostic) || diagnostic.stage !== "done" || !diagnostic.ok ||
+      diagnostic.exitCode !== result.code) return null;
+    const report = parseCloudV4Document(Buffer.from(lines[0]), "diagnostic_missing");
+    return isRecord(report) ? report : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Bounded operator diagnostics contain only fixed gate names and booleans.
  * Attestation stdout/stderr can contain workload output and stays private. */
 export function cloudWorkspaceImageAdmissionChecks(
@@ -2174,6 +2197,27 @@ export function cloudWorkspaceImageAdmissionChecks(
   result,
   report,
 ) {
+  if (profile.version === 4) {
+    return {
+      execution: result.code === 0 && !result.timedOut && !result.overflow,
+      report: isRecord(report) && report.version === 1,
+      profile: profile.profile === "zeros-cloud-worker-v4" && report?.profile === profile.profile,
+      qualified: report?.qualified === true,
+      // Keep the setup diagnostic's metadata gate. For v4 it checks RUNTIME,
+      // the validated descriptor pinned before redemption and sent as its
+      // witness to the control plane, never an attester-supplied identity.
+      metadata: RUNTIME.profile === "v4" && isRecord(report?.runtime) &&
+        exactKeys(report.runtime, CLOUD_V4_IDENTITY_FIELDS) &&
+        CLOUD_V4_IDENTITY_FIELDS.every(key => report.runtime[key] === RUNTIME[key]),
+      helpers:
+        report?.helpers?.deploymentTrusted?.setupHelper === true &&
+        report?.helpers?.deploymentTrusted?.workerSupervisor === true,
+      resources:
+        report?.resources?.finite === true &&
+        cloudResourcesMeetContract(material.image.resources, report.resources),
+      runtime: report?.qualification?.secure === true,
+    };
+  }
   return {
     execution: result.code === 0 && !result.timedOut && !result.overflow,
     report: isRecord(report) && report.version === 1,
@@ -2317,7 +2361,7 @@ export function cloudWorkspaceImageDigests(build, observed) {
   return result;
 }
 
-async function attestImage(material, profile, recordChecks) {
+export async function attestImage(material, profile, recordChecks) {
   if (
     material.repository.credential.expiresAtMs - Date.now() < 5 * 60_000 ||
     material.engine.registration.expiresAtMs - Date.now() < 5 * 60_000
@@ -2334,10 +2378,14 @@ async function attestImage(material, profile, recordChecks) {
     },
   );
   let report;
-  try {
-    report = JSON.parse(result.stdout);
-  } catch {
-    report = null;
+  if (profile.version === 4) {
+    report = readCloudWorkspaceV4Attestation(result);
+  } else {
+    try {
+      report = JSON.parse(result.stdout);
+    } catch {
+      report = null;
+    }
   }
   const checks = cloudWorkspaceImageAdmissionChecks(
     material,
@@ -2347,6 +2395,7 @@ async function attestImage(material, profile, recordChecks) {
   );
   recordChecks(checks, cloudWorkspaceImageAdmissionDiagnostic(report));
   if (!Object.values(checks).every((value) => value === true)) {
+    if (profile.version === 4) throw failure("image_contract_invalid");
     const observed = {};
     try {
       const inventory = await import("./image-build-contract.mjs");

@@ -84,8 +84,9 @@ describe("cloud worker attestation", () => {
     const duplicate = fixture();
     duplicate.updateReceipt(`{"schema":"ignored",${JSON.stringify(duplicate.receipt).slice(1)}`);
     failed(duplicate, "installer_receipt");
-    const incomplete = fixture(); incomplete.write(`${incomplete.root}/.incomplete`, "pending");
+    const incomplete = fixture(); incomplete.write(`${incomplete.root}.incomplete`, "", 0o600);
     failed(incomplete, "file_inventory");
+    expect(incomplete.calls).toHaveLength(0);
   });
   it("rejects a package link that leaves the runtime before reentering it", () => {
     const tree = fixture();

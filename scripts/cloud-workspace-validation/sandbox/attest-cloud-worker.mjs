@@ -616,8 +616,8 @@ process.stdout.write(serializedReport);
 if (!report.qualified) process.exitCode = 1;
 }
 
-// Component-local vocabulary. New attester/proof names are proposed with B9;
-// arbitrary child output and exception messages never enter this vocabulary.
+// Component-local vocabulary. Arbitrary child output and exception messages
+// never enter this vocabulary.
 const V4_CHECKS = new Set([
   "active_descriptor", "host_marker", "installer_receipt", "receipt_digest",
   "manifest_digest", "manifest_schema", "base_compatibility", "root_ownership",
@@ -781,7 +781,7 @@ export function verifyCloudV4Installation() {
     receipt.baseCompatibilityId === runtime.baseCompatibilityId && receipt.bootstrapVersion === 1 &&
     hexDigest(receipt.archiveSha256) && receipt.expandedBytes === expandedBytes && receipt.fileCount === fileCount &&
     receiptTimestamp(receipt.installedAt), "installer_receipt");
-  try { lstatSync(`${runtime.root}/.incomplete`); throw new V4Failure("file_inventory"); }
+  try { lstatSync(`${runtime.root}.incomplete`); throw new V4Failure("file_inventory"); }
   catch (error) { if (error?.code !== "ENOENT") throw error; }
   requireCloudV4Check(runtime.bootId === readOptional("/proc/sys/kernel/random/boot_id"), "boot_identity");
   return runtime;
@@ -917,7 +917,7 @@ function v4DelegatedResources(runtime, qualification) {
   return { finite: true, cpuMax: resources.cpuMax, memoryMax: resources.memoryMax, pidsMax: resources.pidsMax, allocation };
 }
 
-function validV4Diagnostic(value) {
+export function validV4Diagnostic(value) {
   return exactKeys(value, ["schema", "component", "stage", "ok", "exitCode", "timedOut", "failedChecks"]) &&
     value.schema === "zeros.diagnostic/v1" && value.component === "attester" && V4_STAGES.has(value.stage) &&
     typeof value.ok === "boolean" && value.exitCode === (value.ok ? 0 : 1) && typeof value.timedOut === "boolean" &&
