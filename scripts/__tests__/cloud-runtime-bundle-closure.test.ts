@@ -404,10 +404,18 @@ describe.skipIf(!process.env.ZEROS_RUNTIME_BUNDLE_TEST_DIR)(
     it("checks the descriptor, every file hash and offline probes with no checkout or store", async () => {
       const { verifyBundleDirectory } =
         await import("../cloud-workspace-validation/runtime-bundle/verify");
-      const result = await verifyBundleDirectory(
-        path.resolve(process.env.ZEROS_RUNTIME_BUNDLE_TEST_DIR!),
-        true,
+      const directory = path.resolve(
+        process.env.ZEROS_RUNTIME_BUNDLE_TEST_DIR!,
       );
+      const result = await verifyBundleDirectory(directory, true);
+      const receipt = JSON.parse(
+        await readFile(path.join(directory, "build-receipt.json"), "utf8"),
+      );
+      expect(receipt.fileCount).toBe(
+        result.manifest.files.filter((entry) => entry.type === "file").length,
+      );
+      expect(receipt.entryCount).toBe(result.manifest.files.length);
+      expect(receipt.fileCount).toBeLessThan(receipt.entryCount);
       expect(result.closure?.checks).toContain("engine_help");
       expect(result.closure?.checks).toContain("sqlite_query");
       expect(result.closure?.checks).toContain("pty_load");

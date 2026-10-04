@@ -4,14 +4,18 @@ import { lstat, readdir, readlink } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
-// Cloud v2 contracts §2–4. Keep the builder independent of the runtime it builds.
+// Cloud v2 contracts §2–4 and §17. Keep the builder independent of its runtime.
 export const NODE_VERSION = "22.23.1";
 export const NODE_MODULES_ABI = 127;
 export const PNPM_VERSION = "10.28.0";
 export const PLAYWRIGHT_VERSION = "1.59.1";
 export const MAX_MANIFEST_BYTES = 64 * 1024 * 1024;
-export const MAX_EXPANDED_BYTES = 8 * 1024 ** 3;
-export const MAX_ENTRIES = 200_000;
+export const MAX_ARCHIVE_BYTES = 2 * 1024 ** 3;
+export const MAX_EXPANDED_BYTES = 4 * 1024 ** 3;
+export const MAX_ENTRIES = 250_000;
+export const MAX_PAX_BYTES = 16 * 1024;
+export const MAX_PATH_BYTES = 4096;
+export const MAX_PROTOCOL_VERSION = 65_535;
 
 export class BundleError extends Error {
   constructor(readonly check: string) {
@@ -59,6 +63,7 @@ export function canonicalJson(value: unknown): Buffer {
 export function validPath(value: string): boolean {
   return (
     value.length > 0 &&
+    Buffer.byteLength(value) <= MAX_PATH_BYTES &&
     !/[\0\\\r\n]/.test(value) &&
     value
       .split("/")
@@ -87,12 +92,16 @@ const entrySchema = z.discriminatedUnion("type", [
     .object({
       type: z.literal("symlink"),
       path: relativePath,
-      target: z.string().min(1),
+      target: z
+        .string()
+        .min(1)
+        .refine((value) => Buffer.byteLength(value) <= MAX_PATH_BYTES),
     })
     .strict(),
 ]);
 export type ManifestEntry = z.infer<typeof entrySchema>;
-const agentVersion = z.string().regex(/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/);
+const agentVersion = z.string().regex(/^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$/);
+const protocolVersion = z.number().int().min(1).max(MAX_PROTOCOL_VERSION);
 const manifestSchema = z
   .object({
     schema: z.literal("zeros.runtime-manifest/v1"),
@@ -115,7 +124,7 @@ const manifestSchema = z
     protocols: z
       .object({
         bootstrap: z.literal(1),
-        engine: z.number().int().positive(),
+        engine: protocolVersion,
         setup: z.literal(2),
       })
       .strict(),
@@ -132,8 +141,7 @@ const manifestSchema = z
         setup: z.literal("lib/zeros/setup-cloud-workspace.mjs"),
         startEngine: z.literal("bin/start-engine.sh"),
         supervisor: z.literal("lib/zeros/cloud-worker-supervisor.mjs"),
-        // Reserved by the shared contract; B7 supplies this file when it lands.
-        selfTest: z.literal("lib/zeros/runtime-self-test.mjs"),
+        selfTest: z.literal("lib/zeros/runtime-self-test.mjs").optional(),
       })
       .strict(),
     files: z.array(entrySchema).max(MAX_ENTRIES),
@@ -145,12 +153,12 @@ export const descriptorSchema = z
     runtimeId: z.string().regex(/^r1-[a-f0-9]{64}$/),
     manifestSha256: digest,
     archiveSha256: digest,
-    archiveBytes: z.number().int().positive(),
-    expandedBytes: size,
+    archiveBytes: z.number().int().min(1).max(MAX_ARCHIVE_BYTES),
+    expandedBytes: size.min(1),
     sourceCommit: z.string().regex(/^[a-f0-9]{40}$/),
-    nodeModulesAbi: z.number().int().positive(),
+    nodeModulesAbi: protocolVersion,
     bootstrapProtocolVersion: z.literal(1),
-    engineProtocolVersion: z.number().int().positive(),
+    engineProtocolVersion: protocolVersion,
   })
   .strict();
 export type RuntimeDescriptor = z.infer<typeof descriptorSchema>;
@@ -294,7 +302,13 @@ export function createManifest(
       startEngine: "bin/start-engine.sh",
       setup: "lib/zeros/setup-cloud-workspace.mjs",
       supervisor: "lib/zeros/cloud-worker-supervisor.mjs",
-      selfTest: "lib/zeros/runtime-self-test.mjs",
+      ...(files.some(
+        (entry) =>
+          entry.type === "file" &&
+          entry.path === "lib/zeros/runtime-self-test.mjs",
+      )
+        ? { selfTest: "lib/zeros/runtime-self-test.mjs" as const }
+        : {}),
     },
     files,
   };
@@ -314,5 +328,20 @@ export function parseManifest(bytes: Buffer): RuntimeManifest {
   const parsed = manifestSchema.safeParse(value);
   check(parsed.success, "manifest_schema");
   validateFiles(parsed.data.files);
+  const regularFiles = new Set(
+    parsed.data.files
+      .filter((entry) => entry.type === "file")
+      .map((entry) => entry.path),
+  );
+  check(
+    Object.values(parsed.data.entrypoints).every((entry) =>
+      regularFiles.has(entry),
+    ),
+    "file_inventory",
+  );
+  check(
+    parsed.data.files.some((entry) => entry.type === "file" && entry.size > 0),
+    "expanded_size",
+  );
   return parsed.data;
 }

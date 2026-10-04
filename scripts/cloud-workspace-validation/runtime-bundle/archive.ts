@@ -2,11 +2,14 @@ import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { lstat } from "node:fs/promises";
 import path from "node:path";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import {
+  BundleError,
   check,
+  MAX_ARCHIVE_BYTES,
+  MAX_PAX_BYTES,
   parseManifest,
   validMode,
   validPath,
@@ -37,6 +40,8 @@ function octal(
 export function tarHeader(input: HeaderInput): Buffer {
   check(validPath(input.path), "archive_paths");
   check(validMode(input.mode), "file_mode");
+  if (input.type === "pax")
+    check((input.size ?? 0) <= MAX_PAX_BYTES, "pax_records");
   const header = Buffer.alloc(512);
   for (const [text, offset, limit] of [
     [input.path, 0, 100],
@@ -90,6 +95,21 @@ function ustarName(
 }
 export const padding = (length: number) =>
   Buffer.alloc((512 - (length % 512)) % 512);
+
+/** Bound compressed output while writing, before an oversized artifact exists. */
+export function archiveByteLimit(): Transform {
+  let bytes = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      bytes += chunk.length;
+      if (bytes > MAX_ARCHIVE_BYTES) callback(new BundleError("archive_size"));
+      else callback(null, chunk);
+    },
+    flush(callback) {
+      callback(bytes > 0 ? null : new BundleError("archive_size"));
+    },
+  });
+}
 
 function* entryHeaders(entry: ManifestEntry, index: number): Generator<Buffer> {
   const name = ustarName(entry.path);
@@ -168,6 +188,7 @@ export async function writeRuntimeArchive(
   await pipeline(
     Readable.from(tar()),
     createGzip({ level: 9 }),
+    archiveByteLimit(),
     createWriteStream(output, { flags: "wx", mode: 0o644 }),
   );
 }

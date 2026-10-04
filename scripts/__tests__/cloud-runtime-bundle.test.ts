@@ -7,21 +7,27 @@ import {
   readFile,
   rm,
   symlink,
+  truncate,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Readable, Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { gunzipSync, gzipSync } from "node:zlib";
 import {
   canonicalJson,
   createManifest,
+  descriptorSchema,
   inventoryTree,
   parseManifest,
   sha256,
   validateFiles,
+  validPath,
   type ManifestEntry,
 } from "../cloud-workspace-validation/runtime-bundle/manifest";
 import {
+  archiveByteLimit,
   tarHeader,
   writeRuntimeArchive,
 } from "../cloud-workspace-validation/runtime-bundle/archive";
@@ -84,6 +90,14 @@ async function fixture() {
     mode: 0o555,
   });
   await symlink("node", path.join(root, "bin/alias"));
+  for (const name of [
+    "bin/start-engine.sh",
+    "lib/zeros/setup-cloud-workspace.mjs",
+    "lib/zeros/cloud-worker-supervisor.mjs",
+  ]) {
+    await mkdir(path.dirname(path.join(root, name)), { recursive: true });
+    await writeFile(path.join(root, name), "", { mode: 0o555 });
+  }
   const manifest = createManifest(
     {
       agents: {
@@ -127,6 +141,11 @@ describe("runtime manifest", () => {
       "bin",
       "bin/alias",
       "bin/node",
+      "bin/start-engine.sh",
+      "lib",
+      "lib/zeros",
+      "lib/zeros/cloud-worker-supervisor.mjs",
+      "lib/zeros/setup-cloud-workspace.mjs",
     ]);
     expect(entries.find((entry) => entry.path === "bin/alias")).toEqual({
       path: "bin/alias",
@@ -235,9 +254,372 @@ describe("runtime manifest", () => {
       parseManifest(canonicalJson({ ...manifest, runtimeId: "recursive" })),
     ).toThrow();
   });
+
+  it("lists the self-test entrypoint only when its regular file is included", async () => {
+    const { root, manifest } = await fixture();
+    expect(manifest.entrypoints).not.toHaveProperty("selfTest");
+    await writeFile(path.join(root, "lib/zeros/runtime-self-test.mjs"), "", {
+      mode: 0o555,
+    });
+    const withSelfTest = createManifest(
+      {
+        source: manifest.source,
+        agents: manifest.agents,
+        engineProtocolVersion: manifest.protocols.engine,
+      },
+      await inventoryTree(root),
+    );
+    expect(withSelfTest.entrypoints.selfTest).toBe(
+      "lib/zeros/runtime-self-test.mjs",
+    );
+  });
+
+  it.each(["missing", "dir", "symlink"] as const)(
+    "rejects every listed entrypoint backed by a %s inventory entry",
+    async (type) => {
+      const { root, manifest } = await fixture();
+      await writeFile(path.join(root, "lib/zeros/runtime-self-test.mjs"), "", {
+        mode: 0o555,
+      });
+      const files = (await inventoryTree(root)).filter(
+        (entry) => entry.path !== "bin/alias",
+      );
+      const entrypoints = {
+        ...manifest.entrypoints,
+        selfTest: "lib/zeros/runtime-self-test.mjs",
+      };
+      for (const target of Object.values(entrypoints)) {
+        const invalid = files.flatMap((entry): ManifestEntry[] => {
+          if (entry.path !== target) return [entry];
+          if (type === "missing") return [];
+          if (type === "dir") return [{ path: target, type, mode: "0555" }];
+          return [{ path: target, type, target: "." }];
+        });
+        expect(() =>
+          parseManifest(
+            canonicalJson({ ...manifest, entrypoints, files: invalid }),
+          ),
+        ).toThrow(/file_inventory/);
+      }
+    },
+  );
+});
+
+describe("shared producer/consumer limits", () => {
+  const gib = 1024 ** 3;
+  const descriptor = {
+    runtimeId: "r1-" + "a".repeat(64),
+    manifestSha256: "a".repeat(64),
+    archiveSha256: "b".repeat(64),
+    archiveBytes: 1,
+    expandedBytes: 1,
+    sourceCommit: "c".repeat(40),
+    nodeModulesAbi: 127,
+    bootstrapProtocolVersion: 1,
+    engineProtocolVersion: 20,
+  };
+
+  it("accepts descriptor size/protocol boundaries", () => {
+    expect(descriptorSchema.safeParse(descriptor).success).toBe(true);
+    expect(
+      descriptorSchema.safeParse({
+        ...descriptor,
+        archiveBytes: 2 * gib,
+        expandedBytes: 4 * gib,
+        nodeModulesAbi: 65_535,
+        engineProtocolVersion: 65_535,
+      }).success,
+    ).toBe(true);
+  });
+
+  it.each([
+    ["archiveBytes", 0],
+    ["archiveBytes", 2 * gib + 1],
+    ["expandedBytes", 0],
+    ["expandedBytes", 4 * gib + 1],
+    ["nodeModulesAbi", 0],
+    ["nodeModulesAbi", 65_536],
+    ["engineProtocolVersion", 0],
+    ["engineProtocolVersion", 65_536],
+  ])("rejects descriptor %s = %i", (field, value) => {
+    expect(
+      descriptorSchema.safeParse({ ...descriptor, [field]: value }).success,
+    ).toBe(false);
+  });
+
+  it("bounds expanded payload totals while allowing individual empty files", async () => {
+    const { manifest } = await fixture();
+    for (const total of [1, 4 * gib]) {
+      const files = manifest.files.map((entry) =>
+        entry.type === "file"
+          ? { ...entry, size: entry.path === "bin/node" ? total : 0 }
+          : entry,
+      );
+      expect(() =>
+        parseManifest(canonicalJson({ ...manifest, files })),
+      ).not.toThrow();
+    }
+    for (const total of [0, 4 * gib + 1]) {
+      const files = manifest.files.map((entry) =>
+        entry.type === "file"
+          ? { ...entry, size: entry.path === "bin/node" ? total : 0 }
+          : entry,
+      );
+      expect(() =>
+        parseManifest(canonicalJson({ ...manifest, files })),
+      ).toThrow();
+    }
+    const files = manifest.files.map((entry) =>
+      entry.type === "file" ? { ...entry, size: gib + 1 } : entry,
+    );
+    expect(() => parseManifest(canonicalJson({ ...manifest, files }))).toThrow(
+      /expanded_size/,
+    );
+  });
+
+  it("accepts 250,000 inventory entries and rejects the next entry", () => {
+    const entries: ManifestEntry[] = Array.from(
+      { length: 250_000 },
+      (_, index) => ({
+        path: `entry-${String(index).padStart(6, "0")}`,
+        type: "dir",
+        mode: "0755",
+      }),
+    );
+    expect(() => validateFiles(entries)).not.toThrow();
+    entries.push({ path: "entry-250000", type: "dir", mode: "0755" });
+    expect(() => validateFiles(entries)).toThrow(/file_inventory/);
+  });
+
+  it("bounds paths and link targets by UTF-8 bytes", () => {
+    expect(validPath("é".repeat(2048))).toBe(true);
+    expect(validPath("é".repeat(2048) + "a")).toBe(false);
+    const file: ManifestEntry = {
+      path: "é",
+      type: "file",
+      mode: "0444",
+      size: 1,
+      sha256: sha256(Buffer.from("a")),
+    };
+    const target = "./".repeat(2047) + "é";
+    expect(Buffer.byteLength(target)).toBe(4096);
+    expect(() =>
+      validateFiles([{ path: "link", type: "symlink", target }, file]),
+    ).not.toThrow();
+    expect(() =>
+      validateFiles([
+        { path: "link", type: "symlink", target: "./".repeat(2047) + "/é" },
+        file,
+      ]),
+    ).toThrow();
+  });
+
+  it("allows 64 symlink resolutions but rejects a 65-link chain", () => {
+    function chain(length: number): ManifestEntry[] {
+      return [
+        ...Array.from(
+          { length },
+          (_, index): ManifestEntry => ({
+            path: `link-${String(index).padStart(2, "0")}`,
+            type: "symlink",
+            target:
+              index === length - 1
+                ? "payload"
+                : `link-${String(index + 1).padStart(2, "0")}`,
+          }),
+        ),
+        {
+          path: "payload",
+          type: "file",
+          mode: "0444",
+          size: 1,
+          sha256: sha256(Buffer.from("a")),
+        },
+      ];
+    }
+    expect(() => validateFiles(chain(64))).not.toThrow();
+    expect(() => validateFiles(chain(65))).toThrow(/symlink_cycle/);
+  });
+
+  it("bounds manifest protocol integers", async () => {
+    const { manifest } = await fixture();
+    expect(() =>
+      parseManifest(
+        canonicalJson({
+          ...manifest,
+          protocols: { ...manifest.protocols, engine: 65_535 },
+        }),
+      ),
+    ).not.toThrow();
+    for (const engine of [0, 65_536]) {
+      expect(() =>
+        parseManifest(
+          canonicalJson({
+            ...manifest,
+            protocols: { ...manifest.protocols, engine },
+          }),
+        ),
+      ).toThrow(/manifest_schema/);
+    }
+    for (const nodeModulesAbi of [0, 65_536]) {
+      expect(() =>
+        parseManifest(
+          canonicalJson({
+            ...manifest,
+            platform: { ...manifest.platform, nodeModulesAbi },
+          }),
+        ),
+      ).toThrow(/manifest_schema/);
+    }
+  });
+
+  it("uses the shared bounded agent-version grammar for every provider", async () => {
+    const { manifest } = await fixture();
+    for (const version of ["vNext-1.2", "A".repeat(64), "1"]) {
+      expect(() =>
+        parseManifest(
+          canonicalJson({
+            ...manifest,
+            agents: {
+              claude: { cli: version, sdk: version },
+              codex: { package: version },
+              cursor: { sdk: version },
+            },
+          }),
+        ),
+      ).not.toThrow();
+    }
+    for (const version of [
+      "",
+      "a".repeat(65),
+      "1.2.3+build",
+      "1.2.3-rc_1",
+      "-1.2.3",
+      ".1",
+      "1 2",
+    ]) {
+      for (const [provider, field] of [
+        ["claude", "cli"],
+        ["claude", "sdk"],
+        ["codex", "package"],
+        ["cursor", "sdk"],
+      ] as const) {
+        expect(() =>
+          parseManifest(
+            canonicalJson({
+              ...manifest,
+              agents: {
+                ...manifest.agents,
+                [provider]: { ...manifest.agents[provider], [field]: version },
+              },
+            }),
+          ),
+        ).toThrow(/manifest_schema/);
+      }
+    }
+  });
 });
 
 describe("runtime archive", () => {
+  it.each([
+    [0, false],
+    [1, true],
+    [2 * 1024 ** 3, true],
+    [2 * 1024 ** 3 + 1, false],
+  ] as const)(
+    "bounds compressed output at %i bytes",
+    async (size, accepted) => {
+      // Reuse one buffer and discard accepted output; no multi-GiB allocation/I/O.
+      const chunk = Buffer.alloc(1024 ** 2);
+      function* chunks() {
+        for (let remaining = size; remaining > 0; remaining -= chunk.length)
+          yield chunk.subarray(0, Math.min(remaining, chunk.length));
+      }
+      let written = 0;
+      const output = pipeline(
+        Readable.from(chunks()),
+        archiveByteLimit(),
+        new Writable({
+          write(bytes: Buffer, _encoding, callback) {
+            written += bytes.length;
+            callback();
+          },
+        }),
+      );
+      if (accepted) await expect(output).resolves.toBeUndefined();
+      else await expect(output).rejects.toThrow(/archive_size/);
+      expect(written).toBe(Math.min(size, 2 * 1024 ** 3));
+    },
+  );
+
+  it.each([0, 2 * 1024 ** 3 + 1])(
+    "rejects a %i-byte archive before hashing or decompression",
+    async (size) => {
+      const { directory } = await fixture();
+      const archivePath = path.join(directory, "oversized.tar.gz");
+      await writeFile(archivePath, "");
+      await truncate(archivePath, size); // Sparse fixture: no multi-GiB allocation.
+      await expect(verifyRuntimeArchive({ archivePath })).rejects.toThrow(
+        /archive_size/,
+      );
+    },
+    30_000,
+  );
+
+  it("enforces the 16 KiB PAX header limit in the producer", () => {
+    expect(() =>
+      tarHeader({
+        path: "PaxHeaders/entry",
+        type: "pax",
+        mode: "0444",
+        size: 16 * 1024,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      tarHeader({
+        path: "PaxHeaders/entry",
+        type: "pax",
+        mode: "0444",
+        size: 16 * 1024 + 1,
+      }),
+    ).toThrow(/pax_records/);
+  });
+
+  it("rejects oversized PAX payloads before reading them", async () => {
+    const { directory, bytes } = await fixture();
+    const header = tarHeader({
+      path: "PaxHeaders/entry",
+      type: "pax",
+      mode: "0444",
+      size: 16 * 1024,
+    });
+    header.write((16 * 1024 + 1).toString(8).padStart(11, "0") + "\0", 124);
+    header.fill(32, 148, 156);
+    const checksum = header.reduce((sum, byte) => sum + byte, 0);
+    header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148);
+    const archivePath = path.join(directory, "oversized-pax.tar.gz");
+    await writeFile(
+      archivePath,
+      gzipSync(
+        Buffer.concat([
+          tarHeader({
+            path: "manifest.json",
+            type: "file",
+            mode: "0444",
+            size: bytes.length,
+          }),
+          bytes,
+          Buffer.alloc((512 - (bytes.length % 512)) % 512),
+          header,
+        ]),
+        { level: 9 },
+      ),
+    );
+    await expect(verifyRuntimeArchive({ archivePath })).rejects.toThrow(
+      /pax_records/,
+    );
+  });
+
   it("extracts manifest modes independently of the verifier's umask", async () => {
     const { root, directory, bytes } = await fixture();
     const archivePath = path.join(directory, "modes.tar.gz");

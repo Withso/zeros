@@ -23,7 +23,9 @@ import {
   check,
   descriptorSchema,
   inventoryTree,
+  MAX_ARCHIVE_BYTES,
   MAX_MANIFEST_BYTES,
+  MAX_PAX_BYTES,
   parseManifest,
   sha256,
   sha256File,
@@ -224,6 +226,10 @@ export async function verifyRuntimeArchive(options: {
   descriptor: RuntimeDescriptor;
 }> {
   const archiveInfo = await stat(options.archivePath);
+  check(
+    archiveInfo.size >= 1 && archiveInfo.size <= MAX_ARCHIVE_BYTES,
+    "archive_size",
+  );
   const archiveSha256 = await sha256File(options.archivePath);
   const file = await open(options.archivePath, "r");
   try {
@@ -311,7 +317,7 @@ export async function verifyRuntimeArchive(options: {
       check(!raw.every((byte) => byte === 0), "file_inventory");
       let header = parseHeader(raw);
       if (header.type === "pax") {
-        check(header.size <= 64 * 1024, "pax_records");
+        check(header.size <= MAX_PAX_BYTES, "pax_records");
         const records: Buffer[] = [];
         await reader.payload(header.size, (chunk) => {
           records.push(chunk);

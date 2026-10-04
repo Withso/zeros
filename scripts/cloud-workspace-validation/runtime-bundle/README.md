@@ -39,6 +39,14 @@ manifest itself). `fileCount` counts those regular files; `entryCount` also
 counts directories and links. The 2.5 GiB expanded-size guideline is reported
 as `exceedsSizeGuidance`, not silently used to drop dependencies.
 
+The producer and verifier share the contract limits: archive size 1 byte–2 GiB,
+expanded payload 1 byte–4 GiB (individual empty files are allowed), at most
+250,000 inventory entries, a 64 MiB manifest, 16 KiB per-entry PAX payloads and
+4,096 UTF-8 bytes per path/link target. Symlink resolution is bounded to 64
+links. Protocol/ABI integers are 1–65,535; agent versions use the shared
+64-character ASCII grammar. Compressed output is bounded while streaming, and
+the verifier checks archive size before hashing or decompressing it.
+
 The payload preserves the production pnpm graph, installed Linux x64 optional
 SDK packages, peers and workspace packages, plus `tsx` and TypeScript. Its
 source slices and single append-only helper inventory live in `closure.ts`.
@@ -50,13 +58,16 @@ README and SSH2/Zod test fixtures containing credential examples are omitted;
 their package code and license/NOTICE files remain unchanged. The source-built
 SQLite addon also fills the Linux platform export's prebuild slot. Everything
 else in the selected dependency packages, including notices, is retained.
+Claude's SDK tries the musl package as a fallback even on glibc, so both Linux
+x64 variants remain in the closure.
 
 Node's complete upstream license/provenance lives in `lib/node/`; package
 licenses remain beside their packages and the Linux dependency inventory is
 `worker/runtime-dependencies.json`. Playwright 1.59.1 installs the Ubuntu 24.04
 Chromium, headless-shell and FFmpeg assets with their original notices.
 
-The manifest reserves `selfTest` per the shared contract. B7's self-test and
+The manifest lists `selfTest` only when B7's regular self-test file is included;
+every listed entrypoint must be a regular inventory file. B7's self-test and
 B2's runtime-root resolver are included when their source files are present.
 This builder does not supply either implementation or publish artifacts.
 
