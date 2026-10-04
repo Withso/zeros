@@ -20,9 +20,44 @@ import {
 } from "../../state/read-caches";
 import { gitRepoBranchCatalog, type RepoRemote } from "../../platform/git";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { useCloudComputerV2CreateGate } from "../../features/settings/cloud-computer-v2-create-gate";
 
 const capabilityCache = new KeyedAsyncCache<{ enabled: boolean }>(1);
 const optionsCache = new KeyedAsyncCache<CloudWorkspaceCreateOptions>(32);
+
+// Both create surfaces consume the same confirmed source metadata. Clicks
+// submit that snapshot; token/proof and branch reads happen on visible intent.
+export function useCloudCreateSource(
+  repository: ReturnType<typeof parseRemote>,
+  active: boolean,
+) {
+  const organization = useActiveOrganization();
+  const { me } = useTeams();
+  const canCreateCloud = canCreateWorkspaceIn(organization, "cloud");
+  const readCloud = active && canCreateCloud;
+  const capability = useCachedRead(capabilityCache, readCloud ? "desktop" : null, cloudWorkspaceCapability, { maxAgeMs: Infinity });
+  const key = readCloud && organization && !organization.isPersonal && repository?.host === "github.com" && me
+    ? JSON.stringify([me.user.id, organization.id, repository.owner, repository.repo]) : null;
+  const readOptions = (value: string) => {
+    const [, org, owner, repo] = JSON.parse(value) as string[];
+    return getCloudWorkspaceCreateOptions(org, owner, repo);
+  };
+  const options = useCachedRead(optionsCache, key, readOptions, { maxAgeMs: 30_000 });
+  const reason = !canCreateCloud ? "Select an organization with Cloud access."
+    : !capability.data?.enabled ? capability.loading ? "Checking Cloud availability…" : "Cloud workspaces are not enabled in this desktop build."
+    : repository?.host !== "github.com" ? "Cloud requires a repository hosted on GitHub."
+    : options.error ? options.error.message
+    : !options.data ? "Checking repository access…"
+    : !options.data.configured ? "Cloud creation is not enabled for this environment."
+    : !options.data.repository || options.data.installations.length === 0 ? "Connect the GitHub App to this repository in Settings → Integrations."
+    : null;
+  const warm = () => {
+    if (!readCloud) return;
+    void capabilityCache.load("desktop", cloudWorkspaceCapability, { maxAgeMs: Infinity }).catch(() => {});
+    if (key) void optionsCache.load(key, () => readOptions(key), { maxAgeMs: 30_000 }).catch(() => {});
+  };
+  return { organization, canCreateCloud, readCloud, options, reason, warm };
+}
 
 export function cloudSourceRepositoryReason(
   base: DispatcherBase | null,
@@ -79,38 +114,15 @@ export function useCloudCreate(
   repository: { host: string; owner: string; repo: string } | null;
   revision: string | null;
   installationId: string | null;
+  computerRequired: boolean;
+  canManageComputer: boolean;
+  warmComputer: () => void;
 } {
-  const organization = useActiveOrganization();
-  const { me } = useTeams();
-  const canCreateCloud = canCreateWorkspaceIn(organization, "cloud");
-  const readCloud = active && canCreateCloud;
   const repository = useMemo(
     () => parseRemote(project?.originUrl ?? null),
     [project?.originUrl],
   );
-  const capability = useCachedRead(
-    capabilityCache,
-    readCloud ? "desktop" : null,
-    cloudWorkspaceCapability,
-    { maxAgeMs: Infinity },
-  );
-  const key =
-    readCloud &&
-    organization &&
-    !organization.isPersonal &&
-    repository?.host === "github.com" &&
-    me?.user.id
-      ? JSON.stringify([me.user.id, organization.id, repository.owner, repository.repo])
-      : null;
-  const options = useCachedRead(
-    optionsCache,
-    key,
-    (value) => {
-      const [, org, owner, repo] = JSON.parse(value) as string[];
-      return getCloudWorkspaceCreateOptions(org, owner, repo);
-    },
-    { maxAgeMs: 30_000 },
-  );
+  const { organization, canCreateCloud, readCloud, options, reason: sourceReason } = useCloudCreateSource(repository, active);
   // The first/default Cloud create needs no live checkout. An explicit branch
   // keeps its existing remote-identity checks; local projects retain their
   // configured target branch through the normal catalog.
@@ -140,30 +152,20 @@ export function useCloudCreate(
     catalog.data?.listedRemote ?? null,
     project?.originUrl ?? null,
   );
+  const computer = useCloudComputerV2CreateGate(readCloud);
   const reason = !canCreateCloud
     ? "Select an organization with Cloud access."
-    : !project
+    : computer.reason ?? (!project
       ? "Choose a project first."
-      : !capability.data?.enabled
-        ? capability.loading
-          ? "Checking Cloud availability…"
-          : "Cloud workspaces are not enabled in this desktop build."
-        : repository?.host !== "github.com"
-          ? "Cloud requires a repository hosted on GitHub."
-          : options.error
-            ? options.error.message
-            : !options.data
-              ? "Checking repository access…"
-              : !options.data.configured
-                ? "Cloud creation is not enabled for this environment."
-                : options.data.installations.length === 0
-                  ? "Connect the GitHub App to this repository in Settings → Integrations."
-                  : (source.reason ?? repositoryReason);
+      : sourceReason ?? source.reason ?? repositoryReason);
   return {
     reason,
     organization,
     repository,
     revision: source.revision,
     installationId: options.data?.installations[0]?.id ?? null,
+    computerRequired: computer.required,
+    canManageComputer: computer.canManage,
+    warmComputer: computer.warm,
   };
 }

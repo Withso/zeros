@@ -35,8 +35,9 @@ import { upsertProject } from "../../state/projects-store";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { getActiveOrganizationSnapshot, getOrganizationStoreGeneration, useActiveOrganization, useTeams } from "../../features/team/team-store";
 import { parseRemote } from "../pr/github-url";
-import { cloudWorkspaceCapability } from "../../platform/cloud-workspace-access";
-import { createCloudWorkspaceDocument, getCloudWorkspaceCreateOptions } from "../../platform/cloud-workspaces";
+import { createCloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import { useCloudCreateSource } from "../dispatcher/cloud-create";
+import { CloudComputerV2CreateNotice, useCloudComputerV2CreateGate } from "../../features/settings/cloud-computer-v2-create-gate";
 import { acceptCloudWorkspaceDocument, cloudProjectForFolder } from "../../state/cloud-workspace-catalog";
 import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { useWorkspaceDispatch } from "../../state/store";
@@ -93,6 +94,10 @@ function ScopedOpenGithubProjectDialog({
   const [busy, setBusy] = useState(false);
   const organization = useActiveOrganization();
   const cloud = Boolean(organization && !organization.isPersonal);
+  const source = useMemo(() => parseRemote(url.trim()), [url]);
+  const createSource = useCloudCreateSource(source, open && cloud);
+  const computer = useCloudComputerV2CreateGate(open && cloud);
+  const cloudReason = cloud ? computer.reason ?? createSource.reason : null;
   const dispatch = useWorkspaceDispatch();
   const cloudIntent = useRef<{ fingerprint: string; key: string; repository: Parameters<typeof createCloudWorkspaceDocument>[0]["repository"] } | null>(null);
 
@@ -118,20 +123,18 @@ function ScopedOpenGithubProjectDialog({
   };
 
   const handleClone = async () => {
-    if (busy || !urlIsValid || (!cloud && !parentFolder.trim())) return;
+    if (!open || busy || !urlIsValid || cloudReason || (!cloud && !parentFolder.trim())) return;
     const owner = getActiveOrganizationSnapshot();
     if (owner?.id !== organization?.id) return;
     setBusy(true);
     try {
       if (owner && !owner.isPersonal) {
         const epoch = getOrganizationStoreGeneration();
-        const source = parseRemote(url.trim());
         if (source?.host !== "github.com") throw new Error("Choose a GitHub repository.");
-        if (!(await cloudWorkspaceCapability()).enabled) throw new Error("Cloud workspaces are not enabled in this desktop build.");
         const fingerprint = JSON.stringify([epoch, owner.id, source.owner.toLowerCase(), source.repo.toLowerCase()]);
         if (cloudIntent.current?.fingerprint !== fingerprint) {
-          const options = await getCloudWorkspaceCreateOptions(owner.id, source.owner, source.repo);
-          if (!options.configured) throw new Error("Cloud creation is not enabled for this environment.");
+          const options = createSource.options.data;
+          if (!options?.configured) throw new Error("Cloud creation is not enabled for this environment.");
           if (!options.repository || !options.installations[0]) throw new Error("Connect the GitHub App to this repository in Settings → Integrations.");
           cloudIntent.current = { fingerprint, key: crypto.randomUUID(), repository: {
             forge: "github.com", owner: options.repository.owner, name: options.repository.name,
@@ -186,12 +189,14 @@ function ScopedOpenGithubProjectDialog({
     }
   };
 
-  const canSubmit = urlIsValid && (cloud || parentFolder.trim().length > 0) && !busy;
+  const canSubmit = open && urlIsValid && !cloudReason && (cloud || parentFolder.trim().length > 0) && !busy;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="max-w-[520px]"
+        onPointerEnter={() => { computer.warm(); createSource.warm(); }}
+        onFocus={() => { computer.warm(); createSource.warm(); }}
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && canSubmit) {
             e.preventDefault();
@@ -209,6 +214,9 @@ function ScopedOpenGithubProjectDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="gap-5">
+          {cloudReason && (computer.required
+            ? <CloudComputerV2CreateNotice required canManage={computer.canManage} warm={computer.warm} onOpenSettings={() => onOpenChange(false)} />
+            : <p className="text-fg2 text-xs" role="status">{cloudReason}</p>)}
           {cloud && me && organization && <CloudRepositoryPicker userId={me.user.id} organizationId={organization.id}
             active={open} disabled={busy} value={repositories} onManageConnections={() => onOpenChange(false)} onChange={selected => {
               setRepositories(selected);

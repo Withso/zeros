@@ -1,4 +1,5 @@
 import { clearCloudComputers } from "../features/settings/cloud-computer-client";
+import { clearCloudComputersV2 } from "../features/settings/cloud-computer-v2-client";
 import { clearCloudGithub } from "../platform/cloud-github";
 import { useEffect } from "react";
 import { cloudWorkspaceCapability } from "../platform/cloud-workspace-access";
@@ -140,6 +141,7 @@ export function CloudWorkspaceLifecycle() {
       clearCloudProviderConnections();
       clearCloudGithub();
       clearCloudComputers();
+      clearCloudComputersV2();
     };
     const install = (session: AuthSessionInfo | null) => {
       if (!alive) return;
