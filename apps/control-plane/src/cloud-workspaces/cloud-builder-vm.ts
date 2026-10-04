@@ -221,11 +221,15 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
   }
 
   async stop(vm: BuilderVm): Promise<{ archived: true }> {
-    await this.owned(vm, true);
+    const row = await this.owned(vm, false);
+    if (row.state === "deleted") builderOperationConflict();
+    // Cleanup may stop compute while deletion is pending. Keep its monotonic
+    // journal state and deletion identity; this does not make the VM usable.
+    const cleanupOnly = row.state === "deleting";
     const deadline = this.now() + this.lifecycleTimeoutMs;
     let sandbox = await this.inspect(vm.sandboxId, deadline);
     if (sandbox.state !== "archived") {
-      await this.options.operations.state(vm.operationKey, "stopping");
+      if (!cleanupOnly) await this.options.operations.state(vm.operationKey, "stopping");
       if (sandbox.state !== "archiving") await this.retry(() => this.options.client.request(`/sandboxes/${vm.sandboxId}/stop`, { method: "POST" }), deadline);
       while (sandbox.state !== "archived") {
         if (["error", "cancelled"].includes(sandbox.state)) fail("builder_stopped");
@@ -233,7 +237,7 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
         sandbox = await this.inspect(vm.sandboxId, deadline);
       }
     }
-    await this.options.operations.state(vm.operationKey, "archived");
+    if (!cleanupOnly) await this.options.operations.state(vm.operationKey, "archived");
     return { archived: true };
   }
 

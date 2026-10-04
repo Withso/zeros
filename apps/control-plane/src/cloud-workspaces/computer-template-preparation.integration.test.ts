@@ -48,7 +48,7 @@ database("computer template claim preparation with the real B7 journal", () => {
     fixture = await seedReadyCloudWorkspace(pool);
     service = new DatabaseCloudComputerV2Service(pool, {
       settingsSecretKeyV1: randomBytes(32).toString("base64url"),
-    } as CloudWorkspaceBackendConfig);
+    } as CloudWorkspaceBackendConfig, { maxConcurrentBuilds: 1 });
     operations = new DatabaseBuilderVmOperationStore(pool, claimOptions().accountScope);
     boat = builderFixture(operations);
     worker = new ComputerTemplateWorker({
@@ -119,6 +119,60 @@ database("computer template claim preparation with the real B7 journal", () => {
     )).rowCount)).toBe(0);
     expect(boat.state.creates).toBe(0);
     expect((await service.claimNextBuild(8, claimOptions()))?.build.id).toBe(requested.build.id);
+  });
+
+  it.each(["request", "confirmation"])("stops compute after deletion %s fails without reversing the deletion journal", async failure => {
+    const requested = await request();
+    await service.claimNextBuild(7, claimOptions());
+    const key = `computer-build:${requested.build.id}`;
+    const prepared = (await operations.find(key))!;
+    const vm = await boat.vms.create(prepared.intent);
+    const fetch = boat.fetcher.getMockImplementation()!;
+    let failDeletion = true, failures = 0;
+    boat.fetcher.mockImplementation(async (url, input) => {
+      const route = new URL(String(url)).pathname;
+      if (failDeletion && (failure === "request" ? input?.method === "DELETE" : route.includes("/deletion-operations/"))) {
+        failures++;
+        throw new Error("fixture deletion unavailable");
+      }
+      return fetch(url, input);
+    });
+    await service.cancel(fixture.organizationId, fixture.userId, requested.build.id, { expectedRevision: requested.revision });
+    await worker.tick();
+    const stopCalls = () => boat.fetcher.mock.calls.filter(([url]) => new URL(String(url)).pathname.endsWith("/stop"));
+    expect(failures).toBeGreaterThan(0);
+    expect(stopCalls()).toHaveLength(1);
+    expect(boat.state.states).toEqual(["archived"]);
+    const deleting = await operations.find(key);
+    expect(deleting).toMatchObject({ state: "deleting", sandbox_id: vm.sandboxId,
+      deletion_operation_id: failure === "request" ? null : `bdop_${"d".repeat(32)}` });
+    const allocation = () => withSystemTx(pool, async tx => (await tx.query(
+      "SELECT state,stopped_at,cleanup_confirmed_at,cleanup_retry_at FROM cloud_computer_templates WHERE build_id=$1", [requested.build.id],
+    )).rows[0]);
+    expect(await allocation()).toMatchObject({ state: "quarantined", stopped_at: expect.any(Date),
+      cleanup_confirmed_at: null, cleanup_retry_at: expect.any(Date) });
+
+    // Recheck an already archived sandbox without reopening a deleting VM for
+    // commands or changing its durable deletion identity.
+    await expect(boat.vms.stop(vm)).resolves.toEqual({ archived: true });
+    expect(stopCalls()).toHaveLength(1);
+    expect(await operations.find(key)).toEqual(deleting);
+    await expect(boat.vms.baseStatus(vm)).rejects.toMatchObject({ code: "provider_operation_conflict" });
+    const next = await request();
+    expect((await service.claimNextBuild(8, claimOptions()))?.build.id).toBe(next.build.id);
+
+    // Physical cleanup remains retryable and reuses any saved deletion operation.
+    failDeletion = false;
+    await withSystemTx(pool, tx => tx.query(
+      "UPDATE cloud_computer_templates SET cleanup_retry_at=clock_timestamp()-interval '1 second' WHERE build_id=$1", [requested.build.id],
+    ));
+    await worker.tick();
+    expect(await allocation()).toMatchObject({ state: "retired", stopped_at: expect.any(Date),
+      cleanup_confirmed_at: expect.any(Date), cleanup_retry_at: null });
+    expect(await operations.find(key)).toMatchObject({ state: "deleted", sandbox_id: vm.sandboxId,
+      deletion_operation_id: `bdop_${"d".repeat(32)}` });
+    expect(boat.state.deleteRequests).toBe(1);
+    await expect(boat.vms.stop(vm)).rejects.toMatchObject({ code: "provider_operation_conflict" });
   });
 
   it("constructs the real adapters and revalidates the selected pin without following a new head", async () => {
