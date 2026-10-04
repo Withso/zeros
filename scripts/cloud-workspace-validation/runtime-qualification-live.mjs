@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Operator-only Alpha runbook. No provider credentials or model sessions are
 // needed here; the control-plane worker owns allocation and verified cleanup.
-import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -98,10 +98,15 @@ export function runbookDiagnostic(error) {
 
 function staffToken() {
   try {
-    const file = path.join(ROOT, ".env.agent");
-    const stat = lstatSync(file);
-    if (!stat.isFile() || stat.mode & 0o077 || stat.size > 128 * 1024) fail("operator_auth");
-    const parsed = parseAgentEnv(readFileSync(file, "utf8"));
+    // Check and read the private file through one no-follow descriptor.
+    const fd = openSync(path.join(ROOT, ".env.agent"), constants.O_RDONLY | constants.O_NOFOLLOW);
+    let source;
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.mode & 0o077 || stat.size > 128 * 1024) fail("operator_auth");
+      source = readFileSync(fd, "utf8");
+    } finally { closeSync(fd); }
+    const parsed = parseAgentEnv(source);
     const token = parsed.values.get("ZEROS_ACCOUNT_ACCESS_TOKEN");
     if (parsed.malformedLines.length || parsed.duplicateKeys.length || !token || !/^[A-Za-z0-9._-]{20,16384}$/.test(token)) fail("operator_auth");
     return token;
