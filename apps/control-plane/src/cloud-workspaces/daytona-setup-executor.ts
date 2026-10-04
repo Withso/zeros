@@ -31,7 +31,12 @@ const SETUP_RESULT_AUDIENCE = "zeros-cloud-workspace-setup-result-v1";
 const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_LOG_BYTES = 128 * 1024;
 const MIN_ADMISSION_REMAINING_MS = 5_000;
-const MAX_ADMISSION_LIFETIME_MS = 15 * 60_000;
+export const CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS = 900;
+const MAX_ADMISSION_LIFETIME_MS = CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS * 1_000;
+// Installation precedes the one-use redemption. Reserve the ten-minute
+// delivery/install allowance plus the helper's minimum entry lifetime; the
+// remaining setup budget runs on fresh materials after that redemption.
+const RUNTIME_INSTALL_BUDGET_MS = 10 * 60_000;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
@@ -220,7 +225,7 @@ function validateAdmission(
     !TOKEN_PATTERN.test(admission.token) ||
     endpoint === null ||
     !Number.isSafeInteger(expiresAt) ||
-    expiresAt - now < MIN_ADMISSION_REMAINING_MS ||
+    expiresAt - now < MIN_ADMISSION_REMAINING_MS + (execution.runtime ? RUNTIME_INSTALL_BUDGET_MS : 0) ||
     expiresAt - now > MAX_ADMISSION_LIFETIME_MS ||
     admission.workspaceId !== execution.workspaceId ||
     admission.organizationId !== execution.organizationId ||
@@ -364,25 +369,44 @@ function parseReadyResponse(
   };
 }
 
-function runtimeInstallerOutput(output: string, exitCode: number): string {
+type InstallerDiagnostic = NonNullable<SetupDiagnostic["installer"]>;
+
+function withInstallerDiagnostic(error: CloudWorkspaceSetupError, installer: InstallerDiagnostic | undefined): CloudWorkspaceSetupError {
+  if (installer) {
+    const setup = "diagnostic" in error ? parseSetupDiagnostic(error.diagnostic) : null;
+    Object.assign(error, { diagnostic: { ...(setup ?? { version: 1, phase: "runtime" }), installer } });
+  }
+  return error;
+}
+
+function runtimeInstallerOutput(output: string, exitCode: number): { output: string; diagnostic: InstallerDiagnostic } {
   // The installer appends one closed diagnostic after the unchanged helper
   // result. Never expose raw installer output or parser errors to diagnostics.
-  let retryable = false;
+  let installer: InstallerDiagnostic | undefined;
   try {
     const lines = output.trim().split("\n");
     const diagnostic = ClosedDiagnosticSchema.safeParse(JSON.parse(lines.pop()!));
-    if (diagnostic.success && diagnostic.data.component === "installer" && diagnostic.data.exitCode === exitCode) {
-      if (lines.length > 0 && (exitCode === 0
-        ? diagnostic.data.ok && !diagnostic.data.timedOut && diagnostic.data.failedChecks.length === 0
-        : !diagnostic.data.ok)) return lines.join("\n");
-      // The worker's bounded retry issues fresh admission and delivery URLs
-      // for the same pin. Integrity/schema failures require operator action.
-      const transient = new Set(["lock_busy", "artifact_expired", "http_status", "download_truncated", "timeout", "process_signal"]);
-      retryable = exitCode !== 0 && !diagnostic.data.ok && diagnostic.data.failedChecks.length > 0 &&
-        diagnostic.data.failedChecks.every(check => transient.has(check));
+    if (diagnostic.success && diagnostic.data.component === "installer") {
+      installer = diagnostic.data;
+      if (installer.exitCode === exitCode && lines.length > 0 && (exitCode === 0
+        ? installer.ok && !installer.timedOut && installer.failedChecks.length === 0
+        : !installer.ok && installer.stage === "run_setup" && installer.failedChecks.length === 1 && installer.failedChecks[0] === "setup_exit")) {
+        return { output: lines.join("\n"), diagnostic: installer };
+      }
     }
   } catch { /* Reject through the closed error below. */ }
-  throw setupError("setup_runtime_install_failed", "Cloud workspace runtime installation did not complete", retryable);
+  // GNU timeout returns 124 after the child reports SIGTERM/143, or 137
+  // after kill-after. The outer nonblocking flock exits 1 with no stdout.
+  // Neither wrapper outcome can produce readiness; both use bounded retries.
+  const transportTimeout = exitCode === 124 || exitCode === 137;
+  const transient = new Set(["lock_busy", "artifact_expired", "http_status", "download_truncated", "timeout", "process_signal"]);
+  const retryable = transportTimeout
+    ? !installer || installer.failedChecks.every(check => transient.has(check))
+    : installer
+      ? exitCode !== 0 && installer.exitCode === exitCode && !installer.ok && installer.failedChecks.length > 0 &&
+        installer.failedChecks.every(check => transient.has(check))
+      : exitCode === 1 && output.trim() === "";
+  throw withInstallerDiagnostic(setupError("setup_runtime_install_failed", "Cloud workspace runtime installation did not complete", retryable), installer);
 }
 
 function helperFailure(
@@ -590,8 +614,9 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
           false,
         );
       }
-      const output = execution.runtime ? runtimeInstallerOutput(response.output, response.exitCode) : response.output;
-      if (response.exitCode !== 0) throw helperFailure(output, execution);
+      const installed = execution.runtime ? runtimeInstallerOutput(response.output, response.exitCode) : null;
+      const output = installed?.output ?? response.output;
+      if (response.exitCode !== 0) throw withInstallerDiagnostic(helperFailure(output, execution), installed?.diagnostic);
       result = parseReadyResponse(
         output,
         execution,
@@ -603,7 +628,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       disposition = "completed";
     } catch (error) {
       failure = normalizeExecutionError(error);
-      await this.retain(execution,failure,"bootstrap",error);
+      await this.retain(execution,failure,execution.runtime ? "runtime" : "bootstrap",error);
       if (failure.code === "setup_admission_invalid") disposition = "rejected";
     }
 

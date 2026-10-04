@@ -5,6 +5,7 @@ import { createCloudWorkspaceHistoryRoutes } from "./history-routes.js";
 import { authorizeCloudComputerBuild } from "./computer.js";
 import { resolveComputerImage } from "./computer-image.js";
 import { selectCloudRuntime, cloudRuntimePin, cloudRuntimePinValues, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { ensureWorkspaceDeletionJob } from "./workspace-deletion-job.js";
 import { assertCloudGithubSource } from "./github-user-access.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -1906,6 +1907,10 @@ export function createCloudWorkspaceRoutes(
       const v4 = config.runtime?.newWorkspaceProfile === "v4" && profile.provider === "boat" && !input.delegated &&
         profile.imageRef === base.imageRef && (!config.runtime.staffOnly || user.staffRole === "developer" || user.staffRole === "platform_owner");
       if (!v4) return { profile, runtime: null as CloudRuntimePin | null };
+      // Older protocol overrides support legacy rolling deployments. V4 is
+      // qualified only for the current tested protocol, including setup.
+      if (config.setupExecution && config.setupExecution.engineProtocolVersion !== CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION)
+        throw new HttpError(409, "cloud_runtime_unavailable", "A qualified cloud runtime is unavailable");
       const selected = await selectCloudRuntime(tx, config.runtime!.qualificationMode);
       if (!selected) throw new HttpError(409, "cloud_runtime_unavailable", "A qualified cloud runtime is unavailable");
       return { profile: { ...profile, imageRef: selected.base.imageRef, sourceCommit: selected.base.sourceCommit,

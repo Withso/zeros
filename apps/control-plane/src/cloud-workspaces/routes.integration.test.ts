@@ -26,6 +26,7 @@ import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import { reserveWriterSlot } from "./pro-sharing.js";
 import { DatabaseProMonthlyAllowance } from "./pro-allowance.js";
 import { runtimeBase, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -197,6 +198,32 @@ d("cloud workspace API contracts", () => {
     expect(repositoryResolver.resolve).not.toHaveBeenCalled();
     expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
     expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_bindings")).rowCount).toBe(0);
+  });
+
+  it("rejects v4 create before allocation when setup uses an allowed older protocol override", async () => {
+    await seedV4();
+    const olderProtocol = CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION - 1;
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "1", releaseOrder: 2, engineProtocolVersion: olderProtocol }));
+    actor = { ...owner, staffRole: "developer" };
+    const setupExecution = {
+      controlPlaneOrigin: "https://api.example.test", allowedToolboxOrigins: [], setupSecretEncryptionKeys: {},
+      currentSetupSecretEncryptionKeyVersion: 1, setupSecretKeyV1: null, engineProtocolVersion: olderProtocol,
+      enginePort: 4317, engineHeartbeatIntervalMs: 5000, intervalMs: 1000, timeoutSeconds: 1800, leaseMs: 60000, admissionTtlSeconds: 120,
+    };
+    configureApp(false, { ...v4Config(), setupExecution });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_unavailable" } });
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_workspaces WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_generations WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_operations WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+
+    // The supported rolling-deployment override remains valid for legacy creates.
+    configureApp(false, { ...cloudConfig, setupExecution });
+    const legacy = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(legacy.status).toBe(202);
+    expect((await generationPin((await legacy.json()).workspace.id)).rows[0].runtime_id).toBeNull();
   });
 
   it("rechecks v4 head revocation after repository resolution, before inserting the generation", async () => {

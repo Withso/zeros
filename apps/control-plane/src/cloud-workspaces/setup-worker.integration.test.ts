@@ -28,8 +28,13 @@ import {
   type CloudWorkspaceSetupResult,
 } from "./setup-worker.js";
 import { runtimeBase, runtimeWitness, seedRuntimeGeneration, seedRuntimeBundle } from "./runtime-test-fixtures.js";
-import { cloudRuntimePinValues } from "./runtime-selection.js";
+import { cloudRuntimePinValues, loadPinnedCloudRuntime } from "./runtime-selection.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { CloudWorkspaceLinuxSetupExecutor, type CloudWorkspaceSetupAdmissionBroker } from "./daytona-setup-executor.js";
+import { DatabaseCloudWorkspaceSetupAdmissionBroker } from "./setup-admission-broker.js";
+import { consumeCloudWorkspaceGrant } from "./grants.js";
+import type { CloudWorkspaceCommandRunner } from "./provider.js";
+import { parseCloudWorkspaceSetupRequest } from "../../../../scripts/cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -460,6 +465,113 @@ d("cloud workspace setup worker", () => {
     });
     return result;
   };
+
+  const installerSuccess = { schema: "zeros.diagnostic/v1", component: "installer", stage: "done", ok: true,
+    exitCode: 0, timedOut: false, failedChecks: [] };
+  const admissionEndpoint = "https://control.example.test/internal/v1/cloud-workspaces/setup/admission";
+  const linuxSetupOptions = (admissionBroker: CloudWorkspaceSetupAdmissionBroker, commandRunner: CloudWorkspaceCommandRunner) => ({
+    admissionBroker, commandRunner, diagnosticPool: pool,
+    engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, timeoutSeconds: 1800,
+    resolveRuntimeArtifact: (pin: NonNullable<CloudWorkspaceSetupExecution["runtime"]>) => withSystemTx(pool, tx => loadPinnedCloudRuntime(tx, pin, "full")),
+    runtimeArtifacts: { presignCreatePut: vi.fn(), head: vi.fn(),
+      presignGet: vi.fn(async () => ({ url: "https://artifacts.example.test/runtime?signature=private-runtime-delivery",
+        expiresAt: new Date(Date.now() + 900_000).toISOString() })) },
+  });
+
+  it.each([
+    { v4: true, elapsedMs: 180_000, ttlSeconds: 900 },
+    { v4: true, elapsedMs: 600_000, ttlSeconds: 900 },
+    { v4: false, elapsedMs: 60_000, ttlSeconds: 120 },
+  ])("keeps a single admission redeemable at helper entry after $elapsedMs ms (v4=$v4)", async ({ v4, elapsedMs, ttlSeconds }) => {
+    const seeded = await seedSetup({ v4 });
+    const broker = new DatabaseCloudWorkspaceSetupAdmissionBroker({ pool, endpoint: admissionEndpoint });
+    const issue = vi.spyOn(broker, "issue");
+    let helperAccepted = false;
+    let observedTtlMs = 0;
+    const executor = new FakeExecutor([async (execution, signal) => {
+      const linux = new CloudWorkspaceLinuxSetupExecutor(linuxSetupOptions(broker, {
+        execute: async input => {
+          const encoded = input.env!.ZEROS_CLOUD_WORKSPACE_SETUP_B64;
+          const nested = v4 ? JSON.parse(Buffer.from(encoded, "base64url").toString()).setup : encoded;
+          const issuedAt = JSON.parse(Buffer.from(nested, "base64url").toString()).issuedAtMs;
+          let request: ReturnType<typeof parseCloudWorkspaceSetupRequest>;
+          vi.useFakeTimers({ toFake: ["Date"] });
+          vi.setSystemTime(issuedAt + elapsedMs);
+          try {
+            // Use the actual helper parser after download/verification/startup,
+            // including its five-second remaining-lifetime requirement.
+            request = parseCloudWorkspaceSetupRequest(nested);
+            helperAccepted = true;
+            observedTtlMs = request.admission.expiresAtMs - request.issuedAtMs;
+          } finally { vi.useRealTimers(); }
+          const consume = () => withSystemTx(pool, tx => consumeCloudWorkspaceGrant(tx, {
+            token: request.admission.token, audience: admissionEndpoint, purpose: "setup",
+            workspaceId: execution.workspaceId, organizationId: execution.organizationId, generation: execution.generation,
+            accountUserId: execution.authority.accountUserId,
+            setup: { setupRunId: execution.setupRunId, executionFence: execution.executionFence },
+          }));
+          expect(await consume() !== null).toBe(true);
+          expect(await consume()).toBeNull();
+          const ready = await registeredSuccessfulSetup(execution, "setup completed");
+          const helper = JSON.stringify({ version: 1, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "ready", readiness: ready.readiness });
+          return { exitCode: 0, outputTruncated: false, output: helper + (v4 ? "\n" + JSON.stringify(installerSuccess) : "") };
+        },
+      }));
+      return linux.execute(execution, signal);
+    }]);
+    await worker(executor).runOnce();
+    expect(helperAccepted).toBe(true);
+    expect(observedTtlMs).toBeGreaterThan((ttlSeconds - 1) * 1000);
+    expect(observedTtlMs).toBeLessThanOrEqual(ttlSeconds * 1000);
+    expect(issue).toHaveBeenCalledTimes(1);
+    expect((await pool.query("SELECT state FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0].state).toBe("succeeded");
+    const retired = await pool.query(`SELECT consumed_at IS NOT NULL AS consumed, revoked_at IS NOT NULL AS revoked
+      FROM cloud_workspace_endpoint_grants WHERE setup_run_id=$1 AND audience=$2`, [seeded.setupRunId, admissionEndpoint]);
+    expect(retired.rows).toEqual([{ consumed: true, revoked: true }]);
+  });
+
+  it("persists distinct closed installer failures without URL or token-like input", async () => {
+    const seeded = await seedSetup({ v4: true });
+    const broker = new DatabaseCloudWorkspaceSetupAdmissionBroker({ pool, endpoint: admissionEndpoint });
+    const tokenCanary = ["ghp", "synthetic-installer-canary"].join("_");
+    const urlCanary = `https://untrusted.example.test/runtime?signature=${tokenCanary}`;
+    const archive = { ...installerSuccess, stage: "verify_archive", ok: false, exitCode: 1, failedChecks: ["archive_digest"] };
+    const space = { ...archive, stage: "check_space", failedChecks: ["insufficient_space"] };
+    const executor = new FakeExecutor([async (execution, signal) => {
+      const runner = { execute: vi.fn(async () => ({ exitCode: 1, output: "", outputTruncated: false })) };
+      const options = linuxSetupOptions(broker, runner);
+      const linux = new CloudWorkspaceLinuxSetupExecutor(options);
+      let lastFailure: unknown;
+      for (const diagnostic of [archive, archive, space,
+        { ...archive, component: tokenCanary }, { ...archive, stage: urlCanary },
+        { ...archive, failedChecks: [tokenCanary] }, { ...archive, message: urlCanary },
+      ]) {
+        runner.execute.mockResolvedValueOnce({ exitCode: 1, output: JSON.stringify(diagnostic), outputTruncated: false });
+        lastFailure = await linux.execute(execution, signal).catch(error => error);
+      }
+      options.runtimeArtifacts.presignGet.mockRejectedValueOnce(new Error(urlCanary + " " + tokenCanary));
+      lastFailure = await linux.execute(execution, signal).catch(error => error);
+      options.runtimeArtifacts.presignGet.mockResolvedValueOnce({ url: urlCanary, expiresAt: new Date(Date.now() + 901_000).toISOString() });
+      lastFailure = await linux.execute(execution, signal).catch(error => error);
+      throw lastFailure;
+    }]);
+    await worker(executor).runOnce();
+    const incidents = (await pool.query("SELECT first_cause,terminal_cause,events FROM cloud_workspace_diagnostic_incidents WHERE operation_id=$1", [seeded.setupRunId])).rows;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0].first_cause).toMatchObject({ code: "setup_runtime_install_failed", phase: "runtime",
+      setup: { version: 1, phase: "runtime", installer: archive } });
+    expect(incidents[0].terminal_cause).toMatchObject({ code: "setup_runtime_input_invalid", phase: "runtime" });
+    const installers = incidents[0].events.flatMap((event: { diagnostic: { setup?: { installer?: unknown } } }) =>
+      event.diagnostic.setup?.installer ? [event.diagnostic.setup.installer] : []);
+    expect(installers).toEqual([archive, space]);
+    expect(incidents[0].events[0].count).toBe(2);
+    const logs = (await pool.query(`SELECT run.log_excerpt,run.error_code,workspace.last_error_message
+      FROM cloud_workspace_setup_runs run JOIN cloud_workspaces workspace ON workspace.id=run.workspace_id
+      WHERE run.id=$1`, [seeded.setupRunId])).rows;
+    const serialized = JSON.stringify({ incidents, logs });
+    for (const forbidden of [tokenCanary, urlCanary, "https://artifacts.example.test", "private-runtime-delivery"])
+      expect(serialized.includes(forbidden)).toBe(false);
+  });
 
   it("retains a v4 generation pin across retries and persists its registered nine-field witness at readiness", async () => {
     const seeded = await seedSetup({ v4: true });

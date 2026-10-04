@@ -144,6 +144,7 @@ describe("DaytonaCloudWorkspaceSetupExecutor", () => {
     const artifactUrl = "https://artifacts.example.test/runtime?signature=private-runtime-delivery";
     const input = execution({ provider: { name: "boat", resourceId: "sandbox-exact-id" }, runtime: pin });
     const f = harness(input);
+    f.grant.expiresAt = new Date(NOW + 900_000);
     const artifact = { url: artifactUrl, expiresAt: new Date(NOW + 900_000).toISOString() };
     const objectKey = `runtime/v1/${pin.runtimeId}/${descriptor.archiveSha256}.tar.gz`;
     const resolveRuntimeArtifact = vi.fn(async () => ({ descriptor, objectKey }));
@@ -172,6 +173,7 @@ describe("DaytonaCloudWorkspaceSetupExecutor", () => {
     expect(f.runtimeArtifacts.presignGet).toHaveBeenCalledExactlyOnceWith(f.objectKey, 900);
     const { runtime: _runtime, ...legacyInput } = f.input;
     const legacy = harness(legacyInput);
+    legacy.grant.expiresAt = f.grant.expiresAt;
     await legacy.executor.execute(legacy.input, new AbortController().signal);
     expect(wrapped.setup).toBe(vi.mocked(legacy.runner.execute).mock.calls[0][0].env!.ZEROS_CLOUD_WORKSPACE_SETUP_B64);
     expect(JSON.stringify(vi.mocked(f.broker.revoke).mock.calls)).not.toContain(f.artifactUrl);
@@ -224,15 +226,50 @@ describe("DaytonaCloudWorkspaceSetupExecutor", () => {
     await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_runtime_input_invalid" });
     expect(f.runner.execute).not.toHaveBeenCalled();
   });
-  it.each([
-    { check: "timeout", exitCode: 124, retryable: true },
-    { check: "manifest_digest", exitCode: 1, retryable: false },
-  ])("handles installer-only $check failures before the helper runs", async ({ check, exitCode, retryable }) => {
+  it.each([120_000, 604_999])("rejects v4 admission without time for installation and helper entry (%i ms)", async lifetime => {
     const f = v4();
-    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode, outputTruncated: false,
+    f.grant.expiresAt = new Date(NOW + lifetime);
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_admission_invalid", retryable: false });
+    expect(f.runner.execute).not.toHaveBeenCalled();
+    expect(f.runtimeArtifacts.presignGet).not.toHaveBeenCalled();
+    expect(f.broker.revoke).toHaveBeenCalledWith(f.grant, "rejected");
+  });
+  it.each([
+    { check: "timeout", exitCode: 124, transportExitCode: 124, retryable: true },
+    { check: "process_signal", exitCode: 143, transportExitCode: 124, retryable: true },
+    { check: "manifest_digest", exitCode: 1, transportExitCode: 1, retryable: false },
+    { check: "archive_digest", exitCode: 1, transportExitCode: 124, retryable: false },
+  ])("handles installer-only $check failures with child $exitCode / transport $transportExitCode", async ({ check, exitCode, transportExitCode, retryable }) => {
+    const f = v4();
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: transportExitCode, outputTruncated: false,
       output: JSON.stringify({ ...f.installerDiagnostic, stage: "download", ok: false,
         exitCode, timedOut: check === "timeout", failedChecks: [check] }) + "\n" });
     await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_runtime_install_failed", retryable });
+  });
+  it.each([
+    { exitCode: 1, reason: "outer flock contention" },
+    { exitCode: 124, reason: "outer timeout" },
+    { exitCode: 137, reason: "outer timeout kill-after" },
+  ])("retries $reason without an installer diagnostic", async ({ exitCode }) => {
+    const f = v4();
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode, output: "", outputTruncated: false });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_runtime_install_failed", retryable: true });
+    expect(f.broker.revoke).toHaveBeenCalledWith(f.grant, "failed");
+  });
+  it("requires installer success even when the helper already returned readiness before an outer timeout", async () => {
+    const f = v4();
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 124, outputTruncated: false,
+      output: f.output.split("\n")[0] + "\n" + JSON.stringify({ ...f.installerDiagnostic,
+        stage: "run_setup", ok: false, exitCode: 143, failedChecks: ["process_signal"] }) });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_runtime_install_failed", retryable: true });
+  });
+  it("attaches the validated installer diagnostic to a typed failure", async () => {
+    const f = v4();
+    const installer = { ...f.installerDiagnostic, stage: "verify_archive", ok: false, exitCode: 1, failedChecks: ["archive_digest"] };
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 1, output: JSON.stringify(installer), outputTruncated: false });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({
+      code: "setup_runtime_install_failed", retryable: false, diagnostic: { version: 1, phase: "runtime", installer },
+    });
   });
   it("accepts a bounded v2 failure envelope without changing the exact v1 proof", async () => {
     const { executor, runner, input } = harness();

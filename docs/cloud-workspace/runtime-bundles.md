@@ -305,6 +305,9 @@ whose bundle is not revoked, uses the deployed engine protocol, and has enabled,
 non-revoked qualifications for all of `claude-setup-token`, `codex-chatgpt`, and
 `cursor-api-key` for that base's compatibility ID and the configured evidence
 mode. MCP approval is checked independently when a credential path requires it.
+V4 admission supports only the current tested engine protocol. An older
+`CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION` override retains legacy behavior but
+closes new v4 creates with HTTP 409 before allocation.
 
 Create reselects under the organization lock and saves base provenance and all
 six runtime fields in the generation transaction, without provider or artifact
@@ -322,6 +325,16 @@ GET capability and the unchanged nested setup payload. Legacy input remains
 bounded to 48 KiB. Artifact URLs never enter workspace responses, persisted
 setup logs, grants or errors. The helper result uses the existing parser and the
 final installer diagnostic must also confirm success.
+V4 uses a 900-second one-use setup admission, covering the ten-minute install
+allowance and the helper's five-second minimum remaining lifetime. The executor
+rejects an admission without that remaining budget before installation. Legacy
+keeps `CLOUD_WORKSPACE_SETUP_ADMISSION_TTL_SECONDS` (120 seconds by default).
+Materials are minted by the single redemption after installation, so their
+lifetime covers the remaining setup work independently of admission expiry.
+Outer timeout and setup-lock contention use the worker's bounded retries with
+fresh admission and artifact delivery for the same pin. Integrity failures stay
+terminal. Validated installer component, stage, exit code, timeout flag and
+failed checks are retained in bounded diagnostics without raw output or URLs.
 Publication and setup share one artifact store from `CLOUD_WORKSPACE_S3_*`;
 without that store v4 setup rejects with `cloud_runtime_unavailable`. Delivery
 remains enabled for saved v4 generations when new v4 creation is disabled.

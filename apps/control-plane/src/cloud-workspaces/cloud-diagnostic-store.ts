@@ -4,6 +4,13 @@ import { cloudDiagnosticSchema, cloudStopReason, type CloudDiagnostic } from "./
 
 type Scope = { workspaceId: string; organizationId: string; generation: number; operationKind: "compute" | "setup" | "engine"; operationId: string; executionFence?: number; leaseOwner?: string };
 const retentionLock = () => "SELECT pg_advisory_xact_lock(837416,114)";
+function installerDiagnosticKey(value: CloudDiagnostic): string | null {
+  const installer = value.setup?.installer;
+  // JSONB reorders object keys. Compare a stable tuple so identical failures
+  // coalesce while different installer checks retain separate bounded events.
+  return installer ? JSON.stringify([installer.component, installer.stage, installer.ok, installer.exitCode,
+    installer.timedOut, [...installer.failedChecks].sort()]) : null;
+}
 /** Global failure-only serialization bounds aggregate rows/bytes even with many
  * writers. Routine lease renewal never takes this lock. Reserve 64 bytes per
  * row for the later timestamp and int32 recovery generation replacing nulls;
@@ -89,7 +96,8 @@ export async function retainCloudDiagnosticTx(tx: Tx, scope: Scope, value: Cloud
       [scope.workspaceId,scope.generation,scope.operationKind,scope.operationId])).rows[0];
     const now = new Date().toISOString();
     const events = prior?.events ?? [];
-    const repeated = events.find(event => event.diagnostic.phase === diagnostic.phase && event.diagnostic.code === diagnostic.code && event.diagnostic.sqlState === diagnostic.sqlState);
+    const repeated = events.find(event => event.diagnostic.phase === diagnostic.phase && event.diagnostic.code === diagnostic.code && event.diagnostic.sqlState === diagnostic.sqlState &&
+      installerDiagnosticKey(event.diagnostic) === installerDiagnosticKey(diagnostic));
     if (repeated) { repeated.lastAt=now; repeated.count=Math.min(Number.MAX_SAFE_INTEGER,repeated.count+1); repeated.diagnostic=diagnostic; }
     else { if (events.length === 16) events.splice(1,1); events.push({ diagnostic, firstAt: now, lastAt: now, count: 1 }); }
     // Freeze the cause that requested a stop; later drain failures remain in
