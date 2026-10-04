@@ -81,12 +81,13 @@ function report() {
 }
 
 describe("cloud workspace runtime admission", () => {
-  it.each([2, 3])("routes profile %i through the isolated engine launcher", (version) => {
+  it.each([2, 3, 4])("routes profile %i through the isolated engine launcher", (version) => {
     const source=readFileSync("scripts/cloud-workspace-validation/sandbox/start-engine.sh","utf8");
     const select=source.slice(source.indexOf('case "$PROFILE_VERSION" in'),source.indexOf("esac")+4);
     const launch=source.slice(source.lastIndexOf('if [[ "$PROFILE_VERSION"'));
     const temporary=mkdtempSync(join(tmpdir(),"zeros-launch-regression-"));
     const log=join(temporary,"launch.log");
+    const runtimeRoot=version===4?`/opt/zeros-infra/r1-${"a".repeat(64)}`:"/opt/zeros-runtime";
     try {
     const result=spawnSync("bash",["-c",`set -euo pipefail
 PROFILE_VERSION=${version}
@@ -94,11 +95,12 @@ ${select}
 printf '%s' "$REPO_DIR"
 RUNTIME=/bin/echo
 LOG="$1"
+RUNTIME_LIB="$2"
 ENGINE_DIR=/opt/zeros
-${launch}`,"test",log],{encoding:"utf8",env:{PATH:"/usr/bin:/bin"}});
+${launch}`,"test",log,`${runtimeRoot}/lib/zeros`],{encoding:"utf8",env:{PATH:"/usr/bin:/bin"}});
     expect(result.status,result.stderr).toBe(0);
-    expect(result.stdout).toBe(version === 3 ? runtimeLayout.repository : runtimeLayout.logicalRepository);
-    expect(readFileSync(log,"utf8").trim()).toBe("/opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs");
+    expect(result.stdout).toBe(version >= 3 ? runtimeLayout.repository : runtimeLayout.logicalRepository);
+    expect(readFileSync(log,"utf8").trim()).toBe(`${runtimeRoot}/lib/zeros/cloud-engine-launcher.mjs`);
     } finally { rmSync(temporary,{recursive:true,force:true}); }
   });
 

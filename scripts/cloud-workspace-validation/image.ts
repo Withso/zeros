@@ -186,6 +186,9 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): Image {
         path.join(here, "sandbox", "cgroup-resources.mjs"),
         "/opt/zeros-runtime/lib/zeros/cgroup-resources.mjs",
       )
+      .runCommands(
+        `install -o root -g root -m 0444 ${engineDirectory}/apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-root.mjs`,
+      )
       .addLocalFile(
         path.join(here, "sandbox", "cloud-runtime-profile.mjs"),
         "/opt/zeros-runtime/lib/zeros/cloud-runtime-profile.mjs",
@@ -255,7 +258,7 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): Image {
         "chmod 0755 /opt/zeros-runtime/bin/start-engine.sh /opt/zeros-runtime/bin/egress-probe.sh",
         "chmod 0555 /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs /opt/zeros-runtime/lib/zeros/write-image-build-metadata.mjs /opt/zeros-runtime/lib/zeros/attest-cloud-worker.mjs /opt/zeros-runtime/lib/zeros/consume-cloud-admission.mjs /opt/zeros-runtime/lib/zeros/install-cloud-preview-links.mjs /opt/zeros-runtime/lib/zeros/install-cloud-github-credential.mjs /opt/zeros-runtime/lib/zeros/cloud-github-refresh-request.mjs /opt/zeros-runtime/lib/zeros/cloud-git-askpass.mjs /opt/zeros-runtime/lib/zeros/cloud-worker-supervisor.mjs /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs",
         "cc -std=c11 -O2 -Wall -Wextra -Werror /tmp/cloud-engine-namespace.c -o /opt/zeros-runtime/cloud-engine-namespace && chmod 0500 /opt/zeros-runtime/cloud-engine-namespace && rm /tmp/cloud-engine-namespace.c",
-        "chown root:root /opt/zeros-runtime/lib/zeros/cloud-runtime-profile.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-cgroup.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-view.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs && chmod 0444 /opt/zeros-runtime/lib/zeros/cloud-runtime-profile.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-cgroup.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-view.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs",
+        "chown root:root /opt/zeros-runtime/lib/zeros/cloud-runtime-root.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-profile.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-cgroup.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-view.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs && chmod 0444 /opt/zeros-runtime/lib/zeros/cloud-runtime-root.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-profile.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-cgroup.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-view.mjs /opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs",
         "chmod 0644 /etc/zeros/cloud-worker.json",
         "chown root:root /opt/zeros-runtime/lib/zeros/zeros-cloud-engine.apparmor && chmod 0444 /opt/zeros-runtime/lib/zeros/zeros-cloud-engine.apparmor",
         "chown root:root /opt/zeros-runtime/lib/zeros/runtime-layout.json && chmod 0444 /opt/zeros-runtime/lib/zeros/runtime-layout.json",

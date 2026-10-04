@@ -12,6 +12,7 @@ import {
   hasCloudEngineUserNamespace,
   isCloudDeploymentOwner,
 } from "./cloud-deployment-authority.mjs";
+import {resolveCloudRuntime, validateCloudRuntimeMarker} from "./cloud-runtime-root.mjs";
 
 import type {
   CloudWorkerRuntimeConfiguration,
@@ -22,9 +23,9 @@ export const CLOUD_WORKER_CONFIG_PATH = "/etc/zeros/cloud-worker.json";
 const MAX_CONFIG_BYTES = 4 * 1024;
 
 export interface CloudWorkerConfiguration extends CloudWorkerRuntimeConfiguration {
-  readonly version: 1 | 2 | 3;
+  readonly version: 1 | 2 | 3 | 4;
   readonly backend: "cloud-worker";
-  readonly profile: "zeros-cloud-worker-v1" | "zeros-cloud-worker-v2" | "zeros-cloud-worker-v3";
+  readonly profile: "zeros-cloud-worker-v1" | "zeros-cloud-worker-v2" | "zeros-cloud-worker-v3" | "zeros-cloud-worker-v4";
   readonly toolchain: CloudWorkerToolchain;
 }
 
@@ -79,7 +80,8 @@ export function parseCloudWorkerConfiguration(
     value.version === 1 && value.profile === "zeros-cloud-worker-v1";
   const isolated =
     (value.version === 2 && value.profile === "zeros-cloud-worker-v2") ||
-    (value.version === 3 && value.profile === "zeros-cloud-worker-v3");
+    (value.version === 3 && value.profile === "zeros-cloud-worker-v3") ||
+    (value.version === 4 && value.profile === "zeros-cloud-worker-v4");
   if (
     Object.keys(value).sort().join("\0") !== expectedKeys.join("\0") ||
     (!legacy && !isolated) ||
@@ -96,7 +98,7 @@ export function parseCloudWorkerConfiguration(
     throw new Error("cloud-worker configuration has an unsupported contract");
   }
   return {
-    version: value.version as 1|2|3,
+    version: value.version as 1|2|3|4,
     backend: "cloud-worker",
     profile: value.profile as CloudWorkerConfiguration["profile"],
     uid: Number(value.uid),
@@ -190,6 +192,14 @@ export function loadCloudWorkerConfiguration(
   }
   for (const candidate of Object.values(configuration.toolchain)) {
     assertRootControlledPath(candidate);
+  }
+  if (configuration.version === 4) {
+    validateCloudRuntimeMarker(configuration, true);
+    const runtime = resolveCloudRuntime();
+    if (runtime.profile !== "v4" || configuration.toolchain.node !== runtime.node ||
+      configuration.toolchain.supervisor !== `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs` ||
+      configuration.toolchain.bwrap !== "/usr/bin/bwrap" || configuration.toolchain.setpriv !== "/usr/bin/setpriv")
+      throw new Error("cloud-worker toolchain does not match the active runtime");
   }
   for (const candidate of [
     configuration.toolchain.node,

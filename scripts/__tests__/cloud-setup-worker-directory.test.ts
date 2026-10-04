@@ -24,6 +24,7 @@ it("runs the unprivileged host setup in the physical repository, before the engi
   fixture.document = Buffer.from(JSON.stringify({ version: 1, command: "pwd", environment: {}, timeoutMs: 1000 }));
   fixture.spawn.mockReturnValue({ status: 0 });
   const argv = process.argv, exitCode = process.exitCode;
+  vi.spyOn(process, "execPath", "get").mockReturnValue("/opt/zeros-runtime/bin/node");
   vi.spyOn(process, "getuid").mockReturnValue(10001);
   vi.spyOn(process, "platform", "get").mockReturnValue("linux");
   process.argv = [process.execPath, path.resolve("scripts/cloud-workspace-validation/sandbox/cloud-setup-process.mjs"), "--unprivileged"];

@@ -16,9 +16,10 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CloudEngineCgroup } from "./cloud-engine-cgroup.mjs";
@@ -27,6 +28,7 @@ import {
   cloudEngineViewEnvironment,
 } from "./cloud-engine-view.mjs";
 import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
+import { resolveCloudRuntime, cloudActiveRuntimeDescriptor } from "./cloud-runtime-root.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 
 function rootPath(file, directory = false) {
@@ -158,6 +160,7 @@ export function prepareCloudEngineAppArmor({
   read = readCloudEngineKernelParameter,
   verify = rootPath,
   execute = spawnSync,
+  runtime = resolveCloudRuntime(),
 } = {}) {
   let restriction;
   try {
@@ -187,7 +190,7 @@ export function prepareCloudEngineAppArmor({
     return;
   }
   const parser = "/usr/sbin/apparmor_parser";
-  const profile = "/opt/zeros-runtime/lib/zeros/zeros-cloud-engine.apparmor";
+  const profile = runtime.profile === "v4" ? "/etc/apparmor.d/zeros-cloud-engine" : `${runtime.libRoot}/zeros-cloud-engine.apparmor`;
   verify(parser);
   verify(profile);
   const result = execute(parser, ["--replace", "--skip-cache", profile], {
@@ -203,24 +206,24 @@ export function prepareCloudEngineAppArmor({
     );
 }
 
-export function prepareCloudEngineView() {
+export function prepareCloudEngineView(runtime = resolveCloudRuntime()) {
   const profile = readCloudHostRuntimeProfile();
-  if (profile.version !== 2 && profile.version !== 3)
+  if (![2,3,4].includes(profile.version) || (profile.version === 4) !== (runtime.profile === "v4"))
     throw new Error("Isolated cloud engine profile required");
   for (const file of [
     "/usr/bin/bwrap",
     "/usr/bin/setpriv",
     "/usr/bin/rg",
-    "/opt/zeros-runtime/bin/node",
-    "/opt/zeros-runtime/cloud-engine-namespace",
-    "/opt/zeros/dist-engine/cli.js",
+    runtime.node,
+    runtime.engineNamespace,
+    `${runtime.workerRoot}/dist-engine/cli.js`,
   ])
     rootPath(file);
   // The attester verifies the complete installation against the image digest.
   // Recheck immutable path ancestry at the final launch boundary as well.
-  rootPath("/opt/zeros", true);
-  rootPath("/opt/zeros-runtime", true);
-  prepareCloudEngineAppArmor();
+  rootPath(runtime.workerRoot, true);
+  rootPath(runtime.root, true);
+  prepareCloudEngineAppArmor({runtime});
   privateDirectory("/run/zeros/view", 0, 0, 0o700);
   privateDirectory("/run/zeros/view/settings", 10003, 10001, 0o750);
   privateDirectory(profile.runtimeDirectory, 10003, 10003, 0o700);
@@ -260,7 +263,32 @@ export function prepareCloudEngineView() {
   } finally {
     managed.fill(0);
   }
-  return profile;
+  if (runtime.profile !== "v4") return {...profile, runtime};
+  const viewDirectory = `/run/zeros/view/runtime-${randomUUID()}`;
+  privateDirectory(viewDirectory, 0, 0, 0o700);
+  try {
+    privateDirectory(`${viewDirectory}/etc`, 0, 0, 0o755);
+    privateDirectory(`${viewDirectory}/facade`, 0, 0, 0o755);
+    privateDirectory(`${viewDirectory}/facade/sessions`, 0, 0, 0o700);
+    const descriptor = cloudActiveRuntimeDescriptor(runtime);
+    publishViewFile(`${viewDirectory}/active-runtime.json`, JSON.stringify(descriptor), 0, 0, 0o444);
+    publishViewFile(`${viewDirectory}/etc/cloud-worker.json`, JSON.stringify({
+      version: 4, backend: "cloud-worker", profile: "zeros-cloud-worker-v4", uid: 10001, gid: 10001,
+      toolchain: { node: runtime.node, supervisor: `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`,
+        bwrap: "/usr/bin/bwrap", setpriv: "/usr/bin/setpriv" },
+    }), 0, 0, 0o444);
+    for (const [name, target] of Object.entries({ current: `../zeros-infra/${runtime.runtimeId}`, bin: "current/bin",
+      worker: "current/worker", "manifest.json": "current/manifest.json", logs: "/srv/zeros/log", state: "/srv/zeros/state" }))
+      symlinkSync(target, `${viewDirectory}/facade/${name}`);
+    rootPath("/opt/zeros/disk-epoch");
+    const epoch = readPhysical("/opt/zeros/disk-epoch", 64);
+    if (!/^[0-9]+\n?$/.test(epoch.toString("utf8"))) throw new Error("Invalid cloud disk epoch");
+    publishViewFile(`${viewDirectory}/facade/disk-epoch`, epoch, 0, 0, 0o444);
+    return {...profile, runtime, viewDirectory, releaseView: () => rmSync(viewDirectory, {recursive:true,force:true})};
+  } catch (error) {
+    rmSync(viewDirectory, {recursive:true,force:true});
+    throw error;
+  }
 }
 
 /** The child cannot enter the general engine until the host has positively
@@ -269,15 +297,33 @@ export function prepareCloudEngineView() {
 export async function launchCloudEngine({
   operation = "serve",
   source = process.env,
-  scope = new CloudEngineCgroup(),
+  runtime = resolveCloudRuntime(),
+  scope,
   prepare = prepareCloudEngineView,
   spawnProcess = spawn,
   signals = process,
 } = {}) {
-  const profile=prepare();
-  const args = cloudEngineViewArguments(operation,profile?.version??2);
-  const environment = cloudEngineViewEnvironment(source, operation);
-  scope.prepare();
+  const profile=prepare(runtime);
+  runtime = profile?.runtime ?? runtime;
+  let args, environment;
+  try {
+    args = cloudEngineViewArguments(operation,profile?.version??2,runtime,profile?.viewDirectory);
+    environment = cloudEngineViewEnvironment(source, operation,runtime);
+    if (!scope) {
+      let instanceId;
+      if (runtime.profile === "v4") {
+        if (operation === "serve") {
+          try { instanceId = JSON.parse(Buffer.from(source.ZEROS_CLOUD_RUNTIME_B64 ?? "", "base64url").toString("utf8"))?.engine?.instanceId; }
+          catch { throw new Error("Invalid cloud engine scope identity"); }
+        } else instanceId = randomUUID();
+      }
+      scope = new CloudEngineCgroup({runtime, instanceId});
+    }
+    scope.prepare();
+  } catch (error) {
+    profile?.releaseView?.();
+    throw error;
+  }
   let child;
   let admitted = false;
   let exit;
@@ -309,7 +355,7 @@ export async function launchCloudEngine({
   signals.once("SIGINT", interrupt);
   try {
     child = spawnProcess(
-      "/opt/zeros-runtime/cloud-engine-namespace",
+      runtime.engineNamespace,
       ["--await-scope", ...args],
       {
         cwd: "/",
@@ -361,6 +407,7 @@ export async function launchCloudEngine({
     try {
       await scope.retire();
     } finally {
+      profile?.releaseView?.();
       child?.stdio[3]?.destroy();
       child?.unref();
     }

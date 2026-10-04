@@ -13,6 +13,14 @@
 // pass on any dev machine and prove nothing.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from "node:fs";
+import {tmpdir} from "node:os";
+import path from "node:path";
+import {resolveCloudRuntime,resolveCloudRuntimePackagePath} from "../../../containment/cloud-runtime-root.mjs";
+vi.mock("../../../containment/cloud-runtime-root.mjs",async original=>{
+  const actual=await original<typeof import("../../../containment/cloud-runtime-root.mjs")>();
+  return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime),resolveCloudRuntimePackagePath:vi.fn(actual.resolveCloudRuntimePackagePath)};
+});
 
 import {
   CLAUDE_CLI_PATH_ENV,
@@ -73,6 +81,27 @@ beforeEach(() => {
 afterEach(() => {
   warn.mockRestore();
   resetClaudeCliCacheForTests();
+  vi.mocked(resolveCloudRuntime).mockReset();vi.mocked(resolveCloudRuntimePackagePath).mockReset();vi.unstubAllEnvs();
+});
+
+it("resolves v4 Claude from the selected worker SDK and its native sibling",async()=>{
+  const root=mkdtempSync(path.join(tmpdir(),"zeros-cloud-claude-"));
+  try {
+    const sdk=path.join(root,"node_modules/@anthropic-ai/claude-agent-sdk");
+    const native=path.join(root,"node_modules",claudePlatformPackages()[0]!);
+    mkdirSync(sdk,{recursive:true});mkdirSync(native,{recursive:true});
+    writeFileSync(path.join(root,"package.json"),"{}");
+    writeFileSync(path.join(sdk,"package.json"),JSON.stringify({name:"@anthropic-ai/claude-agent-sdk",exports:"./sdk.mjs"}));
+    writeFileSync(path.join(sdk,"sdk.mjs"),"export {};");
+    const binary=path.join(native,claudeBinaryName());writeFileSync(binary,"fixture",{mode:0o555});
+    vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile:"v4",workerRoot:root} as ReturnType<typeof resolveCloudRuntime>);
+    vi.mocked(resolveCloudRuntimePackagePath).mockImplementation(file=>file);
+    vi.stubEnv("ZEROS_CLAUDE_CLI_PATH","/tmp/untrusted-claude");
+    const {resolveCloudClaudeCli}=await import("../adapter");
+    expect(resolveCloudClaudeCli()).toEqual({path:binary,source:"bundled"});
+    expect(resolveCloudRuntimePackagePath).toHaveBeenCalledWith(path.join(sdk,"package.json"));
+    expect(resolveCloudRuntimePackagePath).toHaveBeenCalledWith(binary);
+  } finally {rmSync(root,{recursive:true,force:true});}
 });
 
 describe("resolveClaudeCli — the packaged shape (the actual bug)", () => {

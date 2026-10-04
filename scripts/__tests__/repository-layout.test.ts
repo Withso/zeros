@@ -693,7 +693,7 @@ describe("repository layout contracts", () => {
     expect(launcher).toContain(
       '"$RUNTIME" "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR"',
     );
-    expect(launcher).toContain('"$RUNTIME" /opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs');
+    expect(launcher).toContain('"$RUNTIME" "$RUNTIME_LIB/cloud-engine-launcher.mjs"');
     expect(launcher).not.toContain('node "$REPO_DIR/dist-engine/cli.js"');
   });
 

@@ -90,7 +90,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
   static async prepare(lease: CloudAgentLease, workload: PreparedBoundary, conversationId: string,
     settings?: Record<string, string>): Promise<CloudNativeBoundary> {
     const configuration = loadCloudWorkerConfiguration();
-    if (configuration?.version !== 3 || workload.status.backend !== "cloud-worker")
+    if ((configuration?.version !== 3 && configuration?.version !== 4) || workload.status.backend !== "cloud-worker")
       throw new Error("Native cloud agents require a qualified cloud worker");
     lease.assertLive(); await workload.attestation; lease.assertLive();
     await mkdir(ROOT, { recursive: true, mode: 0o700 });

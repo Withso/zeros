@@ -4,6 +4,7 @@ import {chown,lstat,mkdir,realpath,readlink,rm} from "node:fs/promises";
 import type {CloudAgentAccessMaterial} from "@zeros/protocol/cloud-agent-execution";
 import {CLOUD_CORE_PROVIDER_RESTRICTIONS,type ExecutionBoundaryStatus} from "@zeros/protocol/containment";
 import type {CloudAgentLease} from "../cloud-agent-lease";
+import {resolveCloudRuntime} from "./cloud-runtime-root.mjs";
 import {loadCloudWorkerConfiguration} from "./cloud-worker-config";
 import {cloudCoordinatorArguments,cloudCoordinatorEnvironment,CLOUD_COORDINATOR_HOME,CLOUD_COORDINATOR_CWD,CLOUD_COORDINATOR_UID} from "./cloud-coordinator-view.mjs";
 import {CloudSupervisedProcess} from "./cloud-supervised-process";
@@ -12,14 +13,12 @@ import {acquireCloudNativeHistory,CLOUD_NATIVE_HISTORY_ROOT} from "./cloud-nativ
 import type {BoundaryLaunchSpec,BoundaryProcess,BoundarySpawnRequest,PortLease,PortRequest,PreparedBoundary} from "./types";
 
 const ROOT="/run/zeros/coordinators";
-const NODE="/opt/zeros-runtime/bin/node";
 const BWRAP="/usr/bin/bwrap";
-const SUPERVISOR="/opt/zeros-runtime/cloud-process-supervisor";
 const AUTH_ENV=new Set(["ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","CURSOR_API_KEY","OPENAI_API_KEY"]);
 const STARTUP_ENV=new Set(["CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS","CLAUDE_CODE_STARTUP_FAILURE_RESULTS","NODE_USE_ENV_PROXY"]);
 const CANARY=`const fs=require('node:fs');const status=fs.readFileSync('/proc/self/status','utf8');
 if(process.getuid()!==10004||process.getgid()!==10004||!/^CapEff:\\s+0+$/m.test(status))process.exit(91);
-for(const name of ['/srv/zeros/state','/srv/zeros/home/agent','/run/zeros','/etc/zeros'])if(fs.existsSync(name))process.exit(92);
+for(const name of ['/srv/zeros/state','/srv/zeros/home/agent','/run/zeros','/etc/zeros','/zeros','/opt/zeros-bootstrap','/srv/zeros/runtime-installs'])if(fs.existsSync(name))process.exit(92);
 if(fs.readlinkSync('/proc/self/ns/pid')===process.argv[1])process.exit(93);
 for(const directory of ['/home/zeros-agent','/srv/zeros/workspace','/tmp','/dev/shm']){const file=directory+'/.zeros-canary';fs.writeFileSync(file,'canary',{flag:'wx'});fs.unlinkSync(file);}
 try{fs.writeFileSync('/.zeros-denied','denied',{flag:'wx'});process.exit(94);}catch(error){if(!['EACCES','EROFS','EPERM'].includes(error.code))process.exit(95);}
@@ -47,7 +46,7 @@ export class CloudCoordinatorBoundary implements PreparedBoundary {
   }
   static async prepare(lease:CloudAgentLease,workload:PreparedBoundary,conversationId:string,settings?:Record<string,string>):Promise<CloudCoordinatorBoundary>{
     const configuration=loadCloudWorkerConfiguration();
-    if(configuration?.version!==3)throw new Error("Private cloud agents require the qualified v3 runtime");
+    if(configuration?.version!==3&&configuration?.version!==4)throw new Error("Private cloud agents require the qualified cloud runtime");
     lease.assertLive();await workload.attestation;lease.assertLive();
     await mkdir(ROOT,{recursive:true,mode:0o700});
     const root=await lstat(ROOT);
@@ -69,7 +68,7 @@ export class CloudCoordinatorBoundary implements PreparedBoundary {
       // its role. Admission material remains in the trusted engine meanwhile.
       const owned=boundary;
       const parentNamespace=await readlink("/proc/self/ns/pid");
-      const canary=await lease.launch(()=>owned.spawn({command:NODE,args:["-e",CANARY,parentNamespace],cwd:CLOUD_COORDINATOR_CWD,
+      const canary=await lease.launch(()=>owned.spawn({command:resolveCloudRuntime().node,args:["-e",CANARY,parentNamespace],cwd:CLOUD_COORDINATOR_CWD,
         env:Object.fromEntries(Object.entries(env).filter(([name])=>!AUTH_ENV.has(name))),stdio:"pipe"},true));
       await attestCloudCoordinator(lease,canary);
       lease.assertLive();
@@ -95,11 +94,11 @@ export class CloudCoordinatorBoundary implements PreparedBoundary {
     const arguments_=cloudCoordinatorArguments(this.directory,request.command,request.args,this.history.mount);
     if(this.launches.size+this.processes.size>=16)throw new Error("Private coordinator process capacity exceeded");
     const receipt=`${this.directory}/${randomBytes(16).toString("hex")}`;this.launches.add(receipt);
-    return {command:SUPERVISOR,args:[receipt,String(process.pid),"--",BWRAP,...arguments_],cwd:"/",env,stdio:request.stdio??"pipe"};
+    return {command:resolveCloudRuntime().processSupervisor,args:[receipt,String(process.pid),"--",BWRAP,...arguments_],cwd:"/",env,stdio:request.stdio??"pipe"};
   }
   trackProcess(child:ChildProcess):BoundaryProcess{
     const receipt=child.spawnargs[1];
-    if(child.spawnfile!==SUPERVISOR||!receipt||!this.launches.has(receipt)||child.spawnargs[2]!==String(process.pid)||child.spawnargs[3]!=="--"||child.spawnargs[4]!==BWRAP){
+    if(child.spawnfile!==resolveCloudRuntime().processSupervisor||!receipt||!this.launches.has(receipt)||child.spawnargs[2]!==String(process.pid)||child.spawnargs[3]!=="--"||child.spawnargs[4]!==BWRAP){
       void this.lease.close().catch(()=>{});throw new Error("Private coordinator launch identity is invalid");
     }
     const tracked=new CloudSupervisedProcess(child,receipt,()=>{void this.lease.close().catch(()=>{});});this.processes.add(tracked);
@@ -113,7 +112,7 @@ export class CloudCoordinatorBoundary implements PreparedBoundary {
     return tracked;
   }
   cancelUnstartedLaunch(launch:BoundaryLaunchSpec):void{
-    if(launch.command!==SUPERVISOR||launch.args[1]!==String(process.pid)||launch.args[2]!=="--"||launch.args[3]!==BWRAP)
+    if(launch.command!==resolveCloudRuntime().processSupervisor||launch.args[1]!==String(process.pid)||launch.args[2]!=="--"||launch.args[3]!==BWRAP)
       throw new Error("Private coordinator launch identity is invalid");
     this.launches.delete(launch.args[0]!);
   }

@@ -13,16 +13,15 @@ import { fileURLToPath } from "node:url";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 import {
   CloudEngineCgroup,
-  CLOUD_SETUP_CGROUP,
+  cloudCgroupDirectory,
 } from "./cloud-engine-cgroup.mjs";
+import { resolveCloudRuntime, resolveCloudRuntimeChild } from "./cloud-runtime-root.mjs";
 
-const HELPER = "/opt/zeros-runtime/lib/zeros/cloud-setup-process.mjs";
-const NODE = "/opt/zeros-runtime/bin/node";
 const MAX_DOCUMENT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const FIXED_ENV = {
   HOME: "/srv/zeros/home/agent",
-  PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin",
+  PATH: "",
   LANG: "C.UTF-8",
   LOGNAME: "zeros-agent",
   USER: "zeros-agent",
@@ -81,20 +80,20 @@ export function validateCloudSetupPayload(value) {
 /** Called only while the image-owned setup flock is held. The trusted child
  * blocks on fd 3 before it can fork. Every untrusted descendant inherits the
  * confirmed cgroup; success, timeout, cancellation and restart drain it. */
-export async function runScopedCloudSetup(payload) {
+export async function runScopedCloudSetup(payload, {runtime = resolveCloudRuntime()} = {}) {
   validateCloudSetupPayload(payload);
   const document = Buffer.from(JSON.stringify(payload));
   if (document.length > MAX_DOCUMENT_BYTES) {
     document.fill(0);
     throw invalid();
   }
-  const scope = new CloudEngineCgroup({ directory: CLOUD_SETUP_CGROUP });
+  const scope = new CloudEngineCgroup({runtime, kind:"setup"});
   await scope.retire();
   scope.prepare();
   return new Promise((resolve, reject) => {
-    const child = spawn(NODE, [HELPER, "--worker"], {
+    const child = spawn(runtime.node, [runtime.helpers.setupProcess, "--worker"], {
       cwd: "/",
-      env: { PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin", HOME: "/root" },
+      env: { PATH: `${runtime.binRoot}:/usr/bin:/bin`, HOME: "/root" },
       stdio: ["pipe", "pipe", "pipe", "pipe"],
       detached: true,
     });
@@ -173,6 +172,8 @@ export async function runScopedCloudSetup(payload) {
 }
 
 function worker() {
+  const runtime = resolveCloudRuntimeChild();
+  const fixedEnvironment = {...FIXED_ENV, PATH:`${runtime.binRoot}:/usr/bin:/bin`};
   const privileged = process.argv[2] === "--worker";
   if (
     process.platform !== "linux" ||
@@ -217,13 +218,13 @@ function worker() {
           "--reuid=10001",
           "--regid=10001",
           "--clear-groups",
-          NODE,
-          HELPER,
+          runtime.node,
+          runtime.helpers.setupProcess,
           "--unprivileged",
         ],
         {
           cwd: "/",
-          env: { ...FIXED_ENV },
+          env: { ...fixedEnvironment },
           input: encoded,
           stdio: ["pipe", "inherit", "inherit"],
           timeout: payload.timeoutMs,
@@ -237,7 +238,7 @@ function worker() {
           // Setup precedes the engine's mount namespace. Its repository is
           // the host path; the logical path exists only inside that view.
           cwd: runtimeLayout.repository,
-          env: { ...payload.environment, ...FIXED_ENV },
+          env: { ...payload.environment, ...fixedEnvironment },
           stdio: ["ignore", "inherit", "inherit"],
           timeout: payload.timeoutMs,
           killSignal: "SIGKILL",
@@ -249,6 +250,8 @@ function worker() {
   process.exitCode = result.status ?? 125;
 }
 export async function qualifyCloudSetupProcess() {
+  const runtime = resolveCloudRuntime();
+  const setupCgroup = cloudCgroupDirectory(runtime,"setup");
   const directory = mkdtempSync("/tmp/zeros-setup-qualification-");
   chownSync(directory, 10001, 10001);
   const marker = path.join(directory, "child.json");
@@ -266,11 +269,11 @@ export async function qualifyCloudSetupProcess() {
     const before = readFileSync(counter, "utf8");
     await delay(100);
     const retired =
-      !existsSync(CLOUD_SETUP_CGROUP) &&
+      !existsSync(setupCgroup) &&
       readFileSync(counter, "utf8") === before;
     const unprivileged =
       identity.uid === 10001 &&
-      identity.scope.trim() === "0::/zeros-cloud-setup" &&
+      identity.scope.trim() === `0::${setupCgroup.slice("/sys/fs/cgroup".length)}` &&
       /^NoNewPrivs:\s+1$/m.test(identity.privileges) &&
       /^CapEff:\s+0+$/m.test(identity.privileges);
     const timeout = await runScopedCloudSetup({
@@ -280,7 +283,7 @@ export async function qualifyCloudSetupProcess() {
       environment: {},
     });
     const timeoutRetired =
-      !existsSync(CLOUD_SETUP_CGROUP) &&
+      !existsSync(setupCgroup) &&
       (timeout.timedOut || timeout.code !== 0);
     return {
       secure:
@@ -294,7 +297,7 @@ export async function qualifyCloudSetupProcess() {
       timeoutRetired,
     };
   } finally {
-    await new CloudEngineCgroup({ directory: CLOUD_SETUP_CGROUP }).retire();
+    await new CloudEngineCgroup({runtime,kind:"setup"}).retire();
     rmSync(directory, { recursive: true, force: true });
   }
 }

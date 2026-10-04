@@ -3,7 +3,11 @@ import type { CloudWorkerConfiguration } from '../../agents/containment/cloud-wo
 const boundary = vi.hoisted(() => ({
   stat: vi.fn(), owner: vi.fn(), spawn: vi.fn(() => { throw new Error('qualified worker launch'); }),
 }));
-vi.mock('node:fs', async (actual) => ({ ...await actual<typeof import('node:fs')>(), lstatSync: boundary.stat }));
+vi.mock('node:fs', async (actual) => {
+  const fs = await actual<typeof import('node:fs')>();
+  return { ...fs, lstatSync: (file: Parameters<typeof fs.lstatSync>[0]) =>
+    String(file) === script ? boundary.stat(file) : fs.lstatSync(file) };
+});
 vi.mock('node:child_process', async (actual) => ({ ...await actual<typeof import('node:child_process')>(), spawn: boundary.spawn }));
 vi.mock('../../agents/containment/cloud-deployment-authority.mjs', () => ({ isCloudDeploymentOwner: boundary.owner }));
 import { CloudRuntimeHumanServices } from '../cloud-human-services';

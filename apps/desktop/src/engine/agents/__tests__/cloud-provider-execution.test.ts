@@ -4,8 +4,13 @@ import {CLOUD_NATIVE_PROVIDER_RESTRICTIONS,type ExecutionBoundaryStatus} from "@
 import {CloudNativeBoundary} from "../containment/cloud-native-boundary";
 import type {PreparedBoundary} from "../containment/types";
 import {cloudProviderExecution,createCloudAgentExecutionFactory} from "../cloud-provider-execution";
+import {resolveCloudRuntime} from "../containment/cloud-runtime-root.mjs";
 
 vi.mock("../containment/cloud-native-boundary",()=>({CloudNativeBoundary:{prepare:vi.fn()}}));
+vi.mock("../containment/cloud-runtime-root.mjs",async original=>{
+  const actual=await original<typeof import("../containment/cloud-runtime-root.mjs")>();
+  return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime)};
+});
 afterEach(()=>vi.resetAllMocks());
 function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="cursor-api-key"){
   const status:ExecutionBoundaryStatus={version:1,actor:"agent-code",state:"ready",backend:"cloud-worker",
@@ -27,6 +32,16 @@ function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="c
   return {factory,input,workload,coordinator,controller};
 }
 describe("admitted native cloud diagnostic",()=>{
+  it("reports the verified v4 profile for execution and unavailable Browser",async()=>{
+    const legacy=resolveCloudRuntime();
+    vi.mocked(resolveCloudRuntime).mockReturnValue({...legacy,profile:"v4"} as ReturnType<typeof resolveCloudRuntime>);
+    const {factory,input}=fixture();
+    const result=await factory.prepare(input);
+    try {
+      expect(result.boundary.status.cloudExecution?.runtimeProfile).toBe("zeros-cloud-worker-v4");
+      expect(result.boundary.status.browser).toMatchObject({runtimeProfile:"zeros-cloud-worker-v4",state:"unavailable",reason:"provider-unsupported"});
+    } finally { await result.boundary.stopAndProve(); }
+  });
   it.each([
     ["claude","claude-api-key","claude-direct-login-required"],
     ["claude","claude-setup-token","claude-direct-login-required"],

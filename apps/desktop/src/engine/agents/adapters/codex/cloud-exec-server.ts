@@ -1,3 +1,4 @@
+import {resolveCloudRuntime} from "../../containment/cloud-runtime-root.mjs";
 import {randomBytes} from "node:crypto";
 import {createServer,type Server} from "node:http";
 import {timingSafeEqual} from "node:crypto";
@@ -7,7 +8,7 @@ import type {CloudProviderExecution} from "../../cloud-provider-execution";
 import type {BoundaryProcess} from "../../containment/types";
 
 const MAX_FRAME=4*1024*1024,MAX_BUFFER=8*1024*1024;
-const HELPER="/opt/zeros/apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs";
+
 
 /** Adapt the pinned native executor's JSONL stdio to its WebSocket protocol.
  * The capability URL stays in the private app-server; the workspace never
@@ -44,7 +45,8 @@ export class CloudCodexExecServer {
   }
   static async start(execution:CloudProviderExecution,binary:string):Promise<CloudCodexExecServer>{
     execution.lease.assertLive();
-    if(!binary.startsWith("/opt/zeros/")||binary.endsWith(".js"))throw new Error("Cloud Codex requires the pinned native executable");
+    const runtime=resolveCloudRuntime();
+    if(!binary.startsWith(`${runtime.workerRoot}/`)||binary.endsWith(".js"))throw new Error("Cloud Codex requires the pinned native executable");
     const bridge=new CloudCodexExecServer(execution);execution.lease.attach(bridge);
     try{
       // Install the listening promise before yielding. Retirement must wait
@@ -59,8 +61,8 @@ export class CloudCodexExecServer {
       let timer:ReturnType<typeof setTimeout>|undefined;
       try{
         bridge.child=await Promise.race([execution.lease.launch(()=>execution.coordinator.workload.spawn({
-          command:"/opt/zeros-runtime/bin/node",args:[HELPER,binary],cwd:"/srv/zeros/workspace",
-          env:{HOME:"/srv/zeros/home/agent",PATH:"/opt/zeros-runtime/bin:/usr/bin:/bin",LANG:"C.UTF-8"},stdio:"pipe",
+          command:runtime.node,args:[`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs`,binary],cwd:"/srv/zeros/workspace",
+          env:{HOME:"/srv/zeros/home/agent",PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8"},stdio:"pipe",
         })),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("Cloud executor launch timed out")),5000);})]);
       }finally{if(timer)clearTimeout(timer);}
       execution.lease.assertLive();

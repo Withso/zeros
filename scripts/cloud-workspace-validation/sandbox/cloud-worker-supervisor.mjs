@@ -15,7 +15,8 @@ import {
 } from "node:fs";
 import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
-import { CloudEngineCgroup } from "./cloud-engine-cgroup.mjs";
+import { CloudEngineCgroup, CloudDelegatedCgroups } from "./cloud-engine-cgroup.mjs";
+import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +26,6 @@ export const CLOUD_WORKER_SUPERVISOR_SOCKET =
 export const CLOUD_WORKER_SUPERVISOR_AUDIENCE =
   "zeros-cloud-worker-supervisor-v1";
 
-const LAUNCHER = "/opt/zeros-runtime/bin/start-engine.sh";
 const MAX_REQUEST_BYTES = 128 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
 const STOP_GRACE_MS = 10_000;
@@ -266,12 +266,14 @@ function childExit(child, timeoutMs) {
 export class CloudWorkerSupervisor {
   constructor({
     socketPath = CLOUD_WORKER_SUPERVISOR_SOCKET,
-    launcher = LAUNCHER,
+    runtime = resolveCloudRuntime(),
+    launcher = runtime.startEngine,
     spawnProcess = spawn,
     engineScope = null,
     setupScope = null,
   } = {}) {
     this.socketPath = socketPath;
+    this.runtime = runtime;
     this.launcher = launcher;
     this.spawnProcess = spawnProcess;
     this.engineScope = engineScope;
@@ -331,7 +333,7 @@ export class CloudWorkerSupervisor {
       env: {
         HOME: "/root",
         LANG: "C.UTF-8",
-        PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        PATH: `${this.runtime.binRoot}:/usr/bin:/bin:/usr/sbin:/sbin`,
         ZEROS_ACCOUNT_JWT_AUD: environment.accountAudience,
         ...(environment.accountContract
           ? {
@@ -492,6 +494,9 @@ export class CloudWorkerSupervisor {
       if (acquired.status !== 0 || acquired.signal || acquired.error)
         throw new Error("cloud worker supervisor is already owned");
       this.lock = lock;
+      // A restarted systemd host begins idle only after the previous kernel
+      // workload set is proven empty, including launchers it never observed.
+      if (this.runtime.profile === "v4") await this.stopChild();
       await this.listen();
     } catch (error) {
       this.lock = null;
@@ -554,13 +559,18 @@ async function main() {
   }
   process.umask(0o077);
   const profile = readCloudHostRuntimeProfile();
+  const runtime = resolveCloudRuntime();
+  const delegated = runtime.profile === "v4" ? new CloudDelegatedCgroups({runtime}) : null;
+  if (delegated) {
+    if (process.argv.length !== 2) throw new Error("Cloud systemd host takes no arguments");
+    delegated.prepareHost();
+  }
   const supervisor = new CloudWorkerSupervisor({
-    engineScope: profile.version >= 2 ? new CloudEngineCgroup() : null,
+    runtime,
+    engineScope: delegated ?? (profile.version >= 2 ? new CloudEngineCgroup({runtime}) : null),
     setupScope:
-      profile.version >= 2
-        ? new CloudEngineCgroup({
-            directory: "/sys/fs/cgroup/zeros-cloud-setup",
-          })
+      profile.version >= 2 && !delegated
+        ? new CloudEngineCgroup({runtime, kind:"setup"})
         : null,
   });
   await supervisor.start();

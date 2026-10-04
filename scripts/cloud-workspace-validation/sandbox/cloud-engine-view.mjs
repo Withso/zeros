@@ -1,14 +1,17 @@
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
+import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 
 /** Mount inputs are image-owned constants, never paths or commands from an
  * engine request. The host launcher verifies their physical ownership first.
  * Private broker authority, provider login homes and the host shadow/SSH files
  * have no mount in this view. */
-export function cloudEngineViewArguments(operation = "serve",version=2) {
+export function cloudEngineViewArguments(operation = "serve",version=2,runtime=resolveCloudRuntime(),viewDirectory) {
   if (!["serve", "qualify", "qualify-agent"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
-  if(version!==2&&version!==3)throw new Error("Invalid cloud engine profile version");
-  if(operation==="qualify-agent"&&version!==3)throw new Error("Native agent qualification requires v3");
+  if(![2,3,4].includes(version)||(version===4)!==(runtime.profile==="v4"))throw new Error("Invalid cloud engine profile version");
+  if(operation==="qualify-agent"&&version<3)throw new Error("Native agent qualification requires v3 or v4");
+  if(version===4&&(!/^\/run\/zeros\/view\/runtime-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(viewDirectory??"")))
+    throw new Error("Invalid cloud engine runtime projection");
   const args = [
     "--die-with-parent",
     "--unshare-ipc",
@@ -50,15 +53,16 @@ export function cloudEngineViewArguments(operation = "serve",version=2) {
     "--ro-bind",
     "/sys/fs/cgroup",
     "/sys/fs/cgroup",
-    "--ro-bind",
-    "/opt/zeros",
-    "/opt/zeros",
-    "--ro-bind",
-    "/opt/zeros-runtime",
-    "/opt/zeros-runtime",
-    "--ro-bind",
-    "/etc/zeros",
-    "/etc/zeros",
+    ...(version === 4 ? [
+      "--ro-bind", runtime.root, runtime.root,
+      "--ro-bind", `${viewDirectory}/facade`, "/opt/zeros",
+      "--symlink", "/opt/zeros", "/zeros",
+      "--ro-bind", `${viewDirectory}/etc`, "/etc/zeros",
+    ] : [
+      "--ro-bind", runtime.workerRoot, runtime.workerRoot,
+      "--ro-bind", runtime.root, runtime.root,
+      "--ro-bind", "/etc/zeros", "/etc/zeros",
+    ]),
     "--ro-bind",
     "/etc/containers/policy.json",
     "/etc/containers/policy.json",
@@ -83,6 +87,7 @@ export function cloudEngineViewArguments(operation = "serve",version=2) {
     "--bind",
     "/run/zeros/engine",
     "/run/zeros",
+    ...(version === 4 ? ["--ro-bind", `${viewDirectory}/active-runtime.json`, "/run/zeros/active-runtime.json"] : []),
     "--ro-bind",
     "/run/zeros/view/settings",
     "/srv/zeros/managed-settings",
@@ -117,6 +122,7 @@ export function cloudEngineViewArguments(operation = "serve",version=2) {
     args.push("--cap-add", capability);
   for (const directory of [
     "/opt",
+    ...(version === 4 ? ["/opt/zeros-infra"] : []),
     "/srv",
     "/srv/zeros",
     "/srv/zeros/home",
@@ -135,11 +141,12 @@ export function cloudEngineViewArguments(operation = "serve",version=2) {
     "--remount-ro",
     "/",
     "--chdir",
-    operation === "qualify-agent" ? "/opt/zeros" : "/srv/zeros/workspace",
+    operation === "qualify-agent" ? runtime.workerRoot : "/srv/zeros/workspace",
     "--",
-    "/opt/zeros-runtime/cloud-engine-namespace",
+    runtime.engineNamespace,
   );
   if(version===3)args.push("--v3");
+  if(version===4)args.push("--runtime-id",runtime.runtimeId);
   if (operation === "qualify") args.push("--qualify");
   if (operation === "qualify-agent") args.push("--qualify-agent");
   return args;
@@ -148,11 +155,11 @@ export function cloudEngineViewArguments(operation = "serve",version=2) {
 /** Secrets remain in the child's environment, never bwrap argv or process
  * listings. Every authority-bearing variable is selected explicitly from the
  * existing supervisor contract; ambient provider/loader variables are absent. */
-export function cloudEngineViewEnvironment(source, operation = "serve") {
+export function cloudEngineViewEnvironment(source, operation = "serve", runtime=resolveCloudRuntime()) {
   if (!["serve", "qualify", "qualify-agent"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
   const environment = {
-    PATH: "/opt/zeros-runtime/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    PATH: `${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
     HOME: "/srv/zeros/home/agent",
     USER: "zeros-agent",
     LOGNAME: "zeros-agent",
@@ -163,14 +170,14 @@ export function cloudEngineViewEnvironment(source, operation = "serve") {
     ZEROS_USER_SETTINGS_DIR: "/srv/zeros/managed-settings",
     ZEROS_REPO_DIR: "/srv/zeros/workspace",
     ZEROS_ATTACHMENT_TEMP_DIR: "/srv/zeros/attachment-staging",
-    ZEROS_PTY_HOST_RUNTIME: "/opt/zeros-runtime/bin/node",
+    ZEROS_PTY_HOST_RUNTIME: runtime.node,
     ZEROS_PTY_HOST_SCRIPT:
-      "/opt/zeros/apps/desktop/src/engine/pty/pty-host.cjs",
+      `${runtime.workerRoot}/apps/desktop/src/engine/pty/pty-host.cjs`,
     ZEROS_CURSOR_HOST_SCRIPT:
-      "/opt/zeros/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs",
-    ZEROS_ZSR_SUPERVISOR_RUNTIME: "/opt/zeros-runtime/bin/node",
+      `${runtime.workerRoot}/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs`,
+    ZEROS_ZSR_SUPERVISOR_RUNTIME: runtime.node,
     ZEROS_ZSR_SUPERVISOR_SCRIPT:
-      "/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs",
+      `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`,
     ZEROS_ZSR_BWRAP_PATH: "/usr/bin/bwrap",
     ZEROS_ZSR_SETPRIV_PATH: "/usr/bin/setpriv",
   };

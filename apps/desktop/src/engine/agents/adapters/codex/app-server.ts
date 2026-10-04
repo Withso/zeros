@@ -1,3 +1,4 @@
+import {resolveCloudRuntime} from "../../containment/cloud-runtime-root.mjs";
 import {CloudCodexAuth} from "./cloud-auth";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 // ──────────────────────────────────────────────────────────
@@ -589,7 +590,7 @@ export async function bootCodexAppServerRuntime(
   let cloudEnvironment:CloudCodexExecServer|undefined;
 
   const binarySource = cloud ? await resolveCloudCodexBinaryFromImage() : await resolveCodexBinary({ override: opts.cliBinary });
-  if(cloud&&(binarySource.source!=="bundled"||!binarySource.path.startsWith("/opt/zeros/")||binarySource.path.endsWith(".js")))
+  if(cloud&&(binarySource.source!=="bundled"||!binarySource.path.startsWith(`${resolveCloudRuntime().workerRoot}/`)||binarySource.path.endsWith(".js")))
     throw new Error("Cloud Codex requires the pinned native executable");
   const env = cloud?cloud.coordinator.environment():await buildSpawnEnvWithLoginPath(opts.env);
 

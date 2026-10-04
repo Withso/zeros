@@ -3,6 +3,8 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ensureCloudWorkerSupervisor } from "../cloud-workspace-validation/sandbox/ensure-cloud-worker-supervisor.mjs";
+import {createCloudRuntimeResolver} from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
+import {cloudRuntimeFixture} from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
 import {
   CloudWorkerSupervisor,
   parseCloudWorkerSupervisorRequest,
@@ -10,6 +12,15 @@ import {
 } from "../cloud-workspace-validation/sandbox/cloud-worker-supervisor.mjs";
 
 describe("cloud broker resume and ownership", () => {
+  it("requires systemd ownership on v4 even when a broker is already healthy",async()=>{
+    const tree=cloudRuntimeFixture();
+    try {
+      const runtime=createCloudRuntimeResolver({filesystem:tree.filesystem}).resolve();
+      const launch=vi.fn(),probe=vi.fn(async()=>true);
+      await expect(ensureCloudWorkerSupervisor({runtime,launch,probe})).rejects.toThrow(/systemd/);
+      expect(launch).not.toHaveBeenCalled();expect(probe).not.toHaveBeenCalled();
+    } finally {tree.dispose();}
+  });
   it("leaves a healthy broker and its admitted work running", async () => {
     const launch = vi.fn();
     await ensureCloudWorkerSupervisor({ probe: async () => true, launch });

@@ -28,6 +28,7 @@ import {
 import { createRequire } from "node:module";
 import net from "node:net";
 import path from "node:path";
+import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 import { runScopedCloudSetup } from "./cloud-setup-process.mjs";
 import {
   validCloudResourceContract,
@@ -64,8 +65,9 @@ const ENGINE_REGISTRATION_PATH =
 const SETUP_RECOVERY_PATH = "/internal/v1/cloud-workspaces/setup/recovery";
 const TARGET_REPOSITORY = runtimeLayout.repository;
 const SEEDED_REPOSITORY_BACKUP = runtimeLayout.seedBackup;
-const ATTESTER = "/opt/zeros-runtime/lib/zeros/attest-cloud-worker.mjs";
-const ASKPASS = "/opt/zeros-runtime/lib/zeros/cloud-git-askpass.mjs";
+const RUNTIME = resolveCloudRuntime();
+const ATTESTER = RUNTIME.helpers.attester;
+const ASKPASS = RUNTIME.helpers.gitAskpass;
 const GITHUB_REVOKE_URL = "https://api.github.com/installation/token";
 const WORKER_UID = 10_001;
 const WORKER_GID = 10_001;
@@ -91,8 +93,8 @@ const GITHUB_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
 
 // Both deployed setup and the bundled engine use the same immutable native
 // checkpoint parser. Its path is deployment-owned, never selected by a grant.
-const CHECKPOINT_HELPER_URL = fileURLToPath(import.meta.url) === "/opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs"
-  ? pathToFileURL(path.join(runtimeLayout.engine, "apps/desktop/src/engine/agents/containment/cloud-checkpoint-artifacts.mjs"))
+const CHECKPOINT_HELPER_URL = fileURLToPath(import.meta.url) === RUNTIME.helpers.setup
+  ? pathToFileURL(path.join(RUNTIME.workerRoot, "apps/desktop/src/engine/agents/containment/cloud-checkpoint-artifacts.mjs"))
   : new URL("../../../apps/desktop/src/engine/agents/containment/cloud-checkpoint-artifacts.mjs", import.meta.url);
 
 export const CLOUD_WORKSPACE_UNPRIVILEGED_SET_PRIV_ARGS = Object.freeze([
@@ -1592,7 +1594,7 @@ async function gitCommand(repositoryDirectory, homeDirectory, args, token) {
     GIT_TERMINAL_PROMPT: "0",
     HOME: homeDirectory,
     LANG: "C.UTF-8",
-    PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin",
+    PATH: `${RUNTIME.binRoot}:/usr/bin:/bin`,
     ...(token
       ? {
           ZEROS_GIT_ASKPASS_HOST: "github.com",
@@ -1852,7 +1854,7 @@ async function cloneRepository(material,profile) {
 
 async function stringifyManagedSettings(values) {
   try {
-    const requireFromEngine = createRequire("/opt/zeros/package.json");
+    const requireFromEngine = createRequire(path.join(RUNTIME.workerRoot,"package.json"));
     const modulePath = requireFromEngine.resolve("smol-toml");
     const module = await import(pathToFileURL(modulePath).href);
     const source = module.stringify(values);
@@ -1965,7 +1967,7 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
                 HOME: runtimeLayout.agentHome,
                 LANG: "C.UTF-8",
                 LOGNAME: "zeros-agent",
-                PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin",
+                PATH: `${RUNTIME.binRoot}:/usr/bin:/bin`,
                 SHELL: "/bin/bash",
                 USER: "zeros-agent",
               },
@@ -2314,7 +2316,7 @@ async function attestImage(material, profile, recordChecks) {
   }
   const result = await runProcess(
     profile.version >= 2
-      ? "/opt/zeros-runtime/bin/node"
+      ? RUNTIME.node
       : "/usr/local/bin/node",
     [ATTESTER],
     {
@@ -2339,8 +2341,8 @@ async function attestImage(material, profile, recordChecks) {
     try {
       const inventory = await import("./image-build-contract.mjs");
       try { observed.inventory = inventory.readCloudImageNativeInventory(); } catch { /* Unknown remains failed. */ }
-      try { observed.source = inventory.cloudImageSourceIdentity(runtimeLayout.engine); } catch { /* No raw error retained. */ }
-      try { observed.artifacts = inventory.cloudImageArtifactHashes(runtimeLayout.engine); } catch { /* Fixed artifacts only. */ }
+      try { observed.source = inventory.cloudImageSourceIdentity(RUNTIME.workerRoot); } catch { /* No raw error retained. */ }
+      try { observed.artifacts = inventory.cloudImageArtifactHashes(RUNTIME.workerRoot); } catch { /* Fixed artifacts only. */ }
     } catch { /* Broken images may lack the diagnostic helper too. */ }
     recordChecks({ ...checks, ...cloudWorkspaceImageIdentityDiagnostic(report?.metadata?.build, observed) }, undefined, cloudWorkspaceImageDigests(report?.metadata?.build, observed));
     throw failure("image_contract_invalid");
@@ -2545,10 +2547,10 @@ async function executeSetup(encoded) {
       ...(diagnostic.checks ? { checks: diagnostic.checks } : {}),
       ...(diagnostic.digests ? { digests: diagnostic.digests } : {}),
       files: {
-        node: existsSync("/opt/zeros-runtime/bin/node"),
-        supervisor: existsSync("/opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs"),
-        setup: existsSync("/opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs"),
-        engine: existsSync(path.join(runtimeLayout.engine, "dist-engine/cli.js")),
+        node: existsSync(RUNTIME.node),
+        supervisor: existsSync(RUNTIME.profile === "v4" ? RUNTIME.helpers.supervisor : RUNTIME.helpers.ensureSupervisor),
+        setup: existsSync(RUNTIME.helpers.setup),
+        engine: existsSync(path.join(RUNTIME.workerRoot, "dist-engine/cli.js")),
       },
     };
     throw normalized;

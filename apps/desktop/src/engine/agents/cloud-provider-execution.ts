@@ -4,6 +4,7 @@ import {CLOUD_NATIVE_EXECUTION_PROFILE,cloudNativeProviderRestrictions,cloudBrow
 import {CloudAgentLease,type CloudAgentLeaseSupervisor} from "./cloud-agent-lease";
 import {CloudWorkloadTools} from "./cloud-workload-tools";
 import {CloudNativeBoundary} from "./containment/cloud-native-boundary";
+import {resolveCloudRuntime} from "./containment/cloud-runtime-root.mjs";
 import type {PreparedBoundary} from "./containment/types";
 import type {McpServerRegistration} from "./types";
 import {materializeMcpServerRegistrations} from "./mcp-registration";
@@ -62,14 +63,17 @@ export function createCloudAgentExecutionFactory(options:{
       const userServers=lease.customization?.servers.map(({server})=>admission.provider==="codex"?cloudCodexMcpServer(server):server)??[];
       if(userServers.some(server=>productServers.some(product=>product.name===server.name)))throw new Error("Cloud MCP server name conflicts with a product tool");
       const owned=lease;
+      // B1 extends the shared diagnostic union; keep this runtime-only change
+      // independent of the parallel protocol PR while preserving the wire value.
+      const runtimeProfile=`zeros-cloud-worker-${resolveCloudRuntime().profile}` as ReturnType<typeof cloudBrowserUnavailable>["runtimeProfile"];
       // Gateway retirement closes both domains through the lease. This facade
       // is deliberately not attached back to the lease (which would deadlock).
       const boundary:PreparedBoundary={
         generation:workload.generation,status:{...coordinator.status,
-          browser:cloudBrowserUnavailable(admission.provider,lease.credentialKind),
+          browser:{...cloudBrowserUnavailable(admission.provider,lease.credentialKind),runtimeProfile},
           parity:{level:"restricted",restrictions:[...new Set([...coordinator.status.parity.restrictions.filter(value=>!lease!.customization||value!=="user-mcp-disabled"),
             ...cloudNativeProviderRestrictions(admission.provider,lease.nativeCapabilities),...(!lease.customization?["user-mcp-disabled" as const]:[])])].sort()},cloudExecution:{version:1,
-          profile:CLOUD_NATIVE_EXECUTION_PROFILE,runtimeProfile:"zeros-cloud-worker-v3",provider:admission.provider,
+          profile:CLOUD_NATIVE_EXECUTION_PROFILE,runtimeProfile,provider:admission.provider,
           ...(lease.nativeCapabilities?{capabilities:{...lease.nativeCapabilities,connectedApps:lease.nativeCapabilities.connectedApps&&!!lease.codexAuth()}}:{}),
           designApi:productServers.some(server=>server.name==="design-draft"&&server.transport==="http")?"admitted":"unavailable"}},attestation:coordinator.attestation,
         providerHomePath:coordinator.providerHomePath,

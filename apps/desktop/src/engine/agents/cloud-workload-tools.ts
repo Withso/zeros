@@ -1,3 +1,4 @@
+import {resolveCloudRuntime} from "./containment/cloud-runtime-root.mjs";
 import {randomUUID} from "node:crypto";
 import {isUtf8} from "node:buffer";
 import path from "node:path";
@@ -12,7 +13,7 @@ import {LspError} from "./lsp-rpc";
 import {cloudGitAuthorEnvironment} from "../git/cloud-git-author";
 
 const MAX_OUTPUT=1024*1024,MAX_JOBS=8,MAX_CALLS=4;
-const FILE_HELPER="/opt/zeros/apps/desktop/src/engine/agents/containment/cloud-file-tool.mjs";
+
 type Job={process:BoundaryProcess;chunks:Buffer[];start:number;end:number;exit:{code:number|null;signal:string|null}|null;
   done:Promise<void>;timer:ReturnType<typeof setTimeout>;touched:number;timedOut:boolean};
 type ToolError=Extract<CloudAgentToolResult,{ok:false}>["error"];
@@ -31,10 +32,11 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
   private closing:Promise<void>|null=null;
   private languageService:CloudLanguageService|null=null;
   private readonly env:Record<string,string>;
+  private readonly runtime=resolveCloudRuntime();
   constructor(readonly lease:CloudAgentLease,private readonly boundary:PreparedBoundary,private readonly cwd:string){
     if(!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||!(cwd==="/srv/zeros/workspace"||cwd.startsWith("/srv/zeros/workspace/")))
       throw new Error("Cloud workload root is invalid");
-    this.env={HOME:"/srv/zeros/home/agent",PATH:"/opt/zeros-runtime/bin:/usr/local/bin:/usr/bin:/bin",LANG:"C.UTF-8",
+    this.env={HOME:"/srv/zeros/home/agent",PATH:`${this.runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,LANG:"C.UTF-8",
       USER:"zeros-agent",LOGNAME:"zeros-agent",SHELL:"/bin/bash",TMPDIR:"/tmp",ZEROS_WORKTREE_PATH:cwd,
       ...cloudGitAuthorEnvironment(lease.gitAuthor??null)};
     lease.attach(this);lease.attach(boundary);
@@ -64,7 +66,7 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
         this.languageService??=new CloudLanguageService({root:this.cwd,assertLive:()=>this.assertLive(),
           launch:(command,args)=>this.start(command,args),retire:process=>this.retire(process),
           settleLaunchFailure:async()=>{await Promise.allSettled([...this.launches]);await this.boundary.stopAndProve();},
-          readDocument:async(file,signal)=>{const result=await this.collect("/opt/zeros-runtime/bin/node",[FILE_HELPER],JSON.stringify({operation:"read",path:file,offset:0,length:65536}),signal);
+          readDocument:async(file,signal)=>{const result=await this.collect(this.runtime.node,[`${this.runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-file-tool.mjs`],JSON.stringify({operation:"read",path:file,offset:0,length:65536}),signal);
             if(result.code!==0||result.truncated)throw unavailable();return parseLanguageDocument(result.output);},
           failed:()=>{void this.lease.close().catch(()=>{});}});
         const data=await this.languageService.request(input.request,signal);this.assertLive();return {ok:true,data};
@@ -98,7 +100,7 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
         return {ok:true,data:{output:result.output,code:result.code,truncated:result.truncated}};
       }
       const encoded=JSON.stringify(input);if(Buffer.byteLength(encoded)>256*1024)return {ok:false,error:"invalid_input"};
-      const result=await this.collect("/opt/zeros-runtime/bin/node",[FILE_HELPER],encoded,signal);
+      const result=await this.collect(this.runtime.node,[`${this.runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-file-tool.mjs`],encoded,signal);
       if(result.code!==0||result.truncated)return {ok:false,error:result.truncated?"output_limit":"unavailable"};
       const value:unknown=JSON.parse(result.output);
       if(!value||typeof value!=="object"||!("ok" in value))return {ok:false,error:"unavailable"};

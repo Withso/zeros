@@ -6,13 +6,11 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
+import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 import {
   CLOUD_WORKER_SUPERVISOR_AUDIENCE,
   CLOUD_WORKER_SUPERVISOR_SOCKET,
 } from "./cloud-worker-supervisor.mjs";
-
-const NODE = "/opt/zeros-runtime/bin/node";
-const SUPERVISOR = "/opt/zeros-runtime/lib/zeros/cloud-worker-supervisor.mjs";
 
 function rootPath(file, directory = false) {
   if (realpathSync(file) !== file) throw new Error("Unsafe cloud broker path");
@@ -78,14 +76,15 @@ export async function probeCloudWorkerSupervisor() {
  * owner if multiple reconcilers arrive after a cold resume. A healthy broker
  * receives only a read-only probe, never a prepare or engine restart. */
 export async function ensureCloudWorkerSupervisor({
+  runtime = resolveCloudRuntime(),
   probe = probeCloudWorkerSupervisor,
   launch = () => {
-    const child = spawn(NODE, [SUPERVISOR], {
+    const child = spawn(runtime.node, [runtime.helpers.supervisor], {
       detached: true,
       stdio: "ignore",
       cwd: "/",
       env: {
-        PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin",
+        PATH: `${runtime.binRoot}:/usr/bin:/bin`,
         HOME: "/root",
         LANG: "C.UTF-8",
       },
@@ -95,6 +94,7 @@ export async function ensureCloudWorkerSupervisor({
   },
   wait = delay,
 } = {}) {
+  if (runtime.profile === "v4") throw new Error("Cloud v4 supervisor requires systemd ownership");
   if (await probe()) return;
   launch();
   for (let attempt = 0; attempt < 20; attempt++) {
@@ -112,10 +112,12 @@ async function main() {
   )
     throw new Error("Cloud broker recovery requires fixed root admission");
   process.umask(0o077);
+  const runtime = resolveCloudRuntime();
+  if (runtime.profile === "v4") throw new Error("Cloud v4 supervisor requires systemd ownership");
   if (readCloudHostRuntimeProfile().version < 2)
     throw new Error("Cloud broker recovery requires image profile v2");
-  rootPath(NODE);
-  rootPath(SUPERVISOR);
+  rootPath(runtime.node);
+  rootPath(runtime.helpers.supervisor);
   rootPath("/run", true);
   try {
     mkdirSync("/run/zeros", { mode: 0o700 });
