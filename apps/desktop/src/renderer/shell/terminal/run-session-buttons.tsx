@@ -5,6 +5,7 @@ import { WORKBENCH_TITLE_ACTION_CLS } from "../workbench/tab-chrome";
 import { workspacePreviewAvailable, warmCloudPreviewContext } from "../../platform/cloud-workspace-access";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { useInternalFeatureActive } from "../../features/settings/internal-features";
+import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 
 /** Headers show labels while their own container has room; sidebar rows always
  * use compact icons. Both placements share the same actions and accessible names. */
@@ -24,9 +25,10 @@ export function RunSessionButtons({
   onStop(): void;
 }) {
   const cloudPreviews = useInternalFeatureActive("cloudComputerV2");
-  const previewAvailable = workspacePreviewAvailable(folderKey ?? "") && (!isCloudWorkspace(folderKey) || cloudPreviews);
+  const canEdit = useCloudWorkspaceCanEdit(folderKey);
+  const previewAvailable = workspacePreviewAvailable(folderKey ?? "") && (!isCloudWorkspace(folderKey) || (cloudPreviews && canEdit));
   const warmPreview = () => {
-    if (cloudPreviews && isCloudWorkspace(folderKey)) void warmCloudPreviewContext().catch(() => undefined);
+    if (cloudPreviews && canEdit && isCloudWorkspace(folderKey)) void warmCloudPreviewContext().catch(() => undefined);
   };
   // The cache supplies normalized HTTP(S) URLs; display their effective port.
   const preview = previewUrl ? new URL(previewUrl) : null;

@@ -1380,7 +1380,7 @@ export function createCloudWorkspaceRoutes(
       kind: "preview",
       remotePort: (body as z.infer<typeof PreviewAccessSchema>).port,
       ...((body as z.infer<typeof PreviewAccessSchema>).target ? { previewTarget: (body as z.infer<typeof PreviewAccessSchema>).target! } : {}),
-      ...((body as z.infer<typeof PreviewAccessSchema>).native || (body as z.infer<typeof PreviewAccessSchema>).target ? { proof: deviceProof(c) } : {}),
+      ...((body as z.infer<typeof PreviewAccessSchema>).native || (body as z.infer<typeof PreviewAccessSchema>).target || c.req.header("x-zeros-device-id") ? { proof: deviceProof(c) } : {}),
       expiresInMinutes: body.expiresInMinutes,
       idempotencyKey: key,
     }).catch(error => {

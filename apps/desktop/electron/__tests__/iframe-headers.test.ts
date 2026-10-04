@@ -19,6 +19,68 @@ afterEach(() => {
 });
 
 describe("iframe request header admission", () => {
+  it("injects native HMR headers only for the owned secure WebSocket frame", () => {
+    let listener: (
+      details: BeforeSendHeadersDetails,
+      callback: BeforeSendHeadersCallback,
+    ) => void;
+    const session = {
+      webRequest: {
+        onBeforeSendHeaders: vi.fn(
+          (_filter: unknown, callback: typeof listener) => {
+            listener = callback;
+          },
+        ),
+        onHeadersReceived: vi.fn(),
+      },
+    };
+    installIframeHeaderStripping(session as never);
+    expect(session.webRequest.onBeforeSendHeaders.mock.calls[0][0]).toEqual({
+      urls: ["https://*/*", "wss://*/*"],
+    });
+    const capability = `zwp_${"a".repeat(43)}`;
+    expect(
+      previewFrameAuthorizations.authorizeCloudPreview(
+        {
+          frameName: "zeros-browser-hmr",
+          origin: "https://owned.preview.test:8443",
+          expiresAt: Date.now() + 60_000,
+          capability,
+        },
+        101,
+      ),
+    ).toBe(true);
+    for (const [url, frameId, allowed] of [
+      ["wss://owned.preview.test:8443/hmr", 101, true],
+      ["wss://owned.preview.test:8443/hmr", 102, false],
+      ["wss://owned.preview.test:8444/hmr", 101, false],
+      ["wss://other.preview.test:8443/hmr", 101, false],
+      ["ws://owned.preview.test:8443/hmr", 101, false],
+    ] as const) {
+      const callback = vi.fn<BeforeSendHeadersCallback>();
+      listener!(
+        {
+          url,
+          frame: { frameTreeNodeId: frameId, parent: null },
+          requestHeaders: { Upgrade: "websocket" },
+        },
+        callback,
+      );
+      expect(callback).toHaveBeenCalledWith(
+        allowed
+          ? {
+              cancel: false,
+              requestHeaders: {
+                Upgrade: "websocket",
+                "X-Daytona-Skip-Preview-Warning": "true",
+                "x-zeros-preview-capability": capability,
+              },
+            }
+          : { cancel: false },
+      );
+    }
+  });
+
   it("calls back without capability headers when any frame ancestry getter throws", () => {
     let beforeSendHeaders:
       | ((

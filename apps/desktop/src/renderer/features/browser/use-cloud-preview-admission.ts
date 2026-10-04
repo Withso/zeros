@@ -16,6 +16,7 @@ import { getOrganizationStoreGeneration } from "../team/team-store";
 import { useInternalFeatureActive } from "../settings/internal-features";
 import { toast } from "../../shared/ui/primitives/elements";
 import { useAgentSessions } from "../agent/sessions-hooks";
+import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import {
   previewNavigationDescriptor,
   type PreviewNavigationInput,
@@ -30,6 +31,7 @@ export function useCloudPreviewAdmission(options: {
   frameName: string;
   active: boolean;
   ready: boolean;
+  navigationVersion?: number;
   source?: {
     chatId: string;
     port: number;
@@ -40,6 +42,7 @@ export function useCloudPreviewAdmission(options: {
   navigate(input: PreviewNavigationInput): void | Promise<void>;
 }) {
   const enabled = useInternalFeatureActive("cloudComputerV2");
+  const canEdit = useCloudWorkspaceCanEdit(options.scope);
   const sessions = useAgentSessions();
   const accountGeneration = getOrganizationStoreGeneration();
   const [visible, setVisible] = useState(
@@ -53,6 +56,7 @@ export function useCloudPreviewAdmission(options: {
   }, []);
   const { scope, url, frameName, active, ready, agentPreview, navigate } =
     options;
+  const navigationVersion = options.navigationVersion;
   const executionId = options.source?.executionId,
     portId = options.source?.portId;
   const chatId = options.source?.chatId,
@@ -64,7 +68,7 @@ export function useCloudPreviewAdmission(options: {
     } catch {
       return;
     }
-    if (!workspace || !enabled || !active || !visible || !ready || !url) return;
+    if (!workspace || !enabled || !canEdit || !active || !visible || !ready || !url) return;
     const logical = new URL(url);
     const port = Number(
       logical.port || (logical.protocol === "https:" ? 443 : 80),
@@ -196,6 +200,7 @@ export function useCloudPreviewAdmission(options: {
     visible,
     ready,
     enabled,
+    canEdit,
     executionId,
     portId,
     chatId,
@@ -204,5 +209,6 @@ export function useCloudPreviewAdmission(options: {
     navigate,
     sessions,
     accountGeneration,
+    navigationVersion,
   ]);
 }

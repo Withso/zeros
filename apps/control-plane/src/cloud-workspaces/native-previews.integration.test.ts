@@ -120,6 +120,100 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
       heartbeatToken: fixture.heartbeatToken,
       token,
     });
+  async function nativeFixture() {
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: true });
+    await pool.query(
+      "UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'",
+    );
+  }
+
+  it("requires a device proof for a native scalar preview even without native or target hints", async () => {
+    await nativeFixture();
+    const owner = await device();
+    const { proof: _proof, ...legacyShape } = owner.request();
+    await expect(service.issue(legacyShape)).rejects.toMatchObject({
+      code: "device_proof_rejected",
+    });
+    expect(
+      (
+        await pool.query(
+          "SELECT count(*)::int AS count FROM cloud_workspace_client_access_grants WHERE workspace_id=$1",
+          [fixture.workspaceId],
+        )
+      ).rows[0].count,
+    ).toBe(0);
+    const issued = await service.issue(owner.request());
+    const row = (
+      await pool.query(
+        "SELECT preview_device_id,preview_device_key_version FROM cloud_workspace_client_access_grants WHERE id=$1",
+        [issued.grant.id],
+      )
+    ).rows[0];
+    expect(row).toEqual({
+      preview_device_id: owner.id,
+      preview_device_key_version: 1,
+    });
+    await pool.query(
+      "UPDATE devices SET trust_state='revoked',revoked_at=now() WHERE id=$1",
+      [owner.id],
+    );
+    await expect(admit(issued.preview!.capability)).rejects.toMatchObject({
+      code: "runtime_access_rejected",
+    });
+    expect(
+      (
+        await service.handlePreviewRequest(
+          new Request(issued.preview!.origin, {
+            headers: {
+              "x-zeros-preview-capability": issued.preview!.capability,
+            },
+          }),
+        )
+      )?.status,
+    ).toBe(401);
+  });
+
+  it("rejects pre-existing unbound scalar grants on native ingress and runtime admission", async () => {
+    await nativeFixture();
+    const owner = await device();
+    const issued = await service.issue(owner.request());
+    await pool.query(
+      "UPDATE cloud_workspace_client_access_grants SET preview_device_id=NULL,preview_device_key_version=NULL WHERE id=$1",
+      [issued.grant.id],
+    );
+    await expect(admit(issued.preview!.capability)).rejects.toMatchObject({
+      code: "runtime_access_rejected",
+    });
+    expect(
+      (
+        await service.handlePreviewRequest(
+          new Request(issued.preview!.origin, {
+            headers: {
+              "x-zeros-preview-capability": issued.preview!.capability,
+            },
+          }),
+        )
+      )?.status,
+    ).toBe(401);
+  });
+
+  it("retains proof-free scalar issuance for a verified legacy provider runtime", async () => {
+    const legacy = new DatabaseCloudWorkspaceAccessService({
+      pool,
+      previewBaseDomain: "preview.example.test",
+      provider: {
+        getPreviewEndpoint: vi.fn(async () => ({
+          url: "https://5173-legacy.proxy.daytona.work/",
+          headerName: "x-daytona-preview-token",
+          headerValue: "legacy-fixture-preview-token",
+        })),
+      } as unknown as CloudWorkspaceAccessProvider,
+    });
+    const { proof: _proof, ...legacyShape } = (await device()).request();
+    await expect(legacy.issue(legacyShape)).resolves.toMatchObject({
+      grant: { kind: "preview", remotePort: 5173 },
+    });
+  });
 
   it("binds opaque identity to the signed device and rejects a changed target", async () => {
     const owner = await device(),

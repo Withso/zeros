@@ -19,6 +19,10 @@ import {
 } from "../features/team/team-store";
 import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { cloudScopedId } from "../platform/bridge/cloud-workspace-key";
+import { useWorkspaceStore } from "../state/workspace-store";
+import { cloudWorkspaceDetails } from "../state/cloud-workspace-catalog";
+import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
+import { RunSessionButtons } from "../shell/terminal/run-session-buttons";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const firstWorkspace = "22222222-2222-4222-8222-222222222222";
@@ -31,7 +35,55 @@ const fixture = {
   hold: false,
   legacy: false,
   release: () => pending.shift()?.(),
+  setEditAccess: (
+    canEdit: boolean | undefined | null,
+    workspaceId = currentWorkspace,
+  ) => {
+    const key = `cloud://${organizationId}/${workspaceId}`;
+    if (canEdit === null) {
+      cloudWorkspaceDetails.forget(key);
+      return;
+    }
+    cloudWorkspaceDetails.setData(key, {
+      id: workspaceId,
+      organizationId,
+      teamId: organizationId,
+      name: "Preview fixture",
+      createdBy: organizationId,
+      placement: "cloud",
+      status: "ready",
+      version: 1,
+      error: null,
+      deletedAt: null,
+      createdAt: "2026-09-26T10:00:00Z",
+      updatedAt: "2026-09-26T10:00:00Z",
+      capabilities: {
+        canEdit,
+        canWrite: true,
+        canManage: true,
+        canStart: true,
+        startUnavailableReason: null,
+      },
+      repository: {
+        forge: "github.com",
+        owner: "example",
+        name: "fixture",
+        revision: "main",
+      },
+      generation: {
+        number: 1,
+        architecture: "linux/amd64",
+        observedState: "running",
+        lastObservedAt: null,
+        resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
+      },
+    } satisfies CloudWorkspaceDocument);
+  },
 };
+if (!new URLSearchParams(location.search).has("missing-capabilities")) {
+  fixture.setEditAccess(true, firstWorkspace);
+  fixture.setEditAccess(true, secondWorkspace);
+}
 Object.assign(window, { cloudPreviewFixture: fixture });
 let next = 0;
 window.__ZEROS_NATIVE__ = {
@@ -82,7 +134,11 @@ acceptOrganizationSnapshot({
 });
 setInternalFeatureEnabled("cloudComputerV2", true);
 const tab = createBrowserTab({
-  url: "http://localhost:5173/assets?version=2",
+  url:
+    new URLSearchParams(location.search).has("empty") ||
+    new URLSearchParams(location.search).has("run")
+      ? ""
+      : "http://localhost:5173/assets?version=2",
   title: "Native preview",
   previewSource: {
     chatId: "chat-native",
@@ -95,27 +151,49 @@ const tab = createBrowserTab({
         }),
   },
 });
+if (
+  new URLSearchParams(location.search).has("human") ||
+  new URLSearchParams(location.search).has("empty") ||
+  new URLSearchParams(location.search).has("run")
+)
+  tab.previewSource = undefined;
+for (const workspaceId of [firstWorkspace, secondWorkspace])
+  useWorkspaceStore
+    .getState()
+    .dispatch({
+      type: "ADD_WORKBENCH_TAB",
+      scope: `cloud://${organizationId}/${workspaceId}`,
+      tab,
+    });
 function Harness() {
   const [active, setActive] = useState(false);
   const [workspace, setWorkspace] = useState(firstWorkspace);
   currentWorkspace = workspace;
+  const storedTab =
+    useWorkspaceStore((state) =>
+      state.workbenchByScope[
+        `cloud://${organizationId}/${workspace}`
+      ]?.tabs.find((candidate) => candidate.id === tab.id),
+    ) ?? tab;
   const ownedTab = {
-    ...tab,
-    previewSource: {
-      ...tab.previewSource!,
-      ...(tab.previewSource?.executionId
-        ? {
-            executionId: new URLSearchParams(location.search).has(
-              "invalid-source",
-            )
-              ? `cloud:${organizationId}:${workspace}:%ZZ`
-              : cloudScopedId(
-                  { organizationId, workspaceId: workspace },
-                  "execution-native",
-                ),
-          }
-        : {}),
-    },
+    ...storedTab,
+    previewSource: storedTab.previewSource
+      ? {
+          ...storedTab.previewSource,
+          ...(storedTab.previewSource.executionId
+            ? {
+                executionId: new URLSearchParams(location.search).has(
+                  "invalid-source",
+                )
+                  ? `cloud:${organizationId}:${workspace}:%ZZ`
+                  : cloudScopedId(
+                      { organizationId, workspaceId: workspace },
+                      "execution-native",
+                    ),
+              }
+            : {}),
+        }
+      : undefined,
   };
   return (
     <main className="bg-bg0 text-fg1 flex h-screen flex-col p-4">
@@ -155,6 +233,27 @@ function Harness() {
           Disable previews
         </Button>
       </nav>
+      {new URLSearchParams(location.search).has("run") && (
+        <RunSessionButtons
+          title="Fixture"
+          folderKey={`cloud://${organizationId}/${workspace}`}
+          previewUrl="http://localhost:5173/assets?version=2"
+          onStop={() => {}}
+          onOpenPreview={() =>
+            useWorkspaceStore
+              .getState()
+              .dispatch({
+                type: "UPDATE_WORKBENCH_TAB",
+                scope: `cloud://${organizationId}/${workspace}`,
+                id: tab.id,
+                updates: {
+                  url: "http://localhost:5173/assets?version=2",
+                  previewSource: undefined,
+                },
+              })
+          }
+        />
+      )}
       <BrowserTab
         tab={ownedTab}
         active={active}

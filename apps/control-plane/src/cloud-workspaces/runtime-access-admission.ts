@@ -102,7 +102,9 @@ export class DatabaseCloudRuntimeAccessAdmissionService {
           WHERE access.workspace_id = $1 AND access.org_id = $2 AND access.generation = $3
             AND access.token_hash = $4
             AND access.state = 'active' AND access.expires_at > now()
-            AND (access.preview_device_id IS NULL OR EXISTS (
+            AND ((access.preview_device_id IS NULL AND access.preview_target IS NULL
+              AND generation.provider='daytona' AND connection.provider='daytona'
+              AND generation.runtime_id IS NULL AND generation.runtime_profile IS NULL) OR EXISTS (
               SELECT 1 FROM devices device WHERE device.id=access.preview_device_id AND device.user_id=access.account_user_id
                 AND device.key_version=access.preview_device_key_version AND device.trust_state='trusted' AND device.revoked_at IS NULL
             ))

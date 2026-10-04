@@ -6,13 +6,13 @@ import {
 } from "node:crypto";
 import type pg from "pg";
 import { isCloudAgentPreviewTarget, type CloudAgentPreviewTarget } from "./preview-target.js";
-import { consumeCloudWorkspaceDeviceProof, type CloudWorkspaceDeviceProof } from "./replicas.js";
+import { consumeCloudWorkspaceDeviceProof, WorkspaceReplicaError, type CloudWorkspaceDeviceProof } from "./replicas.js";
 
 import { PreviewRequestLease } from "./preview-request-lease.js";
 import type { CloudPreviewSocketGrant } from "./preview-websocket-relay.js";
 
 import { audit } from "../audit.js";
-import { HttpError } from "../authz.js";
+import { HttpError, requireOrganizationCreationCapability, type StaffRole } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import {
   lockCloudWorkspaceScope,
@@ -135,6 +135,7 @@ export type CloudWorkspaceAccessService = {
 };
 
 type AuthorizedWorkspace = {
+  native_preview: boolean;
   actorFingerprint:string;
   single_member_mode:boolean;
   team_id: string;
@@ -232,9 +233,14 @@ export async function authorizeReadyCloudWorkspaceAccess(tx:Tx,input:{
   catch(error){if(error instanceof HttpError&&error.status===404)throw absent();throw error;}
   const selected=await tx.query<AuthorizedWorkspace>(`SELECT cw.team_id,cw.owner_user_id,cw.single_member_mode,
       cw.current_generation AS generation,cw.authority_epoch,cw.status,cw.desired_state,
-      binding.provider_resource_id,binding.updated_at AS provider_binding_updated_at
+      binding.provider_resource_id,binding.updated_at AS provider_binding_updated_at,
+      NOT (generation.provider='daytona' AND connection.provider='daytona'
+        AND generation.runtime_id IS NULL AND generation.runtime_profile IS NULL) AS native_preview
     FROM cloud_workspaces cw JOIN cloud_workspace_provider_bindings binding
       ON binding.workspace_id=cw.id AND binding.org_id=cw.org_id AND binding.generation=cw.current_generation
+    JOIN cloud_workspace_generations generation
+      ON generation.workspace_id=cw.id AND generation.org_id=cw.org_id AND generation.generation=cw.current_generation
+    JOIN provider_connections connection ON connection.id=generation.provider_connection_id AND connection.org_id=cw.org_id
     WHERE cw.id=$1 AND cw.org_id=$2 AND cw.deleted_at IS NULL
       AND binding.provider_resource_id IS NOT NULL AND binding.observed_state='running'
       AND (NOT $5::boolean OR (cw.single_member_mode AND cw.owner_user_id=$3))
@@ -585,6 +591,12 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         workosEnabled: this.workosEnabled,
         legacyProviderAccess:input.kind!=="preview"||purpose==="engine-runtime",
       });
+      if (input.kind === "preview" && (workspace.native_preview || input.previewTarget || input.proof)) {
+        const account = (await tx.query<{ staff_role: StaffRole | null }>(
+          "SELECT staff_role FROM users WHERE id=$1 AND auth_status='active' AND deleted_at IS NULL FOR SHARE", [input.accountUserId])).rows[0];
+        requireOrganizationCreationCapability(account?.staff_role ?? null);
+        if (!input.proof) throw new WorkspaceReplicaError("device_proof_rejected", "A trusted device is required for native previews");
+      }
       const previewDevice = input.kind === "preview" && input.proof ? await consumeCloudWorkspaceDeviceProof(tx, {
         accountUserId: input.accountUserId, action: "preview.issue", proof: input.proof,
         payload: { organizationId: input.organizationId, workspaceId: input.workspaceId, port: remotePort,
@@ -716,6 +728,8 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
             { grantId, credential },
           );
         assertProviderPreviewEndpoint(endpoint);
+        if (endpoint.headerName === "x-zeros-runtime-access" && !input.proof)
+          throw new Error("native previews require device admission");
         if (input.previewTarget && endpoint.headerName !== "x-zeros-runtime-access")
           throw new Error("opaque previews require native runtime admission");
       } else {
@@ -1243,7 +1257,9 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           AND pb.provider_resource_id = access.provider_resource_id
          WHERE access.preview_proxy_label = $1 AND access.kind = 'preview'
            AND access.state = 'active' AND access.expires_at > now()
-           AND (access.preview_device_id IS NULL OR EXISTS (
+           AND ((access.preview_device_id IS NULL AND access.preview_target IS NULL
+             AND generation.provider='daytona' AND provider_connection.provider='daytona'
+             AND generation.runtime_id IS NULL AND generation.runtime_profile IS NULL) OR EXISTS (
              SELECT 1 FROM devices device WHERE device.id=access.preview_device_id AND device.user_id=access.account_user_id
                AND device.key_version=access.preview_device_key_version AND device.trust_state='trusted' AND device.revoked_at IS NULL
            ))

@@ -14,6 +14,7 @@ import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { useInternalFeatureActive } from "../../features/settings/internal-features";
 import type { BrowserPreviewSource } from "./tab-model";
 import type { ExecutionBoundaryPortsSnapshot } from "@zeros/protocol/containment";
+import { cloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import {
   canonicalBrowsableHttpUrl,
   createBrowserTab,
@@ -87,7 +88,7 @@ export function useOpenChatPreviewInWorkbench(): (cwd: string | undefined, url: 
     const cloud = isCloudWorkspace(cwd);
     // Consume cloud-local URLs even when unavailable; the OS must never open
     // them against a coincidental listener on this Mac.
-    if (!workspacePreviewAvailable(cwd) || (cloud && !cloudPreviews)) return cloud;
+    if (!workspacePreviewAvailable(cwd) || (cloud && (!cloudPreviews || !cloudWorkspaceCanEdit(cwd)))) return cloud;
     let previewSource: BrowserPreviewSource | undefined;
     if (cloud) {
       const parsed = new URL(url);

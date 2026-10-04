@@ -45,6 +45,9 @@ be 5173; the trusted engine owns its real mapped listener.
    Require the `human-a` marker, correct assets and nested route/query string,
    cookie roundtrip and a successful asset edit/HMR update without reload.
    No Mac loopback application may answer these navigations.
+   From an empty Browser tab, enter another allowed loopback port. Change the
+   address in an admitted tab and use Back, Forward and Reload. Require fresh
+   native admission before navigation and zero Mac loopback requests throughout.
 2. Ask a real cloud agent to start the second application. Open its published
    listener button, then a loopback link from that same agent transcript.
    Require `agent-a`, assets, cookie roundtrip, nested path and actual HMR.
@@ -89,6 +92,11 @@ be 5173; the trusted engine owns its real mapped listener.
    Prompter/viewer accounts must not gain edit authority through a copied URL,
    forged target or direct native request. Re-enable/re-enroll only through
    normal staff/account/device flows; prior grants must not regain authority.
+   Remove or withhold the exact workspace capability snapshot too. Browser,
+   Run and agent previews must retire authority and stop admission/retry work;
+   editing permission on a different workspace must not authorize this one.
+   A native scalar API request omitting `native` and `target` must still require
+   trusted device proof, and old unbound native grants must be denied.
 
 ## Wake and cleanup
 

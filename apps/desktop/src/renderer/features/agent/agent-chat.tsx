@@ -179,6 +179,7 @@ import {
 } from "./session-tools-cache";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { BoundaryPortsPill } from "./boundary-ports";
+import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
 import { createBrowserTab } from "@/renderer/shell/workbench/tab-model";
 import {
@@ -1460,7 +1461,9 @@ export function AgentChat({
   ]);
 
   const openBoundaryPort = session.openBoundaryPort;
-  const cloudPreviewsActive = useInternalFeatureActive("cloudComputerV2");
+  const cloudPreviewsEnabled = useInternalFeatureActive("cloudComputerV2");
+  const cloudCanEdit = useCloudWorkspaceCanEdit(chatThread?.folder);
+  const cloudPreviewsActive = cloudPreviewsEnabled && cloudCanEdit;
   const warmBoundaryPreview = useCallback(() => {
     if (interactive && cloudPreviewsActive && isCloudWorkspace(chatThread?.folder))
       void warmCloudPreviewContext().catch(() => undefined);

@@ -216,4 +216,141 @@ export async function runCloudPreviewSmoke({ page, check, harnessBase }) {
     "malformed restored preview identity stays inert without crashing Browser",
     true,
   );
+
+  for (const kind of ["human", "agent", "run"]) {
+    await page.goto(
+      `${harnessBase}/harness-cloud-previews.html?missing-capabilities${kind === "agent" ? "" : `&${kind}`}`,
+    );
+    await page.getByRole("button", { name: "Toggle active" }).click();
+    await page.clock.fastForward(60_000);
+    expect(await count()).toBe(0);
+    await page.evaluate(() =>
+      window.cloudPreviewFixture.setEditAccess(
+        true,
+        "33333333-3333-4333-8333-333333333333",
+      ),
+    );
+    await page.clock.fastForward(60_000);
+    expect(await count()).toBe(0);
+    if (kind === "run")
+      await expect(
+        page.getByRole("button", { name: "Open Fixture in Browser" }),
+      ).toHaveCount(0);
+    await page.evaluate(() => window.cloudPreviewFixture.setEditAccess(true));
+    if (kind === "run")
+      await page
+        .getByRole("button", { name: "Open Fixture in Browser" })
+        .click();
+    await expect.poll(count).toBe(1);
+    for (const denied of [false, undefined, null]) {
+      const revokesBefore = await page.evaluate(
+        () =>
+          window.cloudPreviewFixture.calls.filter(
+            (call) => call.command === "browser:revoke-preview-origin",
+          ).length,
+      );
+      await page.evaluate(
+        (value) => window.cloudPreviewFixture.setEditAccess(value),
+        denied,
+      );
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              window.cloudPreviewFixture.calls.filter(
+                (call) => call.command === "browser:revoke-preview-origin",
+              ).length,
+          ),
+        )
+        .toBeGreaterThan(revokesBefore);
+      await page.clock.fastForward(60_000);
+      expect(await count()).toBe(1);
+      if (kind === "run")
+        await expect(
+          page.getByRole("button", { name: "Open Fixture in Browser" }),
+        ).toHaveCount(0);
+      await page.evaluate(() => window.cloudPreviewFixture.setEditAccess(true));
+      await expect.poll(count).toBe(2);
+      await page.reload();
+      await page.getByRole("button", { name: "Toggle active" }).click();
+      await page.evaluate(() => window.cloudPreviewFixture.setEditAccess(true));
+      if (kind === "run")
+        await page
+          .getByRole("button", { name: "Open Fixture in Browser" })
+          .click();
+      await expect.poll(count).toBe(1);
+    }
+    check(
+      `${kind} previews require exact-workspace editing capabilities and retire without retries when denied`,
+      true,
+    );
+  }
+
+  const loopbackRequests = [];
+  const recordLoopback = (request) => {
+    if (
+      /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):517[345]\//.test(
+        request.url(),
+      )
+    )
+      loopbackRequests.push(request.url());
+  };
+  page.on("request", recordLoopback);
+  await page.route("http://localhost:*/**", (route) =>
+    route.fulfill({ body: "Local loopback must never be requested" }),
+  );
+  await page.goto(`${harnessBase}/harness-cloud-previews.html?human`);
+  await page.getByRole("button", { name: "Toggle active" }).click();
+  await expect.poll(count).toBe(1);
+  await page.evaluate(() => {
+    window.cloudPreviewFixture.hold = true;
+  });
+  await page
+    .getByRole("textbox", { name: "Browser URL" })
+    .fill("http://localhost:5174/next?version=3");
+  await page.getByRole("textbox", { name: "Browser URL" }).press("Enter");
+  await expect.poll(count).toBe(2);
+  expect(loopbackRequests).toEqual([]);
+  await expect.poll(frameUrl).toMatch(/0001\.preview\.example\.test/);
+  await page.evaluate(() => {
+    window.cloudPreviewFixture.hold = false;
+    window.cloudPreviewFixture.release();
+  });
+  await expect
+    .poll(frameUrl)
+    .toMatch(/0002\.preview\.example\.test\/next\?version=3$/);
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect.poll(count).toBe(3);
+  await expect
+    .poll(frameUrl)
+    .toMatch(/0003\.preview\.example\.test\/assets\?version=2$/);
+  await page.getByRole("button", { name: "Forward", exact: true }).click();
+  await expect.poll(count).toBe(4);
+  await expect
+    .poll(frameUrl)
+    .toMatch(/0004\.preview\.example\.test\/next\?version=3$/);
+  await page.getByRole("button", { name: "Reload", exact: true }).click();
+  await expect.poll(count).toBe(5);
+  await expect.poll(frameUrl).toMatch(/0005\.preview\.example\.test\/next\?version=3$/);
+  expect(loopbackRequests).toEqual([]);
+  check(
+    "cloud address entry and history admit logical URLs before navigating, with zero local loopback requests",
+    true,
+  );
+
+  await page.goto(`${harnessBase}/harness-cloud-previews.html?empty`);
+  await page.getByRole("button", { name: "Toggle active" }).click();
+  expect(await count()).toBe(0);
+  await page
+    .getByRole("textbox", { name: "Browser URL" })
+    .fill("http://localhost:5175/empty-entry");
+  await page.getByRole("textbox", { name: "Browser URL" }).press("Enter");
+  await expect.poll(count).toBe(1);
+  await expect.poll(frameUrl).toMatch(/\.preview\.example\.test\/empty-entry$/);
+  expect(loopbackRequests).toEqual([]);
+  page.off("request", recordLoopback);
+  check(
+    "empty cloud Browser tabs admit their first logical address without contacting local loopback",
+    true,
+  );
 }

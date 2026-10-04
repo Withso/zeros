@@ -1784,6 +1784,18 @@ d("cloud workspace API contracts", () => {
     expect(accessService.issue).toHaveBeenCalledWith(expect.objectContaining({ previewTarget: target, proof: expect.objectContaining({ deviceId: DEVICE_ID, keyVersion: 1 }) }));
   });
 
+  it("forwards a scalar preview device proof even when native and target hints are omitted", async () => {
+    const workspaceId = randomUUID();
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/access/previews`, {
+      method: "POST", key: randomUUID(), body: { port: 5173, expiresInMinutes: 15 },
+      headers: { "x-zeros-device-id": DEVICE_ID, "x-zeros-device-key-version": "1",
+        "x-zeros-device-timestamp": String(Date.now()), "x-zeros-device-nonce": "A".repeat(32),
+        "x-zeros-device-signature": Buffer.alloc(64).toString("base64url") },
+    });
+    expect(response.status).toBe(201);
+    expect(accessService.issue).toHaveBeenCalledWith(expect.objectContaining({ proof: expect.objectContaining({ deviceId: DEVICE_ID, keyVersion: 1 }) }));
+  });
+
   it("requires an exact one-time credential when revoking client access", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
