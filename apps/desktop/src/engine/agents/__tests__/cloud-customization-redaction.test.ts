@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { CloudCustomizationRedactor } from "../cloud-customization-redaction";
 
+it("filters maximum-size literals with overlapping shorter values without rescanning replacement markers",()=>{
+  const large="é".repeat(32768),redactor=new CloudCustomizationRedactor([large,"prefix","prefix-suffix","redacted"]);
+  expect(redactor.value(`prefix-suffix prefix ${large}`)).toBe("[redacted] [redacted] [redacted]");
+  expect(redactor.stream("large",large.slice(0,20000))).toBe("");
+  expect(redactor.stream("large",large.slice(20000))).toBe("[redacted]");
+});
+
 describe("execution MCP secret redaction", () => {
   it("adds scoped product headers to the same transcript and history filter", () => {
     const redactor = new CloudCustomizationRedactor(["existing-user-secret"]);

@@ -128,7 +128,10 @@ function failure(code) {
 /** Only the immutable helper has the execution's literals. Filter them before
  * either the root journal or the bounded private result receives command text. */
 export function redactCloudWorkspaceSetupHookLog(output, values, truncated = false) {
-  const literals = [...new Set(values.filter(value => typeof value === "string" && value.length).flatMap(value => [value, JSON.stringify(value).slice(1, -1)]))]
+  const normalize = text => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+  output = normalize(output);
+  const literals = [...new Set(values.filter(value => typeof value === "string" && value.length).flatMap(value => [value, normalize(value)])
+    .filter(Boolean).flatMap(value => [value, JSON.stringify(value).slice(1, -1)]))]
     .sort((a, b) => b.length - a.length);
   const maximum = 16 * 1024;
   const source = output.slice(0, maximum + (literals[0]?.length ?? 0));
@@ -146,8 +149,7 @@ export function redactCloudWorkspaceSetupHookLog(output, values, truncated = fal
     }
     return keep ? line.slice(0, -keep) + "[redacted]" : line;
   }).join("\n");
-  text = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "")
-    .replace(/(?:gh[opsu]_)[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|Bearer\s+[^\s]+/gi, "[redacted]");
+  text = text.replace(/(?:gh[opsu]_)[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|Bearer\s+[^\s]+/gi, "[redacted]");
   const bytes = Buffer.from(text);
   if (bytes.length > maximum) {
     // Avoid persisting a partial UTF-8 code point.

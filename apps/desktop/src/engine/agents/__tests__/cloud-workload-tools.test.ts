@@ -9,11 +9,11 @@ import type {CloudAgentLease} from "../cloud-agent-lease";
 import {CloudWorkloadTools} from "../cloud-workload-tools";
 import type {BoundaryProcess,BoundarySpawnRequest,PreparedBoundary} from "../containment/types";
 const roots:string[]=[],hosts:CloudWorkloadTools[]=[];
-async function fixture(gitAuthor?:{name:string;email:string}){
+async function fixture(gitAuthor?:{name:string;email:string},values?:Record<string,string>){
   const root=await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-tools-"));roots.push(root);
   const domains=new Set<{stopAndProve():Promise<void>}>();
   const controller=new AbortController();
-  const lease={gitAuthor,signal:controller.signal,assertLive:()=>{if(controller.signal.aborted)throw new Error("retired");},validate:async()=>{},
+  const lease={gitAuthor,environment:values?{values}:undefined,signal:controller.signal,assertLive:()=>{if(controller.signal.aborted)throw new Error("retired");},validate:async()=>{},
     attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),
     launch:async(spawn:()=>Promise<BoundaryProcess>)=>{const child=await spawn();domains.add(child);return child;},
     retire:async(domain:{stopAndProve():Promise<void>})=>{await domain.stopAndProve();domains.delete(domain);},
@@ -32,6 +32,19 @@ async function fixture(gitAuthor?:{name:string;email:string}){
 }
 afterEach(async()=>{for(const host of hosts.splice(0))await host.stopAndProve();for(const root of roots.splice(0))await rm(root,{recursive:true,force:true});});
 describe.skipIf(process.platform!=="linux")("credential-free cloud workspace tools",()=>{
+  it("delivers each actor's admitted environment to shells without provider credentials or values in argv",async()=>{
+    for(const actor of ["member-one","member-two"]){
+      const values={ORG_VALUE:"synthetic-org-value",REPO_VALUE:"synthetic-repository-value",PERSONAL_VALUE:actor,ORG_SECRET:"synthetic-org-secret",EMPTY_VALUE:"",
+        OPENAI_API_KEY:"synthetic-provider-value",ANTHROPIC_API_KEY:"synthetic-provider-value",CURSOR_API_KEY:"synthetic-provider-value",CODEX_API_KEY:"synthetic-provider-value"};
+      const {tools,launched}=await fixture(undefined,values);
+      const result=await tools.call({operation:"exec",command:'printf "%s\\n" "$ORG_VALUE" "$REPO_VALUE" "$PERSONAL_VALUE" "$ORG_SECRET" "${EMPTY_VALUE-unset}" "${OPENAI_API_KEY-unset}" "${ANTHROPIC_API_KEY-unset}" "${CURSOR_API_KEY-unset}" "${CODEX_API_KEY-unset}" "$HOME"'});
+      expect(result).toMatchObject({ok:true,data:{exit:{code:0},output:[values.ORG_VALUE,values.REPO_VALUE,actor,values.ORG_SECRET,"","unset","unset","unset","unset","/srv/zeros/home/agent",""].join("\n")}});
+      for(const [request] of launched.mock.calls){
+        for(const value of Object.values(values).filter(Boolean))expect(request.args.join("\0").includes(value)).toBe(false);
+        for(const name of ["OPENAI_API_KEY","ANTHROPIC_API_KEY","CURSOR_API_KEY","CODEX_API_KEY"])expect(request.env).not.toHaveProperty(name);
+      }
+    }
+  });
   it("gives saved tool-bridge conversations the prompting member's Git author",async()=>{
     const author={name:"Test Member",email:"1234+test-member@users.noreply.github.com"};
     const {tools}=await fixture(author);

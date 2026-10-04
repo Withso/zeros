@@ -45,7 +45,10 @@ managed in both paths.
   actor-specific environment and keyed revision. Lease validation recomputes the
   revision; a change retires the process. V2 admission fails closed for runtimes
   without this capability. Another actor cannot take over the execution even
-  when both actors share an agent-credential delegation.
+  when both actors share an agent-credential delegation. The same filtered values
+  reach workload tools and Codex's separate executor. Codex shell inheritance
+  allows only admitted names and managed runtime paths; its argv contains names,
+  never the values or provider credentials.
 - V4 terminal admission requests the private `terminal-environment` capability.
   Values enter only that shell's child environment. Reattachment retains its
   admitted environment, and another member cannot attach or operate it. Restart
@@ -53,7 +56,8 @@ managed in both paths.
   reaches the existing workspace security-stop path.
 - The existing execution redactor filters org/repository/personal literals from
   agent output and errors. Encrypted native-history authority retains previous
-  literals and separates actor histories. Terminal filtering precedes live
+  literals up to 65,536 UTF-8 bytes and separates actor histories, retaining the
+  4 MiB encrypted-history limit. Terminal filtering precedes live
   publication and replay. No personal values are installed in the shared engine
   environment. User code can deliberately write its own files; literal filtering
   is not a data-loss-prevention boundary for arbitrary transformations.
@@ -92,7 +96,8 @@ explicit new setup run, using the existing failed-workspace wake/retry action;
 automatic retries of the same run cannot rerun them. An explicit retry can repeat
 side effects from an interrupted command, so setup hooks should be idempotent.
 
-Failures retain at most 16 KiB of UTF-8 output, after literal redaction, in the
+Failures normalize ANSI/control sequences before literal and truncated-prefix
+redaction, then retain at most 16 KiB of UTF-8 output in the
 root setup log and existing setup-run log fields. The private helper's version-3
 error envelope is accepted only on v4 and only for hook failures. Other provider
 output keeps the existing withholding boundary. Existing version-1 journals

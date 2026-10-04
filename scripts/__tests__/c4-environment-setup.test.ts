@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { runC4SetupProbe } from "../cloud-workspace-validation/c4-environment-setup.mjs";
 
@@ -99,6 +104,61 @@ function fixture(
 }
 
 describe("Alpha C4 runbook", () => {
+  it.each(["private file", "symlink", "public file", "directory", "oversized file", "replaced after inspection"])(
+    "reads only the inspected private credential file: %s",
+    (kind) => {
+      const root = mkdtempSync(join(tmpdir(), "zeros-c4-agent-env-"));
+      try {
+        const scripts = join(root, "scripts", "cloud-workspace-validation");
+        mkdirSync(scripts, { recursive: true });
+        const script = join(scripts, "c4-environment-setup.mjs");
+        copyFileSync(fileURLToPath(new URL("../cloud-workspace-validation/c4-environment-setup.mjs", import.meta.url)), script);
+        writeFileSync(join(root, "scripts", "agent-env-check.mjs"),
+          `export { parseAgentEnv } from ${JSON.stringify(new URL("../agent-env-check.mjs", import.meta.url).href)};`);
+        const file = join(root, ".env.agent");
+        if (kind === "directory") mkdirSync(file, { mode: 0o700 });
+        else if (kind === "symlink") {
+          writeFileSync(file + ".target", "FIXTURE=synthetic\n", { mode: 0o600 });
+          symlinkSync(file + ".target", file);
+        } else writeFileSync(file, kind === "oversized file" ? " ".repeat(1024 * 1024 + 1) : "FIXTURE=synthetic\n",
+          { mode: kind === "public file" ? 0o644 : 0o600 });
+        const args: string[] = [];
+        if (kind === "replaced after inspection") {
+          const preload = join(root, "race.mjs");
+          writeFileSync(preload, `
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const file = ${JSON.stringify(file)}, descriptors = new Set();
+let replaced = false;
+function replace() {
+  if (replaced) return;
+  replaced = true;
+  fs.renameSync(file, file + ".opened");
+  fs.writeFileSync(file, "invalid dotenv", { mode: 0o600 });
+}
+const open = fs.openSync, stat = fs.statSync, fstat = fs.fstatSync;
+fs.openSync = (path, ...args) => { const fd = open(path, ...args); if (path === file) descriptors.add(fd); return fd; };
+fs.statSync = (path, ...args) => { const result = stat(path, ...args); if (path === file) replace(); return result; };
+fs.fstatSync = (fd, ...args) => { const result = fstat(fd, ...args); if (descriptors.has(fd)) replace(); return result; };
+syncBuiltinESMExports();
+`);
+          args.push("--import", pathToFileURL(preload).href);
+        }
+        const result = spawnSync(process.execPath, [...args, script, "--run"], { encoding: "utf8", timeout: 5_000 });
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(1);
+        expect(result.stderr).toBe("");
+        // Valid dotenv has no live configuration, so it stops before any HTTP.
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          passed: false,
+          phase: ["private file", "replaced after inspection"].includes(kind) ? "input" : "configuration",
+          cleanup: "not-needed",
+        });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
   it("restores setup settings and reports only closed checks and resource identities", async () => {
     const f = fixture();
     const report = await runC4SetupProbe(f.config, f.fetcher);

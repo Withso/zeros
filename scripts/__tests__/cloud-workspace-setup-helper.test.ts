@@ -69,6 +69,13 @@ describe("versioned cloud recovery manifests", () => {
     expect(Buffer.byteLength(bounded.text)).toBeLessThanOrEqual(16384);
     expect(bounded.text).not.toContain("\uFFFD"); expect(bounded.text).not.toContain(secret); expect(bounded.truncated).toBe(true);
   });
+  it.each(["\x1b[31m", "\r", "\b"])("normalizes inserted controls before filtering setup secrets (%j)", separator => {
+    const secret = "synthetic-private-setup-value";
+    const split = secret.slice(0, 10) + separator + secret.slice(10) + "\x1b[0m";
+    const log = redactCloudWorkspaceSetupHookLog(`failed: ${split}\npartial: synthetic-${separator}private-`, [secret]);
+    expect(log.text).toBe("failed: [redacted]\npartial: [redacted]");
+    expect(JSON.stringify(log)).not.toContain(secret);
+  });
   const checkpointId = "11111111-1111-4111-8111-111111111111";
   const blob = { blobId: "22222222-2222-4222-8222-222222222222", contentSha256: "a".repeat(64), sizeBytes: 12 };
   const page = { version: 2, audience: "zeros-cloud-workspace-recovery-manifest-v2", checkpointId, contentRevision: 1,

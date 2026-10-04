@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { parseAgentEnv } from "../agent-env-check.mjs";
@@ -288,8 +288,15 @@ async function main() {
   }
   try {
     const file = fileURLToPath(new URL("../../.env.agent", import.meta.url));
-    required((statSync(file).mode & 0o077) === 0);
-    const parsed = parseAgentEnv(readFileSync(file, "utf8"));
+    const descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    let parsed;
+    try {
+      const stat = fstatSync(descriptor);
+      required(stat.isFile() && (stat.mode & 0o077) === 0 && stat.size > 0 && stat.size <= 1024 * 1024);
+      parsed = parseAgentEnv(readFileSync(descriptor, "utf8"));
+    } finally {
+      closeSync(descriptor);
+    }
     required(
       parsed.malformedLines.length === 0 && parsed.duplicateKeys.length === 0,
     );

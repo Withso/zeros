@@ -11,6 +11,7 @@ import {CloudLanguageService} from "./cloud-language-service";
 import {parseLanguageDocument} from "./cloud-language-document";
 import {LspError} from "./lsp-rpc";
 import {cloudGitAuthorEnvironment} from "../git/cloud-git-author";
+import {cloudComputerProcessEnvironment} from "./cloud-computer-environment";
 
 const MAX_OUTPUT=1024*1024,MAX_JOBS=8,MAX_CALLS=4;
 
@@ -36,9 +37,9 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
   constructor(readonly lease:CloudAgentLease,private readonly boundary:PreparedBoundary,private readonly cwd:string){
     if(!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||!(cwd==="/srv/zeros/workspace"||cwd.startsWith("/srv/zeros/workspace/")))
       throw new Error("Cloud workload root is invalid");
-    this.env={HOME:"/srv/zeros/home/agent",PATH:`${this.runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,LANG:"C.UTF-8",
+    this.env=cloudComputerProcessEnvironment({HOME:"/srv/zeros/home/agent",PATH:`${this.runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,LANG:"C.UTF-8",
       USER:"zeros-agent",LOGNAME:"zeros-agent",SHELL:"/bin/bash",TMPDIR:"/tmp",ZEROS_WORKTREE_PATH:cwd,
-      ...cloudGitAuthorEnvironment(lease.gitAuthor??null)};
+      ...cloudGitAuthorEnvironment(lease.gitAuthor??null)},lease.environment?.values,"agent");
     lease.attach(this);lease.attach(boundary);
   }
   private assertLive(){if(this.retired)throw unavailable();this.lease.assertLive();}

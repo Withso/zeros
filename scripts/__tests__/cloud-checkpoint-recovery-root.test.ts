@@ -65,7 +65,7 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
     const profile={version:4,setupDirectory:"/srv/zeros/setup-v4",managedSettingsDirectory:"/srv/zeros/managed-v4"};
     const material={execution:{workspaceId:randomUUID(),organizationId:randomUUID(),generation:1,setupRunId:randomUUID(),executionFence:1},
       repository:{cloneUrl:"https://github.com/example/recovery.git",revision:commit},settings:{version:1,snapshotSha256:"b".repeat(64),document:{values:{}},
-        setupCommands:[{command:'if ! test -f allow-hook; then printf "failed: %s\\n" "$ORG_SECRET"; exit 1; fi; id -u >> hook-runs',timeoutSeconds:5}],
+        setupCommands:[{command:'if ! test -f allow-hook; then printf "failed: %s\\033[31m%s\\033[0m\\n" "${ORG_SECRET:0:10}" "${ORG_SECRET:10}"; exit 1; fi; id -u >> hook-runs',timeoutSeconds:5}],
         setupEnvironment:[{name:"ORG_SECRET",value:"synthetic-org-hook-secret"}]}};
     vi.mocked(runScopedCloudSetup).mockImplementation(async payload=>{
       try {
