@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { createReadStream, ReadStream } from "node:fs";
-import { lstat, readFile } from "node:fs/promises";
+import { constants, createReadStream, ReadStream } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -92,11 +92,17 @@ function positiveInteger(
   return number;
 }
 async function readBoundedFile(file: string, maximum: number): Promise<Buffer> {
-  const info = await lstat(file);
-  check(info.isFile() && info.size > 0 && info.size <= maximum, "input_schema");
-  const bytes = await readFile(file);
-  check(bytes.length <= maximum, "input_schema");
-  return bytes;
+  // Check and read the same file through one descriptor; never follow a link.
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    check(info.isFile() && info.size > 0 && info.size <= maximum, "input_schema");
+    const bytes = await handle.readFile();
+    check(bytes.length <= maximum, "input_schema");
+    return bytes;
+  } finally {
+    await handle.close();
+  }
 }
 async function responseJson(response: Response): Promise<unknown> {
   const reader = response.body?.getReader();
