@@ -35,6 +35,9 @@ import {
   type ZsrBoundaryOptions,
 } from "../zsr-boundary";
 import { sessionDir } from "../../session-paths";
+import { createRepoTaskBoundaryFactory } from "../repo-task-boundary";
+import { UtilityBoundaryPool } from "../utility-boundary-pool";
+import type { BoundaryRequest, PreparedBoundary, TerritoryGeneration } from "../types";
 
 const boundaryTmpdir =
   process.platform === "darwin" ? "/private/tmp" : tmpdir();
@@ -380,6 +383,181 @@ describe("ZSR execution boundary", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("proves only the requested rejected preparation and keeps unproven cleanup for retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = new ZsrExecutionBoundary({ projectRoot: root, supervisorScript: supervisor, supervisorRuntime: process.execPath }) as ZsrExecutionBoundary & {
+        proveFailedPreparationStopped(executionId: string): Promise<void>;
+      };
+      vi.spyOn(boundary, "probe").mockResolvedValue({ backend: "zeros-srt", available: true, secureNestedIsolation: true, reasons: [] });
+      const targetCleanup = vi.fn<() => Promise<void>>().mockRejectedValueOnce(new Error("initial cleanup failed"))
+        .mockRejectedValueOnce(new Error("cleanup still unproven")).mockResolvedValue();
+      const siblingCleanup = vi.fn<() => Promise<void>>().mockRejectedValue(new Error("sibling cleanup failed"));
+      const internals = boundary as unknown as {
+        admitLocalHostParity(request: BoundaryRequest, generation: TerritoryGeneration): Promise<PreparedBoundary>;
+        throwAfterPreparationCleanup(generation: TerritoryGeneration, error: unknown, cleanups: readonly (() => Promise<unknown>)[], executionId?: string): Promise<never>;
+      };
+      vi.spyOn(internals, "admitLocalHostParity").mockImplementation((admission, generation) =>
+        internals.throwAfterPreparationCleanup(generation, new Error("admission failed"),
+          [admission.executionId === "target-failed-preparation" ? targetCleanup : siblingCleanup], admission.executionId),
+      );
+      for (const executionId of ["target-failed-preparation", "sibling-failed-preparation"]) {
+        await expect(boundary.prepare({ executionId, actor: "agent-code", cwd: workspace, workspaceRoot: workspace }, { retainFailedPreparationProof: true })).rejects.toThrow(/cleanup could not be proven/i);
+      }
+      await expect(boundary.proveFailedPreparationStopped("target-failed-preparation")).rejects.toThrow(/cleanup still unproven/i);
+      await expect(boundary.proveFailedPreparationStopped("target-failed-preparation")).resolves.toBeUndefined();
+      expect(targetCleanup).toHaveBeenCalledTimes(3);
+      expect(siblingCleanup).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("does not retain failed preflight proof without an opt-in", async () => {
+    const boundary = new ZsrExecutionBoundary({ projectRoot: root });
+    const internals = boundary as unknown as {
+      preparationOwnership: Map<TerritoryGeneration, unknown>;
+    };
+    vi.spyOn(boundary, "probe").mockResolvedValue({
+      backend: "zeros-srt",
+      available: false,
+      secureNestedIsolation: false,
+      reasons: ["preflight unavailable"],
+    });
+    try {
+      await expect(boundary.prepare({
+        executionId: "ordinary-preflight-failure",
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      })).rejects.toThrow("preflight unavailable");
+      expect(internals.preparationOwnership.size).toBe(0);
+      await expect(boundary.proveFailedPreparationStopped("ordinary-preflight-failure")).rejects.toThrow();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each(["utility", "repo-task"] as const)(
+    "does not retain fully cleaned failed %s preparation bookkeeping",
+    async (operation) => {
+      const boundary = new ZsrExecutionBoundary({ projectRoot: root });
+      const cleanup = vi.fn<() => Promise<void>>().mockResolvedValue();
+      const internals = boundary as unknown as {
+        admitLocalHostParity(request: BoundaryRequest, generation: TerritoryGeneration): Promise<PreparedBoundary>;
+        throwAfterPreparationCleanup(generation: TerritoryGeneration, error: unknown, cleanups: readonly (() => Promise<unknown>)[], executionId?: string): Promise<never>;
+        preparationOwnership: Map<TerritoryGeneration, unknown>;
+        retirementFailures: Map<TerritoryGeneration, unknown>;
+      };
+      vi.spyOn(boundary, "probe").mockResolvedValue({
+        backend: "zeros-srt", available: true, secureNestedIsolation: true, reasons: [],
+      });
+      vi.spyOn(internals, "admitLocalHostParity").mockImplementation((admission, generation) =>
+        internals.throwAfterPreparationCleanup(generation, new Error("admission failed"), [cleanup], admission.executionId),
+      );
+      const admission = {
+        executionId: `ordinary-zsr-${operation}`,
+        actor: "agent-code" as const,
+        cwd: workspace,
+        workspaceRoot: workspace,
+      };
+      const pool = new UtilityBoundaryPool({
+        prepare: (request) => boundary.prepare(request),
+        retire: (_executionId, prepared) => prepared.stopAndProve(),
+      });
+      const factory = createRepoTaskBoundaryFactory(boundary);
+      try {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const pending = operation === "utility"
+            ? pool.acquire(admission)
+            : factory({ ...admission, repoRoot: workspace });
+          await expect(pending).rejects.toThrow("admission failed");
+          expect(internals.retirementFailures.size).toBe(0);
+          expect(internals.preparationOwnership.size).toBe(0);
+          await expect(boundary.proveFailedPreparationStopped(admission.executionId)).rejects.toThrow();
+        }
+        expect(cleanup).toHaveBeenCalledTimes(3);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "keeps automatic failed-cleanup recovery with proof retention %s",
+    async (retainFailedPreparationProof) => {
+      vi.useFakeTimers();
+      try {
+        const boundary = new ZsrExecutionBoundary({ projectRoot: root });
+        const cleanup = vi.fn<() => Promise<void>>()
+          .mockRejectedValueOnce(new Error("initial cleanup failed"))
+          .mockResolvedValue();
+        const internals = boundary as unknown as {
+          admitLocalHostParity(request: BoundaryRequest, generation: TerritoryGeneration): Promise<PreparedBoundary>;
+          throwAfterPreparationCleanup(generation: TerritoryGeneration, error: unknown, cleanups: readonly (() => Promise<unknown>)[], executionId?: string): Promise<never>;
+          preparationOwnership: Map<TerritoryGeneration, unknown>;
+          retirementFailures: Map<TerritoryGeneration, unknown>;
+          retirementRecoveryBoundaries: Map<TerritoryGeneration, unknown>;
+          retirementRecoveryTimers: Map<TerritoryGeneration, unknown>;
+        };
+        vi.spyOn(boundary, "probe").mockResolvedValue({
+          backend: "zeros-srt", available: true, secureNestedIsolation: true, reasons: [],
+        });
+        vi.spyOn(internals, "admitLocalHostParity").mockImplementation((admission, generation) =>
+          internals.throwAfterPreparationCleanup(generation, new Error("admission failed"), [cleanup], admission.executionId),
+        );
+        const admission = {
+          executionId: "automatically-recovered-preparation",
+          actor: "agent-code" as const,
+          cwd: workspace,
+          workspaceRoot: workspace,
+        };
+        const pool = new UtilityBoundaryPool({
+          prepare: (request) => boundary.prepare(request),
+          retire: (_executionId, prepared) => prepared.stopAndProve(),
+        });
+        const pending = retainFailedPreparationProof
+          ? boundary.prepare(admission, { retainFailedPreparationProof: true })
+          : pool.acquire(admission);
+        await expect(pending).rejects.toThrow(/cleanup could not be proven/i);
+        expect(internals.preparationOwnership.size).toBe(retainFailedPreparationProof ? 1 : 0);
+        expect(internals.retirementFailures.size).toBe(1);
+        expect(internals.retirementRecoveryBoundaries.size).toBe(1);
+        expect(internals.retirementRecoveryTimers.size).toBe(1);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+
+        expect(cleanup).toHaveBeenCalledTimes(2);
+        await vi.waitFor(() => expect(internals.retirementFailures.size).toBe(0));
+        expect(internals.retirementRecoveryBoundaries.size).toBe(0);
+        expect(internals.retirementRecoveryTimers.size).toBe(0);
+        if (retainFailedPreparationProof) {
+          await expect(boundary.proveFailedPreparationStopped(admission.executionId)).resolves.toBeUndefined();
+        } else {
+          await expect(boundary.proveFailedPreparationStopped(admission.executionId)).rejects.toThrow();
+        }
+        expect(internals.preparationOwnership.size).toBe(0);
+      } finally {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
+  it("refuses unknown and active ZSR executions through the failed-preparation proof seam", async () => {
+    const boundary = new ZsrExecutionBoundary({ projectRoot: root, supervisorScript: supervisor, supervisorRuntime: process.execPath }) as ZsrExecutionBoundary & {
+      proveFailedPreparationStopped(executionId: string): Promise<void>;
+    };
+    vi.spyOn(boundary, "probe").mockResolvedValue({ backend: "zeros-srt", available: true, secureNestedIsolation: true, reasons: [] });
+    const internals = boundary as unknown as { admitLocalHostParity(request: BoundaryRequest, generation: TerritoryGeneration): Promise<PreparedBoundary> };
+    vi.spyOn(internals, "admitLocalHostParity").mockImplementation(async (_request, generation) => ({ generation }) as PreparedBoundary);
+    await expect(boundary.proveFailedPreparationStopped("unknown-preparation")).rejects.toThrow();
+    await boundary.prepare({ executionId: "active-zsr-preparation", actor: "agent-code", cwd: workspace, workspaceRoot: workspace });
+    await expect(boundary.proveFailedPreparationStopped("active-zsr-preparation")).rejects.toThrow();
+    vi.restoreAllMocks();
   });
 
   it("retries exact preparation cleanup without poisoning later admissions", async () => {

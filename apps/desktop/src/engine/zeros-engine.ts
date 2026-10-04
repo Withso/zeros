@@ -40,6 +40,7 @@ import { CSSResolver } from "./css-resolver";
 import { CSSFileWriter } from "./css-writer";
 import { FileWatcher } from "./watcher";
 import { SlowOperationReporter } from "./slow-operation-reporter";
+import { EngineActivityHeartbeat } from "./engine-activity-heartbeat";
 import {
   repoLocalSettingsPath,
   repoSettingsPath,
@@ -47,6 +48,7 @@ import {
 } from "./settings/files";
 import { startSettingsWatcher, type SettingsWatcher } from "./settings/watch";
 import { startGitWatcher, type GitWatcher } from "./git/watch";
+import { invalidateWorkspaceChangeProbes } from "./git/workspace-change-probe";
 import { LocalTransport } from "./transport/local";
 import { CloudTransport, parseCloudTransportPort } from "./transport/cloud";
 import { CloudRuntimeHumanServices } from "./transport/cloud-human-services";
@@ -811,6 +813,7 @@ export class ZerosEngine {
   /** Debounce for the persist control-fd write (token refresh can fire often). */
   private vaultPersistTimer: ReturnType<typeof setTimeout> | null = null;
   private local: LocalTransport;
+  private readonly activityHeartbeat: EngineActivityHeartbeat;
   /** Per-launch secret the local renderer presents on the /ws upgrade. */
   private readonly localToken: string;
   /** The in-sandbox 0.0.0.0 bridge. Null in the local build —
@@ -921,6 +924,13 @@ export class ZerosEngine {
   private readonly workspaceProcessStarts = new Map<
     string,
     Set<Promise<unknown>>
+  >();
+  /** Agent create/resume admissions can still be waiting on the provider when
+   * archive acquires its owner. Abort only this workspace's admissions, then
+   * await their complete per-session retirement before draining other starts. */
+  private readonly workspaceAgentAdmissions = new Map<
+    string,
+    Set<{ controller: AbortController; completion: Promise<unknown> }>
   >();
   /** Enter-Design requests can discover first-use territory only after an
    * asynchronous Git/settings preview. Their outer workspace promise is
@@ -1488,6 +1498,29 @@ export class ZerosEngine {
         // The live ones are stopped after their exit observers are registered.
         this.setup.cancelPendingStart(workspaceId);
         this.runs.cancelPendingStartsForWorkspace(workspaceId);
+        // Close/supersede only binds owned by this checkout. A session may not
+        // have an execution id yet, so its durable chat is the fallback owner.
+        for (const conversationId of this.conversationBindAborts.keys()) {
+          const location = getChatLocation(conversationId);
+          if (
+            location &&
+            (location.folder
+              ? belongsToWorkspace(location.folder)
+              : location.workspaceId === workspaceId)
+          ) {
+            this.invalidateConversationBind(conversationId);
+          }
+        }
+        const admissions = [
+          ...(this.workspaceAgentAdmissions.get(workspaceId) ?? []),
+        ];
+        for (const admission of admissions) admission.controller.abort();
+        // Provider retirement includes process proof and outstanding grants.
+        // Keep archive ownership until that contract finishes; its successful
+        // completion must not lose a race against the ordinary start timeout.
+        await Promise.allSettled(
+          admissions.map((admission) => admission.completion),
+        );
         // Starts already admitted before this lifecycle acquired its
         // single-flight may still be resolving environment/session state and
         // therefore have no PTY/session to enumerate yet. Wait for them first.
@@ -1500,56 +1533,56 @@ export class ZerosEngine {
         // worktree. An idle SDK session can still own a watcher/subprocess even
         // when promptSessions is empty.
         const agentSessionIds = new Set<string>(
-          this.agents.workspaceSessionIds(workspaceId, worktreePath),
+          this.agents.workspaceOwnedSessionIds(
+            workspaceId,
+            worktreePath,
+            ownerOf,
+          ),
         );
-        for (const [sessionId, boundWorkspaceId] of this.sessionWorkspace) {
-          if (boundWorkspaceId !== workspaceId) continue;
+        for (const sessionId of new Set([
+          ...this.sessionWorkspace.keys(),
+          ...this.sessionChat.keys(),
+        ])) {
+          const primary = this.agents.sessionWorkspaceBinding(sessionId);
           const chatId = this.sessionChat.get(sessionId);
-          const folder = chatId ? getChatLocation(chatId)?.folder : null;
-          if (!folder || belongsToWorkspace(folder)) {
-            agentSessionIds.add(sessionId);
-          }
+          const location = chatId ? getChatLocation(chatId) : null;
+          const folder = primary?.cwd ?? location?.folder;
+          const owner = folder ? ownerOf(folder) : null;
+          const bound = primary?.workspaceId ??
+            this.sessionWorkspace.get(sessionId) ?? location?.workspaceId;
+          const owned = owner
+            ? owner === workspaceId
+            : bound
+              ? bound === workspaceId
+              : Boolean(folder && isUnderRoot(folder));
+          if (!owned) continue;
+          agentSessionIds.add(sessionId);
+          // Preserve a lifecycle tombstone after the adapter session is
+          // disposed. A late prompt carrying only the old session id must
+          // still resolve to this archived/deleted managed workspace.
+          this.sessionWorkspace.set(sessionId, workspaceId);
         }
-        for (const [sessionId, chatId] of this.sessionChat) {
-          const folder = getChatLocation(chatId)?.folder;
-          if (folder && belongsToWorkspace(folder)) {
-            agentSessionIds.add(sessionId);
-            // Preserve a lifecycle tombstone after the adapter session is
-            // disposed. A late prompt carrying only the old session id must
-            // still resolve to this archived/deleted managed workspace and be
-            // refused instead of escaping the gate as "unmanaged".
-            this.sessionWorkspace.set(sessionId, workspaceId);
-          }
-        }
-        const promptsSettled =
-          await this.cancelLiveAgentSessions(agentSessionIds);
-        if (!promptsSettled) {
-          throw new GitError({
-            code: "GIT_COMMAND_FAILED",
-            message: `Couldn't stop every agent using ${worktreePath}`,
-            remediation:
-              "The workspace remains live. Stop its running agents, then retry.",
-            context: { workspaceId, worktreePath },
-          });
-        }
+        // A provider can ignore cooperative Stop while its process is still
+        // safely disposable. Cancellation settles the durable turn first;
+        // fail-closed session retirement below proves the stronger boundary.
+        await this.cancelLiveAgentSessions(agentSessionIds);
         const endedAgents = await Promise.all(
           [...agentSessionIds].map(async (sessionId) => {
-            const agentId = this.sessionAgent.get(sessionId);
+            const agentId =
+              this.sessionAgent.get(sessionId) ??
+              this.agents.sessionAgentId(sessionId);
             if (!agentId) return { sessionId, ended: true };
-            let timer: ReturnType<typeof setTimeout> | null = null;
+            // Retain this exact owner even if the gateway clears its routing
+            // during teardown. Late prompts and a failed archive retry must
+            // not reinterpret the execution as an unmanaged session.
+            this.sessionWorkspace.set(sessionId, workspaceId);
             try {
-              const ended = await Promise.race([
-                this.agents
-                  .endSession(agentId, sessionId, { failClosed: true })
-                  .then(() => true)
-                  .catch(() => false),
-                new Promise<boolean>((resolve) => {
-                  timer = setTimeout(() => resolve(false), 3_000);
-                }),
-              ]);
-              return { sessionId, ended };
-            } finally {
-              if (timer) clearTimeout(timer);
+              await this.agents.endSession(agentId, sessionId, {
+                failClosed: true,
+              });
+              return { sessionId, ended: true };
+            } catch {
+              return { sessionId, ended: false };
             }
           }),
         );
@@ -1563,6 +1596,9 @@ export class ZerosEngine {
           this.detachedProviderBindings.delete(sessionId);
           this.exitedAgentExecutions.delete(sessionId);
           this.releasePromptContext(sessionId);
+          this.promptSessions.delete(sessionId);
+          this.cancelRequested.delete(sessionId);
+          this.steeringReceipts.delete(sessionId);
           this.clearPendingAgentInteractions(sessionId);
           if (
             conversationId &&
@@ -1570,6 +1606,7 @@ export class ZerosEngine {
           ) {
             this.conversationExecution.delete(conversationId);
           }
+          this.activityHeartbeat.refresh();
         }
         if (endedAgents.some(({ ended }) => !ended)) {
           throw new GitError({
@@ -1770,6 +1807,12 @@ export class ZerosEngine {
       },
     });
     this.transports = [this.local];
+    this.activityHeartbeat = new EngineActivityHeartbeat({
+      instance: this.local.instanceNonce,
+      publish: (frame) =>
+        this.publishPrivateHostControl(`${JSON.stringify(frame)}\n`),
+      activeTurns: () => this.activeAgentExecutionCount(),
+    });
 
     // Cloud transport: when the engine runs inside a remote sandbox the
     // bootstrap sets ZEROS_CLOUD_PORT, and we add a SECOND transport that binds
@@ -2083,6 +2126,7 @@ export class ZerosEngine {
               ...this.sessionLoadResponses.get(executionId),
               backgroundTasks: notification.update,
             });
+            this.activityHeartbeat.refresh();
           }
           if (notification.update.sessionUpdate === "current_mode_update") {
             const cached = this.sessionLoadResponses.get(executionId);
@@ -2936,6 +2980,7 @@ export class ZerosEngine {
     // 3. Start HTTP + WebSocket server (loopback transport)
     await this.local.start();
     this.actualPort = this.local.actualPort;
+    this.activityHeartbeat.start();
 
     // MCP gateway: front any auth:"oauth" backends on a localhost
     // endpoint + inject that one server into every agent. Best-effort — a
@@ -3058,6 +3103,7 @@ export class ZerosEngine {
    * Stop the engine gracefully.
    */
   async stop(): Promise<void> {
+    this.activityHeartbeat?.stop();
     const idleStopped = this.cloudIdleStop.close();
     const checkpointStopped = this.cloudCheckpointScheduler?.close();
     this.cloudActions?.close();
@@ -4662,8 +4708,8 @@ export class ZerosEngine {
     cwd: string | null | undefined,
   ): string | null {
     return (
-      this.workspace.workspaceIdForCwd(workspaceId ?? undefined) ??
       this.workspace.workspaceIdForCwd(cwd ?? undefined) ??
+      this.workspace.workspaceIdForCwd(workspaceId ?? undefined) ??
       workspaceId ??
       null
     );
@@ -4671,6 +4717,14 @@ export class ZerosEngine {
 
   private workspaceIdForAgentSession(sessionId: string): string | null {
     const bound = this.sessionWorkspace.get(sessionId);
+    const primary = this.agents.sessionWorkspaceBinding(sessionId);
+    if (primary) {
+      const owner = this.workspaceIdForProcess(
+        primary.workspaceId ?? bound,
+        primary.cwd,
+      );
+      if (owner) return owner;
+    }
     if (bound) return bound;
     const chatId = this.sessionChat.get(sessionId);
     const location = chatId ? getChatLocation(chatId) : null;
@@ -4725,6 +4779,36 @@ export class ZerosEngine {
     this.globalDesignAuthorityStarts.add(tracked);
     if (!workspaceId) return tracked;
     return this.trackWorkspaceProcessStart(workspaceId, tracked);
+  }
+
+  private trackAgentSessionStart<T>(
+    workspaceId: string | null,
+    start: (signal: AbortSignal) => Promise<T>,
+    conversationSignal?: AbortSignal,
+  ): Promise<T> {
+    const controller = new AbortController();
+    const signal = conversationSignal
+      ? AbortSignal.any([controller.signal, conversationSignal])
+      : controller.signal;
+    const completion = this.trackRepositoryCodeAuthorityStart(
+      workspaceId,
+      start(signal),
+    );
+    if (!workspaceId) return completion;
+    let admissions = this.workspaceAgentAdmissions.get(workspaceId);
+    if (!admissions) {
+      admissions = new Set();
+      this.workspaceAgentAdmissions.set(workspaceId, admissions);
+    }
+    const admission = { controller, completion };
+    admissions.add(admission);
+    return completion.finally(() => {
+      const current = this.workspaceAgentAdmissions.get(workspaceId);
+      current?.delete(admission);
+      if (current?.size === 0) {
+        this.workspaceAgentAdmissions.delete(workspaceId);
+      }
+    });
   }
 
   private beginConversationBind(
@@ -4827,6 +4911,7 @@ export class ZerosEngine {
     ) {
       this.conversationExecution.delete(conversationId);
     }
+    this.activityHeartbeat.refresh();
   }
 
   /** The engine learns provider identity at creation/resume and sometimes
@@ -5083,6 +5168,19 @@ export class ZerosEngine {
   }
 
   private async handleMessage(
+    msg: EngineMessage,
+    client: TransportClient,
+  ): Promise<void> {
+    // Prompt activity belongs to the accepted turn, starting before its first
+    // await. Its original RPC can remain unresolved after verified retirement;
+    // counting that promise too would keep renewing an abandoned work lease.
+    if (msg.type === "CONNECTED" || msg.type === "HEARTBEAT" || msg.type === "AGENT_PROMPT") {
+      return this.dispatchMessage(msg, client);
+    }
+    return this.activityHeartbeat.track(() => this.dispatchMessage(msg, client));
+  }
+
+  private async dispatchMessage(
     msg: EngineMessage,
     client: TransportClient,
   ): Promise<void> {
@@ -5482,13 +5580,14 @@ export class ZerosEngine {
             spawnOpts.cwd,
           );
           let provisionalExecutionId: string | undefined;
-          const startSession = (async () => {
+          const startSession = async (sessionAdmissionSignal: AbortSignal) => {
             const initialize = await this.agents.ensureAgent(msg.agentId, {
               env: spawnOpts.env,
             });
             // ensureAgent may spawn/initialize asynchronously. Re-check
             // before the workspace-scoped session itself is created.
             this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+            sessionAdmissionSignal.throwIfAborted();
             if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
               throw this.staleConversationBindFailure("newSession");
             }
@@ -5497,15 +5596,12 @@ export class ZerosEngine {
               const sessionOptions: NewAgentSessionOptions = {
                 cwd: spawnOpts.cwd,
                 env: spawnOpts.env,
-                workspaceId: spawnOpts.workspaceId,
+                workspaceId: lifecycleWorkspaceId ?? spawnOpts.workspaceId,
                 conversationId: msg.chatId,
                 cliBinary: spawnOpts.cliBinary,
                 cloudExecution:spawnOpts.cloudExecution,
                 cloudExecutionId:spawnOpts.cloudExecutionId,
-                admissionSignal: this.conversationAdmissionSignal(
-                  msg.chatId,
-                  bindToken,
-                ),
+                admissionSignal: sessionAdmissionSignal,
                 onExecutionCreated: (executionId) => {
                   if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
                     throw this.staleConversationBindFailure("newSession");
@@ -5616,10 +5712,11 @@ export class ZerosEngine {
               );
             }
             return { initialize, session };
-          })();
-          const { initialize, session } = await this.trackRepositoryCodeAuthorityStart(
+          };
+          const { initialize, session } = await this.trackAgentSessionStart(
             lifecycleWorkspaceId,
             startSession,
+            admissionSignal,
           );
           this.assertAgentSessionProcessStartAllowed(
             session.executionId,
@@ -6469,6 +6566,7 @@ export class ZerosEngine {
                 this.promptSessions.delete(executionId);
               }
               this.clearPendingAgentInteractions(executionId);
+              this.activityHeartbeat.refresh();
               if (
                 conversationId &&
                 this.conversationExecution.get(conversationId) === executionId
@@ -7404,9 +7502,9 @@ export class ZerosEngine {
             });
           }
           let provisionalExecutionId: string | undefined;
-          let response = await this.trackRepositoryCodeAuthorityStart(
+          let response = await this.trackAgentSessionStart(
             lifecycleWorkspaceId,
-            (async () => {
+            async (sessionAdmissionSignal) => {
               let adapterLoadCompleted = false;
               try {
                 const loaded = await this.agents.loadSession(
@@ -7415,15 +7513,12 @@ export class ZerosEngine {
                   {
                     cwd: loadOpts.cwd,
                     env: loadOpts.env,
-                    workspaceId: loadOpts.workspaceId,
+                    workspaceId: lifecycleWorkspaceId ?? loadOpts.workspaceId,
                     conversationId: msg.chatId,
                     cliBinary: loadOpts.cliBinary,
                     cloudExecution:loadOpts.cloudExecution,
                     cloudExecutionId:loadOpts.cloudExecutionId,
-                    admissionSignal: this.conversationAdmissionSignal(
-                      msg.chatId,
-                      bindToken,
-                    ),
+                    admissionSignal: sessionAdmissionSignal,
                     onExecutionCreated: (executionId) => {
                       if (
                         !this.conversationBindIsCurrent(msg.chatId, bindToken)
@@ -7508,7 +7603,8 @@ export class ZerosEngine {
                 }
                 throw err;
               }
-            })(),
+            },
+            loadAdmissionSignal,
           );
           const executionId = response.executionId;
           if (!executionId) {
@@ -9050,6 +9146,15 @@ export class ZerosEngine {
               },
             )
           : await operation;
+      const changed = dbChangedKinds(op, result);
+      const workspaceIds = changed && (changed.includes("codeReview") || changed.includes("gitReview")) && typeof params.workspaceId === "string"
+        ? [params.workspaceId]
+        : changed?.includes("workspaces")
+        ? dbChangedWorkspaceIds(params, result)
+        : undefined;
+      if (changed?.includes("workspaces")) {
+        invalidateWorkspaceChangeProbes(workspaceIds);
+      }
       const elapsedMs = Date.now() - startedAt;
       this.slowWorkspaceOperations.observe(op, elapsedMs);
       client.send(
@@ -9108,13 +9213,7 @@ export class ZerosEngine {
       // for the ops dbChangedIncludesOriginator names, which broadcast to
       // EVERYONE (a refetch is idempotent + cheap on the happy path). See that
       // predicate for why each family is there.
-      const changed = dbChangedKinds(op, result);
       if (changed) {
-        const workspaceIds = (changed.includes("codeReview") || changed.includes("gitReview")) && typeof params.workspaceId === "string"
-          ? [params.workspaceId]
-          : changed.includes("workspaces")
-          ? dbChangedWorkspaceIds(params, result)
-          : undefined;
         const dbChangedMsg = createMessage({
           type: "DB_CHANGED",
           source: "engine",
@@ -10368,6 +10467,17 @@ export class ZerosEngine {
   private busyFilePath(): string {
     return path.join(engineRuntimeDir(this.root), "busy");
   }
+  private activeAgentExecutionCount(): number {
+    const executions = new Set([...this.activePrompts].map((prompt) => prompt.sessionId));
+    for (const [executionId, response] of this.sessionLoadResponses) {
+      if (!this.sessionAgent.has(executionId)) continue;
+      const background = response.backgroundTasks;
+      if (background && (background.tasks.length > 0 || background.activity != null)) {
+        executions.add(executionId);
+      }
+    }
+    return executions.size;
+  }
   private enterPrompt(prompt: ActivePromptContext): void {
     if (this.activePrompts.has(prompt)) return;
     this.activePrompts.add(prompt);
@@ -10376,10 +10486,12 @@ export class ZerosEngine {
       this.busyHeartbeat = setInterval(() => this.touchBusy(), 10_000);
       this.busyHeartbeat.unref?.();
     }
+    this.activityHeartbeat.refresh();
   }
   private exitPrompt(prompt: ActivePromptContext): void {
     if (!this.activePrompts.delete(prompt)) return;
     if (this.activePrompts.size === 0) this.clearBusy();
+    else this.activityHeartbeat.refresh();
   }
   private releasePromptContext(sessionId: string): void {
     const prompt = this.activePromptContexts.get(sessionId);
@@ -10403,6 +10515,7 @@ export class ZerosEngine {
   }
   private clearBusy(): void {
     this.activePrompts.clear();
+    this.activityHeartbeat?.refresh();
     if (this.busyHeartbeat) {
       clearInterval(this.busyHeartbeat);
       this.busyHeartbeat = null;

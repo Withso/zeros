@@ -59,6 +59,10 @@ import chokidar, { type ChokidarOptions, type FSWatcher } from "chokidar";
 
 import { DESIGN_CANVAS_FILE } from "../design/directory-registry";
 import { isDesignMetadataRepoPath } from "../design/metadata";
+import {
+  invalidateWorkspaceChangeProbes,
+  invalidateWorkspaceChangeProbesForRoot,
+} from "./workspace-change-probe";
 
 const POLL_INTERVAL_MS = 1_000;
 const WORKTREE_DEBOUNCE_MS = 75;
@@ -437,6 +441,11 @@ export function startGitWatcher(
     designRecognitionChanged = false,
   ) => {
     if (stopped) return;
+    // Fence old probes as soon as the event is observed, before the debounced
+    // renderer refresh can request its replacement snapshot.
+    invalidateWorkspaceChangeProbes(
+      target?.workspaceId ? [target.workspaceId] : undefined,
+    );
     if (target) pendingWorktreeTargets.set(target.root, target);
     else pendingWorktreeCoarse = true;
     if (designRecognitionChanged) {
@@ -943,14 +952,14 @@ export function startGitWatcher(
     }
     primed = true;
     if (changedTargets.size > 0) {
-      onChange(
-        makeChange(
-          changedTargets.values(),
-          gitRefsChanged,
-          false,
-          designRecognitionChanged,
-        ),
+      const change = makeChange(
+        changedTargets.values(),
+        gitRefsChanged,
+        false,
+        designRecognitionChanged,
       );
+      invalidateWorkspaceChangeProbes(change.coarse ? undefined : change.workspaceIds);
+      onChange(change);
     }
   };
 
@@ -999,6 +1008,7 @@ export function startGitWatcher(
         expiry: null,
       };
       suspendedRoots.set(key, suspension);
+      invalidateWorkspaceChangeProbesForRoot(key);
       const matches = Array.from(rootWatchers.entries()).filter(
         ([candidate]) => candidate === key,
       );

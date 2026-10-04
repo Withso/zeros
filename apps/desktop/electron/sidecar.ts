@@ -8,10 +8,10 @@
 // (Stable 24193–24200, Beta 24203–24210, Dev 24293–24300) and writes
 // the actual port to its app-data runtime manifest once bound.
 //
-// Crash recovery: a lightweight watchdog requests `/health` from the bound
-// port every 3 s; five consecutive failed responses (~15 s) →
-// respawn with the last-known root and emit `engine-restarted` so the
-// renderer can reconnect.
+// Crash recovery: short `/health` probes every 3 s detect suspected stalls.
+// A living child needs a bounded confirmation; exact-child work heartbeats
+// defer recovery while work remains live. An observed exit recovers promptly.
+// Replacement emits `engine-restarted` so the renderer can reconnect.
 //
 // `shutdown()` MUST be called from app.on("before-quit") — otherwise
 // the Node child outlives the Electron window and eats a channel-owned
@@ -38,7 +38,7 @@ import { app } from "electron";
 import { emitEvent } from "./ipc/events";
 import { IS_DEV, IS_PACKAGED } from "./runtime-mode";
 import { engineTurnIsActive } from "./dev-main-restart";
-import { engineResponsive } from "./engine-health-probe";
+import { ownedEngineResponsive } from "./engine-health-probe";
 import { createEngineWatchdogTick, sameEngineTarget } from "./engine-watchdog";
 import { engineBasePort, ENGINE_PORT_SPAN } from "../src/engine/runtime";
 import {
@@ -66,6 +66,8 @@ import {
 } from "./orphan-engines";
 import {
   ENGINE_STARTUP_TIMEOUT_MS,
+  ENGINE_WATCHDOG_INTERVAL_MS,
+  createEngineHealthActivityTracker,
   engineStartupWaitDecision,
   parseOwnedEngineManifest,
   selectEnginePort,
@@ -117,6 +119,7 @@ interface SidecarStateShape {
   /** Bumped every successful spawn; invalidates stale watchdog races
    *  so a post-respawn reachable probe doesn't respawn again. */
   spawnGeneration: number;
+  healthActivity: ReturnType<typeof createEngineHealthActivityTracker> | null;
   watchdogTimer: NodeJS.Timeout | null;
 }
 
@@ -128,6 +131,7 @@ const state: SidecarStateShape = {
   root: null,
   shuttingDown: false,
   spawnGeneration: 0,
+  healthActivity: null,
   watchdogTimer: null,
 };
 
@@ -162,6 +166,9 @@ class EngineHealthUnreachableError extends Error {
     this.name = "EngineHealthUnreachableError";
   }
 }
+
+/** A queued watchdog decision lost its authority before the actual kill. */
+class EngineWatchdogRecoveryCancelledError extends Error {}
 
 function archTriple(): string {
   if (process.arch === "arm64") return "aarch64-apple-darwin";
@@ -774,7 +781,7 @@ async function confirmSpawnReachable(
   for (let attempt = 0; attempt < 5; attempt++) {
     if (state.shuttingDown || state.spawnGeneration !== generation)
       return false;
-    if (await engineResponsive(port, instance)) {
+    if (await ownedEngineResponsive(state.child, port, instance)) {
       consecutive += 1;
       if (consecutive >= 3) return true;
     } else {
@@ -854,6 +861,7 @@ async function killCurrentChild(): Promise<void> {
   state.port = null;
   state.instance = null;
   state.localToken = null;
+  state.healthActivity = null;
   if (!current || current.killed) return;
   const pid = current.pid;
 
@@ -1234,6 +1242,7 @@ export function spawnEngine(projectRoot: string): Promise<number> {
 async function spawnEngineWithRecovery(
   projectRoot: string,
   prerequisite: Promise<void>,
+  beforeReplace?: () => boolean,
 ): Promise<number> {
   const rangeStart = currentEngineBasePort();
   const rangeEnd = rangeStart + ENGINE_PORT_SPAN - 1;
@@ -1243,6 +1252,7 @@ async function spawnEngineWithRecovery(
   let requestedPort = rangeStart;
   let barrier = prerequisite;
   let lastFailedPort = rangeStart;
+  let replacementGuard = beforeReplace;
 
   while (requestedPort <= rangeEnd) {
     if (state.shuttingDown) {
@@ -1255,6 +1265,7 @@ async function spawnEngineWithRecovery(
         rangeStart,
         requestedPort,
         rangeEnd - requestedPort + 1,
+        replacementGuard,
       );
     } catch (err) {
       if (state.shuttingDown) throw err;
@@ -1268,6 +1279,9 @@ async function spawnEngineWithRecovery(
       requestedPort = nextPort;
       // The first attempt already awaited the cold-start prerequisites.
       barrier = Promise.resolve();
+      // Only guard replacement of the original child. Once its own new boot
+      // fails readiness, the ordinary owned port walk must still recover it.
+      replacementGuard = undefined;
     }
   }
 
@@ -1292,6 +1306,7 @@ async function doSpawnEngine(
   rangeBasePort = currentEngineBasePort(),
   requestedPort = currentEngineBasePort(),
   portSpan = ENGINE_PORT_SPAN,
+  beforeReplace?: () => boolean,
 ): Promise<number> {
   let orphanCleanup: Promise<void> = Promise.resolve();
   if (!orphansReaped) {
@@ -1303,6 +1318,12 @@ async function doSpawnEngine(
   await Promise.all([prerequisite, orphanCleanup]);
   if (state.shuttingDown) {
     throw new Error("engine spawn cancelled while the app is shutting down");
+  }
+  // Prerequisites can yield after the spawn queue's ownership check. Validate
+  // the watchdog's evidence again immediately before clearing/signalling its
+  // child; work that resumed while waiting must remain live.
+  if (beforeReplace && !beforeReplace()) {
+    throw new EngineWatchdogRecoveryCancelledError();
   }
   console.log(
     `[Zeros] engine spawn prerequisites complete; requesting ${requestedPort}-${requestedPort + portSpan - 1}`,
@@ -1530,6 +1551,8 @@ async function doSpawnEngine(
   state.localToken = null;
   // Wrapping add; JS numbers are safe up to 2^53.
   state.spawnGeneration = (state.spawnGeneration + 1) & 0xffffffff;
+  const healthActivity = createEngineHealthActivityTracker();
+  state.healthActivity = healthActivity;
 
   // Forward child stdout/stderr line-by-line through the parent's
   // overridden console.log / console.error so they land in main.log
@@ -1540,6 +1563,7 @@ async function doSpawnEngine(
   const forwardLines = (
     stream: NodeJS.ReadableStream | null,
     write: (s: string) => void,
+    observeOutput = true,
   ) => {
     if (!stream) return;
     // Bound both the partial-line buffer AND downstream log volume. A child
@@ -1548,6 +1572,9 @@ async function doSpawnEngine(
     const forwarder = createBoundedLineForwarder(write);
     stream.setEncoding?.("utf-8");
     stream.on("data", (chunk: string | Buffer) => {
+      if (observeOutput && chunk.length > 0 && state.child === child) {
+        healthActivity.recordOutput();
+      }
       forwarder.push(chunk);
     });
     stream.on("end", () => forwarder.end());
@@ -1594,6 +1621,13 @@ async function doSpawnEngine(
       } catch {
         controlValue = null;
       }
+      if (
+        state.child === child &&
+        state.instance !== null &&
+        healthActivity.recordHeartbeat(controlValue, state.instance)
+      ) {
+        return;
+      }
       if (state.child === child && providerCredentialSync.acknowledge(child, controlValue)) return;
       void handleCloudReplicaEngineControl(
         controlValue,
@@ -1634,6 +1668,7 @@ async function doSpawnEngine(
           );
         });
     },
+    false,
   );
 
   if (isPackaged) {
@@ -1741,8 +1776,8 @@ async function doSpawnEngine(
     // Only clear the child reference if this is still the active one
     // (a newer spawn may have already replaced it). CRITICAL: do NOT
     // clear `state.port` OR `state.instance` here — the watchdog needs the
-    // owned identity to stay set so its health probe can fail, accumulate
-    // strikes, and trigger a respawn. Clearing either on exit would make the
+    // owned identity to stay set so its observed child exit triggers recovery.
+    // Clearing either on exit would make the
     // watchdog treat a dead engine as "nothing to monitor" and skip respawn.
     if (state.child === child) {
       state.child = null;
@@ -1856,6 +1891,7 @@ export function shutdown(): void {
   state.port = null;
   state.instance = null;
   state.localToken = null;
+  state.healthActivity = null;
   state.root = null;
 }
 
@@ -2359,9 +2395,8 @@ export function startEngineCodeWatcher(): void {
   });
 }
 
-/** Starts an application-level heartbeat against the engine every 3 s.
- *  Five consecutive failed `/health` probes (~15 s) trigger a respawn and emit
- *  `engine-restarted { port: <new> }` so the renderer reconnects. */
+/** Monitor exact-child HTTP health and private work activity every 3 s.
+ * Suspected stalls need confirmation; child exits recover promptly. */
 export function startWatchdog(): void {
   if (state.watchdogTimer) return;
   const current = () =>
@@ -2370,20 +2405,48 @@ export function startWatchdog(): void {
     state.instance === null ||
     !state.root
       ? null
-      : { root: state.root, port: state.port, instance: state.instance };
+      : {
+          root: state.root,
+          port: state.port,
+          instance: state.instance,
+          generation: state.spawnGeneration,
+        };
   const tick = createEngineWatchdogTick({
     current,
-    probe: engineResponsive,
+    observe: (target) => {
+      if (!sameEngineTarget(target, current())) return null;
+      const child = state.child;
+      return {
+        childExited:
+          !child || child.exitCode !== null || child.signalCode !== null,
+        ...(state.healthActivity?.snapshot() ?? {
+          lastOutputAt: null,
+          lastHeartbeatAt: null,
+          activeWork: false,
+        }),
+      };
+    },
+    probe: (port, instance, timeoutMs) =>
+      ownedEngineResponsive(state.child, port, instance, timeoutMs),
     log: (message) => console.error(`[Zeros] ${message}`),
     describeListeners: async () =>
       `${currentEnginePortRange()}:\n${await describeRangeListeners()}`,
-    restart: async (target) => {
+    restart: async (target, shouldRestart) => {
       // Serialize with ALL other spawn drivers, and recheck ownership when this
       // request actually reaches the front of the queue. An older health result
       // must never kill the replacement that got there first.
       const newPort = await enqueueEngineSpawn(async () => {
-        if (!sameEngineTarget(target, current())) return null;
-        return spawnEngineWithRecovery(target.root, engineSpawnBarrier);
+        if (!sameEngineTarget(target, current()) || !shouldRestart()) return null;
+        try {
+          return await spawnEngineWithRecovery(
+            target.root,
+            engineSpawnBarrier,
+            shouldRestart,
+          );
+        } catch (error) {
+          if (error instanceof EngineWatchdogRecoveryCancelledError) return null;
+          throw error;
+        }
       });
       if (newPort === null || state.shuttingDown) return null;
       const replacement = current();
@@ -2399,7 +2462,7 @@ export function startWatchdog(): void {
         `[Zeros] watchdog timer failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
-  }, 3000);
+  }, ENGINE_WATCHDOG_INTERVAL_MS);
 }
 
 // ──────────────────────────────────────────────────────────

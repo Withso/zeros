@@ -80,11 +80,38 @@ type Request = {
   cwd?: string;
   env?: Record<string, string>;
   sessionId?: string;
+  executionId?: string;
+  promptId?: string;
+  userMessageId?: string;
+  adoptOnly?: boolean;
   prompt?: { type: string; text?: string }[];
   bubble?: { displayText?: string; autoAction?: string };
 };
 const requests: Request[] = [];
+const historyReads: (() => void)[] = [];
+const promptTranscripts: string[][] = [];
+let historyReadsToHold = 0;
+let sessionActions: ReturnType<typeof useAgentSessions> | null = null;
 let connected = true;
+const clients = new Set<RuntimeClient>();
+let runningPrompt: Request | null = null;
+let rejectPrompt: ((error: Error) => void) | undefined;
+let turnFinished = false;
+function connectionStatus(value: boolean) {
+  connected = value;
+  for (const client of clients) {
+    (client as unknown as { setStatus(status: string): void }).setStatus(value ? "connected" : "disconnected");
+  }
+}
+function emitPromptUpdate(update: Record<string, unknown>) {
+  for (const client of clients) {
+    (client as unknown as { handleIncoming(message: unknown): void }).handleIncoming({
+      id: "fixture-update", source: "engine", timestamp: Date.now(),
+      type: "AGENT_SESSION_UPDATE", agentId: "codex", chatId: chat.id, executionId: "execution-a",
+      notification: { sessionId: "execution-a", executionId: "execution-a", update },
+    });
+  }
+}
 let releaseAccess: (() => void) | undefined;
 const access = params.get("holdAccess")
   ? new Promise<void>((resolve) => {
@@ -100,10 +127,30 @@ const admission = params.get("holdAdmission")
 Object.assign(window, {
   prActionsFixture: {
     requests,
+    historyReads,
+    promptTranscripts,
+    prepareSession: () => sessionActions?.ensureSession(chat.id, "codex", { cwd: chat.folder }),
+    holdHistory: (count: number) => { historyReadsToHold = count; },
+    releaseHistory: (index: number) => historyReads[index]?.(),
+    reconcileHistory: () => sessionActions?.hydrateChat(chat.id),
+    queueFollowup: () => sessionActions?.sendPrompt(chat.id, "Queued follow-up"),
     releaseAccess: () => releaseAccess?.(),
     releaseAdmission: () => releaseAdmission?.(),
     disconnect: () => {
-      connected = false;
+      connectionStatus(false);
+      rejectPrompt?.(new Error("Request timeout: engine disconnected"));
+    },
+    reconnect: () => connectionStatus(true),
+    stream: () => emitPromptUpdate({
+      sessionUpdate: "agent_message_chunk", messageId: "reply-a",
+      content: { type: "text", text: "Work started." },
+    }),
+    finishPrompt: () => {
+      turnFinished = true;
+      if (connected) emitPromptUpdate({
+        sessionUpdate: "turn_state", turnId: runningPrompt?.userMessageId,
+        state: "completed", stopReason: "end_turn", startedAt: 1,
+      });
     },
     selectOtherChat: () =>
       useWorkspaceStore.setState({ activeChatId: otherChat.id }),
@@ -127,6 +174,7 @@ RuntimeClient.prototype.request = async function <
   T extends BridgeMessage = BridgeMessage,
 >(message: Partial<BridgeMessage> & { type: string }): Promise<T> {
   const request = message as unknown as Request;
+  clients.add(this);
   requests.push(request);
   let response: unknown;
   if (
@@ -149,6 +197,10 @@ RuntimeClient.prototype.request = async function <
             type: "AGENT_SESSION_LOADED",
             agentId: request.agentId,
             sessionId: "execution-a",
+            executionId: "execution-a",
+            ...(request.adoptOnly ? {
+              promptActive: !turnFinished, promptId: runningPrompt?.promptId,
+            } : {}),
             response: { sessionId: "execution-a" },
           }
         : {
@@ -158,6 +210,12 @@ RuntimeClient.prototype.request = async function <
             session: { sessionId: "execution-a" },
           };
   } else if (request.type === "AGENT_PROMPT") {
+    promptTranscripts.push((useSessionsStore.getState().sessions[chat.id]?.messages ?? [])
+      .flatMap((message) => message.kind === "text" ? [message.text] : []));
+    if (params.has("holdPrompt")) {
+      runningPrompt = request;
+      return await new Promise<T>((_resolve, reject) => { rejectPrompt = reject; });
+    }
     response = {
       type: "AGENT_PROMPT_COMPLETE",
       sessionId: request.sessionId,
@@ -225,13 +283,27 @@ RuntimeClient.prototype.request = async function <
         break;
       case "messages.window":
         result = {
-          messages: history.map((m) => ({
+          messages: (turnFinished ? (useSessionsStore.getState().sessions[chat.id]?.messages ?? []).map(m =>
+            m.kind === "text" && m.role === "agent" ? { ...m, text: "Work continued while disconnected." } : m,
+          ) : history).filter((m) => !(m.kind === "text" && m.queued)).map((m) => ({
             msgId: m.id,
             kind: m.kind,
             payload: JSON.stringify(m),
             createdAt: m.createdAt,
           })),
         };
+        // Capture before blocking so a ready-to-ready read really can return
+        // an older transcript after an entire disconnected turn has finished.
+        if (historyReadsToHold > 0) {
+          historyReadsToHold--;
+          await new Promise<void>((resolve) => historyReads.push(resolve));
+        }
+        break;
+      case "turns.get":
+        result = { turn: turnFinished ? {
+          chatId: chat.id, turnId: runningPrompt?.userMessageId, agentId: "codex",
+          status: "completed", stopReason: "end_turn",
+        } : null };
         break;
       case "settings.read":
         result = { doc: {}, raw: "", exists: true };
@@ -245,7 +317,11 @@ RuntimeClient.prototype.request = async function <
 function Harness() {
   const sessions = useAgentSessions();
   const slot = useSessionsStore((s) => s.sessions[chat.id]);
-  useEffect(() => sessions.setRetainedChatIds([chat.id]), [sessions]);
+  useEffect(() => {
+    sessionActions = sessions;
+    sessions.setRetainedChatIds([chat.id]);
+    return () => { if (sessionActions === sessions) sessionActions = null; };
+  }, [sessions]);
   return (
     <div className="bg-bg1 text-fg1 min-h-screen p-4">
       {workspace.prNumber ? (
@@ -256,7 +332,7 @@ function Harness() {
           originUrl="https://github.com/example/fixture.git"
         />
       )}
-      <div data-transcript="">
+      <div data-transcript="" data-session-status={slot?.status} data-session-error={slot?.error ?? ""}>
         {slot?.messages.map((m) =>
           m.kind === "text" ? (
             <p key={m.id} data-auto-action={m.autoAction}>

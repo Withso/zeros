@@ -22,6 +22,22 @@ A failed request reveals the newest confirmed live row and reports the error
 without changing the user's current destination. Duplicate clicks share the
 busy guard, and burst archives never navigate onto another hidden archive intent.
 
+Setup and agent activity do not require a separate manual Stop before archiving.
+The engine cancels pending starts, stops accepted prompts, and retires each owned
+provider execution before checkpointing. An initialized idle chat is a resource
+to retire, not evidence that an agent is still working. Slow successful cleanup
+must finish through the gateway's bounded retirement contract; an unacknowledged
+prompt cancellation still proceeds to verified per-session disposal. Failed
+retirement keeps its ownership record so a retry cannot overlook a live writer.
+
+Archive selects sessions by their primary workspace owner. Another workspace's
+additional-directory access to this checkout does not make that session an
+archive target. The most-specific registered owner protects nested workspaces,
+including chatless executions. Setup, run actions and terminals follow the same
+workspace ownership rule. Provider startup aborted by archive cannot publish a
+late session or recreate the removed checkout. If process retirement cannot be
+verified, the checkout remains live rather than being snapshotted under a writer.
+
 A response timeout keeps the intent hidden while exact workspace and lifecycle
 reads determine the outcome. Stale live-list refreshes cannot undo that intent.
 Renderer reload discards presentation intent and reads authoritative engine

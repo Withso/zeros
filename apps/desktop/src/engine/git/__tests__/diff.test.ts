@@ -23,6 +23,7 @@ import {
   changeLineCounts,
   createWorkspace,
   diff,
+  hasWorkspaceChanges,
   log,
   setStateRootForTesting,
   stagePaths,
@@ -170,6 +171,7 @@ describe("diff / status / log", () => {
       staged: 2,
       unstaged: 2,
     });
+    expect(await hasWorkspaceChanges(unborn)).toBe(true);
     expect(await changeLineCounts(unborn)).toEqual({
       additions: 2,
       deletions: 0,
@@ -250,6 +252,7 @@ describe("diff / status / log", () => {
         staged: 1,
         unstaged: 1,
       });
+      await expect(hasWorkspaceChanges(workspaceId)).resolves.toBe(false);
 
       const [net, staged, unstaged] = await Promise.all([
         diff({ workspaceId, mode: "worktree-vs-head", rawPatch: true }),
@@ -259,6 +262,38 @@ describe("diff / status / log", () => {
       expect(net.patch).toBe("");
       expect(staged.patch).toContain("new file mode");
       expect(unstaged.patch).toContain("deleted file mode");
+    });
+  });
+
+  describe("hasWorkspaceChanges visibility", () => {
+    it("ignores excluded context and ignored files and internal Zeros state", async () => {
+      const ws = (await import("..")).getWorkspace(workspaceId);
+      await appendFile(path.join(repoRoot, ".git", "info", "exclude"), "\n.context/\nignored.tmp\n");
+      await mkdir(path.join(ws.path, ".context"), { recursive: true });
+      await mkdir(path.join(ws.path, ".zeros"), { recursive: true });
+      await writeFile(path.join(ws.path, ".context", "notes.txt"), "local notes\n");
+      await writeFile(path.join(ws.path, ".zeros", "state.json"), "{}\n");
+      await writeFile(path.join(ws.path, "ignored.tmp"), "ignored\n");
+      expect(await hasWorkspaceChanges(workspaceId)).toBe(false);
+
+      await writeFile(path.join(ws.path, "untracked.txt"), "source\n");
+      expect(await hasWorkspaceChanges(workspaceId)).toBe(true);
+      await rm(path.join(ws.path, "untracked.txt"));
+      expect(await hasWorkspaceChanges(workspaceId)).toBe(false);
+    });
+
+    it("counts ordinary Design source and explicitly tracked context", async () => {
+      const ws = (await import("..")).getWorkspace(workspaceId);
+      await mkdir(path.join(ws.path, "Design"));
+      await writeFile(path.join(ws.path, "Design", "frame.html"), "<main>Frame</main>\n");
+      expect(await hasWorkspaceChanges(workspaceId)).toBe(true);
+      await rm(path.join(ws.path, "Design"), { recursive: true });
+      expect(await hasWorkspaceChanges(workspaceId)).toBe(false);
+
+      await mkdir(path.join(ws.path, ".context"), { recursive: true });
+      await writeFile(path.join(ws.path, ".context", "notes.txt"), "tracked notes\n");
+      await execFileAsync("git", ["add", "--force", ".context/notes.txt"], { cwd: ws.path });
+      expect(await hasWorkspaceChanges(workspaceId)).toBe(true);
     });
   });
 
@@ -641,6 +676,7 @@ describe("diff / status / log", () => {
       });
       expect(clean.hunks).toEqual([]);
       expect(clean.patch ?? "").not.toContain("upstream.txt");
+      expect(await hasWorkspaceChanges(clone)).toBe(false);
 
       // Dirty trunk → exactly the uncommitted edit.
       await appendFile(path.join(clone, "README.md"), "local wip\n");
@@ -651,6 +687,7 @@ describe("diff / status / log", () => {
       });
       expect(dirty.patch).toContain("+local wip");
       expect(dirty.patch ?? "").not.toContain("upstream.txt");
+      expect(await hasWorkspaceChanges(clone)).toBe(true);
     });
 
     it("a stale local base branch doesn't inflate the diff (fork point uses origin/<base>)", async () => {
@@ -713,6 +750,7 @@ describe("diff / status / log", () => {
       });
       expect(d.hunks).toEqual([]);
       expect(d.patch ?? "").not.toContain("newer.txt");
+      expect(await hasWorkspaceChanges(created.workspaceId)).toBe(false);
     });
   });
 

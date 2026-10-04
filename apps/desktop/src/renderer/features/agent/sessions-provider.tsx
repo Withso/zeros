@@ -1,5 +1,6 @@
 import { PermissionModeChanges } from "./permission-mode-change";
 import { awaitComposerMode } from "./composer-mode";
+import { backfillLocalPromptTranscript, LocalPromptRecoveryError, requestLocalPrompt } from "./local-prompt-recovery";
 // ──────────────────────────────────────────────────────────
 // AgentSessionsProvider — bridge-connected actions over the Zustand store
 // ──────────────────────────────────────────────────────────
@@ -2500,6 +2501,7 @@ export function AgentSessionsProvider({
         startedAt: number;
       } | null = null;
       let promptRetryCount = 0;
+      let recoveredLocalExecution: string | null = null;
       let promptInterruptedAfterOutput:
         | (Pick<AgentFailure, "kind" | "stage"> &
             Partial<Pick<AgentFailure, "message">>)
@@ -2894,26 +2896,38 @@ export function AgentSessionsProvider({
 
             const selectionRevision = getStore().sessions[chatId]?.modelSelectionRevision ?? 0;
             getStore().patchSession(chatId, { modelSelectionRevisionAtRequest: selectionRevision });
-            const send = () => bridge
-              .request<AgentPromptCompleteMessage | AgentPromptFailedMessage>(
-                {
-                  type: "AGENT_PROMPT",
-                  agentId: current.agentId!,
-                  executionId: sessionId,
-                  sessionId,
-                  prompt: outgoing,
-                  // Keep elapsed time continuous across the admission/provider
-                  // startup that happened after the optimistic bubble appeared.
-                  startedAt: userMessage.createdAt,
-                  // Persist the user msg under the renderer's id so turn ids align
-                  // (the footer + reset key on it) without a transcript re-window.
-                  userMessageId: userMessage.id,
-                  // Durable correlation for PostHog/logs across renderer reload.
-                  promptId,
-                  ...(replay?.text ? { bubble: { ...bubble, displayText: userMessage.text } } : bubble ? { bubble } : {}),
-                },
-                { timeoutMs: 0, signal: controller.signal },
-              );
+            const send = () => {
+              const request = {
+                type: "AGENT_PROMPT" as const,
+                agentId: current.agentId!,
+                executionId: sessionId,
+                sessionId,
+                prompt: outgoing,
+                // Keep elapsed time continuous across the admission/provider
+                // startup that happened after the optimistic bubble appeared.
+                startedAt: userMessage.createdAt,
+                // Persist the user msg under the renderer's id so turn ids align
+                // (the footer + reset key on it) without a transcript re-window.
+                userMessageId: userMessage.id,
+                // Durable correlation for PostHog/logs across renderer reload.
+                promptId,
+                ...(replay?.text ? { bubble: { ...bubble, displayText: userMessage.text } } : bubble ? { bubble } : {}),
+              };
+              return isCloudWorkspace(current.cwd)
+                ? bridge.request<AgentPromptCompleteMessage | AgentPromptFailedMessage>(
+                    request, { timeoutMs: 0, signal: controller.signal },
+                  )
+                : requestLocalPrompt(bridge, request, {
+                    chatId,
+                    signal: controller.signal,
+                    isCurrent: () => !stoppedByUser() &&
+                      getStore().sessions[chatId]?.sessionId === sessionId,
+                    onRecovery: () => {
+                      recoveredLocalExecution = sessionId;
+                      getStore().patchSession(chatId, { transcriptDirty: true });
+                    },
+                  });
+            };
             const modeSelection = awaitComposerMode(bridge, chatId);
             void (modeSelection ? modeSelection.then(send) : send())
               .then(finishResolve, finishReject);
@@ -3297,6 +3311,25 @@ export function AgentSessionsProvider({
             // not a fault: settle quietly, exactly like a clean cancel.
             if (stoppedByUser() || getStore().cancellingChats.has(chatId)) {
               settleStoppedSend();
+              return;
+            }
+            if (!isCloudWorkspace(current.cwd) && firstErr instanceof DOMException && firstErr.name === "AbortError") {
+              // The observed route was removed or replaced during recovery.
+              return;
+            }
+            // A reconnect has already checked the exact engine-owned turn.
+            // Failure to prove its state is never permission to replay a
+            // possibly delivered prompt or replace its provider conversation.
+            if (firstErr instanceof LocalPromptRecoveryError) {
+              const slot = getStore().sessions[chatId];
+              if (!slot || slot.sessionId !== firstErr.executionId) return;
+              const failure = slot.failure ?? classifyRpcError({
+                agentId: current.agentId!, stage: "prompt", error: firstErr,
+              });
+              promptInterruptedAfterOutput = failure;
+              getStore().patchSession(chatId, {
+                status: "failed", error: failure.message, failure,
+              });
               return;
             }
             const failure = classifyRpcError({
@@ -3686,6 +3719,24 @@ export function AgentSessionsProvider({
         }
         if (getStore().sessions[chatId]?.status === "ready")
           authPromptsRef.current.delete(chatId);
+        if (recoveredLocalExecution && bridge &&
+          getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
+          getStore().sessions[chatId]?.status !== "streaming") {
+          // Fill any stream gap from the engine's saved transcript before a
+          // queued successor can make history reads ineligible again, including
+          // another disconnect between terminal delivery and this finalizer.
+          const ownsRecovery = () => !stoppedByUser() &&
+            getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
+            getStore().sessions[chatId]?.status !== "streaming";
+          const applied = await backfillLocalPromptTranscript(bridge, {
+            isCurrent: ownsRecovery,
+            reconcile: async () => {
+              await reconcileChatMessagesRef.current(chatId);
+              return getStore().sessions[chatId]?.transcriptDirty === false;
+            },
+          });
+          if (!applied && ownsRecovery()) pauseQueue(chatId);
+        }
         sendingChatsRef.current.delete(chatId);
         // Drop a STRANDED plan-review card. A plan gate BLOCKS its turn, so in
         // the happy path Approve / a typed follow-up cleared pendingPermission
@@ -3756,6 +3807,7 @@ export function AgentSessionsProvider({
       drainNextQueued,
       resumeQueue,
       drainOrDropQueue,
+      pauseQueue,
       evictUnretainedTranscripts,
       persistAuthPrompt,
     ],
@@ -4832,9 +4884,10 @@ export function AgentSessionsProvider({
       })().finally(() => {
         const current = isCurrentTranscriptRequest(reconcileInFlightRef.current, chatId, request);
         releaseTranscriptRequest(reconcileInFlightRef.current, chatId, request);
-        // A DB nudge during the stale read shared that in-flight request. Read
-        // once more after releasing it; a current live stream needs no retry.
-        if (current && retryAfterChange) void reconcileChatMessagesRef.current(chatId);
+        // A DB nudge during the stale read shared that in-flight request. Keep
+        // its waiters attached to the fresh read, so reconnect recovery cannot
+        // release queued work before the missing transcript is applied.
+        if (current && retryAfterChange) return reconcileChatMessagesRef.current(chatId);
       });
       reconcileInFlightRef.current.set(chatId, request);
       return request;

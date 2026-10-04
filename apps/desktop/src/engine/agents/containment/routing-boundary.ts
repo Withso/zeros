@@ -28,6 +28,7 @@ export interface RoutingExecutionBoundaryOptions {
  * redacted status used by capability gates. */
 export class RoutingExecutionBoundary implements ExecutionBoundary {
   readonly backend: ExecutionBoundary["backend"];
+  private readonly failedPreparationOwners = new Map<string, ExecutionBoundary>();
 
   constructor(private readonly options: RoutingExecutionBoundaryOptions) {
     this.backend = options.forceSandbox ? options.sandbox.backend : "none";
@@ -94,7 +95,27 @@ export class RoutingExecutionBoundary implements ExecutionBoundary {
     request: BoundaryRequest,
     control?: AdmissionControl,
   ): Promise<PreparedBoundary> {
-    return (await this.select(request)).prepare(request, control);
+    if (this.failedPreparationOwners.has(request.executionId)) {
+      throw new Error("The prior preparation for this execution needs cleanup proof before readmission.");
+    }
+    const selected = await this.select(request);
+    try {
+      return await selected.prepare(request, control);
+    } catch (error) {
+      if (control?.retainFailedPreparationProof) this.failedPreparationOwners.set(request.executionId, selected);
+      throw error;
+    }
+  }
+
+  async proveFailedPreparationStopped(executionId: string): Promise<void> {
+    const owner = this.failedPreparationOwners.get(executionId);
+    if (!owner?.proveFailedPreparationStopped) {
+      throw new Error("No exact rejected preparation cleanup proof is available.");
+    }
+    await owner.proveFailedPreparationStopped(executionId);
+    if (this.failedPreparationOwners.get(executionId) === owner) {
+      this.failedPreparationOwners.delete(executionId);
+    }
   }
 
   clearRetirementFailure(generation: TerritoryGeneration): void {

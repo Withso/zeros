@@ -5,9 +5,11 @@ import type { TransportClient } from "../transport/types";
 import type { EngineMessage } from "../types";
 import { WorkspaceService } from "../workspace/service";
 
+// Exercise the authorization dispatcher with small injected dependencies.
+// The outer activity wrapper is covered by engine-activity-lifecycle.test.ts.
 const handle=(ZerosEngine.prototype as unknown as {
-  handleMessage(this:unknown,message:EngineMessage,client:TransportClient):Promise<void>;
-}).handleMessage;
+  dispatchMessage(this:unknown,message:EngineMessage,client:TransportClient):Promise<void>;
+}).dispatchMessage;
 function fixture(role:NonNullable<TransportClient["cloudActor"]>["role"]="viewer") {
   const client:TransportClient={id:randomUUID(),kind:"cloud",accountUserId:randomUUID(),
     cloudActor:{sessionId:randomUUID(),deviceId:randomUUID(),role,fingerprint:"a".repeat(64)},authorized:()=>true,send:vi.fn(),close:vi.fn()};
