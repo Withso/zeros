@@ -11,7 +11,7 @@ No provider API, deployment or release workflow was run for E2 implementation.
    B10 boot/restore persistence qualification. Use a fresh B10 base and sanitized
    Cloud Computer template. Consume their completed qualification receipts;
    older Boat experiments are not implementation proof.
-2. Deploy the E2 control plane with migration 0129 and qualify an E2 runtime.
+2. Deploy the E2 control plane with migration 0130 and qualify an E2 runtime.
    Confirm the Alpha desktop includes E1 and E2 and its preview-domain allowlist
    matches the control plane's configured TLS domain. Do not change Beta or
    Production. Wake an existing pinned runtime only through B8's normal flow;

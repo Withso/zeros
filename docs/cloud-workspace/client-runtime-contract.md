@@ -339,7 +339,7 @@ display metadata), `expiresInMinutes` and an optional
 `target:{executionId,portId}`. Native issuance is engineering-staff-only and
 requires the current Ed25519 device proof. Its `preview.issue` payload is
 `{organizationId,workspaceId,port,target:null|{executionId,portId},expiresInMinutes,idempotencyKey}`.
-Migration 0129 adds nullable `preview_target`, `preview_device_id` and
+Migration 0130 adds nullable `preview_target`, `preview_device_id` and
 `preview_device_key_version`; legacy scalar grants keep their existing shape.
 Both public preview routing and runtime admission check the native device's
 current trusted key. Device rotation/revocation, actor changes, expired grants,
