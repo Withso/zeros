@@ -68,7 +68,7 @@ describe("buildPrInstructions", () => {
       draft: false,
     });
     expect(out).toContain("2 files have unresolved merge conflicts");
-    expect(out.indexOf("conflict")).toBeLessThan(out.indexOf("Preserve staged"));
+    expect(out.indexOf("conflict")).toBeLessThan(out.indexOf("- Commit them"));
     expect(out).toContain("Resolve them first");
   });
 
@@ -126,11 +126,32 @@ describe("buildPrInstructions", () => {
     expect(out).toContain("could not be read");
     expect(out).toContain("Inspect the worktree for unresolved conflicts");
     expect(out).toContain(
-      "Preserve staged, unstaged, and untracked Code and Design work",
+      "If the inspection finds uncommitted changes, commit them",
     );
     expect(out).not.toContain("There are no uncommitted changes.");
     expect(out).not.toContain("There is no upstream branch yet.");
-    expect(out).not.toContain("Commit them.");
+    expect(out).not.toContain("- Commit them");
+  });
+
+  it("commits Code and Design changes before pushing, leaving .context out", () => {
+    const out = buildPrInstructions({
+      branch: "zeros/my-feature",
+      baseBranch: "main",
+      uncommittedCount: 57,
+      statusKnown: true,
+      hasUpstream: false,
+      draft: false,
+    });
+    expect(out.startsWith("The user likes the current state of the code.")).toBe(
+      true,
+    );
+    expect(out).toContain("- Commit them: Code and Design changes together");
+    expect(out).toContain("leaving `.context/` out unless the user asked");
+    expect(out).toContain(
+      "Follow any instructions the user gave you about writing commit messages.",
+    );
+    expect(out.indexOf("- Commit them")).toBeLessThan(out.indexOf("git push"));
+    expect(out).not.toContain("Do not stage files or create a commit");
   });
 
   it("does not instruct the agent to create an empty commit on a confirmed clean tree", () => {
