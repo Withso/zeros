@@ -454,6 +454,19 @@ function secretShaped(text: string): boolean {
     text,
   );
 }
+
+export class PayloadScanError extends BundleError {
+  readonly entry: string | undefined;
+
+  constructor(check: string, relative: string) {
+    super(check);
+    // Diagnostics may include the relative payload name, never matched bytes,
+    // symlink targets, host paths or credential-shaped filenames.
+    this.entry =
+      validPath(relative) && !secretShaped(relative) ? relative : undefined;
+  }
+}
+
 export async function scanPayload(
   root: string,
   forbiddenPaths: string[],
@@ -464,22 +477,19 @@ export async function scanPayload(
   const overlap = Math.max(4096, ...patterns.map((value) => value.length));
   async function walk(relative: string): Promise<void> {
     const filename = path.join(root, relative);
-    check(
-      !relative || (validPath(relative) && !forbiddenPayloadPath(relative)),
-      "forbidden_payload",
-    );
+    if (relative && (!validPath(relative) || forbiddenPayloadPath(relative)))
+      throw new PayloadScanError("forbidden_payload", relative);
     const info = await lstat(filename);
     if (info.isSymbolicLink()) {
       const target = await readlink(filename);
-      check(
-        !patterns.some((pattern) => target.includes(pattern.toString())),
-        "build_path",
-      );
+      if (patterns.some((pattern) => target.includes(pattern.toString())))
+        throw new PayloadScanError("build_path", relative);
     } else if (info.isDirectory()) {
       for (const name of await readdir(filename))
         await walk(relative ? `${relative}/${name}` : name);
     } else {
-      check(info.isFile(), "archive_member_type");
+      if (!info.isFile())
+        throw new PayloadScanError("archive_member_type", relative);
       let carry = Buffer.alloc(0);
       for await (const chunk of createReadStream(filename, {
         highWaterMark: 64 * 1024,
@@ -490,10 +500,7 @@ export async function scanPayload(
           : secretShaped(bytes.toString("latin1"))
             ? "secret_shape"
             : null;
-        // A relative entry is available to local callers for debugging; CLI
-        // diagnostics emit only the fixed check name, never file contents.
-        if (failure)
-          throw Object.assign(new BundleError(failure), { entry: relative });
+        if (failure) throw new PayloadScanError(failure, relative);
         carry = bytes.subarray(Math.max(0, bytes.length - overlap));
       }
     }
