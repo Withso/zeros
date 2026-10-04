@@ -16,6 +16,7 @@ import { parseArgs } from "node:util";
 import { writeRuntimeArchive } from "./archive";
 import {
   copyPayload,
+  PayloadScanError,
   scanPayload,
   stageDependencyClosure,
   stageSources,
@@ -41,7 +42,26 @@ import {
 } from "./toolchain";
 import { verifyBundleDirectory } from "./verify";
 
+export function buildPathPrefixes(paths: {
+  work: string;
+  sourceDir: string;
+  outDir: string;
+}): string[] {
+  // All build subprocesses use a private HOME/store/cache below work. The
+  // operator's HOME is not a build root: vendor executables can independently
+  // contain that prefix (notably /home/runner) in upstream compiler provenance.
+  return [paths.work, paths.sourceDir, paths.outDir];
+}
+
 export function diagnostic(stage: string, error?: unknown): void {
+  if (
+    stage === "scan_payload" &&
+    error instanceof PayloadScanError &&
+    error.entry
+  )
+    console.error(
+      JSON.stringify({ stage, check: error.check, entry: error.entry }),
+    );
   const failure = error as
     | { exitCode?: number; timedOut?: boolean; failedChecks?: string[] }
     | undefined;
@@ -373,9 +393,8 @@ export async function buildRuntimeBundle(options: {
     const nativeRequirements = await stage("verify_abi", () =>
       inspectNativeRequirements(runtime, entries, env),
     );
-    await stage("scan_payload", () =>
-      scanPayload(runtime, [work, sourceDir, os.homedir()]),
-    );
+    const forbiddenPaths = buildPathPrefixes({ work, sourceDir, outDir });
+    await stage("scan_payload", () => scanPayload(runtime, forbiddenPaths));
     const claude = JSON.parse(
       await readFile(
         path.join(
@@ -465,7 +484,7 @@ export async function buildRuntimeBundle(options: {
     };
     const receiptBytes = canonicalJson(receipt);
     check(
-      ![work, sourceDir, os.homedir()].some((hostPath) =>
+      !forbiddenPaths.some((hostPath) =>
         receiptBytes.includes(Buffer.from(hostPath)),
       ),
       "build_path",

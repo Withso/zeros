@@ -12,7 +12,18 @@ requires that exact HEAD. The build exports tracked source into a disposable
 directory and uses a fresh HOME and pnpm store. It does not modify the checkout.
 An optional `--work-dir <new-directory>` retains build intermediates for local
 debugging; they are not publication inputs. Child output is captured, and CLI
-output uses closed, value-free diagnostics. No provider credentials are needed.
+stdout uses closed, value-free diagnostics. A payload scan failure also reports
+the first offending relative payload path and check name on stderr; file contents,
+symlink targets and credential-shaped filenames are never printed. No provider
+credentials are needed.
+
+The byte scan rejects the actual checkout, output and build-work directory
+prefixes, including the private HOME, stores and caches beneath the build-work
+directory. It scans every staged file and symlink without vendor exemptions.
+The ambient operator HOME is not a build root: upstream SDK executables contain
+their own compiler provenance under `/home/runner`, even when built elsewhere.
+Those original vendor bytes are preserved; their unrelated paths do not identify
+this build's checkout or temporary directories.
 
 Host requirements: Linux x64 with glibc, a C/C++ toolchain supporting C++20,
 make, Python 3, Git, GNU tar/xz, readelf, bubblewrap and util-linux (`setpriv`).
