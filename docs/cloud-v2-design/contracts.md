@@ -233,3 +233,16 @@ Installer (`component: "installer"`) checks additionally include `lock_busy`, `b
 installer reports stage `run_setup`, check `setup_exit` (and its exit code); the setup helper prints its own
 closed diagnostic line (component `setup`) before that. Shared golden fixtures (B1) cover these cases and the
 Python bootstrap tests consume them.
+
+## 17. Producer/consumer alignment (2026-10-04, from cross-check X1)
+- `entrypoints.selfTest` is OPTIONAL: listed only when `lib/zeros/runtime-self-test.mjs` is in the bundle
+  (B3 must omit the key when absent). Consumers require every LISTED entrypoint to be a regular inventory file.
+- Symlink tar headers: producers write mode 0777 or 0555; consumers IGNORE symlink header mode bits and validate
+  type + target confinement only.
+- Shared limits (both producer and consumer enforce; B1 zod descriptor/manifest schemas too):
+  archive bytes 1..2 GiB; expandedBytes 1..4 GiB (individual empty files allowed); inventory entries
+  ≤ 250,000; manifest ≤ 64 MiB; per-entry PAX payload ≤ 16 KiB; path and symlink-target ≤ 4,096 UTF-8 bytes,
+  no NUL/backslash/CR/LF; symlink resolution ≤ 64 steps; nodeModulesAbi and engineProtocolVersion 1..65,535;
+  agent version strings `^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$`.
+- Installer receipt `fileCount` = number of REGULAR files (equals the producer's regular-file count);
+  `expandedBytes` = sum of regular file sizes.
