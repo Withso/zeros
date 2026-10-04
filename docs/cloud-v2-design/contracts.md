@@ -246,3 +246,11 @@ Python bootstrap tests consume them.
   agent version strings `^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$`.
 - Installer receipt `fileCount` = number of REGULAR files (equals the producer's regular-file count);
   `expandedBytes` = sum of regular file sizes.
+
+## 18. v4 workspace-setup stdout over SSH (2026-10-04, B4 ↔ B5b)
+For `purpose = "workspace-setup"` the installer's stdout is, in order: (1) the setup helper's stdout passed
+through UNCHANGED (today's bounded helper result line(s), exactly what the legacy path returns; size bound as today),
+then (2) exactly one final line: the installer's closed diagnostic (§9/§16). The CP parses the helper result exactly
+as on the legacy path and additionally requires the final installer diagnostic with `ok: true`. On failures before
+the helper runs, only the installer diagnostic is printed. The installer never rewrites or drops helper output and
+never forwards helper checks into its own diagnostic (§16).
