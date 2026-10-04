@@ -292,5 +292,22 @@ For a base-only build (also the manual `Cloud runtime base` workflow), replace
 `live-check` with `build`. This requires only Boat credentials and proves the
 clean cold boot. Its receipt explicitly reports `synthetic_runtime_pending`.
 The workflow is dispatch-only, Alpha-only, independent of runtime release jobs,
-and uses the existing Boat secret/organization variable. B5 owns control-plane
-registration; this PR does not dispatch, deploy or register a base.
+and uses the existing Boat secret/organization variable. After build, cold-boot
+verification and cleanup succeed, its final step registers the retained named
+snapshot at `POST /internal/v1/runtime-bases` using GitHub Actions OIDC. The
+receipt's additive `compatibilityRawB64` field preserves the exact public
+compatibility contract bytes, checked against the proven `baseCompatibilityId`.
+Older receipts without those bytes require a new verified build before registration.
+
+The step uses `vars.VITE_CONTROL_PLANE_URL` and `vars.CLOUD_RUNTIME_OIDC_AUDIENCE`
+(default `zeros-control-plane-alpha`), matching Alpha runtime publication.
+`vars.CLOUD_WORKSPACE_STORAGE_MIB` overrides the workflow fallback of 70,225 MiB
+(Alpha's qualified Boat `default` disk). This value MUST equal the Alpha control
+plane's `CLOUD_WORKSPACE_STORAGE_MIB`; Boat rejects workspace creates with a
+different capacity. The script requires this environment variable explicitly
+and has no storage default. It refuses a source commit different from
+`GITHUB_SHA`, unconfirmed cleanup, malformed contract bytes or a digest mismatch.
+Exact re-registration succeeds; conflicting identity fails.
+Requests and response sizes are bounded, redirects are rejected, and only a
+closed diagnostic reaches the registration step's output. No OIDC/shared
+publication credential is stored in the receipt.

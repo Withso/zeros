@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sshBoundary from "../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
 import { builderCommand, KitError, main, parseArgs, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
-import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, resumeOwned, v4Command, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
+import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, resumeOwned, v4Command, verifyBase, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
 import { cleanupLiveObjects, installOverSsh, presignGet, signedHeaders, syntheticArchives, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
 
 const scratch: string[] = [];
@@ -14,6 +14,9 @@ const temp = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-ba
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const BASE = path.join(ROOT, "scripts/cloud-workspace-validation/runtime-base-v4");
+const compatibilityBytes = fs.readFileSync(path.join(BASE, "compatibility.json"));
+const compatibilityRawB64 = compatibilityBytes.toString("base64");
+const baseCompatibilityId = `bc1-${createHash("sha256").update(compatibilityBytes).digest("hex")}`;
 
 function deps(): KitDeps & { calls: { method: string; route: string; body: unknown; headers: unknown }[] } {
   const calls: { method: string; route: string; body: unknown; headers: unknown }[] = [];
@@ -80,7 +83,7 @@ function fullKit(failColdBoot = false) {
       }
       const stage = command.includes("def verify()") ? "verify" : command.includes("def sanitize()") ? "sanitize" : "build";
       const fail = failColdBoot && stage === "verify" && id.endsWith("2");
-      const value = stage === "verify" ? { schema: "zeros.base-verification/v1", baseCompatibilityId: `bc1-${"a".repeat(64)}`,
+      const value = stage === "verify" ? { schema: "zeros.base-verification/v1", baseCompatibilityId, compatibilityRawB64,
         baseBuildSha256: "b".repeat(64), sourceCommit: commit, hostState: "waiting_for_runtime",
         bootId: `00000000-0000-4000-8000-${id.endsWith("2") ? "2" : "1"}`.padEnd(36, "0"),
         versions: { systemd: 255, glibc: "2.39", arch: "x86_64", kernel: "6.8.0", python: "3.12.3" },
@@ -276,6 +279,10 @@ describe("runtime-base-v4 profile", () => {
     expect(result).toMatchObject({ schema: "zeros.runtime-base-receipt/v1", snapshotName: "zeros-v2-test-base-v4-1", snapshotId: "snapshot_fixture",
       sandboxStarts: 2, imageBytes: 1024, live: { status: "synthetic_runtime_pending" }, cleanup: { confirmed: true, snapshot: "retained" } });
     expect(result.cleanup.sandboxes).toEqual(["bx_v4test2", "bx_v4test1"]);
+    expect(result.compatibilityRawB64).toBe(compatibilityRawB64);
+    expect(result.baseCompatibilityId).toBe(baseCompatibilityId);
+    expect(JSON.parse(fs.readFileSync(path.join(f.d.stateDir, "runtime-base-v4/base-receipt.json"), "utf8")).compatibilityRawB64)
+      .toBe(compatibilityRawB64);
     expect(f.machines.size).toBe(0);
     expect(f.getSnapshot()).toBeDefined();
     const creates = f.requests.filter(request => request.route === "/sandboxes" && request.method === "POST");
@@ -284,6 +291,22 @@ describe("runtime-base-v4 profile", () => {
       "zeros-v2-test-builder-111111111111", "zeros-v2-test-verify-111111111111",
     ]);
   }, 30_000);
+
+  it.each([undefined, "", "not base64", compatibilityRawB64 + "\n", Buffer.from("{}").toString("base64")])(
+    "rejects missing, malformed or substituted compatibility bytes from verification (%#)", async raw => {
+      const f = fullKit(), original = f.d.boat;
+      f.d.boat = async (method, route, options) => {
+        const response = await original(method, route, options);
+        if (route.endsWith("/commands")) {
+          const [value, diagnostic] = response.body.stdout.split("\n");
+          response.body.stdout = JSON.stringify({ ...JSON.parse(value), compatibilityRawB64: raw }) + "\n" + diagnostic;
+        }
+        return response;
+      };
+      await expect(verifyBase(f.d, "bx_v4test2"))
+        .rejects.toMatchObject({ diagnostic: { stage: "verify", failedChecks: ["base_compatibility"] } });
+    },
+  );
 
   it("deletes a failed candidate snapshot and both VMs when the cold boot proof fails", async () => {
     const f = fullKit(true);

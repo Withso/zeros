@@ -309,9 +309,15 @@ export async function verifyBase(deps: KitDeps, id: string) {
   requireBase(Number.isInteger(versions?.systemd) && versions.systemd >= 254 && versions.glibc === "2.39" && versions.arch === "x86_64" &&
     [versions.kernel, versions.python].every(value => typeof value === "string" && /^[A-Za-z0-9_.+-]{1,128}$/.test(value)), "verify", "base_compatibility");
   requireBase(Array.isArray(result.checks) && result.checks.every((value: string) => CHECKS.has(value)), "verify", "diagnostic_missing");
+  requireBase(typeof result.compatibilityRawB64 === "string" && result.compatibilityRawB64.length >= 4 &&
+    result.compatibilityRawB64.length <= 87_384, "verify", "base_compatibility");
+  const compatibilityBytes = Buffer.from(result.compatibilityRawB64, "base64");
+  requireBase(compatibilityBytes.length <= 65_536 && compatibilityBytes.toString("base64") === result.compatibilityRawB64 &&
+    `bc1-${hash(compatibilityBytes)}` === result.baseCompatibilityId, "verify", "base_compatibility");
   // Copy only the fields above; arbitrary probe properties cannot enter state
   // files or CLI output even if a command accidentally prints a secret.
   return { baseCompatibilityId: result.baseCompatibilityId, baseBuildSha256: result.baseBuildSha256,
+    compatibilityRawB64: result.compatibilityRawB64,
     sourceCommit: result.sourceCommit, bootId: result.bootId, hostState: result.hostState,
     versions: { systemd: versions.systemd, glibc: versions.glibc, kernel: versions.kernel, python: versions.python, arch: versions.arch },
     checks: [...new Set(result.checks)] as string[] };
@@ -613,6 +619,7 @@ function finishReceipt(deps: KitDeps) {
   requireBase(state.keepSnapshot && state.proof && state.coldProof && state.snapshot && cleanup.confirmed, "cleanup", "cleanup_pending");
   const receipt = { schema: "zeros.runtime-base-receipt/v1", profile: "zeros-cloud-worker-v4", sourceCommit: state.sourceCommit,
     baseCompatibilityId: state.proof!.baseCompatibilityId, baseBuildSha256: state.proof!.baseBuildSha256,
+    compatibilityRawB64: state.coldProof!.compatibilityRawB64,
     snapshotName: state.name, snapshotId: state.snapshot!.id, imageBytes: state.snapshot!.sizeBytes,
     versions: state.proof!.versions, checks: state.coldProof!.checks, sandboxStarts: state.starts,
     live: state.live ?? { status: "synthetic_runtime_pending" }, cleanup };

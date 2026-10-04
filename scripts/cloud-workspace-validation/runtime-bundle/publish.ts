@@ -40,7 +40,7 @@ type Check =
   | "timeout"
   | "unexpected_failure";
 
-class PublicationError extends Error {
+export class PublicationError extends Error {
   constructor(
     readonly check: Check,
     readonly timedOut = false,
@@ -69,7 +69,7 @@ function diagnostic(stage: Stage, error?: unknown): ClosedDiagnostic {
           ],
   };
 }
-function httpsUrl(value: string | undefined, name: Check): URL {
+export function httpsUrl(value: string | undefined, name: Check): URL {
   try {
     check(value && value.length <= 16 * 1024, name);
     const url = new URL(value);
@@ -91,12 +91,18 @@ function positiveInteger(
   check(Number.isSafeInteger(number) && number <= maximum, "input_schema");
   return number;
 }
-async function readBoundedFile(file: string, maximum: number): Promise<Buffer> {
+export async function readBoundedFile(
+  file: string,
+  maximum: number,
+): Promise<Buffer> {
   // Check and read the same file through one descriptor; never follow a link.
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await handle.stat();
-    check(info.isFile() && info.size > 0 && info.size <= maximum, "input_schema");
+    check(
+      info.isFile() && info.size > 0 && info.size <= maximum,
+      "input_schema",
+    );
     const bytes = await handle.readFile();
     check(bytes.length <= maximum, "input_schema");
     return bytes;
@@ -104,7 +110,7 @@ async function readBoundedFile(file: string, maximum: number): Promise<Buffer> {
     await handle.close();
   }
 }
-async function responseJson(response: Response): Promise<unknown> {
+export async function responseJson(response: Response): Promise<unknown> {
   const reader = response.body?.getReader();
   check(reader, "response_schema");
   const chunks: Uint8Array[] = [];
@@ -153,6 +159,41 @@ const completeSchema = z
 const disabledSchema = z
   .object({ error: z.object({ code: z.literal("not_found") }).strict() })
   .strict();
+
+export function githubActionsOidcRequest(env: NodeJS.ProcessEnv) {
+  const url = httpsUrl(env.ACTIONS_ID_TOKEN_REQUEST_URL, "input_schema");
+  const audience = env.CLOUD_RUNTIME_OIDC_AUDIENCE;
+  check(
+    audience && audience.length <= 256 && !/\s/.test(audience),
+    "input_schema",
+  );
+  const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  check(
+    requestToken &&
+      requestToken.length <= 16 * 1024 &&
+      !/[\r\n]/.test(requestToken),
+    "input_schema",
+  );
+  url.searchParams.set("audience", audience);
+  return {
+    url,
+    init: { headers: { Authorization: `Bearer ${requestToken}` } },
+  };
+}
+
+export async function requestGithubActionsOidcToken(
+  input: ReturnType<typeof githubActionsOidcRequest>,
+  request: (
+    url: URL,
+    init: RequestInit,
+  ) => Promise<{ ok: boolean; value: unknown }>,
+): Promise<string> {
+  const response = await request(input.url, input.init);
+  check(response.ok, "http_status");
+  const token = oidcSchema.safeParse(response.value);
+  check(token.success, "response_schema");
+  return token.data.value;
+}
 
 export async function publishRuntimeBundle(options: {
   outDir: string;
@@ -225,20 +266,7 @@ export async function publishRuntimeBundle(options: {
       "input_schema",
     );
     check(origin.pathname === "/" && !origin.search, "input_schema");
-    const oidcUrl = httpsUrl(env.ACTIONS_ID_TOKEN_REQUEST_URL, "input_schema");
-    const audience = env.CLOUD_RUNTIME_OIDC_AUDIENCE;
-    check(
-      audience && audience.length <= 256 && !/\s/.test(audience),
-      "input_schema",
-    );
-    const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
-    check(
-      requestToken &&
-        requestToken.length <= 16 * 1024 &&
-        !/[\r\n]/.test(requestToken),
-      "input_schema",
-    );
-    oidcUrl.searchParams.set("audience", audience);
+    const oidcRequest = githubActionsOidcRequest(env);
     const releaseOrder = positiveInteger(env.GITHUB_RUN_NUMBER);
     const githubRunId = positiveInteger(env.GITHUB_RUN_ID);
     const githubRunAttempt = positiveInteger(
@@ -318,17 +346,12 @@ export async function publishRuntimeBundle(options: {
       // each CP phase while retaining the exact same publication identity.
       const nextStage = stage;
       stage = "oidc";
-      const tokenResponse = await request(oidcUrl, {
-        headers: { Authorization: `Bearer ${requestToken}` },
-      });
-      check(tokenResponse.ok, "http_status");
-      const token = oidcSchema.safeParse(tokenResponse.value);
-      check(token.success, "response_schema");
+      const token = await requestGithubActionsOidcToken(oidcRequest, request);
       stage = nextStage;
       return request(url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${token.data.value}`,
+          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
           "Cache-Control": "no-store",
         },

@@ -1,4 +1,5 @@
-"""Fixed root probe; only version/identity fields and closed checks leave it."""
+"""Fixed root probe; only public base contract, identities and closed checks leave it."""
+import base64
 import grp
 import hashlib
 import importlib.util
@@ -91,7 +92,10 @@ def verify_host(bootstrap, app):
         for name in private:
             target = Path(home) / name
             require(not os.path.lexists(target) or (target.is_file() and target.stat().st_size == 0), 'base_compatibility')
+    compatibility_raw = app.read('/opt/zeros-bootstrap/compatibility.json', 65536, 0o444)
+    require('bc1-' + hashlib.sha256(compatibility_raw).hexdigest() == app.compat_id, 'base_compatibility')
     return {'schema': 'zeros.base-verification/v1', 'baseCompatibilityId': app.compat_id,
+            'compatibilityRawB64': base64.b64encode(compatibility_raw).decode('ascii'),
             'baseBuildSha256': hashlib.sha256(build_raw).hexdigest(), 'sourceCommit': build['sourceCommit'],
             'versions': versions, 'bootId': status['bootId'], 'hostState': status['hostState'],
             'checks': ['base_compatibility', 'uid_map', 'apparmor', 'cgroup_controllers', 'root_ownership', 'host_start', 'private_state']}

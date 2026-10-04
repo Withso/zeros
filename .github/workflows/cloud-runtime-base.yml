@@ -23,6 +23,9 @@ concurrency:
 jobs:
   build:
     if: github.event.repository.fork == false && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     environment: alpha
@@ -45,7 +48,8 @@ jobs:
       - name: Verify base tools before provider access
         run: |
           pnpm install --frozen-lockfile
-          pnpm exec vitest run scripts/__tests__/cloud-runtime-bootstrap.test.ts scripts/__tests__/cloud-runtime-base-v4.test.ts scripts/__tests__/boat-image-kit.test.ts
+          pnpm --dir apps/control-plane install --frozen-lockfile
+          pnpm exec vitest run scripts/__tests__/cloud-runtime-bootstrap.test.ts scripts/__tests__/cloud-runtime-base-v4.test.ts scripts/__tests__/cloud-runtime-base-registration.test.ts scripts/__tests__/boat-image-kit.test.ts
       - name: Build, sanitize and cold boot the base
         env:
           BOAT_API_KEY: ${{ secrets.BOAT_API_KEY }}
@@ -75,3 +79,13 @@ jobs:
             ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/*/snapshot-ledger.json
           if-no-files-found: warn
           retention-days: 30
+      - name: Register verified base with Alpha
+        if: success()
+        env:
+          CLOUD_WORKSPACE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL }}
+          CLOUD_RUNTIME_OIDC_AUDIENCE: ${{ vars.CLOUD_RUNTIME_OIDC_AUDIENCE || 'zeros-control-plane-alpha' }}
+          # MUST equal the Alpha control plane's CLOUD_WORKSPACE_STORAGE_MIB (Boat default disk).
+          CLOUD_WORKSPACE_STORAGE_MIB: ${{ vars.CLOUD_WORKSPACE_STORAGE_MIB || '70225' }}
+        run: |
+          pnpm tsx scripts/cloud-workspace-validation/runtime-base-v4/register-base.ts \
+            --receipt "$ZEROS_BOAT_IMAGE_STATE_DIR/runtime-base-v4/base-receipt.json"
