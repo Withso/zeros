@@ -328,6 +328,28 @@ describe("verified Alpha base registration", () => {
 });
 
 describe("manual Alpha base workflow", () => {
+  it("installs both frozen dependency trees before the pre-provider tests", async () => {
+    const workflow = await readFile(
+      new URL(
+        "../../.github/workflows/cloud-runtime-base.yml",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const verifyStep = workflow
+      .split("- name: Verify base tools before provider access")[1]
+      ?.split("\n      - name:")[0];
+    expect(verifyStep).toBeDefined();
+    const rootInstall = verifyStep!.indexOf("pnpm install --frozen-lockfile");
+    const controlPlaneInstall = verifyStep!.indexOf(
+      "pnpm --dir apps/control-plane install --frozen-lockfile",
+    );
+    const tests = verifyStep!.indexOf("pnpm exec vitest run");
+    expect(rootInstall).toBeGreaterThanOrEqual(0);
+    expect(controlPlaneInstall).toBeGreaterThan(rootInstall);
+    expect(tests).toBeGreaterThan(controlPlaneInstall);
+  });
+
   it("registers only after successful build, cold boot and cleanup with narrowly scoped OIDC", async () => {
     const workflow = await readFile(
       new URL(

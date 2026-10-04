@@ -48,6 +48,7 @@ jobs:
       - name: Verify base tools before provider access
         run: |
           pnpm install --frozen-lockfile
+          pnpm --dir apps/control-plane install --frozen-lockfile
           pnpm exec vitest run scripts/__tests__/cloud-runtime-bootstrap.test.ts scripts/__tests__/cloud-runtime-base-v4.test.ts scripts/__tests__/cloud-runtime-base-registration.test.ts scripts/__tests__/boat-image-kit.test.ts
       - name: Build, sanitize and cold boot the base
         env:
