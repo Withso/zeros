@@ -1271,7 +1271,7 @@ export function parseRecoveryDesignSelection(value) {
   return value;
 }
 
-async function redeemMaterials(request) {
+export async function redeemMaterials(request) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   timer.unref?.();
@@ -1295,6 +1295,16 @@ async function redeemMaterials(request) {
         setupRunId: request.execution.setupRunId,
         executionFence: request.execution.executionFence,
         expected: request.expected,
+        ...(RUNTIME.profile === "v4" ? {
+          runtime: {
+            runtimeId: RUNTIME.runtimeId,
+            manifestSha256: RUNTIME.manifestSha256,
+            baseCompatibilityId: RUNTIME.baseCompatibilityId,
+            installerReceiptSha256: RUNTIME.installerReceiptSha256,
+            bootId: RUNTIME.bootId,
+            supervisorSessionId: RUNTIME.supervisorSessionId,
+          },
+        } : {}),
       }),
     });
   } catch {

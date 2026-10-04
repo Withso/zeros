@@ -3,34 +3,21 @@ import os from "node:os";
 import path from "node:path";
 
 /** Real files behind a logical VM root; tests never write to /etc or /run. */
-export function cloudRuntimeFixture() {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-runtime-root-"));
+export function cloudRuntimeFixture({ mapAbsoluteLinks = true } = {}) {
+  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "zeros-runtime-root-")));
   const hostUid = fs.statSync(directory).uid;
   const physical = (file: string) => path.join(directory, file);
   const logical = (file: string) => file === directory ? "/" :
     file.startsWith(directory + "/") ? file.slice(directory.length) : file;
   const owners = new Map<string, number>();
   const descriptors = new Map<number, string>();
-  const realpath = (file: string, links = 0): string => {
-    if (links > 40) throw new Error("fixture symlink cycle");
-    const parts = file.split("/").filter(Boolean);
-    let current = "/";
-    for (let index = 0; index < parts.length; index++) {
-      current = path.join(current, parts[index]);
-      if (fs.lstatSync(physical(current)).isSymbolicLink()) {
-        const target = path.resolve(path.dirname(current), fs.readlinkSync(physical(current)));
-        return realpath(path.join(target, ...parts.slice(index + 1)), links + 1);
-      }
-    }
-    return logical(fs.realpathSync(physical(current)));
-  };
   const metadata = (stat: fs.Stats, file: string) => Object.assign(stat, {
     uid: owners.get(file) ?? (stat.uid === hostUid ? 0 : stat.uid),
   });
   const filesystem = {
     lstatSync: (file: string) => metadata(fs.lstatSync(physical(file)), file),
-    realpathSync: (file: string) => realpath(file),
-    readlinkSync: (file: string) => fs.readlinkSync(physical(file)),
+    realpathSync: (file: string) => logical(fs.realpathSync.native(physical(file))),
+    readlinkSync: (file: string) => logical(fs.readlinkSync(physical(file))),
     readdirSync: (file: string) => fs.readdirSync(physical(file)),
     openSync: (file: string, flags: number) => {
       const fd = fs.openSync(physical(file), flags);
@@ -49,7 +36,9 @@ export function cloudRuntimeFixture() {
   };
   const link = (file: string, target: string) => {
     mkdir(path.dirname(file));
-    fs.symlinkSync(target, physical(file));
+    // Keep absolute VM links inside the fixture so the kernel is the traversal
+    // oracle. Namespace tests retain VM-absolute links for their mounted view.
+    fs.symlinkSync(mapAbsoluteLinks && path.isAbsolute(target) ? directory + target : target, physical(file));
   };
   const descriptor = {
     schema: "zeros.active-runtime/v1",

@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCloudRuntimeResolver, cloudProfileIdentityMapVersion, parseCloudActiveRuntime } from "../cloud-runtime-root.mjs";
 import { cloudRuntimeFixture } from "./cloud-runtime-fixture";
@@ -152,6 +153,32 @@ describe("verified cloud runtime root", () => {
     expect(() => tree.resolver.packagePath(`${root}/node_modules/absolute/index.js`)).toThrow(/runtime/);
     fs.linkSync(tree.physical(`${root}/node_modules/.pnpm/pkg/index.js`), tree.physical(`${root}/other.js`));
     expect(() => tree.resolver.packagePath(`${root}/node_modules/pkg/index.js`)).toThrow(/runtime/);
+  });
+  it("rejects an external package link before consuming a subsequent parent component", () => {
+    const tree = fixture(), runtime = tree.resolver.resolve();
+    const scope = `${runtime.workerRoot}/node_modules/@anthropic-ai`;
+    tree.write(`${scope}/sdk-safe/package.json`, { main: "internal" });
+    tree.mkdir("/outside/step");
+    tree.write("/outside/sdk-safe/package.json", { main: "external" });
+    tree.link(`${scope}/escape`, path.posix.relative(scope, "/outside/step"));
+    tree.link(`${scope}/claude-agent-sdk`, "escape/../sdk-safe");
+    const file = `${scope}/claude-agent-sdk/package.json`;
+    expect(fs.realpathSync.native(tree.physical(file))).toBe(tree.physical("/outside/sdk-safe/package.json"));
+    expect(JSON.parse(fs.readFileSync(tree.physical(file), "utf8"))).toEqual({ main: "external" });
+    expect(() => tree.resolver.packagePath(file)).toThrow(/runtime/);
+  });
+  it("follows an internal package link before consuming a subsequent parent component", () => {
+    const tree = fixture(), runtime = tree.resolver.resolve();
+    const scope = `${runtime.workerRoot}/node_modules/@anthropic-ai`;
+    tree.write(`${scope}/sdk-safe/package.json`, { main: "lexical-decoy" });
+    tree.mkdir(`${runtime.root}/packages/step`);
+    const actual = `${runtime.root}/packages/sdk-safe/package.json`;
+    tree.write(actual, { main: "physical-target" });
+    tree.link(`${scope}/redirect`, path.posix.relative(scope, `${runtime.root}/packages/step`));
+    tree.link(`${scope}/claude-agent-sdk`, "redirect/../sdk-safe");
+    const file = `${scope}/claude-agent-sdk/package.json`;
+    expect(fs.realpathSync.native(tree.physical(file))).toBe(tree.physical(actual));
+    expect(tree.resolver.packagePath(file)).toBe(actual);
   });
   it("maps the declared v4 profile to map version 3 without inferring the profile from maps", () => {
     expect(cloudProfileIdentityMapVersion(4)).toBe(3);

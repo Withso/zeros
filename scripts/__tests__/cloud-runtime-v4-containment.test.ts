@@ -14,8 +14,8 @@ const trees: ReturnType<typeof cloudRuntimeFixture>[] = [];
 const instance = "32345678-1234-4234-8234-123456789abc";
 const view = `/run/zeros/view/runtime-${instance}`;
 const nativeNamespaces=process.platform==="linux"&&spawnSync("sudo",["-n","/usr/bin/bwrap","--ro-bind","/","/","--unshare-pid","--proc","/proc","--","/usr/bin/true"],{stdio:"ignore"}).status===0;
-function fixture() {
-  const tree = cloudRuntimeFixture(); trees.push(tree);
+function fixture(mapAbsoluteLinks = true) {
+  const tree = cloudRuntimeFixture({ mapAbsoluteLinks }); trees.push(tree);
   const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
   return { tree, runtime };
 }
@@ -23,7 +23,7 @@ afterEach(() => { for (const tree of trees.splice(0)) tree.dispose(); });
 
 describe("v4 runtime launch containment", () => {
   it.skipIf(!nativeNamespaces)("preserves host, engine and cross-actor read boundaries through the actual v4 native transition",()=>{
-    const {tree,runtime}=fixture();
+    const {tree,runtime}=fixture(false);
     const resolverSource=path.resolve("apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs");
     const resolver=`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs`;
     tree.write(`${runtime.workerRoot}/package.json`,{});

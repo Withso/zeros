@@ -309,16 +309,24 @@ export function createCloudRuntimeResolver({
     const linkRoot = runtime.profile === "v4" ? runtime.root : runtime.workerRoot;
     assertPath(current, true);
     while (pending.length) {
-      current = path.join(current, pending.shift());
+      const component = pending.shift();
+      if (component === "" || component === ".") continue;
+      if (component === "..") {
+        const parent = path.dirname(current);
+        if (!inside(linkRoot, parent)) throw invalidRuntime();
+        current = parent;
+        continue;
+      }
+      current = path.join(current, component);
       const stat = filesystem.lstatSync(current);
       if (!isOwner(current, stat.uid)) throw invalidRuntime();
       if (stat.isSymbolicLink()) {
         const target = filesystem.readlinkSync(current);
-        const next = path.resolve(path.dirname(current), target);
-        if (path.isAbsolute(target) || target.includes("\0") || !inside(linkRoot, next) || ++links > 40) throw invalidRuntime();
-        // Package links may point elsewhere inside R, but never outside it.
-        pending = [...path.relative(linkRoot, next).split("/").filter(Boolean), ...pending];
-        current = linkRoot;
+        if (!target || path.isAbsolute(target) || target.includes("\0") || ++links > 40) throw invalidRuntime();
+        // Follow each raw component before a later '..'. Lexical normalization
+        // would erase an intervening symlink and could validate a different file.
+        pending = [...target.split("/"), ...pending];
+        current = path.dirname(current);
       } else if ((stat.mode & 0o022) ||
         (pending.length ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) throw invalidRuntime();
     }
