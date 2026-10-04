@@ -8,6 +8,8 @@ import type { AuthedUser } from "../auth.js";
 import { HttpError } from "../authz.js";
 import type { Config } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { ClosedDiagnosticSchema } from "./runtime-contract.js";
+import type { RuntimeRequalify } from "./runtime-qualification.js";
 import {
   runtimeArtifactObjectKey,
   type RuntimeArtifactStore,
@@ -651,6 +653,7 @@ export type RuntimePublicationDependencies = {
   artifacts?: RuntimeArtifactStore | null;
   verifyOidc?: RuntimeOidcVerifier;
   enqueueSmoke?: (runtimeId: string) => Promise<unknown>;
+  requalify?: RuntimeRequalify;
 };
 
 export function createRuntimePublicationRoutes(
@@ -808,8 +811,23 @@ export async function readRuntimeStatus(
           [channel],
         )
       ).rows;
+      const qualificationRuns = (await tx.query<{
+        id: string; runtime_id: string; state: string; base_image_id: string | null;
+        base_compatibility_id: string | null; sandbox_id: string | null; diagnostic: unknown;
+        created_at: Date; started_at: Date | null; deadline_at: Date | null;
+        finished_at: Date | null; cleanup_confirmed_at: Date | null;
+      }>(`SELECT id,runtime_id,state,base_image_id,base_compatibility_id,sandbox_id,diagnostic,
+        created_at,started_at,deadline_at,finished_at,cleanup_confirmed_at
+        FROM cloud_runtime_qualification_runs ORDER BY created_at DESC,id LIMIT 20`)).rows;
       return {
         channel,
+        qualificationRuns: qualificationRuns.map(row => ({
+          runId: row.id, runtimeId: row.runtime_id, state: row.state, baseImageId: row.base_image_id,
+          baseCompatibilityId: row.base_compatibility_id, sandboxId: row.sandbox_id,
+          diagnostic: ClosedDiagnosticSchema.safeParse(row.diagnostic).data ?? null,
+          createdAt: row.created_at, startedAt: row.started_at, deadlineAt: row.deadline_at,
+          finishedAt: row.finished_at, cleanupConfirmedAt: row.cleanup_confirmed_at,
+        })),
         bases: bases.map(publicBase),
         runtimes: runtimes.map((row) => ({
           ...descriptor(row),
@@ -910,7 +928,7 @@ export async function readRuntimeReleaseIdentity(
   );
 }
 
-export function createRuntimeStaffRoutes(config: Config, pool: pg.Pool): Hono {
+export function createRuntimeStaffRoutes(config: Config, pool: pg.Pool, requalify?: RuntimeRequalify): Hono {
   const routes = new Hono();
   routes.use(`${RUNTIME_STAFF_PATH}/*`, async (c, next) => {
     c.header("Cache-Control", "no-store");
@@ -925,6 +943,13 @@ export function createRuntimeStaffRoutes(config: Config, pool: pg.Pool): Hono {
   routes.get(`${RUNTIME_STAFF_PATH}/status`, async (c) =>
     c.json(await readRuntimeStatus(pool, config.deploymentChannel)),
   );
+  routes.post(`${RUNTIME_STAFF_PATH}/runtimes/:runtimeId/requalify`, async c => {
+    const id = input(runtimeId, c.req.param("runtimeId"));
+    if (!requalify) throw new HttpError(503, "runtime_smoke_disabled", "Runtime smoke qualification disabled");
+    const scheduled = await requalify(id);
+    if (scheduled.status === "disabled") throw new HttpError(503, "runtime_smoke_disabled", "Runtime smoke qualification disabled");
+    return c.json({ runtimeId: id, ...scheduled }, 202);
+  });
   routes.post(`${RUNTIME_STAFF_PATH}/runtimes/:runtimeId/revoke`, async (c) => {
     const id = input(runtimeId, c.req.param("runtimeId"));
     await withSystemTx(pool, async (tx) => {

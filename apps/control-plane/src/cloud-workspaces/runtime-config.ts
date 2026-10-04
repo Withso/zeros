@@ -4,6 +4,7 @@ const schema = z.object({
   CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: z.enum(["legacy", "v4"]).default("legacy"),
   CLOUD_RUNTIME_V4_STAFF_ONLY: z.enum(["true", "false"]).default("true"),
   CLOUD_RUNTIME_QUALIFICATION_MODE: z.enum(["full", "smoke"]).default("full"),
+  CLOUD_RUNTIME_QUALIFICATION_ENABLED: z.enum(["true", "false"]).default("false"),
 });
 
 export type CloudRuntimeQualificationMode = "full" | "smoke";
@@ -11,6 +12,7 @@ export type CloudRuntimeConfig = {
   newWorkspaceProfile: "legacy" | "v4";
   staffOnly: boolean;
   qualificationMode: CloudRuntimeQualificationMode;
+  qualificationEnabled?: boolean;
 };
 
 export function loadCloudRuntimeConfig(env: NodeJS.ProcessEnv = process.env): CloudRuntimeConfig {
@@ -18,7 +20,8 @@ export function loadCloudRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Cl
   if (!parsed.success) throw new Error(`Invalid cloud runtime environment: ${parsed.error.issues.map(issue => issue.path.join(".")).join(", ")}`);
   return { newWorkspaceProfile: parsed.data.CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE,
     staffOnly: parsed.data.CLOUD_RUNTIME_V4_STAFF_ONLY === "true",
-    qualificationMode: parsed.data.CLOUD_RUNTIME_QUALIFICATION_MODE };
+    qualificationMode: parsed.data.CLOUD_RUNTIME_QUALIFICATION_MODE,
+    qualificationEnabled: parsed.data.CLOUD_RUNTIME_QUALIFICATION_ENABLED === "true" };
 }
 
 // Credential discovery, foreground admission, action admission and renewal all
