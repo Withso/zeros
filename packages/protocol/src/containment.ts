@@ -9,7 +9,7 @@
 
 export const EXECUTION_BOUNDARY_STATUS_VERSION = 1 as const;
 export const EXECUTION_BOUNDARY_PORTS_VERSION = 1 as const;
-import { CloudBrowserCapabilitySchema, type CloudBrowserCapability, type CloudNativeCapabilities } from "./cloud-agent-execution";
+import { CloudBrowserCapabilitySchema, type CloudBrowserCapability, type CloudNativeCapabilities, type CloudWorkerRuntimeProfile } from "./cloud-agent-execution";
 
 export type ExecutionBoundaryActor =
   | "agent-code"
@@ -60,8 +60,9 @@ export function cloudBrowserUnavailable(
   credentialKind: CloudBrowserCapability["credentialKind"] = "unknown",
   reason: Extract<CloudBrowserCapability, { state: "unavailable" }>["reason"] =
     provider === "codex" ? "codex-runtime-unavailable" : provider === "claude" ? "claude-direct-login-required" : "provider-unsupported",
+  runtimeProfile: CloudWorkerRuntimeProfile = "zeros-cloud-worker-v3",
 ): CloudBrowserCapability {
-  return { version: 1, provider, runtimeProfile: "zeros-cloud-worker-v3", credentialKind, state: "unavailable", reason };
+  return { version: 1, provider, runtimeProfile, credentialKind, state: "unavailable", reason };
 }
 
 /** Rolling upgrades: old/malformed diagnostics are unavailable. Only an exact
@@ -125,7 +126,7 @@ export interface ExecutionBoundaryStatus {
   cloudExecution?: {
     version: 1;
     profile: typeof CLOUD_CORE_EXECUTION_PROFILE | typeof CLOUD_NATIVE_EXECUTION_PROFILE;
-    runtimeProfile: "zeros-cloud-worker-v3";
+    runtimeProfile: CloudWorkerRuntimeProfile;
     provider: CloudCoreProvider;
     capabilities?: CloudNativeCapabilities;
     designApi: "admitted" | "unavailable";
