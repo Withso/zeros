@@ -3,7 +3,8 @@ import {afterEach,describe,expect,it,vi} from "vitest";
 import {CLOUD_NATIVE_PROVIDER_RESTRICTIONS,type ExecutionBoundaryStatus} from "@zeros/protocol/containment";
 import {CloudNativeBoundary} from "../containment/cloud-native-boundary";
 import type {PreparedBoundary} from "../containment/types";
-import {cloudProviderExecution,createCloudAgentExecutionFactory} from "../cloud-provider-execution";
+import {adminWorkspaceSystemInstruction,cloudProviderExecution,createCloudAgentExecutionFactory} from "../cloud-provider-execution";
+import {CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE} from "@zeros/protocol/system-instructions";
 import {resolveCloudRuntime} from "../containment/cloud-runtime-root.mjs";
 import {AgentGateway} from "../gateway";
 import type {AgentAdapter} from "../types";
@@ -43,6 +44,10 @@ describe("admitted native cloud diagnostic",()=>{
       name:"design-draft",transport:"http",url:"http://127.0.0.1:1234/mcp",headersFromEnv:{Authorization:"DESIGN_AUTH"},
     }]}});
     const execution=cloudProviderExecution(result.boundary)!;
+    expect(adminWorkspaceSystemInstruction(result.boundary,"Existing workspace orientation"))
+      .toBe(`Existing workspace orientation\n\n${CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE}`);
+    expect(adminWorkspaceSystemInstruction(input.workload,"Ordinary workspace orientation"))
+      .toBe("Ordinary workspace orientation");
     expect(execution.productServers.map(server=>server.name)).toEqual(["design-draft","cloud-computer"]);
     const computer=execution.productServers[1]!;
     if(computer.transport!=="http")throw new Error("Expected HTTP product transport");
@@ -56,6 +61,7 @@ describe("admitted native cloud diagnostic",()=>{
   it("keeps computer tools absent without CP admission and rejects a caller-supplied namesake",async()=>{
     const {factory,input}=fixture();
     const result=await factory.prepare(input);
+    expect(adminWorkspaceSystemInstruction(result.boundary)).toBeUndefined();
     expect(cloudProviderExecution(result.boundary)!.productServers.some(server=>server.name==="cloud-computer")).toBe(false);
     await result.boundary.stopAndProve();
     const another=fixture();

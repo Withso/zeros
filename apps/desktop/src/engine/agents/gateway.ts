@@ -104,7 +104,6 @@ import {
   buildDesignAgentNotice,
   effectiveCodeAgentDesignDirectories,
   buildFirstTurnInstructionBody,
-  buildFirstTurnSystemInstruction,
   wrapSystemInstruction,
 } from "@zeros/protocol/system-instructions";
 import {
@@ -1390,7 +1389,7 @@ async function withTargetBranchEnv(
   return { ...env, ZEROS_TARGET_BRANCH: targetRef };
 }
 
-import {cloudProviderExecution,type CloudAgentExecutionFactory,type CloudAgentSelection} from "./cloud-provider-execution";
+import {adminWorkspaceSystemInstruction,cloudProviderExecution,type CloudAgentExecutionFactory,type CloudAgentSelection} from "./cloud-provider-execution";
 import {copyCloudNativeForkHistory,CLOUD_NATIVE_HISTORY_ROOT} from "./containment/cloud-native-history";
 import {loadCloudWorkerConfiguration} from "./containment/cloud-worker-config";
 import {CloudAgentExecutionAdmissionSchema,type CloudAgentExecutionAdmission} from "@zeros/protocol/cloud-agent-execution";
@@ -4914,7 +4913,7 @@ export class AgentGateway {
       ),
       agentRole: "code" as const,
     };
-    const systemInstruction = this.nativeInstructionFor(
+    let systemInstruction = this.nativeInstructionFor(
       adapter,
       cwd,
       instructionCtx,
@@ -5023,6 +5022,7 @@ export class AgentGateway {
         },
         actor,
       );
+    if (adapter.nativeSystemInstruction) systemInstruction = adminWorkspaceSystemInstruction(preparedBoundary, systemInstruction);
     const boundary = cloudAdmission
       ? { ...preparedBoundary.status, browser: resolveCloudBrowserCapability(agentId as CloudCoreProvider, preparedBoundary.status.browser) }
       : preparedBoundary.status;
@@ -5251,7 +5251,7 @@ export class AgentGateway {
       territory?.designDirectory,
       territory?.protectedDesignDirectories,
     );
-    const systemInstruction = this.nativeInstructionFor(
+    let systemInstruction = this.nativeInstructionFor(
       adapter,
       cwd,
       instructionCtx,
@@ -5350,6 +5350,7 @@ export class AgentGateway {
           return { mcpServers, preparedBoundary, protectionAttestation };
         },
       );
+    if (adapter.nativeSystemInstruction) systemInstruction = adminWorkspaceSystemInstruction(preparedBoundary, systemInstruction);
     const boundary = cloudAdmission
       ? { ...preparedBoundary.status, browser: resolveCloudBrowserCapability(agentId as CloudCoreProvider, preparedBoundary.status.browser) }
       : preparedBoundary.status;
@@ -5481,13 +5482,14 @@ export class AgentGateway {
       // fresh thread for non-self-aware agents.)
       this.sessionsInstructed.add(executionId);
       if (response.resumedFresh) this.sessionsCwdHinted.delete(executionId);
-    } else if (response.resumedFresh) {
+    } else if (response.resumedFresh || adminWorkspaceSystemInstruction(preparedBoundary)) {
       // DEGRADED RESUME → the adapter couldn't resume and started a FRESH
       // thread/agent (Codex stale rollout, Cursor "agent not found", Claude
       // with no persisted session id). That transcript is empty, so the
       // preamble would be lost forever; re-arm the one-shot (delete, don't
       // add) so the next prompt() re-injects the workspace orientation + cwd
-      // hint.
+      // hint. A newly admitted admin execution also needs its fixed context
+      // when resuming a conversation that predates the workspace marker.
       this.sessionsInstructed.delete(executionId);
       this.sessionsCwdHinted.delete(executionId);
       this.sessionsTerritoryNoticePending.delete(executionId);
@@ -5600,7 +5602,7 @@ export class AgentGateway {
       territory?.designDirectory,
       territory?.protectedDesignDirectories,
     );
-    const systemInstruction = this.nativeInstructionFor(
+    let systemInstruction = this.nativeInstructionFor(
       adapter,
       cwd,
       instructionCtx,
@@ -5648,6 +5650,7 @@ export class AgentGateway {
           });
           preparedBoundary=prepared.boundary;providerEnv=prepared.env;
         }
+        if (adapter.nativeSystemInstruction) systemInstruction = adminWorkspaceSystemInstruction(preparedBoundary, systemInstruction);
         try {
           await this.assertAdditionalTerritorySetStillCurrent(
             territorySet,
@@ -6044,7 +6047,7 @@ export class AgentGateway {
     const cwd = this.executionToCwd.get(sessionId);
     if (!cwd) return prompt;
     const ctx = this.executionToInstructionCtx.get(sessionId);
-    const block = buildFirstTurnSystemInstruction({
+    const body = buildFirstTurnInstructionBody({
       workspaceDir: cwd,
       targetBranch: ctx?.targetBranch ?? null,
       additionalDirectories: ctx?.additionalDirectories ?? [],
@@ -6053,6 +6056,7 @@ export class AgentGateway {
       designDirectories: ctx?.designDirectories,
       agentRole: ctx?.agentRole ?? "code",
     });
+    const block = wrapSystemInstruction(adminWorkspaceSystemInstruction(this.executionBoundaries.get(sessionId), body) ?? "");
     if (!block) return prompt;
     return [{ type: "text", text: block }, ...prompt];
   }

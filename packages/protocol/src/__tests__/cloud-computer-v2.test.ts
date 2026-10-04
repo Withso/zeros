@@ -28,6 +28,14 @@ describe("Cloud Computer v2 request contracts", () => {
     requestedRef: null,
   };
   it.each([
+    ["CloudComputerV2AdminWorkspaceRequestSchema", { expectedActiveVersion: 1, operationId: randomUUID() }, true],
+    ["CloudComputerV2AdminWorkspaceRequestSchema", { expectedActiveVersion: 0, operationId: randomUUID() }, false],
+    ["CloudComputerV2AdminWorkspaceRequestSchema", { expectedActiveVersion: 1 }, false],
+    ["CloudComputerV2AdminWorkspaceRequestSchema", { expectedActiveVersion: 1, operationId: "invalid" }, false],
+    ["CloudComputerV2AdminWorkspaceRequestSchema", { expectedActiveVersion: 1, operationId: randomUUID(), adminWorkspace: true }, false],
+    ["CloudComputerAdminWorkspaceSchema", { creatorUserId: randomUUID() }, true],
+    ["CloudComputerAdminWorkspaceSchema", { creatorUserId: "invalid" }, false],
+    ["CloudComputerAdminWorkspaceSchema", { creatorUserId: randomUUID(), organizationId: randomUUID() }, false],
     ["CloudComputerV2SaveDraftSchema", { ...draft, expectedRevision: 0 }, true],
     [
       "CloudComputerV2SaveDraftSchema",

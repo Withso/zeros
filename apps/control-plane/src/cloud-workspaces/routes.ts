@@ -1,6 +1,9 @@
 import { loadQuota, loadUsage, assertGenerationReplacementQuota, createCloudRecoveryTransition, requireCloudRecoveryPoint, cloudRecoveryPointLosslessSql, type QuotaRow, type UsageRow } from "./automatic-recovery.js";
 import { createCloudComputerRoutes } from "./computer-routes.js";
 import { createCloudComputerV2Routes } from "./computer-v2-routes.js";
+import type { CloudComputerV2AdminWorkspaceRequest } from "./computer-v2-contract.js";
+import { markAdminWorkspace, requireCloudComputerAdmin } from "./computer-admin-workspaces.js";
+import { adminWorkspaceRepository, loadAdminWorkspaceReceipt, matchingAdminWorkspace, recordAdminWorkspaceReceipt } from "./computer-admin.js";
 import { createCloudWorkspaceHistoryRoutes } from "./history-routes.js";
 import { authorizeCloudComputerBuild } from "./computer.js";
 import { resolveComputerImage } from "./computer-image.js";
@@ -301,6 +304,7 @@ const DeleteWorkspaceSchema = z.object({
 
 
 type WorkspaceRow = CloudRuntimePinRow & {
+  admin_creator_user_id: string | null;
   actor_role: string|null;
   sponsor_pro_live: boolean;
   sponsor_staff_allowance: boolean;
@@ -392,8 +396,17 @@ type ForkIntentRow = {
   completed_at: Date | string | null;
 };
 
-const workspaceSelect = (actorSql="NULL::text") => `
+const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
   SELECT ${actorSql} AS actor_role,cw.id, cw.org_id, cw.team_id, cw.created_by, cw.owner_user_id,
+         (SELECT creator_user_id FROM cloud_computer_admin_workspaces admin
+          WHERE admin.workspace_id=cw.id AND admin.org_id=cw.org_id
+            AND (admin.creator_user_id=${actorUserSql} OR EXISTS (
+              SELECT 1 FROM organization_members member JOIN organizations org ON org.id=member.org_id
+              JOIN users account ON account.id=member.user_id
+              WHERE member.org_id=cw.org_id AND member.user_id=${actorUserSql}
+                AND member.role IN ('owner','admin') AND account.staff_role IN ('developer','platform_owner')
+                AND account.auth_status='active' AND account.deleted_at IS NULL
+                AND org.deleted_at IS NULL AND NOT org.is_personal))) AS admin_creator_user_id,
          cw.display_name,
          (SELECT json_build_object(
            'state', coalesce(
@@ -506,6 +519,7 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
     teamId: row.team_id,
     createdBy: row.created_by,
     ownerUserId: row.owner_user_id,
+    ...(row.admin_creator_user_id ? { adminWorkspace: { creatorUserId: row.admin_creator_user_id } } : {}),
     sharingMode: row.sharing_mode,
     accessRevision: Number(row.access_revision),
     capabilities:{canWrite,canManage,canStart:reason===null,startUnavailableReason:reason},
@@ -620,7 +634,7 @@ function sameDigest(left: Buffer, right: Buffer): boolean {
 
 async function loadWorkspaceRow(tx:Tx,orgId:string,workspaceId:string,lock=false,actorUserId?:string):Promise<WorkspaceRow>{
   const result = await tx.query<WorkspaceRow>(
-    `${workspaceSelect(actorUserId?"cloud_workspace_actor_role(cw.id,$3)":"NULL::text")}
+    `${workspaceSelect(actorUserId?"cloud_workspace_actor_role(cw.id,$3)":"NULL::text",actorUserId?"$3":"NULL::uuid")}
      WHERE cw.org_id = $1 AND cw.id = $2
      ${lock ? "FOR UPDATE OF cw" : ""}`,
     actorUserId?[orgId,workspaceId,actorUserId]:[orgId,workspaceId],
@@ -1064,7 +1078,7 @@ export function createCloudWorkspaceRoutes(
   );
   if (config) {
     // V2 handlers terminate before the legacy prefix's smaller body/rate limits.
-    app.route("/", createCloudComputerV2Routes(pool, config));
+    app.route("/", createCloudComputerV2Routes(pool, config, { createAdminWorkspace: createWorkspace }));
     app.route("/", createCloudComputerRoutes(pool, config, options.workosEnabled === true));
     app.route(
       "/",
@@ -1177,7 +1191,7 @@ export function createCloudWorkspaceRoutes(
       }
       return (
         await tx.query<WorkspaceRow>(
-          `${workspaceSelect("cloud_workspace_actor_role(cw.id,$2)")}
+          `${workspaceSelect("cloud_workspace_actor_role(cw.id,$2)","$2")}
            WHERE ($1::uuid IS NULL OR cw.org_id = $1)
              AND (cw.owner_user_id=$2 OR cw.org_id IN (SELECT org_id FROM organization_members WHERE user_id=$2)
                OR cw.id IN (SELECT workspace_id FROM cloud_workspace_guest_grants WHERE user_id=$2 AND revoked_at IS NULL AND expires_at>now()))
@@ -1851,7 +1865,7 @@ export function createCloudWorkspaceRoutes(
     );
   });
 
-  app.post(base, async (c) => {
+  async function createWorkspace(c: Context, adminRequest?: CloudComputerV2AdminWorkspaceRequest) {
     if (!config || !repositoryResolver) {
       throw new HttpError(
         503,
@@ -1861,15 +1875,14 @@ export function createCloudWorkspaceRoutes(
     }
     const user = c.get("user");
     const orgId = uuidParam(c.req.param("organization"));
-    const key = idempotencyKey(c.req.header("Idempotency-Key"));
-    const body = parse(
-      CreateWorkspaceSchema,
-      await c.req.json().catch(() => ({})),
-    );
-    if (body.cloudComputerBuild)
+    const key = adminRequest ? `cloud-computer-admin:${adminRequest.operationId.toLowerCase()}` : idempotencyKey(c.req.header("Idempotency-Key"));
+    // Admin input is server-derived from the active version inside preflight.
+    let body!: z.infer<typeof CreateWorkspaceSchema>;
+    if (!adminRequest) body = parse(CreateWorkspaceSchema, await c.req.json().catch(() => ({})));
+    if (!adminRequest && body.cloudComputerBuild)
       throw new HttpError(409,"cloud_computer_build_unavailable","Update Zeros to build a reusable Cloud Computer image with the dedicated builder.");
     if (
-      body.forkFromLocal &&
+      !adminRequest && body.forkFromLocal &&
       body.forkFromLocal.sourceGitBaseCommit !== body.repository.revision
     ) {
       throw new HttpError(
@@ -1879,7 +1892,7 @@ export function createCloudWorkspaceRoutes(
       );
     }
     if (
-      body.forkFromLocal &&
+      !adminRequest && body.forkFromLocal &&
       body.forkFromLocal.sourceWorkspaceId ===
         body.forkFromLocal.targetWorkspaceId
     ) {
@@ -1907,6 +1920,7 @@ export function createCloudWorkspaceRoutes(
       providerConnectionId: body.providerConnectionId ?? null,
       forkFromLocal: body.forkFromLocal ?? null,
       ...(body.cloudComputerBuild ? { cloudComputerBuild: body.cloudComputerBuild } : {}),
+      ...(adminRequest ? { adminWorkspace: { expectedActiveVersion: adminRequest.expectedActiveVersion } } : {}),
     });
     const selectCreateProfile = async (tx: Tx, input: { provider: CloudWorkspaceProvisioningProfile["provider"]; delegated: boolean; isPersonal: boolean;
       expectedComputer?: CloudComputerWorkspaceSource | null }) => {
@@ -1915,7 +1929,10 @@ export function createCloudWorkspaceRoutes(
         ? await selectComputerWorkspaceSource(tx, { organizationId: orgId,
           qualificationMode: config.runtime?.qualificationMode ?? "full",
           ...(input.expectedComputer === undefined ? {} : { expectedActiveBuildId: input.expectedComputer?.buildId ?? null }),
+          ...(adminRequest ? { expectedActiveVersion: adminRequest.expectedActiveVersion } : {}),
           ...(config.boat ? { accountScope: config.boat.accountScope, billingOrg: config.boat.billingOrg } : {}) }) : null;
+      if (adminRequest && !selectedComputer)
+        throw new HttpError(409, "cloud_computer_build_required", "Build your Cloud Computer before creating an admin workspace.");
       if (selectedComputer) {
         if (input.delegated || base.provider !== "boat")
           throw new HttpError(409, "cloud_computer_template_unavailable", "The active Cloud Computer requires managed Boat compute.");
@@ -1963,6 +1980,17 @@ export function createCloudWorkspaceRoutes(
       }
       assertIdempotencyMatch(existing, null, requestDigest(normalize(profile)),user.id);
     };
+    const adminInput = adminRequest ? { ...adminRequest, organizationId: orgId, creatorUserId: user.id } : null;
+    const adminResult = async (tx: Tx, receipt: { workspace_id: string; intent_id: string; reused: boolean }, replayed: boolean) => {
+      const workspace = await loadWorkspace(tx, orgId, receipt.workspace_id, user.id, { ownerOnly: true });
+      const intent = (await tx.query<IntentRow>(`SELECT id,workspace_id,requested_by,operation,request_sha256,state,
+        attempt_count,created_at,updated_at FROM cloud_workspace_lifecycle_intents WHERE id=$1 AND org_id=$2`,
+      [receipt.intent_id, orgId])).rows[0];
+      if (!intent || workspace.admin_creator_user_id !== user.id)
+        throw new HttpError(404, "not_found", "Cloud workspace request not found");
+      if (!replayed) await recordAdminWorkspaceReceipt(tx, { ...adminInput!, workspaceId: workspace.id, intentId: intent.id, reused: true });
+      return { workspace, intent, fork: null, replayed, reused: receipt.reused };
+    };
 
     // Resolve current Zeros authority and the provider-owned installation id
     // before making a network request. The GitHub call intentionally runs
@@ -1970,6 +1998,17 @@ export function createCloudWorkspaceRoutes(
     // mutable fact before it writes or consumes quota.
     const preflight = await withSystemTx(pool, async (tx) => {
       await requireOrganizationRole(tx, orgId, user.id, "member");
+      if (adminInput) {
+        await lockCloudOrganization(tx, orgId);
+        await requireCloudComputerAdmin(tx, orgId, user.id);
+        const receipt = await loadAdminWorkspaceReceipt(tx, adminInput);
+        if (receipt) return { ...await adminResult(tx, receipt, true), completed: true as const };
+        const { computer } = await selectCreateProfile(tx, { provider: config.provider, delegated: false, isPersonal: false });
+        body = { name: "Configure Cloud Computer", repository: await adminWorkspaceRepository(tx, orgId, computer!) };
+        const matching = await matchingAdminWorkspace(tx, { ...adminInput, buildId: computer!.buildId,
+          qualificationMode: config.runtime?.qualificationMode ?? "full" });
+        if (matching) return { ...await adminResult(tx, matching, false), completed: true as const };
+      }
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
         await assertCreateReplay(tx, existing);
@@ -1991,6 +2030,8 @@ export function createCloudWorkspaceRoutes(
           intent: existing,
           fork: await loadForkForTarget(tx, orgId, existing.workspace_id),
           replayed: true as const,
+          completed: true as const,
+          reused: false,
         };
       }
       const teamId = await resolveAuthorizedTeam(tx, {
@@ -2049,6 +2090,7 @@ export function createCloudWorkspaceRoutes(
       });
       return {
         replayed: false as const,
+        completed: false as const,
         teamId,
         installation,
         profile,
@@ -2057,14 +2099,15 @@ export function createCloudWorkspaceRoutes(
       };
     });
 
-    if (preflight.replayed) {
-      c.header("Idempotency-Replayed", "true");
+    if (preflight.completed) {
+      if (preflight.replayed) c.header("Idempotency-Replayed", "true");
       return c.json(
         {
           workspace: workspaceDocument(preflight.workspace,config),
           intent: intentDocument(preflight.intent),
           fork: forkDocument(preflight.fork),
-          replayed: true,
+          replayed: preflight.replayed,
+          ...(adminInput ? { reused: preflight.reused } : {}),
         },
         200,
       );
@@ -2092,6 +2135,11 @@ export function createCloudWorkspaceRoutes(
       // This parent lock serializes duplicate idempotency keys and quota
       // consumption. Authorization below reads current WorkOS/plan/seat state.
       await lockCloudOrganization(tx, orgId);
+      if (adminInput) {
+        await requireCloudComputerAdmin(tx, orgId, user.id);
+        const receipt = await loadAdminWorkspaceReceipt(tx, adminInput);
+        if (receipt) return adminResult(tx, receipt, true);
+      }
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
         await assertCreateReplay(tx, existing);
@@ -2113,6 +2161,7 @@ export function createCloudWorkspaceRoutes(
           intent: existing,
           fork: await loadForkForTarget(tx, orgId, existing.workspace_id),
           replayed: true,
+          reused: false,
         };
       }
       const teamId = await resolveAuthorizedTeam(tx, {
@@ -2135,6 +2184,11 @@ export function createCloudWorkspaceRoutes(
       if (computer?.buildId !== preflight.computer?.buildId || computer?.configId !== preflight.computer?.configId ||
         computer?.sourceSandboxId !== preflight.computer?.sourceSandboxId)
         throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed during workspace creation. Refresh before trying again.");
+      if (adminInput) {
+        const matching = await matchingAdminWorkspace(tx, { ...adminInput, buildId: computer!.buildId,
+          qualificationMode: config.runtime?.qualificationMode ?? "full" });
+        if (matching) return adminResult(tx, matching, false);
+      }
       const installation = computer ? await resolveComputerRepositoryGrant(tx, {
         organizationId: orgId, configId: computer.configId, owner: body.repository.owner, name: body.repository.name,
         installationId: body.repository.githubInstallationId, repositoryId: resolvedRepository.forgeRepositoryId,
@@ -2196,7 +2250,7 @@ export function createCloudWorkspaceRoutes(
            repository_revision, github_installation_id, repository_id,
            owner_user_id, assignee_user_id, sharing_mode, single_member_mode
          ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $4, $4, 'organization', false
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $4, $4, $12, false
          )`,
         [
           workspaceId,
@@ -2210,6 +2264,7 @@ export function createCloudWorkspaceRoutes(
           body.repository.revision,
           body.repository.githubInstallationId,
           repositoryId,
+          adminInput ? "private" : "organization",
         ],
       );
       await tx.query(
@@ -2292,6 +2347,7 @@ export function createCloudWorkspaceRoutes(
         ],
       );
       if (computer) await pinComputerWorkspaceSource(tx, { workspaceId, organizationId: orgId, generation: 1, source: computer });
+      if (adminInput) await markAdminWorkspace(tx, { workspaceId, orgId, creatorUserId: user.id });
       const computerProfile = body.cloudComputerBuild ? await authorizeCloudComputerBuild(tx, {
         organizationId: orgId, actorUserId: user.id, version: body.cloudComputerBuild.version,
         repositoryOwner: resolvedRepository.owner, repositoryName: resolvedRepository.name,
@@ -2380,6 +2436,7 @@ export function createCloudWorkspaceRoutes(
                    attempt_count, created_at, updated_at`,
         [intentId, workspaceId, orgId, user.id, key, digest],
       );
+      if (adminInput) await recordAdminWorkspaceReceipt(tx, { ...adminInput, workspaceId, intentId, reused: false });
       let fork: ForkIntentRow | null = null;
       if (body.forkFromLocal) {
         const forkId = randomUUID();
@@ -2459,6 +2516,7 @@ export function createCloudWorkspaceRoutes(
         intent: insertedIntent.rows[0]!,
         fork,
         replayed: false,
+        reused: false,
       };
     });
 
@@ -2469,10 +2527,12 @@ export function createCloudWorkspaceRoutes(
         intent: intentDocument(result.intent),
         fork: forkDocument(result.fork),
         replayed: result.replayed,
+        ...(adminInput ? { reused: result.reused } : {}),
       },
-      result.replayed ? 200 : 202,
+      result.replayed || result.reused ? 200 : 202,
     );
-  });
+  }
+  app.post(base, c => createWorkspace(c));
 
   const replaceGeneration = async (c: Context, runtimeUpgrade = false) => {
     if (runtimeUpgrade) {

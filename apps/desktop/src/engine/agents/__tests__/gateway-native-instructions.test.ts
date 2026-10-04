@@ -14,6 +14,8 @@ import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AgentGateway } from "../gateway";
+import * as cloudExecutions from "../cloud-provider-execution";
+import { CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE } from "@zeros/protocol/system-instructions";
 import { closeZerosDb } from "../../db";
 import type {
   AgentAdapter,
@@ -164,6 +166,37 @@ describe("gateway native system-instruction routing", () => {
     } else {
       process.env.ZEROS_USER_SETTINGS_DIR = previousUserSettingsDir;
     }
+  });
+
+  it.each(["claude", "codex", "cursor"])("includes CP-admitted admin context at create and resume for %s", async agentId => {
+    const instruction = vi.spyOn(cloudExecutions, "adminWorkspaceSystemInstruction").mockImplementation((_boundary, body) =>
+      [body, CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE].filter(Boolean).join("\n\n"));
+    try {
+      const gw = makeGateway();
+      const c = calls();
+      const native = agentId !== "cursor";
+      (gw as unknown as GwInternals).adapters.set(agentId, fakeAdapter({ agentId, native, sessionId: "admin", calls: c }));
+      const session = await gw.newSession(agentId, { cwd: CWD });
+      await gw.prompt(agentId, session.executionId, [text("configure")]);
+      await gw.prompt(agentId, session.executionId, [text("continue")]);
+      if (native) {
+        expect(c.newSessionOpts[0]!.systemInstruction).toContain(CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE);
+        expect(c.newSessionOpts[0]!.systemInstruction).not.toContain("<system_instruction>");
+        expect(c.prompts[0]).toEqual([text("configure")]);
+      } else {
+        expect(c.newSessionOpts[0]!.systemInstruction).toBeUndefined();
+        expect(JSON.stringify(c.prompts[0])).toContain(CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE);
+      }
+      expect(JSON.stringify(c.prompts[1])).not.toContain(CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE);
+      const resumed = await gw.loadSession(agentId, "admin-resume", { cwd: CWD });
+      await gw.prompt(agentId, resumed.executionId!, [text("resume")]);
+      if (native) {
+        expect(c.loadSessionOpts[0]!.systemInstruction).toContain(CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE);
+        expect(c.prompts[2]).toEqual([text("resume")]);
+      } else {
+        expect(JSON.stringify(c.prompts[2])).toContain(CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE);
+      }
+    } finally { instruction.mockRestore(); }
   });
 
   it("newSession passes the UNWRAPPED body to a native adapter and skips the in-band prepend", async () => {

@@ -172,6 +172,11 @@ export const CloudComputerV2RepositorySetupSchema = z.object({
 }).strict();
 export type CloudComputerV2RepositorySetupRequest = z.infer<typeof CloudComputerV2RepositorySetupSchema>;
 export type CloudComputerV2RepositorySetupResult = { repositoryId: string; version: number };
+export const CloudComputerV2AdminWorkspaceRequestSchema = z
+  .object({ expectedActiveVersion: z.number().int().positive().safe(), operationId: z.string().uuid() })
+  .strict();
+export type CloudComputerV2AdminWorkspaceRequest = z.infer<typeof CloudComputerV2AdminWorkspaceRequestSchema>;
+export const CloudComputerAdminWorkspaceSchema = z.object({ creatorUserId: z.string().uuid() }).strict();
 export const CloudComputerV2BuildStateSchema = z.enum([
   "queued",
   "running",

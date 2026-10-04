@@ -1881,6 +1881,14 @@ d("account, organization, and operator deletion lifecycle", () => {
          VALUES($1,$2,$3)`,
         [workspaceId, organizationId, owner.id],
       );
+      const intentId = randomUUID();
+      await cloudClient.query(`INSERT INTO cloud_workspace_lifecycle_intents
+        (id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256)
+        VALUES($1,$2,1,$3,$4,'create',$5,$6)`,
+      [intentId, workspaceId, organizationId, owner.id, randomUUID(), randomBytes(32)]);
+      await cloudClient.query(`INSERT INTO cloud_computer_admin_workspace_requests
+        (org_id,operation_id,creator_user_id,expected_active_version,workspace_id,intent_id,reused)
+        VALUES($1,$2,$3,1,$4,$5,false)`, [organizationId, randomUUID(), owner.id, workspaceId, intentId]);
       await cloudClient.query("COMMIT");
     } finally {
       await cloudClient.query("ROLLBACK").catch(() => undefined);
@@ -2274,6 +2282,7 @@ d("account, organization, and operator deletion lifecycle", () => {
       ),
     ).resolves.toMatchObject({ rows: [{ count: 2 }] });
     for (const table of [
+      "cloud_computer_admin_workspace_requests",
       "cloud_computer_admin_workspaces",
       "cloud_workspace_computer_sources",
       "cloud_computer_build_logs",

@@ -13,6 +13,7 @@ import { CloudCustomizationRedactor } from "./cloud-customization-redaction";
 import {CloudBackgroundExecution} from "./cloud-background-execution";
 import {CloudComputerMcpServer} from "./cloud-computer-tools";
 import {CLOUD_COMPUTER_TOOLS_SERVER} from "@zeros/protocol/cloud-computer-tools";
+import {CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE} from "@zeros/protocol/system-instructions";
 
 export type CloudAgentSelection=Omit<CloudAgentExecutionAdmission,"executionId"|"provider"|"customization">;
 export type CloudProviderExecution={
@@ -30,6 +31,11 @@ const admitted=new WeakMap<PreparedBoundary,CloudProviderExecution>();
  * an SDK message, a client flag, or a caller-supplied method implementation. */
 export function cloudProviderExecution(boundary?:PreparedBoundary):CloudProviderExecution|null{
   return boundary?admitted.get(boundary)??null:null;
+}
+/** Only CP-admitted computer tools identify the marked admin execution. */
+export function adminWorkspaceSystemInstruction(boundary:PreparedBoundary|undefined,instruction?:string):string|undefined{
+  return cloudProviderExecution(boundary)?.lease.computerToolsVersion===1
+    ? [instruction,CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE].filter(Boolean).join("\n\n") : instruction;
 }
 /** An execution uses its admitted snapshot, never the mutable Local registry. */
 export function executionMcpServers(execution:CloudProviderExecution|null,registrations:readonly McpServerRegistration[]|undefined):McpServerRegistration[]|undefined{

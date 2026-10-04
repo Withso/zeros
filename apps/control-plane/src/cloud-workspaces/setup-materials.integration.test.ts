@@ -260,6 +260,8 @@ d("cloud workspace setup material redemption", () => {
       const sourceSandboxId = `zeros-v2-test-template-${workspaceId}`;
       const imageRef = template ? `boat-template:${sourceSandboxId}` : runtimeBase.imageRef;
       const repositoryRevision = template ? "4".repeat(40) : "refs/heads/main";
+      // C3's build foreign keys require the base/runtime registry before the
+      // succeeded version.
       const runtime = v4 ? await seedRuntimeGeneration(tx, { workspaceId, organizationId, ownerUserId: accountUserId, imageRef }) : null;
       const environment = [];
       for (const [name, value] of Object.entries(templateEnvironment)) {
