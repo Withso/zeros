@@ -31,6 +31,8 @@ const operations: string[] = [];
 let finishEdit: (() => void) | undefined;
 let failEdit: (() => void) | undefined;
 
+/** New records use the flat layout; `shared` simulates a record an earlier
+ *  build's share action moved. */
 function saveRecord(
   id: string,
   name: string,
@@ -38,7 +40,9 @@ function saveRecord(
   shared = false,
 ) {
   const record = {
-    relativePath: `.context/${shared ? "shared" : "local"}/attachments/${id}/${name}`,
+    relativePath: shared
+      ? `.context/shared/attachments/${id}/${name}`
+      : `.context/attachments/${id}/${name}`,
     bytes,
   };
   records.set(id, record);

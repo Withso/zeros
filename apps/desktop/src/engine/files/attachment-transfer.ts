@@ -8,6 +8,9 @@ import {
 } from "./attachment-temporary-directory";
 import {
   ATTACHMENT_CHUNK_BYTES,
+  contextAttachmentLocations,
+  isContextAttachmentRecordPath,
+  parseContextAttachmentPath,
   validateAttachmentFile,
   type AttachmentWriteResult,
 } from "@zeros/protocol/attachment-policy";
@@ -16,11 +19,7 @@ import {
   stageContextGraphAttachment,
   stageContextGraphAttachmentFile,
 } from "./context-graph";
-import {
-  assertContextDirectory,
-  CONTEXT_DIR,
-  LEGACY_CONTEXT_DIR,
-} from "./context-paths";
+import { assertContextDirectory } from "./context-paths";
 
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
 const MAX_ACTIVE_UPLOADS = 16;
@@ -68,28 +67,25 @@ async function resolveAttachment(
   let safeFilename = safeAttachmentFilename(filename);
   const candidates = new Set<string>();
   if (diskPath !== undefined) {
-    const graph = typeof diskPath === "string" &&
-      /^(\.context(?:-graph)?)\/(local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/([a-zA-Z0-9._-]+)$/.exec(diskPath);
-    if (graph) {
-      if (graph[3] !== attachmentId || graph[4] === "." || graph[4] === "..")
-        throw new Error("invalid attachment path identity");
-      safeFilename = graph[4];
-      candidates.add(diskPath as string);
-    } else if (
-      typeof diskPath !== "string" ||
-      !/^\.context\/attachments\/[a-zA-Z0-9_-]{1,128}\/[a-zA-Z0-9._-]+$/.test(diskPath)
-    ) {
-      throw new Error("invalid attachment path");
-    }
+    const parsed =
+      typeof diskPath === "string" ? parseContextAttachmentPath(diskPath) : null;
+    if (!parsed) throw new Error("invalid attachment path");
     // Old chat-scoped paths still use the encoder's explicit migration read.
+    if (isContextAttachmentRecordPath(parsed, attachmentId)) {
+      if (
+        parsed.folderId !== attachmentId ||
+        parsed.filename === "." ||
+        parsed.filename === ".."
+      )
+        throw new Error("invalid attachment path identity");
+      safeFilename = parsed.filename;
+      candidates.add(diskPath as string);
+    }
   }
   // Try the confirmed path first. If it moved, accept only one surviving
-  // identity; conflicting scopes must never silently substitute other bytes.
-  for (const directory of [CONTEXT_DIR, LEGACY_CONTEXT_DIR]) {
-    for (const scope of ["local", "shared"]) {
-      candidates.add(`${directory}/${scope}/attachments/${attachmentId}/${safeFilename}`);
-    }
-  }
+  // identity; conflicting copies must never silently substitute other bytes.
+  for (const relativePath of contextAttachmentLocations(attachmentId, safeFilename))
+    candidates.add(relativePath);
   let resolved: AttachmentWriteResult | undefined;
   for (const relativePath of candidates) {
     const target = path.join(root, relativePath);

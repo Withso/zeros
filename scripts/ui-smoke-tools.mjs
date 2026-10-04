@@ -199,6 +199,39 @@ export async function runToolsSmoke({ page, check }) {
     "Tools isolates chat/provider snapshots and omits unsupported authentication",
     true,
   );
+  await page.getByRole("button", { name: "Chat C", exact: true }).click();
+  await trigger.click();
+  await expandMcp();
+  // Locally configured servers sit in a collapsed Local folder and count
+  // toward the MCPs total.
+  await expect(
+    mcpGroup.getByRole("button", { name: "MCPs, 2", exact: true }),
+  ).toBeVisible();
+  await expect(
+    mcpGroup.getByRole("list", { name: "MCPs", exact: true }).locator("li"),
+  ).toHaveText(["Calendar"]);
+  const localFolder = mcpGroup.locator('[data-tool-folder="local"]');
+  const localTrigger = localFolder.getByRole("button", {
+    name: "Local, 1",
+    exact: true,
+  });
+  await expect(localTrigger).toHaveAttribute("aria-expanded", "false");
+  await expect(localFolder.locator("li")).toHaveCount(0);
+  await localTrigger.click();
+  await expect(
+    localFolder
+      .getByRole("list", { name: "Local MCPs", exact: true })
+      .locator("li"),
+  ).toHaveText(["repo-tools"]);
+  await expect(
+    localFolder.getByRole("img", { name: "Connected", exact: true }),
+  ).toHaveCount(1);
+  await page.getByRole("button", { name: "Chat A", exact: true }).click();
+  await trigger.click();
+  await expandMcp();
+  await expect(mcpGroup.locator("li")).toHaveCount(3);
+  await expect(panel.locator('[data-tool-folder="local"]')).toHaveCount(0);
+  check("Tools lists locally configured MCP servers in a Local folder", true);
   for (const fixture of ["Empty inventory", "Unavailable inventory"]) {
     await page.getByRole("button", { name: fixture, exact: true }).click();
     await trigger.click();

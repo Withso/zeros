@@ -69,9 +69,10 @@ describe("agent attachment scope resolution", () => {
       }),
     ).toEqual([
       local,
-      shared,
+      ".context/attachments/att-1/shot.png",
       ".context/local/attachments/att-1/shot.png",
       ".context/shared/attachments/att-1/shot.png",
+      shared,
     ]);
 
     const result = await readAgentAttachmentFile(
@@ -85,7 +86,28 @@ describe("agent attachment scope resolution", () => {
 
     expect(result?.kind).toBe("image");
     expect(result?.path).toBe(shared);
-    expect(read.mock.calls.map((call) => call[1])).toEqual([local, shared]);
+    expect(read.mock.calls.map((call) => call[1])).toEqual([
+      local,
+      ".context/attachments/att-1/shot.png",
+      ".context/local/attachments/att-1/shot.png",
+      ".context/shared/attachments/att-1/shot.png",
+      shared,
+    ]);
+  });
+
+  it("reads current records first and falls back to earlier scopes by id", () => {
+    expect(
+      agentAttachmentPathCandidates({
+        diskPath: ".context/attachments/att-1/shot.png",
+        attachmentId: "att-1",
+      }),
+    ).toEqual([
+      ".context/attachments/att-1/shot.png",
+      ".context/local/attachments/att-1/shot.png",
+      ".context/shared/attachments/att-1/shot.png",
+      ".context-graph/local/attachments/att-1/shot.png",
+      ".context-graph/shared/attachments/att-1/shot.png",
+    ]);
   });
 
   it("does not widen legacy or malformed paths into graph reads", () => {
@@ -110,9 +132,25 @@ describe("agent attachment scope resolution", () => {
       }),
     ).toEqual([
       ".context-graph/shared/attachments/old-id/shot.png",
-      ".context-graph/local/attachments/old-id/shot.png",
-      ".context/shared/attachments/old-id/shot.png",
+      ".context/attachments/old-id/shot.png",
       ".context/local/attachments/old-id/shot.png",
+      ".context/shared/attachments/old-id/shot.png",
+      ".context-graph/local/attachments/old-id/shot.png",
     ]);
   });
+
+  it.each([undefined, "../invalid"])(
+    "keeps a flat chat-era path exact-only without a valid saved id (%s)",
+    async (attachmentId) => {
+      const diskPath = ".context/attachments/chat-1/shot.png";
+      const read = vi.fn(async (_cwd: string, candidate: string): Promise<ReadFileResult> => ({
+        kind: candidate === diskPath ? "error" : "image",
+        path: candidate,
+        bytes: 0,
+      }));
+      expect(agentAttachmentPathCandidates({ diskPath, attachmentId })).toEqual([diskPath]);
+      expect(await readAgentAttachmentFile({ cwd: "/repo", diskPath, attachmentId }, read)).toMatchObject({ kind: "error" });
+      expect(read).toHaveBeenCalledTimes(1);
+    },
+  );
 });

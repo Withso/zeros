@@ -33,7 +33,6 @@ import {
   bridgeWorkspaceSetMode,
   bridgeAttachmentWrite,
   bridgeContextGraphScaffold,
-  bridgeContextGraphSetShared,
   bridgeMessageWindow,
   bridgeMessageWindowOlder,
   bridgeChatSnapshot,
@@ -171,7 +170,7 @@ describe("requestWorkspaceList", () => {
 });
 
 describe("context-graph transition queue budgets", () => {
-  it("preserves actionable scaffold and sharing failures from the engine", async () => {
+  it("preserves actionable scaffold failures from the engine", async () => {
     const bridge = {
       request: async (message: { op?: string }) => ({
         type: "WORKSPACE_RESPONSE",
@@ -179,7 +178,6 @@ describe("context-graph transition queue budgets", () => {
         result: {
           ok: false,
           created: false,
-          moved: false,
           error: "context migration conflict",
         },
       }),
@@ -189,9 +187,6 @@ describe("context-graph transition queue budgets", () => {
       created: false,
       error: "context migration conflict",
     });
-    expect(
-      await bridgeContextGraphSetShared(bridge, "ws1", "id", true),
-    ).toEqual({ ok: false, moved: false, error: "context migration conflict" });
   });
 
   it.each([
@@ -217,11 +212,6 @@ describe("context-graph transition queue budgets", () => {
     [
       "context.graph.scaffold",
       (bridge: RuntimeClient) => bridgeContextGraphScaffold(bridge, "ws1"),
-    ],
-    [
-      "context.graph.setShared",
-      (bridge: RuntimeClient) =>
-        bridgeContextGraphSetShared(bridge, "ws1", "att-1", true),
     ],
   ])("gives %s the workspace-create timeout", async (op, run) => {
     const seen: { op?: string; timeoutMs?: number } = {};

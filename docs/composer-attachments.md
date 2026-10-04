@@ -68,8 +68,9 @@ Linux and Windows can allocate a private sibling on the workspace volume. A work
 that occupies an entire mount with no writable outside location still needs
 host-provided temporary space on that volume; unsuitable locations are refused.
 Only a completed file is published into
-`.context/local/attachments/<attachmentId>/<filename>`. An attachment moved to
-`shared/` retains its identity. Aborted, failed and idle uploads are cleaned up.
+`.context/attachments/<attachmentId>/<filename>`. A record an earlier build
+wrote under `local/` or `shared/` retains its folder and identity. Aborted,
+failed and idle uploads are cleaned up.
 Successful publication removes its temporary directory as well. Private
 `attachment-temporaries/` ownership records identify the directory, inode and
 creating process. Maintenance reclaims recorded copies older than 24 hours

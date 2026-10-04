@@ -222,3 +222,72 @@ export function safeAttachmentFilename(raw: string): string {
       ? `${cleaned.slice(0, 80 - extension.length)}${extension}` : cleaned.slice(0, 80);
   return capped === "" || capped === "." || capped === ".." ? "attachment" : capped;
 }
+
+// ── Context attachment layout ──────────────────────────────
+// Composer attachments are stored at `.context/attachments/<attachmentId>/<file>`.
+// Earlier builds kept them in a private or shared scope
+// (`<root>/<local|shared>/attachments/<id>/<file>`, root `.context` or the older
+// `.context-graph`). Those records keep their saved paths and stay readable.
+// A pre-graph transcript layout used the same flat shape keyed by chat
+// (`.context/attachments/<chat>/<file>`), so a flat path names an attachment
+// record only when its folder equals the record's attachment id.
+
+export const CONTEXT_ATTACHMENTS_DIR = ".context/attachments";
+
+export interface ContextAttachmentPath {
+  root: ".context" | ".context-graph";
+  /** Scope written by earlier builds; absent for the current flat layout. */
+  scope?: "local" | "shared";
+  /** Folder name: the attachment id, or a chat id for pre-graph paths. */
+  folderId: string;
+  filename: string;
+}
+
+const FLAT_ATTACHMENT_PATH =
+  /^\.context\/attachments\/([a-zA-Z0-9_-]{1,128})\/([a-zA-Z0-9._-]+)$/;
+const SCOPED_ATTACHMENT_PATH =
+  /^(\.context(?:-graph)?)\/(local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/([a-zA-Z0-9._-]+)$/;
+
+/** Parse a workspace-relative attachment path in any supported layout. */
+export function parseContextAttachmentPath(
+  diskPath: string,
+): ContextAttachmentPath | null {
+  const flat = FLAT_ATTACHMENT_PATH.exec(diskPath);
+  if (flat) return { root: ".context", folderId: flat[1], filename: flat[2] };
+  const scoped = SCOPED_ATTACHMENT_PATH.exec(diskPath);
+  if (!scoped) return null;
+  return {
+    root: scoped[1] as ContextAttachmentPath["root"],
+    scope: scoped[2] as NonNullable<ContextAttachmentPath["scope"]>,
+    folderId: scoped[3],
+    filename: scoped[4],
+  };
+}
+
+/** True when the path is keyed by `attachmentId` rather than a pre-graph chat. */
+export function isContextAttachmentRecordPath(
+  parsed: ContextAttachmentPath,
+  attachmentId: unknown,
+): boolean {
+  return parsed.scope !== undefined || parsed.folderId === attachmentId;
+}
+
+/** Where a new attachment record is written. */
+export function contextAttachmentPath(attachmentId: string, filename: string): string {
+  return `${CONTEXT_ATTACHMENTS_DIR}/${attachmentId}/${filename}`;
+}
+
+/** Every location an attachment record can occupy, current layout first. */
+export function contextAttachmentLocations(
+  attachmentId: string,
+  filename: string,
+): string[] {
+  return [
+    contextAttachmentPath(attachmentId, filename),
+    ...[".context", ".context-graph"].flatMap((root) =>
+      ["local", "shared"].map(
+        (scope) => `${root}/${scope}/attachments/${attachmentId}/${filename}`,
+      ),
+    ),
+  ];
+}

@@ -164,22 +164,26 @@ revocation, restored vaults, cancellation/late callbacks, and browser form check
 
 ## Native session execution
 
-Ordinary chats connect the Zeros registry and supported account extensions.
-Local MCP declarations require **Customize → MCP → Import** first. HTTP is a
-transport, not account provenance: an HTTPS endpoint in a local configuration
-file still requires import. Provider and organization disable policies remain
-in force; Zeros does not rewrite the user's native configuration files.
+Ordinary local Code chats load each provider's own configuration natively, as
+its CLI or app would: instruction files, rules, skills, hooks, plugins and MCP
+servers declared in the provider's local settings. Zeros MCP, imported MCP and
+Zeros skills are injected alongside them. Provider and organization disable
+policies remain in force; Zeros does not rewrite the user's native
+configuration files. Restricted actors and cloud executions keep only their
+admitted configuration.
 
-- Claude uses `settingSources: []` with non-strict MCP discovery in Code chats.
-  This excludes user/project MCP declarations while leaving the runtime's
-  independent claude.ai subscription connector discovery enabled. The SDK
-  couples these disk sources with local settings/plugins/rules; those sources
-  are consequently excluded too. Zeros instructions, imported MCP and Zeros
-  skills remain injected. There is no complete API for loading all extensions
-  attached to a Claude web account. Strict MCP configuration is retained for
-  restricted actors and tool-free helpers.
+- Claude Code chats use `settingSources: ["user", "project", "local"]` with
+  non-strict MCP, so CLAUDE.md, `.claude/rules/`, skills, hooks, plugins and
+  MCP declared in `~/.claude.json` or a repository `.mcp.json` load natively,
+  alongside claude.ai account connectors. Claude reads AGENTS.md only where no
+  CLAUDE.md exists, so Zeros sets the built-in `agents-md` plugin's
+  `instructionFiles` option to `claude-md-and-agents-md` as a flag setting;
+  Claude honors that option in user, flag and policy settings, never in a
+  repository's own settings files. Restricted actors use `settingSources: []`
+  with strict MCP configuration. A cloud execution uses its lease's sources:
+  `["user"]` for a customized lease, otherwise none.
   Claude Code's **bundled** skills are separate from those filesystem settings
-  sources: the runtime still supplies them with `settingSources: []`. Zeros
+  sources: the runtime supplies them in every case. Zeros
   reads the supported command list and skill names over the control connection
   before the first prompt. Opening the `/` picker prepares that connection
   through normal chat admission and shares the Tools cache. The picker updates
@@ -187,13 +191,13 @@ in force; Zeros does not rewrite the user's native configuration files.
   results after restart or a newer provider push. Provider feature gates still
   decide which bundled commands are available. Skills present only in Claude's
   web environment are not automatically installed in Claude Code.
-- Cursor uses `local.settingSources: ["team"]` for ordinary Code chats. This
-  enables the SDK's team rules and dashboard-managed skills path without
-  enabling the `project`, `user`, or `plugins` MCP sources. Only inline,
-  admitted Zeros MCP connects. The source selection is captured at admission
-  and reused for prewarm, create, resume, fallback, and mode rebuild. Restricted
-  actors and the host account opt-out use `[]`. Local rules/skills/plugins
-  remain coupled to the excluded disk/plugin sources. Dashboard
+- Cursor Code chats use `local.settingSources: ["project", "user", "team",
+  "mdm", "plugins"]`, loading project and user rules, AGENTS.md, skills,
+  plugins and MCP declared in Cursor's own settings, alongside inline Zeros
+  MCP. The source selection is captured at admission and reused for prewarm,
+  create, resume, fallback, and mode rebuild, because it keys the SDK's
+  executor cache. Restricted actors and the host account opt-out use `[]`; a
+  cloud execution uses its lease's sources. Dashboard
   account MCP is a **Cursor-hosted agent** capability; subscription sign-in
   does not deliver it to SDK local mode, including local mode inside a Zeros
   cloud workspace. Zeros does not silently transfer chats to Cursor hosting.
@@ -214,36 +218,31 @@ in force; Zeros does not rewrite the user's native configuration files.
   [native computer use](native-computer-use.md) for provenance, profile, approval,
   artwork and macOS setup contracts.
 
-`ZEROS_NATIVE_MCP_PASSTHROUGH=0` remains a host opt-out for native account loading;
-it no longer enables ambient local MCP. Restricted actors keep only their
-admitted MCP registry. No provider account credentials or local MCP secrets are
-copied to a cloud workspace by these controls.
+`ZEROS_NATIVE_MCP_PASSTHROUGH=0` remains a host opt-out for native MCP: Claude
+keeps loading its settings sources with strict MCP configuration, Cursor loads
+no settings sources, and Codex keeps account extensions off. Restricted actors
+keep only their admitted MCP registry. No provider account credentials or local
+MCP secrets are copied to a cloud workspace by these controls.
 
 ### Source ownership and component loading
 
-Ownership and component type are separate decisions. Local MCP configuration
-requires import; that requirement does not inherently exclude rules, skills,
-or the rest of a plugin. A downloaded marketplace package can still represent
+Ownership and component type are separate decisions. Codex runs local MCP
+configuration only after import; that requirement does not inherently exclude
+rules, skills, or the rest of a plugin. A downloaded marketplace package can still represent
 an account installation, and an HTTPS MCP declared in a local file still
 represents local configuration. A provider web application's saved content
 is not necessarily synchronized to its coding SDK.
 
 Codex already offers the needed per-MCP controls while preserving native
-instruction and skill loading. Claude's account connector discovery remains
-independent of `settingSources: []`; its managed policy tier also remains in
-force. The pinned Claude SDK additionally supports `skipMcpDiscovery` on an
-explicit `plugins` entry, preserving that package's skills/hooks/agents/commands
-while skipping its `.mcp.json` and manifest MCP declarations. Zeros does not
-yet use that path for automatic native plugin loading: it is not an account
-plugin inventory or a blanket switch for all local sources, and subagent MCP
-frontmatter requires separate review before enabling those components.
+instruction and skill loading. Claude's account connector discovery is
+independent of its settings sources, and its managed policy tier remains in
+force in every case.
 
-Cursor's `team` source provides partial separation for team content. The pinned
-SDK still has no public MCP-only exclusion option for its `project`, `user`,
-or `plugins` source. Preserving all their non-MCP components requires a separate
-component-loading integration; simply enabling those sources violates the
-local MCP import contract. No full automatic inheritance of every cloud
-rule/skill/plugin is claimed for either Claude or Cursor.
+Neither SDK has a public MCP-only exclusion option for its settings sources, so
+loading a provider's local rules, skills and plugins also loads the MCP servers
+declared beside them. Codex keeps its per-MCP disable path. No full automatic
+inheritance of every cloud rule/skill/plugin is claimed for either Claude or
+Cursor.
 
 ## Composer Tools
 
@@ -267,6 +266,16 @@ Plugins can
 contain apps and MCPs, so category counts overlap and must not be summed as a
 unique tool total. Skills are not MCP connection receipts. The Customize page
 continues to manage Zeros MCP and skills only.
+
+MCP servers declared in the provider's own local settings appear in a
+collapsed **Local** folder inside MCPs; the MCPs count includes them. Grouped
+inventory rows mark them with `source: "local"`; the strict legacy list never
+carries the field. Claude marks servers whose reported source is its `user`,
+`project` or `local` configuration scope. Servers Zeros registers report
+`dynamic`, plugin servers `plugin`, and claude.ai connectors stay in Apps.
+Cursor reports no MCP status, so its Local rows list the servers named in the
+user and workspace `.cursor/mcp.json` files as not verified. Cloud executions
+never mark Local rows.
 
 Codex reads `app/installed` with the current `threadId` for installed app
 membership and effective `enabled`/`callable` state. Bounded `app/read` batches
@@ -357,7 +366,8 @@ is recreated at the normal session boundary.
 
 Cursor has no public
 MCP connection-status API, so its rows show an Error with an explanation that
-status could not be verified; configured does not receive a connection tick.
+status could not be verified, and its Local rows show Not verified; configured
+does not receive a connection tick.
 Provider errors, tool schemas, URLs, headers and credentials are excluded from
 the status result.
 
@@ -366,11 +376,11 @@ declarations, and Zeros copies them into its own registry. They then execute as
 Zeros-managed servers across providers. The source files remain provider-owned;
 provider login grants are not copied with a URL. Discovery includes Codex
 project configuration and its active `CODEX_HOME`, alongside Claude and Cursor
-local declarations. This is independent of native settings-source loading:
-those SDK switches currently bundle MCP with other native content, which is
-why disabling those sources also excludes their local rules/skills/plugins.
-Cursor team rules/managed skills and Claude's supported account connectors
-have separate paths. Zeros instructions and imported content remain available.
+local declarations. Claude and Cursor Code chats already load their own local
+declarations natively; importing one under a different name connects it twice
+for those providers. Import remains the way to run a declaration with every
+provider, including Codex. Zeros instructions and imported content remain
+available.
 
 For Cursor local execution, the existing Zeros MCP gateway is the supported
 common connection path: configure a remote service and its Zeros-owned grant,
@@ -535,9 +545,11 @@ without a prompt, tool invocation, or loading either local MCP fixture. Regressi
 tests cover early command discovery, stale query results, missing account auth,
 and account/bridge/owner changes during admission. Browser coverage verifies
 that a bundled skill appears in an already open `/` picker without submitting.
-Native execution tests also cover ordinary-chat defaults, the explicit legacy
-opt-out, scoped actors, tool-free title helpers, Cursor mode rebuilds, and the
-Zeros-only Customize scope with no hidden native discovery. Cursor team-source
-tests cover startup, prewarm, reopen, missing-agent recovery, imported MCP,
-and admission-time source selection across mode rebuilds in both opt-out
-directions. These verify SDK options, not a signed-in team's live inventory.
+Native execution tests also cover ordinary-chat settings sources and the
+AGENTS.md instruction option, cloud and restricted-actor isolation, the
+explicit legacy opt-out, Cursor mode rebuilds, and the Zeros-only Customize
+scope with no hidden native discovery. Cursor settings-source tests cover
+startup, prewarm, reopen, missing-agent recovery, imported MCP, and
+admission-time source selection across mode rebuilds in both opt-out
+directions. Tools tests cover Local classification and the Local folder. These
+verify SDK options, not a signed-in team's live inventory.

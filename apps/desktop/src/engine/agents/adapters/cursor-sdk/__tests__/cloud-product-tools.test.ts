@@ -49,7 +49,8 @@ beforeEach(async () => {
     module: { Agent: { create: createSpy, resume: resumeSpy, list: vi.fn(async () => ({ items: [] })) }, Cursor: { models: { list: vi.fn(async () => []) } }, platform: { prewarm: prewarmSpy } },
     dispose: vi.fn(async () => {}),
   }));
-  vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ productServers: [minted] } as unknown as cloudExecution.CloudProviderExecution);
+  // Every admitted execution carries a lease; this one has no customization.
+  vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ productServers: [minted], lease: {} } as unknown as cloudExecution.CloudProviderExecution);
 });
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -66,6 +67,17 @@ describe("Cursor cloud product tools", () => {
       expect(Object.keys(servers)).toEqual(["design-draft"]);
       expect(servers["design-draft"]!.headers?.Authorization).toBe("Bearer engine-minted-capability");
       for (const [options] of prewarmSpy.mock.calls) expect(Object.keys(configured(options) ?? {})).toEqual(["design-draft"]);
+      // A cloud execution never loads this machine's Cursor settings layers.
+      expect((createSpy.mock.calls[0]![0] as { local: { settingSources: string[] } }).local.settingSources).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("loads only the user layer for a customized cloud lease", async () => {
+    vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ productServers: [minted], lease: { customization: {} } } as unknown as cloudExecution.CloudProviderExecution);
+    const adapter = new CursorSdkAdapter(ctx());
+    try {
+      await adapter.newSession(sessionOptions());
+      expect((createSpy.mock.calls[0]![0] as { local: { settingSources: string[] } }).local.settingSources).toEqual(["user"]);
     } finally { await adapter.dispose(); }
   });
 
@@ -80,7 +92,7 @@ describe("Cursor cloud product tools", () => {
   });
 
   it("never falls back to the user's MCP registry when a cloud execution has no product tools", async () => {
-    vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ productServers: [] } as unknown as cloudExecution.CloudProviderExecution);
+    vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ productServers: [], lease: {} } as unknown as cloudExecution.CloudProviderExecution);
     const adapter = new CursorSdkAdapter(ctx());
     try {
       await adapter.newSession(sessionOptions());

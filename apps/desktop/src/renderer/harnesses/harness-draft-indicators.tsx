@@ -95,8 +95,8 @@ setActiveBridge({
         bytes: p.totalBytes,
         pending: p.base64 === "",
         mimeType: p.mimeType,
-        relativePath: `.context/local/attachments/${p.attachmentId}/${p.filename}`,
-        absolutePath: `${p.cwd}/.context/local/attachments/${p.attachmentId}/${p.filename}`,
+        relativePath: `.context/attachments/${p.attachmentId}/${p.filename}`,
+        absolutePath: `${p.cwd}/.context/attachments/${p.attachmentId}/${p.filename}`,
       };
     if (message.op === "git.changeLineCounts")
       result = {

@@ -19,6 +19,8 @@ import {
 } from "../../shared/ui/primitives/elements/collapsible";
 
 const LABELS = { plugins: "Plugins", apps: "Apps", mcp: "MCPs" } as const;
+/** MCP servers declared in the agent's own settings files on this machine. */
+const LOCAL_FOLDER = "mcp/local";
 const STATUS_LABELS = {
   connected: "Connected",
   available: "Available",
@@ -49,6 +51,13 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const toggle = (key: string) => (next: boolean) =>
+    setExpanded((previous) => {
+      const changed = new Set(previous);
+      if (next) changed.add(key);
+      else changed.delete(key);
+      return changed;
+    });
   if (groups.length === 0)
     return (
       <p role="status" className="text-fg2 text-xs">
@@ -67,19 +76,20 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
           (group.state === "partial" && !group.entries.length)
             ? "—"
             : `${group.entries.length}${group.state === "partial" ? "*" : ""}`;
+        const local =
+          group.kind === "mcp"
+            ? group.entries.filter((entry) => entry.source === "local")
+            : [];
+        const rows = local.length
+          ? group.entries.filter((entry) => entry.source !== "local")
+          : group.entries;
+        const localOpen = expanded.has(LOCAL_FOLDER);
         return (
           <Collapsible
             key={group.kind}
             open={open}
             data-tool-group={group.kind}
-            onOpenChange={(next) =>
-              setExpanded((previous) => {
-                const changed = new Set(previous);
-                if (next) changed.add(group.kind);
-                else changed.delete(group.kind);
-                return changed;
-              })
-            }
+            onOpenChange={toggle(group.kind)}
           >
             <CollapsibleTrigger asChild>
               <Button
@@ -107,31 +117,52 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
               </Button>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              {group.entries.length > 0 && (
-                <ul aria-label={label}>
-                  {group.entries.map((entry) => (
-                    <li
-                      key={entry.id}
-                      data-tool-id={entry.id}
-                      className="flex min-h-8 items-center gap-2 px-2 py-1 text-sm"
+              {rows.length > 0 && (
+                <ToolRows
+                  label={label}
+                  entries={rows}
+                  canAuthenticate={group.kind === "mcp"}
+                  authBusy={authBusy}
+                  onAuthenticate={onAuthenticate}
+                />
+              )}
+              {local.length > 0 && (
+                <Collapsible
+                  open={localOpen}
+                  data-tool-folder="local"
+                  onOpenChange={toggle(LOCAL_FOLDER)}
+                  className="pl-4"
+                >
+                  <CollapsibleTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="w-full justify-start gap-2"
+                      aria-label={`Local, ${local.length}`}
+                      title="Declared in this agent's own settings on this machine"
                     >
-                      <div
-                        className="text-fg1 min-w-0 flex-1 truncate"
-                        title={entry.name}
-                      >
-                        {entry.name}
-                      </div>
-                      <ToolStatus
-                        entry={entry}
-                        canAuthenticate={
-                          group.kind === "mcp" && entry.canAuthenticate === true
-                        }
-                        authBusy={authBusy}
-                        onAuthenticate={onAuthenticate}
-                      />
-                    </li>
-                  ))}
-                </ul>
+                      {localOpen ? (
+                        <ChevronDown className="text-fg2 size-3.5" />
+                      ) : (
+                        <ChevronRight className="text-fg2 size-3.5" />
+                      )}
+                      <span className="min-w-0 flex-1 text-left">Local</span>
+                      <span className="text-fg2 text-xs tabular-nums">
+                        {local.length}
+                      </span>
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <ToolRows
+                      label="Local MCPs"
+                      entries={local}
+                      canAuthenticate
+                      authBusy={authBusy}
+                      onAuthenticate={onAuthenticate}
+                    />
+                  </CollapsibleContent>
+                </Collapsible>
               )}
             </CollapsibleContent>
           </Collapsible>
@@ -140,6 +171,43 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
     </div>
   );
 });
+
+function ToolRows({
+  label,
+  entries,
+  canAuthenticate,
+  authBusy,
+  onAuthenticate,
+}: {
+  label: string;
+  entries: readonly SessionToolInventoryEntry[];
+  /** Only MCP connections offer an Authenticate action. */
+  canAuthenticate: boolean;
+  authBusy: string | null;
+  onAuthenticate: (id: string) => void;
+}) {
+  return (
+    <ul aria-label={label}>
+      {entries.map((entry) => (
+        <li
+          key={entry.id}
+          data-tool-id={entry.id}
+          className="flex min-h-8 items-center gap-2 px-2 py-1 text-sm"
+        >
+          <div className="text-fg1 min-w-0 flex-1 truncate" title={entry.name}>
+            {entry.name}
+          </div>
+          <ToolStatus
+            entry={entry}
+            canAuthenticate={canAuthenticate && entry.canAuthenticate === true}
+            authBusy={authBusy}
+            onAuthenticate={onAuthenticate}
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function ToolStatus({
   entry,

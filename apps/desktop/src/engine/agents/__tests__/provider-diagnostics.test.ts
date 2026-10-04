@@ -51,7 +51,6 @@ describe("provider configuration provenance", () => {
     const snapshot = configurationProvenanceFor("cursor", {
       protectedTerritory: true,
       suppressUnsafeSources: true,
-      nativeMcpRequiresImport: true,
       nativeSettingSources: ["team"],
     });
     expect(
@@ -62,6 +61,25 @@ describe("provider configuration provenance", () => {
     ).toMatchObject({
       status: "suppressed",
       reason: "Suppressed to preserve protected workspace boundaries",
+    });
+  });
+
+  it("reports the native layers a session loads and suppresses the rest", () => {
+    const snapshot = configurationProvenanceFor("claude", {
+      protectedTerritory: false,
+      suppressUnsafeSources: false,
+      nativeSettingSources: ["user", "project"],
+    });
+    expect(
+      snapshot.sources.map((source) => [source.id, source.status]),
+    ).toEqual([
+      ["user", "loaded"],
+      ["project", "loaded"],
+      ["local", "suppressed"],
+      ["zeros-session", "injected"],
+    ]);
+    expect(snapshot.sources[2]).toMatchObject({
+      reason: "Native source is not enabled for this session",
     });
   });
 

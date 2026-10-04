@@ -989,7 +989,16 @@ describe("Claude cloud connector inventory", () => {
       });
       await adapter.capabilityPorts.sessionTools.list({ sessionId: session.executionId });
       expect(reloadSkills).toHaveBeenCalledTimes(1);
-      expect(captured[0]?.settingSources).toEqual([]);
+      // A Code chat loads Claude's own settings layers, CLAUDE.md and AGENTS.md
+      // together, beside the Zeros registry.
+      expect(captured[0]?.settingSources).toEqual(["user", "project", "local"]);
+      expect(captured[0]?.settings).toMatchObject({
+        pluginConfigs: {
+          "agents-md@builtin": {
+            options: { instructionFiles: "claude-md-and-agents-md" },
+          },
+        },
+      });
       expect(captured[0]?.strictMcpConfig).toBeUndefined();
       expect(inputsSeen).toEqual([]);
     } finally {
@@ -1106,19 +1115,21 @@ describe("Claude cloud connector inventory", () => {
     }
   });
 
-  it("reports disk settings as suppressed when MCP requires import", async () => {
+  it("reports Claude's settings layers as loaded for a Code chat and suppressed for a scoped actor", async () => {
     const adapter = new ClaudeSdkAdapter(makeCtx([], []));
-    const provenance = await adapter.capabilityPorts.configuration.readProvenance({
+    const loaded = (sources: { id: string; status: string }[]) =>
+      sources.filter((source) => source.status === "loaded").map((source) => source.id);
+    const code = await adapter.capabilityPorts.configuration.readProvenance({
       cwd: "/tmp",
     });
-    expect(
-      provenance.sources.filter((source) => source.status === "loaded"),
-    ).toHaveLength(0);
-    expect(
-      provenance.sources
-        .filter((source) => source.status === "suppressed")
-        .every((source) => source.reason?.includes("MCP")),
-    ).toBe(true);
+    expect(loaded(code.sources)).toEqual(["user", "project", "local"]);
+    const design = await adapter.capabilityPorts.configuration.readProvenance({
+      cwd: "/tmp",
+      executionBoundary: {
+        status: { actor: "design-agent", backend: "zeros-srt" },
+      } as never,
+    });
+    expect(loaded(design.sources)).toEqual([]);
     await adapter.dispose();
   });
 
@@ -1196,8 +1207,12 @@ describe("Claude cloud connector inventory", () => {
     });
     expect(captured[0]).toMatchObject({
       strictMcpConfig: true,
+      settingSources: [],
       mcpServers: { design: { url: "https://example.test/design" } },
     });
+    expect(
+      (captured[0]?.settings as { pluginConfigs?: unknown }).pluginConfigs,
+    ).toBeUndefined();
     await adapter.dispose();
   });
 
@@ -4653,7 +4668,7 @@ describe("ClaudeSdkAdapter", () => {
     expect(captured[0]?.permissionMode).toBe("bypassPermissions");
     expect(captured[0]?.allowDangerouslySkipPermissions).toBe(true);
     expect(captured[0]?.sandbox).toBeUndefined();
-    expect(captured[0]?.settingSources).toEqual([]);
+    expect(captured[0]?.settingSources).toEqual(["user", "project", "local"]);
     // Native settings also carry installed plugins and subscription connectors.
     // Normal chats must let Claude resolve those alongside the Zeros registry.
     expect(captured[0]?.strictMcpConfig).not.toBe(true);

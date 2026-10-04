@@ -55,6 +55,10 @@ vi.mock("@cursor/sdk", () => ({
   platform: { prewarm: prewarmSpy },
 }));
 
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { sessionToolsInventorySnapshotSchema } from "@zeros/protocol/agent-extensions";
 import { CursorSdkAdapter } from "../adapter";
 import type { AgentAdapterContext, ContentBlock } from "../../../types";
 
@@ -192,20 +196,20 @@ describe("Cursor executor prewarm across a mode change", () => {
     }
   });
 
-  it("reports team content separately from suppressed local MCP sources", async () => {
+  it("reports every native settings layer as loaded for a Code chat", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     const provenance =
       await adapter.capabilityPorts.configuration.readProvenance({
         cwd: "/tmp",
       });
     expect(
-      provenance.sources.filter((source) => source.status === "loaded"),
-    ).toEqual([{ id: "team", label: "Team", status: "loaded" }]);
-    expect(
       provenance.sources
-        .filter((source) => source.status === "suppressed")
-        .every((source) => source.reason?.includes("MCP")),
-    ).toBe(true);
+        .filter((source) => source.status === "loaded")
+        .map((source) => source.id),
+    ).toEqual(["user", "project", "team", "mdm", "plugins"]);
+    expect(
+      provenance.sources.filter((source) => source.status === "suppressed"),
+    ).toEqual([]);
     await adapter.dispose();
   });
 
@@ -245,14 +249,14 @@ describe("Cursor executor prewarm across a mode change", () => {
     expect(warmed.apiKey).toBe("key_test");
   });
 
-  it("loads team rules and managed skills without local MCP at creation and prewarm", async () => {
+  it("loads Cursor's own settings layers at creation and prewarm", async () => {
     const { adapter } = await startSession();
-    // The team source has its own rules/managed-skills path. MCP discovery
-    // requires project/user/plugins, which must still remain excluded.
+    // Project and user rules, AGENTS.md, skills, plugins and locally declared
+    // MCP load natively, as in the Cursor app.
     expect(
       (localOf(prewarmSpy.mock.calls[0]) as { settingSources?: unknown })
         .settingSources,
-    ).toEqual(["team"]);
+    ).toEqual(["project", "user", "team", "mdm", "plugins"]);
     expect(localOf(createSpy.mock.calls[0])).toEqual(
       localOf(prewarmSpy.mock.calls[0]),
     );
@@ -263,7 +267,7 @@ describe("Cursor executor prewarm across a mode change", () => {
   it.each([
     ["http", false], ["http", true], ["sse", false], ["sse", true],
   ] as const)(
-    "preserves team content and imported %s MCP when reopening (missing agent: %s)",
+    "preserves native settings and imported %s MCP when reopening (missing agent: %s)",
     async (transport, missingAgent) => {
       if (missingAgent)
         resumeSpy.mockRejectedValueOnce(new Error("Agent agent-old not found"));
@@ -280,7 +284,13 @@ describe("Cursor executor prewarm across a mode change", () => {
         mcpServers: [imported],
       });
       const warmed = prewarmSpy.mock.calls[0][0];
-      expect(warmed.local.settingSources).toEqual(["team"]);
+      expect(warmed.local.settingSources).toEqual([
+        "project",
+        "user",
+        "team",
+        "mdm",
+        "plugins",
+      ]);
       expect(warmed.mcpServers).toEqual({
         "imported-server": { type: transport, url: imported.url },
       });
@@ -402,5 +412,119 @@ describe("Cursor executor prewarm across a mode change", () => {
     await adapter.setMode({ sessionId, modeId: "not-a-mode" });
 
     expect(prewarmSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("Cursor session tools", () => {
+  async function withCursorConfigs(
+    run: (workspace: string) => Promise<void>,
+  ): Promise<void> {
+    const home = await mkdtemp(path.join(os.tmpdir(), "zeros-cursor-home-"));
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "zeros-cursor-ws-"));
+    const write = async (root: string, servers: Record<string, unknown>) => {
+      await mkdir(path.join(root, ".cursor"), { recursive: true });
+      await writeFile(
+        path.join(root, ".cursor", "mcp.json"),
+        JSON.stringify({ mcpServers: servers }),
+      );
+    };
+    try {
+      // The provider home is this process's HOME for an uncontained session.
+      vi.stubEnv("HOME", home);
+      await write(home, { "home-tools": { url: "https://example.test/home" } });
+      await write(workspace, {
+        "repo-tools": { command: "node", args: ["server.js"] },
+        imported: { url: "https://example.test/imported" },
+      });
+      await run(workspace);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+      await rm(workspace, { recursive: true, force: true });
+    }
+  }
+  const imported = {
+    name: "imported",
+    transport: "http" as const,
+    url: "https://example.test/imported",
+  };
+
+  it("lists MCP servers from Cursor's own settings in the Local folder", async () => {
+    await withCursorConfigs(async (workspace) => {
+      const adapter = new CursorSdkAdapter(makeCtx());
+      try {
+        const { session } = await adapter.newSession({
+          cwd: workspace,
+          env: { CURSOR_API_KEY: "key_test" },
+          mcpServers: [imported],
+        });
+        const sessionId = session.executionId;
+        const inventory =
+          await adapter.capabilityPorts.sessionTools.inventory({ sessionId });
+        expect(
+          inventory.groups
+            ?.find((group) => group.kind === "mcp")
+            ?.entries.map((entry) => [entry.name, entry.status, entry.source]),
+        ).toEqual([
+          ["imported", "error", undefined],
+          ["home-tools", "unverified", "local"],
+          ["repo-tools", "unverified", "local"],
+        ]);
+        // The strict legacy list carries only the admitted registry.
+        const list = await adapter.capabilityPorts.sessionTools.list({ sessionId });
+        expect(list.entries.map((entry) => entry.name)).toEqual(["imported"]);
+      } finally {
+        await adapter.dispose();
+      }
+    });
+  });
+
+  it("lists no Local servers when the host opt-out keeps native settings off", async () => {
+    await withCursorConfigs(async (workspace) => {
+      vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", "0");
+      const adapter = new CursorSdkAdapter(makeCtx());
+      try {
+        const { session } = await adapter.newSession({
+          cwd: workspace,
+          env: { CURSOR_API_KEY: "key_test" },
+          mcpServers: [imported],
+        });
+        const inventory = await adapter.capabilityPorts.sessionTools.inventory({
+          sessionId: session.executionId,
+        });
+        expect(
+          inventory.groups
+            ?.find((group) => group.kind === "mcp")
+            ?.entries.map((entry) => entry.name),
+        ).toEqual(["imported"]);
+      } finally {
+        await adapter.dispose();
+      }
+    });
+  });
+
+  it("keeps long local server names within the inventory wire limits", async () => {
+    await withCursorConfigs(async (workspace) => {
+      const prefix = "x".repeat(512);
+      await writeFile(path.join(workspace, ".cursor", "mcp.json"), JSON.stringify({
+        mcpServers: {
+          [prefix + "a"]: { command: "node" },
+          [prefix + "b"]: { command: "node" },
+        },
+      }));
+      const adapter = new CursorSdkAdapter(makeCtx());
+      try {
+        const { session } = await adapter.newSession({
+          cwd: workspace,
+          env: { CURSOR_API_KEY: "key_test" },
+        });
+        const inventory = await adapter.capabilityPorts.sessionTools.inventory({ sessionId: session.executionId });
+        expect(sessionToolsInventorySnapshotSchema.safeParse(inventory).success).toBe(true);
+        const entries = inventory.groups.find(group => group.kind === "mcp")!.entries;
+        expect(entries).toHaveLength(3);
+        expect(new Set(entries.map(entry => entry.id)).size).toBe(3);
+      } finally {
+        await adapter.dispose();
+      }
+    });
   });
 });

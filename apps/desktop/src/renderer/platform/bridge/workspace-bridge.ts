@@ -974,13 +974,13 @@ export async function bridgeAttachmentWrite(
   };
 }
 
-// ── Context graph (the Context tab's canvas) ────────────────
-// DESKTOP ONLY, same posture as `file.ignored`: the graph's `local/` scope is
-// gitignored private material, so the engine refuses remote callers outright.
-// The renderer façade (platform/context-graph.ts) short-circuits remote clients
+// ── Context graph (the workspace's `.context/` listing) ─────
+// DESKTOP ONLY, same posture as `file.ignored`: `.context/` holds private
+// workspace material, so the engine refuses remote callers outright. The
+// renderer façade (platform/context-graph.ts) short-circuits remote clients
 // before a round-trip is spent.
 
-/** Everything in the workspace's `.context/`, both scopes merged. */
+/** Everything in the workspace's `.context/`. */
 export async function bridgeContextGraphList(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1009,30 +1009,6 @@ export async function bridgeContextGraphScaffold(
   return {
     ok: r?.ok === true,
     created: r?.created === true,
-    ...(typeof r?.error === "string" ? { error: r.error } : {}),
-  };
-}
-
-/** Move one attachment folder between the private and shared scopes. */
-export async function bridgeContextGraphSetShared(
-  bridge: RuntimeClient,
-  workspaceId: string,
-  attachmentId: string,
-  shared: boolean,
-): Promise<{ ok: boolean; moved: boolean; error?: string }> {
-  const r = (await workspaceOp(
-    bridge,
-    "context.graph.setShared",
-    {
-      workspaceId,
-      attachmentId,
-      shared,
-    },
-    CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
-  )) as { ok?: boolean; moved?: boolean; error?: string } | undefined;
-  return {
-    ok: r?.ok === true,
-    moved: r?.moved === true,
     ...(typeof r?.error === "string" ? { error: r.error } : {}),
   };
 }

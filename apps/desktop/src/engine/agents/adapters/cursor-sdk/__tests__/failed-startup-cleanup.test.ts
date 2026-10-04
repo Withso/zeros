@@ -145,12 +145,16 @@ afterEach(async () => {
 
 describe("CursorSdkAdapter — failed contained startup cleanup", () => {
   it("refuses to replace missing cloud history with a fresh native agent", async () => {
-    vi.spyOn(cloudExecution,"cloudProviderExecution").mockReturnValue({productServers:[]} as unknown as cloudExecution.CloudProviderExecution);
+    vi.spyOn(cloudExecution,"cloudProviderExecution").mockReturnValue({
+      productServers: [],
+      lease: { customization: undefined },
+    } as unknown as cloudExecution.CloudProviderExecution);
     resumeSpy.mockRejectedValueOnce(new Error("Agent prior-agent-id not found"));
     const adapter=new CursorSdkAdapter(makeCtx());
     try {
       await expect(adapter.loadSession({sessionId:"prior-agent-id",cwd:root,env:{CURSOR_API_KEY:"key"},executionBoundary:boundary()})).rejects.toThrow("not found");
       expect(createSpy).not.toHaveBeenCalled();
+      expect(resumeSpy.mock.calls[0][1].local.settingSources).toEqual([]);
       expect(disposeSpy).toHaveBeenCalledTimes(1);
     } finally { await adapter.dispose(); }
   });
@@ -172,14 +176,20 @@ describe("CursorSdkAdapter — failed contained startup cleanup", () => {
     } finally { await adapter.dispose(); }
   });
 
-  it("loads team content under a Code actor's prepared boundary", async () => {
+  it("loads native settings layers under a Code actor's prepared boundary", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     await adapter.newSession({
       cwd: root,
       env: { CURSOR_API_KEY: "key" },
       executionBoundary: boundary(),
     });
-    expect(createSpy.mock.calls[0][0].local.settingSources).toEqual(["team"]);
+    expect(createSpy.mock.calls[0][0].local.settingSources).toEqual([
+      "project",
+      "user",
+      "team",
+      "mdm",
+      "plugins",
+    ]);
     expect(prewarmSpy.mock.calls[0][0].local).toEqual(
       createSpy.mock.calls[0][0].local,
     );

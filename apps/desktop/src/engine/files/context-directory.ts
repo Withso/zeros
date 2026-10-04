@@ -315,12 +315,13 @@ async function ignored(
   }
 }
 
-/** Called only for a sharing action or migration of already-shared content.
- * Re-open an ignored parent while keeping every sibling private. Ignore rules
- * inside shared subfolders are user-owned and still take precedence. */
-export async function exposeSharedContext(
+/** Called only while migrating `.context-graph/` content that an earlier
+ * build's share action made visible to Git, so it stays visible at its new
+ * path. Re-open an ignored parent while keeping every sibling private. Ignore
+ * rules inside shared subfolders are user-owned and still take precedence. */
+async function exposeSharedContext(
   workspaceRoot: string,
-  targets = [`${CONTEXT_DIR}/shared/attachments/`],
+  targets: string[],
 ): Promise<void> {
   // Some attachment users are ordinary folders, with no Git checkout at all.
   try {

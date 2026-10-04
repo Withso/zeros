@@ -32,32 +32,27 @@ const ZEROS_CONFIGURATION_SOURCE: AgentConfigurationSource = {
 
 /** Project the provider loaders Zeros actually enables. This is intentionally
  * static and privacy-preserving: it reports eligible layers, not file paths,
- * values, plugin names, rules, commands, or credentials. */
+ * values, plugin names, rules, commands, or credentials. Without
+ * `nativeSettingSources`, every layer is reported as loaded. */
 export function configurationProvenanceFor(
   providerId: SupportedProvenanceProvider,
   options: {
     protectedTerritory: boolean;
     suppressUnsafeSources: boolean;
-    nativeMcpRequiresImport?: boolean;
     nativeSettingSources?: readonly string[];
   },
 ): AgentConfigurationProvenance {
-  const nativeStatus: AgentConfigurationSource["status"] =
-    options.suppressUnsafeSources || options.nativeMcpRequiresImport
-      ? "suppressed"
-      : "loaded";
   return {
     providerId,
     protectedTerritory: options.protectedTerritory,
     sources: [
       ...CONFIGURATION_LAYERS[providerId].map((source) => {
-        const status = options.suppressUnsafeSources
-          ? "suppressed"
-          : options.nativeSettingSources
-            ? options.nativeSettingSources.includes(source.id)
-              ? "loaded"
-              : "suppressed"
-            : nativeStatus;
+        const status: AgentConfigurationSource["status"] =
+          options.suppressUnsafeSources ||
+          (options.nativeSettingSources &&
+            !options.nativeSettingSources.includes(source.id))
+            ? "suppressed"
+            : "loaded";
         return {
           ...source,
           status,
@@ -65,9 +60,7 @@ export function configurationProvenanceFor(
             ? {
                 reason: options.suppressUnsafeSources
                   ? "Suppressed to preserve protected workspace boundaries"
-                  : options.nativeSettingSources
-                    ? "Native source is not enabled for this session; local MCP servers require import in Customize"
-                    : "Native settings include local MCP servers, which require import in Customize",
+                  : "Native source is not enabled for this session",
               }
             : {}),
         };

@@ -253,7 +253,7 @@ export async function runConversationSummarySmoke({
       const first = await page.evaluate(() => window.__summaryHarness.state());
       expect(first.tabs.find((tab) => tab.id === first.activeId)).toMatchObject({
         type: "files",
-        filePath: ".context/local/attachments/3/Implementation plan.md",
+        filePath: ".context/attachments/3/Implementation plan.md",
       });
       expect(first.tabs.some((tab) => tab.type === "context")).toBe(false);
       await trigger.click();

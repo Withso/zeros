@@ -8,11 +8,19 @@
 // graph, replace both transcript copies with the same stable record id/path,
 // and upsert the compact payload. A failed copy leaves the old reference intact
 // so the chat remains viewable/editable.
+//
+// Current records share the chat layout's flat shape
+// (`.context/attachments/<attachmentId>/`). A flat reference is current only
+// when its folder is the reference's own attachment id.
 // ──────────────────────────────────────────────────────────
 
 import { createHash } from "node:crypto";
 import path from "node:path";
 
+import {
+  isContextAttachmentRecordPath,
+  parseContextAttachmentPath,
+} from "@zeros/protocol/attachment-policy";
 import type { PersistedMessage } from "../db/messages";
 import { upsertChatMessagesBulk } from "../db/messages";
 import { stageContextGraphAttachment } from "./context-graph";
@@ -34,16 +42,15 @@ interface MigratedImage {
 }
 
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
-const CONTEXT_GRAPH_PATH =
-  /^\.context(?:-graph)?\/(?:local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/[a-zA-Z0-9._-]+$/;
-const LEGACY_DISK_PATH =
-  /^\.context\/attachments\/[a-zA-Z0-9_-]{1,128}\/[a-zA-Z0-9._-]+$/;
+/** A persisted reference in the flat shape; tool payloads that merely mention
+ *  an attachment path don't match the field name. */
+const FLAT_DISK_PATH_FIELD = /"diskPath"\s*:\s*"\.context\/attachments\//;
 
 /** Cheap raw-payload gate shared with the window handlers. */
 export function payloadNeedsLegacyImageMigration(payload: string): boolean {
   return (
     (payload.includes('"thumbnailUri"') && payload.includes("data:image/")) ||
-    payload.includes(".context/attachments/")
+    FLAT_DISK_PATH_FIELD.test(payload)
   );
 }
 
@@ -113,13 +120,13 @@ export async function externalizeLegacyMessageImages(args: {
     const writes = new Map<string, Promise<MigratedImage | null>>();
     let changed = false;
     for (const ref of refs) {
-      const currentGraph =
+      const parsed =
         typeof ref.diskPath === "string"
-          ? CONTEXT_GRAPH_PATH.exec(ref.diskPath)
+          ? parseContextAttachmentPath(ref.diskPath)
           : null;
-      if (currentGraph) {
-        if (ref.attachmentId !== currentGraph[1]) {
-          ref.attachmentId = currentGraph[1];
+      if (parsed && isContextAttachmentRecordPath(parsed, ref.attachmentId)) {
+        if (ref.attachmentId !== parsed.folderId) {
+          ref.attachmentId = parsed.folderId;
           changed = true;
         }
         if (dataUrlParts(ref.thumbnailUri)) {
@@ -129,10 +136,9 @@ export async function externalizeLegacyMessageImages(args: {
         continue;
       }
 
+      // Anything else in the flat shape is a pre-graph chat folder.
       const legacyDiskPath =
-        typeof ref.diskPath === "string" && LEGACY_DISK_PATH.test(ref.diskPath)
-          ? ref.diskPath
-          : null;
+        parsed && !parsed.scope ? (ref.diskPath as string) : null;
       const inline = dataUrlParts(ref.thumbnailUri);
       if (!legacyDiskPath && !inline) continue;
       const source = legacyDiskPath ?? (ref.thumbnailUri as string);

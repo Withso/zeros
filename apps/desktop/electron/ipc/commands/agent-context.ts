@@ -91,14 +91,12 @@ function previewFile(
   }
 }
 
-/** The set of context-file names each agent loads. The renderer's
- *  agent-ui-registry knows the same
- *  facts (rulesFileName); we duplicate here to keep the IPC handler
- *  self-contained — agent ids cross the bridge as plain strings, no
- *  registry lookup possible main-side. */
+/** The set of context-file names each agent loads. Agent ids cross the
+ *  bridge as plain strings, so the facts live here. Zeros has Claude load
+ *  AGENTS.md beside CLAUDE.md (claude-sdk/adapter.ts). */
 function rulesFileNamesForAgent(agentId: string): string[] {
   const id = agentId.toLowerCase();
-  if (id.startsWith("claude")) return ["CLAUDE.md"];
+  if (id.startsWith("claude")) return ["CLAUDE.md", "AGENTS.md"];
   if (id.startsWith("codex") || id.includes("openai")) return ["AGENTS.md"];
   if (id.startsWith("cursor")) return ["AGENTS.md", "CLAUDE.md"];
   return ["AGENTS.md"];

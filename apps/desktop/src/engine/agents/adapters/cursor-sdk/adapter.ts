@@ -15,7 +15,13 @@ import { CursorUsageReconciler, cursorTokenUsage, sumCursorUsage } from "./usage
 
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { createHash, randomBytes, randomUUID, scrypt } from "node:crypto";
+import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
+import {
+  sessionToolGroups,
+  type SessionToolInventoryEntry,
+  type SessionToolsSnapshot,
+} from "@zeros/protocol/agent-extensions";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import type { AdvertisedModel } from "@zeros/protocol/agent-events";
 import { isDevRuntime } from "../../../runtime";
@@ -25,6 +31,7 @@ import { AgentFailureError } from "../../types";
 import { cloudProviderExecution, executionMcpServers } from "../../cloud-provider-execution";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
+import { scanCursorMcpServers } from "../../mcp-scan";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
 import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
 import { requireExplicitModel, requiresExactModel } from "../shared/exact-model-selection";
@@ -952,15 +959,30 @@ async function loadSdk(): Promise<CursorSdkModule> {
   return sdkPromise;
 }
 
-// The SDK's team source loads team rules and dashboard-managed skills without
-// enabling project/user/plugin MCP. Capture it once at admission; mode rebuilds
-// must reuse the same sources and must not widen a restricted actor's runtime.
-type CursorSettingSources = [] | ["team"];
+// Ordinary local Code chats load every Cursor settings layer, as the Cursor
+// app would: project and user rules, AGENTS.md, skills, plugins and MCP
+// servers declared in Cursor's own settings. A cloud execution's layers follow
+// its lease (host/cloud-policy.ts rewrites every request to the same value).
+// Restricted actors and the host opt-out keep only their admitted runtime.
+// Capture the sources once at admission: they key the SDK's executor cache,
+// so prewarm, create, resume and mode rebuilds must reuse them.
+const NATIVE_CURSOR_SETTING_SOURCES = [
+  "project",
+  "user",
+  "team",
+  "mdm",
+  "plugins",
+] as const;
+type CursorSettingSources = readonly (typeof NATIVE_CURSOR_SETTING_SOURCES)[number][];
 
 function cursorSettingSources(
   boundary?: PreparedBoundary,
 ): CursorSettingSources {
-  return nativeMcpPassthroughEnabled(undefined, boundary) ? ["team"] : [];
+  const cloud = cloudProviderExecution(boundary);
+  if (cloud) return cloud.lease.customization ? ["user"] : [];
+  return nativeMcpPassthroughEnabled(undefined, boundary)
+    ? NATIVE_CURSOR_SETTING_SOURCES
+    : [];
 }
 
 interface Session {
@@ -1046,20 +1068,16 @@ export class CursorSdkAdapter implements AgentAdapter {
   readonly agentId = AGENT_ID;
   readonly capabilityPorts = {
     sessionTools: {
-      list: async ({ sessionId }) => {
-        const session = this.sessions.get(sessionId);
-        if (!session) throw new Error("This chat session ended.");
+      list: async ({ sessionId }) => this.readSessionTools(sessionId),
+      inventory: async ({ sessionId }) => {
+        const list = this.readSessionTools(sessionId);
+        const local = this.localMcpEntries(sessionId, list.entries);
         return {
-          state: "unsupported" as const,
-          detail:
-            "Cursor does not report MCP connection status. Dashboard tools require Cursor-hosted agents.",
-          entries: (session.mcpServers ?? this.ctx.mcpServers).map(
-            (server) => ({
-              id: server.name,
-              name: server.name,
-              status: "error" as const,
-              detail: "Cursor cannot verify this connection through its SDK.",
-            }),
+          ...list,
+          groups: sessionToolGroups(list).map((group) =>
+            group.kind === "mcp"
+              ? { ...group, entries: [...group.entries, ...local] }
+              : group,
           ),
         };
       },
@@ -1068,7 +1086,6 @@ export class CursorSdkAdapter implements AgentAdapter {
       readProvenance: async (opts) =>
         configurationProvenanceFor("cursor", {
           protectedTerritory: Boolean(opts.territory),
-          nativeMcpRequiresImport: true,
           nativeSettingSources: cursorSettingSources(opts.executionBoundary),
           suppressUnsafeSources: Boolean(
             opts.territory && !opts.executionBoundary,
@@ -1078,6 +1095,49 @@ export class CursorSdkAdapter implements AgentAdapter {
   } satisfies import("../../types").AgentCapabilityPorts;
   private readonly ctx: AgentAdapterContext;
   private readonly sessions = new Map<string, Session>();
+
+  private readSessionTools(sessionId: string): SessionToolsSnapshot {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error("This chat session ended.");
+    return {
+      state: "unsupported",
+      detail:
+        "Cursor does not report MCP connection status. Dashboard tools require Cursor-hosted agents.",
+      entries: (session.mcpServers ?? this.ctx.mcpServers).map((server) => ({
+        id: server.name,
+        name: server.name,
+        status: "error",
+        detail: "Cursor cannot verify this connection through its SDK.",
+      })),
+    };
+  }
+
+  /** MCP servers Cursor's own settings declare for a session that loads them.
+   *  Cursor reports no connection status, so they stay unverified. */
+  private localMcpEntries(
+    sessionId: string,
+    admitted: readonly { name: string }[],
+  ): SessionToolInventoryEntry[] {
+    const session = this.sessions.get(sessionId);
+    if (!session?.settingSources.includes("project")) return [];
+    const taken = new Set(admitted.map((entry) => entry.name));
+    return scanCursorMcpServers(session.providerHome ?? homedir(), session.cwd)
+      .filter((server) => !taken.has(server.name))
+      .slice(0, Math.max(0, 1_000 - admitted.length))
+      .map((server) => ({
+        // Native configuration names are not constrained by our wire schema.
+        // Hash oversized identities so truncating their labels cannot merge
+        // two rows or invalidate the entire Tools inventory response.
+        id: server.name.length > 512
+          ? `local:${createHash("sha256").update(server.name).digest("hex")}`
+          : server.name,
+        name: server.name.slice(0, 512),
+        status: "unverified",
+        source: "local",
+        detail:
+          "Declared in Cursor's MCP settings. Cursor does not report whether it connected.",
+      }));
+  }
   private cachedInitialize: InitializeResponse | null = null;
   /** The most recently activated account feeds initialize metadata and new
    * admissions. Existing sessions retain the state object captured for their
@@ -2693,9 +2753,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       cwd,
       ...(additionalDirs.length > 0 ? { dirs: [cwd, ...additionalDirs] } : {}),
       ...(autoReview ? { autoReview: true } : {}),
-      // Team rules and managed skills have a separate SDK loading path. Keep
-      // project/user/plugins excluded: those also connect unimported MCP.
-      // Dashboard MCP still belongs to Cursor-hosted execution.
+      // Admission-time settings layers (see cursorSettingSources). Dashboard
+      // MCP still belongs to Cursor-hosted execution.
       settingSources: [...settingSources],
     };
     if (env?.CURSOR_SANDBOX === "1") {

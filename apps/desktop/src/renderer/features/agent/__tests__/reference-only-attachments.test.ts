@@ -17,7 +17,6 @@ import {
   transferContextAttachment,
   resetAttachmentTransfersForTests,
 } from "../../../../engine/files/attachment-transfer";
-import { setContextGraphAttachmentShared } from "../../../../engine/files/context-graph";
 import { encodeAttachments } from "../encode-attachments";
 import { messageToEditorContent } from "../composer-editor/reconstruct";
 import { resetFileAttachmentTransfersForTests } from "../file-attachment-transfer";
@@ -119,7 +118,7 @@ it("saves empty files and preserves metadata through repeated edits", async () =
   expect(second.bubbleAttachments).toEqual(first.bubbleAttachments);
 });
 
-it.each(["local", "shared", "legacy root"])(
+it.each(["current", "local", "shared", "legacy root"])(
   "preserves saved legacy text when resending an old transcript from %s",
   async (location) => {
     const body = "original attachment héllo\r\n";
@@ -129,8 +128,18 @@ it.each(["local", "shared", "legacy root"])(
       mimeType: "text/plain",
       base64: Buffer.from(body).toString("base64"),
     });
-    if (location === "shared")
-      await setContextGraphAttachmentShared(root, "att-original", true);
+    // Earlier builds kept records in a scope under `.context/` or the older
+    // `.context-graph/` root; resend resolves the record wherever it lives.
+    const scope = location === "shared" ? "shared" : "local";
+    if (location !== "current") {
+      await fs.mkdir(path.join(root, ".context", scope, "attachments"), {
+        recursive: true,
+      });
+      await fs.rename(
+        path.join(root, ".context/attachments/att-original"),
+        path.join(root, ".context", scope, "attachments/att-original"),
+      );
+    }
     if (location === "legacy root")
       await fs.rename(
         path.join(root, ".context"),

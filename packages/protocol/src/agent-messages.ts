@@ -144,11 +144,12 @@ export interface AgentTextMessageAttachment {
   /** Legacy data/file URL written by older clients. New messages must not put
    *  full-resolution image bytes in transcript JSON. */
   thumbnailUri?: string;
-  /** Cwd-relative attachment path under the workspace context graph. Its scope is
-   *  a hint because the Context tab can move the stable record after send. */
+  /** Cwd-relative attachment path under the workspace context graph. Older
+   *  rows may name a `local/` or `shared/` scope; reads resolve the record by
+   *  its id wherever it lives. */
   diskPath?: string;
   /** The composer attachment id this chip was encoded from — the key of its
-   *  `.context/<scope>/attachments/<id>/` record (provenance: the
+   *  `.context/attachments/<id>/` record (provenance: the
    *  graph is append-only, so the record outlives the chip, the queue row,
    *  and the send). Absent on pre-2026-08 rows; deliberately NOT reused by
    *  edit-in-place reconstruction, whose fresh `att-edit-` ids are what keep
@@ -176,9 +177,10 @@ export type MessageContentSegment =
       size?: number;
       /** Legacy data URL for images persisted by older clients. */
       thumbnailUri?: string;
-      /** Disk-backed attachment reference; its local/shared scope can become stale. */
+      /** Disk-backed attachment reference. Older rows may name a `local/` or
+       *  `shared/` scope; reads resolve the record by its id. */
       diskPath?: string;
-      /** Stable context-graph record id; local/shared is a movable scope. */
+      /** Stable context-graph record id. */
       attachmentId?: string;
     };
 

@@ -3472,22 +3472,12 @@ printf ran > '${sentinel}'
     const created = await createWorkspace({ repoRoot });
     expect(existsSync(path.join(created.path, ".context"))).toBe(false);
     await ensureContextGraph(created.path);
-    const ignore = await readFile(
-      path.join(created.path, ".context", ".gitignore"),
-      "utf8",
-    );
-    expect(ignore).toContain("/local/");
-    expect(
-      existsSync(
-        path.join(created.path, ".context", "local", "attachments"),
-      ),
-    ).toBe(true);
-    expect(
-      existsSync(
-        path.join(created.path, ".context", "shared", "attachments"),
-      ),
-    ).toBe(true);
-    // The scaffold is self-ignoring: a fresh workspace still reads clean.
+    // Only the attachments folder: no earlier-build scopes and no ignore
+    // rules. Whether .context is committed is the repository's choice.
+    expect(await fs.readdir(path.join(created.path, ".context"))).toEqual([
+      "attachments",
+    ]);
+    // An empty folder leaves a fresh workspace reading clean.
     const { stdout } = await execFileAsync("git", [
       "-C",
       created.path,
@@ -3510,31 +3500,38 @@ printf ran > '${sentinel}'
   });
 
   it.each([".context", ".context-graph"])(
-    "round-trips private %s attachments without archiving unrelated scratch",
+    "round-trips %s attachments and working files but never private tool state",
     async (directory) => {
       const created = await createWorkspace({ repoRoot });
-      // A real attachment write prepares its private storage on demand.
-      await ensureContextGraph(created.path);
-      // A composer attachment staged into the PRIVATE (gitignored) scope — the
-      // exact material `git add -A` alone would drop from the snapshot.
-      const attachmentDir = path.join(
-        created.path,
-        directory,
-        "local",
-        "attachments",
-        "att-test-1",
-      );
-      await mkdir(attachmentDir, { recursive: true });
-      if (directory === ".context-graph") {
-        await writeFile(
-          path.join(created.path, directory, ".gitignore"),
-          "/local/\n/.gitignore\n",
-        );
-      }
-      await writeFile(path.join(attachmentDir, "notes.md"), "# keep me\n");
+      // Like this repository, ignore all context so only force-added paths
+      // reach the snapshot; `git add -A` alone would drop them.
       await writeFile(
-        path.join(created.path, ".context", "scratch.txt"),
-        "unrelated scratch",
+        path.join(repoRoot, ".git", "info", "exclude"),
+        ".context/\n.context-graph/\n",
+      );
+      // A real attachment write prepares its storage on demand.
+      await ensureContextGraph(created.path);
+      const attachmentDir =
+        directory === ".context"
+          ? path.join(created.path, ".context", "attachments", "att-test-1")
+          : path.join(created.path, directory, "local", "attachments", "att-test-1");
+      await mkdir(attachmentDir, { recursive: true });
+      await writeFile(path.join(attachmentDir, "notes.md"), "# keep me\n");
+      await mkdir(path.join(created.path, ".context", "plan-task"), {
+        recursive: true,
+      });
+      await writeFile(
+        path.join(created.path, ".context", "plan-task", "plan.md"),
+        "the plan",
+      );
+      // Owner-only tool state, such as a development checkout binding.
+      await mkdir(path.join(created.path, ".context", "zeros-dev"), {
+        mode: 0o700,
+      });
+      await writeFile(
+        path.join(created.path, ".context", "zeros-dev", "owner.json"),
+        "{}",
+        { mode: 0o600 },
       );
 
       await archiveWorkspace({
@@ -3550,18 +3547,25 @@ printf ran > '${sentinel}'
         archiveSnapshotRef(created.workspaceId),
       ]);
       expect(snapshot).toContain(
-        `${directory}/local/attachments/att-test-1/notes.md`,
+        `${path.relative(created.path, attachmentDir)}/notes.md`,
       );
-      expect(snapshot).not.toContain(".context/scratch.txt");
+      expect(snapshot).toContain(".context/plan-task/plan.md");
+      expect(snapshot).not.toContain("zeros-dev");
       await restoreWorkspace(created.workspaceId);
 
       expect(await readFile(path.join(attachmentDir, "notes.md"), "utf8")).toBe(
         "# keep me\n",
       );
+      expect(
+        await readFile(
+          path.join(created.path, ".context", "plan-task", "plan.md"),
+          "utf8",
+        ),
+      ).toBe("the plan");
     },
   );
 
-  it("preserves migrated root documents through repeated archive/restore without including scratch", async () => {
+  it("preserves migrated root documents and working files through repeated archive/restore", async () => {
     const created = await createWorkspace({ repoRoot });
     await mkdir(path.join(created.path, ".context-graph", "docs"), {
       recursive: true,
@@ -3597,7 +3601,7 @@ printf ran > '${sentinel}'
       ]);
       expect(snapshot).toContain(".context/overview.md");
       expect(snapshot).toContain(".context/docs/plan.md");
-      expect(snapshot).not.toContain("scratch.md");
+      expect(snapshot).toContain(".context/docs/scratch.md");
       await restoreWorkspace(created.workspaceId);
       expect(
         await readFile(

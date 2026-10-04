@@ -1498,8 +1498,10 @@ Files provides a Design section with editable local source. Workspace Changes
 and Review observe the shared checkout. Direct Create PR publishes existing branch
 commits, preserving staged, unstaged and untracked Code and Design; if no branch
 commits exist it asks the user to review and commit first. The agent PR brief
-uses the same publication scope and no longer instructs commit-all. Push/pull
-also do not implicitly commit local changes. The current Review Changes tab
+treats the request as approval of the current code: it reviews and commits Code
+and Design changes together before pushing, leaves `.context/` out unless the
+user asks, and still stops for conflict markers or an operation in progress.
+Push/pull do not implicitly commit local changes. The current Review Changes tab
 compares the branch's committed HEAD with its base; it can include unpushed
 commits and is not yet a comparison pinned to the published remote PR head.
 Richer Design ownership badges/action handoff and remote visual evidence remain

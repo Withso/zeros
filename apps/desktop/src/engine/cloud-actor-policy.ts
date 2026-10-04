@@ -28,7 +28,7 @@ const edits=new Set([
   "design.frame.create","design.frame.rename","design.frame.duplicate","design.frame.delete","design.canvas.update",
   "design.node.styles","design.node.transfer","design.node.text","design.node.html","design.asset.insert",
   "design.stage","design.unstage","design.save","design.commit",
-  "context.graph.scaffold","context.graph.setShared","skills.saveZeros","skills.removeZeros",
+  "context.graph.scaffold","skills.saveZeros","skills.removeZeros",
   "workspace.setWorkingDirectories",
   "git.reset","git.restore","git.merge","git.cherryPick","git.revert","git.continue","git.abort",
   "git.stashApply","git.stashDrop","git.deleteBranch","git.stageHunk","git.unstageHunk","git.discardHunk","git.tagCreate","git.tagDelete",

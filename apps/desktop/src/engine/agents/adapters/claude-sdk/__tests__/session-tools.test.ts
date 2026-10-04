@@ -59,6 +59,42 @@ describe("Claude session tool connections", () => {
     );
   });
 
+  it("marks MCP servers from Claude's own settings files as Local only when asked", async () => {
+    const servers = [
+      { name: "repo-tools", status: "connected", scope: "project", source: "project" },
+      { name: "home-tools", status: "pending", scope: "user", source: "user" },
+      { name: "per-project", status: "failed", scope: "local", source: "local" },
+      // Zeros registry servers arrive through --mcp-config and report dynamic.
+      { name: "zeros-gateway", status: "connected", scope: "dynamic", source: "dynamic" },
+      { name: "claude-in-chrome", status: "connected", source: "dynamic" },
+      { name: "plugin-tools", status: "connected", scope: "user", source: "plugin" },
+      { name: "Calendar", status: "connected", scope: "claudeai", config: { type: "claudeai-proxy", id: "calendar", url: "x" } },
+    ];
+    const read = (markLocalServers: boolean) =>
+      readClaudeSessionTools(
+        { mcpServerStatus: vi.fn().mockResolvedValue(servers) },
+        {
+          includeInventory: true,
+          markLocalServers,
+          readConnectorMembership: vi.fn().mockResolvedValue({
+            memberships: new Map([["calendar", "connected"]]),
+            complete: true,
+          }),
+        },
+      );
+    const local = (result: Awaited<ReturnType<typeof read>>) =>
+      result.groups
+        ?.find((group) => group.kind === "mcp")
+        ?.entries.filter((entry) => entry.source === "local")
+        .map((entry) => entry.name);
+
+    const marked = await read(true);
+    expect(local(marked)).toEqual(["repo-tools", "home-tools", "per-project"]);
+    // The strict legacy list never carries the field.
+    expect(marked.entries.some((entry) => "source" in entry)).toBe(false);
+    expect(local(await read(false))).toEqual([]);
+  });
+
   it("does not turn a missing plugin receipt into an empty loaded-plugin inventory", () => {
     expect(claudeSessionPluginGroup(undefined).state).toBe("unsupported");
     expect(claudeSessionPluginGroup([])).toEqual({

@@ -82,8 +82,9 @@ continues to emit archive v1, and both versions remain readable by current setup
   normalized separately. Other `settings.local.toml` fields are not copied.
   Ignored legacy `.zeros/design/`, `.zeros/design-dir.toml` and
   `.zeros-canvas.json` remain recoverable without enrolling other `.zeros` state.
-- `.context/attachments` is an explicit native recovery scope. It does not enroll
-  the rest of `.context`, ignored dependency trees or arbitrary home directories.
+- `.context/attachments` is an explicit native recovery scope. It holds composer
+  attachments and the older chat-era transcript images. It does not enroll the
+  rest of `.context`, ignored dependency trees or arbitrary home directories.
 
 Git capture uses the documented
 [pack-objects](https://git-scm.com/docs/git-pack-objects) object-selection flags;

@@ -2,53 +2,48 @@
 // Stable context-graph attachment reads
 // ──────────────────────────────────────────────────────────
 //
-// Transcript rows outlive the Context tab's local/shared checkbox. The
-// checkbox moves an attachment folder, so the physical scope embedded in an
-// older `diskPath` is only a hint; the durable identity is the attachment id.
-// Reads try the persisted path first, then the other scope and the renamed
-// root. Legacy `.context/attachments/...` paths remain exact-only until their
-// transcript window copies them into the graph.
+// Transcript rows outlive the folder an attachment was first written to.
+// Records live at `.context/attachments/<id>/`; earlier builds wrote them under
+// a `local/` or `shared/` scope, and a retired share action could move them
+// between scopes after send. The durable identity is the attachment id: reads
+// try the persisted path first, then every location that id can occupy.
+// Pre-graph `.context/attachments/<chat>/...` paths remain exact-only until
+// their transcript window copies them into the graph.
 // ──────────────────────────────────────────────────────────
 
+import {
+  contextAttachmentLocations,
+  isContextAttachmentRecordPath,
+  parseContextAttachmentPath,
+} from "@zeros/protocol/attachment-policy";
 import { readWorkspaceFile, type ReadFileResult } from "../../platform/files";
 
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
-const GRAPH_ATTACHMENT_PATH =
-  /^(\.context(?:-graph)?)\/(local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/([a-zA-Z0-9._-]+)$/;
-const LEGACY_ATTACHMENT_PATH =
-  /^\.context\/attachments\/[a-zA-Z0-9_-]{1,128}\/[a-zA-Z0-9._-]+$/;
 
 export function isAgentAttachmentDiskPath(value: string): boolean {
-  return (
-    GRAPH_ATTACHMENT_PATH.test(value) || LEGACY_ATTACHMENT_PATH.test(value)
-  );
+  return parseContextAttachmentPath(value) !== null;
 }
 
-/** Exact path first, then the record's other movable scope and root. Invalid paths get
+/** Exact path first, then the record's other locations. Invalid paths get
  * no candidates, so a forged transcript cannot turn this fallback into a
  * general workspace-file reader. */
 export function agentAttachmentPathCandidates(args: {
   diskPath: string;
   attachmentId?: string;
 }): string[] {
-  const graph = GRAPH_ATTACHMENT_PATH.exec(args.diskPath);
-  if (!graph) {
-    return LEGACY_ATTACHMENT_PATH.test(args.diskPath) ? [args.diskPath] : [];
-  }
-  const [, directory, scope, pathAttachmentId, filename] = graph;
+  const parsed = parseContextAttachmentPath(args.diskPath);
+  if (!parsed) return [];
+  // A flat path alone cannot distinguish a chat folder from a record id.
+  if (!isContextAttachmentRecordPath(parsed, args.attachmentId))
+    return [args.diskPath];
   const attachmentId =
     args.attachmentId && ID_OK.test(args.attachmentId)
       ? args.attachmentId
-      : pathAttachmentId;
-  const otherScope = scope === "local" ? "shared" : "local";
-  const otherDirectory =
-    directory === ".context" ? ".context-graph" : ".context";
+      : parsed.folderId;
   return [
     ...new Set([
       args.diskPath,
-      `${directory}/${otherScope}/attachments/${attachmentId}/${filename}`,
-      `${otherDirectory}/${scope}/attachments/${attachmentId}/${filename}`,
-      `${otherDirectory}/${otherScope}/attachments/${attachmentId}/${filename}`,
+      ...contextAttachmentLocations(attachmentId, parsed.filename),
     ]),
   ];
 }
