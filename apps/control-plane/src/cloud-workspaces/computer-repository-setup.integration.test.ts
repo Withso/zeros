@@ -8,6 +8,7 @@ import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
+import { seedComputerTemplateRuntime, templateRuntime } from "./computer-template-test-fixtures.js";
 import { createCloudComputerV2Routes } from "./computer-v2-routes.js";
 import { DatabaseCloudWorkspaceManagementService } from "./management.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
@@ -180,13 +181,14 @@ d("Cloud Computer repository setup", () => {
   });
 
   it("accepts an active repository removed from the draft, but refuses unselected and cross-org IDs", async () => {
+    await seedComputerTemplateRuntime(pool);
     const built = await service.build(fixture.organizationId, fixture.userId, {
       expectedRevision: 1,
       operationId: randomUUID(),
     });
     const pins = {
-      baseImageId: "fixture-base",
-      runtimeId: "fixture-runtime",
+      baseImageId: templateRuntime.baseImageId,
+      runtimeId: templateRuntime.descriptor.runtimeId,
       repositoryManifest: [
         { id: "123", owner: "fixture-org", name: "repo", sha: "a".repeat(40) },
       ],

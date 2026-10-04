@@ -3,6 +3,7 @@ import type pg from "pg";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
+import { seedComputerTemplateRuntime, templateRuntime } from "./computer-template-test-fixtures.js";
 import {
   persistDatabaseCloudWorkspaceSettings,
   type DatabaseResolvedCloudWorkspaceSettings,
@@ -15,6 +16,7 @@ export async function pinTestComputerEnvironment(
   key: string,
   values: Record<string, string>,
 ) {
+  await seedComputerTemplateRuntime(pool);
   const service = new DatabaseCloudComputerV2Service(pool, {
     settingsSecretKeyV1: key,
   } as CloudWorkspaceBackendConfig);
@@ -33,8 +35,8 @@ export async function pinTestComputerEnvironment(
     },
   });
   const pins = {
-    baseImageId: "fixture-base",
-    runtimeId: "fixture-runtime",
+    baseImageId: templateRuntime.baseImageId,
+    runtimeId: templateRuntime.descriptor.runtimeId,
     repositoryManifest: [],
   };
   await service.claimNextBuild(1);
