@@ -213,3 +213,16 @@ schemas, no-store responses, closed error codes. Idempotent by exact identity; c
 - Staff-only (engineering staff) internal reads/actions for operators: `GET /v1/internal/cloud-runtime/status`
   (bases, recent runtimes, qualifications, channel head), `POST /v1/internal/cloud-runtime/runtimes/:id/revoke`,
   `POST /v1/internal/cloud-runtime/runtimes/:id/requalify` (B7).
+
+## 15. v4 setup redemption witness and engine row (2026-10-04, resolves B5b blockers)
+- The engine registration grant keeps today's issuance: `purpose = 'setup'` (setup-materials.ts), bound to the
+  setup run/fence. Migration 0124's v4 engine trigger must check that existing grant shape (copy the predicate
+  of the 0022 readiness backstop), NOT a new `engine-connect` purpose.
+- The installation witness enters the control plane at REDEMPTION: on v4 hosts the setup helper (running from
+  R after the installer succeeded) reads `/run/zeros/active-runtime.json` via the runtime-root resolver and
+  adds to its existing redemption request:
+  `runtime: {runtimeId, manifestSha256, baseCompatibilityId, installerReceiptSha256, bootId, supervisorSessionId}`.
+  Legacy (v1–v3) redemptions never send it; a v4 generation's redemption without it is rejected.
+- The CP compares runtimeId/manifestSha256/baseCompatibilityId with the generation pin and inserts the
+  `starting` engine row with all nine v4 columns in the same transaction as today's insert. Engine
+  registration later reports the same AgentRuntimeV4 identity and must match that row exactly.
