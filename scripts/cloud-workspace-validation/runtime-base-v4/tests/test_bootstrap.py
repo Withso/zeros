@@ -129,6 +129,9 @@ class FakeHost:
         self.setup_checks = []
         self.runtime = None
 
+    def load_apparmor(self):
+        pass
+
     def stop(self):
         self.calls.append("stop")
         self.state = "inactive"
@@ -164,7 +167,12 @@ class BootstrapTests(unittest.TestCase):
         compat = json.loads((HERE.parent / "compatibility.json").read_text())
         (bootstrap / "protected").write_bytes(b"base-owned")
         (bootstrap / "protected").chmod(0o555)
-        compat["protectedFiles"] = [{"path": "/opt/zeros-bootstrap/protected", "mode": "0555", "sha256": digest(b"base-owned")}]
+        profile = self.root / "etc/apparmor.d/zeros-cloud-engine"
+        profile.parent.mkdir(parents=True)
+        profile.write_bytes((HERE.parent / "zeros-cloud-engine.apparmor").read_bytes())
+        profile.chmod(0o444)
+        compat["protectedFiles"] = [{"path": "/opt/zeros-bootstrap/protected", "mode": "0555", "sha256": digest(b"base-owned")},
+                                    {"path": "/etc/apparmor.d/zeros-cloud-engine", "mode": "0444", "sha256": digest(profile.read_bytes())}]
         (bootstrap / "compatibility.json").write_bytes(canonical(compat))
         (bootstrap / "compatibility.json").chmod(0o444)
         self.app.boot()
@@ -197,6 +205,70 @@ class BootstrapTests(unittest.TestCase):
         self.app.boot()
         self.assertEqual((self.root / "opt/zeros/disk-epoch").read_text(), "1\n")
 
+    def test_restore_without_early_boot_reloads_apparmor_and_recreates_tmpfiles(self):
+        self.install()
+        previous = self.app.current()
+        (self.root / "zeros").unlink()
+        shutil.rmtree(self.root / "run/zeros")
+        self.app.host = b.SystemHost()
+        self.app.boot_id = lambda: "22222222-2222-4222-8222-222222222222"
+        loaded = False
+
+        def load(command, **kwargs):
+            nonlocal loaded
+            self.assertEqual(command, ["/usr/sbin/apparmor_parser", "-r", "-W", "/etc/apparmor.d/zeros-cloud-engine"])
+            self.assertEqual(kwargs, {"env": b.ENV, "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                                      "stderr": subprocess.DEVNULL, "timeout": 30, "check": False})
+            self.assertEqual(os.readlink(self.root / "zeros"), "/opt/zeros")
+            self.assertEqual((self.root / "run/zeros").stat().st_mode & 0o777, 0o700)
+            loaded = True
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(b.subprocess, "run", side_effect=load) as command:
+            self.app.boot()
+            self.assertTrue(loaded, "restore left the base AppArmor policy unloaded")
+            self.assertEqual((self.root / "run/zeros/boot-id").read_text(), self.app.boot_id())
+            self.assertEqual(self.app.current(), previous)
+            self.app.verify_runtime(previous)
+            epoch = self.app.epoch()
+            loaded = False
+            self.app.boot()
+            self.assertTrue(loaded, "boot must reload policy even when its kernel boot ID is unchanged")
+            self.assertEqual(command.call_count, 2)
+            self.assertEqual(self.app.epoch(), epoch)
+
+    def test_boot_verifies_the_protected_apparmor_profile_before_loading(self):
+        profile = self.root / "etc/apparmor.d/zeros-cloud-engine"
+        profile.chmod(0o644)
+        profile.write_bytes(b"unverified profile")
+        profile.chmod(0o444)
+        self.app.host = b.SystemHost()
+        with mock.patch.object(b.subprocess, "run") as command:
+            with self.assertRaises(b.Failure) as caught:
+                self.app.boot()
+            self.assertEqual(caught.exception.checks, ["base_compatibility"])
+            command.assert_not_called()
+
+    def test_boot_apparmor_failures_are_closed_and_do_not_publish_readiness(self):
+        self.app.host = b.SystemHost()
+        ready = self.root / "run/zeros/boot-id"
+        ready.unlink()
+        outcomes = (({"return_value": mock.Mock(returncode=1, stdout=b"private-canary", stderr=b"private-canary")}, 1, False),
+                    ({"side_effect": FileNotFoundError("private-canary")}, 1, False),
+                    ({"side_effect": PermissionError("private-canary")}, 1, False),
+                    ({"side_effect": subprocess.TimeoutExpired("private-canary", 30)}, 124, True))
+        for outcome, expected_code, timed_out in outcomes:
+            with self.subTest(outcome=expected_code, error=type(outcome.get("side_effect")).__name__), \
+                 mock.patch.object(b.subprocess, "run", **outcome) as command:
+                code, output = self.cli(["boot"])
+                self.assertEqual(code, expected_code)
+                self.assertEqual(json.loads(output), {"schema": "zeros.diagnostic/v1", "component": "bootstrap",
+                    "stage": "validate_input", "ok": False, "exitCode": expected_code, "timedOut": timed_out,
+                    "failedChecks": ["apparmor"]})
+                self.assertNotIn(b"private-canary", output)
+                self.assertFalse(ready.exists())
+                command.assert_called_once()
+
     def test_base_probe_waits_for_completed_boot_before_reading_metadata_or_facade(self):
         verifier = template("verify.py")
         (self.root / "zeros").unlink()
@@ -204,12 +276,17 @@ class BootstrapTests(unittest.TestCase):
         replies = [units(boot="activating", boot_sub="start", host="inactive", host_sub="dead"),
                    units(host="activating", host_sub="start"), units()]
         calls = []
+        loaded = False
         original_read = self.app.read
 
         class MetadataReached(Exception):
             pass
 
         def probe(command, **_kwargs):
+            nonlocal loaded
+            if command == ["/usr/sbin/apparmor_parser", "-r", "-W", "/etc/apparmor.d/zeros-cloud-engine"]:
+                loaded = True
+                return mock.Mock(returncode=0)
             calls.append(command)
             return mock.Mock(returncode=0, stdout=replies.pop(0))
 
@@ -219,6 +296,7 @@ class BootstrapTests(unittest.TestCase):
         def read(absolute, limit, mode=None):
             if absolute == "/etc/zeros/cloud-worker.json":
                 self.assertEqual(len(calls), 3, "verification read the base before both units completed startup")
+                self.assertTrue(loaded, "verification reached the profile check before boot loaded it")
                 self.assertEqual(os.readlink(self.root / "zeros"), "/opt/zeros")
                 raise MetadataReached()
             return original_read(absolute, limit, mode)
@@ -442,14 +520,14 @@ class BootstrapTests(unittest.TestCase):
             b.diagnostic("installer", self.app.stage, caught.exception.code, caught.exception)
         self.assertEqual(json.loads(output.getvalue()), {**golden, "failedChecks": ["setup_exit"]})
 
-    def cli(self):
+    def cli(self, argv=None):
         with binary_stdout() as output, \
              mock.patch.object(b, "Bootstrap", return_value=self.app), \
              mock.patch.object(b.os, "geteuid", return_value=0), \
              mock.patch.object(b.os, "umask"), \
              mock.patch.object(b.signal, "signal"), mock.patch.object(b.signal, "alarm"), \
              mock.patch.object(b.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(encoded(self.value)))):
-            code = b.main(["install", "--stdin"])
+            code = b.main(["install", "--stdin"] if argv is None else argv)
         return code, output.getvalue()
 
     def test_cli_preserves_legacy_helper_stdout_before_exactly_one_installer_diagnostic(self):

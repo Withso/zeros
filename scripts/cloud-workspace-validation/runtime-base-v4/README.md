@@ -56,6 +56,34 @@ in `/run/zeros/bootstrap-failures.jsonl` (root-only 0600, at most 64 KiB). This
 distinguishes assertions with the same public check without putting paths,
 inputs, exception messages or URLs in the closed diagnostic.
 
+## Boat restore and early-boot dependencies
+
+The orchestrator's Alpha restore/resume experiment showed that Boat overlays
+the saved filesystem onto a VM whose stock image has already completed early
+boot, then starts the enabled Zeros units. Files restored under `/etc` arrive
+after services such as AppArmor, tmpfiles, sysctl, sysusers, modules-load and
+udev have run. Their earlier success does not apply the restored configuration.
+
+Every `zeros-boot.service` invocation verifies the base's protected files,
+restores the facade and runtime directories, and runs the fixed command
+`/usr/sbin/apparmor_parser -r -W /etc/apparmor.d/zeros-cloud-engine`. Reloading is
+idempotent and also happens when the kernel boot ID has not changed. It is
+bounded to 30 seconds, suppresses command stdout/stderr, and fails with the
+closed bootstrap check `apparmor` if execution, loading or timeout fails.
+`zeros-host.service` requires this oneshot to complete successfully.
+Sanitation and verification wait for boot `active/exited` and host
+`active/running` before probing the loaded policy or facade.
+
+The base dependency audit is:
+
+| Dependency | Build/persistence | Restore action |
+| --- | --- | --- |
+| AppArmor policy | `build.sh` installs the protected profile and initially loads it. | `Bootstrap.boot()` reloads the verified profile into the current kernel before publishing boot readiness. |
+| `/zeros`, facade links, `/run/zeros` | `zeros.conf` supplies the alias and root-only runtime directory. | `Bootstrap.layout()` recreates and validates them directly, including ownership and modes, without relying on the earlier tmpfiles service. |
+| UIDs/groups 10001–10004 and subuid/subgid mappings | `build.sh` writes the account databases with `groupadd`, `useradd` and `usermod`; directory ownership is on disk. | The restored databases/directories are verified; there are no v4 sysusers rules to replay. |
+| Cgroup controllers and host limits | The service delegates CPU, memory and PIDs with `DelegateSubgroup=host`. | `SystemHost.cgroup()` checks the actual subtree, enables controllers and writes host limits on each dispatch. |
+| Sysctl, kernel modules and udev | The v4 profile installs no sysctl overrides, modules-load/modprobe configuration or udev rules. | No additional replay was identified in this base profile; stock kernel/device capabilities still require live qualification. |
+
 ## Local checks
 
 ```sh

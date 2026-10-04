@@ -1006,6 +1006,10 @@ class Bootstrap:
         self.base()
         self.layout()
         with self.lock("runtime-install.lock"), self.lock("runtime-publication.lock"):
+            # Boat overlays the saved disk after stock early-boot services
+            # have run. Reload verified base policy on every invocation,
+            # including a retry with the same kernel boot ID.
+            self.host.load_apparmor()
             self.stage = "switch_pointer"
             self.clean_staging()
             self.reconcile()
@@ -1075,6 +1079,17 @@ class Bootstrap:
 
 
 class SystemHost:
+    def load_apparmor(self):
+        try:
+            result = subprocess.run(["/usr/sbin/apparmor_parser", "-r", "-W", "/etc/apparmor.d/zeros-cloud-engine"],
+                                    env=ENV, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=30, check=False)
+        except subprocess.TimeoutExpired:
+            raise Failure("apparmor", code=124, timed_out=True) from None
+        except OSError:
+            raise Failure("apparmor") from None
+        require(result.returncode == 0, "apparmor")
+
     def wait_ready(self, timeout=30):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
