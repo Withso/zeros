@@ -181,6 +181,22 @@ describe("cloud image admission diagnostics", () => {
 });
 
 describe("cloud setup credential transport", () => {
+  it("requires the saved Cloud Computer tuple for a template image and refuses it on other images", () => {
+    const request = requestDocument();
+    request.expected.imageRef = "boat-template:bx_3456789a";
+    request.expected.repositoryRevision = "a".repeat(40);
+    const raw = { ...materialDocument(), version: 2, image: { ref: request.expected.imageRef,
+      sourceCommit: request.expected.imageSourceCommit, resources: { architecture: "linux/amd64", cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 } },
+      repository: { ...materialDocument().repository, revision: request.expected.repositoryRevision } };
+    const computer = { template: { schema: "zeros.computer-template/v1", buildId: WORKSPACE_ID, configId: ORGANIZATION_ID,
+      baseImageId: "zeros-v2-test-base", runtimeId: `r1-${"a".repeat(64)}`, baseCompatibilityId: `bc1-${"b".repeat(64)}`,
+      repositoryManifest: [{ id: "123", owner: "withso", name: "zeros", sha: "b".repeat(40) }], protectedContractDigest: "c".repeat(64) },
+      primaryRepositoryId: "123", requestedRevision: "feature/accepted" };
+    expect(() => parseCloudWorkspaceSetupMaterials(raw, request, NOW)).toThrow();
+    expect(parseCloudWorkspaceSetupMaterials({ ...raw, computer }, request, NOW).computer).toEqual(computer);
+    expect(() => parseCloudWorkspaceSetupMaterials({ ...materialDocument(), computer }, requestDocument(), NOW)).toThrow();
+    expect(() => parseCloudWorkspaceSetupMaterials({ ...raw, computer: { ...computer, primaryRepositoryId: "999" } }, request, NOW)).toThrow();
+  });
   it("reads a bounded request from SSH stdin without an environment or argv secret", async () => {
     const encoded = Buffer.from("test-request").toString("base64url");
     await expect(

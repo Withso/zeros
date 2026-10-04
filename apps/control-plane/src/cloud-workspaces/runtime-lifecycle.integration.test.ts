@@ -9,6 +9,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { requireCloudRecoveryPoint } from "./automatic-recovery.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { copyGenerationPins, loadGenerationSource } from "./generation-pins.js";
+import { seedComputerTemplate } from "./computer-workspace-test-fixtures.js";
 import { rollbackCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
 import { DatabaseCloudIdleStop } from "./idle-stop.js";
 import { DatabaseCloudWorkspaceManagementService } from "./management.js";
@@ -129,7 +130,55 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     return worker;
   }
 
-  it("copies the full pin at the single generation-copy boundary (extend here for Computer source pins)", async () => {
+  it.each(["wake", "retry", "recover", "automatic recovery", "upgrade"] as const)("retains the accepted computer source through %s after activation changes", async operation => {
+    const accepted = await withSystemTx(pool, async tx => {
+      const installationId = randomUUID();
+      await tx.query(`INSERT INTO github_installations(id,github_installation_id,app_variant,org_id,account_login,account_type,target_type)
+        VALUES($1,987654,'github.com',$2,'withso','Organization','Organization')`, [installationId,fixture.organizationId]);
+      const input = { organizationId: fixture.organizationId, ownerUserId: fixture.userId, installationId,
+        runtimeId: (await loadGenerationSource(tx, scope())).runtime!.runtimeId };
+      const computer = await seedComputerTemplate(tx, input);
+      await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
+        VALUES($1,1,$2,$3,$3,$4)`, [fixture.workspaceId,fixture.organizationId,computer.buildId,computer.configId]);
+      await seedComputerTemplate(tx, { ...input, version: 2 });
+      return { build_id: computer.buildId, template_id: computer.templateId, config_id: computer.configId };
+    });
+    const checkpointId = await finalCheckpoint();
+    await advanceHead();
+    if (operation === "automatic recovery") {
+      const worker = await failedWake();
+      await drain();
+      expect(await worker.runOnce()).toBe(true);
+    } else if (operation === "recover") {
+      expect((await route("/generations", { operation: "recover", sourceGeneration: 1, checkpointId })).status).toBe(202);
+    } else if (operation === "upgrade") {
+      expect((await upgrade()).status).toBe(202);
+    } else {
+      expect((await route("/wake")).status).toBe(202);
+      if (operation === "retry") {
+        await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
+        const run = (await pool.query(`INSERT INTO cloud_workspace_setup_runs(workspace_id,generation,org_id,attempt,state)
+          VALUES($1,1,$2,2,'queued') RETURNING id`, [fixture.workspaceId,fixture.organizationId])).rows[0];
+        await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='running' WHERE workspace_id=$1", [fixture.workspaceId]);
+        await pool.query("UPDATE cloud_workspaces SET status='setting_up' WHERE id=$1", [fixture.workspaceId]);
+        const execute = vi.fn(async () => { throw new CloudWorkspaceSetupError("setup_repository_unavailable", "Fixture retry", true); });
+        const worker = new CloudWorkspaceSetupWorker({ pool, recoveryConfig: config, intervalMs: 1000, maxClaims: 3,
+          sanitizeLog: value => value, executor: { execute } });
+        expect(await worker.runOnce()).toBe(true);
+        await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now() WHERE id=$1", [run.id]);
+        expect(await worker.runOnce()).toBe(true);
+        expect(execute).toHaveBeenCalledTimes(2);
+      }
+    }
+    // Wake and retry reuse generation 1. Replacements copy the same immutable
+    // build/template/config tuple even though a different build is now active.
+    const generations = operation === "wake" || operation === "retry" ? [1] : [1,2];
+    expect((await pool.query(`SELECT generation,build_id,template_id,config_id FROM cloud_workspace_computer_sources
+      WHERE workspace_id=$1 ORDER BY generation`, [fixture.workspaceId])).rows)
+      .toEqual(generations.map(generation => ({ generation, ...accepted })));
+  });
+
+  it("copies the full pin at the single generation-copy boundary", async () => {
     const source = await pin();
     await advanceHead();
     await withSystemTx(pool, async tx => {

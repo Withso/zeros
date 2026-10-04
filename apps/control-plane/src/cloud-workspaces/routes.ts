@@ -5,6 +5,7 @@ import { createCloudWorkspaceHistoryRoutes } from "./history-routes.js";
 import { authorizeCloudComputerBuild } from "./computer.js";
 import { resolveComputerImage } from "./computer-image.js";
 import { selectCloudRuntime, cloudRuntimePin, cloudRuntimePinValues, CloudRuntimeError, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
+import { pinComputerWorkspaceSource, resolveComputerRepositoryGrant, selectComputerWorkspaceSource, type CloudComputerWorkspaceSource } from "./computer-workspace-source.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { copyGenerationPins, loadGenerationSource, requireGenerationRuntime } from "./generation-pins.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
@@ -736,6 +737,7 @@ async function lockCloudOrganization(
 type AuthorizedGithubInstallation = {
   id: string;
   githubInstallationId: number;
+  repositoryId?: string;
 };
 
 function safeGithubInstallationId(value: string | number): number {
@@ -1906,14 +1908,28 @@ export function createCloudWorkspaceRoutes(
       forkFromLocal: body.forkFromLocal ?? null,
       ...(body.cloudComputerBuild ? { cloudComputerBuild: body.cloudComputerBuild } : {}),
     });
-    const selectCreateProfile = async (tx: Tx, input: { provider: CloudWorkspaceProvisioningProfile["provider"]; delegated: boolean; isPersonal: boolean }) => {
+    const selectCreateProfile = async (tx: Tx, input: { provider: CloudWorkspaceProvisioningProfile["provider"]; delegated: boolean; isPersonal: boolean;
+      expectedComputer?: CloudComputerWorkspaceSource | null }) => {
       const base = cloudWorkspaceProvisioningProfile(config, input.provider);
+      const selectedComputer = user.staffRole === "developer" || user.staffRole === "platform_owner"
+        ? await selectComputerWorkspaceSource(tx, { organizationId: orgId,
+          qualificationMode: config.runtime?.qualificationMode ?? "full",
+          ...(input.expectedComputer === undefined ? {} : { expectedActiveBuildId: input.expectedComputer?.buildId ?? null }),
+          ...(config.boat ? { accountScope: config.boat.accountScope, billingOrg: config.boat.billingOrg } : {}) }) : null;
+      if (selectedComputer) {
+        if (input.delegated || base.provider !== "boat")
+          throw new HttpError(409, "cloud_computer_template_unavailable", "The active Cloud Computer requires managed Boat compute.");
+        if (config.setupExecution && config.setupExecution.engineProtocolVersion !== CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION)
+          throw new HttpError(409, "cloud_runtime_unavailable", "A qualified cloud runtime is unavailable");
+        return { profile: { ...base, imageRef: selectedComputer.imageRef, sourceCommit: selectedComputer.sourceCommit,
+          architecture: selectedComputer.architecture, storageMiB: selectedComputer.storageMiB },
+        runtime: selectedComputer.runtime, computer: selectedComputer.source };
+      }
       const profile = input.delegated || input.isPersonal ? base : await resolveComputerImage(tx, orgId, base);
-      // Phase C owns template forks. Existing selected organization images and
-      // customer providers retain their own admission path.
+      // Unenrolled organizations and non-staff retain the existing image/base switch.
       const v4 = config.runtime?.newWorkspaceProfile === "v4" && profile.provider === "boat" && !input.delegated &&
         profile.imageRef === base.imageRef && (!config.runtime.staffOnly || user.staffRole === "developer" || user.staffRole === "platform_owner");
-      if (!v4) return { profile, runtime: null as CloudRuntimePin | null };
+      if (!v4) return { profile, runtime: null as CloudRuntimePin | null, computer: null as CloudComputerWorkspaceSource | null };
       // Older protocol overrides support legacy rolling deployments. V4 is
       // qualified only for the current tested protocol, including setup.
       if (config.setupExecution && config.setupExecution.engineProtocolVersion !== CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION)
@@ -1921,7 +1937,7 @@ export function createCloudWorkspaceRoutes(
       const selected = await selectCloudRuntime(tx, config.runtime!.qualificationMode);
       if (!selected) throw new HttpError(409, "cloud_runtime_unavailable", "A qualified cloud runtime is unavailable");
       return { profile: { ...profile, imageRef: selected.base.imageRef, sourceCommit: selected.base.sourceCommit,
-        architecture: selected.base.architecture, storageMiB: selected.base.storageMiB }, runtime: selected.pin };
+        architecture: selected.base.architecture, storageMiB: selected.base.storageMiB }, runtime: selected.pin, computer: null };
     };
     const assertCreateReplay = async (tx: Tx, existing: IntentRow) => {
       // Preserve the original request digest format, using its accepted immutable
@@ -2006,7 +2022,7 @@ export function createCloudWorkspaceRoutes(
           "Cloud provider connection not found",
         );
       }
-      const { profile } = await selectCreateProfile(tx, { provider: providerConnection?.provider ?? config.provider,
+      const { profile, computer } = await selectCreateProfile(tx, { provider: providerConnection?.provider ?? config.provider,
         delegated: providerConnection?.credentialSource === "delegated", isPersonal: authorization.isPersonal });
       if (body.forkFromLocal) {
         const collision = await tx.query(
@@ -2021,7 +2037,10 @@ export function createCloudWorkspaceRoutes(
           );
         }
       }
-      const installation = await resolveAuthorizedGithubInstallation(tx, {
+      const installation = computer ? await resolveComputerRepositoryGrant(tx, {
+        organizationId: orgId, configId: computer.configId, owner: body.repository.owner, name: body.repository.name,
+        installationId: body.repository.githubInstallationId,
+      }) : await resolveAuthorizedGithubInstallation(tx, {
         installationRecordId: body.repository.githubInstallationId,
         organizationId: orgId,
         actorUserId: user.id,
@@ -2033,6 +2052,7 @@ export function createCloudWorkspaceRoutes(
         teamId,
         installation,
         profile,
+        computer,
         providerConnection,
       };
     });
@@ -2056,6 +2076,8 @@ export function createCloudWorkspaceRoutes(
         installationId: preflight.installation.githubInstallationId,
         owner: body.repository.owner,
         repository: body.repository.name,
+        ...(preflight.computer ? { repositoryId: preflight.installation.repositoryId!,
+          revision: body.repository.revision } : {}),
       });
     } catch {
       throw new HttpError(
@@ -2107,7 +2129,16 @@ export function createCloudWorkspaceRoutes(
           workosEnabled: options.workosEnabled === true,
           requireWorkspaceOwner: true,
         });
-      const installation = await resolveAuthorizedGithubInstallation(tx, {
+      const { profile, runtime, computer } = await selectCreateProfile(tx, { provider: preflight.providerConnection?.provider ?? config.provider,
+        delegated: preflight.providerConnection?.credentialSource === "delegated", isPersonal: authorization.isPersonal,
+        expectedComputer: preflight.computer });
+      if (computer?.buildId !== preflight.computer?.buildId || computer?.configId !== preflight.computer?.configId ||
+        computer?.sourceSandboxId !== preflight.computer?.sourceSandboxId)
+        throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed during workspace creation. Refresh before trying again.");
+      const installation = computer ? await resolveComputerRepositoryGrant(tx, {
+        organizationId: orgId, configId: computer.configId, owner: body.repository.owner, name: body.repository.name,
+        installationId: body.repository.githubInstallationId, repositoryId: resolvedRepository.forgeRepositoryId,
+      }) : await resolveAuthorizedGithubInstallation(tx, {
         installationRecordId: body.repository.githubInstallationId,
         organizationId: orgId,
         actorUserId: user.id,
@@ -2127,10 +2158,11 @@ export function createCloudWorkspaceRoutes(
       }
 
       const quota = await loadQuota(tx, orgId);
-      const { profile, runtime } = await selectCreateProfile(tx, { provider: preflight.providerConnection?.provider ?? config.provider,
-        delegated: preflight.providerConnection?.credentialSource === "delegated", isPersonal: authorization.isPersonal });
       if (!runtime && profile.imageRef !== preflight.profile.imageRef)
         throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed during workspace creation. Try again.");
+      if (computer && (!resolvedRepository.resolvedRevision || !FullCommitPattern.test(resolvedRepository.resolvedRevision) ||
+        (FullCommitPattern.test(body.repository.revision) && resolvedRepository.resolvedRevision !== body.repository.revision)))
+        throw new HttpError(409, "cloud_computer_repository_unavailable", "The requested repository revision could not be verified.");
       const normalized = normalize(profile);
       const digest = requestDigest(normalized);
       assertCreateQuota(quota, await loadUsage(tx, orgId), profile);
@@ -2259,6 +2291,7 @@ export function createCloudWorkspaceRoutes(
           ...cloudRuntimePinValues(runtime),
         ],
       );
+      if (computer) await pinComputerWorkspaceSource(tx, { workspaceId, organizationId: orgId, generation: 1, source: computer });
       const computerProfile = body.cloudComputerBuild ? await authorizeCloudComputerBuild(tx, {
         organizationId: orgId, actorUserId: user.id, version: body.cloudComputerBuild.version,
         repositoryOwner: resolvedRepository.owner, repositoryName: resolvedRepository.name,
@@ -2314,7 +2347,7 @@ export function createCloudWorkspaceRoutes(
           resolvedRepository.forge,
           resolvedRepository.owner,
           resolvedRepository.name,
-          body.repository.revision,
+          computer ? resolvedRepository.resolvedRevision! : body.repository.revision,
           body.repository.githubInstallationId,
           settings.document,
           settings.id,

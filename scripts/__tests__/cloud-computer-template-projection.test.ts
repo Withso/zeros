@@ -91,6 +91,7 @@ describe("computer template repository projection", () => {
         for (const name of [
           "cloud-engine-launcher.mjs",
           "cloud-engine-view.mjs",
+          "cloud-computer-checkout.mjs",
           "cloud-engine-cgroup.mjs",
           "cloud-runtime-profile.mjs",
           "cloud-runtime-root.mjs",

@@ -2,6 +2,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import * as filesystem from "node:fs";
+import { cloudComputerHostRepository } from "./cloud-computer-checkout.mjs";
 import {
   chmodSync,
   closeSync,
@@ -910,7 +911,7 @@ function v4DelegatedResources(runtime, qualification) {
   requireCloudV4Check(resources?.finite === true &&
     [resources.memoryMax, resources.pidsMax].every(value => typeof value === "string" && /^[1-9][0-9]{0,15}$/.test(value) && Number.isSafeInteger(Number(value))) &&
     typeof resources.cpuMax === "string" && /^[1-9][0-9]{0,15} [1-9][0-9]{0,15}$/.test(resources.cpuMax), "finite_resources");
-  const storage = statfsSync(runtimeLayout.repository, { bigint: true });
+  const storage = statfsSync(cloudComputerHostRepository(runtime), { bigint: true });
   const allocation = cloudAllocationCapacity({ isolated: false, membership: `0::${relative}\n`, read: readOptional,
     architecture: process.arch, availableCPUs: availableParallelism(), storageBytes: Number(storage.blocks * storage.bsize) });
   requireCloudV4Check([allocation.cpuMillicores, allocation.memoryBytes, allocation.storageBytes].every(value => Number.isSafeInteger(value) && value > 0), "finite_resources");

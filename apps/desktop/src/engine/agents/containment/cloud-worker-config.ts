@@ -107,7 +107,7 @@ export function parseCloudWorkerConfiguration(
   };
 }
 
-function assertRootControlledPath(
+export function assertRootControlledPath(
   file: string,
   leafKind: "file" | "directory" = "file",
 ): void {

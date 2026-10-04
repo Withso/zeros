@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { ExecutionBoundaryActor } from "@zeros/protocol/containment";
+import { expandCloudWorkspacePaths, loadCloudWorkspacePaths } from "./cloud-workspace-paths";
 
 import {
   zerosChannelDataDir,
@@ -760,6 +761,7 @@ export async function prepareZsrPolicy(
   if (localPorts.length > 256 || localPorts.some((port) => !validPort(port))) {
     throw new Error("local service ports must be 256 valid TCP ports or fewer");
   }
+  const workspacePaths = options.cloudWorker ? loadCloudWorkspacePaths() : null;
   const document: ZsrPolicyDocument = {
     version: ZSR_POLICY_VERSION,
     executionId: request.executionId,
@@ -767,7 +769,12 @@ export async function prepareZsrPolicy(
     actor: request.actor,
     cwd,
     workspaceRoot,
-    filesystem: { allowRead, allowWrite, denyWrite, denyRead },
+    filesystem: {
+      allowRead: expandCloudWorkspacePaths(allowRead, workspacePaths),
+      allowWrite: expandCloudWorkspacePaths(allowWrite, workspacePaths),
+      denyWrite: expandCloudWorkspacePaths(denyWrite, workspacePaths),
+      denyRead: expandCloudWorkspacePaths(denyRead, workspacePaths),
+    },
     runtime: {
       normalNetwork: true,
       allowPty: true,

@@ -29,6 +29,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { currentCloudFilePolicy } from "./cloud-file-policy";
 import { createAttachmentTemporaryDirectory } from "./attachment-temporary-directory";
+import { cloudWorkspacePublicationPath } from "../agents/containment/cloud-workspace-paths";
 import { cleanupLegacyAttachmentStaging } from "./attachment-legacy-staging";
 import {
   assertContextDirectory,
@@ -540,6 +541,9 @@ async function atomicWriteAttachment(
   contents: AttachmentContents,
   workspaceRoot: string,
 ): Promise<void> {
+  // The template's logical workspace is a separate bind mount. Keep the
+  // already-authorized destination on the same shared mount as staging.
+  const publicationPath = cloudWorkspacePublicationPath(filePath);
   const temporary = await createAttachmentTemporaryDirectory(workspaceRoot);
   const temporaryPath = path.join(
     temporary.path,
@@ -564,7 +568,7 @@ async function atomicWriteAttachment(
     handle = null;
     if (!Buffer.isBuffer(contents)) await contents.verify?.();
     try {
-      await fs.rename(temporaryPath, filePath);
+      await fs.rename(temporaryPath, publicationPath);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (
@@ -578,8 +582,8 @@ async function atomicWriteAttachment(
       // The destination is a directory-shaped squatter. Remove the entry and
       // retry the rename; rename itself still replaces any file/symlink planted
       // in the gap rather than following it.
-      await fs.rm(filePath, { recursive: true, force: true });
-      await fs.rename(temporaryPath, filePath);
+      await fs.rm(publicationPath, { recursive: true, force: true });
+      await fs.rename(temporaryPath, publicationPath);
     }
   } finally {
     await handle?.close().catch(() => {});

@@ -15,6 +15,8 @@ export type CloudWorkspaceRepositoryIdentity = {
   webUrl: string;
   defaultBranch: string;
   visibility: "private" | "internal" | "public";
+  /** Present only when a create admission resolves a requested ref to a commit. */
+  resolvedRevision?: string;
 };
 
 export interface CloudWorkspaceRepositoryResolver {
@@ -22,10 +24,13 @@ export interface CloudWorkspaceRepositoryResolver {
     installationId: number;
     owner: string;
     repository: string;
+    repositoryId?: string;
+    revision?: string;
   }): Promise<CloudWorkspaceRepositoryIdentity>;
 }
 
 type RepositoryCredential = {
+  mintContentsRead?(input: { installationId: number; repositoryId: number }): Promise<{ token: string; expiresAtMs: number }>;
   mint(input: {
     installationId: number;
     owner: string;
@@ -185,6 +190,8 @@ export class GithubCloudWorkspaceRepositoryResolver
     installationId: number;
     owner: string;
     repository: string;
+    repositoryId?: string;
+    revision?: string;
   }): Promise<CloudWorkspaceRepositoryIdentity> {
     if (
       !Number.isSafeInteger(input.installationId) ||
@@ -195,7 +202,11 @@ export class GithubCloudWorkspaceRepositoryResolver
       throw unavailable();
     }
 
-    const minted = await this.credential.mint(input).catch(() => {
+    if (input.revision !== undefined) requiredGitBranch(input.revision);
+    const immutableId = input.repositoryId === undefined ? null : Number(repositoryId(input.repositoryId));
+    if (immutableId !== null && (!Number.isSafeInteger(immutableId) || !this.credential.mintContentsRead)) throw unavailable();
+    const minted = await (immutableId === null ? this.credential.mint(input) :
+      this.credential.mintContentsRead!({ installationId: input.installationId, repositoryId: immutableId })).catch(() => {
       throw unavailable();
     });
     let resolved: CloudWorkspaceRepositoryIdentity | null = null;
@@ -251,6 +262,24 @@ export class GithubCloudWorkspaceRepositoryResolver
         defaultBranch,
         visibility: visibility(body.visibility, body.private),
       };
+      if (input.repositoryId !== undefined && resolved.forgeRepositoryId !== input.repositoryId) throw unavailable();
+      if (input.revision !== undefined) {
+        const response = await this.fetch(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${encodeURIComponent(input.revision)}`,
+          { method: "GET", redirect: "error", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), headers: {
+            accept: "application/vnd.github+json", authorization: `Bearer ${minted.token}`,
+            "user-agent": "zeros-control-plane", "x-github-api-version": GITHUB_API_VERSION,
+          } },
+        );
+        if (response.status !== 200) {
+          await response.body?.cancel().catch(() => undefined);
+          throw unavailable();
+        }
+        const commit = await boundedJson(response) as { sha?: unknown } | null;
+        if (!commit || typeof commit.sha !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit.sha) ||
+          (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(input.revision) && commit.sha !== input.revision)) throw unavailable();
+        resolved.resolvedRevision = commit.sha;
+      }
     } catch {
       resolutionFailed = true;
     }

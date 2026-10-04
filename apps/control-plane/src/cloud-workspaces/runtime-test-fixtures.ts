@@ -72,7 +72,7 @@ export const runtimeWitness = {
   supervisorSessionId: "22222222-2222-4222-8222-222222222222",
 };
 
-export async function seedRuntimeGeneration(tx: Tx, input: { workspaceId: string; organizationId: string; ownerUserId: string }) {
+export async function seedRuntimeGeneration(tx: Tx, input: { workspaceId: string; organizationId: string; ownerUserId: string; imageRef?: string }) {
   await seedRuntimeBase(tx);
   const runtime = await seedRuntimeBundle(tx);
   const connection = await ensureHostedCloudProviderConnection(tx, { organizationId: input.organizationId,
@@ -81,7 +81,7 @@ export async function seedRuntimeGeneration(tx: Tx, input: { workspaceId: string
     architecture, cpu_millicores, memory_mib, storage_mib, source_commit, created_by, provider_connection_id,
     runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id, runtime_profile, runtime_engine_protocol_version)
     VALUES ($1, 1, $2, 'boat', $3, 'linux/amd64', 2000, 4096, $4, $5, $6, $7, $8, $9, $10, $11, 'zeros-cloud-worker-v4', $12)`,
-  [input.workspaceId, input.organizationId, runtimeBase.imageRef, runtimeBase.storageMiB, runtimeBase.sourceCommit,
+  [input.workspaceId, input.organizationId, input.imageRef ?? runtimeBase.imageRef, runtimeBase.storageMiB, runtimeBase.sourceCommit,
     input.ownerUserId, connection.id, runtime.pin.runtimeId, runtime.pin.manifestSha256, runtimeBase.id,
     runtimeBase.compatibilityId, runtime.pin.engineProtocolVersion]);
   return { ...runtime, providerConnectionId: connection.id };

@@ -128,7 +128,7 @@ function heredocBody(script: string) {
 }
 
 describe("Boat image kit", () => {
-  it("preserves the qualified build recipe apart from the layout migration and shared resolver", () => {
+  it("preserves the qualified build recipe apart from the layout migration and shared helpers", () => {
     const script = fillTemplate("build.sh", {
       SOURCE_COMMIT: "aa11196c97a69ec4d1ef430dc1c6d0b36256f41d",
       IMAGE_CONTRACT_SHA256: "4b8ae9a31462b29cd502d3a0274edea1daf0058d758e3ab19ede1d2f32d8e2ed",
@@ -137,9 +137,11 @@ describe("Boat image kit", () => {
     expect(script).toContain(migration);
     const resolver = " cloud-runtime-root.mjs";
     expect(script).toContain(`cloud-runtime-profile.mjs${resolver} cloud-engine-cgroup.mjs`);
+    const checkout = " cloud-computer-checkout.mjs";
+    expect(script).toContain(`cloud-setup-process.mjs${checkout} cloud-engine-view.mjs`);
     // Historical recipe compatibility, not qualification of the new image.
     // The new layout/source still requires fresh immutable-image attestation.
-    expect(sha256(script.replace(migration, "").replace(resolver, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
+    expect(sha256(script.replace(migration, "").replace(resolver, "").replace(checkout, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
   });
 
   it("keeps templates free of build identities and private paths", () => {
