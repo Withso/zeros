@@ -203,6 +203,17 @@ describe("DaytonaCloudWorkspaceSetupExecutor", () => {
         stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] }) + "\n" });
     await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_repository_unavailable", retryable: true });
   });
+  it("retains only bounded redacted v4 hook logs and requires an explicit retry", async () => {
+    const f=v4(),hookLog={version:1,text:"Install failed: [redacted]\n",truncated:false};
+    const failure={version:3,audience:"zeros-cloud-workspace-setup-result-v1",outcome:"error",code:"setup_command_failed",diagnostic:{version:1,phase:"repository"},hookLog};
+    const output=(value:unknown)=>JSON.stringify(value)+"\n"+JSON.stringify({...f.installerDiagnostic,stage:"run_setup",ok:false,exitCode:1,failedChecks:["setup_exit"]})+"\n";
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({exitCode:1,output:output(failure),outputTruncated:false});
+    await expect(f.executor.execute(f.input,new AbortController().signal)).rejects.toMatchObject({code:"setup_command_failed",retryable:false,hookLog});
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({exitCode:1,output:output({...failure,hookLog:{...hookLog,text:"x".repeat(16385)}}),outputTruncated:false});
+    const rejected=await f.executor.execute(f.input,new AbortController().signal).catch(error=>error);
+    expect(rejected.hookLog).toBeUndefined();
+    expect(String(rejected)).not.toContain("x".repeat(100));
+  });
   it("rejects oversized v4 stdin and invalid or missing installer success diagnostics", async () => {
     const f = v4();
     f.runtimeArtifacts.presignGet.mockResolvedValueOnce({ ...f.artifact, url: "https://artifacts.example.test/" + "x".repeat(64 * 1024) });

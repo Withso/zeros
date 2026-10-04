@@ -4,6 +4,21 @@ import * as wire from "../cloud-computer-v2";
 import * as backend from "../../../../apps/control-plane/src/cloud-workspaces/computer-v2-contract";
 
 describe("Cloud Computer v2 request contracts", () => {
+  it.each(["ZEROS_INTERNAL_TOKEN", "ZEROS_GIT_AUTH_TOKEN", "NODE_REPL_EXTERNAL_MODULE", "BASHOPTS", "SHELLOPTS", "PROMPT_COMMAND", "SSH_ASKPASS", "EDITOR", "VISUAL", "PAGER", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "NODE_TLS_REJECT_UNAUTHORIZED"])("rejects execution control name %s in both draft validators", name => {
+    const operation={op:"set",name,value:"synthetic-value"};
+    expect(wire.CloudComputerV2EnvironmentOperationSchema.safeParse(operation).success).toBe(false);
+    expect(backend.CloudComputerV2EnvironmentOperationSchema.safeParse(operation).success).toBe(false);
+  });
+  it.each([
+    [{expectedSettingsVersion:0,operationId:randomUUID(),script:"",timeoutSeconds:900},true],
+    [{expectedSettingsVersion:2,operationId:randomUUID(),script:"npm install",timeoutSeconds:30},true],
+    [{expectedSettingsVersion:0,operationId:randomUUID(),script:"é".repeat(8193),timeoutSeconds:900},false],
+    [{expectedSettingsVersion:0,operationId:randomUUID(),script:"true",timeoutSeconds:901},false],
+    [{expectedSettingsVersion:0,operationId:randomUUID(),script:"true",timeoutSeconds:1,values:{}},false],
+  ])("keeps the narrow repository setup contract in parity (%#)",(input,accepted)=>{
+    expect(wire.CloudComputerV2RepositorySetupSchema.safeParse(input).success).toBe(accepted);
+    expect(backend.CloudComputerV2RepositorySetupSchema.safeParse(input).success).toBe(accepted);
+  });
   const draft = { repositories: [], installScript: "", timeoutSeconds: 900 };
   const repository = {
     id: "123",

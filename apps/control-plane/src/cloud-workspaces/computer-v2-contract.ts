@@ -18,6 +18,29 @@ const environmentName = z
         value.startsWith(prefix),
       ) &&
       ![
+        "BASHOPTS",
+        "SHELLOPTS",
+        "PROMPT_COMMAND",
+        "PS4",
+        "NODE_REPL_EXTERNAL_MODULE",
+        "SSH_ASKPASS",
+        "PAGER",
+        "EDITOR",
+        "VISUAL",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "NODE_USE_ENV_PROXY",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_URL",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "ANTHROPIC_VERTEX_BASE_URL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+        "GOOGLE_GEMINI_BASE_URL",
+        "GOOGLE_VERTEX_BASE_URL",
         "BASH_ENV",
         "ENV",
         "HOME",
@@ -139,6 +162,16 @@ export const CloudComputerV2BuildRequestSchema = z
 export const CloudComputerV2VersionRequestSchema = z
   .object({ expectedRevision: revision, operationId: z.string().uuid() })
   .strict();
+export const CloudComputerV2RepositorySetupSchema = z.object({
+  expectedSettingsVersion: revision,
+  operationId: z.string().uuid(),
+  script: z.string().max(CLOUD_COMPUTER_V2_MAX_SCRIPT_BYTES).refine(
+    value => !value.includes("\0") && bytes(value) <= CLOUD_COMPUTER_V2_MAX_SCRIPT_BYTES,
+  ),
+  timeoutSeconds: z.number().int().min(1).max(900),
+}).strict();
+export type CloudComputerV2RepositorySetupRequest = z.infer<typeof CloudComputerV2RepositorySetupSchema>;
+export type CloudComputerV2RepositorySetupResult = { repositoryId: string; version: number };
 export const CloudComputerV2BuildStateSchema = z.enum([
   "queued",
   "running",

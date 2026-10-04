@@ -30,6 +30,8 @@ import {
   cloudWorkspaceImageAdmissionDiagnostic,
   parseRecoveryManifestPage,
   parseRecoveryDesignSelection,
+  redactCloudWorkspaceSetupHookLog,
+  redeemMaterials,
 } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 import {
   CLOUD_WORKER_SUPERVISOR_AUDIENCE,
@@ -45,6 +47,35 @@ const ENGINE_INSTANCE_ID = "00000000-0000-4000-8000-000000000004";
 const execFileAsync = promisify(execFile);
 
 describe("versioned cloud recovery manifests", () => {
+  it("retains only the closed revoked code from a bounded admission error", async () => {
+    const responses = [
+      { body: JSON.stringify({ error: { code: "computer_environment_revoked", retryable: false } }), status: 409, code: "computer_environment_revoked" },
+      { body: JSON.stringify({ error: { code: "private-provider-output" } }), status: 409, code: "request_invalid" },
+      { body: "private-provider-output".repeat(100), status: 409, code: "request_invalid" },
+      { body: "private-provider-output", status: 503, code: "admission_temporarily_unavailable" },
+    ];
+    try {
+      for (const { body, status, code } of responses) {
+        vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status })));
+        await expect(redeemMaterials(requestDocument())).rejects.toMatchObject({ code });
+      }
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("redacts setup literals and truncated prefixes before bounding the UTF-8 failure log", () => {
+    const secret='synthetic-quote-"-value';
+    const log=redactCloudWorkspaceSetupHookLog(`raw ${secret}\nescaped ${JSON.stringify(secret).slice(1,-1)}\npartial synthetic-quote-`,[secret]);
+    expect(log).toEqual({version:1,text:"raw [redacted]\nescaped [redacted]\npartial [redacted]",truncated:false});
+    const bounded=redactCloudWorkspaceSetupHookLog("é".repeat(10000)+secret,[secret]);
+    expect(Buffer.byteLength(bounded.text)).toBeLessThanOrEqual(16384);
+    expect(bounded.text).not.toContain("\uFFFD"); expect(bounded.text).not.toContain(secret); expect(bounded.truncated).toBe(true);
+  });
+  it.each(["\x1b[31m", "\r", "\b"])("normalizes inserted controls before filtering setup secrets (%j)", separator => {
+    const secret = "synthetic-private-setup-value";
+    const split = secret.slice(0, 10) + separator + secret.slice(10) + "\x1b[0m";
+    const log = redactCloudWorkspaceSetupHookLog(`failed: ${split}\npartial: synthetic-${separator}private-`, [secret]);
+    expect(log.text).toBe("failed: [redacted]\npartial: [redacted]");
+    expect(JSON.stringify(log)).not.toContain(secret);
+  });
   const checkpointId = "11111111-1111-4111-8111-111111111111";
   const blob = { blobId: "22222222-2222-4222-8222-222222222222", contentSha256: "a".repeat(64), sizeBytes: 12 };
   const page = { version: 2, audience: "zeros-cloud-workspace-recovery-manifest-v2", checkpointId, contentRevision: 1,

@@ -6,6 +6,7 @@ import type {Socket} from "node:net";
 import {WebSocketServer,type WebSocket} from "ws";
 import type {CloudProviderExecution} from "../../cloud-provider-execution";
 import type {BoundaryProcess} from "../../containment/types";
+import {cloudComputerProcessEnvironment} from "../../cloud-computer-environment";
 
 const MAX_FRAME=4*1024*1024,MAX_BUFFER=8*1024*1024;
 
@@ -62,7 +63,7 @@ export class CloudCodexExecServer {
       try{
         bridge.child=await Promise.race([execution.lease.launch(()=>execution.coordinator.workload.spawn({
           command:runtime.node,args:[`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs`,binary],cwd:"/srv/zeros/workspace",
-          env:{HOME:"/srv/zeros/home/agent",PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8"},stdio:"pipe",
+          env:cloudComputerProcessEnvironment({HOME:"/srv/zeros/home/agent",PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8"},execution.lease.environment?.values,"agent"),stdio:"pipe",
         })),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("Cloud executor launch timed out")),5000);})]);
       }finally{if(timer)clearTimeout(timer);}
       execution.lease.assertLive();

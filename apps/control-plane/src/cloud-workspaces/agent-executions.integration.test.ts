@@ -18,6 +18,8 @@ import {syntheticCodexCache} from "./codex-auth-test-fixture.js";
 import {DatabaseCloudWorkspaceActionService} from "./action-receipts.js";
 import {interceptQueries,withAuthorityDeadlineBarrier,pauseBeforeQuery,withHeldEngineRows} from "./authority-deadline-test-utils.js";
 import {cloudWorkspaceHasActiveWork} from "./idle-workloads.js";
+import { consentTestPersonalEnvironment, persistTestComputerSettings, pinTestComputerEnvironment } from "./computer-environment-test-fixtures.js";
+import { resolveDatabaseCloudWorkspaceSettings } from "./settings.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
 // Measured budgets for the approval path (see the statement-budget test).
@@ -67,6 +69,51 @@ d("private provider execution leases",()=>{
     const snapshot={tasks:[{taskId:"native-child",name:"Background task",startedAt:Date.now(),updatedAt:Date.now()}],waiting:true,processWork:true};
     return {commands,commandId,claim,input,lease,payload,snapshot};
   }
+  async function computerEnvironment() {
+    const key = randomBytes(32).toString("base64url");
+    await pinTestComputerEnvironment(pool, fixture, key, { ORG_SETTING: "synthetic-org-value", COLLISION: "org-default" });
+    const consent = await consentTestPersonalEnvironment(pool, fixture.organizationId, owner.id, { COLLISION: "creator-personal-value" });
+    const settings = await withSystemTx(pool, tx => resolveDatabaseCloudWorkspaceSettings(tx, {
+      ...fixture, generation: 1, actorUserId: owner.id, isPersonal: false, setupSecretKeyV1: key,
+    }));
+    await persistTestComputerSettings(pool, fixture, settings);
+    service = new DatabaseCloudAgentExecutionService(pool, encryption, false, undefined, undefined, { setupSecretKeyV1: key });
+    return { consent };
+  }
+  it("delivers v2 org env only to opted-in executions and revalidates personal consent and pinned versions", async () => {
+    const { consent } = await computerEnvironment();
+    await expect(service.admit(engine(), admission())).rejects.toMatchObject({ code: "computer_environment_runtime_required" });
+    const lease = await service.admit(engine(), admission(), false, undefined, undefined, undefined, 1);
+    expect(lease.environment?.values).toEqual({ ORG_SETTING: "synthetic-org-value", COLLISION: "creator-personal-value" });
+    expect(lease.environment?.history).toHaveProperty("owner");
+    expect((await service.validate(engine(), lease.leaseId)).environmentRevision).toBe(lease.environment?.revision);
+    await pool.query("UPDATE personal_profile_inheritance_consents SET state='revoked',revoked_at=now() WHERE id=$1", [consent]);
+    expect((await service.validate(engine(), lease.leaseId)).environmentRevision).not.toBe(lease.environment?.revision);
+    const persisted = (await pool.query("SELECT row_to_json(lease)::text AS text FROM cloud_agent_execution_leases lease")).rows.map(row => row.text).join();
+    expect(persisted.includes("creator-personal-value")).toBe(false);
+    expect(persisted.includes("synthetic-org-value")).toBe(false);
+    await pool.query("UPDATE secret_binding_versions SET retired_at=now()");
+    await expect(service.validate(engine(), lease.leaseId)).rejects.toMatchObject({ code: "computer_environment_revoked" });
+  });
+  it("isolates terminal and agent environment by actor and rejects cross-actor execution actions", async () => {
+    await computerEnvironment();
+    const otherWorkspace = await seedReadyCloudWorkspace(pool);
+    const member = await ensureUser(pool, { provider: "workos", providerSubject: `workos|${otherWorkspace.userId}`, email: `member-${otherWorkspace.userId}@example.test`, displayName: "Member",
+      session: { id: `session_${randomUUID()}`, clientKind: "desktop", authTime: Math.floor(Date.now()/1000), tokenExpiresAt: Math.floor(Date.now()/1000)+3600 } });
+    await pool.query("INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at) VALUES($1,$2,$3,'desktop',now()+interval '1 hour')", [member.authentication.sessionId, member.identity.subject, member.id]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')", [fixture.organizationId, member.id]);
+    await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,assigned_by) VALUES($1,$2,$3)", [fixture.organizationId, member.id, owner.id]);
+    const memberSession = await connectActor(member), grant = randomUUID();
+    await credentials.delegate(owner.id, { id: grant, credentialId, expectedRevision: 1, workspaceId: fixture.workspaceId, granteeUserId: member.id, models: ["grok-4.6"], expiresAt: new Date(Date.now()+3600_000).toISOString() });
+    const request = admission(), creator = await service.admit(engine(), request, false, undefined, undefined, undefined, 1);
+    const other = await service.admit(engine(), { ...admission(), delegationId: grant, source: { kind: "session", actorSessionId: memberSession } }, false, undefined, undefined, undefined, 1);
+    expect(other.environment?.values).toEqual({ ORG_SETTING: "synthetic-org-value", COLLISION: "org-default" });
+    expect(other.environment?.history.owner).not.toBe(creator.environment?.history.owner);
+    expect((await service.terminalEnvironment(engine(), memberSession)).environment).toEqual(other.environment?.values);
+    expect((await service.terminalEnvironment(engine(), actorSessionId)).environment).toEqual(creator.environment?.values);
+    await expect(service.authorizeAction(engine(), request.executionId, memberSession)).rejects.toMatchObject({ status: 403 });
+    await expect(service.terminalEnvironment(engine(), randomUUID())).rejects.toThrow();
+  });
   it("background lease survives foreground settlement and desktop disconnect, remains busy, and reloads durable tasks",async()=>{
     const f=await backgroundFixture();
     const state=await service.background(engine(),f.lease.leaseId,{kind:"retain",conversationId:"chat",revision:1,snapshot:f.snapshot});

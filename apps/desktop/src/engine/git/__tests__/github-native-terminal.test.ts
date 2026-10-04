@@ -35,12 +35,13 @@ afterEach(async () => {
   fixture.realRequest = false; configureNativeGithubDesktop(() => []); configureNativeGithubTransport(() => null);
   fixture.options.length = 0; fixture.sources.length = 0; fixture.forwarded.length = 0; vi.restoreAllMocks();
 });
-async function prepare(memberIdentity = true) {
+async function prepare(memberIdentity = true, computerEnvironment = false) {
   const root = await mkdtemp(path.join(tmpdir(), "zeros-native-terminal-"));
   await exec("git", ["init", "-b", "topic", root]);
   const engine = new ZerosEngine({ root, port: 0 });
-  Object.defineProperty(engine, "cloudWorker", { value: { version: 3, backend: "cloud-worker", profile: "zeros-cloud-worker-v3", uid: process.getuid!(), gid: process.getgid!(), toolchain: { node: process.execPath, supervisor: "/opt/zeros/supervisor", bwrap: "/usr/bin/bwrap", setpriv: "/usr/bin/setpriv" } } as NonNullable<typeof engine["cloudWorker"]> });
-  Object.defineProperty(engine, "cloudRuntimeRegistration", { value: { gitAuthorRequest: vi.fn(async () => ({ name: "Actor A", email: "123+a@users.noreply.github.com" })) } as unknown as NonNullable<typeof engine["cloudRuntimeRegistration"]> });
+  Object.defineProperty(engine, "cloudWorker", { value: { version: computerEnvironment ? 4 : 3, backend: "cloud-worker", profile: computerEnvironment ? "zeros-cloud-worker-v4" : "zeros-cloud-worker-v3", uid: process.getuid!(), gid: process.getgid!(), toolchain: { node: process.execPath, supervisor: "/opt/zeros/supervisor", bwrap: "/usr/bin/bwrap", setpriv: "/usr/bin/setpriv" } } as NonNullable<typeof engine["cloudWorker"]> });
+  const environmentRequest=vi.fn(async()=>({version:1,environment:{ORG_SETTING:"synthetic-org-value",PERSONAL_SETTING:"actor-a-personal-value"}}));
+  Object.defineProperty(engine, "cloudRuntimeRegistration", { value: { agentExecutionRequest:environmentRequest,gitAuthorRequest: vi.fn(async () => ({ name: "Actor A", email: "123+a@users.noreply.github.com" })) } as unknown as NonNullable<typeof engine["cloudRuntimeRegistration"]> });
   const seam = engine as unknown as { workspaceAllowsProcessStart(): boolean; terminalDesignWatchGuard(): Promise<null> };
   vi.spyOn(engine["workspace"], "workspaceIdForCwd").mockReturnValue(null);
   vi.spyOn(engine["pty"], "resolveCwd").mockReturnValue(root);
@@ -79,8 +80,25 @@ setTimeout(()=>process.exit(2),5000).unref();
     create.mockReturnValue({ ...info, reattached: true });
     await engine["handlePtyCreate"](message, client);
   };
-  return { root, engine, id, a, b, gitRequest, reattach, state, env };
+  return { root, engine, id, a, b, gitRequest, reattach, state, env, create, environmentRequest };
 }
+it.runIf(process.platform === "linux")("admits actor env for a v2 terminal without putting personal values in a shared process or another actor's shell", async () => {
+  const f=await prepare(true,true);
+  try {
+    expect(f.environmentRequest).toHaveBeenCalledWith({kind:"terminal-environment",actorSessionId:f.a.cloudActor!.sessionId},expect.any(AbortSignal));
+    expect(f.env).toMatchObject({ORG_SETTING:"synthetic-org-value",PERSONAL_SETTING:"actor-a-personal-value"});
+    expect(process.env.PERSONAL_SETTING).toBeUndefined();
+    const filter=f.create.mock.calls[0]![0].outputFilter!;
+    expect(filter.write("actor-a-personal-")+filter.write("value")+filter.finish()).toBe("[redacted]");
+    f.create.mockClear();
+    await f.reattach(f.b); expect(f.create).not.toHaveBeenCalled();
+    const write=vi.spyOn(f.engine["pty"],"write");
+    await f.engine["handleMessage"]({type:"PTY_WRITE",id:randomUUID(),timestamp:Date.now(),source:"browser",sessionId:f.id,data:"echo"},f.b);
+    expect(write).not.toHaveBeenCalled();
+    await f.reattach(f.a); expect(f.create).toHaveBeenCalledOnce();
+    expect(f.environmentRequest).toHaveBeenCalledOnce();
+  } finally {await rm(f.root,{recursive:true,force:true});}
+});
 it.runIf(process.platform === "linux").each([false, true])("cloud PTY opens with no desktop courier; push then fails with the clear message (member identity: %s)", async memberIdentity => {
   fixture.realRequest = true;
   configureNativeGithubDesktop(() => []);

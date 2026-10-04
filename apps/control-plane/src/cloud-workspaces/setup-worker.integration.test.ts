@@ -34,7 +34,7 @@ import { CloudWorkspaceLinuxSetupExecutor, type CloudWorkspaceSetupAdmissionBrok
 import { DatabaseCloudWorkspaceSetupAdmissionBroker } from "./setup-admission-broker.js";
 import { consumeCloudWorkspaceGrant } from "./grants.js";
 import type { CloudWorkspaceCommandRunner } from "./provider.js";
-import { parseCloudWorkspaceSetupRequest } from "../../../../scripts/cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
+import { parseCloudWorkspaceSetupRequest, redactCloudWorkspaceSetupHookLog } from "../../../../scripts/cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -1161,6 +1161,22 @@ d("cloud workspace setup worker", () => {
       claim_count: 2,
       execution_fence: "2",
     });
+  });
+
+  it("records a v4 hook failure log without requeueing or publishing Ready", async () => {
+    const seeded=await seedSetup({v4:true});
+    const secret="synthetic-private-setup-value";
+    const hookLog=redactCloudWorkspaceSetupHookLog(`Hook failed: synthetic-\x1b[31mprivate-setup-value\x1b[0m\n`,[secret]);
+    const executor=new FakeExecutor([async()=>{throw Object.assign(new CloudWorkspaceSetupError("setup_command_failed","private executor detail",false),{hookLog});}]);
+    const setupWorker=worker(executor);
+    expect(await setupWorker.runOnce()).toBe(true);
+    const stored=(await pool.query(`SELECT workspace.status,run.state,run.claim_count,run.log_excerpt,run.log_truncated
+      FROM cloud_workspaces workspace JOIN cloud_workspace_setup_runs run ON run.workspace_id=workspace.id WHERE workspace.id=$1`,[seeded.workspaceId])).rows[0];
+    expect(stored).toMatchObject({status:"failed",state:"failed",claim_count:1,log_excerpt:hookLog.text,log_truncated:false});
+    expect(stored.log_excerpt).toBe("Hook failed: [redacted]\n");
+    expect(JSON.stringify(stored)).not.toContain(secret);
+    expect(await setupWorker.runOnce()).toBe(false);
+    expect(JSON.stringify(stored)).not.toContain("private executor detail");
   });
 
   it("rolls a rejected candidate back to its source generation and queues fenced cleanup", async () => {

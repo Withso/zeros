@@ -1,4 +1,4 @@
-import {CloudAgentExecutionAuthoritySchema,CloudAgentExecutionLeaseSchema,CloudAgentActionAuthoritySchema,CloudBackgroundStateSchema,type CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
+import {CloudAgentExecutionAuthoritySchema,CloudAgentExecutionLeaseSchema,CloudAgentActionAuthoritySchema,CloudBackgroundStateSchema,CloudComputerTerminalEnvironmentSchema,type CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
 import type {CloudRuntimeAuthority} from "./cloud-runtime-registration";
 import { CloudCustomizationResultSchema } from "@zeros/protocol/cloud-customization";
 import { CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES, CloudComputerToolConflictSchema, CloudComputerToolResultSchemas } from "@zeros/protocol/cloud-computer-tools";
@@ -38,7 +38,7 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     return requestCloudAgentExecution(authority,{kind:"admit",admission:request.admission},signal,requestFetch);
   }
   const typedConflict=response.status===409&&(request.kind==="computer-tool"||request.kind==="admit");
-  const limit=response.ok?(request.kind==="computer-tool"?CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES:request.kind==="background"?256*1024:request.kind==="customization"||(request.kind==="admit"&&request.admission.customization)?1024*1024:40*1024):1024;
+  const limit=response.ok?(request.kind==="terminal-environment"||(request.kind==="admit"&&request.environmentVersion===1)?2*1024*1024:request.kind==="computer-tool"?CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES:request.kind==="background"?256*1024:request.kind==="customization"||(request.kind==="admit"&&request.admission.customization)?1024*1024:40*1024):1024;
   if((!response.ok&&!typedConflict)||!response.body||Number(response.headers.get("content-length"))>limit){await response.body?.cancel().catch(()=>{});throw new CloudAgentExecutionError();}
   const reader=response.body.getReader();let size=0;const chunks:Uint8Array[]=[];
   try{
@@ -54,6 +54,9 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
       if(!parsed.success)throw new CloudAgentExecutionError();return parsed.data;
     }
     if(!response.ok)throw new CloudAgentExecutionError();
+    if(request.kind==="terminal-environment"){
+      const parsed=CloudComputerTerminalEnvironmentSchema.safeParse(value);if(!parsed.success)throw new CloudAgentExecutionError();return parsed.data;
+    }
     if(request.kind==="background"){
       const parsed=CloudBackgroundStateSchema.safeParse(value);
       if(!parsed.success||parsed.data.leaseId!==request.leaseId||parsed.data.conversationId!==request.operation.conversationId)throw new CloudAgentExecutionError();

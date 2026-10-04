@@ -43,6 +43,7 @@ function configure(staffRole: StaffRole | null = "developer", parent = false) {
     cancel: vi.fn().mockResolvedValue({ cancelled: true }),
     activate: vi.fn().mockResolvedValue({ activated: true }),
     rebuild: vi.fn().mockResolvedValue({ build: { id: buildId } }),
+    updateRepositorySetupScript: vi.fn().mockResolvedValue({ repositoryId: "123", version: 1 }),
   };
   const app = new Hono(),
     user = { id: randomUUID(), staffRole } as AuthedUser;

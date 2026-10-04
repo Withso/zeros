@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type pg from "pg";
 import { z } from "zod";
-import { HttpError, requireOrganizationCreationCapability } from "../authz.js";
+import { canCreateOrganization, HttpError, requireOrganizationCreationCapability } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { rateLimit } from "../ratelimit.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
@@ -10,6 +10,8 @@ import {
   CLOUD_COMPUTER_V2_MAX_REQUEST_BYTES,
   CloudComputerV2BuildRequestSchema,
   CloudComputerV2RevisionSchema,
+  CloudComputerV2RepositorySchema,
+  CloudComputerV2RepositorySetupSchema,
   CloudComputerV2SaveDraftSchema,
   CloudComputerV2VersionRequestSchema,
 } from "./computer-v2-contract.js";
@@ -25,6 +27,7 @@ type Service = Pick<
   | "cancel"
   | "activate"
   | "rebuild"
+  | "updateRepositorySetupScript"
 >;
 export function createCloudComputerV2Routes(
   pool: pg.Pool,
@@ -40,6 +43,8 @@ export function createCloudComputerV2Routes(
     await next();
   });
   app.use(root + "*", async (c, next) => {
+    if (c.req.method === "PUT" && /\/repositories\/[^/]+\/setup$/.test(c.req.path) && !canCreateOrganization(c.get("user").staffRole))
+      throw new HttpError(403, "forbidden", "Engineering staff access is required.");
     requireOrganizationCreationCapability(c.get("user").staffRole);
     await next();
   });
@@ -126,6 +131,13 @@ export function createCloudComputerV2Routes(
       ),
     ),
   );
+  app.put(root + "/repositories/:repository/setup", async c => c.json(
+    await service.updateRepositorySetupScript(
+      id(c.req.param("organization")), c.get("user").id,
+      parse(CloudComputerV2RepositorySchema.shape.id, c.req.param("repository")),
+      parse(CloudComputerV2RepositorySetupSchema, await c.req.json().catch(() => null)),
+    ),
+  ));
   app.post(root + "/discard", async (c) =>
     c.json(
       await service.discard(

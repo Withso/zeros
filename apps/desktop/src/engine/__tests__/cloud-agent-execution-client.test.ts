@@ -33,6 +33,22 @@ describe("private agent execution client",()=>{
       .rejects.toThrow("Update the cloud runtime and control plane");
     expect(requestFetch).toHaveBeenCalledOnce();
   });
+  it("accepts bounded terminal env only over the private engine request and rejects malformed maps",async()=>{
+    const request={kind:"terminal-environment" as const,actorSessionId:randomUUID()};
+    const values={ORG_VALUE:"synthetic-org-value",EMPTY_OVERRIDE:"",LARGE_VALUE:"v".repeat(65_536)};
+    const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({result:{version:1,environment:values}})));
+    await expect(requestCloudAgentExecution(authority,request,AbortSignal.timeout(1000),fetcher)).resolves.toEqual({version:1,environment:values});
+    expect(JSON.parse(fetcher.mock.calls[0]![1].body).request).toEqual(request);
+    expect(fetcher.mock.calls[0]![1].body).not.toContain(values.ORG_VALUE);
+    for(const environment of [{NODE_OPTIONS:"private"},{ORG_VALUE:"v".repeat(65_537)},{ORG_VALUE:"bad\0value"}]){
+      fetcher.mockResolvedValueOnce(new Response(JSON.stringify({result:{version:1,environment}})));
+      await expect(requestCloudAgentExecution(authority,request,AbortSignal.timeout(1000),fetcher)).rejects.toThrow(/^Cloud agent execution authority is unavailable$/);
+    }
+    fetcher.mockResolvedValueOnce(new Response("private-diagnostic",{status:409}));
+    await expect(requestCloudAgentExecution(authority,request,AbortSignal.timeout(1000),fetcher)).rejects.toThrow(/^Cloud agent execution authority is unavailable$/);
+    fetcher.mockResolvedValueOnce(new Response("x".repeat(2*1024*1024+1)));
+    await expect(requestCloudAgentExecution(authority,request,AbortSignal.timeout(1000),fetcher)).rejects.toThrow(/^Cloud agent execution authority is unavailable$/);
+  });
   it("negotiates background retention with a legacy backend only after a definite schema rejection",async()=>{
     const fetcher=vi.fn().mockResolvedValueOnce(new Response("legacy schema",{status:422})).mockResolvedValueOnce(new Response(JSON.stringify({result:grant})));
     await expect(requestCloudAgentExecution(authority,{kind:"admit",admission,backgroundTasksVersion:1},new AbortController().signal,fetcher)).resolves.toEqual(grant);

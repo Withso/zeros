@@ -8,6 +8,7 @@ import {resolveCloudRuntime} from "../containment/cloud-runtime-root.mjs";
 import {AgentGateway} from "../gateway";
 import type {AgentAdapter} from "../types";
 import {testExecutionBoundary} from "./helpers/test-execution-boundary";
+import type { CloudComputerExecutionEnvironment } from "@zeros/protocol/cloud-agent-execution";
 
 vi.mock("../containment/cloud-native-boundary",()=>({CloudNativeBoundary:{prepare:vi.fn()}}));
 vi.mock("../containment/cloud-runtime-root.mjs",async original=>{
@@ -15,7 +16,7 @@ vi.mock("../containment/cloud-runtime-root.mjs",async original=>{
   return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime)};
 });
 afterEach(()=>vi.resetAllMocks());
-function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="cursor-api-key", computerToolsVersion?:1){
+function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="cursor-api-key", computerToolsVersion?:1,environment?:CloudComputerExecutionEnvironment){
   const status:ExecutionBoundaryStatus={version:1,actor:"agent-code",state:"ready",backend:"cloud-worker",
     designProtection:{required:true,enforced:true,protectedDirectoryCount:1},
     parity:{level:"restricted",restrictions:[...CLOUD_NATIVE_PROVIDER_RESTRICTIONS.cursor]},checkedAt:Date.now()};
@@ -25,7 +26,7 @@ function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="c
   vi.mocked(CloudNativeBoundary.prepare).mockResolvedValue(coordinator as unknown as CloudNativeBoundary);
   const leaseId=randomUUID();
   const request=vi.fn(async(input:{kind:string})=>input.kind==="release"?{released:true}:{leaseId,authorityId:"a".repeat(64),
-    expiresAt:new Date(Date.now()+45000).toISOString(),credentialVersion:1,...(computerToolsVersion?{computerToolsVersion}:{}),credentialKind,provider,model:"grok-4.6",material:
+    expiresAt:new Date(Date.now()+45000).toISOString(),credentialVersion:1,...(computerToolsVersion?{computerToolsVersion}:{}),credentialKind,provider,model:"grok-4.6",...(environment?{environment}:{}),material:
       credentialKind==="claude-setup-token"?{kind:credentialKind,accessToken:"synthetic-setup-token"}:
       credentialKind==="codex-chatgpt"?{kind:credentialKind,accessToken:"synthetic-chatgpt-token",accountId:"synthetic-account",expiresAt:2_100_000_000}:
       {kind:credentialKind,apiKey:"synthetic-provider-key"}});
@@ -85,6 +86,18 @@ describe("admitted native cloud diagnostic",()=>{
       expect(execution.lease.signal.aborted).toBe(true);
       await expect(fetch(computer.url,{headers:computer.headers})).rejects.toThrow();
     }finally{await result.boundary.stopAndProve();}
+  });
+  it("redacts org literals even when native process preparation fails before history opens", async () => {
+    const environment:CloudComputerExecutionEnvironment={version:1,revision:"c".repeat(64),values:{ORG_KEY:"synthetic-org-value"},
+      history:{owner:"a".repeat(64),currentKeyVersion:1,keys:{1:"b".repeat(43)}}};
+    const {factory,input,workload}=fixture("cursor","cursor-api-key",undefined,environment);
+    vi.mocked(CloudNativeBoundary.prepare).mockImplementation(async lease=>{
+      expect(lease.environment?.values).toEqual(environment.values);
+      throw new Error("native failed: synthetic-org-value");
+    });
+    await expect(factory.prepare(input)).rejects.toThrow("native failed: [redacted]");
+    expect(JSON.stringify(workload.status)).not.toContain("synthetic-org-value");
+    expect(process.env.ORG_KEY).toBeUndefined();
   });
   it("reports the verified v4 profile for execution and unavailable Browser",async()=>{
     const legacy=resolveCloudRuntime();

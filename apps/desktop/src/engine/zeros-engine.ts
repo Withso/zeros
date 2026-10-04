@@ -53,6 +53,9 @@ import { LocalTransport } from "./transport/local";
 import { CloudTransport, parseCloudTransportPort } from "./transport/cloud";
 import { CloudRuntimeHumanServices } from "./transport/cloud-human-services";
 import { CloudRuntimeLanguageServices } from "./transport/cloud-language-services";
+import { CloudComputerTerminalEnvironmentSchema } from "@zeros/protocol/cloud-agent-execution";
+import { cloudComputerProcessEnvironment } from "./agents/cloud-computer-environment";
+import { CloudCustomizationRedactor } from "./agents/cloud-customization-redaction";
 import { readObservedCloudWorkspacePorts } from "./cloud-observed-ports";
 import { CloudPreviewGatewayFactory } from "./agents/containment/cloud-preview-links";
 import type { Transport, TransportClient } from "./transport/types";
@@ -1021,6 +1024,7 @@ export class ZerosEngine {
   private cloudGithubCredentialWatcher: CloudGithubCredentialProjectionWatcher | null =
     null;
   private readonly nativeGithubTerminals = new NativeGithubTerminals();
+  private readonly cloudEnvironmentTerminals = new Map<string, string>();
   /** Parent-death watchdog (Electron host only — armed by ZEROS_PARENT_PID). */
   private parentWatchTimer: ReturnType<typeof setInterval> | null = null;
   private parentDeathExiting = false;
@@ -1396,6 +1400,7 @@ export class ZerosEngine {
       this.runs.appendData(sessionId, data);
     });
     this.pty.onExit((sessionId, exitCode, signal, reason) => {
+      this.cloudEnvironmentTerminals.delete(sessionId);
       // `signal` matters as much as `exitCode`: node-pty reports a killed PTY as
       // `exitCode 0, signal N`, so a verdict read off the code alone scores an
       // OOM-killed or externally-killed install as a PASS.
@@ -9909,6 +9914,8 @@ export class ZerosEngine {
     client: TransportClient,
     sessionId: string,
   ): boolean {
+    const environmentOwner = this.cloudEnvironmentTerminals.get(sessionId);
+    if (environmentOwner && (client.accountUserId !== environmentOwner || client.authorized?.() !== true)) return false;
     if (client.cloudActor && (client.authorized?.()!==true || !["developer","manager","owner"].includes(client.cloudActor.role))) return false;
     if (!this.isHostRelayClient(client)) return true;
     return this.terminals.remoteMayOperate(
@@ -10207,6 +10214,8 @@ export class ZerosEngine {
       return;
     }
     let env: Record<string, string> | undefined;
+    let environmentOwner: string | undefined;
+    let outputFilter: { write(data: string): string; finish(): string } | undefined;
     const fullHumanEnvironment = client.kind === "local" && this.cloudWorker === null;
     const scriptWorkspace = canonicalWsId ? getWorkspaceById(canonicalWsId) : null;
     if (!reattach && (fullHumanEnvironment || this.cloudWorker)) {
@@ -10225,6 +10234,17 @@ export class ZerosEngine {
         // Isolated image/login probes have no account actor. Keep their
         // existing terminal admission and give them no default Git identity.
         if (client.cloudActor && !this.cloudRuntimeRegistration) { ptyExit(); return; }
+        if (this.cloudWorker.version === 4 && client.cloudActor) {
+          const material = CloudComputerTerminalEnvironmentSchema.parse(await this.cloudRuntimeRegistration!.agentExecutionRequest(
+            { kind: "terminal-environment", actorSessionId: client.cloudActor.sessionId }, AbortSignal.timeout(10_000)));
+          if (material.environment !== null) {
+            if (!client.accountUserId || client.authorized?.() !== true) { ptyExit(); return; }
+            env = cloudComputerProcessEnvironment(env, material.environment, "terminal");
+            environmentOwner = client.accountUserId;
+            const redactor = new CloudCustomizationRedactor(Object.values(material.environment));
+            outputFilter = { write: data => redactor.stream("pty", data), finish: () => redactor.finish("pty") };
+          }
+        }
         const author = client.cloudActor
           ? await this.cloudRuntimeRegistration!.gitAuthorRequest(client.cloudActor.sessionId)
           : null;
@@ -10284,6 +10304,9 @@ export class ZerosEngine {
       return;
     }
     if (client.cloudActor && client.authorized?.()!==true) {ptyExit();return;}
+    // A concurrent create may have published this id while admission awaited.
+    // Never turn that race into a reattach to another actor's environment.
+    if (!this.mayOperateTerminal(client, msg.sessionId)) { ptyExit(); return; }
     if (this.cloudWorker && reattach) this.nativeGithubTerminals.reattach(msg.sessionId, client);
     const loginProvider = msg.loginProvider;
     const loginBinary = loginProvider
@@ -10292,7 +10315,9 @@ export class ZerosEngine {
           loginProvider === "claude" ? "ZEROS_CLAUDE_CLI_PATH" : "ZEROS_CODEX_CLI_PATH"
         ] || loginProvider
       : undefined;
-    const info = this.pty.create({
+    if (environmentOwner) this.cloudEnvironmentTerminals.set(msg.sessionId, environmentOwner);
+    let info: ReturnType<PtyService["create"]>;
+    try { info = this.pty.create({
       sessionId: msg.sessionId,
       resolvedCwd,
       ...(loginProvider && loginBinary
@@ -10300,11 +10325,14 @@ export class ZerosEngine {
         : {}),
       cols: msg.cols,
       rows: msg.rows,
-      // Human cloud processes receive only safe toolchain/location variables
-      // and the explicit repository credential helper, never provider secrets.
+      // v2 values are private admission material for this actor's child only.
       scrubEnv: !fullHumanEnvironment,
       ...(env ? { env } : {}),
-    });
+      ...(outputFilter ? { outputFilter } : {}),
+    }); } catch (error) {
+      if (environmentOwner && !this.pty.has(msg.sessionId)) this.cloudEnvironmentTerminals.delete(msg.sessionId);
+      throw error;
+    }
     // Register a freshly-spawned terminal in the SHARED registry so every device
     // can discover + attach to it (PTY_LIST) and the restriction gate can scope
     // it. The workspace is resolved server-side from the cwd (id OR path), so a

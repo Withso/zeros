@@ -15,9 +15,28 @@ export class CloudCustomizationRedactor {
   addSecrets(values: string[]): void {
     this.secrets = [...new Set([...this.secrets, ...values.filter(Boolean).flatMap(value => [value, JSON.stringify(value).slice(1, -1),
       ...(value.startsWith("Bearer ") || value.startsWith("Basic ") ? [value.slice(value.indexOf(" ") + 1)] : [])])])].sort((a, b) => b.length - a.length);
-    this.pattern = this.secrets.length ? new RegExp(this.secrets.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g") : null;
+    const pattern = this.secrets.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+    // Valid 64 KiB env literals can exceed V8's compiled-regexp limit.
+    this.pattern = pattern.length && pattern.length <= 16384 ? new RegExp(pattern, "g") : null;
   }
-  private text(value: string): string { return this.pattern ? value.replace(this.pattern, "[redacted]") : value; }
+  private text(value: string): string {
+    if (this.pattern) return value.replace(this.pattern, "[redacted]");
+    if (!this.secrets.length) return value;
+    let result = "", offset = 0;
+    while (offset < value.length) {
+      let next = value.length, matched = "";
+      // Preserve the regexp's earliest, longest match without rescanning the
+      // replacement marker as if it were provider output.
+      for (const secret of this.secrets) {
+        const index = value.indexOf(secret, offset);
+        if (index >= 0 && index < next) { next = index; matched = secret; }
+      }
+      if (!matched) return result + value.slice(offset);
+      result += value.slice(offset, next) + "[redacted]";
+      offset = next + matched.length;
+    }
+    return result;
+  }
   private suffix(value: string): number {
     let keep = 0;
     for (const secret of this.secrets) for (let size = Math.min(secret.length - 1, value.length); size > keep; size--)

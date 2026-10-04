@@ -4,6 +4,7 @@ import type pg from "pg";
 
 import { audit } from "../audit.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { parseCloudWorkspaceSetupHookLog, type CloudWorkspaceSetupHookLog } from "./setup-log.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { cloudRuntimePin, cloudRuntimePinValues, requirePinnedCloudRuntime, CloudRuntimeError, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
 import { publicCloudError } from "./public-contract.js";
@@ -109,6 +110,7 @@ export interface CloudWorkspaceSetupExecutor {
 }
 
 export class CloudWorkspaceSetupError extends Error {
+  hookLog?: CloudWorkspaceSetupHookLog;
   constructor(
     public readonly code: string,
     message: string,
@@ -150,6 +152,7 @@ type SafeSetupFailure = {
   code: string;
   retryable: boolean;
   restoreEvidence?: string | undefined;
+  hookLog?: CloudWorkspaceSetupHookLog | undefined;
 };
 
 function safeInteger(
@@ -226,6 +229,7 @@ function safeFailure(error: unknown): SafeSetupFailure {
         ? error.code
         : "setup_executor_failure",
       retryable: error.retryable,
+      hookLog: ["setup_command_failed", "setup_hook_retry_required"].includes(error.code) ? parseCloudWorkspaceSetupHookLog(error.hookLog) ?? undefined : undefined,
       restoreEvidence: classifyCloudRestoreEvidence(error.code, "diagnostic" in error ? error.diagnostic : null) ?? undefined,
     };
   }
@@ -1078,9 +1082,10 @@ export class CloudWorkspaceSetupWorker {
       await tx.query(
         `UPDATE cloud_workspace_setup_runs
          SET state = 'failed', completed_at = now(), updated_at = now(),
-             error_code = $2, lease_owner = NULL, lease_expires_at = NULL
+             error_code = $2, lease_owner = NULL, lease_expires_at = NULL,
+             log_excerpt = coalesce($3, log_excerpt), log_truncated = coalesce($4, log_truncated)
          WHERE id = $1`,
-        [setup.setupRunId, failure.code],
+        [setup.setupRunId, failure.code, setup.runtime ? failure.hookLog?.text ?? null : null, setup.runtime ? failure.hookLog?.truncated ?? null : null],
       );
       const rolledBack = await rollbackCloudWorkspaceGenerationTransition(tx, {
         workspaceId: setup.workspaceId,
@@ -1089,7 +1094,7 @@ export class CloudWorkspaceSetupWorker {
         errorCode: failure.code,
         errorMessage: message,
       });
-      const recovering = !rolledBack && this.recoveryConfig && await enqueueCloudAutomaticRecovery(tx, setup);
+      const recovering = !rolledBack && !failure.hookLog && this.recoveryConfig && await enqueueCloudAutomaticRecovery(tx, setup);
       if (!rolledBack && !recovering) {
         await tx.query(
           `UPDATE cloud_workspaces

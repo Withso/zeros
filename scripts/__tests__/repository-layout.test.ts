@@ -759,6 +759,7 @@ describe("repository layout contracts", () => {
       "checkpoint-native-format.md",
       "client-runtime-contract.md",
       "compute-credits.md",
+      "computer-environment.md",
       "computer-template-builds.md",
       "computer-template-retention.md",
       "computer-tools.md",

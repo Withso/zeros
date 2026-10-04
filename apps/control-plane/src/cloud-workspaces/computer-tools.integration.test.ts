@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { HttpError } from "../authz.js";
-import { withSystemTx, withUserTx, type Tx } from "../db.js";
+import { withSystemTx, withUserTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { DatabaseCloudAgentExecutionService } from "./agent-executions.js";
 import { createCloudAgentExecutionRoutes, CLOUD_AGENT_EXECUTION_PATH } from "./agent-credential-routes.js";
 import { adminComputerToolsVersion, markAdminWorkspace } from "./computer-admin-workspaces.js";
 import { computerToolOperationId, type UpdateRepositorySetupScript } from "./computer-tools.js";
+import { createRepositorySetupScriptWriter } from "./computer-repository-setup.js";
 import { seedComputerToolsFixture } from "./computer-tools-test-fixture.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import type { CloudComputerToolRequest } from "./computer-tools-contract.js";
@@ -23,22 +23,7 @@ database("admin workspace computer tools", () => {
   async function initialize(marked = true) {
     await resetMigratedTestDatabase(pool);
     f = await seedComputerToolsFixture(pool, marked);
-    // C4 is injected: this database-backed substitute verifies the narrow
-    // transaction contract without introducing a second production writer.
-    setup = vi.fn(async (input: Parameters<UpdateRepositorySetupScript>[0], tx: Tx) => {
-      const head = (await tx.query<{ current_version: string; document: Record<string, unknown> }>(`SELECT head.current_version,version.document
-        FROM repository_settings_heads head JOIN repository_settings_versions version ON version.org_id=head.org_id
-          AND version.repository_id=head.repository_id AND version.scope=head.scope AND version.version=head.current_version
-        WHERE head.org_id=$1 AND head.repository_id=$2 AND head.scope='cloud' FOR UPDATE OF head`, [input.orgId, input.repositoryId])).rows[0];
-      if (Number(head?.current_version ?? 0) !== input.expectedSettingsVersion) throw new HttpError(409, "changed", "Changed");
-      const version = input.expectedSettingsVersion + 1;
-      await tx.query(`INSERT INTO repository_settings_versions(org_id,repository_id,scope,version,document,created_by)
-        VALUES($1,$2,'cloud',$3,$4::jsonb,$5)`, [input.orgId, input.repositoryId, version,
-        JSON.stringify({ ...head?.document, setupCommands: input.script ? [{ command: input.script, timeoutSeconds: input.timeoutSeconds }] : [] }), input.actorUserId]);
-      await tx.query(`INSERT INTO repository_settings_heads(org_id,repository_id,scope,current_version) VALUES($1,$2,'cloud',$3)
-        ON CONFLICT(org_id,repository_id,scope) DO UPDATE SET current_version=EXCLUDED.current_version`, [input.orgId, input.repositoryId, version]);
-      return { version };
-    });
+    setup = vi.fn(createRepositorySetupScriptWriter(pool));
     service = new DatabaseCloudAgentExecutionService(pool, f.encryption, false, undefined, { computer: f.computer, updateRepositorySetupScript: setup });
   }
   beforeEach(() => initialize());
@@ -133,6 +118,33 @@ database("admin workspace computer tools", () => {
     expect((await config()).revision).toBe(1);
     expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(0);
     expect((await pool.query("SELECT version FROM repository_settings_versions")).rows).toEqual([{ version: "1" }]);
+  });
+  it("writes setup through C4 with preserved settings, its audit/outbox, and no replay", async () => {
+    const document = { values: { env: { PUBLIC_SETTING: "repo-value" }, runtime: { node: "24" } },
+      secretRefs: [{ id: randomUUID(), name: "REGISTRY_TOKEN" }], setupCommands: [{ command: "echo old", timeoutSeconds: 5 }] };
+    await pool.query(`INSERT INTO repository_settings_versions(org_id,repository_id,scope,version,document,created_by)
+      VALUES($1,$2,'cloud',1,$3::jsonb,$4)`, [f.fixture.organizationId, f.fixture.repositoryId, JSON.stringify(document), f.fixture.userId]);
+    await pool.query(`INSERT INTO repository_settings_heads(org_id,repository_id,scope,current_version)
+      VALUES($1,$2,'cloud',1)`, [f.fixture.organizationId, f.fixture.repositoryId]);
+    const tool = { name: "UpdateRepositorySetupScript", arguments: { repositoryId: f.fixture.repositoryId,
+      expectedSettingsVersion: 1, script: "echo from tool", timeoutSeconds: 30 } } as const;
+    expect(await ok(tool, { callId: "c4-setup" })).toEqual({ version: 2 });
+    expect((await pool.query(`SELECT document FROM repository_settings_versions
+      WHERE repository_id=$1 AND scope='cloud' AND version=2`, [f.fixture.repositoryId])).rows[0].document).toEqual({
+      ...document, setupCommands: [{ command: tool.arguments.script, timeoutSeconds: 30 }],
+    });
+    expect((await pool.query(`SELECT actor_id,subject FROM audit_log
+      WHERE org_id=$1 AND action='cloud_computer_v2.repository_setup_updated'`, [f.fixture.organizationId])).rows).toEqual([{
+      actor_id: f.fixture.userId, subject: { repositoryId: "123", version: 2, operationId: computerToolOperationId(f.initiating.leaseId, "c4-setup") },
+    }]);
+    expect((await pool.query(`SELECT payload FROM cloud_workspace_outbox WHERE org_id=$1 AND event_type='cloud_settings.repository_updated'`,
+      [f.fixture.organizationId])).rows).toEqual([{ payload: { repositoryId: f.fixture.repositoryId, scope: "cloud", version: 2 } }]);
+    const conflict = await call(tool, { callId: "c4-setup" });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({ result: { conflict: true, version: 2 } });
+    expect((await pool.query("SELECT version FROM repository_settings_versions ORDER BY version")).rows).toEqual([{ version: "1" }, { version: "2" }]);
+    expect((await config()).revision).toBe(1);
+    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(0);
   });
   it("accepts an active-only repository after the draft removes it, and still rejects an unrelated repository", async () => {
     const accepted = await ok(create());

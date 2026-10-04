@@ -118,6 +118,9 @@ export interface PtyCreateOptions {
   command?: string;
   /** Verbatim child env (see PtySpawnRequest.env). */
   env?: Record<string, string>;
+  /** Execution-owned literal filter, applied before live output or replay.
+   * It stays in the engine and never enters the PTY host request. */
+  outputFilter?: { write(data: string): string; finish(): string };
   /** Interactive one-shot shell (see PtySpawnRequest.interactive). */
   interactive?: boolean;
   /** Prepared ZSR wrapper for repository-controlled commands. */
@@ -423,14 +426,17 @@ export class PtyService {
       proc.onSpawned((pid) => opts.onSpawned?.(pid, () => leaderExited));
     }
 
-    proc.onData((data) => {
+    const publish = (data: string) => {
+      if (!data) return;
       // Feed the mirror the EXACT bytes clients get so its resolved grid stays
       // in lockstep — that grid is what we serialize on reattach.
       session.mirror?.write(data);
       this.onDataCb?.(opts.sessionId, data);
-    });
+    };
+    proc.onData((data) => publish(opts.outputFilter ? opts.outputFilter.write(data) : data));
     proc.onExit((exitCode, signal, reason) => {
       leaderExited = true;
+      if (opts.outputFilter) publish(opts.outputFilter.finish());
       session.mirror?.dispose();
       this.sessions.delete(opts.sessionId);
       const waiters = this.exitWaiters.get(opts.sessionId);

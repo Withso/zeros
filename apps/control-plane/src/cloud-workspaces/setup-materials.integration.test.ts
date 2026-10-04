@@ -29,6 +29,8 @@ import {
 import type { CloudWorkspaceSetupExecution } from "./setup-worker.js";
 import { runtimeBase, runtimeWitness, seedRuntimeGeneration } from "./runtime-test-fixtures.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { consentTestPersonalEnvironment, persistTestComputerSettings, pinTestComputerEnvironment } from "./computer-environment-test-fixtures.js";
+import { resolveDatabaseCloudWorkspaceSettings } from "./settings.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
@@ -509,6 +511,46 @@ d("cloud workspace setup material redemption", () => {
       protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2,
       agentRuntime: { ...runtimeWitness, profile: "zeros-cloud-worker-v4" } }))).toBe("engine_registration_rejected");
     expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0].state).toBe("starting");
+  });
+
+  async function computerEnvironment() {
+    const fixture = { ...seed.execution, userId: seed.execution.authority.accountUserId };
+    const repositoryId = (await pool.query("SELECT repository_id FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].repository_id;
+    await pinTestComputerEnvironment(pool, fixture, SECRET_KEY, { ORG_SETTING: "synthetic-org-setting", COLLISION: "org-default" });
+    const consent = await consentTestPersonalEnvironment(pool, fixture.organizationId, fixture.userId, { COLLISION: "creator-personal-value", PERSONAL_ONLY: "creator-only-value" });
+    const settings = await withSystemTx(pool, tx => resolveDatabaseCloudWorkspaceSettings(tx, { ...fixture, repositoryId, actorUserId: fixture.userId, isPersonal: false, setupSecretKeyV1: SECRET_KEY }));
+    const snapshot = await persistTestComputerSettings(pool, fixture, settings);
+    seed.execution.settings.sha256 = snapshot.sha256;
+    return { consent };
+  }
+  it("redeems v2 setup env with fresh creator consent and keeps the managed document value-free", async () => {
+    const { consent } = await computerEnvironment();
+    await pool.query("UPDATE personal_profile_inheritance_consents SET state='revoked',revoked_at=now() WHERE id=$1", [consent]);
+    const material = await service.redeem(redemptionInput());
+    expect(material.settings.setupEnvironment).toEqual([{ name: "COLLISION", value: "org-default" }, { name: "ORG_SETTING", value: "synthetic-org-setting" }]);
+    const text = Buffer.from(material.settings.documentB64, "base64url").toString("utf8");
+    expect(JSON.parse(text).secretRefs.map((ref: { name: string }) => ref.name)).toEqual(["COLLISION", "ORG_SETTING"]);
+    for (const value of ["org-default", "synthetic-org-setting", "creator-personal-value", "creator-only-value"]) expect(text.includes(value)).toBe(false);
+  });
+  it.each(["before redemption", "during Git mint"])("rejects a retired org version %s instead of opening saved setup secrets", async when => {
+    await computerEnvironment();
+    const retire = () => pool.query("UPDATE secret_binding_versions SET retired_at=now()");
+    if (when === "before redemption") await retire();
+    else vi.mocked(github.mint).mockImplementationOnce(async () => { await retire(); return { token: "synthetic-github-material", expiresAtMs: Date.now()+3600_000 }; });
+    await expect(service.redeem(redemptionInput())).rejects.toMatchObject({ code: "computer_environment_revoked" });
+    if (when === "before redemption") expect(github.mint).not.toHaveBeenCalled();
+    else expect(github.revoke).toHaveBeenCalledOnce();
+  });
+  it("keeps binding contention retryable and rolls back admission before minting", async () => {
+    await computerEnvironment();
+    const lock = await pool.connect();
+    try {
+      await lock.query("BEGIN");
+      await lock.query("SELECT id FROM secret_bindings FOR UPDATE");
+      await expect(service.redeem(redemptionInput())).rejects.toMatchObject({ code: "computer_environment_busy", retryable: true });
+      expect(github.mint).not.toHaveBeenCalled();
+    } finally { await lock.query("ROLLBACK"); lock.release(); }
+    await expect(service.redeem(redemptionInput())).resolves.toHaveProperty("settings.setupEnvironment");
   });
 
   it("returns generation-pinned resources only to version-2 material consumers", async () => {

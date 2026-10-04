@@ -30,6 +30,8 @@ describe("bounded unprivileged setup process", () => {
       await Promise.resolve();
       expect(fixture.scope).toHaveBeenCalledWith(expect.objectContaining({runtime,kind:"setup"}));
       expect(fixture.launch.mock.calls.at(-1)?.slice(0,2)).toEqual([runtime.node,[runtime.helpers.setupProcess,"--worker"]]);
+      expect(JSON.stringify(fixture.launch.mock.calls.at(-1))).not.toContain(valid().environment.PACKAGE_TOKEN);
+      expect(String(child.stdin.read())).toContain(valid().environment.PACKAGE_TOKEN);
       expect(fixture.attach).toHaveBeenCalledWith(4242);
       child.emit("exit",0);expect(fixture.retire).toHaveBeenCalledTimes(2);
       let settled=false;void pending.then(()=>{settled=true;});
