@@ -195,6 +195,52 @@ describe("retained cloud task attachment",()=>{
 });
 
 describe("cloud agent command adapter", () => {
+  it.each(["release", "cancel", "dispose", "owner", "timeout"])("bounds checkpointing retries with one enqueue identity: %s", async outcome => {
+    vi.useFakeTimers();
+    const f = fixture(), controller = new AbortController(), original = f.request.getMockImplementation()!;
+    const writes: WireRecord[] = [], times: number[] = [];
+    let blocked = true, settled = false;
+    f.request.mockImplementation(async message => {
+      const input = (message.params as WireRecord).request as WireRecord | undefined;
+      if (input?.kind === "mutate") {
+        writes.push(input.mutation as WireRecord); times.push(Date.now());
+        if (blocked) return { type: "WORKSPACE_ERROR", code: "CLOUD_WORKSPACE_CHECKPOINTING", message: "Capturing" } as never;
+      }
+      return original(message);
+    });
+    try {
+      await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+      const sending = f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`,
+        userMessageId: "checkpoint-retry", prompt: [{ type: "text", text: "Run once" }] }, { signal: controller.signal })
+        .finally(() => { settled = true; });
+      void sending.catch(() => {});
+      await vi.waitFor(() => expect(writes).toHaveLength(1));
+      expect(settled).toBe(false);
+      if (outcome === "release") blocked = false;
+      if (outcome === "cancel") controller.abort();
+      if (outcome === "dispose") f.connection.dispose();
+      if (outcome === "owner") await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat,
+        agentId: "claude", env: { ANTHROPIC_MODEL: "test-model" } });
+      await vi.advanceTimersByTimeAsync(outcome === "timeout" ? 60_000 : 2_000);
+      if (outcome === "release") {
+        await expect(sending).resolves.toMatchObject({ type: "AGENT_PROMPT_COMPLETE" });
+        expect(writes).toHaveLength(2);
+        expect(f.getEnqueued()).toMatchObject({ kind: "enqueue", payload: { userMessageId: "checkpoint-retry" } });
+      } else {
+        await expect(sending).rejects.toThrow();
+        expect(f.getEnqueued()).toBeUndefined();
+        if (outcome === "timeout") {
+          expect(writes.length).toBeGreaterThan(2);
+          expect(writes.length).toBeLessThan(35);
+          expect(times.at(-1)! - times[0]).toBeLessThan(60_000);
+          expect(times[1] - times[0]).toBe(250);
+          expect(times[2] - times[1]).toBe(500);
+        } else expect(writes).toHaveLength(1);
+      }
+      expect(writes.every(write => JSON.stringify(write) === JSON.stringify(writes[0]))).toBe(true);
+      expect(f.authorize).toHaveBeenCalledOnce();
+    } finally { f.connection.dispose(); vi.useRealTimers(); }
+  });
   it("restores confirmation order when a paused goal utility overtakes an older queued prompt",async()=>{
     const f=fixture(),original=f.request.getMockImplementation()!,update=vi.fn();
     const goal={objective:"Finish",status:"active",tokenBudget:1000,tokensUsed:0,timeUsedSeconds:0,createdAt:1,updatedAt:1};

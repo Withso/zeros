@@ -19,6 +19,8 @@ import { workspaceIsReadOnly } from "./workspace-history";
 import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
+import { useInternalFeatureActive } from "../features/settings/internal-features";
+import { requestCloudWorkspaceOpen } from "./cloud-workspace-open-intent";
 
 interface OpenWorkspaceOptions {
   /** Publish a repository-filter change with the workspace destination in the
@@ -39,6 +41,7 @@ export function useOpenWorkspace(): (
 ) => void {
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
+  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
   return useCallback(
     (workspace: WorkspaceNavigationTarget, options?: OpenWorkspaceOptions) => {
       const historyOnly = workspaceIsReadOnly(workspace);
@@ -64,6 +67,7 @@ export function useOpenWorkspace(): (
           validationPending: workspace.validationPending,
           workspaceListFilter: options?.workspaceListFilter,
         });
+        if (cloudComputerV2) requestCloudWorkspaceOpen(workspace.path);
         return;
       }
       // Last-viewed chat there (validated), else the most-recent live one.
@@ -93,6 +97,7 @@ export function useOpenWorkspace(): (
         validationPending: workspace.validationPending,
         workspaceListFilter: options?.workspaceListFilter,
       });
+      if (cloudComputerV2 && !historyOnly) requestCloudWorkspaceOpen(workspace.path);
       if (fallbackId) {
         return;
       }
@@ -106,6 +111,6 @@ export function useOpenWorkspace(): (
         dispatch,
       });
     },
-    [dispatch, sessions],
+    [dispatch, sessions, cloudComputerV2],
   );
 }

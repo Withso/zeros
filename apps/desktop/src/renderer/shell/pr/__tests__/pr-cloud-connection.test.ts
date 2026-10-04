@@ -5,11 +5,14 @@ import { useSendToActiveChat } from "../use-send-to-active-chat";
 const folder =
   "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const fixture = vi.hoisted(() => ({
+  cloudComputerV2: false,
+  prepareForSend: vi.fn<() => Promise<void> | null>(() => null),
   bridge: null as unknown as WorkspaceRuntimeClient,
   chats: [] as unknown[],
   sendPrompt: vi.fn(async () => {}),
   error: vi.fn(),
 }));
+vi.mock("../../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => fixture.cloudComputerV2 }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,
@@ -25,6 +28,7 @@ vi.mock("../../../features/agent/sessions-hooks", () => ({
       transcriptState: "resident",
     }),
     sendPrompt: fixture.sendPrompt,
+    prepareForSend: fixture.prepareForSend,
   }),
 }));
 vi.mock("../../../state/store", () => ({
@@ -38,6 +42,8 @@ vi.mock("../../../shared/ui/primitives/elements", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  fixture.cloudComputerV2 = false;
+  fixture.prepareForSend.mockReturnValue(null);
   fixture.chats = [{ id: "chat", folder, agentId: "codex", kind: "chat" }];
   fixture.bridge = Object.create(WorkspaceRuntimeClient.prototype, {
     status: { value: "disconnected", writable: true },
@@ -45,6 +51,19 @@ beforeEach(() => {
   });
 });
 describe("PR action connection ownership", () => {
+  it("prepares an explicitly submitted cloud message before requiring its runtime connection", async () => {
+    fixture.cloudComputerV2 = true;
+    vi.mocked(fixture.bridge.statusForWorkspace).mockReturnValue("disconnected");
+    let ready!: () => void;
+    fixture.prepareForSend.mockReturnValue(new Promise<void>(resolve => { ready = resolve; }));
+    expect(useSendToActiveChat(folder)({ text: "Create a PR" })).toBe(true);
+    expect(fixture.prepareForSend).toHaveBeenCalledExactlyOnceWith("chat");
+    expect(fixture.sendPrompt).not.toHaveBeenCalled();
+    vi.mocked(fixture.bridge.statusForWorkspace).mockReturnValue("connected");
+    ready();
+    await vi.waitFor(() => expect(fixture.sendPrompt).toHaveBeenCalledOnce());
+    expect(fixture.error).not.toHaveBeenCalled();
+  });
   it("sends through a connected cloud workspace while the local engine is disconnected", async () => {
     expect(useSendToActiveChat(folder)({ text: "Create a PR" })).toBe(true);
     await vi.waitFor(() => expect(fixture.sendPrompt).toHaveBeenCalledOnce());

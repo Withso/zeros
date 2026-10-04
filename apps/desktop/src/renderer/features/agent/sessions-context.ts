@@ -84,6 +84,9 @@ export interface SessionsActions {
   getSession(chatId: string): AgentSessionState | undefined;
   /** Cancellation/close epoch for explicit retry preparation before send. */
   getSendGeneration(chatId: string): number;
+  /** Explicit send only: obtain fresh cloud admission before session work.
+   * Local and gated-off callers need no preparation. Stop/close cancels it. */
+  prepareForSend(chatId: string): Promise<void> | null;
   /** Fresh close-boundary work snapshot. Includes local sends still awaiting a
    * route, adopted provider turns, active background work, and queued prompts. */
   getCloseActivity(chatId: string): {
@@ -113,6 +116,8 @@ export interface SessionsActions {
      *  buttons) — the action kind stamped on the user bubble so it renders
      *  with the "sent by Zeros" treatment (icon + brown bubble, copy-only). */
     autoAction?: string,
+    /** The provider now owns a pending message/queue entry; not turn completion. */
+    onAccepted?: () => void,
   ): Promise<void>;
   cancel(chatId: string): Promise<void>;
   /** Revoke only the active native Browser lease. If the official Browser

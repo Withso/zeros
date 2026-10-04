@@ -90,7 +90,7 @@ export function useChatSession(
     // with the chat's id baked in.
     startSession: (agentId, options) =>
       ctx.ensureSession(chatId, agentId, options),
-    sendPrompt: (text, displayText, attachments, bubbleAttachments, segments) =>
+    sendPrompt: (text, displayText, attachments, bubbleAttachments, segments, onAccepted) =>
       ctx.sendPrompt(
         chatId,
         text,
@@ -98,6 +98,8 @@ export function useChatSession(
         attachments,
         bubbleAttachments,
         segments,
+        undefined,
+        onAccepted,
       ),
     cancel: () => ctx.cancel(chatId),
     stopBackgroundTask,
