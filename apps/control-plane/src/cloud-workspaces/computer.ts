@@ -67,13 +67,14 @@ async function authority(
   organizationId: string,
   userId: string,
   admin = false,
+  lockRows = true,
 ) {
   if (admin) await requireOrganizationRole(tx, organizationId, userId, "admin");
   else await requireOrganizationMembership(tx, organizationId, userId);
   const row = (
     await tx.query<{ role: string }>(
       `SELECT member.role FROM organization_members member JOIN organizations org ON org.id=member.org_id
-    WHERE member.org_id=$1 AND member.user_id=$2 AND NOT org.is_personal AND org.deleted_at IS NULL FOR SHARE OF org,member`,
+    WHERE member.org_id=$1 AND member.user_id=$2 AND NOT org.is_personal AND org.deleted_at IS NULL${lockRows ? " FOR SHARE OF org,member" : ""}`,
       [organizationId, userId],
     )
   ).rows[0];
@@ -83,12 +84,35 @@ async function authority(
       "not_found",
       "Cloud Computer is available only in organizations.",
     );
+  // Membership may have changed since the preliminary role check. Use the
+  // locked row so demotion cannot authorize a mutation with a stale role.
+  if (admin && row.role !== "owner" && row.role !== "admin")
+    throw new HttpError(403, "forbidden", "Requires admin role");
   return row;
 }
 async function lock(tx: Tx, org: string) {
   await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,62171))", [
     org,
   ]);
+}
+export { authority as requireCloudComputerAuthority, lock as lockCloudComputerOrganization };
+
+async function assertLegacyWriteAllowed(tx: Tx, organizationId: string) {
+  if ((await tx.query("SELECT 1 FROM cloud_computer_v2_heads WHERE org_id=$1", [organizationId])).rowCount)
+    throw new HttpError(409, "cloud_computer_v2_enabled", "This organization uses Cloud Computer v2. Update Zeros to manage it.");
+}
+
+/** V2 enrollment reuses the existing identity without rewriting a legacy
+ * recipe or publishing it as a v2 build. Called under the organization lock. */
+export async function ensureCloudComputerIdentity(tx: Tx, org: string, userId: string) {
+  if ((await tx.query("SELECT 1 FROM cloud_computers WHERE org_id=$1", [org])).rowCount) return;
+  const profileId = randomUUID();
+  await tx.query(`INSERT INTO environment_profiles(id,org_id,owner_kind,name,placement,is_default,current_version)
+    VALUES($1,$2,'organization',$3,'cloud',false,1)`, [profileId, org, `Cloud Computer ${profileId.slice(0, 8)}`]);
+  await tx.query(`INSERT INTO environment_profile_versions(profile_id,org_id,version,document,created_by)
+    VALUES($1,$2,1,$3::jsonb,$4)`, [profileId, org, JSON.stringify(profileDocument(empty)), userId]);
+  await tx.query(`INSERT INTO cloud_computers(org_id,profile_id,draft_version,operation_id,request_sha256)
+    VALUES($1,$2,1,$3,$4)`, [org, profileId, randomUUID(), digest({ document: empty })]);
 }
 export function cloudComputerRecipe(document: unknown): CloudComputerDocument {
   const input = document as { values?: { cloudComputer?: unknown } };
@@ -240,6 +264,7 @@ export class DatabaseCloudComputerService {
     return withSystemTx(this.pool, async (tx) => {
       await authority(tx, organizationId, userId, true);
       await lock(tx, organizationId);
+      await assertLegacyWriteAllowed(tx, organizationId);
       const current = (
         await tx.query<{
           profile_id: string;
@@ -325,6 +350,7 @@ export class DatabaseCloudComputerService {
     return withSystemTx(this.pool, async (tx) => {
       await authority(tx, organizationId, userId, true);
       await lock(tx, organizationId);
+      await assertLegacyWriteAllowed(tx, organizationId);
       const current = (
         await tx.query<{ revision: string; active_version: string | null; active_image_id: string | null; previous_image_id: string | null }>(
           "SELECT revision,active_version,active_image_id,previous_image_id FROM cloud_computers WHERE org_id=$1 FOR UPDATE",
@@ -368,6 +394,8 @@ export class DatabaseCloudComputerService {
   async rollback(organizationId: string, userId: string, expectedRevision: number, artifactId: string) {
     const version = await withSystemTx(this.pool, async tx => {
       await authority(tx, organizationId, userId, true);
+      await lock(tx, organizationId);
+      await assertLegacyWriteAllowed(tx, organizationId);
       return (await tx.query<{ version: string }>("SELECT version FROM cloud_computer_builds WHERE id=$1 AND org_id=$2", [artifactId, organizationId])).rows[0]?.version;
     });
     if (!version) conflict();
@@ -376,20 +404,22 @@ export class DatabaseCloudComputerService {
   async build(organizationId: string, userId: string, value: unknown) {
     const parsed = z.object({ id: z.string().uuid(), expectedRevision: z.number().int().positive(), version: z.number().int().positive() }).strict().safeParse(value);
     if (!parsed.success) throw new HttpError(422, "invalid_input", "Invalid Cloud Computer build.");
-    if (this.config.provider !== "boat" || !this.config.boat || !this.config.setupExecution || this.config.backgroundWorkersEnabled === false)
-      throw new HttpError(409, "cloud_computer_build_unavailable", "Image building is unavailable in this environment.");
-    const input = parsed.data, driver = this.imageDriver ?? createComputerImageDriver(this.config);
+    const input = parsed.data;
     return withSystemTx(this.pool, async tx => {
       // Match paid-work admission's organization-first lock order.
       await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [organizationId]);
       await authority(tx, organizationId, userId, true);
+      await lock(tx, organizationId);
+      await assertLegacyWriteAllowed(tx, organizationId);
+      if (this.config.provider !== "boat" || !this.config.boat || !this.config.setupExecution || this.config.backgroundWorkersEnabled === false)
+        throw new HttpError(409, "cloud_computer_build_unavailable", "Image building is unavailable in this environment.");
+      const driver = this.imageDriver ?? createComputerImageDriver(this.config);
       const team = (await tx.query<{ id: string }>(`SELECT team.id FROM teams team JOIN team_members member
         ON member.team_id=team.id AND member.org_id=team.org_id AND member.user_id=$2
         WHERE team.org_id=$1 AND team.deleted_at IS NULL ORDER BY team.is_default DESC,team.id LIMIT 1`, [organizationId, userId])).rows[0];
       if (!team) throw new HttpError(404, "team_not_found", "Authorized cloud workspace team not found.");
       await authorizeCloudWorkspaceOperation(tx, { organizationId, teamId: team.id, actorUserId: userId,
         billingOwnerUserId: userId, workosEnabled: this.workosEnabled, requireWorkspaceOwner: true });
-      await lock(tx, organizationId);
       const current = (await tx.query<{ profile_id: string; revision: string; draft_version: string; document: unknown }>(
         `SELECT computer.*,version.document FROM cloud_computers computer JOIN environment_profile_versions version
          ON version.profile_id=computer.profile_id AND version.version=computer.draft_version WHERE computer.org_id=$1 FOR UPDATE OF computer`, [organizationId])).rows[0];
@@ -434,6 +464,7 @@ export class DatabaseCloudComputerService {
     return withSystemTx(this.pool, async (tx) => {
       await authority(tx, organizationId, userId, true);
       await lock(tx, organizationId);
+      await assertLegacyWriteAllowed(tx, organizationId);
       const row = await tx.query(
         "UPDATE cloud_computer_builds SET state='cancelled',completed_at=now() WHERE org_id=$1 AND id=$2 AND state='building' RETURNING id",
         [organizationId, buildId],
@@ -456,6 +487,8 @@ export async function authorizeCloudComputerBuild(
   },
 ) {
   await authority(tx, input.organizationId, input.actorUserId, true);
+  await lock(tx, input.organizationId);
+  await assertLegacyWriteAllowed(tx, input.organizationId);
   const row = (
     await tx.query<{
       profile_id: string;
