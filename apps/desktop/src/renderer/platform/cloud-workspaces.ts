@@ -1,5 +1,6 @@
 import { authorizeCloudGithubSource } from "./cloud-github";
 import { z } from "zod";
+import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
@@ -16,6 +17,7 @@ export const CloudWorkspaceDocumentSchema = z.object({
   name: z.string().min(1).max(120),
   createdBy: z.string().uuid(),
   ownerUserId: z.string().uuid().optional(),
+  adminWorkspace: CloudComputerAdminWorkspaceSchema.optional(),
   recovery: z.object({
     state: z.string().nullable(),
     checkpointId: z.string().uuid().nullable(),

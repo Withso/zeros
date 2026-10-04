@@ -107,14 +107,21 @@ d("cloud workspace API contracts", () => {
     });
   };
 
-  const signup = (name: string) => {
+  let fixtureSignupTime = Date.now();
+  const signup = async (name: string) => {
     const sub = randomUUID();
-    return ensureUser(pool, {
-      provider: "auth0",
-      providerSubject: sub,
-      email: `${name.toLowerCase()}-${sub}@example.com`,
-      displayName: name,
-    });
+    // Disposable fixture identities must not share the production signup
+    // window across database resets. Auth0 fixtures use this clock only there.
+    fixtureSignupTime += 60 * 60 * 1000 + 1;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(fixtureSignupTime);
+    try {
+      return await ensureUser(pool, {
+        provider: "auth0",
+        providerSubject: sub,
+        email: `${name.toLowerCase()}-${sub}@example.com`,
+        displayName: name,
+      });
+    } finally { clock.mockRestore(); }
   };
 
   const request = (
@@ -255,6 +262,204 @@ d("cloud workspace API contracts", () => {
   });
   const seedTemplate = (options: { version?: number; primaryName?: string } = {}) => withSystemTx(pool, tx =>
     seedComputerTemplate(tx, { organizationId: orgId, ownerUserId: owner.id, installationId, ...options }));
+
+  describe("private Cloud Computer admin workspaces", () => {
+    const adminBody = (expectedActiveVersion = 1, operationId = randomUUID()) => ({ expectedActiveVersion, operationId });
+    const adminPath = () => `/v1/organizations/${orgId}/cloud-computer/v2/admin-workspaces`;
+    const createAdmin = (body: Record<string, unknown> = adminBody()) => request(adminPath(), { method: "POST", body });
+    const prepareAdmin = async () => {
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [owner.id]);
+      actor = { ...owner, staffRole: "developer" };
+      await seedV4();
+      const template = await seedTemplate();
+      configureApp(false, templateConfig());
+      const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+      vi.mocked(repositoryResolver.resolve).mockImplementation(async input => ({ ...await resolve(input),
+        resolvedRevision: /^[a-f0-9]{40}$/.test(input.revision ?? "") ? input.revision! : "4".repeat(40) }));
+      return template;
+    };
+
+    it.each([null, "support_admin"] as const)("rejects non-engineering staff (%s) without creating a workspace", async staffRole => {
+      await prepareAdmin();
+      actor = { ...owner, staffRole };
+      const response = await createAdmin();
+      expect(response.status).toBe(404);
+      expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+      expect((await pool.query("SELECT 1 FROM cloud_workspaces")).rowCount).toBe(0);
+    });
+
+    it("rechecks the live staff and organization admin roles", async () => {
+      await prepareAdmin();
+      await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [owner.id]);
+      expect((await createAdmin()).status).toBe(404);
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [owner.id]);
+      await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [orgId, owner.id]);
+      expect((await createAdmin()).status).toBe(403);
+      expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
+    });
+
+    it("requires an active ready template and at least one configured repository", async () => {
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [owner.id]);
+      actor = { ...owner, staffRole: "developer" };
+      configureApp(false, templateConfig());
+      expect(await (await createAdmin()).json()).toMatchObject({ error: { code: "cloud_computer_build_required" } });
+      await seedV4();
+      const empty = await withSystemTx(pool, tx => seedComputerTemplate(tx, {
+        organizationId: orgId, ownerUserId: owner.id, installationId, repositories: [],
+      }));
+      const response = await createAdmin();
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { message: expect.stringMatching(/at least one repository/i) } });
+      await pool.query("UPDATE cloud_computer_templates SET state='retired',retired_at=now() WHERE build_id=$1", [empty.buildId]);
+      expect(await (await createAdmin()).json()).toMatchObject({ error: { code: "cloud_computer_build_required" } });
+      expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
+    });
+
+    it.each(["developer", "platform_owner"] as const)("creates a private first-repository template fork owned and billed to its %s creator", async staffRole => {
+      const template = await prepareAdmin();
+      await pool.query("UPDATE users SET staff_role=$2 WHERE id=$1", [owner.id, staffRole]);
+      await pool.query("UPDATE organization_members SET role='admin' WHERE org_id=$1 AND user_id=$2", [orgId, owner.id]);
+      actor = { ...owner, staffRole };
+      const response = await createAdmin();
+      expect(response.status).toBe(202);
+      const created = await response.json();
+      expect(created).toMatchObject({ reused: false, replayed: false, workspace: {
+        createdBy: owner.id, ownerUserId: owner.id, sharingMode: "private", adminWorkspace: { creatorUserId: owner.id },
+        repository: { owner: "withso", name: "zeros", revision: "1".repeat(40) },
+      } });
+      expect(repositoryResolver.resolve).toHaveBeenCalledWith(expect.objectContaining({ repository: "zeros", revision: "1".repeat(40) }));
+      const workspaceId = created.workspace.id;
+      expect((await generationPin(workspaceId)).rows[0]).toMatchObject({ image_ref: `boat-template:${template.sourceSandboxId}`, runtime_profile: "zeros-cloud-worker-v4" });
+      expect((await pool.query("SELECT created_by,owner_user_id,assignee_user_id FROM cloud_workspaces WHERE id=$1", [workspaceId])).rows[0])
+        .toEqual({ created_by: owner.id, owner_user_id: owner.id, assignee_user_id: owner.id });
+      expect((await pool.query("SELECT billing_owner_user_id FROM workspace_billing_epochs WHERE workspace_id=$1", [workspaceId])).rows[0])
+        .toEqual({ billing_owner_user_id: owner.id });
+      expect((await pool.query("SELECT build_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [workspaceId])).rows[0])
+        .toEqual({ build_id: template.buildId, config_id: template.configId });
+      expect((await pool.query("SELECT creator_user_id FROM cloud_computer_admin_workspaces WHERE workspace_id=$1", [workspaceId])).rows[0])
+        .toEqual({ creator_user_id: owner.id });
+      expect((await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}`)).status).toBe(200);
+      expect((await (await request(`/v1/organizations/${orgId}/cloud-workspaces`)).json()).workspaces[0].adminWorkspace)
+        .toEqual({ creatorUserId: owner.id });
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')", [orgId, outsider.id]);
+      actor = { ...outsider, staffRole: "developer" };
+      expect((await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}`)).status).toBe(404);
+      expect((await (await request(`/v1/organizations/${orgId}/cloud-workspaces`)).json()).workspaces).toEqual([]);
+    });
+
+    it("deduplicates concurrent requests, reuses only the creator's version, and replays accepted receipts after activation", async () => {
+      await prepareAdmin();
+      const originalBody = adminBody();
+      const responses = await Promise.all([createAdmin(originalBody), createAdmin(originalBody)]);
+      expect(responses.map(response => response.status).sort()).toEqual([200, 202]);
+      const [original, duplicate] = await Promise.all(responses.map(response => response.json()));
+      expect(duplicate.workspace.id).toBe(original.workspace.id);
+      const reuseBody = adminBody();
+      const reusedResponse = await createAdmin(reuseBody);
+      expect(reusedResponse.status).toBe(200);
+      const reused = await reusedResponse.json();
+      expect(reused).toMatchObject({ reused: true, replayed: false, workspace: { id: original.workspace.id }, intent: { id: original.intent.id } });
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(1);
+      await seedTemplate({ version: 2 });
+      const stale = await createAdmin(adminBody());
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toMatchObject({ error: { code: "cloud_computer_changed" } });
+      for (const [body, wasReused] of [[originalBody, false], [reuseBody, true]] as const) {
+        const replay = await createAdmin(body);
+        expect(replay.status).toBe(200);
+        expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+        expect(await replay.json()).toMatchObject({ replayed: true, reused: wasReused, workspace: { id: original.workspace.id } });
+      }
+      const changed = await createAdmin({ ...originalBody, expectedActiveVersion: 2 });
+      expect(changed.status).toBe(409);
+      const next = await (await createAdmin(adminBody(2))).json();
+      expect(next.workspace.id).not.toBe(original.workspace.id);
+      expect(next.reused).toBe(false);
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(2);
+    });
+
+    it("keeps another admin's request and workspace private and creates their own fork", async () => {
+      await prepareAdmin();
+      const body = adminBody();
+      const original = await (await createAdmin(body)).json();
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [outsider.id]);
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')", [orgId, outsider.id]);
+      await pool.query("INSERT INTO team_members(team_id,org_id,user_id,role) VALUES($1,$2,$3,'maintainer')", [teamId, orgId, outsider.id]);
+      actor = { ...outsider, staffRole: "developer" };
+      expect((await createAdmin(body)).status).toBe(404);
+      const created = await createAdmin();
+      expect(created.status).toBe(202);
+      const other = await created.json();
+      expect(other.workspace.id).not.toBe(original.workspace.id);
+      expect(other.workspace.adminWorkspace).toEqual({ creatorUserId: outsider.id });
+      expect((await pool.query("SELECT billing_owner_user_id FROM workspace_billing_epochs WHERE workspace_id=$1", [other.workspace.id])).rows[0])
+        .toEqual({ billing_owner_user_id: outsider.id });
+    });
+
+    it("reuses a saved eligible runtime across head changes but creates a new fork when that runtime is revoked", async () => {
+      await prepareAdmin();
+      const original = await (await createAdmin()).json();
+      await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "1", releaseOrder: 2 }));
+      const reused = await (await createAdmin()).json();
+      expect(reused).toMatchObject({ reused: true, workspace: { id: original.workspace.id } });
+      await pool.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [`r1-${"a".repeat(64)}`]);
+      const replacement = await createAdmin();
+      expect(replacement.status).toBe(202);
+      const created = await replacement.json();
+      expect(created.workspace.id).not.toBe(original.workspace.id);
+      expect(created.workspace.generation.runtime.runtimeId).toBe(`r1-${"1".repeat(64)}`);
+    });
+
+    it("rechecks activation and creator authority after the external repository lookup", async () => {
+      await prepareAdmin();
+      const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+      vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+        await seedTemplate({ version: 2 });
+        return resolve(input);
+      });
+      expect((await createAdmin()).status).toBe(409);
+      vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+        await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [orgId, owner.id]);
+        return resolve(input);
+      });
+      expect((await createAdmin(adminBody(2))).status).toBe(403);
+      for (const table of ["cloud_workspaces", "cloud_workspace_generations", "cloud_computer_admin_workspaces"])
+        expect((await pool.query(`SELECT 1 FROM ${table}`)).rowCount).toBe(0);
+    });
+
+    it("rolls back the workspace, generation and lifecycle acceptance if sidecar insertion fails", async () => {
+      await prepareAdmin();
+      await pool.query(`CREATE FUNCTION zeros_v2_test_reject_admin_marker() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'synthetic marker failure'; END $$`);
+      await pool.query(`CREATE TRIGGER zeros_v2_test_reject_admin_marker BEFORE INSERT ON cloud_computer_admin_workspaces
+        FOR EACH ROW EXECUTE FUNCTION zeros_v2_test_reject_admin_marker()`);
+      await expect(createAdmin()).rejects.toThrow("synthetic marker failure");
+      for (const table of ["cloud_workspaces", "cloud_workspace_generations", "cloud_workspace_lifecycle_intents", "cloud_computer_admin_workspaces"])
+        expect((await pool.query(`SELECT 1 FROM ${table}`)).rowCount).toBe(0);
+    });
+
+    it("rejects client-supplied admin identity and keeps ordinary workspaces unmarked", async () => {
+      await prepareAdmin();
+      for (const field of ["adminWorkspace", "creatorUserId", "repository", "sharingMode"])
+        expect((await createAdmin({ ...adminBody(), [field]: "spoofed" })).status).toBe(422);
+      const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+      expect(response.status).toBe(202);
+      expect((await response.json()).workspace).not.toHaveProperty("adminWorkspace");
+      expect((await pool.query("SELECT 1 FROM cloud_computer_admin_workspaces")).rowCount).toBe(0);
+    });
+
+    it("keeps request receipts immutable and hidden from user transactions", async () => {
+      await prepareAdmin();
+      await createAdmin();
+      expect((await withUserTx(pool, owner.id, tx => tx.query("SELECT * FROM cloud_computer_admin_workspace_requests"))).rows).toEqual([]);
+      await expect(pool.query("UPDATE cloud_computer_admin_workspace_requests SET expected_active_version=2 WHERE org_id=$1", [orgId]))
+        .rejects.toMatchObject({ code: "23514" });
+      await expect(pool.query("DELETE FROM cloud_computer_admin_workspace_requests WHERE org_id=$1", [orgId]))
+        .rejects.toMatchObject({ code: "23514" });
+    });
+  });
 
   it("requires an active ready v2 template before lookup or allocation, independently of the base switch", async () => {
     await seedV4();

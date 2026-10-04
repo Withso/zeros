@@ -16,10 +16,11 @@ export async function seedComputerTemplate(tx: Tx, input: {
   primaryName?: string;
   sourceSandboxId?: string;
   environment?: Array<{ name: string; bindingId: string; bindingVersion: number }>;
+  repositories?: { id: string; owner: string; name: string; sha: string }[];
 }) {
   const version = input.version ?? 1;
   const buildId = randomUUID(), configId = randomUUID();
-  const repositories = [
+  const repositories = input.repositories ?? [
     { id: "123456789", owner: "withso", name: input.primaryName ?? "zeros", sha: "1".repeat(40) },
     { id: "987654321", owner: "withso", name: "secondary", sha: "2".repeat(40) },
   ];

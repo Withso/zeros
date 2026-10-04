@@ -10,7 +10,7 @@ import { CloudProviderError, type CloudProviderCreateInput } from "./provider.js
 const templateRef = /^boat-template:([A-Za-z0-9_-]{1,128})$/;
 const pathName = /^[a-z0-9_.-]{1,100}$/;
 type TemplateRow = {
-  build_id: string; config_id: string; provider_resource_id: string | null;
+  build_id: string; version: string | number; config_id: string; provider_resource_id: string | null;
   account_scope: string | null; billing_org: string | null;
   base_image_id: string; base_compatibility_id: string; runtime_id: string;
   manifest_sha256: string; engine_protocol_version: number;
@@ -37,7 +37,7 @@ function buildRequired(): never {
   throw new HttpError(409, "cloud_computer_build_required", "Build your Cloud Computer before creating a workspace.");
 }
 
-const templateSelect = `SELECT build.id AS build_id,build.config_id,template.provider_resource_id,
+const templateSelect = `SELECT build.id AS build_id,build.version,build.config_id,template.provider_resource_id,
   template.account_scope,template.billing_org,template.protected_contract_digest,
   build.base_image_id,base.base_compatibility_id,build.runtime_id,bundle.manifest_sha256,bundle.engine_protocol_version,
   base.source_commit,base.architecture,base.storage_mib,build.repository_manifest
@@ -94,6 +94,7 @@ export async function selectComputerWorkspaceSource(tx: Tx, input: {
   organizationId: string; qualificationMode: CloudRuntimeQualificationMode;
   accountScope?: string; billingOrg?: string;
   expectedActiveBuildId?: string | null;
+  expectedActiveVersion?: number;
 }) {
   await lockCloudComputerOrganization(tx, input.organizationId);
   // C6 claims retirement under this same UPDATE lock and rechecks source
@@ -108,6 +109,8 @@ export async function selectComputerWorkspaceSource(tx: Tx, input: {
   if (!head.active_build_id) buildRequired();
   const row = (await tx.query<TemplateRow>(templateSelect, [head.active_build_id, input.organizationId])).rows[0];
   if (!row) buildRequired();
+  if (input.expectedActiveVersion !== undefined && Number(row.version) !== input.expectedActiveVersion)
+    throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed. Refresh before creating an admin workspace.");
   const source = await sourceFromRow(tx, input.organizationId, row);
   if (!input.accountScope || !input.billingOrg || row.account_scope !== input.accountScope || row.billing_org !== input.billingOrg)
     throw new HttpError(409, "cloud_computer_template_unavailable", "The active Cloud Computer template is unavailable. Rebuild the computer.");

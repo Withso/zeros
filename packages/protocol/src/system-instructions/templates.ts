@@ -53,6 +53,9 @@ Link files you create with workspace-relative Markdown links, including their fu
  *  notice when the user adds a dir mid-chat. Substitution: {DIRS}. */
 export const ADDITIONAL_DIRS_NOTICE = `You also have access to these additional directories (read from them with your tools as needed): {DIRS}.`;
 
+/** Enabled only by the control plane's marked-workspace execution admission. */
+export const CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE = "This workspace can view and change the organization's Cloud Computer through the cloud-computer tools; do not edit repository code unless asked.";
+
 /** [SYS-INSTR: code-agent-design-territory]
  * Behavioral contract for the native Code actor. Identified Design subtrees
  * are live and readable in the same worktree. Composer instructions select

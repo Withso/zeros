@@ -10,7 +10,7 @@ vi.mock("../../features/team/control-plane", () => ({
     constructor(public status: number, public code: string, message: string) { super(message); }
   },
 }));
-import { CloudWorkspaceDocumentSchema, cloudAccountRequest, cloudAgentGrant, createCloudWorkspaceDocument } from "../cloud-workspaces";
+import { CloudWorkspaceDocumentSchema, cloudAccountRequest, cloudAgentGrant, createCloudWorkspaceDocument, getCloudWorkspaceDocument } from "../cloud-workspaces";
 
 const session = { access_token: "synthetic-session", user: { sub: "test-user" } };
 beforeEach(() => { state.generation = 0; state.session.mockReset(); state.source.mockReset(); });
@@ -21,6 +21,23 @@ describe("cloud request account boundaries", () => {
     const capabilities = { canWrite: true, canManage: false, canStart: false, startUnavailableReason: null };
     expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse(capabilities).canEdit).toBeUndefined();
     for (const canEdit of [true, false]) expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse({ ...capabilities, canEdit }).canEdit).toBe(canEdit);
+  });
+  it("retains server-derived admin metadata in a fetched workspace DTO", async () => {
+    state.session.mockResolvedValue(session);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const workspace = {
+      id, organizationId: id, teamId: id, name: "Configure Cloud Computer", createdBy: id,
+      ownerUserId: id, adminWorkspace: { creatorUserId: id }, placement: "cloud", status: "provisioning",
+      capabilities: { canWrite: true, canManage: true, canStart: false, startUnavailableReason: "workspace_not_stopped" },
+      repository: { forge: "github.com", owner: "sample", name: "repo", revision: "main" },
+      generation: { number: 1, architecture: "linux/amd64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
+        observedState: "unknown", lastObservedAt: null },
+      version: 1, error: null, createdAt: "2026-10-04T00:00:00.000Z", updatedAt: "2026-10-04T00:00:00.000Z", deletedAt: null,
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace })));
+    expect((await getCloudWorkspaceDocument({ organizationId: id, workspaceId: id })).adminWorkspace).toEqual({ creatorUserId: id });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: { ...workspace, adminWorkspace: { creatorUserId: "invalid" } } })));
+    await expect(getCloudWorkspaceDocument({ organizationId: id, workspaceId: id })).rejects.toThrow();
   });
   it("chooses the proven account grant even when a newer unqualified API-key grant matches the same model", async () => {
     state.session.mockResolvedValue(session);

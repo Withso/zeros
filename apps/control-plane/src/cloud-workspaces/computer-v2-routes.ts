@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type pg from "pg";
 import { z } from "zod";
@@ -14,6 +14,8 @@ import {
   CloudComputerV2RepositorySetupSchema,
   CloudComputerV2SaveDraftSchema,
   CloudComputerV2VersionRequestSchema,
+  CloudComputerV2AdminWorkspaceRequestSchema,
+  type CloudComputerV2AdminWorkspaceRequest,
 } from "./computer-v2-contract.js";
 
 type Service = Pick<
@@ -32,7 +34,7 @@ type Service = Pick<
 export function createCloudComputerV2Routes(
   pool: pg.Pool,
   config: CloudWorkspaceBackendConfig,
-  options: { service?: Service } = {},
+  options: { service?: Service; createAdminWorkspace?: (c: Context, request: CloudComputerV2AdminWorkspaceRequest) => Promise<Response> } = {},
 ) {
   const app = new Hono(),
     service =
@@ -108,6 +110,12 @@ export function createCloudComputerV2Routes(
   const logQuery = z
     .object({ after: z.string().optional(), limit: z.string().optional() })
     .strict();
+  app.post(root + "/admin-workspaces", async (c) => {
+    const request = parse(CloudComputerV2AdminWorkspaceRequestSchema, await c.req.json().catch(() => null));
+    if (!options.createAdminWorkspace)
+      throw new HttpError(503, "cloud_workspaces_not_configured", "Cloud workspace provisioning is not configured");
+    return options.createAdminWorkspace(c, request);
+  });
   app.get(root, (c) => {
     const query = parse(historyQuery, c.req.query());
     return service

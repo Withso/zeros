@@ -35,6 +35,7 @@ async function requireAdmin(tx: Tx, orgId: string, userId: string) {
   requireOrganizationCreationCapability(user?.staff_role ?? null);
   await requireCloudComputerAuthority(tx, orgId, userId, true);
 }
+export { requireAdmin as requireCloudComputerAdmin };
 
 /** Called only after authenticating/locking the current engine and resolving
  * the initiating actor. Absence is ordinary execution, never an opt-in flag. */

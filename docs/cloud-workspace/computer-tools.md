@@ -7,14 +7,31 @@ adapters. It has no global registry entry or stdio product server.
 
 ## Creation and admission
 
-`markAdminWorkspace(tx, {workspaceId, orgId, creatorUserId})` is an internal store
-helper for the workspace-creation transaction. That transaction must first pass
-normal template/generation admission, choose the first configured repository as
-primary, and require at least one repository in the active computer. It creates
-a private workspace with creator, owner and assignee equal to the authenticated
-creating administrator, then inserts the sidecar before committing. Creation and
-initial agent context are separate integration work; there is no client-supplied
-admin flag in the workspace API.
+`POST /v1/organizations/:organization/cloud-computer/v2/admin-workspaces`
+accepts only `{expectedActiveVersion, operationId}` from current engineering staff
+who are organization owners/admins. It requires an active ready template and at
+least one repository. The first configured repository is primary, at its exact
+build SHA; an empty list returns 409 with guidance to configure and build a repo.
+The ordinary template-fork creation path assigns creator, owner, assignee and
+billing owner to the authenticated admin, with private sharing. It calls
+`markAdminWorkspace(tx, {workspaceId, orgId, creatorUserId})` in the same transaction
+as the generation, source pin, settings snapshot and lifecycle intent. There is
+no client-supplied admin flag.
+
+Reopening with a new operation ID returns that creator's existing matching
+non-retired admin workspace for the active version with `reused: true`. Requests
+for a stale version conflict; testing a new active version requires an explicit
+new request. Immutable operation receipts preserve the original workspace and
+reuse result on replay, including after later activation, without another
+allocation. Organization erasure removes these receipts before the sidecars.
+Normal VM accounting meters the creator through the existing billing epoch.
+
+Workspace DTOs expose optional server-derived `adminWorkspace: {creatorUserId}`
+metadata. Execution admission supplies the fixed context through the existing
+native system-instruction channel or first-turn preamble: “This workspace can
+view and change the organization's Cloud Computer through the cloud-computer
+tools; do not edit repository code unless asked.” It is included on resume too;
+DTOs and prompt text never establish tool authority.
 
 `cloud_computer_admin_workspaces` binds the workspace and organization to an
 immutable creator. Forced system RLS hides it from user transactions. Updates
@@ -101,5 +118,7 @@ does not release its physical allocation or cleanup capacity hold.
 The admin workspace's ordinary shell can read the organization environment
 injected into that workspace. These five tools constrain control-plane writes
 and result projections; they do not establish a separate secret boundary inside
-an already authorized shell. Organization environment injection, workspace
-creation and live provider qualification remain separate rollout requirements.
+an already authorized shell. Organization environment injection and live
+provider qualification remain separate rollout requirements. Admin
+creation uses the normal generation settings path, so organization environment
+delivery joins through that path when its implementation lands.
