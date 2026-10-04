@@ -41,9 +41,11 @@ const pending = (row) => row && ["queued", "running"].includes(row.state);
 export const cloudComputerV2ReviewRegressions = [
   "role-loss",
   "discard-typing",
+  "discard-clean-typing",
   "terminal-log",
   "history-retirement",
   "history-conflict",
+  "history-hidden-conflict",
   "external-first-build",
 ];
 
@@ -74,7 +76,9 @@ export async function runCloudComputerV2Smoke({
     heldDiscard = null,
     holdNextDiscard = false,
     heldBuild = null,
-    holdNextBuild = false;
+    holdNextBuild = false,
+    heldConflict = null,
+    holdNextConflict = false;
   const logCount = () =>
     requests.filter((row) => row.path.endsWith("/log")).length;
   const writes = (path) =>
@@ -265,16 +269,20 @@ export async function runCloudComputerV2Smoke({
         } else if (path.endsWith("/activate")) {
           const version = Number(path.match(/\/versions\/([^/]+)/)[1]);
           const selected = history.find((item) => item.version === version);
-          if (selected?.templateState === "retired")
-            return reply(
-              {
-                error: {
-                  code: "cloud_computer_template_retired",
-                  message: "Rebuild this version.",
-                },
+          if (selected?.templateState === "retired") {
+            const result = {
+              error: {
+                code: "cloud_computer_template_retired",
+                message: "Rebuild this version.",
               },
-              409,
-            );
+            };
+            if (holdNextConflict) {
+              holdNextConflict = false;
+              heldConflict = { route, result };
+              return;
+            }
+            return reply(result, 409);
+          }
           computer.previous = computer.active;
           computer.active = selected;
           computer.revision++;
@@ -296,7 +304,10 @@ export async function runCloudComputerV2Smoke({
     return reply(result);
   });
 
-  if (regression === "discard-typing") {
+  if (
+    regression === "discard-typing" ||
+    regression === "discard-clean-typing"
+  ) {
     const first = build(1);
     const computer = states.get(orgA);
     Object.assign(computer, {
@@ -332,7 +343,8 @@ export async function runCloudComputerV2Smoke({
   }
   if (
     regression === "history-retirement" ||
-    regression === "history-conflict"
+    regression === "history-conflict" ||
+    regression === "history-hidden-conflict"
   ) {
     const latest = build(31);
     Object.assign(states.get(orgA), {
@@ -406,7 +418,10 @@ export async function runCloudComputerV2Smoke({
         "Known organization demotion clears pending secrets and management, including while hidden with staff access and warm canManage",
         true,
       );
-    } else if (regression === "discard-typing") {
+    } else if (
+      regression === "discard-typing" ||
+      regression === "discard-clean-typing"
+    ) {
       await expect(editor).toHaveText("echo saved draft");
       await editor.fill("echo before discard");
       holdNextDiscard = true;
@@ -429,22 +444,33 @@ export async function runCloudComputerV2Smoke({
       await page
         .getByLabel("Cloud Computer build timeout", { exact: true })
         .fill("222");
+      const clean = regression === "discard-clean-typing";
+      if (clean) {
+        await editor.fill("echo saved draft");
+        await page
+          .getByLabel("Cloud Computer build timeout", { exact: true })
+          .fill("600");
+      }
       await heldState.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify(current),
       });
       heldState = null;
-      await expect(editor).toHaveText("echo typed during discard refresh");
+      await expect(editor).toHaveText(
+        clean ? "echo saved draft" : "echo typed during discard refresh",
+      );
       await expect(
         page.getByLabel("Cloud Computer build timeout", { exact: true }),
-      ).toHaveValue("222");
+      ).toHaveValue(clean ? "600" : "222");
       await expect(button("Save draft")).toBeEnabled();
       await expect(
         page.getByText("Unbuilt changes", { exact: true }),
       ).toHaveCount(0);
       check(
-        "Discard preserves script and timeout typing across a held mutation and replacement read",
+        clean
+          ? "Discard preserves later typing that restores the old saved baseline during its replacement read"
+          : "Discard preserves script and timeout typing across a held mutation and replacement read",
         true,
       );
     } else if (regression === "terminal-log") {
@@ -493,7 +519,8 @@ export async function runCloudComputerV2Smoke({
       );
     } else if (
       regression === "history-retirement" ||
-      regression === "history-conflict"
+      regression === "history-conflict" ||
+      regression === "history-hidden-conflict"
     ) {
       await expect(page.getByText("Active v31", { exact: true })).toBeVisible();
       await button("Older versions").click();
@@ -517,7 +544,25 @@ export async function runCloudComputerV2Smoke({
         await expect.poll(() => Boolean(heldBuild)).toBe(true);
       }
       old.templateState = "retired";
+      const hiddenConflict = regression === "history-hidden-conflict";
+      if (hiddenConflict) holdNextConflict = true;
       await button("Activate").click();
+      if (hiddenConflict) {
+        await expect.poll(() => Boolean(heldConflict)).toBe(true);
+        await button("Toggle settings activity").click();
+        const reads = requests.filter((row) => row.method === "GET").length;
+        await heldConflict.route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify(heldConflict.result),
+        });
+        heldConflict = null;
+        await page.clock.runFor(10_000);
+        expect(requests.filter((row) => row.method === "GET")).toHaveLength(
+          reads,
+        );
+        await button("Toggle settings activity").click();
+      }
       await expect(
         page.getByText("Changed by someone else — Review", { exact: true }),
       ).toBeVisible();
@@ -530,12 +575,17 @@ export async function runCloudComputerV2Smoke({
         heldBuild = null;
       }
       await expect(button("Rebuild")).toHaveCount(1);
-      expect(
-        requests.some(
-          (row) =>
-            row.method === "GET" && row.path.endsWith(`/builds/${old.id}`),
-        ),
-      ).toBe(true);
+      if (hiddenConflict)
+        expect(
+          requests.filter((row) => row.query.get("cursor") === "older-v1"),
+        ).toHaveLength(2);
+      else
+        expect(
+          requests.some(
+            (row) =>
+              row.method === "GET" && row.path.endsWith(`/builds/${old.id}`),
+          ),
+        ).toBe(true);
       if (regression === "history-conflict")
         expect(
           requests.filter(
@@ -549,7 +599,9 @@ export async function runCloudComputerV2Smoke({
       await expect(button("Activate")).toHaveCount(0);
       expect(current.revision).toBe(31);
       check(
-        "Older same-revision history revalidates on Refresh and confirms the affected build after an action conflict",
+        hiddenConflict
+          ? "A retirement conflict received while hidden defers history recovery until return without hidden reads"
+          : "Older same-revision history revalidates on Refresh and confirms the affected build after an action conflict",
         true,
       );
     } else if (regression === "external-first-build") {

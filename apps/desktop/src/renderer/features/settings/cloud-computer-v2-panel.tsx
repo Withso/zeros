@@ -188,10 +188,16 @@ function CloudComputerV2Form({
   active: boolean;
   refreshing: boolean;
 }) {
+  const discardEdits = useRef<
+    Partial<Pick<CloudComputerV2DraftInput, "installScript" | "timeoutSeconds">>
+    | null
+  >(null);
   const [editor, setEditor] = useState(() =>
     newCloudComputerV2Editor(snapshot),
   );
-  const reconciled = reconcileCloudComputerV2Editor(editor, snapshot);
+  const reconciled = discardEdits.current
+    ? editor
+    : reconcileCloudComputerV2Editor(editor, snapshot);
   if (reconciled !== editor) setEditor(reconciled);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -246,11 +252,18 @@ function CloudComputerV2Form({
   ).success;
   const canMutate =
     editable && !busy && !stale && editor.revision === snapshot.revision;
-  const update = (change: Partial<CloudComputerV2DraftInput>) =>
+  const update = (change: Partial<CloudComputerV2DraftInput>) => {
+    if (discardEdits.current) {
+      if (change.installScript !== undefined)
+        discardEdits.current.installScript = change.installScript;
+      if (change.timeoutSeconds !== undefined)
+        discardEdits.current.timeoutSeconds = change.timeoutSeconds;
+    }
     setEditor((current) => ({
       ...current,
       document: { ...current.document, ...change },
     }));
+  };
   const selectedRepositories = useMemo(
     () =>
       editor.document.repositories.map((repo) => ({
@@ -291,7 +304,9 @@ function CloudComputerV2Form({
         setReview(false);
         operationIntent.current = null;
         // The server's current revision is reviewable; keep the local buffer.
-        void refreshCloudComputerV2(scopeKey).catch(() => {});
+        if (visibleRef.current)
+          void refreshCloudComputerV2(scopeKey).catch(() => {});
+        else cloudComputerV2Cache.invalidate(scopeKey);
         return "conflict" as const;
       } else
         setError(
@@ -352,18 +367,33 @@ function CloudComputerV2Form({
     run(async () => {
       const submitted = editor,
         epoch = getOrganizationStoreGeneration();
-      const result = await discardCloudComputerV2(scopeKey, submitted.revision);
-      const confirmed = await loadCloudComputerV2(scopeKey);
-      if (
-        mounted.current &&
-        epoch === getOrganizationStoreGeneration() &&
-        confirmed.revision >= result.revision
-      ) {
-        setEditor((current) =>
-          acceptCloudComputerV2EditorDiscard(current, submitted, confirmed),
+      // Keep automatic reconciliation fenced until the confirmed merge is queued.
+      discardEdits.current = {};
+      const edits = discardEdits.current;
+      try {
+        const result = await discardCloudComputerV2(
+          scopeKey,
+          submitted.revision,
         );
-        setSecretEditorRevision((value) => value + 1);
-        operationIntent.current = null;
+        const confirmed = await loadCloudComputerV2(scopeKey);
+        if (
+          mounted.current &&
+          epoch === getOrganizationStoreGeneration() &&
+          confirmed.revision >= result.revision
+        ) {
+          setEditor((current) =>
+            acceptCloudComputerV2EditorDiscard(
+              current,
+              submitted,
+              confirmed,
+              edits,
+            ),
+          );
+          setSecretEditorRevision((value) => value + 1);
+          operationIntent.current = null;
+        }
+      } finally {
+        discardEdits.current = null;
       }
     }, false);
   const logBuild =
@@ -729,9 +759,13 @@ function CloudComputerV2Form({
           if (
             outcome === "conflict" &&
             mounted.current &&
-            visibleRef.current &&
             epoch === getOrganizationStoreGeneration()
           ) {
+            if (!visibleRef.current) {
+              // History consumes the pending refresh only when this scope returns.
+              setHistoryRefreshVersion((value) => value + 1);
+              return;
+            }
             const buildKey = cloudComputerV2BuildKey(
               userId,
               organizationId,

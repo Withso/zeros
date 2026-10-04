@@ -15,6 +15,34 @@ import {
 } from "./cloud-computer-v2-fixtures";
 
 describe("Cloud Computer editor buffers", () => {
+  it("keeps later typing that restores the old saved script and timeout during Discard", () => {
+    const current = newCloudComputerV2Editor(
+      computerState({
+        revision: 1,
+        draft: {
+          ...computerState().draft,
+          installScript: "echo saved draft",
+          timeoutSeconds: 600,
+        },
+      }),
+    );
+    const submitted = {
+      ...current,
+      document: { ...current.document, installScript: "echo before discard" },
+    };
+    expect(cloudComputerV2EditorDirty(current)).toBe(false);
+    const confirmed = computerState({ revision: 2 });
+    const discarded = acceptCloudComputerV2EditorDiscard(
+      current,
+      submitted,
+      confirmed,
+      { installScript: "echo saved draft", timeoutSeconds: 600 },
+    );
+    expect(discarded.base).toBe(confirmed.draft);
+    expect(discarded.document.installScript).toBe("echo saved draft");
+    expect(discarded.document.timeoutSeconds).toBe(600);
+    expect(cloudComputerV2EditorDirty(discarded)).toBe(true);
+  });
   it("discards the submitted buffer while keeping newer script and timeout typing against the confirmed baseline", () => {
     const submitted = newCloudComputerV2Editor(
       computerState({
