@@ -226,3 +226,10 @@ schemas, no-store responses, closed error codes. Idempotent by exact identity; c
 - The CP compares runtimeId/manifestSha256/baseCompatibilityId with the generation pin and inserts the
   `starting` engine row with all nine v4 columns in the same transaction as today's insert. Engine
   registration later reports the same AgentRuntimeV4 identity and must match that row exactly.
+
+## 16. Installer diagnostic vocabulary amendment (2026-10-04, from review R-282)
+Installer (`component: "installer"`) checks additionally include `lock_busy`, `base_compatibility`,
+`cgroup_retired`. The installer never forwards checks of nested components: when the setup helper fails the
+installer reports stage `run_setup`, check `setup_exit` (and its exit code); the setup helper prints its own
+closed diagnostic line (component `setup`) before that. Shared golden fixtures (B1) cover these cases and the
+Python bootstrap tests consume them.
