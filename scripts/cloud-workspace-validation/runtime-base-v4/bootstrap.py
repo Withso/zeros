@@ -39,6 +39,8 @@ MAX_MANIFEST = 64 * 1024**2
 MAX_ENTRIES = 250_000
 MAX_PATH_DEPTH = 128
 MAX_LINK_COMPONENTS = 4096
+# Leave readiness/verification time inside Boat exec's 600-second budget.
+HYDRATION_TIMEOUT = 480
 RESERVE = 512 * 1024**2
 CHUNK = 1024 * 1024
 HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -52,6 +54,7 @@ ACTIVE = "/run/zeros/active-runtime.json"
 PRIVATE_FAILURES = "/run/zeros/bootstrap-failures.jsonl"
 PERSIST_ROOT = "/home/user/.zeros-persist"
 PERSIST_RECORD = "/run/zeros/persistence.json"
+PERSIST_RESIDUE = "/run/zeros/persistence-residue.json"
 # Only fixed paths are mounted. Mutable contents retain the existing runtime
 # ownership contract; root controls the backing parent and every mount point.
 PERSIST_LAYOUT = (("files", "root", "root", 0o755), ("state", "engine", "engine", 0o700),
@@ -498,7 +501,8 @@ def parse_mountinfo(raw):
         require(len(fields) >= 10 and "-" in fields[6:], "base_compatibility")
         separator = fields.index("-", 6)
         require(len(fields) == separator + 4 and re.fullmatch(r"[0-9]+:[0-9]+", fields[2]), "base_compatibility")
-        result.append({"device": fields[2], "root": pathname(fields[3]), "target": pathname(fields[4]),
+        require(fields[0].isdigit(), "base_compatibility")
+        result.append({"id": int(fields[0]), "device": fields[2], "root": pathname(fields[3]), "target": pathname(fields[4]),
                        "options": fields[5].split(","), "filesystem": fields[separator + 1], "source": fields[separator + 2]})
     require(result, "base_compatibility")
     return result
@@ -515,9 +519,27 @@ class BindMounts:
         require(len(matches) <= 1, "base_compatibility")
         return bool(matches)
 
+    def unmounted(self, target):
+        require(not any(entry["target"] == str(target) or entry["target"].startswith(str(target) + "/")
+                        for entry in self.table()), "base_compatibility")
+
+    def mount_id(self, fd):
+        # st_dev cannot distinguish a bind of the same filesystem. Check the
+        # opened inode's actual mount, including mounts added after table().
+        with open(f"/proc/self/fdinfo/{fd}", "rb") as stream:
+            raw = stream.read(4097)
+        matches = re.findall(rb"^mnt_id:\s*([0-9]+)$", raw, re.MULTILINE)
+        require(len(raw) <= 4096 and len(matches) == 1, "base_compatibility")
+        return int(matches[0])
+
     def bind(self, source_fd, target_fd):
         # Pass pinned directory descriptors, never re-resolve a user-owned
         # ancestor in mount(8). The destination is reopened after mounting.
+        # Refuse a FUSE or detached fd even if hydration's marker/table changed
+        # between the readiness gate and opening the source directory.
+        source_mount = self.mount_id(source_fd)
+        matches = [entry for entry in self.table() if entry["id"] == source_mount]
+        require(len(matches) == 1 and not matches[0]["filesystem"].startswith("fuse"), "base_compatibility")
         try:
             result = subprocess.run(["/usr/bin/mount", "--bind", "--no-canonicalize",
                                      f"/proc/self/fd/{source_fd}", f"/proc/self/fd/{target_fd}"],
@@ -542,6 +564,7 @@ class BindMounts:
         require(len(parents) == len(mounts) == 1 and
                 not any(entry["target"].startswith(target + "/") for entry in table), "base_compatibility")
         parent, mounted = parents[0], mounts[0]
+        require(not parent["filesystem"].startswith("fuse") and not mounted["filesystem"].startswith("fuse"), "base_compatibility")
         expected_root = os.path.normpath(os.path.join(parent["root"], os.path.relpath(source, parent["target"])))
         src, dst = os.fstat(source_fd), os.fstat(target_fd)
         require((src.st_dev, src.st_ino) == (dst.st_dev, dst.st_ino) and
@@ -713,6 +736,9 @@ class Bootstrap:
                 os.close(fd)
 
     def base(self):
+        # A wake can reach any entry point while Boat is still restoring the
+        # protected base files. Gate verification as well as bind creation.
+        self.wait_hydration()
         raw = self.read("/opt/zeros-bootstrap/compatibility.json", 256 * 1024, 0o444)
         value = strict_json(raw, "base_compatibility")
         shape(value, ("arch", "artifactHostSuffixes", "bootstrapProtocolVersion", "glibc", "os", "protectedFiles",
@@ -797,11 +823,96 @@ class Bootstrap:
         require(re.fullmatch(rb"[0-9a-f]{32}\n?", raw) is not None and raw.strip() != b"0" * 32, "base_compatibility")
         return sha(raw)
 
+    def clear_persistence_residue(self, target, root_fd):
+        """Delete only uncovered capture residue; the backing tree is authority."""
+        self.mounts.unmounted(target)  # Refuse nested mounts before any deletion.
+        mount_id = self.mounts.mount_id(root_fd)
+        counts = dict.fromkeys(("directories", "files", "symlinks", "other"), 0)
+
+        @contextlib.contextmanager
+        def directory(parts):
+            fd = os.dup(root_fd)
+            try:
+                for part in parts:
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    os.close(fd)
+                    fd = child
+                    require(self.mounts.mount_id(fd) == mount_id, "base_compatibility")
+                yield fd
+            finally:
+                os.close(fd)
+
+        # Iterative postorder with a constant descriptor count, even for deep
+        # residue left by an older base. Every component is reopened no-follow
+        # relative to the pinned root; never use resolved user paths.
+        pending = [((name,), False) for name in os.listdir(root_fd)]
+        while pending:
+            parts, visited = pending.pop()
+            with directory(parts[:-1]) as parent:
+                info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    with directory(parts) as child:
+                        opened = os.fstat(child)
+                        require((info.st_dev, info.st_ino) == (opened.st_dev, opened.st_ino), "base_compatibility")
+                        if not visited:
+                            os.fchmod(child, 0o700)
+                            pending.append((parts, True))
+                            pending.extend(((*parts, name), False) for name in os.listdir(child))
+                            continue
+                        os.fsync(child)
+                    os.rmdir(parts[-1], dir_fd=parent)
+                    counts["directories"] += 1
+                else:
+                    os.unlink(parts[-1], dir_fd=parent)  # Also unlinks symlinks/FIFOs without opening them.
+                    counts["files" if stat.S_ISREG(info.st_mode) else "symlinks" if stat.S_ISLNK(info.st_mode) else "other"] += 1
+        os.fsync(root_fd)
+        self.mounts.unmounted(target)
+        if any(counts.values()):
+            # Preserve the single closed stdout diagnostic; this value-free
+            # event is available in the unit journal and private live evidence.
+            print(json.dumps({"event": "persistence_residue_cleared", **counts}, separators=(",", ":")), file=sys.stderr, flush=True)
+        return counts
+
+    def wait_hydration(self):
+        lazy = self.path("/var/lib/ascii-lazy")
+        try:
+            info = lazy.lstat()
+        except FileNotFoundError:
+            return  # Fresh stock builders do not have lazy-restore state.
+        require(stat.S_ISDIR(info.st_mode), "base_compatibility")
+        home = str(self.path("/home/user"))
+        started = time.monotonic()
+        print(json.dumps({"event": "persistence_hydration_wait", "waitedSeconds": 0}), file=sys.stderr, flush=True)
+        while True:
+            try:
+                marker = (lazy / "hydration-done").lstat()
+            except FileNotFoundError:
+                done = False
+            else:
+                require(stat.S_ISREG(marker.st_mode), "base_compatibility")
+                done = True
+            fuse = any(entry["filesystem"].startswith("fuse") and
+                       (entry["target"] == home or entry["target"].startswith(home + "/")) for entry in self.mounts.table())
+            waited = time.monotonic() - started
+            if done and not fuse:
+                print(json.dumps({"event": "persistence_hydration_ready", "waitedSeconds": int(waited)}), file=sys.stderr, flush=True)
+                return
+            if waited >= HYDRATION_TIMEOUT:
+                print(json.dumps({"event": "persistence_hydration_timeout", "waitedSeconds": int(waited)}), file=sys.stderr, flush=True)
+                raise Failure("timeout", code=124, timed_out=True)
+            time.sleep(min(1, HYDRATION_TIMEOUT - waited))
+
     def persistence(self, create=False):
         try:
+            if create:
+                # Do this before opening /home/user: fds and binds pin the
+                # transient ascii-lazyfs even after Boat replaces that mount.
+                self.wait_hydration()
             boot_id = self.boot_id()
             text_match(boot_id, UUID, "base_compatibility")
             result = {"schema": "zeros.persistence/v1", "bootId": boot_id, "machineIdSha256": self.machine_id(create), "mounts": []}
+            residue = {"schema": "zeros.persistence-residue/v1", "bootId": boot_id, "mountPoints": 0,
+                       "directories": 0, "files": 0, "symlinks": 0, "other": 0}
             with self.directory("/home", create=create) as home, \
                  self.data_directory(home, "user", *self.account("user"), 0o755, create, exact=False) as user, \
                  self.data_directory(user, ".zeros-persist", self.uid, self.gid, 0o755, create) as backing, \
@@ -817,7 +928,12 @@ class Bootstrap:
                         source_fd = stack.enter_context(self.data_directory(parent, name, uid, gid, mode, create))
                         with self.data_directory(logical, name, uid, gid, mode, create) as target_fd:
                             if not self.mounts.present(target):
-                                require(create and not os.listdir(target_fd), "base_compatibility")
+                                require(create, "base_compatibility")
+                                require(self.mounts.mount_id(target_fd) == self.mounts.mount_id(logical), "base_compatibility")
+                                cleared = self.clear_persistence_residue(target, target_fd)
+                                residue["mountPoints"] += int(any(cleared.values()))
+                                for key, count in cleared.items():
+                                    residue[key] += count
                                 self.mounts.bind(source_fd, target_fd)
                         # An fd opened before mount(2) refers to the covered
                         # directory, not the root of the new bind.
@@ -870,6 +986,10 @@ class Bootstrap:
                                     os.fsync(host_dir)
                                 finally:
                                     os.close(fd)
+            if create:
+                with self.directory("/run/zeros", create=True, mode=0o700):
+                    pass
+                self.atomic(PERSIST_RESIDUE, packed(residue))
             return result
         except OSError as error:
             raise Failure("base_compatibility") from error
@@ -1312,6 +1432,7 @@ class Bootstrap:
         self.layout()
         with self.lock("runtime-install.lock"), self.lock("runtime-publication.lock"):
             self.unlink(PERSIST_RECORD)
+            self.unlink(PERSIST_RESIDUE)
             # Boat overlays the saved disk after stock early-boot services
             # have run. Reload verified base policy on every invocation,
             # including a retry with the same kernel boot ID.
@@ -1406,7 +1527,7 @@ class SystemHost:
             raise Failure("apparmor") from None
         require(result.returncode == 0, "apparmor")
 
-    def wait_ready(self, timeout=30):
+    def wait_ready(self, timeout=HYDRATION_TIMEOUT + 60):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:

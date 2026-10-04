@@ -72,14 +72,17 @@ The public diagnostic still uses the same closed stage/check mapping.
 
 ## Boat directory persistence
 
-Boat's measured stop/resume behavior (design contracts §§22–23) reverts a
-directory rename if the directory existed at the preceding stop, except under
-`/home/user`. The old path can return with old contents while the new path is
-empty, partial or duplicated. The same failure occurs on forks of stopped
-templates. Renamed regular files and symlinks persist. Directory renames under
-`/home/user`, including through a bind mount, persist correctly;
-`/home/user/.cache` is not persisted at all. V4 never publishes a runtime by
-renaming a directory.
+Boat incremental snapshots may revert directory renames after idle sleep/wake; tracked as a Boat platform issue.
+
+On restored VMs, renaming a directory containing subdirectories can be fully
+or partially reverted at the next stop/resume, including under `/home/user`
+(hidden or visible, directly or through a bind). An old path can return with old
+contents while the new path is empty, partial or duplicated. Simpler rename
+cases passed the earlier measurements, but do not establish a general guarantee.
+The earlier §§22–23 capture issues also affect forks of stopped templates.
+Renamed regular files and symlinks persisted in those measurements;
+`/home/user/.cache` is not persisted at all. V4 continues to publish runtime
+directories without directory renames. The base cannot repair this Boat issue.
 
 After archive validation, the installer durably creates the root-only 0600
 sidecar `/opt/zeros-infra/<runtimeId>.incomplete` before creating the fresh final
@@ -110,10 +113,49 @@ requires a separate compatibility fix before reuse with this Boat behavior.
 
 ## Mutable storage on every boot and restore
 
+Boat can restore `/home/user` through the temporary `ascii-lazyfs` FUSE mount
+while hydrating the real disk in the background. Boot must not pin that mount
+in its persistence binds. When `/var/lib/ascii-lazy` exists, boot waits for both
+its regular `hydration-done` marker and absence of any FUSE mount at or below
+`/home/user`, before opening that directory. It polls once per second for at
+most 480 seconds. Fresh builders without this provider state proceed immediately.
+The pre-bind check also rejects opened FUSE or detached sources, and every
+subsequent verification explicitly rejects FUSE-backed binds.
+
+The same hydration gate runs at the start of `Bootstrap.base()`, before any
+compatibility/protected-file read or ownership check. It covers direct base
+verification, boot, installation, dispatch and status, including setup invoked
+immediately after a wake. The separate pre-bind guard remains. Once hydration
+finishes, the existing strict verification runs unchanged; timeout and persistent
+corruption still fail closed. The orchestrator's `b31b2348` live run identified
+this earlier boundary: a runtime probe reached `app.base()` during lazy restore,
+before its unit-readiness wait.
+
+The value-free `persistence_hydration_wait`, `persistence_hydration_ready` and
+`persistence_hydration_timeout` journal events report only elapsed seconds.
+A stalled restore exits with the closed `timeout` check (124, `timedOut: true`)
+and publishes no readiness. Unit-readiness probes allow 540 seconds; cold-base
+and live-persistence commands allow 600 seconds, within the existing Boat exec
+cap. This leaves time for host startup and verification after hydration.
+
 The base creates `/home/user/.zeros-persist` as root:root 0755 and binds the
 following directories before publishing readiness. These are fresh v4 bases;
-boot refuses a nonempty, unmounted destination instead of hiding or migrating
-data from a v3 or older v4 layout.
+the backing tree is authoritative, and this layout does not migrate v3 data.
+Boat capture can leave directory skeletons or stale copies in the covered
+mount-point directories when it stops with binds active. On restore, mounts
+are gone but this residue remains. Before each missing bind, boot removes the
+uncovered destination's contents with an iterative descriptor-relative walk.
+It never follows symlinks or crosses mounts (including same-filesystem binds).
+Destination ownership/mode, symlink, wrong-source, stacked and nested-mount
+checks still fail closed before accepting work. Backing data is never migrated
+from or replaced by residue.
+
+Each cleared destination emits a value-free `persistence_residue_cleared`
+event with directory/file/symlink/other counts to stderr (the unit journal).
+Stdout retains its single closed diagnostic. The current boot's aggregate
+counts are stored root-only (0600) in `/run/zeros/persistence-residue.json`;
+boot discards stale evidence before attempting recovery. Re-running boot with
+valid mounts performs no deletion and records zero counts.
 
 | Logical host path | Backing path relative to `.zeros-persist` | Owner/group and mode | Contents |
 | --- | --- | --- | --- |
@@ -195,7 +237,7 @@ closed bootstrap check `apparmor` if execution, loading or timeout fails.
 Sanitation and verification wait for boot `active/exited` and host
 `active/running`, an empty delegation parent, enabled CPU/memory/PID controllers,
 and all four dispatch-written host limits before probing the policy or facade.
-This gate polls for at most 30 seconds; systemd's `active` state alone can
+This gate polls for at most 540 seconds, including hydration; systemd's `active` state alone can
 precede a `Type=simple` service's initialization.
 
 The base dependency audit is:
@@ -267,8 +309,10 @@ pnpm tsx scripts/cloud-workspace-validation/boat-image/boat-image.ts runtime-bas
 ```
 
 Use a previously unused snapshot name for each attempt. B10 has only local
-verification in this PR; the orchestrator runs the command above with Alpha
-credentials to verify Boat capture/restore behavior.
+verification from this workspace. The orchestrator's two runs of `3c886c66`
+confirmed hydration, residue clearing, cold boot, install A and the first
+restore. A later live-check step failed without enough evidence to identify
+it. The private step records below support the next credentialed rerun.
 
 The script performs these steps sequentially (normally four sandbox starts;
 the journal refuses more than ten):
@@ -290,20 +334,33 @@ the journal refuses more than ten):
    valid machine ID. Cold-boot checks do not start or repair units.
    Sanitation and verification wait for both units to be active, the boot
    oneshot to complete, and dispatch's cgroup limits before reading the facade
-   or cleaning session state.
+   or cleaning session state. The workflow's `build` and `live-check` both use
+   the same `buildBase` sanitize → verify → snapshot sequence, with binds
+   active; there is no separate live-check snapshot/unmount path.
 3. Fetch official Node 22.23.1 and verify its published SHA-256. Build three
    deterministic synthetic archives containing that Node, idle/success
    stubs and a symlink with a 0555 archive header. The setup stub prints the
    legacy result shape. Upload create-only objects under
    `runtime-test/zeros-v2-test-<attempt>/`; mint each GET immediately before
    SSH stdin delivery. Install A with the nested setup stub, verify the receipt
-   and active descriptor. As UID 10001, seed two directory trees under
-   `/srv/zeros/files/zeros-v2-test-persistence`, then clear `/etc/machine-id` to
-   model template sanitation. Stop/resume, require boot to restore the binds
-   and regenerate the ID, and rename one tree in the same parent and the other
+   and active descriptor. As UID 10001, seed two rename-test directory trees
+   and an untouched control tree under `/srv/zeros/files/zeros-v2-test-persistence`, then clear `/etc/machine-id` to
+   model template sanitation. Stop/resume **with all four binds active**,
+   require zeros-boot to complete, zeros-host to become ready, fresh positive
+   residue-clearing counts, the restored binds and regenerated ID. Rename one tree in the same parent and the other
    across parents. Write new content after each rename. Stop/resume a second
-   time, require both old paths absent and both old/new contents intact, and
-   recheck all binds and the repo alias. Each resume must produce a new
+   time **with the binds still active**, again require fresh positive cleanup
+   counts and ready units, and recheck all binds and the repo alias. The untouched
+   seed must remain intact after both resumes; loss of either original tree's
+   seed before the rename also fails. Check both old paths and both old/new
+   contents after the second resume, recording only these post-resume rename
+   assertions as the accepted Alpha known issue if they fail. Immediate rename
+   checks and unexpected I/O failures remain fatal. `live.persistence` records
+   `hostReady`, `residueCleared`, `residueEntries` and `residueMounts` for each
+   phase; both resume phases must confirm residue was actually cleared.
+   Every persistence probe (cold clone and both resumes) also requires
+   `bindFilesystem: "ext4"` for all four binds; a remaining FUSE mount fails.
+   Each resume must produce a new
    boot/session with the same runtime. Measure a full re-hash after the first resume, dropping the
    page cache when the provider permits it (`coldCache` records the result).
    Install B and require `previous=A`; corrupt C's archive and require the
@@ -320,11 +377,60 @@ boot/session IDs, re-hash milliseconds, four `live.persistence` phase results
 (`cold`, `seed`, `rename`, `verify`) and confirmed cleanup. Each phase records
 only the bind count and boolean/count assertions, never machine-ID bytes. The
 last phase requires `bindCount=4`, `repoAliases=true`, `machineIdPresent=true`,
-`renames=2`, and `oldPathsAbsent=true`. This proves the
-installer/base boundary, not agent qualification or the full B3 native closure.
+`renames=2` and `seedDataIntact=true`. `oldPathsAbsent` reflects the actual result;
+`knownIssues` contains `boat_incremental_directory_rename` only when a final
+rename assertion failed (otherwise it is empty). Alpha accepts that recorded
+issue while keeping every other assertion mandatory. A successful run does not
+establish reliable directory-rename persistence, agent qualification or the
+full B3 native closure.
 `imageBytes` records Boat's `sizeBytes`, the restored content size of the snapshot.
 Do not describe the re-hash as a full production-runtime measurement; report
 the synthetic archive's `expandedBytes` and `fileCount` alongside the timing.
+
+The live portion also records each named step under
+`$ZEROS_BOAT_IMAGE_STATE_DIR/runtime-base-v4/private/live-check/<step>.json`
+(0600, parent directories 0700). A durable `running` record precedes each
+operation; it becomes `passed` or `failed`. Failures retain the closed outer
+diagnostic, and `private/live-check-failure.json` names the most recent failing
+step. Individual records survive subsequent cleanup failures. The stderr event
+`live_check_failure` prints only that fixed step name; the stdout diagnostic
+schema is unchanged. No operation inputs, helper output, URLs, exception
+messages, command stderr or environments are stored in these records.
+
+The step names distinguish `install_a`, `runtime_a`, `persistence_cold`,
+`persistence_seed`, each `stop_first`/`resume_first` and `stop_second`/`resume_second`,
+`runtime_after_first_resume`, `persistence_rename`, `persistence_verify`,
+`runtime_after_second_resume`, `install_b`, `runtime_b`, `install_corrupt_c`
+and `runtime_after_corrupt`. Archive creation, the three uploads and object
+cleanup have their own records. `<step>-installer.json` retains the validated
+installer stage, `ok`, `exitCode`, `timedOut` and `failedChecks` before SSH key
+revocation; it is also attached to a failing install step. A rejected corrupted
+C with `archive_digest` is the expected result, so that step is marked passed.
+
+`private/live-check/persistence_verify-renames.json` stores six fixed boolean
+checks: old path absent, prior seed content intact and post-rename content intact
+for each of `same_parent` and `cross_parent`. It records both successes and
+failures, with the known-issue code when observed. The immediate rename phase
+has a corresponding `persistence_rename-renames.json` record and requires every
+check to pass. These files are 0600 and contain no paths or file contents.
+
+Runtime and persistence probes retain only the allowlisted exception class and
+innermost line in `runtime_probe.py` or `persistence_probe.py`. This includes
+the persistence probe's unprivileged child; errors are not flattened into its
+parent's wait assertion. The two scripts are operator payloads, not installed
+base assets. A provider timeout or killed probe may have no Python evidence;
+the named step still records the closed transport failure.
+
+Both post-resume probes call `app.wait_ready()` before `app.base()` or inspecting
+runtime/persistence state. That waits for completed boot, hydration and host cgroup
+initialization. Only afterward does the runtime probe start its separate
+30-second wait for `active-runtime.json`, followed by full hashing and a
+10-second Node version check. The remote command allows 600 seconds total.
+A local regression simulates a 400-second hydration wait before the active
+descriptor arrives. Another covers each bootstrap entry point while protected
+files are incomplete, the marker is absent and FUSE is active; verification starts
+only after restoration completes. Timeout bounds remain unchanged. Named evidence
+distinguishes a probe assertion, Node timeout and transport timeout.
 
 After interruption or failure, use the **same state directory**:
 

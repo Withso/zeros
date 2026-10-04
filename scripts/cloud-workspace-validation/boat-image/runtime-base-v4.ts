@@ -301,7 +301,7 @@ export async function waitSandbox(deps: KitDeps, id: string, desired: "ready" | 
 }
 
 export async function verifyBase(deps: KitDeps, id: string) {
-  const result = parseProbe(await remote(deps, id, pythonProbe(fillTemplate("v4/verify.py", {}), "verify")), "verify");
+  const result = parseProbe(await remote(deps, id, pythonProbe(fillTemplate("v4/verify.py", {}), "verify"), 600), "verify");
   requireBase(result?.schema === "zeros.base-verification/v1" && /^bc1-[a-f0-9]{64}$/.test(result.baseCompatibilityId) &&
     HEX.test(result.baseBuildSha256) && /^[a-f0-9]{40}$/.test(result.sourceCommit) && result.hostState === "waiting_for_runtime" &&
     /^[a-f0-9-]{36}$/.test(result.bootId), "verify", "base_compatibility");

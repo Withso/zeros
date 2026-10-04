@@ -7,8 +7,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseEnv } from "node:util";
 import { boatAuthorizedKeyCommand, openBoatBootstrapChannel, parseBoatHostKey, parseBoatSshEndpoint } from "../../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
-import { builderCommand, type KitDeps } from "../boat-image/boat-image";
-import { BaseFailure, buildBase, parseProbe, pythonProbe, remote, requireBase, resumeOwned, saveJson, waitSandbox } from "../boat-image/runtime-base-v4";
+import { builderCommand, type BoatResponse, type KitDeps } from "../boat-image/boat-image";
+import { BaseFailure, buildBase, closedFailure, parseProbe, pythonProbe, remote, requireBase, resumeOwned, saveJson, waitSandbox } from "../boat-image/runtime-base-v4";
 
 type R2 = { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string };
 const hash = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
@@ -156,8 +156,98 @@ const INSTALL_CHECKS = new Set(["input_schema", "input_too_large", "artifact_hos
   "http_status", "download_truncated", "archive_digest", "archive_size", "manifest_digest", "manifest_schema", "bootstrap_protocol",
   "archive_paths", "archive_member_type", "file_inventory", "file_digest", "file_mode", "symlink_escape", "root_ownership", "hard_link",
   "pointer_publish", "host_start", "setup_exit", "timeout", "process_signal", "diagnostic_missing", "lock_busy", "base_compatibility", "cgroup_retired"]);
+const INSTALL_STAGES = new Set(["validate_input", "lock", "check_space", "check_cache", "download", "verify_archive", "verify_manifest",
+  "extract", "verify_tree", "publish_receipt", "switch_pointer", "start_host", "run_setup", "done"]);
+const LIVE_STEPS = ["synthetic_archives", "upload_a", "upload_b", "upload_c", "install_a", "runtime_a", "persistence_cold", "persistence_seed",
+  "stop_first", "resume_first", "runtime_after_first_resume", "persistence_rename", "stop_second", "resume_second",
+  "persistence_verify", "runtime_after_second_resume", "install_b", "runtime_b", "install_corrupt_c", "runtime_after_corrupt", "cleanup_objects"] as const;
+type LiveStep = typeof LIVE_STEPS[number];
+type InstallerDiagnostic = { ok: boolean; stage: string; exitCode: number; timedOut: boolean; failedChecks: string[] };
+type ProbeFailure = { exception: string; line: number };
+const PROBE_ERRORS = new Set(["AssertionError", "Failure", "FileNotFoundError", "PermissionError", "OSError", "TimeoutError",
+  "TimeoutExpired", "CalledProcessError", "ValueError", "TypeError", "KeyError", "RuntimeError", "JSONDecodeError", "NotADirectoryError",
+  "IsADirectoryError", "FileExistsError", "BlockingIOError", "InterruptedError", "BrokenPipeError", "Exception"]);
 
-export async function installOverSsh(deps: KitDeps, id: string, value: unknown) {
+class LiveFailure extends BaseFailure {
+  constructor(failure: BaseFailure, readonly installer?: InstallerDiagnostic, readonly probe?: ProbeFailure) {
+    super(failure.diagnostic.stage, failure.diagnostic.failedChecks[0], failure.diagnostic.exitCode, failure.diagnostic.failedChecks);
+  }
+}
+
+function liveFailure(error: unknown): BaseFailure {
+  if (error instanceof BaseFailure) return error;
+  closedFailure(error); // Log only its safe class/code, as buildBase would.
+  return new BaseFailure("install", "provider_request");
+}
+
+export async function runLiveStep<T>(deps: KitDeps, step: LiveStep, operation: () => Promise<T>): Promise<T> {
+  requireBase(LIVE_STEPS.includes(step), "validate_input", "input_schema");
+  const record = { schema: "zeros.live-check-step/v1", step };
+  const file = path.join(deps.stateDir, "private", "live-check", `${step}.json`);
+  saveJson(file, { ...record, state: "running" });
+  try {
+    const result = await operation();
+    saveJson(file, { ...record, state: "passed" });
+    return result;
+  } catch (error) {
+    const closed = liveFailure(error);
+    const failure = { ...record, state: "failed", diagnostic: closed.diagnostic,
+      ...(closed instanceof LiveFailure ? { installer: closed.installer, probe: closed.probe } : {}) };
+    try {
+      saveJson(file, failure);
+      saveJson(path.join(deps.stateDir, "private", "live-check-failure.json"), failure);
+    } catch { /* Keep the original failure; the durable running step remains. */ }
+    console.error(JSON.stringify({ event: "live_check_failure", step }));
+    throw closed;
+  }
+}
+
+function installerDiagnostic(value: any): InstallerDiagnostic {
+  requireBase(value && typeof value.ok === "boolean" && typeof value.timedOut === "boolean" && INSTALL_STAGES.has(value.stage) &&
+    Number.isInteger(value.exitCode) && value.exitCode >= 0 && value.exitCode <= 255 && Array.isArray(value.failedChecks) &&
+    value.failedChecks.length <= 32 && value.failedChecks.every((check: unknown) => INSTALL_CHECKS.has(check as string)), "install", "diagnostic_missing");
+  return { ok: value.ok, stage: value.stage, exitCode: value.exitCode, timedOut: value.timedOut, failedChecks: [...value.failedChecks] };
+}
+
+export async function runInstallerStep(deps: KitDeps, step: "install_a" | "install_b" | "install_corrupt_c",
+  operation: (received: (value: InstallerDiagnostic) => void) => Promise<InstallerDiagnostic>) {
+  return runLiveStep(deps, step, async () => {
+    let diagnostic: InstallerDiagnostic | undefined;
+    const received = (value: InstallerDiagnostic) => {
+      diagnostic = installerDiagnostic(value);
+      saveJson(path.join(deps.stateDir, "private", "live-check", `${step}-installer.json`), { step, installer: diagnostic });
+    };
+    try {
+      const result = await operation(received);
+      received(result);
+      requireBase(step === "install_corrupt_c"
+        ? !result.ok && result.exitCode !== 0 && result.failedChecks.includes("archive_digest")
+        : result.ok && result.exitCode === 0 && !result.failedChecks.length, "install", step === "install_corrupt_c" ? "archive_digest" : "runtime_install");
+      return result;
+    } catch (error) {
+      if (diagnostic) throw new LiveFailure(liveFailure(error), diagnostic);
+      throw error;
+    }
+  });
+}
+
+function parseLiveProbe(response: BoatResponse, stage: string) {
+  try { return parseProbe(response, stage); }
+  catch (error) {
+    const stdout = response.body?.stdout;
+    if (error instanceof BaseFailure && typeof stdout === "string" && Buffer.byteLength(stdout) <= 65_536 && !response.body?.stdoutTruncated) {
+      let value: any;
+      try { value = JSON.parse(stdout.trimEnd().split("\n").slice(0, -1).join("\n")); } catch { /* Missing probe evidence. */ }
+      if (value?.schema === "zeros.live-probe-failure/v1" && PROBE_ERRORS.has(value.exception) &&
+        Number.isInteger(value.line) && value.line >= 0 && value.line <= 65_536) {
+        throw new LiveFailure(error, undefined, { exception: value.exception, line: value.line });
+      }
+    }
+    throw error;
+  }
+}
+
+export async function installOverSsh(deps: KitDeps, id: string, value: unknown, received?: (value: InstallerDiagnostic) => void) {
   const signal = AbortSignal.timeout(1_260_000);
   const channel = await openBoatBootstrapChannel(64 * 1024, signal);
   let installed = false;
@@ -178,13 +268,11 @@ export async function installOverSsh(deps: KitDeps, id: string, value: unknown) 
     let diagnostic: any;
     try { diagnostic = JSON.parse(result.output.trimEnd().split("\n").at(-1)!); }
     catch { throw new BaseFailure("install", result.exitCode === 124 ? "timeout" : "diagnostic_missing", result.exitCode || 1); }
-    requireBase(diagnostic?.schema === "zeros.diagnostic/v1" && diagnostic.component === "installer" &&
-      typeof diagnostic.ok === "boolean" && typeof diagnostic.timedOut === "boolean" && diagnostic.exitCode === result.exitCode &&
-      typeof diagnostic.stage === "string" && /^[a-z_]{1,32}$/.test(diagnostic.stage) &&
-      Array.isArray(diagnostic.failedChecks) && diagnostic.failedChecks.length <= 32 &&
-      diagnostic.failedChecks.every((check: string) => INSTALL_CHECKS.has(check)), "install", "diagnostic_missing");
-    return { ok: diagnostic.ok, stage: diagnostic.stage, exitCode: diagnostic.exitCode as number,
-      timedOut: diagnostic.timedOut, failedChecks: diagnostic.failedChecks as string[] };
+    requireBase(diagnostic?.schema === "zeros.diagnostic/v1" && diagnostic.component === "installer" && diagnostic.exitCode === result.exitCode,
+      "install", "diagnostic_missing");
+    const closed = installerDiagnostic(diagnostic);
+    received?.(closed); // Retain the helper result even if SSH revocation fails.
+    return closed;
   } finally {
     try {
       if (installed) {
@@ -197,51 +285,9 @@ export async function installOverSsh(deps: KitDeps, id: string, value: unknown) 
 
 export async function probeRuntime(deps: KitDeps, id: string, runtimeId: string, coldHash = false) {
   requireBase(/^r1-[a-f0-9]{64}$/.test(runtimeId), "validate_input", "input_schema");
-  const program = `import importlib.util,json,os,pathlib,subprocess,sys,time
-sys.dont_write_bytecode=True
-code=0
-checks=[]
-try:
- spec=importlib.util.spec_from_file_location('bootstrap','/opt/zeros-bootstrap/bootstrap.py')
- b=importlib.util.module_from_spec(spec)
- spec.loader.exec_module(b)
- app=b.Bootstrap()
- app.base()
- app.wait_ready()
- rid=${JSON.stringify(runtimeId)}
- deadline=time.monotonic()+30
- while not pathlib.Path(b.ACTIVE).exists() and time.monotonic()<deadline:
-  time.sleep(.2)
- assert app.current()==rid
- cold=False
- if ${coldHash ? "True" : "False"}:
-  os.sync()
-  try:
-   pathlib.Path('/proc/sys/vm/drop_caches').write_text('3')
-   cold=True
-  except OSError:
-   pass
- start=time.monotonic()
- manifest,receipt=app.verify_runtime(rid,full=True)
- elapsed=(time.monotonic()-start)*1000
- active=json.loads(app.read(b.ACTIVE,4096,0o600))
- assert active['runtimeId']==rid and active['bootId']==app.boot_id() and active['installerReceiptSha256']==b.sha(receipt)
- assert app.status()['hostState']=='idle'
- node=subprocess.run([b.INFRA+'/'+rid+'/bin/node','-p','JSON.stringify({node:process.versions.node,abi:process.versions.modules})'],
-                     env=b.ENV,check=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10)
- versions=json.loads(node.stdout)
- assert versions=={'node':'22.23.1','abi':'127'}
- print(json.dumps({'runtimeId':rid,'previous':app.current('previous'),'bootId':app.boot_id(),
-   'sessionId':active['supervisorSessionId'],'fullRehashMs':elapsed,'coldCache':cold,
-   'fileCount':sum(e['type']=='file' for e in manifest['files']),'expandedBytes':sum(e.get('size',0) for e in manifest['files']),
-   'node':versions['node'],'abi':127}))
-except BaseException:
- code=1
- checks=['runtime_install']
-print(json.dumps({'schema':'zeros.diagnostic/v1','component':'base','stage':'install','ok':code==0,
- 'exitCode':code,'timedOut':False,'failedChecks':checks}),flush=True)
-sys.exit(code)`;
-  const result = parseProbe(await remote(deps, id, pythonProbe(program, "install"), 600), "install");
+  const source = fs.readFileSync(path.join(deps.repoRoot, "scripts/cloud-workspace-validation/runtime-base-v4/runtime_probe.py"), "utf8");
+  const program = `${source}\nmain(${JSON.stringify(runtimeId)}, ${coldHash ? "True" : "False"})`;
+  const result = parseLiveProbe(await remote(deps, id, pythonProbe(program, "install"), 600), "install");
   requireBase(result?.runtimeId === runtimeId && (result.previous === null || /^r1-[a-f0-9]{64}$/.test(result.previous)) &&
     [result.bootId, result.sessionId].every(value => typeof value === "string" && /^[a-f0-9-]{36}$/.test(value)) &&
     Number.isFinite(result.fullRehashMs) && result.fullRehashMs >= 0 && result.fullRehashMs < 600_000 &&
@@ -253,75 +299,115 @@ sys.exit(code)`;
     fileCount: result.fileCount as number, expandedBytes: result.expandedBytes as number, node: "22.23.1", abi: 127 };
 }
 
+const RENAME_CHECKS = ["same_parent_old_absent", "same_parent_seed_intact", "same_parent_new_intact",
+  "cross_parent_old_absent", "cross_parent_seed_intact", "cross_parent_new_intact"] as const;
+
 export async function probePersistence(deps: KitDeps, id: string, phase: "cold" | "seed" | "rename" | "verify") {
   requireBase(["cold", "seed", "rename", "verify"].includes(phase), "validate_input", "input_schema");
   const program = fs.readFileSync(path.join(deps.repoRoot, "scripts/cloud-workspace-validation/runtime-base-v4/persistence_probe.py"), "utf8");
-  const result = parseProbe(await remote(deps, id, pythonProbe(`${program}\nmain(${JSON.stringify(phase)})`, "resume"), 120), "resume");
+  const result = parseLiveProbe(await remote(deps, id, pythonProbe(`${program}\nmain(${JSON.stringify(phase)})`, "resume"), 600), "resume");
   const renamed = phase === "rename" || phase === "verify";
+  let checks: Record<string, boolean> | null = null;
+  if (renamed) {
+    requireBase(result?.renameChecks && typeof result.renameChecks === "object" && !Array.isArray(result.renameChecks) &&
+      Object.keys(result.renameChecks).length === RENAME_CHECKS.length &&
+      RENAME_CHECKS.every(name => typeof result.renameChecks[name] === "boolean"), "resume", "base_compatibility");
+    checks = Object.fromEntries(RENAME_CHECKS.map(name => [name, result.renameChecks[name] as boolean]));
+    requireBase(phase === "verify" || Object.values(checks).every(Boolean), "resume", "base_compatibility");
+  } else requireBase(result?.renameChecks === null, "resume", "base_compatibility");
+  const oldPathsAbsent = checks !== null && checks.same_parent_old_absent && checks.cross_parent_old_absent;
   requireBase(result?.schema === "zeros.persistence-probe/v1" && result.phase === phase && result.bindCount === 4 &&
     result.repoAliases === true && result.machineIdPresent === (phase !== "seed") && result.templateIdentityCleared === (phase === "seed") &&
-    result.renames === (renamed ? 2 : 0) && result.oldPathsAbsent === renamed, "resume", "base_compatibility");
+    result.renames === (renamed ? 2 : 0) && result.oldPathsAbsent === oldPathsAbsent && result.seedDataIntact === (phase !== "cold") &&
+    result.hostReady === true && result.bindFilesystem === "ext4" &&
+    Number.isSafeInteger(result.residueEntries) && result.residueEntries >= 0 &&
+    Number.isSafeInteger(result.residueMounts) && result.residueMounts >= 0 && result.residueMounts <= 4 &&
+    result.residueCleared === (result.residueEntries > 0) && (result.residueMounts > 0) === result.residueCleared &&
+    (!renamed || result.residueCleared === true), "resume", "base_compatibility");
+  const knownIssues = phase === "verify" && checks && !Object.values(checks).every(Boolean) ? ["boat_incremental_directory_rename"] : [];
+  if (checks) saveJson(path.join(deps.stateDir, "private", "live-check", `persistence_${phase}-renames.json`), {
+    schema: "zeros.persistence-rename-evidence/v1", step: `persistence_${phase}`, knownIssues, checks,
+  });
   return { phase, bindCount: 4, repoAliases: true, machineIdPresent: phase !== "seed", templateIdentityCleared: phase === "seed",
-    renames: renamed ? 2 : 0, oldPathsAbsent: renamed };
+    hostReady: true, bindFilesystem: "ext4", residueCleared: result.residueCleared as boolean,
+    residueEntries: result.residueEntries as number, residueMounts: result.residueMounts as number,
+    seedDataIntact: phase !== "cold", knownIssues, renames: renamed ? 2 : 0, oldPathsAbsent };
 }
 
 export async function liveCheck(options: Map<string, string>, deps: KitDeps) {
   const r2 = credentials(deps.repoRoot); // Reject missing/wrong-channel material before allocating anything.
   return buildBase(options, deps, async (profile, sandboxId, maxUsedHours) => {
+    const step = <T>(name: LiveStep, operation: () => Promise<T>) => runLiveStep(profile, name, operation);
     let evidence: Record<string, unknown>;
     let success = false;
     try {
-      const { directory, nodeArchiveSha256 } = await syntheticArchives(profile);
+      const { directory, nodeArchiveSha256 } = await step("synthetic_archives", () => syntheticArchives(profile));
       const state = JSON.parse(fs.readFileSync(path.join(profile.stateDir, "state.json"), "utf8"));
       requireBase(!fs.existsSync(objectsFile(profile)), "install", "input_schema");
       const descriptors: Record<string, any> = {};
-      for (const variant of ["a", "b", "c"]) {
+      for (const variant of ["a", "b", "c"] as const) {
         const key = `runtime-test/zeros-v2-test-${state.attemptHex}/${variant}.tar.gz`;
-        await uploadLiveObject(profile, r2, key, fs.readFileSync(path.join(directory, `${variant}.tar.gz`)));
-        descriptors[variant] = JSON.parse(fs.readFileSync(path.join(directory, `${variant}.json`), "utf8"));
+        await step(`upload_${variant}`, async () => {
+          await uploadLiveObject(profile, r2, key, fs.readFileSync(path.join(directory, `${variant}.tar.gz`)));
+          descriptors[variant] = JSON.parse(fs.readFileSync(path.join(directory, `${variant}.json`), "utf8"));
+        });
       }
-      const install = async (variant: string, setup = false) => {
-        const key = `runtime-test/zeros-v2-test-${state.attemptHex}/${variant}.tar.gz`;
-        // URLs are minted immediately before transport and are never written
-        // to the ledger, passed in command arguments, or sent in provider exec.
-        return installOverSsh(profile, sandboxId, { schema: "zeros.runtime-install/v1", purpose: setup ? "workspace-setup" : "build",
-          runtime: descriptors[variant], artifact: presignGet(r2, key),
-          ...(setup ? { setup: Buffer.from(JSON.stringify({ synthetic: true })).toString("base64url") } : {}) });
-      };
+      const install = async (variant: "a" | "b" | "c", setup = false) => runInstallerStep(profile,
+        variant === "c" ? "install_corrupt_c" : `install_${variant}`, async received => {
+          const key = `runtime-test/zeros-v2-test-${state.attemptHex}/${variant}.tar.gz`;
+          // URLs are minted immediately before transport and are never written
+          // to the ledger, passed in command arguments, or sent in provider exec.
+          return installOverSsh(profile, sandboxId, { schema: "zeros.runtime-install/v1", purpose: setup ? "workspace-setup" : "build",
+            runtime: descriptors[variant], artifact: presignGet(r2, key),
+            ...(setup ? { setup: Buffer.from(JSON.stringify({ synthetic: true })).toString("base64url") } : {}) }, received);
+        });
       const firstInstall = await install("a", true);
-      requireBase(firstInstall.ok && firstInstall.exitCode === 0 && !firstInstall.failedChecks.length, "install", "runtime_install");
-      const first = await probeRuntime(profile, sandboxId, descriptors.a.runtimeId);
-      requireBase(first.previous === null, "install", "runtime_switch");
-      const coldPersistence = await probePersistence(profile, sandboxId, "cold");
-      const seededPersistence = await probePersistence(profile, sandboxId, "seed");
+      const first = await step("runtime_a", async () => {
+        const proof = await probeRuntime(profile, sandboxId, descriptors.a.runtimeId);
+        requireBase(proof.previous === null, "install", "runtime_switch");
+        return proof;
+      });
+      const coldPersistence = await step("persistence_cold", () => probePersistence(profile, sandboxId, "cold"));
+      const seededPersistence = await step("persistence_seed", () => probePersistence(profile, sandboxId, "seed"));
       const clone = { ...profile, stateDir: path.join(profile.stateDir, "verification") };
-      const stopAndResume = async () => {
-        await builderCommand("stop", new Map(), [], clone);
-        await waitSandbox(profile, sandboxId, "archived");
-        await resumeOwned(profile, clone, maxUsedHours);
-        await waitSandbox(profile, sandboxId);
+      const stopAndResume = async (which: "first" | "second") => {
+        // Keep the binds active during both captures, exactly like workspace
+        // idle sleep. The next probe requires boot's residue-clearing evidence.
+        await step(`stop_${which}`, async () => {
+          await builderCommand("stop", new Map(), [], clone);
+          await waitSandbox(profile, sandboxId, "archived");
+        });
+        await step(`resume_${which}`, async () => {
+          await resumeOwned(profile, clone, maxUsedHours);
+          await waitSandbox(profile, sandboxId);
+        });
       };
-      await stopAndResume();
+      await stopAndResume("first");
       // Dispatch runs automatically; do not repair/start units in the proof.
-      const resumed = await probeRuntime(profile, sandboxId, descriptors.a.runtimeId, true);
-      requireBase(resumed.bootId !== first.bootId && resumed.sessionId !== first.sessionId && resumed.previous === null,
-        "resume", "boot_reconciliation");
-      const renamedPersistence = await probePersistence(profile, sandboxId, "rename");
-      await stopAndResume();
-      const verifiedPersistence = await probePersistence(profile, sandboxId, "verify");
-      const afterRenameResume = await probeRuntime(profile, sandboxId, descriptors.a.runtimeId);
-      requireBase(afterRenameResume.bootId !== resumed.bootId && afterRenameResume.sessionId !== resumed.sessionId && afterRenameResume.previous === null,
-        "resume", "boot_reconciliation");
+      const resumed = await step("runtime_after_first_resume", async () => {
+        const proof = await probeRuntime(profile, sandboxId, descriptors.a.runtimeId, true);
+        requireBase(proof.bootId !== first.bootId && proof.sessionId !== first.sessionId && proof.previous === null, "resume", "boot_reconciliation");
+        return proof;
+      });
+      const renamedPersistence = await step("persistence_rename", () => probePersistence(profile, sandboxId, "rename"));
+      await stopAndResume("second");
+      const verifiedPersistence = await step("persistence_verify", () => probePersistence(profile, sandboxId, "verify"));
+      const afterRenameResume = await step("runtime_after_second_resume", async () => {
+        const proof = await probeRuntime(profile, sandboxId, descriptors.a.runtimeId);
+        requireBase(proof.bootId !== resumed.bootId && proof.sessionId !== resumed.sessionId && proof.previous === null, "resume", "boot_reconciliation");
+        return proof;
+      });
       const secondInstall = await install("b");
-      requireBase(secondInstall.ok && secondInstall.exitCode === 0 && !secondInstall.failedChecks.length, "install", "runtime_install");
-      const second = await probeRuntime(profile, sandboxId, descriptors.b.runtimeId);
-      requireBase(second.previous === descriptors.a.runtimeId, "install", "runtime_switch");
+      const second = await step("runtime_b", async () => {
+        const proof = await probeRuntime(profile, sandboxId, descriptors.b.runtimeId);
+        requireBase(proof.previous === descriptors.a.runtimeId, "install", "runtime_switch");
+        return proof;
+      });
       const corruptedInstall = await install("c");
-      requireBase(!corruptedInstall.ok && corruptedInstall.exitCode !== 0 && corruptedInstall.failedChecks.includes("archive_digest"),
-        "install", "archive_digest");
-      const afterCorrupt = await probeRuntime(profile, sandboxId, descriptors.b.runtimeId);
-      requireBase(afterCorrupt.previous === descriptors.a.runtimeId && afterCorrupt.sessionId === second.sessionId,
-        "install", "runtime_switch");
+      await step("runtime_after_corrupt", async () => {
+        const proof = await probeRuntime(profile, sandboxId, descriptors.b.runtimeId);
+        requireBase(proof.previous === descriptors.a.runtimeId && proof.sessionId === second.sessionId, "install", "runtime_switch");
+      });
       evidence = { mode: "synthetic", agentQualified: false, sandboxId, nodeArchiveSha256,
         firstInstall, first, resumed, afterRenameResume, secondInstall, second, corruptedInstall, currentUnchanged: true,
         persistence: [coldPersistence, seededPersistence, renamedPersistence, verifiedPersistence] };
@@ -329,8 +415,10 @@ export async function liveCheck(options: Map<string, string>, deps: KitDeps) {
     } finally {
       if (success || options.get("--keep-on-failure") !== "true") {
         // Even an uncertain upload is deleted, with HEAD confirming absence.
-        await cleanupLiveObjects(profile);
-        fs.rmSync(path.join(profile.stateDir, "synthetic"), { recursive: true, force: true });
+        await step("cleanup_objects", async () => {
+          await cleanupLiveObjects(profile);
+          fs.rmSync(path.join(profile.stateDir, "synthetic"), { recursive: true, force: true });
+        });
       }
     }
     return { ...evidence!, objects: JSON.parse(fs.readFileSync(objectsFile(profile), "utf8")) };

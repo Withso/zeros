@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sshBoundary from "../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
 import { builderCommand, KitError, main, parseArgs, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
 import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, resumeOwned, v4Command, verifyBase, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
-import { cleanupLiveObjects, installOverSsh, presignGet, probePersistence, signedHeaders, syntheticArchives, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
+import { cleanupLiveObjects, installOverSsh, presignGet, probePersistence, probeRuntime, runInstallerStep, runLiveStep, signedHeaders, syntheticArchives, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
 
 const scratch: string[] = [];
 const temp = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-base-v4-")); scratch.push(dir); return dir; };
@@ -17,6 +17,8 @@ const BASE = path.join(ROOT, "scripts/cloud-workspace-validation/runtime-base-v4
 const compatibilityBytes = fs.readFileSync(path.join(BASE, "compatibility.json"));
 const compatibilityRawB64 = compatibilityBytes.toString("base64");
 const baseCompatibilityId = `bc1-${createHash("sha256").update(compatibilityBytes).digest("hex")}`;
+const renameChecks = () => ({ same_parent_old_absent: true, same_parent_seed_intact: true, same_parent_new_intact: true,
+  cross_parent_old_absent: true, cross_parent_seed_intact: true, cross_parent_new_intact: true });
 
 function deps(): KitDeps & { calls: { method: string; route: string; body: unknown; headers: unknown }[] } {
   const calls: { method: string; route: string; body: unknown; headers: unknown }[] = [];
@@ -109,32 +111,161 @@ function seedState(d: KitDeps, overrides = {}) {
 }
 
 describe("runtime-base-v4 profile", () => {
+  it("retains the exception identity and exact probe line from the real runtime probe", async () => {
+    const d = deps(), directory = temp(), bootstrap = path.join(directory, "bootstrap.py"), evidence = path.join(directory, "logged");
+    fs.writeFileSync(bootstrap, `from pathlib import Path
+class Bootstrap:
+ def base(self): pass
+ def wait_ready(self): raise ValueError('private-canary')
+ def log_failure(self, error, stage=None): Path(${JSON.stringify(evidence)}).write_text('logged')
+`);
+    let line = 0;
+    d.boat = async (_method, _route, options) => {
+      const command = (options!.body as any).command as string;
+      const program = command.split("<<'PYV4'\n")[1].replace(/\nPYV4$/, "").replace("/opt/zeros-bootstrap/bootstrap.py", bootstrap);
+      line = program.split("\n").findIndex(value => value.trim() === "return app.wait_ready()") + 1;
+      const result = spawnSync("python3", ["-I", "-"], { input: program, encoding: "utf8", timeout: 5000 });
+      expect(result.error).toBeUndefined();
+      return { status: 200, body: { exitCode: result.status, stdout: result.stdout, stderr: result.stderr } };
+    };
+    let caught: unknown;
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await runLiveStep(d, "runtime_after_first_resume", () => probeRuntime(d, "bx_fixture", `r1-${"a".repeat(64)}`, true));
+    } catch (error) { caught = error; }
+    expect(caught).toMatchObject({ probe: { exception: "ValueError", line }, diagnostic: { failedChecks: ["runtime_install"] } });
+    expect(line).toBeGreaterThan(0);
+    expect(fs.readFileSync(evidence, "utf8")).toBe("logged");
+    expect(JSON.stringify(caught)).not.toContain("private-canary");
+    expect(JSON.stringify(closedFailure(caught))).not.toContain("probe");
+    const failure = JSON.parse(fs.readFileSync(path.join(d.stateDir, "private/live-check-failure.json"), "utf8"));
+    expect(failure).toMatchObject({ state: "failed", step: "runtime_after_first_resume", probe: { exception: "ValueError", line } });
+    expect(stderr).toHaveBeenCalledWith(JSON.stringify({ event: "live_check_failure", step: "runtime_after_first_resume" }));
+    expect(stdout).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { exception: "TimeoutExpired", line: 42, accepted: true },
+    { exception: "private-canary", line: 42, accepted: false },
+    { exception: "ValueError", line: -1, accepted: false },
+    { exception: "ValueError", line: 2.5, accepted: false },
+    { exception: "ValueError", line: 65_537, accepted: false },
+  ])("keeps only bounded Python failure identities: $exception/$line", async ({ exception, line, accepted }) => {
+    const d = deps();
+    const proof = { schema: "zeros.live-probe-failure/v1", exception, line, message: "private-canary", path: "private-canary" };
+    d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 1, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
+      schema: "zeros.diagnostic/v1", component: "base", stage: "resume", ok: false, exitCode: 1, timedOut: false, failedChecks: ["base_compatibility"],
+    }), stderr: "private-canary" } });
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let caught: any;
+    try { await runLiveStep(d, "persistence_verify", () => probePersistence(d, "bx_fixture", "verify")); } catch (error) { caught = error; }
+    expect(caught.diagnostic).toMatchObject({ stage: "resume", failedChecks: ["base_compatibility"] });
+    const failure = JSON.parse(fs.readFileSync(path.join(d.stateDir, "private/live-check-failure.json"), "utf8"));
+    expect(failure.probe).toEqual(accepted ? { exception, line } : undefined);
+    expect(failure.step).toBe("persistence_verify");
+    expect(JSON.stringify(failure) + JSON.stringify(stderr.mock.calls)).not.toContain("private-canary");
+  });
+
+  it("durably records the current step before work and keeps a failure after successful cleanup", async () => {
+    const d = deps(), privateDir = path.join(d.stateDir, "private");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await expect(runLiveStep(d, "runtime_b", async () => {
+      expect(JSON.parse(fs.readFileSync(path.join(privateDir, "live-check/runtime_b.json"), "utf8"))).toEqual({
+        schema: "zeros.live-check-step/v1", step: "runtime_b", state: "running",
+      });
+      throw new TypeError("private-canary");
+    })).rejects.toMatchObject({ diagnostic: { stage: "install", failedChecks: ["provider_request"] } });
+    await runLiveStep(d, "cleanup_objects", async () => "private-canary");
+    const failurePath = path.join(privateDir, "live-check-failure.json");
+    const failure = JSON.parse(fs.readFileSync(failurePath, "utf8"));
+    expect(failure).toMatchObject({ step: "runtime_b", state: "failed", diagnostic: { stage: "install", failedChecks: ["provider_request"] } });
+    expect(fs.statSync(failurePath).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(privateDir).mode & 0o777).toBe(0o700);
+    const cleanup = fs.readFileSync(path.join(privateDir, "live-check/cleanup_objects.json"), "utf8");
+    expect(JSON.parse(cleanup)).toMatchObject({ step: "cleanup_objects", state: "passed" });
+    expect(JSON.stringify(failure) + cleanup).not.toContain("private-canary");
+    expect(stdout).not.toHaveBeenCalled();
+  });
+
+  it("identifies a provider timeout even when the Python probe cannot emit a diagnostic", async () => {
+    const d = deps();
+    d.boat = vi.fn().mockResolvedValue({ status: 200, body: { timedOut: true, exitCode: 124, stdout: "" } });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(runLiveStep(d, "runtime_after_second_resume", () => probeRuntime(d, "bx_fixture", `r1-${"a".repeat(64)}`)))
+      .rejects.toMatchObject({ diagnostic: { stage: "install", timedOut: true, exitCode: 124, failedChecks: ["timeout"] } });
+    const failure = JSON.parse(fs.readFileSync(path.join(d.stateDir, "private/live-check-failure.json"), "utf8"));
+    expect(failure).toMatchObject({ step: "runtime_after_second_resume", diagnostic: { exitCode: 124, failedChecks: ["timeout"] } });
+    expect(failure.probe).toBeUndefined();
+    expect(d.boat).toHaveBeenCalledWith("POST", "/sandboxes/bx_fixture/commands", expect.objectContaining({
+      body: expect.objectContaining({ timeoutSeconds: 600 }), timeoutMs: 630_000,
+    }));
+  });
+
   it.each(["cold", "seed", "rename", "verify"] as const)("checks bounded persistence evidence in phase %s", async phase => {
     const d = deps(), renamed = phase === "rename" || phase === "verify";
     const proof = { schema: "zeros.persistence-probe/v1", phase, bindCount: 4, repoAliases: true,
       machineIdPresent: phase !== "seed", templateIdentityCleared: phase === "seed", renames: renamed ? 2 : 0, oldPathsAbsent: renamed,
+      seedDataIntact: phase !== "cold", renameChecks: renamed ? renameChecks() : null,
+      hostReady: true, bindFilesystem: "ext4", residueCleared: renamed, residueEntries: renamed ? 9 : 0, residueMounts: renamed ? 3 : 0,
       ignoredPrivateField: "private-canary" };
     d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 0, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
       schema: "zeros.diagnostic/v1", component: "base", stage: "resume", ok: true, exitCode: 0, timedOut: false, failedChecks: [],
     }) } });
     const result = await probePersistence(d, "bx_fixture", phase);
-    expect(result).toMatchObject({ phase, bindCount: 4, repoAliases: true, renames: renamed ? 2 : 0 });
+    expect(result).toMatchObject({ phase, bindCount: 4, repoAliases: true, renames: renamed ? 2 : 0,
+      hostReady: true, bindFilesystem: "ext4", residueCleared: renamed, residueEntries: renamed ? 9 : 0, residueMounts: renamed ? 3 : 0 });
     expect(JSON.stringify(result)).not.toContain("private-canary");
     expect(d.boat).toHaveBeenCalledWith("POST", "/sandboxes/bx_fixture/commands", expect.objectContaining({
-      body: expect.objectContaining({ command: expect.stringContaining(`main("${phase}")`) }),
+      body: expect.objectContaining({ command: expect.stringContaining(`main("${phase}")`), timeoutSeconds: 600 }),
     }));
   });
 
-  it.each([{ bindCount: 3 }, { repoAliases: false }, { machineIdPresent: false }, { renames: 1 }, { oldPathsAbsent: false }])(
+  it.each([{ bindCount: 3 }, { repoAliases: false }, { machineIdPresent: false }, { renames: 1 }, { oldPathsAbsent: false },
+    { seedDataIntact: false }, { renameChecks: undefined }, { renameChecks: {} },
+    { hostReady: false }, { bindFilesystem: "fuse" }, { bindFilesystem: "xfs" }, { bindFilesystem: undefined },
+    { residueCleared: false }, { residueEntries: 0 }, { residueEntries: -1 }, { residueEntries: 1.5 },
+    { residueMounts: 0 }, { residueMounts: 5 }])(
     "rejects incomplete final persistence evidence %j", async corrupt => {
       const d = deps();
       const proof = { schema: "zeros.persistence-probe/v1", phase: "verify", bindCount: 4, repoAliases: true,
-        machineIdPresent: true, templateIdentityCleared: false, renames: 2, oldPathsAbsent: true, ...corrupt };
+        machineIdPresent: true, templateIdentityCleared: false, renames: 2, oldPathsAbsent: true,
+        seedDataIntact: true, renameChecks: { ...renameChecks(), same_parent_seed_intact: false },
+        hostReady: true, bindFilesystem: "ext4", residueCleared: true, residueEntries: 9, residueMounts: 3, ...corrupt };
       d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 0, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
         schema: "zeros.diagnostic/v1", component: "base", stage: "resume", ok: true, exitCode: 0, timedOut: false, failedChecks: [],
       }) } });
       await expect(probePersistence(d, "bx_fixture", "verify")).rejects.toMatchObject({ diagnostic: { stage: "resume", failedChecks: ["base_compatibility"] } });
     });
+
+  it.each(["rename", "verify"] as const)("limits the known rename issue to the post-resume phase: %s", async phase => {
+    const d = deps();
+    const checks = { ...renameChecks(), same_parent_old_absent: false, same_parent_seed_intact: false };
+    const proof = { schema: "zeros.persistence-probe/v1", phase, bindCount: 4, repoAliases: true,
+      machineIdPresent: true, templateIdentityCleared: false, renames: 2, oldPathsAbsent: false,
+      seedDataIntact: true, renameChecks: checks,
+      hostReady: true, bindFilesystem: "ext4", residueCleared: true, residueEntries: 9, residueMounts: 3,
+      ignoredPrivateField: "private-canary" };
+    d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 0, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
+      schema: "zeros.diagnostic/v1", component: "base", stage: "resume", ok: true, exitCode: 0, timedOut: false, failedChecks: [],
+    }) } });
+    const operation = runLiveStep(d, `persistence_${phase}`, () => probePersistence(d, "bx_fixture", phase));
+    if (phase === "rename") {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      await expect(operation).rejects.toMatchObject({ diagnostic: { failedChecks: ["base_compatibility"] } });
+    } else {
+      await expect(operation).resolves.toMatchObject({ oldPathsAbsent: false, seedDataIntact: true,
+        knownIssues: ["boat_incremental_directory_rename"] });
+      const file = path.join(d.stateDir, "private/live-check/persistence_verify-renames.json");
+      const evidence = fs.readFileSync(file, "utf8");
+      expect(JSON.parse(evidence)).toEqual({ schema: "zeros.persistence-rename-evidence/v1", step: "persistence_verify",
+        knownIssues: ["boat_incremental_directory_rename"], checks });
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      expect(evidence).not.toContain("private-canary");
+      expect(JSON.parse(fs.readFileSync(path.join(d.stateDir, "private/live-check/persistence_verify.json"), "utf8"))).toMatchObject({ state: "passed" });
+    }
+  });
 
   it.each(["ready", "idle", "running"])("accepts Boat %s as command-ready", async state => {
     vi.useFakeTimers();
@@ -300,11 +431,23 @@ describe("runtime-base-v4 profile", () => {
     expect(fs.existsSync(path.join(replay, "runtime-base-v4/pending-delete.json"))).toBe(false);
   });
 
-  it("completes a stock build and cold clone, retains only the named base and confirms deletion", async () => {
+  it.each([false, true])("shares snapshot preparation, retains only the base and confirms deletion (live=%s)", async live => {
     const f = fullKit();
-    const result: any = await v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d);
+    const options = new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]);
+    const hook = vi.fn(async () => ({ status: "fixture_live_verified" }));
+    const result: any = live ? await buildBase(options, profileDeps(f.d), hook) : await v4Command("build", options, [], f.d);
     expect(result).toMatchObject({ schema: "zeros.runtime-base-receipt/v1", snapshotName: "zeros-v2-test-base-v4-1", snapshotId: "snapshot_fixture",
-      sandboxStarts: 2, imageBytes: 1024, live: { status: "synthetic_runtime_pending" }, cleanup: { confirmed: true, snapshot: "retained" } });
+      sandboxStarts: 2, imageBytes: 1024, live: { status: live ? "fixture_live_verified" : "synthetic_runtime_pending" },
+      cleanup: { confirmed: true, snapshot: "retained" } });
+    expect(hook).toHaveBeenCalledTimes(live ? 1 : 0);
+    const captureIndex = f.requests.findIndex(request => request.method === "POST" && request.route === "/named-snapshots");
+    const preparation = f.requests.slice(0, captureIndex).filter(request => request.route.endsWith("/commands"))
+      .map(request => request.body.command as string)
+      .flatMap(command => command.includes("def sanitize()") ? ["sanitize"] : command.includes("def verify()") ? ["verify"] : []);
+    expect(preparation).toEqual(["sanitize", "verify", "sanitize", "verify"]);
+    const verification = f.requests.filter(request => request.route.endsWith("/commands") && request.body.command.includes("def verify()"));
+    expect(verification).toHaveLength(3);
+    expect(verification.every(request => request.body.timeoutSeconds === 600)).toBe(true);
     expect(result.cleanup.sandboxes).toEqual(["bx_v4test2", "bx_v4test1"]);
     expect(result.compatibilityRawB64).toBe(compatibilityRawB64);
     expect(result.baseCompatibilityId).toBe(baseCompatibilityId);
@@ -595,6 +738,52 @@ sys.stdout.buffer.write(out.getvalue())`]);
     expect(artifact.expiresAt).toBe("2026-10-04T00:15:00.000Z");
     expect(artifact.url).not.toContain(r2.secretAccessKey);
     expect(signedHeaders(r2, "DELETE", key, Buffer.alloc(0), now)["if-none-match"]).toBeUndefined();
+  });
+
+  it.each([
+    { step: "install_a", stage: "done", checks: [], exitCode: 0, revokeFailed: false, outerCheck: null },
+    { step: "install_b", stage: "run_setup", checks: ["setup_exit"], exitCode: 23, revokeFailed: false, outerCheck: "runtime_install" },
+    { step: "install_corrupt_c", stage: "verify_archive", checks: ["archive_digest"], exitCode: 1, revokeFailed: false, outerCheck: null },
+    { step: "install_b", stage: "done", checks: [], exitCode: 0, revokeFailed: true, outerCheck: "ssh_key_revoked" },
+  ] as const)("retains the installer result privately for $step/$stage (revocation failure: $revokeFailed)", async entry => {
+    const d = deps(), key = Buffer.alloc(51);
+    key.writeUInt32BE(11); key.write("ssh-ed25519", 4); key.writeUInt32BE(32, 15);
+    const publicKey = `ssh-ed25519 ${key.toString("base64")}`;
+    const installer = { ok: entry.exitCode === 0, stage: entry.stage, exitCode: entry.exitCode, timedOut: false, failedChecks: entry.checks };
+    const diagnostic = { schema: "zeros.diagnostic/v1", component: "installer", ...installer, ignoredPrivateField: "private-canary" };
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(sshBoundary, "openBoatBootstrapChannel").mockResolvedValue({ publicKey, dispose,
+      execute: vi.fn().mockResolvedValue({ exitCode: entry.exitCode, outputTruncated: false,
+        output: "legacy helper private-canary\n" + JSON.stringify(diagnostic) }) });
+    d.boat = async (method, _route, options = {}) => {
+      if (method === "GET") return { status: 200, body: { sandbox: { id: "bx_fixture", ip: "8.8.8.8" } } };
+      const command = (options.body as any).command;
+      return { status: 200, body: { exitCode: command.includes("print('revoked')") && entry.revokeFailed ? 1 : 0,
+        stdout: command.includes("/usr/bin/cat") ? publicKey : command.includes("expiry-time=") ? "restricted\n" : "revoked\n" } };
+    };
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    let caught: unknown;
+    try {
+      await runInstallerStep(d, entry.step, received => installOverSsh(d, "bx_fixture", { artifact: "private-canary" }, received));
+    } catch (error) { caught = error; }
+    const stepPath = path.join(d.stateDir, "private/live-check", entry.step);
+    const retained = fs.readFileSync(`${stepPath}-installer.json`, "utf8");
+    expect(JSON.parse(retained)).toEqual({ step: entry.step, installer });
+    expect(fs.statSync(`${stepPath}-installer.json`).mode & 0o777).toBe(0o600);
+    const stepRecord = JSON.parse(fs.readFileSync(`${stepPath}.json`, "utf8"));
+    expect(stepRecord.state).toBe(entry.outerCheck ? "failed" : "passed");
+    if (entry.outerCheck) {
+      expect(closedFailure(caught)).toMatchObject({ stage: entry.revokeFailed ? "cleanup" : "install", failedChecks: [entry.outerCheck] });
+      expect(stepRecord).toMatchObject({ step: entry.step, installer, diagnostic: closedFailure(caught) });
+      expect(stderr).toHaveBeenCalledWith(JSON.stringify({ event: "live_check_failure", step: entry.step }));
+    } else {
+      expect(caught).toBeUndefined();
+      expect(fs.existsSync(path.join(d.stateDir, "private/live-check-failure.json"))).toBe(false);
+    }
+    expect(retained + JSON.stringify(stepRecord) + JSON.stringify(stderr.mock.calls)).not.toContain("private-canary");
+    expect(stdout).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it("does not delete an occupied object after a create-only upload returns 412", async () => {
