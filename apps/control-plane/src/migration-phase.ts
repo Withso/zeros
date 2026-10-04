@@ -133,7 +133,12 @@ function sqlTokens(sql: string): string[] {
           "Unterminated dollar-quoted migration body.",
         );
       if (isExecutableBody(tokens)) {
-        tokens.push(...sqlTokens(sql.slice(cursor + dollar.length, end)));
+        // Body statements must not inherit their declaration's token context.
+        tokens.push(
+          ";",
+          ...sqlTokens(sql.slice(cursor + dollar.length, end)),
+          ";",
+        );
       } else tokens.push("VALUE");
       cursor = end + dollar.length;
       continue;
@@ -158,7 +163,6 @@ export function expandMigrationViolations(sql: string): string[] {
     ["DROP", /\bDROP\b/],
     ["RENAME", /\bRENAME\b/],
     ["TRUNCATE", /\bTRUNCATE\b/],
-    ["DELETE", /\bDELETE\b/],
     ["REVOKE", /\bREVOKE\b/],
     [
       "ALTER COLUMN TYPE",
@@ -170,15 +174,63 @@ export function expandMigrationViolations(sql: string): string[] {
   ] as const;
   for (const [label, pattern] of forbidden)
     if (pattern.test(source)) violations.push(label);
-  let grantPrivileges = false;
-  for (const token of tokens) {
-    if (token === "GRANT") grantPrivileges = true;
-    if (["ON", "TO", ";"].includes(token)) grantPrivileges = false;
-    if (token === "EXECUTE" && !grantPrivileges)
+  let statementStart = 0;
+  for (const [index, token] of tokens.entries()) {
+    if (token === ";" || token === "BEGIN") {
+      statementStart = index + 1;
+      continue;
+    }
+    if (token !== "DELETE" && token !== "EXECUTE") continue;
+    const prefix = tokens.slice(statementStart, index),
+      // Procedural control flow may precede a DDL or GRANT statement.
+      statement = prefix.slice(
+        Math.max(0, prefix.lastIndexOf("CREATE"), prefix.lastIndexOf("GRANT")),
+      ),
+      previous = tokens[index - 1],
+      next = tokens[index + 1],
+      grantPrivileges =
+        statement[0] === "GRANT" &&
+        !statement.some((word) => word === "ON" || word === "TO") &&
+        (previous === "GRANT" || previous === ",") &&
+        (next === "," || next === "ON"),
+      trigger = /^CREATE (?:CONSTRAINT )?TRIGGER\b/.test(statement.join(" "));
+    if (
+      token === "DELETE" &&
+      !(
+        grantPrivileges ||
+        (previous === "ON" &&
+          statement.includes("REFERENCES") &&
+          /^(?:CASCADE|RESTRICT|SET (?:NULL|DEFAULT)|NO ACTION)\b/.test(
+            tokens.slice(index + 1, index + 3).join(" "),
+          )) ||
+        (trigger &&
+          !statement.includes("ON") &&
+          (["BEFORE", "AFTER", "OR"].includes(previous ?? "") ||
+            (previous === "OF" && tokens[index - 2] === "INSTEAD")) &&
+          (next === "OR" || next === "ON")) ||
+        (statement[0] === "CREATE" &&
+          statement[1] === "POLICY" &&
+          previous === "FOR" &&
+          next !== "FROM")
+      )
+    )
+      violations.push("DELETE");
+    if (
+      token === "EXECUTE" &&
+      !grantPrivileges &&
+      !(
+        trigger &&
+        statement.includes("ON") &&
+        (next === "FUNCTION" || next === "PROCEDURE")
+      )
+    )
       violations.push("dynamic SQL EXECUTE");
   }
   for (const clause of source.matchAll(/\bADD (?:COLUMN )?([^;,]+)/g)) {
-    if (/\bNOT NULL\b/.test(clause[1]!) && !/\bDEFAULT\b/.test(clause[1]!))
+    if (
+      /\bNOT NULL\b/.test(clause[1]!) &&
+      !/(?<!SET )\bDEFAULT\b/.test(clause[1]!)
+    )
       violations.push("ADD NOT NULL without a compatible DEFAULT");
   }
   return [...new Set(violations)];

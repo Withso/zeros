@@ -21,6 +21,52 @@ describe("migration-phase CI lint", () => {
   ])("rejects a destructive expand statement: %s", sql => {
     expect(lintMigrationPhase(file, expand(sql)).length).toBeGreaterThan(0);
   });
+  it.each([
+    "CREATE TRIGGER audit_change BEFORE UPDATE OR DELETE ON example FOR EACH ROW EXECUTE FUNCTION audit_change();",
+    "CREATE TRIGGER audit_change AFTER INSERT OR DELETE ON example FOR EACH ROW EXECUTE PROCEDURE audit_change();",
+    "CREATE TRIGGER audit_change BEFORE INSERT ON example FOR EACH ROW EXECUTE FUNCTION audit_change();",
+    "CREATE CONSTRAINT TRIGGER audit_change AFTER DELETE ON example DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION audit_change();",
+    "CREATE TRIGGER audit_change INSTEAD OF DELETE ON example FOR EACH ROW EXECUTE FUNCTION audit_change();",
+    "DO $$ BEGIN CREATE TRIGGER audit_change BEFORE DELETE ON example FOR EACH ROW EXECUTE FUNCTION audit_change(); END $$;",
+    "DO $$ BEGIN IF true THEN CREATE TRIGGER audit_change BEFORE DELETE ON example FOR EACH ROW EXECUTE FUNCTION audit_change(); END IF; END $$;",
+    "DO $$ BEGIN IF true THEN CREATE POLICY delete_own ON example FOR DELETE USING (true); END IF; END $$;",
+    "DO $$ BEGIN IF EXISTS (SELECT 1 FROM example e JOIN child c ON c.parent_id = e.id) THEN GRANT EXECUTE ON FUNCTION audit_change() TO zeros_app; END IF; END $$;",
+    "CREATE FUNCTION grant_execution() RETURNS void LANGUAGE SQL AS $$ GRANT EXECUTE ON FUNCTION audit_change() TO zeros_app; $$;",
+    "CREATE POLICY delete_own ON example FOR DELETE TO zeros_app USING (true);",
+    "GRANT SELECT, INSERT, UPDATE, DELETE ON example TO zeros_app;",
+  ])("accepts a non-destructive DELETE or trigger EXECUTE clause: %s", sql => {
+    expect(lintMigrationPhase(file, expand(sql))).toEqual([]);
+  });
+  it.each(["CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", "NO ACTION"])("accepts foreign-key referential actions: %s", action => {
+    expect(lintMigrationPhase(file, expand(`CREATE TABLE child (parent_id integer REFERENCES example(id) ON DELETE ${action} ON UPDATE ${action});`))).toEqual([]);
+    expect(lintMigrationPhase(file, expand(`ALTER TABLE child ADD CONSTRAINT child_parent FOREIGN KEY (parent_id) REFERENCES example(id) ON UPDATE ${action} ON DELETE ${action};`))).toEqual([]);
+  });
+  it.each([
+    "DELETE;",
+    "DELETE FROM example;",
+    "WITH d AS (DELETE FROM example RETURNING 1) SELECT 1;",
+    "CREATE FUNCTION dangerous() RETURNS void LANGUAGE plpgsql AS $$ BEGIN DELETE FROM example; END $$;",
+    "CREATE FUNCTION dangerous() RETURNS void LANGUAGE SQL AS $$ DELETE FROM example; $$;",
+    "DO $$ BEGIN DELETE FROM example; END $$;",
+    "CREATE FUNCTION dangerous() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN DELETE FROM example; RETURN OLD; END $$; CREATE TRIGGER audit_change AFTER DELETE ON example FOR EACH ROW EXECUTE FUNCTION dangerous();",
+    "CREATE TRIGGER audit_change AFTER DELETE ON example FOR EACH ROW EXECUTE FUNCTION dangerous(); CREATE FUNCTION dangerous() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN DELETE FROM example; RETURN OLD; END $$;",
+    "GRANT DELETE ON example TO zeros_app; DELETE FROM example;",
+    "CREATE POLICY delete_own ON example FOR DELETE USING (true); WITH d AS (DELETE FROM example RETURNING 1) SELECT 1;",
+    "CREATE TABLE child (parent_id integer REFERENCES example(id) ON DELETE CASCADE); DELETE FROM example;",
+  ])("still rejects DELETE statements without borrowing another statement's context: %s", sql => {
+    expect(lintMigrationPhase(file, expand(sql))).toContain(`${file}: expand migrations may not contain DELETE.`);
+  });
+  it.each([
+    "DO $$ BEGIN EXECUTE 'DROP TABLE example'; END $$;",
+    "CREATE FUNCTION dangerous() RETURNS void LANGUAGE plpgsql AS $$ BEGIN EXECUTE 'DROP TABLE example'; END $$;",
+    "CREATE TRIGGER audit_change AFTER DELETE ON example FOR EACH ROW EXECUTE FUNCTION audit_change(); DO $$ BEGIN EXECUTE 'DROP TABLE example'; END $$;",
+    "GRANT EXECUTE ON FUNCTION audit_change() TO zeros_app; DO $$ BEGIN EXECUTE 'DROP TABLE example'; END $$;",
+  ])("still rejects dynamic EXECUTE in executable bodies: %s", sql => {
+    expect(lintMigrationPhase(file, expand(sql))).toContain(`${file}: expand migrations may not contain dynamic SQL EXECUTE.`);
+  });
+  it("keeps REVOKE forbidden alongside permitted grants", () => {
+    expect(lintMigrationPhase(file, expand("GRANT DELETE ON example TO zeros_app; REVOKE DELETE ON example FROM zeros_app;"))).toContain(`${file}: expand migrations may not contain REVOKE.`);
+  });
   it("ignores comments and literal or quoted-identifier keywords", () => {
     expect(lintMigrationPhase(file, expand(`
       -- DROP TABLE ignored;
@@ -54,6 +100,10 @@ describe("migration-phase CI lint", () => {
   it("accepts the additive phase ledger and non-null columns with compatible defaults", () => {
     expect(lintMigrationPhase("0122_migration_phases.sql", expand("SET LOCAL lock_timeout = '5s'; ALTER TABLE schema_migrations ADD COLUMN phase text NOT NULL DEFAULT 'legacy';"))).toEqual([]);
     expect(lintMigrationPhase(file, expand("ALTER TABLE example ADD COLUMN phase text NOT NULL DEFAULT 'legacy';"))).toEqual([]);
+  });
+  it("does not mistake a foreign-key SET DEFAULT action for a new column's default", () => {
+    expect(lintMigrationPhase(file, expand("ALTER TABLE child ADD COLUMN parent_id integer NOT NULL REFERENCES example(id) ON DELETE SET DEFAULT;"))).toContain(`${file}: expand migrations may not contain ADD NOT NULL without a compatible DEFAULT.`);
+    expect(lintMigrationPhase(file, expand("ALTER TABLE child ADD COLUMN parent_id integer NOT NULL DEFAULT 1 REFERENCES example(id) ON DELETE SET DEFAULT;"))).toEqual([]);
   });
   it("allows least-privilege function execution grants without allowing dynamic SQL execution", () => {
     expect(lintMigrationPhase(file, expand("CREATE FUNCTION new_addition() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$; GRANT EXECUTE ON FUNCTION new_addition() TO zeros_app;"))).toEqual([]);
