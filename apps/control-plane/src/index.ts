@@ -12,6 +12,7 @@ import {DatabaseCloudAgentExecutionService} from "./cloud-workspaces/agent-execu
 import { S3Client } from "@aws-sdk/client-s3";
 import { Agent as HttpsAgent } from "node:https";
 import { S3CloudWorkspaceObjectStore } from "./cloud-workspaces/s3-object-store.js";
+import { createRuntimeArtifactStore } from "./cloud-workspaces/runtime-artifact-store.js";
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool } from "./db.js";
@@ -48,6 +49,9 @@ import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
 
 const config = loadConfig();
+const runtimeArtifacts = createRuntimeArtifactStore({
+  s3: config.cloudRuntimePublication?.s3 ?? config.cloudWorkspaces?.durability?.s3 ?? null,
+});
 const pool = createPool(config.databaseUrl, { maxConnections: config.databasePoolMax ?? 10 });
 if (config.development && "generation" in config.development) {
   await assertHostedDatabaseOwnership(pool, config.development);
@@ -568,6 +572,7 @@ let githubWriteCleanup: ReturnType<typeof setInterval> | undefined;
 let githubWriteCleanupPending = Promise.resolve();
 let githubWriteCleanupRunning = false;
 const app = createApp(config, pool, emailConfig, {
+  runtimePublication: { artifacts: runtimeArtifacts },
   ...(cloudWorkspaceInternalSetupService ? { cloudIdleStop: new DatabaseCloudIdleStop(pool, config.auth.provider === "workos") } : {}),
   ...(cloudGithubWriteGrants ? { cloudGithubWriteGrants } : {}),
   securityEventBroker,

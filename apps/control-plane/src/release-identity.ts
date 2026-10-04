@@ -7,6 +7,7 @@ import { withSystemTx } from "./db.js";
 import type { MigrationStatus } from "./migrate.js";
 import { isNewerExpandMigration } from "./migration-phase.js";
 import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
+import { readRuntimeReleaseIdentity } from "./cloud-workspaces/runtime-publication-routes.js";
 
 type LedgerRow = { name: string; checksum: string | null; phase?: string | null };
 type Dependencies = {
@@ -16,6 +17,7 @@ type Dependencies = {
   readManifest?: () => Promise<LedgerRow[]>;
   readLedger?: () => Promise<LedgerRow[]>;
   readWorkerQualified?: (provider: string, imageRef: string) => Promise<boolean>;
+  readRuntimeIdentity?: () => ReturnType<typeof readRuntimeReleaseIdentity>;
 };
 const sha = (value: string | undefined | null) => /^[a-f0-9]{40}$/.test(value ?? "") ? value! : null;
 const digest = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
@@ -106,8 +108,16 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
           )).rows), { consistentRead: true });
       } catch { /* Missing/unreadable approval must not authorize publication. */ }
     }
+    let runtimeV4: Awaited<ReturnType<typeof readRuntimeReleaseIdentity>> | undefined;
+    if (config.cloudRuntimePublication && !maintenance && migrations.state === "current") {
+      try {
+        runtimeV4 = await (deps.readRuntimeIdentity ? deps.readRuntimeIdentity() :
+          readRuntimeReleaseIdentity(pool, config.cloudWorkspaceNewRuntimeProfile ?? "legacy"));
+      } catch { /* Registry visibility never changes v1 readiness or leaks diagnostics. */ }
+    }
     return { version: 1 as const, ready: !!sourceSha && !maintenance && migrations.state === "current" && cloud.ready && (!configured || !!worker),
-      sourceSha, channel: config.deploymentChannel, maintenance, migrations, cloud, worker, workerQualified };
+      sourceSha, channel: config.deploymentChannel, maintenance, migrations, cloud, worker, workerQualified,
+      ...(runtimeV4 ? { runtimeV4 } : {}) };
   }
   app.get("/v1/release-identity", async c => {
     c.header("Cache-Control", "no-store");
