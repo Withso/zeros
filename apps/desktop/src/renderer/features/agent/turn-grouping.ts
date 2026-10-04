@@ -19,10 +19,11 @@ import type { AgentMessage, AgentTextMessage } from "./use-agent-session";
 import { isLegacyEnvironmentConnection } from "./renderers/tool-readiness";
 
 export interface Turn {
-  /** The user prompt that started this turn. null only for the
-   *  rare leading "system turn" — events arriving before the
-   *  first user prompt (e.g. the agent's session-init system
-   *  message). */
+  /** Renderer-only identity carried by stabilizeTurns while a resident
+   * segment gains or loses older events and its opening user prompt. */
+  renderKey?: string;
+  /** The user prompt that started this visual segment. null when the resident
+   * window starts inside a turn, or for warm-up events before the first prompt. */
   userPrompt: AgentTextMessage | null;
   /** Persisted provider-turn id. Several visual segments can share this when
    *  the user steers an in-flight turn. null for a leading system segment. */
@@ -42,10 +43,11 @@ export interface Turn {
   providerEvents: AgentMessage[];
 }
 
-/** Stable id for a turn — the user-prompt id, or a synthetic one
- *  derived from the first event when there's no prompt. Used as
- *  the React key on the container. */
+/** React identity for a turn. Stabilization retains an already-mounted key;
+ * new containers use the user-prompt id, or their first event without a prompt.
+ * Provider ownership and checkpoint ids remain independent of this key. */
 export function turnKey(turn: Turn): string {
+  if (turn.renderKey) return turn.renderKey;
   if (turn.userPrompt) return `turn-${turn.userPrompt.id}`;
   if (turn.events.length > 0) return `turn-evt-${turn.events[0].id}`;
   return "turn-empty";

@@ -296,6 +296,15 @@ Current deck helpers live in `apps/desktop/src/renderer/shell/retained-view-keys
 - Memoized list rows receive row-local booleans such as `isSelected`; passing the whole selected id causes every row to fail memo equality.
 - Virtualize unbounded files, transcript, and diff content. Keep syntax highlighting off the main thread where supported.
 
+Transcript following tracks reader intent separately from scroll geometry.
+“Jump to latest” resolves the current content bottom after smooth scrolling;
+intermediate animation events are not evidence that the reader scrolled away.
+Follow asynchronous layout growth while at the tail, exclude checkpoint blank
+space, and cancel navigation on a reader gesture. Each new navigation cancels
+older corrections on that exact scroller. Hidden surfaces never measure
+or change that intent. Older history merges into the current exact-chat snapshot
+and preserves a visible anchor, so concurrent tail growth cannot move the reader.
+
 ### 5.1 Direct manipulation: one authority per pixel
 
 A drag on the design canvas has two sources of truth for the same geometry — the

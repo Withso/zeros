@@ -128,7 +128,8 @@ export function partitionTurn(
 
 export interface TurnSegment {
   kind: "working" | "output";
-  /** First durable event id keeps disclosure state stable as a feed grows. */
+  /** Durable anchor retained from the last committed group when history grows
+   * at either end. New groups start with their first visible event id. */
   key: string;
   events: AgentMessage[];
 }
@@ -136,7 +137,11 @@ export interface TurnSegment {
 /** A send can produce several confirmed replies, separated by more work.
  * Keep those boundaries in source order instead of moving later work ahead
  * of an earlier answer. The legacy partition remains available to counters. */
-export function partitionTurnSequence(events: AgentMessage[], options?: PartitionOptions): TurnSegment[] {
+export function partitionTurnSequence(
+  events: AgentMessage[],
+  options?: PartitionOptions,
+  previousSegments: readonly TurnSegment[] = [],
+): TurnSegment[] {
   const { working, finalOutput } = partitionTurn(events, options);
   const output = new Set(finalOutput);
   const visible = new Set([...working, ...finalOutput]);
@@ -147,6 +152,31 @@ export function partitionTurnSequence(events: AgentMessage[], options?: Partitio
     const previous = segments.at(-1);
     if (kind === "working" && previous?.kind === kind) previous.events.push(event);
     else segments.push({ kind, key: event.id, events: [event] });
+  }
+  // Prepending within a working run must not remount EventStripe or its
+  // nested tool/Agent disclosures. Match durable rows only, and let at most
+  // one new group inherit each prior subtree. Prefer its original anchor if
+  // a newly confirmed report splits a previously paginated group.
+  if (previousSegments.length > 0) {
+    const workingByEventId = new Map<string, TurnSegment>();
+    for (const segment of segments) {
+      if (segment.kind !== "working") continue;
+      for (const event of segment.events) workingByEventId.set(event.id, segment);
+    }
+    const claimed = new Set<TurnSegment>();
+    for (const previous of previousSegments) {
+      if (previous.kind !== "working") continue;
+      let retained = workingByEventId.get(previous.key);
+      if (!retained) {
+        for (const event of previous.events) {
+          retained = workingByEventId.get(event.id);
+          if (retained) break;
+        }
+      }
+      if (!retained || claimed.has(retained)) continue;
+      retained.key = previous.key;
+      claimed.add(retained);
+    }
   }
   return segments;
 }

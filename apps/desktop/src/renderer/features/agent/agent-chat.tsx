@@ -9,6 +9,7 @@
 //
 // ──────────────────────────────────────────────────────────
 
+import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import { transcriptParentId } from "./transcript-parent";
 import { useCloudTranscriptLatency } from "./use-cloud-transcript-latency";
 import { startCloudSubmitSpan } from "../../state/cloud-workspace-latency";
@@ -35,6 +36,12 @@ import {
   shouldCaptureChatScroll,
   type ChatScrollPosition,
 } from "./chat-scroll-anchor";
+import {
+  canApplyHistoryPage,
+  captureHistoryPageScrollPosition,
+  prependHistoryPage,
+  scheduleHistoryPageScrollRestore,
+} from "./transcript-paging";
 import { useOpenPrUrlInReviewTab } from "@/renderer/shell/pr/use-open-review-tab";
 import { warmWorkspaceFiles } from "@/renderer/shell/workspace-files-cache";
 import { nativeInvoke, useNativeRuntime } from "@/renderer/platform/runtime";
@@ -2212,7 +2219,8 @@ export function AgentChat({
   const settleEpochRef = useRef(0);
   useEffect(() => () => settleCancelRef.current(), []);
   const settleScroll = useCallback(
-    (el: HTMLElement, computeTarget: () => number) => {
+    (el: HTMLElement, computeTarget: () => number, onFinished?: () => void, follow = false) => {
+      beginChatScrollNavigation(el, { follow, target: computeTarget() });
       settleCancelRef.current();
       const epoch = settleEpochRef.current + 1;
       settleEpochRef.current = epoch;
@@ -2229,6 +2237,7 @@ export function AgentChat({
         finished = true;
         if (raf) cancelAnimationFrame(raf);
         raf = 0;
+        el.removeEventListener(CHAT_SCROLL_NAVIGATION_EVENT, finish);
         el.removeEventListener("wheel", finish);
         el.removeEventListener("touchstart", finish);
         el.removeEventListener("pointerdown", finish);
@@ -2236,6 +2245,7 @@ export function AgentChat({
         if (settleEpochRef.current === epoch) {
           restoreInProgressRef.current = false;
         }
+        onFinished?.();
       };
       const tick = () => {
         raf = 0;
@@ -2248,12 +2258,14 @@ export function AgentChat({
         raf = requestAnimationFrame(tick);
       };
       apply();
+      el.addEventListener(CHAT_SCROLL_NAVIGATION_EVENT, finish);
       el.addEventListener("wheel", finish, { passive: true });
       el.addEventListener("touchstart", finish, { passive: true });
       el.addEventListener("pointerdown", finish, { passive: true });
       el.addEventListener("keydown", finish);
       raf = requestAnimationFrame(tick);
       settleCancelRef.current = finish;
+      return finish;
     },
     [],
   );
@@ -2286,7 +2298,7 @@ export function AgentChat({
       // target is re-derived from scrollHeight on each settle pass, and the
       // latest turn is already content-visibility:visible. Avoid putting a
       // cold 200-message transcript's full layout on the workspace click.
-      settleScroll(el, () => el.scrollHeight - el.clientHeight);
+      settleScroll(el, () => el.scrollHeight - el.clientHeight, undefined, true);
       checkpointRecomputeRef.current?.();
     },
     [settleScroll],
@@ -2523,11 +2535,30 @@ export function AgentChat({
   // without a separate affordance.
   // Hydration pulls the most-recent 200 messages on chat
   // open; older transcript sits on disk and auto-pages in as the user
-  // scrolls toward the top. loadOlder preserves the viewport (scrollTop
-  // is bumped by the prepend's height delta), so paging never yanks the
-  // content the user is reading.
+  // scrolls toward the top. loadOlder preserves a transcript anchor so tail
+  // growth cannot be mistaken for the prepend's height.
   const LOAD_OLDER_PAGE = 200;
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const olderPageRequestRef = useRef<object | null>(null);
+  const olderPageEpochRef = useRef(0);
+  const olderScrollCancelRef = useRef<() => void>(() => {});
+  // Retiring a surface invalidates its read and correction before the next
+  // paint. A late finally must not clear a replacement surface's loading state.
+  useLayoutEffect(() => {
+    setLoadingOlder(false);
+    return () => {
+      olderPageEpochRef.current += 1;
+      olderPageRequestRef.current = null;
+      olderScrollCancelRef.current();
+    };
+  }, [
+    chatId,
+    scrollEl,
+    surfaceActive,
+    session.executionId,
+    session.sessionId,
+    session.transcriptState,
+  ]);
   // Whether more older messages might exist on disk. Default to false on chat
   // mount and probe
   // SQLite once with a single-row read so a brand-new chat with zero
@@ -2588,6 +2619,7 @@ export function AgentChat({
       setHasOlder(false);
       return;
     }
+    if (!surfaceActive) return;
     let cancelled = false;
     const probe = async () => {
       const slot = useSessionsStore.getState().sessions[chatId];
@@ -2599,6 +2631,8 @@ export function AgentChat({
       try {
         const rows = await ipcWindowOlderMessages(chatId, 1, oldest.id);
         if (cancelled) return;
+        const current = useSessionsStore.getState().sessions[chatId];
+        if (!canApplyHistoryPage(slot, current)) return;
         if (rows.length === 0) {
           setHasOlder(false);
           return;
@@ -2610,26 +2644,51 @@ export function AgentChat({
         // session rebuild). The probe would otherwise return the user
         // message as "older than the marker" — true by ord, but it's
         // already in memory, so the affordance would be a lie.
-        const present = new Set(slot.messages.map((m) => m.id));
+        const present = new Set(current.messages.map((m) => m.id));
         const hasGenuineOlder = rows.some((r) => !present.has(r.id));
         setHasOlder(hasGenuineOlder);
       } catch {
         // SQLite/IPC unavailable (browser harness) — leave hasOlder
         // at false; loadOlder is a no-op there anyway.
-        if (!cancelled) setHasOlder(false);
+        if (
+          !cancelled &&
+          canApplyHistoryPage(slot, useSessionsStore.getState().sessions[chatId])
+        ) {
+          setHasOlder(false);
+        }
       }
     };
     void probe();
     return () => {
       cancelled = true;
     };
-  }, [chatId, hasAnyMessages, oldestMsgId]);
+  }, [
+    chatId,
+    hasAnyMessages,
+    oldestMsgId,
+    surfaceActive,
+    session.executionId,
+    session.sessionId,
+    session.transcriptState,
+  ]);
   const loadOlder = useCallback(async () => {
-    if (!chatId) return;
-    if (loadingOlder) return;
+    if (!chatId || !surfaceActiveRef.current) return;
+    if (loadingOlder || olderPageRequestRef.current) return;
     const slot = useSessionsStore.getState().sessions[chatId];
     const oldest = slot?.messages[0];
-    if (!oldest) return;
+    if (!oldest || slot.transcriptState !== "resident") return;
+    const request = {};
+    const epoch = olderPageEpochRef.current;
+    let awaitingRestore = false;
+    const finishRequest = () => {
+      if (olderPageRequestRef.current !== request) return;
+      olderPageRequestRef.current = null;
+      if (scrollEl?.isConnected && surfaceActiveRef.current) {
+        setNearTop(scrollEl.scrollTop <= NEAR_TOP_PX);
+      }
+      setLoadingOlder(false);
+    };
+    olderPageRequestRef.current = request;
     setLoadingOlder(true);
     try {
       const older = await ipcWindowOlderMessages(
@@ -2637,49 +2696,70 @@ export function AgentChat({
         LOAD_OLDER_PAGE,
         oldest.id,
       );
+      if (
+        olderPageRequestRef.current !== request ||
+        !surfaceActiveRef.current
+      ) return;
+      const current = useSessionsStore.getState().sessions[chatId];
+      if (!canApplyHistoryPage(slot, current)) return;
       if (older.length === 0) {
         setHasOlder(false);
         return;
       }
-      // Dedup against the in-memory tail in case of overlap.
-      const present = new Set(slot.messages.map((m) => m.id));
-      const fresh = older.filter((m) => !present.has(m.id));
-      if (fresh.length === 0) {
+      const messages = prependHistoryPage(current.messages, older);
+      if (messages === current.messages) {
         // SQLite returned only messages already in memory — treat as no-more.
         setHasOlder(false);
         return;
       }
-      // Preserve viewport position: the prepend grows scrollHeight; we
-      // add the delta to scrollTop so the user sees the same content
-      // they were reading rather than getting yanked to the new top.
-      const heightBefore = scrollEl?.scrollHeight ?? 0;
-      const topBefore = scrollEl?.scrollTop ?? 0;
+      olderScrollCancelRef.current();
+      if (scrollEl?.isConnected && !restoreInProgressRef.current) {
+        const position = captureHistoryPageScrollPosition(scrollEl);
+        const applied = { ...current, messages };
+        const restoreEpoch = settleEpochRef.current;
+        olderScrollCancelRef.current = scheduleHistoryPageScrollRestore(
+          scrollEl,
+          position,
+          {
+            isCurrent: () =>
+              surfaceActiveRef.current &&
+              olderPageEpochRef.current === epoch &&
+              canApplyHistoryPage(applied, useSessionsStore.getState().sessions[chatId]),
+            allowHeightFallback: () =>
+              useSessionsStore.getState().sessions[chatId]?.messages === messages,
+            restore: (computeTarget, onFinished) => {
+              if (
+                restoreInProgressRef.current ||
+                settleEpochRef.current !== restoreEpoch
+              ) return;
+              const cancel = settleScroll(scrollEl, computeTarget, onFinished);
+              checkpointRecomputeRef.current?.();
+              return cancel;
+            },
+            onFinished: finishRequest,
+            requestFrame: requestAnimationFrame,
+            cancelFrame: cancelAnimationFrame,
+          },
+        );
+        awaitingRestore = true;
+      }
       useSessionsStore.getState().patchSession(chatId, {
-        messages: [...fresh, ...slot.messages],
+        messages,
         // Suspend the live-append trim (MAX_MESSAGES_PER_CHAT) while the
         // reader holds expanded history — see the re-arm effect below.
         historyExpanded: true,
       });
-      requestAnimationFrame(() => {
-        if (
-          !scrollEl ||
-          !surfaceActiveRef.current ||
-          restoreInProgressRef.current
-        ) {
-          return;
-        }
-        const heightAfter = scrollEl.scrollHeight;
-        const delta = heightAfter - heightBefore;
-        if (delta > 0) scrollEl.scrollTop = topBefore + delta;
-      });
       // If the page wasn't full, no point offering another load.
       if (older.length < LOAD_OLDER_PAGE) setHasOlder(false);
     } catch (err) {
+      if (awaitingRestore) olderScrollCancelRef.current();
       console.warn("[Zeros] load-older failed:", err);
     } finally {
-      setLoadingOlder(false);
+      // React may publish the prepend before the correction frame. Keep the
+      // synchronous lock through settling so auto-paging cannot overtake it.
+      if (!awaitingRestore) finishRequest();
     }
-  }, [chatId, loadingOlder, scrollEl]);
+  }, [chatId, loadingOlder, scrollEl, settleScroll]);
   // Auto-page older history while the user is near the top. Each load
   // prepends a page and pushes the viewport down by the same height, so
   // the post-load scroll event re-evaluates `nearTop` — if the user keeps
@@ -2874,6 +2954,7 @@ export function AgentChat({
         const top = nextTextMessageTarget(el, { direction: "up" });
         if (top !== null) {
           e.preventDefault();
+          beginChatScrollNavigation(el, { target: top });
           el.scrollTo({ top, behavior: "smooth" });
         }
         return;
@@ -2882,24 +2963,26 @@ export function AgentChat({
         const top = nextTextMessageTarget(el, { direction: "down" });
         if (top !== null) {
           e.preventDefault();
+          beginChatScrollNavigation(el, { target: top });
           el.scrollTo({ top, behavior: "smooth" });
         }
         return;
       }
       if (e.key === "Home") {
         e.preventDefault();
+        beginChatScrollNavigation(el, { target: 0 });
         el.scrollTo({ top: 0, behavior: "smooth" });
         return;
       }
       if (e.key === "End") {
         e.preventDefault();
-        el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+        jumpToBottom(true);
         return;
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [chatId, surfaceActive, readOnly]);
+  }, [chatId, surfaceActive, readOnly, jumpToBottom]);
 
   // File picker for the "+" → "Add attachment" menu (routes through the
   // editor's insertFiles, same as drag-drop / paste).

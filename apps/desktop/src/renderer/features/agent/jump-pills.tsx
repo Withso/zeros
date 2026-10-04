@@ -22,6 +22,8 @@ import { ArrowDown, ArrowUp } from "lucide-react";
 
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 
+import { beginChatScrollNavigation } from "./chat-scroll-navigation";
+
 interface JumpToPromptPillProps {
   scrollEl: HTMLElement | null;
   /** Element to jump to. Typically the active turn's user-prompt DOM
@@ -62,6 +64,7 @@ export const JumpToPromptPill = memo(function JumpToPromptPill({
     const promptTop = promptEl.getBoundingClientRect().top;
     const target = scrollEl.scrollTop + (promptTop - containerTop);
     if (Math.abs(target - scrollEl.scrollTop) < 4) return;
+    beginChatScrollNavigation(scrollEl, { target });
     scrollEl.scrollTo({ top: target, behavior: "smooth" });
   };
 

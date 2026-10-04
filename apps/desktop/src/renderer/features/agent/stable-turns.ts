@@ -1,4 +1,4 @@
-import type { Turn } from "./turn-container";
+import { turnKey, type Turn } from "./turn-grouping";
 
 function sameTurn(previous: Turn, next: Turn): boolean {
   return (
@@ -32,9 +32,41 @@ export function stabilizeTurns(
   if (next.length === 0)
     return previous.length === 0 ? (previous as Turn[]) : [];
   const previousById = new Map(previous.map((turn) => [identity(turn), turn]));
+  // The leading resident segment can gain or lose its prompt as history is
+  // prepended or trimmed. Its retained durable rows still own the same mounted
+  // subtree. Index only visual events, not providerEvents shared across steers;
+  // distinct prompt segments must remain distinct. This index is transient.
+  const hasPartial =
+    previous.some((turn) => !turn.userPrompt) ||
+    next.some((turn) => !turn.userPrompt);
+  const previousByEventId = new Map<string, Turn>();
+  if (hasPartial) {
+    for (const turn of previous) {
+      for (const event of turn.events) previousByEventId.set(event.id, turn);
+    }
+  }
+  const claimed = new Set<Turn>();
   const stable = next.map((turn) => {
-    const prior = previousById.get(identity(turn));
-    return prior && sameTurn(prior, turn) ? prior : turn;
+    let prior = previousById.get(identity(turn));
+    if (prior && claimed.has(prior)) prior = undefined;
+    if (!prior && hasPartial) {
+      for (const event of turn.events) {
+        const candidate = previousByEventId.get(event.id);
+        if (
+          candidate &&
+          !claimed.has(candidate) &&
+          (!turn.userPrompt || !candidate.userPrompt)
+        ) {
+          prior = candidate;
+          break;
+        }
+      }
+    }
+    if (!prior) return turn;
+    claimed.add(prior);
+    if (sameTurn(prior, turn)) return prior;
+    const priorKey = turnKey(prior);
+    return priorKey === turnKey(turn) ? turn : { ...turn, renderKey: priorKey };
   });
   if (
     stable.length === previous.length &&

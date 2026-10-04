@@ -52,6 +52,60 @@ const liveTool = (
 const ids = (xs: AgentMessage[]) => xs.map((m) => (m as { id: string }).id);
 
 describe("partitionTurn", () => {
+  it("keeps a working subtree's key when older history extends the same group", () => {
+    const retained = [tool("retained"), tool("last")];
+    const previous = partitionTurnSequence(retained);
+    const paged = partitionTurnSequence([tool("older"), ...retained], undefined, previous);
+
+    expect(paged[0].key).toBe(previous[0].key);
+    expect(ids(paged[0].events)).toEqual(["older", "retained", "last"]);
+    expect(ids(previous[0].events)).toEqual(["retained", "last"]);
+  });
+
+  it("preserves independent groups when a prepend reveals an earlier report boundary", () => {
+    const retained = tool("retained");
+    const answer = phasedAgentText("answer", "final_answer");
+    const previous = partitionTurnSequence([retained, answer]);
+    const paged = partitionTurnSequence([
+      tool("older"), phasedAgentText("earlier-report", "final_answer"),
+      tool("prefix"), retained, answer,
+    ], undefined, previous);
+
+    expect(paged.map((segment) => [segment.kind, segment.key])).toEqual([
+      ["working", "older"], ["output", "earlier-report"],
+      ["working", previous[0].key], ["output", "answer"],
+    ]);
+  });
+
+  it("keeps the original anchor's subtree when a newly confirmed report splits prepended work", () => {
+    const original = partitionTurnSequence([tool("retained"), tool("last")]);
+    const paged = partitionTurnSequence([
+      tool("prefix"), phasedAgentText("new-report", "commentary"), tool("retained"), tool("last"),
+    ], undefined, original);
+    const split = partitionTurnSequence([
+      tool("prefix"), phasedAgentText("new-report", "final_answer"), tool("retained"), tool("last"),
+    ], undefined, paged);
+
+    expect(split.map((segment) => [segment.kind, segment.key])).toEqual([
+      ["working", "prefix"], ["output", "new-report"], ["working", original[0].key],
+    ]);
+    expect(new Set(split.map((segment) => `${segment.kind}:${segment.key}`)).size).toBe(split.length);
+  });
+
+  it("retains a working key when its first event retires or becomes an output row", () => {
+    const narration = phasedAgentText("narration", "commentary");
+    const retained = tool("retained");
+    const previous = partitionTurnSequence([narration, retained]);
+    const retired = partitionTurnSequence([{ ...narration, text: "" } as AgentMessage, retained], undefined, previous);
+    const output = partitionTurnSequence([phasedAgentText("narration", "final_answer"), retained], undefined, previous);
+
+    expect(retired[0].key).toBe(previous[0].key);
+    expect(output[1].key).toBe(previous[0].key);
+    expect(new Set(output.map((segment) => `${segment.kind}:${segment.key}`)).size).toBe(output.length);
+    expect(partitionTurnSequence([tool("unrelated")], undefined, previous)[0].key).toBe("unrelated");
+    expect(partitionTurnSequence([], undefined, previous)).toEqual([]);
+  });
+
   it.each([true, false])("retains report/work/report order with independent working groups (live=%s)", (live) => {
     const events = [
       tool("first-tool"), phasedAgentText("first-report", "final_answer"),

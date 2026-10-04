@@ -2,7 +2,7 @@
 // disclosure; each child tool retains its own bounded detail card.
 import { memo, useId, useMemo, useState } from "react";
 import { Bot, ChevronDown, ChevronRight, MessageSquare } from "lucide-react";
-import { partitionTurnSequence } from "../turn-partition";
+import { useTurnSequence } from "../use-turn-sequence";
 import { MessageView } from "./message-view";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import type { Renderer } from "./types";
@@ -58,10 +58,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
       (tool.status === "pending" || tool.status === "in_progress") &&
       !unreported;
     const failed = tool.status === "failed";
-    const sequence = useMemo(
-      () => partitionTurnSequence(children, { live: running }),
-      [children, running],
-    );
+    const sequence = useTurnSequence(children, running, ctx.chatId);
     const tailId = sequence.at(-1)?.events.at(-1)?.id ?? null;
     const childCtx = useMemo(
       () => ({ ...ctx, isStreaming: running, lastMessageId: tailId }),
@@ -158,7 +155,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
             {sequence.map((segment, index) =>
               segment.kind === "working" ? (
                 <EventStripe
-                  key={segment.key}
+                  key={JSON.stringify([ctx.chatId, segment.kind, segment.key])}
                   events={segment.events}
                   ctx={childCtx}
                   live={running}
@@ -168,7 +165,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
                   }
                 />
               ) : (
-                <div key={segment.key} data-agent-output="">
+                <div key={JSON.stringify([ctx.chatId, segment.kind, segment.key])} data-agent-output="">
                   <MessageView message={segment.events[0]} ctx={childCtx} />
                 </div>
               ),
