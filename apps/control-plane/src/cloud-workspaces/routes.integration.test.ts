@@ -1235,6 +1235,14 @@ d("cloud workspace API contracts", () => {
     configureApp();
   });
 
+  it("keeps route fixtures usable beyond the live signup budget", async () => {
+    const actors = [];
+    for (let index = 0; index < 201; index++) actors.push(await signup("Fixture"));
+    expect(new Set(actors.map(user => user.id)).size).toBe(201);
+    expect((await pool.query("SELECT count(*)::int AS count FROM user_identities")).rows[0].count).toBe(203);
+    expect((await pool.query("SELECT count(*)::int AS count FROM organizations WHERE is_personal")).rows[0].count).toBe(203);
+  });
+
   it("replays a create against its accepted image after the deployment default changes", async () => {
     const created = await createWorkspace();
     expect(created.response.status).toBe(202);
