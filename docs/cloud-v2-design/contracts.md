@@ -188,3 +188,27 @@ A v4 generation (complete runtime pin) has `image_ref` equal to EITHER the pinne
 In both cases the pinned base row must exist and match provider/source_commit/architecture/storage_mib.
 Template provenance (which build/template, org) is validated by Phase C's sidecar
 (`cloud_workspace_computer_sources`) — B1 only admits the ref format.
+
+## 14. CI → control-plane publication API (B5 implements, B6/B4-workflow call) — 2026-10-04
+All requests: `Authorization: Bearer <GitHub Actions OIDC JWT>` (audience = CP config
+`CLOUD_RUNTIME_OIDC_AUDIENCE`, default `zeros-control-plane-<channel>`); claims checked per AB-3
+(repository, exact workflow_ref, ref `refs/heads/main`, event, environment `alpha`). JSON bodies, strict
+schemas, no-store responses, closed error codes. Idempotent by exact identity; conflicting identity = 409.
+- `POST /internal/v1/runtime-bundles/publications` (workflow `release-alpha.yml`)
+  body `{descriptor: RuntimeDescriptor (§4), manifestHeader: <manifest without "files">, releaseOrder: <run_number>,
+         githubRunId, githubRunAttempt}` →
+  `200 {objectKey: "runtime/v1/<runtimeId>/<archiveSha256>.tar.gz", upload: {url, expiresAt, headers} | null}`
+  (`upload` null when the exact object already exists). Presigned create-only PUT for the exact key/size.
+- `POST /internal/v1/runtime-bundles/publications/complete` (same workflow)
+  body `{runtimeId, archiveSha256, releaseOrder, githubRunId, githubRunAttempt}` → CP HEADs the object
+  (exact byte length), inserts/validates the `cloud_runtime_bundles` row and the
+  `cloud_runtime_channel_releases` row for channel alpha with `confirmed_at = now()` (the job runs after
+  hosted promotion succeeded), then schedules runtime-smoke qualification (B7). → `200 {runtimeId, registered: true}`.
+- `POST /internal/v1/runtime-bases` (workflow `cloud-runtime-base.yml`)
+  body `{baseImageId, imageRef, sourceCommit, imageBuildSha256, storageMib, compatibility: <raw compatibility.json
+         object>, compatibilitySha256}` → validates `bc1-` id = sha256 of the canonical raw bytes (sent as
+  base64 field `compatibilityRawB64` to avoid re-serialization), inserts base contract + base image with
+  `approved_at = now()`. → `200 {baseImageId, baseCompatibilityId}`.
+- Staff-only (engineering staff) internal reads/actions for operators: `GET /v1/internal/cloud-runtime/status`
+  (bases, recent runtimes, qualifications, channel head), `POST /v1/internal/cloud-runtime/runtimes/:id/revoke`,
+  `POST /v1/internal/cloud-runtime/runtimes/:id/requalify` (B7).
