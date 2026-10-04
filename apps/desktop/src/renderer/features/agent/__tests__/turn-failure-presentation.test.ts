@@ -38,7 +38,7 @@ describe("turn failure presentation", () => {
   it.each(["claude", "codex", "cursor"])(
     "renders a persisted %s failure only in the footer, retaining failed tools",
     (provider) => {
-      let events = [tool];
+      let events: AgentMessage[] = [tool];
       // Codex can emit an untagged native error before the engine persists its
       // turn-owned failure. Both describe the terminal failure, not tool calls.
       if (provider === "codex") {
