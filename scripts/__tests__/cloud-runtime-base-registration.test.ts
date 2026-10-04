@@ -56,7 +56,7 @@ describe("verified Alpha base registration", () => {
       GITHUB_SHA: sourceCommit,
       CLOUD_WORKSPACE_CONTROL_PLANE_URL: "https://control.example.invalid",
       CLOUD_RUNTIME_OIDC_AUDIENCE: "zeros-control-plane-alpha",
-      CLOUD_WORKSPACE_STORAGE_MIB: "20480",
+      CLOUD_WORKSPACE_STORAGE_MIB: "70225",
       ACTIONS_ID_TOKEN_REQUEST_URL:
         "https://actions.example.invalid/token?request=fixture",
       ACTIONS_ID_TOKEN_REQUEST_TOKEN: requestToken,
@@ -94,13 +94,13 @@ describe("verified Alpha base registration", () => {
     });
 
   it("builds the exact snapshot/build identity and preserves the raw contract bytes", () => {
-    const body = baseRegistrationBody(receipt, sourceCommit);
+    const body = baseRegistrationBody(receipt, sourceCommit, 70_225);
     expect(body).toEqual({
       baseImageId: snapshotName,
       imageRef: `boat:${snapshotName}@sha256:${baseBuildSha256}`,
       sourceCommit,
       imageBuildSha256: baseBuildSha256,
-      storageMib: 20_480,
+      storageMib: 70_225,
       compatibilityRawB64: receipt.compatibilityRawB64,
       compatibilitySha256: String(receipt.baseCompatibilityId).slice(4),
     });
@@ -140,6 +140,29 @@ describe("verified Alpha base registration", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, "", " "])(
+    "requires explicit provisioning storage before OIDC (%#)",
+    async (storage) => {
+      env.CLOUD_WORKSPACE_STORAGE_MIB = storage;
+      expect(await run()).toMatchObject({
+        stage: "validate_input",
+        ok: false,
+        failedChecks: ["input_schema"],
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([70_225, 40_960])(
+    "registers the explicit qualified storage capacity unchanged (%#)",
+    async (storageMib) => {
+      env.CLOUD_WORKSPACE_STORAGE_MIB = String(storageMib);
+      expect((await run()).ok).toBe(true);
+      const body = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+      expect(body.storageMib).toBe(storageMib);
+    },
+  );
+
   it("does not follow a receipt symlink or read an oversized receipt", async () => {
     const target = path.join(directory, "target.json");
     await writeFile(target, JSON.stringify(receipt));
@@ -175,7 +198,7 @@ describe("verified Alpha base registration", () => {
     expect(cpInit?.redirect).toBe("error");
     expect(cpInit?.signal).toBeInstanceOf(AbortSignal);
     expect(JSON.parse(String(cpInit?.body))).toEqual(
-      baseRegistrationBody(receipt, sourceCommit),
+      baseRegistrationBody(receipt, sourceCommit, 70_225),
     );
     expect(fetcher.mock.calls[3][1]?.body).toBe(cpInit?.body);
     expect(output).toHaveLength(2);
@@ -384,7 +407,7 @@ describe("manual Alpha base workflow", () => {
       "CLOUD_RUNTIME_OIDC_AUDIENCE: ${{ vars.CLOUD_RUNTIME_OIDC_AUDIENCE || 'zeros-control-plane-alpha' }}",
     );
     expect(step).toContain(
-      "CLOUD_WORKSPACE_STORAGE_MIB: ${{ vars.CLOUD_WORKSPACE_STORAGE_MIB || '20480' }}",
+      "CLOUD_WORKSPACE_STORAGE_MIB: ${{ vars.CLOUD_WORKSPACE_STORAGE_MIB || '70225' }}",
     );
     expect(step).toContain("runtime-base-v4/register-base.ts");
     expect(step).toContain(

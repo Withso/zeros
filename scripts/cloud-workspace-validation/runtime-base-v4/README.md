@@ -301,10 +301,13 @@ Older receipts without those bytes require a new verified build before registrat
 
 The step uses `vars.VITE_CONTROL_PLANE_URL` and `vars.CLOUD_RUNTIME_OIDC_AUDIENCE`
 (default `zeros-control-plane-alpha`), matching Alpha runtime publication.
-`vars.CLOUD_WORKSPACE_STORAGE_MIB` must match the control plane's provisioning
-storage override; both default to 20,480 MiB. The script refuses a source commit
-different from `GITHUB_SHA`, unconfirmed cleanup, malformed contract bytes or a
-digest mismatch. Exact re-registration succeeds; conflicting identity fails.
+`vars.CLOUD_WORKSPACE_STORAGE_MIB` overrides the workflow fallback of 70,225 MiB
+(Alpha's qualified Boat `default` disk). This value MUST equal the Alpha control
+plane's `CLOUD_WORKSPACE_STORAGE_MIB`; Boat rejects workspace creates with a
+different capacity. The script requires this environment variable explicitly
+and has no storage default. It refuses a source commit different from
+`GITHUB_SHA`, unconfirmed cleanup, malformed contract bytes or a digest mismatch.
+Exact re-registration succeeds; conflicting identity fails.
 Requests and response sizes are bounded, redirects are rejected, and only a
 closed diagnostic reaches the registration step's output. No OIDC/shared
 publication credential is stored in the receipt.

@@ -84,7 +84,8 @@ jobs:
         env:
           CLOUD_WORKSPACE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL }}
           CLOUD_RUNTIME_OIDC_AUDIENCE: ${{ vars.CLOUD_RUNTIME_OIDC_AUDIENCE || 'zeros-control-plane-alpha' }}
-          CLOUD_WORKSPACE_STORAGE_MIB: ${{ vars.CLOUD_WORKSPACE_STORAGE_MIB || '20480' }}
+          # MUST equal the Alpha control plane's CLOUD_WORKSPACE_STORAGE_MIB (Boat default disk).
+          CLOUD_WORKSPACE_STORAGE_MIB: ${{ vars.CLOUD_WORKSPACE_STORAGE_MIB || '70225' }}
         run: |
           pnpm tsx scripts/cloud-workspace-validation/runtime-base-v4/register-base.ts \
             --receipt "$ZEROS_BOAT_IMAGE_STATE_DIR/runtime-base-v4/base-receipt.json"

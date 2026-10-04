@@ -31,9 +31,8 @@ const receiptSchema = z.object({
 const registeredSchema = z
   .object({ baseImageId: z.string(), baseCompatibilityId: z.string() })
   .strict();
-// Match CloudWorkspaceEnvSchema's Boat provisioning storage default/range in
-// apps/control-plane/src/config.ts; the workflow passes the same named override.
-const defaultStorageMib = 20_480;
+// Match the allowed range in apps/control-plane/src/config.ts. The caller must
+// provide the control plane's qualified Boat storage capacity explicitly.
 const storageSchema = z.number().int().min(1_024).max(2_097_152);
 type Stage = "validate_input" | "oidc" | "register" | "done";
 type Check =
@@ -75,7 +74,7 @@ function diagnostic(stage: Stage, error?: unknown): ClosedDiagnostic {
 export function baseRegistrationBody(
   value: unknown,
   githubSha: string | undefined,
-  storageMib = defaultStorageMib,
+  storageMib: number,
 ) {
   const parsed = receiptSchema.safeParse(value);
   check(
@@ -173,16 +172,12 @@ export async function registerRuntimeBase(options: {
     );
     check(origin.pathname === "/" && !origin.search, "input_schema");
     const oidcRequest = githubActionsOidcRequest(env);
-    const storageMib =
-      env.CLOUD_WORKSPACE_STORAGE_MIB === undefined
-        ? defaultStorageMib
-        : (() => {
-            check(
-              /^[1-9][0-9]*$/.test(env.CLOUD_WORKSPACE_STORAGE_MIB),
-              "input_schema",
-            );
-            return Number(env.CLOUD_WORKSPACE_STORAGE_MIB);
-          })();
+    const storageValue = env.CLOUD_WORKSPACE_STORAGE_MIB;
+    check(
+      storageValue !== undefined && /^[1-9][0-9]*$/.test(storageValue),
+      "input_schema",
+    );
+    const storageMib = Number(storageValue);
     let receipt: unknown;
     try {
       receipt = JSON.parse(
