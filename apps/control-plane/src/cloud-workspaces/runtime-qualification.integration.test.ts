@@ -71,6 +71,29 @@ const url = process.env.TEST_DATABASE_URL;
     expect(boat.state.creates).toBe(1);
   });
 
+  it("waits for bootstrap readiness before installing or qualifying", async () => {
+    boat.state.baseStatusReplies = [{ success: false, exitCode: 1 }, { timedOut: true },
+      { stdout: "private boot output" }, { hostState: "stopped" }];
+    const execute = boat.channel.execute.getMockImplementation()!;
+    boat.channel.execute.mockImplementation(async input => {
+      expect(boat.state.baseStatusCalls).toBeGreaterThanOrEqual(5);
+      return execute(input);
+    });
+    await worker.enqueue(runtimeId); await worker.tick();
+    expect((await runs())[0]).toMatchObject({ state: "succeeded" });
+    expect(await qualifications()).toHaveLength(5);
+  });
+
+  it.each([["stopped", "timeout"], ["failed", "builder_stopped"]])("fails closed and cleans up when bootstrap stays %s", async (hostState, check) => {
+    boat.state.hostState = hostState;
+    await worker.enqueue(runtimeId); await worker.tick();
+    expect((await runs())[0]).toMatchObject({ state: "failed", cleanup_confirmed_at: expect.any(Date),
+      diagnostic: { stage: "base_status", failedChecks: [check] } });
+    expect(boat.channel.execute).not.toHaveBeenCalled();
+    expect(await qualifications()).toHaveLength(0);
+    expect(boat.state.deleted).toBe(true);
+  });
+
   it.each(["self_test", "base_status", "install_runtime", "allocation", "artifact"])("fails closed and cleans the VM on %s failure", async phase => {
     if (phase === "self_test") boat.state.failChecks = ["sqlite_query"];
     if (phase === "base_status") boat.state.baseCompatibilityId = `bc1-${"e".repeat(64)}`;
@@ -101,6 +124,37 @@ const url = process.env.TEST_DATABASE_URL;
     await makeWorker().tick();
     expect((await runs())[0]).toMatchObject({ state: "failed", cleanup_confirmed_at: expect.any(Date), diagnostic: { timedOut: true } });
     expect(await qualifications()).toHaveLength(0);
+  });
+
+  it("reconciles an expired storage-pending deletion, then qualifies the queued runtime on the newest approved base", async () => {
+    boat.state.hostState = "failed";
+    boat.state.deletionStatus = "processing";
+    boat.state.deletionReleasesCompute = true;
+    const { runId } = await worker.enqueue(runtimeId);
+    await worker.tick();
+    expect((await runs())[0]).toMatchObject({ state: "running", cleanup_confirmed_at: null,
+      diagnostic: { stage: "cleanup", failedChecks: ["cleanup_unconfirmed"] } });
+    const newestBase = { ...runtimeBase, id: "zeros-v2-test-newest-base",
+      imageRef: `boat:zeros-v2-test-newest-base@sha256:${"c".repeat(64)}` };
+    const nextRuntime = await withSystemTx(pool, async tx => {
+      await seedRuntimeBase(tx, newestBase);
+      return (await seedRuntimeBundle(tx, { digit: "d", releaseOrder: 2, kinds: [] })).descriptor.runtimeId;
+    });
+    await worker.enqueue(nextRuntime);
+    // Only provider state changes: the failed cleanup already expired the run.
+    boat.state.deletionStatus = "blocked"; boat.state.deletionStage = "waiting_for_uploads";
+    await makeWorker().tick();
+    expect((await runs()).map(run => run.state)).toEqual(["failed", "queued"]);
+    expect((await runs())[0]).toMatchObject({ id: runId, cleanup_confirmed_at: expect.any(Date) });
+    expect((await operations.find(runIntent(runId!).operationKey))?.state).toBe("deleted");
+    expect(boat.state.creates).toBe(1); expect(boat.state.deleteRequests).toBe(1);
+    expect(await qualifications()).toHaveLength(0);
+    boat = builderFixture(operations); boat.state.sandboxId = "bx_bcdefghj";
+    await makeWorker().tick();
+    expect((await runs())[1]).toMatchObject({ state: "succeeded", runtime_id: nextRuntime, base_image_id: newestBase.id });
+    const approvals = await qualifications();
+    expect(approvals).toHaveLength(5);
+    expect(approvals.every(row => row.runtime_id === nextRuntime && row.evidence.baseImageId === newestBase.id)).toBe(true);
   });
 
   it("closes a certified create refusal and releases the global slot without replaying it", async () => {

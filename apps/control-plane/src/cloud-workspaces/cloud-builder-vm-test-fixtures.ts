@@ -69,10 +69,13 @@ export function builderFixture(operations: BuilderVmOperationStore = memoryBuild
   const state = {
     sandboxId: BUILDER_SANDBOX, states: ["running"], wallet: BUILDER_WALLET, hostState: "waiting_for_runtime", runtimeId: null as string | null,
     baseCompatibilityId: runtimeBase.compatibilityId, deleted: false, deletionStatus: "completed", deleteRequests: 0,
+    deletionStage: null as string | null, deletionReleasesCompute: false, baseStatusCalls: 0,
+    baseStatusReplies: [] as Array<{ success?: boolean; exitCode?: number; timedOut?: boolean; stdout?: string; hostState?: string }>,
     createRepliesLost: 0, createRefused: false, creates: 0, allocations: new Set<string>(), failChecks: [] as string[],
     sshOutput: null as string | null, sshExit: 0, stdoutTruncated: false,
   };
-  const operation = () => ({ id: `bdop_${"d".repeat(32)}`, kind: "sandbox", targetId: state.sandboxId, status: state.deletionStatus });
+  const operation = () => ({ id: `bdop_${"d".repeat(32)}`, kind: "sandbox", targetId: state.sandboxId,
+    status: state.deletionStatus, stage: state.deletionStage });
   const keyBytes = Buffer.concat([Buffer.from([0, 0, 0, 11]), Buffer.from("ssh-ed25519"), Buffer.from([0, 0, 0, 32]), Buffer.alloc(32, 7)]);
   const publicKey = `ssh-ed25519 ${keyBytes.toString("base64")}`;
   const response = (body: object, status = 200) => new Response(JSON.stringify({ ok: status === 200, ...body }), { status });
@@ -93,14 +96,22 @@ export function builderFixture(operations: BuilderVmOperationStore = memoryBuild
       if (state.deletionStatus === "completed") state.deleted = true;
       return response({ operation: operation() });
     }
-    if (method === "DELETE") { state.deleteRequests++; return response({ operation: operation() }); }
+    if (method === "DELETE") {
+      state.deleteRequests++;
+      if (state.deletionReleasesCompute) state.deleted = true;
+      return response({ operation: operation() });
+    }
     if (route.endsWith("/stop")) { state.states = ["archived"]; return response({}); }
     if (route.endsWith("/commands")) {
       const command = JSON.parse(String(init?.body)).command as string;
-      const stdout = command.endsWith("bootstrap.py status") ? JSON.stringify({ schema: "zeros.base-status/v1",
-        baseCompatibilityId: state.baseCompatibilityId, bootId: "11111111-1111-4111-8111-111111111111",
-        currentRuntimeId: state.runtimeId, hostState: state.hostState }) + "\n" :
-        command.includes("authorized_keys") ? command.includes("expiry-time") ? "restricted\n" : "revoked\n" : publicKey;
+      if (command.endsWith("bootstrap.py status")) {
+        state.baseStatusCalls++;
+        const { hostState = state.hostState, ...reply } = state.baseStatusReplies.shift() ?? {};
+        return response({ success: true, exitCode: 0, timedOut: false, stdoutTruncated: false,
+          stdout: JSON.stringify({ schema: "zeros.base-status/v1", baseCompatibilityId: state.baseCompatibilityId,
+            bootId: "11111111-1111-4111-8111-111111111111", currentRuntimeId: state.runtimeId, hostState }) + "\n", ...reply });
+      }
+      const stdout = command.includes("authorized_keys") ? command.includes("expiry-time") ? "restricted\n" : "revoked\n" : publicKey;
       return response({ success: true, exitCode: 0, stdout, timedOut: false, stdoutTruncated: false });
     }
     if (state.deleted) return response({}, 404);
@@ -117,8 +128,10 @@ export function builderFixture(operations: BuilderVmOperationStore = memoryBuild
         output: state.sshOutput ?? `${JSON.stringify(result)}\n`, outputTruncated: state.stdoutTruncated };
     }),
   };
+  const waits: number[] = [];
   const vms = new BoatCloudBuilderVms({ client, billingOrg: BUILDER_WALLET, operations,
     resolveSource: async source => source.kind === "base" ? "zeros-v2-test-base" : "bx_bcdefghj",
-    openChannel: async () => channel, now: () => now, wait: async ms => { now += ms; }, lifecycleTimeoutMs: 3000 });
-  return { vms, client, channel, fetcher, operations, state, advance: (ms: number) => { now += ms; } };
+    openChannel: async () => channel, now: () => now, wait: async ms => { waits.push(ms); now += ms; },
+    lifecycleTimeoutMs: 3000, baseReadinessTimeoutMs: 18_000 });
+  return { vms, client, channel, fetcher, operations, state, waits, advance: (ms: number) => { now += ms; } };
 }
