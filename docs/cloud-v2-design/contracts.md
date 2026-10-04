@@ -271,3 +271,34 @@ CLOUD_WORKSPACE_S3_* config) and passes it to the publication routes; B5b adds a
 `runtimeArtifacts: RuntimeArtifactStore | null` to the Boat setup executor/runner and passes the same instance in
 index.ts (rebase conflict there is expected and trivial). v4 setup with a null store fails closed
 (`cloud_runtime_unavailable`).
+
+## 20. Builder-VM module (B7 owns; C3 consumes) — 2026-10-04
+`apps/control-plane/src/cloud-workspaces/cloud-builder-vm.ts` — short-lived control-plane-owned Boat VMs for runtime
+qualification (B7) and Cloud Computer template builds (C3). Reuses BoatApiClient (wallet header, idempotency,
+boat_starting/cancelled handling), provider-operation journaling and the pinned-SSH key install/stdin/revoke helpers of
+boat-setup-runner (extract shared helpers, do not duplicate). API:
+```ts
+export type BuilderVmSource = { kind: "base"; baseImageId: string } | { kind: "template"; templateId: string };
+export type BuilderVm = { sandboxId: string; purpose: "runtime-qualification" | "computer-build"; operationKey: string };
+export interface CloudBuilderVms {
+  create(input: { purpose: BuilderVm["purpose"]; source: BuilderVmSource; name: string; operationKey: string;
+                  ttlSeconds: number }): Promise<BuilderVm>;            // idempotent per operationKey; verifies wallet;
+                                                                        // waits command-ready (ready|idle|running)
+  baseStatus(vm: BuilderVm): Promise<BaseStatus>;                       // contracts §11 probe
+  runFixed(vm: BuilderVm, command: BuilderFixedCommand, input?: Buffer, opts?: { timeoutMs?: number }):
+    Promise<{ exitCode: number; stdout: string /* bounded */; diagnostic: ClosedDiagnostic | null }>; // pinned SSH stdin
+  stop(vm: BuilderVm): Promise<{ archived: true }>;                     // graceful stop → archived (C3 templates)
+  delete(vm: BuilderVm): Promise<void>;                                 // X-Ascii-Confirm-Delete + verify 404
+}
+export type BuilderFixedCommand = "install-runtime" | "runtime-self-test" | `computer:${string}`; // closed allowlist;
+// C3 registers its own `computer:*` fixed commands in the same allowlist file.
+```
+Never send credentials in Boat create/fork env; inputs travel only on pinned SSH stdin; never log stdin or URLs.
+
+## 21. Runtime self-test (B7 implements; B3 bundles it) — 2026-10-04
+Source: `scripts/cloud-workspace-validation/sandbox/runtime-self-test.mjs`, bundled at `R/lib/zeros/runtime-self-test.mjs`
+(B3's helper list gains it; the manifest then lists `entrypoints.selfTest`). Run as root, no input, no network, no
+credentials: `R/bin/node R/lib/zeros/runtime-self-test.mjs`. Checks (closed names): `node_abi`, `sqlite_query`,
+`pty_load`, `claude_version`, `codex_version`, `cursor_load`, `engine_load`, `supervisor_idle` (base status reports
+idle with currentRuntimeId = R's id), plus a containment smoke if it can run without credentials (`containment_smoke`).
+Prints exactly one closed diagnostic line (component `qualification`, stage `self_test`).
