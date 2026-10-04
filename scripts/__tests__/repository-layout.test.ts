@@ -760,6 +760,7 @@ describe("repository layout contracts", () => {
       "client-runtime-contract.md",
       "compute-credits.md",
       "computer-template-builds.md",
+      "computer-template-retention.md",
       "computer-tools.md",
       "data-and-sync.md",
       "database-qualification.md",
