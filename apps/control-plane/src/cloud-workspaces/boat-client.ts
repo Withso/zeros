@@ -4,8 +4,8 @@ import type { CloudProviderCreateRejectionCode } from "./provider-operation-stor
 export type BoatApiClientOptions = {
   apiKey: string;
   timeoutMs: number;
-  /** Boat organization wallet billed for new sandboxes. Without it Boat uses
-   * the account's mutable, dashboard-selected wallet. */
+  /** Boat organization wallet for sandbox, snapshot and allowance requests.
+   * Without it Boat uses the account's mutable, dashboard-selected wallet. */
   billingOrg?: string;
   fetch?: typeof fetch;
   /** Receives bounded, value-free explanations of uncertified create
@@ -168,6 +168,7 @@ export class BoatApiClient {
       idempotencyKey?: string;
       confirmDelete?: string;
       signal?: AbortSignal;
+      timeoutMs?: number;
     } = {},
   ): Promise<Record<string, unknown>> {
     if (
@@ -186,12 +187,15 @@ export class BoatApiClient {
       headers.set("idempotency-key", input.idempotencyKey);
     if (input.confirmDelete)
       headers.set("x-ascii-confirm-delete", input.confirmDelete);
-    // A sandbox keeps the wallet chosen at creation. Boat matches idempotent
-    // creates on account, key and body, so the scope never changes a replay.
-    if (this.options.billingOrg && path === "/sandboxes" && input.method === "POST")
+    // Pin lifecycle, snapshot storage and allowance requests to the configured
+    // wallet. Idempotent replays send the same scope, key and body.
+    if (this.options.billingOrg)
       headers.set("x-boat-org", this.options.billingOrg);
+    const timeoutMs = input.timeoutMs ?? this.options.timeoutMs;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 610_000)
+      throw new Error("Invalid Boat request deadline");
     const signal = AbortSignal.any([
-      AbortSignal.timeout(this.options.timeoutMs),
+      AbortSignal.timeout(timeoutMs),
       ...(input.signal ? [input.signal] : []),
     ]);
     try {
@@ -244,7 +248,7 @@ export class BoatApiClient {
           response.status === 408 ||
           response.status >= 500 ||
           (response.status === 409 &&
-            ["idempotency_in_progress", "boat_restoring"].includes(
+            ["idempotency_in_progress", "boat_restoring", "boat_starting"].includes(
               String(value?.code),
             ));
         const code =
