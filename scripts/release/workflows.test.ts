@@ -57,6 +57,43 @@ describe("cloud backend provisioning workflow", () => {
   });
 });
 describe("release dependency and authority contracts", () => {
+  it("builds the exact Alpha runtime after CI and publishes it after hosted promotion", () => {
+    const text = workflow("release-alpha"), build = job(text, "runtime-build"), publish = job(text, "runtime-publish");
+    expect(build).toContain("needs: ci");
+    expect(build).toContain("runs-on: ubuntu-24.04");
+    expect(build).toContain("timeout-minutes: 40");
+    expect(build).toContain("pnpm cloud:runtime-bundle:build");
+    expect(build).toContain('bash scripts/ci/with-userns.sh');
+    expect(build).toContain('--source-commit "$GITHUB_SHA"');
+    expect(build).toContain("uses: actions/upload-artifact@");
+    expect(build).toContain("if-no-files-found: error");
+    expect(build).toContain("overwrite: true");
+    for (const file of ["*.tar.gz", "descriptor.json", "manifest.json", "build-receipt.json"]) expect(build).toContain(`/cloud-runtime-bundle/${file}`);
+    expect(publish).toContain("needs: [runtime-build, hosted]");
+    expect(publish).toContain("environment: alpha");
+    expect(publish).toContain("timeout-minutes: 15");
+    expect(publish).toContain("uses: actions/download-artifact@");
+    expect(publish).toContain("scripts/cloud-workspace-validation/runtime-bundle/publish.ts");
+    expect(publish).toContain("CLOUD_WORKSPACE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL }}");
+    expect(publish).toContain("CLOUD_RUNTIME_OIDC_AUDIENCE: ${{ vars.CLOUD_RUNTIME_OIDC_AUDIENCE || 'zeros-control-plane-alpha' }}");
+    for (const runtimeJob of [build, publish]) {
+      expect(runtimeJob).toContain("ref: ${{ github.sha }}");
+      expect(runtimeJob).toContain("persist-credentials: false");
+      expect(runtimeJob).toContain("pnpm install --frozen-lockfile --ignore-scripts");
+      expect(runtimeJob).not.toMatch(/secrets\.|secrets:|BOAT_|DAYTONA_|CLOUD_WORKSPACE_S3_|qualify|qualification|hosted-mutation|contents: write/);
+    }
+  });
+  it("grants Alpha OIDC only to runtime publication and gates its feed on publication", () => {
+    const text = workflow("release-alpha"), publish = job(text, "runtime-publish");
+    expect(publish).toContain("id-token: write");
+    expect(publish).toContain("contents: read");
+    expect((text.match(/id-token: write/g) ?? []).length).toBe(1);
+    for (const name of ["ci", "hosted", "build", "runtime-build", "publish"]) expect(job(text, name)).not.toContain("id-token:");
+    expect(job(text, "publish")).toContain("needs: [ci, build, hosted, runtime-publish]");
+    expect(job(text, "hosted")).toContain("needs: ci");
+    expect(job(text, "build")).not.toMatch(/^ {4}needs:/m);
+    for (const name of ["release-beta", "release"]) expect(workflow(name)).not.toMatch(/runtime-build|runtime-publish/);
+  });
   it.each(["release-alpha", "release-beta", "release"])("gates %s mutations on exact-source required CI without delaying the build", name => {
     const text = workflow(name), ci = job(text, "ci");
     expect(ci).toContain("actions: read");
@@ -122,7 +159,7 @@ describe("release dependency and authority contracts", () => {
     expect(build).toContain("contents: read");
     expect(build).not.toMatch(channel === "production" ? /^    needs: (?!approve$)/m : /^    needs:/m);
     expect(build).toContain("if: github.event.repository.fork == false");
-    expect(publish).toContain(channel === "production" ? "needs: [approve, ci, build, hosted, notarize]" : "needs: [ci, build, hosted]");
+    expect(publish).toContain(channel === "production" ? "needs: [approve, ci, build, hosted, notarize]" : channel === "alpha" ? "needs: [ci, build, hosted, runtime-publish]" : "needs: [ci, build, hosted]");
     expect(publish).toContain("contents: write");
     expect(publish).toContain("actions: read");
     expect(publish).toContain("ref: ${{ github.sha }}");
