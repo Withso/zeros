@@ -8,6 +8,21 @@ export interface TurnFailure {
   newChatAllowed: boolean;
 }
 
+/** Root terminal notices are owned by the turn footer. Native notices from
+ * older providers may lack a turn id; an explicit id must match exactly. */
+export function isTurnFailureNotice(
+  event: AgentMessage,
+  turnId: string,
+): event is Extract<AgentMessage, { kind: "error_notice" }> {
+  return (
+    event.kind === "error_notice" &&
+    !event.parentToolId &&
+    !event.recoverable &&
+    event.severity === "error" &&
+    (!event.turnFailure || event.turnFailure.turnId === turnId)
+  );
+}
+
 export function turnFailureForCard(input: {
   events: AgentMessage[];
   turnId: string;
@@ -35,13 +50,7 @@ export function turnFailureForCard(input: {
       (!event.turnFailure || event.turnFailure.turnId === input.turnId)
     )
       return null;
-    if (
-      event.kind === "error_notice" &&
-      !event.parentToolId &&
-      !event.recoverable &&
-      event.severity === "error" &&
-      (!event.turnFailure || event.turnFailure.turnId === input.turnId)
-    ) {
+    if (isTurnFailureNotice(event, input.turnId)) {
       notice = event;
       break;
     }

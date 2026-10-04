@@ -32,6 +32,9 @@ import { WorkflowActivity } from "./workflow-activity";
 
 interface TurnEventListProps {
   events: AgentMessage[];
+  /** The provider turn whose footer owns terminal failures, including across
+   * steer segments. Omit when no turn footer is available. */
+  failureTurnId?: string;
   /** True when this visual segment belongs to the provider turn currently at
    *  the transcript tail. A steered provider turn can own several segments;
    *  every one stays live/expanded until the shared turn settles. */
@@ -67,6 +70,7 @@ interface TurnEventListProps {
 
 export const TurnEventList = memo(function TurnEventList({
   events,
+  failureTurnId,
   isActive,
   isStreaming,
   showActivity = true,
@@ -87,7 +91,7 @@ export const TurnEventList = memo(function TurnEventList({
 
   // Phase-less prose stays in the working feed while live. Explicit final
   // answers keep their output position even if bookkeeping arrives later.
-  const sequence = useTurnSequence(events, live, ctx.chatId);
+  const sequence = useTurnSequence(events, live, ctx.chatId, failureTurnId);
   const tailId = sequence.at(-1)?.events.at(-1)?.id ?? null;
   const turnCtx = useMemo(() => ({ ...ctx, isStreaming: live, lastMessageId: tailId }), [ctx, live, tailId]);
 

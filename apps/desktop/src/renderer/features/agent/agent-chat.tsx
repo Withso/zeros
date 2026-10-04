@@ -4771,6 +4771,7 @@ export function AgentChat({
                     {(!authRequired || visibleEvents.length > 0) && (
                       <TurnEventList
                         events={visibleEvents}
+                        failureTurnId={!authRequired && chatId ? turn.recordedTurnId ?? undefined : undefined}
                         isActive={isActiveProviderSegment}
                         isStreaming={turnInFlight && !authStopped}
                         showActivity={isVisualTail}
