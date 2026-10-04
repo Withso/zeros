@@ -1,0 +1,272 @@
+import { execFileSync, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as sshBoundary from "../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
+import { builderCommand, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
+import { basePayload, closedFailure, parseProbe, v4Command } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
+import { installOverSsh, presignGet, signedHeaders } from "../cloud-workspace-validation/runtime-base-v4/live-check";
+
+const scratch: string[] = [];
+const temp = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-base-v4-")); scratch.push(dir); return dir; };
+afterEach(() => { vi.restoreAllMocks(); for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
+const ROOT = path.resolve(import.meta.dirname, "../..");
+const BASE = path.join(ROOT, "scripts/cloud-workspace-validation/runtime-base-v4");
+
+function deps(): KitDeps & { calls: { method: string; route: string; body: unknown; headers: unknown }[] } {
+  const calls: { method: string; route: string; body: unknown; headers: unknown }[] = [];
+  return {
+    calls, billingOrg: "test-org", stateDir: temp(), repoRoot: ROOT, imageContract: () => "unused",
+    now: () => Date.parse("2026-10-04T00:00:00Z"), randomHex: () => "1".repeat(32), randomUUID: () => "test-operation",
+    boat: async (method, route, options = {}) => {
+      calls.push({ method, route, body: options.body, headers: options.headers });
+      if (route.startsWith("/limits")) return { status: 200, body: { creditUsedSeconds: 1 } };
+      if (method === "POST" && route === "/sandboxes") return { status: 202, body: { sandbox: { id: "bx_testv4", team: { id: "test-org" } } } };
+      throw new Error("unexpected fixture request");
+    },
+  };
+}
+
+function fullKit(failColdBoot = false) {
+  const d = deps(), root = temp();
+  const relative = "scripts/cloud-workspace-validation";
+  fs.mkdirSync(path.join(root, relative), { recursive: true });
+  for (const directory of ["runtime-base-v4", "boat-image/templates"]) {
+    fs.cpSync(path.join(ROOT, relative, directory), path.join(root, relative, directory), { recursive: true, filter: source => !source.includes("__pycache__") });
+  }
+  const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", ...args], { cwd: root, encoding: "utf8" }).trim();
+  git("init", "-q"); git("add", "."); git("commit", "-qm", "fixture");
+  const commit = git("rev-parse", "HEAD");
+  d.repoRoot = root;
+  const machines = new Set<string>();
+  let sequence = 0, snapshot: any;
+  const requests: { method: string; route: string; body: any }[] = [];
+  d.boat = async (method, route, options = {}) => {
+    const body: any = options.body;
+    requests.push({ method, route, body });
+    if (route.startsWith("/limits")) return { status: 200, body: { creditUsedSeconds: 1 } };
+    if (route === "/sandboxes" && method === "POST") {
+      const id = `bx_v4test${++sequence}`;
+      machines.add(id);
+      return { status: 202, body: { sandbox: { id, team: { id: d.billingOrg }, state: "ready" } } };
+    }
+    const id = route.split("/")[2];
+    if (method === "PUT" && route.endsWith("/files")) return { status: 200, body: { size: Buffer.from(body.content, "base64").length } };
+    if (method === "PATCH") return { status: 200, body: {} };
+    if (route.startsWith("/sandboxes/") && !route.endsWith("/commands")) {
+      if (method === "DELETE") { machines.delete(id); return { status: 202, body: {} }; }
+      return { status: machines.has(id) ? 200 : 404, body: { sandbox: { id, state: "ready" } } };
+    }
+    if (route === "/named-snapshots" && method === "GET") return { status: 200, body: { snapshots: [] } };
+    if (route === "/named-snapshots" && method === "POST") {
+      // The intent must already be durable before the provider captures.
+      const ledger = JSON.parse(fs.readFileSync(path.join(d.stateDir, "runtime-base-v4", commit.slice(0, 12), "snapshot-ledger.json"), "utf8"));
+      expect(ledger).toMatchObject({ name: body.name, resourceId: body.sandboxId, state: "save-pending" });
+      snapshot = { name: body.name, sourceSandboxId: body.sandboxId, status: "ready", snapshotId: "snapshot_fixture", sizeBytes: 1024 };
+      return { status: 202, body: { snapshot } };
+    }
+    if (route.startsWith("/named-snapshots/")) {
+      if (method === "DELETE") snapshot = undefined;
+      return { status: snapshot ? 200 : 404, body: { snapshot } };
+    }
+    if (route.endsWith("/commands")) {
+      const command: string = body.command;
+      const stage = command.includes("def verify()") ? "verify" : command.includes("def sanitize()") ? "sanitize" : "build";
+      const fail = failColdBoot && stage === "verify" && id.endsWith("2");
+      const value = stage === "verify" ? { schema: "zeros.base-verification/v1", baseCompatibilityId: `bc1-${"a".repeat(64)}`,
+        baseBuildSha256: "b".repeat(64), sourceCommit: commit, hostState: "waiting_for_runtime",
+        bootId: `00000000-0000-4000-8000-${id.endsWith("2") ? "2" : "1"}`.padEnd(36, "0"),
+        versions: { systemd: 255, glibc: "2.39", arch: "x86_64", kernel: "6.8.0", python: "3.12.3" },
+        checks: ["base_compatibility", "uid_map", "apparmor", "cgroup_controllers", "root_ownership", "host_start", "private_state"] }
+        : stage === "sanitize" ? { clean: true } : command.includes("'result.json'") ? { finished: true, code: 0, passed: true, retired: true } : { started: true };
+      const diagnostic = { schema: "zeros.diagnostic/v1", component: "base", stage, ok: !fail, exitCode: fail ? 1 : 0, timedOut: false, failedChecks: fail ? ["host_start"] : [] };
+      return { status: 200, body: { exitCode: fail ? 1 : 0, stdout: JSON.stringify(value) + "\n" + JSON.stringify(diagnostic), stderr: "never persist private-canary" } };
+    }
+    throw new Error("unexpected fixture operation");
+  };
+  return { d, requests, machines, getSnapshot: () => snapshot };
+}
+
+describe("runtime-base-v4 profile", () => {
+  it("creates from stock with the kit's budget and idempotency journal", async () => {
+    const d = deps();
+    const options = new Map([["--profile", "runtime-base-v4"], ["--max-used-hours", "2"]]);
+    await expect(builderCommand("create", options, [], d)).resolves.toMatchObject({ id: "bx_testv4" });
+    const create = d.calls.find(call => call.method === "POST")!;
+    expect(create.body).toEqual({ type: "default", ttlSeconds: 3600, noEnv: true, env: {} });
+    expect(create.headers).toEqual({ "idempotency-key": "test-operation", "x-boat-org": "test-org" });
+    expect(JSON.parse(fs.readFileSync(path.join(d.stateDir, "builder.json"), "utf8")).id).toBe("bx_testv4");
+  });
+
+  it("requires an explicit meter budget and refuses a v3 parent", async () => {
+    const d = deps();
+    await expect(builderCommand("create", new Map([["--profile", "runtime-base-v4"]]), [], d)).rejects.toThrow("--max-used-hours");
+    await expect(builderCommand("create", new Map([["--profile", "runtime-base-v4"], ["--from", "legacy"]]), [], d)).rejects.toThrow("stock image");
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it("can clean up when verification failed before the first allocation", async () => {
+    const d = deps();
+    await expect(v4Command("cleanup", new Map(), [], d)).resolves.toMatchObject({ sandboxes: [], objects: [], snapshot: "not_created" });
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it("completes a stock build and cold clone, retains only the named base and confirms deletion", async () => {
+    const f = fullKit();
+    const result: any = await v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d);
+    expect(result).toMatchObject({ schema: "zeros.runtime-base-receipt/v1", snapshotName: "zeros-v2-test-base-v4-1", snapshotId: "snapshot_fixture",
+      sandboxStarts: 2, imageBytes: 1024, live: { status: "synthetic_runtime_pending" }, cleanup: { confirmed: true, snapshot: "retained" } });
+    expect(result.cleanup.sandboxes).toEqual(["bx_v4test2", "bx_v4test1"]);
+    expect(f.machines.size).toBe(0);
+    expect(f.getSnapshot()).toBeDefined();
+    const creates = f.requests.filter(request => request.route === "/sandboxes" && request.method === "POST");
+    expect(creates.map(request => request.body.from)).toEqual([undefined, "zeros-v2-test-base-v4-1"]);
+    expect(f.requests.filter(request => request.method === "PATCH").map(request => request.body.name)).toEqual([
+      "zeros-v2-test-builder-111111111111", "zeros-v2-test-verify-111111111111",
+    ]);
+  }, 30_000);
+
+  it("deletes a failed candidate snapshot and both VMs when the cold boot proof fails", async () => {
+    const f = fullKit(true);
+    await expect(v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d))
+      .rejects.toMatchObject({ diagnostic: { failedChecks: ["host_start"] } });
+    expect(f.getSnapshot()).toBeUndefined();
+    expect(f.machines.size).toBe(0);
+    const cleanup = JSON.parse(fs.readFileSync(path.join(f.d.stateDir, "runtime-base-v4/cleanup.json"), "utf8"));
+    expect(cleanup).toMatchObject({ confirmed: true, snapshot: "deleted", sandboxes: ["bx_v4test2", "bx_v4test1"] });
+  }, 30_000);
+
+  it("preserves owned builder timeouts and cleans up before returning a closed failure", async () => {
+    const f = fullKit(), original = f.d.boat;
+    f.d.boat = async (method, route, options) => {
+      const result = await original(method, route, options);
+      if (route.endsWith("/commands") && (options?.body as any)?.command.includes("'result.json'")) {
+        const diagnostic = { schema: "zeros.diagnostic/v1", component: "base", stage: "build", ok: true,
+          exitCode: 0, timedOut: false, failedChecks: [] };
+        return { status: 200, body: { exitCode: 0, stdout: JSON.stringify({ finished: true, code: 124, passed: false, retired: true }) + "\n" + JSON.stringify(diagnostic) } };
+      }
+      return result;
+    };
+    await expect(v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d))
+      .rejects.toMatchObject({ diagnostic: { stage: "build", exitCode: 124, timedOut: true, failedChecks: ["timeout"] } });
+    expect(f.getSnapshot()).toBeUndefined();
+    expect(f.machines.size).toBe(0);
+  }, 30_000);
+
+  it("does not overwrite or delete an already named snapshot", async () => {
+    const f = fullKit(), original = f.d.boat;
+    f.d.boat = async (method, route, options) => method === "GET" && route === "/named-snapshots"
+      ? { status: 200, body: { snapshots: [{ name: "zeros-v2-test-base-v4-1" }] } } : original(method, route, options);
+    await expect(v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d))
+      .rejects.toMatchObject({ diagnostic: { stage: "snapshot", failedChecks: ["snapshot_identity"] } });
+    expect(f.requests.filter(request => request.method === "DELETE" && request.route.startsWith("/named-snapshots"))).toHaveLength(0);
+    expect(f.requests.filter(request => request.method === "POST" && request.route === "/named-snapshots")).toHaveLength(0);
+    expect(f.machines.size).toBe(0);
+  }, 30_000);
+
+  it("reconciles and deletes an ambiguous capture without issuing another POST", async () => {
+    const f = fullKit(), original = f.d.boat;
+    f.d.boat = async (method, route, options) => {
+      const result = await original(method, route, options);
+      if (method === "POST" && route === "/named-snapshots") throw new Error("private-canary uncertain response");
+      return result;
+    };
+    await expect(v4Command("build", new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"]]), [], f.d))
+      .rejects.toMatchObject({ diagnostic: { stage: "snapshot", failedChecks: ["provider_request"] } });
+    expect(f.requests.filter(request => request.method === "POST" && request.route === "/named-snapshots")).toHaveLength(1);
+    expect(f.getSnapshot()).toBeUndefined();
+    expect(f.machines.size).toBe(0);
+  }, 30_000);
+
+  it("uses the existing pinned SSH result contract, sends bearer input only on stdin and revokes the key", async () => {
+    const key = Buffer.alloc(51);
+    key.writeUInt32BE(11); key.write("ssh-ed25519", 4); key.writeUInt32BE(32, 15);
+    const publicKey = `ssh-ed25519 ${key.toString("base64")}`;
+    const diagnostic = { schema: "zeros.diagnostic/v1", component: "installer", stage: "done", ok: true, exitCode: 0, timedOut: false, failedChecks: [] };
+    const execute = vi.fn().mockResolvedValue({ exitCode: 0, output: JSON.stringify(diagnostic), outputTruncated: false });
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(sshBoundary, "openBoatBootstrapChannel").mockResolvedValue({ publicKey, execute, dispose });
+    const d = deps(), commands: string[] = [];
+    d.boat = async (method, route, options = {}) => {
+      if (method === "GET") return { status: 200, body: { sandbox: { id: "bx_fixture", ip: "8.8.8.8" } } };
+      const command = (options.body as any).command;
+      commands.push(command);
+      return { status: 200, body: { exitCode: 0, stdout: command.includes("/usr/bin/cat") ? publicKey : command.includes("expiry-time=") ? "restricted\n" : "revoked\n" } };
+    };
+    const input = { artifact: { url: "https://fixture.test/presign-canary" } };
+    await expect(installOverSsh(d, "bx_fixture", input)).resolves.toMatchObject({ ok: true, exitCode: 0 });
+    expect(JSON.parse(Buffer.from(execute.mock.calls[0][0].stdin, "base64url").toString())).toEqual(input);
+    expect(commands.every(command => !command.includes("presign-canary"))).toBe(true);
+    expect(commands.at(-1)).toContain("print('revoked')");
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("signs create-only Alpha uploads and fifteen-minute GETs without persistence", () => {
+    const r2 = { endpoint: `https://${"a".repeat(32)}.r2.cloudflarestorage.com`, bucket: "zeros-cloud-workspaces-alpha",
+      accessKeyId: "fixture-access", secretAccessKey: "fixture-secret" };
+    const now = new Date("2026-10-04T00:00:00Z"), key = "runtime-test/zeros-v2-test-fixture/a.tar.gz";
+    const headers = signedHeaders(r2, "PUT", key, Buffer.from("fixture"), now);
+    expect(headers["if-none-match"]).toBe("*");
+    expect(headers.authorization).toContain("SignedHeaders=host;if-none-match;x-amz-content-sha256;x-amz-date");
+    const artifact = presignGet(r2, key, now);
+    expect(new URL(artifact.url).searchParams.get("X-Amz-Expires")).toBe("900");
+    expect(artifact.expiresAt).toBe("2026-10-04T00:15:00.000Z");
+    expect(artifact.url).not.toContain(r2.secretAccessKey);
+    expect(signedHeaders(r2, "DELETE", key, Buffer.alloc(0), now)["if-none-match"]).toBeUndefined();
+  });
+
+  it("rejects non-test names, extra arguments and missing budgets before allocation", async () => {
+    const d = deps();
+    for (const options of [new Map(), new Map([["--name", "unscoped-base"], ["--max-used-hours", "2"]]),
+      new Map([["--name", "zeros-v2-test-base-v4-1"], ["--max-used-hours", "2"], ["--from", "legacy"]])]) {
+      await expect(v4Command("build", options, [], d)).rejects.toThrow();
+    }
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it("uploads only the reviewed base inputs and bounded owned runner", () => {
+    const payload = basePayload(ROOT, "1".repeat(40), "2".repeat(32));
+    expect(payload.files.map(file => file.name)).toContain("base/bootstrap.py");
+    expect(payload.files.map(file => file.name)).toContain("owned-runner.py");
+    expect(payload.files.every(file => !/node_modules|\.git|\.env|dist-engine|tests\//.test(file.name))).toBe(true);
+    expect(payload.files.find(file => file.name === "base/cloud-worker.json")!.data.toString()).toBe(fs.readFileSync(path.join(BASE, "cloud-worker.json"), "utf8"));
+    for (const file of payload.files.filter(file => file.name.endsWith(".sh"))) {
+      expect(spawnSync("bash", ["-n"], { input: file.data }).status).toBe(0);
+    }
+    expect(payload.files.find(file => file.name === "build.sh")!.data.toString()).not.toContain("{{");
+  });
+
+  it("accepts only bounded closed diagnostic output from remote commands", () => {
+    const diagnostic = { schema: "zeros.diagnostic/v1", component: "base", stage: "verify", ok: true, exitCode: 0, timedOut: false, failedChecks: [] };
+    expect(parseProbe({ status: 200, body: { exitCode: 0, stdout: JSON.stringify({ versions: {} }) + "\n" + JSON.stringify(diagnostic) } }, "verify")).toEqual({ versions: {} });
+    for (const body of [{ exitCode: 1, stderr: "private-canary" }, { exitCode: 0, stdout: "private-canary" },
+      { exitCode: 0, stdout: "x".repeat(65_537) }, { exitCode: 0, stdoutTruncated: true, stdout: JSON.stringify(diagnostic) }]) {
+      let failure: unknown;
+      try { parseProbe({ status: 200, body }, "verify"); } catch (error) { failure = error; }
+      expect(failure).toBeDefined();
+      expect(JSON.stringify(closedFailure(failure))).not.toContain("private-canary");
+    }
+  });
+
+  it("keeps marker, units, facade and wrappers on the approved contracts", () => {
+    expect(JSON.parse(fs.readFileSync(path.join(BASE, "cloud-worker.json"), "utf8"))).toEqual({ backend: "cloud-worker", gid: 10001, profile: "zeros-cloud-worker-v4", uid: 10001, version: 4 });
+    const host = fs.readFileSync(path.join(BASE, "zeros-host.service"), "utf8");
+    for (const line of ["Delegate=cpu memory pids", "DelegateSubgroup=host", "KillMode=control-group", "TimeoutStopSec=20", "Restart=on-failure"]) expect(host).toContain(line);
+    expect(fs.readFileSync(path.join(BASE, "zeros.conf"), "utf8")).toContain("L /zeros - - - - /opt/zeros");
+    for (const name of ["boot.sh", "dispatch.sh", "install-runtime.sh"]) {
+      const file = path.join(BASE, name);
+      const result = spawnSync("sh", [file, "unexpected"], { encoding: "utf8" });
+      expect(result.status).toBe(64);
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, failedChecks: ["input_schema"] });
+      expect(fs.readFileSync(file, "utf8")).toContain("/usr/bin/env -i");
+      expect(fs.readFileSync(file, "utf8")).toContain("/usr/bin/python3 -I");
+    }
+    const work = temp();
+    for (const name of ["zeros-boot.service", "zeros-host.service"]) fs.copyFileSync(path.join(BASE, name), path.join(work, name));
+    // A rootless parse works on Linux; execution/DelegateSubgroup is qualified
+    // by the live script on Ubuntu 24.04 with systemd 254 or newer.
+    expect(execFileSync("python3", ["-c", "import configparser,sys; p=configparser.ConfigParser(strict=False); p.read(sys.argv[1]); assert p['Service']['DelegateSubgroup']=='host'", path.join(work, "zeros-host.service")], { encoding: "utf8" })).toBe("");
+  });
+});

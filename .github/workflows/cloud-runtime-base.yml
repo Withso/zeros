@@ -1,0 +1,75 @@
+name: Cloud runtime base
+
+on:
+  workflow_dispatch:
+    inputs:
+      snapshot_name:
+        description: New test base name (must start with zeros-v2-test-)
+        required: true
+        default: zeros-v2-test-base-v4-1
+        type: string
+      max_used_hours:
+        description: Absolute Boat organization meter ceiling, in hours
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-runtime-base-alpha
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event.repository.fork == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    environment: alpha
+    env:
+      BOAT_BILLING_ORG: ${{ vars.BOAT_BILLING_ORG }}
+    steps:
+      - name: Checkout reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set isolated build state directory
+        run: printf 'ZEROS_BOAT_IMAGE_STATE_DIR=%s/zeros-v2-test-base-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Verify base tools before provider access
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec vitest run scripts/__tests__/cloud-runtime-bootstrap.test.ts scripts/__tests__/cloud-runtime-base-v4.test.ts scripts/__tests__/boat-image-kit.test.ts
+      - name: Build, sanitize and cold boot the base
+        env:
+          BOAT_API_KEY: ${{ secrets.BOAT_API_KEY }}
+          SNAPSHOT_NAME: ${{ inputs.snapshot_name }}
+          MAX_USED_HOURS: ${{ inputs.max_used_hours }}
+        run: |
+          pnpm tsx scripts/cloud-workspace-validation/boat-image/boat-image.ts runtime-base-v4 build \
+            --name "$SNAPSHOT_NAME" --max-used-hours "$MAX_USED_HOURS"
+      - name: Confirm cleanup of owned builders and verification VMs
+        if: always()
+        env:
+          BOAT_API_KEY: ${{ secrets.BOAT_API_KEY }}
+        run: pnpm tsx scripts/cloud-workspace-validation/boat-image/boat-image.ts runtime-base-v4 cleanup
+      - name: Retain the value-free base receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zeros-v4-base-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/base-receipt.json
+            ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/cleanup.json
+            ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/state.json
+            ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/builder*.json
+            ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/verification/builder*.json
+            ${{ env.ZEROS_BOAT_IMAGE_STATE_DIR }}/runtime-base-v4/*/snapshot-ledger.json
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,8 @@
+# Base-owned v4 adaptation of sandbox/zeros-cloud-engine.apparmor. Applies only
+# to the root-owned, non-setuid namespace launcher in a verified runtime.
+# Namespace, mount, identity, syscall and cgroup enforcement remain in that
+# launcher; this grants the nested user namespaces needed by Podman/Chromium.
+abi <abi/4.0>,
+profile zeros-cloud-engine /opt/zeros-infra/r1-*/bin/cloud-engine-namespace flags=(unconfined) {
+  userns,
+}

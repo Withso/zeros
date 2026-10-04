@@ -143,7 +143,7 @@ describe("Boat image kit", () => {
   });
 
   it("keeps templates free of build identities and private paths", () => {
-    for (const name of fs.readdirSync(TEMPLATES)) {
+    for (const name of fs.readdirSync(TEMPLATES).filter(name => fs.statSync(path.join(TEMPLATES, name)).isFile())) {
       const text = fs.readFileSync(path.join(TEMPLATES, name), "utf8");
       expect(text, name).not.toMatch(/[a-f0-9]{32}/);
       expect(text, name).not.toMatch(/\b(bx|team)_[a-z0-9]/);

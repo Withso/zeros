@@ -1,5 +1,12 @@
 # Boat image kit
 
+The default commands below retain the legacy v3 behavior. The separate
+`runtime-base-v4` profile builds the base-owned installer and systemd services
+from Boat's stock Ubuntu 24.04 image. It does not bake a Zeros runtime. See the
+[v4 runbook](../runtime-base-v4/README.md) for build, synthetic live verification,
+receipts and cleanup. V4 state lives in a separate `runtime-base-v4/` subdirectory
+of the kit state directory, and v4 receipts never emit legacy Railway settings.
+
 Rebuilds the Zeros cloud runtime as a Boat named snapshot from one exact merged
 commit. The control plane selects the result with `BOAT_SNAPSHOT_ID` and
 `BOAT_IMAGE_BUILD_SHA256` (see

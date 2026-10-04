@@ -130,7 +130,7 @@ async function usedSeconds(deps: KitDeps): Promise<number> {
 }
 
 /** Every start or renewal names the meter reading at which to stop. */
-async function assertBudget(deps: KitDeps, maxUsedHours: number | undefined): Promise<number> {
+export async function assertBudget(deps: KitDeps, maxUsedHours: number | undefined): Promise<number> {
   if (maxUsedHours === undefined || !Number.isFinite(maxUsedHours) || maxUsedHours <= 0) {
     throw new KitError("Starting or renewing a builder requires --max-used-hours <hours> on the Boat meter");
   }
@@ -151,16 +151,16 @@ async function inspect(deps: KitDeps, id: string) {
   return response.body?.sandbox ?? null;
 }
 
-async function createBuilder(deps: KitDeps, from: string | undefined, type: string, maxUsedHours: number | undefined) {
-  if (!from || !SNAPSHOT_NAME.test(from)) throw new KitError("builder create requires --from <named snapshot>");
+async function createBuilder(deps: KitDeps, from: string | undefined, type: string, maxUsedHours: number | undefined, stockV4 = false) {
+  if (stockV4 ? from !== undefined : !from || !SNAPSHOT_NAME.test(from)) throw new KitError(stockV4 ? "The v4 base requires Boat's stock image (no --from)" : "builder create requires --from <named snapshot>");
   if (!["small", "default", "large", "xlarge"].includes(type)) throw new KitError("--type must be small, default, large or xlarge");
   if (fs.existsSync(builderFile(deps))) throw new KitError(`Builder ${builderId(deps)} is already recorded; delete it first`);
   // Persist the idempotency key before dispatch: a lost response is replayed
   // with the same key and body, which returns the original sandbox.
   const intentFile = path.join(deps.stateDir, "builder-intent.json");
   const replay = fs.existsSync(intentFile);
-  const intent = replay ? readJson(intentFile) : { from, type, idempotencyKey: deps.randomUUID(), createdAt: iso(deps) };
-  if (intent.from !== from || intent.type !== type) {
+  const intent = replay ? readJson(intentFile) : { from, type, ...(stockV4 ? { profile: "runtime-base-v4" } : {}), idempotencyKey: deps.randomUUID(), createdAt: iso(deps) };
+  if (intent.from !== from || intent.type !== type || (intent.profile === "runtime-base-v4") !== stockV4) {
     throw new KitError(`A create from ${intent.from} (${intent.type}) is unresolved; repeat it, or remove builder-intent.json once no such builder exists`);
   }
   if (!(deps.now() - Date.parse(intent.createdAt) < IDEMPOTENCY_REPLAY_MS)) {
@@ -172,7 +172,7 @@ async function createBuilder(deps: KitDeps, from: string | undefined, type: stri
   let created: BoatResponse;
   try {
     created = await scopedBoatRequest(deps, "POST", "/sandboxes", {
-      body: { type, from, ttlSeconds: LEASE_SECONDS, noEnv: true, env: {} },
+      body: { type, ...(from ? { from } : {}), ttlSeconds: LEASE_SECONDS, noEnv: true, env: {} },
       headers: { "idempotency-key": intent.idempotencyKey, "x-boat-org": deps.billingOrg },
       timeoutMs: 180_000,
     });
@@ -203,7 +203,7 @@ async function createBuilder(deps: KitDeps, from: string | undefined, type: stri
 
 export async function builderCommand(action: string | undefined, options: Map<string, string>, operands: string[], deps: KitDeps): Promise<unknown> {
   const maxUsedHours = options.has("--max-used-hours") ? Number(options.get("--max-used-hours")) : undefined;
-  if (action === "create") return createBuilder(deps, options.get("--from"), options.get("--type") ?? "default", maxUsedHours);
+  if (action === "create") return createBuilder(deps, options.get("--from"), options.get("--type") ?? "default", maxUsedHours, options.get("--profile") === "runtime-base-v4");
   const id = builderId(deps);
   if (action === "status") {
     const sandbox = await inspect(deps, id);
@@ -447,7 +447,7 @@ export async function generatePost(deps: KitDeps) {
 
 // ── Named snapshot ────────────────────────────────────────
 
-async function namedSnapshotInventory(deps: KitDeps) {
+export async function namedSnapshotInventory(deps: KitDeps) {
   const names = new Set<string>(), cursors = new Set<string>();
   let cursor: string | undefined;
   for (let page = 0; page < 100; page++) {
@@ -555,6 +555,7 @@ export function parseArgs(argv: string[]) {
 export async function main(argv: string[], deps: KitDeps): Promise<unknown> {
   const { command, action, options, operands } = parseArgs(argv);
   switch (command) {
+    case "runtime-base-v4": return (await import("./runtime-base-v4")).v4Command(action, options, operands, deps);
     case "builder": return builderCommand(action, options, operands, deps);
     case "export": return exportSource(deps);
     case "generate": return generateBuild(deps, options.get("--previous"));
@@ -592,10 +593,21 @@ async function run() {
     randomUUID,
   });
   console.log(JSON.stringify(result, null, 2));
+  if (process.argv[2] === "runtime-base-v4") {
+    console.log(JSON.stringify({ schema: "zeros.diagnostic/v1", component: "base", stage: "done", ok: true, exitCode: 0, timedOut: false, failedChecks: [] }));
+  }
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   run().catch((error: unknown) => {
+    if (process.argv[2] === "runtime-base-v4") {
+      import("./runtime-base-v4").then(({ closedFailure }) => {
+        const diagnostic = closedFailure(error);
+        console.log(JSON.stringify(diagnostic));
+        process.exitCode = diagnostic.exitCode;
+      });
+      return;
+    }
     console.error(`[boat-image] ${error instanceof KitError ? error.message : `failed (${(error as Error)?.name ?? "Error"}); inspect the state directory before retrying`}`);
     process.exitCode = 1;
   });
