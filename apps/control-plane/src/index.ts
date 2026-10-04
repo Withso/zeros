@@ -13,9 +13,11 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { Agent as HttpsAgent } from "node:https";
 import { S3CloudWorkspaceObjectStore } from "./cloud-workspaces/s3-object-store.js";
 import { createRuntimeArtifactStore } from "./cloud-workspaces/runtime-artifact-store.js";
+import { cloudRuntimeQualificationMode } from "./cloud-workspaces/runtime-config.js";
+import { loadPinnedCloudRuntime } from "./cloud-workspaces/runtime-selection.js";
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
-import { createPool, createMigrationPool } from "./db.js";
+import { createPool, createMigrationPool, withSystemTx } from "./db.js";
 import { assertHostedDatabaseOwnership } from "./development-environment.js";
 import { runServiceBootMigrations, verifyMigrations, type ServiceBootMigrationResult } from "./migrate.js";
 import { loadEmailConfig, sendEmailStrict } from "./email.js";
@@ -484,6 +486,9 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     const executor = new CloudWorkspaceLinuxSetupExecutor({
       diagnosticPool: pool,
       admissionBroker: admission,
+      runtimeArtifacts,
+      resolveRuntimeArtifact: (pin) => withSystemTx(pool, (tx) =>
+        loadPinnedCloudRuntime(tx, pin, cloudRuntimeQualificationMode())),
       commandRunnerResolver: async (execution) => {
         const resolved = await providerResolver.resolve({
           workspaceId: execution.workspaceId,

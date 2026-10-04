@@ -25,6 +25,8 @@ import { sealCloudProviderCredential } from "./provider-connections.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import { reserveWriterSlot } from "./pro-sharing.js";
 import { DatabaseProMonthlyAllowance } from "./pro-allowance.js";
+import { runtimeBase, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -141,6 +143,137 @@ d("cloud workspace API contracts", () => {
       githubInstallationId: installationId,
     },
     ...overrides,
+  });
+
+  const v4Config = (staffOnly = true): CloudWorkspaceBackendConfig => ({
+    ...cloudConfig, provider: "boat", snapshotId: "zeros-v2-test-legacy",
+    imageRef: `boat:zeros-v2-test-legacy@sha256:${"0".repeat(64)}`,
+    runtime: { newWorkspaceProfile: "v4", staffOnly, qualificationMode: "full" },
+  });
+  const seedV4 = () => withSystemTx(pool, async tx => {
+    await seedRuntimeBase(tx);
+    return seedRuntimeBundle(tx);
+  });
+  const generationPin = (workspaceId: string) => pool.query(`SELECT image_ref, source_commit, architecture, storage_mib,
+    runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id, runtime_profile,
+    runtime_engine_protocol_version FROM cloud_workspace_generations WHERE workspace_id=$1`, [workspaceId]);
+
+  it("pins the latest eligible runtime under the create lock and replays the saved pin after the head advances", async () => {
+    await seedV4();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, v4Config());
+    const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+    vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+      await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "1", releaseOrder: 2 }));
+      return resolve(input);
+    });
+    const key = randomUUID();
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key, body: createBody() });
+    expect(response.status).toBe(202);
+    const created = await response.json();
+    const saved = (await generationPin(created.workspace.id)).rows[0];
+    expect(saved).toMatchObject({ image_ref: runtimeBase.imageRef, source_commit: runtimeBase.sourceCommit,
+      architecture: runtimeBase.architecture, runtime_id: `r1-${"1".repeat(64)}`, runtime_manifest_sha256: "1".repeat(64),
+      runtime_base_image_id: runtimeBase.id, runtime_base_compatibility_id: runtimeBase.compatibilityId, runtime_profile: "zeros-cloud-worker-v4" });
+    expect(Number(saved.storage_mib)).toBe(runtimeBase.storageMiB);
+    expect(created.workspace.generation.runtime).toEqual({ runtimeId: saved.runtime_id, manifestSha256: saved.runtime_manifest_sha256,
+      baseImageId: saved.runtime_base_image_id, baseCompatibilityId: saved.runtime_base_compatibility_id,
+      profile: saved.runtime_profile, engineProtocolVersion: saved.runtime_engine_protocol_version });
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "2", releaseOrder: 3 }));
+    configureApp(false, cloudConfig); // Replays also survive disabling new v4 creates.
+    const replay = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key, body: createBody() });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect((await replay.json()).workspace.generation.runtime).toEqual(created.workspace.generation.runtime);
+    expect((await generationPin(created.workspace.id)).rows).toEqual([saved]);
+    expect(repositoryResolver.resolve).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an unavailable v4 head before any workspace or provider allocation", async () => {
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, v4Config());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_unavailable" } });
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_bindings")).rowCount).toBe(0);
+  });
+
+  it("rejects v4 create before allocation when setup uses an allowed older protocol override", async () => {
+    await seedV4();
+    const olderProtocol = CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION - 1;
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "1", releaseOrder: 2, engineProtocolVersion: olderProtocol }));
+    actor = { ...owner, staffRole: "developer" };
+    const setupExecution = {
+      controlPlaneOrigin: "https://api.example.test", allowedToolboxOrigins: [], setupSecretEncryptionKeys: {},
+      currentSetupSecretEncryptionKeyVersion: 1, setupSecretKeyV1: null, engineProtocolVersion: olderProtocol,
+      enginePort: 4317, engineHeartbeatIntervalMs: 5000, intervalMs: 1000, timeoutSeconds: 1800, leaseMs: 60000, admissionTtlSeconds: 120,
+    };
+    configureApp(false, { ...v4Config(), setupExecution });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_unavailable" } });
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_workspaces WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_generations WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_operations WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+
+    // The supported rolling-deployment override remains valid for legacy creates.
+    configureApp(false, { ...cloudConfig, setupExecution });
+    const legacy = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(legacy.status).toBe(202);
+    expect((await generationPin((await legacy.json()).workspace.id)).rows[0].runtime_id).toBeNull();
+  });
+
+  it("rechecks v4 head revocation after repository resolution, before inserting the generation", async () => {
+    await seedV4();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, v4Config());
+    const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+    vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+      await withSystemTx(pool, tx => tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [`r1-${"a".repeat(64)}`]));
+      return resolve(input);
+    });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_unavailable" } });
+    expect((await pool.query("SELECT 1 FROM cloud_workspaces WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_operations WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+  });
+
+  it("wakes the saved v4 generation after the head advances and new v4 creation is disabled", async () => {
+    await seedV4();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, v4Config());
+    const created = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(created.status).toBe(202);
+    const workspace = (await created.json()).workspace;
+    const saved = (await generationPin(workspace.id)).rows[0];
+    await withSystemTx(pool, async tx => {
+      await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 });
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1", [workspace.id]);
+      await tx.query("UPDATE cloud_workspaces SET status='stopped',desired_state='stopped' WHERE id=$1", [workspace.id]);
+      await tx.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$2,observed_state='stopped' WHERE workspace_id=$1", [workspace.id, `sandbox-${workspace.id}`]);
+    });
+    configureApp(false, { ...v4Config(), runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full" } });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}/wake`, { method: "POST", key: randomUUID() });
+    expect(response.status).toBe(202);
+    expect((await response.json()).workspace.generation.runtime).toEqual(workspace.generation.runtime);
+    expect((await generationPin(workspace.id)).rows).toEqual([saved]);
+  });
+
+  it("preserves legacy creation for non-engineering actors until staff-only is disabled", async () => {
+    await seedV4();
+    actor = { ...owner, staffRole: "support_admin" };
+    configureApp(false, v4Config());
+    const legacy = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(legacy.status).toBe(202);
+    expect((await generationPin((await legacy.json()).workspace.id)).rows[0].runtime_id).toBeNull();
+    configureApp(false, v4Config(false));
+    const v4 = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(v4.status).toBe(202);
+    expect((await generationPin((await v4.json()).workspace.id)).rows[0].runtime_id).toBe(`r1-${"a".repeat(64)}`);
   });
 
   it("returns only the signed-in member's compute balance with no caching",async()=>{

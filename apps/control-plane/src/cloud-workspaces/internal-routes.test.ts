@@ -18,6 +18,7 @@ import { WorkspaceContentError } from "./content-record.js";
 import { CloudWorkspaceSetupMaterialError } from "./setup-materials.js";
 import { CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH } from "./engine-client-admission.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { runtimeWitness } from "./runtime-test-fixtures.js";
 import {
   CLOUD_RUNTIME_ACCESS_ADMISSION_PATH,
   CloudRuntimeAccessAdmissionError,
@@ -57,6 +58,25 @@ function harness(overrides: Partial<CloudWorkspaceInternalSetupService> = {}) {
 }
 
 describe("cloud workspace internal setup routes", () => {
+  it("passes strict v4 redemption and registration witnesses to the generation-bound service", async () => {
+    const { app, service } = harness();
+    const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json" };
+    const redeemed = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers,
+      body: JSON.stringify({ ...body, materialVersion: 2, runtime: runtimeWitness }) });
+    expect(redeemed.status).toBe(200);
+    expect(vi.mocked(service.redeem).mock.calls[0][0].runtime).toEqual(runtimeWitness);
+    const { expected: _expected, ...binding } = body;
+    const registered = await app.request(CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH, { method: "POST", headers,
+      body: JSON.stringify({ ...binding, engineInstanceId: "44444444-4444-4444-8444-444444444444",
+        protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2,
+        agentRuntime: { ...runtimeWitness, profile: "zeros-cloud-worker-v4" } }) });
+    expect(registered.status).toBe(200);
+    expect(vi.mocked(service.registerEngine).mock.calls[0][0].agentRuntime).toEqual({ ...runtimeWitness, profile: "zeros-cloud-worker-v4" });
+    const rejected = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers,
+      body: JSON.stringify({ ...body, runtime: { ...runtimeWitness, artifactUrl: "https://untrusted.example.test/" } }) });
+    expect(rejected.status).toBe(422);
+    expect(service.redeem).toHaveBeenCalledOnce();
+  });
   it("coalesces fragmented upload bodies without retaining a buffer per fragment", async () => {
     const { app } = harness({ putBlobBatch: vi.fn(async () => ({ blobs: [] })) });
     const payload = new TextEncoder().encode(" ".repeat(32_768) + JSON.stringify({ workspaceId: body.workspaceId, organizationId: body.organizationId,

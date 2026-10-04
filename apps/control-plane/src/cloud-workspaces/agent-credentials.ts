@@ -10,6 +10,8 @@ import type {CloudAgentCredentialConfig} from "./agent-credential-config.js";
 import {readCloudAgentComputeTrust} from "./agent-compute-trust.js";
 import {CODEX_AUTH_RUNTIME_VERSION,parseCodexNativeCache,sealCodexNativeCache,type CodexNativeAuthCache} from "./codex-auth-cache.js";
 import {rememberCodexRefreshSeed} from "./codex-auth-renewal.js";
+import {cloudRuntimeQualificationMode} from "./runtime-config.js";
+import {runtimeCredentialQualificationJoin} from "./runtime-selection.js";
 
 // Keep the shared schema/projection import acyclic; disabled paths do not load
 // the Dev adapter or read its authority configuration.
@@ -422,10 +424,8 @@ export class DatabaseCloudAgentCredentialService {
           JOIN cloud_workspace_generations generation ON generation.workspace_id=workspace.id AND generation.generation=workspace.current_generation
           JOIN cloud_workspace_engine_instances engine ON engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id AND engine.generation=generation.generation
             AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>clock_timestamp() AND engine.actor_protocol_version=2
-          JOIN cloud_agent_runtime_qualifications qualification ON qualification.provider=generation.provider AND qualification.image_ref=generation.image_ref
-            AND qualification.runtime_contract_sha256=engine.agent_runtime_contract_sha256 AND qualification.profile=engine.agent_runtime_profile
-          WHERE workspace.id=delegation.workspace_id AND qualification.credential_kind=credential.kind AND qualification.enabled
-            AND qualification.profile='zeros-cloud-worker-v3' AND qualification.mcp_qualified) AS runtime_qualified
+          ${runtimeCredentialQualificationJoin("$7", "true")}
+          WHERE workspace.id=delegation.workspace_id) AS runtime_qualified
         FROM cloud_agent_credential_delegations delegation JOIN cloud_agent_credentials credential ON credential.id=delegation.credential_id
         WHERE delegation.workspace_id=$1 AND delegation.org_id=$2 AND delegation.grantee_user_id=$3
           AND delegation.revoked_at IS NULL AND delegation.expires_at>clock_timestamp() AND credential.revoked_at IS NULL
@@ -433,7 +433,7 @@ export class DatabaseCloudAgentCredentialService {
           AND delegation.compute_fingerprint=$5 AND delegation.compute_trust=$6
           AND delegation.owner_fingerprint=cloud_workspace_actor_fingerprint($1,credential.owner_user_id)
           AND cloud_workspace_actor_role($1,credential.owner_user_id) IN ('prompter','developer','manager','owner')
-        ORDER BY delegation.created_at DESC,delegation.id LIMIT 100`,[workspaceId,workspace.org_id,actorUserId,actor.fingerprint,compute.fingerprint,compute.trust]);
+        ORDER BY delegation.created_at DESC,delegation.id LIMIT 100`,[workspaceId,workspace.org_id,actorUserId,actor.fingerprint,compute.fingerprint,compute.trust,cloudRuntimeQualificationMode()]);
       return {compute,delegations:rows.rows.map(row=>({id:row.id,kind:row.kind,ownerUserId:row.owner_user_id,models:row.models,expiresAt:row.expires_at.toISOString(),runtimeQualified:row.runtime_qualified}))};
     });
   }

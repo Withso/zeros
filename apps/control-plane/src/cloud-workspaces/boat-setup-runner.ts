@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { BOAT_RESOURCE_ID_PATTERN, type BoatApiClient } from "./boat-client.js";
-import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND } from "./daytona-setup-executor.js";
+import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./daytona-setup-executor.js";
+import { RuntimeBaseStatusSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES } from "./runtime-contract.js";
 import {
   CloudProviderError,
   type CloudWorkspaceCommandRunner,
@@ -16,6 +17,7 @@ const HOST_KEY_COMMAND =
   "/usr/bin/sudo -n /usr/bin/cat /etc/ssh/ssh_host_ed25519_key.pub";
 const ENSURE_SUPERVISOR_COMMAND =
   "/usr/bin/sudo -n /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs";
+const BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
 // A fixed list, no path/argv disclosure and no dependency on the restored Node.
 const BOOTSTRAP_FILE_PROBE_COMMAND = "/bin/sh -c 'for f in /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs /opt/zeros/dist-engine/cli.js; do if test -f \"$f\"; then printf 1; else printf 0; fi; done'";
 const PRIVATE_ADDRESSES = new BlockList();
@@ -421,13 +423,15 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
     signal: AbortSignal,
   ): Promise<CommandResult> {
     const encoded = input.env?.[SETUP_ENV];
+    const v4 = input.command === CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND;
     if (
       !BOAT_RESOURCE_ID_PATTERN.test(input.resourceId) ||
-      input.command !== CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND ||
+      (!v4 && input.command !== CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND) ||
+      (v4 ? !/^bc1-[a-f0-9]{64}$/.test(input.runtimeBaseCompatibilityId ?? "") : input.runtimeBaseCompatibilityId !== undefined) ||
       (input.cwd !== undefined && input.cwd !== "/") ||
       !encoded ||
       !/^[A-Za-z0-9_-]+$/.test(encoded) ||
-      encoded.length > 48 * 1024 ||
+      encoded.length > (v4 ? RUNTIME_INSTALL_MAX_ENCODED_BYTES : 48 * 1024) ||
       Object.keys(input.env ?? {}).length !== 1 ||
       !Number.isSafeInteger(input.timeoutSeconds) ||
       input.timeoutSeconds < 1 ||
@@ -438,6 +442,14 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
         "Boat accepts only the fixed setup admission",
         false,
       );
+    }
+    if (v4) {
+      let valid = false;
+      try {
+        const parsed = RuntimeInstallInputSchema.safeParse(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")));
+        valid = parsed.success && parsed.data.purpose === "workspace-setup";
+      } catch { /* Input and URLs never appear in errors. */ }
+      if (!valid) throw new CloudProviderError("provider_command_invalid", "Boat accepts only the fixed setup admission", false);
     }
     signal.throwIfAborted();
     await this.options.assertOwned(input.resourceId);
@@ -454,19 +466,27 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
         `/sandboxes/${input.resourceId}/commands`,
         {
           method: "POST",
-          body: { command: ENSURE_SUPERVISOR_COMMAND, timeoutSeconds: 20 },
+          body: { command: v4 ? BASE_STATUS_COMMAND : ENSURE_SUPERVISOR_COMMAND, timeoutSeconds: 20 },
           signal,
         },
       );
+      let baseReady = false;
+      if (v4 && typeof prepared.stdout === "string" && /^[^\r\n]+\n?$/.test(prepared.stdout)) {
+        try {
+          const status = RuntimeBaseStatusSchema.safeParse(JSON.parse(prepared.stdout));
+          baseReady = status.success && status.data.baseCompatibilityId === input.runtimeBaseCompatibilityId &&
+            (status.data.hostState === "idle" || status.data.hostState === "waiting_for_runtime");
+        } catch { /* The provider response cannot contribute free text. */ }
+      }
       if (
         prepared.success !== true ||
         prepared.exitCode !== 0 ||
         prepared.timedOut ||
         prepared.stdoutTruncated ||
-        prepared.stdout !== "ready\n"
+        (v4 ? !baseReady : prepared.stdout !== "ready\n")
       ) {
         let files;
-        try {
+        if (!v4) try {
           const probe = await this.options.client.request(`/sandboxes/${input.resourceId}/commands`, {
             method: "POST", body: { command: BOOTSTRAP_FILE_PROBE_COMMAND, timeoutSeconds: 5 }, signal,
           });
@@ -504,7 +524,7 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
         | undefined;
       if (sandbox?.id !== input.resourceId) throw invalidAccess();
       const endpoint = parseBoatSshEndpoint(sandbox);
-      const command = `/usr/bin/sudo -n /usr/bin/timeout --signal=TERM --kill-after=5s ${input.timeoutSeconds}s ${CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND} --stdin`;
+      const command = `/usr/bin/sudo -n /usr/bin/timeout --signal=TERM --kill-after=5s ${input.timeoutSeconds}s ${input.command}${v4 ? "" : " --stdin"}`;
       installed = true;
       const restricted = await this.options.client.request(
         `/sandboxes/${input.resourceId}/commands`,

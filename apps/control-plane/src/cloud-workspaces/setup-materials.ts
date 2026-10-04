@@ -22,6 +22,10 @@ import {
   MIN_ENGINE_HEARTBEAT_INTERVAL_MS,
 } from "./engine-heartbeat.js";
 import { issueWorkspaceSetupRecoveryGrant } from "./setup-recovery.js";
+import { CloudRuntimeWitnessSchema, CloudAgentRuntimeSchema, cloudRuntimeWitnessValues,
+  type CloudRuntimeWitness, type CloudAgentRuntime, type CloudRuntimeWitnessRow } from "./runtime-contract.js";
+import { cloudRuntimePin, cloudRuntimePinValues, loadPinnedCloudRuntime, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
+import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 
 const SETUP_MATERIALS_AUDIENCE =
   "zeros-cloud-workspace-setup-materials-v1" as const;
@@ -116,6 +120,7 @@ export type CloudWorkspaceSetupMaterialServiceOptions = {
 };
 
 export type CloudWorkspaceSetupRedemptionInput = {
+  runtime?: CloudRuntimeWitness | undefined;
   /** Omitted by legacy images. Version 2 requires measured resource admission. */
   materialVersion?: 2 | undefined;
   token: string;
@@ -143,7 +148,7 @@ export type CloudWorkspaceEngineRegistrationInput = {
   engineInstanceId: string;
   protocolVersion: number;
   actorProtocolVersion?: 2;
-  agentRuntime?: {profile:"zeros-cloud-worker-v3";contractSha256:string};
+  agentRuntime?: CloudAgentRuntime;
 };
 
 export type CloudWorkspaceEngineHeartbeatInput = {
@@ -171,6 +176,7 @@ type ParsedSettings = {
 };
 
 type RedemptionContract = {
+  runtime: CloudRuntimePin | null;
   accountUserId: string;
   ownerSubject: string;
   imageRef: string;
@@ -568,7 +574,8 @@ function validateRedemptionInput(
     !COMMIT_PATTERN.test(input.expected.imageSourceCommit) ||
     !safeString(input.expected.repositoryRevision, 512) ||
     !validPositiveInteger(input.expected.settingsVersion) ||
-    !SHA256_PATTERN.test(input.expected.settingsSha256)
+    !SHA256_PATTERN.test(input.expected.settingsSha256) ||
+    (input.runtime !== undefined && !CloudRuntimeWitnessSchema.safeParse(input.runtime).success)
   ) {
     throw materialError("setup_admission_rejected", false);
   }
@@ -890,7 +897,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         throw materialError("setup_admission_rejected", false);
       }
 
-      const loaded = await tx.query<{
+      const loaded = await tx.query<CloudRuntimePinRow & {
         image_ref: string;
         image_source_commit: string | null;
         architecture: "linux/amd64" | "linux/arm64";
@@ -914,6 +921,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         owner_subject: string | null;
       }>(
         `SELECT g.image_ref, g.source_commit AS image_source_commit,
+                g.runtime_id, g.runtime_manifest_sha256, g.runtime_base_image_id,
+                g.runtime_base_compatibility_id, g.runtime_profile, g.runtime_engine_protocol_version,
                 g.architecture, g.cpu_millicores, g.memory_mib, g.storage_mib,
                 ss.repository_forge, ss.repository_owner,
                 ss.repository_name, ss.repository_revision,
@@ -968,6 +977,13 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           row.installation_owner_user_id === accountUserId
         )
       ) {
+        throw materialError("setup_admission_rejected", false);
+      }
+      const pin = cloudRuntimePin(row);
+      if (pin ? (input.materialVersion !== 2 || !input.runtime || input.runtime.runtimeId !== pin.runtimeId ||
+        input.runtime.manifestSha256 !== pin.manifestSha256 || input.runtime.baseCompatibilityId !== pin.baseCompatibilityId ||
+        pin.engineProtocolVersion !== this.engineProtocolVersion ||
+        !await loadPinnedCloudRuntime(tx, pin, cloudRuntimeQualificationMode())) : input.runtime !== undefined) {
         throw materialError("setup_admission_rejected", false);
       }
       if (row.installation_owner_user_id === accountUserId) {
@@ -1034,8 +1050,10 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         `INSERT INTO cloud_workspace_engine_instances (
            id, workspace_id, generation, org_id, account_user_id,
            setup_run_id, setup_execution_fence, registration_grant_id,
-           protocol_version, state, bridge_token_hash
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'starting', $10)`,
+           protocol_version, state, bridge_token_hash,
+           runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id,
+           runtime_profile, runtime_engine_protocol_version, runtime_installer_receipt_sha256, runtime_boot_id, runtime_supervisor_session_id
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'starting', $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
         [
           engineInstanceId,
           input.workspaceId,
@@ -1047,6 +1065,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           registrationGrant.id,
           this.engineProtocolVersion,
           tokenHash(bridgeToken),
+          ...cloudRuntimePinValues(pin),
+          ...cloudRuntimeWitnessValues(input.runtime),
         ],
       );
       await audit(
@@ -1065,6 +1085,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         },
       );
       return {
+        runtime: pin,
         accountUserId,
         ownerSubject: row.owner_subject,
         imageRef: row.image_ref,
@@ -1244,6 +1265,11 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         ) {
           throw materialError("setup_authority_changed", false);
         }
+        // Repository minting is external I/O. Recheck the saved pin after it
+        // completes, before releasing any materials or recovery capability.
+        if (contract.runtime && !await loadPinnedCloudRuntime(tx, contract.runtime, cloudRuntimeQualificationMode())) {
+          throw materialError("setup_authority_changed", false);
+        }
         return issueWorkspaceSetupRecoveryGrant(tx, {
           workspaceId: input.workspaceId,
           organizationId: input.organizationId,
@@ -1332,8 +1358,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       !validPositiveInteger(input.executionFence, Number.MAX_SAFE_INTEGER) ||
       input.protocolVersion !== this.engineProtocolVersion ||
       (input.actorProtocolVersion !== undefined && input.actorProtocolVersion !== 2) ||
-      (input.agentRuntime!==undefined && (input.actorProtocolVersion!==2 || input.agentRuntime.profile!=="zeros-cloud-worker-v3" ||
-        !/^[a-f0-9]{64}$/.test(input.agentRuntime.contractSha256)))
+      (input.agentRuntime!==undefined && (input.actorProtocolVersion!==2 || !CloudAgentRuntimeSchema.safeParse(input.agentRuntime).success))
     ) {
       throw materialError("engine_registration_rejected", false);
     }
@@ -1374,8 +1399,9 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       // Membership/lifecycle retirement locks endpoint grants before engine
       // instances. Consume the one-use registration grant first, then lock the
       // exact engine carrying that grant so boot cannot invert that order.
-      const instance = await tx.query(
-        `SELECT 1
+      const instance = await tx.query<CloudRuntimePinRow & CloudRuntimeWitnessRow>(
+        `SELECT runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id,
+                runtime_profile, runtime_engine_protocol_version, runtime_installer_receipt_sha256, runtime_boot_id, runtime_supervisor_session_id
          FROM cloud_workspace_engine_instances
          WHERE id = $1 AND workspace_id = $2 AND generation = $3
            AND org_id = $4 AND account_user_id = $5
@@ -1398,6 +1424,16 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       if ((instance.rowCount ?? 0) !== 1) {
         throw materialError("engine_registration_rejected", false);
       }
+      const row = instance.rows[0]!;
+      const pin = cloudRuntimePin(row);
+      const identity = input.agentRuntime;
+      if (pin ? (!identity || identity.profile !== "zeros-cloud-worker-v4" || identity.runtimeId !== pin.runtimeId ||
+        identity.manifestSha256 !== pin.manifestSha256 || identity.baseCompatibilityId !== pin.baseCompatibilityId ||
+        identity.installerReceiptSha256 !== row.runtime_installer_receipt_sha256 || identity.bootId !== row.runtime_boot_id ||
+        identity.supervisorSessionId !== row.runtime_supervisor_session_id ||
+        !await loadPinnedCloudRuntime(tx, pin, cloudRuntimeQualificationMode())) : identity?.profile === "zeros-cloud-worker-v4") {
+        throw materialError("engine_registration_rejected", false);
+      }
       const updated = await tx.query<{ lease_expires_at: Date }>(
         `UPDATE cloud_workspace_engine_instances
          SET state = 'ready', heartbeat_token_hash = $2,
@@ -1412,8 +1448,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           tokenHash(heartbeatToken),
           ENGINE_HEARTBEAT_LEASE_MS,
           input.actorProtocolVersion ?? 1,
-          input.agentRuntime?.profile??null,
-          input.agentRuntime?.contractSha256??null,
+          identity?.profile === "zeros-cloud-worker-v3" ? identity.profile : null,
+          identity?.profile === "zeros-cloud-worker-v3" ? identity.contractSha256 : null,
         ],
       );
       if ((updated.rowCount ?? 0) !== 1) {

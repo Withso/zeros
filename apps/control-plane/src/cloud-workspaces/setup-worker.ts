@@ -5,6 +5,9 @@ import type pg from "pg";
 import { audit } from "../audit.js";
 import { withSystemTx, type Tx } from "../db.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
+import { cloudRuntimePin, cloudRuntimePinValues, loadPinnedCloudRuntime, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
+import type { CloudRuntimeWitnessRow } from "./runtime-contract.js";
+import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 import { advanceCloudAutomaticRecovery, classifyCloudRestoreEvidence, enqueueCloudAutomaticRecovery, recordCloudRestoreEvidence } from "./automatic-recovery.js";
 import {
   completeCloudWorkspaceGenerationTransition,
@@ -23,6 +26,7 @@ const SETUP_EXECUTION_ABORTED = Symbol("setup-execution-aborted");
 type SetupWorkerLogger = Pick<Console, "info" | "warn" | "error">;
 
 export type CloudWorkspaceSetupExecution = {
+  runtime?: CloudRuntimePin;
   setupRunId: string;
   workspaceId: string;
   organizationId: string;
@@ -208,6 +212,7 @@ export function cloudWorkspaceSetupReadinessMatches(
     (value.engine.protocolVersion ?? 0) > 0 &&
     (value.engine.protocolVersion ?? 0) <= 65_535 &&
     value.engine.health === "ready" &&
+    (!execution.runtime || value.engine.protocolVersion === execution.runtime.engineProtocolVersion) &&
     value.engine.durableRecordConnected === true
   );
 }
@@ -444,7 +449,7 @@ export class CloudWorkspaceSetupWorker {
       const workspace = candidate.rows[0];
       if (!workspace) return { kind: "none" };
 
-      const selected = await tx.query<{
+      const selected = await tx.query<CloudRuntimePinRow & {
         id: string;
         attempt: number;
         state: "queued" | "running";
@@ -465,7 +470,8 @@ export class CloudWorkspaceSetupWorker {
       }>(
         `SELECT sr.id, sr.attempt, sr.state, sr.claim_count,
                 sr.execution_fence, g.provider, g.image_ref, g.source_commit,
-                pb.provider_resource_id,
+                pb.provider_resource_id, g.runtime_id, g.runtime_manifest_sha256, g.runtime_base_image_id,
+                g.runtime_base_compatibility_id, g.runtime_profile, g.runtime_engine_protocol_version,
                 ss.spec_version, ss.repository_forge, ss.repository_owner,
                 ss.repository_name, ss.repository_revision,
                 ss.github_installation_id, ss.settings_snapshot,
@@ -593,6 +599,7 @@ export class CloudWorkspaceSetupWorker {
       );
       const lease = claimed.rows[0]!;
       const executionFence = safeFence(lease.execution_fence);
+      const runtime = cloudRuntimePin(row);
       await audit(
         tx,
         workspace.org_id,
@@ -612,6 +619,7 @@ export class CloudWorkspaceSetupWorker {
       return {
         kind: "claimed",
         setup: {
+          ...(runtime ? { runtime } : {}),
           setupRunId: row.id,
           workspaceId: workspace.id,
           organizationId: workspace.org_id,
@@ -815,8 +823,10 @@ export class CloudWorkspaceSetupWorker {
       );
       const registrationGrantId = registrationGrant.rows[0]?.id;
       const registeredEngine = registrationGrantId
-        ? await tx.query(
-            `SELECT 1
+        ? await tx.query<CloudRuntimePinRow & CloudRuntimeWitnessRow>(
+            `SELECT ei.runtime_id, ei.runtime_manifest_sha256, ei.runtime_base_image_id, ei.runtime_base_compatibility_id,
+                    ei.runtime_profile, ei.runtime_engine_protocol_version, ei.runtime_installer_receipt_sha256,
+                    ei.runtime_boot_id, ei.runtime_supervisor_session_id
              FROM cloud_workspace_engine_instances ei
              WHERE ei.id = $1 AND ei.workspace_id = $2
                AND ei.generation = $3 AND ei.org_id = $4
@@ -840,7 +850,12 @@ export class CloudWorkspaceSetupWorker {
           )
         : null;
 
-      const eligible =
+      const registeredIdentity = registeredEngine?.rows[0];
+      const registeredPin = registeredIdentity ? cloudRuntimePin(registeredIdentity) : null;
+      const expectedPin = cloudRuntimePinValues(setup.runtime);
+      const runtimeEligible = cloudRuntimePinValues(registeredPin).every((value, index) => value === expectedPin[index]) &&
+        (!registeredPin || !!await loadPinnedCloudRuntime(tx, registeredPin, cloudRuntimeQualificationMode()));
+      const eligible = runtimeEligible &&
         current?.current_generation === setup.generation &&
         current.authority_live &&
         current.desired_state === "running" &&
@@ -873,9 +888,11 @@ export class CloudWorkspaceSetupWorker {
            image_ref, image_source_commit, repository_revision,
            repository_commit, settings_version, settings_snapshot_sha256,
            engine_instance_id, engine_protocol_version, engine_health,
-           durable_record_connected
+           durable_record_connected, runtime_id, runtime_manifest_sha256, runtime_base_image_id,
+           runtime_base_compatibility_id, runtime_profile, runtime_engine_protocol_version,
+           runtime_installer_receipt_sha256, runtime_boot_id, runtime_supervisor_session_id
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                   decode($11, 'hex'), $12, $13, 'ready', true)`,
+                   decode($11, 'hex'), $12, $13, 'ready', true, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
         [
           setup.setupRunId,
           setup.workspaceId,
@@ -890,6 +907,10 @@ export class CloudWorkspaceSetupWorker {
           readiness.settings.sha256,
           readiness.engine.instanceId,
           readiness.engine.protocolVersion,
+          ...cloudRuntimePinValues(registeredPin),
+          registeredIdentity!.runtime_installer_receipt_sha256,
+          registeredIdentity!.runtime_boot_id,
+          registeredIdentity!.runtime_supervisor_session_id,
         ],
       );
       await tx.query(

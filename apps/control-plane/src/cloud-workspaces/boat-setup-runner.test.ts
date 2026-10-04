@@ -18,7 +18,9 @@ import {
   boatAuthorizedKeyCommand,
   type BoatBootstrapExecution,
 } from "./boat-setup-runner.js";
-import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND } from "./daytona-setup-executor.js";
+import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./daytona-setup-executor.js";
+import { runtimeBase } from "./runtime-test-fixtures.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 const keyBytes = Buffer.concat([
   Buffer.from([0, 0, 0, 11]),
@@ -89,6 +91,47 @@ function fixture() {
 }
 
 describe("Boat bootstrap transport", () => {
+  function v4Fixture(hostState = "waiting_for_runtime", compatibilityId = runtimeBase.compatibilityId) {
+    const f = fixture();
+    const payload = { schema: "zeros.runtime-install/v1", purpose: "workspace-setup",
+      runtime: { runtimeId: `r1-${"a".repeat(64)}`, manifestSha256: "a".repeat(64), archiveSha256: "b".repeat(64),
+        archiveBytes: 100, expandedBytes: 200, sourceCommit: "c".repeat(40), nodeModulesAbi: 127,
+        bootstrapProtocolVersion: 1, engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION },
+      artifact: { url: "https://artifacts.example.test/" + "x".repeat(36 * 1024), expiresAt: new Date(Date.now() + 900_000).toISOString() },
+      setup: SECRET };
+    const input = { ...f.input, command: CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND,
+      runtimeBaseCompatibilityId: runtimeBase.compatibilityId,
+      env: { ZEROS_CLOUD_WORKSPACE_SETUP_B64: Buffer.from(JSON.stringify(payload)).toString("base64url") } };
+    f.request.mockResolvedValueOnce({ ok: true, success: true, exitCode: 0,
+      stdout: JSON.stringify({ schema: "zeros.base-status/v1", baseCompatibilityId: compatibilityId,
+        bootId: "11111111-1111-4111-8111-111111111111", currentRuntimeId: null, hostState }) + "\n", stderr: "", timedOut: false });
+    return { ...f, input };
+  }
+  it.each(["idle", "waiting_for_runtime"])("uses the base status probe and bounded v4 installer SSH stdin when %s", async state => {
+    const f = v4Fixture(state);
+    expect(f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64.length).toBeGreaterThan(48 * 1024);
+    await f.runner.execute(f.input, new AbortController().signal);
+    expect(f.request.mock.calls[0][1]).toMatchObject({ body: { command: "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status" } });
+    expect(f.channel.execute.mock.calls[0][0]).toMatchObject({ stdin: f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64,
+      command: `/usr/bin/sudo -n /usr/bin/timeout --signal=TERM --kill-after=5s 60s ${CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND}` });
+    expect(JSON.stringify(f.request.mock.calls)).not.toContain("ensure-cloud-worker-supervisor");
+    expect(JSON.stringify(f.request.mock.calls)).not.toContain("artifacts.example.test");
+  });
+  it.each(["stopped", "failed", "unknown"])("rejects v4 base state %s before installing SSH access", async state => {
+    const f = v4Fixture(state);
+    await expect(f.runner.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "provider_bootstrap_unavailable" });
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+  });
+  it("rejects the wrong compatibility id and a v4 request above 64 KiB", async () => {
+    const f = v4Fixture("idle", `bc1-${"d".repeat(64)}`);
+    await expect(f.runner.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "provider_bootstrap_unavailable" });
+    const large = v4Fixture();
+    large.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64 = "A".repeat(64 * 1024 + 1);
+    await expect(large.runner.execute(large.input, new AbortController().signal)).rejects.toMatchObject({ code: "provider_command_invalid" });
+    expect(large.openChannel).not.toHaveBeenCalled();
+  });
   it("returns only fixed missing-file evidence after bootstrap fails", async () => {
     const f = fixture();
     f.request.mockResolvedValueOnce({ ok: true, success: false, exitCode: 1, stdout: "", stderr: "untrusted", timedOut: false });

@@ -1,4 +1,7 @@
 import type pg from "pg";
+import { ClosedDiagnosticSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES, type RuntimeDescriptor } from "./runtime-contract.js";
+import type { CloudRuntimePin } from "./runtime-selection.js";
+import type { RuntimeArtifactStore } from "./runtime-artifact-store.js";
 import { parseSetupDiagnostic, classifyCloudFailure, diagnosticCode, type SetupDiagnostic, type CloudDiagnosticPhase } from "./cloud-diagnostics.js";
 import { retainCloudDiagnostic, diagnosticStorageFailed } from "./cloud-diagnostic-store.js";
 import {
@@ -17,6 +20,8 @@ import {
 
 export const CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND =
   "/usr/bin/flock --exclusive --nonblock /run/zeros/setup.lock /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs";
+export const CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND =
+  "/usr/bin/flock --exclusive --nonblock /run/zeros/setup.lock /opt/zeros-bootstrap/install-runtime.sh --stdin";
 /** Compatibility export; the image-owned helper contract is provider neutral. */
 export const DAYTONA_SETUP_HELPER_COMMAND =
   CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND;
@@ -26,7 +31,12 @@ const SETUP_RESULT_AUDIENCE = "zeros-cloud-workspace-setup-result-v1";
 const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_LOG_BYTES = 128 * 1024;
 const MIN_ADMISSION_REMAINING_MS = 5_000;
-const MAX_ADMISSION_LIFETIME_MS = 15 * 60_000;
+export const CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS = 900;
+const MAX_ADMISSION_LIFETIME_MS = CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS * 1_000;
+// Installation precedes the one-use redemption. Reserve the ten-minute
+// delivery/install allowance plus the helper's minimum entry lifetime; the
+// remaining setup budget runs on fresh materials after that redemption.
+const RUNTIME_INSTALL_BUDGET_MS = 10 * 60_000;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
@@ -65,6 +75,8 @@ export type DaytonaSetupCommandRunner = CloudWorkspaceCommandRunner;
 
 export type CloudWorkspaceLinuxSetupExecutorOptions = {
   admissionBroker: CloudWorkspaceSetupAdmissionBroker;
+  runtimeArtifacts: RuntimeArtifactStore | null;
+  resolveRuntimeArtifact?: (pin: CloudRuntimePin) => Promise<{ descriptor: RuntimeDescriptor; objectKey: string } | null>;
   diagnosticPool?: pg.Pool;
   commandRunner?: DaytonaSetupCommandRunner;
   commandRunnerResolver?: (
@@ -213,7 +225,7 @@ function validateAdmission(
     !TOKEN_PATTERN.test(admission.token) ||
     endpoint === null ||
     !Number.isSafeInteger(expiresAt) ||
-    expiresAt - now < MIN_ADMISSION_REMAINING_MS ||
+    expiresAt - now < MIN_ADMISSION_REMAINING_MS + (execution.runtime ? RUNTIME_INSTALL_BUDGET_MS : 0) ||
     expiresAt - now > MAX_ADMISSION_LIFETIME_MS ||
     admission.workspaceId !== execution.workspaceId ||
     admission.organizationId !== execution.organizationId ||
@@ -355,6 +367,46 @@ function parseReadyResponse(
     ...(value.logExcerpt !== undefined ? { logExcerpt: value.logExcerpt } : {}),
     logTruncated: false,
   };
+}
+
+type InstallerDiagnostic = NonNullable<SetupDiagnostic["installer"]>;
+
+function withInstallerDiagnostic(error: CloudWorkspaceSetupError, installer: InstallerDiagnostic | undefined): CloudWorkspaceSetupError {
+  if (installer) {
+    const setup = "diagnostic" in error ? parseSetupDiagnostic(error.diagnostic) : null;
+    Object.assign(error, { diagnostic: { ...(setup ?? { version: 1, phase: "runtime" }), installer } });
+  }
+  return error;
+}
+
+function runtimeInstallerOutput(output: string, exitCode: number): { output: string; diagnostic: InstallerDiagnostic } {
+  // The installer appends one closed diagnostic after the unchanged helper
+  // result. Never expose raw installer output or parser errors to diagnostics.
+  let installer: InstallerDiagnostic | undefined;
+  try {
+    const lines = output.trim().split("\n");
+    const diagnostic = ClosedDiagnosticSchema.safeParse(JSON.parse(lines.pop()!));
+    if (diagnostic.success && diagnostic.data.component === "installer") {
+      installer = diagnostic.data;
+      if (installer.exitCode === exitCode && lines.length > 0 && (exitCode === 0
+        ? installer.ok && !installer.timedOut && installer.failedChecks.length === 0
+        : !installer.ok && installer.stage === "run_setup" && installer.failedChecks.length === 1 && installer.failedChecks[0] === "setup_exit")) {
+        return { output: lines.join("\n"), diagnostic: installer };
+      }
+    }
+  } catch { /* Reject through the closed error below. */ }
+  // GNU timeout returns 124 after the child reports SIGTERM/143, or 137
+  // after kill-after. The outer nonblocking flock exits 1 with no stdout.
+  // Neither wrapper outcome can produce readiness; both use bounded retries.
+  const transportTimeout = exitCode === 124 || exitCode === 137;
+  const transient = new Set(["lock_busy", "artifact_expired", "http_status", "download_truncated", "timeout", "process_signal"]);
+  const retryable = transportTimeout
+    ? !installer || installer.failedChecks.every(check => transient.has(check))
+    : installer
+      ? exitCode !== 0 && installer.exitCode === exitCode && !installer.ok && installer.failedChecks.length > 0 &&
+        installer.failedChecks.every(check => transient.has(check))
+      : exitCode === 1 && output.trim() === "";
+  throw withInstallerDiagnostic(setupError("setup_runtime_install_failed", "Cloud workspace runtime installation did not complete", retryable), installer);
 }
 
 function helperFailure(
@@ -512,17 +564,43 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
         );
       }
       const request = encodeRequest(execution, admission, endpoint, now);
+      let encoded = request;
+      let artifactUrl: string | undefined;
+      if (execution.runtime) {
+        if (execution.provider.name !== "boat" || !this.options.runtimeArtifacts || !this.options.resolveRuntimeArtifact)
+          throw setupError("cloud_runtime_unavailable", "Cloud workspace runtime delivery is unavailable", false);
+        const artifact = await this.options.resolveRuntimeArtifact(execution.runtime);
+        if (!artifact || artifact.descriptor.runtimeId !== execution.runtime.runtimeId ||
+          artifact.descriptor.manifestSha256 !== execution.runtime.manifestSha256 ||
+          artifact.descriptor.engineProtocolVersion !== execution.runtime.engineProtocolVersion ||
+          artifact.descriptor.engineProtocolVersion !== this.engineProtocolVersion)
+          throw setupError("cloud_runtime_unavailable", "Cloud workspace runtime delivery is unavailable", false);
+        const delivery = await this.options.runtimeArtifacts.presignGet(artifact.objectKey, 900);
+        const expires = Date.parse(delivery.expiresAt);
+        const issuedAt = this.now();
+        if (!Number.isFinite(expires) || expires <= issuedAt || expires > issuedAt + 900_000)
+          throw setupError("setup_runtime_input_invalid", "Cloud workspace runtime input is invalid", false);
+        artifactUrl = delivery.url;
+        const input = RuntimeInstallInputSchema.safeParse({ schema: "zeros.runtime-install/v1", purpose: "workspace-setup",
+          runtime: artifact.descriptor, artifact: delivery, setup: request });
+        if (!input.success) throw setupError("setup_runtime_input_invalid", "Cloud workspace runtime input is invalid", false);
+        encoded = Buffer.from(JSON.stringify(input.data), "utf8").toString("base64url");
+        if (encoded.length > RUNTIME_INSTALL_MAX_ENCODED_BYTES)
+          throw setupError("setup_runtime_input_invalid", "Cloud workspace runtime input is invalid", false);
+      }
       const response = await commandRunner.execute(
         {
           resourceId: execution.provider.resourceId,
-          command: CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND,
+          command: execution.runtime ? CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND : CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND,
           cwd: "/",
-          env: { [SETUP_REQUEST_ENV]: request },
+          env: { [SETUP_REQUEST_ENV]: encoded },
+          ...(execution.runtime ? { runtimeBaseCompatibilityId: execution.runtime.baseCompatibilityId } : {}),
           timeoutSeconds: this.timeoutSeconds,
         },
         signal,
       );
-      if (response.output.includes(admission.token)) {
+      if (response.output.includes(admission.token) || (artifactUrl && response.output.includes(artifactUrl)) ||
+        (execution.runtime && response.output.includes(encoded))) {
         throw setupError(
           "setup_helper_secret_echo",
           "Cloud workspace setup helper exposed its admission",
@@ -536,16 +614,21 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
           false,
         );
       }
-      if (response.exitCode !== 0) throw helperFailure(response.output, execution);
+      const installed = execution.runtime ? runtimeInstallerOutput(response.output, response.exitCode) : null;
+      const output = installed?.output ?? response.output;
+      if (response.exitCode !== 0) throw withInstallerDiagnostic(helperFailure(output, execution), installed?.diagnostic);
       result = parseReadyResponse(
-        response.output,
+        output,
         execution,
         this.engineProtocolVersion,
       );
+      // V4 installer output is a closed diagnostic boundary. The helper sees
+      // only its nested payload, but never persist arbitrary installer stdout.
+      if (execution.runtime) result = { readiness: result.readiness, logTruncated: false };
       disposition = "completed";
     } catch (error) {
       failure = normalizeExecutionError(error);
-      await this.retain(execution,failure,"bootstrap",error);
+      await this.retain(execution,failure,execution.runtime ? "runtime" : "bootstrap",error);
       if (failure.code === "setup_admission_invalid") disposition = "rejected";
     }
 

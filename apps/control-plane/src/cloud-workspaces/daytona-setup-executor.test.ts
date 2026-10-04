@@ -9,12 +9,14 @@ import type {
 } from "./setup-worker.js";
 import {
   DAYTONA_SETUP_HELPER_COMMAND,
+  CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND,
   DaytonaCloudWorkspaceSetupExecutor,
   type CloudWorkspaceSetupAdmission,
   type CloudWorkspaceSetupAdmissionBroker,
   type DaytonaSetupCommandRunner,
 } from "./daytona-setup-executor.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { runtimeBase } from "./runtime-test-fixtures.js";
 
 const NOW = 1_800_000_000_000;
 
@@ -122,6 +124,7 @@ function harness(input = execution()) {
   };
   const executor = new DaytonaCloudWorkspaceSetupExecutor({
     admissionBroker: broker,
+    runtimeArtifacts: null,
     commandRunner: runner,
     engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
     timeoutSeconds: 300,
@@ -131,6 +134,143 @@ function harness(input = execution()) {
 }
 
 describe("DaytonaCloudWorkspaceSetupExecutor", () => {
+  const v4 = () => {
+    const pin = { runtimeId: `r1-${"a".repeat(64)}`, manifestSha256: "a".repeat(64), baseImageId: runtimeBase.id,
+      baseCompatibilityId: runtimeBase.compatibilityId, profile: "zeros-cloud-worker-v4" as const,
+      engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION };
+    const descriptor = { runtimeId: pin.runtimeId, manifestSha256: pin.manifestSha256, archiveSha256: "b".repeat(64),
+      archiveBytes: 100, expandedBytes: 200, sourceCommit: "c".repeat(40), nodeModulesAbi: 127,
+      bootstrapProtocolVersion: 1 as const, engineProtocolVersion: pin.engineProtocolVersion };
+    const artifactUrl = "https://artifacts.example.test/runtime?signature=private-runtime-delivery";
+    const input = execution({ provider: { name: "boat", resourceId: "sandbox-exact-id" }, runtime: pin });
+    const f = harness(input);
+    f.grant.expiresAt = new Date(NOW + 900_000);
+    const artifact = { url: artifactUrl, expiresAt: new Date(NOW + 900_000).toISOString() };
+    const objectKey = `runtime/v1/${pin.runtimeId}/${descriptor.archiveSha256}.tar.gz`;
+    const resolveRuntimeArtifact = vi.fn(async () => ({ descriptor, objectKey }));
+    const runtimeArtifacts = { presignGet: vi.fn(async () => artifact),
+      presignCreatePut: vi.fn(), head: vi.fn() };
+    const installerDiagnostic = { schema: "zeros.diagnostic/v1", component: "installer", stage: "done", ok: true,
+      exitCode: 0, timedOut: false, failedChecks: [] };
+    const output = JSON.stringify({ version: 1, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "ready", readiness: readiness(input) }) +
+      "\n" + JSON.stringify(installerDiagnostic) + "\n";
+    vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 0, output, outputTruncated: false });
+    const executor = new DaytonaCloudWorkspaceSetupExecutor({ admissionBroker: f.broker, commandRunner: f.runner,
+      runtimeArtifacts, resolveRuntimeArtifact, engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, timeoutSeconds: 300, now: () => NOW });
+    return { ...f, executor, runtimeArtifacts, resolveRuntimeArtifact, descriptor, pin, objectKey, artifact, artifactUrl, installerDiagnostic, output };
+  };
+
+  it("wraps the unchanged setup payload in the fixed v4 installer input with a 15-minute artifact capability", async () => {
+    const f = v4();
+    await expect(f.executor.execute(f.input, new AbortController().signal)).resolves.toMatchObject({ readiness: readiness(f.input) });
+    const call = vi.mocked(f.runner.execute).mock.calls[0][0];
+    expect(call.command).toBe(CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND);
+    expect(call.runtimeBaseCompatibilityId).toBe(runtimeBase.compatibilityId);
+    const wrapped = JSON.parse(Buffer.from(call.env!.ZEROS_CLOUD_WORKSPACE_SETUP_B64, "base64url").toString());
+    expect(Object.keys(wrapped).sort()).toEqual(["artifact", "purpose", "runtime", "schema", "setup"]);
+    expect(wrapped).toMatchObject({ schema: "zeros.runtime-install/v1", purpose: "workspace-setup", runtime: f.descriptor,
+      artifact: { url: f.artifactUrl, expiresAt: new Date(NOW + 900_000).toISOString() } });
+    expect(f.runtimeArtifacts.presignGet).toHaveBeenCalledExactlyOnceWith(f.objectKey, 900);
+    const { runtime: _runtime, ...legacyInput } = f.input;
+    const legacy = harness(legacyInput);
+    legacy.grant.expiresAt = f.grant.expiresAt;
+    await legacy.executor.execute(legacy.input, new AbortController().signal);
+    expect(wrapped.setup).toBe(vi.mocked(legacy.runner.execute).mock.calls[0][0].env!.ZEROS_CLOUD_WORKSPACE_SETUP_B64);
+    expect(JSON.stringify(vi.mocked(f.broker.revoke).mock.calls)).not.toContain(f.artifactUrl);
+  });
+  it("never returns artifact URLs in setup logs or errors", async () => {
+    const f = v4();
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 1, output: f.artifactUrl, outputTruncated: false });
+    const failure = await f.executor.execute(f.input, new AbortController().signal).catch(error => error);
+    expect(failure.code).toBe("setup_helper_secret_echo");
+    expect(String(failure)).not.toContain(f.artifactUrl);
+    f.runtimeArtifacts.presignGet.mockRejectedValueOnce(new Error(f.artifactUrl));
+    const signingFailure = await f.executor.execute(f.input, new AbortController().signal).catch(error => error);
+    expect(String(signingFailure)).not.toContain(f.artifactUrl);
+  });
+  it("parses the unchanged helper document before the final installer diagnostic", async () => {
+    const f = v4();
+    const helper = JSON.parse(f.output.split("\n")[0]);
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 0, outputTruncated: false,
+      output: JSON.stringify(helper, null, 2) + "\n" + JSON.stringify(f.installerDiagnostic) + "\n" });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).resolves.toMatchObject({ readiness: readiness(f.input) });
+  });
+  it("keeps the helper's retry classification when the v4 installer reports its failure", async () => {
+    const f = v4();
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 1, outputTruncated: false,
+      output: JSON.stringify({ version: 1, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error",
+        code: "repository_temporarily_unavailable" }) + "\n" + JSON.stringify({ ...f.installerDiagnostic,
+        stage: "run_setup", ok: false, exitCode: 1, failedChecks: ["setup_exit"] }) + "\n" });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_repository_unavailable", retryable: true });
+  });
+  it("rejects oversized v4 stdin and invalid or missing installer success diagnostics", async () => {
+    const f = v4();
+    f.runtimeArtifacts.presignGet.mockResolvedValueOnce({ ...f.artifact, url: "https://artifacts.example.test/" + "x".repeat(64 * 1024) });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_runtime_input_invalid" });
+    expect(f.runner.execute).not.toHaveBeenCalled();
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 0, output: f.output.split("\n")[0], outputTruncated: false });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_runtime_install_failed" });
+  });
+  it("fails closed when v4 runtime artifact delivery is not configured", async () => {
+    const f = v4();
+    const executor = new DaytonaCloudWorkspaceSetupExecutor({ admissionBroker: f.broker, commandRunner: f.runner,
+      runtimeArtifacts: null, resolveRuntimeArtifact: f.resolveRuntimeArtifact,
+      engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, timeoutSeconds: 300, now: () => NOW });
+    await expect(executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "cloud_runtime_unavailable" });
+    expect(f.runner.execute).not.toHaveBeenCalled();
+    expect(f.resolveRuntimeArtifact).not.toHaveBeenCalled();
+  });
+  it.each([NOW - 1, NOW + 900_001])("rejects an expired or overlong artifact capability", async expires => {
+    const f = v4();
+    f.runtimeArtifacts.presignGet.mockResolvedValueOnce({ ...f.artifact, expiresAt: new Date(expires).toISOString() });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_runtime_input_invalid" });
+    expect(f.runner.execute).not.toHaveBeenCalled();
+  });
+  it.each([120_000, 604_999])("rejects v4 admission without time for installation and helper entry (%i ms)", async lifetime => {
+    const f = v4();
+    f.grant.expiresAt = new Date(NOW + lifetime);
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_admission_invalid", retryable: false });
+    expect(f.runner.execute).not.toHaveBeenCalled();
+    expect(f.runtimeArtifacts.presignGet).not.toHaveBeenCalled();
+    expect(f.broker.revoke).toHaveBeenCalledWith(f.grant, "rejected");
+  });
+  it.each([
+    { check: "timeout", exitCode: 124, transportExitCode: 124, retryable: true },
+    { check: "process_signal", exitCode: 143, transportExitCode: 124, retryable: true },
+    { check: "manifest_digest", exitCode: 1, transportExitCode: 1, retryable: false },
+    { check: "archive_digest", exitCode: 1, transportExitCode: 124, retryable: false },
+  ])("handles installer-only $check failures with child $exitCode / transport $transportExitCode", async ({ check, exitCode, transportExitCode, retryable }) => {
+    const f = v4();
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: transportExitCode, outputTruncated: false,
+      output: JSON.stringify({ ...f.installerDiagnostic, stage: "download", ok: false,
+        exitCode, timedOut: check === "timeout", failedChecks: [check] }) + "\n" });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_runtime_install_failed", retryable });
+  });
+  it.each([
+    { exitCode: 1, reason: "outer flock contention" },
+    { exitCode: 124, reason: "outer timeout" },
+    { exitCode: 137, reason: "outer timeout kill-after" },
+  ])("retries $reason without an installer diagnostic", async ({ exitCode }) => {
+    const f = v4();
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode, output: "", outputTruncated: false });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_runtime_install_failed", retryable: true });
+    expect(f.broker.revoke).toHaveBeenCalledWith(f.grant, "failed");
+  });
+  it("requires installer success even when the helper already returned readiness before an outer timeout", async () => {
+    const f = v4();
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 124, outputTruncated: false,
+      output: f.output.split("\n")[0] + "\n" + JSON.stringify({ ...f.installerDiagnostic,
+        stage: "run_setup", ok: false, exitCode: 143, failedChecks: ["process_signal"] }) });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "setup_runtime_install_failed", retryable: true });
+  });
+  it("attaches the validated installer diagnostic to a typed failure", async () => {
+    const f = v4();
+    const installer = { ...f.installerDiagnostic, stage: "verify_archive", ok: false, exitCode: 1, failedChecks: ["archive_digest"] };
+    vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 1, output: JSON.stringify(installer), outputTruncated: false });
+    await expect(f.executor.execute(f.input, new AbortController().signal)).rejects.toMatchObject({
+      code: "setup_runtime_install_failed", retryable: false, diagnostic: { version: 1, phase: "runtime", installer },
+    });
+  });
   it("accepts a bounded v2 failure envelope without changing the exact v1 proof", async () => {
     const { executor, runner, input } = harness();
     const diagnostic = { version: 1, phase: "image_preflight", checks: { source: false, engine: true } };

@@ -4,6 +4,8 @@ import { createCloudComputerV2Routes } from "./computer-v2-routes.js";
 import { createCloudWorkspaceHistoryRoutes } from "./history-routes.js";
 import { authorizeCloudComputerBuild } from "./computer.js";
 import { resolveComputerImage } from "./computer-image.js";
+import { selectCloudRuntime, cloudRuntimePin, cloudRuntimePinValues, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { ensureWorkspaceDeletionJob } from "./workspace-deletion-job.js";
 import { assertCloudGithubSource } from "./github-user-access.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -290,7 +292,7 @@ const DeleteWorkspaceSchema = z.object({
 }).strict();
 
 
-type WorkspaceRow = {
+type WorkspaceRow = CloudRuntimePinRow & {
   actor_role: string|null;
   sponsor_pro_live: boolean;
   sponsor_staff_allowance: boolean;
@@ -418,6 +420,8 @@ const workspaceSelect = (actorSql="NULL::text") => `
          cw.last_error_message, cw.last_observed_at, cw.created_at,
          cw.updated_at, cw.deleted_at, cw.repository_id, cw.sharing_mode, cw.access_revision,
          g.provider, g.provider_connection_id, g.image_ref,
+         g.runtime_id, g.runtime_manifest_sha256, g.runtime_base_image_id,
+         g.runtime_base_compatibility_id, g.runtime_profile, g.runtime_engine_protocol_version,
          g.architecture, g.cpu_millicores, g.memory_mib, g.storage_mib,
          g.source_commit, pb.observed_state, pb.provider_target,
          pb.last_observed_at AS provider_last_observed_at,
@@ -510,6 +514,7 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
     },
     generation: {
       number: row.current_generation,
+      ...(row.runtime_id ? { runtime: cloudRuntimePin(row)! } : {}),
       architecture: row.architecture,
       resources: {
         cpuMillicores: row.cpu_millicores,
@@ -1894,6 +1899,23 @@ export function createCloudWorkspaceRoutes(
       forkFromLocal: body.forkFromLocal ?? null,
       ...(body.cloudComputerBuild ? { cloudComputerBuild: body.cloudComputerBuild } : {}),
     });
+    const selectCreateProfile = async (tx: Tx, input: { provider: CloudWorkspaceProvisioningProfile["provider"]; delegated: boolean; isPersonal: boolean }) => {
+      const base = cloudWorkspaceProvisioningProfile(config, input.provider);
+      const profile = input.delegated || input.isPersonal ? base : await resolveComputerImage(tx, orgId, base);
+      // Phase C owns template forks. Existing selected organization images and
+      // customer providers retain their own admission path.
+      const v4 = config.runtime?.newWorkspaceProfile === "v4" && profile.provider === "boat" && !input.delegated &&
+        profile.imageRef === base.imageRef && (!config.runtime.staffOnly || user.staffRole === "developer" || user.staffRole === "platform_owner");
+      if (!v4) return { profile, runtime: null as CloudRuntimePin | null };
+      // Older protocol overrides support legacy rolling deployments. V4 is
+      // qualified only for the current tested protocol, including setup.
+      if (config.setupExecution && config.setupExecution.engineProtocolVersion !== CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION)
+        throw new HttpError(409, "cloud_runtime_unavailable", "A qualified cloud runtime is unavailable");
+      const selected = await selectCloudRuntime(tx, config.runtime!.qualificationMode);
+      if (!selected) throw new HttpError(409, "cloud_runtime_unavailable", "A qualified cloud runtime is unavailable");
+      return { profile: { ...profile, imageRef: selected.base.imageRef, sourceCommit: selected.base.sourceCommit,
+        architecture: selected.base.architecture, storageMiB: selected.base.storageMiB }, runtime: selected.pin };
+    };
     const assertCreateReplay = async (tx: Tx, existing: IntentRow) => {
       // Preserve the original request digest format, using its accepted immutable
       // generation rather than today's deployment defaults.
@@ -1977,11 +1999,8 @@ export function createCloudWorkspaceRoutes(
           "Cloud provider connection not found",
         );
       }
-      const baseProfile = cloudWorkspaceProvisioningProfile(
-        config,
-        providerConnection?.provider ?? config.provider,
-      );
-      const profile = providerConnection?.credentialSource === "delegated" || authorization.isPersonal ? baseProfile : await resolveComputerImage(tx, orgId, baseProfile);
+      const { profile } = await selectCreateProfile(tx, { provider: providerConnection?.provider ?? config.provider,
+        delegated: providerConnection?.credentialSource === "delegated", isPersonal: authorization.isPersonal });
       if (body.forkFromLocal) {
         const collision = await tx.query(
           `SELECT 1 FROM cloud_workspaces WHERE id = $1`,
@@ -2024,9 +2043,6 @@ export function createCloudWorkspaceRoutes(
       );
     }
 
-    const profile = preflight.profile;
-    const normalized = normalize(profile);
-    const digest = requestDigest(normalized);
     let resolvedRepository: CloudWorkspaceRepositoryIdentity;
     try {
       resolvedRepository = await repositoryResolver.resolve({
@@ -2104,10 +2120,12 @@ export function createCloudWorkspaceRoutes(
       }
 
       const quota = await loadQuota(tx, orgId);
-      if (preflight.providerConnection?.credentialSource !== "delegated" && !authorization.isPersonal) {
-        const currentImage = await resolveComputerImage(tx, orgId, cloudWorkspaceProvisioningProfile(config, preflight.providerConnection?.provider ?? config.provider));
-        if (currentImage.imageRef !== profile.imageRef) throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed during workspace creation. Try again.");
-      }
+      const { profile, runtime } = await selectCreateProfile(tx, { provider: preflight.providerConnection?.provider ?? config.provider,
+        delegated: preflight.providerConnection?.credentialSource === "delegated", isPersonal: authorization.isPersonal });
+      if (!runtime && profile.imageRef !== preflight.profile.imageRef)
+        throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed during workspace creation. Try again.");
+      const normalized = normalize(profile);
+      const digest = requestDigest(normalized);
       assertCreateQuota(quota, await loadUsage(tx, orgId), profile);
 
       const repositoryId = await upsertCanonicalRepository(tx, {
@@ -2214,8 +2232,10 @@ export function createCloudWorkspaceRoutes(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by, provider_connection_id, sandbox_class
-         ) VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+           source_commit, created_by, provider_connection_id, sandbox_class,
+           runtime_id, runtime_manifest_sha256, runtime_base_image_id,
+           runtime_base_compatibility_id, runtime_profile, runtime_engine_protocol_version
+         ) VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
         [
           workspaceId,
           orgId,
@@ -2229,6 +2249,7 @@ export function createCloudWorkspaceRoutes(
           user.id,
           providerConnection.id,
           profile.sandboxClass??null,
+          ...cloudRuntimePinValues(runtime),
         ],
       );
       const computerProfile = body.cloudComputerBuild ? await authorizeCloudComputerBuild(tx, {
