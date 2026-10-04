@@ -1,8 +1,32 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, lstatSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, lstatSync, fstatSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const manifestRace = vi.hoisted(() => ({ file: "", replacement: "", descriptor: undefined as number | undefined }));
+vi.mock("node:fs", async original => {
+  const actual = await original<typeof import("node:fs")>();
+  const replace = () => { actual.renameSync(manifestRace.replacement, manifestRace.file); manifestRace.file = ""; };
+  return { ...actual,
+    lstatSync: (file: string) => {
+      const stat = actual.lstatSync(file);
+      if (file === manifestRace.file) replace();
+      return stat;
+    },
+    fstatSync: (descriptor: number) => {
+      const stat = actual.fstatSync(descriptor);
+      if (manifestRace.file) {
+        const target = actual.lstatSync(manifestRace.file);
+        if (stat.dev === target.dev && stat.ino === target.ino) {
+          manifestRace.descriptor = descriptor;
+          replace();
+        }
+      }
+      return stat;
+    },
+  };
+});
 import {
   checkoutCloudComputerPrimary,
   createCloudComputerWorkspaceAdmission,
@@ -17,7 +41,11 @@ const buildId = "11111111-1111-4111-8111-111111111111";
 const configId = "22222222-2222-4222-8222-222222222222";
 const token = "fixture-transient-read-token";
 const directories: string[] = [];
-afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
+afterEach(() => {
+  manifestRace.file = "";
+  manifestRace.descriptor = undefined;
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "zeros-v2-test-checkout-"));
   directories.push(root);
@@ -53,6 +81,20 @@ function fixture() {
 }
 
 describe("Cloud Computer fork checkout", () => {
+  it("reads the verified manifest inode when its pathname is replaced after the metadata check", () => {
+    const f = fixture();
+    rmSync(f.templateFile);
+    writeFileSync(f.templateFile, JSON.stringify({ ...f.template, buildId: configId }), { mode: 0o444 });
+    manifestRace.replacement = path.join(f.root, "replacement.json");
+    writeFileSync(manifestRace.replacement, JSON.stringify(f.template), { mode: 0o600 });
+    // Both the former path-stat and the new descriptor-stat reach the same
+    // race. Reopening the pathname would accept unverified replacement bytes.
+    manifestRace.file = f.templateFile;
+    expect(() => verifyCloudComputerTemplate(f.computer, f.repository, f.options)).toThrow("image_contract_invalid");
+    expect(manifestRace.descriptor).toBeTypeOf("number");
+    expect(() => fstatSync(manifestRace.descriptor!)).toThrow(expect.objectContaining({ code: "EBADF" }));
+  });
+
   it("checks out the existing primary without a host mount or move and keeps secondary/build outputs in place", async () => {
     const f = fixture();
     writeFileSync(path.join(f.source, "installed-tool"), "template build output");

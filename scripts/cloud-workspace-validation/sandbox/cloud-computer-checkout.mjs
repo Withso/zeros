@@ -102,12 +102,15 @@ export function verifyCloudComputerTemplate(computer, repository, overrides = {}
   const options = settings(overrides), repos = path.join(options.filesRoot, "repos");
   directory(options.filesRoot, options.rootUid, true);
   directory(repos, options.rootUid, true);
-  const stat = lstatSync(options.templateFile);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== options.rootUid ||
-    (stat.mode & 0o022) || stat.size > 65536 || realpathSync(options.templateFile) !== options.templateFile) throw invalid();
-  let manifest;
-  try { manifest = JSON.parse(readFileSync(options.templateFile, "utf8")); } catch { throw invalid(); }
-  if (canonical(manifest) !== canonical(computer.template)) throw invalid();
+  const descriptor = openSync(options.templateFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== options.rootUid ||
+      (stat.mode & 0o022) || stat.size > 65536 || realpathSync(options.templateFile) !== options.templateFile) throw invalid();
+    let manifest;
+    try { manifest = JSON.parse(readFileSync(descriptor, "utf8")); } catch { throw invalid(); }
+    if (canonical(manifest) !== canonical(computer.template)) throw invalid();
+  } finally { closeSync(descriptor); }
   const expected = new Map();
   for (const repo of computer.template.repositoryManifest) {
     const owner = path.join(repos, repo.owner), checkout = path.join(owner, repo.name);
