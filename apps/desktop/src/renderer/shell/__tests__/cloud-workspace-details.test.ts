@@ -7,6 +7,9 @@ const state = vi.hoisted(() => ({ workspace: null as CloudWorkspaceDocument | nu
 vi.mock("../../state/use-cached-read", () => ({ useCachedRead: () => ({ data: state.workspace }) }));
 vi.mock("../../state/cloud-workspace-catalog", () => ({ cloudWorkspaceDetails: {}, manageCloudWorkspace: vi.fn(), manageCloudWorkspaceRecovery: vi.fn(), refreshCloudWorkspace: vi.fn() }));
 vi.mock("../../features/team/team-store", () => ({ useTeams: () => ({ me: { user: { id: state.userId } } }), getOrganizationStoreGeneration: () => 0 }));
+vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => false }));
+vi.mock("../../state/cloud-workspace-collaboration-cache", () => ({ warmCloudWorkspaceCollaboration: vi.fn() }));
+vi.mock("../conversation/cloud-workspace-sharing-controls", () => ({ CloudWorkspaceSharingControls: () => null }));
 vi.mock("../../shared/ui", () => ({ Button: ({ children, disabled }: { children: ReactNode; disabled?: boolean }) => createElement("button", { disabled }, children) }));
 vi.mock("../../shared/ui/primitives", () => ({ Tooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("../../shared/ui/primitives/elements", () => ({ toast: { error: vi.fn() } }));

@@ -84,6 +84,186 @@ relay permissions remain separate. A successful checkout of another branch
 clears the old branch's PR binding atomically with the branch change. A failed
 or unchanged checkout preserves it; explicit cancelled/backlog status is kept.
 
+## Staff workspace sharing
+
+Cloud workspace details expose sharing controls to staff with the
+`cloudComputerV2` internal feature active. Staff eligibility controls visibility;
+workspace authority still comes from the backend's current actor role. An
+organization admin is a default **viewer** on an account-funded Pro workspace
+until explicitly assigned another role. Organization-funded workspaces retain
+their existing authority rules, including inherited manager/developer access.
+
+Both the catalog and detail document add `actorRole` and
+`capabilities.canEdit`. The existing `canWrite`, `canManage`, `canStart` and start
+reason fields retain their behavior. `canWrite` includes agent submission;
+edit services must check `canEdit === true`, rather than inferring edit authority
+from staff status, organization role or `canWrite`. `canStart` remains a separate
+lifecycle/funding decision; sharing does not grant wake, stop or delete authority.
+
+| Workspace actor role | Read | Run agents (`canWrite`) | Edit (`canEdit`) | Manage sharing (`canManage`) |
+| --- | --- | --- | --- | --- |
+| Viewer | Yes | No | No | No |
+| Prompter | Yes | Yes | No | No |
+| Developer | Yes | Yes | Yes | No |
+| Manager | Yes | Yes | Yes | Yes |
+| Owner | Yes | Yes | Yes | Yes |
+
+Role and sharing metadata remain optional in the renderer for mixed-version
+servers. Missing edit authority disables edit controls. Missing role, sharing
+mode or access revision disables sharing management. A null actor role can occur
+on the owner's durable-data recovery path without granting compute or management.
+No role is inferred from `ownerUserId` or organization membership.
+
+Owners/managers use **Manage sharing** in the existing details popover. The
+panel reuses the existing sharing, invitation, assignment and revocation APIs:
+
+- Scope updates send the document's exact `accessRevision` as
+  `expectedRevision`. A conflict refreshes metadata and requires a new explicit
+  action; it never retries the write automatically.
+- For preserved owner-only private workspaces, use **Enable collaboration**
+  before inviting. This explicitly submits Private with the current CAS revision
+  and keeps the scope private; reselecting Private alone does not enable sharing.
+- Account-funded organization scope gives eligible unassigned members viewer
+  access. Private scope retains the owner and explicit assignments/guest grants;
+  it withdraws default organization discovery. Removing an assignment while
+  organization-shared can leave that member with default viewer access.
+- Invitations support viewer, prompter and developer. Assignment changes support
+  only viewer/developer, matching the existing API. Prompter is an invitation
+  role. Owner and manager rows have no role controls in this panel.
+- The backend owns writer slots, Pro eligibility and reservations. The panel
+  displays returned usage and blocks new writer selections when full. Viewer
+  invitations remain available. Cancellation, downgrade, expiry and revocation
+  retain the backend's existing slot-release behavior.
+- Organization-funded lists return `writers: null`; their inherited assignments
+  remain read-only in this panel. Existing invitations, guest removal and scope
+  controls retain their backend authorization.
+
+Collaborators are read as independent 50-row member, guest and invitation pages.
+The bounded, memory-only cache includes account identity/generation, renderer
+device/window scope, organization, workspace and catalog generation. It retains
+same-key confirmations during refresh, revalidates the expanded page window,
+rejects late pages after account changes, writes or replacement reads even when
+sharing CAS is unchanged, and withdraws metadata on
+denied authority. Display names are bounded page metadata; responses contain no
+recipient email or invitation token. Pointer/focus intent warms read-only data.
+Collapsed or inactive management views initiate no reads or polling.
+
+### Alpha sharing acceptance runbook
+
+This is an operator-run qualification on signed Zeros Alpha desktop on Mac.
+Local PostgreSQL/browser fixtures do not qualify the combined runtime. Record
+app/control-plane commits, runtime/base/template revisions and prerequisite
+receipt IDs privately. Use only Alpha/test resources, with disposable names
+prefixed `zeros-v2-test-`; never record credential values or invitation links.
+
+1. Confirm integrated C5 template forks, B8 accepted-pin lifecycle behavior and
+   B10 persistence qualification receipts for the fresh v4 base. Runtime edit
+   checks also require the E1/E2/E3 consumers of `canEdit`; E4 owns shared-writer
+   wake. Do not substitute older provider experiments or this PR's UI tests for
+   those receipts. Enable Cloud Computer v2 in Internal settings for each staff
+   account, and also verify the new sharing surface disappears with the flag off.
+2. Use distinct owner, assigned developer, invited prompter and default viewer
+   accounts/devices. Make the viewer an organization **admin** with no explicit
+   workspace assignment. All accounts must meet the existing Alpha/Pro
+   eligibility rules. Fork a disposable ordinary workspace from the sanitized
+   Cloud Computer template through C5; record workspace/generation/template IDs.
+   Confirm the chosen primary and secondary projections before testing access.
+3. As owner, open details on pointer/focus intent and expand Manage sharing.
+   Verify current scope, owner role, slot usage and participant names. Assign the
+   developer through the member role control. Invite/accept the prompter using
+   the ordinary signed-in invitation flow. Record invitation/grant IDs privately.
+   A developer, prompter or viewer must see its actual role and no manager form.
+4. Run the read-only API companion below for all four accounts. Verify the admin
+   viewer reports `canWrite: false`, `canEdit: false`, `canManage: false`, and
+   that its collaborator-list read is denied. Verify the prompter can run but
+   cannot edit; developer can edit but cannot manage sharing/credentials. Owner
+   can manage. Do not change expected results to accommodate a failed check.
+5. Across devices, read shared primary Files, Git comparisons, saved chat and
+   terminal inventory. Submit an agent prompt as developer and prompter; the
+   viewer cannot submit or execute. Try direct file/Git mutations, terminal
+   creation/input, SSH and edit services as viewer/prompter: controls must be
+   unavailable and server admission must deny attempts. Repeat as developer to
+   establish allowed behavior. Secondary repositories are writable under ACD-3,
+   but Alpha Files and checkpoint coverage remain primary-only.
+6. On two owner devices, keep the same sharing revision open. Change one to
+   Private, then submit the stale scope change on the other. The stale action
+   must conflict, refresh to the accepted scope and require an explicit new
+   action. The default admin viewer loses workspace discovery/read access;
+   explicit developer/prompter access remains. Re-run the API companion with
+   the viewer case's `expectedStatus: 404`. Restore organization sharing and
+   verify the viewer regains only viewer authority.
+7. Exercise the final available writer slot with two owner devices. At most one
+   competing writer assignment/invitation succeeds. Confirm the refreshed count
+   never exceeds the returned limit, and viewer invitations still work. Cancel
+   a pending writer invitation and downgrade an assigned developer to viewer;
+   confirm capacity returns and new edits/services from the downgraded device
+   are denied. Re-run the companion with the new expected role. Existing service
+   withdrawal must satisfy the runtime admission owners' acceptance checks.
+8. Revoke an accepted guest and verify its live connection/access is withdrawn,
+   its workspace read becomes unavailable, and its slot is released. Removing an
+   organization member's assignment while shared must leave only default viewer
+   authority; under Private it must remove access. Re-run the companion for each
+   state. Expiry and failed-delivery cases use existing invitation policy, never
+   an altered database clock or relaxed eligibility.
+9. Switch accounts while a collaborator read/page is delayed and verify no
+   participant/form state crosses owners. Reopen the same authorized workspace
+   to confirm cached rows survive a refresh failure. Close/collapse the view or
+   navigate away: no hidden collaborator reads, focus or polling may continue.
+   Where the test organization supplies more than 50 members, load More members
+   and refresh after a removal; rows must not duplicate or resurrect. Record
+   unavailable live pagination coverage explicitly; synthetic pagination is
+   covered by the browser/cache suites.
+10. Cancel all test invitations, revoke test guest grants/assignments, close
+    terminals and retire SSH/preview grants through their owning controls.
+    Restore any pre-existing scope/roles, then delete disposable workspaces as
+    their owner and confirm physical cleanup through the existing lifecycle.
+    Record resource IDs and completed cleanup privately, including any residual
+    item that blocks acceptance. Do not revoke shared credentials or remove
+    pre-existing organization membership.
+
+The API companion reads credentials only from the orchestrator's `.env.agent`
+and contacts the repository's Alpha API origin. It issues GET requests only,
+creates no resource, and prints only closed check codes, roles, revisions, page
+counts and writer availability. It does not prove Mac/device/runtime behavior.
+Place current per-account Alpha access tokens under these variable **names** in
+that private file: `ZEROS_E5_ALPHA_OWNER_ACCESS_TOKEN`,
+`ZEROS_E5_ALPHA_DEVELOPER_ACCESS_TOKEN`, `ZEROS_E5_ALPHA_PROMPTER_ACCESS_TOKEN`, and
+`ZEROS_E5_ALPHA_VIEWER_ACCESS_TOKEN`. Never pass token values on the command line.
+
+Create gitignored `.context/e5-sharing-cases.json`. Start with this synthetic
+example, replace all IDs with the recorded Alpha IDs, and add developer,
+prompter and viewer cases using their own token variable and immutable account
+ID. Set the viewer's `organizationRole` to `admin`; other cases need not assert
+an organization role. Use the current role/scope at each checkpoint above.
+
+```json
+[
+  {
+    "name": "owner",
+    "tokenEnv": "ZEROS_E5_ALPHA_OWNER_ACCESS_TOKEN",
+    "actorUserId": "33333333-3333-4333-8333-333333333333",
+    "organizationId": "11111111-1111-4111-8111-111111111111",
+    "workspaceId": "22222222-2222-4222-8222-222222222222",
+    "expectedStatus": 200,
+    "actorRole": "owner",
+    "sharingMode": "organization"
+  }
+]
+```
+
+```sh
+node scripts/cloud-workspace-validation/verify-sharing-controls.mjs .context/e5-sharing-cases.json > .context/e5-alpha-sharing-receipt.json
+```
+
+Exit 0 means the supplied cases passed their API checks. A denied private/revoked
+case expects 404 for both detail and collaborators; an accessible nonmanager
+expects 403 for collaborators. An owner data-recovery case with `actorRole: null`
+expects all three projected capabilities false and collaborator access 404.
+A scope/revision change during pagination fails
+the read and requires rerunning the read after the state settles. Keep these
+receipts alongside the manual checklist; do not label live acceptance complete
+until all required Mac/runtime observations and cleanup are confirmed.
+
 ## Cloud Computer
 
 Cloud Computer is an organization-owned, versioned setup configuration. It

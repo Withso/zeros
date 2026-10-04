@@ -1,4 +1,4 @@
-import {seedProviderLossAttestation,withCloudFixtureOwnerTx} from "./test-fixtures.js";
+import {seedProviderLossAttestation,seedReadyProCloudWorkspace,withCloudFixtureOwnerTx} from "./test-fixtures.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   afterAll,
@@ -1235,6 +1235,14 @@ d("cloud workspace API contracts", () => {
     configureApp();
   });
 
+  it("keeps route fixtures usable beyond the live signup budget", async () => {
+    const actors = [];
+    for (let index = 0; index < 201; index++) actors.push(await signup("Fixture"));
+    expect(new Set(actors.map(user => user.id)).size).toBe(201);
+    expect((await pool.query("SELECT count(*)::int AS count FROM user_identities")).rows[0].count).toBe(203);
+    expect((await pool.query("SELECT count(*)::int AS count FROM organizations WHERE is_personal")).rows[0].count).toBe(203);
+  });
+
   it("replays a create against its accepted image after the deployment default changes", async () => {
     const created = await createWorkspace();
     expect(created.response.status).toBe(202);
@@ -1543,6 +1551,35 @@ d("cloud workspace API contracts", () => {
     expect(await managementView.json()).toMatchObject({settings:null,compute:null,quota:null,usage:[]});
     await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2",[orgId,outsider.id]);
     expect((await request(`/v1/cloud-workspaces/${workspaceId}`)).status).toBe(404);
+  });
+
+  it.each(["owner", "manager", "developer", "prompter", "viewer"])("projects the exact %s role and edit capability in detail and catalog reads", async role => {
+    const fixture = await seedReadyProCloudWorkspace(pool);
+    if (role === "owner") actor = { ...owner, id: fixture.userId };
+    else {
+      // Staff and organization administration do not confer workspace authority.
+      actor = { ...outsider, staffRole: "developer" };
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [actor.id]);
+      await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')", [actor.id]);
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')", [fixture.organizationId, actor.id]);
+      if (role !== "viewer") {
+        await pool.query("INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,$4)", [fixture.workspaceId, fixture.organizationId, actor.id, role]);
+        await withSystemTx(pool, tx => reserveWriterSlot(tx, fixture.workspaceId, { userId: actor.id }));
+      }
+    }
+    const expected = {
+      actorRole: role,
+      capabilities: {
+        canWrite: role !== "viewer",
+        canEdit: ["owner", "manager", "developer"].includes(role),
+        canManage: ["owner", "manager"].includes(role),
+      },
+    };
+    const detail = await request(`/v1/cloud-workspaces/${fixture.workspaceId}`);
+    expect(detail.status).toBe(200);
+    expect((await detail.json()).workspace).toMatchObject(expected);
+    const catalog = await (await request("/v1/cloud-workspaces")).json();
+    expect(catalog.workspaces.find((workspace: { id: string }) => workspace.id === fixture.workspaceId)).toMatchObject(expected);
   });
   it("keeps stored infrastructure diagnostics out of workspace responses",async()=>{
     const created=await createWorkspace();

@@ -1,4 +1,4 @@
-// Real tab strip and details popover; only workspace data is a fixture.
+// Real tab strip and details/sharing controls; synthetic workspace/auth transport.
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
@@ -14,15 +14,19 @@ import {
   cloudScopedId,
   cloudWorkspaceKey,
 } from "../platform/bridge/cloud-workspace-key";
-import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
-import type { ChatThread } from "../state/store";
+import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudWorkspaceDetails } from "../state/cloud-workspace-catalog";
+import { useWorkspaceDispatch, useWorkspaceStore, type ChatThread } from "../state/store";
+import type { CloudWorkspaceActorRole, CloudWorkspaceDocument } from "../platform/cloud-workspaces";
+import { acceptOrganizationSnapshot, clearTeamStore } from "../features/team/team-store";
+import { setInternalFeatureEnabled } from "../features/settings/internal-features";
+import { Toaster } from "../shared/ui/primitives/elements/toast";
 
 const target = {
   organizationId: "11111111-1111-4111-8111-111111111111",
   workspaceId: "22222222-2222-4222-8222-222222222222",
 };
 const folder = cloudWorkspaceKey(target);
-acceptCloudWorkspaceDocument({
+const workspaceDocument: CloudWorkspaceDocument = {
   id: target.workspaceId,
   organizationId: target.organizationId,
   teamId: target.organizationId,
@@ -54,7 +58,57 @@ acceptCloudWorkspaceDocument({
     observedState: "running",
     lastObservedAt: null,
   },
-});
+};
+const sharingFixture = new URLSearchParams(location.search).has("sharing");
+const ownerId = "33333333-3333-4333-8333-333333333333";
+const actorIds = { owner: ownerId, manager: ownerId,
+  developer: "44444444-4444-4444-8444-444444444444",
+  prompter: "55555555-5555-4555-8555-555555555555",
+  viewer: "66666666-6666-4666-8666-666666666666" };
+let actorRole: CloudWorkspaceActorRole = "owner";
+let fixtureDocument = workspaceDocument;
+function installActor(role: CloudWorkspaceActorRole) {
+  actorRole = role;
+  clearTeamStore();
+  clearCloudWorkspaceCatalog();
+  const organization = { id: target.organizationId, slug: "fixture", name: "Example organization", logo: null,
+    isPersonal: false, role: "admin" as const, defaultTeamId: target.organizationId,
+    workspaceCapabilities: { local: false, cloud: true },
+    teamCapabilities: { multiple: false as const, canCreate: false as const } };
+  acceptOrganizationSnapshot({
+    user: { id: actorIds[role], email: "fixture@example.test", displayName: "Fixture", staffRole: "developer" },
+    teams: [organization], organizations: [organization],
+  });
+  setInternalFeatureEnabled("cloudComputerV2", true);
+  fixtureDocument = { ...workspaceDocument, ownerUserId: ownerId, createdBy: ownerId, actorRole: role,
+    sharingMode: "organization", accessRevision: 2,
+    capabilities: { ...workspaceDocument.capabilities, canWrite: role !== "viewer", canEdit: ["owner", "manager", "developer"].includes(role),
+      canManage: ["owner", "manager"].includes(role) } };
+  acceptCloudWorkspaceDocument(fixtureDocument);
+}
+if (sharingFixture) {
+  window.__ZEROS_NATIVE__ = {
+    async invoke<T>(command: string): Promise<T> {
+      if (command === "auth_get_access_token") return { access_token: "fixture-session" } as T;
+      if (command === "auth_get_session_user") return {
+        sub: actorIds[actorRole], accountId: actorIds[actorRole], email: "fixture@example.test", name: "Fixture", provider: "workos",
+      } as T;
+      throw new Error(`Unexpected fixture native command: ${command}`);
+    },
+    on: () => () => {},
+  };
+  Object.assign(window, { cloudWorkspaceSharingFixture: {
+    get document() { return fixtureDocument; },
+    get details() { return cloudWorkspaceDetails.peekSnapshot(folder).data; },
+    invalidateDetails() { cloudWorkspaceDetails.invalidate(folder); },
+    setPage(page: "workspace" | "dashboard") { useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page }); },
+    publishSharing(sharingMode: "private" | "organization", accessRevision: number) {
+      fixtureDocument = { ...fixtureDocument, sharingMode, accessRevision, version: fixtureDocument.version + 1 };
+      acceptCloudWorkspaceDocument(fixtureDocument);
+    },
+  } });
+  installActor("owner");
+} else acceptCloudWorkspaceDocument(workspaceDocument);
 const chats: ChatThread[] = Array.from({ length: 12 }, (_, i) => ({
   id: cloudScopedId(target, `chat-${i}`),
   folder,
@@ -68,15 +122,26 @@ const chats: ChatThread[] = Array.from({ length: 12 }, (_, i) => ({
   updatedAt: i,
 }));
 function Harness() {
+  const dispatch = useWorkspaceDispatch();
   const [cloud, setCloud] = useState(true);
   const [selected, setSelected] = useState(chats[0].id);
   return (
     <ActionsCtx.Provider value={{} as SessionsActions}>
       <TooltipProvider>
+        <Toaster />
         <main className="bg-bg0 text-fg1 min-h-screen p-6">
-          <div className="mb-6 flex gap-2">
+          <div className="mb-6 flex flex-wrap gap-2">
             <Button onClick={() => setCloud(true)}>Cloud fixture</Button>
             <Button onClick={() => setCloud(false)}>Local fixture</Button>
+            {sharingFixture && <>
+              <Button onClick={() => installActor("owner")}>Owner fixture</Button>
+              <Button onClick={() => installActor("developer")}>Developer fixture</Button>
+              <Button onClick={() => installActor("prompter")}>Prompter fixture</Button>
+              <Button onClick={() => installActor("viewer")}>Viewer admin fixture</Button>
+              <Button onClick={() => setInternalFeatureEnabled("cloudComputerV2", false)}>Flag off</Button>
+              <Button onClick={() => dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" })}>Hide workspace</Button>
+              <Button onClick={() => dispatch({ type: "SET_ACTIVE_PAGE", page: "workspace" })}>Show workspace</Button>
+            </>}
           </div>
           <section className="border-border1 bg-bg1 h-[500px] max-w-[740px] overflow-hidden rounded-lg border [--pane-bg:var(--bg1)]">
             <ChatTabs
