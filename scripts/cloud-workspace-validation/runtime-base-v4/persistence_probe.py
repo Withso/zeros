@@ -58,6 +58,17 @@ def probe(app, phase):
     aliases = [app.path(name).stat() for name in ("/srv/zeros/files/repos", "/srv/zeros/repos")]
     assert (aliases[0].st_dev, aliases[0].st_ino) == (aliases[1].st_dev, aliases[1].st_ino)
     assert len(record["mounts"]) == 4
+    residue = json.loads(app.read("/run/zeros/persistence-residue.json", 4096, 0o600))
+    assert residue["schema"] == "zeros.persistence-residue/v1" and residue["bootId"] == record["bootId"]
+    counts = [residue[key] for key in ("directories", "files", "symlinks", "other")]
+    assert all(type(count) is int and 0 <= count <= 2**53 - 1 for count in counts)
+    entries = sum(counts)
+    mounts = residue["mountPoints"]
+    assert type(mounts) is int and 0 <= mounts <= 4 and bool(entries) == bool(mounts)
+    if phase in ("rename", "verify"):
+        # Both stops deliberately keep all binds active. Boot must acknowledge
+        # clearing capture residue on this restore, not just hide it by binding.
+        assert entries > 0 and mounts > 0
     if phase != "cold":
         root = app.path("/srv/zeros/files/zeros-v2-test-persistence")
         uid, gid = app.account("agent")
@@ -74,6 +85,7 @@ def probe(app, phase):
         app.atomic("/etc/machine-id", b"", 0o444)
     os.sync()
     return {"schema": "zeros.persistence-probe/v1", "phase": phase, "bindCount": 4, "repoAliases": True,
+            "hostReady": True, "residueCleared": entries > 0, "residueEntries": entries, "residueMounts": mounts,
             "machineIdPresent": phase != "seed", "templateIdentityCleared": phase == "seed",
             "renames": 2 if phase in ("rename", "verify") else 0,
             "oldPathsAbsent": phase in ("rename", "verify")}

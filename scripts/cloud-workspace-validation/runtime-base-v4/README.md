@@ -112,8 +112,22 @@ requires a separate compatibility fix before reuse with this Boat behavior.
 
 The base creates `/home/user/.zeros-persist` as root:root 0755 and binds the
 following directories before publishing readiness. These are fresh v4 bases;
-boot refuses a nonempty, unmounted destination instead of hiding or migrating
-data from a v3 or older v4 layout.
+the backing tree is authoritative, and this layout does not migrate v3 data.
+Boat capture can leave directory skeletons or stale copies in the covered
+mount-point directories when it stops with binds active. On restore, mounts
+are gone but this residue remains. Before each missing bind, boot removes the
+uncovered destination's contents with an iterative descriptor-relative walk.
+It never follows symlinks or crosses mounts (including same-filesystem binds).
+Destination ownership/mode, symlink, wrong-source, stacked and nested-mount
+checks still fail closed before accepting work. Backing data is never migrated
+from or replaced by residue.
+
+Each cleared destination emits a value-free `persistence_residue_cleared`
+event with directory/file/symlink/other counts to stderr (the unit journal).
+Stdout retains its single closed diagnostic. The current boot's aggregate
+counts are stored root-only (0600) in `/run/zeros/persistence-residue.json`;
+boot discards stale evidence before attempting recovery. Re-running boot with
+valid mounts performs no deletion and records zero counts.
 
 | Logical host path | Backing path relative to `.zeros-persist` | Owner/group and mode | Contents |
 | --- | --- | --- | --- |
@@ -290,7 +304,9 @@ the journal refuses more than ten):
    valid machine ID. Cold-boot checks do not start or repair units.
    Sanitation and verification wait for both units to be active, the boot
    oneshot to complete, and dispatch's cgroup limits before reading the facade
-   or cleaning session state.
+   or cleaning session state. The workflow's `build` and `live-check` both use
+   the same `buildBase` sanitize → verify → snapshot sequence, with binds
+   active; there is no separate live-check snapshot/unmount path.
 3. Fetch official Node 22.23.1 and verify its published SHA-256. Build three
    deterministic synthetic archives containing that Node, idle/success
    stubs and a symlink with a 0555 archive header. The setup stub prints the
@@ -299,11 +315,16 @@ the journal refuses more than ten):
    SSH stdin delivery. Install A with the nested setup stub, verify the receipt
    and active descriptor. As UID 10001, seed two directory trees under
    `/srv/zeros/files/zeros-v2-test-persistence`, then clear `/etc/machine-id` to
-   model template sanitation. Stop/resume, require boot to restore the binds
-   and regenerate the ID, and rename one tree in the same parent and the other
+   model template sanitation. Stop/resume **with all four binds active**,
+   require zeros-boot to complete, zeros-host to become ready, fresh positive
+   residue-clearing counts, the restored binds and regenerated ID. Rename one tree in the same parent and the other
    across parents. Write new content after each rename. Stop/resume a second
-   time, require both old paths absent and both old/new contents intact, and
-   recheck all binds and the repo alias. Each resume must produce a new
+   time **with the binds still active**, again require fresh positive cleanup
+   counts and ready units, both old paths absent and both old/new contents
+   intact, and recheck all binds and the repo alias. `live.persistence` records
+   `hostReady`, `residueCleared`, `residueEntries` and `residueMounts` for each
+   phase; both resume phases must confirm residue was actually cleared.
+   Each resume must produce a new
    boot/session with the same runtime. Measure a full re-hash after the first resume, dropping the
    page cache when the provider permits it (`coldCache` records the result).
    Install B and require `previous=A`; corrupt C's archive and require the

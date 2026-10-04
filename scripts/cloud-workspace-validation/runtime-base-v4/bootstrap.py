@@ -52,6 +52,7 @@ ACTIVE = "/run/zeros/active-runtime.json"
 PRIVATE_FAILURES = "/run/zeros/bootstrap-failures.jsonl"
 PERSIST_ROOT = "/home/user/.zeros-persist"
 PERSIST_RECORD = "/run/zeros/persistence.json"
+PERSIST_RESIDUE = "/run/zeros/persistence-residue.json"
 # Only fixed paths are mounted. Mutable contents retain the existing runtime
 # ownership contract; root controls the backing parent and every mount point.
 PERSIST_LAYOUT = (("files", "root", "root", 0o755), ("state", "engine", "engine", 0o700),
@@ -515,6 +516,19 @@ class BindMounts:
         require(len(matches) <= 1, "base_compatibility")
         return bool(matches)
 
+    def unmounted(self, target):
+        require(not any(entry["target"] == str(target) or entry["target"].startswith(str(target) + "/")
+                        for entry in self.table()), "base_compatibility")
+
+    def mount_id(self, fd):
+        # st_dev cannot distinguish a bind of the same filesystem. Check the
+        # opened inode's actual mount, including mounts added after table().
+        with open(f"/proc/self/fdinfo/{fd}", "rb") as stream:
+            raw = stream.read(4097)
+        matches = re.findall(rb"^mnt_id:\s*([0-9]+)$", raw, re.MULTILINE)
+        require(len(raw) <= 4096 and len(matches) == 1, "base_compatibility")
+        return int(matches[0])
+
     def bind(self, source_fd, target_fd):
         # Pass pinned directory descriptors, never re-resolve a user-owned
         # ancestor in mount(8). The destination is reopened after mounting.
@@ -797,11 +811,63 @@ class Bootstrap:
         require(re.fullmatch(rb"[0-9a-f]{32}\n?", raw) is not None and raw.strip() != b"0" * 32, "base_compatibility")
         return sha(raw)
 
+    def clear_persistence_residue(self, target, root_fd):
+        """Delete only uncovered capture residue; the backing tree is authority."""
+        self.mounts.unmounted(target)  # Refuse nested mounts before any deletion.
+        mount_id = self.mounts.mount_id(root_fd)
+        counts = dict.fromkeys(("directories", "files", "symlinks", "other"), 0)
+
+        @contextlib.contextmanager
+        def directory(parts):
+            fd = os.dup(root_fd)
+            try:
+                for part in parts:
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    os.close(fd)
+                    fd = child
+                    require(self.mounts.mount_id(fd) == mount_id, "base_compatibility")
+                yield fd
+            finally:
+                os.close(fd)
+
+        # Iterative postorder with a constant descriptor count, even for deep
+        # residue left by an older base. Every component is reopened no-follow
+        # relative to the pinned root; never use resolved user paths.
+        pending = [((name,), False) for name in os.listdir(root_fd)]
+        while pending:
+            parts, visited = pending.pop()
+            with directory(parts[:-1]) as parent:
+                info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    with directory(parts) as child:
+                        opened = os.fstat(child)
+                        require((info.st_dev, info.st_ino) == (opened.st_dev, opened.st_ino), "base_compatibility")
+                        if not visited:
+                            os.fchmod(child, 0o700)
+                            pending.append((parts, True))
+                            pending.extend(((*parts, name), False) for name in os.listdir(child))
+                            continue
+                        os.fsync(child)
+                    os.rmdir(parts[-1], dir_fd=parent)
+                    counts["directories"] += 1
+                else:
+                    os.unlink(parts[-1], dir_fd=parent)  # Also unlinks symlinks/FIFOs without opening them.
+                    counts["files" if stat.S_ISREG(info.st_mode) else "symlinks" if stat.S_ISLNK(info.st_mode) else "other"] += 1
+        os.fsync(root_fd)
+        self.mounts.unmounted(target)
+        if any(counts.values()):
+            # Preserve the single closed stdout diagnostic; this value-free
+            # event is available in the unit journal and private live evidence.
+            print(json.dumps({"event": "persistence_residue_cleared", **counts}, separators=(",", ":")), file=sys.stderr, flush=True)
+        return counts
+
     def persistence(self, create=False):
         try:
             boot_id = self.boot_id()
             text_match(boot_id, UUID, "base_compatibility")
             result = {"schema": "zeros.persistence/v1", "bootId": boot_id, "machineIdSha256": self.machine_id(create), "mounts": []}
+            residue = {"schema": "zeros.persistence-residue/v1", "bootId": boot_id, "mountPoints": 0,
+                       "directories": 0, "files": 0, "symlinks": 0, "other": 0}
             with self.directory("/home", create=create) as home, \
                  self.data_directory(home, "user", *self.account("user"), 0o755, create, exact=False) as user, \
                  self.data_directory(user, ".zeros-persist", self.uid, self.gid, 0o755, create) as backing, \
@@ -817,7 +883,12 @@ class Bootstrap:
                         source_fd = stack.enter_context(self.data_directory(parent, name, uid, gid, mode, create))
                         with self.data_directory(logical, name, uid, gid, mode, create) as target_fd:
                             if not self.mounts.present(target):
-                                require(create and not os.listdir(target_fd), "base_compatibility")
+                                require(create, "base_compatibility")
+                                require(self.mounts.mount_id(target_fd) == self.mounts.mount_id(logical), "base_compatibility")
+                                cleared = self.clear_persistence_residue(target, target_fd)
+                                residue["mountPoints"] += int(any(cleared.values()))
+                                for key, count in cleared.items():
+                                    residue[key] += count
                                 self.mounts.bind(source_fd, target_fd)
                         # An fd opened before mount(2) refers to the covered
                         # directory, not the root of the new bind.
@@ -870,6 +941,10 @@ class Bootstrap:
                                     os.fsync(host_dir)
                                 finally:
                                     os.close(fd)
+            if create:
+                with self.directory("/run/zeros", create=True, mode=0o700):
+                    pass
+                self.atomic(PERSIST_RESIDUE, packed(residue))
             return result
         except OSError as error:
             raise Failure("base_compatibility") from error
@@ -1312,6 +1387,7 @@ class Bootstrap:
         self.layout()
         with self.lock("runtime-install.lock"), self.lock("runtime-publication.lock"):
             self.unlink(PERSIST_RECORD)
+            self.unlink(PERSIST_RESIDUE)
             # Boat overlays the saved disk after stock early-boot services
             # have run. Reload verified base policy on every invocation,
             # including a retry with the same kernel boot ID.

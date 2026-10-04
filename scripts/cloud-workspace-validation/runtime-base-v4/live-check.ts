@@ -260,8 +260,14 @@ export async function probePersistence(deps: KitDeps, id: string, phase: "cold" 
   const renamed = phase === "rename" || phase === "verify";
   requireBase(result?.schema === "zeros.persistence-probe/v1" && result.phase === phase && result.bindCount === 4 &&
     result.repoAliases === true && result.machineIdPresent === (phase !== "seed") && result.templateIdentityCleared === (phase === "seed") &&
-    result.renames === (renamed ? 2 : 0) && result.oldPathsAbsent === renamed, "resume", "base_compatibility");
+    result.renames === (renamed ? 2 : 0) && result.oldPathsAbsent === renamed && result.hostReady === true &&
+    Number.isSafeInteger(result.residueEntries) && result.residueEntries >= 0 &&
+    Number.isSafeInteger(result.residueMounts) && result.residueMounts >= 0 && result.residueMounts <= 4 &&
+    result.residueCleared === (result.residueEntries > 0) && (result.residueMounts > 0) === result.residueCleared &&
+    (!renamed || result.residueCleared === true), "resume", "base_compatibility");
   return { phase, bindCount: 4, repoAliases: true, machineIdPresent: phase !== "seed", templateIdentityCleared: phase === "seed",
+    hostReady: true, residueCleared: result.residueCleared as boolean,
+    residueEntries: result.residueEntries as number, residueMounts: result.residueMounts as number,
     renames: renamed ? 2 : 0, oldPathsAbsent: renamed };
 }
 
@@ -296,6 +302,8 @@ export async function liveCheck(options: Map<string, string>, deps: KitDeps) {
       const seededPersistence = await probePersistence(profile, sandboxId, "seed");
       const clone = { ...profile, stateDir: path.join(profile.stateDir, "verification") };
       const stopAndResume = async () => {
+        // Keep the binds active during both captures, exactly like workspace
+        // idle sleep. The next probe requires boot's residue-clearing evidence.
         await builderCommand("stop", new Map(), [], clone);
         await waitSandbox(profile, sandboxId, "archived");
         await resumeOwned(profile, clone, maxUsedHours);

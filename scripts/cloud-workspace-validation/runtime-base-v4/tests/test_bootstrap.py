@@ -165,6 +165,11 @@ class FakeMounts:
     def present(self, target):
         return str(target) in self.links
 
+    def unmounted(self, target):
+        b.require(not any(path == str(target) or path.startswith(str(target) + "/") for path in self.links), "base_compatibility")
+
+    mount_id = b.BindMounts.mount_id
+
     def bind(self, source_fd, target_fd):
         source = os.readlink(f"/proc/self/fd/{source_fd}")
         target = os.readlink(f"/proc/self/fd/{target_fd}")

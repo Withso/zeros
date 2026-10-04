@@ -142,16 +142,97 @@ class PersistenceTests(unittest.TestCase):
                     saved.rename(target)
                 self.app.boot()
 
-    def test_unmounted_nonempty_target_is_not_silently_hidden_or_migrated(self):
+    def test_restore_clears_only_unmounted_residue_and_reports_counts(self):
+        authority = self.backing / "files/keep"
+        authority.write_text("authoritative data")
+        for name in NAMES:
+            target = self.root / "srv/zeros" / name
+            self.mounts.links.pop(str(target))
+            (target / "old/nested").mkdir(parents=True)
+            (target / "old/nested/file").write_text("stale copy")
+            (target / "link").symlink_to(authority)
+            (target / "directory-link").symlink_to(self.backing)
+            (target / "dangling").symlink_to("missing")
+            os.mkfifo(target / "pipe")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            code, output = self.cli(["boot"])
+        self.assertEqual(code, 0, output)
+        self.assertTrue(json.loads(output)["ok"])  # Still exactly one stdout line.
+        self.assertEqual(authority.read_text(), "authoritative data")
+        for name in NAMES:
+            self.assertEqual(list((self.root / "srv/zeros" / name).iterdir()), [])
+        events = [json.loads(line) for line in errors.getvalue().splitlines()]
+        self.assertEqual(events, [{"event": "persistence_residue_cleared", "directories": 2,
+                                   "files": 1, "symlinks": 3, "other": 1}] * 4)
+        evidence = self.app.path(b.PERSIST_RESIDUE)
+        self.assertEqual(evidence.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(evidence.read_bytes()), {"schema": "zeros.persistence-residue/v1",
+            "bootId": fixtures.BOOT, "mountPoints": 4, "directories": 8, "files": 4, "symlinks": 12, "other": 4})
+        self.app.require_persistence()
+        errors = io.StringIO()
+        count = len(self.mounts.calls)
+        with contextlib.redirect_stderr(errors):
+            self.app.boot()
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(len(self.mounts.calls), count)
+        self.assertEqual(json.loads(evidence.read_bytes())["mountPoints"], 0)
+
+    def test_nested_mount_refuses_cleanup_before_deleting_any_residue(self):
         target = self.root / "srv/zeros/files"
-        self.assertTrue(target.is_dir())
         self.mounts.links.pop(str(target))
-        (target / "unexpected").write_text("preserve")
+        (target / "stale").write_text("keep on refusal")
+        (target / "nested").mkdir()
+        self.mounts.links[str(target / "nested")] = str(self.backing / "home")
         code, output = self.cli(["boot"])
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(output)["failedChecks"], ["base_compatibility"])
-        self.assertEqual((target / "unexpected").read_text(), "preserve")
+        self.assertEqual((target / "stale").read_text(), "keep on refusal")
         self.assertFalse(self.record.exists())
+
+    def test_interrupted_residue_cleanup_fails_closed_and_is_retryable(self):
+        target = self.root / "srv/zeros/files"
+        self.mounts.links.pop(str(target))
+        for name in ("first", "second"):
+            (target / name).write_text("residue")
+        original, removed = b.os.unlink, []
+
+        def interrupted(name, **kwargs):
+            if name in ("first", "second"):
+                if removed:
+                    raise OSError("private-canary")
+                removed.append(name)
+            return original(name, **kwargs)
+
+        with mock.patch.object(b.os, "unlink", side_effect=interrupted):
+            code, output = self.cli(["boot"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output)["failedChecks"], ["base_compatibility"])
+        self.assertNotIn(b"private-canary", output)
+        self.assertFalse(self.record.exists())
+        self.assertFalse(self.app.path(b.PERSIST_RESIDUE).exists())
+        self.assertEqual(len(list(target.iterdir())), 1)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.app.boot()
+        self.assertEqual(list(target.iterdir()), [])
+        self.app.require_persistence()
+
+    def test_residue_does_not_bypass_destination_mode_or_source_checks(self):
+        target = self.root / "srv/zeros/files"
+        (target / "stale").write_text("keep on refusal")
+        for problem in ("mode", "wrong-source"):
+            with self.subTest(problem=problem):
+                self.mounts.links[str(target)] = str(self.backing / "home")
+                if problem == "mode":
+                    self.mounts.links.pop(str(target))
+                    target.chmod(0o777)
+                code, output = self.cli(["boot"])
+                self.assertEqual(code, 1)
+                self.assertEqual(json.loads(output)["failedChecks"],
+                                 ["file_mode" if problem == "mode" else "base_compatibility"])
+                self.assertEqual((target / "stale").read_text(), "keep on refusal")
+                self.assertFalse(self.record.exists())
+                target.chmod(0o755)
 
     def test_wrong_backing_mode_fails_closed_before_any_remount(self):
         state = self.backing / "state"
@@ -287,6 +368,16 @@ class KernelBindTests(unittest.TestCase):
             with self.assertRaises(b.Failure):
                 b.parse_mountinfo(invalid)
 
+    def test_residue_preflight_rejects_exact_stacked_and_nested_mounts(self):
+        target = "/srv/zeros/files"
+        mounts = b.BindMounts()
+        with mock.patch.object(mounts, "table", return_value=[{"target": "/"}]):
+            mounts.unmounted(target)
+        for targets in ((target,), (target, target), (target + "/nested",)):
+            with self.subTest(targets=targets), mock.patch.object(mounts, "table", return_value=[{"target": value} for value in targets]):
+                with self.assertRaises(b.Failure):
+                    mounts.unmounted(target)
+
     def test_real_bind_mounts_in_an_isolated_user_and_mount_namespace(self):
         if sys.platform != "linux":
             self.skipTest("Linux mount namespaces required")
@@ -338,19 +429,69 @@ assert probe.probe(app, 'cold')['repoAliases']
 assert probe.probe(app, 'seed')['templateIdentityCleared']
 assert not app.path('/etc/machine-id').read_bytes()
 # Recreate the mounts like an overlay restore, with the same underlying data
-# and a sanitized machine-id. No early system service is involved.
+# and capture residue in the uncovered targets. No early service is involved.
 for name, *_ in reversed(b.PERSIST_LAYOUT):
     subprocess.run(['umount', str(root / 'srv/zeros' / name)], check=True, capture_output=True)
+
+def capture_residue():
+    for name, *_ in b.PERSIST_LAYOUT:
+        target = root / 'srv/zeros' / name
+        (target / 'stale/nested').mkdir(parents=True)
+        (target / 'stale/nested/file').write_text('stale')
+        (target / 'link').symlink_to(root / 'home/user/.zeros-persist/files/repos/new')
+
+capture_residue()
+# A same-filesystem nested bind must be rejected before cleanup, even when a
+# stale mount table misses it: compare each opened fd's kernel mount identity.
+other = root / 'foreign'
+other.mkdir(mode=0o755)
+(other / 'keep').write_text('never delete')
+point = files / 'nested-mount'
+point.mkdir()
+subprocess.run(['mount', '--bind', str(other), str(point)], check=True, capture_output=True)
+assert other.stat().st_dev == files.stat().st_dev
+for stale_table in (False, True):
+    app.mounts = b.BindMounts()
+    if stale_table:
+        app.mounts.unmounted = lambda _: None
+    try:
+        app.persistence(create=True)
+    except b.Failure as error:
+        assert error.checks == ['base_compatibility']
+    else:
+        raise AssertionError('cleanup crossed a nested bind')
+    assert (other / 'keep').read_text() == 'never delete'
+    assert other.stat().st_mode & 0o777 == 0o755
+    if not stale_table:
+        assert (files / 'stale/nested/file').read_text() == 'stale'
+subprocess.run(['umount', str(point)], check=True, capture_output=True)
+app.mounts = b.BindMounts()
 record = app.persistence(create=True)
 app.atomic(b.PERSIST_RECORD, b.packed(record))
-assert probe.probe(app, 'rename')['machineIdPresent']
+renamed = probe.probe(app, 'rename')
+assert renamed['machineIdPresent'] and renamed['residueCleared'] and renamed['residueMounts'] == 4
 for name, *_ in reversed(b.PERSIST_LAYOUT):
     subprocess.run(['umount', str(root / 'srv/zeros' / name)], check=True, capture_output=True)
+assert all(not list((root / 'srv/zeros' / name).iterdir()) for name, *_ in b.PERSIST_LAYOUT)
+capture_residue()
 record = app.persistence(create=True)
 app.atomic(b.PERSIST_RECORD, b.packed(record))
-assert probe.probe(app, 'verify')['oldPathsAbsent']
+verified = probe.probe(app, 'verify')
+assert verified['oldPathsAbsent'] and verified['residueCleared'] and verified['residueMounts'] == 4
+assert (root / 'srv/zeros/repos/new/contents').read_text() == 'keep'
+# An idempotent boot clears the previous invocation's count. A resume proof
+# must fail without fresh cleanup evidence, even though binds/data are valid.
+record = app.persistence(create=True)
+app.atomic(b.PERSIST_RECORD, b.packed(record))
+try:
+    probe.probe(app, 'verify')
+except AssertionError:
+    pass
+else:
+    raise AssertionError('resume accepted without fresh residue evidence')
 for name, *_ in reversed(b.PERSIST_LAYOUT):
     subprocess.run(['umount', str(root / 'srv/zeros' / name)], check=True, capture_output=True)
+assert all(not list((root / 'srv/zeros' / name).iterdir()) for name, *_ in b.PERSIST_LAYOUT)
 '''
         with tempfile.TemporaryDirectory(prefix="zeros-persistence-mount-") as root:
             result = subprocess.run(["unshare", "--user", "--map-root-user", "--mount", "python3", "-I", "-c", program,
