@@ -83,13 +83,14 @@ describe("release dependency and authority contracts", () => {
       expect(runtimeJob).not.toMatch(/secrets\.|secrets:|BOAT_|DAYTONA_|CLOUD_WORKSPACE_S3_|qualify|qualification|hosted-mutation|contents: write/);
     }
   });
-  it("grants Alpha OIDC only to runtime publication and gates its feed on publication", () => {
-    const text = workflow("release-alpha"), publish = job(text, "runtime-publish");
+  it("grants Alpha OIDC only to runtime publication and keeps its feed independent of runtime jobs", () => {
+    const text = workflow("release-alpha"), publish = job(text, "runtime-publish"), feed = job(text, "publish");
     expect(publish).toContain("id-token: write");
     expect(publish).toContain("contents: read");
     expect((text.match(/id-token: write/g) ?? []).length).toBe(1);
     for (const name of ["ci", "hosted", "build", "runtime-build", "publish"]) expect(job(text, name)).not.toContain("id-token:");
-    expect(job(text, "publish")).toContain("needs: [ci, build, hosted, runtime-publish]");
+    expect(feed).toContain("needs: [ci, build, hosted]");
+    expect(feed).not.toMatch(/^ {4}needs:.*runtime-(?:build|publish)/m);
     expect(job(text, "hosted")).toContain("needs: ci");
     expect(job(text, "build")).not.toMatch(/^ {4}needs:/m);
     for (const name of ["release-beta", "release"]) expect(workflow(name)).not.toMatch(/runtime-build|runtime-publish/);
@@ -159,7 +160,7 @@ describe("release dependency and authority contracts", () => {
     expect(build).toContain("contents: read");
     expect(build).not.toMatch(channel === "production" ? /^    needs: (?!approve$)/m : /^    needs:/m);
     expect(build).toContain("if: github.event.repository.fork == false");
-    expect(publish).toContain(channel === "production" ? "needs: [approve, ci, build, hosted, notarize]" : channel === "alpha" ? "needs: [ci, build, hosted, runtime-publish]" : "needs: [ci, build, hosted]");
+    expect(publish).toContain(channel === "production" ? "needs: [approve, ci, build, hosted, notarize]" : "needs: [ci, build, hosted]");
     expect(publish).toContain("contents: write");
     expect(publish).toContain("actions: read");
     expect(publish).toContain("ref: ${{ github.sha }}");
