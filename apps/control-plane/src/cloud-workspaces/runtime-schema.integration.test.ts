@@ -364,6 +364,54 @@ database("v4 runtime registry and immutable schema", () => {
     ).rejects.toMatchObject({ code: "23514" });
   });
 
+  it("accepts an org template ref with a matching runtime base pin", async () => {
+    await withSystemTx(pool, (tx) =>
+      insert(
+        tx,
+        "cloud_workspace_generations",
+        generation({ image_ref: "boat-template:zeros-v2-test-template_1" }),
+      ),
+    );
+  });
+
+  it("rejects arbitrary or malformed template refs with a runtime pin", async () => {
+    for (const image_ref of [
+      "zeros-v2-test-arbitrary-snapshot",
+      "boat-template:",
+      "boat-template:zeros-v2-test-template/child",
+      "boat-template:zeros-v2-test-template:child",
+      `boat-template:${"x".repeat(129)}`,
+    ])
+      await expect(
+        withSystemTx(pool, (tx) =>
+          insert(
+            tx,
+            "cloud_workspace_generations",
+            generation({ image_ref }),
+          ),
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("rejects template refs whose source or storage mismatches the pinned base", async () => {
+    for (const changes of [
+      { source_commit: manifest.source.commit },
+      { storage_mib: 20481 },
+    ])
+      await expect(
+        withSystemTx(pool, (tx) =>
+          insert(
+            tx,
+            "cloud_workspace_generations",
+            generation({
+              image_ref: "boat-template:zeros-v2-test-template_1",
+              ...changes,
+            }),
+          ),
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+  });
+
   it("rejects mismatched base pairs, saved base provenance, manifest digests and protocols", async () => {
     const otherContract = { ...baseContract, systemdMin: 255 };
     const otherDigest = createHash("sha256")

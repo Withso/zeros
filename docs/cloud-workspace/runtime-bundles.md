@@ -129,9 +129,13 @@ Generations carry the nullable six-column group `runtime_id`,
 `runtime_manifest_sha256`, `runtime_base_image_id`, `runtime_base_compatibility_id`,
 `runtime_profile`, `runtime_engine_protocol_version`: all NULL or all present.
 Composite foreign keys bind runtime/digest and base image/compatibility. A
-registered v4 base requires a pin, with the same provider, image, source commit,
-architecture and storage; the protocol must match its bundle. The six columns
-are immutable after insert, including NULL-to-v4 updates.
+registered v4 base's image ref requires a pin. The pinned base must match the
+generation's provider, source commit, architecture and storage. The generation's
+image ref must equal the base's registered ref or match
+`^boat-template:[A-Za-z0-9_-]{1,128}$` for an org template fork. Phase C's
+`cloud_workspace_computer_sources` sidecar validates template/build and org
+provenance; this guard only admits the ref format. The protocol must match its
+bundle. The six columns are immutable after insert, including NULL-to-v4 updates.
 
 Engine instances and setup attestations carry those columns plus
 `runtime_installer_receipt_sha256`, UUID `runtime_boot_id`, and UUID

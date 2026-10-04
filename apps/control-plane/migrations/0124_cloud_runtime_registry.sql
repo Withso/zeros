@@ -193,10 +193,13 @@ BEGIN
     END IF;
     RETURN NEW;
   END IF;
+  -- Phase C's sidecar validates template/org provenance. This guard admits
+  -- only the template ref format while retaining the exact base/runtime pin.
   IF NOT EXISTS (
     SELECT 1 FROM cloud_runtime_base_images base JOIN cloud_runtime_bundles bundle ON bundle.runtime_id = NEW.runtime_id
     WHERE base.base_image_id = NEW.runtime_base_image_id AND base.base_compatibility_id = NEW.runtime_base_compatibility_id
-      AND base.provider = NEW.provider AND base.image_ref = NEW.image_ref AND base.source_commit = NEW.source_commit
+      AND base.provider = NEW.provider AND base.source_commit = NEW.source_commit
+      AND (base.image_ref = NEW.image_ref OR NEW.image_ref ~ '^boat-template:[A-Za-z0-9_-]{1,128}$')
       AND base.architecture = NEW.architecture AND base.storage_mib = NEW.storage_mib
       AND bundle.manifest_sha256 = NEW.runtime_manifest_sha256
       AND bundle.engine_protocol_version = NEW.runtime_engine_protocol_version
