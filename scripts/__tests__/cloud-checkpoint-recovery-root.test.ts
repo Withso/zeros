@@ -62,6 +62,7 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
 
   it("journals v4 primary hooks across wake, with redacted failure output and an explicit new-run retry", async () => {
     const repo=runtimeLayout.repository, commit=git(repo,["rev-parse","HEAD"],true);
+    await fs.mkdir(path.join(runtimeLayout.engineFilesRoot, ".zeros-setup", "seed"), { recursive: true });
     const profile={version:4,setupDirectory:"/srv/zeros/setup-v4",managedSettingsDirectory:"/srv/zeros/managed-v4"};
     const material={execution:{workspaceId:randomUUID(),organizationId:randomUUID(),generation:1,setupRunId:randomUUID(),executionFence:1},
       repository:{cloneUrl:"https://github.com/example/recovery.git",revision:commit},settings:{version:1,snapshotSha256:"b".repeat(64),document:{values:{}},
