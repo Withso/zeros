@@ -181,6 +181,9 @@ export class CloudAccessDeviceAuthority {
   async signRuntimeService(accessToken: string, payload: import("./cloud-runtime-service-client").CloudRuntimeServiceProofPayload) {
     return this.signAccess(accessToken, "runtime-service.issue", payload);
   }
+  async signPreview(accessToken: string, payload: import("./cloud-workspace-access-client").CloudPreviewProofPayload) {
+    return this.signAccess(accessToken, "preview.issue", payload);
+  }
 
   private async signAccess(accessToken: string, action: string, payload: unknown) {
     const device=await this.ensure();
@@ -316,6 +319,10 @@ export async function signCloudEngineAdmissionForMain(accessToken:string,target:
 export async function signCloudRuntimeServiceForMain(accessToken: string, payload: import("./cloud-runtime-service-client").CloudRuntimeServiceProofPayload) {
   await ensureCloudAccessDeviceForMain();
   return accessDeviceAuthority!.signRuntimeService(accessToken, payload);
+}
+export async function signCloudPreviewForMain(accessToken: string, payload: import("./cloud-workspace-access-client").CloudPreviewProofPayload) {
+  await ensureCloudAccessDeviceForMain();
+  return accessDeviceAuthority!.signPreview(accessToken, payload);
 }
 
 /** Build the private stdin seed. Auth0 compatibility sessions deliberately

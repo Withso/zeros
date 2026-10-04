@@ -151,9 +151,8 @@ export interface UseIframeWebviewResult {
   /** Latest known state. Updated on iframe load events. */
   state: IframeWebviewState;
   navigate: (url: string) => void;
-  /** Replace the current history entry while remounting the iframe. Used for
-   * transparent preview credential/origin renewal. */
-  replace: (url: string) => void;
+  /** Replace history; native admission must preserve its exact owned frame. */
+  replace: (url: string, options?: { preserveFrame?: boolean }) => void | Promise<void>;
   back: () => void;
   forward: () => void;
   reload: () => void;
@@ -591,7 +590,7 @@ export function useIframeWebview(
   );
 
   const replace = useCallback(
-    (url: string) => {
+    (url: string, options?: { preserveFrame?: boolean }) => {
       if (!url) return;
       const previousHistory = snapshotIframeHistory(
         historyRef.current,
@@ -604,11 +603,18 @@ export function useIframeWebview(
         historyRef.current[indexRef.current] = url;
       }
       documentGenerationRef.current += 1;
-      requestFrameNavigation(url, previousHistory);
+      let completion: Promise<void> | undefined;
+      if (options?.preserveFrame) {
+        pendingFrameNavigationRef.current = { requestedUrl: url, previousHistory, replaceFrameOnCancel: false };
+        completion = nativeInvoke<{ ok: boolean }>("browser:control-iframe", { frameName, action: "replace", url }).then(result => {
+          if (!result.ok) throw new Error("admitted preview frame is unavailable");
+        });
+      } else requestFrameNavigation(url, previousHistory);
       updateState({ currentUrl: url, isLoading: true, title: "" });
       recomputeNav();
+      return completion;
     },
-    [requestFrameNavigation, updateState, recomputeNav],
+    [frameName, requestFrameNavigation, updateState, recomputeNav],
   );
 
   const back = useCallback(() => {

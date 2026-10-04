@@ -772,6 +772,7 @@ describe("repository layout contracts", () => {
       "lifecycle-diagnostics.md",
       "mcp-and-skills.md",
       "native-access-acceptance.md",
+      "native-preview-acceptance.md",
       "organization-setup.md",
       "pro-backend.md",
       "product-contract.md",

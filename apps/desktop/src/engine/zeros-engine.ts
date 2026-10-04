@@ -58,6 +58,7 @@ import { cloudComputerProcessEnvironment } from "./agents/cloud-computer-environ
 import { CloudCustomizationRedactor } from "./agents/cloud-customization-redaction";
 import { readObservedCloudWorkspacePorts } from "./cloud-observed-ports";
 import { CloudPreviewGatewayFactory } from "./agents/containment/cloud-preview-links";
+import { CloudNativePreviewGatewayFactory } from "./agents/containment/cloud-native-preview-gateway";
 import type { Transport, TransportClient } from "./transport/types";
 import {
   channel,
@@ -1939,6 +1940,7 @@ export class ZerosEngine {
                 this.cloudRuntimeRegistration!.verifyClientAdmission(token, true),
               verifyServiceAccess: (token: string) => this.cloudRuntimeCheckpointQuiescing
                 ? Promise.resolve(null) : this.cloudRuntimeRegistration!.verifyServiceAccess(token),
+              resolveAgentPreviewTarget: (target) => this.agents.resolveNativePreviewTarget(target),
               ...(humanServices ? { openServiceStream: (grant: Parameters<CloudRuntimeHumanServices["open"]>[0]) => humanServices.open(grant) } : {}),
               forbiddenPreviewPorts: Array.from({ length: this.portSpan }, (_, index) => this.portStart + index),
             }
@@ -2001,7 +2003,8 @@ export class ZerosEngine {
           ),
       }).admit,
       ...(this.cloud
-        ? { previewGatewayFactory: new CloudPreviewGatewayFactory() }
+        ? { previewGatewayFactory: this.cloudWorker?.version === 4
+            ? new CloudNativePreviewGatewayFactory() : new CloudPreviewGatewayFactory() }
         : {}),
       events: {
         onBoundaryStatusChanged: (agentId, executionId, status) => {
@@ -5507,6 +5510,7 @@ export class ZerosEngine {
               url: opened.url,
               admissionUrl: opened.admissionUrl,
               expiresAt: opened.expiresAt,
+              ...(opened.nativeTarget ? { nativeTarget: opened.nativeTarget } : {}),
             }),
           );
           return;

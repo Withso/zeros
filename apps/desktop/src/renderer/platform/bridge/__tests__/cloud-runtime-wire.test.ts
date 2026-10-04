@@ -27,6 +27,17 @@ describe("cloud runtime wire routing", () => {
     })).toBeNull();
   });
 
+  it("scopes the preview response envelope while retaining the engine's opaque native target", () => {
+    const target = { executionId: "execution-native", portId: "A".repeat(32) };
+    const response = cloudIncoming(scope, { type: "AGENT_BOUNDARY_PORT_OPENED",
+      executionId: target.executionId, portId: target.portId, nativeTarget: target,
+      url: "http://localhost:5173/", admissionUrl: "http://localhost:5173/" });
+    expect(response.executionId).toBe(cloudScopedId(scope, target.executionId));
+    expect(response.nativeTarget).toBe(target);
+    expect(cloudOutgoing(scope, { type: "AGENT_OPEN_BOUNDARY_PORT", executionId: response.executionId, portId: target.portId }))
+      .toMatchObject({ executionId: target.executionId, portId: target.portId });
+  });
+
   it("routes file operations by stable workspace identity and preserves relative file paths", () => {
     const message = {
       type: "WORKSPACE_REQUEST",

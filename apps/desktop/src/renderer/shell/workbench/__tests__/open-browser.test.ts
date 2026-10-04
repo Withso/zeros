@@ -3,6 +3,15 @@ import { describe, expect, it } from "vitest";
 import { planBrowserOpen } from "../use-open-browser";
 import { createBrowserTab, type WorkbenchTab } from "../tab-model";
 
+it("keeps same-port previews separate across agent listeners and human applications", () => {
+  const firstSource = { chatId: "chat-a", port: 5173, executionId: "execution-a", portId: "A".repeat(32) };
+  const first = createBrowserTab({ url: "http://localhost:5173/", previewSource: firstSource });
+  const second = planBrowserOpen([first], first.id, { url: first.url, previewSource: { ...firstSource, executionId: "execution-b", portId: "B".repeat(32) } });
+  expect(second?.type).toBe("ADD_WORKBENCH_TAB");
+  expect(planBrowserOpen([first], first.id, { url: first.url })?.type).toBe("ADD_WORKBENCH_TAB");
+  expect(planBrowserOpen([first], first.id, { url: first.url, previewSource: firstSource })?.type).toBe("ACTIVATE_WORKBENCH_TAB");
+});
+
 const filesTab = (): WorkbenchTab => ({
   id: "files-home",
   type: "files",

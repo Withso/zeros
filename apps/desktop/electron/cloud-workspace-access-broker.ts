@@ -11,6 +11,7 @@ import {
   type CloudWorkspaceSshAccess,
   type CloudWorkspaceTunnelAccess,
 } from "./cloud-workspace-access-client";
+import type { CloudAgentPreviewTarget } from "@zeros/protocol/containment";
 
 const ACCESS_TTL_MINUTES = 30;
 const MAX_ACTIVE_ACCESS = 64;
@@ -65,6 +66,7 @@ export interface CloudWorkspaceAccessBrokerApi {
       organizationId: string;
       workspaceId: string;
       port: number;
+      target?: CloudAgentPreviewTarget;
       expiresInMinutes: number;
       idempotencyKey: string;
     },
@@ -578,7 +580,7 @@ export class CloudWorkspaceAccessBroker {
   }
 
   async openPreview(
-    input: AccessTarget & { port: number; frameName: string },
+    input: AccessTarget & { port: number; frameName: string; target?: CloudAgentPreviewTarget } & Partial<CloudServiceContext>,
     authorize: PreviewAuthorizer,
   ): Promise<{
     accessId: string;
@@ -588,6 +590,13 @@ export class CloudWorkspaceAccessBroker {
     expiresAt: string;
   }> {
     const frameName = safeFrameName(input.frameName);
+    const context = this.nativeServices ? this.serviceContext() : null;
+    const assertContext = () => {
+      if (context && (JSON.stringify(this.serviceContext()) !== JSON.stringify(context) ||
+        (input.authorityId !== undefined && (input.authorityId !== context.authorityId || input.deviceId !== context.deviceId || input.keyVersion !== context.keyVersion))))
+        throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "Cloud preview authority changed.");
+    };
+    assertContext();
     const releaseFrame = await this.lockPreviewFrame(frameName);
     try {
       const prior = this.previewByFrame.get(frameName);
@@ -599,6 +608,7 @@ export class CloudWorkspaceAccessBroker {
           organizationId: input.organizationId,
           workspaceId: input.workspaceId,
           port: applicationPort(input.port, "Preview port"),
+          ...(input.target ? { target: input.target } : {}),
           expiresInMinutes: ACCESS_TTL_MINUTES,
           idempotencyKey: this.key("preview"),
         });
@@ -618,6 +628,7 @@ export class CloudWorkspaceAccessBroker {
         let authorized = false;
         let previewAuthorizationCleanup: (() => void) | undefined;
         try {
+          assertContext();
           const authorization = authorize({
             frameName,
             origin: response.preview.origin,

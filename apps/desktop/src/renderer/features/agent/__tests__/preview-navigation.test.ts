@@ -14,6 +14,15 @@ import {
 
 describe("ephemeral preview navigation", () => {
   beforeEach(clearPreviewNavigationsForTest);
+  it("keeps native header admission outside the persisted logical URL", () => {
+    const url = "http://localhost:5173/assets?version=2";
+    const admissionUrl = "https://preview.example.test/assets?version=2";
+    stagePreviewNavigation("browser-native", { url, admissionUrl, expiresAt: Date.now() + 60_000, native: true });
+    expect(previewNavigationForTab("browser-native", url)).toBe(admissionUrl);
+    expect(isPreviewRuntimeUrlForTab("browser-native", url, admissionUrl)).toBe(true);
+    expect(url).not.toContain("preview.example.test");
+    expect(() => stagePreviewNavigation("browser-native-invalid", { url, admissionUrl: "http://preview.example.test/", native: true })).toThrow("capability");
+  });
 
   it("keeps the one-use admission URL out of persisted tab state", () => {
     const persisted = "http://127.0.0.1:45678/";

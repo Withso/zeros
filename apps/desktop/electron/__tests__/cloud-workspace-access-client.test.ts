@@ -377,6 +377,17 @@ describe("CloudWorkspaceAccessClient", () => {
     });
   });
 
+  it("carries opaque preview identity and rejects a mismatched returned target", async () => {
+    const target = { executionId: "execution-native", portId: "A".repeat(32) };
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => init?.method === "DELETE" ? new Response(null, { status: 204 }) : json({ grant: grant("preview", 4173), preview: {
+      logicalUrl: "http://localhost:4173/", origin: "https://0123456789abcdef0123456789abcdef.preview.zeros.test",
+      capability: PREVIEW_CAPABILITY, headerName: "x-zeros-preview-capability", target: { ...target, portId: "B".repeat(32) },
+    } }, 201));
+    const client = new CloudWorkspaceAccessClient({ baseUrl: "https://api.zeros.test", fetch: fetcher as typeof fetch, now: () => NOW, allowedPreviewHostSuffixes: ["preview.zeros.test"] });
+    await expect(client.issuePreview("account-access-token", { organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID, port: 4173, target, expiresInMinutes: 30, idempotencyKey: "desktop:preview:opaque" })).rejects.toMatchObject({ code: "bad_response" });
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({ target });
+  });
+
   it("rejects an array-encoded preview capability instead of returning it as a string", async () => {
     const client = new CloudWorkspaceAccessClient({
       baseUrl: "https://api.zeros.test",

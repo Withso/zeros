@@ -91,6 +91,7 @@ import {
 } from "./ui-smoke-create-source-focus.mjs";
 import { runCloudWorkspaceSmoke } from "./ui-smoke-cloud-workspace.mjs";
 import { runCloudReplicaSmoke } from "./ui-smoke-cloud-replicas.mjs";
+import { runCloudPreviewSmoke } from "./ui-smoke-cloud-previews.mjs";
 import { runCloudTerminalSmoke } from "./ui-smoke-cloud-terminal.mjs";
 import { runCloudSettingsSmoke } from "./ui-smoke-cloud-settings.mjs";
 import {
@@ -169,7 +170,7 @@ const vite = spawn(
     stdio: ["ignore", "pipe", "pipe"],
     // Keep API-backed browser contracts deterministic even without a local
     // .env. Each exercised endpoint is intercepted by its smoke test.
-    env: { ...process.env, VITE_CONTROL_PLANE_URL: "https://api.example.test" },
+    env: { ...process.env, VITE_CONTROL_PLANE_URL: "https://api.example.test", VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "preview.example.test" },
     detached: true,
   },
 );
@@ -215,6 +216,9 @@ try {
   await runCloudReplicaSmoke({ page: cloudReplicaPage, check, harnessBase });
   await cloudReplicaPage.close();
   await cloudPage.close();
+  const cloudPreviewPage = await newPage({ viewport: { width: 900, height: 650 } });
+  await runCloudPreviewSmoke({ page: cloudPreviewPage, check, harnessBase });
+  await cloudPreviewPage.close();
   const cloudTerminalPage = await newPage({
     viewport: { width: 1100, height: 780 },
   });

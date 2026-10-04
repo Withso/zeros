@@ -14,6 +14,8 @@ export interface PreviewNavigationInput {
   readonly url: string;
   readonly admissionUrl: string;
   readonly expiresAt?: number;
+  /** Native frame admission injects authority in Electron, never a URL. */
+  readonly native?: boolean;
 }
 
 interface NormalizedPreviewNavigation {
@@ -86,7 +88,9 @@ function normalizedPreviewNavigation(
   }
   if (
     url.searchParams.has("__zsr_cap") ||
-    !admission.searchParams.get("__zsr_cap")
+    (input.native
+      ? !isLoopbackLogicalUrl(url) || admission.protocol !== "https:" || admission.searchParams.has("__zsr_cap")
+      : !admission.searchParams.get("__zsr_cap"))
   ) {
     throw new Error("preview admission capability is invalid");
   }

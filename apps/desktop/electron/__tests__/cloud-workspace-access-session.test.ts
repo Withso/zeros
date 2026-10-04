@@ -21,6 +21,7 @@ vi.mock("../preview-frame-authorizations", () => ({
 vi.mock("../cloud-replica-host-runtime", () => ({
   ensureCloudAccessDeviceForMain: vi.fn(),
   signCloudEngineAdmissionForMain: vi.fn(),
+  signCloudPreviewForMain: vi.fn(),
   signCloudRuntimeServiceForMain: vi.fn(),
   readCloudAccessDeviceForMain: vi.fn(() => null),
 }));

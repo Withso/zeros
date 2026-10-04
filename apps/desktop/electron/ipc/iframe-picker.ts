@@ -45,12 +45,15 @@ import {
   revokeCloudWorkspacePreviewFrame,
 } from "../cloud-workspace-access-runtime";
 import { isOwnedMainRendererFrame } from "../preview-frame-ipc-authority";
+import { CloudPreviewFrameAdmissions } from "../cloud-preview-frame-admissions";
+import { isCloudAgentPreviewTarget } from "@zeros/protocol/containment";
 
 let mainWindowRef: BrowserWindow | null = null;
 // `window.name` is page-mutable. Pin the DOM iframe's original React-assigned
 // name to Chromium's stable frame-tree id before visited code can change it.
 const browserFrameNames = new Map<number, string>();
 const pendingBrowserNavigations = new PendingIframeNavigations();
+const cloudPreviewFrameAdmissions = new CloudPreviewFrameAdmissions<WebFrameMain>();
 const iframeFaviconGenerationByName = new Map<string, number>();
 const iframeFaviconUrlByName = new Map<string, string>();
 
@@ -569,6 +572,7 @@ export function registerIframePickerCommands(opts: {
   browserFrameNames.clear();
   pendingBrowserNavigations.clear();
   previewFrameAuthorizations.clear();
+  cloudPreviewFrameAdmissions.clear();
   iframeFaviconGenerationByName.clear();
   iframeFaviconUrlByName.clear();
   mainWindowRef = opts.mainWindow;
@@ -604,7 +608,12 @@ export function registerIframePickerCommands(opts: {
         previewFrameAuthorizations.authorize(args, Date.now(), null),
     };
   });
-  setCommand("browser:open-cloud-preview", async (args) => {
+  setCommand("browser:open-cloud-preview", async (args, event) => {
+    if (!isOwnedMainRendererFrame({
+      windowDestroyed: opts.mainWindow.isDestroyed(), senderWebContents: event.sender,
+      ownerWebContents: opts.mainWindow.webContents, senderFrame: event.senderFrame,
+      ownerMainFrame: opts.mainWindow.webContents.mainFrame,
+    })) throw new Error("cloud preview renderer authority is unavailable");
     const frameName =
       typeof args.frameName === "string" &&
       args.frameName.startsWith("zeros-browser-") &&
@@ -619,20 +628,24 @@ export function registerIframePickerCommands(opts: {
       typeof args.port === "number" && Number.isSafeInteger(args.port)
         ? args.port
         : 0;
-    if (!frameName || !organizationId || !workspaceId || !port) {
+    if (!frameName || !organizationId || !workspaceId || !port ||
+      (args.target !== undefined && !isCloudAgentPreviewTarget(args.target))) {
       throw new Error("cloud preview request is invalid");
     }
-    if (!currentBrowserFrame(opts.mainWindow, frameName)) {
+    const original = currentBrowserFrame(opts.mainWindow, frameName);
+    if (!original) {
       throw new Error("cloud preview Browser frame is unavailable");
     }
+    const pendingAdmission = cloudPreviewFrameAdmissions.begin(frameName, original);
     return getCloudWorkspaceAccessBroker().openPreview(
-      { frameName, organizationId, workspaceId, port },
+      { frameName, organizationId, workspaceId, port, ...(isCloudAgentPreviewTarget(args.target) ? { target: args.target } : {}),
+        ...(typeof args.authorityId === "string" ? { authorityId: args.authorityId, deviceId: args.deviceId as string | null, keyVersion: args.keyVersion as number | null } : {}) },
       (authorization) => {
         // Re-resolve after the network round trip. A closed/replaced iframe may
         // reuse no stale frame authority even when it kept the same tab id.
         const current = currentBrowserFrame(opts.mainWindow, frameName);
         if (
-          current === null ||
+          !pendingAdmission.current(current) || current === null ||
           !previewFrameAuthorizations.authorizeCloudPreview(
             authorization,
             current.frameTreeNodeId,
@@ -648,7 +661,9 @@ export function registerIframePickerCommands(opts: {
       },
     );
   });
-  setCommand("browser:revoke-preview-origin", async (args) => {
+  setCommand("browser:revoke-preview-origin", async (args, event) => {
+    if (!isOwnedMainRendererFrame({ windowDestroyed: opts.mainWindow.isDestroyed(), senderWebContents: event.sender,
+      ownerWebContents: opts.mainWindow.webContents, senderFrame: event.senderFrame, ownerMainFrame: opts.mainWindow.webContents.mainFrame })) return { ok: false };
     const frameName =
       typeof args.frameName === "string" &&
       args.frameName.startsWith("zeros-browser-") &&
@@ -656,19 +671,25 @@ export function registerIframePickerCommands(opts: {
         ? args.frameName
         : null;
     if (!frameName) return { ok: false };
+    cloudPreviewFrameAdmissions.cancel(frameName);
     previewFrameAuthorizations.revoke(frameName);
     const remoteRevoked = await revokeCloudWorkspacePreviewFrame(
       frameName,
     ).catch(() => false);
     return { ok: true, remoteRevoked };
   });
-  setCommand("browser:control-iframe", async (args) => {
+  setCommand("browser:control-iframe", async (args, event) => {
     const request = parseBrowserIframeControl(args);
     if (!request) return { ok: false, frameTreeNodeId: null };
+    if (request.action === "replace" && !isOwnedMainRendererFrame({
+      windowDestroyed: opts.mainWindow.isDestroyed(), senderWebContents: event.sender,
+      ownerWebContents: opts.mainWindow.webContents, senderFrame: event.senderFrame,
+      ownerMainFrame: opts.mainWindow.webContents.mainFrame,
+    })) return { ok: false, frameTreeNodeId: null };
     const frame = currentBrowserFrame(opts.mainWindow, request.frameName);
     if (!frame) return { ok: false, frameTreeNodeId: null };
     const control =
-      request.action === "navigate"
+      request.action === "navigate" || request.action === "replace"
         ? { action: request.action, url: request.url }
         : { action: request.action };
     return {
@@ -683,6 +704,7 @@ export function registerIframePickerCommands(opts: {
       browserFrameNames.clear();
       pendingBrowserNavigations.clear();
       previewFrameAuthorizations.clear();
+      cloudPreviewFrameAdmissions.clear();
       void disposeCloudWorkspaceAccessBroker();
       iframeFaviconGenerationByName.clear();
       iframeFaviconUrlByName.clear();

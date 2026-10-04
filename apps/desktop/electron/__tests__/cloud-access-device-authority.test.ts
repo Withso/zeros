@@ -64,6 +64,15 @@ describe("main cloud access device authority", () => {
     expect(matches("runtime-service.issue")).toBe(true);
     expect(matches("engine.connect")).toBe(false);
     expect(matches("runtime-service.issue", { ...payload, remotePort: 4174 })).toBe(false);
+    const previewPayload = { organizationId: payload.organizationId, workspaceId: payload.workspaceId,
+      port: 5173, target: { executionId: "execution-native", portId: "A".repeat(32) }, expiresInMinutes: 15, idempotencyKey: "desktop:preview:fixture" };
+    const previewProof = await authority.signPreview("current-token", previewPayload);
+    const matchesPreview = (action: string, value = previewPayload) => verify(null, cloudReplicaDeviceProofMessage({
+      ...previewProof, accountUserId: accountId, action, payload: value,
+    }), key, Buffer.from(previewProof.signature, "base64url"));
+    expect(matchesPreview("preview.issue")).toBe(true);
+    expect(matchesPreview("runtime-service.issue")).toBe(false);
+    expect(matchesPreview("preview.issue", { ...previewPayload, target: { ...previewPayload.target, portId: "B".repeat(32) } })).toBe(false);
     await expect(authority.signRuntimeService("retired-token", payload)).rejects.toThrow(/session changed/);
   });
   it("signs admission only for the exact current account access token",async()=>{

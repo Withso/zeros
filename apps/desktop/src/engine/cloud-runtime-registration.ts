@@ -1,4 +1,5 @@
 import type { CloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
+import { isCloudAgentPreviewTarget } from "@zeros/protocol/containment";
 import { configureNativeGithubTransport } from "./git/github-native-client";
 import { requestCloudGithubWrite, type CloudGithubWriteRequest } from "./cloud-github-write-client";
 import type { CloudCommandEngineRequest } from "@zeros/protocol/cloud-commands";
@@ -111,6 +112,7 @@ export type CloudRuntimeServiceAccess = {
   authorityEpoch: number;
   kind: "preview" | "ssh" | "tunnel";
   remotePort: number | null;
+  previewTarget?: import("@zeros/protocol/containment").CloudAgentPreviewTarget;
   expiresAtMs: number;
 };
 
@@ -697,6 +699,7 @@ export class CloudRuntimeRegistration {
           "remotePort",
           "expiresAtMs",
           ...(relativeLease ? ["leaseDurationMs"] : []),
+          ...(raw.previewTarget !== undefined ? ["previewTarget"] : []),
         ]) ||
         raw.version !== 1 ||
         raw.audience !== "zeros-cloud-runtime-access-admission-v1" ||
@@ -706,6 +709,7 @@ export class CloudRuntimeRegistration {
         !positiveInteger(raw.authorityEpoch) ||
         !["preview", "ssh", "tunnel"].includes(String(raw.kind)) ||
         (raw.kind === "preview") !== token.startsWith("zwp_") ||
+        (raw.previewTarget !== undefined && (raw.kind !== "preview" || !isCloudAgentPreviewTarget(raw.previewTarget))) ||
         (raw.kind === "ssh"
           ? raw.remotePort !== null
           : !positiveInteger(raw.remotePort, 65535) ||

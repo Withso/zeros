@@ -5,6 +5,8 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import type pg from "pg";
+import { isCloudAgentPreviewTarget, type CloudAgentPreviewTarget } from "./preview-target.js";
+import { consumeCloudWorkspaceDeviceProof, type CloudWorkspaceDeviceProof } from "./replicas.js";
 
 import { PreviewRequestLease } from "./preview-request-lease.js";
 import type { CloudPreviewSocketGrant } from "./preview-websocket-relay.js";
@@ -86,6 +88,7 @@ export type CloudWorkspaceAccessDocument = {
     origin: string;
     capability: string;
     headerName: "x-zeros-preview-capability";
+    target?: CloudAgentPreviewTarget;
   };
 };
 
@@ -100,6 +103,8 @@ export type CloudWorkspaceAccessService = {
     deviceId?: string;
     requestedLocalPort?: number;
     remotePort?: number;
+    previewTarget?: CloudAgentPreviewTarget;
+    proof?: CloudWorkspaceDeviceProof;
     expiresInMinutes: number;
     idempotencyKey: string;
   }): Promise<CloudWorkspaceAccessDocument>;
@@ -491,12 +496,17 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     deviceId?: string;
     requestedLocalPort?: number;
     remotePort?: number;
+    previewTarget?: CloudAgentPreviewTarget;
+    proof?: CloudWorkspaceDeviceProof;
     expiresInMinutes: number;
     idempotencyKey: string;
   }): Promise<CloudWorkspaceAccessDocument> {
     assertUuid(input.organizationId, "Organization");
     assertUuid(input.workspaceId, "Cloud workspace");
     assertUuid(input.accountUserId, "Account");
+    if (input.previewTarget !== undefined && (input.kind !== "preview" || !isCloudAgentPreviewTarget(input.previewTarget)))
+      throw new HttpError(422, "invalid_input", "Cloud preview target is invalid");
+    if (input.previewTarget && !input.proof) throw new HttpError(422, "invalid_input", "A trusted device is required for native previews");
     if (!IDEMPOTENCY_PATTERN.test(input.idempotencyKey)) {
       throw new HttpError(
         422,
@@ -559,6 +569,8 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
       deviceId: deviceId ?? null,
       requestedLocalPort,
       remotePort,
+      ...(input.previewTarget ? { previewTarget: input.previewTarget } : {}),
+      ...(input.proof ? { deviceId: input.proof.deviceId, deviceKeyVersion: input.proof.keyVersion } : {}),
       expiresInMinutes,
     });
     const requestedExpiresAt = new Date(Date.now() + expiresInMinutes * 60_000);
@@ -573,6 +585,11 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         workosEnabled: this.workosEnabled,
         legacyProviderAccess:input.kind!=="preview"||purpose==="engine-runtime",
       });
+      const previewDevice = input.kind === "preview" && input.proof ? await consumeCloudWorkspaceDeviceProof(tx, {
+        accountUserId: input.accountUserId, action: "preview.issue", proof: input.proof,
+        payload: { organizationId: input.organizationId, workspaceId: input.workspaceId, port: remotePort,
+          target: input.previewTarget ?? null, expiresInMinutes, idempotencyKey: input.idempotencyKey },
+      }) : null;
       if (
         input.expectedGeneration !== undefined &&
         workspace.generation !== input.expectedGeneration
@@ -597,8 +614,8 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         `INSERT INTO cloud_workspace_client_access_grants (
            id, workspace_id, generation, org_id, account_user_id, kind,
            remote_port, provider_resource_id, preview_proxy_label,
-           idempotency_key, request_sha256, requested_expires_at,actor_fingerprint
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,$13)
+           idempotency_key, request_sha256, requested_expires_at,actor_fingerprint,preview_target,preview_device_id,preview_device_key_version
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,$13,$14,$15,$16)
          ON CONFLICT (org_id, account_user_id, idempotency_key) DO NOTHING
          RETURNING id`,
         [
@@ -615,6 +632,8 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           digest,
           requestedExpiresAt,
           workspace.actorFingerprint,
+          input.previewTarget ?? null,
+          previewDevice?.id ?? null, previewDevice?.key_version ?? null,
         ],
       );
       if ((inserted.rowCount ?? 0) !== 1) {
@@ -691,13 +710,14 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         // Prove the exact private provider endpoint now; the raw provider
         // token is intentionally discarded and resolved again only in proxy
         // memory while a request is authorized.
-        assertProviderPreviewEndpoint(
-          await provider.getPreviewEndpoint(
+        const endpoint = await provider.getPreviewEndpoint(
             prepared.provider_resource_id,
             remotePort!,
             { grantId, credential },
-          ),
-        );
+          );
+        assertProviderPreviewEndpoint(endpoint);
+        if (input.previewTarget && endpoint.headerName !== "x-zeros-runtime-access")
+          throw new Error("opaque previews require native runtime admission");
       } else {
         ssh = await provider.createSshAccess(
           prepared.provider_resource_id,
@@ -901,6 +921,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         origin: `https://${previewProxyLabel}.${this.previewBaseDomain}`,
         capability: credential,
         headerName: "x-zeros-preview-capability",
+        ...(input.previewTarget ? { target: input.previewTarget } : {}),
       },
     };
   }
@@ -1222,6 +1243,10 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           AND pb.provider_resource_id = access.provider_resource_id
          WHERE access.preview_proxy_label = $1 AND access.kind = 'preview'
            AND access.state = 'active' AND access.expires_at > now()
+           AND (access.preview_device_id IS NULL OR EXISTS (
+             SELECT 1 FROM devices device WHERE device.id=access.preview_device_id AND device.user_id=access.account_user_id
+               AND device.key_version=access.preview_device_key_version AND device.trust_state='trusted' AND device.revoked_at IS NULL
+           ))
            AND cw.deleted_at IS NULL AND cw.desired_state = 'running'
            AND access.actor_fingerprint=cloud_workspace_actor_fingerprint(cw.id,access.account_user_id)
            AND cloud_workspace_actor_role(cw.id,access.account_user_id) IN ('developer','manager','owner')
