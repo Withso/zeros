@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -9,6 +9,9 @@ import { cloudEngineWorkspacePaths } from "../cloud-workspace-validation/sandbox
 
 const require = createRequire(import.meta.url);
 const engine = path.join(process.cwd(), "apps/desktop/src/engine");
+const nativeNamespaces = process.platform === "linux" && spawnSync("sudo", [
+  "-n", "/usr/bin/bwrap", "--ro-bind", "/", "/", "--unshare-pid", "--proc", "/proc", "--", "/usr/bin/true",
+], { stdio: "ignore" }).status === 0;
 // Run the production allocator, transfer, policy builder and sandbox runtime
 // inside real bind mounts. No mount-ID or filesystem mocks are involved.
 const probe = `
@@ -102,7 +105,10 @@ if (process.argv[2] === 'invalid') {
 }
 `;
 
-describe.skipIf(process.platform !== "linux")("Cloud Computer engine bind aliases", () => {
+describe("Cloud Computer engine bind aliases", () => {
+  it.skipIf(process.platform !== "linux" || !process.env.CI)("requires native namespace coverage on Linux CI", () => {
+    expect(nativeNamespaces, "Run through scripts/ci/with-userns.sh with sudo and bubblewrap installed").toBe(true);
+  });
   async function run(mode: string, template: boolean, invalid?: "different clone" | "path escape" | "writable marker") {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-v2-test-mounts-"));
     try {
@@ -124,30 +130,38 @@ describe.skipIf(process.platform !== "linux")("Cloud Computer engine bind aliase
       await chmod(config, 0o755);
       const script = path.join(root, "probe.mts");
       await writeFile(script, probe);
-      const args = ["--unshare-user", "--uid", "0", "--gid", "0", "--cap-add", "CAP_SYS_ADMIN", "--die-with-parent"];
+      const args = ["--die-with-parent", "--unshare-pid", "--clearenv", "--setenv", "PATH", "/usr/bin:/bin",
+        "--setenv", "HOME", "/tmp/home", "--setenv", "ZEROS_DATA_DIR", "/tmp/state",
+        "--setenv", "ZEROS_ATTACHMENT_TEMP_DIR", "/srv/zeros/attachment-staging"];
       for (const directory of ["/usr", "/home", "/opt", "/vercel", "/nix"])
         if (existsSync(directory)) args.push("--ro-bind", directory, directory);
       for (const name of ["bin", "sbin", "lib", "lib64"]) args.push("--symlink", `usr/${name}`, `/${name}`);
-      args.push("--ro-bind", "/proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+      args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
         "--ro-bind", config, "/etc/zeros", "--ro-bind", script, "/probe.mts", "--bind", files, "/srv/zeros");
       if (template) args.push("--bind", primary, "/srv/zeros/workspace");
       args.push("--remount-ro", "/", "--", process.execPath, "--import", require.resolve("tsx"), "/probe.mts", mode, template ? "template" : "base");
-      const result = spawnSync("setpriv", ["--no-new-privs", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all", "bwrap", ...args], {
+      // Match the native suites: sudo owns only this disposable fixture and
+      // mount namespace. Unprivileged runners cannot change the host bounding set.
+      execFileSync("sudo", ["-n", "/usr/bin/chown", "-hR", "0:0", root]);
+      const result = spawnSync("sudo", ["-n", "/usr/bin/bwrap", ...args], {
         encoding: "utf8", timeout: 30_000,
-        env: { PATH: process.env.PATH, HOME: "/tmp/home", ZEROS_DATA_DIR: "/tmp/state", ZEROS_ATTACHMENT_TEMP_DIR: "/srv/zeros/attachment-staging" },
+        env: { PATH: "/usr/bin:/bin" },
       });
       expect(result.status, result.stderr).toBe(0);
       return result.stdout;
-    } finally { await rm(root, { recursive: true, force: true }); }
+    } finally {
+      execFileSync("sudo", ["-n", "/usr/bin/chown", "-hR", `${process.getuid!()}:${process.getgid!()}`, root]);
+      await rm(root, { recursive: true, force: true });
+    }
   }
 
-  it.each([false, true])("allocates and publishes attachments on actual mounts (template: %s)", async template => {
+  it.skipIf(!nativeNamespaces).each([false, true])("allocates and publishes attachments on actual mounts (template: %s)", async template => {
     expect(await run("attachments", template)).toContain("attachments published");
   });
-  it("enforces Code restrictions through both primary paths while keeping secondary repositories writable", async () => {
+  it.skipIf(!nativeNamespaces)("enforces Code restrictions through both primary paths while keeping secondary repositories writable", async () => {
     expect(await run("policy", true)).toContain("primary restrictions enforced; secondary writable");
   });
-  it.each(["different clone", "path escape", "writable marker"] as const)("refuses invalid alias admission: %s", async invalid => {
+  it.skipIf(!nativeNamespaces).each(["different clone", "path escape", "writable marker"] as const)("refuses invalid alias admission: %s", async invalid => {
     expect(await run("invalid", true, invalid)).toContain("invalid admission rejected");
   });
 });
