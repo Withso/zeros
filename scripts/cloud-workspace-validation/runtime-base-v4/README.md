@@ -70,6 +70,47 @@ For an OS error it retains the original allowlisted exception class, numeric
 and symbolic errno, and innermost bootstrap function/line from the traceback.
 The public diagnostic still uses the same closed stage/check mapping.
 
+## Published runtime containment reproduction
+
+For the Alpha qualification failure on base `zeros-v2-test-base-v4-3`, run
+from the repository root:
+
+```sh
+pnpm tsx scripts/cloud-workspace-validation/containment-repro.ts --max-used-hours 32
+```
+
+This operator-only script reads **only** the repository's `.env.agent`:
+`BOAT_API_KEY`, `BOAT_BILLING_ORG`, `ZEROS_R2_ALPHA_ENDPOINT`,
+`ZEROS_R2_ALPHA_BUCKET`, `ZEROS_R2_ALPHA_ACCESS_KEY_ID`, and
+`ZEROS_R2_ALPHA_SECRET_ACCESS_KEY`. It uses one uniquely named
+`zeros-v2-test-containment-*` VM, the kit's absolute organization meter budget,
+and the published `b9834ef8` runtime descriptor pinned in the script. It sends
+`noEnv: true`, `env: {}`, and `snapshots: true` when creating from the snapshot.
+No control-plane API/database or environment settings are changed. No R2
+objects or named snapshots are created or deleted.
+
+After base readiness, installation and the fixed self-test use the worker's
+command allowlist and pinned SSH transport. The artifact's 15-minute GET URL
+travels only on SSH stdin. The self-test's closed diagnostic prints unchanged.
+A second launcher invocation reproduces the smoke's root identity, `/` cwd,
+private HOME/TMPDIR, clean environment, disconnected network namespace and
+loopback setup. It reports each containment section and identity/workload
+checks, with redacted error/stderr tails bounded to 2,000 characters. If the
+launcher produces no JSON, the same exported launcher runs again to expose the
+rejected-launch exception, without patching any runtime file or relaxing checks.
+Read-only host probes capture kernel controls, AppArmor profile presence,
+ownership/modes, mount roots, delegated cgroup limits, unit state, and a minimal
+bubblewrap namespace probe. No process arguments or environments are dumped.
+
+Redacted output and durable allocation/deletion identities are kept under the
+printed `.context/containment-repro-*` directory (0700; files 0600). The script
+deletes its VM in `finally` with `X-Ascii-Confirm-Delete`, polls the deletion
+operation and confirms sandbox 404; the final `cleanup` record reports both.
+A nonzero self-test is expected evidence and does not stop collection. A zero
+script exit means evidence collection and cleanup completed, not that the
+runtime qualified. Transport, installation, readiness, or unconfirmed cleanup
+fail the command. The meter ceiling cannot exceed the authorized 32 hours.
+
 ## Boat directory persistence
 
 Boat incremental snapshots may revert directory renames after idle sleep/wake; tracked as a Boat platform issue.
