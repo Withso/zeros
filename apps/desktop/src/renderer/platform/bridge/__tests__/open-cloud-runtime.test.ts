@@ -29,6 +29,40 @@ beforeEach(() => {
 });
 afterEach(() => { mocks.listeners.clear(); });
 describe("cloud runtime admission fencing", () => {
+  it("serializes an explicit ready open with idle capture before acquiring admission", async () => {
+    const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
+    const opening = openCloudRuntime(target, { wake: true });
+    await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
+    expect(mocks.admission).not.toHaveBeenCalled();
+    capture.resolve(mocks.doc);
+    const peer = await opening;
+    expect(mocks.admission).toHaveBeenCalledOnce(); peer.release();
+  });
+  it("revalidates a connected runtime after cancelling ready-state capture", async () => {
+    const peer = await openCloudRuntime(target);
+    mocks.list.mockClear();
+    const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
+    const preparing = peer.prepareForRun!(new AbortController().signal);
+    await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
+    expect(mocks.list).not.toHaveBeenCalled();
+    capture.resolve(mocks.doc);
+    expect(await preparing).toBe(true);
+    expect(mocks.list).toHaveBeenCalledOnce();
+    expect(mocks.admission).toHaveBeenCalledOnce(); peer.release();
+  });
+  it("requires replacement admission when committed capture retires a connected runtime", async () => {
+    const peer = await openCloudRuntime(target);
+    mocks.list.mockClear();
+    const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
+    const preparing = peer.prepareForRun!(new AbortController().signal);
+    await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
+    mocks.doc = { ...mocks.doc, status: "waking" };
+    for (const listener of mocks.listeners) listener();
+    expect(mocks.dispose).toHaveBeenCalledOnce();
+    mocks.doc = { ...mocks.doc, status: "ready" }; capture.resolve(mocks.doc);
+    expect(await preparing).toBe(false);
+    expect(mocks.list).not.toHaveBeenCalled();
+  });
   it("wakes a stopped workspace only for an explicit use before minting fresh admission", async () => {
     mocks.doc = { ...mocks.doc, status: "stopped" };
     await expect(openCloudRuntime(target)).rejects.toThrow(/stopped/);

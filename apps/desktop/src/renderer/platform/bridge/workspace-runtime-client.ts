@@ -32,6 +32,9 @@ export interface CloudPeer {
   runtimeId?: string;
   agents?: CloudAgentConnection;
   events?: Pick<RuntimeClient, "on">;
+  /** Serialize explicit work with idle capture and revalidate the admission.
+   * False means the drain retired this connection and a fresh one is needed. */
+  prepareForRun?: (signal: AbortSignal) => Promise<boolean>;
 }
 export interface WorkspaceRuntimeOptions {
   open: (target: CloudWorkspaceTarget, options?: { signal: AbortSignal; wake?: boolean }) => Promise<CloudPeer>;
@@ -299,6 +302,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     this.claimPeer(key);
     const open = () => {
       if (options?.signal?.aborted) return Promise.reject(new Error("Cloud workspace open cancelled"));
+      if (identity !== this.identity(target)) return Promise.reject(new Error("Cloud account changed while connecting"));
       const promise = this.peer(target, true);
       const flight = this.opening.get(key);
       if (flight) flight.consumers++;
@@ -323,14 +327,15 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         promise.then(value => { if (finish(false)) resolve(value); }, error => { if (finish(false)) reject(error); });
       });
     };
-    try { await open(); }
-    catch (error) {
-      // A passive attachment already in flight may discover sleeping compute.
-      // Only this explicit caller can retry admission with wake enabled. This
-      // retries preparation, never an engine command or a submitted message.
-      if (!pending || pending.identity !== identity || pending.wake || options?.signal?.aborted || identity !== this.identity(target)) throw error;
-      await open();
+    if (pending?.identity === identity && !pending.wake) {
+      // Even a successful passive attachment did not serialize with capture.
+      // Await it, then prepare explicitly; never retry a submitted command.
+      try { await open(); }
+      catch (error) {
+        if (options?.signal?.aborted || identity !== this.identity(target)) throw error;
+      }
     }
+    await open();
   }
 
   async warmHistoryWorkspace(target: CloudWorkspaceTarget, options?: { intent: boolean }): Promise<void> {
@@ -521,7 +526,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       this.opening.delete(key);
     }
     const existing = this.peers.get(key);
-    if (existing && existing.identity === identity && !existing.retired && existing.client.status === "connected")
+    const connected = existing && existing.identity === identity && !existing.retired && existing.client.status === "connected";
+    if (connected && !wake)
       return Promise.resolve(existing);
     if (this.closed)
       return Promise.reject(new Error("Workspace connections are closed"));
@@ -537,7 +543,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     // New work obtains fresh authority once per exact workspace. Preserve the
     // confirmed snapshot while retiring its transport; never replay a request
     // whose previous connection may already have executed it.
-    if (existing) this.retirePeer(existing);
+    const reusable = connected && wake && existing.prepareForRun ? existing : undefined;
+    if (existing && !reusable) this.retirePeer(existing);
     const epoch = this.accountEpoch;
     const controller = new AbortController();
     // Publish durable history independently, including while admission/connect
@@ -548,7 +555,18 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     // settles so sweeping the pointer cannot grow an unbounded admission queue.
     this.ongoingOpens++;
     let opening: Promise<CloudPeer>;
-    try { opening = this.routing.open(target, { signal: controller.signal, ...(wake ? { wake: true } : {}) }); }
+    try {
+      opening = reusable
+        ? reusable.prepareForRun!(controller.signal).then(ready => {
+            if (controller.signal.aborted) throw new Error("Cloud workspace open cancelled");
+            if (ready && !reusable.retired && reusable.client.status === "connected") return reusable;
+            this.retirePeer(reusable);
+            // Preparation already crossed the capture barrier. Re-admit only;
+            // a newer Stop must win instead of triggering another wake.
+            return this.routing.open(target, { signal: controller.signal });
+          })
+        : this.routing.open(target, { signal: controller.signal, ...(wake ? { wake: true } : {}) });
+    }
     catch (error) { this.ongoingOpens--; return Promise.reject(error); }
     const flight = opening
       .then(async (opened) => {
@@ -558,9 +576,10 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           this.closed ||
           (this.routing.canAccess && !this.routing.canAccess(target))
         ) {
-          opened.release();
+          if (opened !== reusable) opened.release();
           throw new Error("Cloud account changed while connecting");
         }
+        if (opened === reusable) { this.assertCurrent(reusable); return reusable; }
         if (cloudWorkspaceKey(opened.scope) !== key) {
           opened.release();
           throw new Error("Cloud connection returned a different workspace");

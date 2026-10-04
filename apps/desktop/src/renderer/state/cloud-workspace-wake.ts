@@ -12,7 +12,7 @@ import {
 
 /** Only explicit open/send callers may enter here. Catalog/history/hover reads
  * must not acquire compute. Cancellation ends the local intent, not an already
- * accepted server lifecycle operation. Admission is always acquired afterwards. */
+ * accepted server lifecycle operation. Admission is acquired or revalidated afterwards. */
 export async function wakeCloudWorkspace(
   target: CloudWorkspaceTarget,
   initial: CloudWorkspaceDocument,
@@ -51,6 +51,13 @@ export async function wakeCloudWorkspace(
     // An open arriving during final capture waits for stop to finish. After a
     // wake has begun, a later Stop wins; never loop by waking it a second time.
     let mayWake = ["stopped", "stopping"].includes(current.status);
+    // Ready is not proof that final capture is absent. The existing wake
+    // transaction cancels an uncommitted idle checkpoint, or serializes a
+    // committed drain before fresh runtime admission is allowed.
+    if (["ready", "busy"].includes(current.status)) {
+      await wait(manageCloudWorkspace(target, "wake"));
+      current = assertCurrent();
+    }
     const deadline = Date.now() + 120_000;
     while (!["ready", "busy"].includes(current.status)) {
       if (current.status === "stopped" && mayWake) {

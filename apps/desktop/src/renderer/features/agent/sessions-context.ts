@@ -116,6 +116,8 @@ export interface SessionsActions {
      *  buttons) — the action kind stamped on the user bubble so it renders
      *  with the "sent by Zeros" treatment (icon + brown bubble, copy-only). */
     autoAction?: string,
+    /** The provider now owns a pending message/queue entry; not turn completion. */
+    onAccepted?: () => void,
   ): Promise<void>;
   cancel(chatId: string): Promise<void>;
   /** Revoke only the active native Browser lease. If the official Browser

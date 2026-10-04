@@ -2231,6 +2231,7 @@ export function AgentSessionsProvider({
       bubbleAttachments,
       segments,
       autoAction,
+      onAccepted,
     ) => {
       if (!bridge) return;
       const preparation = prepareForSend(chatId);
@@ -2310,6 +2311,7 @@ export function AgentSessionsProvider({
         });
         persistAuthPrompt(chatId, message);
         getStore().setPendingLocalTurn(chatId, null);
+        onAccepted?.();
         return;
       }
       // Only an explicit send releases a Stop pause. Automatic FIFO flushes
@@ -2396,6 +2398,7 @@ export function AgentSessionsProvider({
           bubbleId,
         });
         sendQueueRef.current.set(chatId, q);
+        onAccepted?.();
         // The queue may be parked in an IDLE chat (nothing in flight to
         // trigger the turn-completion drain) — kick it so this send isn't
         // stranded. No-op while held/in-flight/non-ready.
@@ -2503,6 +2506,7 @@ export function AgentSessionsProvider({
           if (flushBubbleId) q.unshift(entry);
           else q.push(entry);
           sendQueueRef.current.set(chatId, q);
+          onAccepted?.();
           // Publishes `warming` synchronously (so later sends queue behind),
           // drains this queue on ready, and returns the text to the composer
           // via drainOrDropQueue on failure. De-duped against an admission the
@@ -2792,6 +2796,7 @@ export function AgentSessionsProvider({
         // `warming` window it used to infer from is also every chat reopen. See
         // pendingLocalTurns / tailTurnInFlight.
         getStore().setPendingLocalTurn(chatId, userMessage.id);
+        onAccepted?.();
 
         if (pendingAuth.length) {
           // The old prompts stay stopped in the transcript. Carry them only

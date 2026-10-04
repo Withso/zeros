@@ -111,6 +111,53 @@ describe("workspace runtime routing", () => {
     } finally { client.dispose(); }
   });
 
+  it.each([false, true])("prepares a connected ready peer, including a successful passive flight (pending: %s)", async pending => {
+    const ready = deferred<CloudPeer>(), prepared = deferred<boolean>(), peer = fakePeer(a);
+    const prepareForRun = vi.fn(() => prepared.promise);
+    peer.peer.prepareForRun = prepareForRun;
+    const open = vi.fn<WorkspaceRuntimeOptions["open"]>(() => ready.promise);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    const warming = client.warmWorkspace(a);
+    ready.resolve(peer.peer);
+    if (!pending) await warming;
+    let accepted = false;
+    const sending = client.openWorkspace(a).then(() => { accepted = true; });
+    await vi.waitFor(() => expect(prepareForRun).toHaveBeenCalledOnce());
+    expect(accepted).toBe(false);
+    prepared.resolve(true); await Promise.all([warming, sending]);
+    expect(open).toHaveBeenCalledOnce();
+    expect(peer.release).not.toHaveBeenCalled(); client.dispose();
+  });
+  it("obtains fresh admission after capture retired the runtime without issuing another wake", async () => {
+    const old = fakePeer(a), next = fakePeer(a);
+    old.peer.prepareForRun = vi.fn(async () => false);
+    const open = vi.fn<WorkspaceRuntimeOptions["open"]>().mockResolvedValueOnce(old.peer).mockResolvedValueOnce(next.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    await client.warmWorkspace(a);
+    await client.openWorkspace(a);
+    expect(old.peer.prepareForRun).toHaveBeenCalledOnce();
+    expect(old.release).toHaveBeenCalledOnce();
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(open.mock.calls[1][1]?.wake).toBeUndefined();
+    await client.request({ type: "WORKSPACE_REQUEST", op: "git.status", params: { cwd: cloudWorkspaceKey(a) } } as never);
+    expect(next.request).toHaveBeenCalledWith(expect.objectContaining({ op: "git.status" }), expect.anything());
+    client.dispose();
+  });
+  it("cancels preparation without retiring a healthy connected runtime", async () => {
+    const prepared = deferred<boolean>(), peer = fakePeer(a), controller = new AbortController();
+    const prepareForRun = vi.fn<NonNullable<CloudPeer["prepareForRun"]>>(() => prepared.promise);
+    peer.peer.prepareForRun = prepareForRun;
+    const open = vi.fn<WorkspaceRuntimeOptions["open"]>().mockResolvedValue(peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    await client.warmWorkspace(a);
+    const cancelled = expect(client.openWorkspace(a, { signal: controller.signal })).rejects.toThrow(/cancel/i);
+    controller.abort(); await cancelled;
+    expect(prepareForRun.mock.calls[0][0].aborted).toBe(true);
+    prepared.resolve(true);
+    await client.warmWorkspace(a);
+    expect(peer.release).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledOnce(); client.dispose();
+  });
   it("honors cancellation raised synchronously while the shared flight is being published", async () => {
     const controller = new AbortController(), ready = deferred<CloudPeer>(), peer = fakePeer(a);
     const open = vi.fn<WorkspaceRuntimeOptions["open"]>(() => { controller.abort(); return ready.promise; });

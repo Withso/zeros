@@ -3916,6 +3916,29 @@ export function AgentChat({
     }
     if (cloudComputerV2 && chatId && isCloudWorkspace(chatThread?.folder) &&
         agentSessions.getSendGeneration(chatId) !== sendGeneration) return;
+    const submit = (onAccepted?: () => void) => session.sendPrompt(
+      wireText, displayText, extraBlocks,
+      bubbleAttachments.length > 0 ? bubbleAttachments : undefined,
+      messageSegments && messageSegments.length > 0 ? messageSegments : undefined,
+      onAccepted,
+    );
+    const cloudSubmission = cloudComputerV2 && isCloudWorkspace(chatThread?.folder);
+    if (cloudSubmission) {
+      // Attachments/session work can outlive the first wake. Keep the rich
+      // draft until the provider's final preparation and pending-message handoff
+      // succeed; do not await the agent's entire turn or hide an early failure.
+      setCloudSendPreparing(true);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          let accepted = false;
+          submit(() => { accepted = true; resolve(); }).then(() => {
+            if (!accepted) reject(new Error("The message was not accepted. Try sending it again."));
+          }, reject);
+        });
+      } finally {
+        setCloudSendPreparing(false);
+      }
+    }
     const submittedDraftUnchanged = override === undefined && snapshot &&
       isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
     if (submittedDraftUnchanged) {
@@ -3937,19 +3960,9 @@ export function AgentChat({
     // sends each get their own visibility check as they dispatch one
     // per turn.
     pendingSendScrollCountRef.current += 1;
-    session
-      .sendPrompt(
-        wireText,
-        displayText,
-        extraBlocks,
-        bubbleAttachments.length > 0 ? bubbleAttachments : undefined,
-        messageSegments && messageSegments.length > 0
-          ? messageSegments
-          : undefined,
-      )
-      .catch(() => {
-        /* error surfaces via session.error */
-      });
+    if (!cloudSubmission) submit().catch(() => {
+      /* error surfaces via session.error */
+    });
     return true;
   };
 

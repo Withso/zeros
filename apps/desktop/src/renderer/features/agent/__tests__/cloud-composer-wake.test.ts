@@ -22,6 +22,39 @@ const code = ts.transpileModule(declarations.join("\n") + "\nglobalThis.handleSe
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 
+const providerSource = readFileSync(new URL("../sessions-provider.tsx", import.meta.url), "utf8");
+const providerAst = ts.createSourceFile("provider.tsx", providerSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+let providerCallback = "";
+function collectProvider(node: ts.Node) {
+  if (ts.isVariableDeclaration(node) && node.name.getText(providerAst) === "sendPrompt" &&
+      node.initializer && ts.isCallExpression(node.initializer))
+    providerCallback = node.initializer.arguments[0].getText(providerAst);
+  ts.forEachChild(node, collectProvider);
+}
+collectProvider(providerAst);
+const providerCode = ts.transpileModule(`globalThis.send = ${providerCallback};`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText;
+
+function useActualProvider(h: ReturnType<typeof harness>) {
+  const slot = { agentId: "codex", cwd: "cloud://fixture", status: "warming", messages: [] as unknown[] };
+  const queue = new Map();
+  const context: Record<string, unknown> = {
+    bridge: {}, prepareForSend: h.prepare, getStore: () => ({ sessions: { chat: slot },
+      patchSession: (_id: string, patch: object) => Object.assign(slot, patch), setPendingLocalTurn: vi.fn() }),
+    flushBubbleRef: { current: new Map() }, getAgentsSnapshot: () => [], isCloudWorkspace,
+    resumeQueue: () => false, sendingChatsRef: { current: new Set() }, sendQueueRef: { current: queue },
+    queueHeldRef: { current: new Set() }, shouldQueuePrompt: () => true,
+    queuedPromptPresentation: () => "follow-up", capUserAppend: (messages: unknown[], message: unknown) => [...messages, message],
+    drainNextQueued: vi.fn(),
+  };
+  vm.runInNewContext(providerCode, context);
+  h.sendPrompt.mockImplementation(async (...args: unknown[]) => {
+    await (context.send as (...args: unknown[]) => Promise<void>)("chat", ...args.slice(0, 5), undefined, args[5]);
+  });
+  return { slot, queue };
+}
+
 function harness(status = "stopped", enabled = true) {
   const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
   const draft = { displayText: "Inspect this attachment", json: { text: "Inspect this attachment", attachment: "image" },
@@ -31,7 +64,8 @@ function harness(status = "stopped", enabled = true) {
   let fail!: (error: Error) => void;
   const pending = new Promise<void>((resolve, reject) => { ready = resolve; fail = reject; });
   const prepare = vi.fn(() => pending);
-  const clear = vi.fn(), dispatch = vi.fn(), startSession = vi.fn(async () => {}), sendPrompt = vi.fn(async () => {});
+  const clear = vi.fn(), dispatch = vi.fn(), startSession = vi.fn(async () => {});
+  const sendPrompt = vi.fn(async (...args: unknown[]) => { (args[5] as (() => void) | undefined)?.(); });
   const state = { sessions: { chat: { transcriptState: "resident" } } };
   const context: Record<string, unknown> = {
     chatId: "chat", readOnly: false, cloudComputerV2: enabled, workspaceProvisioning: status !== "ready",
@@ -62,6 +96,32 @@ function harness(status = "stopped", enabled = true) {
 }
 
 describe("message wake before the provisioning queue", () => {
+  it("retains the draft and surfaces a provider preparation failure after attachment encoding", async () => {
+    const h = harness(); useActualProvider(h);
+    h.prepare.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("Connection retired during attachment encoding"));
+    await h.send();
+    expect(h.prepare).toHaveBeenCalledTimes(2);
+    expect(h.clear).not.toHaveBeenCalled();
+    expect(h.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "CLEAR_CHAT_DRAFT" }));
+    expect((h.context.toast as { error: ReturnType<typeof vi.fn> }).error).toHaveBeenCalledWith("Message wasn't sent", {
+      description: expect.stringContaining("Connection retired during attachment encoding"),
+    });
+  });
+
+  it("clears only after the actual provider owns a pending submission, preserving duplicate-Enter fencing", async () => {
+    const h = harness(), provider = useActualProvider(h);
+    let accept!: () => void;
+    h.prepare.mockResolvedValueOnce(undefined).mockImplementationOnce(() => new Promise<void>(resolve => { accept = resolve; }));
+    const first = h.send();
+    await vi.waitFor(() => expect(h.prepare).toHaveBeenCalledTimes(2));
+    const clearsBeforeAcceptance = h.clear.mock.calls.length;
+    const duplicate = h.send();
+    accept(); h.ready(); await Promise.all([first, duplicate]);
+    expect(clearsBeforeAcceptance).toBe(0);
+    expect(h.clear).toHaveBeenCalledOnce();
+    expect(provider.queue.get("chat")).toHaveLength(1);
+    expect(provider.slot.messages).toHaveLength(1);
+  });
   it("wakes a stopped workspace before ordinary admission and submits a repeated Enter once", async () => {
     const h = harness();
     const first = h.send(), duplicate = h.send();

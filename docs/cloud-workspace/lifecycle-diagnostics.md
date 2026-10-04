@@ -104,6 +104,13 @@ available while the workspace starts. Concurrent open/send preparation shares
 one connection flight and one lifecycle idempotency key. The renderer does not
 retry a submitted prompt to repair a missing response.
 
+A `ready` workspace may still have a queued or delivered idle final checkpoint.
+Explicit preparation always crosses the server wake transaction, including on
+an already connected runtime: it cancels uncommitted capture or waits for a
+committed drain. Afterwards, a healthy connection revalidates its admission with
+an authenticated engine workspace read; a retired connection obtains fresh
+native admission. Only then may ordinary Resume/submission proceed.
+
 `POST /v1/organizations/:organization/cloud-workspaces/:workspace/wake` accepts
 current run authority for stopped compute, including an exact-workspace guest
 prompter or developer with a writer slot. Run authority is `canWrite`; it is not
@@ -126,6 +133,11 @@ generation change or failed wake ends the intent, without an automatic restart.
 Retry is a new explicit user action. Wake retains the existing generation;
 fresh runtime admission is minted only after readiness, with account, workspace
 and generation checked again before connecting and dispatching.
+The rich draft remains until the session provider owns a pending submission,
+including its final preparation after attachment encoding. Preparation failures
+surface in the composer; they do not clear the draft. A confirmed superseding
+Stop, terminal failure or server rejection retires the wake idempotency key.
+Only an unresolved transport outcome retains that key for a retry.
 
 ### Alpha live acceptance runbook
 
@@ -186,6 +198,12 @@ workspace; credentials must not be copied to an implementation workspace.
    file edit. There must be no ordinary command admission before wake completes.
    Repeat with explicit open and send overlapping and with a temporary response
    loss after dispatch: reconnection must not replay a possibly accepted prompt.
+   Also submit to a paused conversation while its real idle checkpoint is
+   queued/delivered and its workspace still reports `ready`. Require capture
+   cancellation before Resume, admission revalidation and one execution. For a
+   committed capture, require completion of the drain and fresh admission first.
+   Retire the connection or request Stop during attachment encoding: a failed
+   final preparation must leave the rich draft intact and show an error.
 9. Repeat the authorization and cancellation cases below. A rejected or
    cancelled preparation must preserve the draft, attachments and history and
    must never dispatch its message to another workspace/account.
@@ -199,7 +217,7 @@ workspace; credentials must not be copied to an implementation workspace.
    | Open A, switch to B, then reopen A while the old reply is delayed | Old reply cannot replace B or erase A's replacement intent |
    | Open plus send; cancel only the open by navigation | Original message continues for A once; B stays independent |
    | Change account, remove owner access or advance generation during wake/admission | Late response is rejected and any late native connection is closed |
-   | Manager Stop wins after wake began | Intent ends; no restart loop or delayed message |
+   | Manager Stop wins after wake began; then explicitly retry once stopped | Original intent ends with no delayed message; retry gets a new wake identity and starts compute |
    | Restore a saved selection or disable Cloud v2 | Existing read-only behavior; no implicit wake |
 
 10. Cleanup as the owner using normal Alpha lifecycle controls. Delete both

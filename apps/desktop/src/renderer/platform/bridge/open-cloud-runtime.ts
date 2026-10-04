@@ -33,7 +33,7 @@ export async function openCloudRuntime(
   assertAccount();
   let document = await refreshCloudWorkspace(target);
   assertAccount();
-  if (options?.wake && !["ready", "busy"].includes(document.status)) {
+  if (options?.wake) {
     document = await wakeCloudWorkspace(target, document, options.signal);
     assertAccount();
   }
@@ -157,6 +157,24 @@ export async function openCloudRuntime(
         },
       },
       runtimeId: descriptor.runtimeId,
+      async prepareForRun(signal) {
+        const current = await refreshCloudWorkspace(target);
+        assertAccount();
+        await wakeCloudWorkspace(target, current, signal);
+        if (signal.aborted) throw new Error("Cloud workspace open cancelled");
+        assertCurrent();
+        // A committed capture retires this runtime while preparation waits.
+        // The caller must obtain a fresh native admission in that case.
+        if (released) return false;
+        // Revalidate the still-live admission through an authenticated engine
+        // read after capture cancellation, without disrupting an active turn.
+        const rows = await bridgeWorkspaceList(client, {});
+        if (signal.aborted) throw new Error("Cloud workspace open cancelled");
+        checkConnection();
+        if (!rows.some(row => row.id === workspace.id && row.path === workspace.path))
+          throw new Error("Cloud workspace root changed while preparing to run");
+        return true;
+      },
       scope: {
         ...target,
         root: workspace.path,
