@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 
 export async function runToolPresentationSmoke({ page, check }) {
+  await runToolSpacingSmoke({ page, check });
   const fixture = page.locator("#tool-presentation-fixture");
   const rows = fixture.locator("#tool-presentation-rows");
   await expect(rows).not.toContainText("Environment connected");
@@ -170,4 +171,64 @@ export async function runToolPresentationSmoke({ page, check }) {
     "Tools survive settlement/reload; shared results stay singular; highlighting never paints stale source",
     true,
   );
+}
+
+export async function runToolSpacingSmoke({ page, check }) {
+  const fixture = page.locator("#tool-spacing-fixture");
+  const root = fixture.locator("#tool-spacing-root");
+  const nested = fixture.locator("[data-agent-children]");
+  const rows = (feed) => feed.locator('[class~="group/event-row"]');
+  const expectSpacing = async (feed, label, count = 11) => {
+    await expect(rows(feed)).toHaveCount(count);
+    const gaps = await rows(feed).evaluateAll((buttons) =>
+      buttons.slice(1).map((button, index) =>
+        button.getBoundingClientRect().top -
+        buttons[index].parentElement.getBoundingClientRect().bottom,
+      ),
+    );
+    // Measure the rendered space after the complete row, including an open
+    // detail surface, so neither missing nor doubled batch gaps can pass.
+    expect(gaps, label).toEqual(Array(count - 1).fill(8));
+    check(`${label}: every tool row has an 8px gap`, true);
+  };
+
+  await expectSpacing(root, "Live mixed calls and batched edits/reads");
+  await fixture.getByRole("button", { name: "Agent Spacing audit", exact: true }).click();
+  await expectSpacing(nested, "Nested agent tools");
+  const edit = root.getByRole("button", { name: "Edit update.ts", exact: true });
+  await edit.click();
+  await expect(edit).toHaveAttribute("aria-expanded", "true");
+  await expectSpacing(root, "Expanded edit details");
+  await fixture.getByRole("button", { name: "Finish spacing tools", exact: true }).click();
+  await root.getByRole("button", { name: /tool calls/ }).click();
+  await expectSpacing(root, "Completed expanded history");
+  await expectSpacing(nested, "Completed nested history");
+  await fixture.getByRole("button", { name: "Remount spacing history", exact: true }).click();
+  await root.getByRole("button", { name: /tool calls/ }).click();
+  await expectSpacing(root, "Remounted history");
+  const viewport = page.viewportSize();
+  try {
+    await page.setViewportSize({ width: 420, height: 900 });
+    await expectSpacing(root, "Narrow transcript");
+    await expectSpacing(nested, "Narrow nested transcript");
+  } finally {
+    await page.setViewportSize(viewport);
+  }
+  await fixture.getByRole("button", { name: "Load large batch", exact: true }).click();
+  const large = fixture.locator("#tool-spacing-large");
+  await expectSpacing(large, "Capped edit batch", 50);
+  const more = large.getByRole("button", { name: "Show 1 more files", exact: true });
+  const moreGeometry = await more.evaluate((button) => {
+    const bounds = button.getBoundingClientRect();
+    return {
+      gap: bounds.top - button.previousElementSibling.getBoundingClientRect().bottom,
+      width: bounds.width,
+      containerWidth: button.parentElement.getBoundingClientRect().width,
+    };
+  });
+  expect(moreGeometry.gap).toBe(8);
+  expect(moreGeometry.width).toBeLessThan(moreGeometry.containerWidth);
+  await more.click();
+  await expectSpacing(large, "Fully revealed edit batch", 51);
+  await expect(more).toHaveCount(0);
 }
