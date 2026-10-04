@@ -238,6 +238,7 @@ d("account, organization, and operator deletion lifecycle", () => {
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
     await resetMigratedTestDatabase(pool);
+    await seedComputerTemplateRuntime(pool);
     actor = await signup("Bootstrap");
 
     app = new Hono();
@@ -1647,8 +1648,8 @@ d("account, organization, and operator deletion lifecycle", () => {
       });
       await computer.claimNextBuild(1);
       const pins = {
-        baseImageId: "fixture-base",
-        runtimeId: "fixture-runtime",
+        baseImageId: templateRuntime.baseImageId,
+        runtimeId: templateRuntime.descriptor.runtimeId,
         repositoryManifest: [],
       };
       await computer.markBuildStage(
@@ -1888,7 +1889,6 @@ d("account, organization, and operator deletion lifecycle", () => {
     const computer = new DatabaseCloudComputerV2Service(pool, {
       settingsSecretKeyV1: randomBytes(32).toString("base64url"),
     } as CloudWorkspaceBackendConfig);
-    await seedComputerTemplateRuntime(pool);
     const pins = {
       baseImageId: templateRuntime.baseImageId,
       runtimeId: templateRuntime.descriptor.runtimeId,

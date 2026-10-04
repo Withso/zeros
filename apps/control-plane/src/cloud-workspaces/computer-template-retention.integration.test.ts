@@ -25,6 +25,10 @@ import {
   type ComputerTemplateDeletionJournal,
 } from "./computer-template-retention.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
+import {
+  seedComputerTemplateRuntime,
+  templateRuntime,
+} from "./computer-template-test-fixtures.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -92,6 +96,7 @@ d("Cloud Computer template retention", () => {
   });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await seedComputerTemplateRuntime(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     service = new DatabaseCloudComputerV2Service(
       pool,
@@ -215,7 +220,7 @@ d("Cloud Computer template retention", () => {
         await tx.query(
           `INSERT INTO cloud_computer_v2_builds(id,org_id,version,config_id,accepted_revision,state,stage,requested_by,
              operation_id,base_image_id,runtime_id,repository_manifest,completed_at)
-           VALUES($1,$2,$3,$4,1,'succeeded','done',$5,$6,'fixture-base','fixture-runtime','[]',now())`,
+           VALUES($1,$2,$3,$4,1,'succeeded','done',$5,$6,$7,$8,'[]',now())`,
           [
             template.id,
             fixture.organizationId,
@@ -223,6 +228,8 @@ d("Cloud Computer template retention", () => {
             configId,
             fixture.userId,
             randomUUID(),
+            templateRuntime.baseImageId,
+            templateRuntime.descriptor.runtimeId,
           ],
         );
         await tx.query(
@@ -270,7 +277,7 @@ d("Cloud Computer template retention", () => {
         store,
         {
           purpose: "computer-build",
-          source: { kind: "base", baseImageId: "fixture-base" },
+          source: { kind: "base", baseImageId: templateRuntime.baseImageId },
           name: `zeros-v2-test-c6-${template.id}`,
           operationKey: key(template),
           ttlSeconds: 1800,
@@ -819,8 +826,8 @@ d("Cloud Computer template retention", () => {
       );
       await service.claimNextBuild(1);
       const pins = {
-        baseImageId: "fixture-base",
-        runtimeId: "fixture-runtime",
+        baseImageId: templateRuntime.baseImageId,
+        runtimeId: templateRuntime.descriptor.runtimeId,
         repositoryManifest: [],
       };
       await service.markBuildStage(
