@@ -17,6 +17,7 @@ import http.client
 import io
 import json
 import os
+import pwd
 from pathlib import Path
 import re
 import selectors
@@ -49,6 +50,13 @@ FACADE = "/opt/zeros"
 RECEIPTS = "/srv/zeros/runtime-installs"
 ACTIVE = "/run/zeros/active-runtime.json"
 PRIVATE_FAILURES = "/run/zeros/bootstrap-failures.jsonl"
+PERSIST_ROOT = "/home/user/.zeros-persist"
+PERSIST_RECORD = "/run/zeros/persistence.json"
+# Only fixed paths are mounted. Mutable contents retain the existing runtime
+# ownership contract; root controls the backing parent and every mount point.
+PERSIST_LAYOUT = (("files", "root", "root", 0o755), ("state", "engine", "engine", 0o700),
+                  ("home", "root", "root", 0o755),
+                  ("repos", "root", "root", 0o755))
 FACADE_LINKS = (("/zeros", FACADE), (FACADE + "/bin", "current/bin"),
                 (FACADE + "/worker", "current/worker"), (FACADE + "/manifest.json", "current/manifest.json"),
                 (FACADE + "/logs", "/srv/zeros/log"), (FACADE + "/state", "/srv/zeros/state"))
@@ -477,6 +485,72 @@ def archive_members(file):
                 count += 1
 
 
+def parse_mountinfo(raw):
+    require(len(raw) <= 2 * 1024**2, "base_compatibility")
+    def pathname(value):
+        escapes = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
+        value = re.sub(r"\\(040|011|012|134)", lambda match: escapes[match[1]], value)
+        require(value.startswith("/") and os.path.normpath(value) == value, "base_compatibility")
+        return value
+    result = []
+    for line in raw.decode("utf-8", "strict").splitlines():
+        fields = line.split()
+        require(len(fields) >= 10 and "-" in fields[6:], "base_compatibility")
+        separator = fields.index("-", 6)
+        require(len(fields) == separator + 4 and re.fullmatch(r"[0-9]+:[0-9]+", fields[2]), "base_compatibility")
+        result.append({"device": fields[2], "root": pathname(fields[3]), "target": pathname(fields[4]),
+                       "options": fields[5].split(","), "filesystem": fields[separator + 1], "source": fields[separator + 2]})
+    require(result, "base_compatibility")
+    return result
+
+
+class BindMounts:
+    """Kernel mounts are separate from systemd so temporary roots can inject them."""
+    def table(self):
+        with open("/proc/self/mountinfo", "rb") as stream:
+            return parse_mountinfo(stream.read(2 * 1024**2 + 1))
+
+    def present(self, target):
+        matches = [entry for entry in self.table() if entry["target"] == str(target)]
+        require(len(matches) <= 1, "base_compatibility")
+        return bool(matches)
+
+    def bind(self, source_fd, target_fd):
+        # Pass pinned directory descriptors, never re-resolve a user-owned
+        # ancestor in mount(8). The destination is reopened after mounting.
+        try:
+            result = subprocess.run(["/usr/bin/mount", "--bind", "--no-canonicalize",
+                                     f"/proc/self/fd/{source_fd}", f"/proc/self/fd/{target_fd}"],
+                                    pass_fds=(source_fd, target_fd), env=ENV, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
+        except subprocess.TimeoutExpired:
+            raise Failure("timeout", code=124, timed_out=True) from None
+        require(result.returncode == 0, "base_compatibility")
+
+    def verify(self, source, target, source_fd, target_fd):
+        source, target = str(source), str(target)
+        table = self.table()
+        # Backing children must not themselves be aliases of storage elsewhere.
+        backing = source.rsplit("/", 1)[0]
+        require(not any(entry["target"] == backing or entry["target"].startswith(backing + "/") for entry in table),
+                "base_compatibility")
+        parents = [entry for entry in table if entry["target"] == "/" or source == entry["target"] or source.startswith(entry["target"] + "/")]
+        require(parents, "base_compatibility")
+        longest = max(len(entry["target"]) for entry in parents)
+        parents = [entry for entry in parents if len(entry["target"]) == longest]
+        mounts = [entry for entry in table if entry["target"] == target]
+        require(len(parents) == len(mounts) == 1 and
+                not any(entry["target"].startswith(target + "/") for entry in table), "base_compatibility")
+        parent, mounted = parents[0], mounts[0]
+        expected_root = os.path.normpath(os.path.join(parent["root"], os.path.relpath(source, parent["target"])))
+        src, dst = os.fstat(source_fd), os.fstat(target_fd)
+        require((src.st_dev, src.st_ino) == (dst.st_dev, dst.st_ino) and
+                parent["device"] == mounted["device"] == f"{os.major(src.st_dev)}:{os.minor(src.st_dev)}" and
+                parent["filesystem"] == mounted["filesystem"] and parent["source"] == mounted["source"] and
+                mounted["root"] == expected_root and "rw" in mounted["options"], "base_compatibility")
+        return {"device": src.st_dev, "inode": src.st_ino}
+
+
 class Bootstrap:
     def __init__(self, root=Path("/"), *, uid=0, gid=0, host=None, now=None, boot_id=None, downloader=download_https):
         self.root = Path(root)
@@ -489,6 +563,8 @@ class Bootstrap:
         self.stage = "validate_input"
         self.compat = None
         self.compat_id = None
+        self.mounts = BindMounts()
+        self.accounts = {"agent": (10001, 10001), "capture": (10002, 10002), "engine": (10003, 10003)}
 
     def path(self, absolute):
         require(absolute.startswith("/") and ".." not in absolute.split("/"), "archive_paths")
@@ -532,7 +608,7 @@ class Bootstrap:
     def read(self, absolute, limit, mode=None):
         parent, name = absolute.rsplit("/", 1)
         with self.directory(parent or "/") as directory:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
             with os.fdopen(fd, "rb") as stream:
                 st = os.fstat(stream.fileno())
                 self.check_stat(st, {"type": "file", "mode": f"{mode:04o}" if mode is not None else f"{stat.S_IMODE(st.st_mode):04o}", "size": st.st_size})
@@ -574,7 +650,7 @@ class Bootstrap:
                      "failedChecks": error.checks if isinstance(error, Failure) else ["diagnostic_missing"]}
             if isinstance(cause, OSError) and type(cause.errno) is int and cause.errno in errno.errorcode:
                 value["errno"] = {"name": errno.errorcode[cause.errno], "number": cause.errno}
-            require(value["stage"] in (*STAGES, "verify", "sanitize"), "diagnostic_missing")
+            require(value["stage"] in (*STAGES, "verify", "sanitize", "resume"), "diagnostic_missing")
             with self.directory("/run/zeros", create=True, mode=0o700) as directory:
                 require(stat.S_IMODE(os.fstat(directory).st_mode) == 0o700, "file_mode")
             with self.lock("diagnostic.lock"):
@@ -673,6 +749,138 @@ class Bootstrap:
         for name, target in FACADE_LINKS:
             self.link(name, target)
 
+    def account(self, name):
+        if name == "root":
+            return self.uid, self.gid
+        if name == "user" and name not in self.accounts:
+            provider = pwd.getpwnam("user")
+            return provider.pw_uid, provider.pw_gid
+        return self.accounts[name]
+
+    @contextlib.contextmanager
+    def data_directory(self, parent, name, uid, gid, mode, create=False, exact=True):
+        require(name and "/" not in name and name not in (".", ".."), "base_compatibility")
+        created = False
+        if create:
+            try:
+                os.mkdir(name, 0o700, dir_fd=parent)
+                created = True
+            except FileExistsError:
+                pass
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        except OSError as error:
+            raise Failure("root_ownership") from error
+        try:
+            if created:
+                self.owner(os.fstat(fd))
+                os.fchown(fd, uid, gid)
+                os.fchmod(fd, mode)
+                os.fsync(fd)
+                os.fsync(parent)
+            st = os.fstat(fd)
+            require((st.st_uid, st.st_gid) == (uid, gid), "root_ownership")
+            require(stat.S_IMODE(st.st_mode) == mode if exact else not st.st_mode & 0o022, "file_mode")
+            yield fd
+        finally:
+            os.close(fd)
+
+    def machine_id(self, create=False):
+        try:
+            raw = self.read("/etc/machine-id", 33)
+        except FileNotFoundError:
+            require(create, "base_compatibility")
+            raw = b""
+        if not raw and create:
+            raw = (uuid.uuid4().hex + "\n").encode()
+            self.atomic("/etc/machine-id", raw, 0o444)
+        require(re.fullmatch(rb"[0-9a-f]{32}\n?", raw) is not None and raw.strip() != b"0" * 32, "base_compatibility")
+        return sha(raw)
+
+    def persistence(self, create=False):
+        try:
+            boot_id = self.boot_id()
+            text_match(boot_id, UUID, "base_compatibility")
+            result = {"schema": "zeros.persistence/v1", "bootId": boot_id, "machineIdSha256": self.machine_id(create), "mounts": []}
+            with self.directory("/home", create=create) as home, \
+                 self.data_directory(home, "user", *self.account("user"), 0o755, create, exact=False) as user, \
+                 self.data_directory(user, ".zeros-persist", self.uid, self.gid, 0o755, create) as backing, \
+                 self.directory("/srv/zeros", create=create) as logical:
+                for name, owner, group, mode in PERSIST_LAYOUT:
+                    uid, gid = self.account(owner)[0], self.account(group)[1]
+                    source_name = "files/repos" if name == "repos" else name
+                    source, target = self.path(PERSIST_ROOT + "/" + source_name), self.path("/srv/zeros/" + name)
+                    with contextlib.ExitStack() as stack:
+                        parent = backing
+                        if name == "repos":
+                            parent = stack.enter_context(self.data_directory(backing, "files", self.uid, self.gid, 0o755, create))
+                        source_fd = stack.enter_context(self.data_directory(parent, name, uid, gid, mode, create))
+                        with self.data_directory(logical, name, uid, gid, mode, create) as target_fd:
+                            if not self.mounts.present(target):
+                                require(create and not os.listdir(target_fd), "base_compatibility")
+                                self.mounts.bind(source_fd, target_fd)
+                        # An fd opened before mount(2) refers to the covered
+                        # directory, not the root of the new bind.
+                        with self.data_directory(logical, name, uid, gid, mode) as target_fd:
+                            identity = self.mounts.verify(source, target, source_fd, target_fd)
+                        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                        require((current.st_dev, current.st_ino) == (os.fstat(source_fd).st_dev, os.fstat(source_fd).st_ino),
+                                "base_compatibility")
+                        result["mounts"].append({"name": name, "source": PERSIST_ROOT + "/" + source_name, "target": "/srv/zeros/" + name,
+                                                 "uid": uid, "gid": gid, "mode": f"{mode:04o}", **identity})
+                        if create:
+                            if name == "files":
+                                # Root controls staging/seed entries; Git's
+                                # UID/GID 10001 can traverse to its 0700 child.
+                                # The engine masks this parent from its view.
+                                with self.data_directory(source_fd, ".zeros-setup", self.uid, self.account("agent")[1], 0o710, True):
+                                    pass
+                                # Empty targets for the engine's existing
+                                # namespace overlays, not copies of host data.
+                                for point in ("state", "managed-settings", "home"):
+                                    with self.data_directory(source_fd, point, self.uid, self.gid, 0o755, True) as view:
+                                        if point == "home":
+                                            require(set(os.listdir(view)) <= {"agent", "capture"}, "base_compatibility")
+                                            for actor in ("agent", "capture"):
+                                                with self.data_directory(view, actor, self.uid, self.gid, 0o755, True) as empty:
+                                                    require(not os.listdir(empty), "base_compatibility")
+                                        else:
+                                            require(not os.listdir(view), "base_compatibility")
+                            for parent, child, account, child_mode in (("home", "agent", "agent", 0o755),
+                                    ("home", "capture", "capture", 0o700), ("state", "workspaces", "engine", 0o700)):
+                                if name == parent:
+                                    with self.data_directory(source_fd, child, *self.account(account), child_mode, True):
+                                        pass
+                # These host-owned directories publish regular files only;
+                # no user/agent mutable tree or directory rename lives here.
+                for name, group, mode in (("setup", "root", 0o700), ("log", "agent", 0o750), ("managed-settings", "agent", 0o750)):
+                    gid = self.account(group)[1]
+                    with self.data_directory(logical, name, self.uid, gid, mode, create) as host_dir:
+                        if create and name == "managed-settings":
+                            try:
+                                fd = os.open("settings.managed.toml", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                             0o600, dir_fd=host_dir)
+                            except FileExistsError:
+                                pass
+                            else:
+                                try:
+                                    os.fchown(fd, self.uid, gid)
+                                    os.fchmod(fd, 0o640)
+                                    os.fsync(fd)
+                                    os.fsync(host_dir)
+                                finally:
+                                    os.close(fd)
+            return result
+        except OSError as error:
+            raise Failure("base_compatibility") from error
+
+    def require_persistence(self):
+        try:
+            record = strict_json(self.read(PERSIST_RECORD, 16 * 1024, 0o600), "base_compatibility")
+            require(record == self.persistence(), "base_compatibility")
+        except (FileNotFoundError, KeyError) as error:
+            raise Failure("base_compatibility") from error
+
     def wait_ready(self):
         # Wait for the boot oneshot and dispatch's cgroup initialization;
         # an active Type=simple unit alone does not acknowledge either.
@@ -686,6 +894,7 @@ class Bootstrap:
                     st = os.stat(name, dir_fd=directory, follow_symlinks=False)
                     require(stat.S_ISLNK(st.st_mode) and st.st_uid == self.uid and st.st_gid == self.gid, "pointer_publish")
                     require(os.readlink(name, dir_fd=directory) == target, "pointer_publish")
+            self.require_persistence()
 
     def current(self, name="current"):
         with self.directory(FACADE) as directory:
@@ -942,6 +1151,7 @@ class Bootstrap:
         # The SSH command owns setup.lock exactly once. This separate lock also
         # serializes boot reconciliation and direct root invocations.
         with self.lock("runtime-install.lock"):
+            self.require_persistence()
             if os.path.lexists(self.path(RECEIPTS + "/switch-intent.json")):
                 self.stage = "switch_pointer"
                 self.host.stop()
@@ -1101,10 +1311,12 @@ class Bootstrap:
         self.base()
         self.layout()
         with self.lock("runtime-install.lock"), self.lock("runtime-publication.lock"):
+            self.unlink(PERSIST_RECORD)
             # Boat overlays the saved disk after stock early-boot services
             # have run. Reload verified base policy on every invocation,
             # including a retry with the same kernel boot ID.
             self.host.load_apparmor()
+            persistence = self.persistence(create=True)
             self.stage = "switch_pointer"
             self.clean_staging()
             self.reconcile()
@@ -1134,6 +1346,7 @@ class Bootstrap:
                 self.fault("boot_epoch_published")
                 self.atomic("/run/zeros/boot-id", boot_id.encode())
                 self.fault("boot_id_published")
+            self.atomic(PERSIST_RECORD, packed(persistence))
         self.stage = "done"
 
     def activate(self, runtime_id, cgroup):
@@ -1154,17 +1367,24 @@ class Bootstrap:
         state = self.host.status()
         host_state = "failed" if state == "failed" else "stopped"
         if state == "active":
-            host_state = "idle" if current else "waiting_for_runtime"
+            try:
+                self.require_persistence()
+                host_state = "idle" if current else "waiting_for_runtime"
+            except (Failure, OSError):
+                host_state = "failed"
         return {"schema": "zeros.base-status/v1", "baseCompatibilityId": self.compat_id,
                 "bootId": self.boot_id(), "currentRuntimeId": current, "hostState": host_state}
 
     def dispatch(self):
         self.base()
         self.layout()
+        with self.lock("runtime-publication.lock"):
+            self.require_persistence()
         cgroup = self.host.cgroup()
         while self.current() is None:
             time.sleep(1)
         with self.lock("runtime-publication.lock"):
+            self.require_persistence()
             self.stage = "verify_tree"
             runtime_id = self.current()
             self.activate(runtime_id, cgroup)

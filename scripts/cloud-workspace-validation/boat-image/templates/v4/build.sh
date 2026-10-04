@@ -33,7 +33,7 @@ apt-get install -y --no-install-recommends \
 chown root:root /opt
 chmod 0755 /opt
 
-install -d -o root -g root -m 0755 /srv/zeros /srv/zeros/home /srv/zeros/files
+install -d -o root -g root -m 0755 /srv/zeros
 groupadd --gid 10001 zeros-agent
 useradd --uid 10001 --gid 10001 --no-create-home --home-dir /srv/zeros/home/agent --shell /bin/bash zeros-agent
 usermod --add-subuids 100000-165535 --add-subgids 100000-165535 zeros-agent
@@ -43,12 +43,9 @@ groupadd --gid 10003 zeros-engine
 useradd --uid 10003 --gid 10003 --no-create-home --shell /usr/sbin/nologin zeros-engine
 groupadd --gid 10004 zeros-coordinator
 useradd --uid 10004 --gid 10004 --no-create-home --shell /usr/sbin/nologin zeros-coordinator
-install -d -o 10001 -g 10001 -m 0755 /srv/zeros/home/agent
-install -d -o 10002 -g 10002 -m 0700 /srv/zeros/home/capture
-install -d -o 10003 -g 10003 -m 0700 /srv/zeros/state /srv/zeros/state/workspaces
-install -d -o root -g 10001 -m 0750 /srv/zeros/log /srv/zeros/managed-settings
-install -o root -g 10001 -m 0640 /dev/null /srv/zeros/managed-settings/settings.managed.toml
-install -d -o root -g root -m 0700 /srv/zeros/setup /srv/zeros/runtime-installs /run/zeros
+# zeros-boot creates mutable data in its Boat-persisted backing directories,
+# then binds the logical paths before initializing homes/settings/workspaces.
+install -d -o root -g root -m 0700 /srv/zeros/runtime-installs /run/zeros
 install -d -o root -g root -m 0755 /opt/zeros-bootstrap /opt/zeros-infra /opt/zeros /etc/zeros
 for name in bootstrap.py boot.sh dispatch.sh install-runtime.sh; do
   install -o root -g root -m 0555 "base/$name" "/opt/zeros-bootstrap/$name"

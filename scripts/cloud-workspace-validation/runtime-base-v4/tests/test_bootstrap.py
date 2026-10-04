@@ -155,6 +155,30 @@ def cgroup_fixture(root):
     return scope
 
 
+class FakeMounts:
+    """Mount-namespace model for rootless bootstrap lifecycle tests."""
+    def __init__(self):
+        self.links = {}
+        self.calls = []
+        self.fail = None
+
+    def present(self, target):
+        return str(target) in self.links
+
+    def bind(self, source_fd, target_fd):
+        source = os.readlink(f"/proc/self/fd/{source_fd}")
+        target = os.readlink(f"/proc/self/fd/{target_fd}")
+        if target == self.fail:
+            raise b.Failure("base_compatibility")
+        self.calls.append((source, target))
+        self.links[target] = source
+
+    def verify(self, source, target, source_fd, _target_fd):
+        b.require(self.links.get(str(target)) == str(source), "base_compatibility")
+        st = os.fstat(source_fd)
+        return {"device": st.st_dev, "inode": st.st_ino}
+
+
 class FakeHost:
     def __init__(self):
         self.calls = []
@@ -199,6 +223,9 @@ class BootstrapTests(unittest.TestCase):
         self.downloads = 0
         self.app = b.Bootstrap(self.root, uid=os.getuid(), gid=os.getgid(), host=self.host,
                                now=lambda: NOW, boot_id=lambda: BOOT, downloader=self.download)
+        self.mounts = FakeMounts()
+        self.app.mounts = self.mounts
+        self.app.accounts = {name: (os.getuid(), os.getgid()) for name in ("user", "agent", "capture", "engine")}
         bootstrap = self.root / "opt/zeros-bootstrap"
         bootstrap.mkdir(parents=True)
         compat = json.loads((HERE.parent / "compatibility.json").read_text())
@@ -481,10 +508,13 @@ class BootstrapTests(unittest.TestCase):
         self.assertNotIn(b"private-canary", log.read_bytes() + output)
 
     def assert_fresh_dispatch(self, runtime_id, boot=False):
-        boot_id = "22222222-2222-4222-8222-222222222222" if boot else BOOT
+        boot_id = "22222222-2222-4222-8222-222222222222" if boot else self.app.boot_id()
         dispatcher = b.Bootstrap(self.root, uid=os.getuid(), gid=os.getgid(), host=FakeHost(), boot_id=lambda: boot_id)
+        dispatcher.mounts = self.mounts
+        dispatcher.accounts = self.app.accounts
         if boot:
             dispatcher.boot()
+            self.app.boot_id = dispatcher.boot_id
         dispatcher.unlink(b.ACTIVE)
         with mock.patch.object(b.os, "execve") as execute, contextlib.redirect_stdout(io.StringIO()) as output:
             dispatcher.dispatch()

@@ -37,11 +37,18 @@ def sanitize_base(app):
         elif target.is_dir():
             shutil.rmtree(target)
 
-    for directory in ('/srv/zeros/files', '/srv/zeros/setup', '/srv/zeros/log', '/srv/zeros/state/workspaces',
+    # Keep the backing root and bind sources themselves. In particular, repos
+    # is also mounted at /srv/zeros/repos; unlinking its source strands the bind.
+    for child in Path('/srv/zeros/files').iterdir():
+        if child.name not in ('repos', '.zeros-setup', 'state', 'home', 'managed-settings'):
+            remove(child)
+    for directory in ('/srv/zeros/files/repos', '/srv/zeros/files/.zeros-setup', '/srv/zeros/setup', '/srv/zeros/log', '/srv/zeros/state/workspaces',
                       '/srv/zeros/home/agent', '/srv/zeros/home/capture', '/opt/zeros/sessions'):
         for child in Path(directory).iterdir():
             remove(child)
     assert set(os.listdir('/srv/zeros/state')) <= {'workspaces'}
+    for name in ('state', 'managed-settings', 'home/agent', 'home/capture'):
+        assert not os.listdir('/srv/zeros/files/' + name)
     private = ('.ssh', '.aws', '.azure', '.config/gh', '.config/gcloud', '.config/cursor', '.claude', '.codex', '.cursor',
                '.git-credentials', '.netrc', '.npmrc', '.pypirc', '.bash_history', '.zsh_history')
     for home in ('/root', '/home/user'):

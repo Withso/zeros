@@ -72,10 +72,14 @@ The public diagnostic still uses the same closed stage/check mapping.
 
 ## Boat directory persistence
 
-Boat's measured stop/resume behavior (design contracts §22) loses the children
-of directories that were created and then renamed: the directory survives
-empty. Renamed regular files, renamed symlinks, and directories populated at
-their final paths persist. V4 never publishes a runtime by renaming a directory.
+Boat's measured stop/resume behavior (design contracts §§22–23) reverts a
+directory rename if the directory existed at the preceding stop, except under
+`/home/user`. The old path can return with old contents while the new path is
+empty, partial or duplicated. The same failure occurs on forks of stopped
+templates. Renamed regular files and symlinks persist. Directory renames under
+`/home/user`, including through a bind mount, persist correctly;
+`/home/user/.cache` is not persisted at all. V4 never publishes a runtime by
+renaming a directory.
 
 After archive validation, the installer durably creates the root-only 0600
 sidecar `/opt/zeros-infra/<runtimeId>.incomplete` before creating the fresh final
@@ -103,6 +107,75 @@ JSON state files. Uploaded/build files are written at their final paths, and
 sanitation only deletes. The separate legacy v3 `boat-image/templates/install.sh`
 still contains directory moves and is outside this v4 profile's changes; it
 requires a separate compatibility fix before reuse with this Boat behavior.
+
+## Mutable storage on every boot and restore
+
+The base creates `/home/user/.zeros-persist` as root:root 0755 and binds the
+following directories before publishing readiness. These are fresh v4 bases;
+boot refuses a nonempty, unmounted destination instead of hiding or migrating
+data from a v3 or older v4 layout.
+
+| Logical host path | Backing path relative to `.zeros-persist` | Owner/group and mode | Contents |
+| --- | --- | --- | --- |
+| `/srv/zeros/files` | `files` | root:root 0755 | Checkouts, `repos`, attachments, and empty engine mount points. |
+| `/srv/zeros/state` | `state` | 10003:10003 0700 | Engine SQLite, native histories, workspace state; `workspaces` retains 10003:10003 0700. |
+| `/srv/zeros/home` | `home` | root:root 0755 | Agent home 10001:10001 0755 and capture home 10002:10002 0700. |
+| `/srv/zeros/repos` | `files/repos` | root:root 0755 | Alias of `/srv/zeros/files/repos`; preserves C3's `/srv/zeros/repos/<owner>/<name>` build paths. |
+
+Only these four binds exist on the host. `/srv/zeros/setup` remains root:root
+0700, and `/srv/zeros/{log,managed-settings}` remain root:10001 0750 at their
+existing physical paths. They hold host-owned regular files (settings remain
+root:10001 0640) and use file publication only, without directory renames or
+user/agent-mutable trees. The engine still receives its existing read-only
+managed-settings copy; setup journals are never exposed.
+`/srv/zeros/runtime-installs` and `/opt/zeros/sessions` remain root-only metadata
+with atomic file publication. Immutable runtime directories stay at their final
+`/opt/zeros-infra/r1-*` paths. `/run/zeros`, namespace views and `/tmp` remain
+ephemeral. No persistent data is placed in the provider's `.cache`.
+
+V4 clone staging and the seed backup live under
+`/srv/zeros/files/.zeros-setup`: a root:10001 0710 parent containing private
+10001:10001 0700 operation directories and `seed`. The group execute bit lets
+the unprivileged Git process reach its staging checkout/home while root controls
+the parent's entries. All clone, backup and recovery directory renames stay
+within the files bind and therefore within Boat's persisted home tree. The
+legacy staging/seed paths in `runtime-layout.json` retain their v1–v3 meaning.
+The template-fork setup path belongs to C5 and must use the already populated
+repository without clone/rename publication. Its selected
+`/srv/zeros/files/repos/<owner>/<name>` is projected to `/srv/zeros/workspace`
+inside the engine's private mount namespace on each start, from the admitted
+manifest. There is no host child mount below `files`; boot continues to reject
+unexpected host submounts there.
+
+The engine still projects `files` as `/srv/zeros`, so its `repos` directory is the
+same physical tree as both host aliases. The v4 launcher admits `repos` and masks
+`.zeros-setup` with an empty, inaccessible, read-only tmpfs. Boot recreates the
+empty `files/{state,managed-settings,home/agent,home/capture}` overlay targets
+after sanitation; it refuses populated or redirected targets. `/home/user`,
+setup journals, bootstrap authority and broker sockets remain hidden. B2's
+runtime resolver and B9's attester retain their path and mount contracts; neither
+needs a schema or implementation change for these data binds.
+
+Directory creation uses component-wise no-follow descriptors, checks owners and
+modes, and passes pinned descriptors to the fixed `mount --bind` command. Each
+bind must match the kernel mount table (source filesystem/root and exact target)
+and the backing directory's device/inode. Read-only, stacked, unexpected nested
+or redirected mounts fail closed. A partial failure leaves no readiness record;
+the next boot verifies existing binds and creates only missing ones.
+
+Boot publishes `/run/zeros/persistence.json` atomically, root-only 0600, only
+after mounts and runtime reconciliation succeed. It includes the kernel boot
+ID, a digest of the machine ID and the verified bind identities. Installer,
+dispatch and readiness probes compare it with the current kernel/filesystem
+state before accepting work; an active host reports `failed` when readiness is invalid.
+The existing closed checks (`base_compatibility`, `root_ownership`, `file_mode`,
+`timeout`) cover failures. Boot also fills a missing/empty regular
+`/etc/machine-id` using a random UUID and atomic file publication, preserving a
+valid nonempty ID. Symlinks, hard links, FIFOs and malformed IDs are rejected.
+
+Base sanitation preserves `.zeros-persist` and the bind roots, including the
+shared `files/repos` inode; it clears only empty-base private contents. Template
+sanitation may remove empty projection/staging directories, which boot recreates.
 
 ## Boat restore and early-boot dependencies
 
@@ -134,6 +207,7 @@ The base dependency audit is:
 | UIDs/groups 10001–10004 and subuid/subgid mappings | `build.sh` writes the account databases with `groupadd`, `useradd` and `usermod`; directory ownership is on disk. | The restored databases/directories are verified; there are no v4 sysusers rules to replay. |
 | Cgroup controllers and host limits | The service delegates CPU, memory and PIDs with `DelegateSubgroup=host`. | `SystemHost.cgroup()` checks the actual subtree, enables controllers and writes host limits on each dispatch. |
 | Sysctl, kernel modules and udev | The v4 profile installs no sysctl overrides, modules-load/modprobe configuration or udev rules. | No additional replay was identified in this base profile; stock kernel/device capabilities still require live qualification. |
+| Mutable data binds and machine ID | Boot creates the §23 backing layout; template sanitation can empty the machine ID. | Boot revalidates/recreates all four binds and fills an empty machine ID before publishing readiness; it does not rely on early-boot mount or machine-ID services. |
 
 ## Local checks
 
@@ -185,14 +259,18 @@ outside the checkout, and keep it until cleanup is confirmed:
 
 ```sh
 pnpm agent:check
-export ZEROS_BOAT_IMAGE_STATE_DIR="$(mktemp -d /tmp/zeros-v2-test-base.XXXXXX)"
+export ZEROS_BOAT_IMAGE_STATE_DIR="$(mktemp -d /tmp/zeros-v2-test-base-v4-b10.XXXXXX)"
 # Example only: use the approved meter ceiling for the Alpha account.
 export ZEROS_BASE_MAX_USED_HOURS=12
 pnpm tsx scripts/cloud-workspace-validation/boat-image/boat-image.ts runtime-base-v4 live-check \
-  --name zeros-v2-test-base-v4-1 --max-used-hours "$ZEROS_BASE_MAX_USED_HOURS"
+  --name zeros-v2-test-base-v4-b10-1 --max-used-hours "$ZEROS_BASE_MAX_USED_HOURS"
 ```
 
-The script performs these steps sequentially (normally three sandbox starts;
+Use a previously unused snapshot name for each attempt. B10 has only local
+verification in this PR; the orchestrator runs the command above with Alpha
+credentials to verify Boat capture/restore behavior.
+
+The script performs these steps sequentially (normally four sandbox starts;
 the journal refuses more than ten):
 
 1. Create a no-env stock Boat builder without `from`; install OS packages,
@@ -208,7 +286,8 @@ the journal refuses more than ten):
    Capture `systemd`, glibc, kernel, Python, architecture and measured snapshot
    bytes. Cold boot a disposable clone and verify `/zeros`, enabled/active
    units, delegated cgroups, the exact host marker, empty runtime/private state,
-   and `waiting_for_runtime`. Cold-boot checks do not start or repair units.
+   `waiting_for_runtime`, all four persistence binds, repo alias identity and a
+   valid machine ID. Cold-boot checks do not start or repair units.
    Sanitation and verification wait for both units to be active, the boot
    oneshot to complete, and dispatch's cgroup limits before reading the facade
    or cleaning session state.
@@ -218,8 +297,14 @@ the journal refuses more than ten):
    legacy result shape. Upload create-only objects under
    `runtime-test/zeros-v2-test-<attempt>/`; mint each GET immediately before
    SSH stdin delivery. Install A with the nested setup stub, verify the receipt
-   and active descriptor, stop/resume the VM, and verify the new boot/session
-   with the same runtime. Measure a full re-hash after resume, dropping the
+   and active descriptor. As UID 10001, seed two directory trees under
+   `/srv/zeros/files/zeros-v2-test-persistence`, then clear `/etc/machine-id` to
+   model template sanitation. Stop/resume, require boot to restore the binds
+   and regenerate the ID, and rename one tree in the same parent and the other
+   across parents. Write new content after each rename. Stop/resume a second
+   time, require both old paths absent and both old/new contents intact, and
+   recheck all binds and the repo alias. Each resume must produce a new
+   boot/session with the same runtime. Measure a full re-hash after the first resume, dropping the
    page cache when the provider permits it (`coldCache` records the result).
    Install B and require `previous=A`; corrupt C's archive and require the
    closed `archive_digest` failure with B's current pointer/session unchanged.
@@ -231,7 +316,11 @@ The last stdout line is `zeros.diagnostic/v1` with `component=base`, `stage=done
 `ok=true`, `exitCode=0` and empty `failedChecks`. The preceding receipt and
 `$ZEROS_BOAT_IMAGE_STATE_DIR/runtime-base-v4/base-receipt.json` contain the
 snapshot name/id/size, versions, sandbox-start count, synthetic runtime IDs,
-boot/session IDs, re-hash milliseconds and confirmed cleanup. This proves the
+boot/session IDs, re-hash milliseconds, four `live.persistence` phase results
+(`cold`, `seed`, `rename`, `verify`) and confirmed cleanup. Each phase records
+only the bind count and boolean/count assertions, never machine-ID bytes. The
+last phase requires `bindCount=4`, `repoAliases=true`, `machineIdPresent=true`,
+`renames=2`, and `oldPathsAbsent=true`. This proves the
 installer/base boundary, not agent qualification or the full B3 native closure.
 `imageBytes` records Boat's `sizeBytes`, the restored content size of the snapshot.
 Do not describe the re-hash as a full production-runtime measurement; report
@@ -249,7 +338,7 @@ For an operator debugging a failure, add the bare `--keep-on-failure` flag to
 
 ```sh
 pnpm tsx scripts/cloud-workspace-validation/boat-image/boat-image.ts runtime-base-v4 live-check \
-  --name zeros-v2-test-base-v4-2 --max-used-hours "$ZEROS_BASE_MAX_USED_HOURS" --keep-on-failure
+  --name zeros-v2-test-base-v4-b10-2 --max-used-hours "$ZEROS_BASE_MAX_USED_HOURS" --keep-on-failure
 ```
 
 On failure the final stdout diagnostic remains closed, private evidence is
@@ -270,7 +359,7 @@ existing object; successful and ambiguous PUTs remain cleanup-owned. Old state
 without a billing-organization binding can be used for deletion, not a new build.
 Do not delete the state directory while cleanup
 is pending. Once confirmed, retry with a fresh state directory and name
-`zeros-v2-test-base-v4-2`; include the previous attempt's starts in the overall
+`zeros-v2-test-base-v4-b10-2`; include the previous attempt's starts in the overall
 ten-start budget. Send the receipt and closed diagnostics to the orchestrator
 for review; neither raw command logs nor URLs/keys belong in the report.
 

@@ -133,6 +133,8 @@ describe("computer template repository projection", () => {
         ])
           tree.mkdir(directory);
         tree.write("/srv/zeros/files/workspace/primary", "primary data", 0o644);
+        tree.write("/srv/zeros/files/.zeros-setup/seed/private", "private setup seed", 0o600);
+        chmodSync(tree.physical("/srv/zeros/files/.zeros-setup"), 0o710);
         tree.write(
           "/srv/zeros/managed-settings/settings.managed.toml",
           "",
@@ -214,6 +216,7 @@ import {spawnSync} from 'node:child_process';
 assert.equal(process.cwd(), '/srv/zeros/workspace');
 assert.equal(fs.readFileSync('/srv/zeros/workspace/primary','utf8'), 'primary data');
 for (const file of ['/home/user','/srv/zeros/setup','/srv/zeros/broker','/opt/zeros-bootstrap']) assert(!fs.existsSync(file));
+assert(!fs.existsSync('/srv/zeros/.zeros-setup/seed/private'));
 assert(!fs.existsSync('/srv/zeros/files/repos'));
 for (let index=0; index<${repositoryCount}; index++) {
   const source="const fs=require('node:fs'); const p='/srv/zeros/repos/fixture/repo"+index+"'; " +
@@ -252,6 +255,12 @@ if (${JSON.stringify(error)}) {
           "-hR",
           "0:0",
           tree.directory,
+        ]);
+        execFileSync("sudo", [
+          "-n",
+          "/usr/bin/chown",
+          "0:10001",
+          tree.physical("/srv/zeros/files/.zeros-setup"),
         ]);
         execFileSync(
           "sudo",
