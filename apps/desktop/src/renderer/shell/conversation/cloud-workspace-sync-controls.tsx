@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useInternalFeatureActive } from "../../features/settings/internal-features";
 import { getOrganizationStoreGeneration, useTeams } from "../../features/team/team-store";
 import { useNativeRuntime } from "../../platform/runtime";
@@ -39,15 +39,24 @@ export function CloudWorkspaceSyncControls({ workspace, active }: { workspace: C
   const detached = replica?.observedState === "detached";
   const context = useRef({ key, active, authorized, replicaId: replica?.replicaId });
   context.current = { key, active, authorized, replicaId: replica?.replicaId };
-  const pending = useRef<{ key: string; id: string } | null>(null);
+  const lifecycleGeneration = useRef(0);
+  const pending = useRef<{ key: string; id: string; picking: boolean } | null>(null);
   const [busy, setBusy] = useState<{ key: string; id: string } | null>(null);
   const [error, setError] = useState<{ key: string; message: string } | null>(null);
   const [confirmation, setConfirmation] = useState<{ key: string; replicaId: string; action: "remove" | "replace" } | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     context.current.active = active;
-    return () => { context.current.active = false; };
-  }, [active]);
+    return () => {
+      context.current.active = false;
+      lifecycleGeneration.current += 1;
+      const job = pending.current;
+      if (job?.picking) {
+        pending.current = null;
+        setBusy(value => value?.id === job.id ? null : value);
+      }
+    };
+  }, [active, authorized, key]);
 
   useEffect(() => {
     if (!active || !authorized || !accountKey) return;
@@ -79,23 +88,25 @@ export function CloudWorkspaceSyncControls({ workspace, active }: { workspace: C
     if (!scope || !key || !isCurrent(key) || pending.current?.key === key || disabled || (detached && operation !== "remove")) return;
     const ownerKey = key, currentReplicaId = replica?.replicaId;
     if (operation !== "create" && !currentReplicaId) return;
-    const job = { key: ownerKey, id: crypto.randomUUID() };
+    const generation = lifecycleGeneration.current;
+    const job = { key: ownerKey, id: crypto.randomUUID(), picking: operation === "create" };
     pending.current = job; setBusy(job); setError(null); setConfirmation(null);
     cloudReplicaCache.invalidate(ownerKey);
     try {
       let next: CloudReplica;
       if (operation === "create") {
         const root = await pickCloudReplicaFolder(scope);
-        if (!root || !isCurrent(ownerKey)) return;
+        if (!root || generation !== lifecycleGeneration.current || pending.current !== job || !isCurrent(ownerKey)) return;
+        job.picking = false;
         next = await createCloudReplica(scope, root, job.id);
       } else {
         if (!isCurrent(ownerKey, currentReplicaId)) return;
         next = await changeCloudReplica(scope, currentReplicaId!, operation === "replace" ? "resume" : operation, job.id, operation === "replace");
       }
-      if (isCurrent(ownerKey)) cloudReplicaCache.setData(ownerKey, { replica: next.desiredState === "removed" ? null : next,
+      if (generation === lifecycleGeneration.current && isCurrent(ownerKey)) cloudReplicaCache.setData(ownerKey, { replica: next.desiredState === "removed" ? null : next,
         divergences: operation === "replace" || operation === "remove" ? [] : divergences });
     } catch {
-      if (isCurrent(ownerKey)) setError({ key: ownerKey, message: operation === "create"
+      if (generation === lifecycleGeneration.current && isCurrent(ownerKey)) setError({ key: ownerKey, message: operation === "create"
         ? "Couldn’t start sync. Choose an empty folder and try again."
         : "Couldn’t update sync. Your downloaded files are kept. Try again." });
     } finally {

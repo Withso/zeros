@@ -152,6 +152,58 @@ describe("desktop cloud replica runtime", () => {
     } finally { await fixture.runtime.dispose(); }
   });
 
+  it.each(["pause", "resume", "remove"] as const)(
+    "keeps account/device and another workspace's replica metadata readable during pending %s",
+    async (operation) => {
+      const fixture = await activeRuntimeFixture();
+      const otherReplicaId = randomUUID();
+      const otherWorkspaceId = randomUUID();
+      fixture.state.createReplica({
+        ...fixture.state.replica(fixture.replicaId)!,
+        replicaId: otherReplicaId,
+        workspaceId: otherWorkspaceId,
+        rootPath: path.join(fixture.root, "other"),
+        checkpointId: fixture.checkpointId,
+        manifestRevision: 0,
+      });
+      let responseStarted!: () => void;
+      let releaseResponse!: () => void;
+      const started = new Promise<void>((resolve) => { responseStarted = resolve; });
+      const responseGate = new Promise<void>((resolve) => { releaseResponse = resolve; });
+      const responseError = new Error("held lifecycle response failed");
+      const api = {
+        changeReplicaState: async () => {
+          responseStarted();
+          await responseGate;
+          throw responseError;
+        },
+      } as unknown as CloudWorkspaceDesktopApi;
+      const internals = fixture.runtime as unknown as {
+        session: CloudReplicaHostSession;
+        api: CloudWorkspaceDesktopApi;
+        broker: CloudReplicaSyncBroker | null;
+      };
+      internals.session = fixture.session;
+      internals.api = api;
+      internals.broker = new CloudReplicaSyncBroker(api, fixture.state, () => 1_000);
+      const change = fixture.runtime[operation](fixture.replicaId, `held-${operation}`);
+      const settled = change.catch((error: unknown) => error);
+      try {
+        await started;
+        expect(internals.broker).toBeNull();
+        expect(fixture.runtime.identity()).toEqual({ accountUserId: fixture.accountUserId, deviceId: fixture.deviceId });
+        expect(fixture.runtime.list()).toEqual(expect.arrayContaining([
+          expect.objectContaining({ replicaId: otherReplicaId, workspaceId: otherWorkspaceId,
+            accountUserId: fixture.accountUserId, deviceId: fixture.deviceId }),
+        ]));
+      } finally {
+        releaseResponse();
+        expect(await settled).toBe(responseError);
+        await fixture.runtime.dispose();
+      }
+    },
+  );
+
   it("retries a transient unreadable projection without recording a local edit", async () => {
     const transient = Object.assign(new Error("temporarily unreadable"), {
       code: "EACCES",

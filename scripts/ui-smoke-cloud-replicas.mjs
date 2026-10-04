@@ -97,6 +97,25 @@ export async function runCloudReplicaSmoke({ page, check, harnessBase }) {
   expect((await calls()).filter(call => call.op === "cloudReplica.create")).toHaveLength(beforeClosedPicker);
   await trigger.click();
   await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toBeVisible();
+  for (const lifecycle of ["activity", "authorization"]) {
+    await page.evaluate(() => window.cloudReplicaHarness.holdFolder());
+    await sync.getByRole("button", { name: "Choose folder…", exact: true }).click();
+    const beforeCancelledPicker = (await calls()).filter(call => call.op === "cloudReplica.create").length;
+    if (lifecycle === "activity") {
+      await page.evaluate(() => window.cloudReplicaHarness.hide());
+      await expect(sync).toHaveCount(0);
+      await page.evaluate(() => window.cloudReplicaHarness.show());
+    } else {
+      await page.evaluate(() => window.cloudReplicaHarness.canEdit(false));
+      await expect(sync).toContainText("edit access");
+      await page.evaluate(() => window.cloudReplicaHarness.canEdit(true));
+    }
+    await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toBeVisible();
+    await page.evaluate(lifecycle => window.cloudReplicaHarness.finishFolder(`/Users/fixture/zeros-v2-test-cancelled-${lifecycle}`), lifecycle);
+    await page.clock.fastForward(100);
+    expect((await calls()).filter(call => call.op === "cloudReplica.create")).toHaveLength(beforeCancelledPicker);
+    await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toBeEnabled();
+  }
   await page.evaluate(() => window.cloudReplicaHarness.canEdit(undefined));
   await expect(sync).toContainText("edit access");
   await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toHaveCount(0);
