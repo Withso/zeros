@@ -107,6 +107,8 @@ import {
 import { appInfo, appSettingGet, appSettingSet, engineRestart } from "./app";
 import { logSubmit, logsExportOpen, logsRecent } from "./logs";
 import {
+  cloudWorkspaceAccessContext,
+  cloudWorkspaceAccessList,
   cloudWorkspaceAccessRevoke,
   cloudWorkspaceRuntimeClose,
   cloudWorkspaceRuntimeOpen,
@@ -171,6 +173,8 @@ export function registerAllCommands(): void {
   setCommand("cloud_workspace_ssh_ide", cloudWorkspaceSshIde);
   setCommand("cloud_workspace_tunnel_start", cloudWorkspaceTunnelStart);
   setCommand("cloud_workspace_access_revoke", cloudWorkspaceAccessRevoke);
+  setCommand("cloud_workspace_access_context", cloudWorkspaceAccessContext);
+  setCommand("cloud_workspace_access_list", cloudWorkspaceAccessList);
   setCommand("cloud_workspace_runtime_open", cloudWorkspaceRuntimeOpen);
   setCommand("cloud_workspace_capability", cloudWorkspaceCapability);
   setCommand("cloud_workspace_runtime_refresh", cloudWorkspaceRuntimeRefresh);

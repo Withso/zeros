@@ -31,6 +31,8 @@ import {
 } from "node:net";
 
 import type { CloudWorkspaceTunnelHandle } from "./cloud-workspace-access-broker";
+import type { CloudRuntimeServiceAccess } from "./cloud-runtime-service-client";
+import type { CloudRuntimeServiceTransport, CloudServiceConnection, CloudServiceHandle } from "./cloud-runtime-service-transport";
 
 const SSH_CREDENTIAL_PATTERN = /^[A-Za-z0-9._~-]{16,4096}$/;
 const HOST_PATTERN =
@@ -924,5 +926,134 @@ export class CloudWorkspaceSshRuntime {
         await stop();
       },
     };
+  }
+}
+
+export type CloudNativeSshHandle = CloudServiceHandle & {
+  command: string;
+  configPath: string;
+  launchTerminal(): Promise<void>;
+};
+
+/** A private one-use OpenSSH adapter for an authenticated native stream. The
+ * socket is opened on demand: copied commands do not consume the worker's SSH
+ * handshake deadline before the user pastes them. No service bearer is written
+ * to disk, argv, the clipboard, Terminal's environment, or renderer state. */
+export class CloudWorkspaceNativeSshRuntime {
+  private readonly handles = new Set<CloudNativeSshHandle>();
+  private disposed = false;
+  private initialized = false;
+  constructor(private readonly options: {
+    runtimeRoot: string;
+    transport: Pick<CloudRuntimeServiceTransport, "open">;
+    spawn?: SpawnCloudProcess;
+    openBinary?: string;
+  }) {}
+
+  async prepare(access: CloudRuntimeServiceAccess): Promise<CloudNativeSshHandle> {
+    if (this.disposed) throw new Error("Cloud SSH authority has ended.");
+    const remaining = Date.parse(access.grant.expiresAt) - Date.now();
+    if (access.grant.kind !== "ssh" || access.ssh?.username !== "zeros" || access.grant.remotePort !== null ||
+        !Number.isFinite(remaining) || remaining <= 0 || remaining > 32 * 60_000) throw new Error("Cloud SSH access is invalid or expired.");
+    const root = path.resolve(this.options.runtimeRoot);
+    // OpenSSH expands percent/dollar tokens in configuration values. These
+    // application-owned paths must be literal and cannot inject config lines.
+    if (/[\r\n\0%$]/.test(root)) throw new Error("Cloud SSH runtime path is unavailable.");
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const rootStat = lstatSync(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || rootStat.uid !== process.getuid?.()) throw new Error("Cloud SSH runtime directory is unsafe.");
+    chmodSync(root, 0o700);
+    if (!this.initialized) {
+      for (const name of readdirSync(root)) if (/^native-[A-Za-z0-9]{6}$/.test(name)) rmSync(path.join(root, name), { recursive: true, force: true });
+      this.initialized = true;
+    }
+    const directory = mkdtempSync(path.join(root, "native-"));
+    chmodSync(directory, 0o700);
+    // macOS sockaddr_un paths are limited to 104 bytes. A separate private
+    // temp directory handles long application-support paths without a TCP SSH
+    // listener or an externally installed ProxyCommand executable.
+    const socketDirectory = Buffer.byteLength(path.join(directory, "s")) < 100 ? directory : mkdtempSync(path.join(os.tmpdir(), "zs-"));
+    chmodSync(socketDirectory, 0o700);
+    const socketPath = path.join(socketDirectory, "s");
+    const configPath = path.join(directory, "config"), knownHosts = path.join(directory, "known_hosts");
+    let peer: NetSocket | undefined, connection: CloudServiceConnection | undefined;
+    let consumed = false, stopped = false, stopping: Promise<void> | undefined, finishClosed!: () => void;
+    const closed = new Promise<void>(resolve => { finishClosed = resolve; });
+    const abort = new AbortController();
+    const server = createServer({ pauseOnConnect: true }, socket => {
+      if (consumed || stopped) { socket.destroy(); return; }
+      consumed = true; peer = socket;
+      server.close();
+      socket.on("error", retire); socket.once("close", retire);
+      void this.options.transport.open(access, abort.signal).then(opened => {
+        connection = opened;
+        if (stopped || socket.destroyed || opened.intro.kind !== "ssh") { retire(); return; }
+        try {
+          // Write the verified introduction before releasing any SSH handshake
+          // bytes. OpenSSH independently verifies this exact key during KEX.
+          writeFileSync(knownHosts, `zeros-cloud ${opened.intro.publicKey}\n`, { flag: "wx", mode: 0o600 });
+          opened.stream.on("error", retire);
+          opened.stream.once("close", retire);
+          socket.pipe(opened.stream).pipe(socket); socket.resume();
+        } catch { retire(); }
+      }, retire);
+    });
+    const stop = (): Promise<void> => {
+      if (stopping) return stopping;
+      stopped = true; clearTimeout(deadline); abort.abort(); peer?.destroy();
+      stopping = (async () => {
+        try {
+          await connection?.stop();
+          await new Promise<void>(resolve => server.close(() => resolve()));
+          await rm(directory, { recursive: true, force: true });
+          if (socketDirectory !== directory) await rm(socketDirectory, { recursive: true, force: true });
+        } finally { this.handles.delete(handle); finishClosed(); }
+      })();
+      return stopping;
+    };
+    const retire = () => { void stop().catch(() => undefined); };
+    const deadline = setTimeout(retire, remaining); deadline.unref();
+    const command = `/usr/bin/ssh -F ${shellQuote(configPath)} zeros-cloud`;
+    const handle: CloudNativeSshHandle = { command, configPath, closed, stop,
+      launchTerminal: async () => {
+        if (stopped || this.disposed) throw new Error("Cloud SSH access has ended.");
+        const wrapper = path.join(directory, "open-cloud.command");
+        try {
+          writeFileSync(wrapper, `#!/bin/sh\nexec ${command}\n`, { flag: "wx", mode: 0o700 });
+          const child = (this.options.spawn ?? spawn)(this.options.openBinary ?? "/usr/bin/open", ["-a", "Terminal", wrapper],
+            { stdio: "ignore", detached: true, shell: false });
+          await waitForAcceptedNativeLaunch(child); child.unref();
+        } catch { await stop(); throw new Error("Cloud workspace Terminal could not be opened."); }
+      },
+    };
+    this.handles.add(handle);
+    server.on("error", retire);
+    try {
+      if (Buffer.byteLength(socketPath) >= 100 || /[\r\n\0%$]/.test(socketPath)) throw new Error("Cloud SSH socket path is unavailable.");
+      writeFileSync(configPath, [
+        "Host zeros-cloud", "  HostName zeros-cloud", "  User zeros", "  BatchMode yes", "  ConnectTimeout 10",
+        "  PasswordAuthentication no", "  KbdInteractiveAuthentication no", "  PubkeyAuthentication no",
+        "  IdentityAgent none", "  ForwardAgent no", "  ForwardX11 no", "  ClearAllForwardings yes",
+        "  ControlMaster no", "  ControlPath none", "  PermitLocalCommand no", "  StrictHostKeyChecking yes",
+        "  HostKeyAlgorithms ssh-ed25519", "  HostKeyAlias zeros-cloud", "  GlobalKnownHostsFile /dev/null",
+        `  UserKnownHostsFile ${configQuote(knownHosts)}`,
+        `  ProxyCommand /usr/bin/nc -U ${shellQuote(socketPath)}`, "  LogLevel ERROR", "",
+      ].join("\n"), { flag: "wx", mode: 0o600 });
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.once("close", () => reject(new Error("Cloud SSH access has ended.")));
+        server.listen(socketPath, () => { server.off("error", reject); resolve(); });
+      });
+      if (stopped || this.disposed) throw new Error("Cloud SSH access has ended.");
+      chmodSync(socketPath, 0o600);
+      return handle;
+    } catch {
+      await stop(); throw new Error("The private cloud SSH adapter could not be opened.");
+    }
+  }
+
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    await Promise.all([...this.handles].map(handle => handle.stop()));
   }
 }
