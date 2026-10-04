@@ -14,6 +14,9 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { HostExecutionBoundary } from "../host-boundary";
+import { createRepoTaskBoundaryFactory } from "../repo-task-boundary";
+import type { TerritoryGeneration } from "../types";
+import { UtilityBoundaryPool } from "../utility-boundary-pool";
 import type { AgentFilesystemTerritory } from "../../types";
 
 const territory: AgentFilesystemTerritory = {
@@ -29,6 +32,63 @@ const territory: AgentFilesystemTerritory = {
 };
 
 describe("host execution boundary", () => {
+  it("proves only a known rejected no-process preparation and refuses unknown or active execution", async () => {
+    const boundary = new HostExecutionBoundary() as HostExecutionBoundary & {
+      proveFailedPreparationStopped(executionId: string): Promise<void>;
+    };
+    await expect(boundary.proveFailedPreparationStopped("unknown-preparation")).rejects.toThrow();
+    const controller = new AbortController();
+    controller.abort();
+    const admission = { executionId: "cancelled-host-preparation", actor: "agent-code" as const, cwd: process.cwd(), workspaceRoot: process.cwd() };
+    await expect(boundary.prepare(admission, { signal: controller.signal, retainFailedPreparationProof: true })).rejects.toThrow();
+    await expect(boundary.proveFailedPreparationStopped(admission.executionId)).resolves.toBeUndefined();
+
+    const active = await boundary.prepare({ ...admission, executionId: "active-host-preparation" });
+    try {
+      await expect(boundary.proveFailedPreparationStopped("active-host-preparation")).rejects.toThrow();
+      expect(active.wrapSpawn({ command: process.execPath, args: [], cwd: process.cwd(), env: {} }).command).toBe(process.execPath);
+    } finally {
+      await active.stopAndProve();
+    }
+  });
+
+  it.each(["utility", "repo-task"] as const)(
+    "does not retain failed %s preparation bookkeeping without an opt-in",
+    async (operation) => {
+      const root = await mkdtemp(path.join(tmpdir(), "zeros-host-admission-"));
+      try {
+        const boundary = new HostExecutionBoundary({
+          projectRoot: root,
+          supervisorScript: path.join(root, "missing-supervisor.mjs"),
+        });
+        const internals = boundary as unknown as {
+          preparationOwnership: Map<TerritoryGeneration, unknown>;
+        };
+        const admission = {
+          executionId: `ordinary-host-${operation}`,
+          actor: "agent-code" as const,
+          cwd: root,
+          workspaceRoot: root,
+        };
+        const pool = new UtilityBoundaryPool({
+          prepare: (request) => boundary.prepare(request),
+          retire: (_executionId, prepared) => prepared.stopAndProve(),
+        });
+        const factory = createRepoTaskBoundaryFactory(boundary);
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const pending = operation === "utility"
+            ? pool.acquire(admission)
+            : factory({ ...admission, repoRoot: root });
+          await expect(pending).rejects.toMatchObject({ code: "ENOENT" });
+          expect(internals.preparationOwnership.size).toBe(0);
+          await expect(boundary.proveFailedPreparationStopped(admission.executionId)).rejects.toThrow();
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("reports ordinary code-only work as unrestricted and not requiring containment", async () => {
     const boundary = new HostExecutionBoundary();
     const prepared = await boundary.prepare({

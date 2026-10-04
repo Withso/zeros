@@ -91,6 +91,71 @@ export function isExpectedEngineHealth(
   );
 }
 
+export const ENGINE_HEALTH_PROBE_TIMEOUT_MS = 1500;
+export const ENGINE_WATCHDOG_INTERVAL_MS = 3000;
+export const ENGINE_WATCHDOG_FAILURE_THRESHOLD = 5;
+/** Confirm an idle listener for a full missed-probe window. Output is weaker
+ * evidence than a private heartbeat, but can indicate queued Git work; allow
+ * that confirmation the same minute as bounded Git read requests. Neither
+ * deadline is extended by subsequent log output. */
+export const ENGINE_HEALTH_CONFIRMATION_TIMEOUT_MS =
+  ENGINE_WATCHDOG_INTERVAL_MS * ENGINE_WATCHDOG_FAILURE_THRESHOLD;
+export const ENGINE_OUTPUT_CONFIRMATION_TIMEOUT_MS = 60_000;
+/** Protect outstanding work through temporary event-loop starvation. Only a
+ * newer exact-child heartbeat renews this lease. A dead child bypasses it, and
+ * an abandoned lease expires so a wedged event loop remains recoverable. */
+export const ENGINE_ACTIVE_WORK_STALL_TIMEOUT_MS = 5 * 60_000;
+
+export interface EngineHealthActivity {
+  readonly lastOutputAt: number | null;
+  readonly lastHeartbeatAt: number | null;
+  readonly activeWork: boolean;
+}
+
+/** One tracker per spawned child. Raw output may come from an inherited pipe,
+ * so keep it separate from the engine's private event-loop/work heartbeat.
+ * Store receive times and counters only; never retain any log/control text. */
+export function createEngineHealthActivityTracker(
+  now: () => number = () => performance.now(),
+): {
+  recordOutput(): void;
+  recordHeartbeat(value: unknown, expectedInstance: string): boolean;
+  snapshot(): EngineHealthActivity;
+} {
+  let lastOutputAt: number | null = null;
+  let lastHeartbeatAt: number | null = null;
+  let activeWork = false;
+  let lastSequence = -1;
+  const counter = (value: unknown): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  return {
+    recordOutput() {
+      lastOutputAt = now();
+    },
+    recordHeartbeat(value, expectedInstance) {
+      if (
+        !isRecord(value) ||
+        value.type !== "engine.heartbeat" ||
+        expectedInstance.length === 0 ||
+        value.instance !== expectedInstance ||
+        !counter(value.sequence) ||
+        value.sequence <= lastSequence ||
+        !counter(value.activeRequests) ||
+        !counter(value.activeTurns)
+      ) {
+        return false;
+      }
+      lastSequence = value.sequence;
+      lastHeartbeatAt = now();
+      activeWork = value.activeRequests > 0 || value.activeTurns > 0;
+      return true;
+    },
+    snapshot() {
+      return { lastOutputAt, lastHeartbeatAt, activeWork };
+    },
+  };
+}
+
 /** Hold-off before the watchdog's NEXT kill/respawn after a run of respawns
  *  that never produced a single successful probe.
  *

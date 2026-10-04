@@ -194,15 +194,17 @@ async function awaitAdapterStartup<T>(options: {
   readonly agentId: string;
   readonly stage: "newSession" | "loadSession" | "forkSession";
   readonly operation: Promise<T>;
+  readonly signal?: AbortSignal;
   /** Promise.race does not cancel provider work. Reap any adapter allocation
    * that settles after the caller already received a timeout. */
   readonly onLateSettlement?: () => Promise<void>;
 }): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let timedOut = false;
+  let abandoned = false;
+  let abort: (() => void) | undefined;
   const operation = options.operation.then(
     (value) => {
-      if (timedOut && options.onLateSettlement) {
+      if (abandoned && options.onLateSettlement) {
         void Promise.resolve()
           .then(options.onLateSettlement)
           .catch((error) => {
@@ -217,7 +219,7 @@ async function awaitAdapterStartup<T>(options: {
       return value;
     },
     (error: unknown) => {
-      if (timedOut && options.onLateSettlement) {
+      if (abandoned && options.onLateSettlement) {
         void Promise.resolve()
           .then(options.onLateSettlement)
           .catch((cleanupError) => {
@@ -236,7 +238,7 @@ async function awaitAdapterStartup<T>(options: {
   );
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
-      timedOut = true;
+      abandoned = true;
       reject(
         new AgentFailureError({
           kind: "timeout",
@@ -251,10 +253,25 @@ async function awaitAdapterStartup<T>(options: {
       );
     }, ADAPTER_START_TIMEOUT_MS);
   });
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    if (!options.signal) return;
+    abort = () => {
+      abandoned = true;
+      reject(new AgentFailureError({
+        kind: "lifecycle-superseded",
+        stage: options.stage,
+        agentId: options.agentId,
+        message: "The agent session was closed while its provider was starting.",
+      }));
+    };
+    options.signal.addEventListener("abort", abort, { once: true });
+    if (options.signal.aborted) abort();
+  });
   try {
-    return await Promise.race([operation, timeout]);
+    return await Promise.race([operation, timeout, cancelled]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (abort) options.signal?.removeEventListener("abort", abort);
   }
 }
 
@@ -1434,6 +1451,15 @@ export class AgentGateway {
    *  agent that doesn't self-report its cwd where it is. Set at
    *  newSession/loadSession, cleared on endSession/dispose. */
   private readonly executionToCwd = new Map<string, string>();
+  /** Primary lifecycle ownership survives route revocation until all teardown
+   * stages succeed. Archive can retry an unproven execution without treating
+   * an attached directory as ownership of another workspace's session. */
+  private readonly executionOwnership = new Map<
+    string,
+    { agentId: string; workspaceId?: string; cwd?: string }
+  >();
+  private readonly sessionRetirements = new Map<string, Promise<void>>();
+  private readonly failedBoundaryPreparations = new Set<string>();
   /** Immutable Design boundary captured when the session is admitted. A null
    * entry is intentional: if a Design directory appears or the pointer moves
    * later, the session must be rebuilt rather than silently gaining a new
@@ -1581,7 +1607,11 @@ export class AgentGateway {
    *  instead of failing on that transient gap. */
   private readonly adapterStartupFlights = new Map<
     string,
-    { readonly promise: Promise<void>; readonly settle: () => void }
+    {
+      readonly promise: Promise<void>;
+      readonly settle: () => void;
+      readonly controller: AbortController;
+    }
   >();
 
   /** Per-agent account-details cache (provider / plan / org / email), keyed
@@ -1845,6 +1875,7 @@ export class AgentGateway {
     const sessions: string[] = [];
     const candidates = new Set([
       ...this.executionToAgent.keys(),
+      ...this.executionOwnership.keys(),
       ...this.executionToTerritoryContributions.keys(),
       ...this.provisionalTerritoryContributions.keys(),
     ]);
@@ -1854,7 +1885,10 @@ export class AgentGateway {
         this.provisionalExecutionActors.get(sessionId) ??
         "agent-code";
       if (options.actor && actor !== options.actor) continue;
-      if (this.executionToWorkspace.get(sessionId) === workspaceId) {
+      if (
+        (this.executionToWorkspace.get(sessionId) ??
+          this.executionOwnership.get(sessionId)?.workspaceId) === workspaceId
+      ) {
         sessions.push(sessionId);
         continue;
       }
@@ -1871,12 +1905,62 @@ export class AgentGateway {
         sessions.push(sessionId);
         continue;
       }
-      const cwd = this.executionToCwd.get(sessionId);
+      const cwd =
+        this.executionToCwd.get(sessionId) ??
+        this.executionOwnership.get(sessionId)?.cwd;
       if (cwd && pathInsideOrEqual(cwd, normalizedWorkspace)) {
         sessions.push(sessionId);
       }
     }
     return [...new Set(sessions)].sort();
+  }
+
+  /** Archive/delete owns primary sessions only. Design-authority retirement
+   * intentionally uses the broader workspaceSessionIds query above. A current
+   * most-specific cwd owner overrides an older durable workspace binding. */
+  workspaceOwnedSessionIds(
+    workspaceId: string,
+    workspaceRoot: string,
+    ownerOf: (cwd: string) => string | null,
+  ): string[] {
+    const candidates = new Set([
+      ...this.executionToAgent.keys(),
+      ...this.executionToWorkspace.keys(),
+      ...this.executionToCwd.keys(),
+      ...this.executionOwnership.keys(),
+    ]);
+    return [...candidates].filter((executionId) => {
+      const retained = this.executionOwnership.get(executionId);
+      const cwd = this.executionToCwd.get(executionId) ?? retained?.cwd;
+      const owner = cwd ? ownerOf(cwd) : null;
+      if (owner) return owner === workspaceId;
+      const bound = this.executionToWorkspace.get(executionId) ?? retained?.workspaceId;
+      if (bound) return bound === workspaceId;
+      return Boolean(cwd && pathInsideOrEqual(cwd, path.resolve(workspaceRoot)));
+    }).sort();
+  }
+
+  sessionAgentId(executionId: string): string | null {
+    return this.executionToAgent.get(executionId) ??
+      this.executionOwnership.get(executionId)?.agentId ?? null;
+  }
+
+  sessionWorkspaceBinding(
+    executionId: string,
+  ): { workspaceId?: string; cwd?: string } | null {
+    const retained = this.executionOwnership.get(executionId);
+    const workspaceId = this.executionToWorkspace.get(executionId) ?? retained?.workspaceId;
+    const cwd = this.executionToCwd.get(executionId) ?? retained?.cwd;
+    return workspaceId || cwd ? { workspaceId, cwd } : null;
+  }
+
+  private retainExecutionOwnership(executionId: string, agentId: string): void {
+    if (this.executionOwnership.has(executionId)) return;
+    this.executionOwnership.set(executionId, {
+      agentId,
+      workspaceId: this.executionToWorkspace.get(executionId),
+      cwd: this.executionToCwd.get(executionId),
+    });
   }
 
   workspaceHasSessions(workspaceId: string, workspaceRoot: string): boolean {
@@ -1897,7 +1981,14 @@ export class AgentGateway {
     try {
       return await run();
     } catch (error) {
-      await this.sessionTools.stop(executionId);
+      const owner = this.executionOwnership.get(executionId);
+      if (owner) {
+        // Keep the admission failure visible while retaining any incomplete
+        // exact cleanup for archive/retry after routing is gone.
+        await this.endSession(owner.agentId, executionId);
+      } else {
+        await this.sessionTools.stop(executionId);
+      }
       throw error;
     } finally {
       this.provisionalTerritoryContributions.delete(executionId);
@@ -2710,21 +2801,31 @@ export class AgentGateway {
         }
       }
       if (!prepared) {
-        prepared = await this.executionBoundary.prepare(request, {
-          ...(options.admissionSignal
-            ? { signal: options.admissionSignal }
-            : {}),
-          // Cloud's canary and provider use the same generation-private OCI
-          // service. Finish the canary before the long-lived provider takes
-          // its exclusive service lock. Local sessions can attest in the
-          // background after establishing their immutable kernel policy.
-          // Forks, utilities, Run/Setup, and warm spares also remain blocking.
-          attestation:
-            this.executionBoundary.backend !== "cloud-worker" &&
-            (stage === "newSession" || stage === "loadSession")
-              ? "background"
-              : "blocking",
-        });
+        try {
+          prepared = await this.executionBoundary.prepare(request, {
+            // Session lifecycle cleanup consumes exact rejected-admission
+            // proof; one-shot forks and pooled/task callers do not opt in.
+            ...(stage !== "forkSession"
+              ? { retainFailedPreparationProof: true }
+              : {}),
+            ...(options.admissionSignal
+              ? { signal: options.admissionSignal }
+              : {}),
+            // Cloud's canary and provider use the same generation-private OCI
+            // service. Finish the canary before the long-lived provider takes
+            // its exclusive service lock. Local sessions can attest in the
+            // background after establishing their immutable kernel policy.
+            // Forks, utilities, Run/Setup, and warm spares also remain blocking.
+            attestation:
+              this.executionBoundary.backend !== "cloud-worker" &&
+              (stage === "newSession" || stage === "loadSession")
+                ? "background"
+                : "blocking",
+          });
+        } catch (error) {
+          if (stage !== "forkSession") this.failedBoundaryPreparations.add(executionId);
+          throw error;
+        }
       }
       this.attachBoundaryAuthority(
         prepared,
@@ -4819,6 +4920,12 @@ export class AgentGateway {
       instructionCtx,
     );
     const executionId = cloudAdmission && opts.cloudExecutionId ? opts.cloudExecutionId : randomUUID();
+    const executionOwner = {
+      agentId,
+      workspaceId: opts.workspaceId,
+      cwd,
+    };
+    this.executionOwnership.set(executionId, executionOwner);
     const { mcpServers, preparedBoundary, protectionAttestation } =
       await this.withProvisionalTerritory(
         executionId,
@@ -4931,6 +5038,7 @@ export class AgentGateway {
     // session. Product tools have separately revocable engine authority.
     try {
       opts.onExecutionCreated?.(executionId);
+      opts.admissionSignal?.throwIfAborted();
     } catch (error) {
       await this.disposeRejectedExecutions(adapter, [executionId]);
       throw error;
@@ -4950,15 +5058,20 @@ export class AgentGateway {
         ...(territory && actor === "agent-code" ? { territory } : {}),
         executionBoundary: preparedBoundary,
       });
-      this.trackAdapterStartup(executionId, startup);
+      const startupSignal = this.trackAdapterStartup(
+        executionId,
+        startup,
+        opts.admissionSignal,
+      );
       ({ session } = await this.raceBoundaryAttestation(
         executionId,
         awaitAdapterStartup({
           agentId,
           stage: "newSession",
           operation: startup,
+          signal: startupSignal,
           onLateSettlement: () =>
-            this.disposeRejectedExecutions(adapter, [executionId]),
+            this.disposeRejectedExecutions(adapter, [executionId], executionOwner),
         }),
         () => this.disposeRejectedExecutions(adapter, [executionId]),
       ));
@@ -5143,6 +5256,12 @@ export class AgentGateway {
       cwd,
       instructionCtx,
     );
+    const executionOwner = {
+      agentId,
+      workspaceId: opts.workspaceId,
+      cwd,
+    };
+    this.executionOwnership.set(executionId, executionOwner);
     const { mcpServers, preparedBoundary, protectionAttestation } =
       await this.withProvisionalTerritory(
         executionId,
@@ -5243,6 +5362,7 @@ export class AgentGateway {
     );
     try {
       opts.onExecutionCreated?.(executionId);
+      opts.admissionSignal?.throwIfAborted();
     } catch (error) {
       await this.disposeRejectedExecutions(adapter, [executionId]);
       throw error;
@@ -5269,15 +5389,20 @@ export class AgentGateway {
       const startup = cloudProviderExecution(preparedBoundary)?.coordinator?.requiresFreshHistory
         ? adapter.newSession(freshOptions).then(({session}) => ({ ...session, resumedFresh: true, replacementSessionId: session.providerBinding?.resumeId }))
         : adapter.loadSession(loadOptions);
-      this.trackAdapterStartup(executionId, startup);
+      const startupSignal = this.trackAdapterStartup(
+        executionId,
+        startup,
+        opts.admissionSignal,
+      );
       response = await this.raceBoundaryAttestation(
         executionId,
         awaitAdapterStartup({
           agentId,
           stage: "loadSession",
           operation: startup,
+          signal: startupSignal,
           onLateSettlement: () =>
-            this.disposeRejectedExecutions(adapter, [executionId]),
+            this.disposeRejectedExecutions(adapter, [executionId], executionOwner),
         }),
         () => this.disposeRejectedExecutions(adapter, [executionId]),
       );
@@ -5601,71 +5726,27 @@ export class AgentGateway {
   private async disposeRejectedExecutions(
     adapter: AgentAdapter,
     executionIds: Array<string | undefined>,
+    lateStartupOwner?: { agentId: string; workspaceId?: string; cwd: string },
   ): Promise<void> {
     for (const executionId of new Set(
       executionIds.filter(Boolean) as string[],
     )) {
-      const boundary = this.executionBoundaries.get(executionId);
-      const protectionCompletion =
-        this.boundaryAttestations.get(executionId)?.completion;
-      // Every path that abandons a startup lands here, so this is where a
-      // prompt still waiting on that startup is released.
-      this.settleAdapterStartup(executionId);
-      this.boundaryAttestations.delete(executionId);
-      this.executionToAgent.delete(executionId);
-      this.executionAuthFingerprint.delete(executionId);
-      this.executionToActor.delete(executionId);
-      this.executionToWorkspace.delete(executionId);
-      this.executionToCwd.delete(executionId);
-      this.executionToInstructionCtx.delete(executionId);
-      this.executionToDesignDirectory.delete(executionId);
-      this.executionToTerritoryIdentity.delete(executionId);
-      this.executionToTerritoryContributions.delete(executionId);
-      this.executionToContextTerritories.delete(executionId);
-      this.provisionalTerritoryContributions.delete(executionId);
-      this.executionToBoundaryStatus.delete(executionId);
-      this.stopObservingBoundaryPorts(executionId);
-      const failures: unknown[] = [];
       try {
-        await this.sessionTools.stop(executionId);
-      } catch (error) {
-        failures.push(error);
-      }
-      // Each step is independent and teardown is fail-closed: an adapter
-      // cleanup failure must never skip the kernel-boundary kill/proof, while
-      // a lease-revocation failure must not leave the provider process alive.
-      try {
-        await this.closeBoundaryPreviews(executionId);
-      } catch (error) {
-        failures.push(error);
-      }
-      try {
-        await boundary?.revoke();
-      } catch (error) {
-        failures.push(error);
-      }
-      try {
-        await adapter.disposeSession?.(executionId);
-      } catch (error) {
-        failures.push(error);
-      }
-      let boundaryStopped = boundary === undefined;
-      try {
-        await boundary?.stopAndProve();
-        boundaryStopped = true;
-      } catch (error) {
-        failures.push(error);
-        if (boundary) {
-          this.recordFailedBoundaryRetirement(executionId, boundary, error);
+        if (lateStartupOwner) {
+          // Startup may allocate after the first adapter disposal while its
+          // boundary proof is still pending. That shared retirement cannot
+          // cover the new allocation: follow it with another disposal pass.
+          const priorRetirement = this.sessionRetirements.get(executionId);
+          if (priorRetirement) await priorRetirement.catch(() => undefined);
+          // The prior pass may have removed live routing and ownership. Keep
+          // the exact admission owner if this new disposal needs a retry.
+          if (!this.executionOwnership.has(executionId)) {
+            this.executionOwnership.set(executionId, lateStartupOwner);
+          }
         }
-      }
-      if (boundaryStopped) {
-        this.executionBoundaries.delete(executionId);
-        this.failedBoundaryRetirements.delete(executionId);
-        await this.removeRetiredSessionDir(executionId);
-      }
-      await protectionCompletion?.catch(() => undefined);
-      for (const err of failures) {
+        // Ordinary concurrent closes continue to share exact-session proof.
+        await this.endSession(adapter.agentId, executionId, { failClosed: true });
+      } catch (err) {
         console.warn(
           `[agents] ${adapter.agentId} failed to dispose rejected execution ` +
             `${executionId}: ` +
@@ -5680,10 +5761,31 @@ export class AgentGateway {
     sessionId: string,
     opts: { failClosed?: boolean } = {},
   ): Promise<void> {
-    const resolvedAgentId = this.executionToAgent.get(sessionId) ?? agentId;
+    let retirement = this.sessionRetirements.get(sessionId);
+    if (!retirement) {
+      const resolvedAgentId = this.sessionAgentId(sessionId) ?? agentId;
+      this.retainExecutionOwnership(sessionId, resolvedAgentId);
+      retirement = this.retireSession(resolvedAgentId, sessionId);
+      this.sessionRetirements.set(sessionId, retirement);
+      const current = retirement;
+      void retirement.finally(() => {
+        if (this.sessionRetirements.get(sessionId) === current) {
+          this.sessionRetirements.delete(sessionId);
+        }
+      }).catch(() => undefined);
+    }
+    if (opts.failClosed) await retirement;
+    else await retirement.catch(() => undefined);
+  }
+
+  private async retireSession(
+    resolvedAgentId: string,
+    sessionId: string,
+  ): Promise<void> {
     const boundary = this.executionBoundaries.get(sessionId);
     const protectionCompletion =
       this.boundaryAttestations.get(sessionId)?.completion;
+    this.adapterStartupFlights.get(sessionId)?.controller.abort();
     this.settleAdapterStartup(sessionId);
     this.boundaryAttestations.delete(sessionId);
     this.stopObservingBoundaryPorts(sessionId);
@@ -5744,9 +5846,16 @@ export class AgentGateway {
           (err instanceof Error ? err.message : String(err)),
       );
     }
-    let boundaryStopped = boundary === undefined;
+    let boundaryStopped = false;
     try {
-      await boundary?.stopAndProve();
+      if (boundary) {
+        await boundary.stopAndProve();
+      } else if (this.failedBoundaryPreparations.has(sessionId)) {
+        if (!this.executionBoundary.proveFailedPreparationStopped) {
+          throw new Error("Exact rejected preparation cleanup proof is unavailable.");
+        }
+        await this.executionBoundary.proveFailedPreparationStopped(sessionId);
+      }
       boundaryStopped = true;
     } catch (err) {
       failure ??= err;
@@ -5759,6 +5868,7 @@ export class AgentGateway {
       );
     }
     if (boundaryStopped) {
+      this.failedBoundaryPreparations.delete(sessionId);
       this.executionBoundaries.delete(sessionId);
       this.failedBoundaryRetirements.delete(sessionId);
       await this.removeRetiredSessionDir(sessionId);
@@ -5767,7 +5877,8 @@ export class AgentGateway {
     // but it must not leave a filesystem revalidation running against a
     // workspace the caller may archive or delete immediately afterward.
     await protectionCompletion?.catch(() => undefined);
-    if (failure && opts.failClosed) throw failure;
+    if (failure) throw failure;
+    this.executionOwnership.delete(sessionId);
   }
 
   async listSessions(
@@ -5958,14 +6069,19 @@ export class AgentGateway {
   private trackAdapterStartup(
     executionId: string,
     operation: Promise<unknown>,
-  ): void {
+    admissionSignal?: AbortSignal,
+  ): AbortSignal {
     let settle!: () => void;
     const promise = new Promise<void>((resolve) => {
       settle = resolve;
     });
-    const flight = { promise, settle };
+    const controller = new AbortController();
+    const flight = { promise, settle, controller };
     this.adapterStartupFlights.set(executionId, flight);
     void operation.catch(() => this.settleAdapterStartup(executionId, flight));
+    return admissionSignal
+      ? AbortSignal.any([admissionSignal, controller.signal])
+      : controller.signal;
   }
 
   /** Release anything waiting on this execution's startup. */
@@ -6716,6 +6832,9 @@ export class AgentGateway {
     this.executionToActor.clear();
     this.executionToWorkspace.clear();
     this.executionToCwd.clear();
+    this.executionOwnership.clear();
+    this.sessionRetirements.clear();
+    this.failedBoundaryPreparations.clear();
     this.executionToMainRepoRoot.clear();
     this.executionToInstructionCtx.clear();
     this.executionToDesignDirectory.clear();

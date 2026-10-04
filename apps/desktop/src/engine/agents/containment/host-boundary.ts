@@ -720,6 +720,11 @@ export class HostExecutionBoundary implements ExecutionBoundary {
   private readonly supervisorScript: string;
   private readonly supervisorRuntime: string;
   private readonly ownerProcessId: number;
+  private readonly preparationOwnership = new Map<
+    TerritoryGeneration,
+    { executionId: string; state: "preparing" | "active" | "failed" }
+  >();
+  private readonly failedPreparationProofs = new Map<string, Promise<void>>();
 
   constructor(options: HostExecutionBoundaryOptions = {}) {
     this.projectRoot = path.resolve(options.projectRoot ?? process.cwd());
@@ -804,8 +809,50 @@ export class HostExecutionBoundary implements ExecutionBoundary {
     request: BoundaryRequest,
     control?: AdmissionControl,
   ): Promise<PreparedBoundary> {
-    abortIfRequested(control);
+    if (this.failedPreparationProofs.has(request.executionId)) {
+      throw new Error("This execution's failed preparation is being retired.");
+    }
     const generation = `host-${randomUUID()}` as TerritoryGeneration;
+    const ownership = { executionId: request.executionId, state: "preparing" as "preparing" | "active" | "failed" };
+    this.preparationOwnership.set(generation, ownership);
+    try {
+      const prepared = await this.prepareHost(request, control, generation);
+      ownership.state = "active";
+      return prepared;
+    } catch (error) {
+      // Host preparation creates bookkeeping only. Provider/PTY process
+      // authority is first returned by the completed PreparedBoundary.
+      ownership.state = "failed";
+      if (!control?.retainFailedPreparationProof) this.preparationOwnership.delete(generation);
+      throw error;
+    }
+  }
+
+  async proveFailedPreparationStopped(executionId: string): Promise<void> {
+    const current = this.failedPreparationProofs.get(executionId);
+    if (current) return current;
+    const attempts = [...this.preparationOwnership].filter(([, owner]) => owner.executionId === executionId);
+    if (attempts.length === 0 || attempts.some(([, owner]) => owner.state !== "failed")) {
+      throw new Error("Only an exact rejected no-process preparation can be proven here.");
+    }
+    const proof = Promise.resolve().then(async () => {
+      await removeSessionDir(executionId);
+      for (const [generation] of attempts) this.preparationOwnership.delete(generation);
+    });
+    this.failedPreparationProofs.set(executionId, proof);
+    try {
+      await proof;
+    } finally {
+      if (this.failedPreparationProofs.get(executionId) === proof) this.failedPreparationProofs.delete(executionId);
+    }
+  }
+
+  private async prepareHost(
+    request: BoundaryRequest,
+    control: AdmissionControl | undefined,
+    generation: TerritoryGeneration,
+  ): Promise<PreparedBoundary> {
+    abortIfRequested(control);
     const supervisor = await this.resolvedSupervisor();
     const ownerStartToken = await processStartToken(this.ownerProcessId);
     const ownedSession = await ensureSessionDir(request.executionId);
@@ -1132,6 +1179,7 @@ export class HostExecutionBoundary implements ExecutionBoundary {
           pendingLaunches.clear();
           processes.clear();
           await removeSessionDir(request.executionId);
+          this.preparationOwnership.delete(generation);
         })();
         const wrapped = attempt.catch((error) => {
           if (stopPromise === wrapped) stopPromise = null;

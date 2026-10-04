@@ -55,6 +55,16 @@ automatically creating a default chat. A repository list arriving first is not
 evidence of an empty conversation. Preserve the selection and drafts during
 revalidation; a reload alone must not create an extra Untitled tab.
 
+A Local transport reconnect observes the existing execution and prompt identity.
+It never resends a possibly accepted prompt to repair a missing response. Keep
+the live turn and elapsed clock while re-adopting, reject stale owner responses,
+and use exact saved turn state when completion happened offline. Reconcile
+missed transcript rows before draining a queued successor, retaining that wait
+across repeated disconnects and failed reads. If backfill cannot be confirmed,
+preserve and pause follow-ups. A terminated engine
+cannot prove an unfinished operation was undelivered; retain the conversation
+and surface recovery instead of starting the same work again automatically.
+
 When a cloud engine stops or changes, new work must not reuse an admission that
 is still disconnected or reconnecting. Reopen that workspace through normal
 admission, deduplicate concurrent opens, and fence all late responses from the

@@ -1109,7 +1109,7 @@ describe("code-agent territory resolution", () => {
           ],
         }),
       }),
-      { attestation: "background" },
+      { attestation: "background", retainFailedPreparationProof: true },
     );
     expect(adapter.newSession).not.toHaveBeenCalled();
   });
@@ -1243,7 +1243,7 @@ describe("code-agent territory resolution", () => {
           }),
         }),
       }),
-      { attestation: "background" },
+      { attestation: "background", retainFailedPreparationProof: true },
     );
     expect(adapterTerritory?.protectedDesignDirectories).toEqual([
       attachedDesign,
@@ -1405,7 +1405,7 @@ describe("code-agent territory resolution", () => {
             ),
           }),
         }),
-        { attestation: "background" },
+        { attestation: "background", retainFailedPreparationProof: true },
       );
       expect(
         (

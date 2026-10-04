@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { RoutingExecutionBoundary } from "../routing-boundary";
+import { createRepoTaskBoundaryFactory } from "../repo-task-boundary";
+import { UtilityBoundaryPool } from "../utility-boundary-pool";
 import type {
   BoundaryRequest,
   ExecutionBoundary,
@@ -58,11 +60,75 @@ function fakeBoundary(backend: "none" | "zeros-srt") {
       preserved: 0,
     })),
     clearRetirementFailure: vi.fn(),
+    proveFailedPreparationStopped: vi.fn<(_: string) => Promise<void>>().mockResolvedValue(),
   } satisfies ExecutionBoundary;
   return { boundary, prepared };
 }
 
 describe("execution-boundary routing", () => {
+  it("proves a rejected preparation only through its selected backend and retains failed proof for retry", async () => {
+    const host = fakeBoundary("none");
+    const sandbox = fakeBoundary("zeros-srt");
+    sandbox.boundary.prepare.mockRejectedValueOnce(new Error("preparation failed"));
+    sandbox.boundary.proveFailedPreparationStopped.mockRejectedValueOnce(new Error("cleanup still unproven"));
+    const routing = new RoutingExecutionBoundary({ host: host.boundary, sandbox: sandbox.boundary }) as RoutingExecutionBoundary & {
+      proveFailedPreparationStopped(executionId: string): Promise<void>;
+    };
+    const admission = request("design-agent");
+
+    await expect(routing.prepare(admission, { retainFailedPreparationProof: true })).rejects.toThrow("preparation failed");
+    expect(sandbox.boundary.prepare).toHaveBeenCalledWith(admission, { retainFailedPreparationProof: true });
+    await expect(routing.proveFailedPreparationStopped(admission.executionId)).rejects.toThrow("cleanup still unproven");
+    await expect(routing.proveFailedPreparationStopped(admission.executionId)).resolves.toBeUndefined();
+    expect(sandbox.boundary.proveFailedPreparationStopped.mock.calls).toEqual([[admission.executionId], [admission.executionId]]);
+    expect(host.boundary.proveFailedPreparationStopped).not.toHaveBeenCalled();
+  });
+
+  it.each(["utility", "repo-task"] as const)(
+    "does not retain or block failed ordinary %s preparations",
+    async (operation) => {
+      const host = fakeBoundary("none");
+      const sandbox = fakeBoundary("zeros-srt");
+      host.boundary.prepare.mockRejectedValue(new Error("preparation failed"));
+      const routing = new RoutingExecutionBoundary({
+        host: host.boundary,
+        sandbox: sandbox.boundary,
+      });
+      const internals = routing as unknown as {
+        failedPreparationOwners: Map<string, ExecutionBoundary>;
+      };
+      const admission = request();
+      const pool = new UtilityBoundaryPool({
+        prepare: (candidate) => routing.prepare(candidate),
+        retire: async () => {},
+      });
+      const factory = createRepoTaskBoundaryFactory(routing);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const pending = operation === "utility"
+          ? pool.acquire(admission)
+          : factory({ ...admission, repoRoot: admission.workspaceRoot });
+        await expect(pending).rejects.toThrow("preparation failed");
+        expect(internals.failedPreparationOwners.size).toBe(0);
+        await expect(routing.proveFailedPreparationStopped(admission.executionId)).rejects.toThrow();
+      }
+      expect(host.boundary.prepare).toHaveBeenCalledTimes(3);
+      expect(host.boundary.proveFailedPreparationStopped).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses unknown and successfully admitted executions through the failed-preparation seam", async () => {
+    const host = fakeBoundary("none");
+    const sandbox = fakeBoundary("zeros-srt");
+    const routing = new RoutingExecutionBoundary({ host: host.boundary, sandbox: sandbox.boundary }) as RoutingExecutionBoundary & {
+      proveFailedPreparationStopped(executionId: string): Promise<void>;
+    };
+    await expect(routing.proveFailedPreparationStopped("unknown")).rejects.toThrow();
+    const admission = request();
+    await routing.prepare(admission);
+    await expect(routing.proveFailedPreparationStopped(admission.executionId)).rejects.toThrow();
+    expect(host.boundary.proveFailedPreparationStopped).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["agent-code", false],
     ["agent-code", true],

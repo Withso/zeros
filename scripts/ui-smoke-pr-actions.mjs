@@ -7,6 +7,81 @@ export async function runPrActionsSmoke({ page, check }) {
       (type) => window.prActionsFixture.requests.filter((r) => r.type === type),
       type,
     );
+  for (const finishOffline of [false, true]) {
+    await page.goto(`${base}?holdPrompt=1`);
+    await page.getByRole("button", { name: "Create PR", exact: true }).click();
+    await expect.poll(() => requests("AGENT_PROMPT")).toHaveLength(1);
+    await page.evaluate(() => window.prActionsFixture.stream());
+    await expect(page.locator("[data-transcript]")).toContainText("Work started.");
+    await page.evaluate(() => window.prActionsFixture.disconnect());
+    if (finishOffline) await page.evaluate(() => window.prActionsFixture.finishPrompt());
+    await page.evaluate(() => window.prActionsFixture.reconnect());
+    await expect.poll(async () => (await requests("AGENT_LOAD_SESSION")).filter(r => r.adoptOnly)).toHaveLength(1);
+    if (!finishOffline) {
+      await expect(page.locator("[data-transcript]")).toHaveAttribute("data-session-status", "streaming");
+      await expect(page.locator("[data-transcript]")).toHaveAttribute("data-session-error", "");
+      await page.evaluate(() => window.prActionsFixture.finishPrompt());
+    }
+    await expect(page.locator("[data-transcript]")).toHaveAttribute("data-session-status", "ready");
+    await expect(page.locator("[data-transcript]")).toHaveAttribute("data-session-error", "");
+    await expect(page.locator("[data-transcript]")).toContainText("Work continued while disconnected.");
+    expect(await requests("AGENT_PROMPT")).toHaveLength(1);
+    expect(await requests("AGENT_NEW_SESSION")).toHaveLength(1);
+    check(`A Local turn ${finishOffline ? "completed offline" : "still running"} survives reconnect without replay and restores missed text`, true);
+  }
+  await page.goto(`${base}?holdPrompt=1`);
+  await page.getByRole("button", { name: "Create PR", exact: true }).waitFor();
+  await page.evaluate(() => window.prActionsFixture.prepareSession());
+  await page.evaluate(() => {
+    window.prActionsFixture.holdHistory(2);
+    void window.prActionsFixture.reconcileHistory();
+  });
+  await expect.poll(() => page.evaluate(() => window.prActionsFixture.historyReads.length)).toBe(1);
+  await page.getByRole("button", { name: "Create PR", exact: true }).click();
+  await expect.poll(() => requests("AGENT_PROMPT")).toHaveLength(1);
+  await page.evaluate(() => window.prActionsFixture.stream());
+  await expect(page.locator("[data-transcript]")).toContainText("Work started.");
+  await page.evaluate(() => window.prActionsFixture.queueFollowup());
+  await expect(page.locator("[data-transcript]")).toContainText("Queued follow-up");
+  await page.evaluate(() => {
+    window.prActionsFixture.disconnect();
+    window.prActionsFixture.finishPrompt();
+    window.prActionsFixture.reconnect();
+  });
+  await expect(page.locator("[data-transcript]")).toHaveAttribute("data-session-status", "ready");
+  await page.evaluate(() => window.prActionsFixture.releaseHistory(0));
+  await expect.poll(() => page.evaluate(() => window.prActionsFixture.historyReads.length)).toBe(2);
+  expect(await requests("AGENT_PROMPT")).toHaveLength(1);
+  await page.evaluate(() => window.prActionsFixture.releaseHistory(1));
+  await expect.poll(() => requests("AGENT_PROMPT")).toHaveLength(2);
+  expect(await page.evaluate(() => window.prActionsFixture.promptTranscripts[1]))
+    .toContain("Work continued while disconnected.");
+  expect(await requests("AGENT_NEW_SESSION")).toHaveLength(1);
+  check("Recovery waits for a fresh transcript after a stale read before sending a queued follow-up", true);
+
+  await page.goto(`${base}?holdPrompt=1`);
+  await page.getByRole("button", { name: "Create PR", exact: true }).click();
+  await expect.poll(() => requests("AGENT_PROMPT")).toHaveLength(1);
+  await page.evaluate(() => window.prActionsFixture.stream());
+  await expect(page.locator("[data-transcript]")).toContainText("Work started.");
+  await page.evaluate(() => window.prActionsFixture.queueFollowup());
+  await page.evaluate(() => {
+    window.prActionsFixture.disconnect();
+    window.prActionsFixture.reconnect();
+  });
+  await expect.poll(async () => (await requests("AGENT_LOAD_SESSION")).filter(r => r.adoptOnly)).toHaveLength(1);
+  await page.evaluate(() => {
+    window.prActionsFixture.finishPrompt();
+    window.prActionsFixture.disconnect();
+  });
+  await expect(page.locator("[data-transcript]")).toHaveAttribute("data-session-status", "ready");
+  expect(await requests("AGENT_PROMPT")).toHaveLength(1);
+  await page.evaluate(() => window.prActionsFixture.reconnect());
+  await expect.poll(() => requests("AGENT_PROMPT")).toHaveLength(2);
+  expect(await page.evaluate(() => window.prActionsFixture.promptTranscripts[1]))
+    .toContain("Work continued while disconnected.");
+  check("A second disconnect at completion keeps follow-ups queued until transcript recovery finishes", true);
+
   for (const action of ["create", "resolve"]) {
     await page.goto(`${base}?action=${action}`);
     const button = page.getByRole("button", {

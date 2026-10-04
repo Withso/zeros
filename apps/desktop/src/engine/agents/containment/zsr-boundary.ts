@@ -1710,6 +1710,11 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     TerritoryGeneration,
     NodeJS.Timeout
   >();
+  private readonly preparationOwnership = new Map<
+    TerritoryGeneration,
+    { executionId: string; state: "preparing" | "active" | "failed"; stopped: boolean }
+  >();
+  private readonly failedPreparationProofs = new Map<string, Promise<void>>();
 
   constructor(private readonly options: ZsrBoundaryOptions) {
     this.backend = options.cloudWorker ? "cloud-worker" : "zeros-srt";
@@ -1776,6 +1781,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       this.recordBoundaryRetirementFailure(generation, cleanupProof, failure);
       throw failure;
     }
+    this.clearRetirementFailure(generation);
     throw primaryError;
   }
 
@@ -1900,6 +1906,40 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     this.retirementRecoveryAttempts.delete(generation);
     this.retirementRecoveryBoundaries.delete(generation);
     this.retirementFailures.delete(generation);
+    const ownership = this.preparationOwnership.get(generation);
+    if (ownership) {
+      ownership.stopped = true;
+      if (ownership.state === "active") this.preparationOwnership.delete(generation);
+    }
+  }
+
+  async proveFailedPreparationStopped(executionId: string): Promise<void> {
+    const current = this.failedPreparationProofs.get(executionId);
+    if (current) return current;
+    const attempts = [...this.preparationOwnership].filter(([, owner]) => owner.executionId === executionId);
+    if (attempts.length === 0 || attempts.some(([, owner]) => owner.state !== "failed")) {
+      throw new Error("Only an exact rejected preparation can be proven here.");
+    }
+    const proof = Promise.resolve().then(async () => {
+      const results = await Promise.allSettled(attempts.map(async ([generation, ownership]) => {
+        const retained = this.retirementRecoveryBoundaries.get(generation);
+        if (retained) {
+          await retained.stopAndProve();
+          this.clearRetirementFailure(generation);
+        }
+        if (!ownership.stopped) throw new Error("Rejected preparation cleanup remains unproven.");
+        this.preparationOwnership.delete(generation);
+      }));
+      const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) throw new AggregateError(failures, "Rejected preparation cleanup remains unproven.");
+    });
+    this.failedPreparationProofs.set(executionId, proof);
+    try {
+      await proof;
+    } finally {
+      if (this.failedPreparationProofs.get(executionId) === proof) this.failedPreparationProofs.delete(executionId);
+    }
   }
 
   async recoverStaleProcesses(): Promise<MacosProcessDomainRecoveryResult> {
@@ -2523,17 +2563,37 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     initialRequest: BoundaryRequest,
     control?: AdmissionControl,
   ): Promise<PreparedBoundary> {
-    const admissionStartedAt = Date.now();
-    const probe = await this.probe(initialRequest);
-    if (!probe.available || !probe.secureNestedIsolation) {
-      throw new Error(probe.reasons.join("; ") || "ZSR is unavailable");
+    if (this.failedPreparationProofs.has(initialRequest.executionId)) {
+      throw new Error("This execution's failed preparation is being retired.");
     }
-    return this.admitLocalHostParity(
-      initialRequest,
-      newTerritoryGeneration(),
-      admissionStartedAt,
-      control?.signal,
-      control?.attestation ?? "blocking",
-    );
+    const generation = newTerritoryGeneration();
+    const ownership = { executionId: initialRequest.executionId, state: "preparing" as "preparing" | "active" | "failed", stopped: false };
+    this.preparationOwnership.set(generation, ownership);
+    const admissionStartedAt = Date.now();
+    let allocationStarted = false;
+    try {
+      const probe = await this.probe(initialRequest);
+      if (!probe.available || !probe.secureNestedIsolation) {
+        throw new Error(probe.reasons.join("; ") || "ZSR is unavailable");
+      }
+      allocationStarted = true;
+      const prepared = await this.admitLocalHostParity(
+        initialRequest,
+        generation,
+        admissionStartedAt,
+        control?.signal,
+        control?.attestation ?? "blocking",
+      );
+      ownership.state = "active";
+      if (ownership.stopped) this.preparationOwnership.delete(generation);
+      return prepared;
+    } catch (error) {
+      ownership.state = "failed";
+      if (!allocationStarted) ownership.stopped = true;
+      // Unproven cleanup stays in the generation-specific recovery maps;
+      // only opted-in lifecycle owners retain this additional proof record.
+      if (!control?.retainFailedPreparationProof) this.preparationOwnership.delete(generation);
+      throw error;
+    }
   }
 }

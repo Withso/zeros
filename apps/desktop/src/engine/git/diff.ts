@@ -17,6 +17,7 @@ import { isConflictEntry, parsePorcelainZ } from "./porcelain";
 import { getInProgressState } from "./repo";
 import { GitError } from "./errors";
 import { mapBounded } from "./bounded-parallel";
+import { shareWorkspaceChangeProbe } from "./workspace-change-probe";
 import type {
   Commit,
   FileChange,
@@ -530,7 +531,23 @@ export async function hasWorkspaceChanges(
   workspaceId: string,
 ): Promise<boolean> {
   try {
-    return (await changeCounts(workspaceId)).all > 0;
+    const ws = await resolveRepoForGitOp(workspaceId);
+    const { remote } = resolveRepoGit(ws.repoRoot);
+    return await shareWorkspaceChangeProbe(ws, remote, async () => {
+      const [{ stdout }, resolvedFloor] = await Promise.all([
+        runGitRead(ws.path, ["status", "--porcelain=v1", "-z", "-uall"]),
+        forkPoint(ws.path, ws.baseBranch, remote),
+      ]);
+      const parsed = parsePorcelain(stdout);
+      const tracked = await diffNameStatus(ws.path, [
+        resolvedFloor ?? (await headOrEmptyTree(ws.path)),
+      ]);
+      return (
+        tracked.some((change) => !isInternal(change.path)) ||
+        parsed.conflicted.some((change) => !isInternal(change.path)) ||
+        parsed.untracked.some((filePath) => !isInternal(filePath))
+      );
+    });
   } catch {
     return false;
   }

@@ -29,12 +29,39 @@ This is development lifecycle coordination, not a new provider or renderer
 permission boundary. Production installs have no development restart handler.
 
 Production and development both have a separate crash watchdog. It allows one
-health probe at a time, bounds each request to 1.5 seconds and 8 KiB, and checks
-the exact root/port/boot identity after asynchronous work. Five failures trigger
-recovery; repeated replacements with no healthy response retain exponential
-backoff. Ownership is checked again inside the shared spawn queue, so a delayed
-failure from an old engine cannot restart its replacement. Shutdown invalidates
-pending probes and startup rechecks shutdown after its prerequisites.
+health probe at a time, normally bounds each request to 1.5 seconds and 8 KiB,
+and checks the exact root/port/boot identity after asynchronous work. Five misses
+require a longer confirmation: 15 seconds for an idle child, or 60 seconds after
+recent child output. Output alone cannot extend that confirmation indefinitely.
+An observed child exit recovers without waiting for HTTP. Delayed host timers
+after sleep or load do not count as independent engine failures.
+
+The engine also sends private `engine.heartbeat` frames over its existing host
+control pipe every three seconds and at activity transitions. Frames contain
+only the boot nonce, an advancing sequence, and active request/turn counts.
+Outstanding work with an advancing heartbeat defers global replacement; idle
+heartbeats do not hide a broken listener. Work evidence expires five minutes
+after the last heartbeat if the engine event loop stops. A stale child or nonce
+cannot renew another engine's lease. This signal is separate from the filesystem
+heartbeat used by development reloaders and never goes to renderers or relays.
+
+Ownership, current work and the age of the confirmation are checked again in
+the shared spawn queue and after spawn prerequisites, before terminating the
+child. Repeated replacements with no healthy response retain exponential
+backoff. Shutdown invalidates pending probes and stops activity publication.
+Heavy work in one workspace must not restart agents in other workspaces merely
+because a short HTTP probe timed out.
+
+A Local prompt that loses its response socket re-adopts its exact live execution
+without starting a provider or resending the prompt. Session-scoped terminal
+events and the saved turn record establish completion, including completion
+while disconnected. The renderer fills transcript gaps before releasing queued
+follow-ups, even if the socket drops again during backfill. Unavailable history
+keeps follow-ups queued; exhaustion of the bounded backfill wait pauses them
+for an explicit send. Read timeouts retry with backoff during a five-minute
+recovery window, matching the host's allowance for stalled active work. A confirmed
+missing execution fails immediately. Recovery failure retains the conversation
+and surfaces uncertainty; it never silently repeats a possibly committed operation.
 
 ## Testing a synced checkout
 

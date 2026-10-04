@@ -312,6 +312,10 @@ export interface ExecutionBoundary {
     request: BoundaryRequest,
     control?: AdmissionControl,
   ): Promise<PreparedBoundary>;
+  /** Prove cleanup of this exact opted-in rejected preparation, including resources
+   * allocated before prepare() could return a handle. Unknown, preparing, and
+   * successfully admitted executions must be refused by this narrow seam. */
+  proveFailedPreparationStopped?(executionId: string): Promise<void>;
   /** Clear retained diagnostics for one generation after a retried teardown
    * proved it stopped. Retirement failures are execution-scoped and must not
    * become a process-wide admission latch. */
@@ -325,6 +329,10 @@ export interface AdmissionControl {
   /** Checked between acquisitions. A cancellation after preparation starts
    * unwinds through the same proven cleanup path as an admission error. */
   readonly signal?: AbortSignal;
+  /** Retain failed-admission proof until its lifecycle owner consumes
+   * proveFailedPreparationStopped(). Default callers rely on backend cleanup
+   * and automatic recovery without retaining this extra ownership record. */
+  readonly retainFailedPreparationProof?: boolean;
   /** `blocking` is the conservative default for Run, Setup, utilities, and
    * pre-warmed boundaries. Interactive agent create/resume may use
    * `background`; a ZSR kernel policy is still established before return while
