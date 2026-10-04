@@ -312,10 +312,14 @@ intent, so an expired claim cannot be marked cleaned while a suspended worker
 can still dispatch an unjournalled create.
 
 The worker creates `zeros-v2-qual-<runtime-short>` with a 30-minute provider TTL,
-checks base status, and installs with `purpose:qualification`, a descriptor and
-an artifact GET capability lasting at most 15 minutes. Installer input travels
-only on pinned SSH stdin. The installed runtime must report idle with the exact
-runtime and base identity before the worker invokes its self-test.
+waits up to 12 minutes for bootstrap to report `idle` or `waiting_for_runtime`,
+and installs with `purpose:qualification`, a descriptor and an artifact GET
+capability lasting at most 15 minutes. Cloud Computer builds use the same wait:
+Boat readiness can precede lazy image hydration, persistent binds and host startup.
+Nonzero, timed-out or malformed status probes are retried; a parsed `failed`
+state or the deadline fails closed. Installer input travels only on pinned SSH
+stdin. The installed runtime must report idle with the exact runtime and base
+identity before the worker invokes its self-test.
 
 `runtime-self-test.mjs` selects R only through the active runtime resolver and
 checks the original manifest and receipt bytes against that descriptor. It runs
@@ -347,7 +351,12 @@ immutable qualification evidence is never overwritten or re-enabled by retry.
 Failures retain only a closed diagnostic and insert no qualifications. A
 crashed run is reconciled after its deadline: recover the sandbox identity from
 the provider journal, delete it, verify the deletion receipt and a subsequent
-404, then mark the run failed. A seven-minute cleanup lease prevents concurrent
+404, then mark the run failed. A receipt may be `completed`, or `blocked` at
+`waiting_for_uploads`, `kept_for_newer_snapshots` or `waiting_for_restore` with
+the sandbox absent. The latter proves compute release while storage remains
+pending; it does not prove storage erasure. Unknown stages, `pending`/`processing`
+operations and still-visible sandboxes never confirm builder deletion.
+A seven-minute cleanup lease prevents concurrent
 reconcilers. Unconfirmed cleanup keeps the running slot occupied. A lost create
 reply is recovered with the original idempotency key and exact request; replay
 is bounded to 23 hours so it cannot silently allocate a second VM after the

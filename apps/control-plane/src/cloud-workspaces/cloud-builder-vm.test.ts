@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { builderFixedCommand, parseBuilderDiagnostic } from "./cloud-builder-commands.js";
+import { BuilderVmError } from "./cloud-builder-vm.js";
 import { builderFixture, builderIntent, BUILDER_SANDBOX, BUILDER_WALLET, diagnostic, encodeInstaller, installerInput } from "./cloud-builder-vm-test-fixtures.js";
 
 describe("short-lived Boat builder VMs", () => {
@@ -23,6 +24,37 @@ describe("short-lived Boat builder VMs", () => {
     expect(f.state.creates).toBe(2);
     expect(f.state.allocations.size).toBe(1);
     expect((await f.operations.find(builderIntent.operationKey))?.create_dispatched_at).toBeInstanceOf(Date);
+  });
+  it.each(["idle", "waiting_for_runtime"])("waits through bootstrap failures and stopped until the base is %s", async hostState => {
+    const f = builderFixture(); const vm = await f.vms.create(builderIntent);
+    f.state.hostState = hostState;
+    f.state.baseStatusReplies = [{ success: false, exitCode: 1 }, { timedOut: true },
+      { stdout: "private boot output" }, { hostState: "stopped" }];
+    await expect(f.vms.waitForBase(vm)).resolves.toMatchObject({ hostState });
+    expect(f.state.baseStatusCalls).toBe(5);
+    expect(f.waits).toEqual([3000, 3000, 3000, 3000]);
+  });
+  it.each([["stopped", "timeout"], ["failed", "builder_stopped"]])("fails closed when bootstrap stays %s", async (hostState, check) => {
+    const f = builderFixture(); const vm = await f.vms.create(builderIntent);
+    f.state.hostState = hostState;
+    const result = f.vms.waitForBase(vm);
+    await expect(result).rejects.toBeInstanceOf(BuilderVmError);
+    await expect(result).rejects.toMatchObject({ check, message: `Builder VM ${check}` });
+    expect(f.waits.reduce((sum, ms) => sum + ms, 0)).toBe(hostState === "stopped" ? 18_000 : 0);
+  });
+  it("does not accept a ready probe that returns after the readiness deadline", async () => {
+    const f = builderFixture(); const vm = await f.vms.create(builderIntent);
+    const fetch = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementationOnce(async (...args) => { f.advance(18_001); return fetch(...args); });
+    await expect(f.vms.waitForBase(vm)).rejects.toMatchObject({ check: "timeout" });
+  });
+  it("fails closed at the deadline even with less than Boat's minimum request timeout remaining", async () => {
+    const f = builderFixture(); const vm = await f.vms.create(builderIntent);
+    const find = f.operations.find.bind(f.operations);
+    vi.spyOn(f.operations, "find").mockImplementationOnce(async key => { f.advance(17_950); return find(key); });
+    const fetch = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementationOnce(async (...args) => { f.advance(51); return fetch(...args); });
+    await expect(f.vms.waitForBase(vm)).rejects.toMatchObject({ check: "timeout", message: "Builder VM timeout" });
   });
   it.each(["error", "cancelled", "archived"])("retains the cleanup identity when readiness reports %s", async status => {
     const f = builderFixture(); f.state.states = [status];
@@ -50,6 +82,30 @@ describe("short-lived Boat builder VMs", () => {
     f.state.deletionStatus = "completed";
     await f.vms.delete(vm);
     expect(f.state.deleteRequests).toBe(1);
+  });
+  it.each(["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"])("confirms compute deletion with %s storage retention and a 404", async stage => {
+    const f = builderFixture(); const vm = await f.vms.create({ ...builderIntent, purpose: "computer-build" });
+    f.state.deletionStatus = "blocked"; f.state.deletionStage = stage; f.state.deletionReleasesCompute = true;
+    await expect(f.vms.delete(vm)).resolves.toBeUndefined();
+    expect((await f.operations.find(vm.operationKey))?.state).toBe("deleted");
+    expect(new URL(String(f.fetcher.mock.calls.at(-1)![0])).pathname).toBe(`/api/v1/sandboxes/${BUILDER_SANDBOX}`);
+    expect(f.state.deletionStatus).toBe("blocked");
+  });
+  it("keeps waiting on storage retention while the sandbox is visible, then resumes the same deletion", async () => {
+    const f = builderFixture(); const vm = await f.vms.create(builderIntent);
+    f.state.deletionStatus = "blocked"; f.state.deletionStage = "waiting_for_uploads";
+    await expect(f.vms.delete(vm)).rejects.toMatchObject({ check: "timeout" });
+    expect((await f.operations.find(vm.operationKey))?.state).toBe("deleting");
+    f.state.deleted = true;
+    await expect(f.vms.delete(vm)).resolves.toBeUndefined();
+    expect(f.state.deleteRequests).toBe(1);
+  });
+  it.each([["blocked", "unknown_stage"], ["blocked", null], ["pending", "waiting_for_uploads"],
+    ["processing", "waiting_for_uploads"]])("does not confirm %s / %s even when the sandbox is absent", async (status, stage) => {
+    const f = builderFixture(); const vm = await f.vms.create(builderIntent);
+    f.state.deletionStatus = status!; f.state.deletionStage = stage; f.state.deletionReleasesCompute = true;
+    await expect(f.vms.delete(vm)).rejects.toMatchObject({ check: "timeout" });
+    expect((await f.operations.find(vm.operationKey))?.state).toBe("deleting");
   });
   it("forks an explicitly resolved template with no inherited environment and stops to archived", async () => {
     const f = builderFixture();

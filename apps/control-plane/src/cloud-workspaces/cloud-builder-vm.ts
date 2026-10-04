@@ -18,6 +18,7 @@ export type BaseStatus = z.infer<typeof RuntimeBaseStatusSchema>;
 export interface CloudBuilderVms {
   create(input: BuilderVmIntent): Promise<BuilderVm>;
   baseStatus(vm: BuilderVm): Promise<BaseStatus>;
+  waitForBase(vm: BuilderVm): Promise<BaseStatus>;
   runFixed(vm: BuilderVm, command: BuilderFixedCommand, input?: Buffer, opts?: { timeoutMs?: number }):
     Promise<{ exitCode: number; stdout: string; diagnostic: ClosedDiagnostic | null }>;
   stop(vm: BuilderVm): Promise<{ archived: true }>;
@@ -43,6 +44,7 @@ const deletionSchema = z.object({
   id: z.string().regex(/^bdop_[a-f0-9]{32}$/), kind: z.literal("sandbox"),
   targetId: z.string().regex(BOAT_RESOURCE_ID_PATTERN),
   status: z.enum(["pending", "processing", "blocked", "completed"]),
+  stage: z.string().nullable().optional(),
 });
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const CREATE_RETRY_WINDOW_MS = 23 * 60 * 60_000;
@@ -106,6 +108,7 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
   private readonly now: () => number;
   private readonly wait: (ms: number) => Promise<void>;
   private readonly lifecycleTimeoutMs: number;
+  private readonly baseReadinessTimeoutMs: number;
   constructor(private readonly options: {
     client: Pick<BoatApiClient, "request">;
     billingOrg: string;
@@ -113,6 +116,7 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
     resolveSource(source: BuilderVmSource): Promise<string>;
     openChannel?: (signal: AbortSignal) => Promise<BoatBootstrapChannel>;
     lifecycleTimeoutMs?: number;
+    baseReadinessTimeoutMs?: number;
     now?: () => number;
     wait?: (ms: number) => Promise<void>;
   }) {
@@ -121,6 +125,8 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
     this.wait = options.wait ?? (ms => delay(ms));
     this.lifecycleTimeoutMs = options.lifecycleTimeoutMs ?? 180_000;
     if (!Number.isSafeInteger(this.lifecycleTimeoutMs) || this.lifecycleTimeoutMs < 1 || this.lifecycleTimeoutMs > 600_000) fail("input_schema");
+    this.baseReadinessTimeoutMs = options.baseReadinessTimeoutMs ?? 12 * 60_000;
+    if (!Number.isSafeInteger(this.baseReadinessTimeoutMs) || this.baseReadinessTimeoutMs < 1 || this.baseReadinessTimeoutMs > 1800_000) fail("input_schema");
   }
 
   async create(value: BuilderVmIntent): Promise<BuilderVm> {
@@ -169,10 +175,36 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
   }
 
   async baseStatus(vm: BuilderVm): Promise<BaseStatus> {
+    return this.readBaseStatus(vm, this.now() + this.lifecycleTimeoutMs);
+  }
+
+  async waitForBase(vm: BuilderVm): Promise<BaseStatus> {
+    const deadline = this.now() + this.baseReadinessTimeoutMs;
+    for (;;) {
+      let status: BaseStatus | null = null;
+      try { status = await this.readBaseStatus(vm, deadline); }
+      catch (error) {
+        // Boat can be command-ready while zeros-boot is still hydrating the
+        // image. Failed, timed-out or malformed status output is not readiness.
+        if (!(error instanceof BuilderVmError && error.check === "provider_response")) throw error;
+      }
+      if (this.now() >= deadline) fail("timeout");
+      if (status?.hostState === "failed") fail("builder_stopped");
+      if (status && ["idle", "waiting_for_runtime"].includes(status.hostState)) return status;
+      await this.pause(deadline, 3000);
+    }
+  }
+
+  private async readBaseStatus(vm: BuilderVm, deadline: number): Promise<BaseStatus> {
     await this.owned(vm, true);
-    const reply = await this.retry(() => this.options.client.request(`/sandboxes/${vm.sandboxId}/commands`, {
-      method: "POST", body: { command: BUILDER_BASE_STATUS_COMMAND, timeoutSeconds: 20 }, timeoutMs: 30_000,
-    }), this.now() + this.lifecycleTimeoutMs);
+    const reply = await this.retry(() => {
+      const timeoutMs = Math.max(1, Math.min(30_000, deadline - this.now()));
+      return this.options.client.request(`/sandboxes/${vm.sandboxId}/commands`, {
+        method: "POST", body: { command: BUILDER_BASE_STATUS_COMMAND, timeoutSeconds: Math.min(20, Math.ceil(timeoutMs / 1000)) },
+        // Boat requires at least 100 ms; the signal retains the exact deadline.
+        timeoutMs: Math.max(100, timeoutMs), signal: AbortSignal.timeout(timeoutMs),
+      });
+    }, deadline);
     if (reply.success !== true || reply.exitCode !== 0 || reply.timedOut || reply.stdoutTruncated ||
         typeof reply.stdout !== "string" || Buffer.byteLength(reply.stdout) > 4096 || !/^[^\r\n]+\n?$/.test(reply.stdout)) fail("provider_response");
     try {
@@ -265,7 +297,11 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
         const reply = await this.retry(() => this.options.client.request(`/deletion-operations/${operationId}`), deadline);
         const parsed = deletionSchema.safeParse(reply.operation);
         if (!parsed.success || parsed.data.id !== operationId || parsed.data.targetId !== vm.sandboxId) fail("cleanup_unconfirmed");
-        if (parsed.data.status !== "completed") { await this.pause(deadline); continue; }
+        // These documented blocked stages retain storage only. Compute release
+        // still requires the following sandbox 404; this does not prove erasure.
+        const storagePending = parsed.data.status === "blocked" &&
+          ["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"].includes(parsed.data.stage ?? "");
+        if (parsed.data.status !== "completed" && !storagePending) { await this.pause(deadline); continue; }
       }
       try { await this.inspect(vm.sandboxId, deadline); }
       catch (error) {

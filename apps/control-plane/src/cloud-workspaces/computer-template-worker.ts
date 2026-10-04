@@ -335,7 +335,7 @@ export class ComputerTemplateWorker {
       await this.journal.recordVm(id, vm.operationKey, vm.sandboxId);
       await this.stage(claim, "runtime");
       failure = "runtime_install_failed";
-      const status = await this.deps.vms.baseStatus(vm);
+      const status = await this.deps.vms.waitForBase(vm);
       if (
         status.baseCompatibilityId !== runtime.baseCompatibilityId ||
         status.currentRuntimeId !== null ||

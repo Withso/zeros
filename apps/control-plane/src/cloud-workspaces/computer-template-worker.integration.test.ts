@@ -22,7 +22,7 @@ import type {
   ComputerTemplateRuntime,
 } from "./computer-template-boat.js";
 import { seedComputerTemplateRuntime } from "./computer-template-test-fixtures.js";
-import { memoryBuilderOperations } from "./cloud-builder-vm-test-fixtures.js";
+import { builderFixture, memoryBuilderOperations } from "./cloud-builder-vm-test-fixtures.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const runtime: ComputerTemplateRuntime = {
@@ -224,6 +224,7 @@ database("Cloud Computer template worker", () => {
         bootId: randomUUID(),
         hostState: "idle" as const,
       })),
+      waitForBase: vi.fn(async value => vm.baseStatus(value)),
     };
     github = {
       mintContentsRead: vi.fn(async () => ({
@@ -328,6 +329,35 @@ database("Cloud Computer template worker", () => {
         .map((entry) => entry.text)
         .join(""),
     ).toContain("package installed");
+  });
+
+  it.each(["ready", "stopped", "failed"])("waits for the base before installing when bootstrap becomes %s", async state => {
+    const boat = builderFixture(operations);
+    boat.state.baseCompatibilityId = runtime.baseCompatibilityId;
+    boat.state.hostState = state === "ready" ? "waiting_for_runtime" : state;
+    if (state === "ready") boat.state.baseStatusReplies = [{ success: false, exitCode: 1 },
+      { timedOut: true }, { stdout: "private boot output" }, { hostState: "stopped" }];
+    create.mockImplementation(input => boat.vms.create(input));
+    remove.mockImplementation(value => boat.vms.delete(value));
+    vm.baseStatus = value => boat.vms.baseStatus(value);
+    const readiness = vi.fn((value: BuilderVm) => boat.vms.waitForBase(value));
+    vm.waitForBase = readiness;
+    vm.stop = value => boat.vms.stop(value);
+    await request();
+    await worker.tick();
+    expect(readiness).toHaveBeenCalledOnce();
+    if (state === "ready") {
+      expect((await read()).active).not.toBeNull();
+      expect(boat.state.baseStatusCalls).toBe(5);
+      expect(inputs[0]?.command).toBe("install-runtime");
+    } else {
+      await expect(readiness.mock.results[0].value).rejects.toMatchObject({
+        check: state === "stopped" ? "timeout" : "builder_stopped" });
+      expect(await read()).toMatchObject({ active: null,
+        latestBuild: { state: "failed", errorCode: "runtime_install_failed" } });
+      expect(runFixed).not.toHaveBeenCalled();
+      expect(boat.state.deleted).toBe(true);
+    }
   });
 
   it.each([undefined, `zeros-v2-test-c3-${randomUUID()}`])(

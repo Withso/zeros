@@ -194,7 +194,7 @@ export class RuntimeQualificationWorker {
       const builder = await this.options.vms!.create(intent(run));
       await this.recordSandbox(run, builder.sandboxId);
       stage = "base_status";
-      const base = await this.options.vms!.baseStatus(builder);
+      const base = await this.options.vms!.waitForBase(builder);
       if (base.baseCompatibilityId !== run.base_compatibility_id || !["idle", "waiting_for_runtime"].includes(base.hostState)) reject(stage, "base_compatibility");
       stage = "install_runtime";
       const runtime = await this.admitted(run);
