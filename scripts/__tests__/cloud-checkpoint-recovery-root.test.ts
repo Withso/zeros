@@ -4,10 +4,14 @@ import { promises as fs } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { CloudWorkspaceDurabilityRuntime } from "../../apps/desktop/src/engine/cloud-durability-runtime";
 import { prepareRepositoryAndSettings, restoreCloudWorkspaceCheckpoint } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 import runtimeLayout from "../cloud-workspace-validation/sandbox/runtime-layout.json" with { type: "json" };
+import { runScopedCloudSetup } from "../cloud-workspace-validation/sandbox/cloud-setup-process.mjs";
+vi.mock("../cloud-workspace-validation/sandbox/cloud-setup-process.mjs", async original => ({
+  ...await original<typeof import("../cloud-workspace-validation/sandbox/cloud-setup-process.mjs")>(), runScopedCloudSetup: vi.fn(),
+}));
 
 // This suite exercises real setpriv/chown and setup's fixed Linux deployment
 // layout. It requires an explicit disposable-root test invocation; never run it
@@ -54,6 +58,60 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
     await expect(prepareRepositoryAndSettings({ ...material, settings: { ...material.settings, setupCommands: [{ command: "true", timeoutSeconds: 1 }] } }, profile, stringify)).rejects.toMatchObject({ code: "repository_revision_invalid" });
     await fs.unlink(journalPath);
     await expect(prepareRepositoryAndSettings({ ...material, recovery: { checkpointId: randomUUID() } }, profile, stringify)).resolves.toBe(head);
+  });
+
+  it("journals v4 primary hooks across wake, with redacted failure output and an explicit new-run retry", async () => {
+    const repo=runtimeLayout.repository, commit=git(repo,["rev-parse","HEAD"],true);
+    const profile={version:4,setupDirectory:"/srv/zeros/setup-v4",managedSettingsDirectory:"/srv/zeros/managed-v4"};
+    const material={execution:{workspaceId:randomUUID(),organizationId:randomUUID(),generation:1,setupRunId:randomUUID(),executionFence:1},
+      repository:{cloneUrl:"https://github.com/example/recovery.git",revision:commit},settings:{version:1,snapshotSha256:"b".repeat(64),document:{values:{}},
+        setupCommands:[{command:'if ! test -f allow-hook; then printf "failed: %s\\n" "$ORG_SECRET"; exit 1; fi; id -u >> hook-runs',timeoutSeconds:5}],
+        setupEnvironment:[{name:"ORG_SECRET",value:"synthetic-org-hook-secret"}]}};
+    vi.mocked(runScopedCloudSetup).mockImplementation(async payload=>{
+      try {
+        const stdout=execFileSync("/usr/bin/setpriv",["--reuid=10001","--regid=10001","--clear-groups","/bin/bash","--noprofile","--norc","-c",payload.command],
+          {cwd:repo,env:{...payload.environment,PATH:"/usr/bin:/bin",HOME:"/srv/zeros/home/agent"},encoding:"utf8"});
+        return {code:0,signal:null,timedOut:false,overflow:false,stdout,stderr:""};
+      } catch (error) {
+        const result=error as {stdout:string;stderr:string};
+        return {code:1,signal:null,timedOut:false,overflow:false,stdout:result.stdout,stderr:result.stderr};
+      }
+    });
+    const stringify=async()=>"";
+    const outcome=(operation:Promise<unknown>)=>operation.then(()=>({code:"accepted"}),error=>({code:error.code,hookLog:error.hookLog}));
+    try {
+      expect(await outcome(prepareRepositoryAndSettings(material,profile,stringify))).toMatchObject({code:"setup_command_failed",hookLog:{text:"failed: [redacted]\n"}});
+      const failed=await fs.readFile(path.join(profile.setupDirectory,"setup-hook-log.json"),"utf8");
+      expect(failed).not.toContain("synthetic-org-hook-secret"); expect(failed).toContain("[redacted]");
+      const journalPath=path.join(profile.setupDirectory,"repository.json");
+      const journal=JSON.parse(await fs.readFile(journalPath,"utf8"));
+      expect(journal.commandState).toBe("failed");
+      // An orphaned running marker has the same explicit-retry requirement.
+      await fs.writeFile(journalPath,JSON.stringify({...journal,commandState:"running"}));
+      await expect(prepareRepositoryAndSettings({...material,execution:{...material.execution,executionFence:2}},profile,stringify)).rejects.toMatchObject({code:"setup_hook_retry_required"});
+      expect(runScopedCloudSetup).toHaveBeenCalledTimes(1);
+      await fs.writeFile(path.join(repo,"allow-hook"),"");
+      const retry={...material,execution:{...material.execution,setupRunId:randomUUID(),executionFence:1}};
+      await expect(prepareRepositoryAndSettings(retry,profile,stringify)).resolves.toBe(commit);
+      await expect(prepareRepositoryAndSettings({...retry,execution:{...retry.execution,setupRunId:randomUUID()}},profile,stringify)).resolves.toBe(commit);
+      expect(await fs.readFile(path.join(repo,"hook-runs"),"utf8")).toBe("10001\n");
+      expect(runScopedCloudSetup).toHaveBeenCalledTimes(2);
+      expect(await fs.readFile(path.join(profile.managedSettingsDirectory,"settings.managed.toml"),"utf8")).not.toContain("synthetic-org-hook-secret");
+    } finally {vi.mocked(runScopedCloudSetup).mockReset();}
+  });
+
+  it("preserves legacy scoped setup errors and environment delivery", async () => {
+    const commit = git(runtimeLayout.repository, ["rev-parse", "HEAD"], true);
+    const material = { execution: { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 1, setupRunId: randomUUID(), executionFence: 1 },
+      repository: { cloneUrl: "https://github.com/example/recovery.git", revision: commit },
+      settings: { version: 1, snapshotSha256: "c".repeat(64), document: { values: {} },
+        setupCommands: [{ command: "true", timeoutSeconds: 5 }], setupEnvironment: [{ name: "LANG", value: "en_US.UTF-8" }] } };
+    vi.mocked(runScopedCloudSetup).mockRejectedValueOnce(new Error("legacy scoped setup failure"));
+    try {
+      await expect(prepareRepositoryAndSettings(material, { version: 2, setupDirectory: "/srv/zeros/setup-v2", managedSettingsDirectory: "/srv/zeros/managed-v2" }, async () => ""))
+        .rejects.toThrow("legacy scoped setup failure");
+      expect(runScopedCloudSetup).toHaveBeenCalledWith(expect.objectContaining({ environment: { LANG: "en_US.UTF-8" } }));
+    } finally { vi.mocked(runScopedCloudSetup).mockReset(); }
   });
 
   it("restores optimized packs through HTTP, including setup when its remote base is unavailable", async () => {

@@ -10,6 +10,21 @@ import type {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import {CloudWorkspaceEngineAuthorityError} from "./engine-authority.js";
 
 describe("personal cloud credential HTTP boundaries",()=>{
+  it("authenticates terminal environment requests and returns only closed authority errors",async()=>{
+    const service={terminalEnvironment:vi.fn().mockResolvedValue({version:1,environment:{ORG_VALUE:"synthetic-org-value"}})};
+    const app=createCloudAgentExecutionRoutes(service as unknown as DatabaseCloudAgentExecutionService);
+    const scope={workspaceId:randomUUID(),organizationId:randomUUID(),generation:1,engineInstanceId:randomUUID()},token=`zwh_${"x".repeat(43)}`;
+    const request={kind:"terminal-environment",actorSessionId:randomUUID()};
+    const call=(value:unknown=request,authorization=`Bearer ${token}`)=>app.request(CLOUD_AGENT_EXECUTION_PATH,{method:"POST",headers:{authorization,"content-type":"application/json"},body:JSON.stringify({...scope,request:value})});
+    expect((await call(request,"Bearer browser-user-token")).status).toBe(401);
+    expect((await call({...request,actorUserId:randomUUID()})).status).toBe(422);
+    expect(service.terminalEnvironment).not.toHaveBeenCalled();
+    const response=await call();
+    expect(response.status).toBe(200);expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(service.terminalEnvironment).toHaveBeenCalledWith({...scope,heartbeatToken:token},request.actorSessionId);
+    service.terminalEnvironment.mockRejectedValueOnce(new HttpError(409,"computer_environment_revoked","synthetic-org-value"));
+    const revoked=await call();expect(revoked.status).toBe(409);expect(await revoked.json()).toEqual({error:"computer_environment_revoked"});
+  });
   it("derives ownership from the authenticated account and rejects supplied owner selectors",async()=>{
     const user={id:randomUUID()} as AuthedUser,service={put:vi.fn().mockResolvedValue({credential:{id:randomUUID()}}),list:vi.fn().mockResolvedValue({credentials:[]})};
     const app=new Hono();app.use("*",async(c,next)=>{c.set("user",user);await next();});
@@ -45,13 +60,13 @@ describe("personal cloud credential HTTP boundaries",()=>{
     expect((await call({...request,credentialId:randomUUID()})).status).toBe(422);
     expect((await call({...request,admission:"x".repeat(5000)})).status).toBe(413);expect(service.admit).not.toHaveBeenCalled();
     const response=await call(request);expect(response.status).toBe(200);expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(service.admit).toHaveBeenCalledWith({...scope,heartbeatToken:token},admission,undefined,undefined,undefined,undefined);
+    expect(service.admit).toHaveBeenCalledWith({...scope,heartbeatToken:token},admission,undefined,undefined,undefined,undefined,undefined);
     expect((await call({...request,includeGitAuthor:true})).status).toBe(200);
-    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,true,undefined,undefined,undefined);
+    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,true,undefined,undefined,undefined,undefined);
     expect((await call({...request,nativeCapabilitiesVersion:1})).status).toBe(200);
-    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,undefined,1,undefined,undefined);
+    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,undefined,1,undefined,undefined,undefined);
     expect((await call({...request,backgroundTasksVersion:1})).status).toBe(200);
-    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,undefined,undefined,1,undefined);
+    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,undefined,undefined,1,undefined,undefined);
     const background={kind:"background",leaseId:randomUUID(),operation:{kind:"retain",conversationId:"chat",revision:1,
       snapshot:{tasks:[],waiting:false,processWork:true}}};
     expect((await call(background)).status).toBe(200);

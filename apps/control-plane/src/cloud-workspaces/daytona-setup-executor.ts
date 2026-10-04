@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { parseCloudWorkspaceSetupHookLog } from "./setup-log.js";
 import { ClosedDiagnosticSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES, type RuntimeDescriptor } from "./runtime-contract.js";
 import type { CloudRuntimePin } from "./runtime-selection.js";
 import type { RuntimeArtifactStore } from "./runtime-artifact-store.js";
@@ -132,6 +133,8 @@ const HELPER_FAILURES: Readonly<
     code: "setup_command_failed",
     retryable: true,
   },
+  setup_hook_retry_required: { code: "setup_hook_retry_required", retryable: false },
+  computer_environment_revoked: { code: "computer_environment_revoked", retryable: false },
   request_invalid: { code: "setup_request_invalid", retryable: false },
   settings_invalid: { code: "setup_settings_invalid", retryable: false },
 });
@@ -417,7 +420,11 @@ function helperFailure(
     const parsed = JSON.parse(output) as Record<string, unknown>;
     if (
       ((parsed.version === 1 && exactKeys(parsed, ["audience", "code", "outcome", "version"])) ||
-        (parsed.version === 2 && exactKeys(parsed, ["audience", "code", "outcome", "version", "diagnostic"]) && parseSetupDiagnostic(parsed.diagnostic))) &&
+        (parsed.version === 2 && exactKeys(parsed, ["audience", "code", "outcome", "version", "diagnostic"]) && parseSetupDiagnostic(parsed.diagnostic)) ||
+        (parsed.version === 3 && execution.runtime?.profile === "zeros-cloud-worker-v4" &&
+          ["setup_command_failed", "setup_hook_retry_required"].includes(String(parsed.code)) &&
+          exactKeys(parsed, ["audience", "code", "outcome", "version", "diagnostic", "hookLog"]) &&
+          parseSetupDiagnostic(parsed.diagnostic) && parseCloudWorkspaceSetupHookLog(parsed.hookLog))) &&
       parsed.audience === SETUP_RESULT_AUDIENCE &&
       parsed.outcome === "error" &&
       typeof parsed.code === "string"
@@ -435,8 +442,9 @@ function helperFailure(
         return Object.assign(setupError(
           mapped.code,
           "Cloud workspace setup helper did not complete",
-          mapped.retryable || restoringBoatImage,
-        ), parsed.version === 2 ? { diagnostic: parseSetupDiagnostic(parsed.diagnostic)! } : {});
+          parsed.code === "computer_environment_revoked" || (execution.runtime && ["setup_command_failed", "setup_hook_retry_required"].includes(parsed.code)) ? false : mapped.retryable || restoringBoatImage,
+        ), parsed.version === 2 || parsed.version === 3 ? { diagnostic: parseSetupDiagnostic(parsed.diagnostic)! } : {},
+        parsed.version === 3 ? { hookLog: parseCloudWorkspaceSetupHookLog(parsed.hookLog)! } : {});
       }
     }
   } catch {

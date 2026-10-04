@@ -2230,12 +2230,19 @@ export class DatabaseCloudWorkspaceManagementService {
       }
       const affected = await tx.query<{ workspace_id: string }>(
         `SELECT DISTINCT workspace.id AS workspace_id
-         FROM cloud_workspace_generation_secret_bindings link
-         JOIN cloud_workspaces workspace
-           ON workspace.id = link.workspace_id AND workspace.org_id = link.org_id
-          AND workspace.current_generation = link.generation
-         WHERE link.binding_id = $1 AND link.org_id = $2
-           AND workspace.deleted_at IS NULL
+         FROM cloud_workspaces workspace
+         WHERE workspace.org_id = $2 AND workspace.deleted_at IS NULL
+           AND (EXISTS (
+             SELECT 1 FROM cloud_workspace_generation_secret_bindings link
+             WHERE link.workspace_id = workspace.id AND link.org_id = workspace.org_id
+               AND link.generation = workspace.current_generation AND link.binding_id = $1
+           ) OR EXISTS (
+             SELECT 1 FROM cloud_workspace_computer_sources source
+             JOIN cloud_computer_environment_refs ref
+               ON ref.config_id = source.config_id AND ref.org_id = source.org_id
+             WHERE source.workspace_id = workspace.id AND source.org_id = workspace.org_id
+               AND source.generation = workspace.current_generation AND ref.binding_id = $1
+           ))
          ORDER BY workspace.id`,
         [input.id, input.organizationId],
       );

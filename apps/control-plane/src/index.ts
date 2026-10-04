@@ -463,7 +463,9 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     });
     cloudWorkspaceInternalSetupService = {
       ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos",undefined,
-        {computer:new DatabaseCloudComputerV2Service(pool,cloud)})}:{}),
+        {computer:new DatabaseCloudComputerV2Service(pool,cloud)}, {
+          secretEncryptionKeys:cloud.settingsSecretEncryptionKeys,currentSecretEncryptionKeyVersion:cloud.currentSettingsSecretEncryptionKeyVersion,setupSecretKeyV1:cloud.settingsSecretKeyV1,
+        })}:{}),
       commands: new DatabaseCloudWorkspaceCommandService({ pool, workosEnabled: config.auth.provider === "workos" }),
       events: new DatabaseCloudWorkspaceEventService({ pool, workosEnabled: config.auth.provider === "workos" }),
       actions: new DatabaseCloudWorkspaceActionService({ pool, workosEnabled: config.auth.provider === "workos" }),

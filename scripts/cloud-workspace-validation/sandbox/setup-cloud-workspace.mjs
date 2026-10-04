@@ -125,6 +125,38 @@ function failure(code) {
   return new SetupFailure(code);
 }
 
+/** Only the immutable helper has the execution's literals. Filter them before
+ * either the root journal or the bounded private result receives command text. */
+export function redactCloudWorkspaceSetupHookLog(output, values, truncated = false) {
+  const literals = [...new Set(values.filter(value => typeof value === "string" && value.length).flatMap(value => [value, JSON.stringify(value).slice(1, -1)]))]
+    .sort((a, b) => b.length - a.length);
+  const maximum = 16 * 1024;
+  const source = output.slice(0, maximum + (literals[0]?.length ?? 0));
+  truncated ||= source.length < output.length;
+  const pattern = literals.length ? new RegExp(literals.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g") : null;
+  let text = pattern ? source.replace(pattern, "[redacted]") : source;
+  // A stopped or overflowing hook may end midway through a literal. Withhold
+  // such suffixes at line boundaries, just like execution transcript filtering.
+  text = text.split("\n").map(line => {
+    let keep = 0;
+    for (const literal of literals) {
+      for (let start = line.indexOf(literal[0], Math.max(0, line.length - literal.length + 1)); start >= 0 && start < line.length - keep; start = line.indexOf(literal[0], start + 1)) {
+        if (literal.startsWith(line.slice(start))) { keep = line.length - start; break; }
+      }
+    }
+    return keep ? line.slice(0, -keep) + "[redacted]" : line;
+  }).join("\n");
+  text = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "")
+    .replace(/(?:gh[opsu]_)[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|Bearer\s+[^\s]+/gi, "[redacted]");
+  const bytes = Buffer.from(text);
+  if (bytes.length > maximum) {
+    // Avoid persisting a partial UTF-8 code point.
+    let end = maximum; while ((bytes[end] & 0xc0) === 0x80) end--;
+    text = bytes.subarray(0, end).toString("utf8"); truncated = true;
+  }
+  return { version: 1, text, truncated };
+}
+
 function isRecord(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -1318,6 +1350,13 @@ export async function redeemMaterials(request) {
     clearTimeout(timer);
   }
   if (!response.ok) {
+    if (response.status === 409) {
+      let code;
+      try { code = (await boundedResponseJson(response, 1024))?.error?.code; }
+      catch { /* Provider text is never a setup diagnostic. */ }
+      if (code === "computer_environment_revoked") throw failure(code);
+      throw failure("request_invalid");
+    }
     await response.body?.cancel().catch(() => undefined);
     if (response.status === 422) throw failure("settings_invalid");
     if (response.status === 429 || response.status >= 500) {
@@ -1535,6 +1574,7 @@ function parseJournal(raw) {
   if (
     !isRecord(raw) ||
     !exactKeys(raw, [
+      ...(raw.commandState === undefined ? [] : ["commandState"]),
       "commandsCompleted",
       "executionFence",
       "generation",
@@ -1546,6 +1586,7 @@ function parseJournal(raw) {
       "workspaceId",
     ]) ||
     raw.version !== 1 ||
+    (raw.commandState !== undefined && !["running", "failed"].includes(raw.commandState)) ||
     !UUID_PATTERN.test(raw.workspaceId ?? "") ||
     !UUID_PATTERN.test(raw.organizationId ?? "") ||
     !UUID_PATTERN.test(raw.setupRunId ?? "") ||
@@ -1570,7 +1611,7 @@ function parseJournal(raw) {
   return raw;
 }
 
-function saveJournal(file, identity, material, commandsCompleted) {
+function saveJournal(file, identity, material, commandsCompleted, commandState) {
   atomicWrite(
     file,
     `${JSON.stringify({
@@ -1578,6 +1619,7 @@ function saveJournal(file, identity, material, commandsCompleted) {
       setupRunId: material.execution.setupRunId,
       executionFence: material.execution.executionFence,
       commandsCompleted,
+      ...(commandState ? { commandState } : {}),
     })}\n`,
     { mode: 0o600 },
   );
@@ -1956,6 +1998,11 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   ) {
     throw failure("repository_revision_invalid");
   }
+  if (profile.version === 4 && journal.commandState && journal.setupRunId === material.execution.setupRunId) {
+    const error = failure("setup_hook_retry_required");
+    error.hookLog = { version: 1, text: "The previous setup hook did not complete. Retry setup explicitly.\n", truncated: false };
+    throw error;
+  }
   for (
     let index = journal.commandsCompleted;
     index < material.settings.setupCommands.length;
@@ -1963,12 +2010,14 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   ) {
     const command = material.settings.setupCommands[index];
     const commandEnvironment = Object.fromEntries(
-      material.settings.setupEnvironment.map((entry) => [
+      material.settings.setupEnvironment.filter(entry => profile.version !== 4 || !["LANG", "LOGNAME", "USER", "SHELL", "TMPDIR"].includes(entry.name)).map((entry) => [
         entry.name,
         entry.value,
       ]),
     );
-    const result =
+    if (profile.version === 4) saveJournal(journalFile, identity, material, index, "running");
+    let result;
+    try { result =
       profile.version >= 2
         ? await runScopedCloudSetup({
             version: 1,
@@ -2000,6 +2049,10 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
               },
             },
           );
+    } catch (error) {
+      if (profile.version !== 4) throw error;
+      result = { code: null, signal: null, timedOut: false, overflow: false, stdout: "", stderr: "Setup hook could not complete.\n" };
+    }
     for (const name of Object.keys(commandEnvironment)) {
       commandEnvironment[name] = "";
     }
@@ -2009,7 +2062,15 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
       result.overflow ||
       result.signal
     ) {
-      throw failure("setup_command_failed");
+      const error = failure("setup_command_failed");
+      if (profile.version === 4) {
+        error.hookLog = redactCloudWorkspaceSetupHookLog(`${result.stdout}${result.stderr}`, [
+          ...material.settings.setupEnvironment.map(entry => entry.value), material.repository.credential?.token,
+        ], result.overflow);
+        atomicWrite(path.join(profile.setupDirectory, "setup-hook-log.json"), `${JSON.stringify(error.hookLog)}\n`, { mode: 0o600 });
+        saveJournal(journalFile, identity, material, index, "failed");
+      }
+      throw error;
     }
     saveJournal(journalFile, identity, material, index + 1);
   }
@@ -2728,12 +2789,13 @@ async function main() {
   } catch (error) {
     exitCode = 1;
     response = {
-      version: error instanceof SetupFailure && error.diagnostic ? 2 : 1,
+      version: error instanceof SetupFailure && error.hookLog ? 3 : error instanceof SetupFailure && error.diagnostic ? 2 : 1,
       audience: CLOUD_WORKSPACE_SETUP_RESULT_AUDIENCE,
       outcome: "error",
       code:
         error instanceof SetupFailure ? error.code : "image_contract_invalid",
       ...(error instanceof SetupFailure && error.diagnostic ? { diagnostic: error.diagnostic } : {}),
+      ...(error instanceof SetupFailure && error.hookLog ? { hookLog: error.hookLog } : {}),
     };
   }
   process.stdout.write(JSON.stringify(response));

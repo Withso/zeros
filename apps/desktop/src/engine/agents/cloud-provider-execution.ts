@@ -53,8 +53,8 @@ export function createCloudAgentExecutionFactory(options:{
       signal.throwIfAborted();
       const requested=customization?{...admission,customization:{version:2 as const,repositoryServers:await readCloudRepositoryMcp(cwd)}}:admission;
       lease=await CloudAgentLease.admit(requested,options.request,signal,options.supervisor);
-      redactor=new CloudCustomizationRedactor((lease.customization?.servers??[]).flatMap(({server})=>
-        Object.values(server.transport==="stdio"?server.env??{}:server.headers??{})));
+      redactor=new CloudCustomizationRedactor([...Object.values(lease.environment?.values??{}),...(lease.customization?.servers??[]).flatMap(({server})=>
+        Object.values(server.transport==="stdio"?server.env??{}:server.headers??{}))]);
       lease.attach(workload);
       const tools=new CloudWorkloadTools(lease,workload,cwd);
       const coordinator=await CloudNativeBoundary.prepare(lease,workload,conversationId,providerSettings);

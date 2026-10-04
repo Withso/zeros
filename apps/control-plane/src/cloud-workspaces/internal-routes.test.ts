@@ -433,6 +433,17 @@ describe("cloud workspace internal setup routes", () => {
     });
   });
 
+  it.each([
+    ["computer_environment_revoked", 409, false],
+    ["computer_environment_busy", 503, true],
+  ] as const)("returns the closed %s setup code", async (code, status, retryable) => {
+    const { app } = harness({ redeem: vi.fn(async () => { throw new CloudWorkspaceSetupMaterialError(code, "private environment value", retryable); }) });
+    const response = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST",
+      headers: { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code, retryable } });
+  });
+
   it("keeps durable engine capabilities in the header and forwards binary blobs byte-for-byte", async () => {
     let uploadedBytes: number[] = [];
     const putBlob = vi.fn(async (input: { bytes: Uint8Array }) => { uploadedBytes = [...input.bytes]; return ({

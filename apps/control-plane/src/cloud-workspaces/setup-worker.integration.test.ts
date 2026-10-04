@@ -1163,6 +1163,19 @@ d("cloud workspace setup worker", () => {
     });
   });
 
+  it("records a v4 hook failure log without requeueing or publishing Ready", async () => {
+    const seeded=await seedSetup({v4:true});
+    const hookLog={version:1 as const,text:"Hook failed: [redacted]\n",truncated:false};
+    const executor=new FakeExecutor([async()=>{throw Object.assign(new CloudWorkspaceSetupError("setup_command_failed","private executor detail",false),{hookLog});}]);
+    const setupWorker=worker(executor);
+    expect(await setupWorker.runOnce()).toBe(true);
+    const stored=(await pool.query(`SELECT workspace.status,run.state,run.claim_count,run.log_excerpt,run.log_truncated
+      FROM cloud_workspaces workspace JOIN cloud_workspace_setup_runs run ON run.workspace_id=workspace.id WHERE workspace.id=$1`,[seeded.workspaceId])).rows[0];
+    expect(stored).toMatchObject({status:"failed",state:"failed",claim_count:1,log_excerpt:hookLog.text,log_truncated:false});
+    expect(await setupWorker.runOnce()).toBe(false);
+    expect(JSON.stringify(stored)).not.toContain("private executor detail");
+  });
+
   it("rolls a rejected candidate back to its source generation and queues fenced cleanup", async () => {
     const seeded = await seedReplacementSetup();
     const executor = new FakeExecutor([

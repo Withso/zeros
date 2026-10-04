@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudAgentLease } from "../../cloud-agent-lease";
-import { CloudNativeBoundary } from "../cloud-native-boundary";
+import { CloudNativeBoundary, cloudNativeProviderEnvironment } from "../cloud-native-boundary";
+import { CLOUD_COORDINATOR_HOME } from "../cloud-coordinator-view.mjs";
+import { CLOUD_NATIVE_HOME } from "../cloud-native-view.mjs";
 import type { BoundarySpawnRequest, PreparedBoundary } from "../types";
 
 const mocked = vi.hoisted(() => ({ rm: vi.fn(async () => {}) }));
@@ -36,6 +38,12 @@ async function fixture() {
 }
 
 describe("native provider process ownership", () => {
+  it("preserves admitted literals when translating managed native-home paths", () => {
+    const values = { APP_PATH: `${CLOUD_COORDINATOR_HOME}/app`, ORG_SECRET: `${CLOUD_COORDINATOR_HOME}/synthetic-private-value` };
+    const env = cloudNativeProviderEnvironment({ kind: "cursor-api-key", apiKey: "synthetic-cursor-key" }, "qualified-model", undefined, values);
+    expect(env.HOME).toBe(CLOUD_NATIVE_HOME);
+    expect({ APP_PATH: env.APP_PATH, ORG_SECRET: env.ORG_SECRET }).toEqual(values);
+  });
   it("uses the existing workspace policy and supplies only the active run's environment and home", async () => {
     const { boundary, lease, workload, view } = await fixture();
     try {

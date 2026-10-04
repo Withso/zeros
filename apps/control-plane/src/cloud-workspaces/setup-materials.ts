@@ -9,7 +9,9 @@ import {
 import type pg from "pg";
 
 import { audit } from "../audit.js";
+import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { resolveCloudComputerExecutionEnvironment } from "./computer-environment.js";
 import {
   consumeCloudWorkspaceGrant,
   issueCloudWorkspaceGrant,
@@ -59,6 +61,8 @@ export class CloudWorkspaceSetupMaterialError extends Error {
       | "setup_admission_rejected"
       | "setup_authority_changed"
       | "setup_settings_invalid"
+      | "computer_environment_revoked"
+      | "computer_environment_busy"
       | "setup_repository_unavailable"
       | "engine_registration_rejected"
       | "engine_heartbeat_rejected",
@@ -198,6 +202,7 @@ type RedemptionContract = {
   settingsVersion: number;
   settingsSha256: string;
   settingsText: string;
+  computerEnvironment: Record<string, string> | null;
   secretRows: Array<{
     id: string;
     name: string;
@@ -850,6 +855,15 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     this.now = options.now ?? Date.now;
   }
 
+  private async computerEnvironment(tx: Tx, scope: { workspaceId: string; organizationId: string; generation: number }, actorUserId: string) {
+    try {
+      return await resolveCloudComputerExecutionEnvironment(tx, scope, actorUserId, { secretEncryptionKeys: this.setupSecretEncryptionKeys });
+    } catch (error) {
+      if (error instanceof HttpError && error.code === "computer_environment_busy") throw materialError("computer_environment_busy", true);
+      throw materialError(error instanceof HttpError && error.code === "computer_environment_revoked" ? "computer_environment_revoked" : "setup_settings_invalid", false);
+    }
+  }
+
   async redeem(input: CloudWorkspaceSetupRedemptionInput) {
     validateRedemptionInput(input);
     const engineInstanceId = randomUUID();
@@ -1013,6 +1027,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       });
       if (!consumed) throw materialError("setup_admission_rejected", false);
 
+      const computerEnvironment = await this.computerEnvironment(tx, input, accountUserId);
       const secretRows = await tx.query<
         RedemptionContract["secretRows"][number]
       >(
@@ -1107,6 +1122,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         settingsVersion: row.settings_version,
         settingsSha256: row.settings_sha256,
         settingsText: row.settings_text,
+        computerEnvironment,
         secretRows: secretRows.rows,
         engineInstanceId,
         bridgeToken,
@@ -1123,35 +1139,41 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     let setupEnvironment: Array<{ name: string; value: string }>;
     try {
       settings = parseSettings(contract.settingsText);
-      const byIdentity = new Map(
-        contract.secretRows.map((row) => [`${row.id}\0${row.name}`, row]),
-      );
-      const totalSecretBytes = contract.secretRows.reduce(
-        (total, row) => total + row.ciphertext.length,
-        0,
-      );
-      if (
-        byIdentity.size !== settings.secretRefs.length ||
-        totalSecretBytes > MAX_TOTAL_SECRET_BYTES
-      ) {
-        throw materialError("setup_settings_invalid", false);
+      if (contract.computerEnvironment !== null) {
+        setupEnvironment = Object.entries(contract.computerEnvironment).map(([name, value]) => ({ name, value }));
+        const secretRefs = setupEnvironment.map(({ name }) => ({ name, id: settings.secretRefs.find(ref => ref.name === name)?.id ?? randomUUID() }));
+        settings = { ...settings, secretRefs, document: { ...settings.document, secretRefs } };
+      } else {
+        const byIdentity = new Map(
+          contract.secretRows.map((row) => [`${row.id}\0${row.name}`, row]),
+        );
+        const totalSecretBytes = contract.secretRows.reduce(
+          (total, row) => total + row.ciphertext.length,
+          0,
+        );
+        if (
+          byIdentity.size !== settings.secretRefs.length ||
+          totalSecretBytes > MAX_TOTAL_SECRET_BYTES
+        ) {
+          throw materialError("setup_settings_invalid", false);
+        }
+        setupEnvironment = settings.secretRefs.map((reference) => {
+          const row = byIdentity.get(`${reference.id}\0${reference.name}`);
+          if (!row) throw materialError("setup_settings_invalid", false);
+          return {
+            name: reference.name,
+            value: openCloudWorkspaceSetupSecret(
+              row,
+              {
+                workspaceId: input.workspaceId,
+                organizationId: input.organizationId,
+                generation: input.generation,
+              },
+              this.setupSecretEncryptionKeys,
+            ),
+          };
+        });
       }
-      setupEnvironment = settings.secretRefs.map((reference) => {
-        const row = byIdentity.get(`${reference.id}\0${reference.name}`);
-        if (!row) throw materialError("setup_settings_invalid", false);
-        return {
-          name: reference.name,
-          value: openCloudWorkspaceSetupSecret(
-            row,
-            {
-              workspaceId: input.workspaceId,
-              organizationId: input.organizationId,
-              generation: input.generation,
-            },
-            this.setupSecretEncryptionKeys,
-          ),
-        };
-      });
     } catch (error) {
       await cleanupEngineStart(this.pool, {
         engineInstanceId,
@@ -1242,10 +1264,15 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
             contract.accountUserId,
           ],
         );
-        return (current.rowCount ?? 0) === 1;
+        if ((current.rowCount ?? 0) !== 1) return false;
+        // Minting crosses an external boundary. Do not publish env whose
+        // binding authorization or personal consent changed in the meantime.
+        const environment = await this.computerEnvironment(tx, input, contract.accountUserId);
+        return JSON.stringify(environment) === JSON.stringify(contract.computerEnvironment);
       });
-    } catch {
+    } catch (error) {
       await retireMintedCredential(repositoryCredential.token);
+      if (error instanceof CloudWorkspaceSetupMaterialError) throw error;
       throw materialError("setup_repository_unavailable", true);
     }
     if (!stillAuthorized) {

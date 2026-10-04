@@ -394,10 +394,12 @@ function errorStatus(
 ): 401 | 409 | 422 | 503 {
   switch (error.code) {
     case "setup_authority_changed":
+    case "computer_environment_revoked":
       return 409;
     case "setup_settings_invalid":
       return 422;
     case "setup_repository_unavailable":
+    case "computer_environment_busy":
       return 503;
     case "setup_admission_rejected":
     case "engine_registration_rejected":

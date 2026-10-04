@@ -72,8 +72,9 @@ export function createCloudAgentCredentialRoutes(service:DatabaseCloudAgentCrede
 export const CLOUD_AGENT_EXECUTION_PATH="/internal/v2/cloud-workspaces/engine/agent-execution";
 const privateRequest=z.object({workspaceId:z.string().uuid(),organizationId:z.string().uuid(),generation:z.number().int().positive().safe(),engineInstanceId:z.string().uuid(),
   request:z.discriminatedUnion("kind",[
-    z.object({kind:z.literal("admit"),admission:z.unknown(),includeGitAuthor:z.boolean().optional(),nativeCapabilitiesVersion:z.literal(1).optional(),backgroundTasksVersion:z.literal(1).optional(),computerToolsVersion:z.literal(1).optional()}).strict(),
+    z.object({kind:z.literal("admit"),admission:z.unknown(),includeGitAuthor:z.boolean().optional(),nativeCapabilitiesVersion:z.literal(1).optional(),backgroundTasksVersion:z.literal(1).optional(),computerToolsVersion:z.literal(1).optional(),environmentVersion:z.literal(1).optional()}).strict(),
     CloudComputerToolExecutionRequestSchema,
+    z.object({kind:z.literal("terminal-environment"),actorSessionId:z.string().uuid()}).strict(),
     z.object({kind:z.literal("background"),leaseId:z.string().uuid(),operation:CloudBackgroundOperationSchema}).strict(),
     z.object({kind:z.literal("validate"),leaseId:z.string().uuid(),renew:z.boolean().optional(),credentialVersion:z.number().int().positive().safe().optional(),nativeCapabilitiesVersion:z.literal(1).optional()}).strict(),
     z.object({kind:z.literal("refresh-codex"),leaseId:z.string().uuid(),credentialVersion:z.number().int().positive().safe(),nativeCapabilitiesVersion:z.literal(1).optional()}).strict(),
@@ -93,7 +94,7 @@ export function createCloudAgentExecutionRoutes(service:DatabaseCloudAgentExecut
     const customized=request.kind==="computer-tool"||request.kind==="background"||request.kind==="customization"||(request.kind==="admit"&&request.admission!==null&&typeof request.admission==="object"&&"customization" in request.admission);
     if(!customized&&Buffer.byteLength(JSON.stringify(parsed.data))>4096)return c.json({error:"invalid_agent_execution"},413);
     try{
-      const result=request.kind==="admit"?await service.admit(binding,request.admission,request.includeGitAuthor,request.nativeCapabilitiesVersion,request.backgroundTasksVersion,request.computerToolsVersion):request.kind==="computer-tool"?
+      const result=request.kind==="terminal-environment"?await service.terminalEnvironment(binding,request.actorSessionId):request.kind==="admit"?await service.admit(binding,request.admission,request.includeGitAuthor,request.nativeCapabilitiesVersion,request.backgroundTasksVersion,request.computerToolsVersion,request.environmentVersion):request.kind==="computer-tool"?
         await service.computerTool(binding,request):request.kind==="background"?
         await service.background(binding,request.leaseId,request.operation):request.kind==="validate"?
         await service.validate(binding,request.leaseId,request.renew??false,request.credentialVersion,false,request.nativeCapabilitiesVersion):request.kind==="refresh-codex"?
@@ -106,6 +107,7 @@ export function createCloudAgentExecutionRoutes(service:DatabaseCloudAgentExecut
       if(request.kind==="computer-tool"&&error instanceof ComputerToolConflictError)return c.json({result:error.result},409);
       if(request.kind==="admit"&&error instanceof HttpError&&error.code==="cloud_computer_tools_update_required")
         return c.json({error:"cloud_computer_tools_update_required"},409);
+      if(error instanceof HttpError&&["computer_environment_revoked","computer_environment_runtime_required"].includes(error.code))return c.json({error:error.code},409);
       if(error instanceof HttpError)return c.json({error:"cloud_agent_authority_rejected"},error.status===503?503:error.status===429?429:403);
       return c.json({error:"cloud_agent_execution_unavailable"},503);
     }

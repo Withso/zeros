@@ -25,6 +25,7 @@ import { computerTemplateBuilderIntent } from "./computer-template-boat.js";
 import { builderVmBaseSnapshot, prepareBuilderVmOperation } from "./cloud-builder-vm.js";
 import type { BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
 import { COMPUTER_TEMPLATE_RETENTION_CHANNEL } from "./computer-template-retention.js";
+import { updateRepositorySetupScript } from "./computer-repository-setup.js";
 import {
   CLOUD_COMPUTER_V2_MAX_LOG_BYTES,
   CLOUD_COMPUTER_V2_MAX_LOG_ROW_BYTES,
@@ -360,6 +361,9 @@ async function audit(
 export class DatabaseCloudComputerV2Service {
   private readonly maxConcurrentBuilds: number;
   private readonly sanitizeLog: (value: string) => string;
+  updateRepositorySetupScript(organizationId: string, userId: string, repositoryId: string, value: unknown) {
+    return updateRepositorySetupScript(this.pool, organizationId, userId, repositoryId, value);
+  }
   constructor(
     private readonly pool: pg.Pool,
     private readonly config: CloudWorkspaceBackendConfig,

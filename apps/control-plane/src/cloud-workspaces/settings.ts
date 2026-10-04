@@ -10,6 +10,7 @@ import {
 
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
+import { loadCloudComputerEnvironmentSource, materializeCloudComputerSettings } from "./computer-environment.js";
 import {
   openCloudWorkspaceSetupSecret,
   sealCloudWorkspaceSetupSecret,
@@ -746,13 +747,13 @@ type SecretBindingRow = {
   value_verifier: Buffer | null;
 };
 
-type SecretEncryptionConfiguration = {
+export type SecretEncryptionConfiguration = {
   setupSecretKeyV1?: string | null;
   secretEncryptionKeys?: Readonly<Record<number, string>>;
   currentSecretEncryptionKeyVersion?: number | null;
 };
 
-function configuredSecretEncryption(input: SecretEncryptionConfiguration): {
+export function configuredSecretEncryption(input: SecretEncryptionConfiguration): {
   keys: Readonly<Record<number, string>>;
   currentVersion: number | null;
 } {
@@ -792,6 +793,8 @@ export async function resolveDatabaseCloudWorkspaceSettings(
   const layers: CloudWorkspaceSettingsLayer[] = [
     { source: "built-in defaults", document: { values: {} } },
   ];
+  const personalEnvironmentLayers: CloudWorkspaceSettingsLayer[] = [];
+  const repositoryEnvironmentLayers: CloudWorkspaceSettingsLayer[] = [];
   const sourceVersions: Record<string, JsonValue> = Object.create(null);
   let environmentProfileId: string | null = null;
   let environmentProfileVersion: number | null = null;
@@ -807,6 +810,7 @@ export async function resolveDatabaseCloudWorkspaceSettings(
     if (profile) {
       const version = positiveVersion(profile.version);
       layers.push({ source: `personal cloud profile:${profile.id}@${version}`, document: profile.document });
+      personalEnvironmentLayers.push(layers[layers.length - 1]!);
       sourceVersions.personalProfile = { id: profile.id, version };
       environmentProfileId = profile.id;
       environmentProfileVersion = version;
@@ -849,6 +853,7 @@ export async function resolveDatabaseCloudWorkspaceSettings(
           profile.allowed_paths,
         ),
       });
+      personalEnvironmentLayers.push(layers[layers.length - 1]!);
       inheritedSources.push({
         consentId: profile.consent_id,
         profileId: profile.id,
@@ -905,6 +910,7 @@ export async function resolveDatabaseCloudWorkspaceSettings(
       source: `repository ${scope}:${input.repositoryId}@${version}`,
       document: row.document,
     });
+    repositoryEnvironmentLayers.push(layers[layers.length - 1]!);
     sourceVersions[`repository${scope === "shared" ? "Shared" : "Cloud"}`] =
       version;
   }
@@ -933,6 +939,14 @@ export async function resolveDatabaseCloudWorkspaceSettings(
   }
 
   const merged = resolveCloudWorkspaceSettingsLayers(layers);
+  const computerSource = await loadCloudComputerEnvironmentSource(tx, input);
+  if (computerSource) {
+    return materializeCloudComputerSettings(tx, input, computerSource, {
+      resolved: merged, sourceVersions, environmentProfileId, environmentProfileVersion, managedPolicyVersion, setupSecrets: [],
+    }, [...repositoryEnvironmentLayers, ...personalEnvironmentLayers,
+      ...(policyRow ? [{ source: `managed policy:${managedPolicyVersion}`, document: policyRow.document }] : [])],
+    repository.get("cloud") ? parseLayer({ source: "repository cloud setup", document: repository.get("cloud")!.document }).setupCommands ?? [] : []);
+  }
   const references = merged.snapshot.secretRefs ?? [];
   const setupSecrets: CloudWorkspaceSetupSecretMaterial[] = [];
   let resolved = merged;
