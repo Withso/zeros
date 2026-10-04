@@ -187,6 +187,11 @@ function platformAllows(rule: string[] | undefined, value: string): boolean {
 
 function omitPackageFile(name: string, relative: string): boolean {
   if (relative === "node_modules") return true; // Dependency edges are copied separately.
+  // Published non-runtime examples contain credential-shaped tokens or private
+  // test keys. Preserve package code and all LICENSE/NOTICE files unchanged.
+  if (name === "@octokit/auth-token" && relative === "README.md") return true;
+  if (name === "ssh2" && relative === "test") return true;
+  if (name === "zod" && relative === "src/v4/mini/tests") return true;
   if (name === "better-sqlite3" || name === "node-pty") {
     if (relative === "prebuilds") return true; // Rebuilt under the pinned Node below.
     if (relative.startsWith("build/")) {
@@ -196,6 +201,14 @@ function omitPackageFile(name: string, relative: string): boolean {
       );
     }
   }
+  if (
+    name === "node-pty" &&
+    relative.startsWith("third_party/conpty/") &&
+    /\.(?:dll|exe)$/i.test(relative)
+  )
+    return true;
+  // PuTTY Pageant bridge; ssh2's Linux agent transport uses Unix sockets.
+  if (name === "ssh2" && relative === "util/pagent.exe") return true;
   // SRT's npm package embeds helpers for other targets; keep Linux x64 plus
   // shared source, Java assets and all notices. No unrelated dependency trimming.
   if (
@@ -226,7 +239,10 @@ export async function stageDependencyClosure(
   ): Promise<string | undefined> {
     check(/^(?:@[a-z0-9_.-]+\/)?[a-z0-9_.-]+$/i.test(name), "dependency_name");
     const require = createRequire(path.join(owner, "package.json"));
-    for (const nodeModules of require.resolve.paths(name) ?? []) {
+    // Asking for "buffer"/"events" alone returns null (Node built-ins), even
+    // when the dependency graph declares their separate npm implementations.
+    for (const nodeModules of require.resolve.paths(`${name}/package.json`) ??
+      []) {
       const candidate = path.join(nodeModules, name);
       if (!(await exists(path.join(candidate, "package.json")))) continue;
       const physical = await realpath(candidate);
@@ -342,6 +358,10 @@ export async function stageDependencyClosure(
     for (const [name, target] of [...entries].sort(([a], [b]) =>
       byteOrder(a, b),
     )) {
+      check(
+        within(await realpath(runtime), await realpath(target)),
+        "symlink_escape",
+      );
       const file = await open(target, "r");
       let prefix: string;
       try {
@@ -421,7 +441,7 @@ export async function stageSources(
 // code and license text legitimately contain long hex/base64). Low-entropy
 // placeholders match the repository secret gate's fixture policy.
 const SECRET_SHAPE =
-  /\b(?:gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{50,}|condw_[A-Za-z0-9_-]{20,}|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{40,}|sk_(?:(?:test|live)_)?[A-Za-z0-9_-]{32,}|npm_[A-Za-z0-9]{36,}|AKIA[0-9A-Z]{16}|Bearer [A-Za-z0-9_.-]{32,}|eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{16,})/g;
+  /\b(?:gh[po]_[A-Za-z0-9]{36,}|ghs_\d+_[A-Za-z0-9._-]{40,}|ghs_[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]{8,})+|gh[sur]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|condw_[A-Za-z0-9_-]{20,}|sk-(?:proj-|svcacct-|ant-(?:api\d\d-)?)[A-Za-z0-9_-]{40,}|sk-(?!proj-|svcacct-|ant-)[A-Za-z0-9]{40,}|sk_(?:(?:test|live)_)?[A-Za-z0-9_-]{32,}|npm_[A-Za-z0-9]{36,}|AKIA[0-9A-Z]{16}|Bearer [A-Za-z0-9_.-]{32,}|eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{16,})/g;
 function secretShaped(text: string): boolean {
   for (const match of text.matchAll(SECRET_SHAPE)) {
     const body = match[0].replace(

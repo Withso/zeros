@@ -85,7 +85,7 @@ const checks = {
     const binary = internal(
       path.join(
         path.dirname(native),
-        "vendor/x86_64-unknown-linux-musl/codex/codex",
+        "vendor/x86_64-unknown-linux-musl/bin/codex",
       ),
     );
     assert.equal(

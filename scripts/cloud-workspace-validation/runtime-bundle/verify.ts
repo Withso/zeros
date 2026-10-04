@@ -296,12 +296,14 @@ export async function verifyRuntimeArchive(options: {
       );
       check(!existing, "extraction_exists");
       await mkdir(options.extractTo, { recursive: true, mode: 0o755 });
+      await chmod(options.extractTo, 0o755);
       created = true;
       await writeFile(
         path.join(options.extractTo, "manifest.json"),
         manifestBytes,
         { mode: 0o444, flag: "wx" },
       );
+      await chmod(path.join(options.extractTo, "manifest.json"), 0o444);
     }
     const links: Extract<ManifestEntry, { type: "symlink" }>[] = [];
     for (const entry of manifest.files) {
@@ -353,6 +355,7 @@ export async function verifyRuntimeArchive(options: {
             hash.update(chunk);
             if (destination) await destination.writeFile(chunk);
           });
+          if (destination) await destination.chmod(parseInt(entry.mode, 8));
         } finally {
           await destination?.close();
         }

@@ -174,6 +174,124 @@ describe("pnpm runtime closure", () => {
     ).rejects.toThrow(/dependency_external/);
   });
 
+  it("rejects a package bin symlink before chmod can follow it outside R", async () => {
+    const temp = await directory(),
+      source = path.join(temp, "source");
+    await json(path.join(source, "package.json"), { dependencies: { a: "1" } });
+    const pkg = path.join(source, "node_modules/a");
+    await json(path.join(pkg, "package.json"), {
+      name: "a",
+      version: "1.0.0",
+      bin: { a: "cli.js" },
+    });
+    const outside = path.join(temp, "external.js");
+    await writeFile(outside, "#!/usr/bin/env node\n", { mode: 0o444 });
+    await symlink(outside, path.join(pkg, "cli.js"));
+    await expect(
+      stageDependencyClosure(source, path.join(temp, "runtime"), {
+        harnessRoots: [],
+      }),
+    ).rejects.toThrow(/symlink_escape/);
+    expect((await lstat(outside)).mode & 0o777).toBe(0o444);
+  });
+
+  it("retains declared npm dependencies whose names also name Node built-ins", async () => {
+    const temp = await directory(),
+      source = path.join(temp, "source");
+    await json(path.join(source, "package.json"), {
+      dependencies: { buffer: "1" },
+    });
+    await json(path.join(source, "node_modules/buffer/package.json"), {
+      name: "buffer",
+      version: "1.0.0",
+    });
+    const packages = await stageDependencyClosure(
+      source,
+      path.join(temp, "runtime"),
+      { harnessRoots: [] },
+    );
+    expect(packages.map((entry) => entry.name)).toEqual(["buffer"]);
+  });
+
+  it("keeps rebuilt PTY and vendor notices without non-Linux PTY/SSH helpers", async () => {
+    const temp = await directory(),
+      source = path.join(temp, "source");
+    await json(path.join(source, "package.json"), {
+      dependencies: { "node-pty": "1.1.0", ssh2: "1.17.0" },
+    });
+    const pkg = path.join(source, "node_modules/node-pty");
+    await json(path.join(pkg, "package.json"), {
+      name: "node-pty",
+      version: "1.1.0",
+    });
+    for (const name of [
+      "build/Release/pty.node",
+      "prebuilds/win32-x64/pty.node",
+      "third_party/conpty/LICENSE",
+      "third_party/conpty/win10-arm64/OpenConsole.exe",
+      "third_party/conpty/win10-x64/conpty.dll",
+    ]) {
+      await mkdir(path.dirname(path.join(pkg, name)), { recursive: true });
+      await writeFile(path.join(pkg, name), "fixture");
+    }
+    const ssh = path.join(source, "node_modules/ssh2");
+    await json(path.join(ssh, "package.json"), {
+      name: "ssh2",
+      version: "1.17.0",
+    });
+    await mkdir(path.join(ssh, "util"));
+    await writeFile(path.join(ssh, "util/pagent.exe"), "fixture");
+    await writeFile(path.join(ssh, "LICENSE"), "fixture license");
+    const runtime = path.join(temp, "runtime");
+    await stageDependencyClosure(source, runtime, { harnessRoots: [] });
+    const entries = (await inventoryTree(runtime)).map((entry) => entry.path);
+    expect(entries).toContain(
+      "worker/node_modules/node-pty/build/Release/pty.node",
+    );
+    expect(entries).toContain(
+      "worker/node_modules/node-pty/third_party/conpty/LICENSE",
+    );
+    expect(entries).toContain("worker/node_modules/ssh2/LICENSE");
+    expect(
+      entries.some(
+        (name) => /\.(exe|dll)$/.test(name) || name.includes("prebuilds/"),
+      ),
+    ).toBe(false);
+  });
+
+  it("omits upstream credential examples and test keys while retaining notices", async () => {
+    const temp = await directory(),
+      source = path.join(temp, "source");
+    await json(path.join(source, "package.json"), {
+      dependencies: { "@octokit/auth-token": "6", ssh2: "1", zod: "4" },
+    });
+    const example = ["gh", "p_", "abcdefghijklmnopqrstuvwxyz0123456789"].join(
+      "",
+    );
+    for (const [name, relative] of [
+      ["@octokit/auth-token", "README.md"],
+      ["ssh2", "test/fixtures/key"],
+      ["zod", "src/v4/mini/tests/string.test.ts"],
+    ]) {
+      const pkg = path.join(source, "node_modules", name);
+      await json(path.join(pkg, "package.json"), {
+        name,
+        version: "1.0.0",
+        license: "MIT",
+      });
+      await mkdir(path.dirname(path.join(pkg, relative)), { recursive: true });
+      await writeFile(path.join(pkg, relative), example);
+      await writeFile(path.join(pkg, "LICENSE"), "Unmodified upstream license");
+    }
+    const runtime = path.join(temp, "runtime");
+    await stageDependencyClosure(source, runtime, { harnessRoots: [] });
+    await expect(scanPayload(runtime, [])).resolves.toBeUndefined();
+    const entries = await inventoryTree(runtime);
+    expect(
+      entries.filter((entry) => entry.path.endsWith("/LICENSE")),
+    ).toHaveLength(3);
+  });
+
   it("rejects installed packages for another CPU or OS", async () => {
     const temp = await directory(),
       source = path.join(temp, "source");
@@ -252,6 +370,28 @@ describe("payload hygiene", () => {
       ),
     );
     await chmod(path.join(root, "patterns"), 0o444);
+    await expect(scanPayload(root, [])).resolves.toBeUndefined();
+  });
+  it("does not mistake compiled format strings or adjacent provider prefixes for tokens", async () => {
+    const root = await directory();
+    const symbols = [
+      "gh",
+      "p_",
+      "a_format_string_with_underscores_and_no_credential",
+    ].join("");
+    const prefixes = [
+      "sk-",
+      "proj-",
+      "sk-",
+      "svcacct-",
+      "sk-",
+      "OPENAI_API_KEY",
+      "field",
+    ].join("");
+    await writeFile(
+      path.join(root, "binary"),
+      Buffer.from(`\0${symbols}\0${prefixes}\0`),
+    );
     await expect(scanPayload(root, [])).resolves.toBeUndefined();
   });
 });

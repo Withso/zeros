@@ -44,8 +44,10 @@ SDK packages, peers and workspace packages, plus `tsx` and TypeScript. Its
 source slices and single append-only helper inventory live in `closure.ts`.
 Copies preserve package topology with internal relative links; regenerated
 `.bin` shims invoke the bundled Node. pnpm metadata, browser `.links`, install
-validation markers, native build intermediates, non-target embedded SRT helpers,
-upstream SQLite/PTY prebuilds, secrets and caches are omitted. The source-built
+validation markers, native build intermediates, non-target embedded SRT/PTY/SSH helpers,
+upstream SQLite/PTY prebuilds, secrets and caches are omitted. The Octokit auth-token
+README and SSH2/Zod test fixtures containing credential examples are omitted;
+their package code and license/NOTICE files remain unchanged. The source-built
 SQLite addon also fills the Linux platform export's prebuild slot. Everything
 else in the selected dependency packages, including notices, is retained.
 

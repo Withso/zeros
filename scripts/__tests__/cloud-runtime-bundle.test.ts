@@ -26,8 +26,55 @@ import {
   writeRuntimeArchive,
 } from "../cloud-workspace-validation/runtime-bundle/archive";
 import { verifyRuntimeArchive } from "../cloud-workspace-validation/runtime-bundle/verify";
+import {
+  buildEnvironment,
+  elfVersionNeeds,
+  versionAtMost,
+} from "../cloud-workspace-validation/runtime-bundle/toolchain";
 
 const temporary: string[] = [];
+
+describe("Linux toolchain contract", () => {
+  it("compares numeric GLIBC versions and inspects needs instead of definitions", () => {
+    expect(versionAtMost("2.9", "2.39")).toBe(true);
+    expect(versionAtMost("2.39", "2.39")).toBe(true);
+    expect(versionAtMost("2.40", "2.39")).toBe(false);
+    expect(versionAtMost("2.39.1", "2.39")).toBe(false);
+    const needs = elfVersionNeeds(
+      "Version definition section '.gnu.version_d'\nName: GLIBC_2.99\nVersion needs section '.gnu.version_r'\nName: GLIBC_2.28\nName: GLIBCXX_3.4.29\nName: CXXABI_1.3\nName: GLIBC_2.3\nName: GLIBC_2.28\n",
+    );
+    expect(needs).toEqual({
+      glibc: ["2.3", "2.28"],
+      glibcxx: ["3.4.29"],
+      cxxabi: ["1.3"],
+    });
+  });
+  it("uses a fresh HOME, an explicit cloud capability and an environment allowlist", () => {
+    const key = "BUNDLE_TEST_SECRET";
+    const previous = process.env[key];
+    process.env[key] = "synthetic-fixture";
+    try {
+      const environment = buildEnvironment("/temporary-build");
+      expect(environment.HOME).toBe("/temporary-build/home");
+      expect(environment.ZEROS_CLOUD_WORKSPACES_ENABLED).toBe("true");
+      expect(environment.SOURCE_DATE_EPOCH).toBe("0");
+      for (const name of [
+        key,
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "LD_PRELOAD",
+        "GITHUB_TOKEN",
+        "BOAT_API_KEY",
+        "OPENAI_API_KEY",
+      ])
+        expect(Object.keys(environment)).not.toContain(name);
+    } finally {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+  });
+});
+
 async function fixture() {
   const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-bundle-unit-"));
   temporary.push(directory);
@@ -191,6 +238,24 @@ describe("runtime manifest", () => {
 });
 
 describe("runtime archive", () => {
+  it("extracts manifest modes independently of the verifier's umask", async () => {
+    const { root, directory, bytes } = await fixture();
+    const archivePath = path.join(directory, "modes.tar.gz");
+    await writeRuntimeArchive(root, bytes, archivePath);
+    const previous = process.umask(0o077);
+    try {
+      await expect(
+        verifyRuntimeArchive({
+          archivePath,
+          manifestBytes: bytes,
+          extractTo: path.join(directory, "extracted"),
+        }),
+      ).resolves.toBeTruthy();
+    } finally {
+      process.umask(previous);
+    }
+  });
+
   it("writes identical gzip bytes across roots and normalizes every header", async () => {
     const first = await fixture();
     const second = await fixture();

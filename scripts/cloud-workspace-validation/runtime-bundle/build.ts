@@ -125,10 +125,11 @@ export async function buildRuntimeBundle(options: {
   let outputCreated = false;
   const durations: Record<string, number> = {};
   async function stage<T>(name: string, run: () => Promise<T>): Promise<T> {
-    options.progress?.(name);
     const start = performance.now();
     try {
-      return await run();
+      const result = await run();
+      options.progress?.(name);
+      return result;
     } catch (error) {
       throw Object.assign(
         error instanceof Error ? error : new BundleError("unexpected_failure"),
@@ -138,6 +139,7 @@ export async function buildRuntimeBundle(options: {
       durations[name] = Math.round(performance.now() - start);
     }
   }
+  const previousUmask = process.umask(0o022);
   try {
     await mkdir(path.dirname(outDir), { recursive: true });
     await mkdir(outDir);
@@ -219,6 +221,20 @@ export async function buildRuntimeBundle(options: {
         fromCheckout.resolve("@electron/rebuild"),
       );
       const nodeGyp = fromRebuild.resolve("node-gyp/bin/node-gyp.js");
+      tools.versions["node-gyp"] = JSON.parse(
+        await readFile(
+          path.join(path.dirname(nodeGyp), "../package.json"),
+          "utf8",
+        ),
+      ).version;
+      for (const name of ["esbuild", "tsup", "typescript", "playwright-core"]) {
+        tools.versions[name] = JSON.parse(
+          await readFile(
+            path.join(checkout, "node_modules", name, "package.json"),
+            "utf8",
+          ),
+        ).version;
+      }
       // better-sqlite3 13 has gypfile:false and no install hook; `pnpm rebuild`
       // alone silently leaves it unbuilt. Invoke the lockfile's node-gyp.
       for (const name of ["better-sqlite3", "node-pty"]) {
@@ -464,6 +480,7 @@ export async function buildRuntimeBundle(options: {
     if (outputCreated) await rm(outDir, { recursive: true, force: true });
     throw error;
   } finally {
+    process.umask(previousUmask);
     // An explicit work directory is a local debugging aid, never an artifact.
     if (!options.workDir) await rm(work, { recursive: true, force: true });
   }
@@ -503,7 +520,8 @@ if (
     });
     diagnostic("done");
   })().catch((error: unknown) => {
-    diagnostic(currentStage, error);
+    const stage = (error as { stage?: string })?.stage ?? currentStage;
+    diagnostic(stage, error);
     process.exitCode = 1;
   });
 }

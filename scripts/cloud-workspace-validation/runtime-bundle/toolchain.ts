@@ -44,6 +44,7 @@ export async function runTool(
     throw Object.assign(new BundleError(failure), {
       exitCode: typeof result.code === "number" ? result.code : null,
       timedOut: result.killed === true,
+      toolStdout: result.stdout,
       toolOutput: result.stderr || result.stdout,
     });
   }

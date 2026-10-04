@@ -61,6 +61,8 @@ export async function runClosureProbes(
       "/dev",
       "--tmpfs",
       "/tmp",
+      "--tmpfs",
+      "/home",
       "--dir",
       "/etc",
     );
@@ -78,7 +80,7 @@ export async function runClosureProbes(
       "--clearenv",
       "--setenv",
       "HOME",
-      "/tmp/home",
+      "/home/runtime-probe",
       "--setenv",
       "PATH",
       `${installed}/bin:/usr/bin:/bin`,
@@ -136,7 +138,33 @@ export async function runClosureProbes(
   } catch (error) {
     // Preserve only a closed diagnostic from the probe when a native check fails.
     // Tool stderr is never returned to a release job.
-    if (error instanceof BundleError) throw error;
+    if (error instanceof BundleError) {
+      try {
+        const stdout =
+          (error as BundleError & { toolStdout?: string }).toolStdout ?? "";
+        const diagnostic = JSON.parse(stdout.trim().split("\n").at(-1)!);
+        if (
+          diagnostic.schema === "zeros.diagnostic/v1" &&
+          diagnostic.component === "bundle" &&
+          diagnostic.stage === "closure" &&
+          Array.isArray(diagnostic.failedChecks) &&
+          diagnostic.failedChecks.length <= 31 &&
+          diagnostic.failedChecks.every(
+            (name: unknown) =>
+              typeof name === "string" && /^[a-z_]+$/.test(name),
+          )
+        ) {
+          Object.assign(error, {
+            failedChecks: [
+              ...new Set(["closure_probes", ...diagnostic.failedChecks]),
+            ],
+          });
+        }
+      } catch {
+        /* A namespace/tool failure has no inner diagnostic. */
+      }
+      throw error;
+    }
     throw new BundleError("closure_probes");
   } finally {
     await rm(scratch, { recursive: true, force: true });
