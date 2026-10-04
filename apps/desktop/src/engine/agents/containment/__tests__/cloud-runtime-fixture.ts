@@ -28,11 +28,24 @@ export function cloudRuntimeFixture({ mapAbsoluteLinks = true } = {}) {
     readSync: fs.readSync,
     closeSync: (fd: number) => { descriptors.delete(fd); fs.closeSync(fd); },
   };
-  const mkdir = (file: string) => fs.mkdirSync(physical(file), { recursive: true, mode: 0o755 });
+  const mkdir = (file: string) => {
+    const target = physical(file);
+    const firstCreated = fs.mkdirSync(target, { recursive: true, mode: 0o755 });
+    if (!firstCreated) return;
+    // Mounted runtime directories must remain traversable with a strict umask.
+    for (let directory = target; ; directory = path.dirname(directory)) {
+      fs.chmodSync(directory, 0o755);
+      if (directory === firstCreated) break;
+    }
+  };
   const write = (file: string, value: unknown, mode = 0o444) => {
     mkdir(path.dirname(file));
-    fs.writeFileSync(physical(file), typeof value === "string" ? value : JSON.stringify(value));
-    fs.chmodSync(physical(file), mode);
+    const target = physical(file);
+    // Replace admitted read-only files through their user-owned parent rather
+    // than relying on root/DAC override to truncate them during test setup.
+    fs.rmSync(target, { force: true });
+    fs.writeFileSync(target, typeof value === "string" ? value : JSON.stringify(value), { flag: "wx", mode });
+    fs.chmodSync(target, mode);
   };
   const link = (file: string, target: string) => {
     mkdir(path.dirname(file));

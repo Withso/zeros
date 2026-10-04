@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import {spawnSync,execFileSync} from "node:child_process";
-import {copyFileSync,chmodSync,readFileSync} from "node:fs";
+import {copyFileSync,chmodSync,readFileSync,unlinkSync} from "node:fs";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -28,6 +28,8 @@ describe("v4 runtime launch containment", () => {
     const resolver=`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs`;
     tree.write(`${runtime.workerRoot}/package.json`,{});
     tree.write(resolver,readFileSync(resolverSource,"utf8"));
+    // Replace the read-only placeholders before copying/building as the CI user.
+    for(const file of [runtime.node,runtime.engineNamespace])unlinkSync(tree.physical(file));
     copyFileSync(process.execPath,tree.physical(runtime.node));chmodSync(tree.physical(runtime.node),0o555);
     execFileSync("cc",["-std=c11","-O2","-Wall","-Wextra","-Werror",
       "scripts/cloud-workspace-validation/sandbox/cloud-engine-namespace.c","-o",tree.physical(runtime.engineNamespace)],{stdio:"pipe"});

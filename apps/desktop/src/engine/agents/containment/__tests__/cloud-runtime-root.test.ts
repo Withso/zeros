@@ -13,6 +13,22 @@ function fixture() {
 afterEach(() => { vi.unstubAllEnvs(); for (const tree of fixtures.splice(0)) tree.dispose(); });
 
 describe("verified cloud runtime root", () => {
+  it("replaces read-only fixture files while preserving their admitted modes and simulated owner", () => {
+    const tree = fixture();
+    for (const [file, mode] of [
+      ["/etc/zeros/cloud-worker.json", 0o444],
+      ["/run/zeros/active-runtime.json", 0o600],
+      [`${tree.descriptor.root}/bin/node`, 0o555],
+    ] as const) {
+      const content = fs.readFileSync(tree.physical(file), "utf8");
+      tree.write(file, content, mode);
+      expect(fs.readFileSync(tree.physical(file), "utf8")).toBe(content);
+      expect(fs.statSync(tree.physical(file)).uid).toBe(process.getuid?.());
+      expect(tree.filesystem.lstatSync(file).uid).toBe(0);
+      expect(tree.filesystem.lstatSync(file).mode & 0o777).toBe(mode);
+    }
+    expect(tree.resolver.resolve().profile).toBe("v4");
+  });
   it("preserves the legacy paths exactly for absent and v1–v3 markers", () => {
     const tree = fixture();
     for (const version of [null, 1, 2, 3]) {

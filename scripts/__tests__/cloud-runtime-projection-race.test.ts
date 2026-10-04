@@ -79,6 +79,7 @@ describe("host credential projection races", () => {
       roots.push(root);
       race.target = path.join(root, "canary");
       fs.writeFileSync(race.target, "unchanged", { mode: 0o644 });
+      fs.chmodSync(race.target, 0o644);
       const now = Date.now();
       const shared = {
         version: 1,
