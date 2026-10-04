@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { DevAgentRequestSchema, assertDevAgentEnvironment, devAgentModel } from "./dev-agent-qualification.js";
+import type pg from "pg";
+import { DevAgentRequestSchema, assertDevAgentEnvironment, devAgentModel, inspectDevAgents } from "./dev-agent-qualification.js";
+import { DatabaseCloudAgentCredentialService } from "./cloud-workspaces/agent-credentials.js";
 import { startNativeDevCanary } from "./cloud-workspaces/dev-native-canary.js";
 
 const request = { owner: "a".repeat(24), generation: "11111111-1111-4111-8111-111111111111",
@@ -26,6 +28,33 @@ describe("Dev native agent operator boundaries", () => {
     expect(() => assertDevAgentEnvironment(input, { ...hosted, BOAT_ACCOUNT_SCOPE: "foreign" })).toThrow();
     expect(() => assertDevAgentEnvironment(input, { ...hosted, ZEROS_DEV_CONNECTIONS_ENABLED: "false" })).toThrow();
     expect(() => assertDevAgentEnvironment({ ...input, image: organizationImage }, hosted)).toThrow();
+  });
+  it("returns the qualified image contract when the source contract differs", async () => {
+    const organizationImage = { ...request.image, id: "33333333-3333-4333-8333-333333333333",
+      snapshotId: `zeros-org-${"3".repeat(32)}`, buildSha256: "d".repeat(64) };
+    const sourceContractSha256 = "e".repeat(64), imageContractSha256 = "f".repeat(64), credentialId = "44444444-4444-4444-8444-444444444444";
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("zeros_development_identity")) return { rows: [{ owner: request.owner, generation: request.generation }] };
+      if (sql.includes("FROM user_identities i")) return { rows: [{ id: "user", email: request.fixture.expectedEmail, staff_role: "platform_owner" }] };
+      if (sql.includes("JOIN workos_organization_links")) return { rows: [{ id: "organization", slug: request.fixture.expectedOrganizationSlug }] };
+      if (sql.includes("FROM cloud_computer_images image")) return { rows: [{ id: organizationImage.id,
+        snapshot_name: organizationImage.snapshotId, build_sha256: organizationImage.buildSha256, base_source_commit: organizationImage.sourceCommit,
+        source_contract: sourceContractSha256, image_contract: imageContractSha256, enabled_kinds: ["claude-setup-token"] }] };
+      return { rows: [] };
+    });
+    const pool = { query, connect: async () => ({ query, release: vi.fn() }) } as unknown as pg.Pool;
+    const accounts = vi.spyOn(DatabaseCloudAgentCredentialService.prototype, "organizationConnections").mockResolvedValue({
+      credentials: [{ id: credentialId, kind: "claude-setup-token", displayName: "Test account", revision: 1, revoked: false, connectionMethod: "account" }],
+      connections: [{ provider: "claude", revision: 1, credentialId, models: ["claude-haiku-4-5"], connected: true }],
+    });
+    try {
+      expect(await inspectDevAgents(pool, { ...request, accountScope: "fixture", organizationImage })).toMatchObject({
+        connections: [{ credentialId, enabled: true }],
+        organizationImages: [{ id: organizationImage.id, contractSha256: imageContractSha256, connections: [{ credentialId, enabled: true }] }],
+      });
+      const imageQuery = query.mock.calls.find(([sql]) => sql.includes("FROM cloud_computer_images image"))![0];
+      expect(imageQuery).toContain("q.runtime_contract_sha256=image.image_contract");
+    } finally { accounts.mockRestore(); }
   });
   it("stages access only through a private file and returns no credential or native output", async () => {
     const secret = "synthetic-provider-token-for-test";
