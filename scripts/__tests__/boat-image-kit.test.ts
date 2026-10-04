@@ -320,7 +320,7 @@ describe("Boat image kit", () => {
 
   it("saves the snapshot only after attestation and fresh sanitation, then reports the Railway values", async () => {
     const saves: Call[] = [];
-    const { commit, deps, dir } = await prepared({
+    const { commit, deps, dir, fake } = await prepared({
       "GET /named-snapshots": () => ({ status: 200, body: { snapshots: [{ name: "zeros-qualification-aa11196c97a6" }] } }),
       "POST /named-snapshots": (call) => {
         saves.push(call);
@@ -335,6 +335,7 @@ describe("Boat image kit", () => {
     expect(fs.readFileSync(path.join(dir, "sanitize.sh"), "utf8")).toContain(`buildHash=='${BUILD}'`);
     await expect(main(["snapshot", "save"], deps)).resolves.toEqual({ requested: true, name, state: "saving" });
     expect(saves.map((call) => call.body)).toEqual([{ sandboxId: "bx_builder1", name }]);
+    expect(fake.calls.map(call => call.headers?.["x-boat-org"])).toEqual(fake.calls.map(() => ORG));
     await expect(main(["snapshot", "save"], deps)).rejects.toThrow("already requested");
     await expect(main(["builder", "delete"], deps)).rejects.toThrow(`${name} from this builder is not ready`);
 
@@ -369,10 +370,10 @@ describe("Boat image kit", () => {
     await expect(main(["snapshot", "save"], stale.deps)).rejects.toThrow("Attestation gate");
   });
 
-  it("captures beyond ten snapshots after complete pagination and saves its pending intent before POST", async () => {
+  it.each([false, true])("captures with more than 100 snapshot names per response after complete inventory (paginated=%s)", async paginated => {
     let pendingFile = "";
     const f = await prepared({
-      "GET /named-snapshots": () => ({ status: 200, body: { snapshots: Array.from({ length: 20 }, (_, i) => ({ name: `retained-${i}` })), hasMore: true, nextCursor: "second/page" } }),
+      "GET /named-snapshots": () => ({ status: 200, body: { snapshots: Array.from({ length: 150 }, (_, i) => ({ name: `retained-${i}` })), allowance: { used: 150 }, ...(paginated ? { hasMore: true, nextCursor: "second/page" } : {}) } }),
       "GET /named-snapshots?cursor=second%2Fpage": () => ({ status: 200, body: { snapshots: [{ name: "last-retained" }], hasMore: false } }),
       "POST /named-snapshots": ({ body }) => {
         expect(JSON.parse(fs.readFileSync(pendingFile, "utf8"))).toMatchObject({ name: body.name, state: "save-pending" });
@@ -383,7 +384,7 @@ describe("Boat image kit", () => {
     await main(["attestation", "status"], f.deps); await main(["generate-post"], f.deps);
     await expect(main(["snapshot", "save"], f.deps)).resolves.toMatchObject({ requested: true });
     expect(f.fake.calls.filter(call => call.path.startsWith("/named-snapshots")).map(call => call.path))
-      .toEqual(["/named-snapshots", "/named-snapshots?cursor=second%2Fpage", "/named-snapshots"]);
+      .toEqual(["/named-snapshots", ...(paginated ? ["/named-snapshots?cursor=second%2Fpage"] : []), "/named-snapshots"]);
   });
 
   it.each(["missing cursor", "looping cursor", "duplicate name", "candidate on later page"])("refuses %s before saving any pending intent or snapshot", async scenario => {

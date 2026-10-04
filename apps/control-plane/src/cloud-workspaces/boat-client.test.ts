@@ -64,7 +64,7 @@ describe("Boat API boundary", () => {
     }
     expect(f.fetcher).toHaveBeenCalledOnce();
   });
-  it("bills only sandbox creation to the configured wallet, outside the request body", async () => {
+  it("scopes sandbox and snapshot requests to the configured wallet, including idempotent replays", async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json({ ok: true }));
     const client = new BoatApiClient({
       apiKey: "boat_test-only-credential",
@@ -72,14 +72,29 @@ describe("Boat API boundary", () => {
       billingOrg: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41",
       fetch: fetcher,
     });
-    await client.request("/sandboxes", { method: "POST", body: { noEnv: true } });
-    await client.request("/sandboxes/bx_23456789");
-    await client.request("/sandboxes/bx_23456789/resume", { method: "POST", body: { ttlSeconds: 600 } });
+    const create = { method: "POST" as const, body: { from: "release-base", noEnv: true }, idempotencyKey: "test-create" };
+    const requests: Array<[string, Parameters<BoatApiClient["request"]>[1]]> = [
+      ["/sandboxes", create],
+      ["/sandboxes", create],
+      ["/sandboxes/bx_23456789", undefined],
+      ["/sandboxes/bx_23456789/resume", { method: "POST", body: { ttlSeconds: 600 } }],
+      ["/sandboxes/bx_23456789/stop", { method: "POST" }],
+      ["/sandboxes/bx_23456789", { method: "PATCH", body: { ttlSeconds: 600 } }],
+      ["/sandboxes/bx_23456789/usage", undefined],
+      ["/sandboxes/bx_23456789", { method: "DELETE", confirmDelete: "bx_23456789" }],
+      ["/deletion-operations/bdop_test", undefined],
+      ["/named-snapshots", { method: "POST", body: { sandboxId: "bx_23456789", name: "test-snapshot" } }],
+      ["/named-snapshots", undefined],
+      ["/named-snapshots/test-snapshot", undefined],
+      ["/named-snapshots/test-snapshot", { method: "DELETE", confirmDelete: "test-snapshot" }],
+      ["/limits", undefined],
+    ];
+    for (const [path, input] of requests) await client.request(path, input);
     const headers = fetcher.mock.calls.map(([, init]) => new Headers(init!.headers));
-    expect(headers[0]!.get("x-boat-org")).toBe("team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41");
-    expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toEqual({ noEnv: true });
-    expect(headers[1]!.has("x-boat-org")).toBe(false);
-    expect(headers[2]!.has("x-boat-org")).toBe(false);
+    expect(headers.map(header => header.get("x-boat-org"))).toEqual(requests.map(() => "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41"));
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toEqual(create.body);
+    expect([...headers[0]!.entries()]).toEqual([...headers[1]!.entries()]);
+    expect(headers[7]!.get("x-ascii-confirm-delete")).toBe("bx_23456789");
     const f = fixture();
     f.fetcher.mockResolvedValue(Response.json({ ok: true }));
     await f.client.request("/sandboxes", { method: "POST", body: { noEnv: true } });
@@ -105,6 +120,20 @@ describe("Boat API boundary", () => {
       code: "provider_response_too_large",
       retryable: false,
     });
+  });
+  it("extends one long operation's deadline without changing subsequent short reads", async () => {
+    const f = fixture(), timeout = vi.spyOn(AbortSignal, "timeout");
+    f.fetcher.mockImplementation(async () => Response.json({ ok: true }));
+    try {
+      await f.client.request("/named-snapshots", { method: "POST", timeoutMs: 120_000 });
+      await f.client.request("/named-snapshots");
+      expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([120_000, 1000]);
+    } finally { timeout.mockRestore(); }
+  });
+  it.each([99, 610_001, 1.5, Infinity])("rejects an unsafe per-request deadline before dispatch: %s", async timeoutMs => {
+    const f = fixture();
+    await expect(f.client.request("/named-snapshots", { timeoutMs })).rejects.toThrow("Invalid Boat request deadline");
+    expect(f.fetcher).not.toHaveBeenCalled();
   });
   it.each([
     [401, false],
@@ -145,6 +174,15 @@ describe("Boat API boundary", () => {
     await expect(f.client.request("/sandboxes")).rejects.toMatchObject({
       retryable: true,
       retryAfterMs: 300_000,
+    });
+  });
+  it.each(["boat_restoring", "boat_starting"])("retries a command while Boat reports %s", async code => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ ok: false, code }, { status: 409, headers: { "retry-after": "7" } }));
+    await expect(f.client.request("/sandboxes/bx_23456789/commands", {
+      method: "POST", body: { command: "true", timeoutSeconds: 30 },
+    })).rejects.toMatchObject({
+      code: "provider_request_failed", httpStatus: 409, retryable: true, retryAfterMs: 7000,
     });
   });
   it("treats the trial's total compute cap as exhausted budget even when HTTP reports 429", async () => {

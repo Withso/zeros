@@ -374,6 +374,32 @@ describe("Boat allocation lifecycle", () => {
     expect(f.fetcher.mock.calls.some(([url, init]) => String(url).endsWith("/stop") && init?.method === "POST")).toBe(true);
   });
 
+  it("retains a cancelled create as failed, stopped compute without certifying its later disappearance", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json(sandbox("cancelled")));
+    await expect(f.provider.create(INPUT)).resolves.toMatchObject({ resourceId: RESOURCE, state: "failed", computeStopped: true });
+    expect(f.stored().resourceId).toBe(RESOURCE);
+    expect(await f.provider.verifyAbsence(INPUT)).toBe(false);
+    f.fetcher.mockResolvedValueOnce(json({ ok: false }, 404));
+    await expect(f.provider.inspect(RESOURCE)).rejects.toMatchObject({ code: "provider_not_found" });
+    f.fetcher.mockResolvedValueOnce(json({ ok: false }, 404));
+    await expect(f.provider.delete(RESOURCE)).rejects.toMatchObject({ code: "provider_not_found" });
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+    expect(await f.provider.verifyAbsence(INPUT)).toBe(false);
+  });
+
+  it("never resumes or stops a cancelled allocation as if it were a live machine", async () => {
+    const f = fixture();
+    await f.allocate();
+    f.fetcher.mockClear();
+    f.fetcher.mockResolvedValueOnce(json(sandbox("cancelled")));
+    await expect(f.provider.start(RESOURCE)).rejects.toMatchObject({ code: "provider_snapshot_unavailable", retryable: false });
+    f.fetcher.mockResolvedValueOnce(json(sandbox("cancelled"))).mockResolvedValueOnce(json(sandbox("cancelled")));
+    await expect(f.provider.stop(RESOURCE)).resolves.toMatchObject({ state: "failed", computeStopped: true });
+    expect(f.access.revokeSshAccess).toHaveBeenCalledOnce();
+    expect(f.fetcher.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+
   it("never grants compute to a mis-billed allocation on a create retry or resume, and refuses its renewal", async () => {
     const f = fixture();
     const misbilled = (state: string) => json(sandbox(state, { team: { id: OTHER_WALLET, name: "Other" } }));
@@ -729,6 +755,11 @@ describe('Boat compute metering and lease authority', () => {
     f.fetcher.mockResolvedValueOnce(json(sandbox('running', { archiveAfter: expiresAt })));
     expect(await f.provider.renewComputeLease(RESOURCE, 3600)).toEqual({ expiresAt });
     expect(f.fetcher.mock.calls.at(-1)![1]).toMatchObject({ method: 'PATCH', body: JSON.stringify({ ttlSeconds: 3600 }) });
+  });
+  it('never confirms renewed compute for a cancelled allocation', async () => {
+    const f = fixture(); await f.allocate();
+    f.fetcher.mockResolvedValueOnce(json(sandbox('cancelled', { archiveAfter: new Date(NOW + 3600_000).toISOString() })));
+    await expect(f.provider.renewComputeLease(RESOURCE, 3600)).rejects.toMatchObject({ code: 'provider_lease_unconfirmed' });
   });
   it.each([0, -1, Infinity, 1.5, 2592001])('rejects an unsafe renewal horizon: %s', async ttl => {
     const f = fixture(); await expect(f.provider.renewComputeLease(RESOURCE, ttl)).rejects.toMatchObject({ code: 'provider_lease_invalid' });

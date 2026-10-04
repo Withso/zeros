@@ -31,6 +31,7 @@ const SandboxSchema = z.object({
     "archiving",
     "archived",
     "error",
+    "cancelled",
   ]),
   type: z.enum(["small", "default", "large"]).optional(),
   vcpu: z.number().int().positive().optional(),
@@ -66,6 +67,7 @@ const STATES: Record<
   archiving: "archiving",
   archived: "archived",
   error: "failed",
+  cancelled: "failed",
 };
 // Provider retention is 24h. Leave a margin for request transit and provider
 // clock differences; after this deadline an unknown create requires recovery.
@@ -197,7 +199,7 @@ export class BoatWorkspaceProvider
       generation: record.generation,
       resourceId: sandbox.id,
       state: billingScope !== "match" && (state === "running" || state === "provisioning") ? "failed" : state,
-      computeStopped: sandbox.state === "archived",
+      computeStopped: sandbox.state === "archived" || sandbox.state === "cancelled",
       target: null,
       metadata: {
         ...(billingScope !== "match" ? { billingScope } : {}),

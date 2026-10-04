@@ -56,6 +56,10 @@ export type KitDeps = {
 
 export class KitError extends Error {}
 
+function scopedBoatRequest(deps: KitDeps, method: Parameters<BoatRequest>[0], apiPath: string, options: Parameters<BoatRequest>[2] = {}) {
+  return deps.boat(method, apiPath, { ...options, headers: { ...options.headers, "x-boat-org": deps.billingOrg } });
+}
+
 const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 
 /** A JSON string literal is also a valid Python string literal. */
@@ -119,7 +123,7 @@ function builderId(deps: KitDeps): string {
 
 /** Boat's organization meter: machine seconds already used. */
 async function usedSeconds(deps: KitDeps): Promise<number> {
-  const limits = await deps.boat("GET", `/limits?org=${encodeURIComponent(deps.billingOrg)}`);
+  const limits = await scopedBoatRequest(deps, "GET", `/limits?org=${encodeURIComponent(deps.billingOrg)}`);
   const used = limits.body?.creditUsedSeconds;
   if (limits.status !== 200 || typeof used !== "number") throw new KitError(`Boat meter unavailable (HTTP ${limits.status})`);
   return used;
@@ -141,7 +145,7 @@ const wallet = (deps: KitDeps, sandbox: any) =>
   sandbox?.team?.id === deps.billingOrg ? "billing-org" : sandbox?.team === null ? "personal" : "unconfirmed";
 
 async function inspect(deps: KitDeps, id: string) {
-  const response = await deps.boat("GET", `/sandboxes/${id}`);
+  const response = await scopedBoatRequest(deps, "GET", `/sandboxes/${id}`);
   if (response.status === 404) return null;
   if (response.status !== 200) throw new KitError(`Cannot read builder ${id} (HTTP ${response.status})`);
   return response.body?.sandbox ?? null;
@@ -167,7 +171,7 @@ async function createBuilder(deps: KitDeps, from: string | undefined, type: stri
   record(deps, { action: "builder.create", from, type, usedSeconds: used });
   let created: BoatResponse;
   try {
-    created = await deps.boat("POST", "/sandboxes", {
+    created = await scopedBoatRequest(deps, "POST", "/sandboxes", {
       body: { type, from, ttlSeconds: LEASE_SECONDS, noEnv: true, env: {} },
       headers: { "idempotency-key": intent.idempotencyKey, "x-boat-org": deps.billingOrg },
       timeoutMs: 180_000,
@@ -210,20 +214,20 @@ export async function builderCommand(action: string | undefined, options: Map<st
     if (state !== "archived") throw new KitError(`Builder is ${state ?? "absent"}, not archived`);
     await assertBudget(deps, maxUsedHours);
     record(deps, { action: "builder.resume", id });
-    const response = await deps.boat("POST", `/sandboxes/${id}/resume`, { body: { ttlSeconds: LEASE_SECONDS }, timeoutMs: 120_000 });
+    const response = await scopedBoatRequest(deps, "POST", `/sandboxes/${id}/resume`, { body: { ttlSeconds: LEASE_SECONDS }, timeoutMs: 120_000 });
     if (response.status >= 300) throw new KitError(`Resume refused (HTTP ${response.status})`);
     const sandbox = await inspect(deps, id);
     return { id, state: sandbox?.state ?? "absent", wallet: wallet(deps, sandbox), archiveAfter: sandbox?.archiveAfter ?? null };
   }
   if (action === "renew") {
     await assertBudget(deps, maxUsedHours);
-    const response = await deps.boat("PATCH", `/sandboxes/${id}`, { body: { ttlSeconds: LEASE_SECONDS } });
+    const response = await scopedBoatRequest(deps, "PATCH", `/sandboxes/${id}`, { body: { ttlSeconds: LEASE_SECONDS } });
     record(deps, { action: "builder.renew", id, status: response.status });
     if (response.status !== 200) throw new KitError(`Renewal refused (HTTP ${response.status})`);
     return { id, archiveAfter: response.body?.sandbox?.archiveAfter ?? null };
   }
   if (action === "stop") {
-    const response = await deps.boat("POST", `/sandboxes/${id}/stop`, { body: {}, timeoutMs: 120_000 });
+    const response = await scopedBoatRequest(deps, "POST", `/sandboxes/${id}/stop`, { body: {}, timeoutMs: 120_000 });
     record(deps, { action: "builder.stop", id, status: response.status });
     if (response.status >= 300) throw new KitError(`Stop refused (HTTP ${response.status})`);
     return { id, state: (await inspect(deps, id))?.state ?? "absent" };
@@ -233,7 +237,7 @@ export async function builderCommand(action: string | undefined, options: Map<st
     if (saving.length) {
       throw new KitError(`${saving.join(", ")} from this builder is not ready; run \`snapshot status\` until it is, or remove its snapshot-ledger.json if the save failed`);
     }
-    const response = await deps.boat("DELETE", `/sandboxes/${id}`, { headers: { "x-ascii-confirm-delete": id } });
+    const response = await scopedBoatRequest(deps, "DELETE", `/sandboxes/${id}`, { headers: { "x-ascii-confirm-delete": id } });
     record(deps, { action: "builder.delete", id, status: response.status });
     if (response.status >= 300 && response.status !== 404) throw new KitError(`Deletion refused (HTTP ${response.status})`);
     fs.rmSync(builderFile(deps));
@@ -267,7 +271,7 @@ async function uploadSource(deps: KitDeps, id: string) {
   let index = 0;
   for (let offset = 0; offset < archive.length; offset += CHUNK_BYTES, index++) {
     const part = archive.subarray(offset, offset + CHUNK_BYTES);
-    const response = await deps.boat("PUT", `/sandboxes/${id}/files`, {
+    const response = await scopedBoatRequest(deps, "PUT", `/sandboxes/${id}/files`, {
       body: { path: `/tmp/zeros-runtime-source.part-${index}`, encoding: "base64", content: part.toString("base64") },
     });
     if (response.status !== 200 || response.body?.size !== part.length) throw new KitError(`Upload of part ${index} unconfirmed (HTTP ${response.status})`);
@@ -283,7 +287,7 @@ async function runOnBuilder(deps: KitDeps, id: string, file: string, timeoutSeco
   if (Buffer.byteLength(command) > MAX_SCRIPT_BYTES) throw new KitError("Scripts are limited to 64 KiB");
   if (PLACEHOLDER.test(command)) throw new KitError(`${path.basename(file)} is an unfilled template; run the generated copy`);
   if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 600) throw new KitError("Timeout must be 1–600 seconds");
-  const response = await deps.boat("POST", `/sandboxes/${id}/commands`, { body: { command, timeoutSeconds }, timeoutMs: (timeoutSeconds + 30) * 1000 });
+  const response = await scopedBoatRequest(deps, "POST", `/sandboxes/${id}/commands`, { body: { command, timeoutSeconds }, timeoutMs: (timeoutSeconds + 30) * 1000 });
   const result = response.body ?? {};
   privateWrite(
     path.join(deps.stateDir, "commands", `${deps.now()}-${path.basename(file)}.json`),
@@ -447,10 +451,10 @@ async function namedSnapshotInventory(deps: KitDeps) {
   const names = new Set<string>(), cursors = new Set<string>();
   let cursor: string | undefined;
   for (let page = 0; page < 100; page++) {
-    const response = await deps.boat("GET", `/named-snapshots${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+    const response = await scopedBoatRequest(deps, "GET", `/named-snapshots${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
     if ([402, 429].includes(response.status)) throw new DevProviderError("Boat", response.status);
     const body = response.body, snapshots = body?.snapshots, next = body?.nextCursor;
-    if (response.status !== 200 || !Array.isArray(snapshots) || snapshots.length > 100 ||
+    if (response.status !== 200 || !Array.isArray(snapshots) ||
         body.hasMore !== undefined && typeof body.hasMore !== "boolean" ||
         next != null && (typeof next !== "string" || !next.length || next.length > 1024) || body.hasMore && !next) {
       throw new KitError("Named snapshot inventory is incomplete");
@@ -490,7 +494,7 @@ export async function snapshotCommand(action: string | undefined, deps: KitDeps)
     }
     const ledger = { version: 1, name, resourceId: id, buildSha256: build, sourceCommit: commit, state: "save-pending", createdAt: iso(deps), sanitation };
     privateWrite(ledgerFile, json(ledger), { exclusive: true });
-    const saved = await deps.boat("POST", "/named-snapshots", { body: { sandboxId: id, name }, timeoutMs: 180_000 });
+    const saved = await scopedBoatRequest(deps, "POST", "/named-snapshots", { body: { sandboxId: id, name }, timeoutMs: 180_000 });
     if ([402, 429].includes(saved.status)) throw new DevProviderError("Boat", saved.status);
     if (saved.status >= 300 || saved.body?.snapshot?.name !== name || saved.body?.snapshot?.sourceSandboxId !== id) {
       throw new KitError(`The snapshot response does not confirm ${name} (HTTP ${saved.status}); check \`snapshot status\` before retrying`);
@@ -500,7 +504,7 @@ export async function snapshotCommand(action: string | undefined, deps: KitDeps)
   }
   if (action === "status") {
     const ledger = readJson(ledgerFile);
-    const current = await deps.boat("GET", `/named-snapshots/${encodeURIComponent(name)}`);
+    const current = await scopedBoatRequest(deps, "GET", `/named-snapshots/${encodeURIComponent(name)}`);
     const snapshot = current.body?.snapshot;
     if (current.status !== 200 || snapshot?.name !== name || snapshot?.sourceSandboxId !== ledger.resourceId) {
       throw new KitError(`Snapshot ${name} does not match the save ledger (HTTP ${current.status})`);

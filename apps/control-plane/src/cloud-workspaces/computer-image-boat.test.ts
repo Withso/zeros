@@ -72,6 +72,24 @@ describe("Boat image wire adapter (fake provider only)", () => {
     expect((await driver.inventory()).map(row => row.name)).toEqual(["release-base", image.snapshot_name]);
     expect(request.mock.calls.map(([route]) => route)).toEqual(["/named-snapshots", "/named-snapshots?cursor=second%2Fpage"]);
   });
+  it.each([false, true])("accepts more than 100 named snapshots per response without truncating inventory (paginated=%s)", async paginated => {
+    const snapshots = Array.from({ length: 150 }, (_, i) => ({ ...snap, name: `retained-${i}` }));
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({
+      ok: true, snapshots, allowance: { used: 150 }, ...(paginated ? { hasMore: true, nextCursor: "next" } : {}),
+    }));
+    if (paginated) fetcher.mockResolvedValueOnce(Response.json({ ok: true, snapshots: [snap] }));
+    const driver = new BoatComputerImageDriver(new BoatApiClient({ apiKey: "boat_test-only-credential", timeoutMs: 1000, fetch: fetcher }), wallet);
+    expect((await driver.inventory()).map(row => row.name)).toEqual([
+      ...snapshots.map(row => row.name), ...(paginated ? [image.snapshot_name] : []),
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(paginated ? 2 : 1);
+  });
+  it("keeps the 1 MiB response byte bound for a large named inventory", async () => {
+    const snapshots = Array.from({ length: 150 }, (_, i) => ({ ...snap, name: `retained-${i}` }));
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ ok: true, snapshots, padding: "x".repeat(1024 * 1024) }));
+    const driver = new BoatComputerImageDriver(new BoatApiClient({ apiKey: "boat_test-only-credential", timeoutMs: 1000, fetch: fetcher }), wallet);
+    await expect(driver.inventory()).rejects.toMatchObject({ code: "provider_response_too_large" });
+  });
   it("refuses incomplete, looping or changing snapshot inventory without dispatching custom compute", async () => {
     for (const pages of [
       [{ snapshots: [{ ...snap, name: "release-base" }], hasMore: true }],
@@ -101,6 +119,7 @@ describe("Boat image wire adapter (fake provider only)", () => {
     expect(await driver.create(image, "builder", async () => {})).toBe(builder);
     expect(request).toHaveBeenCalledWith("/sandboxes", {
       method: "POST",
+      timeoutMs: 120_000,
       idempotencyKey: `computer-image.${image.id}.builder`,
       body: {
         from: "release-base",
@@ -110,6 +129,34 @@ describe("Boat image wire adapter (fake provider only)", () => {
         env: {},
       },
     });
+  });
+  it.each(["create", "command", "capture"])("allows the org-image %s request to outlast Boat's 60-second startup wait", async operation => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
+      ok: true, sandbox: { id: builder }, snapshot: snap,
+      exitCode: 0, stdout: JSON.stringify({ complete: true, code: 0 }),
+    }));
+    const client = new BoatApiClient({ apiKey: "boat_test-only-credential", timeoutMs: 45_000, fetch: fetcher });
+    const admission = { reserve: vi.fn(), release: vi.fn(), capacity: vi.fn() };
+    const driver = new BoatComputerImageDriver(client, wallet, [], admission);
+    vi.spyOn(driver, "inventory").mockResolvedValue([]);
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      if (operation === "create") await driver.create(image, "builder", async () => {});
+      else if (operation === "command") await driver.install(image, { installScript: "true", timeoutSeconds: 30 });
+      else await driver.capture(image);
+      expect(timeout).toHaveBeenLastCalledWith(120_000);
+      expect(fetcher).toHaveBeenCalledOnce();
+    } finally { timeout.mockRestore(); }
+  });
+  it("keeps org-image readiness and snapshot reads on the short deadline", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ ok: true, sandbox: { id: builder, state: "ready", team: { id: wallet } }, snapshot: snap }));
+    const driver = new BoatComputerImageDriver(new BoatApiClient({ apiKey: "boat_test-only-credential", timeoutMs: 45_000, fetch: fetcher }), wallet);
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await driver.ready(builder)).toBe(true);
+      expect(await driver.snapshot(image)).toMatchObject({ name: image.snapshot_name, ready: true });
+      expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([45_000, 45_000]);
+    } finally { timeout.mockRestore(); }
   });
   it("refuses a swapped named snapshot before creating the verification clone", async () => {
     const { request, driver } = fixture();
@@ -129,6 +176,11 @@ describe("Boat image wire adapter (fake provider only)", () => {
     await expect(driver.ready(builder)).rejects.toMatchObject({
       code: "image_billing_scope_mismatch",
     });
+  });
+  it.each(["error", "archived", "cancelled"])("rejects terminal builder state %s instead of waiting for readiness", async state => {
+    const { request, driver } = fixture();
+    request.mockResolvedValue({ sandbox: { id: builder, state, team: { id: wallet } } });
+    await expect(driver.ready(builder)).rejects.toMatchObject({ code: "image_builder_stopped" });
   });
   it("never replays a create outside the provider's idempotency retention", async () => {
     const { request, driver } = fixture();
