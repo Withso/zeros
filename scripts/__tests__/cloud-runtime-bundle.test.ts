@@ -112,6 +112,28 @@ async function fixture() {
   );
   return { directory, root, manifest, bytes: canonicalJson(manifest) };
 }
+
+async function writeManifestOnlyArchive(archivePath: string, bytes: Buffer) {
+  // Forge untrusted input directly; the archive writer validates manifests.
+  await writeFile(
+    archivePath,
+    gzipSync(
+      Buffer.concat([
+        tarHeader({
+          path: "manifest.json",
+          type: "file",
+          mode: "0444",
+          size: bytes.length,
+        }),
+        bytes,
+        Buffer.alloc((512 - (bytes.length % 512)) % 512),
+        Buffer.alloc(1024),
+      ]),
+      { level: 9 },
+    ),
+  );
+}
+
 afterEach(async () => {
   await Promise.all(
     temporary
@@ -413,6 +435,139 @@ describe("shared producer/consumer limits", () => {
       ]),
     ).toThrow();
   });
+
+  it("accepts 128 path components through manifest build and archive verification", async () => {
+    const { root, directory, manifest } = await fixture();
+    const filename = [...Array<string>(127).fill("nested"), "payload"].join(
+      "/",
+    );
+    await mkdir(path.dirname(path.join(root, filename)), { recursive: true });
+    await writeFile(path.join(root, filename), "payload", { mode: 0o444 });
+    const built = createManifest(
+      {
+        source: manifest.source,
+        agents: manifest.agents,
+        engineProtocolVersion: manifest.protocols.engine,
+      },
+      await inventoryTree(root),
+    );
+    const archivePath = path.join(directory, "maximum-depth.tar.gz");
+    await writeRuntimeArchive(root, canonicalJson(built), archivePath);
+    const verified = await verifyRuntimeArchive({ archivePath });
+    expect(
+      verified.manifest.files.some((entry) => entry.path === filename),
+    ).toBe(true);
+  });
+
+  it("rejects staged paths deeper than 128 components", async () => {
+    const { root } = await fixture();
+    const directory = Array<string>(128).fill("nested").join("/");
+    await mkdir(path.join(root, directory), { recursive: true });
+    await writeFile(path.join(root, directory, "payload"), "", { mode: 0o444 });
+    await expect(inventoryTree(root)).rejects.toThrow(/archive_paths/);
+  });
+
+  it.each(["file", "dir", "symlink"] as const)(
+    "rejects a 129-component %s path during manifest build and archive verification",
+    async (type) => {
+      const { directory, manifest } = await fixture();
+      const parents: ManifestEntry[] = Array.from(
+        { length: 128 },
+        (_, index) => ({
+          path: Array<string>(index + 1)
+            .fill("nested")
+            .join("/"),
+          type: "dir",
+          mode: "0755",
+        }),
+      );
+      const filename = `${parents.at(-1)!.path}/payload`;
+      const entry: ManifestEntry =
+        type === "file"
+          ? {
+              path: filename,
+              type,
+              mode: "0444",
+              size: 0,
+              sha256: sha256(Buffer.alloc(0)),
+            }
+          : type === "dir"
+            ? { path: filename, type, mode: "0755" }
+            : { path: filename, type, target: "." };
+      const files = [...manifest.files, ...parents, entry];
+      expect(() =>
+        createManifest(
+          {
+            source: manifest.source,
+            agents: manifest.agents,
+            engineProtocolVersion: manifest.protocols.engine,
+          },
+          files,
+        ),
+      ).toThrow(/manifest_schema/);
+
+      const bytes = canonicalJson({ ...manifest, files });
+      const archivePath = path.join(directory, "excess-depth.tar.gz");
+      await writeManifestOnlyArchive(archivePath, bytes);
+      await expect(verifyRuntimeArchive({ archivePath })).rejects.toThrow(
+        /manifest_schema/,
+      );
+    },
+  );
+
+  it.each([4096, 4097])(
+    "bounds confined symlink expansion at %i pending path components",
+    async (components) => {
+      const { root, directory, manifest } = await fixture();
+      // Sixteen links leave 4,080 dot components pending when n16 expands.
+      // Both final targets resolve to z; the extra dot crosses the cap.
+      const entries: ManifestEntry[] = [
+        ...Array.from(
+          { length: 16 },
+          (_, index): ManifestEntry => ({
+            path: `n${String(index).padStart(2, "0")}`,
+            type: "symlink",
+            target: `n${String(index + 1).padStart(2, "0")}` + "/.".repeat(255),
+          }),
+        ),
+        {
+          path: "n16",
+          type: "symlink",
+          target: "z" + "/.".repeat(components === 4096 ? 15 : 16),
+        },
+        { path: "z", type: "dir", mode: "0755" },
+      ];
+      for (const entry of entries) {
+        if (entry.type === "symlink")
+          await symlink(entry.target, path.join(root, entry.path));
+        else await mkdir(path.join(root, entry.path), { mode: 0o755 });
+      }
+      const input = {
+        source: manifest.source,
+        agents: manifest.agents,
+        engineProtocolVersion: manifest.protocols.engine,
+      };
+      const archivePath = path.join(directory, "symlink-expansion.tar.gz");
+      if (components === 4097) {
+        const files = [...manifest.files, ...entries];
+        await expect(inventoryTree(root)).rejects.toThrow(/symlink_escape/);
+        expect(() => createManifest(input, files)).toThrow(/symlink_escape/);
+        await writeManifestOnlyArchive(
+          archivePath,
+          canonicalJson({ ...manifest, files }),
+        );
+        await expect(verifyRuntimeArchive({ archivePath })).rejects.toThrow(
+          /symlink_escape/,
+        );
+      } else {
+        const built = createManifest(input, await inventoryTree(root));
+        await writeRuntimeArchive(root, canonicalJson(built), archivePath);
+        await expect(
+          verifyRuntimeArchive({ archivePath }),
+        ).resolves.toHaveProperty("manifest", built);
+      }
+    },
+  );
 
   it("allows 64 symlink resolutions but rejects a 65-link chain", () => {
     function chain(length: number): ManifestEntry[] {

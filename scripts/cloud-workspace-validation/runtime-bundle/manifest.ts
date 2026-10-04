@@ -15,6 +15,8 @@ export const MAX_EXPANDED_BYTES = 4 * 1024 ** 3;
 export const MAX_ENTRIES = 250_000;
 export const MAX_PAX_BYTES = 16 * 1024;
 export const MAX_PATH_BYTES = 4096;
+export const MAX_PATH_DEPTH = 128;
+export const MAX_SYMLINK_COMPONENTS = 4096;
 export const MAX_PROTOCOL_VERSION = 65_535;
 
 export class BundleError extends Error {
@@ -64,6 +66,7 @@ export function validPath(value: string): boolean {
   return (
     value.length > 0 &&
     Buffer.byteLength(value) <= MAX_PATH_BYTES &&
+    value.split("/").length <= MAX_PATH_DEPTH &&
     !/[\0\\\r\n]/.test(value) &&
     value
       .split("/")
@@ -223,7 +226,12 @@ export function validateFiles(files: readonly ManifestEntry[]): void {
       check(entry, "symlink_dangling");
       if (entry.type === "symlink") {
         check(++followed <= 64, "symlink_cycle");
-        pending.unshift(...entry.target.split("/"));
+        const target = entry.target.split("/");
+        check(
+          pending.length + target.length <= MAX_SYMLINK_COMPONENTS,
+          "symlink_escape",
+        );
+        pending.unshift(...target);
       } else {
         check(pending.length === 0 || entry.type === "dir", "symlink_dangling");
         resolved.push(part);

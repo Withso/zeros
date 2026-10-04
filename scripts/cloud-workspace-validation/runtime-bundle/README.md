@@ -42,10 +42,11 @@ as `exceedsSizeGuidance`, not silently used to drop dependencies.
 The producer and verifier share the contract limits: archive size 1 byte–2 GiB,
 expanded payload 1 byte–4 GiB (individual empty files are allowed), at most
 250,000 inventory entries, a 64 MiB manifest, 16 KiB per-entry PAX payloads and
-4,096 UTF-8 bytes per path/link target. Symlink resolution is bounded to 64
-links. Protocol/ABI integers are 1–65,535; agent versions use the shared
-64-character ASCII grammar. Compressed output is bounded while streaming, and
-the verifier checks archive size before hashing or decompressing it.
+4,096 UTF-8 bytes per path/link target. Paths have at most 128 components;
+symlink resolution is bounded to 64 links and 4,096 pending path components.
+Protocol/ABI integers are 1–65,535; agent versions use the shared 64-character
+ASCII grammar. Compressed output is bounded while streaming, and the verifier
+checks archive size before hashing or decompressing it.
 
 The payload preserves the production pnpm graph, installed Linux x64 optional
 SDK packages, peers and workspace packages, plus `tsx` and TypeScript. Its
