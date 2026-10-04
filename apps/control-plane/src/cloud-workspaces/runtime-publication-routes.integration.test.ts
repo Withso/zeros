@@ -319,15 +319,49 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
       expect(await registeredRows()).toEqual(before);
     });
 
-    it("rejects a conflicting verified run/attempt rather than rewriting a confirmed release", async () => {
+    it("allows an identical later verified attempt while preserving the first registration provenance", async () => {
       await complete();
       const before = await registeredRows();
-      await expect(
-        service.complete(
-          { ...body, githubRunAttempt: 2 },
-          { ...provenance, runAttempt: 2 },
-        ),
-      ).rejects.toMatchObject({ status: 409 });
+      const rerunBody = { ...body, githubRunAttempt: 2 };
+      const rerunProvenance = { ...provenance, runAttempt: 2 };
+      expect(await service.publication(rerunBody, rerunProvenance)).toEqual({
+        objectKey,
+        upload: null,
+      });
+      expect(await service.complete(rerunBody, rerunProvenance)).toEqual({
+        runtimeId: descriptor.runtimeId,
+        registered: true,
+      });
+      expect(await registeredRows()).toEqual(before);
+      expect(before.releases[0].github_release_run_attempt).toBe(1);
+      expect(enqueueSmoke).toHaveBeenCalledTimes(2);
+      expect(enqueueSmoke).toHaveBeenLastCalledWith(descriptor.runtimeId);
+    });
+
+    it("rejects a verified attempt older than the first registered attempt", async () => {
+      objects.set(objectKey, descriptor.archiveBytes);
+      await service.complete(
+        { ...body, githubRunAttempt: 2 },
+        { ...provenance, runAttempt: 2 },
+      );
+      const before = await registeredRows();
+      await expect(service.publication(body, provenance)).rejects.toMatchObject(
+        {
+          status: 409,
+          code: "runtime_identity_conflict",
+        },
+      );
+      await expect(service.complete(body, provenance)).rejects.toMatchObject({
+        status: 409,
+        code: "runtime_identity_conflict",
+      });
+      expect(await registeredRows()).toEqual(before);
+      expect(enqueueSmoke).toHaveBeenCalledOnce();
+    });
+
+    it("rejects a conflicting verified run or order rather than rewriting a confirmed release", async () => {
+      await complete();
+      const before = await registeredRows();
       await expect(
         service.complete(
           { ...body, githubRunId: 1235 },
@@ -376,6 +410,37 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
       const before = await registeredRows();
       await service.complete(body, provenance);
       expect(await registeredRows()).toEqual(before);
+    });
+
+    it("recovers a post-commit smoke enqueue failure on a later verified attempt", async () => {
+      objects.set(objectKey, descriptor.archiveBytes);
+      const enqueue = vi.fn(async (_id: string) => "not_configured");
+      enqueue.mockRejectedValueOnce(new Error("temporary enqueue failure"));
+      const retrying = new DatabaseRuntimePublicationService(
+        pool,
+        artifacts,
+        enqueue,
+      );
+      await expect(retrying.complete(body, provenance)).rejects.toMatchObject({
+        status: 503,
+        code: "runtime_smoke_scheduling_failed",
+      });
+      const before = await registeredRows();
+      expect(before.releases[0].confirmed_at).toBeInstanceOf(Date);
+      const rerunBody = { ...body, githubRunAttempt: 2 };
+      const rerunProvenance = { ...provenance, runAttempt: 2 };
+      expect(await retrying.publication(rerunBody, rerunProvenance)).toEqual({
+        objectKey,
+        upload: null,
+      });
+      expect(await retrying.complete(rerunBody, rerunProvenance)).toEqual({
+        runtimeId: descriptor.runtimeId,
+        registered: true,
+      });
+      expect(await registeredRows()).toEqual(before);
+      expect(before.releases[0].github_release_run_attempt).toBe(1);
+      expect(enqueue).toHaveBeenCalledTimes(2);
+      expect(enqueue).toHaveBeenLastCalledWith(descriptor.runtimeId);
     });
 
     it("closes storage errors without exposing URLs or inserting registry rows", async () => {

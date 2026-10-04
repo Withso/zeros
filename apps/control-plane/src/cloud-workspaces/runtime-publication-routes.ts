@@ -424,7 +424,7 @@ async function checkRelease(tx: Tx, body: PublicationInput): Promise<void> {
         Number(row.release_order) !== body.releaseOrder ||
         row.runtime_id !== body.descriptor.runtimeId ||
         Number(row.github_release_run_id) !== body.githubRunId ||
-        row.github_release_run_attempt !== body.githubRunAttempt,
+        row.github_release_run_attempt > body.githubRunAttempt,
     )
   )
     identityConflict();

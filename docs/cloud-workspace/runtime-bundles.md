@@ -197,6 +197,8 @@ accepts only `cloud-runtime-base.yml` with event `workflow_dispatch`. Each
 workflow ref includes the configured repository and `@refs/heads/main` suffix.
 Run ID, number, attempt and source SHA come from verified claims. Body run
 values and runtime/base source commits must agree with those claims.
+Issued-at times may be at most 60 seconds ahead of the control plane's clock;
+token expiration remains enforced independently.
 
 | Environment variable | Default / behavior |
 | --- | --- |
@@ -250,9 +252,13 @@ safe integers. An exact replay preserves registration, approval and
 confirmation timestamps; conflicting immutable identities return 409. Missing
 or short/long artifacts cannot register a bundle. Completion sets the parent
 release's `confirmed_at` only once; the publishing job must run after hosted
-promotion succeeds. Re-running a confirmed release with a different run
-attempt is an identity conflict. A later release run may reference an identical
-bundle. Registration does not verify archive contents by downloading them;
+promotion succeeds. An identical rerun with the same run ID and number may
+use an equal or later verified attempt, preserving the first stored attempt
+as provenance, the release order and all registration timestamps. Completion
+retries smoke enqueue after a lost response or post-commit scheduling failure.
+An attempt older than the first stored attempt, different content/run/order,
+or a revoked identity still conflicts. A later release run may reference an
+identical bundle. Registration does not verify archive contents by downloading them;
 the installer verifies the archive and manifest digests before execution.
 
 After commit, completion calls `enqueueRuntimeSmokeQualification(runtimeId)`.

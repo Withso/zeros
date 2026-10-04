@@ -100,6 +100,33 @@ describe("runtime publication OIDC", () => {
     ).rejects.toBeInstanceOf(RuntimeOidcError);
   });
 
+  it.each(["publication", "base_registration"] as const)(
+    "bounds future iat to sixty seconds of skew for %s",
+    async (purpose) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-04T00:00:00Z"));
+      try {
+        const now = Math.floor(Date.now() / 1000);
+        const workflow =
+          purpose === "publication"
+            ? {}
+            : {
+                workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-base.yml@refs/heads/main`,
+                event_name: "workflow_dispatch",
+              };
+        const verify = verifier();
+        expect(
+          await verify(await token({ ...workflow, iat: now + 60 }), purpose),
+        ).toMatchObject({ runId: 1234 });
+        await expect(
+          verify(await token({ ...workflow, iat: now + 61 }), purpose),
+        ).rejects.toThrow(/^Runtime publication authentication rejected$/);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it.each([
     { repository: "Other/zeros" },
     {

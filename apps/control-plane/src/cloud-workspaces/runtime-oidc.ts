@@ -90,6 +90,8 @@ export function createRuntimeOidcVerifier(
       const workflow = workflows[purpose];
       const workflowRef = `${config.repository}/.github/workflows/${workflow.file}@refs/heads/main`;
       if (
+        typeof payload.iat !== "number" ||
+        payload.iat > Math.floor(Date.now() / 1000) + 60 ||
         typeof payload.repository !== "string" ||
         payload.repository.toLowerCase() !== config.repository.toLowerCase() ||
         payload.workflow_ref !== workflowRef ||
