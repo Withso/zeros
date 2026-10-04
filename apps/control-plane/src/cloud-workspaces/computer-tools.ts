@@ -12,8 +12,8 @@ import {
   type CloudComputerToolExecutionRequest,
 } from "./computer-tools-contract.js";
 
-/** C4 supplies this function after it merges. It must use the supplied
- * transaction, preserve unrelated settings, and enforce expectedSettingsVersion
+/** The setup writer uses the supplied transaction, preserves unrelated
+ * settings, and enforces expectedSettingsVersion
  * CAS. operationId identifies the call; setup edits do not replay receipts. */
 export type UpdateRepositorySetupScript = (input: {
   orgId: string; repositoryId: string; expectedSettingsVersion: number; operationId: string;

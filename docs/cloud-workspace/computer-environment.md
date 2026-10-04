@@ -75,8 +75,8 @@ to obtain org environment; builder input isolation belongs to C3.
 accepts `{ expectedSettingsVersion, operationId, script, timeoutSeconds }` and
 returns `{ repositoryId, version }`. `:repository` is GitHub's canonical numeric
 ID, as in the computer config. The generic settings API still uses the internal
-repository UUID. The exported `updateRepositorySetupScript` service performs the
-same authority checks for future admin-tool callers.
+repository UUID. The admin tool translates that UUID and invokes the exported
+`updateRepositorySetupScript` service within its existing authority transaction.
 
 The actor must be engineering staff and an org owner/admin; failing either
 check returns 403. The repository must occur in the active or draft config.

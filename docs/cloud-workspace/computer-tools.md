@@ -83,10 +83,10 @@ repository settings service must preserve unrelated settings and enforce
 `expectedSettingsVersion` CAS. Setup edits do not replay operation receipts:
 retrying an applied call returns HTTP 409 with
 `{result: {conflict: true, version}}`, where `version` is the current repository
-settings version, even for the same native call identity. Until that service is
-wired, the capability flag is false
-and the tool fails closed; this module does not introduce another settings
-writer.
+settings version, even for the same native call identity. The control-plane
+entrypoint wires C4's shared settings writer, translating the tool's repository
+UUID to its GitHub identity within the same transaction. A caller that omits the
+writer still advertises a false capability and fails closed.
 
 ## Lifetime and secrecy
 

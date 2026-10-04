@@ -1,6 +1,7 @@
 import type pg from "pg";
 import { canCreateOrganization, HttpError, type StaffRole } from "../authz.js";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
+import type { UpdateRepositorySetupScript } from "./computer-tools.js";
 import {
   lockCloudComputerOrganization,
   requireCloudComputerAuthority,
@@ -24,6 +25,7 @@ export async function updateRepositorySetupScript(
   actorUserId: string,
   repositoryId: string,
   value: unknown,
+  transaction?: Tx,
 ): Promise<CloudComputerV2RepositorySetupResult> {
   const parsed = CloudComputerV2RepositorySetupSchema.safeParse(value);
   if (
@@ -36,7 +38,7 @@ export async function updateRepositorySetupScript(
       "Invalid repository setup input.",
     );
   const input = parsed.data;
-  return withSystemTx(pool, async (tx) => {
+  const write = async (tx: Tx) => {
     const account = (
       await tx.query<{ staff_role: StaffRole | null }>(
         "SELECT staff_role FROM users WHERE id=$1 AND deleted_at IS NULL AND auth_status='active' FOR SHARE",
@@ -165,5 +167,22 @@ export async function updateRepositorySetupScript(
       ],
     );
     return { repositoryId, version };
-  });
+  };
+  return transaction ? write(transaction) : withSystemTx(pool, write);
+}
+
+/** The admin tool identifies the canonical repository row by UUID. Translate
+ * inside its authority transaction; the shared writer still checks the active
+ * or draft selection and settings CAS using the GitHub repository identity. */
+export function createRepositorySetupScriptWriter(pool: pg.Pool): UpdateRepositorySetupScript {
+  return async ({ orgId, repositoryId, actorUserId, ...input }, tx) => {
+    const repository = (await tx.query<{ forge_repository_id: string }>(
+      `SELECT forge_repository_id FROM repositories WHERE org_id=$1 AND id=$2
+        AND forge='github.com' AND deleted_at IS NULL AND forge_repository_id IS NOT NULL FOR SHARE`,
+      [orgId, repositoryId],
+    )).rows[0];
+    if (!repository) throw new HttpError(403, "forbidden", "Repository is unavailable.");
+    const { version } = await updateRepositorySetupScript(pool, orgId, actorUserId, repository.forge_repository_id, input, tx);
+    return { version };
+  };
 }
