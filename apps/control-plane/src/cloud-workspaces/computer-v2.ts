@@ -24,6 +24,7 @@ import { computerTemplateBuilderName } from "./computer-template-name.js";
 import { computerTemplateBuilderIntent } from "./computer-template-boat.js";
 import { builderVmBaseSnapshot, prepareBuilderVmOperation } from "./cloud-builder-vm.js";
 import type { BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
+import { COMPUTER_TEMPLATE_RETENTION_CHANNEL } from "./computer-template-retention.js";
 import {
   CLOUD_COMPUTER_V2_MAX_LOG_BYTES,
   CLOUD_COMPUTER_V2_MAX_LOG_ROW_BYTES,
@@ -1229,6 +1230,10 @@ export class DatabaseCloudComputerV2Service {
         version: targetVersion,
         revision,
       });
+      await tx.query("SELECT pg_notify($1,$2)", [
+        COMPUTER_TEMPLATE_RETENTION_CHANNEL,
+        org,
+      ]);
       return {
         revision,
         activeBuildId: build.id,
@@ -1658,12 +1663,17 @@ export class DatabaseCloudComputerV2Service {
           input.template.stoppedAt,
         ],
       );
-      if (eligible)
+      if (eligible) {
         await tx.query(
           `UPDATE cloud_computer_v2_heads SET previous_build_id=CASE WHEN active_build_id IS DISTINCT FROM $2::uuid
         THEN active_build_id ELSE previous_build_id END,active_build_id=$2,revision=revision+1 WHERE org_id=$1`,
           [build.org_id, id],
         );
+        await tx.query("SELECT pg_notify($1,$2)", [
+          COMPUTER_TEMPLATE_RETENTION_CHANNEL,
+          build.org_id,
+        ]);
+      }
       return { applied: true, state, activated: eligible };
     });
   }

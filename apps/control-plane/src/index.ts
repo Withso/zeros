@@ -17,6 +17,9 @@ import { createRuntimeArtifactStore } from "./cloud-workspaces/runtime-artifact-
 import { cloudRuntimeQualificationMode } from "./cloud-workspaces/runtime-config.js";
 import { loadPinnedCloudRuntime } from "./cloud-workspaces/runtime-selection.js";
 import { createRuntimeQualificationWorker } from "./cloud-workspaces/runtime-qualification.js";
+import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
+import { DatabaseBuilderVmOperationStore } from "./cloud-workspaces/cloud-builder-vm-store.js";
+import { CloudComputerTemplateRetentionWorker } from "./cloud-workspaces/computer-template-retention.js";
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool, withSystemTx } from "./db.js";
@@ -118,6 +121,7 @@ let stopCloudProAllowances = async () => {};
 let stopCloudSetupWorker = async () => {};
 let stopCloudComputerBuildWorker = async () => {};
 let stopCloudRuntimeQualificationWorker = async () => {};
+let stopCloudComputerTemplateRetentionWorker = async () => {};
 let stopCloudAccessRevocationWorker = async () => {};
 let stopCloudCheckpointRequestWorker = async () => {};
 let stopCloudForkWorker = async () => {};
@@ -572,6 +576,35 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
 
     if (setupWorker) { stopCloudSetupWorker = setupWorker.start(); stopCloudComputerBuildWorker = createCloudComputerBuildWorker(pool, cloud).start(); }
     if (runtimeQualificationWorker) stopCloudRuntimeQualificationWorker = runtimeQualificationWorker.start();
+    if (
+      config.deploymentChannel === "alpha" &&
+      cloud.provider === "boat" &&
+      cloud.boat
+    ) {
+      const retentionListenerPool = config.databaseListenUrl
+        ? createPool(config.databaseListenUrl, {
+            maxConnections: 1,
+            applicationName: "zeros-template-retention-listener",
+          })
+        : pool;
+      const stop = new CloudComputerTemplateRetentionWorker(pool, {
+        accountScope: cloud.boat.accountScope,
+        billingOrg: cloud.boat.billingOrg,
+        journal: new DatabaseBuilderVmOperationStore(pool, cloud.boat.accountScope),
+        client: new BoatApiClient({
+          apiKey: cloud.apiKey,
+          billingOrg: cloud.boat.billingOrg,
+          timeoutMs: 45_000,
+        }),
+      }).start(retentionListenerPool);
+      stopCloudComputerTemplateRetentionWorker = async () => {
+        try {
+          await stop();
+        } finally {
+          if (retentionListenerPool !== pool) await retentionListenerPool.end();
+        }
+      };
+    }
     console.log(
       `[control-plane] cloud workspace reconciliation enabled (${provider.name}/${cloud.target}); setup=${setupWorker ? "enabled" : "paused"}; durability=${blobService ? "enabled" : "disabled"}; outbox=${outboxWorker ? "enabled" : "queued"}`,
     );
@@ -656,6 +689,7 @@ function shutdown(signal: string): void {
     stopCloudSetupWorker(),
     stopCloudComputerBuildWorker(),
     stopCloudRuntimeQualificationWorker(),
+    stopCloudComputerTemplateRetentionWorker(),
     stopCloudAccessRevocationWorker(),
     stopCloudCheckpointRequestWorker(),
     stopCloudForkWorker(),

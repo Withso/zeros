@@ -16,6 +16,11 @@ import { DatabaseCloudComputerService } from "./cloud-workspaces/computer.js";
 import { DatabaseCloudComputerV2Service } from "./cloud-workspaces/computer-v2.js";
 import { seedComputerTemplateRuntime, templateRuntime } from "./cloud-workspaces/computer-template-test-fixtures.js";
 import {
+  CloudComputerTemplateRetentionWorker,
+  type ComputerTemplateDeletionJournal,
+} from "./cloud-workspaces/computer-template-retention.js";
+import { CloudProviderError } from "./cloud-workspaces/provider.js";
+import {
   createDeletionLifecycleRoutes,
   DeletionLifecycleProcessor,
 } from "./deletion-lifecycle.js";
@@ -1623,6 +1628,178 @@ d("account, organization, and operator deletion lifecycle", () => {
       withSystemTx(pool, (tx) => tx.query(remove, [otherOrganizationId])),
     ).rejects.toMatchObject({ code: "23514" });
   });
+
+  it.each(["bound", "unbound"])(
+    "retains template and build journals until %s template provider cleanup finishes",
+    async (allocation) => {
+      const owner = await signup("TemplateCleanup");
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [
+        owner.id,
+      ]);
+      const organizationId = await createOrganization(owner, "Template Cleanup");
+      const computer = new DatabaseCloudComputerV2Service(
+        pool,
+        {} as CloudWorkspaceBackendConfig,
+      );
+      const queued = await computer.build(organizationId, owner.id, {
+        expectedRevision: 0,
+        operationId: randomUUID(),
+      });
+      await computer.claimNextBuild(1);
+      const pins = {
+        baseImageId: "fixture-base",
+        runtimeId: "fixture-runtime",
+        repositoryManifest: [],
+      };
+      await computer.markBuildStage(
+        queued.build.id,
+        1,
+        "capture_confirmed",
+        pins,
+      );
+      await computer.completeBuild(queued.build.id, 1, {
+        ...pins,
+        template: {
+          providerResourceId: null,
+          accountScope: null,
+          billingOrg: null,
+          protectedContractDigest: "f".repeat(64),
+          stoppedAt: new Date().toISOString(),
+        },
+      });
+      asActor(owner);
+      const scheduled = await request(`/v1/organizations/${organizationId}`, {
+        method: "DELETE",
+        body: { confirmation: "Template Cleanup" },
+      });
+      expect(scheduled.status).toBe(202);
+      const body = (await scheduled.json()) as DeletionResponse;
+      await makeDue(body.deletion.id);
+      let operation: NonNullable<
+        Awaited<ReturnType<ComputerTemplateDeletionJournal["find"]>>
+      > | null = null;
+      const journal: ComputerTemplateDeletionJournal = {
+        find: async (key) => {
+          expect(key).toBe(`computer-build:${queued.build.id}`);
+          return operation ? { ...operation } : null;
+        },
+        state: async (_key, state) => {
+          operation!.state = state;
+        },
+        deletion: async (_key, id) => {
+          operation!.deletion_operation_id = id;
+        },
+      };
+      const processor = new DeletionLifecycleProcessor(pool, {
+        workerId: "test-template-erasure",
+        logger: { warn: () => undefined, error: () => undefined },
+        computerTemplateJournal: journal,
+      });
+      expect(await processor.tick(1)).toBe(1);
+      // Allocation evidence arrives after the initial readiness check. The
+      // final transaction must preserve known and uncertain resource journals.
+      operation = {
+        operation_key: `computer-build:${queued.build.id}`,
+        purpose: "computer-build",
+        state: allocation === "bound" ? "archived" : "creating",
+        sandbox_id: allocation === "bound" ? "bx_22222222" : null,
+        deletion_operation_id: null,
+        create_closed_at: null,
+      };
+      await pool.query(
+        `UPDATE cloud_computer_templates SET provider_resource_id=$2,
+           account_scope='fixture-account',billing_org='team_00000000-0000-0000-0000-000000000001'
+           WHERE build_id=$1`,
+        [queued.build.id, operation.sandbox_id],
+      );
+      await pool.query(
+        "UPDATE deletion_requests SET next_attempt_at=now() WHERE id=$1",
+        [body.deletion.id],
+      );
+      expect(await processor.tick(1)).toBe(1);
+      for (const table of [
+        "organizations",
+        "cloud_computer_templates",
+        "cloud_computer_v2_builds",
+        "cloud_computer_v2_operations",
+      ]) {
+        const column = table === "organizations" ? "id" : "org_id";
+        expect(
+          (
+            await pool.query(`SELECT 1 FROM ${table} WHERE ${column}=$1`, [
+              organizationId,
+            ])
+          ).rowCount,
+        ).toBe(1);
+      }
+      expect(
+        (
+          await pool.query(
+            "SELECT state,attempt_count FROM deletion_requests WHERE id=$1",
+            [body.deletion.id],
+          )
+        ).rows[0],
+      ).toMatchObject({ state: "provider_deleting", attempt_count: 1 });
+      const retention = new CloudComputerTemplateRetentionWorker(pool, {
+        accountScope: "fixture-account",
+        billingOrg: "team_00000000-0000-0000-0000-000000000001",
+        journal,
+        client: {
+          request: async (path, input) => {
+            expect(allocation).toBe("bound");
+            expect(path).toBe("/sandboxes/bx_22222222");
+            if (input?.method === "DELETE") {
+              expect(input.confirmDelete).toBe(operation!.sandbox_id);
+              expect(operation!.state).toBe("deleting");
+              return {
+                operation: {
+                  id: `bdop_${"a".repeat(32)}`,
+                  kind: "sandbox",
+                  targetId: operation!.sandbox_id,
+                },
+              };
+            }
+            expect(operation!.deletion_operation_id).not.toBeNull();
+            throw new CloudProviderError(
+              "provider_not_found",
+              "Already gone",
+              false,
+            );
+          },
+        },
+      });
+      expect(await retention.tick(organizationId)).toBe(
+        allocation === "bound" ? 1 : 0,
+      );
+      if (allocation === "bound") {
+        expect(operation.state).toBe("deleted");
+        expect(
+          (
+            await pool.query(
+              "SELECT state FROM cloud_computer_templates WHERE build_id=$1",
+              [queued.build.id],
+            )
+          ).rows[0].state,
+        ).toBe("retired");
+      } else {
+        // B7's closed create proves no outstanding attempt could allocate.
+        // Missing a sandbox ID by itself is never deletion evidence.
+        operation.create_closed_at = new Date();
+      }
+      await pool.query(
+        "UPDATE deletion_requests SET next_attempt_at=now() WHERE id=$1",
+        [body.deletion.id],
+      );
+      expect(await processor.tick(1)).toBe(1);
+      expect(
+        (
+          await pool.query("SELECT 1 FROM organizations WHERE id=$1", [
+            organizationId,
+          ])
+        ).rowCount,
+      ).toBe(0);
+    },
+  );
 
   it("waits for WorkOS organization deletion before erasing tenant data, admin markers and v2 computer history", async () => {
     const owner = await signup("OrgPurge");
