@@ -274,10 +274,21 @@ export async function runDesignEffectKeyboardDraftSmoke({ page, check }) {
   );
 }
 
-export async function runDesignEffectScrubCancellationSmoke({ page, check }) {
+export async function runDesignEffectScrubCancellationSmoke({
+  page,
+  check,
+  holdOpeningAnimation = false,
+}) {
   await openStyleDesign(page);
   await page.getByRole("button", { name: "Add effect", exact: true }).click();
   await expect.poll(() => styleWrites(page)).toBe(1);
+  // Hold the entry transform through the first hover, then let it settle
+  // before pressing. Coordinates from that earlier hover must not be reused.
+  const animationStyle = holdOpeningAnimation
+    ? await page.addStyleTag({
+        content: "[data-design-popover] { animation-play-state: paused !important; }",
+      })
+    : null;
   await page
     .getByRole("button", { name: "Edit drop shadow", exact: true })
     .click();
@@ -290,12 +301,27 @@ export async function runDesignEffectScrubCancellationSmoke({ page, check }) {
     exact: true,
   });
   await scrub.hover();
+  const baseline = await runtimeStyle(page, "home-heading", "textShadow");
+  if (animationStyle) {
+    await scrub.evaluate((element) => {
+      for (const animation of element.closest("[data-design-popover]").getAnimations())
+        animation.finish();
+    });
+    await animationStyle.evaluate((element) => element.remove());
+  }
+  // A stable hover can still precede the popover's final entry transform.
+  // Measure only after that animation and the asynchronous baseline read.
+  await scrub.evaluate(async (element) => {
+    await Promise.all(
+      element.closest("[data-design-popover]").getAnimations().map((animation) => animation.finished),
+    );
+  });
+  await scrub.hover();
   const bounds = await scrub.boundingBox();
   const start = {
     x: bounds.x + bounds.width / 2,
     y: bounds.y + bounds.height / 2,
   };
-  const baseline = await runtimeStyle(page, "home-heading", "textShadow");
   for (const cancellation of ["capture", "blur", "escape"]) {
     await page.mouse.move(start.x, start.y);
     await page.mouse.down();
@@ -321,7 +347,9 @@ export async function runDesignEffectScrubCancellationSmoke({ page, check }) {
   await expect(field).toHaveValue("16");
   await expect.poll(() => styleWrites(page)).toBe(2);
   check(
-    "effect scrubs restore on cancellation and start from the current typed draft",
+    holdOpeningAnimation
+      ? "effect scrubs target the settled popover after an early hover"
+      : "effect scrubs restore on cancellation and start from the current typed draft",
     true,
   );
 }
@@ -398,5 +426,6 @@ export async function runDesignStyleRefinementsSmoke(context) {
   await runDesignColorChannelRefreshSmoke(context);
   await runDesignEffectKeyboardDraftSmoke(context);
   await runDesignEffectScrubCancellationSmoke(context);
+  await runDesignEffectScrubCancellationSmoke({ ...context, holdOpeningAnimation: true });
   await runDesignInspectorPreviewOwnerSmoke(context);
 }
