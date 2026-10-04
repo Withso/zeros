@@ -90,10 +90,10 @@ export async function inspectDevAgents(pool: pg.Pool, input: Request): Promise<S
   }
   const organizationImages: OrganizationImage[] | undefined = request.accountScope === undefined ? undefined : await withSystemTx(pool, async tx => {
     const images = await tx.query<{ id: string; snapshot_name: string; build_sha256: string; base_source_commit: string;
-      source_contract: string; enabled_kinds: string[] }>(`SELECT image.id,image.snapshot_name,image.build_sha256,image.base_source_commit,image.source_contract,
+      image_contract: string; enabled_kinds: string[] }>(`SELECT image.id,image.snapshot_name,image.build_sha256,image.base_source_commit,image.image_contract,
         ARRAY(SELECT q.credential_kind FROM cloud_agent_runtime_qualifications q WHERE q.provider='boat'
           AND q.image_ref=image.image_ref AND q.enabled AND q.profile='zeros-cloud-worker-v3'
-          AND q.runtime_contract_sha256=image.source_contract AND q.qualified_at>=image.attested_at) AS enabled_kinds
+          AND q.runtime_contract_sha256=image.image_contract AND q.qualified_at>=image.attested_at) AS enabled_kinds
       FROM cloud_computer_images image JOIN cloud_computer_builds build ON build.id=image.id AND build.org_id=image.org_id
       JOIN cloud_computers computer ON computer.org_id=image.org_id
       WHERE image.org_id=$1 AND image.account_scope=$2 AND image.state='attested' AND build.state='succeeded'
@@ -102,7 +102,7 @@ export async function inspectDevAgents(pool: pg.Pool, input: Request): Promise<S
       ORDER BY (image.id=computer.active_image_id) DESC NULLS LAST,image.created_at DESC LIMIT 10`,
     [selected.organization.id, request.accountScope, `boat:${request.image.snapshotId}@sha256:${request.image.buildSha256}`, request.image.sourceCommit]);
     return images.rows.map(image => ({ id: image.id, snapshotId: image.snapshot_name, buildSha256: image.build_sha256,
-      sourceCommit: image.base_source_commit, contractSha256: image.source_contract,
+      sourceCommit: image.base_source_commit, contractSha256: image.image_contract,
       connections: connections.map(connection => ({ ...connection, enabled: image.enabled_kinds.includes(connection.kind) })) }));
   });
   const chosen = request.organizationImage && organizationImages?.find(image => image.id === request.organizationImage!.id &&
