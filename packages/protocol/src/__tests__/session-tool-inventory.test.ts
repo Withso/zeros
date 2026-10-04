@@ -47,6 +47,28 @@ describe("session tool inventory wire compatibility", () => {
       })[1].state,
     ).toBe("ready");
   });
+  it("marks locally configured connections only inside grouped inventory", () => {
+    const local = { id: "repo", name: "repo", status: "connected", source: "local" };
+    expect(
+      sessionToolsInventorySnapshotSchema.parse({
+        ...legacy,
+        groups: [{ kind: "mcp", state: "ready", entries: [local] }],
+      }).groups?.[0].entries[0].source,
+    ).toBe("local");
+    // The legacy list stays strict for older clients.
+    expect(
+      sessionToolsSnapshotSchema.safeParse({ ...legacy, entries: [local] })
+        .success,
+    ).toBe(false);
+    expect(
+      sessionToolsInventorySnapshotSchema.safeParse({
+        ...legacy,
+        groups: [
+          { kind: "mcp", state: "ready", entries: [{ ...local, source: "plugin" }] },
+        ],
+      }).success,
+    ).toBe(false);
+  });
   it("rejects duplicate categories and unexpected provider fields", () => {
     const group = { kind: "apps", state: "ready", entries: [] };
     expect(

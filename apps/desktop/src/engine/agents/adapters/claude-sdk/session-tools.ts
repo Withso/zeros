@@ -1,4 +1,8 @@
-import type { AccountInfo, Query } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  AccountInfo,
+  McpServerStatus,
+  Query,
+} from "@anthropic-ai/claude-agent-sdk";
 import { createHash } from "node:crypto";
 import type {
   SessionToolsSnapshot,
@@ -28,6 +32,15 @@ function missingAccountConnectors(account: AccountInfo | null): string {
   return "Claude has not reported any account connectors yet. Refresh to check again. If a connected service stays missing, check the Claude subscription account and reopen this chat.";
 }
 
+/** Claude configuration scopes read from settings files on this machine:
+ *  `~/.claude.json`, a repository `.mcp.json`, or Claude's per-project scope.
+ *  Servers Zeros registers report `dynamic`; plugin servers report `plugin`. */
+const LOCAL_CONFIG_SCOPES = new Set(["user", "project", "local"]);
+
+function isLocalConfigServer(server: McpServerStatus): boolean {
+  return LOCAL_CONFIG_SCOPES.has(server.source ?? server.scope ?? "");
+}
+
 export async function readClaudeSessionTools(
   query: Pick<Query, "mcpServerStatus"> & Partial<Pick<Query, "accountInfo">>,
   {
@@ -35,11 +48,14 @@ export async function readClaudeSessionTools(
     readConnectorMembership,
     includeInventory = false,
     plugins,
+    markLocalServers = false,
   }: {
     accountConnectorsEnabled?: boolean;
     readConnectorMembership?: ClaudeConnectorMembershipReader;
     includeInventory?: boolean;
     plugins?: SessionToolGroup;
+    /** Tag servers from Claude's own settings files for the Local folder. */
+    markLocalServers?: boolean;
   } = {},
 ): Promise<SessionToolsInventorySnapshot> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -121,6 +137,16 @@ export async function readClaudeSessionTools(
         .filter(isClaudeAccountConnector)
         .map((server) => server.name),
     );
+    const localNames = new Set(
+      markLocalServers
+        ? selected.servers
+            .filter(
+              (server) =>
+                isLocalConfigServer(server) && !isClaudeAccountConnector(server),
+            )
+            .map((server) => server.name)
+        : [],
+    );
     return {
       ...snapshot,
       groups: [
@@ -142,7 +168,13 @@ export async function readClaudeSessionTools(
         {
           kind: "mcp",
           state: snapshot.state === "ready" ? "ready" : "partial",
-          entries: snapshot.entries,
+          // The legacy top-level list stays strict; only grouped rows carry
+          // their configuration source.
+          entries: snapshot.entries.map((entry) =>
+            localNames.has(entry.id)
+              ? { ...entry, source: "local" as const }
+              : entry,
+          ),
           ...(snapshot.detail ? { detail: snapshot.detail } : {}),
         },
       ],

@@ -81,8 +81,20 @@ RuntimeClient.prototype.request = async function <
             },
             { id: "broken", name: "Broken", status: "error" },
           ]
-        : [{ id: "calendar", name: "Calendar", status: "needs-auth" }],
+        : request.params?.sessionId === "c"
+          ? [
+              { id: "calendar", name: "Calendar", status: "connected" },
+              { id: "repo-tools", name: "repo-tools", status: "connected" },
+            ]
+          : [{ id: "calendar", name: "Calendar", status: "needs-auth" }],
   };
+  // Chat C's repository declares its own MCP server in Claude's settings.
+  const mcpEntries =
+    request.params?.sessionId === "c"
+      ? result.entries.map((entry) =>
+          entry.id === "repo-tools" ? { ...entry, source: "local" } : entry,
+        )
+      : result.entries;
   const groups =
     request.params?.sessionId === "a"
       ? [
@@ -126,8 +138,12 @@ RuntimeClient.prototype.request = async function <
             detail:
               "Claude has not reported this session’s loaded plugins yet.",
           },
-          { kind: "apps", state: "ready", entries: result.entries },
-          { kind: "mcp", state: "ready", entries: result.entries },
+          {
+            kind: "apps",
+            state: "ready",
+            entries: result.entries.filter((entry) => entry.id === "calendar"),
+          },
+          { kind: "mcp", state: "ready", entries: mcpEntries },
         ];
   return {
     type: "WORKSPACE_RESPONSE",
@@ -210,6 +226,7 @@ function Harness() {
         </Button>
         <Button onClick={() => setOwner("a")}>Chat A</Button>
         <Button onClick={() => setOwner("b")}>Chat B</Button>
+        <Button onClick={() => setOwner("c")}>Chat C</Button>
         <Button
           onClick={() => {
             inventoryMode = "empty";

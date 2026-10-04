@@ -9,7 +9,6 @@ import {
   contextGraphHasContent,
   ensureContextGraph,
   listContextGraph,
-  setContextGraphAttachmentShared,
   stageContextGraphAttachment,
 } from "../context-graph";
 import { snapshotWorkingTree } from "../../git/turns-git";
@@ -197,9 +196,9 @@ describe(".context directory compatibility", () => {
     ).toBe("captured version");
   });
 
-  it("archives migrated root files without including neighboring scratch files", async () => {
-    await put(".context/scratch.md", "unrelated scratch");
-    await put(".context/docs/scratch.md", "unrelated nested scratch");
+  it("archives migrated root files along with agents' working files", async () => {
+    await put(".context/scratch.md", "agent notes");
+    await put(".context/docs/scratch.md", "nested agent notes");
     await put(".context-graph/overview.md", "root document");
     await put(".context-graph/docs/plan.md", "nested root document");
     await put(".context-graph/local/attachments/a/a.txt", "attachment");
@@ -218,7 +217,9 @@ describe(".context directory compatibility", () => {
     );
     expect(snapshot).toContain(".context/overview.md");
     expect(snapshot).toContain(".context/docs/plan.md");
-    expect(snapshot).not.toContain("scratch.md");
+    expect(snapshot).toContain(".context/scratch.md");
+    expect(snapshot).toContain(".context/docs/scratch.md");
+    expect(snapshot).toContain(".context/local/attachments/a/a.txt");
   });
 
   it.each([".context", ".context-graph"])(
@@ -267,14 +268,14 @@ describe(".context directory compatibility", () => {
     },
   );
 
-  it("merges a legacy local gitignore with the generated private-scope rules", async () => {
+  it("keeps a legacy local gitignore's rules and adds no ignore rules of its own", async () => {
     const rules = "# local tooling rules\n*.tmp\n";
     await put(".context-graph/.gitignore", "/local/\n/.gitignore\n");
     await put(".context-graph/local/.gitignore", rules);
     await put(".context-graph/local/notes.md", "keep me");
 
     expect(await ensureContextGraph(root)).toMatchObject({ ok: true });
-    expect(await read(".context/local/.gitignore")).toContain(rules);
+    expect(await read(".context/local/.gitignore")).toBe(rules);
     expect(
       await stageContextGraphAttachment(root, {
         attachmentId: "new-id",
@@ -282,7 +283,9 @@ describe(".context directory compatibility", () => {
         base64: "bmV3",
       }),
     ).toMatchObject({ ok: true });
-    expect(status()).toBe("");
+    // The migrated rules still hide the old private scope; whether the new
+    // attachment is committed is the repository's choice.
+    expect(status()).toBe("?? .context/attachments/new-id/new.txt\n");
     expect(await ensureContextGraph(root)).toEqual({
       ok: true,
       created: false,
@@ -347,14 +350,22 @@ describe(".context directory compatibility", () => {
     });
     expect(result).toMatchObject({
       ok: true,
-      relativePath: ".context/local/attachments/new-id/new.txt",
+      relativePath: ".context/attachments/new-id/new.txt",
     });
     expect(await read(".context/notes.md")).toBe("scratch");
     expect(await read(".context/attachments/chat/old.png")).toBe("old image");
     expect(
-      (await listContextGraph(root)).items.map((item) => item.name),
-    ).toEqual(["new.txt"]);
-    expect(status()).toBe("");
+      (await listContextGraph(root)).items.map((item) => item.relPath).sort(),
+    ).toEqual([
+      ".context/attachments/chat/old.png",
+      ".context/attachments/new-id/new.txt",
+      ".context/notes.md",
+    ]);
+    // No ignore rules are written: the repository decides what Git sees.
+    await expect(fs.lstat(path.join(root, ".context/.gitignore"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(status()).toContain("?? .context/attachments/new-id/new.txt");
   });
 
   it("migrates legacy scopes and docs into an existing folder, preserving mtime and ignore rules", async () => {
@@ -460,48 +471,6 @@ describe(".context directory compatibility", () => {
       }
     },
   );
-
-  it("shares through a parent ignore and an existing star ignore while keeping scratch private", async () => {
-    await put(".gitignore", "# existing rules\n.context/\n");
-    await put(".context/.gitignore", "# scratch\n*\n");
-    await put(".context/notes.md", "private scratch");
-    await stageContextGraphAttachment(root, {
-      attachmentId: "id",
-      filename: "a.txt",
-      base64: "aGk=",
-    });
-    expect(await read(".gitignore")).toBe("# existing rules\n.context/\n");
-    expect(await setContextGraphAttachmentShared(root, "id", true)).toEqual({
-      ok: true,
-      moved: true,
-    });
-    expect(status()).toContain(".context/shared/attachments/id/a.txt");
-    expect(status()).not.toContain("notes.md");
-    expect(status()).not.toContain(".context/.gitignore");
-    expect(await read(".gitignore")).toContain("# existing rules\n.context/\n");
-    expect(await setContextGraphAttachmentShared(root, "id", false)).toEqual({
-      ok: true,
-      moved: true,
-    });
-    expect(status()).not.toContain("a.txt");
-  });
-
-  it("refuses a share still excluded by rules inside shared, leaving the private record intact", async () => {
-    await put(".context/shared/.gitignore", "*.txt\n");
-    await stageContextGraphAttachment(root, {
-      attachmentId: "id",
-      filename: "a.txt",
-      base64: "aGk=",
-    });
-    expect(
-      await setContextGraphAttachmentShared(root, "id", true),
-    ).toMatchObject({
-      ok: false,
-      moved: false,
-      error: expect.stringMatching(/gitignored/),
-    });
-    expect(await read(".context/local/attachments/id/a.txt")).toBe("hi");
-  });
 
   it("keeps legacy shared files available when ignore preparation fails, then retries", async () => {
     await put(".git/info/exclude", ".context/\n");

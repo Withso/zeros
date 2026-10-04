@@ -1,13 +1,13 @@
 // ──────────────────────────────────────────────────────────
-// Native binding — context graph (Context tab canvas)
+// Native binding — context graph (the workspace's `.context/` listing)
 // ──────────────────────────────────────────────────────────
 //
 // Renderer-side façade over the engine's `context.graph.*` bridge ops.
-// Bridge-only, like listIgnoredEntries: the canvas lists once per workspace
+// Bridge-only, like listIgnoredEntries: summaries list once per workspace
 // plus once per refresh signal, so there is no native fast path to keep in
-// sync. DESKTOP ONLY — the engine refuses remote callers (the graph's
-// `local/` scope is gitignored private material), so remote clients short-
-// circuit here instead of spending a guaranteed-refusal round-trip.
+// sync. DESKTOP ONLY — the engine refuses remote callers (`.context/` holds
+// private workspace material), so remote clients short-circuit here instead
+// of spending a guaranteed-refusal round-trip.
 // ──────────────────────────────────────────────────────────
 
 import { isNativeRuntime } from "./runtime";
@@ -15,10 +15,10 @@ import { getActiveBridge } from "./bridge/active-bridge";
 import {
   bridgeContextGraphList,
   bridgeContextGraphScaffold,
-  bridgeContextGraphSetShared,
 } from "./bridge/workspace-bridge";
 import { resolveBridgeWorkspaceIdForCwd } from "./bridge/workspace-id-resolver";
 
+/** `shared` marks only records an earlier build's share action moved. */
 export type ContextGraphScope = "local" | "shared";
 export type ContextGraphCategory = "attachment" | "doc";
 export type ContextGraphKind = "image" | "markdown" | "text" | "other";
@@ -122,19 +122,4 @@ export async function scaffoldContextGraph(
     "scaffold the context graph",
   );
   return bridgeContextGraphScaffold(bridge, workspaceId);
-}
-
-/** Move one attachment between the private (`local/`, gitignored) and shared
- *  (`shared/`, committed) scopes — the canvas checkbox. */
-export async function setContextGraphShared(
-  cwd: string,
-  attachmentId: string,
-  shared: boolean,
-): Promise<{ ok: boolean; moved: boolean; error?: string }> {
-  if (!cwd || !isNativeRuntime()) return { ok: false, moved: false };
-  const { bridge, workspaceId } = await resolveTarget(
-    cwd,
-    "share the context attachment",
-  );
-  return bridgeContextGraphSetShared(bridge, workspaceId, attachmentId, shared);
 }

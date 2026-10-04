@@ -140,13 +140,10 @@ const WORKSPACE_MUTATIONS = new Set([
   // Files-tab manual save changes content and its Git comparisons.
   "file.write",
 
-  // Context-graph writes: scaffolding the folder skeleton and moving an
-  // attachment between the gitignored `local/` and committed `shared/` scopes
-  // (the latter changes git status too). No-op results are suppressed in
-  // dbChangedKinds so the idempotent re-scaffold on every Context-tab open
-  // doesn't broadcast a global refresh.
+  // Context-graph writes: scaffolding the folder skeleton. No-op results are
+  // suppressed in dbChangedKinds so an idempotent re-scaffold doesn't
+  // broadcast a global refresh.
   "context.graph.scaffold",
-  "context.graph.setShared",
 ]);
 
 /** Ops whose RPC can legitimately outlive the renderer's request budget. Two
@@ -262,14 +259,13 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   ) {
     return null;
   }
-  // Context-graph mutations that changed nothing on disk (the idempotent
-  // re-scaffold, an already-in-scope share toggle) don't invalidate anything.
+  // An idempotent re-scaffold that changed nothing on disk doesn't
+  // invalidate anything.
   if (
-    (op === "context.graph.scaffold" || op === "context.graph.setShared") &&
+    op === "context.graph.scaffold" &&
     !!result &&
     typeof result === "object" &&
-    (result as { created?: boolean; moved?: boolean }).created !== true &&
-    (result as { created?: boolean; moved?: boolean }).moved !== true
+    (result as { created?: boolean }).created !== true
   ) {
     return null;
   }

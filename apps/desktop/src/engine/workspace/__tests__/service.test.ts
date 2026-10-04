@@ -456,9 +456,7 @@ describe("WorkspaceService", () => {
         bytes: number;
       };
 
-      expect(result.relativePath).toBe(
-        ".context/local/attachments/att-1/shot.png",
-      );
+      expect(result.relativePath).toBe(".context/attachments/att-1/shot.png");
       // The attachment boundary returns canonical paths, including macOS's
       // /var → /private/var alias and explicitly symlinked workspace roots.
       expect(result.absolutePath).toBe(
@@ -467,9 +465,8 @@ describe("WorkspaceService", () => {
       expect(fs.readFileSync(result.absolutePath, "utf8")).toBe(
         "full-resolution-image",
       );
-      expect(
-        fs.readFileSync(path.join(dir, ".context/.gitignore"), "utf8"),
-      ).toContain("/local/");
+      // Zeros writes no ignore rules; the repository decides what Git sees.
+      expect(fs.existsSync(path.join(dir, ".context/.gitignore"))).toBe(false);
     },
   );
 
@@ -504,7 +501,7 @@ describe("WorkspaceService", () => {
 
     expect(
       fs.existsSync(
-        path.join(workspace.path, ".context/local/attachments", attachmentId),
+        path.join(workspace.path, ".context/attachments", attachmentId),
       ),
     ).toBe(false);
   });
@@ -579,7 +576,7 @@ describe("WorkspaceService", () => {
       segments: Array<{ diskPath?: string; thumbnailUri?: string }>;
     };
     expect(payload.attachments[0].diskPath).toMatch(
-      /^\.context\/local\/attachments\/legacy_[a-f0-9]+\//,
+      /^\.context\/attachments\/legacy_[a-f0-9]+\//,
     );
     expect(payload.segments[1].diskPath).toBe(payload.attachments[0].diskPath);
     expect(payload.attachments[0].thumbnailUri).toBeUndefined();
@@ -668,7 +665,7 @@ describe("WorkspaceService", () => {
     };
 
     expect(payload.attachments[0].diskPath).toMatch(
-      /^\.context\/local\/attachments\/legacy_[a-f0-9]+\//,
+      /^\.context\/attachments\/legacy_[a-f0-9]+\//,
     );
     expect(payload.segments[1].diskPath).toBe(payload.attachments[0].diskPath);
     expect(payload.attachments[0].attachmentId).toMatch(/^legacy_[a-f0-9]+$/);

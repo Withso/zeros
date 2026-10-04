@@ -145,7 +145,7 @@ RuntimeClient.prototype.request = async function <
       workspaceFolder === folderB ? ["Workspace B notes.md"] : contextItems;
     const items: ContextGraphItemWire[] = names.map((name, index) => ({
       name,
-      relPath: `.context/local/attachments/${index}/${name}`,
+      relPath: `.context/attachments/${index}/${name}`,
       scope: "local",
       category: "attachment",
       kind: name.endsWith("png") ? "image" : "markdown",

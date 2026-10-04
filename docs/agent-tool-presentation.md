@@ -46,14 +46,14 @@ records and actual interrupted-turn errors keep their normal presentation.
   active. Unknown provider resource schemes stay readable without invoking an
   arbitrary OS handler. Generated HTML is source content in Files, not trusted
   app code. Do not bypass existing image size or binary-preview limits.
-- Code-agent startup instructions place temporary deliverables in
-  `.context/local/artifacts/<task>/` and investigations/logs in
-  `.context/local/scratch/<task>/`. Read relevant existing context, pass exact
-  paths to delegates, preserve other agents' work, and link actual saved files.
+- Code-agent startup instructions place task files (plans, notes, logs,
+  screenshots, handoffs) in `.context/<task>/` and ask agents not to commit
+  them unless the user asks. Read relevant existing context, pass exact paths
+  to delegates, preserve other agents' work, and link actual saved files.
   Required project source/build outputs keep their normal locations. Design
   source placement and native/API authoring follow the
   [Design contract](design-mode-roadmap.md#native-authoring-and-optional-tools). See
-  [context-storage.md](context-storage.md) for local/shared ownership.
+  [context-storage.md](context-storage.md) for the folder layout.
 
 Contract references: the installed Claude SDK's `SDKMcpResourceLink` and task
 notification declarations, [MCP tool results](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-result),

@@ -12,11 +12,14 @@ import {
 } from "../index";
 
 describe("buildWorkspacePreamble", () => {
-  it("gives code agents shared, private artifact and scratch conventions", () => {
+  it("gives code agents one workspace .context folder organized by task", () => {
     const out = buildWorkspacePreamble({ workspaceDir: "/ws" });
-    expect(out).toContain(".context/local/artifacts/");
-    expect(out).toContain(".context/local/scratch/");
+    expect(out).toContain(".context/<task>/");
+    expect(out).toContain("don't commit its contents unless the user asks");
     expect(out).toContain("workspace-relative Markdown links");
+    // No scopes and no claim about the repository's ignore rules.
+    expect(out).not.toMatch(/\.context\/(local|shared)/);
+    expect(out).not.toContain("gitignored");
   });
   it("fills workspace dir + target branch", () => {
     const out = buildWorkspacePreamble({

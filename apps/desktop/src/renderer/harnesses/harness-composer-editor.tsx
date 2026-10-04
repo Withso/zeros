@@ -82,7 +82,7 @@ setActiveBridge({
         }
         const name = String(p.filename).replace(/[^a-zA-Z0-9._-]+/g, "_");
         records.set(id, {
-          relativePath: `.context/local/attachments/${id}/${name}`,
+          relativePath: `.context/attachments/${id}/${name}`,
           bytes,
           mimeType: String(p.mimeType),
         });

@@ -1,23 +1,20 @@
 // ──────────────────────────────────────────────────────────
-// context-graph — the workspace's shareable context folder
+// context-graph — the workspace's `.context/` folder
 // ──────────────────────────────────────────────────────────
 //
 // Context writes create `.context/` when needed. Workspace creation and reads
-// leave the repository untouched. Existing scratch and transcript files coexist with
-// the graph's two scopes. `.context-graph/` migrates without overwriting files.
+// leave the repository untouched, and Zeros writes no ignore rules: whether
+// `.context/` is committed is the repository's own choice.
+// `.context-graph/` migrates without overwriting files.
 //
 //   .context/
-//     .gitignore          ignores `local/` AND itself (zero `git status` noise
-//                         until the user deliberately shares something)
-//     local/attachments/  private: composer attachments land here by default
-//       <attachmentId>/<file>       one folder per attachment, one file inside
-//     shared/attachments/ committed: items the user opted into sharing from
-//       <attachmentId>/<file>       the Context tab (checkbox = "not ignored")
+//     attachments/<attachmentId>/<file>   composer attachments, one folder each
+//     <task>/…                            agents' working files ("docs")
+//     local/, shared/                     scopes written by earlier builds:
+//                                         listed, archived, never created
 //
-// Docs (any non-attachment file a user or agent drops under local/ or shared/)
-// ride the same split. The Context tab canvas renders both scopes merged —
-// the local/shared distinction is surfaced ONLY as the per-attachment share
-// checkbox, not as a visual grouping.
+// Owner-only and dot-prefixed top-level entries are private tool state. They
+// are neither listed nor swept into archive snapshots.
 //
 // This module is the ONE implementation, shared by the engine bridge ops
 // (context.graph.*) and the electron attachment-write IPC — mirroring how
@@ -27,7 +24,7 @@
 // ──────────────────────────────────────────────────────────
 
 import fs from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, type Dirent } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { currentCloudFilePolicy } from "./cloud-file-policy";
@@ -36,7 +33,6 @@ import { cleanupLegacyAttachmentStaging } from "./attachment-legacy-staging";
 import {
   assertContextDirectory,
   CONTEXT_DIR,
-  exposeSharedContext,
   LEGACY_CONTEXT_DIR,
   migrateLegacyContextDirectory,
 } from "./context-directory";
@@ -46,22 +42,15 @@ import {
 } from "./context-migration-state";
 
 export const CONTEXT_GRAPH_DIR = CONTEXT_DIR;
+/** Scopes written by earlier builds. Existing records stay where they are. */
 export const CONTEXT_GRAPH_LOCAL = "local";
 export const CONTEXT_GRAPH_SHARED = "shared";
 const ATTACHMENTS_DIR = "attachments";
-
-/** `local/` never leaves this machine; `/.gitignore` keeps the scaffold itself
- *  out of `git status` (each teammate's Zeros re-creates it locally), so the
- *  ONLY graph paths git ever reports are files deliberately shared. */
-const GITIGNORE_BODY = [
-  "# Zeros context graph — `local/` stays on this machine; `shared/` is",
-  "# committed so teammates can see it. Toggle items from the Context tab.",
-  "/*",
-  "!/shared/",
-  "/.gitignore",
-  `/${CONTEXT_GRAPH_LOCAL}/`,
-  "",
-].join("\n");
+const RESERVED_ROOT_ENTRIES = new Set([
+  ATTACHMENTS_DIR,
+  CONTEXT_GRAPH_LOCAL,
+  CONTEXT_GRAPH_SHARED,
+]);
 
 /** Same id alphabet the composer generates and the attachment IPC enforces. */
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -94,6 +83,8 @@ const IMAGE_EXTS = new Set([
 ]);
 const MARKDOWN_EXTS = new Set([".md", ".mdx", ".markdown"]);
 
+/** Wire compatibility: everything Zeros writes now reports `local`; `shared`
+ *  marks only records an earlier build's share action moved. */
 export type ContextGraphScope = "local" | "shared";
 export type ContextGraphCategory = "attachment" | "doc";
 export type ContextGraphKind = "image" | "markdown" | "text" | "other";
@@ -111,7 +102,7 @@ export interface ContextGraphItem {
   /** Metadata-change time makes thumbnail revisions exact across rapid,
    *  same-size atomic replacements. Additive for older renderer clients. */
   ctimeMs: number;
-  /** The `<attachmentId>` folder for attachment items — the share toggle's key. */
+  /** The `<attachmentId>` folder for attachment items. */
   attachmentId?: string;
   /** First ~480 chars for text/markdown cards, so the canvas renders previews
    *  without one read round-trip per card. */
@@ -131,13 +122,6 @@ export interface ContextGraphScaffoldResult {
   /** True when this call created anything (drives DB_CHANGED suppression for
    *  the common already-scaffolded case). */
   created: boolean;
-  error?: string;
-}
-
-export interface ContextGraphSetSharedResult {
-  ok: boolean;
-  /** False when the attachment was already in the requested scope. */
-  moved: boolean;
   error?: string;
 }
 
@@ -168,8 +152,7 @@ async function isConfined(target: string, root: string): Promise<boolean> {
   }
 }
 
-/** Create the graph skeleton (both scopes + their attachments dirs + the
- *  self-ignoring .gitignore). Idempotent and quiet: repeated calls report
+/** Create `.context/attachments/`. Idempotent and quiet: repeated calls report
  *  `created: false` so callers can skip change broadcasts. */
 const scaffolds = new Map<string, Promise<ContextGraphScaffoldResult>>();
 
@@ -209,44 +192,15 @@ async function scaffoldContextGraph(
       };
     }
     let created = false;
-    for (const scope of [CONTEXT_GRAPH_LOCAL, CONTEXT_GRAPH_SHARED]) {
-      const dir = path.join(root, scope, ATTACHMENTS_DIR);
-      await assertContextDirectory(dir, workspaceRoot);
-      if (!(await isConfined(dir, workspaceRoot))) {
-        return { ok: false, created, error: "graph scope escapes workspace" };
-      }
-      if (policy) created = policy.createDirectory(path.relative(workspaceRoot, dir)) || created;
-      else {
-        const made = await fs.mkdir(dir, { recursive: true });
-        if (made !== undefined) created = true;
-      }
-      if (!(await isConfined(dir, workspaceRoot))) {
-        return { ok: false, created, error: "graph scope escapes workspace" };
-      }
+    const dir = path.join(root, ATTACHMENTS_DIR);
+    await assertContextDirectory(dir, workspaceRoot);
+    if (!(await isConfined(dir, workspaceRoot))) {
+      return { ok: false, created, error: "graph escapes workspace" };
     }
-    const ignorePath = path.join(root, ".gitignore");
-    currentCloudFilePolicy()?.assertPath(path.relative(workspaceRoot, ignorePath), true);
-    try {
-      // Exclusive creation preserves a user-edited file and closes the
-      // access-then-write race without ever following a planted symlink.
-      if (policy) policy.createFileExclusive(path.relative(workspaceRoot, ignorePath), GITIGNORE_BODY);
-      else await fs.writeFile(ignorePath, GITIGNORE_BODY, { flag: "wx" });
-      created = true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    }
-    // A pre-existing .context/.gitignore may have arbitrary scratch rules.
-    // Keep them intact while making the newly-created private scope safe.
-    try {
-      if (policy) policy.createFileExclusive(`${CONTEXT_GRAPH_DIR}/${CONTEXT_GRAPH_LOCAL}/.gitignore`, "*\n");
-      else await fs.writeFile(
-        path.join(root, CONTEXT_GRAPH_LOCAL, ".gitignore"),
-        "*\n",
-        { flag: "wx" },
-      );
-      created = true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    if (policy) created = policy.createDirectory(path.relative(workspaceRoot, dir));
+    else created = (await fs.mkdir(dir, { recursive: true })) !== undefined;
+    if (!(await isConfined(dir, workspaceRoot))) {
+      return { ok: false, created, error: "graph escapes workspace" };
     }
     const migration = await migrateLegacyContextDirectory(workspaceRoot);
     created ||= migration;
@@ -333,18 +287,89 @@ async function collectFile(
   state.items.push(item);
 }
 
-async function readDirBounded(absDir: string) {
+async function readDirBounded(absDir: string, limit = MAX_DIR_ENTRIES) {
   const policy = currentCloudFilePolicy();
   if (policy && !policy.allows(path.relative(policy.root, absDir))) return [];
   const entries = await fs
     .readdir(absDir, { withFileTypes: true })
     .catch(() => []);
-  return entries.slice(0, MAX_DIR_ENTRIES).filter(entry => !policy || policy.allows(path.relative(policy.root, path.join(absDir, entry.name))));
+  return entries.slice(0, limit).filter(entry => !policy || policy.allows(path.relative(policy.root, path.join(absDir, entry.name))));
 }
 
-/** Walk one scope subtree. Attachments (one folder per attachment under
- *  `attachments/`) are collected with their folder id; everything else in the
- *  scope is a "doc". Deterministic order: readdir order per level, bounded. */
+/** Collect one level of id folders under `attachmentsAbs`, files directly inside. */
+async function walkAttachments(
+  state: WalkState,
+  workspaceRoot: string,
+  attachmentsAbs: string,
+  attachmentsRel: string,
+  scope: ContextGraphScope,
+): Promise<void> {
+  try {
+    await assertContextDirectory(attachmentsAbs, workspaceRoot);
+  } catch {
+    return;
+  }
+  for (const idEntry of await readDirBounded(attachmentsAbs)) {
+    if (!idEntry.isDirectory() || !ID_OK.test(idEntry.name)) continue;
+    const idAbs = path.join(attachmentsAbs, idEntry.name);
+    for (const fileEntry of await readDirBounded(idAbs)) {
+      if (!fileEntry.isFile()) continue;
+      await collectFile(
+        state,
+        path.join(idAbs, fileEntry.name),
+        `${attachmentsRel}/${idEntry.name}/${fileEntry.name}`,
+        scope,
+        "attachment",
+        idEntry.name,
+      );
+    }
+  }
+}
+
+/** Collect every file below `absDir` as a doc. `skip` applies to the first
+ *  level only. Deterministic order: readdir order per level, bounded. */
+async function walkDocs(
+  state: WalkState,
+  absDir: string,
+  relDir: string,
+  scope: ContextGraphScope,
+  depth: number,
+  skip: (name: string) => boolean = () => false,
+): Promise<void> {
+  if (depth > MAX_DEPTH) {
+    state.truncated = true;
+    return;
+  }
+  for (const entry of await readDirBounded(absDir)) {
+    if (skip(entry.name)) continue;
+    if (state.items.length >= MAX_ITEMS) {
+      state.truncated = true;
+      return;
+    }
+    const abs = path.join(absDir, entry.name);
+    const rel = `${relDir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      await walkDocs(state, abs, rel, scope, depth + 1);
+    } else if (entry.isFile()) {
+      await collectFile(state, abs, rel, scope, "doc");
+    }
+  }
+}
+
+/** First-level names an earlier build's scope reserves for its own records. */
+function scopeReservedEntry(
+  directory: string,
+  scope: ContextGraphScope,
+): (name: string) => boolean {
+  return (name) =>
+    name === ATTACHMENTS_DIR ||
+    (directory === CONTEXT_GRAPH_DIR &&
+      scope === CONTEXT_GRAPH_LOCAL &&
+      name === CONTEXT_MIGRATION_STATE);
+}
+
+/** Walk one scope written by an earlier build. Attachments are collected with
+ *  their folder id; everything else in the scope is a "doc". */
 async function walkScope(
   state: WalkState,
   workspaceRoot: string,
@@ -358,72 +383,51 @@ async function walkScope(
   } catch {
     return;
   }
-
-  // Attachments: exactly one level of id folders, files directly inside.
-  const attachmentsAbs = path.join(scopeAbs, ATTACHMENTS_DIR);
-  const safeAttachments = await assertContextDirectory(
-    attachmentsAbs,
+  await walkAttachments(
+    state,
     workspaceRoot,
-  ).then(
-    () => true,
-    () => false,
+    path.join(scopeAbs, ATTACHMENTS_DIR),
+    `${scopeRel}/${ATTACHMENTS_DIR}`,
+    scope,
   );
-  for (const idEntry of safeAttachments
-    ? await readDirBounded(attachmentsAbs)
-    : []) {
-    if (!idEntry.isDirectory() || !ID_OK.test(idEntry.name)) continue;
-    const idAbs = path.join(attachmentsAbs, idEntry.name);
-    for (const fileEntry of await readDirBounded(idAbs)) {
-      if (!fileEntry.isFile()) continue;
-      await collectFile(
-        state,
-        path.join(idAbs, fileEntry.name),
-        `${scopeRel}/${ATTACHMENTS_DIR}/${idEntry.name}/${fileEntry.name}`,
-        scope,
-        "attachment",
-        idEntry.name,
-      );
-    }
-  }
-
-  // Docs: everything else under the scope, attachments subtree excluded.
-  const walkDocs = async (
-    absDir: string,
-    relDir: string,
-    depth: number,
-  ): Promise<void> => {
-    if (depth > MAX_DEPTH) {
-      state.truncated = true;
-      return;
-    }
-    for (const entry of await readDirBounded(absDir)) {
-      if (
-        directory === CONTEXT_GRAPH_DIR &&
-        scope === CONTEXT_GRAPH_LOCAL &&
-        depth === 0 &&
-        entry.name === CONTEXT_MIGRATION_STATE
-      )
-        continue;
-      if (state.items.length >= MAX_ITEMS) {
-        state.truncated = true;
-        return;
-      }
-      if (entry.name === ATTACHMENTS_DIR && depth === 0) continue;
-      const abs = path.join(absDir, entry.name);
-      const rel = `${relDir}/${entry.name}`;
-      if (entry.isDirectory()) {
-        await walkDocs(abs, rel, depth + 1);
-      } else if (entry.isFile()) {
-        await collectFile(state, abs, rel, scope, "doc");
-      }
-    }
-  };
-  await walkDocs(scopeAbs, scopeRel, 0);
+  await walkDocs(
+    state,
+    scopeAbs,
+    scopeRel,
+    scope,
+    0,
+    scopeReservedEntry(directory, scope),
+  );
 }
 
-/** Everything in the workspace's context graph, both scopes merged. Sorted
- *  oldest-first by mtime (ties by path) so the canvas layout is stable: new
- *  items take the next free slot instead of reshuffling every card. */
+interface ContextEntry {
+  name: string;
+  directory: boolean;
+}
+
+/** Top-level `.context/` entries holding agents' working files. Dot-prefixed
+ *  and owner-only entries are private tool state (device bindings,
+ *  credentials); symlinks are never followed. */
+async function workspaceContextEntries(
+  workspaceRoot: string,
+  limit = MAX_DIR_ENTRIES,
+): Promise<ContextEntry[]> {
+  const root = graphRoot(workspaceRoot);
+  const entries: ContextEntry[] = [];
+  for (const entry of await readDirBounded(root, limit)) {
+    if (entry.name.startsWith(".") || RESERVED_ROOT_ENTRIES.has(entry.name))
+      continue;
+    if (!entry.isDirectory() && !entry.isFile()) continue;
+    const stat = await fs.lstat(path.join(root, entry.name)).catch(() => null);
+    if (!stat || (stat.mode & 0o077) === 0) continue;
+    entries.push({ name: entry.name, directory: entry.isDirectory() });
+  }
+  return entries;
+}
+
+/** Everything in the workspace's `.context/`. Sorted oldest-first by mtime
+ *  (ties by path) so the listing is stable: new items take the next free slot
+ *  instead of reshuffling. */
 export async function listContextGraph(
   workspaceRoot: string,
 ): Promise<ContextGraphListResult> {
@@ -438,6 +442,22 @@ export async function listContextGraph(
       if (!stat?.isDirectory() || !(await isConfined(root, workspaceRoot)))
         continue;
       exists = true;
+      if (directory === CONTEXT_GRAPH_DIR) {
+        await walkAttachments(
+          state,
+          workspaceRoot,
+          path.join(root, ATTACHMENTS_DIR),
+          `${directory}/${ATTACHMENTS_DIR}`,
+          CONTEXT_GRAPH_LOCAL,
+        );
+        for (const entry of await workspaceContextEntries(workspaceRoot)) {
+          const abs = path.join(root, entry.name);
+          const rel = `${directory}/${entry.name}`;
+          if (entry.directory)
+            await walkDocs(state, abs, rel, CONTEXT_GRAPH_LOCAL, 1);
+          else await collectFile(state, abs, rel, CONTEXT_GRAPH_LOCAL, "doc");
+        }
+      }
       await walkScope(state, workspaceRoot, CONTEXT_GRAPH_LOCAL, directory);
       await walkScope(state, workspaceRoot, CONTEXT_GRAPH_SHARED, directory);
     }
@@ -454,7 +474,6 @@ export interface ContextGraphStageResult {
   ok: boolean;
   absolutePath?: string;
   relativePath?: string;
-  scope?: ContextGraphScope;
   bytes?: number;
   /** True when the target already held these bytes and nothing was written —
    *  keeps the card's mtime (and so its canvas slot) stable across the
@@ -575,14 +594,11 @@ import { safeAttachmentFilename } from "@zeros/protocol/attachment-policy";
 export { safeAttachmentFilename } from "@zeros/protocol/attachment-policy";
 
 /** Write one attachment's bytes into the graph — the composer's attach-time
- *  staging AND the send path's safety net, so it must be idempotent and
- *  scope-aware:
+ *  staging AND the send path's safety net, so it must be idempotent:
  *
- *    • The folder is `<scope>/attachments/<attachmentId>/`, scope pinned to
- *      wherever the id ALREADY lives. Without the pin, re-staging on send
- *      would re-create `local/<id>` after the user shared the attachment,
- *      leaving divergent copies in both scopes — the state setShared refuses
- *      to touch.
+ *    • The folder is `attachments/<attachmentId>/`. A record an earlier build
+ *      wrote under `shared/` or `local/` keeps its folder, so a re-write
+ *      never leaves a second copy next to the paths saved chats point at.
  *    • An existing file is left alone only after its bytes compare equal, so
  *      re-writes don't bump mtime while an external same-size edit is repaired.
  *
@@ -639,22 +655,19 @@ async function stageAttachmentContents(
       };
     }
     const root = graphRoot(workspaceRoot);
-    const dirForScope = (scope: ContextGraphScope) =>
-      path.join(root, scope, ATTACHMENTS_DIR, args.attachmentId);
     const isDir = async (p: string) =>
       (await fs.lstat(p).catch(() => null))?.isDirectory() === true;
-    const sharedAtPin = await isDir(dirForScope(CONTEXT_GRAPH_SHARED));
-    const localAtPin = await isDir(dirForScope(CONTEXT_GRAPH_LOCAL));
-    const scope: ContextGraphScope = sharedAtPin
-      ? CONTEXT_GRAPH_SHARED
-      : CONTEXT_GRAPH_LOCAL;
-    const otherScope: ContextGraphScope =
-      scope === CONTEXT_GRAPH_SHARED
-        ? CONTEXT_GRAPH_LOCAL
-        : CONTEXT_GRAPH_SHARED;
-    const otherAtPin =
-      scope === CONTEXT_GRAPH_SHARED ? localAtPin : sharedAtPin;
-    const dir = dirForScope(scope);
+    const current = path.join(root, ATTACHMENTS_DIR, args.attachmentId);
+    let dir = current;
+    if (!(await isDir(current))) {
+      for (const scope of [CONTEXT_GRAPH_SHARED, CONTEXT_GRAPH_LOCAL]) {
+        const earlier = path.join(root, scope, ATTACHMENTS_DIR, args.attachmentId);
+        if (await isDir(earlier)) {
+          dir = earlier;
+          break;
+        }
+      }
+    }
     await assertContextDirectory(dir, workspaceRoot);
     if (!(await isConfined(dir, workspaceRoot))) {
       return { ok: false, error: "path escapes workspace" };
@@ -677,7 +690,6 @@ async function stageAttachmentContents(
       ok: true as const,
       absolutePath: finalPath,
       relativePath: path.relative(workspaceRoot, finalPath),
-      scope,
       bytes: buf.length,
     };
     if (await existingFileMatches(finalPath, buf)) {
@@ -685,24 +697,6 @@ async function stageAttachmentContents(
       return { ...result, skipped: true };
     }
     await atomicWriteAttachment(finalPath, buf, workspaceRoot);
-    // A share toggle can move this id between the scope pin above and the
-    // write — the rename lands in the OTHER scope and the write re-creates
-    // the folder the move just emptied, the divergent two-scope state the
-    // toggle refuses to touch. Detect exactly that (the other scope was
-    // absent at pin time, occupied now), drop our redundant copy — same id
-    // ⇒ same bytes — and report the surviving location. When the other
-    // scope was ALREADY occupied at pin time the divergence pre-existed;
-    // leave it for the user rather than silently deleting a copy.
-    if (!otherAtPin && (await isDir(dirForScope(otherScope)))) {
-      await fs.rm(dir, { recursive: true, force: true });
-      const survivor = path.join(dirForScope(otherScope), safeName);
-      return {
-        ...result,
-        absolutePath: survivor,
-        relativePath: path.relative(workspaceRoot, survivor),
-        scope: otherScope,
-      };
-    }
     return result;
   } catch (err) {
     return {
@@ -715,83 +709,7 @@ async function stageAttachmentContents(
 // There is deliberately no per-attachment delete: the graph is append-only
 // from the app (2026-08-03(3)) — staged records outlive the composer chip,
 // the queued message, and the send that carried them. Files leave the graph
-// only when the user deletes them on disk. (setShared below MOVES a record
-// between scopes; it never destroys one.)
-
-/** Move one attachment folder between `local/` and `shared/` — the Context
- *  tab's share checkbox. Idempotent: already-there reports `moved: false`. */
-export async function setContextGraphAttachmentShared(
-  workspaceRoot: string,
-  attachmentId: string,
-  shared: boolean,
-): Promise<ContextGraphSetSharedResult> {
-  if (!ID_OK.test(attachmentId)) {
-    return { ok: false, moved: false, error: "invalid attachment id" };
-  }
-  const root = graphRoot(workspaceRoot);
-  const fromScope = shared ? CONTEXT_GRAPH_LOCAL : CONTEXT_GRAPH_SHARED;
-  const toScope = shared ? CONTEXT_GRAPH_SHARED : CONTEXT_GRAPH_LOCAL;
-  const source = path.join(root, fromScope, ATTACHMENTS_DIR, attachmentId);
-  const target = path.join(root, toScope, ATTACHMENTS_DIR, attachmentId);
-  try {
-    const scaffold = await ensureContextGraph(workspaceRoot);
-    if (!scaffold.ok) return { ok: false, moved: false, error: scaffold.error };
-    await assertContextDirectory(source, workspaceRoot);
-    await assertContextDirectory(target, workspaceRoot);
-    if (
-      !(await isConfined(source, workspaceRoot)) ||
-      !(await isConfined(target, workspaceRoot))
-    ) {
-      return { ok: false, moved: false, error: "path escapes workspace" };
-    }
-    const sourceStat = await fs.lstat(source).catch(() => null);
-    const targetStat = await fs.lstat(target).catch(() => null);
-    const prepareMove = async (current: string) => {
-      const entries = await fs.readdir(current, { recursive: true });
-      const policy = currentCloudFilePolicy();
-      for (const entry of entries) policy?.assertPath(path.relative(workspaceRoot, path.join(current, entry)), true);
-      if (shared) await exposeSharedContext(
-        workspaceRoot,
-        [target, ...entries.map((entry) => path.join(target, entry))].map(
-          (absolute) =>
-            path.relative(workspaceRoot, absolute).split(path.sep).join("/"),
-        ),
-      );
-    };
-    if (targetStat) {
-      // Already in the requested scope. A source ALSO existing means two
-      // divergent copies — refuse rather than clobber either.
-      if (sourceStat) {
-        return {
-          ok: false,
-          moved: false,
-          error: "attachment exists in both scopes — resolve on disk",
-        };
-      }
-      if (shared || currentCloudFilePolicy()) await prepareMove(target);
-      return { ok: true, moved: false };
-    }
-    if (!sourceStat || !sourceStat.isDirectory()) {
-      return { ok: false, moved: false, error: "attachment not found" };
-    }
-    if (shared || currentCloudFilePolicy()) await prepareMove(source);
-    currentCloudFilePolicy()?.assertPath(path.relative(workspaceRoot, source), true);
-    currentCloudFilePolicy()?.assertPath(path.relative(workspaceRoot, target), true);
-    const policy = currentCloudFilePolicy();
-    if (policy) policy.renameDirectory(path.relative(workspaceRoot, source), path.relative(workspaceRoot, target));
-    else {
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.rename(source, target);
-    }
-    return { ok: true, moved: true };
-  } catch (err) {
-    return {
-      ok: false,
-      moved: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
+// only when the user deletes them on disk.
 
 /** True when the graph holds anything worth preserving (any file beyond its
  *  own scaffolding). Gates the archive force-add so an empty skeleton doesn't
@@ -807,9 +725,10 @@ export async function contextGraphHasContent(
   );
 }
 
-/** Archive only the graph-owned scopes. `.context/` also holds unrelated
- * scratch and tool state that must not be swept into recovery snapshots. Old
- * archives and workspaces can still contain the complete legacy graph root. */
+/** Archive attachments, agents' working files and earlier builds' scopes.
+ * Private tool state at the top of `.context/` is excluded: a snapshot cannot
+ * restore its permissions. Old archives and workspaces can still contain the
+ * complete legacy graph root. */
 export async function contextGraphArchivePaths(
   workspaceRoot: string,
 ): Promise<string[]> {
@@ -820,8 +739,12 @@ export async function contextGraphArchivePaths(
   ) {
     candidates.push(
       `${CONTEXT_GRAPH_DIR}/.gitignore`,
-      `${CONTEXT_GRAPH_DIR}/local`,
-      `${CONTEXT_GRAPH_DIR}/shared`,
+      `${CONTEXT_GRAPH_DIR}/${ATTACHMENTS_DIR}`,
+      `${CONTEXT_GRAPH_DIR}/${CONTEXT_GRAPH_LOCAL}`,
+      `${CONTEXT_GRAPH_DIR}/${CONTEXT_GRAPH_SHARED}`,
+      ...(await workspaceContextEntries(workspaceRoot, Infinity)).map(
+        (entry) => `${CONTEXT_GRAPH_DIR}/${entry.name}`,
+      ),
     );
   }
   if (await contextRootHasContent(workspaceRoot, LEGACY_CONTEXT_DIR))
@@ -838,6 +761,51 @@ export async function contextGraphArchivePaths(
   return present.filter((relative): relative is string => relative !== null);
 }
 
+function isContentFile(entry: Dirent): boolean {
+  return (
+    entry.isFile() && entry.name !== ".gitignore" && entry.name !== ".DS_Store"
+  );
+}
+
+async function attachmentsHaveContent(
+  workspaceRoot: string,
+  attachmentsAbs: string,
+): Promise<boolean> {
+  try {
+    await assertContextDirectory(attachmentsAbs, workspaceRoot);
+  } catch {
+    return false;
+  }
+  for (const idEntry of await readDirBounded(attachmentsAbs, Infinity)) {
+    if (!idEntry.isDirectory() || !ID_OK.test(idEntry.name)) continue;
+    for (const fileEntry of await readDirBounded(
+      path.join(attachmentsAbs, idEntry.name),
+      Infinity,
+    )) {
+      if (isContentFile(fileEntry)) return true;
+    }
+  }
+  return false;
+}
+
+async function docsHaveContent(
+  absDir: string,
+  skip: (name: string) => boolean = () => false,
+): Promise<boolean> {
+  // Archive eligibility must inspect beyond the UI's depth/entry limits:
+  // an omitted ignored file would disappear when the worktree is removed.
+  for (const entry of await readDirBounded(absDir, Infinity)) {
+    if (skip(entry.name)) continue;
+    if (entry.isDirectory()) {
+      if (await docsHaveContent(path.join(absDir, entry.name)))
+        return true;
+    } else if (isContentFile(entry)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function contextRootHasContent(
   workspaceRoot: string,
   directory: string,
@@ -848,6 +816,20 @@ async function contextRootHasContent(
     const rootStat = await fs.lstat(root).catch(() => null);
     if (!rootStat?.isDirectory()) return false;
 
+    if (directory === CONTEXT_GRAPH_DIR) {
+      if (
+        await attachmentsHaveContent(
+          workspaceRoot,
+          path.join(root, ATTACHMENTS_DIR),
+        )
+      )
+        return true;
+      for (const entry of await workspaceContextEntries(workspaceRoot, Infinity)) {
+        if (!entry.directory) return true;
+        if (await docsHaveContent(path.join(root, entry.name))) return true;
+      }
+    }
+
     const scopeHasContent = async (
       scope: ContextGraphScope,
     ): Promise<boolean> => {
@@ -857,62 +839,16 @@ async function contextRootHasContent(
       } catch {
         return false;
       }
-      const attachmentsAbs = path.join(scopeAbs, ATTACHMENTS_DIR);
-      const safeAttachments = await assertContextDirectory(
-        attachmentsAbs,
-        workspaceRoot,
-      ).then(
-        () => true,
-        () => false,
+      return (
+        (await attachmentsHaveContent(
+          workspaceRoot,
+          path.join(scopeAbs, ATTACHMENTS_DIR),
+        )) ||
+        (await docsHaveContent(
+          scopeAbs,
+          scopeReservedEntry(directory, scope),
+        ))
       );
-      for (const idEntry of safeAttachments
-        ? await readDirBounded(attachmentsAbs)
-        : []) {
-        if (!idEntry.isDirectory() || !ID_OK.test(idEntry.name)) continue;
-        for (const fileEntry of await readDirBounded(
-          path.join(attachmentsAbs, idEntry.name),
-        )) {
-          if (
-            fileEntry.isFile() &&
-            fileEntry.name !== ".gitignore" &&
-            fileEntry.name !== ".DS_Store"
-          ) {
-            return true;
-          }
-        }
-      }
-
-      const docsHaveContent = async (
-        absDir: string,
-        depth: number,
-      ): Promise<boolean> => {
-        if (depth > MAX_DEPTH) return false;
-        for (const entry of await readDirBounded(absDir)) {
-          if (
-            directory === CONTEXT_GRAPH_DIR &&
-            scope === CONTEXT_GRAPH_LOCAL &&
-            depth === 0 &&
-            entry.name === CONTEXT_MIGRATION_STATE
-          )
-            continue;
-          if (entry.name === ATTACHMENTS_DIR && depth === 0) continue;
-          if (entry.isDirectory()) {
-            if (
-              await docsHaveContent(path.join(absDir, entry.name), depth + 1)
-            ) {
-              return true;
-            }
-          } else if (
-            entry.isFile() &&
-            entry.name !== ".gitignore" &&
-            entry.name !== ".DS_Store"
-          ) {
-            return true;
-          }
-        }
-        return false;
-      };
-      return docsHaveContent(scopeAbs, 0);
     };
 
     return (

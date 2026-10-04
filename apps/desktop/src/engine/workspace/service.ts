@@ -250,11 +250,7 @@ import {
   externalizeLegacyMessageImages,
   payloadNeedsLegacyImageMigration,
 } from "../files/legacy-attachment-migration";
-import {
-  ensureContextGraph,
-  listContextGraph,
-  setContextGraphAttachmentShared,
-} from "../files/context-graph";
+import { ensureContextGraph, listContextGraph } from "../files/context-graph";
 import {
   opSettingsMigrateLegacy,
   opSettingsPreviewWrite,
@@ -648,10 +644,9 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.unstage",
   "design.save",
   "design.commit",
-  // Create/move files under `.context/` — archive's snapshot force-adds
-  // that tree, so a mid-flight scaffold or share-toggle must drain first.
+  // Creates files under `.context/` — archive's snapshot force-adds that
+  // tree, so a mid-flight scaffold must drain first.
   "context.graph.scaffold",
-  "context.graph.setShared",
   // Rewrites the checkout AND the index (sparse patterns + skip-worktree
   // bits), so it belongs on the barrier for the same reason checkoutBranch
   // does: archive/delete drains in-flight work before snapshotting or removing
@@ -2415,7 +2410,7 @@ export class WorkspaceService {
     // Qualified VM authority is server-owned, independent of the paired-host
     // relay flag. Never infer it from a path, client params, or remote alone.
     const cloudFileOperation = ["file.tree", "file.ignored", "file.read", "file.write",
-      "context.graph.list", "context.graph.scaffold", "context.graph.setShared",
+      "context.graph.list", "context.graph.scaffold",
       "workspace.listWorkingDirectories", "workspace.setWorkingDirectories"].includes(op) || isCodeReviewOperation(op) || isGitReviewOperation(op);
     let cloudFiles: QualifiedCloudFilePolicy | undefined;
     if (cloudFileOperation && opts.cloudFileActor) {
@@ -2440,7 +2435,7 @@ export class WorkspaceService {
         privateRoots: [zerosStateRoot(), os.homedir(), "/srv/zeros/state", "/srv/zeros/home", "/opt/zeros", "/etc/zeros"],
         ownerRoots: currentOwners,
       });
-      cloudFiles.assertAuthorized(["file.write", "context.graph.scaffold", "context.graph.setShared", "workspace.setWorkingDirectories"].includes(op) || (isCodeReviewOperation(op) && op !== "codeReview.list") || (isGitReviewOperation(op) && op !== "git.reviewHunks"));
+      cloudFiles.assertAuthorized(["file.write", "context.graph.scaffold", "workspace.setWorkingDirectories"].includes(op) || (isCodeReviewOperation(op) && op !== "codeReview.list") || (isGitReviewOperation(op) && op !== "git.reviewHunks"));
     }
     if (this.options.primaryDesignWorkspace && params.workspaceId === LOCAL_MAIN_WORKSPACE_ID &&
         ["workspace.archive", "workspace.delete", "workspace.restore", "workspace.recover", "workspace.deleteSnapshot"].includes(op)) {
@@ -4315,30 +4310,14 @@ export class WorkspaceService {
         cloudFiles.assertAuthorized(true);
         return result;
       }
-      case "context.graph.setShared": {
-        if (remote && !cloudFiles) {
-          throw new GitError({
-            code: "REMOTE_RESTRICTED",
-            message:
-              "Context attachments can only be shared from the desktop app.",
-          });
-        }
-        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        if (cloudFiles) await assertNoDesignPathWrites(LOCAL_MAIN_WORKSPACE_ID, [".context", ".context-graph"], "moving context", cwd);
-        const share = () => setContextGraphAttachmentShared(
-          cwd,
-          reqStr(params, "attachmentId"),
-          params.shared === true,
-        );
-        const result = await (cloudFiles ? withCloudFilePolicy(cloudFiles, share) : share());
-        if (!result.ok) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: result.error ?? "Couldn't move the attachment",
-          });
-        }
-        return result;
-      }
+      // Retired with the shared scope. The name stays so an older client
+      // gets an explicit answer instead of an unknown-operation failure.
+      case "context.graph.setShared":
+        throw new GitError({
+          code: "VALIDATION_FAILED",
+          message:
+            "Sharing context attachments is no longer supported. Commit files from .context yourself if you want them in Git.",
+        });
 
       // ── Read: git ─────────────────────────────────────────
       case "git.status": {

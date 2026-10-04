@@ -159,6 +159,10 @@ export const sessionToolInventoryEntrySchema = z
     ]),
     detail: z.string().max(1000).optional(),
     canAuthenticate: z.boolean().optional(),
+    /** `local`: declared in the provider's own configuration files on this
+     *  machine (for example a repository `.mcp.json`), not in the Zeros
+     *  registry or an account. Composer Tools lists these in a Local folder. */
+    source: z.enum(["local"]).optional(),
   })
   .strict();
 export type SessionToolInventoryEntry = z.infer<

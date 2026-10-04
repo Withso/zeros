@@ -18,8 +18,8 @@
 //
 // Codex plugins are scanned too, and they are not an edge case: a connector
 // installed from the ChatGPT/Codex desktop MCP-extensions sidebar ships its
-// servers in the PLUGIN's own `.mcp.json`, never in `config.toml`. Since agents
-// no longer load native MCP themselves (adapters/shared/mcp-passthrough.ts),
+// servers in the PLUGIN's own `.mcp.json`, never in `config.toml`. Codex chats
+// don't load unimported native MCP (adapters/shared/mcp-passthrough.ts), so
 // leaving those out would strand exactly the servers a user is most likely to
 // have and least likely to be able to find.
 // ──────────────────────────────────────────────────────────
@@ -191,6 +191,26 @@ function scanSource(baseDir: string, def: SourceDef): DiscoveredMcpSource {
     out.warning = `could not parse: ${err instanceof Error ? err.message : String(err)}`;
   }
   return out;
+}
+
+/** Cursor's own MCP declarations for one workspace: the user configuration at
+ *  `<home>/.cursor/mcp.json` and the workspace's `.cursor/mcp.json`, deduped by
+ *  name. Read-only and best-effort, like every scan here. */
+export function scanCursorMcpServers(
+  home: string,
+  workspace: string,
+): DiscoveredMcpServer[] {
+  const byName = new Map<string, DiscoveredMcpServer>();
+  const scans = [
+    scanSource(home, SOURCES.find((def) => def.source === "cursor")!),
+    scanSource(
+      workspace,
+      REPO_SOURCES.find((def) => def.source === "cursor-project")!,
+    ),
+  ];
+  for (const server of scans.flatMap((scan) => scan.servers))
+    byName.set(server.name, server);
+  return [...byName.values()];
 }
 
 /** Scan every known native MCP config and return what each declares — the

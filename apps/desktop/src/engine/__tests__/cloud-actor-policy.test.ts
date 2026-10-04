@@ -56,11 +56,15 @@ describe("actor roles at the worker message boundary",()=>{
         await f.send({ type: "WORKSPACE_REQUEST", op, params: { workspaceId: "local-main" } });
         expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledOnce();
       }
-      for (const op of ["file.write", "context.graph.scaffold", "context.graph.setShared", "workspace.setWorkingDirectories"]) {
+      for (const op of ["file.write", "context.graph.scaffold", "workspace.setWorkingDirectories"]) {
         f.engine.handleWorkspaceMessage.mockClear();
         await f.send({ type: "WORKSPACE_REQUEST", op, params: { workspaceId: "local-main", path: ".env" } });
         expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledTimes(["developer", "manager", "owner"].includes(role) ? 1 : 0);
       }
+      // The retired share action is no longer an admitted edit for any role.
+      f.engine.handleWorkspaceMessage.mockClear();
+      await f.send({ type: "WORKSPACE_REQUEST", op: "context.graph.setShared", params: { workspaceId: "local-main" } });
+      expect(f.engine.handleWorkspaceMessage).not.toHaveBeenCalled();
       f.engine.handleWorkspaceMessage.mockClear(); f.client.authorized = () => false;
       await f.send({ type: "WORKSPACE_REQUEST", op: "file.ignored", params: { workspaceId: "local-main" } });
       expect(f.engine.handleWorkspaceMessage).not.toHaveBeenCalled();

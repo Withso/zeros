@@ -96,7 +96,8 @@ describe("qualified cloud checkout file policy", () => {
     expect(await service.handle("context.graph.scaffold", target, options())).toEqual({ ok: true, created: true });
     put(".context/local/attachments/item/note.txt");
     expect(await service.handle("context.graph.list", target, options())).toMatchObject({ items: [expect.objectContaining({ name: "note.txt" })] });
-    expect(await service.handle("context.graph.setShared", { ...target, attachmentId: "item", shared: true }, options())).toMatchObject({ ok: true, moved: true });
+    await expect(service.handle("context.graph.setShared", { ...target, attachmentId: "item", shared: true }, options())).rejects.toThrow(/no longer supported/);
+    expect(fs.existsSync(path.join(repo, ".context/local/attachments/item/note.txt"))).toBe(true);
     expect(await service.handle("workspace.listWorkingDirectories", target, options())).toMatchObject({ supported: true });
     put("docs/readme.md", "dirty");
     await service.handle("workspace.setWorkingDirectories", { ...target, directories: ["src"] }, options());
@@ -104,7 +105,7 @@ describe("qualified cloud checkout file policy", () => {
     const { workspaces } = await service.handle("workspace.list") as { workspaces: Workspace[] };
     insertWorkspace(workspaces.find(row => row.id === LOCAL_MAIN_WORKSPACE_ID)!);
     updateWorkspace(LOCAL_MAIN_WORKSPACE_ID, { archivedAt: Date.now() });
-    for (const op of ["context.graph.scaffold", "context.graph.setShared", "workspace.setWorkingDirectories"]) {
+    for (const op of ["context.graph.scaffold", "workspace.setWorkingDirectories"]) {
       expect(service.lifecycleMutationWorkspaceId(op, target)).toBe(LOCAL_MAIN_WORKSPACE_ID);
       await expect(service.handle(op, { ...target, directories: [] }, options())).rejects.toThrow();
     }
@@ -124,21 +125,16 @@ describe("qualified cloud checkout file policy", () => {
     for (const op of ["file.ignored", "context.graph.list", "context.graph.scaffold", "context.graph.setShared", "workspace.listWorkingDirectories", "workspace.setWorkingDirectories"])
       expect(service.isRemoteAllowed(op)).toBe(false);
   });
-  it("excludes private/nested context content and refuses sharing it in either direction", async () => {
+  it("excludes private/nested context content in earlier scopes and task folders", async () => {
     await service.handle("context.graph.scaffold", target, options());
     put(".context/local/docs/.zeros/note.md");
     put(".context/local/docs/nested/.git/config"); put(".context/local/docs/nested/note.md");
+    put(".context/task/.zeros/note.md");
+    put(".context/task/nested/.git/config"); put(".context/task/nested/note.md");
     put(".zeros/note.md");
     fs.symlinkSync(path.join(repo, ".zeros/note.md"), path.join(repo, ".context/local/alias.md"));
+    fs.symlinkSync(path.join(repo, ".zeros/note.md"), path.join(repo, ".context/alias.md"));
     expect(await service.handle("context.graph.list", target, options())).toMatchObject({ items: [] });
-    for (const shared of [true, false]) {
-      const scope = shared ? "local" : "shared";
-      put(`.context/${scope}/attachments/item/nested/.git/config`);
-      put(`.context/${scope}/attachments/item/nested/note.md`);
-      await expect(service.handle("context.graph.setShared", { ...target, attachmentId: "item", shared }, options())).rejects.toThrow();
-      expect(fs.existsSync(path.join(repo, `.context/${scope}/attachments/item/nested/note.md`))).toBe(true);
-      fs.rmSync(path.join(repo, `.context/${scope}/attachments/item`), { recursive: true });
-    }
   });
   it("keeps a file alias to Design territory read-only", async () => {
     await service.handle("design.initialize", target);
@@ -169,10 +165,10 @@ describe("qualified cloud checkout file policy", () => {
   });
   it("publishes a cloud context scaffold to the tenant filesystem identity", async () => {
     const publish = vi.spyOn(ownership, "publishCloudWorkspacePath");
-    await service.handle("context.graph.scaffold", target, options());
+    expect(await service.handle("context.graph.scaffold", target, options())).toEqual({ ok: true, created: true });
     const published = publish.mock.calls.map(([file]) => file);
-    for (const rel of [".context/local/attachments", ".context/shared/attachments", ".context/.gitignore", ".context/local/.gitignore"])
-      expect(published).toContain(path.join(repo, rel));
+    expect(published).toContain(path.join(repo, ".context/attachments"));
+    expect(fs.readdirSync(path.join(repo, ".context"))).toEqual(["attachments"]);
   });
   it("rechecks actor authority after sparse-checkout preflight before changing the index", async () => {
     const runGit = gitExec.runGit;

@@ -41,9 +41,9 @@ export const WORKSPACE_PREAMBLE = `You are working inside Zeros, a Mac app for r
 Your work should take place in the {WORKSPACE_DIR} directory (unless otherwise directed).
 The target branch for this workspace is {TARGET_BRANCH}. Use it for comparisons such as \`git diff {TARGET_BRANCH}...\` and as the base when creating a pull request.
 Do not rename the current branch unless the user explicitly tells you to do so.
-Use .context/local/artifacts/<task>/ for generated images, temporary HTML, reports and other temporary task deliverables. Use .context/local/scratch/<task>/ for logs, investigations and intermediate files. Choose a distinct task folder, create it only when needed, and preserve other agents' files. Keep project source and required build outputs in their normal project locations.
-Read relevant existing .context material before repeating investigations. Agents in this workspace can collaborate through these files; pass exact paths when delegating. The local scope is private to this workspace, not automatically shared with other workspaces or Git. Use .context/shared only when sharing in Git is intended.
-Link deliverables with workspace-relative Markdown links, including their full .context path, so the user can open them in Zeros. When a tool can save generated media, save it under the artifact folder and reference the actual saved file; do not invent a file path for an inline-only or remote result.`;
+Each workspace has a .context folder for working files shared by the agents in this workspace: plans, notes, logs, screenshots and handoffs. Put a task's files in .context/<task>/, creating the folder only when needed, and leave other agents' files alone. Project source and required build outputs stay in their normal project locations. The folder belongs to this workspace, so don't commit its contents unless the user asks.
+Read relevant .context files before repeating an investigation, and pass exact paths when delegating. If you learn something future work on this repository will need, suggest adding it to the repository's docs instead of leaving it only in .context.
+Link files you create with workspace-relative Markdown links, including their full .context path, so the user can open them in Zeros. When a tool can save generated media, save it under .context/<task>/ and link the saved file; never invent a path for an inline-only or remote result.`;
 
 /** [SYS-INSTR: additional-dirs-notice]
  *  Awareness line for `/add-dir`. The agent is GRANTED filesystem access to

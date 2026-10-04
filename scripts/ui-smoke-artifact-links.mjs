@@ -10,7 +10,7 @@ export async function runArtifactLinksSmoke({ page, check }) {
   await file.focus();
   await page.keyboard.press("Enter");
   await expect(fixture.locator("[data-opened-artifact]")).toHaveText(
-    "file:.context/local/artifacts/demo/Generated image.png",
+    "file:.context/demo/Generated image.png",
   );
   const appearance = await file.evaluate((el) => {
     const style = getComputedStyle(el);
@@ -81,7 +81,7 @@ export async function runArtifactLinksSmoke({ page, check }) {
     .getByRole("button", { name: "Generated image.png", exact: true })
     .click();
   await expect(fixture.locator("[data-opened-artifact]")).toHaveText(
-    "file:.context/local/artifacts/demo/Generated image.png",
+    "file:.context/demo/Generated image.png",
   );
   await fixture
     .getByRole("button", { name: "MCP Create report", exact: true })
@@ -99,6 +99,6 @@ export async function runArtifactLinksSmoke({ page, check }) {
   );
   await card.getByRole("button", { name: "Report", exact: true }).click();
   await expect(fixture.locator("[data-opened-artifact]")).toHaveText(
-    "file:.context/local/artifacts/demo/report.html",
+    "file:.context/demo/report.html",
   );
 }

@@ -114,7 +114,10 @@ import {
 } from "../../types";
 import { claudeMcpStdio } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
-import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
+import {
+  isNativeCodeActor,
+  nativeMcpPassthroughEnabled,
+} from "../shared/mcp-passthrough";
 import { advertiseAgentCapabilities } from "../../capabilities";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
 import { FirstTokenLatency } from "../shared/first-token-latency";
@@ -167,6 +170,28 @@ const CLAUDE_IDLE_TIMEOUT_ENV_VAR = "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES";
 const CLAUDE_AUTO_MEMORY_ENV_VAR = "ZEROS_CLAUDE_AUTO_MEMORY";
 const DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES = 30;
 const ALLOWED_CLAUDE_IDLE_TIMEOUT_MINUTES = new Set([30, 60, 120, 300]);
+
+type ClaudeSettingSources = NonNullable<Options["settingSources"]>;
+
+/** Ordinary local Code chats load Claude's own configuration as the CLI
+ *  would: CLAUDE.md and AGENTS.md, rules, skills, hooks, plugins and MCP
+ *  servers declared in local settings. A cloud execution's sources follow its
+ *  lease (cloud-tools.ts applies the same value); restricted actors keep only
+ *  their admitted configuration. */
+function claudeSettingSources(boundary?: PreparedBoundary): ClaudeSettingSources {
+  const cloud = cloudProviderExecution(boundary);
+  if (cloud) return cloud.lease.customization ? ["user"] : [];
+  return isNativeCodeActor(boundary) ? ["user", "project", "local"] : [];
+}
+
+/** Claude reads AGENTS.md only where no CLAUDE.md exists. Load both. Claude
+ *  honors this option in user, flag and policy settings, never in a
+ *  repository's own settings files, so Zeros passes it as a flag setting. */
+const CLAUDE_INSTRUCTION_FILES: NonNullable<Settings["pluginConfigs"]> = {
+  "agents-md@builtin": {
+    options: { instructionFiles: "claude-md-and-agents-md" },
+  },
+};
 
 type ClaudeOAuthTokenProvider = (options: {
   readonly forceRefresh: true;
@@ -858,7 +883,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         configurationProvenanceFor("claude", {
           protectedTerritory: Boolean(opts.territory),
           suppressUnsafeSources: false,
-          nativeMcpRequiresImport: true,
+          nativeSettingSources: claudeSettingSources(opts.executionBoundary),
         }),
     },
   } satisfies AgentCapabilityPorts;
@@ -889,6 +914,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         readConnectorMembership: state.queryConnectorMembership,
         includeInventory,
         plugins: this.queryPlugins.get(query),
+        markLocalServers: claudeSettingSources(
+          state.executionBoundary,
+        ).includes("project"),
       });
       if (this.sessions.get(sessionId) !== state || state.query !== query)
         throw new Error("The chat connection changed. Refresh to retry.");
@@ -4220,6 +4248,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // ride the flag-settings layer so updateConfig can mutate them mid-session
     // via applyFlagSettings — buildFlagSettings is the shared derivation.
     const settings = this.buildFlagSettings(state);
+    const settingSources = claudeSettingSources(state.executionBoundary);
     // "max" is NOT a Settings.effortLevel — it's only a top-level Options.effort
     // tier. So the top-level `effort` is set ONLY for "max"; every other tier
     // (low/medium/high/xhigh/ultracode⇒xhigh) is carried inside `settings`.
@@ -4436,11 +4465,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // final full message.
       includePartialMessages: true,
       forwardSubagentText: true,
-      // Local MCP declarations are opt-in through Customize → Import. The
-      // SDK couples disk settings and MCP sources, so do not load those layers.
-      // claude.ai connectors have their own subscription discovery path; strict
-      // mode would disable that too, and is reserved for restricted actors.
-      settingSources: [],
+      // Code chats load Claude's own settings layers, including MCP servers
+      // declared in local settings. Strict MCP keeps only admitted servers for
+      // restricted actors and the host opt-out; it would also disable claude.ai
+      // connector discovery, so ordinary chats never use it.
+      settingSources,
       ...(nativeMcpPassthroughEnabled(undefined, state.executionBoundary)
         ? {}
         : { strictMcpConfig: true }),
@@ -4463,7 +4492,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // applyFlagSettings). Only the "max" tier — which Settings.effortLevel
       // can't express — stays top-level.
       ...(maxEffort ? { effort: maxEffort } : {}),
-      settings: { ...settings, showThinkingSummaries: true },
+      settings: {
+        ...settings,
+        showThinkingSummaries: true,
+        ...(settingSources.includes("project")
+          ? { pluginConfigs: CLAUDE_INSTRUCTION_FILES }
+          : {}),
+      },
       ...(Number.isFinite(maxTurns) && maxTurns > 0 ? { maxTurns } : {}),
       // ALWAYS attach the `claude_code` preset. The Agent SDK ships NO system
       // prompt by default, and the preset is what injects the dynamic `<env>`

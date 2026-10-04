@@ -59,6 +59,24 @@ describe("composer tool group visibility", () => {
     },
   );
 
+  it("counts Local MCP servers in the MCPs total", () => {
+    const html = render({
+      state: "ready",
+      entries: [{ id: "zeros", name: "zeros", status: "connected" }],
+      groups: [
+        {
+          kind: "mcp",
+          state: "ready",
+          entries: [
+            { id: "zeros", name: "zeros", status: "connected" },
+            { id: "repo", name: "repo", status: "connected", source: "local" },
+          ],
+        },
+      ],
+    });
+    expect(html).toContain('aria-label="MCPs, 2"');
+  });
+
   it("retains loading feedback while discovery is pending", () => {
     const html = render({ state: "pending", entries: [] });
     expect(html).not.toContain("data-tool-group=");

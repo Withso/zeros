@@ -10,7 +10,6 @@ import {
   transferContextAttachment,
   resetAttachmentTransfersForTests,
 } from "../attachment-transfer";
-import { setContextGraphAttachmentShared } from "../context-graph";
 
 let root: string;
 beforeEach(async () => {
@@ -30,13 +29,25 @@ const args = () => ({
 });
 
 describe("attachment chunk transfer", () => {
-  it("uses the saved filename when the display name differs from a legacy record", async () => {
-    const diskPath = ".context/shared/attachments/att-1/legacy.jsonl";
-    await fs.mkdir(path.dirname(path.join(root, diskPath)), { recursive: true });
-    await fs.writeFile(path.join(root, diskPath), "expected");
-    expect((await transferContextAttachment(root, { ...args(), base64: "", resolve: true, diskPath })).relativePath).toBe(diskPath);
+  it.each([".context/attachments", ".context/shared/attachments"])(
+    "uses the saved filename when the display name differs from a %s record",
+    async (folder) => {
+      const diskPath = `${folder}/att-1/legacy.jsonl`;
+      await fs.mkdir(path.dirname(path.join(root, diskPath)), { recursive: true });
+      await fs.writeFile(path.join(root, diskPath), "expected");
+      expect((await transferContextAttachment(root, { ...args(), base64: "", resolve: true, diskPath })).relativePath).toBe(diskPath);
+    },
+  );
+  it("resolves a pre-graph chat-folder path by the record's id, not the chat folder", async () => {
+    const staged = await transferContextAttachment(root, { ...args(), uploadId: undefined, base64: Buffer.from("record").toString("base64") });
+    expect(staged.relativePath).toBe(".context/attachments/att-1/events.jsonl");
+    const chatPath = ".context/attachments/chat-9/events.jsonl";
+    await fs.mkdir(path.dirname(path.join(root, chatPath)), { recursive: true });
+    await fs.writeFile(path.join(root, chatPath), "chat-era bytes");
+    const resolved = await transferContextAttachment(root, { ...args(), base64: "", resolve: true, diskPath: chatPath });
+    expect(resolved.relativePath).toBe(staged.relativePath);
   });
-  it.each([".context/shared", ".context-graph/local", ".context-graph/shared"])(
+  it.each([".context/local", ".context/shared", ".context-graph/local", ".context-graph/shared"])(
     "honors a saved %s path when another scope contains the same id",
     async (scope) => {
       const local = await transferContextAttachment(root, { ...args(), uploadId: undefined, base64: Buffer.from("other").toString("base64") });
@@ -102,7 +113,13 @@ describe("attachment chunk transfer", () => {
     });
     expect(final.pending).toBeUndefined();
     expect(await fs.readFile(final.absolutePath, "utf8")).toBe("abcdef");
-    await setContextGraphAttachmentShared(root, "att-1", true);
+    expect(final.relativePath).toBe(".context/attachments/att-1/events.jsonl");
+    // A record a retired share action moved still resolves by its id.
+    await fs.mkdir(path.join(root, ".context/shared/attachments"), { recursive: true });
+    await fs.rename(
+      path.join(root, ".context/attachments/att-1"),
+      path.join(root, ".context/shared/attachments/att-1"),
+    );
     const resolved = await transferContextAttachment(root, {
       ...args(),
       base64: "",

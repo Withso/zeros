@@ -169,13 +169,15 @@ The backend retains read-only provider inventory with source ownership:
   plugin component paths within their package. Features confined to a native
   app are not advertised as callable.
 
-Local MCP requires **Customize → MCP → Import**, including local HTTP
-configuration and MCP contributed by local plugin packages. Supported account
-connections load automatically under provider policy: Codex retains account
-plugins and `codex_apps`; Claude retains subscription-connector discovery.
-Claude/Cursor SDK settings-source switches also exclude coupled local
-settings/rules/plugins. Cursor dashboard connections require Cursor-hosted
-execution. The composer **Tools** popover reports actual session connections;
+Claude and Cursor Code chats load their own local settings natively,
+including CLAUDE.md, AGENTS.md, rules, skills, plugins and locally declared MCP;
+Tools lists that MCP in a **Local** folder. Codex runs local MCP only after
+**Customize → MCP → Import**, including local HTTP configuration and MCP
+contributed by local plugin packages. Supported account connections load
+automatically under provider policy: Codex retains account plugins and
+`codex_apps`; Claude retains subscription-connector discovery. Cursor dashboard
+connections require Cursor-hosted execution. The composer **Tools** popover
+reports actual session connections;
 Cursor's SDK cannot verify MCP status or launch MCP OAuth, and Claude exposes
 status but no SDK OAuth launcher. Codex offers its supported browser action.
 See [extension-discovery.md](extension-discovery.md) for source selection,

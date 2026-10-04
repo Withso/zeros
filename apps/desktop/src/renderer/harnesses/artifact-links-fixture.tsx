@@ -8,14 +8,14 @@ import { EventStripe } from "../features/agent/renderers/event-stripe";
 import type { RendererContext } from "../features/agent/renderers/types";
 import { isLoopbackUrl } from "../shell/workbench/tabs/localhost-url";
 
-const path = ".context/local/artifacts/demo/Generated image.png";
+const path = ".context/demo/Generated image.png";
 const text: AgentTextMessage = {
   kind: "text",
   id: "artifact-prose",
   role: "agent",
   createdAt: 1,
   updatedAt: 2,
-  text: `[Generated image](<${path}>) and [Report](.context/local/artifacts/demo/report.html).\n\n[Documentation](https://example.com/docs) · [Local preview](http://localhost:5173) · [\`external.ts\`](https://example.com/external)\n\nKeep \`@scope/package\` and \`const value = true\` as code.\n\n[${"LongPath".repeat(35)}.png](.context/local/artifacts/demo/long.png)\n\n\`\`\`ts\nconst message = "unchanged code";\n\`\`\``,
+  text: `[Generated image](<${path}>) and [Report](.context/demo/report.html).\n\n[Documentation](https://example.com/docs) · [Local preview](http://localhost:5173) · [\`external.ts\`](https://example.com/external)\n\nKeep \`@scope/package\` and \`const value = true\` as code.\n\n[${"LongPath".repeat(35)}.png](.context/demo/long.png)\n\n\`\`\`ts\nconst message = "unchanged code";\n\`\`\``,
 };
 const tools: AgentToolMessage[] = [
   {
@@ -52,7 +52,7 @@ const tools: AgentToolMessage[] = [
         type: "content",
         content: {
           type: "resource_link",
-          uri: ".context/local/artifacts/demo/report.html",
+          uri: ".context/demo/report.html",
           name: "Report",
           description: "Generated report",
         },

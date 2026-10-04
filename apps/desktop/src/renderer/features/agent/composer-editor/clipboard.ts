@@ -3,6 +3,7 @@ import { Slice } from "@tiptap/pm/model";
 import type { EditorView } from "@tiptap/pm/view";
 import { parse as parseHtml, type DefaultTreeAdapterTypes } from "parse5";
 import {
+  contextAttachmentPath,
   safeAttachmentFilename,
   validateAttachmentFile,
   ATTACHMENT_CLIPBOARD_MIME,
@@ -75,7 +76,10 @@ function sourcePath(a: ComposerAttachment, owner: Owner): string {
   const source = a.owner ?? owner;
   const relative =
     a.diskPath ??
-    `.context/local/attachments/${a.contextAttachmentId ?? a.id}/${safeAttachmentFilename(a.name)}`;
+    contextAttachmentPath(
+      a.contextAttachmentId ?? a.id,
+      safeAttachmentFilename(a.name),
+    );
   const absolute =
     a.absolutePath ?? `${source.cwd.replace(/\/$/, "")}/${relative}`;
   return source.runtime.startsWith("local")
