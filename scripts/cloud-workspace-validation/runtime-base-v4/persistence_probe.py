@@ -58,6 +58,13 @@ def probe(app, phase):
     aliases = [app.path(name).stat() for name in ("/srv/zeros/files/repos", "/srv/zeros/repos")]
     assert (aliases[0].st_dev, aliases[0].st_ino) == (aliases[1].st_dev, aliases[1].st_ino)
     assert len(record["mounts"]) == 4
+    table = app.mounts.table()
+    filesystems = []
+    for entry in record["mounts"]:
+        mounts = [mount for mount in table if mount["target"] == str(app.path(entry["target"]))]
+        assert len(mounts) == 1
+        filesystems.append(mounts[0]["filesystem"])
+    assert len(set(filesystems)) == 1
     residue = json.loads(app.read("/run/zeros/persistence-residue.json", 4096, 0o600))
     assert residue["schema"] == "zeros.persistence-residue/v1" and residue["bootId"] == record["bootId"]
     counts = [residue[key] for key in ("directories", "files", "symlinks", "other")]
@@ -85,6 +92,7 @@ def probe(app, phase):
         app.atomic("/etc/machine-id", b"", 0o444)
     os.sync()
     return {"schema": "zeros.persistence-probe/v1", "phase": phase, "bindCount": 4, "repoAliases": True,
+            "bindFilesystem": filesystems[0],
             "hostReady": True, "residueCleared": entries > 0, "residueEntries": entries, "residueMounts": mounts,
             "machineIdPresent": phase != "seed", "templateIdentityCleared": phase == "seed",
             "renames": 2 if phase in ("rename", "verify") else 0,
@@ -101,7 +109,9 @@ def main(phase):
         spec.loader.exec_module(bootstrap)
         app = bootstrap.Bootstrap()
         app.base()
-        print(json.dumps(probe(app, phase), separators=(",", ":")), flush=True)
+        result = probe(app, phase)
+        assert result["bindFilesystem"] == "ext4"  # Boat must have retired ascii-lazyfs.
+        print(json.dumps(result, separators=(",", ":")), flush=True)
         code = 0
     except BaseException as error:
         if app is not None:

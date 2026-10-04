@@ -33,6 +33,83 @@ class PersistenceTests(unittest.TestCase):
     def record(self):
         return self.root / "run/zeros/persistence.json"
 
+    def hydration_table(self, filesystem="fuse", nested=False):
+        target = self.root / "home/user"
+        if nested:
+            target /= ".zeros-persist"
+        return b.parse_mountinfo(f"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 0:55 / {target} rw - {filesystem} ascii-lazyfs rw\n".encode())
+
+    def test_hydration_waits_for_marker_and_no_fuse_before_opening_home_or_binding(self):
+        lazy = self.root / "var/lib/ascii-lazy"
+        lazy.mkdir(parents=True)
+        self.mounts.links.clear()
+        self.mounts.calls.clear()
+        clock, opened = [0], []
+        original_directory = self.app.data_directory
+
+        def directory(parent, name, *args, **kwargs):
+            if name == "user":
+                opened.append(clock[0])
+            return original_directory(parent, name, *args, **kwargs)
+
+        def sleep(seconds):
+            self.assertEqual(self.mounts.calls, [])
+            self.assertEqual(opened, [])  # Do not pin an fd into the lazy home.
+            clock[0] += seconds
+            (lazy / "hydration-done").touch()
+
+        errors = io.StringIO()
+        with mock.patch.object(self.mounts, "table", create=True, side_effect=lambda:
+                               self.hydration_table("fuse.ascii-lazyfs" if clock[0] < 3 else "ext4", nested=True)), \
+             mock.patch.object(b.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(b.time, "sleep", side_effect=sleep), \
+             mock.patch.object(self.app, "data_directory", side_effect=directory), contextlib.redirect_stderr(errors):
+            code, output = self.cli(["boot"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(opened, [3])
+        self.assertEqual(len(self.mounts.calls), 4)
+        self.assertEqual(json.loads(errors.getvalue().splitlines()[-1]),
+                         {"event": "persistence_hydration_ready", "waitedSeconds": 3})
+        self.app.require_persistence()
+
+    def test_hydration_timeout_is_closed_and_publishes_no_readiness_or_mounts(self):
+        lazy = self.root / "var/lib/ascii-lazy"
+        lazy.mkdir(parents=True)
+        for marker, filesystem in ((False, "ext4"), (True, "fuse")):
+            with self.subTest(marker=marker, filesystem=filesystem):
+                if marker:
+                    (lazy / "hydration-done").touch()
+                self.mounts.links.clear()
+                self.mounts.calls.clear()
+                clock = [0]
+                def sleep(seconds):
+                    self.assertGreater(seconds, 0)
+                    self.assertLessEqual(seconds, 1)
+                    clock[0] += seconds
+                errors = io.StringIO()
+                with mock.patch.object(self.mounts, "table", create=True, return_value=self.hydration_table(filesystem)), \
+                     mock.patch.object(b.time, "monotonic", side_effect=lambda: clock[0]), \
+                     mock.patch.object(b.time, "sleep", side_effect=sleep), contextlib.redirect_stderr(errors):
+                    code, output = self.cli(["boot"])
+                self.assertEqual(code, 124)
+                diagnostic = json.loads(output)
+                self.assertEqual(diagnostic["failedChecks"], ["timeout"])
+                self.assertTrue(diagnostic["timedOut"])
+                self.assertFalse(self.record.exists())
+                self.assertEqual(self.mounts.calls, [])
+                self.assertGreater(clock[0], 0)
+                self.assertLessEqual(clock[0], 600)
+                self.assertEqual(json.loads(errors.getvalue().splitlines()[-1]),
+                                 {"event": "persistence_hydration_timeout", "waitedSeconds": clock[0]})
+
+    def test_fresh_builder_without_lazy_state_does_not_wait(self):
+        self.mounts.links.clear()
+        self.mounts.calls.clear()
+        with mock.patch.object(b.time, "sleep") as sleep:
+            self.app.boot()
+        sleep.assert_not_called()
+        self.assertEqual(len(self.mounts.calls), 4)
+
     def test_every_boot_verifies_and_records_all_binds_without_overwriting_data(self):
         self.assertTrue(self.record.exists(), "boot did not attest persistent mounts")
         self.assertEqual(self.backing.stat().st_mode & 0o777, 0o755)
@@ -334,8 +411,55 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(record["failedChecks"], ["base_compatibility"])
         self.assertNotIn(str(self.root), output.getvalue() + private.read_text())
 
+    def test_live_operator_probe_requires_ext4_for_every_phase(self):
+        spec = importlib.util.spec_from_file_location("persistence_probe", fixtures.HERE.parent / "persistence_probe.py")
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        bootstrap_spec = types.SimpleNamespace(loader=types.SimpleNamespace(exec_module=lambda _module: None))
+        for phase in ("cold", "seed", "rename", "verify"):
+            for filesystem in ("ext4", "fuse", "xfs"):
+                with self.subTest(phase=phase, filesystem=filesystem):
+                    output = io.StringIO()
+                    proof = {"bindFilesystem": filesystem}
+                    with mock.patch.object(probe.importlib.util, "spec_from_file_location", return_value=bootstrap_spec), \
+                         mock.patch.object(probe.importlib.util, "module_from_spec", return_value=b), \
+                         mock.patch.object(b, "Bootstrap", return_value=self.app), \
+                         mock.patch.object(probe, "probe", return_value=proof), \
+                         contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                        probe.main(phase)
+                    lines = [json.loads(line) for line in output.getvalue().splitlines()]
+                    passed = filesystem == "ext4"
+                    self.assertEqual(stopped.exception.code, 0 if passed else 1)
+                    self.assertEqual(len(lines), 2 if passed else 1)
+                    self.assertEqual(lines[-1]["ok"], passed)
+                    self.assertEqual(lines[-1]["failedChecks"], [] if passed else ["base_compatibility"])
+
 
 class KernelBindTests(unittest.TestCase):
+    def test_fuse_binds_are_refused_even_with_matching_device_and_inode(self):
+        for filesystem in ("fuse", "fuse.ascii-lazyfs", "fuseblk"):
+            with self.subTest(filesystem=filesystem):
+                source, target = "/home/user/.zeros-persist/files", "/srv/zeros/files"
+                raw = f"1 0 0:55 / /home/user rw - {filesystem} ascii-lazyfs rw\n2 1 0:55 /.zeros-persist/files {target} rw - {filesystem} ascii-lazyfs rw\n".encode()
+                mounts = b.BindMounts()
+                info = types.SimpleNamespace(st_dev=os.makedev(0, 55), st_ino=123)
+                with mock.patch.object(mounts, "table", return_value=b.parse_mountinfo(raw)), \
+                     mock.patch.object(b.os, "fstat", return_value=info):
+                    with self.assertRaises(b.Failure):
+                        mounts.verify(source, target, 10, 11)
+
+    def test_open_fuse_or_detached_source_is_rejected_before_mount_command(self):
+        mounts = b.BindMounts()
+        for mount_id in (1, 99):
+            with self.subTest(mount_id=mount_id):
+                table = b.parse_mountinfo(b"1 0 0:55 / /home/user rw - fuse ascii-lazyfs rw\n")
+                with mock.patch.object(mounts, "table", return_value=table), \
+                     mock.patch.object(mounts, "mount_id", return_value=mount_id), \
+                     mock.patch.object(b.subprocess, "run") as run:
+                    with self.assertRaises(b.Failure):
+                        mounts.bind(10, 11)
+                    run.assert_not_called()
+
     def test_mount_table_and_inode_identity_both_have_to_match(self):
         source, target = "/home/user/.zeros-persist/files", "/srv/zeros/files"
         raw = f"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 {source} {target} rw - ext4 /dev/root rw\n".encode()

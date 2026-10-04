@@ -113,28 +113,29 @@ describe("runtime-base-v4 profile", () => {
     const d = deps(), renamed = phase === "rename" || phase === "verify";
     const proof = { schema: "zeros.persistence-probe/v1", phase, bindCount: 4, repoAliases: true,
       machineIdPresent: phase !== "seed", templateIdentityCleared: phase === "seed", renames: renamed ? 2 : 0, oldPathsAbsent: renamed,
-      hostReady: true, residueCleared: renamed, residueEntries: renamed ? 9 : 0, residueMounts: renamed ? 3 : 0,
+      hostReady: true, bindFilesystem: "ext4", residueCleared: renamed, residueEntries: renamed ? 9 : 0, residueMounts: renamed ? 3 : 0,
       ignoredPrivateField: "private-canary" };
     d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 0, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
       schema: "zeros.diagnostic/v1", component: "base", stage: "resume", ok: true, exitCode: 0, timedOut: false, failedChecks: [],
     }) } });
     const result = await probePersistence(d, "bx_fixture", phase);
     expect(result).toMatchObject({ phase, bindCount: 4, repoAliases: true, renames: renamed ? 2 : 0,
-      hostReady: true, residueCleared: renamed, residueEntries: renamed ? 9 : 0, residueMounts: renamed ? 3 : 0 });
+      hostReady: true, bindFilesystem: "ext4", residueCleared: renamed, residueEntries: renamed ? 9 : 0, residueMounts: renamed ? 3 : 0 });
     expect(JSON.stringify(result)).not.toContain("private-canary");
     expect(d.boat).toHaveBeenCalledWith("POST", "/sandboxes/bx_fixture/commands", expect.objectContaining({
-      body: expect.objectContaining({ command: expect.stringContaining(`main("${phase}")`) }),
+      body: expect.objectContaining({ command: expect.stringContaining(`main("${phase}")`), timeoutSeconds: 600 }),
     }));
   });
 
   it.each([{ bindCount: 3 }, { repoAliases: false }, { machineIdPresent: false }, { renames: 1 }, { oldPathsAbsent: false },
-    { hostReady: false }, { residueCleared: false }, { residueEntries: 0 }, { residueEntries: -1 }, { residueEntries: 1.5 },
+    { hostReady: false }, { bindFilesystem: "fuse" }, { bindFilesystem: "xfs" }, { bindFilesystem: undefined },
+    { residueCleared: false }, { residueEntries: 0 }, { residueEntries: -1 }, { residueEntries: 1.5 },
     { residueMounts: 0 }, { residueMounts: 5 }])(
     "rejects incomplete final persistence evidence %j", async corrupt => {
       const d = deps();
       const proof = { schema: "zeros.persistence-probe/v1", phase: "verify", bindCount: 4, repoAliases: true,
         machineIdPresent: true, templateIdentityCleared: false, renames: 2, oldPathsAbsent: true,
-        hostReady: true, residueCleared: true, residueEntries: 9, residueMounts: 3, ...corrupt };
+        hostReady: true, bindFilesystem: "ext4", residueCleared: true, residueEntries: 9, residueMounts: 3, ...corrupt };
       d.boat = vi.fn().mockResolvedValue({ status: 200, body: { exitCode: 0, stdout: JSON.stringify(proof) + "\n" + JSON.stringify({
         schema: "zeros.diagnostic/v1", component: "base", stage: "resume", ok: true, exitCode: 0, timedOut: false, failedChecks: [],
       }) } });
@@ -319,6 +320,9 @@ describe("runtime-base-v4 profile", () => {
       .map(request => request.body.command as string)
       .flatMap(command => command.includes("def sanitize()") ? ["sanitize"] : command.includes("def verify()") ? ["verify"] : []);
     expect(preparation).toEqual(["sanitize", "verify", "sanitize", "verify"]);
+    const verification = f.requests.filter(request => request.route.endsWith("/commands") && request.body.command.includes("def verify()"));
+    expect(verification).toHaveLength(3);
+    expect(verification.every(request => request.body.timeoutSeconds === 600)).toBe(true);
     expect(result.cleanup.sandboxes).toEqual(["bx_v4test2", "bx_v4test1"]);
     expect(result.compatibilityRawB64).toBe(compatibilityRawB64);
     expect(result.baseCompatibilityId).toBe(baseCompatibilityId);

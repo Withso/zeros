@@ -256,17 +256,17 @@ sys.exit(code)`;
 export async function probePersistence(deps: KitDeps, id: string, phase: "cold" | "seed" | "rename" | "verify") {
   requireBase(["cold", "seed", "rename", "verify"].includes(phase), "validate_input", "input_schema");
   const program = fs.readFileSync(path.join(deps.repoRoot, "scripts/cloud-workspace-validation/runtime-base-v4/persistence_probe.py"), "utf8");
-  const result = parseProbe(await remote(deps, id, pythonProbe(`${program}\nmain(${JSON.stringify(phase)})`, "resume"), 120), "resume");
+  const result = parseProbe(await remote(deps, id, pythonProbe(`${program}\nmain(${JSON.stringify(phase)})`, "resume"), 600), "resume");
   const renamed = phase === "rename" || phase === "verify";
   requireBase(result?.schema === "zeros.persistence-probe/v1" && result.phase === phase && result.bindCount === 4 &&
     result.repoAliases === true && result.machineIdPresent === (phase !== "seed") && result.templateIdentityCleared === (phase === "seed") &&
-    result.renames === (renamed ? 2 : 0) && result.oldPathsAbsent === renamed && result.hostReady === true &&
+    result.renames === (renamed ? 2 : 0) && result.oldPathsAbsent === renamed && result.hostReady === true && result.bindFilesystem === "ext4" &&
     Number.isSafeInteger(result.residueEntries) && result.residueEntries >= 0 &&
     Number.isSafeInteger(result.residueMounts) && result.residueMounts >= 0 && result.residueMounts <= 4 &&
     result.residueCleared === (result.residueEntries > 0) && (result.residueMounts > 0) === result.residueCleared &&
     (!renamed || result.residueCleared === true), "resume", "base_compatibility");
   return { phase, bindCount: 4, repoAliases: true, machineIdPresent: phase !== "seed", templateIdentityCleared: phase === "seed",
-    hostReady: true, residueCleared: result.residueCleared as boolean,
+    hostReady: true, bindFilesystem: "ext4", residueCleared: result.residueCleared as boolean,
     residueEntries: result.residueEntries as number, residueMounts: result.residueMounts as number,
     renames: renamed ? 2 : 0, oldPathsAbsent: renamed };
 }

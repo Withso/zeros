@@ -169,6 +169,7 @@ class FakeMounts:
         b.require(not any(path == str(target) or path.startswith(str(target) + "/") for path in self.links), "base_compatibility")
 
     mount_id = b.BindMounts.mount_id
+    table = b.BindMounts.table
 
     def bind(self, source_fd, target_fd):
         source = os.readlink(f"/proc/self/fd/{source_fd}")
@@ -408,7 +409,7 @@ class BootstrapTests(unittest.TestCase):
         (scope / "host/memory.max").write_text("max\n")
         with mock.patch.object(b, "CGROUP", str(scope)), \
              mock.patch.object(b.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=units())), \
-             mock.patch.object(b.time, "sleep"), mock.patch.object(b.time, "monotonic", side_effect=[0, 0, 30]), \
+             mock.patch.object(b.time, "sleep"), mock.patch.object(b.time, "monotonic", side_effect=[0, 0, 600]), \
              mock.patch.object(self.app, "read", wraps=self.app.read) as read:
             with self.assertRaises(b.Failure) as caught:
                 self.app.wait_ready()
@@ -416,6 +417,16 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 124)
             self.assertTrue(caught.exception.timed_out)
             read.assert_not_called()
+
+    def test_readiness_allows_boot_hydration_beyond_normal_host_start_grace(self):
+        self.app.host = b.SystemHost()
+        with mock.patch.object(b.subprocess, "run", side_effect=[
+                mock.Mock(returncode=0, stdout=units(boot="activating", boot_sub="start", host="inactive", host_sub="dead")),
+                mock.Mock(returncode=0, stdout=units())]) as command, \
+             mock.patch.object(self.app.host, "cgroup_ready", return_value=True), \
+             mock.patch.object(b.time, "sleep"), mock.patch.object(b.time, "monotonic", side_effect=[0, 0, 35]):
+            self.app.wait_ready()
+        self.assertEqual(command.call_count, 2)
 
     def test_base_readiness_rejects_failed_boot_and_malformed_facade(self):
         self.app.host = b.SystemHost()

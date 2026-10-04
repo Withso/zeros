@@ -110,6 +110,22 @@ requires a separate compatibility fix before reuse with this Boat behavior.
 
 ## Mutable storage on every boot and restore
 
+Boat can restore `/home/user` through the temporary `ascii-lazyfs` FUSE mount
+while hydrating the real disk in the background. Boot must not pin that mount
+in its persistence binds. When `/var/lib/ascii-lazy` exists, boot waits for both
+its regular `hydration-done` marker and absence of any FUSE mount at or below
+`/home/user`, before opening that directory. It polls once per second for at
+most 480 seconds. Fresh builders without this provider state proceed immediately.
+The pre-bind check also rejects opened FUSE or detached sources, and every
+subsequent verification explicitly rejects FUSE-backed binds.
+
+The value-free `persistence_hydration_wait`, `persistence_hydration_ready` and
+`persistence_hydration_timeout` journal events report only elapsed seconds.
+A stalled restore exits with the closed `timeout` check (124, `timedOut: true`)
+and publishes no readiness. Unit-readiness probes allow 540 seconds; cold-base
+and live-persistence commands allow 600 seconds, within the existing Boat exec
+cap. This leaves time for host startup and verification after hydration.
+
 The base creates `/home/user/.zeros-persist` as root:root 0755 and binds the
 following directories before publishing readiness. These are fresh v4 bases;
 the backing tree is authoritative, and this layout does not migrate v3 data.
@@ -324,6 +340,8 @@ the journal refuses more than ten):
    intact, and recheck all binds and the repo alias. `live.persistence` records
    `hostReady`, `residueCleared`, `residueEntries` and `residueMounts` for each
    phase; both resume phases must confirm residue was actually cleared.
+   Every persistence probe (cold clone and both resumes) also requires
+   `bindFilesystem: "ext4"` for all four binds; a remaining FUSE mount fails.
    Each resume must produce a new
    boot/session with the same runtime. Measure a full re-hash after the first resume, dropping the
    page cache when the provider permits it (`coldCache` records the result).

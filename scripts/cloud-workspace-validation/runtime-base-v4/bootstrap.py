@@ -39,6 +39,8 @@ MAX_MANIFEST = 64 * 1024**2
 MAX_ENTRIES = 250_000
 MAX_PATH_DEPTH = 128
 MAX_LINK_COMPONENTS = 4096
+# Leave readiness/verification time inside Boat exec's 600-second budget.
+HYDRATION_TIMEOUT = 480
 RESERVE = 512 * 1024**2
 CHUNK = 1024 * 1024
 HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -499,7 +501,8 @@ def parse_mountinfo(raw):
         require(len(fields) >= 10 and "-" in fields[6:], "base_compatibility")
         separator = fields.index("-", 6)
         require(len(fields) == separator + 4 and re.fullmatch(r"[0-9]+:[0-9]+", fields[2]), "base_compatibility")
-        result.append({"device": fields[2], "root": pathname(fields[3]), "target": pathname(fields[4]),
+        require(fields[0].isdigit(), "base_compatibility")
+        result.append({"id": int(fields[0]), "device": fields[2], "root": pathname(fields[3]), "target": pathname(fields[4]),
                        "options": fields[5].split(","), "filesystem": fields[separator + 1], "source": fields[separator + 2]})
     require(result, "base_compatibility")
     return result
@@ -532,6 +535,11 @@ class BindMounts:
     def bind(self, source_fd, target_fd):
         # Pass pinned directory descriptors, never re-resolve a user-owned
         # ancestor in mount(8). The destination is reopened after mounting.
+        # Refuse a FUSE or detached fd even if hydration's marker/table changed
+        # between the readiness gate and opening the source directory.
+        source_mount = self.mount_id(source_fd)
+        matches = [entry for entry in self.table() if entry["id"] == source_mount]
+        require(len(matches) == 1 and not matches[0]["filesystem"].startswith("fuse"), "base_compatibility")
         try:
             result = subprocess.run(["/usr/bin/mount", "--bind", "--no-canonicalize",
                                      f"/proc/self/fd/{source_fd}", f"/proc/self/fd/{target_fd}"],
@@ -556,6 +564,7 @@ class BindMounts:
         require(len(parents) == len(mounts) == 1 and
                 not any(entry["target"].startswith(target + "/") for entry in table), "base_compatibility")
         parent, mounted = parents[0], mounts[0]
+        require(not parent["filesystem"].startswith("fuse") and not mounted["filesystem"].startswith("fuse"), "base_compatibility")
         expected_root = os.path.normpath(os.path.join(parent["root"], os.path.relpath(source, parent["target"])))
         src, dst = os.fstat(source_fd), os.fstat(target_fd)
         require((src.st_dev, src.st_ino) == (dst.st_dev, dst.st_ino) and
@@ -861,8 +870,41 @@ class Bootstrap:
             print(json.dumps({"event": "persistence_residue_cleared", **counts}, separators=(",", ":")), file=sys.stderr, flush=True)
         return counts
 
+    def wait_hydration(self):
+        lazy = self.path("/var/lib/ascii-lazy")
+        try:
+            info = lazy.lstat()
+        except FileNotFoundError:
+            return  # Fresh stock builders do not have lazy-restore state.
+        require(stat.S_ISDIR(info.st_mode), "base_compatibility")
+        home = str(self.path("/home/user"))
+        started = time.monotonic()
+        print(json.dumps({"event": "persistence_hydration_wait", "waitedSeconds": 0}), file=sys.stderr, flush=True)
+        while True:
+            try:
+                marker = (lazy / "hydration-done").lstat()
+            except FileNotFoundError:
+                done = False
+            else:
+                require(stat.S_ISREG(marker.st_mode), "base_compatibility")
+                done = True
+            fuse = any(entry["filesystem"].startswith("fuse") and
+                       (entry["target"] == home or entry["target"].startswith(home + "/")) for entry in self.mounts.table())
+            waited = time.monotonic() - started
+            if done and not fuse:
+                print(json.dumps({"event": "persistence_hydration_ready", "waitedSeconds": int(waited)}), file=sys.stderr, flush=True)
+                return
+            if waited >= HYDRATION_TIMEOUT:
+                print(json.dumps({"event": "persistence_hydration_timeout", "waitedSeconds": int(waited)}), file=sys.stderr, flush=True)
+                raise Failure("timeout", code=124, timed_out=True)
+            time.sleep(min(1, HYDRATION_TIMEOUT - waited))
+
     def persistence(self, create=False):
         try:
+            if create:
+                # Do this before opening /home/user: fds and binds pin the
+                # transient ascii-lazyfs even after Boat replaces that mount.
+                self.wait_hydration()
             boot_id = self.boot_id()
             text_match(boot_id, UUID, "base_compatibility")
             result = {"schema": "zeros.persistence/v1", "bootId": boot_id, "machineIdSha256": self.machine_id(create), "mounts": []}
@@ -1482,7 +1524,7 @@ class SystemHost:
             raise Failure("apparmor") from None
         require(result.returncode == 0, "apparmor")
 
-    def wait_ready(self, timeout=30):
+    def wait_ready(self, timeout=HYDRATION_TIMEOUT + 60):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
