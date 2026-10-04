@@ -2,6 +2,15 @@ import { RuntimeDescriptorSchema, type RuntimeDescriptor } from "./runtime-contr
 import type { Tx } from "../db.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { HttpError } from "../authz.js";
+
+export class CloudRuntimeError extends HttpError {
+  constructor(code: "cloud_runtime_revoked" | "cloud_runtime_unavailable") {
+    super(409, code, code === "cloud_runtime_revoked"
+      ? "This workspace runtime was revoked. Request an explicit runtime upgrade to continue."
+      : "The pinned cloud runtime is unavailable. Request an explicit runtime upgrade to continue.");
+  }
+}
 
 export type CloudRuntimePin = {
   runtimeId: string;
@@ -98,15 +107,15 @@ async function lockQualifications(tx: Tx, runtimeId: string, compatibilityId: st
 
 /** The caller owns the organization admission transaction. Lock revocable
  * registry rows through generation INSERT; no provider/artifact I/O occurs here. */
-export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualificationMode) {
+export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualificationMode, baseImageId?: string) {
   const base = (await tx.query<BaseRow>(`SELECT base.* FROM cloud_runtime_base_images base
-    WHERE base.revoked_at IS NULL
-    ORDER BY base.approved_at DESC, base.base_image_id LIMIT 1 FOR SHARE OF base`)).rows[0];
+    WHERE base.revoked_at IS NULL AND ($1::text IS NULL OR base.base_image_id=$1)
+    ORDER BY base.approved_at DESC, base.base_image_id LIMIT 1 FOR SHARE OF base`, [baseImageId ?? null])).rows[0];
   if (!base) return null;
   if (!(await tx.query(`SELECT 1 FROM cloud_runtime_base_contracts contract
     WHERE contract.base_compatibility_id=$1 AND contract.revoked_at IS NULL FOR SHARE OF contract`,
   [base.base_compatibility_id])).rowCount) return null;
-  const bundle = (await tx.query<BundleRow>(`SELECT bundle.* FROM cloud_runtime_channel_releases release
+  const bundle = (await tx.query<BundleRow & { release_order: string }>(`SELECT bundle.*, release.release_order FROM cloud_runtime_channel_releases release
     JOIN cloud_runtime_bundles bundle ON bundle.runtime_id=release.runtime_id
     WHERE release.channel='alpha' AND release.confirmed_at IS NOT NULL AND release.revoked_at IS NULL
       AND bundle.revoked_at IS NULL AND bundle.engine_protocol_version=$1
@@ -118,7 +127,7 @@ export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualification
     ORDER BY release.release_order DESC LIMIT 1 FOR SHARE OF release, bundle`,
   [CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, REQUIRED_KINDS, base.base_compatibility_id, mode])).rows[0];
   if (!bundle || !await lockQualifications(tx, bundle.runtime_id, base.base_compatibility_id, mode)) return null;
-  return { ...artifact(bundle), base: { id: base.base_image_id, compatibilityId: base.base_compatibility_id,
+  return { ...artifact(bundle), releaseOrder: BigInt(bundle.release_order), base: { id: base.base_image_id, compatibilityId: base.base_compatibility_id,
     imageRef: base.image_ref, sourceCommit: base.source_commit, architecture: base.architecture, storageMiB: Number(base.storage_mib) },
   pin: { runtimeId: bundle.runtime_id, manifestSha256: bundle.manifest_sha256,
     baseImageId: base.base_image_id, baseCompatibilityId: base.base_compatibility_id,
@@ -138,4 +147,18 @@ export async function loadPinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode:
     pin.engineProtocolVersion, CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION])).rows[0];
   if (!bundle || pin.profile !== "zeros-cloud-worker-v4" || !await lockQualifications(tx, pin.runtimeId, pin.baseCompatibilityId, mode)) return null;
   return artifact(bundle);
+}
+
+/** Lifecycle admission keeps the saved pin and exposes an actionable refusal.
+ * A successful read holds the same revocation locks as fresh setup admission. */
+export async function requirePinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode: CloudRuntimeQualificationMode) {
+  const runtime = await loadPinnedCloudRuntime(tx, pin, mode);
+  if (runtime) return runtime;
+  const revoked = await tx.query(`SELECT 1 FROM cloud_runtime_bundles WHERE runtime_id=$1 AND revoked_at IS NOT NULL
+    UNION ALL SELECT 1 FROM cloud_runtime_base_images WHERE base_image_id=$2 AND revoked_at IS NOT NULL
+    UNION ALL SELECT 1 FROM cloud_runtime_base_contracts WHERE base_compatibility_id=$3 AND revoked_at IS NOT NULL
+    UNION ALL SELECT 1 FROM cloud_runtime_qualifications WHERE runtime_id=$1 AND base_compatibility_id=$3
+      AND credential_kind=ANY($4::text[]) AND revoked_at IS NOT NULL`,
+  [pin.runtimeId, pin.baseImageId, pin.baseCompatibilityId, REQUIRED_KINDS]);
+  throw new CloudRuntimeError(revoked.rowCount ? "cloud_runtime_revoked" : "cloud_runtime_unavailable");
 }

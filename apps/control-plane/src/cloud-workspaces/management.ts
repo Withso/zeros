@@ -3404,6 +3404,10 @@ export class DatabaseCloudWorkspaceManagementService {
                 created_at, updated_at
          FROM cloud_workspace_lifecycle_intents
          WHERE workspace_id = $1 AND org_id = $2
+           -- Runtime no-op receipts use the idempotency ledger but never stop a VM.
+           AND NOT (operation = 'stop' AND NOT affects_workspace
+             AND generation_transition_id IS NULL AND state = 'succeeded'
+             AND idempotency_key LIKE 'runtime-upgrade:%')
          ORDER BY created_at DESC, id DESC LIMIT 20`,
         [input.workspaceId, input.organizationId],
       );

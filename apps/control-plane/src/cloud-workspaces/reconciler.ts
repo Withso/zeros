@@ -5,6 +5,8 @@ import type pg from "pg";
 import { audit } from "../audit.js";
 import { withSystemTx } from "../db.js";
 import { deferCloudRecoveryResourceBlock } from "./automatic-recovery.js";
+import { requireGenerationRuntime } from "./generation-pins.js";
+import { CloudRuntimeError } from "./runtime-selection.js";
 import {
   assertProviderResourceIdentity,
   assertProviderAbsence,
@@ -223,6 +225,7 @@ function safeFailure(error: unknown): {
   retryable: boolean;
   retryAfterMs?: number | undefined;
 } {
+  if (error instanceof CloudRuntimeError) return { code: error.code, message: error.message, retryable: false };
   if (error instanceof CloudProviderError) {
     return {
       code: error.code.slice(0, 128),
@@ -519,6 +522,11 @@ export class CloudWorkspaceReconciler {
     if (!intent) return false;
     let provider: CloudWorkspaceProvider;
     try {
+      if (intent.operation === "create" || intent.operation === "wake") {
+        await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
+          workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+        }));
+      }
       provider = this.providerResolver
         ? (
             await this.providerResolver.resolve({

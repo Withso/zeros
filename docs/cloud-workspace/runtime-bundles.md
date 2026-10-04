@@ -445,6 +445,61 @@ after the head advances or new v4 creation is disabled. Existing selected legacy
 organization images and delegated provider connections retain their current path;
 Cloud Computer v2 template forks belong to Phase C.
 
+### V4 lifecycle pins and explicit runtime upgrades
+
+Wake/resume and setup retry reuse the saved generation. Rebuild, rollback and
+automatic or explicit checkpoint recovery copy all six runtime fields unchanged
+through `copyGenerationPins` in `generation-pins.ts`, together with the saved v4
+provisioning profile. Neither a later channel head/base nor the new-workspace
+profile switch changes that selection. C5 extends this same transaction boundary
+for `cloud_workspace_computer_sources`; its extension test lives in
+`runtime-lifecycle.integration.test.ts`. Legacy generations keep their existing
+profile selection and NULL runtime fields.
+
+Wake, recovery, provider provisioning and each setup attempt revalidate the saved
+runtime. Revoked bundle/base/contract or required qualification returns
+`cloud_runtime_revoked`, with an explicit-upgrade instruction. Other missing or
+incompatible runtime authority returns `cloud_runtime_unavailable`. Revocation
+during setup also prevents readiness and records the actionable error. No path
+falls back to another runtime. Boat restore is not a reboot: resume still requires
+fresh setup admission and its execution fence; it cannot rely on boot services
+having rerun or publish by renaming a pre-existing directory.
+
+Engineering staff (`developer` or `platform_owner`, including a current account
+role check) can request `POST
+/v1/organizations/:organization/cloud-workspaces/:workspace/runtime-upgrade`
+with the strict body `{expectedGeneration, operationId}`. Normal workspace
+management, funding and quota authorization also applies. This internal HTTP
+contract is exported by `@zeros/protocol`; there is no renderer upgrade UI here.
+
+The endpoint selects the latest eligible runtime under
+`CLOUD_RUNTIME_QUALIFICATION_MODE` for the source's exact saved base. It keeps the
+base image, resource profile and settings snapshot, refuses a downgrade, and
+uses the existing drain/checkpoint/replacement-generation/restore flow. Running
+agents or other active work return 409 `cloud_workspace_busy`; a stale generation
+returns 409 `cloud_generation_changed`. A stopped, archived or failed source
+requires its current lossless final checkpoint before an upgrade can wake it.
+For v4 runtime upgrades, a completed `before_rebuild` capture also qualifies if
+content and record revisions are current and no later source registration or
+setup attestation exists. This permits a new upgrade after a failed candidate
+rolls back to a revoked source; ordinary recovery retains its existing rules.
+The ordinary `/generations` rebuild endpoint preserves v4 runtime pins.
+
+An accepted replacement returns 202 with `{operationId, sourceGeneration,
+generation, runtimeId, transitionId, unchanged:false}`. Replaying the same
+operation returns that accepted selection with 200 and `Idempotency-Replayed:
+true`, even if the generation or channel head advanced. Reusing the operation
+with a different request returns 409 `idempotency_key_reused`. Already-current
+requests return 200 with `unchanged:true`, the source generation and a null
+transition ID; their durable receipt never dispatches provider work. Failed
+candidates retain the source generation's pin; waking that source still checks
+revocation. If no later eligible runtime exists on the saved base, the endpoint
+fails closed instead of changing bases.
+
+The [Alpha lifecycle acceptance runbook](runtime-lifecycle-acceptance.md) covers
+the disposable API exercise, cleanup and the remaining manual acceptance cases.
+Local PostgreSQL and mocked tests do not constitute live Alpha acceptance.
+
 V4 setup checks the base status and compatibility ID, requiring `idle` or
 `waiting_for_runtime`. The existing pinned SSH transport delivers a maximum
 64 KiB encoded installer input containing the descriptor, a 15-minute artifact

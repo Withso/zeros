@@ -779,6 +779,7 @@ describe("repository layout contracts", () => {
       "release-worker-qualification.md",
       "root-coordinator-threat-model.md",
       "runtime-bundles.md",
+      "runtime-lifecycle-acceptance.md",
       "security.md",
     ];
 
