@@ -32,13 +32,15 @@ export type CloudBackgroundOperation={kind:"retain"|"sync";conversationId:string
   {kind:"resume";conversationId:string;admission:CloudAgentExecutionAdmission}|{kind:"read";conversationId:string};
 const token=z.string().min(16).max(16_384).regex(/^[A-Za-z0-9._~+\/-]+={0,2}$/);
 export const CloudAgentProviderSchema=z.enum(["claude","cursor","codex"]);
+export const CloudWorkerRuntimeProfileSchema=z.enum(["zeros-cloud-worker-v3","zeros-cloud-worker-v4"]);
+export type CloudWorkerRuntimeProfile=z.infer<typeof CloudWorkerRuntimeProfileSchema>;
 /** Public diagnostic only: independent of the strict v1 native qualification
  * and private authority responses, so older workers/control planes remain
  * compatible. Absence or an unknown version never implies Browser readiness. */
 const cloudBrowserScope = {
   version: z.literal(1),
   provider: CloudAgentProviderSchema,
-  runtimeProfile: z.literal("zeros-cloud-worker-v3"),
+  runtimeProfile: CloudWorkerRuntimeProfileSchema,
   credentialKind: z.enum(["claude-api-key", "claude-setup-token", "cursor-api-key", "codex-api-key", "codex-chatgpt", "unknown"]),
 };
 export const CloudBrowserCapabilitySchema = z.discriminatedUnion("state", [
