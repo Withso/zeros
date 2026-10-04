@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createPublicKey, randomUUID, verify } from "node:crypto";
+import { cloudReplicaDeviceProofMessage } from "../../src/engine/cloud-replica-device";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -46,6 +47,25 @@ function memoryStore(): CloudReplicaDeviceSecretStore {
 }
 
 describe("main cloud access device authority", () => {
+  it("binds native services to their own action, exact port, TTL and request identity", async () => {
+    const accountId = randomUUID(), deviceId = randomUUID(), store = memoryStore();
+    const pending = store.ensure(accountId);
+    store.bindRegistration({ accountUserId: accountId, deviceId, keyVersion: 1, publicKey: pending.active.publicKey });
+    const authority = new CloudAccessDeviceAuthority({ capabilityEnabled: () => true, store,
+      getSession: async () => ({ provider: "workos", accountId, accessToken: "current-token", sub: "fixture",
+        email: "fixture@example.test", name: null, clientKind: "desktop" }), register: vi.fn() });
+    const payload = { organizationId: randomUUID(), workspaceId: randomUUID(), kind: "tunnel" as const,
+      remotePort: 4173, expiresInMinutes: 15, idempotencyKey: "desktop:tunnel:fixture" };
+    const proof = await authority.signRuntimeService("current-token", payload);
+    const key = createPublicKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: pending.active.publicKey } });
+    const matches = (action: string, value = payload) => verify(null, cloudReplicaDeviceProofMessage({
+      ...proof, accountUserId: accountId, action, payload: value,
+    }), key, Buffer.from(proof.signature, "base64url"));
+    expect(matches("runtime-service.issue")).toBe(true);
+    expect(matches("engine.connect")).toBe(false);
+    expect(matches("runtime-service.issue", { ...payload, remotePort: 4174 })).toBe(false);
+    await expect(authority.signRuntimeService("retired-token", payload)).rejects.toThrow(/session changed/);
+  });
   it("signs admission only for the exact current account access token",async()=>{
     const accountId=randomUUID(),deviceId=randomUUID(),store=memoryStore(),target={organizationId:randomUUID(),workspaceId:randomUUID()};
     const pending=store.ensure(accountId);store.bindRegistration({accountUserId:accountId,deviceId,keyVersion:1,publicKey:pending.active.publicKey});

@@ -3,14 +3,18 @@ import type { ContentBlock, QuestionRequest, RequestPermissionRequest, ResourceL
 /** Literal filtering is for provider-authored content. Routing identities and
  * protocol discriminants must never pass through a generic object scrubber. */
 export class CloudCustomizationRedactor {
-  private readonly secrets: string[];
-  private readonly pattern: RegExp | null;
+  private secrets: string[] = [];
+  private pattern: RegExp | null = null;
   private readonly pending = new Map<string, string>();
   private readonly notifications = new Map<string, SessionNotification>();
   private readonly tools = new Map<string, ToolCallUpdate>();
   constructor(values: string[]) {
-    this.secrets = [...new Set(values.filter(Boolean).flatMap(value => [value, JSON.stringify(value).slice(1, -1),
-      ...(value.startsWith("Bearer ") || value.startsWith("Basic ") ? [value.slice(value.indexOf(" ") + 1)] : [])]))].sort((a, b) => b.length - a.length);
+    this.addSecrets(values);
+  }
+  /** Add engine-minted product headers before the native provider starts. */
+  addSecrets(values: string[]): void {
+    this.secrets = [...new Set([...this.secrets, ...values.filter(Boolean).flatMap(value => [value, JSON.stringify(value).slice(1, -1),
+      ...(value.startsWith("Bearer ") || value.startsWith("Basic ") ? [value.slice(value.indexOf(" ") + 1)] : [])])])].sort((a, b) => b.length - a.length);
     this.pattern = this.secrets.length ? new RegExp(this.secrets.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g") : null;
   }
   private text(value: string): string { return this.pattern ? value.replace(this.pattern, "[redacted]") : value; }

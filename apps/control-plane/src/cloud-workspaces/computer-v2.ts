@@ -19,6 +19,7 @@ import {
   sealCloudWorkspaceSecretBinding,
 } from "./settings.js";
 import { sanitizeCloudWorkspaceSetupLog } from "./setup-log.js";
+import { CreateComputerConfigurationArgumentsSchema } from "./computer-tools-contract.js";
 import {
   CLOUD_COMPUTER_V2_MAX_LOG_BYTES,
   CLOUD_COMPUTER_V2_MAX_LOG_ROW_BYTES,
@@ -687,6 +688,7 @@ export class DatabaseCloudComputerV2Service {
     organizationId: string,
     userId: string,
     options: { cursor?: string; limit?: number } = {},
+    transaction?: Tx,
   ): Promise<CloudComputerV2State> {
     const org = uuid(organizationId),
       user = uuid(userId);
@@ -721,8 +723,8 @@ export class DatabaseCloudComputerV2Service {
         );
       }
     }
-    return withSystemTx(
-      this.pool,
+    return this.readTransaction(
+      transaction,
       async (tx) => {
         const member = await authority(tx, org, user, false, false),
           head = await headRow(tx, org);
@@ -799,8 +801,12 @@ export class DatabaseCloudComputerV2Service {
           canManage: member.role === "owner" || member.role === "admin",
         };
       },
-      { consistentRead: true },
     );
+  }
+  // The private execution route holds its engine/actor fences in the same
+  // transaction as these existing reads. Account routes retain their snapshot.
+  private readTransaction<T>(transaction: Tx | undefined, read: (tx: Tx) => Promise<T>): Promise<T> {
+    return transaction ? read(transaction) : withSystemTx(this.pool, read, { consistentRead: true });
   }
   async saveDraft(
     organizationId: string,
@@ -985,6 +991,49 @@ export class DatabaseCloudComputerV2Service {
       );
       return result;
     });
+  }
+  /** Only the engine tool route calls this seam, inside its live lease fence.
+   * The request verifier covers native arguments, not a reconstructed draft:
+   * retries keep their original receipt across later repository/env edits. */
+  async buildFromTool(
+    tx: Tx,
+    organizationId: string,
+    userId: string,
+    operationId: string,
+    value: unknown,
+  ): Promise<CloudComputerV2BuildResult> {
+    const input = parse(CreateComputerConfigurationArgumentsSchema, value),
+      org = uuid(organizationId), user = uuid(userId), operation = uuid(operationId);
+    await authority(tx, org, user, true);
+    await lockCloudComputerOrganization(tx, org);
+    const request = { tool: "CreateComputerConfiguration", ...input };
+    const replay = await this.replay(tx, org, user, operation, "build", request);
+    if (replay) return {
+      revision: Number(replay.revision),
+      build: summary(await buildRow(tx, org, replay.build_id)),
+      replayed: true,
+    };
+    const current = await headRow(tx, org, true);
+    compareRevision(current, input.expectedRevision);
+    if ((current?.latest_build_id ?? null) !== input.previousBuildId) conflict(current);
+    const head = await this.enable(tx, org, user);
+    const prior = head.draft_config_id ? await configuration(tx, org, head.draft_config_id) : null;
+    const config = await this.createConfig(tx, org, user, {
+      repositories: prior?.repositories ?? [],
+      installScript: input.installScript,
+      timeoutSeconds: input.timeoutSeconds ?? prior?.timeout_seconds ?? 900,
+      // Omission preserves exact environment binding versions.
+    }, prior);
+    if (input.previousBuildId) {
+      // Supersession fences completion; the accepted build's worker still owns
+      // provider cleanup. Stop of the agent does not cancel the new build.
+      await tx.query(`UPDATE cloud_computer_v2_builds SET state='superseded',
+        cancel_requested_at=coalesce(cancel_requested_at,now()),completed_at=now()
+        WHERE id=$1 AND org_id=$2 AND state IN ('queued','running')`, [input.previousBuildId, org]);
+    }
+    const result = await this.queue(tx, head, user, operation, config, null);
+    await this.receipt(tx, org, user, operation, "build", request, result.build.id, result.revision);
+    return result;
   }
   async rebuild(
     organizationId: string,
@@ -1185,17 +1234,17 @@ export class DatabaseCloudComputerV2Service {
     organizationId: string,
     userId: string,
     buildId: string,
+    transaction?: Tx,
   ): Promise<CloudComputerV2BuildSummary> {
     const org = uuid(organizationId),
       user = uuid(userId),
       id = uuid(buildId);
-    return withSystemTx(
-      this.pool,
+    return this.readTransaction(
+      transaction,
       async (tx) => {
         await authority(tx, org, user, false, false);
         return summary(await buildRow(tx, org, id));
       },
-      { consistentRead: true },
     );
   }
   async cancel(
@@ -1254,6 +1303,7 @@ export class DatabaseCloudComputerV2Service {
     userId: string,
     buildId: string,
     options: { after?: number; limit?: number } = {},
+    transaction?: Tx,
   ): Promise<CloudComputerV2BuildLogs> {
     const query = parse(
       z
@@ -1267,8 +1317,8 @@ export class DatabaseCloudComputerV2Service {
     const org = uuid(organizationId),
       user = uuid(userId),
       id = uuid(buildId);
-    return withSystemTx(
-      this.pool,
+    return this.readTransaction(
+      transaction,
       async (tx) => {
         await authority(tx, org, user, false, false);
         const build = await buildRow(tx, org, id);
@@ -1310,7 +1360,6 @@ export class DatabaseCloudComputerV2Service {
           complete: !pending(build),
         };
       },
-      { consistentRead: true },
     );
   }
   private async lockedBuild(tx: Tx, id: string) {

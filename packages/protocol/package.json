@@ -6,6 +6,7 @@
   "description": "Shared Zeros bridge protocol \u2014 wire types, Zod schemas, protocol versioning, crypto seams, and transport-agnostic runtime primitives consumed across desktop renderer, Electron, and engine process boundaries.",
   "type": "module",
   "exports": {
+    "./cloud-computer-tools": "./src/cloud-computer-tools.ts",
     "./cloud-computer-v2": "./src/cloud-computer-v2.ts",
     "./cloud-agent-execution": "./src/cloud-agent-execution.ts",
     "./cloud-customization": "./src/cloud-customization.ts",

@@ -45,13 +45,13 @@ describe("personal cloud credential HTTP boundaries",()=>{
     expect((await call({...request,credentialId:randomUUID()})).status).toBe(422);
     expect((await call({...request,admission:"x".repeat(5000)})).status).toBe(413);expect(service.admit).not.toHaveBeenCalled();
     const response=await call(request);expect(response.status).toBe(200);expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(service.admit).toHaveBeenCalledWith({...scope,heartbeatToken:token},admission,undefined,undefined,undefined);
+    expect(service.admit).toHaveBeenCalledWith({...scope,heartbeatToken:token},admission,undefined,undefined,undefined,undefined);
     expect((await call({...request,includeGitAuthor:true})).status).toBe(200);
-    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,true,undefined,undefined);
+    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,true,undefined,undefined,undefined);
     expect((await call({...request,nativeCapabilitiesVersion:1})).status).toBe(200);
-    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,undefined,1,undefined);
+    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,undefined,1,undefined,undefined);
     expect((await call({...request,backgroundTasksVersion:1})).status).toBe(200);
-    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,undefined,undefined,1);
+    expect(service.admit).toHaveBeenLastCalledWith({...scope,heartbeatToken:token},admission,undefined,undefined,1,undefined);
     const background={kind:"background",leaseId:randomUUID(),operation:{kind:"retain",conversationId:"chat",revision:1,
       snapshot:{tasks:[],waiting:false,processWork:true}}};
     expect((await call(background)).status).toBe(200);

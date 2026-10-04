@@ -12,6 +12,7 @@ import {
 import type { CloudCustomizationSnapshot } from "@zeros/protocol/cloud-customization";
 import { cloudMcpDigest, freezeCloudSnapshot } from "./cloud-mcp";
 import { isDeepStrictEqual } from "node:util";
+import { CloudComputerToolConflictSchema, CloudComputerToolExecutionRequestSchema, CloudComputerToolResultSchemas, type CloudComputerToolRequest } from "@zeros/protocol/cloud-computer-tools";
 
 type Request = (request: CloudAgentExecutionRequest, signal: AbortSignal) => Promise<unknown>;
 type Clock = { wall(): number; monotonic(): number };
@@ -56,6 +57,7 @@ export class CloudAgentLease {
     readonly customization: CloudCustomizationSnapshot | null,
     readonly nativeCapabilities: Readonly<CloudNativeCapabilities> | null,
     readonly backgroundTasksVersion: 1 | null,
+    readonly computerToolsVersion: 1 | null,
   ) { this.credentialKind = material.kind; this.material = material; this.materialVersion = credentialVersion; this.codexMaterial = material.kind === "codex-chatgpt" ? {...material} : null; }
 
   static async admit(
@@ -63,7 +65,7 @@ export class CloudAgentLease {
     supervisor: CloudAgentLeaseSupervisor, time: Clock = clock,
   ): Promise<CloudAgentLease> {
     const start = time.monotonic();
-    const response = CloudAgentExecutionAuthoritySchema.safeParse(await request({ kind: "admit", admission, includeGitAuthor: true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1 }, signal));
+    const response = CloudAgentExecutionAuthoritySchema.safeParse(await request({ kind: "admit", admission, includeGitAuthor: true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1,computerToolsVersion:1 }, signal));
     if (!response.success || response.data.provider !== admission.provider || response.data.model !== admission.model)
       throw new Error("Cloud agent admission failed");
     const value = response.data;
@@ -76,7 +78,7 @@ export class CloudAgentLease {
     const lease = new CloudAgentLease(value.leaseId, value.authorityId, value.credentialVersion,
       freezeCloudSnapshot(structuredClone(admission)), value.material, request, supervisor, time, value.gitAuthor ? Object.freeze({ ...value.gitAuthor }) : null,
       value.customization ? freezeCloudSnapshot(value.customization) : null,
-      value.nativeCapabilities ? Object.freeze({...value.nativeCapabilities}) : null,value.backgroundTasksVersion??null);
+      value.nativeCapabilities ? Object.freeze({...value.nativeCapabilities}) : null,value.backgroundTasksVersion??null,value.computerToolsVersion??null);
     try {
       lease.acceptExpiry(value.expiresAt, start);
       if (signal.aborted) throw new Error("Cloud agent admission cancelled");
@@ -175,6 +177,18 @@ export class CloudAgentLease {
     this.backgroundDeadline=Math.min(this.backgroundDeadline,this.time.monotonic()+remaining);
     this.deadline=Math.min(this.deadline,this.backgroundDeadline);this.armExpiry();
     return response;
+  }
+  async computerTool(toolCallId: string, tool: CloudComputerToolRequest, signal: AbortSignal) {
+    this.assertLive();
+    if (this.computerToolsVersion !== 1) throw new Error("Cloud Computer tools require an admitted admin workspace.");
+    const request = CloudComputerToolExecutionRequestSchema.parse({kind:"computer-tool",leaseId:this.leaseId,toolCallId,tool});
+    const result = await this.request(request, AbortSignal.any([this.signal, signal]));
+    this.assertLive();
+    const conflict = CloudComputerToolConflictSchema.safeParse(result);
+    if (conflict.success) return conflict.data;
+    const parsed = CloudComputerToolResultSchemas[tool.name].safeParse(result);
+    if (!parsed.success) throw new Error("Invalid Cloud Computer tool result.");
+    return parsed.data;
   }
   /** Serialize adoption so an older HTTP response cannot roll back material
    * or authority. Concurrent callers remain bounded by the tool/host queues. */

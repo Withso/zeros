@@ -4,8 +4,10 @@ import path from "node:path";
 import { CloudWorkspaceAccessBroker } from "./cloud-workspace-access-broker";
 import { cloudWorkspaceDesktopCapabilityEnabled } from "../src/engine/cloud-workspace-capability";
 import { CloudWorkspaceAccessClient } from "./cloud-workspace-access-client";
-import { CloudWorkspaceSshRuntime } from "./cloud-workspace-ssh-runtime";
-import { ensureCloudAccessDeviceForMain, signCloudEngineAdmissionForMain } from "./cloud-replica-host-runtime";
+import { CloudWorkspaceNativeSshRuntime, CloudWorkspaceSshRuntime } from "./cloud-workspace-ssh-runtime";
+import { CloudRuntimeServiceClient } from "./cloud-runtime-service-client";
+import { CloudRuntimeServiceTransport } from "./cloud-runtime-service-transport";
+import { ensureCloudAccessDeviceForMain, readCloudAccessDeviceForMain, signCloudEngineAdmissionForMain, signCloudRuntimeServiceForMain } from "./cloud-replica-host-runtime";
 import { previewFrameAuthorizations } from "./preview-frame-authorizations";
 import {
   getValidAccessTokenForMain,
@@ -110,6 +112,10 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
   const hosts = allowedSshHosts();
 
   const previewHostSuffixes = allowedPreviewHostSuffixes();
+  const serviceTransport = new CloudRuntimeServiceTransport({ baseUrl: controlPlaneBaseUrl(), allowInsecureLoopback: IS_DEV });
+  const nativeSsh = new CloudWorkspaceNativeSshRuntime({
+    runtimeRoot: path.join(app.getPath("sessionData"), "cloud-native-ssh"), transport: serviceTransport,
+  });
   let ssh: CloudWorkspaceSshRuntime | null = null;
   const getSsh = () => {
     if (ssh) return ssh;
@@ -124,6 +130,13 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
     return ssh;
   };
   broker = new CloudWorkspaceAccessBroker({
+    nativeServices: {
+      api: new CloudRuntimeServiceClient({ baseUrl: controlPlaneBaseUrl(), fetch: controlPlaneFetch,
+        sign: signCloudRuntimeServiceForMain, allowInsecureLoopback: IS_DEV }),
+      readDeviceIdentity: readCloudAccessDeviceForMain,
+      prepareSsh: access => nativeSsh.prepare(access),
+      startTunnel: (access, localPort) => serviceTransport.startTunnel(access, localPort),
+    },
     api: new CloudWorkspaceAccessClient({
       fetch: controlPlaneFetch,
       baseUrl: controlPlaneBaseUrl(),
@@ -147,7 +160,7 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
     launchIde: (input) => getSsh().launchIde(input),
     startTunnel: (input) => getSsh().startTunnel(input),
     startDynamicTunnel: (input) => getSsh().startDynamicTunnel(input),
-    disposeLocalAccess: async () => { await ssh?.dispose(); },
+    disposeLocalAccess: async () => { await Promise.all([ssh?.dispose(), nativeSsh.dispose(), serviceTransport.dispose()]); },
   });
   return broker;
 }

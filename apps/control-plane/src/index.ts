@@ -9,6 +9,7 @@ import { createCloudComputerBuildWorker } from "./cloud-workspaces/computer.js";
 import { serve } from "@hono/node-server";
 import {cloudAgentCredentialKeys} from "./cloud-workspaces/agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./cloud-workspaces/agent-executions.js";
+import {DatabaseCloudComputerV2Service} from "./cloud-workspaces/computer-v2.js";
 import { S3Client } from "@aws-sdk/client-s3";
 import { Agent as HttpsAgent } from "node:https";
 import { S3CloudWorkspaceObjectStore } from "./cloud-workspaces/s3-object-store.js";
@@ -457,7 +458,8 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       workosEnabled: config.auth.provider === "workos",
     });
     cloudWorkspaceInternalSetupService = {
-      ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos")}:{}),
+      ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos",undefined,
+        {computer:new DatabaseCloudComputerV2Service(pool,cloud)})}:{}),
       commands: new DatabaseCloudWorkspaceCommandService({ pool, workosEnabled: config.auth.provider === "workos" }),
       events: new DatabaseCloudWorkspaceEventService({ pool, workosEnabled: config.auth.provider === "workos" }),
       actions: new DatabaseCloudWorkspaceActionService({ pool, workosEnabled: config.auth.provider === "workos" }),

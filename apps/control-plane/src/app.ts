@@ -73,7 +73,7 @@ import { createWorkOSManagementEventRoutes } from "./workos-sync-events.js";
 import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
 import type { MigrationStatus } from "./migrate.js";
 import type { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runtime-services.js";
-import { createCloudRuntimeServiceRoutes } from "./cloud-workspaces/runtime-service-routes.js";
+import { createCloudRuntimeServiceAuthorityRoutes, createCloudRuntimeServiceRoutes } from "./cloud-workspaces/runtime-service-routes.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming } from "./request-timing.js";
 import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
@@ -207,6 +207,10 @@ export function createApp(
       ? (dependencies.workosProvider ??
         new RailwayWorkOSProvider(config.auth, config.workos))
       : undefined;
+
+  if (!pendingMigration && dependencies.cloudRuntimeServiceAccess) {
+    app.route("/", createCloudRuntimeServiceAuthorityRoutes(dependencies.cloudRuntimeServiceAccess));
+  }
 
   // Preview capabilities use an isolated wildcard origin and a dedicated
   // header, not an interactive account JWT. Let the access service recognize

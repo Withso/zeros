@@ -144,7 +144,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function safeBaseUrl(value: string, allowInsecureLoopback: boolean): string {
+export function safeBaseUrl(value: string, allowInsecureLoopback: boolean): string {
   let url: URL;
   try {
     url = new URL(value);
@@ -214,7 +214,7 @@ function idempotencyKey(value: string): string {
   return value;
 }
 
-function bearer(value: string): string {
+export function bearer(value: string): string {
   if (
     typeof value !== "string" ||
     value.length < 8 ||
@@ -231,7 +231,7 @@ function bearer(value: string): string {
   return value;
 }
 
-async function boundedJson(response: Response): Promise<unknown> {
+export async function boundedJson(response: Response): Promise<unknown> {
   const declared = Number(response.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
     throw new Error("response too large");

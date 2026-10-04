@@ -47,6 +47,23 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
     organizationId: fixture.organizationId, generation: 1, engineInstanceId: fixture.engineInstanceId,
     heartbeatToken: fixture.heartbeatToken, token: document.transport.capability });
 
+  it.each(["device", "epoch", "grant", "expiry", "engine"])("checks idle grant authority without provider I/O and rejects %s retirement", async cause => {
+    const d = await device(), doc = await service.issue(d.request({ kind: "tunnel", remotePort: 3000 }));
+    const checkedAt = Date.now();
+    const expires = await service.check(request(doc));
+    expect(expires).toBeGreaterThan(checkedAt);
+    expect(expires).toBeLessThanOrEqual(Date.now() + 10_000);
+    await expect(service.check(new Request(request(doc).url))).resolves.toBeNull();
+    await expect(service.check(new Request(request(doc).url.replace("/tunnel/", "/ssh/"), { headers: request(doc).headers }))).resolves.toBeNull();
+    if (cause === "device") await pool.query("UPDATE devices SET key_version = key_version + 1 WHERE id=$1", [d.id]);
+    if (cause === "epoch") await pool.query("UPDATE cloud_workspaces SET authority_epoch = authority_epoch + 1 WHERE id=$1", [fixture.workspaceId]);
+    if (cause === "grant") await service.revoke({ organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, accountUserId: fixture.userId, grantId: doc.grant.id });
+    if (cause === "expiry") await pool.query("UPDATE cloud_workspace_runtime_service_grants SET created_at=now() - interval '1 minute', expires_at=now() - interval '1 second' WHERE id=$1", [doc.grant.id]);
+    if (cause === "engine") await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked', revoked_at=now() WHERE id=$1", [fixture.engineInstanceId]);
+    await expect(service.check(request(doc))).resolves.toBeNull();
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
   it("admits a shared owner and developer separately from the engine's compute sponsor",async()=>{
     await pool.query("UPDATE cloud_workspace_engine_instances SET actor_protocol_version=2 WHERE id=$1",[fixture.engineInstanceId]);
     await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,actorUserId:fixture.userId,sharingMode:"organization",expectedRevision:1});

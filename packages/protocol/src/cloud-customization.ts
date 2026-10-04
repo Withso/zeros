@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const text = z.string().max(4096).refine(value => !value.includes("\0") && !/\$\{|\$[A-Za-z_]/.test(value));
 const name = z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/).refine(value =>
-  !["design-draft", "zeros_workspace", "codex_apps", "__proto__", "constructor", "prototype"].includes(value));
+  !["design-draft", "cloud-computer", "zeros_workspace", "codex_apps", "__proto__", "constructor", "prototype"].includes(value));
 const values = z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/), text)
   .refine(value => Object.keys(value).length <= 32);
 const url = z.string().max(2048).url().refine(value => {

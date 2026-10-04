@@ -21,6 +21,8 @@ vi.mock("../preview-frame-authorizations", () => ({
 vi.mock("../cloud-replica-host-runtime", () => ({
   ensureCloudAccessDeviceForMain: vi.fn(),
   signCloudEngineAdmissionForMain: vi.fn(),
+  signCloudRuntimeServiceForMain: vi.fn(),
+  readCloudAccessDeviceForMain: vi.fn(() => null),
 }));
 vi.mock("../ipc/commands/auth-session", () => ({
   getValidAccessTokenForMain: async () => `token-${state.account}`,
@@ -35,6 +37,7 @@ vi.mock("../ipc/commands/auth-session", () => ({
   },
 }));
 vi.mock("../cloud-workspace-ssh-runtime", () => ({
+  CloudWorkspaceNativeSshRuntime: class { async dispose() {} },
   CloudWorkspaceSshRuntime: class {
     constructor() {
       throw new Error("SSH is deliberately unconfigured");

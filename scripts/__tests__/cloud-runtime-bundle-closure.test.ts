@@ -16,6 +16,11 @@ import {
 import os from "node:os";
 import path from "node:path";
 import {
+  buildPathPrefixes,
+  diagnostic,
+} from "../cloud-workspace-validation/runtime-bundle/build";
+import { buildEnvironment } from "../cloud-workspace-validation/runtime-bundle/toolchain";
+import {
   stageDependencyClosure,
   stageSources,
   scanPayload,
@@ -44,6 +49,7 @@ async function link(from: string, to: string) {
   await symlink(path.relative(path.dirname(to), from), to);
 }
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     temporary
       .splice(0)
@@ -411,6 +417,90 @@ describe("pnpm runtime closure", () => {
 });
 
 describe("payload hygiene", () => {
+  const runnerPaths = {
+    sourceDir: "/home/runner/work/zeros/zeros",
+    outDir: "/home/runner/work/_temp/cloud-runtime-bundle",
+    work: "/home/runner/work/_temp/zeros-runtime-build-fixture",
+  };
+  it("scans the actual runner build roots without rejecting upstream SDK build provenance", async () => {
+    vi.spyOn(os, "homedir").mockReturnValue("/home/runner");
+    const root = await directory();
+    // SDK executables ship upstream compiler paths in live ELF sections.
+    // Those bytes also appear in successful bundles built outside CI.
+    await writeFile(
+      path.join(root, "vendor-native"),
+      Buffer.from("\0/home/runner/work/vendor/sdk/source.rs\0"),
+    );
+    await expect(
+      scanPayload(root, buildPathPrefixes(runnerPaths)),
+    ).resolves.toBeUndefined();
+  });
+  it.each(["sourceDir", "outDir", "work", "privateHome"] as const)(
+    "still rejects the runner's %s across chunk boundaries",
+    async (name) => {
+      vi.spyOn(os, "homedir").mockReturnValue("/home/runner");
+      const root = await directory();
+      const hostPath =
+        name === "privateHome"
+          ? buildEnvironment(runnerPaths.work).HOME!
+          : runnerPaths[name];
+      await writeFile(
+        path.join(root, "native-build-output"),
+        Buffer.concat([Buffer.alloc(65530), Buffer.from(`${hostPath}/input`)]),
+      );
+      await expect(
+        scanPayload(root, buildPathPrefixes(runnerPaths)),
+      ).rejects.toThrow(/^build_path$/);
+    },
+  );
+  it.each(["file", "symlink"] as const)(
+    "reports only the offending relative %s path on stderr and keeps stdout closed",
+    async (kind) => {
+      const root = await directory();
+      await mkdir(path.join(root, "worker"));
+      const entry = `worker/${kind}`;
+      const hostPath = `${runnerPaths.work}/private-build-input`;
+      if (kind === "symlink") await symlink(hostPath, path.join(root, entry));
+      else await writeFile(path.join(root, entry), hostPath);
+      const error = await scanPayload(
+        root,
+        buildPathPrefixes(runnerPaths),
+      ).catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(Error);
+      const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+      const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+      diagnostic("scan_payload", error);
+      expect(stderr.mock.calls).toEqual([
+        [JSON.stringify({ stage: "scan_payload", check: "build_path", entry })],
+      ]);
+      expect(stdout.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            schema: "zeros.diagnostic/v1",
+            component: "bundle",
+            stage: "scan_payload",
+            ok: false,
+            exitCode: null,
+            timedOut: false,
+            failedChecks: ["build_path"],
+          }),
+        ],
+      ]);
+    },
+  );
+  it("does not expose credential-shaped filenames in scan diagnostics", async () => {
+    const root = await directory();
+    const entry = ["gh", "p_", "abcdefghijklmnopqrstuvwxyz0123456789"].join("");
+    await writeFile(path.join(root, entry), runnerPaths.work);
+    const error = await scanPayload(root, buildPathPrefixes(runnerPaths)).catch(
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(Error);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    diagnostic("scan_payload", error);
+    expect(stderr).not.toHaveBeenCalled();
+  });
   it("rejects host paths even across scan chunks, without exposing contents", async () => {
     const root = await directory();
     await writeFile(

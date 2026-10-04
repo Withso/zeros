@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { CloudCustomizationRedactor } from "../cloud-customization-redaction";
 
 describe("execution MCP secret redaction", () => {
+  it("adds scoped product headers to the same transcript and history filter", () => {
+    const redactor = new CloudCustomizationRedactor(["existing-user-secret"]);
+    redactor.addSecrets(["Bearer synthetic-computer-capability"]);
+    expect(redactor.value("existing-user-secret Bearer synthetic-computer-capability")).toBe("[redacted] [redacted]");
+    expect(redactor.stream("reply", "synthetic-computer-")).toBe("");
+    expect(redactor.stream("reply", "capability")).toBe("[redacted]");
+  });
   it("removes configured values from tool results, nested receipts and stderr", () => {
     const redactor = new CloudCustomizationRedactor(["synthetic-private-value"]);
     expect(JSON.stringify(redactor.value({ rawOutput: { content: [{ text: "failed: synthetic-private-value" }] } }))).not.toContain("synthetic-private-value");

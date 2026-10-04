@@ -43,11 +43,13 @@ describe("previous control-plane execution profile",()=>{
     }finally{await lease.close();}
     const requests=f.fetcher.mock.calls.map(([,options])=>JSON.parse(String(options?.body)));
     expect(requests[0].request).toMatchObject({includeGitAuthor:true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1});
-    for(const request of requests.slice(1))expect(legacyRequest.safeParse(request).success).toBe(true);
+    expect(requests[1].request).not.toHaveProperty("computerToolsVersion");
+    for(const request of requests.slice(2))expect(legacyRequest.safeParse(request).success).toBe(true);
   });
   it("does not drop required customization when the old route rejects the request",async()=>{
     const f=fixture();await expect(CloudAgentLease.admit({...f.admission,customization:{version:2,repositoryServers:[]}},f.request,
       new AbortController().signal,{onRetirementFailure:vi.fn()})).rejects.toThrow();
-    expect(f.fetcher).toHaveBeenCalledOnce();
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    for(const [,options] of f.fetcher.mock.calls)expect(JSON.parse(String(options?.body)).request.admission.customization).toEqual({version:2,repositoryServers:[]});
   });
 });
