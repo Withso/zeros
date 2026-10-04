@@ -561,7 +561,7 @@ export function createApp(
   // spam mutations or flood the audit log. Runs AFTER auth so it keys on the
   // verified user id, not the IP.
   app.use("/v1/*", rateLimit("global", 240, 60_000));
-  app.route("/", createRuntimeStaffRoutes(config, pool));
+  app.route("/", createRuntimeStaffRoutes(config, pool, dependencies.runtimePublication?.requalify));
   if (releaseCanaryDesignations) app.route("/", createReleaseCanaryDesignationRoutes(releaseCanaryDesignations));
 
   // The larger fork-blob budget is available only after bearer verification

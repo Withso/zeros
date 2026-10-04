@@ -15,6 +15,7 @@ import { S3CloudWorkspaceObjectStore } from "./cloud-workspaces/s3-object-store.
 import { createRuntimeArtifactStore } from "./cloud-workspaces/runtime-artifact-store.js";
 import { cloudRuntimeQualificationMode } from "./cloud-workspaces/runtime-config.js";
 import { loadPinnedCloudRuntime } from "./cloud-workspaces/runtime-selection.js";
+import { createRuntimeQualificationWorker } from "./cloud-workspaces/runtime-qualification.js";
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool, withSystemTx } from "./db.js";
@@ -115,6 +116,7 @@ let stopCloudReconciler = async () => {};
 let stopCloudProAllowances = async () => {};
 let stopCloudSetupWorker = async () => {};
 let stopCloudComputerBuildWorker = async () => {};
+let stopCloudRuntimeQualificationWorker = async () => {};
 let stopCloudAccessRevocationWorker = async () => {};
 let stopCloudCheckpointRequestWorker = async () => {};
 let stopCloudForkWorker = async () => {};
@@ -147,6 +149,8 @@ let cloudWorkspaceHealthService:
 let cloudWorkspaceEngineClientAdmissionService:
   | DatabaseCloudWorkspaceEngineClientAdmissionService
   | undefined;
+const runtimeQualificationWorker = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending"
+  ? createRuntimeQualificationWorker(config, pool, runtimeArtifacts) : null;
 if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   const [
     { createCloudProviderDeployment },
@@ -565,6 +569,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
 
     if (setupWorker) { stopCloudSetupWorker = setupWorker.start(); stopCloudComputerBuildWorker = createCloudComputerBuildWorker(pool, cloud).start(); }
+    if (runtimeQualificationWorker) stopCloudRuntimeQualificationWorker = runtimeQualificationWorker.start();
     console.log(
       `[control-plane] cloud workspace reconciliation enabled (${provider.name}/${cloud.target}); setup=${setupWorker ? "enabled" : "paused"}; durability=${blobService ? "enabled" : "disabled"}; outbox=${outboxWorker ? "enabled" : "queued"}`,
     );
@@ -577,7 +582,9 @@ let githubWriteCleanup: ReturnType<typeof setInterval> | undefined;
 let githubWriteCleanupPending = Promise.resolve();
 let githubWriteCleanupRunning = false;
 const app = createApp(config, pool, emailConfig, {
-  runtimePublication: { artifacts: runtimeArtifacts },
+  runtimePublication: { artifacts: runtimeArtifacts,
+    ...(runtimeQualificationWorker ? { enqueueSmoke: (id: string) => runtimeQualificationWorker.enqueue(id),
+      requalify: (id: string) => runtimeQualificationWorker.enqueue(id, { force: true }) } : {}) },
   ...(cloudWorkspaceInternalSetupService ? { cloudIdleStop: new DatabaseCloudIdleStop(pool, config.auth.provider === "workos") } : {}),
   ...(cloudGithubWriteGrants ? { cloudGithubWriteGrants } : {}),
   securityEventBroker,
@@ -646,6 +653,7 @@ function shutdown(signal: string): void {
     githubWriteCleanupPending,
     stopCloudSetupWorker(),
     stopCloudComputerBuildWorker(),
+    stopCloudRuntimeQualificationWorker(),
     stopCloudAccessRevocationWorker(),
     stopCloudCheckpointRequestWorker(),
     stopCloudForkWorker(),

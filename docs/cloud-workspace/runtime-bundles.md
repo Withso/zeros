@@ -130,10 +130,11 @@ number, separate from run ID and attempt. The five credential kinds remain
 `claude-api-key`, `claude-setup-token`, `codex-api-key`, `codex-chatgpt`, and
 `cursor-api-key`. Qualification `evidence` is a required JSON object bounded to
 64 KiB; contract/header objects have the same bound and native capabilities are
-bounded to 16 KiB. There are no evidence-run/case or continuation tables.
+bounded to 16 KiB. There are no per-provider real-turn case or continuation
+tables. Smoke scheduling uses the separate run and provider journals below.
 
 For internal Alpha, the control plane inserts qualification evidence itself
-(AB-2, for example `{mode:"smoke",checks:[...]}`). All new tables have enabled
+(AB-2, for example `{mode:"smoke",checks:[...]}`). All registry tables have enabled
 and forced RLS with only `app_is_system()` policies. The broad `zeros_app` DML
 grants inherited from migration 0004 remain; **restrictions are enforced by RLS
 and triggers, not column grants**. Tenant contexts cannot read or write these
@@ -261,12 +262,12 @@ or a revoked identity still conflicts. A later release run may reference an
 identical bundle. Registration does not verify archive contents by downloading them;
 the installer verifies the archive and manifest digests before execution.
 
-After commit, completion calls `enqueueRuntimeSmokeQualification(runtimeId)`.
-Until the B7 worker is configured the hook returns `not_configured` and creates
-no qualification. Scheduling failures return a closed 503 after registration;
-retrying completion preserves the committed identity and retries the hook.
-The worker must make enqueue idempotent and recheck revocation. A registered
-runtime alone is never a qualified channel head.
+After commit, completion calls the injected runtime-smoke enqueue hook. With
+`CLOUD_RUNTIME_QUALIFICATION_ENABLED=false` it creates no qualification. With
+the worker enabled, enqueue deduplicates pending runs and rechecks revocation.
+Scheduling failures return a closed 503 after registration; retrying completion
+preserves the committed identity and retries the hook. A registered runtime
+alone is never a qualified channel head.
 
 Staff endpoints use ordinary account authentication and the server's current
 `developer` or `platform_owner` role. `support_admin` and ordinary users receive
@@ -274,7 +275,8 @@ Staff endpoints use ordinary account authentication and the server's current
 
 | Endpoint | Behavior |
 | --- | --- |
-| `GET /v1/internal/cloud-runtime/status` | Lists up to 100 bases, the last 20 runtimes, their kind/profile/approval/MCP/evidence-mode/timestamp metadata, and the current channel's last 20 releases. It lists releases until the separate selection service supplies channel-head eligibility. |
+| `GET /v1/internal/cloud-runtime/status` | Lists up to 100 bases, the last 20 runtimes, their kind/profile/approval/MCP/evidence-mode/timestamp metadata, the current channel's last 20 releases, and the last 20 qualification runs with closed diagnostics and cleanup timestamps. It lists releases until the separate selection service supplies channel-head eligibility. |
+| `POST /v1/internal/cloud-runtime/runtimes/:runtimeId/requalify` | Queues an explicit smoke retry and returns HTTP 202 with `runtimeId`, `runId` and `status:queued\|running`. Concurrent requests reuse the pending run. Disabled workers return a closed 503; unconfirmed or revoked runtimes reject. |
 | `POST /v1/internal/cloud-runtime/runtimes/:runtimeId/revoke` | Sets the bundle and all its qualifications' `revoked_at`, disables qualification/MCP approval, preserves existing revocation timestamps, and emits an audit line with only runtime ID and acting staff role. Registry identities and saved pins remain intact. |
 
 `GET /v1/release-identity` retains all v1 fields and readiness behavior. Optional
@@ -289,6 +291,113 @@ Local verification uses the artifact/OIDC/route suites, including the
 database-backed publication suite with `TEST_DATABASE_URL` pointing at a
 disposable PostgreSQL 18 database. Live OIDC publication belongs to the Alpha
 CI integration, and disposable-VM smoke qualification belongs to its worker.
+
+## Runtime smoke qualification
+
+`CLOUD_RUNTIME_QUALIFICATION_ENABLED` defaults to false. The worker runs only
+on Alpha with managed Boat and the shared runtime artifact store configured.
+It follows the existing background-worker pause and maintenance barriers; its
+startup does not depend on workspace setup being enabled. Qualification mode
+remains a separate admission setting: Alpha must select `smoke` to admit smoke
+evidence. The default `full` admits none of these smoke approvals.
+
+Publication completion and staff retries enqueue durable runs. A 30-second tick
+also discovers the newest confirmed, unrevoked, unqualified runtime for the
+current approved base compatibility. The database permits one running smoke
+globally, including runs awaiting cleanup. Each claim selects the newest
+approved, unrevoked Boat base and records a 25-minute deadline. A failed run is
+not retried automatically for the same runtime/base compatibility; staff may
+retry explicitly.
+
+The worker creates `zeros-v2-qual-<runtime-short>` with a 30-minute provider TTL,
+checks base status, and installs with `purpose:qualification`, a descriptor and
+an artifact GET capability lasting at most 15 minutes. Installer input travels
+only on pinned SSH stdin. The installed runtime must report idle with the exact
+runtime and base identity before the worker invokes its self-test.
+
+`runtime-self-test.mjs` selects R only through the active runtime resolver and
+checks the original manifest and receipt bytes against that descriptor. It runs
+with a private HOME, minimal environment and a disconnected network namespace
+(loopback is enabled only inside that namespace). Its closed checks are
+`node_abi`, `sqlite_query`, `pty_load`, `claude_version`, `codex_version`,
+`cursor_load`, `engine_load`, `supervisor_idle` and `containment_smoke`.
+Containment uses the existing credential-free `qualify-cloud-engine.mjs`
+through R's fixed engine launcher, including identity, workload, capture,
+human-service and actor-tool probes. Workspace setup's v4 attester is a separate
+boundary. The runtime bundle must include this helper and list
+`entrypoints.selfTest`; a bundle built before it was included fails closed.
+
+Approval happens only after confirmed VM deletion. Success inserts the five
+credential-kind rows (`claude-setup-token`, `codex-chatgpt`, `cursor-api-key`,
+`claude-api-key`, `codex-api-key`) for the runtime/base compatibility and
+`zeros-cloud-worker-v4`. Evidence records `mode:smoke`, the completed check
+inventory, base image ID, run ID and timestamp. These checks use no model
+credentials and do not prove a per-kind model turn or an MCP round trip;
+`mcp_qualified` stays false and native capabilities stay empty. Existing
+immutable qualification evidence is never overwritten or re-enabled by retry.
+
+Failures retain only a closed diagnostic and insert no qualifications. A
+crashed run is reconciled after its deadline: recover the sandbox identity from
+the provider journal, delete it, verify the deletion receipt and a subsequent
+404, then mark the run failed. A seven-minute cleanup lease prevents concurrent
+reconcilers. Unconfirmed cleanup keeps the running slot occupied. A lost create
+reply is recovered with the original idempotency key and exact request; replay
+is bounded to 23 hours so it cannot silently allocate a second VM after the
+provider's idempotency window.
+
+The shared `CloudBuilderVms` module also supports authorized template sources
+and graceful stop-to-archived for Cloud Computer builds. Its system-only
+`cloud_builder_vm_operations` journal preserves intent before provider I/O
+and the sandbox ID before readiness or wallet validation. Workspace journals
+require an organization/generation owner and cannot represent these
+infrastructure VMs. The extracted pinned-SSH transport is shared with workspace
+setup; fixed commands live in `cloud-builder-commands.ts`, where computer
+builds add their closed command entries.
+
+## Alpha live verification runbook
+
+Run this only from the orchestrator's credential-bearing Alpha workspace. The
+script does not deploy, change worker flags, publish artifacts or contact Boat
+directly. The control-plane worker owns VM cleanup.
+
+1. Deploy the additive migration and worker with the v4 base/installer, runtime
+   resolver and bundle builder. Enable `CLOUD_RUNTIME_QUALIFICATION_ENABLED`
+   on Alpha and resume background workers. For admission checks, also select
+   `CLOUD_RUNTIME_QUALIFICATION_MODE=smoke`. Register an approved v4 base and
+   publish a confirmed runtime containing the self-test. Use a fresh runtime
+   without existing full/MCP approvals for this smoke acceptance.
+2. In the private, mode-0600 repository-root `.env.agent`, set the existing
+   `ZEROS_ACCOUNT_ACCESS_TOKEN` variable to an Alpha staff account session
+   (`developer` or `platform_owner`). Keep its value out of shell arguments,
+   command output and reports. The script reads the file directly and pins all
+   HTTP requests to the Alpha API; redirects reject.
+3. Set `qualification_runtime_id` to the published resource ID and invoke:
+
+       node scripts/cloud-workspace-validation/runtime-qualification-live.mjs --runtime "$qualification_runtime_id"
+
+   The script verifies the status channel before requesting a staff retry,
+   saves the enqueue receipt immediately, then observes for at most 35 minutes.
+   It requires a successful run, durable cleanup confirmation and all five
+   enabled smoke rows with MCP false. Stdout is one closed diagnostic.
+4. Attach `.context/runtime-qualification-<runId>.json` to the verification
+   report. It records the runtime, base, run and Boat sandbox IDs, final state,
+   approval kinds and cleanup timestamp. For a run with a sandbox ID, a
+   non-null cleanup timestamp means the worker confirmed deletion and the
+   provider 404. Pre-allocation failures can confirm that nothing was allocated.
+   The run, provider journal and intended qualification rows remain as
+   audit/approval state.
+5. If authentication expires or observation times out, cleanup is unconfirmed
+   until a later observation proves it. Refresh the private staff session,
+   set `qualification_run_id` from the saved receipt and resume without
+   allocating another VM:
+
+       node scripts/cloud-workspace-validation/runtime-qualification-live.mjs --run "$qualification_run_id"
+
+   Keep the worker running for crash reconciliation. If provider errors prevent
+   cleanup, report that unresolved state and the recorded sandbox ID; do not
+   claim the VM was deleted. Local fake-provider/database tests cover crash,
+   failed installer/self-test and unconfirmed-deletion paths without live
+   mutation. No live provider resource was created by the local test suite.
 
 ## Control-plane admission
 
