@@ -3,12 +3,28 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { resolveCloudCodexBinaryFromImage } from "../binary-resolver";
+import {resolveCloudRuntime,resolveCloudRuntimePackagePath} from "../../../containment/cloud-runtime-root.mjs";
+vi.mock("../../../containment/cloud-runtime-root.mjs",async original=>{
+  const actual=await original<typeof import("../../../containment/cloud-runtime-root.mjs")>();
+  return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime),resolveCloudRuntimePackagePath:vi.fn(actual.resolveCloudRuntimePackagePath)};
+});
 const roots: string[] = [];
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.mocked(resolveCloudRuntime).mockReset();vi.mocked(resolveCloudRuntimePackagePath).mockReset();
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
+});
+it.skipIf(process.platform !== "linux" || process.arch !== "x64")("anchors v4 native resolution at the selected worker without using an ambient override",async()=>{
+  const fixture=await image();
+  vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile:"v4",workerRoot:fixture.root} as ReturnType<typeof resolveCloudRuntime>);
+  vi.mocked(resolveCloudRuntimePackagePath).mockImplementation(file=>file);
+  vi.stubEnv("ZEROS_CODEX_CLI_PATH","/tmp/untrusted-codex");
+  await expect(resolveCloudCodexBinaryFromImage()).resolves.toMatchObject({path:fixture.binary,source:"bundled"});
+  expect(resolveCloudRuntimePackagePath).toHaveBeenCalledWith(path.join(fixture.root,"package.json"));
+  expect(resolveCloudRuntimePackagePath).toHaveBeenCalledWith(path.join(fixture.root,"node_modules/@openai/codex/package.json"));
+  expect(resolveCloudRuntimePackagePath).toHaveBeenCalledWith(fixture.binary);
 });
 async function image() {
   const root = await mkdtemp(path.join(tmpdir(), "zeros-cloud-codex-"));

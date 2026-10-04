@@ -66,6 +66,7 @@ export const ZSR_CONTRACT_TEST_FILES = Object.freeze([
   "apps/desktop/src/engine/agents/containment/__tests__/cloud-preview-links.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/cloud-worker-config.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-helper-root.test.ts",
+  "apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-root.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/cloud-deployment-authority.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/design-watch-isolation.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/git-dispatch.test.ts",

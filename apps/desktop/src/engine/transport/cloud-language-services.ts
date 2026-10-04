@@ -1,3 +1,4 @@
+import {resolveCloudRuntime} from "../agents/containment/cloud-runtime-root.mjs";
 import {spawn} from "node:child_process";
 import {randomBytes} from "node:crypto";
 import {lstat,mkdir,realpath} from "node:fs/promises";
@@ -9,15 +10,15 @@ import {isCloudDeploymentOwner} from "../agents/containment/cloud-deployment-aut
 import type {CloudWorkerConfiguration} from "../agents/containment/cloud-worker-config";
 import type {BoundaryProcess} from "../agents/containment/types";
 
-const ROOT="/run/zeros/language-services",SUPERVISOR="/opt/zeros-runtime/cloud-process-supervisor";
-const NODE="/opt/zeros-runtime/bin/node",WORKSPACE="/srv/zeros/workspace";
+const ROOT="/run/zeros/language-services",WORKSPACE="/srv/zeros/workspace";
 export function cloudLanguageLaunch(worker:CloudWorkerConfiguration,command:string,args:string[]){
+  const runtime=resolveCloudRuntime(),NODE=runtime.node;
   if(worker.uid!==10001||worker.gid!==10001||worker.toolchain.node!==NODE||worker.toolchain.bwrap!=="/usr/bin/bwrap"||
       worker.toolchain.setpriv!=="/usr/bin/setpriv"||command!==NODE)throw new LspError("denied");
   const script=args[0]==="--max-old-space-size=256"?args[1]:args[0];
   const permitted=script===CLOUD_LANGUAGE_FILE_HELPER&&args.length===1||
-    script==="/opt/zeros/node_modules/typescript-language-server/lib/cli.mjs"&&args.join("\0")===["--max-old-space-size=256",script,"--stdio","--log-level","1"].join("\0")||
-    script==="/opt/zeros/node_modules/pyright/langserver.index.js"&&args.join("\0")===["--max-old-space-size=256",script,"--stdio"].join("\0");
+    script===`${runtime.workerRoot}/node_modules/typescript-language-server/lib/cli.mjs`&&args.join("\0")===["--max-old-space-size=256",script,"--stdio","--log-level","1"].join("\0")||
+    script===`${runtime.workerRoot}/node_modules/pyright/langserver.index.js`&&args.join("\0")===["--max-old-space-size=256",script,"--stdio"].join("\0");
   if(!permitted)throw new LspError("denied");
   // Drop engine identity before creating a nested user/network namespace.
   // The namespace owns its loopback setup without CAP_NET_ADMIN in the engine.
@@ -34,6 +35,7 @@ export class CloudRuntimeLanguageServices {
   private readonly clients=new Map<string,{active:boolean;service:CloudLanguageService;processes:Set<BoundaryProcess>}>();
   constructor(private readonly worker:CloudWorkerConfiguration,private readonly failed:()=>void){}
   async request(id:string,authorized:()=>boolean,request:unknown):Promise<unknown>{
+    const runtime=resolveCloudRuntime(),NODE=runtime.node,SUPERVISOR=runtime.processSupervisor;
     if(this.paused||!authorized())throw new LspError("denied");
     let client=this.clients.get(id);
     if(!client){
@@ -52,7 +54,7 @@ export class CloudRuntimeLanguageServices {
         assertLive();
         const receipt=`${ROOT}/${randomBytes(16).toString("hex")}`;
         const child=spawn(SUPERVISOR,[receipt,String(process.pid),"--",launched.command,...launched.args],{
-          cwd:WORKSPACE,env:{HOME:"/tmp",PATH:"/opt/zeros-runtime/bin:/usr/bin:/bin",LANG:"C.UTF-8",NODE_OPTIONS:"--max-old-space-size=256"},stdio:["pipe","pipe","pipe"]});
+          cwd:WORKSPACE,env:{HOME:"/tmp",PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8",NODE_OPTIONS:"--max-old-space-size=256"},stdio:["pipe","pipe","pipe"]});
         child.on("error",()=>{});
         if(!child.pid)throw new LspError();
         const tracked=new CloudSupervisedProcess(child,receipt,this.failed);

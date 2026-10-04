@@ -13,6 +13,15 @@
 // pass on any dev machine and prove nothing.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {realpathSync} from "node:fs";
+import {createRequire} from "node:module";
+import path from "node:path";
+import {createCloudRuntimeResolver,resolveCloudRuntime,resolveCloudRuntimePackagePath} from "../../../containment/cloud-runtime-root.mjs";
+import {cloudRuntimeFixture} from "../../../containment/__tests__/cloud-runtime-fixture";
+vi.mock("../../../containment/cloud-runtime-root.mjs",async original=>{
+  const actual=await original<typeof import("../../../containment/cloud-runtime-root.mjs")>();
+  return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime),resolveCloudRuntimePackagePath:vi.fn(actual.resolveCloudRuntimePackagePath)};
+});
 
 import {
   CLAUDE_CLI_PATH_ENV,
@@ -73,6 +82,66 @@ beforeEach(() => {
 afterEach(() => {
   warn.mockRestore();
   resetClaudeCliCacheForTests();
+  vi.mocked(resolveCloudRuntime).mockReset();vi.mocked(resolveCloudRuntimePackagePath).mockReset();vi.unstubAllEnvs();
+});
+
+function cloudFixture() {
+  const tree = cloudRuntimeFixture();
+  const resolver = createCloudRuntimeResolver({ filesystem: tree.filesystem });
+  const runtime = resolver.resolve();
+  vi.mocked(resolveCloudRuntime).mockReturnValue({ ...runtime, workerRoot: tree.physical(runtime.workerRoot) });
+  // Only translate the fixture's logical VM paths. Both the package guard and
+  // Node's package resolution run against the real files and links.
+  vi.mocked(resolveCloudRuntimePackagePath).mockImplementation(file => {
+    if (!file.startsWith(tree.directory + "/")) throw new Error("Unexpected fixture path");
+    return tree.physical(resolver.packagePath(file.slice(tree.directory.length)));
+  });
+  tree.write(`${runtime.workerRoot}/package.json`, {});
+  return { tree, worker: runtime.workerRoot };
+}
+
+it("resolves v4 Claude from the selected worker SDK and its native sibling",async()=>{
+  const { tree, worker } = cloudFixture();
+  try {
+    const sdk = `${worker}/node_modules/@anthropic-ai/claude-agent-sdk`;
+    tree.write(`${sdk}/package.json`, { name: "@anthropic-ai/claude-agent-sdk", exports: "./sdk.mjs" });
+    tree.write(`${sdk}/sdk.mjs`, "export {};");
+    const native = `${worker}/node_modules/${claudePlatformPackages()[0]!}/${claudeBinaryName()}`;
+    tree.write(native, "fixture", 0o555);
+    const binary = tree.physical(native);
+    vi.stubEnv("ZEROS_CLAUDE_CLI_PATH","/tmp/untrusted-claude");
+    const {resolveCloudClaudeCli}=await import("../adapter");
+    expect(resolveCloudClaudeCli()).toEqual({path:binary,source:"bundled"});
+    expect(resolveCloudRuntimePackagePath).toHaveBeenCalledWith(tree.physical(`${sdk}/package.json`));
+    expect(resolveCloudRuntimePackagePath).toHaveBeenCalledWith(binary);
+  } finally { tree.dispose(); }
+});
+
+it("rejects external package metadata reached through a link followed by a parent component", async () => {
+  const { tree, worker } = cloudFixture();
+  try {
+    const scope = `${worker}/node_modules/@anthropic-ai`;
+    const alternate = `${worker}/alternate-sdk/sdk.mjs`;
+    const nativePackage = `${claudePlatformPackages()[0]!}/${claudeBinaryName()}`;
+    const binary = `${worker}/alternate-sdk/node_modules/${nativePackage}`;
+    tree.write(`${scope}/sdk-safe/package.json`, { main: "sdk.mjs" });
+    tree.write(`${scope}/sdk-safe/sdk.mjs`, "export {};");
+    tree.mkdir("/outside/step");
+    tree.write("/outside/sdk-safe/package.json", { main: tree.physical(alternate) });
+    tree.write(alternate, "export {};");
+    tree.write(binary, "fixture", 0o555);
+    tree.link(`${scope}/escape`, path.posix.relative(scope, "/outside/step"));
+    tree.link(`${scope}/claude-agent-sdk`, "escape/../sdk-safe");
+    const metadata = tree.physical(`${scope}/claude-agent-sdk/package.json`);
+    expect(realpathSync.native(metadata)).toBe(tree.physical("/outside/sdk-safe/package.json"));
+    // Actual Node resolution observes the external main and selects files
+    // inside the worker. Guarding only those final files cannot catch this.
+    const sdk = createRequire(tree.physical(`${worker}/package.json`)).resolve("@anthropic-ai/claude-agent-sdk");
+    expect(sdk).toBe(tree.physical(alternate));
+    expect(createRequire(sdk).resolve(nativePackage)).toBe(tree.physical(binary));
+    const { resolveCloudClaudeCli } = await import("../adapter");
+    expect(() => resolveCloudClaudeCli()).toThrow(/runtime/);
+  } finally { tree.dispose(); }
 });
 
 describe("resolveClaudeCli — the packaged shape (the actual bug)", () => {

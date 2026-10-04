@@ -74,6 +74,23 @@ afterEach(() => {
 });
 
 describe("cloud runtime registration", () => {
+  it("registers the complete v4 witness without a legacy image-contract claim", async () => {
+    const runtime = consumeCloudRuntimeEnvironment({[CLOUD_RUNTIME_ENV]:encodedRuntime()},()=>NOW)!;
+    const agentRuntime = {profile:"zeros-cloud-worker-v4" as const,runtimeId:`r1-${"a".repeat(64)}`,manifestSha256:"a".repeat(64),
+      baseCompatibilityId:`bc1-${"b".repeat(64)}`,installerReceiptSha256:"c".repeat(64),
+      bootId:"12345678-1234-4234-8234-123456789abc",supervisorSessionId:"22345678-1234-4234-8234-123456789abc"};
+    const fetcher=vi.fn().mockResolvedValue(Response.json(registrationResponse()));
+    const registration=new CloudRuntimeRegistration(runtime,{agentRuntime,fetch:fetcher,now:()=>NOW,
+      onAuthorityLost:vi.fn(),onDurableRecordSync:completedDurableRecordSync()});
+    try {
+      await registration.start();
+      const document=JSON.parse(fetcher.mock.calls[0][1].body);
+      expect(document.agentRuntime).toEqual(agentRuntime);
+      expect(document.agentRuntime).not.toHaveProperty("contractSha256");
+    } finally { await registration.stop(); }
+    for(const change of [{runtimeId:`r1-${"d".repeat(64)}`},{bootId:"invalid"},{supervisorSessionId:"invalid"},{contractSha256:"a".repeat(64)}])
+      expect(()=>new CloudRuntimeRegistration(runtime,{agentRuntime:{...agentRuntime,...change},onAuthorityLost:vi.fn(),onDurableRecordSync:completedDurableRecordSync()})).toThrow(/attestation/);
+  });
   it("preserves verified device control and Stop during a temporary record outage while blocking new claims", async () => {
     vi.useFakeTimers(); vi.setSystemTime(NOW);
     const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;

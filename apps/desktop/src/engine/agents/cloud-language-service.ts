@@ -1,3 +1,4 @@
+import {resolveCloudRuntime} from "./containment/cloud-runtime-root.mjs";
 import path from "node:path";
 import {fileURLToPath,pathToFileURL} from "node:url";
 import {CloudLspRequestSchema,type CloudLspLanguage} from "@zeros/protocol/cloud-lsp";
@@ -20,7 +21,7 @@ type Server={process:BoundaryProcess;rpc:LspRpc;documents:Map<string,{sha256:str
 // is returned only after proven descendant retirement, including late spawns.
 let reservedServers=0;
 const MAX_SERVERS=4,MAX_DOCUMENTS=32;
-const SERVERS={typescript:"/opt/zeros/node_modules/typescript-language-server/lib/cli.mjs",python:"/opt/zeros/node_modules/pyright/langserver.index.js"};
+const SERVERS={typescript:"node_modules/typescript-language-server/lib/cli.mjs",python:"node_modules/pyright/langserver.index.js"};
 const position=(value:unknown):value is {line:number;character:number}=>{
   if(!value||typeof value!=="object")return false;const p=value as Record<string,unknown>;
   return Number.isSafeInteger(p.line)&&Number.isSafeInteger(p.character)&&Number(p.line)>=0&&Number(p.character)>=0&&Number(p.line)<=1_000_000&&Number(p.character)<=1_000_000;
@@ -148,7 +149,8 @@ export class CloudLanguageService {
     let child:BoundaryProcess|undefined;
     const pending=(async()=>{
       try{
-        child=await this.host.launch("/opt/zeros-runtime/bin/node",["--max-old-space-size=256",SERVERS[key],"--stdio",...(key==="typescript"?["--log-level","1"]:[])]);
+        const runtime=resolveCloudRuntime();
+        child=await this.host.launch(runtime.node,["--max-old-space-size=256",`${runtime.workerRoot}/${SERVERS[key]}`,"--stdio",...(key==="typescript"?["--log-level","1"]:[])]);
         this.assertLive();
         const rpc=new LspRpc(child,()=>{void this.stop(key).catch(()=>this.host.failed());},{
           python:{pythonPath:"/usr/bin/python3",analysis:{diagnosticMode:"openFiles",autoSearchPaths:false,useLibraryCodeForTypes:false}},
@@ -159,7 +161,7 @@ export class CloudLanguageService {
           workspaceFolders:[{uri:pathToFileURL(this.host.root).href,name:"workspace"}],
           capabilities:{general:{positionEncodings:["utf-16"]},workspace:{configuration:true,applyEdit:false},textDocument:{completion:{completionItem:{snippetSupport:false}}}},
           initializationOptions:key==="typescript"?{disableAutomaticTypingAcquisition:true,maxTsServerMemory:256,
-            tsserver:{path:"/opt/zeros/node_modules/typescript/lib/tsserver.js"},plugins:[]}:undefined},undefined,15_000);
+            tsserver:{path:`${runtime.workerRoot}/node_modules/typescript/lib/tsserver.js`},plugins:[]}:undefined},undefined,15_000);
         this.assertLive();rpc.notify("initialized",{});return server;
       }catch{
         if(child){try{await this.host.retire(child);reservedServers--;}catch{this.retirementFailed=true;this.host.failed();}}

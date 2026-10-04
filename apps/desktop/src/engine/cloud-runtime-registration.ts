@@ -29,6 +29,21 @@ const MAX_RUNTIME_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
 
+// This module is also imported by server-side setup contracts. Keep the wire
+// check pure; only the engine's attester may read the installed runtime.
+function isCloudAgentRuntimeAttestation(value: unknown): value is CloudAgentRuntimeAttestation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const fields = value as Record<string, unknown>;
+  const digest = (field: unknown): field is string => typeof field === "string" && /^[a-f0-9]{64}$/.test(field);
+  const uuid = (field: unknown): field is string => typeof field === "string" && field === field.toLowerCase() && UUID_PATTERN.test(field);
+  if (fields.profile === "zeros-cloud-worker-v3") return digest(fields.contractSha256);
+  return fields.profile === "zeros-cloud-worker-v4" &&
+    Object.keys(fields).sort().join("\0") === ["baseCompatibilityId", "bootId", "installerReceiptSha256", "manifestSha256", "profile", "runtimeId", "supervisorSessionId"].join("\0") &&
+    digest(fields.manifestSha256) && fields.runtimeId === `r1-${fields.manifestSha256}` &&
+    typeof fields.baseCompatibilityId === "string" && /^bc1-[a-f0-9]{64}$/.test(fields.baseCompatibilityId) &&
+    digest(fields.installerReceiptSha256) && uuid(fields.bootId) && uuid(fields.supervisorSessionId);
+}
+
 export type CloudRuntimeAuthority = {
   heartbeatEndpoint: string;
   heartbeatToken: string;
@@ -391,7 +406,7 @@ export class CloudRuntimeRegistration {
     readonly config: CloudRuntimeConfig,
     dependencies: CloudRuntimeRegistrationDependencies,
   ) {
-    if (dependencies.agentRuntime?.profile !== "zeros-cloud-worker-v3" || !/^[a-f0-9]{64}$/.test(dependencies.agentRuntime.contractSha256)) {
+    if (!isCloudAgentRuntimeAttestation(dependencies.agentRuntime)) {
       throw new Error("cloud engine runtime attestation is required");
     }
     this.agentRuntime = Object.freeze({ ...dependencies.agentRuntime });

@@ -103,7 +103,7 @@ function pathChecker(root: string): (relative: string) => boolean {
     // The durable projection can be read by workspace viewers. Keep private
     // engine paths and sensitive source context outside that projection.
     canEdit: false, authorized: () => true,
-    privateRoots: [zerosStateRoot(), os.homedir(), "/srv/zeros/state", "/srv/zeros/home", "/opt/zeros", "/etc/zeros"],
+    privateRoots: [zerosStateRoot(), os.homedir(), "/srv/zeros/state", "/srv/zeros/home", "/opt/zeros", "/etc/zeros", "/zeros", "/opt/zeros-infra", "/opt/zeros-bootstrap", "/srv/zeros/runtime-installs"],
     ownerRoots: () => owners,
   });
   const known = new Map<string, boolean>();

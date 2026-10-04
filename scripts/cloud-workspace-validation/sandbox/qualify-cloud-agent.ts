@@ -1,3 +1,4 @@
+import {resolveCloudRuntime} from "../../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
 /** Explicit, paid image qualification. Run only in a disposable worker cloned
  * from the exact snapshot, through cloud-engine-launcher --qualify-agent.
  * No application RPC can invoke this entry. The host supplies one expiring,
@@ -79,6 +80,9 @@ async function main() {
   const worker = loadCloudWorkerConfiguration();
   assert.equal(worker?.version, 3); assert(worker);
   const attestation = readCloudAgentRuntimeAttestation(worker);
+  // This paid legacy input binds image-build provenance. B7 owns the separate
+  // v4 runtime-smoke entry; never reinterpret a legacy build digest.
+  assert(attestation.profile === "zeros-cloud-worker-v3");
   const buildBytes = readFileSync("/etc/zeros/image-build.json");
   const build = JSON.parse(buildBytes.toString());
   assert.equal(createHash("sha256").update(buildBytes).digest("hex"), input.buildSha256);
@@ -135,7 +139,7 @@ async function main() {
   gateway = new AgentGateway({
     projectRoot: workspace,
     executionBoundary: new ZsrExecutionBoundary({ projectRoot: workspace, cloudWorker: worker,
-      cloudWorkerToolchain: worker.toolchain, supervisorScript: "/opt/zeros/binaries/zsr-supervisor.mjs" }),
+      cloudWorkerToolchain: worker.toolchain, supervisorScript: `${resolveCloudRuntime().workerRoot}/binaries/zsr-supervisor.mjs` }),
     cloudAgentExecutionFactory: { async prepare(options) {
       const prepared = await factory.prepare(options);
       execution = cloudProviderExecution(prepared.boundary) ?? undefined;

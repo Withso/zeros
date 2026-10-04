@@ -53,6 +53,8 @@ import { randomUUID } from "node:crypto";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import * as fsp from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { resolveCloudRuntime, resolveCloudRuntimePackagePath } from "../../containment/cloud-runtime-root.mjs";
 import * as path from "node:path";
 import { personalRepoRoot } from "../../../settings/personal-repo";
 import { readClaudeConnectors, readClaudeDiscovery } from "./extensions";
@@ -151,6 +153,9 @@ import {
   claudeCliMissingMessage,
   isPinnedClaudeRuntime,
   resolveClaudeCli,
+  claudePlatformPackages,
+  claudeBinaryName,
+  isExecutableFileSync,
   type ClaudeCliSourceKind,
 } from "./binary-resolver";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
@@ -165,6 +170,30 @@ import { defaultMacClaudeOAuthAuthority } from "../../containment/claude-oauth-a
 /** Which CLI tier we last logged, so the breadcrumb lands once per engine boot
  *  (and again if the tier ever changes mid-run) instead of once per turn. */
 let loggedCliSource: ClaudeCliSourceKind | null = null;
+
+/** Cloud resolution starts at the admitted worker tree, independent of desktop
+ * overrides and the writable workspace's package graph. */
+export function resolveCloudClaudeCli(): {path:string;source:"bundled"} {
+  const runtime=resolveCloudRuntime();
+  if(runtime.profile==="v3") {
+    const cli=resolveClaudeCli();
+    if(cli.source!=="bundled"||!cli.path?.startsWith(`${runtime.workerRoot}/`))
+      throw new Error("Cloud Claude requires the immutable bundled runtime");
+    return {path:cli.path,source:"bundled"};
+  }
+  const guard=(file:string)=>runtime.profile==="v4"?resolveCloudRuntimePackagePath(file):file;
+  const anchor=path.join(runtime.workerRoot,"package.json");
+  if(runtime.profile==="v4")guard(path.join(runtime.workerRoot,"node_modules/@anthropic-ai/claude-agent-sdk/package.json"));
+  const sdk=guard(createRequire(guard(anchor)).resolve("@anthropic-ai/claude-agent-sdk"));
+  const fromSdk=createRequire(sdk);
+  for(const pkg of claudePlatformPackages()) {
+    let binary:string;
+    try { binary=fromSdk.resolve(`${pkg}/${claudeBinaryName()}`); } catch { continue; }
+    binary=guard(binary);
+    if(binary.startsWith(`${runtime.workerRoot}/`)&&isExecutableFileSync(binary))return {path:binary,source:"bundled"};
+  }
+  throw new Error("Cloud Claude requires the immutable bundled runtime");
+}
 
 const CLAUDE_IDLE_TIMEOUT_ENV_VAR = "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES";
 const CLAUDE_AUTO_MEMORY_ENV_VAR = "ZEROS_CLAUDE_AUTO_MEMORY";
@@ -4303,9 +4332,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // node_modules sits next to sdk.mjs, which is true in dev and false in every
     // packaged build. Failing HERE (before query()) turns an opaque
     // "AGENT RESPONSE FAILURE" into a message that names the fix.
-    const cli = resolveClaudeCli({ override: cloud?undefined:state.cliBinary });
-    if(cloud&&(cli.source!=="bundled"||!cli.path?.startsWith("/opt/zeros/")))
-      throw new Error("Cloud Claude requires the immutable bundled runtime");
+    const cli = cloud ? resolveCloudClaudeCli() : resolveClaudeCli({ override: state.cliBinary });
     if (!cli.path) {
       throw new AgentFailureError({
         kind: "auth-required",
