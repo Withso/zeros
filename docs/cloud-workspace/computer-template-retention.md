@@ -9,6 +9,8 @@ These sets overlap; ten is not a cap on all retained templates.
 Activation and successful automatic activation notify
 `cloud_computer_template_retention` after their transaction commits. The worker
 also sweeps every minute, including after a restart or a missed notification.
+Each sweep scans candidates in build-version pages, so unresolved deletions do
+not block later candidates. Subsequent sweeps retry unresolved journals.
 It runs on Alpha with the existing `CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED`
 switch and Boat account/wallet scope; no separate retention flag is introduced.
 Notifications use a separate session connection when `DATABASE_LISTEN_URL` is
@@ -37,8 +39,9 @@ retired history cannot Activate.
 Organization final erasure checks B7's operation journals across provider accounts
 before deleting template, build or mutation journals. A missing sandbox ID is
 not cleanup evidence: an unallocated create must be positively closed, including
-every recorded create attempt. Once the deletion grace period has expired and the
-purge worker owns the request, retention releases active/previous/newest holds.
+every recorded create attempt. Once the durable deletion request enters
+irreversible purge, retention releases active/previous/newest holds, including
+staff force-purge before the original grace deadline.
 Workspace-source holds remain until workspace/data cleanup is complete. A
 scheduled deletion still inside its recovery window does not release templates.
 

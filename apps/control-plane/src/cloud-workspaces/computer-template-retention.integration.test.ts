@@ -12,6 +12,7 @@ import {
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { forceDeletionRequestPurgeByStaff } from "../deletion-lifecycle.js";
 import { BoatApiClient } from "./boat-client.js";
 import { prepareBuilderVmOperation } from "./cloud-builder-vm.js";
 import { DatabaseBuilderVmOperationStore } from "./cloud-builder-vm-store.js";
@@ -651,6 +652,101 @@ d("Cloud Computer template retention", () => {
     await deletedWorkspace();
     expect(await tick()).toBe(1);
     expect(operations.get(key(versions[0]!))!.state).toBe("deleted");
+  });
+
+  it("releases retained templates on staff force-purge before the scheduled grace deadline", async () => {
+    const versions = await templates(2);
+    journal = await realJournal(versions[0]!);
+    await realJournal(versions[1]!);
+    worker = makeWorker();
+    await pool.query(
+      "UPDATE cloud_computer_v2_heads SET active_build_id=$2,previous_build_id=$3 WHERE org_id=$1",
+      [fixture.organizationId, versions[1]!.id, versions[0]!.id],
+    );
+    const request = (
+      await pool.query<{ id: string; purge_after: Date }>(
+        `INSERT INTO deletion_requests(public_code,target_kind,target_id,target_organization_id,requested_by_user_id)
+         VALUES('ZD-CCCC-CCCC','organization',$1,$1,$2) RETURNING id,purge_after`,
+        [fixture.organizationId, fixture.userId],
+      )
+    ).rows[0]!;
+    await pool.query(
+      "UPDATE organizations SET lifecycle_status='scheduled',deletion_request_id=$2 WHERE id=$1",
+      [fixture.organizationId, request.id],
+    );
+    expect(request.purge_after.getTime()).toBeGreaterThan(Date.now());
+    expect(await tick()).toBe(0);
+    expect(requests).toEqual([]);
+
+    expect(
+      await forceDeletionRequestPurgeByStaff(pool, {
+        requestId: request.id,
+        operatorUserId: fixture.userId,
+        supportCaseReference: "CASE-C6-FORCE-PURGE",
+      }),
+    ).toMatchObject({ state: "purging", purge_after: request.purge_after });
+    expect(
+      (
+        await pool.query(
+          "SELECT lifecycle_status FROM organizations WHERE id=$1",
+          [fixture.organizationId],
+        )
+      ).rows[0].lifecycle_status,
+    ).toBe("scheduled");
+    expect(await tick()).toBe(2);
+    expect(
+      await withSystemTx(pool, async (tx) => {
+        await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [
+          fixture.organizationId,
+        ]);
+        return computerTemplateCleanupPending(tx, fixture.organizationId);
+      }),
+    ).toBe(false);
+    for (const template of versions)
+      expect((await state(template)).state).toBe("retired");
+  });
+
+  it("scans past fifty uncertain deletions and retries them on later sweeps", async () => {
+    const versions = await templates(63);
+    const eligible = versions.slice(0, 53);
+    const blocked = eligible.slice(0, 50);
+    for (const template of eligible) journal = await realJournal(template);
+    worker = makeWorker();
+    const failures = new Set(blocked.map((template) => template.resource));
+    deleteHook = async (id) => {
+      if (failures.has(id)) throw new Error("uncertain deletion");
+      live.delete(id);
+      return Response.json({
+        ok: true,
+        operation: {
+          id: `bdop_${"a".repeat(32)}`,
+          kind: "sandbox",
+          targetId: id,
+        },
+      });
+    };
+    expect(await tick()).toBe(3);
+    expect(
+      requests.filter((row) => row.method === "DELETE").map((row) => row.id),
+    ).toEqual(eligible.map((template) => template.resource));
+    expect(
+      (
+        await Promise.all(
+          blocked.map((template) => journal.find(key(template))),
+        )
+      ).every(
+        (operation) =>
+          operation?.state === "deleting" &&
+          operation.deletion_operation_id === null,
+      ),
+    ).toBe(true);
+    expect(await makeWorker().tick(fixture.organizationId)).toBe(0);
+    expect(requests.filter((row) => row.method === "DELETE")).toHaveLength(103);
+    deleteHook = undefined;
+    expect(await tick()).toBe(50);
+    for (const template of versions.slice(53))
+      expect((await state(template)).state).toBe("ready");
+    expect(await tick()).toBe(0);
   });
 
   it("preserves retired history for Rebuild and rejects Activate", async () => {

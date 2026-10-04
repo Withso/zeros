@@ -171,7 +171,7 @@ export class CloudComputerTemplateRetentionWorker {
         `SELECT head.active_build_id,head.previous_build_id,
          (organization.lifecycle_status IN ('purging','provider_deleted') OR EXISTS (
            SELECT 1 FROM deletion_requests request WHERE request.id=organization.deletion_request_id
-             AND request.state IN ('purging','provider_deleting') AND request.purge_after<=clock_timestamp()
+             AND request.state IN ('purging','provider_deleting')
          )) AS erasing
        FROM cloud_computer_v2_heads head JOIN organizations organization ON organization.id=head.org_id
        WHERE head.org_id=$1`,
@@ -378,17 +378,23 @@ export class CloudComputerTemplateRetentionWorker {
     });
   }
 
-  private async organization(org: string): Promise<number> {
+  private async organization(org: string, afterVersion = "0"): Promise<number> {
     const candidates = await withSystemTx(this.pool, async (tx) => {
       const keep = await this.keep(tx, org);
       return (
-        await tx.query<Template>(
-          `SELECT template.*,build.worker_fence FROM cloud_computer_templates template
+        await tx.query<Template & { version: string }>(
+          `SELECT template.*,build.worker_fence,build.version FROM cloud_computer_templates template
          JOIN cloud_computer_v2_builds build ON build.id=template.build_id AND build.org_id=template.org_id
-         WHERE template.org_id=$1 AND template.account_scope=$2 AND template.billing_org=$3
+         WHERE template.org_id=$1 AND template.account_scope=$2 AND template.billing_org=$3 AND build.version>$5::bigint
            AND (template.state='retiring' OR (template.state='ready' AND NOT template.build_id=ANY($4::uuid[])))
          ORDER BY build.version LIMIT 50`,
-          [org, this.options.accountScope, this.options.billingOrg, [...keep]],
+          [
+            org,
+            this.options.accountScope,
+            this.options.billingOrg,
+            [...keep],
+            afterVersion,
+          ],
         )
       ).rows;
     });
@@ -421,6 +427,10 @@ export class CloudComputerTemplateRetentionWorker {
         );
       }
     }
+    // Advance past every candidate, including unconfirmed cleanup. The next
+    // sweep starts at zero so unresolved journals remain retryable.
+    if (!this.stopping && candidates.length === 50)
+      retired += await this.organization(org, candidates.at(-1)!.version);
     return retired;
   }
 
