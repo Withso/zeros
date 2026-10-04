@@ -774,14 +774,18 @@ class Bootstrap:
             require(value["archiveSha256"] == descriptor["archiveSha256"], "cache_conflict")
         return raw
 
-    def verify_runtime(self, runtime_id, full=True, descriptor=None, allow_missing_receipt=False):
+    def incomplete_marker(self, runtime_id):
+        text_match(runtime_id, RID, "cache_conflict")
+        return INFRA + "/" + runtime_id + ".incomplete"
+
+    def runtime_metadata(self, runtime_id, descriptor=None):
+        require(not os.path.lexists(self.path(self.incomplete_marker(runtime_id))), "cache_conflict")
         raw, manifest = self.manifest_for(runtime_id, descriptor)
+        return raw, manifest, self.receipt(runtime_id, manifest, descriptor)
+
+    def verify_runtime(self, runtime_id, full=True, descriptor=None):
+        raw, manifest, receipt = self.runtime_metadata(runtime_id, descriptor)
         self.verify_tree(INFRA + "/" + runtime_id, manifest, raw, full=full)
-        try:
-            receipt = self.receipt(runtime_id, manifest, descriptor)
-        except FileNotFoundError:
-            require(allow_missing_receipt and full and descriptor is not None, "cache_conflict")
-            receipt = self.publish_receipt(descriptor, manifest)
         return manifest, receipt
 
     def publish_receipt(self, descriptor, manifest):
@@ -823,7 +827,7 @@ class Bootstrap:
 
     def extract(self, archive, root, raw, manifest):
         self.stage = "extract"
-        with self.directory(root, create=True, mode=0o755):
+        with self.directory(root):
             pass
         entries = {e["path"]: e for e in manifest["files"]}
         entries["manifest.json"] = {"type": "file", "size": len(raw), "sha256": sha(raw), "mode": "0444"}
@@ -857,12 +861,10 @@ class Bootstrap:
             os.fsync(directory)
         self.stage = "verify_tree"
         self.verify_tree(root, manifest, raw)
-        self.fault("stage_fsynced")
+        self.fault("runtime_verified")
 
-    def clean_staging(self):
-        root = INFRA + "/.staging"
-        with self.directory(root) as directory:
-            pending = [(name, False) for name in os.listdir(directory)]
+    def remove_entries(self, root, names):
+        pending = [(name, False) for name in names]
         # Do not apply admission depth limits to cleanup: a prior version may
         # have left deeper partial trees. This postorder walk never recurses or
         # follows a symlink and has a constant open-descriptor count.
@@ -870,7 +872,10 @@ class Bootstrap:
             relative, visited = pending.pop()
             parent, _, name = relative.rpartition("/")
             with self.directory(root + ("/" + parent if parent else "")) as directory:
-                st = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                try:
+                    st = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
                 require(st.st_uid == self.uid and st.st_gid == self.gid, "root_ownership")
                 if stat.S_ISDIR(st.st_mode):
                     if visited:
@@ -888,6 +893,45 @@ class Bootstrap:
                     os.unlink(name, dir_fd=directory)
         with self.directory(root) as directory:
             os.fsync(directory)
+
+    def clean_staging(self):
+        root = INFRA + "/.staging"
+        with self.directory(root) as directory:
+            names = os.listdir(directory)
+        self.remove_entries(root, names)
+
+    def incomplete_runtimes(self, descriptor=None):
+        # A receipt alone or an unmarked directory alone is not a completed
+        # installation. Include dangling pointers and markers left before mkdir.
+        with self.directory(INFRA) as directory:
+            ids = {name.removesuffix(".incomplete") for name in os.listdir(directory)
+                   if RID.fullmatch(name.removesuffix(".incomplete"))}
+        with self.directory(RECEIPTS) as directory:
+            ids.update(name[:-5] for name in os.listdir(directory) if name.endswith(".json") and RID.fullmatch(name[:-5]))
+        ids.update(value for value in (self.current(), self.current("previous")) if value)
+        incomplete = []
+        for runtime_id in sorted(ids):
+            try:
+                self.runtime_metadata(runtime_id, descriptor if descriptor and descriptor["runtimeId"] == runtime_id else None)
+            except (Failure, FileNotFoundError):
+                incomplete.append(runtime_id)
+        return incomplete
+
+    def clean_incomplete(self, runtime_ids):
+        # Caller holds both locks; boot runs before the host, while install
+        # retires a host using an affected current before taking publication.lock.
+        for runtime_id in runtime_ids:
+            marker = self.incomplete_marker(runtime_id)
+            # Keep recovery restartable even if deletion itself is interrupted.
+            self.atomic(marker, b"")
+            if self.current() == runtime_id:
+                self.unlink(ACTIVE)
+                self.unlink(FACADE + "/current")
+            if self.current("previous") == runtime_id:
+                self.unlink(FACADE + "/previous")
+            self.unlink(RECEIPTS + "/" + runtime_id + ".json")
+            self.remove_entries(INFRA, [runtime_id])
+            self.unlink(marker)
 
     def install(self, encoded_input):
         self.stage = "validate_input"
@@ -908,8 +952,14 @@ class Bootstrap:
             runtime_id = descriptor["runtimeId"]
             destination = INFRA + "/" + runtime_id
             self.stage = "check_cache"
+            incomplete = self.incomplete_runtimes(descriptor)
+            if incomplete:
+                if self.current() in incomplete:
+                    self.host.stop()
+                with self.lock("runtime-publication.lock"):
+                    self.clean_incomplete(incomplete)
             if os.path.lexists(self.path(destination)):
-                self.verify_runtime(runtime_id, descriptor=descriptor, allow_missing_receipt=True)
+                self.verify_runtime(runtime_id, descriptor=descriptor)
             else:
                 require(not os.path.lexists(self.path(RECEIPTS + "/" + runtime_id + ".json")), "cache_conflict")
                 self.stage = "check_space"
@@ -930,21 +980,35 @@ class Bootstrap:
                         os.fsync(stream.fileno())
                     archive = self.path(operation + "/archive.tar.gz")
                     raw, manifest = self.scan_archive(archive, descriptor)
-                    self.extract(archive, operation + "/payload", raw, manifest)
+                    self.stage = "extract"
                     with self.lock("runtime-publication.lock"):
-                        with self.directory(operation) as source, self.directory(INFRA) as target:
-                            require(not os.path.lexists(self.path(destination)), "cache_conflict")
-                            os.rename("payload", runtime_id, src_dir_fd=source, dst_dir_fd=target)
+                        require(not os.path.lexists(self.path(destination)), "cache_conflict")
+                        self.atomic(self.incomplete_marker(runtime_id), b"")
+                        self.fault("incomplete_published")
+                        # Boat drops the children of renamed directories on
+                        # restore. Populate R itself; only files/links are renamed.
+                        with self.directory(INFRA) as target:
+                            os.mkdir(runtime_id, 0o755, dir_fd=target)
                             os.fsync(target)
-                            os.fsync(source)
-                        self.fault("runtime_renamed")
+                        with self.directory(destination) as directory:
+                            os.fchmod(directory, 0o755)
+                            os.fsync(directory)
+                        self.fault("runtime_created")
+                    self.extract(archive, destination, raw, manifest)
+                    with self.lock("runtime-publication.lock"):
                         self.publish_receipt(descriptor, manifest)
+                        self.unlink(self.incomplete_marker(runtime_id))
+                        self.fault("incomplete_removed")
                         # Exercise the same installed-tree/receipt path as
-                        # dispatch before publishing current. Full hashes were
-                        # already checked in staging; keep dispatch's closure
-                        # recheck here so a post-rename I/O failure cannot switch.
+                        # dispatch before switching; full hashes were checked
+                        # in R before its receipt and marker were committed.
                         self.stage = "verify_tree"
                         self.verify_runtime(runtime_id, full=False, descriptor=descriptor)
+                except Exception:
+                    if os.path.lexists(self.path(self.incomplete_marker(runtime_id))):
+                        with self.lock("runtime-publication.lock"):
+                            self.clean_incomplete([runtime_id])
+                    raise
                 finally:
                     self.clean_staging()
             self.switch(runtime_id)
@@ -1044,6 +1108,7 @@ class Bootstrap:
             self.stage = "switch_pointer"
             self.clean_staging()
             self.reconcile()
+            self.clean_incomplete(self.incomplete_runtimes())
             boot_id = self.boot_id()
             text_match(boot_id, UUID, "base_compatibility")
             try:

@@ -28,12 +28,13 @@ link resolution is bounded to 64 links and checks lexical containment separately
 Verification and staging cleanup are iterative, including cleanup of deeper
 partial trees left by an earlier installer. Every listed entrypoint must be a
 regular file; `selfTest` may be omitted. Receipt `fileCount` counts regular files.
-Files/directories are flushed before the runtime directory is renamed. Before
-switching `current`, the installer also runs dispatch's installed-tree and
-receipt verifier against the final location, retaining full hashing in staging.
-A cached
-runtime is fully re-hashed; a missing receipt is reconstructed only from the
-fresh descriptor after complete verification. A conflicting cache fails closed.
+Extraction creates and fills the final runtime directory directly. Every file
+and directory is flushed and fully verified there before the receipt is
+published. Before switching `current`, the installer also runs dispatch's
+installed-tree and receipt verifier. A cached runtime with a matching receipt
+is fully re-hashed; a corrupt receipted inventory fails closed. Missing or
+mismatched receipts require deleting the incomplete tree and extracting fresh
+bytes, rather than reconstructing a receipt from leftover files.
 
 Publication stops the host and confirms cgroup retirement before journaling the
 old/new pointers and switching `current`. `previous` keeps the prior runtime.
@@ -68,6 +69,40 @@ inputs, exception messages or URLs in the closed diagnostic.
 For an OS error it retains the original allowlisted exception class, numeric
 and symbolic errno, and innermost bootstrap function/line from the traceback.
 The public diagnostic still uses the same closed stage/check mapping.
+
+## Boat directory persistence
+
+Boat's measured stop/resume behavior (design contracts §22) loses the children
+of directories that were created and then renamed: the directory survives
+empty. Renamed regular files, renamed symlinks, and directories populated at
+their final paths persist. V4 never publishes a runtime by renaming a directory.
+
+After archive validation, the installer durably creates the root-only 0600
+sidecar `/opt/zeros-infra/<runtimeId>.incomplete` before creating the fresh final
+directory `R`. The sidecar stays outside the manifest inventory. Installation
+then extracts into `R`, verifies and flushes it, atomically publishes the receipt
+with a regular-file rename, removes/fsyncs the marker, and atomically replaces
+the `current` symlink. Dispatch rejects any marked runtime, even if a receipt
+has already been written.
+
+Boot and install retries remove marked trees and trees without matching
+manifest/receipt metadata through the same iterative no-follow cleanup. They
+also remove orphan receipts and dangling current/previous pointers. Cleanup
+keeps a marker until deletion finishes so an interrupted cleanup is retryable.
+An install retires a host using an affected `current` before deleting it;
+boot reconciliation runs before the host starts. Valid previous runtimes are
+retained, with no automatic engine restart or download during boot. A later
+install downloads and extracts the requested incomplete runtime again. A
+complete, verified runtime whose marker was already removed can be reused
+after a crash before the pointer switch.
+
+The rename audit covers the v4 bootstrap, kit upload/build path, shared owned
+build runner, and v4 build/sanitize/verify templates. Bootstrap renames only
+regular metadata files and symlinks; the kit atomically renames regular private
+JSON state files. Uploaded/build files are written at their final paths, and
+sanitation only deletes. The separate legacy v3 `boat-image/templates/install.sh`
+still contains directory moves and is outside this v4 profile's changes; it
+requires a separate compatibility fix before reuse with this Boat behavior.
 
 ## Boat restore and early-boot dependencies
 
@@ -119,6 +154,11 @@ the base's ABI pin. The fixture README describes the additional lexical escape
 case and raw-digest checks for changes to canonical serialization. The live
 synthetic generator is exercised through install, a fresh dispatcher, and
 boot followed by dispatch, with additional executable-directory symlink cases.
+Tests prohibit directory renames during that synthetic installation, exercise
+all marker/receipt and pointer-switch crash boundaries with and without an
+intervening boot, and reproduce the empty-runtime/retained-receipt restore
+failure. They also interrupt cleanup and verify deep-tree removal without
+following links outside the incomplete runtime.
 
 ## Scripted Alpha verification (operator runbook)
 

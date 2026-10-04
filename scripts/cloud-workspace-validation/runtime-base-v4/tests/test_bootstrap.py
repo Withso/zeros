@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
@@ -114,6 +115,21 @@ def binary_stdout():
             wrapper.flush()
     finally:
         wrapper.detach()
+
+
+@contextlib.contextmanager
+def no_directory_renames():
+    """Boat preserves file renames but loses renamed directories' children."""
+    def checked(operation):
+        def rename(source, destination, **kwargs):
+            info = os.stat(source, dir_fd=kwargs.get("src_dir_fd"), follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                raise AssertionError("runtime publication renamed a directory")
+            return operation(source, destination, **kwargs)
+        return rename
+    with mock.patch.object(b.os, "rename", side_effect=checked(os.rename)), \
+            mock.patch.object(b.os, "replace", side_effect=checked(os.replace)):
+        yield
 
 
 def template(name):
@@ -506,7 +522,8 @@ class BootstrapTests(unittest.TestCase):
                     self.assertEqual(self.payload, original)
                 original = self.payload
             self.value["runtime"] = descriptor
-            self.install()
+            with no_directory_renames():
+                self.install()
             self.assertEqual((self.runtime() / "bin/node").read_bytes(), node_bytes)
             self.assertEqual((self.runtime() / "worker/variant-link.txt").read_text(), variant)
             self.app.verify_runtime(descriptor["runtimeId"], full=True)
@@ -1040,22 +1057,214 @@ else:
         self.install()
         self.assertEqual(os.readlink(self.root / "opt/zeros/previous"), old)
 
-    def test_missing_receipt_rebuilt_only_after_full_verification(self):
+    def test_missing_or_mismatched_receipt_requires_fresh_extraction(self):
         self.install()
         rid = self.value["runtime"]["runtimeId"]
         receipt = self.root / "srv/zeros/runtime-installs" / (rid + ".json")
-        receipt.unlink()
+        marker = self.runtime().with_suffix(".incomplete")
+        for mismatch in ("missing", "invalid", "baseCompatibilityId", "archiveSha256", "fileCount"):
+            with self.subTest(mismatch=mismatch):
+                value = json.loads(receipt.read_bytes())
+                if mismatch == "missing":
+                    receipt.unlink()
+                elif mismatch == "invalid":
+                    receipt.write_bytes(b"{}")
+                else:
+                    value[mismatch] = value[mismatch] + 1 if mismatch == "fileCount" else "f" * 64
+                    receipt.write_bytes(canonical(value))
+                stale = self.runtime() / "uncommitted-file"
+                stale.write_bytes(b"discard incomplete contents")
+                extract = self.app.extract
+
+                def fresh(*args):
+                    self.assertEqual(args[1], b.INFRA + "/" + rid)
+                    self.assertIsNone(self.app.current())
+                    self.assertNotEqual(self.host.state, "active")
+                    self.assertTrue(marker.is_file())
+                    self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(list(self.runtime().iterdir()), [])
+                    return extract(*args)
+
+                before = self.downloads
+                with mock.patch.object(self.app, "extract", side_effect=fresh), no_directory_renames():
+                    self.assertEqual(self.install(), 0)
+                self.assertEqual(self.downloads, before + 1)
+                self.assertFalse(marker.exists())
+                self.assertFalse(stale.exists())
+                self.app.verify_runtime(rid)
+                self.assert_fresh_dispatch(rid)
+
+    def test_missing_runtime_with_orphan_receipt_is_reextracted(self):
         self.install()
-        self.assertTrue(receipt.exists())
+        rid = self.app.current()
+        shutil.rmtree(self.runtime())
+        self.assertEqual(self.install(), 0)
+        self.assertEqual(self.downloads, 2)
+        self.app.verify_runtime(rid)
+        self.assert_fresh_dispatch(rid, boot=True)
+
+    def test_incomplete_current_is_not_removed_until_host_retirement_succeeds(self):
+        self.install()
+        rid = self.app.current()
+        receipt = self.root / "srv/zeros/runtime-installs" / (rid + ".json")
+        receipt.unlink()
+        with mock.patch.object(self.host, "stop", side_effect=b.Failure("cgroup_retired")):
+            with self.assertRaises(b.Failure) as caught:
+                self.install()
+        self.assertEqual(caught.exception.checks, ["cgroup_retired"])
+        self.assertEqual(self.app.current(), rid)
+        self.assertEqual((self.runtime() / "bin/node").read_bytes(), b"synthetic node\n")
         self.assertEqual(self.downloads, 1)
 
-    def test_orphan_receipt_is_not_overwritten_by_a_new_download(self):
+    def test_boot_removes_marked_current_even_with_a_matching_receipt(self):
         self.install()
-        shutil.rmtree(self.runtime())
+        previous = self.app.current()
+        self.payload, self.value, _ = fixture(extra={"worker/next": b"second"})
+        self.install()
+        rid = self.app.current()
+        marker = self.runtime().with_suffix(".incomplete")
+        marker.write_bytes(b"")
+        marker.chmod(0o600)
         with self.assertRaises(b.Failure) as caught:
-            self.install()
+            self.app.verify_runtime(rid)
         self.assertEqual(caught.exception.checks, ["cache_conflict"])
-        self.assertEqual(self.downloads, 1)
+        self.app.boot()
+        self.assertIsNone(self.app.current())
+        self.assertEqual(self.app.current("previous"), previous)
+        self.assertEqual(self.app.status()["hostState"], "waiting_for_runtime")
+        self.assertFalse(self.runtime().exists())
+        self.assertFalse(marker.exists())
+        self.assertFalse(self.app.path(b.RECEIPTS + "/" + rid + ".json").exists())
+        self.assertFalse(self.app.path(b.ACTIVE).exists())
+        self.app.verify_runtime(previous)
+        before = self.downloads
+        self.assertEqual(self.install(), 0)
+        self.assertEqual(self.downloads, before + 1)
+        self.assertEqual(self.app.current("previous"), previous)
+        self.assert_fresh_dispatch(rid, boot=True)
+
+    def test_boat_restored_empty_runtime_with_receipt_is_reextracted(self):
+        self.install()
+        previous = self.app.current()
+        self.payload, self.value, _ = fixture(extra={"worker/next": b"second"})
+        self.install()
+        rid = self.app.current()
+        # Measured Boat failure: current and receipt survive, but a renamed
+        # runtime directory returns with none of its children after restore.
+        for child in self.runtime().iterdir():
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        self.assertEqual(self.app.current(), rid)
+        self.assertTrue(self.app.path(b.RECEIPTS + "/" + rid + ".json").exists())
+        self.app.boot()
+        self.assertIsNone(self.app.current())
+        self.assertFalse(self.runtime().exists())
+        self.app.verify_runtime(previous)
+        before = self.downloads
+        with no_directory_renames():
+            self.install()
+        self.assertEqual(self.downloads, before + 1)
+        self.assertEqual(self.app.current("previous"), previous)
+        self.assert_fresh_dispatch(rid, boot=True)
+
+    def test_incomplete_cleanup_can_itself_be_interrupted(self):
+        for boundary in ("receipt_removed", "tree_removed"):
+            with self.subTest(boundary=boundary):
+                self.payload, self.value, _ = fixture(extra={"worker/version": boundary.encode()})
+                self.install()
+                rid = self.app.current()
+                marker = self.runtime().with_suffix(".incomplete")
+                marker.write_bytes(b"")
+                marker.chmod(0o600)
+                unlink, remove_entries = self.app.unlink, self.app.remove_entries
+
+                def interrupt_unlink(absolute):
+                    unlink(absolute)
+                    if boundary == "receipt_removed" and absolute == b.RECEIPTS + "/" + rid + ".json":
+                        raise Crash()
+
+                def interrupt_remove(root, names):
+                    remove_entries(root, names)
+                    if boundary == "tree_removed" and root == b.INFRA:
+                        raise Crash()
+
+                with mock.patch.object(self.app, "unlink", side_effect=interrupt_unlink), \
+                        mock.patch.object(self.app, "remove_entries", side_effect=interrupt_remove), self.assertRaises(Crash):
+                    self.app.boot()
+                self.assertTrue(marker.exists())
+                self.app.boot()
+                self.assertFalse(marker.exists())
+                self.assertFalse(self.runtime().exists())
+                self.assertIsNone(self.app.current())
+                self.assertEqual(self.install(), 0)
+                self.assert_fresh_dispatch(rid)
+
+    def test_incomplete_final_tree_cleanup_is_iterative_and_never_follows_links(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "keep").write_bytes(b"keep")
+        self.runtime().mkdir()
+        fd = os.open(self.runtime(), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for _ in range(1050):
+                os.mkdir("a", dir_fd=fd)
+                child = os.open("a", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            os.symlink(str(outside), "outside", dir_fd=fd)
+        finally:
+            os.close(fd)
+        try:
+            self.app.boot()
+            self.assertFalse(self.runtime().exists())
+            self.assertEqual((outside / "keep").read_bytes(), b"keep")
+            with no_directory_renames():
+                self.install()
+            self.assert_fresh_dispatch(self.app.current(), boot=True)
+        finally:
+            subprocess.run(["rm", "-rf", "--", str(self.runtime())], check=True)
+
+    def test_incomplete_publication_is_retried_at_every_boundary_without_directory_renames(self):
+        self.install()
+        boundaries = ("incomplete_published", "runtime_created", "runtime_verified", "receipt_published", "incomplete_removed")
+        for reboot in (False, True):
+            for boundary in boundaries:
+                with self.subTest(boundary=boundary, reboot=reboot):
+                    previous = self.app.current()
+                    self.payload, self.value, _ = fixture(extra={"worker/version": f"{boundary}-{reboot}".encode()})
+                    rid = self.value["runtime"]["runtimeId"]
+                    marker = self.runtime().with_suffix(".incomplete")
+
+                    def crash(point):
+                        if point == boundary:
+                            raise Crash()
+
+                    self.app.fault = crash
+                    with no_directory_renames(), self.assertRaises(Crash):
+                        self.install()
+                    self.app.fault = lambda _: None
+                    self.assertEqual(self.app.current(), previous)
+                    self.assertEqual(marker.exists(), boundary != "incomplete_removed")
+                    self.assertEqual(self.runtime().exists(), boundary != "incomplete_published")
+                    self.app.verify_runtime(previous)
+                    if boundary != "incomplete_removed":
+                        with self.assertRaises(b.Failure) as caught:
+                            self.app.verify_runtime(rid)
+                        self.assertEqual(caught.exception.checks, ["cache_conflict"])
+                    if reboot:
+                        self.app.boot()
+                        self.assertFalse(marker.exists())
+                        self.assertEqual(self.runtime().exists(), boundary == "incomplete_removed")
+                        self.assert_fresh_dispatch(previous)
+                    before = self.downloads
+                    with no_directory_renames():
+                        self.assertEqual(self.install(), 0)
+                    self.assertEqual(self.downloads, before + (boundary != "incomplete_removed"))
+                    self.assertEqual(self.app.current("previous"), previous)
+                    self.assertFalse(marker.exists())
+                    self.assert_fresh_dispatch(rid, boot=True)
 
     def test_boot_epoch_is_once_per_boot_across_each_publication_boundary(self):
         for index, point in enumerate(("boot_intent_published", "boot_epoch_published", "boot_id_published"), 1):
@@ -1139,7 +1348,7 @@ else:
     def test_crashes_at_durable_boundaries_reconcile_without_setup(self):
         self.install()
         old = self.value["runtime"]["runtimeId"]
-        for boundary in ("stage_fsynced", "runtime_renamed", "receipt_published", "intent_published",
+        for boundary in ("incomplete_published", "runtime_created", "runtime_verified", "receipt_published", "incomplete_removed", "intent_published",
                          "previous_published", "current_published", "epoch_published", "intent_removed"):
             with self.subTest(boundary=boundary):
                 self.payload, self.value, _ = fixture(extra={"worker/version": boundary.encode()})
