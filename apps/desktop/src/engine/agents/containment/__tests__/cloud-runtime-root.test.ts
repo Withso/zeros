@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCloudRuntimeResolver, cloudProfileIdentityMapVersion, parseCloudActiveRuntime } from "../cloud-runtime-root.mjs";
@@ -132,6 +133,25 @@ describe("verified cloud runtime root", () => {
     for (const mode of [0o4600, 0o2444]) {
       fs.chmodSync(tree.physical("/run/zeros/active-runtime.json"), mode);
       expect(() => createCloudRuntimeResolver({ filesystem: tree.filesystem, isReadOnly: () => true }).resolve()).toThrow();
+    }
+  });
+  it("rejects a read-only descriptor fail-closed when mount evidence is unavailable", async () => {
+    // macOS has no procfs: the default mount check must reject, not throw ENOENT.
+    const tree = fixture(); fs.chmodSync(tree.physical("/run/zeros/active-runtime.json"), 0o444);
+    const nodeFs = createRequire(import.meta.url)("node:fs") as typeof fs;
+    const openSync = nodeFs.openSync;
+    nodeFs.openSync = ((file: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      if (file === "/proc/self/mountinfo") throw Object.assign(new Error("no procfs"), { code: "ENOENT" });
+      return openSync(file, flags, mode);
+    }) as typeof fs.openSync;
+    syncBuiltinESMExports();
+    try {
+      vi.resetModules();
+      const { createCloudRuntimeResolver: create } = await import("../cloud-runtime-root.mjs");
+      expect(() => create({ filesystem: tree.filesystem }).resolve()).toThrow(/runtime/);
+    } finally {
+      nodeFs.openSync = openSync;
+      syncBuiltinESMExports();
     }
   });
   it("accepts the host-owned engine projection but rejects engine-owned or writable replacements", () => {

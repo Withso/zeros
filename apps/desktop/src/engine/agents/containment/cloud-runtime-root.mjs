@@ -241,7 +241,13 @@ function runtimePaths(descriptor) {
 export function createCloudRuntimeResolver({
   filesystem = nativeFs,
   isOwner = isCloudDeploymentOwner,
-  isReadOnly = file => isReadOnlyCloudMount(file, readProc("/proc/self/mountinfo", 2 * 1024 * 1024)),
+  isReadOnly = file => {
+    // Unreadable mount evidence (for example no procfs) never proves a
+    // read-only projection; the caller then rejects the runtime fail-closed.
+    let mountinfo;
+    try { mountinfo = readProc("/proc/self/mountinfo", 2 * 1024 * 1024); } catch { return false; }
+    return isReadOnlyCloudMount(file, mountinfo);
+  },
   isEngine = () => hasCloudEngineUserNamespace(4),
   executable = () => process.execPath,
 } = {}) {
