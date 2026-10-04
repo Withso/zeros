@@ -1,14 +1,35 @@
 """Operator-only live-check payload; not installed in the base or runtime.
 
 The kit invokes main with a fixed phase over Boat exec. The same directory
-operations run in local tests. Only closed checks and boolean/count evidence
-leave the VM; paths, machine IDs and child errors stay private.
+operations run in local tests. Only closed checks, boolean/count evidence and
+failure class/line identities leave the VM; paths, machine IDs and messages do not.
 """
 import importlib.util
 import json
 import os
 import stat
 import sys
+
+
+class AgentProbeFailure(Exception):
+    def __init__(self, evidence):
+        super().__init__("Agent probe failed")
+        self.evidence = evidence
+
+
+def probe_failure(error):
+    if isinstance(error, AgentProbeFailure):
+        return error.evidence
+    names = {"AssertionError", "Failure", "FileNotFoundError", "PermissionError", "OSError", "TimeoutError",
+             "TimeoutExpired", "CalledProcessError", "ValueError", "TypeError", "KeyError", "RuntimeError", "JSONDecodeError",
+             "NotADirectoryError", "IsADirectoryError", "FileExistsError", "BlockingIOError", "InterruptedError", "BrokenPipeError"}
+    name = type(error).__name__
+    line, trace = 0, error.__traceback__
+    while trace is not None:
+        if trace.tb_frame.f_code.co_filename == __file__:
+            line = trace.tb_lineno
+        trace = trace.tb_next
+    return {"schema": "zeros.live-probe-failure/v1", "exception": name if name in names else "Exception", "line": line}
 
 
 def tree_operation(phase, root):
@@ -36,18 +57,35 @@ def as_agent(uid, gid, phase, root):
     if (os.getuid(), os.getgid()) == (uid, gid):
         tree_operation(phase, root)  # Rootless test adapter.
         return
-    pid = os.fork()
-    if pid == 0:
-        try:
-            os.setgroups([])
-            os.setgid(gid)
-            os.setuid(uid)
-            tree_operation(phase, root)
-        except BaseException:
-            os._exit(1)
-        os._exit(0)
-    _, status = os.waitpid(pid, 0)
-    assert os.waitstatus_to_exitcode(status) == 0
+    reader, writer = os.pipe()
+    try:
+        pid = os.fork()
+        if pid == 0:
+            os.close(reader)
+            try:
+                os.setgroups([])
+                os.setgid(gid)
+                os.setuid(uid)
+                tree_operation(phase, root)
+            except BaseException as error:
+                try:
+                    # Fixed identities only, well below PIPE_BUF; no child
+                    # paths, messages or traceback text cross this boundary.
+                    os.write(writer, json.dumps(probe_failure(error)).encode())
+                finally:
+                    os._exit(1)
+            os._exit(0)
+        os.close(writer)
+        writer = None
+        _, status = os.waitpid(pid, 0)
+        evidence = os.read(reader, 512)
+        if evidence:
+            raise AgentProbeFailure(json.loads(evidence))
+        assert os.waitstatus_to_exitcode(status) == 0
+    finally:
+        os.close(reader)
+        if writer is not None:
+            os.close(writer)
 
 
 def probe(app, phase):
@@ -115,7 +153,11 @@ def main(phase):
         code = 0
     except BaseException as error:
         if app is not None:
-            app.log_failure(error, stage="resume")
+            try:
+                app.log_failure(error, stage="resume")
+            except BaseException:
+                pass  # Preserve the original probe failure even without a VM log.
+        print(json.dumps(probe_failure(error)), flush=True)
     print(json.dumps({"schema": "zeros.diagnostic/v1", "component": "base", "stage": "resume", "ok": code == 0,
                       "exitCode": code, "timedOut": False, "failedChecks": [] if code == 0 else ["base_compatibility"]},
                      separators=(",", ":")), flush=True)

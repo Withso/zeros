@@ -225,7 +225,7 @@ closed bootstrap check `apparmor` if execution, loading or timeout fails.
 Sanitation and verification wait for boot `active/exited` and host
 `active/running`, an empty delegation parent, enabled CPU/memory/PID controllers,
 and all four dispatch-written host limits before probing the policy or facade.
-This gate polls for at most 30 seconds; systemd's `active` state alone can
+This gate polls for at most 540 seconds, including hydration; systemd's `active` state alone can
 precede a `Type=simple` service's initialization.
 
 The base dependency audit is:
@@ -297,8 +297,10 @@ pnpm tsx scripts/cloud-workspace-validation/boat-image/boat-image.ts runtime-bas
 ```
 
 Use a previously unused snapshot name for each attempt. B10 has only local
-verification in this PR; the orchestrator runs the command above with Alpha
-credentials to verify Boat capture/restore behavior.
+verification from this workspace. The orchestrator's two runs of `3c886c66`
+confirmed hydration, residue clearing, cold boot, install A and the first
+restore. A later live-check step failed without enough evidence to identify
+it. The private step records below support the next credentialed rerun.
 
 The script performs these steps sequentially (normally four sandbox starts;
 the journal refuses more than ten):
@@ -364,6 +366,42 @@ installer/base boundary, not agent qualification or the full B3 native closure.
 `imageBytes` records Boat's `sizeBytes`, the restored content size of the snapshot.
 Do not describe the re-hash as a full production-runtime measurement; report
 the synthetic archive's `expandedBytes` and `fileCount` alongside the timing.
+
+The live portion also records each named step under
+`$ZEROS_BOAT_IMAGE_STATE_DIR/runtime-base-v4/private/live-check/<step>.json`
+(0600, parent directories 0700). A durable `running` record precedes each
+operation; it becomes `passed` or `failed`. Failures retain the closed outer
+diagnostic, and `private/live-check-failure.json` names the most recent failing
+step. Individual records survive subsequent cleanup failures. The stderr event
+`live_check_failure` prints only that fixed step name; the stdout diagnostic
+schema is unchanged. No operation inputs, helper output, URLs, exception
+messages, command stderr or environments are stored in these records.
+
+The step names distinguish `install_a`, `runtime_a`, `persistence_cold`,
+`persistence_seed`, each `stop_first`/`resume_first` and `stop_second`/`resume_second`,
+`runtime_after_first_resume`, `persistence_rename`, `persistence_verify`,
+`runtime_after_second_resume`, `install_b`, `runtime_b`, `install_corrupt_c`
+and `runtime_after_corrupt`. Archive creation, the three uploads and object
+cleanup have their own records. `<step>-installer.json` retains the validated
+installer stage, `ok`, `exitCode`, `timedOut` and `failedChecks` before SSH key
+revocation; it is also attached to a failing install step. A rejected corrupted
+C with `archive_digest` is the expected result, so that step is marked passed.
+
+Runtime and persistence probes retain only the allowlisted exception class and
+innermost line in `runtime_probe.py` or `persistence_probe.py`. This includes
+the persistence probe's unprivileged child; errors are not flattened into its
+parent's wait assertion. The two scripts are operator payloads, not installed
+base assets. A provider timeout or killed probe may have no Python evidence;
+the named step still records the closed transport failure.
+
+Both post-resume probes call `app.wait_ready()` before inspecting runtime or
+persistence state. That waits for completed boot, hydration and host cgroup
+initialization. Only afterward does the runtime probe start its separate
+30-second wait for `active-runtime.json`, followed by full hashing and a
+10-second Node version check. The remote command allows 600 seconds total.
+A local regression simulates a 400-second hydration wait before the active
+descriptor arrives. These waits and the live sequence are unchanged; a future
+failure can now distinguish a probe assertion, Node timeout and transport timeout.
 
 After interruption or failure, use the **same state directory**:
 

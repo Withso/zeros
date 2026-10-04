@@ -386,7 +386,7 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(json.loads(output)["failedChecks"], ["file_inventory"])
         self.assertFalse(self.record.exists())
 
-    def test_live_probe_failure_retains_private_evidence_and_only_a_closed_public_line(self):
+    def test_live_probe_failure_retains_private_evidence_and_a_final_closed_line(self):
         spec = importlib.util.spec_from_file_location("persistence_probe", fixtures.HERE.parent / "persistence_probe.py")
         probe = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(probe)
@@ -399,7 +399,12 @@ class PersistenceTests(unittest.TestCase):
              contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
             probe.main("verify")
         self.assertEqual(stopped.exception.code, 1)
-        self.assertEqual(json.loads(output.getvalue()), {
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0]["schema"], "zeros.live-probe-failure/v1")
+        self.assertEqual(lines[0]["exception"], "Failure")
+        self.assertGreater(lines[0]["line"], 0)
+        self.assertEqual(lines[-1], {
             "schema": "zeros.diagnostic/v1", "component": "base", "stage": "resume", "ok": False,
             "exitCode": 1, "timedOut": False, "failedChecks": ["base_compatibility"],
         })
@@ -430,7 +435,10 @@ class PersistenceTests(unittest.TestCase):
                     lines = [json.loads(line) for line in output.getvalue().splitlines()]
                     passed = filesystem == "ext4"
                     self.assertEqual(stopped.exception.code, 0 if passed else 1)
-                    self.assertEqual(len(lines), 2 if passed else 1)
+                    self.assertEqual(len(lines), 2)
+                    if not passed:
+                        self.assertEqual(lines[0]["exception"], "AssertionError")
+                        self.assertGreater(lines[0]["line"], 0)
                     self.assertEqual(lines[-1]["ok"], passed)
                     self.assertEqual(lines[-1]["failedChecks"], [] if passed else ["base_compatibility"])
 
