@@ -99,8 +99,11 @@ Components are `bundle`, `publication`, `base`, `bootstrap`, `installer`,
 bounded snake_case constants; component owners define their enums. Installer
 names are explicitly checked against `RuntimeInstallerStageSchema` and
 `RuntimeInstallerCheckSchema`, including the download, verification, extraction,
-receipt, pointer, host and setup phases. Diagnostics cannot include free text,
-paths, URLs, stderr or exception fields.
+receipt, pointer, host and setup phases, plus `lock_busy`, `base_compatibility`
+and `cgroup_retired`. The installer reports a nested setup failure as stage
+`run_setup`, check `setup_exit`; the setup helper emits its own diagnostic. An
+installer diagnostic cannot forward a setup check such as `generation_pin`.
+Diagnostics cannot include free text, paths, URLs, stderr or exception fields.
 
 ## Registry, pins and authority
 
@@ -140,9 +143,12 @@ bundle. The six columns are immutable after insert, including NULL-to-v4 updates
 Engine instances and setup attestations carry those columns plus
 `runtime_installer_receipt_sha256`, UUID `runtime_boot_id`, and UUID
 `runtime_supervisor_session_id` (all nine NULL or all present). Engine identities
-must equal their exact workspace/org/generation pin. Starting engines retain the
-existing pending registration flow; becoming ready requires that engine's
-consumed, live registration grant. V4 engines cannot carry the v3
+must equal their exact workspace/org/generation pin. Starting engines receive
+all nine fields at setup redemption. Their registration grant retains purpose
+`setup`, bound to the same workspace, org, generation, account, setup run and
+execution fence. Insertion and transitions to ready require a live, unrevoked
+grant; becoming ready also requires consumption. Later heartbeats and retirement
+can outlive the registration grant. V4 engines cannot carry the v3
 `agent_runtime_profile`/`agent_runtime_contract_sha256` columns. An attestation
 must match the exact engine's pin, receipt, boot, session and setup fence, while
 retaining the existing live setup/engine readiness checks. Engine pins/witnesses

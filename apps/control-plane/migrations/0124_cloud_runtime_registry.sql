@@ -264,8 +264,8 @@ BEGIN
     IF NEW.protocol_version IS DISTINCT FROM NEW.runtime_engine_protocol_version THEN
       RAISE EXCEPTION 'v4 engine protocol does not match its runtime pin' USING ERRCODE = '23514';
     END IF;
-    -- Existing engine-connect grants deliberately have no setup columns
-    -- (0021). The engine's exact setup/fence FK owns that binding. Starting
+    -- Registration grants retain the setup purpose and exact run/fence issued
+    -- at redemption (0021/0022), plus the current-fence guard from 0068. Starting
     -- rows precede grant consumption; INSERT-ready and transitions to ready
     -- require consumption. Later heartbeats/retirement retain their authority
     -- even after the short-lived registration capability expires.
@@ -280,7 +280,9 @@ BEGIN
         SELECT 1 FROM cloud_workspace_endpoint_grants grant_row
         WHERE grant_row.id = NEW.registration_grant_id AND grant_row.workspace_id = NEW.workspace_id
           AND grant_row.org_id = NEW.org_id AND grant_row.generation = NEW.generation AND grant_row.account_user_id = NEW.account_user_id
-          AND grant_row.purpose = 'engine-connect' AND (NEW.state <> 'ready' OR grant_row.consumed_at IS NOT NULL)
+          AND grant_row.purpose = 'setup' AND grant_row.setup_run_id = NEW.setup_run_id
+          AND grant_row.setup_execution_fence = NEW.setup_execution_fence
+          AND (NEW.state <> 'ready' OR grant_row.consumed_at IS NOT NULL)
           AND grant_row.revoked_at IS NULL AND grant_row.expires_at > now()
       ) THEN
         RAISE EXCEPTION 'v4 engine requires its live registration grant, consumed before ready' USING ERRCODE = '23514';

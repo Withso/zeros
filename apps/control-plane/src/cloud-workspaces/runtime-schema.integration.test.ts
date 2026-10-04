@@ -245,7 +245,9 @@ database("v4 runtime registry and immutable schema", () => {
         generation: 2,
         org_id: fixture.organizationId,
         account_user_id: fixture.userId,
-        purpose: "engine-connect",
+        purpose: "setup",
+        setup_run_id: setupRunId,
+        setup_execution_fence: 1,
         audience: "runtime-schema-fixture",
         token_hash: randomBytes(32),
         account_revision: 1,
@@ -480,7 +482,7 @@ database("v4 runtime registry and immutable schema", () => {
     );
   });
 
-  it("registers a v4 ready engine and attestation with the exact witness", async () => {
+  it("registers a v4 ready engine and attestation with a bound setup grant and exact witness", async () => {
     const context = await setup(),
       row = engine(context);
     await withSystemTx(pool, (tx) =>
@@ -560,6 +562,83 @@ database("v4 runtime registry and immutable schema", () => {
         { id: row.id },
       ),
     );
+  });
+
+  it("rejects a v4 engine registration grant with the wrong purpose", async () => {
+    const context = await setup();
+    await withSystemTx(pool, (tx) =>
+      update(
+        tx,
+        "cloud_workspace_endpoint_grants",
+        {
+          purpose: "engine-connect",
+          setup_run_id: null,
+          setup_execution_fence: null,
+        },
+        { id: context.registrationGrantId },
+      ),
+    );
+    await expect(
+      withSystemTx(pool, (tx) =>
+        insert(tx, "cloud_workspace_engine_instances", engine(context)),
+      ),
+    ).rejects.toMatchObject({
+      code: "23514",
+      message: "v4 engine requires its live registration grant, consumed before ready",
+    });
+  });
+
+  it("rejects a v4 engine registration grant bound to another setup run", async () => {
+    const context = await setup(),
+      otherSetupRunId = randomUUID();
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `INSERT INTO cloud_workspace_setup_runs (id, workspace_id, generation, org_id, attempt, state,
+          claim_count, execution_fence, lease_owner, lease_expires_at, last_heartbeat_at, started_at)
+        SELECT $1, workspace_id, generation, org_id, attempt + 1, state, claim_count, execution_fence,
+          lease_owner, lease_expires_at, last_heartbeat_at, started_at
+        FROM cloud_workspace_setup_runs WHERE id=$2`,
+        [otherSetupRunId, context.setupRunId],
+      );
+      await update(
+        tx,
+        "cloud_workspace_endpoint_grants",
+        { setup_run_id: otherSetupRunId },
+        { id: context.registrationGrantId },
+      );
+    });
+    await expect(
+      withSystemTx(pool, (tx) =>
+        insert(tx, "cloud_workspace_engine_instances", engine(context)),
+      ),
+    ).rejects.toMatchObject({
+      code: "23514",
+      message: "v4 engine requires its live registration grant, consumed before ready",
+    });
+  });
+
+  it("rejects a v4 engine registration grant bound to a stale setup fence", async () => {
+    const context = await setup();
+    await withSystemTx(pool, (tx) =>
+      update(
+        tx,
+        "cloud_workspace_setup_runs",
+        { execution_fence: 2, claim_count: 2 },
+        { id: context.setupRunId },
+      ),
+    );
+    await expect(
+      withSystemTx(pool, (tx) =>
+        insert(
+          tx,
+          "cloud_workspace_engine_instances",
+          engine(context, { setup_execution_fence: 2 }),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: "23514",
+      message: "v4 engine requires its live registration grant, consumed before ready",
+    });
   });
 
   it("rejects v4 engines with legacy fields, partial identities or different generation pins", async () => {

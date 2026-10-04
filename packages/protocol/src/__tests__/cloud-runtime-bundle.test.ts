@@ -222,7 +222,7 @@ describe("runtime trust-boundary documents", () => {
   it("keeps diagnostics closed and installer names enumerated", () => {
     const diagnostic = read("diagnostic.valid.json");
     expect(RuntimeInstallerStageSchema.options).toHaveLength(14);
-    expect(RuntimeInstallerCheckSchema.options).toHaveLength(27);
+    expect(RuntimeInstallerCheckSchema.options).toHaveLength(30);
     for (const altered of [
       { ...diagnostic, stderr: "untrusted output" },
       { ...diagnostic, failedChecks: ["https://example.test"] },
