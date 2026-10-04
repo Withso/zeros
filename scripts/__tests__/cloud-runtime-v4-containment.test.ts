@@ -3,6 +3,8 @@ import {spawnSync,execFileSync} from "node:child_process";
 import {copyFileSync,chmodSync,readFileSync,unlinkSync} from "node:fs";
 import path from "node:path";
 import { Writable } from "node:stream";
+import { rgPath } from "@vscode/ripgrep";
+import { buildSync } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCloudRuntimeResolver } from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
 import { cloudRuntimeFixture } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
@@ -22,12 +24,21 @@ function fixture(mapAbsoluteLinks = true) {
 afterEach(() => { for (const tree of trees.splice(0)) tree.dispose(); });
 
 describe("v4 runtime launch containment", () => {
-  it.skipIf(!nativeNamespaces)("preserves host, engine and cross-actor read boundaries through the actual v4 native transition",()=>{
+  it.skipIf(!nativeNamespaces)("preserves read boundaries and admits nested UID-0 sandboxes through the actual v4 native transition",()=>{
     const {tree,runtime}=fixture(false);
     const resolverSource=path.resolve("apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs");
     const resolver=`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs`;
     tree.write(`${runtime.workerRoot}/package.json`,{});
     tree.write(resolver,readFileSync(resolverSource,"utf8"));
+    // Run the production supervisor, including its cloud linuxHelpers branch
+    // and the pinned sandbox-runtime dependency check, after the native exec.
+    const supervisor = `${runtime.workerRoot}/zsr-supervisor.mjs`;
+    const bundled = buildSync({ entryPoints: ["apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs"],
+      bundle: true, platform: "node", format: "esm", target: "node20.11", write: false,
+      banner: { js: 'import {createRequire} from "node:module";const require=createRequire(import.meta.url);' } });
+    tree.write(supervisor, bundled.outputFiles[0].text);
+    copyFileSync(rgPath, tree.physical(`${runtime.binRoot}/rg`));
+    chmodSync(tree.physical(`${runtime.binRoot}/rg`), 0o555);
     // Replace the read-only placeholders before copying/building as the CI user.
     for(const file of [runtime.node,runtime.engineNamespace])unlinkSync(tree.physical(file));
     copyFileSync(process.execPath,tree.physical(runtime.node));chmodSync(tree.physical(runtime.node),0o555);
@@ -38,6 +49,10 @@ describe("v4 runtime launch containment", () => {
       import {resolveCloudRuntimeChild} from ${JSON.stringify(resolver)};
       if(resolveCloudRuntimeChild().root!==${JSON.stringify(runtime.root)})process.exit(20);
       const uid=process.getuid();
+      const status=fs.readFileSync('/proc/self/status','utf8');
+      if(!/^NoNewPrivs:\\s+1$/m.test(status))process.exit(24);
+      for(const field of ['CapEff','CapPrm','CapBnd','CapInh','CapAmb'])
+        if(BigInt('0x'+new RegExp('^'+field+':\\\\s+([0-9a-f]+)$','m').exec(status)[1])!==0n)process.exit(25);
       for(const other of [0,10001,10002,10004]) {
         let readable=false;try{readable=fs.readFileSync('/tmp/actor-'+other+'/private','utf8')==='fixture';}catch(e){if(e.code!=='EACCES')throw e;}
         if(readable!==(uid===other))process.exit(21);
@@ -47,6 +62,11 @@ describe("v4 runtime launch containment", () => {
       }
       try{process.setuid(0);process.exit(23);}catch{}
       process.stdout.write('isolated');`;
+    const workerSource = `const fs=require('node:fs');
+      if(process.getuid()!==10001)process.exit(1);
+      const status=fs.readFileSync('/proc/self/status','utf8');
+      if(!/^CapBnd:\\s+0+$/m.test(status)||!/^NoNewPrivs:\\s+1$/m.test(status))process.exit(2);
+      process.stdout.write('worker isolated');`;
     tree.write(`${runtime.workerRoot}/dist-engine/cli.js`,`const fs=require('node:fs'),{spawnSync}=require('node:child_process');
       (async()=>{
         const {resolveCloudRuntime,hasCloudEngineUserNamespace}=await import(${JSON.stringify(resolver)});
@@ -56,6 +76,35 @@ describe("v4 runtime launch containment", () => {
           if(fs.existsSync(file))throw new Error('host exposure');
         if(fs.readFileSync('/srv/zeros/repos/example/project/contents','utf8')!=='persistent repository')throw new Error('repos projection');
         if(fs.existsSync('/srv/zeros/.zeros-setup/seed/private'))throw new Error('setup exposure');
+        const nestedArgs=['--unshare-user','--uid','0','--gid','0','--ro-bind','/','/','--cap-drop','ALL',
+          '--',runtime.node,'-e',"if(process.getuid()!==0)process.exit(1);process.stdout.write('mapped')"];
+        const options={env:{PATH:'/usr/bin:/bin',HOME:'/tmp',TMPDIR:'/tmp'},encoding:'utf8',timeout:5000};
+        // Negative control proves this kernel enforces the Linux 5.12 UID-map
+        // rule, rather than merely checking that a capability flag was added.
+        const denied=spawnSync('/usr/bin/setpriv',['--bounding-set=-setfcap','--inh-caps=-all','--ambient-caps=-all',
+          '--','/usr/bin/bwrap',...nestedArgs],options);
+        if(denied.status===0||!denied.stderr.includes('uid map'))throw new Error('missing UID-0 mapping negative control');
+        const nested=spawnSync('/usr/bin/bwrap',nestedArgs,options);
+        if(nested.status!==0||nested.stdout!=='mapped')throw new Error('nested UID-0 mapping failed: '+nested.stderr);
+        const status=fs.readFileSync('/proc/self/status','utf8');
+        const allowed=[0,1,3,5,6,7,8,18,21,31].reduce((mask,bit)=>mask|(1n<<BigInt(bit)),0n);
+        for(const field of ['CapEff','CapPrm','CapBnd'])
+          if(BigInt('0x'+new RegExp('^'+field+':\\\\s+([0-9a-f]+)$','m').exec(status)[1])!==allowed)
+            throw new Error('engine '+field+' capability set');
+        const generation='12345678-1234-4234-8234-123456789abc';
+        const policy={version:1,executionId:'setfcap-regression',generation,actor:'agent-code',cwd:'/tmp',workspaceRoot:'/tmp',
+          filesystem:{allowRead:['/'],allowWrite:['/tmp'],denyRead:[],denyWrite:[]},
+          runtime:{localHostParity:true,normalNetwork:true,allowPty:true,allowedUnixSockets:[],allowedLocalPorts:[],deniedLocalPorts:[],
+            cloudWorker:{version:1,uid:10001,gid:10001}}};
+        fs.mkdirSync('/tmp/policy',{mode:0o700});
+        fs.mkdirSync('/tmp/policy/commands',{mode:0o700});
+        fs.writeFileSync('/tmp/policy/policy.json',JSON.stringify(policy),{mode:0o600});
+        fs.writeFileSync('/tmp/policy/commands/command.json',JSON.stringify({version:6,generation,command:runtime.node,
+          args:['-e',${JSON.stringify(workerSource)}],
+          cwd:'/tmp',env:{PATH:'/usr/bin:/bin',HOME:'/tmp'},deniedContainerSockets:[]}),{mode:0o600});
+        const supervised=spawnSync(runtime.node,[${JSON.stringify(supervisor)},'--policy','/tmp/policy/policy.json','--command','/tmp/policy/commands/command.json'],
+          {...options,env:{...options.env,ZEROS_ZSR_RIPGREP_PATH:runtime.binRoot+'/rg'},timeout:10000,detached:true});
+        if(supervised.status!==0||supervised.stdout!=='worker isolated')throw new Error('cloud supervisor failed: '+supervised.stderr);
         for(const uid of [0,10001,10002,10004]){
           const directory='/tmp/actor-'+uid;fs.mkdirSync(directory,{mode:0o700});fs.chownSync(directory,uid,uid);
           fs.writeFileSync(directory+'/private','fixture',{mode:0o600});fs.chownSync(directory+'/private',uid,uid);
@@ -89,7 +138,9 @@ describe("v4 runtime launch containment", () => {
         execFileSync("sudo",["-n","/usr/bin/chown","-hR",`${uid}:${uid}`,tree.physical(directory)]);
         execFileSync("sudo",["-n","/usr/bin/chmod","0700",tree.physical(directory)]);
       }
-      const result=spawnSync("sudo",["-n","/usr/bin/bwrap",...args],{env:{PATH:"/usr/bin:/bin"},encoding:"utf8",timeout:20000,maxBuffer:4096});
+      // CI containers may mask proc children. Start with a fresh procfs like
+      // the VM host; locked inherited masks prevent ZSR's private proc mount.
+      const result=spawnSync("sudo",["-n","/usr/bin/unshare","--mount","--pid","--fork","--mount-proc","--","/usr/bin/bwrap",...args],{env:{PATH:"/usr/bin:/bin"},encoding:"utf8",timeout:20000,maxBuffer:4096});
       expect(result.stderr).toBe("");expect(result.status).toBe(0);expect(result.stdout).toBe("v4 actors isolated");
     } finally {execFileSync("sudo",["-n","/usr/bin/chown","-hR",`${process.getuid!()}:${process.getgid!()}`,tree.directory]);}
   },30000);

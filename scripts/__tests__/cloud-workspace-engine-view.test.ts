@@ -92,6 +92,10 @@ describe("fixed cloud engine mount and environment contract", () => {
     expect(cloudEngineViewArguments("qualify").at(-1)).toBe("--qualify");
     expect(cloudEngineViewArguments("qualify",3).slice(-2)).toEqual(["--v3","--qualify"]);
     expect(cloudEngineViewArguments("serve",3).at(-1)).toBe("--v3");
+    expect(args.filter((_, index) => args[index - 1] === "--cap-add")).toEqual([
+      "CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP", "CAP_KILL", "CAP_SYS_ADMIN",
+      "CAP_SYS_CHROOT", "CAP_DAC_OVERRIDE", "CAP_CHOWN", "CAP_FOWNER", "CAP_SETFCAP",
+    ]);
     expect(()=>cloudEngineViewArguments("serve",4)).toThrow(/version/);
     expect(() => cloudEngineViewArguments("shell")).toThrow(/operation/);
   });

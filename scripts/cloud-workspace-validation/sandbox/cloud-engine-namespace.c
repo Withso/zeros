@@ -236,10 +236,14 @@ static void restrict_syscalls(void) {
 }
 
 static void restrict_capabilities(void) {
+  /* Nested bwrap UID-0 maps require SETFCAP, including across exec into the
+   * ZSR supervisor. This user namespace maps root to host UID 10003; the
+   * inherited NoNewPrivs below prevents file capabilities granting privileges. */
   const unsigned long long allowed =
     (1ULL << CAP_CHOWN) | (1ULL << CAP_DAC_OVERRIDE) | (1ULL << CAP_FOWNER) |
     (1ULL << CAP_KILL) | (1ULL << CAP_SETGID) | (1ULL << CAP_SETUID) |
-    (1ULL << CAP_SETPCAP) | (1ULL << CAP_SYS_CHROOT) | (1ULL << CAP_SYS_ADMIN);
+    (1ULL << CAP_SETPCAP) | (1ULL << CAP_SYS_CHROOT) | (1ULL << CAP_SYS_ADMIN) |
+    (1ULL << CAP_SETFCAP);
   for (int capability = 0; capability < 64; capability++) {
     int present = prctl(PR_CAPBSET_READ, capability, 0, 0, 0);
     if (present < 0) { if (errno == EINVAL) continue; fail(); }
