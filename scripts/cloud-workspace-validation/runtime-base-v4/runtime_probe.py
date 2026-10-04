@@ -21,8 +21,21 @@ def probe_failure(error):
     return {"schema": "zeros.live-probe-failure/v1", "exception": name if name in names else "Exception", "line": line}
 
 
+def wait_ready_settled(app, seconds=60):
+    """Bounded retry while dispatch briefly holds the publication lock."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            return app.wait_ready()
+        except Exception as error:
+            checks = getattr(error, "checks", None) or []
+            if "lock_busy" not in checks or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
+
+
 def probe(b, app, rid, cold_hash):
-    app.wait_ready()
+    wait_ready_settled(app)
     app.base()
     deadline = time.monotonic() + 30
     while not pathlib.Path(b.ACTIVE).exists() and time.monotonic() < deadline:

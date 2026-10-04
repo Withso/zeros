@@ -7,6 +7,7 @@ failure class/line identities leave the VM; paths, machine IDs and messages do n
 import importlib.util
 import json
 import os
+import time
 import stat
 import sys
 
@@ -107,10 +108,23 @@ def as_agent(uid, gid, phase, root):
             os.close(writer)
 
 
+def wait_ready_settled(app, seconds=60):
+    """Bounded retry while dispatch briefly holds the publication lock."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            return app.wait_ready()
+        except Exception as error:
+            checks = getattr(error, "checks", None) or []
+            if "lock_busy" not in checks or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
+
+
 def probe(app, phase):
     assert phase in ("cold", "seed", "rename", "verify")
     # This waits for the enabled units. Do not repair/start them in the probe.
-    app.wait_ready()
+    wait_ready_settled(app)
     app.base()
     record = app.persistence()
     aliases = [app.path(name).stat() for name in ("/srv/zeros/files/repos", "/srv/zeros/repos")]
