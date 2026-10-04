@@ -27,6 +27,12 @@ export function record(value: unknown): WireRecord {
 export function cloudRequestTarget(
   message: WireRecord,
 ): CloudWorkspaceTarget | null {
+  // Replica parameters describe the cloud source of a Mac-owned download.
+  // Its filesystem and enrolled device belong to the Local engine even while
+  // that cloud workspace has an open remote connection.
+  if (message.type === "WORKSPACE_REQUEST" &&
+    typeof message.op === "string" && message.op.startsWith("cloudReplica."))
+    return null;
   const candidates: unknown[] = [];
   const collect = (value: WireRecord) => {
     for (const key of [

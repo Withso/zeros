@@ -17,6 +17,16 @@ const scope: CloudRuntimeScope = {
 const key = cloudWorkspaceKey(scope);
 
 describe("cloud runtime wire routing", () => {
+  it.each([
+    "identity", "list", "create", "pause", "resume", "remove", "divergences", "sync", "relocate",
+  ])("keeps cloudReplica.%s on this Mac even with a cloud workspace parameter", (operation) => {
+    expect(cloudRequestTarget({
+      type: "WORKSPACE_REQUEST",
+      op: `cloudReplica.${operation}`,
+      params: { workspaceId: key, cwd: key, replicaId: "local-replica" },
+    })).toBeNull();
+  });
+
   it("routes file operations by stable workspace identity and preserves relative file paths", () => {
     const message = {
       type: "WORKSPACE_REQUEST",

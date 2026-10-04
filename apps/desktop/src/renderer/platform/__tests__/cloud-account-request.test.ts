@@ -10,13 +10,18 @@ vi.mock("../../features/team/control-plane", () => ({
     constructor(public status: number, public code: string, message: string) { super(message); }
   },
 }));
-import { cloudAccountRequest, cloudAgentGrant, createCloudWorkspaceDocument } from "../cloud-workspaces";
+import { CloudWorkspaceDocumentSchema, cloudAccountRequest, cloudAgentGrant, createCloudWorkspaceDocument } from "../cloud-workspaces";
 
 const session = { access_token: "synthetic-session", user: { sub: "test-user" } };
 beforeEach(() => { state.generation = 0; state.session.mockReset(); state.source.mockReset(); });
 afterEach(() => vi.unstubAllGlobals());
 
 describe("cloud request account boundaries", () => {
+  it("preserves optional server-derived edit access without inferring it from legacy write access", () => {
+    const capabilities = { canWrite: true, canManage: false, canStart: false, startUnavailableReason: null };
+    expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse(capabilities).canEdit).toBeUndefined();
+    for (const canEdit of [true, false]) expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse({ ...capabilities, canEdit }).canEdit).toBe(canEdit);
+  });
   it("chooses the proven account grant even when a newer unqualified API-key grant matches the same model", async () => {
     state.session.mockResolvedValue(session);
     const qualified = "44444444-4444-4444-8444-444444444444";

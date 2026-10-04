@@ -34,6 +34,10 @@ import { Checkbox } from "../../shared/ui/primitives/checkbox";
 import { useInternalFeatureActive } from "../../features/settings/internal-features";
 import { warmCloudServiceAccess } from "../../platform/cloud-workspace-access";
 import { CloudWorkspaceAccessControls } from "./cloud-workspace-access-controls";
+import { useNativeRuntime } from "../../platform/runtime";
+import { useWorkspaceStore } from "../../state/workspace-store";
+import { warmCloudWorkspaceReplicas } from "../../state/cloud-replica-cache";
+import { CloudWorkspaceSyncControls } from "./cloud-workspace-sync-controls";
 
 export function cloudStatusLabel(status: string): string {
   return (
@@ -153,6 +157,9 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   const [starting, setStarting] = useState(false);
   const [acknowledgedCheckpoint, setAcknowledgedCheckpoint] = useState<string | null>(null);
   const { me } = useTeams();
+  const syncEnabled = useInternalFeatureActive("cloudComputerV2");
+  const native = useNativeRuntime().ready;
+  const surfaceActive = useWorkspaceStore(state => state.activePage === "workspace");
   const details = useCachedRead(
     cloudWorkspaceDetails,
     key,
@@ -165,6 +172,11 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
     void cloudWorkspaceDetails
       .load(key, () => refreshCloudWorkspace(parseCloudWorkspaceKey(key)!), {
         maxAgeMs: 10_000,
+      })
+      .then(workspace => {
+        if (syncEnabled && native && surfaceActive && me?.user.id && workspace.capabilities.canEdit === true) {
+          return warmCloudWorkspaceReplicas(me.user.id, parseCloudWorkspaceKey(key)!);
+        }
       })
       .catch(() => {});
   };
@@ -263,6 +275,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
             </div>
           )}
         {details.data && <CloudWorkspaceAccessControls workspace={details.data} active={open} />}
+        {details.data && <CloudWorkspaceSyncControls key={`${me?.user.id}:${key}`} workspace={details.data} active={open && surfaceActive} />}
       </PopoverContent>
     </Popover>
   );

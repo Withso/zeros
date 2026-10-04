@@ -90,6 +90,7 @@ import {
   runCreateSourceTooltipEscapeSmoke,
 } from "./ui-smoke-create-source-focus.mjs";
 import { runCloudWorkspaceSmoke } from "./ui-smoke-cloud-workspace.mjs";
+import { runCloudReplicaSmoke } from "./ui-smoke-cloud-replicas.mjs";
 import { runCloudTerminalSmoke } from "./ui-smoke-cloud-terminal.mjs";
 import { runCloudSettingsSmoke } from "./ui-smoke-cloud-settings.mjs";
 import {
@@ -210,6 +211,9 @@ try {
   }
   const cloudPage = await newPage({ viewport: { width: 900, height: 650 } });
   await runCloudWorkspaceSmoke({ page: cloudPage, check, harnessBase });
+  const cloudReplicaPage = await newPage({ viewport: { width: 1100, height: 850 } });
+  await runCloudReplicaSmoke({ page: cloudReplicaPage, check, harnessBase });
+  await cloudReplicaPage.close();
   await cloudPage.close();
   const cloudTerminalPage = await newPage({
     viewport: { width: 1100, height: 780 },
