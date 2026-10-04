@@ -30,11 +30,23 @@ const secondWorkspace = "33333333-3333-4333-8333-333333333333";
 let currentWorkspace = firstWorkspace;
 const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
 const pending: Array<() => void> = [];
+const listeners = new Map<string, Set<(payload: unknown) => void>>();
+let frameUrl = "";
 const fixture = {
   calls,
   hold: false,
   legacy: false,
   release: () => pending.shift()?.(),
+  tab: () =>
+    useWorkspaceStore.getState().workbenchByScope[
+      `cloud://${organizationId}/${currentWorkspace}`
+    ]?.tabs.find((candidate) => candidate.id === tab.id),
+  emitNavigation: (url: string, inPage = false) => {
+    frameUrl = url;
+    const frameName = document.querySelector<HTMLIFrameElement>("iframe")?.name;
+    for (const handler of listeners.get("browser-frame-navigated") ?? [])
+      handler({ frameName, url, loading: false, inPage });
+  },
   setEditAccess: (
     canEdit: boolean | undefined | null,
     workspaceId = currentWorkspace,
@@ -113,14 +125,21 @@ window.__ZEROS_NATIVE__ = {
       const frame = document.querySelector<HTMLIFrameElement>(
         `iframe[name="${args!.frameName}"]`,
       );
-      frame?.contentWindow?.location.replace(String(args!.url));
+      frameUrl = args!.url ? String(args!.url) : frameUrl;
+      frame?.contentWindow?.location.replace(frameUrl);
       return { ok: Boolean(frame) } as T;
     }
     if (command === "browser:authorize-preview-origin")
       return { ok: true } as T;
     return { ok: false } as T;
   },
-  on: () => () => {},
+  on: (event, handler) => {
+    const handlers = listeners.get(event) ?? new Set();
+    listeners.set(event, handlers);
+    const callback = handler as (payload: unknown) => void;
+    handlers.add(callback);
+    return () => handlers.delete(callback);
+  },
 };
 acceptOrganizationSnapshot({
   user: {
@@ -163,7 +182,15 @@ for (const workspaceId of [firstWorkspace, secondWorkspace])
     .dispatch({
       type: "ADD_WORKBENCH_TAB",
       scope: `cloud://${organizationId}/${workspaceId}`,
-      tab,
+      tab: {
+        ...tab,
+        previewSource: tab.previewSource && {
+          ...tab.previewSource,
+          ...(tab.previewSource.executionId ? {
+            executionId: cloudScopedId({ organizationId, workspaceId }, "execution-native"),
+          } : {}),
+        },
+      },
     });
 function Harness() {
   const [active, setActive] = useState(false);

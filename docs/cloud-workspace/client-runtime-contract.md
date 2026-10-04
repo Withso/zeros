@@ -398,6 +398,11 @@ Cloud Browser address entry, empty-tab entry and toolbar history publish logical
 tab state before admission. History retains logical URLs and opaque owners,
 not grant origins. Only the admitted HTTPS URL navigates the frame; back,
 forward and reload re-admit their destination without requesting Mac loopback.
+Trusted page links and SPA navigation also enter this logical history, retaining
+the opaque owner and translating the current admitted origin to localhost.
+Path changes retain their current grant; renewal uses the latest logical URL.
+Leaving the preview origin clears preview ownership and resumes ordinary URL
+persistence and reload for the external page.
 
 See [native preview acceptance](native-preview-acceptance.md) for the signed Mac
 Alpha procedure and its C5/B8/B10 prerequisite boundary.

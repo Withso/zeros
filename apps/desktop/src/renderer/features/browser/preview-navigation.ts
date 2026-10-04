@@ -248,6 +248,39 @@ export function isPreviewRuntimeUrlForTab(
   }
 }
 
+/** Reconcile a trusted frame observation without retaining its grant origin or
+ * changing authority. The exact tab/logical URL must still own this runtime. */
+export function reconcilePreviewRuntimeUrlForTab(
+  tabId: string,
+  persistedUrl: string,
+  candidateUrl: string,
+): string | null {
+  purgeExpired();
+  const runtime = runtimes.get(tabId);
+  if (!runtime?.volatileOrigin) return null;
+  try {
+    const logical = parsedHttpUrl(persistedUrl, "URL");
+    const observed = parsedHttpUrl(candidateUrl, "observed URL");
+    if (
+      logical.toString() !== runtime.persistedUrl ||
+      observed.origin !== runtime.runtimeOrigin
+    ) return null;
+    observed.searchParams.delete("__zsr_cap");
+    logical.pathname = observed.pathname;
+    logical.search = observed.search;
+    logical.hash = observed.hash;
+    const url = logical.toString();
+    runtimes.set(tabId, {
+      ...runtime,
+      persistedUrl: url,
+      runtimeUrl: observed.toString(),
+    });
+    return url;
+  } catch {
+    return null;
+  }
+}
+
 export function clearPreviewRuntimeForTab(tabId: string): void {
   pending.delete(tabId);
   runtimes.delete(tabId);

@@ -121,6 +121,8 @@ interface UseIframeWebviewOptions {
   /** Volatile engine-authorized cloud preview origin. It is never persisted
    * and grants picker messaging only to this Browser-tab hook instance. */
   trustedPreviewOrigin?: string;
+  /** Committed navigation from Electron's exact named-frame event channel. */
+  onNavigation?: (url: string) => void;
 }
 
 function pickerUrlAllowed(value: string, trustedOrigin?: string): boolean {
@@ -274,6 +276,8 @@ export function useIframeWebview(
 ): UseIframeWebviewResult {
   const { initialUrl = "", frameName, trustedPreviewOrigin } = opts;
   const nativeReady = useNativeRuntime().ready;
+  const onNavigationRef = useRef(opts.onNavigation);
+  onNavigationRef.current = opts.onNavigation;
 
   // Typed nullable so the callback ref (setIframeNode) can assign
   // `ref.current` — an object ref initialized with null is otherwise
@@ -444,6 +448,7 @@ export function useIframeWebview(
         isLoading: loading,
       });
       recomputeNav();
+      if (!loading) onNavigationRef.current?.(url);
     };
     const onFavicon = (payload: {
       frameName?: unknown;

@@ -48,6 +48,11 @@ be 5173; the trusted engine owns its real mapped listener.
    From an empty Browser tab, enter another allowed loopback port. Change the
    address in an admitted tab and use Back, Forward and Reload. Require fresh
    native admission before navigation and zero Mac loopback requests throughout.
+   Follow an application link and use SPA navigation to change path/query/hash.
+   Require the updated logical address and working Back/Forward without changing
+   opaque ownership or minting grants for the page-originated moves. Follow an
+   external link; require its URL to persist and Reload to stay on that page
+   without issuing a preview grant. Repeat these checks in the agent preview.
 2. Ask a real cloud agent to start the second application. Open its published
    listener button, then a loopback link from that same agent transcript.
    Require `agent-a`, assets, cookie roundtrip, nested path and actual HMR.

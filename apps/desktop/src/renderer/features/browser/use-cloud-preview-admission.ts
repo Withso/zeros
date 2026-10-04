@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   isCloudAgentPreviewTarget,
   type CloudAgentPreviewTarget,
@@ -56,6 +56,11 @@ export function useCloudPreviewAdmission(options: {
   }, []);
   const { scope, url, frameName, active, ready, agentPreview, navigate } =
     options;
+  // Page-originated path changes retain the current grant. Explicit toolbar
+  // navigation uses navigationVersion; renewal follows the latest logical URL.
+  const currentUrl = useRef(url);
+  currentUrl.current = url;
+  const logicalOrigin = url ? new URL(url).origin : "";
   const navigationVersion = options.navigationVersion;
   const executionId = options.source?.executionId,
     portId = options.source?.portId;
@@ -68,8 +73,8 @@ export function useCloudPreviewAdmission(options: {
     } catch {
       return;
     }
-    if (!workspace || !enabled || !canEdit || !active || !visible || !ready || !url) return;
-    const logical = new URL(url);
+    if (!workspace || !enabled || !canEdit || !active || !visible || !ready || !logicalOrigin) return;
+    const logical = new URL(logicalOrigin);
     const port = Number(
       logical.port || (logical.protocol === "https:" ? 443 : 80),
     );
@@ -154,10 +159,12 @@ export function useCloudPreviewAdmission(options: {
           await revokeCloudWorkspaceAccess(receipt.accessId).catch(() => false);
           return;
         }
+        const url = currentUrl.current;
+        const destination = new URL(url);
         const navigation = new URL(receipt.origin);
-        navigation.pathname = logical.pathname;
-        navigation.search = logical.search;
-        navigation.hash = logical.hash;
+        navigation.pathname = destination.pathname;
+        navigation.search = destination.search;
+        navigation.hash = destination.hash;
         const expiresAt = Date.parse(receipt.expiresAt);
         await navigate({
           url,
@@ -194,7 +201,7 @@ export function useCloudPreviewAdmission(options: {
     };
   }, [
     scope,
-    url,
+    logicalOrigin,
     frameName,
     active,
     visible,

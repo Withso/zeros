@@ -16,7 +16,7 @@ export async function runCloudPreviewSmoke({ page, check, harnessBase }) {
   await page.route("https://*.preview.example.test/**", (route) =>
     route.fulfill({
       contentType: "text/html",
-      body: "<!doctype html><title>Native preview fixture</title><p>Owned application</p>",
+      body: '<!doctype html><title>Native preview fixture</title><p>Owned application</p><a href="/linked?from=page#section">Application link</a><a href="https://external.example.test/guide">External link</a>',
     }),
   );
   await page.goto(`${harnessBase}/harness-cloud-previews.html`);
@@ -337,6 +337,67 @@ export async function runCloudPreviewSmoke({ page, check, harnessBase }) {
     "cloud address entry and history admit logical URLs before navigating, with zero local loopback requests",
     true,
   );
+
+  await page.route("https://external.example.test/**", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<title>External page</title>External guide" }),
+  );
+  for (const kind of ["human", "agent"]) {
+    await page.goto(`${harnessBase}/harness-cloud-previews.html${kind === "human" ? "?human" : ""}`);
+    await page.getByRole("button", { name: "Toggle active" }).click();
+    await expect.poll(count).toBe(1);
+    await expect.poll(frameUrl).toMatch(/\/assets\?version=2$/);
+    const source = await page.evaluate(() => window.cloudPreviewFixture.tab().previewSource);
+    const ownedFrame = () => page.frames().find((frame) => frame.name().startsWith("zeros-browser-"));
+    const observe = async (inPage = false) => {
+      const url = frameUrl();
+      await page.evaluate(({ url, inPage }) => window.cloudPreviewFixture.emitNavigation(url, inPage), { url, inPage });
+    };
+    // Electron reports these cross-origin observations through its trusted
+    // frame-navigation channel; the harness supplies the corresponding event.
+    await observe();
+    await ownedFrame().evaluate(() => history.pushState({}, "", "/next?from=spa#view"));
+    await observe(true);
+    await expect(page.getByRole("textbox", { name: "Browser URL" })).toHaveValue("http://localhost:5173/next?from=spa#view");
+    await expect(page.getByRole("button", { name: "Back", exact: true })).toBeEnabled();
+    expect(await count()).toBe(1);
+    expect(await page.evaluate(() => window.cloudPreviewFixture.tab().previewSource)).toEqual(source);
+    await ownedFrame().getByRole("link", { name: "Application link", exact: true }).click();
+    await expect.poll(frameUrl).toMatch(/\/linked\?from=page#section$/);
+    await observe();
+    await expect(page.getByRole("textbox", { name: "Browser URL" })).toHaveValue("http://localhost:5173/linked?from=page#section");
+    expect(await count()).toBe(1);
+    await page.getByRole("button", { name: "Back", exact: true }).click();
+    await expect.poll(count).toBe(2);
+    await expect.poll(frameUrl).toMatch(/\/next\?from=spa#view$/);
+    await observe();
+    await page.getByRole("button", { name: "Back", exact: true }).click();
+    await expect.poll(count).toBe(3);
+    await expect.poll(frameUrl).toMatch(/\/assets\?version=2$/);
+    await observe();
+    await expect(page.getByRole("button", { name: "Back", exact: true })).toBeDisabled();
+    await page.getByRole("button", { name: "Forward", exact: true }).click();
+    await expect.poll(count).toBe(4);
+    await expect.poll(frameUrl).toMatch(/\/next\?from=spa#view$/);
+    await observe();
+    expect(await page.evaluate(() => window.cloudPreviewFixture.tab().previewSource)).toEqual(source);
+    if (source)
+      expect(await page.evaluate(() => window.cloudPreviewFixture.calls.filter((call) => call.command === "browser:open-cloud-preview").map((call) => call.args.target))).toEqual(Array(4).fill({ executionId: "execution-native", portId: "A".repeat(32) }));
+    check(`${kind} SPA and page links enter logical history without reloading or losing preview ownership`, true);
+
+    await ownedFrame().getByRole("link", { name: "External link", exact: true }).click();
+    await expect.poll(frameUrl).toBe("https://external.example.test/guide");
+    await observe();
+    await expect(page.getByRole("textbox", { name: "Browser URL" })).toHaveValue("https://external.example.test/guide");
+    expect(await page.evaluate(() => window.cloudPreviewFixture.tab().url)).toBe("https://external.example.test/guide");
+    expect(await page.evaluate(() => window.cloudPreviewFixture.tab().previewSource)).toBeUndefined();
+    await page.getByRole("button", { name: "Reload", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.cloudPreviewFixture.calls.some((call) => call.command === "browser:control-iframe" && call.args.action === "reload"))).toBe(true);
+    await page.clock.fastForward(26 * 60_000);
+    expect(await count()).toBe(4);
+    expect(frameUrl()).toBe("https://external.example.test/guide");
+    expect(loopbackRequests).toEqual([]);
+    check(`${kind} external page navigation persists its URL and reloads without reminting preview authority`, true);
+  }
 
   await page.goto(`${harnessBase}/harness-cloud-previews.html?empty`);
   await page.getByRole("button", { name: "Toggle active" }).click();
