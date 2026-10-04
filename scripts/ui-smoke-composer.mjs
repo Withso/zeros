@@ -92,7 +92,10 @@ import {
 import { runCloudWorkspaceSmoke } from "./ui-smoke-cloud-workspace.mjs";
 import { runCloudTerminalSmoke } from "./ui-smoke-cloud-terminal.mjs";
 import { runCloudSettingsSmoke } from "./ui-smoke-cloud-settings.mjs";
-import { runCloudComputerV2Smoke } from "./ui-smoke-cloud-computer-v2.mjs";
+import {
+  cloudComputerV2ReviewRegressions,
+  runCloudComputerV2Smoke,
+} from "./ui-smoke-cloud-computer-v2.mjs";
 import { runDesignModeSmoke } from "./ui-smoke-design-mode.mjs";
 import { runAttachmentPersistenceSmoke } from "./ui-smoke-attachment-persistence.mjs";
 import { runAttachmentLayoutSmoke } from "./ui-smoke-attachment-layout.mjs";
@@ -221,6 +224,16 @@ try {
   const computerV2Page = await newPage({ viewport: { width: 1100, height: 900 } });
   await runCloudComputerV2Smoke({ page: computerV2Page, check, harnessBase });
   await computerV2Page.close();
+  for (const regression of cloudComputerV2ReviewRegressions) {
+    const reviewPage = await newPage({ viewport: { width: 1100, height: 900 } });
+    await runCloudComputerV2Smoke({
+      page: reviewPage,
+      check,
+      harnessBase,
+      regression,
+    });
+    await reviewPage.close();
+  }
   const contextPage = await newPage();
   await runContextGaugeSmoke({ page: contextPage, harnessBase });
   await contextPage.close();

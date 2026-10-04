@@ -54,38 +54,47 @@ export function useCloudComputerV2CreateGate(active: boolean) {
   const reason = enabled
     ? cloudComputerV2CreateReason(snapshot.data, snapshot.error)
     : null;
-  const waitingForFirstBuild =
-    reason === cloudComputerV2BuildRequired &&
-    (snapshot.data?.latestBuild?.state === "queued" ||
-      snapshot.data?.latestBuild?.state === "running");
+  const waitingForFirstBuild = reason === cloudComputerV2BuildRequired;
+  const building =
+    snapshot.data?.latestBuild?.state === "queued" ||
+    snapshot.data?.latestBuild?.state === "running";
   useEffect(() => {
     if (!enabled || !visible || !key || !waitingForFirstBuild) return;
-    // A first build can finish after Settings is hidden. Only the visible
-    // blocked create surface keeps observing state; it never tails build logs.
+    // Other admins can start the first build or retry a failure elsewhere.
+    // Observe only the visible blocked gate, slowly while no build is pending.
     return startCloudComputerV2Polling({
-      intervalMs: 3000,
-      maxIntervalMs: 15_000,
+      intervalMs: building ? 3000 : 30_000,
+      maxIntervalMs: building ? 15_000 : 120_000,
       immediate: false,
+      subscribeVisibility: (listener) => {
+        document.addEventListener("visibilitychange", listener);
+        window.addEventListener("focus", listener);
+        return () => {
+          document.removeEventListener("visibilitychange", listener);
+          window.removeEventListener("focus", listener);
+        };
+      },
       read: async () => {
         const confirmed = await loadCloudComputerV2(key, { maxAgeMs: 2000 });
         return {
-          idle: false,
-          complete:
-            cloudComputerV2CreateReason(confirmed) === null ||
-            (confirmed.latestBuild?.state !== "queued" &&
-              confirmed.latestBuild?.state !== "running"),
+          idle:
+            confirmed.latestBuild?.state !== "queued" &&
+            confirmed.latestBuild?.state !== "running",
+          complete: cloudComputerV2CreateReason(confirmed) === null,
         };
       },
     });
-  }, [enabled, visible, key, waitingForFirstBuild]);
+  }, [enabled, visible, key, waitingForFirstBuild, building]);
   const warm = () => {
-    if (enabled && active)
+    if (enabled && visible)
       void prefetchCloudComputerV2(me!.user.id, organization!.id);
   };
   return {
     reason,
     required: reason === cloudComputerV2BuildRequired,
-    canManage: snapshot.data?.canManage ?? false,
+    canManage:
+      Boolean(snapshot.data?.canManage) &&
+      (organization?.role === "owner" || organization?.role === "admin"),
     warm,
   };
 }

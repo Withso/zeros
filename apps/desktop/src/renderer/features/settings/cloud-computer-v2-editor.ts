@@ -109,3 +109,27 @@ export function acceptCloudComputerV2EditorSave(
     document: { ...current.document, environment: undefined },
   };
 }
+
+export function acceptCloudComputerV2EditorDiscard(
+  current: CloudComputerV2Editor,
+  submitted: CloudComputerV2Editor,
+  snapshot: CloudComputerV2State,
+): CloudComputerV2Editor {
+  const baseline = newCloudComputerV2Editor(snapshot);
+  // Discard applies to the submitted buffer. Editors remain usable while its
+  // mutation and replacement read settle; newer typing stays local.
+  return {
+    ...baseline,
+    document: {
+      ...baseline.document,
+      installScript:
+        current.document.installScript === submitted.document.installScript
+          ? baseline.document.installScript
+          : current.document.installScript,
+      timeoutSeconds:
+        current.document.timeoutSeconds === submitted.document.timeoutSeconds
+          ? baseline.document.timeoutSeconds
+          : current.document.timeoutSeconds,
+    },
+  };
+}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   acceptCloudComputerV2EditorRevision,
   acceptCloudComputerV2EditorSave,
+  acceptCloudComputerV2EditorDiscard,
   cloudComputerV2EditorDirty,
   cloudComputerV2EnvironmentRows,
   editCloudComputerV2Environment,
@@ -14,6 +15,50 @@ import {
 } from "./cloud-computer-v2-fixtures";
 
 describe("Cloud Computer editor buffers", () => {
+  it("discards the submitted buffer while keeping newer script and timeout typing against the confirmed baseline", () => {
+    const submitted = newCloudComputerV2Editor(
+      computerState({
+        revision: 1,
+        draft: {
+          ...computerState().draft,
+          installScript: "echo before discard",
+          timeoutSeconds: 600,
+        },
+      }),
+    );
+    const current = editCloudComputerV2Environment(
+      {
+        ...submitted,
+        document: {
+          ...submitted.document,
+          installScript: "echo newer typing",
+          timeoutSeconds: 222,
+        },
+      },
+      { op: "set", name: "PENDING", value: "synthetic pending value" },
+    );
+    const confirmed = computerState({ revision: 2 });
+    const discarded = acceptCloudComputerV2EditorDiscard(
+      current,
+      submitted,
+      confirmed,
+    );
+    expect(discarded.revision).toBe(2);
+    expect(discarded.base).toBe(confirmed.draft);
+    expect(discarded.document).toEqual({
+      repositories: [],
+      installScript: "echo newer typing",
+      timeoutSeconds: 222,
+    });
+    expect(cloudComputerV2EditorDirty(discarded)).toBe(true);
+    const unchanged = acceptCloudComputerV2EditorDiscard(
+      submitted,
+      submitted,
+      confirmed,
+    );
+    expect(unchanged).toEqual(newCloudComputerV2Editor(confirmed));
+    expect(cloudComputerV2EditorDirty(unchanged)).toBe(false);
+  });
   it("keeps an accepted save while its older confirmed GET snapshot revalidates", () => {
     const original = newCloudComputerV2Editor(computerState());
     const typed = {

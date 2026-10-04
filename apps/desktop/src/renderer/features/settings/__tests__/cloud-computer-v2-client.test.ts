@@ -239,6 +239,34 @@ describe("Cloud Computer v2 exact-key server state", () => {
 });
 
 describe("Cloud Computer v2 typed API", () => {
+  it("revalidates an exact older cursor after same-revision template retirement", async () => {
+    const row = computerBuild();
+    transport.request.mockResolvedValueOnce(
+      computerState({
+        revision: 31,
+        history: { builds: [row], nextCursor: null },
+      }),
+    );
+    await loadCloudComputerV2History(key, "older-v1");
+    transport.request.mockResolvedValueOnce(
+      computerState({
+        revision: 31,
+        history: {
+          builds: [{ ...row, templateState: "retired" }],
+          nextCursor: null,
+        },
+      }),
+    );
+    const [first, second] = await Promise.all([
+      loadCloudComputerV2History(key, "older-v1", { force: true }),
+      loadCloudComputerV2History(key, "older-v1", { force: true }),
+    ]);
+    expect(transport.request).toHaveBeenCalledTimes(2);
+    expect(first).toBe(second);
+    expect(first.revision).toBe(31);
+    expect(first.history.builds[0].templateState).toBe("retired");
+    expect(cloudComputerV2Cache.peekSnapshot(key).data).toBeUndefined();
+  });
   it("shares exact-cursor history reads without replacing the current state page", async () => {
     transport.request.mockResolvedValueOnce(computerState({ revision: 1 }));
     await loadCloudComputerV2(key);

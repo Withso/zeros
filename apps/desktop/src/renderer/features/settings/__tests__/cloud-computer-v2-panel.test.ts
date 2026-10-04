@@ -13,6 +13,7 @@ import {
 const state = vi.hoisted(() => ({
   feature: true,
   role: "developer" as string | null,
+  organizationRole: "admin",
   personal: false,
   snapshot: undefined as CloudComputerV2State | undefined,
   reads: [] as { key: string | null; enabled: boolean }[],
@@ -30,6 +31,7 @@ vi.mock("../../team/team-store", () => ({
   useActiveOrganization: () => ({
     id: computerOrg,
     isPersonal: state.personal,
+    role: state.organizationRole,
   }),
   getTeamStoreState: () => ({
     me: { user: { id: computerUser, staffRole: state.role } },
@@ -94,12 +96,21 @@ const render = (active = true) =>
 beforeEach(() => {
   state.feature = true;
   state.role = "developer";
+  state.organizationRole = "admin";
   state.personal = false;
   state.snapshot = computerState();
   state.reads = [];
 });
 
 describe("Cloud Computer v2 settings states", () => {
+  it("requires current organization management even with a warm canManage snapshot and staff access", () => {
+    state.organizationRole = "member";
+    const html = render();
+    expect(html).toContain("Configure with an agent");
+    expect(html).not.toContain('aria-label="New environment value"');
+    expect(html).not.toContain(">Save draft<");
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>Build computer<\/button>/);
+  });
   it("offers the first default build in one action and keeps the Phase D control disabled", () => {
     const html = render();
     expect(html).toContain("Not built yet");

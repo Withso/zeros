@@ -23,6 +23,7 @@ import {
   activateCloudComputerV2,
   buildCloudComputerV2,
   cancelCloudComputerV2Build,
+  cloudComputerV2BuildCache,
   cloudComputerV2BuildKey,
   cloudComputerV2Cache,
   cloudComputerV2Key,
@@ -39,6 +40,7 @@ import {
 import {
   acceptCloudComputerV2EditorRevision,
   acceptCloudComputerV2EditorSave,
+  acceptCloudComputerV2EditorDiscard,
   cloudComputerV2EditorDirty,
   editCloudComputerV2Environment,
   newCloudComputerV2Editor,
@@ -89,6 +91,9 @@ export function CloudComputerV2Panel({
       scopeKey={key}
       userId={me.user.id}
       organizationId={organization.id}
+      organizationCanManage={
+        organization.role === "owner" || organization.role === "admin"
+      }
       active={surfaceActive}
     />
   );
@@ -98,11 +103,13 @@ function CloudComputerV2Scope({
   scopeKey,
   userId,
   organizationId,
+  organizationCanManage,
   active,
 }: {
   scopeKey: string;
   userId: string;
   organizationId: string;
+  organizationCanManage: boolean;
   active: boolean;
 }) {
   const visible = useCloudComputerV2Visible(active);
@@ -148,6 +155,7 @@ function CloudComputerV2Scope({
           scopeKey={scopeKey}
           userId={userId}
           organizationId={organizationId}
+          organizationCanManage={organizationCanManage}
           snapshot={snapshot.data}
           active={visible}
           refreshing={snapshot.refreshing}
@@ -167,6 +175,7 @@ function CloudComputerV2Form({
   scopeKey,
   userId,
   organizationId,
+  organizationCanManage,
   snapshot,
   active,
   refreshing,
@@ -174,6 +183,7 @@ function CloudComputerV2Form({
   scopeKey: string;
   userId: string;
   organizationId: string;
+  organizationCanManage: boolean;
   snapshot: CloudComputerV2State;
   active: boolean;
   refreshing: boolean;
@@ -188,10 +198,23 @@ function CloudComputerV2Form({
   const [conflict, setConflict] = useState(false);
   const [review, setReview] = useState(false);
   const [secretEditorRevision, setSecretEditorRevision] = useState(0);
+  const [historyRefreshVersion, setHistoryRefreshVersion] = useState(0);
   const [selectedBuild, setSelectedBuild] =
     useState<CloudComputerV2BuildSummary | null>(null);
+  const [observedLog, setObservedLog] = useState(() => ({
+    build: pendingBuild(snapshot.latestBuild) ? snapshot.latestBuild : null,
+    closed: false,
+  }));
+  if (
+    pendingBuild(snapshot.latestBuild) &&
+    observedLog.build?.id !== snapshot.latestBuild?.id
+  ) {
+    setObservedLog({ build: snapshot.latestBuild, closed: false });
+  }
   const mounted = useRef(true),
     pending = useRef(false);
+  const visibleRef = useRef(active);
+  visibleRef.current = active;
   const operationIntent = useRef<{ fingerprint: string; id: string } | null>(
     null,
   );
@@ -202,21 +225,22 @@ function CloudComputerV2Form({
       operationIntent.current = null;
     };
   }, []);
+  const canManage = organizationCanManage && snapshot.canManage;
   useEffect(() => {
-    if (snapshot.canManage) return;
+    if (canManage) return;
     setEditor((current) => ({
       ...current,
       document: { ...current.document, environment: undefined },
     }));
     setSecretEditorRevision((value) => value + 1);
     operationIntent.current = null;
-  }, [snapshot.canManage]);
+  }, [canManage]);
   const dirty = cloudComputerV2EditorDirty(editor);
   const stale = conflict || editor.revision < snapshot.revision;
   const running = pendingBuild(snapshot.latestBuild)
     ? snapshot.latestBuild
     : null;
-  const editable = active && snapshot.canManage;
+  const editable = active && canManage;
   const valid = CloudComputerV2DraftInputSchema.safeParse(
     editor.document,
   ).success;
@@ -268,6 +292,7 @@ function CloudComputerV2Form({
         operationIntent.current = null;
         // The server's current revision is reviewable; keep the local buffer.
         void refreshCloudComputerV2(scopeKey).catch(() => {});
+        return "conflict" as const;
       } else
         setError(
           "Cloud Computer could not be updated. Your edits are preserved. Try again.",
@@ -319,20 +344,30 @@ function CloudComputerV2Form({
         }),
       );
       setSecretEditorRevision((value) => value + 1);
+      setObservedLog({ build: result.build, closed: false });
       setSelectedBuild(null);
       operationIntent.current = null;
     });
   const discard = () =>
     run(async () => {
-      const result = await discardCloudComputerV2(scopeKey, editor.revision);
+      const submitted = editor,
+        epoch = getOrganizationStoreGeneration();
+      const result = await discardCloudComputerV2(scopeKey, submitted.revision);
       const confirmed = await loadCloudComputerV2(scopeKey);
-      if (mounted.current && confirmed.revision >= result.revision) {
-        setEditor(newCloudComputerV2Editor(confirmed));
+      if (
+        mounted.current &&
+        epoch === getOrganizationStoreGeneration() &&
+        confirmed.revision >= result.revision
+      ) {
+        setEditor((current) =>
+          acceptCloudComputerV2EditorDiscard(current, submitted, confirmed),
+        );
         setSecretEditorRevision((value) => value + 1);
         operationIntent.current = null;
       }
     }, false);
-  const logBuild = selectedBuild ?? running;
+  const logBuild =
+    selectedBuild ?? (observedLog.closed ? null : observedLog.build);
   const warmLog = (row: CloudComputerV2BuildSummary) => {
     if (!active) return;
     const key = cloudComputerV2BuildKey(userId, organizationId, row.id);
@@ -354,9 +389,18 @@ function CloudComputerV2Form({
             variant="ghost"
             aria-label="Refresh Cloud Computer"
             disabled={!active || busy}
-            onClick={() =>
-              void refreshCloudComputerV2(scopeKey).catch(() => {})
-            }
+            onClick={() => {
+              const epoch = getOrganizationStoreGeneration();
+              void refreshCloudComputerV2(scopeKey)
+                .then(() => {
+                  if (
+                    mounted.current &&
+                    epoch === getOrganizationStoreGeneration()
+                  )
+                    setHistoryRefreshVersion((value) => value + 1);
+                })
+                .catch(() => {});
+            }}
           >
             <RefreshCw className="size-3.5" />
           </Button>
@@ -634,7 +678,7 @@ function CloudComputerV2Form({
             be between 1 and 900 seconds.
           </p>
         )}
-        {snapshot.canManage && (
+        {canManage && (
           <div className="flex justify-end gap-2">
             <Button
               variant="ghost"
@@ -662,11 +706,13 @@ function CloudComputerV2Form({
         scopeKey={scopeKey}
         snapshot={snapshot}
         active={active}
+        refreshVersion={historyRefreshVersion}
         disabled={!canMutate || Boolean(running)}
         onWarmLog={warmLog}
         onOpenLog={setSelectedBuild}
-        onAction={(kind, row) =>
-          void run(async () => {
+        onAction={async (kind, row) => {
+          const epoch = getOrganizationStoreGeneration();
+          const outcome = await run(async () => {
             const action =
               kind === "activate"
                 ? activateCloudComputerV2
@@ -679,22 +725,37 @@ function CloudComputerV2Form({
             );
             operationIntent.current = null;
             return kind === "activate" ? result : undefined;
-          })
-        }
+          });
+          if (
+            outcome === "conflict" &&
+            mounted.current &&
+            visibleRef.current &&
+            epoch === getOrganizationStoreGeneration()
+          ) {
+            const buildKey = cloudComputerV2BuildKey(
+              userId,
+              organizationId,
+              row.id,
+            );
+            cloudComputerV2BuildCache.invalidate(buildKey);
+            return loadCloudComputerV2Build(buildKey, { force: true });
+          }
+        }}
       />
       {logBuild && (
         <SettingsSection
           title={`Version ${logBuild.version} log`}
           action={
-            selectedBuild ? (
-              <Button
-                variant="ghost"
-                disabled={!active}
-                onClick={() => setSelectedBuild(null)}
-              >
-                Close log
-              </Button>
-            ) : undefined
+            <Button
+              variant="ghost"
+              disabled={!active}
+              onClick={() => {
+                setSelectedBuild(null);
+                setObservedLog((current) => ({ ...current, closed: true }));
+              }}
+            >
+              Close log
+            </Button>
           }
         >
           <CloudComputerV2Log

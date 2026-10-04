@@ -13,6 +13,7 @@ import {
 const state = vi.hoisted(() => ({
   feature: true,
   role: "developer" as string | null,
+  organizationRole: "admin",
   personal: false,
   snapshot: undefined as CloudComputerV2State | undefined,
   error: null as Error | null,
@@ -27,6 +28,7 @@ vi.mock("../../../features/team/team-store", () => ({
   useActiveOrganization: () => ({
     id: computerOrg,
     isPersonal: state.personal,
+    role: state.organizationRole,
     workspaceCapabilities: { local: state.personal, cloud: !state.personal },
   }),
   getTeamStoreState: () => ({ me: { user: { id: computerUser } } }),
@@ -110,6 +112,7 @@ function create(active = true) {
 beforeEach(() => {
   state.feature = true;
   state.role = "developer";
+  state.organizationRole = "admin";
   state.personal = false;
   state.snapshot = computerState();
   state.error = null;
@@ -118,6 +121,12 @@ beforeEach(() => {
 });
 
 describe("first-build cloud create admission", () => {
+  it("removes the admin Settings action on current organization demotion despite a warm canManage", () => {
+    expect(readGate().canManage).toBe(true);
+    state.organizationRole = "member";
+    expect(readGate().canManage).toBe(false);
+    expect(readGate().required).toBe(true);
+  });
   it("disables both create modes before a first successful active template and offers admins the Settings destination", () => {
     const result = create();
     expect(result.reason).toBe("Build your Cloud Computer first");

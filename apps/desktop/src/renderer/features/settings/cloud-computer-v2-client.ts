@@ -302,7 +302,11 @@ export function refreshCloudComputerV2(key: string) {
   cloudComputerV2Cache.invalidate(key);
   return loadCloudComputerV2(key);
 }
-export function loadCloudComputerV2History(key: string, cursor: string) {
+export function loadCloudComputerV2History(
+  key: string,
+  cursor: string,
+  options: AsyncCacheLoadOptions = {},
+) {
   const epoch = getOrganizationStoreGeneration();
   try {
     assertAccount(key, epoch);
@@ -315,7 +319,7 @@ export function loadCloudComputerV2History(key: string, cursor: string) {
       assertAccount(key, epoch);
       return readCloudComputerV2(key, cursor);
     },
-    { maxAgeMs: cloudComputerV2MaxAgeMs },
+    { maxAgeMs: cloudComputerV2MaxAgeMs, ...options },
   );
 }
 export async function readCloudComputerV2Build(key: string) {

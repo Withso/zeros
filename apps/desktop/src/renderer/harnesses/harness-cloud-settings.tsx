@@ -8,6 +8,7 @@ import { ProvidersPanel } from "../features/settings/providers-panel";
 import {
   acceptOrganizationSnapshot,
   clearTeamStore,
+  getTeamStoreState,
 } from "../features/team/team-store";
 import { setActiveOrganizationSelection } from "../features/team/active-team";
 import { clearCloudProviderConnections } from "../features/settings/cloud-provider-connection";
@@ -218,6 +219,20 @@ setActiveBridge({
   },
 } as unknown as RuntimeClient);
 installAccount(userA);
+function setOrganizationRole(role: "admin" | "member") {
+  const me = getTeamStoreState().me;
+  if (!me) return;
+  const update = (organization: (typeof me.teams)[number]) =>
+    organization.id === organizationId
+      ? { ...organization, role }
+      : organization;
+  acceptOrganizationSnapshot({
+    ...me,
+    user: { ...me.user, staffRole: "developer" },
+    teams: me.teams.map(update),
+    organizations: me.organizations?.map(update),
+  });
+}
 function Harness() {
   const [active, setActive] = useState(true);
   const [section, setSection] = useState(computerV2Mode ? "computer" : "providers");
@@ -233,6 +248,12 @@ function Harness() {
             <Button onClick={() => setInternalFeatureEnabled("cloudComputerV2", false)}>Disable computer v2</Button>
             <Button onClick={() => setGithubOpen(true)}>Open GitHub create</Button>
             <Button onClick={() => setSection("create")}>Create section</Button>
+            <Button onClick={() => setOrganizationRole("admin")}>
+              Organization admin
+            </Button>
+            <Button onClick={() => setOrganizationRole("member")}>
+              Organization member
+            </Button>
           </>}
           <Button onClick={() => installAccount(userA)}>Account A</Button>
           <Button onClick={() => installAccount(userB)}>Account B</Button>
