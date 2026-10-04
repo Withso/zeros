@@ -137,6 +137,21 @@ async function activeRuntimeFixture(
 }
 
 describe("desktop cloud replica runtime", () => {
+  it("exposes only the current account/device identity without an active replica", async () => {
+    const fixture = await activeRuntimeFixture();
+    fixture.state.updateRemoteState({ replicaId: fixture.replicaId, desiredState: "removed", observedState: "removed",
+      workspaceAuthorityEpoch: 1, grantEpoch: 2 });
+    try {
+      expect(() => fixture.runtime.identity()).toThrow(/session/);
+      await fixture.runtime.updateSession(fixture.session);
+      expect(fixture.runtime.identity()).toEqual({
+        accountUserId: fixture.accountUserId, deviceId: fixture.deviceId,
+      });
+      await fixture.runtime.updateSession(null);
+      expect(() => fixture.runtime.identity()).toThrow(/session/);
+    } finally { await fixture.runtime.dispose(); }
+  });
+
   it("retries a transient unreadable projection without recording a local edit", async () => {
     const transient = Object.assign(new Error("temporarily unreadable"), {
       code: "EACCES",

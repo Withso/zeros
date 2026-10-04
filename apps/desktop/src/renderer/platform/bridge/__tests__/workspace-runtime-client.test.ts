@@ -88,6 +88,28 @@ function fakePeer(target: CloudWorkspaceTarget) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("workspace runtime routing", () => {
+  it("uses the Local transport for replica controls while a cloud workspace is open", async () => {
+    const peer = fakePeer(a);
+    const open = vi.fn(async () => peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    try {
+      await client.warmWorkspace(a);
+      peer.request.mockClear();
+      open.mockClear();
+      const local = vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue({
+        type: "WORKSPACE_RESPONSE", result: [],
+      } as never);
+      const message = {
+        type: "WORKSPACE_REQUEST", op: "cloudReplica.create",
+        params: { workspaceId: cloudWorkspaceKey(a), organizationId, rootPath: "/Users/test/downloads" },
+      } as const;
+      await client.request(message);
+      expect(local).toHaveBeenCalledWith(message, expect.anything());
+      expect(open).not.toHaveBeenCalled();
+      expect(peer.request).not.toHaveBeenCalled();
+    } finally { client.dispose(); }
+  });
+
   it("authorizes the exact translated PR request without changing shared UI operations", async () => {
     const peer = fakePeer(a), prepareGithubWrite = vi.fn(async () => "test-write-grant");
     const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, workspaces: () => [], prepareGithubWrite });

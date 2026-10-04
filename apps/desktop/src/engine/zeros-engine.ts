@@ -8656,7 +8656,24 @@ export class ZerosEngine {
       }
       return value;
     };
+    // New renderer callers bind every request to the identity that owns their
+    // exact-key snapshot. Keep the older unscoped foundation RPCs compatible.
+    if (op === "cloudReplica.identity" || "accountUserId" in params || "deviceId" in params) {
+      const identity = runtime.identity();
+      if (params.accountUserId !== identity.accountUserId ||
+        (op !== "cloudReplica.identity" && params.deviceId !== identity.deviceId)) {
+        throw new Error("Local replica identity changed; refresh sync controls");
+      }
+      if (op !== "cloudReplica.identity" && op !== "cloudReplica.list" && op !== "cloudReplica.create") {
+        const replica = runtime.list().find(row => row.replicaId === params.replicaId);
+        if (!replica || replica.organizationId !== params.organizationId || replica.workspaceId !== params.workspaceId) {
+          throw new Error("Local replica workspace identity changed; refresh sync controls");
+        }
+      }
+    }
     switch (op) {
+      case "cloudReplica.identity":
+        return runtime.identity();
       case "cloudReplica.list":
         return runtime.list();
       case "cloudReplica.divergences":
