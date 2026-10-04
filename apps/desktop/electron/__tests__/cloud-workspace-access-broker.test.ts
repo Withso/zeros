@@ -5,6 +5,7 @@ import {
   type CloudWorkspaceAccessBrokerApi,
   type CloudWorkspaceTunnelHandle,
 } from "../cloud-workspace-access-broker";
+import type { CloudRuntimeServiceAccess } from "../cloud-runtime-service-client";
 
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
@@ -113,6 +114,178 @@ function broker(
     ...overrides,
   });
 }
+
+function nativeFixture() {
+  let account = "account-a/session-a";
+  let device = { deviceId: DEVICE_ID, keyVersion: 1 };
+  let sequence = 0;
+  const handles: Array<{ stop: ReturnType<typeof vi.fn>; close: () => void; closed: Promise<void>; command: string; configPath: string; launchTerminal: ReturnType<typeof vi.fn>; localPort: number }> = [];
+  const makeHandle = async () => {
+    let close!: () => void;
+    const closed = new Promise<void>(resolve => { close = resolve; });
+    const handle = { closed, close, stop: vi.fn(async () => close()), command: "ssh -F /private/native/config zeros-cloud",
+      configPath: "/private/native/config", launchTerminal: vi.fn(async () => undefined), localPort: 5173 };
+    handles.push(handle); return handle;
+  };
+  const nativeServices = {
+    api: {
+      issue: vi.fn(async (_token: string, input: { kind: "ssh" | "tunnel"; remotePort?: number }): Promise<CloudRuntimeServiceAccess> => ({
+        grant: { id: sequence++ ? SECOND_GRANT_ID : GRANT_ID, workspaceId: WORKSPACE_ID, generation: 7, kind: input.kind,
+          remotePort: input.remotePort ?? null, deviceId: device.deviceId, expiresAt: EXPIRES_AT }, deviceKeyVersion: device.keyVersion,
+        transport: { version: 1, url: "wss://api.zeros.test/service", capability: `zsh_${"a".repeat(43)}`,
+          headerName: "x-zeros-runtime-service", protocol: "zeros.service.v1" },
+        ...(input.kind === "ssh" ? { ssh: { username: "zeros", hostKey: "stream-introduction" } } : {}),
+      })),
+      revoke: vi.fn(async () => undefined),
+    },
+    readDeviceIdentity: () => device,
+    prepareSsh: vi.fn(makeHandle), startTunnel: vi.fn(makeHandle),
+  };
+  const legacy = api(), clipboard = vi.fn(async (_text: string) => undefined);
+  const getAccessToken = vi.fn(async () => "account-access-token");
+  const access = broker(legacy, { ...{ nativeServices }, writeClipboard: clipboard, getAccessToken, getAccountSessionKey: () => account });
+  return { access, nativeServices, legacy, clipboard, handles, getAccessToken, changeAccount: () => { account = "account-b/session-b"; },
+    rotateDevice: () => { device = { ...device, keyVersion: 2 }; } };
+}
+
+describe("native service broker", () => {
+  const target = { organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID };
+  it("uses native SSH for copy/Terminal without exposing or calling provider authority", async () => {
+    const f = nativeFixture();
+    const result = await f.access.copySshCommand(target);
+    expect(f.nativeServices.api.issue).toHaveBeenCalledWith("account-access-token", expect.objectContaining({ ...target, kind: "ssh" }));
+    expect(f.legacy.issueSsh).not.toHaveBeenCalled();
+    expect(f.clipboard).toHaveBeenCalledWith("ssh -F /private/native/config zeros-cloud");
+    expect(result).toEqual({ accessId: GRANT_ID, expiresAt: EXPIRES_AT });
+    await f.access.openSshTerminal(target);
+    expect(f.handles[1]!.launchTerminal).toHaveBeenCalledOnce();
+    await f.access.dispose();
+  });
+  it("closes one native grant without retiring a sibling, and retires an SSH window on EOF", async () => {
+    const f = nativeFixture();
+    const first = await f.access.copySshCommand(target);
+    await f.access.startTunnel({ ...target, remotePort: 4173, localPort: 5173 });
+    await f.access.revoke(first.accessId);
+    expect(f.handles[0]!.stop).toHaveBeenCalledOnce();
+    expect(f.handles[1]!.stop).not.toHaveBeenCalled();
+    expect(f.nativeServices.api.revoke).toHaveBeenCalledWith("account-access-token", { ...target, grantId: GRANT_ID });
+    expect(f.legacy.revoke).not.toHaveBeenCalled();
+    f.handles[1]!.close();
+    await vi.waitFor(() => expect(f.nativeServices.api.revoke).toHaveBeenCalledWith("account-access-token", { ...target, grantId: SECOND_GRANT_ID }));
+    await f.access.dispose();
+  });
+  it("retires a late native admission using the issuing account and never publishes it", async () => {
+    const f = nativeFixture();
+    const issue = f.nativeServices.api.issue.getMockImplementation()!;
+    let release!: (value: CloudRuntimeServiceAccess) => void;
+    f.nativeServices.api.issue.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const pending = f.access.copySshCommand(target);
+    const rejected = expect(pending).rejects.toMatchObject({ code: "signed_out" });
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    f.changeAccount(); release(await issue("account-access-token", { kind: "ssh" })); await rejected;
+    expect(f.clipboard).not.toHaveBeenCalled();
+    expect(f.nativeServices.prepareSsh).not.toHaveBeenCalled();
+    expect(f.nativeServices.api.revoke).toHaveBeenCalledWith("account-access-token", { ...target, grantId: GRANT_ID });
+  });
+  it("rejects a device key rotation during preparation and closes that local adapter", async () => {
+    const f = nativeFixture();
+    const prepare = f.nativeServices.prepareSsh.getMockImplementation()!;
+    f.nativeServices.prepareSsh.mockImplementationOnce(async () => { const handle = await prepare(); f.rotateDevice(); return handle; });
+    await expect(f.access.copySshCommand(target)).rejects.toThrow(/authority|device/i);
+    expect(f.clipboard).not.toHaveBeenCalled();
+    expect(f.handles[0]!.stop).toHaveBeenCalled();
+    expect(f.nativeServices.api.revoke).toHaveBeenCalledOnce();
+  });
+  it("cleans up a port collision or failed clipboard write and never falls back", async () => {
+    const f = nativeFixture();
+    f.nativeServices.startTunnel.mockRejectedValueOnce(new Error("Local port already in use"));
+    await expect(f.access.startTunnel({ ...target, remotePort: 4173, localPort: 5173 })).rejects.toThrow(/port/);
+    expect(f.nativeServices.api.revoke).toHaveBeenCalledOnce();
+    expect(f.legacy.issueTunnel).not.toHaveBeenCalled();
+    f.clipboard.mockRejectedValueOnce(new Error("Clipboard unavailable"));
+    await expect(f.access.copySshCommand(target)).rejects.toThrow(/Clipboard/);
+    expect(f.handles[0]!.stop).toHaveBeenCalled();
+    expect(f.nativeServices.api.revoke).toHaveBeenCalledTimes(2);
+  });
+  it("refuses unqualified native IDE launch before issuing authority", async () => {
+    const f = nativeFixture();
+    await expect(f.access.openSshIde({ ...target, appId: "cursor" })).rejects.toThrow(/IDE.*qualified/i);
+    expect(f.nativeServices.api.issue).not.toHaveBeenCalled();
+    expect(f.legacy.issueSsh).not.toHaveBeenCalled();
+  });
+  it("reads metadata only for the exact account/device/workspace without issuing access", async () => {
+    const f = nativeFixture(), context = f.access.serviceContext();
+    expect(f.access.listServices({ ...target, ...context })).toEqual([]);
+    expect(f.nativeServices.api.issue).not.toHaveBeenCalled();
+    await f.access.copySshCommand(target);
+    const rows = f.access.listServices({ ...target, ...context });
+    expect(rows).toEqual([{ accessId: GRANT_ID, kind: "ssh", generation: 7, expiresAt: EXPIRES_AT,
+      localPort: null, remotePort: null, closing: false }]);
+    expect(f.access.listServices({ ...target, ...context, workspaceId: SECOND_GRANT_ID })).toEqual([]);
+    expect(() => f.access.listServices({ ...target, ...context, authorityId: "old-session" })).toThrow(/authority/);
+    f.rotateDevice();
+    expect(() => f.access.listServices({ ...target, ...context })).toThrow(/authority/);
+    expect(f.access.listServices({ ...target, ...f.access.serviceContext() })).toEqual([]);
+    await f.access.dispose();
+  });
+  it("retries remote retirement after stopping locally without losing a sibling", async () => {
+    const f = nativeFixture();
+    await f.access.copySshCommand(target);
+    await f.access.startTunnel({ ...target, remotePort: 4173, localPort: 5173 });
+    f.nativeServices.api.revoke.mockRejectedValueOnce(new Error("offline"));
+    await expect(f.access.revoke(GRANT_ID)).rejects.toThrow(/offline/);
+    const rows = f.access.listServices({ ...target, ...f.access.serviceContext() });
+    expect(rows.find(row => row.accessId === GRANT_ID)?.closing).toBe(true);
+    expect(f.handles[1]!.stop).not.toHaveBeenCalled();
+    await f.access.revoke(GRANT_ID);
+    expect(f.access.listServices({ ...target, ...f.access.serviceContext() }).map(row => row.accessId)).toEqual([SECOND_GRANT_ID]);
+    await f.access.dispose();
+    expect(f.nativeServices.api.revoke).toHaveBeenCalledWith("account-access-token", { ...target, grantId: SECOND_GRANT_ID });
+  });
+  it("retains failed admission cleanup so a port collision cannot orphan an idle-blocking grant", async () => {
+    const f = nativeFixture();
+    f.nativeServices.startTunnel.mockRejectedValueOnce(new Error("Local port already in use"));
+    f.nativeServices.api.revoke.mockRejectedValueOnce(new Error("offline"));
+    await expect(f.access.startTunnel({ ...target, remotePort: 4173, localPort: 5173 })).rejects.toThrow(/port/);
+    expect(f.access.listServices({ ...target, ...f.access.serviceContext() })).toEqual([
+      { accessId: GRANT_ID, kind: "tunnel", generation: 7, expiresAt: EXPIRES_AT,
+        localPort: 5173, remotePort: 4173, closing: true },
+    ]);
+    await f.access.revoke(GRANT_ID);
+    expect(f.access.listServices({ ...target, ...f.access.serviceContext() })).toEqual([]);
+    await f.access.dispose();
+  });
+  it("refreshes the issuing account token for cleanup without adopting a replacement account", async () => {
+    const f = nativeFixture();
+    await f.access.copySshCommand(target);
+    f.getAccessToken.mockResolvedValueOnce("refreshed-account-token");
+    await f.access.revoke(GRANT_ID);
+    expect(f.nativeServices.api.revoke).toHaveBeenLastCalledWith("refreshed-account-token", { ...target, grantId: GRANT_ID });
+
+    await f.access.copySshCommand(target);
+    f.getAccessToken.mockImplementationOnce(async () => {
+      f.changeAccount();
+      return "replacement-account-token";
+    });
+    await f.access.revoke(SECOND_GRANT_ID);
+    expect(f.nativeServices.api.revoke).toHaveBeenLastCalledWith("account-access-token", { ...target, grantId: SECOND_GRANT_ID });
+    expect(f.handles[1]!.stop).toHaveBeenCalled();
+    await f.access.dispose();
+  });
+  it("rejects a device rotation while the grant is being issued", async () => {
+    const f = nativeFixture();
+    const issue = f.nativeServices.api.issue.getMockImplementation()!;
+    f.nativeServices.api.issue.mockImplementationOnce(async (...args) => {
+      f.rotateDevice();
+      return issue(...args);
+    });
+    await expect(f.access.copySshCommand(target)).rejects.toThrow(/device authority changed/i);
+    expect(f.nativeServices.prepareSsh).not.toHaveBeenCalled();
+    expect(f.clipboard).not.toHaveBeenCalled();
+    expect(f.nativeServices.api.revoke).toHaveBeenCalledOnce();
+    await f.access.dispose();
+  });
+});
 
 describe("CloudWorkspaceAccessBroker", () => {
   it("retires the issuing session before a replacement account can refresh its handle", async () => {

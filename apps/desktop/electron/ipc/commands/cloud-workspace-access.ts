@@ -48,11 +48,26 @@ function positiveInteger(args: Record<string, unknown>, key: string): number {
   return Number(value);
 }
 
+function serviceContext(args: Record<string, unknown>) {
+  const deviceId = args.deviceId === null ? null : requiredString(args, "deviceId");
+  const keyVersion = args.keyVersion === null ? null : positiveInteger(args, "keyVersion");
+  if ((deviceId === null) !== (keyVersion === null)) throw new Error("cloud workspace access: invalid device identity");
+  return { authorityId: requiredString(args, "authorityId"), deviceId, keyVersion };
+}
+
+function accessBroker(args: Record<string, unknown>) {
+  const broker = getCloudWorkspaceAccessBroker();
+  // Additive intent fence: existing IPC names/legacy callers remain valid,
+  // while the staff controls cannot issue into a replacement account/device.
+  if (args.authorityId !== undefined) broker.listServices({ ...target(args), ...serviceContext(args) });
+  return broker;
+}
+
 export const cloudWorkspaceSshCopy: CommandHandler = (args) =>
-  getCloudWorkspaceAccessBroker().copySshCommand(target(args));
+  accessBroker(args).copySshCommand(target(args));
 
 export const cloudWorkspaceSshTerminal: CommandHandler = (args) =>
-  getCloudWorkspaceAccessBroker().openSshTerminal(target(args));
+  accessBroker(args).openSshTerminal(target(args));
 
 export const cloudWorkspaceSshIde: CommandHandler = (args) => {
   const appId = args.appId;
@@ -66,7 +81,7 @@ export const cloudWorkspaceSshIde: CommandHandler = (args) => {
 };
 
 export const cloudWorkspaceTunnelStart: CommandHandler = (args) =>
-  getCloudWorkspaceAccessBroker().startTunnel({
+  accessBroker(args).startTunnel({
     ...target(args),
     remotePort: port(args, "remotePort"),
     localPort: port(args, "localPort"),
@@ -74,6 +89,13 @@ export const cloudWorkspaceTunnelStart: CommandHandler = (args) =>
 
 export const cloudWorkspaceAccessRevoke: CommandHandler = (args) =>
   getCloudWorkspaceAccessBroker().revoke(requiredString(args, "accessId"));
+
+export const cloudWorkspaceAccessContext: CommandHandler = () =>
+  getCloudWorkspaceAccessBroker().serviceContext();
+
+export const cloudWorkspaceAccessList: CommandHandler = (args) => {
+  return getCloudWorkspaceAccessBroker().listServices({ ...target(args), ...serviceContext(args) });
+};
 
 export const cloudWorkspaceRuntimeOpen: CommandHandler = (args) =>
   getCloudWorkspaceAccessBroker().openRuntime(target(args));

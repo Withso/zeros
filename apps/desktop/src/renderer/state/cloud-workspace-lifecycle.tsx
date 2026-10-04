@@ -1,5 +1,6 @@
 import { clearCloudComputers } from "../features/settings/cloud-computer-client";
 import { clearCloudComputersV2 } from "../features/settings/cloud-computer-v2-client";
+import { cloudServiceAccessCache, cloudServiceContextCache } from "./read-caches";
 import { clearCloudGithub } from "../platform/cloud-github";
 import { useEffect } from "react";
 import { cloudWorkspaceCapability } from "../platform/cloud-workspace-access";
@@ -142,6 +143,8 @@ export function CloudWorkspaceLifecycle() {
       clearCloudGithub();
       clearCloudComputers();
       clearCloudComputersV2();
+      cloudServiceAccessCache.clear();
+      cloudServiceContextCache.clear();
     };
     const install = (session: AuthSessionInfo | null) => {
       if (!alive) return;

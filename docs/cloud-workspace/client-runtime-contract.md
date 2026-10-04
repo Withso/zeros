@@ -566,6 +566,65 @@ drain retires engine authority; it cannot publish a successful checkpoint.
 The provider routing credential stays in the control-plane relay. Provider
 legacy SSH grants do not authorize these native workload services.
 
-These are backend contracts. A future SSH ProxyCommand helper and each native
-client must implement the authenticated introduction, framing, device proof
-and explicit reconnect behavior before claiming client support.
+### Desktop native access
+
+Electron main implements native service admission and transport in
+`cloud-runtime-service-client.ts` and `cloud-runtime-service-transport.ts`.
+The existing SSH copy, Terminal and tunnel IPC names now use these native
+services. Provider SSH remains a distinct compatibility path for legacy engine
+dispatch; a refused native service never falls back to provider administration.
+The main process signs the exact device proof, validates the returned workspace,
+device, service, port and expiry, and accepts only the exact control-plane WSS
+service URL. Account replacement and local device-key rotation fence pending
+admissions. The backend remains authoritative for generation, epoch, engine,
+membership and device revocation; the introduction does not invent those fields.
+
+SSH uses macOS's OpenSSH and `/usr/bin/nc -U` through a private, single-use Unix
+socket. A copied command contains only the path to a private OpenSSH config.
+Connecting that socket opens the authenticated WSS stream on demand, validates
+the introduction's Ed25519 encoding and fingerprint, and writes its public key
+before releasing SSH handshake bytes. OpenSSH independently enforces the pin
+with `StrictHostKeyChecking yes`. Delaying WSS admission until command use avoids
+consuming the worker's ten-second SSH handshake deadline while the user copies
+the command. Each new SSH/SFTP connection needs a new command; there is no
+persistent SSH host alias or connection multiplexing. Terminal launch uses a
+private `.command` wrapper. The service capability never enters these files,
+argv, the clipboard, the renderer or a child environment. Config/key/socket
+files are removed on close, expiry or account retirement, and are never resumed
+as authority after app restart. IDE actions remain unavailable until their actual
+connection and forwarding sequence is qualified.
+
+Port forwarding binds only the requested Mac `127.0.0.1` application port.
+Each local connection opens a native binary stream under the same port-scoped
+grant; listener collisions fail visibly and cannot displace another listener.
+The client splits writes at the 64 KiB frame boundary, honors backpressure and
+bounds transfers, connections and expiry. It rejects remote port 22222 and the
+default engine port 39393 before signing; the backend also rejects configured
+engine/service ports. A refused admission closes the local listener. No wake,
+retry, persisted config or account change silently reissues service authority.
+
+Closing an SSH connection or explicitly closing a forwarding listener stops
+local access and deletes only its exact grant, using the issuing account.
+Sibling grants (including other devices) are unaffected. Failed retirement in
+the current session remains visible as **Retry close**, including admission
+whose local bind failed. Account retirement attempts cleanup with the original
+account token; if offline cleanup cannot complete, backend expiry still bounds
+the abandoned grant. Unused copied commands and idle forwarding listeners hold
+their fifteen-minute grant until closed or expired and can therefore delay idle
+sleep. The user must close them when finished.
+
+The workspace details controls require
+`useInternalFeatureActive("cloudComputerV2")`, a running workspace, the native
+desktop bridge, and `capabilities.canEdit === true`. `canEdit` is optional for
+mixed-version documents and fails closed when absent. Read-only
+`cloud_workspace_access_context` / `cloud_workspace_access_list` return safe
+metadata only. Their bounded renderer caches include account epoch, broker
+authority, device/key version, organization and workspace. Pointer/focus intent
+warms metadata without issuing grants; same-key refresh retains confirmed rows;
+hidden surfaces do not poll. Staff actions return the captured authority context
+to main so a stale click cannot issue into a replacement account or device.
+
+Local tests cover real OpenSSH exec/SFTP, key mismatch, framing, authority races,
+cleanup and the staff UI. They do not qualify a signed Mac build against a v4
+template workspace. Run the [Mac Alpha acceptance procedure](native-access-acceptance.md)
+after the template, wake and persistence prerequisites have been qualified.

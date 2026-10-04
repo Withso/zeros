@@ -31,6 +31,9 @@ import { useTeams } from "../../features/team/team-store";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { toast } from "../../shared/ui/primitives/elements";
 import { Checkbox } from "../../shared/ui/primitives/checkbox";
+import { useInternalFeatureActive } from "../../features/settings/internal-features";
+import { warmCloudServiceAccess } from "../../platform/cloud-workspace-access";
+import { CloudWorkspaceAccessControls } from "./cloud-workspace-access-controls";
 
 export function cloudStatusLabel(status: string): string {
   return (
@@ -143,6 +146,7 @@ export function CloudWorkspaceDetailsContent({
 }
 
 export function CloudWorkspaceDetails({ folder }: { folder: string }) {
+  const nativeAccessEnabled = useInternalFeatureActive("cloudComputerV2");
   const target = parseCloudWorkspaceKey(folder);
   const key = target ? cloudWorkspaceKey(target) : null;
   const [open, setOpen] = useState(false);
@@ -157,6 +161,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   );
   if (!key) return null;
   const warm = () => {
+    if (nativeAccessEnabled && target) void warmCloudServiceAccess(target).catch(() => {});
     void cloudWorkspaceDetails
       .load(key, () => refreshCloudWorkspace(parseCloudWorkspaceKey(key)!), {
         maxAgeMs: 10_000,
@@ -257,6 +262,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
               )}
             </div>
           )}
+        {details.data && <CloudWorkspaceAccessControls workspace={details.data} active={open} />}
       </PopoverContent>
     </Popover>
   );

@@ -27,6 +27,7 @@ export const CloudWorkspaceDocumentSchema = z.object({
   status: z.string().min(1).max(64),
   capabilities: z.object({
     canWrite: z.boolean(),
+    canEdit: z.boolean().optional(),
     canManage: z.boolean(),
     canStart: z.boolean(),
     startUnavailableReason: z.string().nullable(),

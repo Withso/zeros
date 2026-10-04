@@ -31,6 +31,16 @@ import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import type { bridgeDesignListDirectories } from "../platform/bridge/design-bridge";
 import type { DesignReviewEvidence, DesignReviewSnapshot, DesignProposalReview, DesignReviewFileDetail } from "@zeros/protocol/design-review";
+import type { CloudServiceAccessRow, CloudServiceContext } from "../platform/cloud-workspace-access";
+
+export const cloudServiceContextCache = new KeyedAsyncCache<CloudServiceContext>({
+  maxEntries: 1, reconcile: (previous, next) => JSON.stringify(previous) === JSON.stringify(next) ? previous! : next,
+});
+/** Account epoch, main authority, device/key version, organization, workspace.
+ * Safe metadata only; service grants and command/config paths stay in main. */
+export const cloudServiceAccessCache = new KeyedAsyncCache<CloudServiceAccessRow[]>({
+  maxEntries: 32, reconcile: (previous, next) => JSON.stringify(previous) === JSON.stringify(next) ? previous! : next,
+});
 
 
 export const designReviewCache = new KeyedAsyncCache<DesignReviewSnapshot>({

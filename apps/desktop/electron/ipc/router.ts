@@ -80,6 +80,8 @@ const commandTable: Record<string, CommandHandler> = {
   cloud_workspace_ssh_ide: notImpl("cloud_workspace_ssh_ide", 3),
   cloud_workspace_tunnel_start: notImpl("cloud_workspace_tunnel_start", 3),
   cloud_workspace_access_revoke: notImpl("cloud_workspace_access_revoke", 3),
+  cloud_workspace_access_context: notImpl("cloud_workspace_access_context", 3),
+  cloud_workspace_access_list: notImpl("cloud_workspace_access_list", 3),
   cloud_workspace_runtime_open: notImpl("cloud_workspace_runtime_open", 3),
   cloud_workspace_capability: notImpl("cloud_workspace_capability", 3),
   cloud_workspace_runtime_refresh: notImpl(
