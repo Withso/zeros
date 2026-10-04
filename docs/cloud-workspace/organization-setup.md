@@ -86,6 +86,15 @@ or unchanged checkout preserves it; explicit cancelled/backlog status is kept.
 
 ## Cloud Computer
 
+With the internal Alpha Cloud Computer v2 feature enabled, engineering staff who
+are organization owners or admins can choose **Configure with an agent** after
+a successful active build. The active configuration must include at least one
+repository. The server reuses that creator’s private admin workspace for the
+current active version, or creates one for a newly activated version. Each open
+starts a new conversation and publishes its workspace destination atomically.
+Older admin workspaces stay in the normal workspace list with an **Admin** badge
+derived from server metadata. See [Computer agent tools](computer-tools.md).
+
 Cloud Computer is an organization-owned, versioned setup configuration. It
 stores up to 20 immutable repository identities, an install script of at most
 16 KiB, and a setup-command timeout of at most 900 seconds. Owners and admins

@@ -43,6 +43,7 @@ import {
 } from "lucide-react";
 
 import { type Workspace } from "../platform/git";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import { AgentActivityIndicator } from "../features/agent/agent-activity-indicator";
 import { AgentAwaitingIcon } from "../features/agent/agent-awaiting-indicator";
 import { useAnyChatUnread } from "../features/agent/chat-unread";
@@ -54,6 +55,7 @@ import {
 } from "../features/agent/sessions-store";
 import { DEFAULT_REPO_SETTINGS_VIEW } from "../features/repositories/repo-page";
 import { RepositoryIcon } from "../features/repositories/repository-icon";
+import { CloudComputerAdminBadge } from "../features/settings/cloud-computer-admin-badge";
 import { useAnyChatHasDraft } from "../state/composer-draft-presence";
 import { isLocalMainWorkspace } from "../state/local-main-workspace";
 import {
@@ -385,6 +387,9 @@ export function SidebarWorkspaceRow({
         )}
         {/* Only the name truncates; everything after it is shrink-0. */}
         <span className="min-w-0 flex-1 truncate">{label}</span>
+        {isCloudWorkspace(workspace.path) && (
+          <CloudComputerAdminBadge folder={workspace.path} />
+        )}
         {/* Counts, then the stream, then state, then the pencil (or a flat
             row's awaiting mark) — each independently optional so a running
             workspace still reports what it changed. Archiving hides the

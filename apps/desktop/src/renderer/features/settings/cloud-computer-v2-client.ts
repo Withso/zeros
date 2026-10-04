@@ -4,6 +4,7 @@ import {
   CLOUD_COMPUTER_V2_MAX_LOG_ROW_BYTES,
   CLOUD_COMPUTER_V2_MAX_REQUEST_BYTES,
   CloudComputerV2BuildErrorSchema,
+  CloudComputerV2AdminWorkspaceRequestSchema,
   CloudComputerV2BuildRequestSchema,
   CloudComputerV2BuildStageSchema,
   CloudComputerV2BuildStateSchema,
@@ -21,7 +22,10 @@ import {
   type CloudComputerV2DraftResult,
   type CloudComputerV2State,
 } from "@zeros/protocol/cloud-computer-v2";
-import { cloudAccountRequest } from "../../platform/cloud-workspaces";
+import {
+  cloudAccountRequest,
+  CloudWorkspaceDocumentSchema,
+} from "../../platform/cloud-workspaces";
 import { authorizeCloudGithubSource } from "../../platform/cloud-github";
 import {
   KeyedAsyncCache,
@@ -31,6 +35,7 @@ import {
   getOrganizationStoreGeneration,
   getTeamStoreState,
 } from "../team/team-store";
+import { isInternalFeatureActive } from "./internal-features";
 
 const uuid = z.string().uuid();
 const revision = z.number().int().nonnegative().safe();
@@ -249,6 +254,7 @@ const minimumRevision = (key: string) =>
     cloudComputerV2Cache.peekSnapshot(key).data?.revision ?? 0,
   );
 export function clearCloudComputersV2() {
+  adminWorkspaceRequests.clear();
   for (const cache of [
     cloudComputerV2Cache,
     cloudComputerV2BuildCache,
@@ -298,6 +304,89 @@ export function loadCloudComputerV2(
 }
 export const prefetchCloudComputerV2 = (user: string, org: string) =>
   loadCloudComputerV2(cloudComputerV2Key(user, org)).catch(() => undefined);
+
+export function canConfigureCloudComputerV2AdminWorkspace(key: string) {
+  const { user, org } = scope(key);
+  const me = getTeamStoreState().me;
+  const organization = (me?.organizations ?? me?.teams)?.find(
+    (row) => row.id === org,
+  );
+  const computer = cloudComputerV2Cache.peekSnapshot(key).data;
+  return (
+    isInternalFeatureActive("cloudComputerV2") &&
+    me?.user.id === user &&
+    Boolean(
+      organization &&
+      !organization.isPersonal &&
+      (organization.role === "owner" || organization.role === "admin") &&
+      computer?.canManage &&
+      computer.active?.state === "succeeded" &&
+      computer.active.templateState === "ready",
+    )
+  );
+}
+
+const adminWorkspaceRequests = new Map<
+  string,
+  Promise<{
+    workspace: z.infer<typeof CloudWorkspaceDocumentSchema>;
+    reused: boolean;
+    replayed: boolean;
+  }>
+>();
+
+export function configureCloudComputerV2AdminWorkspace(
+  key: string,
+  expectedActiveVersion: number,
+  operationId: string,
+) {
+  const epoch = getOrganizationStoreGeneration();
+  const assertAdmin = () => {
+    assertAccount(key, epoch);
+    if (!canConfigureCloudComputerV2AdminWorkspace(key))
+      throw new Error("Cloud Computer admin access is unavailable.");
+  };
+  try {
+    assertAdmin();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  const body = input(CloudComputerV2AdminWorkspaceRequestSchema, {
+    expectedActiveVersion,
+    operationId,
+  });
+  const requestKey = JSON.stringify([epoch, key, body]);
+  const existing = adminWorkspaceRequests.get(requestKey);
+  if (existing) return existing;
+  const request = cloudAccountRequest(
+    `${root(key)}/admin-workspaces`,
+    z.object({
+      workspace: CloudWorkspaceDocumentSchema,
+      reused: z.boolean(),
+      replayed: z.boolean(),
+    }),
+    { body, idempotencyKey: operationId },
+  )
+    .then((result) => {
+      assertAdmin();
+      const { user, org } = scope(key);
+      if (
+        result.workspace.organizationId !== org ||
+        result.workspace.adminWorkspace?.creatorUserId !== user ||
+        result.workspace.createdBy !== user ||
+        result.workspace.ownerUserId !== user
+      )
+        throw new Error("Cloud admin workspace response changed identity.");
+      return result;
+    })
+    .finally(() => {
+      if (adminWorkspaceRequests.get(requestKey) === request)
+        adminWorkspaceRequests.delete(requestKey);
+    });
+  adminWorkspaceRequests.set(requestKey, request);
+  return request;
+}
+
 export function refreshCloudComputerV2(key: string) {
   cloudComputerV2Cache.invalidate(key);
   return loadCloudComputerV2(key);
