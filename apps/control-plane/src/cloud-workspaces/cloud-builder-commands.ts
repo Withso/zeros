@@ -10,10 +10,31 @@ export const RUNTIME_SMOKE_CHECKS = [
   "cursor_load", "engine_load", "supervisor_idle", "containment_smoke",
 ] as const;
 
+export const COMPUTER_TEMPLATE_MAX_INPUT_BYTES = 256 * 1024;
+export const COMPUTER_TEMPLATE_FIXED_COMMANDS = {
+  "computer:clone-repos": "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py clone-repos",
+  "computer:run-install": "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py run-install",
+  "computer:verify-tcb": "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py verify-tcb",
+  "computer:sanitize": "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py sanitize",
+} as const;
+const computerStages = {
+  "computer:clone-repos": "repositories", "computer:run-install": "install",
+  "computer:verify-tcb": "integrity", "computer:sanitize": "sanitation",
+} as const;
+const computerChecks = new Set([
+  "input_schema", "input_too_large", "file_metadata", "repository_metadata", "repository_clone_failed",
+  "repository_unsupported", "repository_access_denied", "install_identity", "install_exit", "install_namespace",
+  "command_timeout", "output_limit", "sanitation_failed", "tcb_modified", "helper_failed",
+]);
+export function isComputerBuilderCommand(command: string): command is keyof typeof COMPUTER_TEMPLATE_FIXED_COMMANDS {
+  return Object.hasOwn(COMPUTER_TEMPLATE_FIXED_COMMANDS, command);
+}
+
 /** Repository-owned allowlist. C3 adds its computer:* entries here, never in
  * request input or configuration. Runtime paths come from the strict base probe. */
 export function builderFixedCommand(command: BuilderFixedCommand, runtimeId: string | null): string | null {
   if (command === "install-runtime") return CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND;
+  if (isComputerBuilderCommand(command)) return COMPUTER_TEMPLATE_FIXED_COMMANDS[command];
   if (command === "runtime-self-test" && /^r1-[a-f0-9]{64}$/.test(runtimeId ?? "")) {
     const root = `/opt/zeros-infra/${runtimeId}`;
     return `${root}/bin/node ${root}/lib/zeros/runtime-self-test.mjs`;
@@ -36,6 +57,9 @@ export function parseBuilderDiagnostic(stdout: string, command: BuilderFixedComm
       return value.component === "installer" && (!value.ok || value.stage === "done") ? value : null;
     if (command === "runtime-self-test" && value.component === "qualification" && value.stage === "self_test" &&
         value.failedChecks.every(check => (RUNTIME_SMOKE_CHECKS as readonly string[]).includes(check))) return value;
+    if (isComputerBuilderCommand(command) && value.component === "build" &&
+        (value.stage === computerStages[command] || (!value.ok && value.stage === "validate_input")) &&
+        value.failedChecks.every(check => computerChecks.has(check))) return value;
     return null;
   } catch { return null; }
 }

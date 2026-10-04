@@ -172,6 +172,7 @@ export const CloudComputerV2BuildErrorSchema = z.enum([
   "repository_clone_failed",
   "install_failed",
   "integrity_failed",
+  "tcb_modified",
   "sanitation_failed",
   "template_stop_failed",
   "template_capture_failed",

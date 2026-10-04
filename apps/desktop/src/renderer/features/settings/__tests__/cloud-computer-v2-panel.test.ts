@@ -222,6 +222,7 @@ describe("Cloud Computer v2 settings states", () => {
     for (const [code, message] of [
       ["build_timeout", "The build timed out."],
       ["integrity_failed", "Protected file verification failed."],
+      ["tcb_modified", "The install script changed protected system files."],
     ] as const) {
       state.snapshot = computerState({
         state: "active",

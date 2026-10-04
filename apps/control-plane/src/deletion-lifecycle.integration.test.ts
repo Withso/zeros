@@ -14,6 +14,7 @@ import { withSystemTx } from "./db.js";
 import type { CloudWorkspaceBackendConfig } from "./config.js";
 import { DatabaseCloudComputerService } from "./cloud-workspaces/computer.js";
 import { DatabaseCloudComputerV2Service } from "./cloud-workspaces/computer-v2.js";
+import { seedComputerTemplateRuntime, templateRuntime } from "./cloud-workspaces/computer-template-test-fixtures.js";
 import {
   createDeletionLifecycleRoutes,
   DeletionLifecycleProcessor,
@@ -1710,9 +1711,10 @@ d("account, organization, and operator deletion lifecycle", () => {
     const computer = new DatabaseCloudComputerV2Service(pool, {
       settingsSecretKeyV1: randomBytes(32).toString("base64url"),
     } as CloudWorkspaceBackendConfig);
+    await seedComputerTemplateRuntime(pool);
     const pins = {
-      baseImageId: "fixture-base",
-      runtimeId: "fixture-runtime",
+      baseImageId: templateRuntime.baseImageId,
+      runtimeId: templateRuntime.descriptor.runtimeId,
       repositoryManifest: [],
     };
     const finishComputer = async (buildId: string) => {

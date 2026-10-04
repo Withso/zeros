@@ -24,6 +24,15 @@ const NOW = Date.parse("2026-08-23T12:00:00.000Z");
 
 describe("GithubCloudWorkspaceCredentialBroker", () => {
 
+  it("mints build clones with only contents read for one immutable repository ID", async () => {
+    const fetch = vi.fn(async () => Response.json({ token: "synthetic-build-read", expires_at: new Date(NOW + 3_600_000).toISOString() }, { status: 201 }));
+    const broker = new GithubCloudWorkspaceCredentialBroker(config, { fetch, now: () => NOW });
+    await broker.mintContentsRead({ installationId: 123, repositoryId: 456 });
+    expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toEqual({ repository_ids: [456], permissions: { contents: "read" } });
+    await expect(broker.mintContentsRead({ installationId: 123, repositoryId: 0 })).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("supports repository PR, review and CI reads without granting writes", async () => {
     const fetch = vi.fn(async () => Response.json({
       token: "ghs_repository_reads",

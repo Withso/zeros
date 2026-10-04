@@ -23,6 +23,7 @@ import {
 } from "./settings.js";
 import { DatabaseCloudWorkspaceManagementService } from "./management.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
+import { seedComputerTemplateRuntime, templateRuntime } from "./computer-template-test-fixtures.js";
 import { requireCloudComputerAuthority } from "./computer.js";
 import { createCloudComputerV2Routes } from "./computer-v2-routes.js";
 import type {
@@ -37,8 +38,8 @@ const draft: CloudComputerV2DraftInput = {
   timeoutSeconds: 900,
 };
 const pins = {
-  baseImageId: "fixture-base",
-  runtimeId: "fixture-runtime",
+  baseImageId: templateRuntime.baseImageId,
+  runtimeId: templateRuntime.descriptor.runtimeId,
   repositoryManifest: [],
 };
 const template = () => ({
@@ -65,6 +66,7 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
   });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await seedComputerTemplateRuntime(pool);
     fixture = await seedReadyCloudWorkspace(pool);
     config = {
       settingsSecretKeyV1: randomBytes(32).toString("base64url"),
@@ -160,6 +162,39 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
       requestedRef: null,
     };
   }
+  it("pins the runtime before repository SHAs exist and refuses to repin it", async () => {
+    const repository = await proof();
+    const request = await build(0, randomUUID(), { ...draft, repositories: [repository] });
+    await service.claimNextBuild(1);
+    expect(await service.markBuildStage(request.build.id, 1, "runtime", {
+      baseImageId: pins.baseImageId, runtimeId: pins.runtimeId,
+    })).toMatchObject({ applied: true });
+    const row = (await pool.query("SELECT base_image_id,runtime_id,repository_manifest FROM cloud_computer_v2_builds WHERE id=$1", [request.build.id])).rows[0];
+    expect(row).toEqual({ base_image_id: pins.baseImageId, runtime_id: pins.runtimeId, repository_manifest: null });
+    await expect(service.markBuildStage(request.build.id, 1, "repositories", {
+      baseImageId: pins.baseImageId, runtimeId: "other-runtime",
+    })).rejects.toMatchObject({ code: "cloud_computer_build_pin_conflict" });
+  });
+  it("rejects completion after its deadline even before the expiry sweep", async () => {
+    const request = await build();
+    await service.claimNextBuild(1);
+    await service.markBuildStage(request.build.id, 1, "capture_confirmed", pins);
+    await pool.query("UPDATE cloud_computer_v2_builds SET deadline_at=now()-interval '1 second' WHERE id=$1", [request.build.id]);
+    expect(await service.completeBuild(request.build.id, 1, { ...pins, template: template() }))
+      .toMatchObject({ activated: false, state: "failed" });
+    expect((await read()).active).toBeNull();
+  });
+  it("fences completion when its deadline expires while runtime eligibility is checked", async () => {
+    const request = await build();
+    await service.claimNextBuild(1);
+    await service.markBuildStage(request.build.id, 1, "capture_confirmed", pins);
+    const completed = await service.completeBuild(request.build.id, 1, { ...pins, template: template() }, async (tx) => {
+      await tx.query("UPDATE cloud_computer_v2_builds SET deadline_at=clock_timestamp()-interval '1 second' WHERE id=$1", [request.build.id]);
+      return true;
+    });
+    expect(completed).toMatchObject({ activated: false, state: "failed" });
+    expect((await read()).active).toBeNull();
+  });
   it("reads virtual defaults and saves without creating builds or provider allocations", async () => {
     const fetch = vi
       .spyOn(globalThis, "fetch")
