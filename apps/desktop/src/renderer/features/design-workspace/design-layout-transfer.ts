@@ -5,7 +5,9 @@ import { transferDesignNodeCached } from "./state/design-workspace-cache";
 import { selectDesignFrame, selectDesignNode } from "./state/design-selection";
 import { designLayoutDrop } from "./design-layout-drag";
 import {
+  captureDesignPageOwner,
   designWorkspaceView,
+  isCurrentDesignPageOwner,
   useDesignWorkspaceUiStore,
 } from "./state/design-workspace-ui";
 
@@ -20,6 +22,7 @@ export async function transferDesignLayerOnCanvas(input: {
   presented?: (frame: DesignCanvasFrameWire) => Promise<void>;
 }): Promise<boolean> {
   const { workspaceId, folder, frame, details, origin } = input;
+  const owner = captureDesignPageOwner(workspaceId);
   const initialSelection = designWorkspaceView(workspaceId);
   const center = {
     x: origin.x + details.rect.width / 2,
@@ -60,6 +63,7 @@ export async function transferDesignLayerOnCanvas(input: {
   const sourceRuntime = designFrameRuntime(workspaceId, frame.file);
   const result = await transferDesignNodeCached(workspaceId, {
     frame: frame.file,
+    pageId: owner.pageId,
     sourceVersion: sourceRuntime?.sourceVersion ?? frame.sourceVersion,
     nodeId: details.oid,
     ...(destination && drop
@@ -84,6 +88,7 @@ export async function transferDesignLayerOnCanvas(input: {
   if (nextFrame) {
     const current = designWorkspaceView(workspaceId);
     const followsTransfer =
+      isCurrentDesignPageOwner(owner) &&
       current.selectedFrame === initialSelection.selectedFrame &&
       current.selectedNodeId === initialSelection.selectedNodeId &&
       current.frameSelected === initialSelection.frameSelected;
@@ -95,14 +100,15 @@ export async function transferDesignLayerOnCanvas(input: {
           nextFrame.file,
           destination ? result.nodeId : null,
           undefined,
-          { frameSelected: !destination },
+          { frameSelected: !destination, owner },
         );
     // Selecting the destination makes it a live-frame priority. Its old
     // document cannot inspect the newly transferred node; wait for presentation.
+    if (!followsTransfer) return true;
     await input.presented?.(nextFrame);
     const selected = designWorkspaceView(workspaceId);
     if (
-      !followsTransfer ||
+      !isCurrentDesignPageOwner(owner) ||
       selected.selectedFrame !== nextFrame.file ||
       selected.selectedNodeId !== (destination ? result.nodeId : null)
     )
@@ -113,8 +119,9 @@ export async function transferDesignLayerOnCanvas(input: {
         folder,
         frame: nextFrame,
         nodeId: result.nodeId,
+        owner,
       });
-    else await selectDesignFrame(workspaceId, nextFrame, { selected: true });
+    else await selectDesignFrame(workspaceId, nextFrame, { selected: true, owner });
   }
   return true;
 }

@@ -17,6 +17,7 @@ import {
 } from "@zeros/protocol/design-runtime";
 import { designFrameGeometryError } from "@zeros/design-core";
 import type { DesignFoundationOpenWire } from "../platform/git";
+import { createDesignPagesHarness } from "./harness-design-pages";
 
 const HOME_SOURCE_VERSION = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const PRICING_SOURCE_VERSION = "bbbbbbbbbbbbbbbbbbbbbbbb";
@@ -125,7 +126,8 @@ async function main() {
     return;
   }
   const workbenchHarness = new URLSearchParams(location.search).has("workbench");
-  const workspaceId = "ws_design_harness";
+  const pagesHarness = new URLSearchParams(location.search).has("pages");
+  const workspaceId = pagesHarness ? "ws_design_pages_harness" : "ws_design_harness";
   const workspacePath =
     "/Users/demo/zeros/design workspaces/north-one/launch-system";
   const workspace = {
@@ -509,12 +511,25 @@ async function main() {
       headingDetails,
       HOME_SOURCE_VERSION,
     );
-  useDesignWorkspaceUiStore
+  if (!pagesHarness) useDesignWorkspaceUiStore
     .getState()
     .setSelection(workspaceId, "home.html", "home-heading");
 
   let currentWorkspaceSnapshot =
     designWorkspaceSnapshotCache.getSnapshot(workspaceId).data!;
+  const pagesFixture = pagesHarness ? createDesignPagesHarness(currentWorkspaceSnapshot, homeSource) : null;
+  if (pagesFixture) {
+    currentWorkspaceSnapshot = pagesFixture.snapshot;
+    designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+    const remembered = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
+    if (!remembered?.activePageId) useDesignWorkspaceUiStore.getState().setSelection(workspaceId, "page-1/home.html", null);
+    for (const document of pagesFixture.documents) {
+      designFrameDocumentCache.setData(designFrameDocumentKey(workspaceId, document.file, document.sourceVersion), {
+        ...document, srcDoc: withDesignRuntime(document.source, document.sourceVersion),
+      });
+      publishFoundation(designFoundationKey(workspaceId, document.file, document.sourceVersion), pagesFixture.foundation(document) as DesignFoundationOpenWire);
+    }
+  }
   let currentHomeSource = homeSource;
   let styleGenerationCounter = 0;
   let textTransactionCounter = 0;
@@ -568,6 +583,15 @@ async function main() {
       params?: Record<string, unknown>;
     }) => {
       if (message.op) workbenchOperations.push(message.op);
+      if (pagesFixture) {
+        const result = await pagesFixture.request(message.op, message.params);
+        if (result !== undefined) {
+          currentWorkspaceSnapshot = pagesFixture.snapshot;
+          const reply = result as { frame?: { source?: string; sourceVersion: string; srcDoc: string } };
+          if (reply.frame?.source) reply.frame.srcDoc = withDesignRuntime(reply.frame.source, reply.frame.sourceVersion);
+          return { type: "WORKSPACE_RESPONSE", result };
+        }
+      }
       if (workbenchHarness && message.op === "file.tree") return { type: "WORKSPACE_RESPONSE", result: { files: [], truncated: false, designDirectories: ["North One - Design"] } };
       if (workbenchHarness && message.op === "file.ignored") return { type: "WORKSPACE_RESPONSE", result: { files: [], truncated: false } };
       if (workbenchHarness && message.op === "settings.resolve") return { type: "WORKSPACE_RESPONSE", result: { effective: { scripts: {}, design: {} }, sources: {}, warnings: [] } };

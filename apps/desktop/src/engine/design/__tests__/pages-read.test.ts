@@ -62,13 +62,22 @@ describe("reading Design directory pages", () => {
   it("includes every page and exact frame ownership in the directory snapshot", async () => {
     const snapshot = await readDesignWorkspaceSnapshot(root);
     expect(snapshot.pages).toEqual([
-      { id: "screens", title: "Screens", folder: "page-1", frameFiles: ["page-1/home.html"] },
-      { id: "checkout", title: "Checkout", folder: "checkout", frameFiles: ["checkout/home.html"] },
-      { id: "empty", title: "Empty", folder: "empty", frameFiles: [] },
+      { id: "screens", title: "Screens", folder: "page-1", frameFiles: ["page-1/home.html"], frameIds: ["home"] },
+      { id: "checkout", title: "Checkout", folder: "checkout", frameFiles: ["checkout/home.html"], frameIds: ["checkout_home"] },
+      { id: "empty", title: "Empty", folder: "empty", frameFiles: [], frameIds: [] },
     ]);
     expect(snapshot.frames.map((frame) => [frame.file, frame.pageId, frame.frameId])).toEqual([
       ["page-1/home.html", "screens", "home"], ["checkout/home.html", "checkout", "checkout_home"],
     ]);
+  });
+
+  it("keeps deletion membership available when registered HTML is missing", async () => {
+    await rm(path.join(root, pagesDirectory, "checkout/home.html"));
+    const snapshot = await readDesignWorkspaceSnapshot(root);
+    expect(snapshot.frames.some(frame => frame.file === "checkout/home.html")).toBe(false);
+    expect(snapshot.pages?.find(page => page.id === "checkout")).toMatchObject({
+      frameFiles: ["checkout/home.html"], frameIds: ["checkout_home"],
+    });
   });
 
   it("selects canvas output version and metadata location from the resolved layout", async () => {

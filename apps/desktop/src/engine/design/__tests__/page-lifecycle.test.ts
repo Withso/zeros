@@ -48,6 +48,26 @@ describe("Design page lifecycle", () => {
     expect(read("CHECKOUT")).toBe("Keep root file");
   }));
 
+  it("skips default titles still in use after an earlier page is deleted", () => run(async () => {
+    const second = await createDesignPage(root);
+    const third = await createDesignPage(root);
+    await deleteDesignPage(root, second.id, []);
+    const next = await createDesignPage(root);
+    expect(next).toMatchObject({ title: "Page 4", folder: "page-4" });
+    expect(JSON.parse(read()).pages.map((page: { title: string }) => page.title)).toEqual(["Page 1", third.title, "Page 4"]);
+    expect(existsSync(path.join(root, directory, "page-3-2"))).toBe(false);
+  }));
+
+  it("requires both an unused default title and a free unsuffixed folder", () => run(async () => {
+    const second = await createDesignPage(root);
+    await renameDesignPage(root, second.id, "Page 3");
+    writeFileSync(path.join(root, directory, "PAGE-4"), "Keep root file");
+    const next = await createDesignPage(root);
+    expect(next).toMatchObject({ title: "Page 5", folder: "page-5" });
+    expect(read("PAGE-4")).toBe("Keep root file");
+    expect(existsSync(path.join(root, directory, "page-4-2"))).toBe(false);
+  }));
+
   it("renames only the title while preserving folder, membership and extensions", () => run(async () => {
     const page = await createDesignPage(root, { title: "Checkout" });
     await createDesignFrame(root, { title: "Home", pageId: page.id });
@@ -122,6 +142,20 @@ describe("Design page lifecycle", () => {
     rmdirSync(path.join(root, directory, page.folder));
     await deleteDesignPage(root, page.id, []);
     expect(JSON.parse(read()).pages).toHaveLength(1);
+  }));
+
+  it.each(["source", "folder"])("deletes a page whose registered %s is already missing", missing => run(async () => {
+    const page = await createDesignPage(root, { title: "Missing" });
+    const frame = await createDesignFrame(root, { title: "Gone", pageId: page.id });
+    const keep = await createDesignFrame(root, { title: "Keep", pageId: JSON.parse(read()).pages[0].id });
+    const ids = (await readCanvas(root)).pages!.find(candidate => candidate.id === page.id)!.frames;
+    rmSync(path.join(root, directory, missing === "source" ? frame.file : page.folder), { recursive: true });
+    await deleteDesignPage(root, page.id, ids);
+    const after = JSON.parse(read());
+    expect(after.pages).toHaveLength(1);
+    expect(Object.values(after.frames).map((entry: unknown) => (entry as { source: string }).source)).toEqual([keep.file]);
+    expect(existsSync(path.join(root, directory, keep.file))).toBe(true);
+    expect(existsSync(path.join(root, directory, page.folder))).toBe(false);
   }));
 
   it("migrates a root-v2 directory before admitting page lifecycle writes", () => run(async () => {

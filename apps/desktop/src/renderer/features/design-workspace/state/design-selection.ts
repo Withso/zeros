@@ -46,15 +46,26 @@ import {
   publishDesignLivePreviewStyles,
 } from "./design-live-preview";
 import {
+  captureDesignPageOwner,
   designWorkspaceView,
+  isCurrentDesignPageOwner,
   isValidDesignNodeId,
   useDesignWorkspaceUiStore,
+  type DesignPageOwner,
 } from "./design-workspace-ui";
 import { requestDesignLayerReveal } from "./design-layer-disclosure";
 import {
   resolveDesignFrameBodyTarget,
   type DesignFrameBodyIntent,
 } from "../design-layer-tree";
+
+function selectionPageOwnerIsCurrent(owner: DesignPageOwner): boolean {
+  // Legacy callers may begin a runtime read before their first directory bind.
+  // Once a page is confirmed, ownership is always exact.
+  return owner.pageId === undefined && owner.directoryId === undefined
+    ? designWorkspaceView(owner.workspaceId).activePageId === undefined
+    : isCurrentDesignPageOwner(owner);
+}
 
 /** Open the Layers path down to a selection in the same transition that
  * publishes it, so a canvas click can never leave its row folded away, and ask
@@ -84,6 +95,7 @@ interface DesignSelectionDetailDemand {
   workspaceId: string;
   folder: string;
   directoryId: string | undefined;
+  pageId: string | undefined;
   frame: DesignCanvasFrameWire;
   nodeIds: readonly string[];
   generation: number;
@@ -327,6 +339,7 @@ function selectionDetailDemandIsCurrent(
   return (
     selectionDetailDemandByWorkspace.get(demand.workspaceId) === demand &&
     !demand.controller.signal.aborted &&
+    view.activePageId === demand.pageId &&
     selectionIsCurrent(
       demand.workspaceId,
       demand.frame.file,
@@ -376,6 +389,7 @@ function requestDesignSelectionDetails(input: {
   const demand: DesignSelectionDetailDemand = {
     workspaceId: input.workspaceId,
     folder: input.folder,
+    pageId: designWorkspaceView(input.workspaceId).activePageId,
     directoryId:
       readSelectionSnapshot(input.workspaceId)?.directoryId ??
       designWorkspaceView(input.workspaceId).directoryId,
@@ -809,14 +823,18 @@ export async function selectDesignFrame(
      * Off by default, because the resting activation republishes on every
      * snapshot and must not pull the list away from where the user left it. */
     reveal?: boolean;
+    owner?: DesignPageOwner;
   },
 ): Promise<void> {
+  const owner = options?.owner ?? captureDesignPageOwner(workspaceId);
+  if (owner.workspaceId !== workspaceId || !selectionPageOwnerIsCurrent(owner) ||
+    (frame?.pageId && owner.pageId && frame.pageId !== owner.pageId)) return;
   clearSelectionDetailDemand(workspaceId);
   nextGeneration(selectionGenerationByWorkspace, workspaceId);
   const version = nextSelectionVersion();
   if (!frame) {
     if (designWorkspaceView(workspaceId).selectedFrame !== null) {
-      useDesignWorkspaceUiStore.getState().setSelectedFrame(workspaceId, null);
+      useDesignWorkspaceUiStore.getState().setSelectedFrame(workspaceId, null, owner);
     }
     await designSetSelection(workspaceId, null, version);
     return;
@@ -832,6 +850,7 @@ export async function selectDesignFrame(
       .getState()
       .setSelection(workspaceId, frame.file, null, undefined, {
         frameSelected,
+        owner,
       });
   }
   if (options?.reveal) revealDesignSelectionPath(workspaceId, frame, []);
@@ -855,8 +874,12 @@ export async function selectDesignNode(input: {
   /** Open and scroll to the Layers row (default). Background re-selection of
    * an unchanged node passes false so the user's folds and scroll survive. */
   reveal?: boolean;
+  owner?: DesignPageOwner;
 }): Promise<DesignRuntimeNodeDetails | null> {
   const { workspaceId, folder, nodeId } = input;
+  const owner = input.owner ?? captureDesignPageOwner(workspaceId);
+  if (owner.workspaceId !== workspaceId || !selectionPageOwnerIsCurrent(owner) ||
+    (input.frame.pageId && owner.pageId && input.frame.pageId !== owner.pageId)) return null;
   const frame = currentDesignSelectionFrame(workspaceId, input.frame);
   const generation = nextGeneration(
     selectionGenerationByWorkspace,
@@ -872,7 +895,7 @@ export async function selectDesignNode(input: {
   ) {
     useDesignWorkspaceUiStore
       .getState()
-      .setSelection(workspaceId, frame.file, nodeId);
+      .setSelection(workspaceId, frame.file, nodeId, undefined, { owner });
   }
   if (input.reveal !== false) {
     revealDesignSelectionPath(workspaceId, frame, [nodeId]);
@@ -889,7 +912,7 @@ export async function selectDesignNode(input: {
   });
   const details = (await demand.read)?.[0];
   if (
-    !details ||
+    !selectionPageOwnerIsCurrent(owner) || !details ||
     details.sourceVersion !== frame.sourceVersion ||
     !selectionIsCurrent(workspaceId, frame.file, nodeId, generation) ||
     !selectionDetailDemandIsCurrent(demand)
@@ -949,7 +972,11 @@ export async function selectDesignNodes(input: {
   forceRuntimeRead?: boolean;
   /** Open and scroll to the primary Layers row (default); see selectDesignNode. */
   reveal?: boolean;
+  owner?: DesignPageOwner;
 }): Promise<DesignRuntimeNodeDetails[] | null> {
+  const owner = input.owner ?? captureDesignPageOwner(input.workspaceId);
+  if (owner.workspaceId !== input.workspaceId || !selectionPageOwnerIsCurrent(owner) ||
+    (input.frame.pageId && owner.pageId && input.frame.pageId !== owner.pageId)) return null;
   const frame = currentDesignSelectionFrame(input.workspaceId, input.frame);
   const unique = [...new Set(input.nodeIds.filter(isValidDesignNodeId))];
   const primary =
@@ -957,7 +984,7 @@ export async function selectDesignNodes(input: {
       ? input.primaryNodeId
       : unique[0]) ?? null;
   if (!primary) {
-    await selectDesignFrame(input.workspaceId, frame);
+    await selectDesignFrame(input.workspaceId, frame, { owner });
     return [];
   }
   const nodeIds = [
@@ -973,7 +1000,7 @@ export async function selectDesignNodes(input: {
   const version = nextSelectionVersion();
   useDesignWorkspaceUiStore
     .getState()
-    .setSelection(input.workspaceId, frame.file, primary, nodeIds);
+    .setSelection(input.workspaceId, frame.file, primary, nodeIds, { owner });
   if (input.reveal !== false) {
     revealDesignSelectionPath(input.workspaceId, frame, nodeIds);
   }
@@ -1078,6 +1105,7 @@ export async function selectDesignNodeAtLocation(input: {
   mode?: DesignRuntimeHitMode;
   selectedNodeId?: string | null;
 }): Promise<DesignRuntimeNodeDetails | null> {
+  const owner = captureDesignPageOwner(input.workspaceId);
   const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
   if (!runtime) {
     await selectDesignFrame(input.workspaceId, input.frame);
@@ -1091,14 +1119,14 @@ export async function selectDesignNodeAtLocation(input: {
     mode: input.mode,
     selectedNodeId: input.selectedNodeId,
   });
-  if (selectionGenerationByWorkspace.get(input.workspaceId) !== generation) {
+  if (!selectionPageOwnerIsCurrent(owner) || selectionGenerationByWorkspace.get(input.workspaceId) !== generation) {
     return null;
   }
   if (!details) {
     await selectDesignFrame(input.workspaceId, input.frame);
     return null;
   }
-  return selectDesignNode({ ...input, nodeId: details.oid, details });
+  return selectDesignNode({ ...input, owner, nodeId: details.oid, details });
 }
 
 /** Canvas body selection shares the generation used by Layers, frame labels,
@@ -1115,10 +1143,13 @@ export async function selectDesignFrameBodyAtLocation(
     additive?: boolean;
     /** Single-node entry can open its editor before selection persistence. */
     onLocalSelection?: (details: DesignRuntimeNodeDetails) => void;
+    owner?: DesignPageOwner;
   },
   retries = 2,
 ): Promise<DesignRuntimeNodeDetails | null> {
   const { workspaceId, frame } = input;
+  const owner = input.owner ?? captureDesignPageOwner(workspaceId);
+  if (!selectionPageOwnerIsCurrent(owner)) return null;
   const current = designWorkspaceView(workspaceId);
   const selectedNodeId =
     current.selectedFrame === frame.file ? current.selectedNodeId : null;
@@ -1133,7 +1164,7 @@ export async function selectDesignFrameBodyAtLocation(
     );
     // A click on the frame is a user gesture: bring its Layers row into view,
     // even when the frame was already the selection.
-    await selectDesignFrame(workspaceId, frame, { selected, reveal: selected });
+    await selectDesignFrame(workspaceId, frame, { selected, reveal: selected, owner });
     return null;
   };
   if (labeledFrame && input.intent === "plain" && !selectedNodeId) {
@@ -1148,7 +1179,7 @@ export async function selectDesignFrameBodyAtLocation(
   const isCurrent = () => {
     const state = designRuntimeFrameState(workspaceId, frame.file);
     return (
-      selectionGenerationByWorkspace.get(workspaceId) === generation &&
+      selectionPageOwnerIsCurrent(owner) && selectionGenerationByWorkspace.get(workspaceId) === generation &&
       designFrameRuntime(workspaceId, frame.file) === runtime &&
       (runtime.sourceVersion
         ? runtime.sourceVersion === frame.sourceVersion
@@ -1157,14 +1188,14 @@ export async function selectDesignFrameBodyAtLocation(
   };
   const retryAdoptedClick = () => {
     if (
-      retries > 0 &&
+      retries > 0 && selectionPageOwnerIsCurrent(owner) &&
       selectionGenerationByWorkspace.get(workspaceId) === generation &&
       designFrameRuntime(workspaceId, frame.file) === runtime &&
       runtime.sourceVersion &&
       runtime.sourceVersion !== frame.sourceVersion
     ) {
       return selectDesignFrameBodyAtLocation(
-        { ...input, frame: { ...frame, sourceVersion: runtime.sourceVersion } },
+        { ...input, owner, frame: { ...frame, sourceVersion: runtime.sourceVersion } },
         retries - 1,
       );
     }
@@ -1239,7 +1270,7 @@ export async function selectDesignFrameBodyAtLocation(
         selection?.find((candidate) => candidate.oid === details.oid) ?? null
       );
     }
-    return selectDesignNode({ ...input, nodeId: details.oid, details });
+    return selectDesignNode({ ...input, owner, nodeId: details.oid, details });
   } catch (error) {
     // An in-place commit may advance the port while this hit response travels
     // back. Retry only that exact live frame; a newer selection always wins.
@@ -1311,12 +1342,14 @@ export async function selectDesignNodesInRect(input: {
   const { workspaceId } = input;
   const frame = currentDesignSelectionFrame(workspaceId, input.frame);
   const initial = designWorkspaceView(workspaceId);
+  const owner = captureDesignPageOwner(workspaceId);
   const generation = nextGeneration(selectionGenerationByWorkspace, workspaceId);
   const runtime = designFrameRuntime(workspaceId, frame.file);
   if (!runtime) return null;
   const sourceVersion = runtime.sourceVersion ?? frame.sourceVersion;
   const isCurrent = () =>
     selectionGenerationByWorkspace.get(workspaceId) === generation &&
+    selectionPageOwnerIsCurrent(owner) &&
     designWorkspaceView(workspaceId).directoryId === initial.directoryId &&
     designFrameRuntime(workspaceId, frame.file) === runtime &&
     runtime.isActive?.() !== false &&

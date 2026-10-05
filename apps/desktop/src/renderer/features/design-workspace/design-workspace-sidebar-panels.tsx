@@ -42,6 +42,7 @@ import {
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
+import { useDesignPageSnapshot } from "./state/design-page-projection";
 import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
 import { Button, ScrollArea, Tooltip, toast } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
@@ -318,7 +319,10 @@ function OwnedDesignWorkspaceSidebarPanels({
       ? (state.byWorkspace[workspaceId]?.frameSelected ?? false)
       : false,
   );
-  const frames = snapshot.data?.frames ?? EMPTY_FRAMES;
+  const activePageId = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined);
+  const pageSnapshot = useDesignPageSnapshot(snapshot.data, activePageId);
+  const layerOwnerKey = workspaceId ? workspaceId + "\0" + (activePageId ?? "") : null;
+  const frames = pageSnapshot?.frames ?? EMPTY_FRAMES;
   const selectedFrame =
     frames.find((frame) => frame.file === selectedFrameFile) ??
     frames[0] ??
@@ -502,11 +506,11 @@ function OwnedDesignWorkspaceSidebarPanels({
     [panelRows.length],
   );
   const layerWindow =
-    layerWindowState.ownerKey === workspaceId &&
+    layerWindowState.ownerKey === layerOwnerKey &&
     layerWindowState.count === panelRows.length
       ? layerWindowState
       : {
-          ownerKey: workspaceId,
+          ownerKey: layerOwnerKey,
           count: panelRows.length,
           ...initialLayerWindow,
         };
@@ -535,13 +539,13 @@ function OwnedDesignWorkspaceSidebarPanels({
         rowHeight: DESIGN_LAYER_ROW_HEIGHT,
       });
       setLayerWindowState((current) =>
-        current.ownerKey === workspaceId &&
+        current.ownerKey === layerOwnerKey &&
         current.count === panelRows.length &&
         current.start === next.start &&
         current.end === next.end
           ? current
           : {
-              ownerKey: workspaceId,
+              ownerKey: layerOwnerKey,
               count: panelRows.length,
               ...next,
             },
@@ -562,7 +566,12 @@ function OwnedDesignWorkspaceSidebarPanels({
         window.cancelAnimationFrame(animationFrame);
       }
     };
-  }, [panelRows.length, treeActive, virtualizedLayers, workspaceId]);
+  }, [panelRows.length, treeActive, virtualizedLayers, workspaceId, layerOwnerKey]);
+
+  useLayoutEffect(() => {
+    const viewport = scrollAreaRef.current?.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]");
+    if (viewport) viewport.scrollTop = 0;
+  }, [layerOwnerKey]);
 
   /** Scroll only the Layers viewport — never an ancestor — so the floating
    * panel and the canvas under it cannot shift. Rows are a fixed 28px, which
@@ -597,18 +606,18 @@ function OwnedDesignWorkspaceSidebarPanels({
           rowHeight: DESIGN_LAYER_ROW_HEIGHT,
         });
         setLayerWindowState((current) =>
-          current.ownerKey === workspaceId &&
+          current.ownerKey === layerOwnerKey &&
           current.count === panelRows.length &&
           current.start === window.start &&
           current.end === window.end
             ? current
-            : { ownerKey: workspaceId, count: panelRows.length, ...window },
+            : { ownerKey: layerOwnerKey, count: panelRows.length, ...window },
         );
       }
       viewport.scrollTop = next;
       return true;
     },
-    [panelRows.length, virtualizedLayers, workspaceId],
+    [panelRows.length, virtualizedLayers, workspaceId, layerOwnerKey],
   );
 
   const focusRowFrameRef = useRef<number | null>(null);

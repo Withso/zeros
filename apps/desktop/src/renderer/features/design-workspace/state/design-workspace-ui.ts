@@ -8,11 +8,13 @@
 
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import { designPageIdSchema, type DesignPageSummary } from "@zeros/protocol/design-pages";
 import { create } from "zustand";
 import { normalizeDesignCanvasBackground } from "../design-canvas-background";
 
 const STORAGE_KEY = "zeros:design-workspace-ui-v1";
 const MAX_WORKSPACES = 32;
+const MAX_PAGE_VIEWS = 32;
 const PERSIST_DEBOUNCE_MS = 150;
 export const DESIGN_MIN_ZOOM = 0.01;
 export const DESIGN_MAX_ZOOM = 256;
@@ -21,6 +23,8 @@ export type DesignBottomPanel = "layers" | "assets";
 
 export interface DesignWorkspaceViewState {
   directoryId?: string;
+  activePageId?: string;
+  byPage?: Record<string, DesignPageViewState>;
   layersVisible: boolean;
   inspectorVisible: boolean;
   selectedFrame: string | null;
@@ -42,6 +46,50 @@ export interface DesignWorkspaceViewState {
   panX: number;
   panY: number;
   updatedAt: number;
+}
+
+export type DesignPageViewState = Pick<DesignWorkspaceViewState,
+  "selectedFrame" | "frameSelected" | "selectedNodeId" | "selectedNodeIds" |
+  "codeView" | "canvasBackground" | "zoom" | "panX" | "panY" | "updatedAt"
+>;
+
+export interface DesignPageOwner {
+  workspaceId: string;
+  directoryId?: string;
+  pageId?: string;
+}
+
+function pageView(view: DesignWorkspaceViewState): DesignPageViewState {
+  const { selectedFrame, frameSelected, selectedNodeId, selectedNodeIds,
+    codeView, canvasBackground, zoom, panX, panY, updatedAt } = view;
+  return { selectedFrame, frameSelected, selectedNodeId, selectedNodeIds,
+    codeView, canvasBackground, zoom, panX, panY, updatedAt };
+}
+
+function savedPage(views: Record<string, DesignPageViewState> | undefined, id: string) {
+  return views && Object.hasOwn(views, id) ? views[id] : undefined;
+}
+
+function boundPageViews(views: Record<string, DesignPageViewState>, activePageId?: string) {
+  return Object.fromEntries(Object.entries(views).sort(([leftId, left], [rightId, right]) =>
+    Number(rightId === activePageId) - Number(leftId === activePageId) || right.updatedAt - left.updatedAt,
+  ).slice(0, MAX_PAGE_VIEWS));
+}
+
+function samePageView(left: DesignPageViewState, right: DesignPageViewState) {
+  return left.selectedFrame === right.selectedFrame && left.frameSelected === right.frameSelected &&
+    left.selectedNodeId === right.selectedNodeId && left.selectedNodeIds.length === right.selectedNodeIds.length &&
+    left.selectedNodeIds.every((id, index) => id === right.selectedNodeIds[index]) &&
+    left.codeView === right.codeView && left.canvasBackground === right.canvasBackground &&
+    left.zoom === right.zoom && left.panX === right.panX && left.panY === right.panY;
+}
+
+function validatePageSelection(view: DesignPageViewState, page: DesignPageSummary): DesignPageViewState {
+  if (view.selectedFrame && page.frameFiles.includes(view.selectedFrame)) return view;
+  const selectedFrame = page.frameFiles[0] ?? null;
+  if (view.selectedFrame === selectedFrame) return view;
+  return { ...view, selectedFrame, frameSelected: false, selectedNodeId: null,
+    selectedNodeIds: [], codeView: false };
 }
 
 export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
@@ -110,7 +158,7 @@ export function normalizeDesignWorkspaceView(
         ]),
       ].slice(0, DESIGN_SELECTION_NODE_LIMIT)
     : [];
-  return {
+  const normalized: DesignWorkspaceViewState = {
     ...(typeof record.directoryId === "string" && record.directoryId.length <= 128 ? { directoryId: record.directoryId } : {}),
     layersVisible: record.layersVisible !== false,
     inspectorVisible: record.inspectorVisible !== false,
@@ -151,6 +199,18 @@ export function normalizeDesignWorkspaceView(
         ? record.updatedAt
         : 0,
   };
+  const activePageId = designPageIdSchema.safeParse(record.activePageId);
+  if (activePageId.success) normalized.activePageId = activePageId.data;
+  if ((record.byPage && typeof record.byPage === "object" && !Array.isArray(record.byPage)) || activePageId.success) {
+    const entries = Object.entries((record.byPage ?? {}) as Record<string, unknown>)
+      .filter(([id]) => designPageIdSchema.safeParse(id).success)
+      .map(([id, value]) => [id, pageView(normalizeDesignWorkspaceView({
+        ...(value && typeof value === "object" && !Array.isArray(value) ? value : {}),
+        activePageId: undefined, byPage: undefined,
+      }))] as const);
+    normalized.byPage = boundPageViews(Object.fromEntries(entries), normalized.activePageId);
+  }
+  return normalized;
 }
 
 function loadViews(): Record<string, DesignWorkspaceViewState> {
@@ -232,22 +292,25 @@ if (typeof window !== "undefined") {
 interface DesignWorkspaceUiStore {
   byWorkspace: Record<string, DesignWorkspaceViewState>;
   bindDirectory(workspaceId: string, directoryId: string): void;
-  setSelectedFrame(workspaceId: string, frame: string | null): void;
+  bindPages(workspaceId: string, directoryId: string | undefined, pages: readonly DesignPageSummary[]): void;
+  setActivePage(workspaceId: string, pageId: string, directoryId?: string): void;
+  setSelectedFrame(workspaceId: string, frame: string | null, owner?: DesignPageOwner): void;
   setSelection(
     workspaceId: string,
     frame: string,
     nodeId: string | null,
     nodeIds?: readonly string[],
-    options?: { frameSelected?: boolean },
+    options?: { frameSelected?: boolean; owner?: DesignPageOwner },
   ): void;
   setPanels(workspaceId: string, panels: Partial<Pick<DesignWorkspaceViewState, "layersVisible" | "inspectorVisible">>): void;
   setPanel(workspaceId: string, panel: DesignBottomPanel): void;
   setCodeView(workspaceId: string, codeView: boolean): void;
   setActiveTheme(workspaceId: string, activeTheme: string | null): void;
-  setCanvasBackground(workspaceId: string, canvasBackground: string): void;
+  setCanvasBackground(workspaceId: string, canvasBackground: string, owner?: DesignPageOwner): void;
   setViewport(
     workspaceId: string,
     viewport: Pick<DesignWorkspaceViewState, "zoom" | "panX" | "panY">,
+    owner?: DesignPageOwner,
   ): void;
   forgetWorkspace(workspaceId: string): void;
 }
@@ -264,7 +327,12 @@ function updateWorkspaceView(
     ...previous,
     ...patch,
     updatedAt: Date.now(),
+    byPage: undefined,
   });
+  if (next.activePageId) {
+    const memory = Object.hasOwn(patch, "byPage") ? patch.byPage : previous.byPage;
+    next.byPage = boundPageViews({ ...memory, [next.activePageId]: pageView(next) }, next.activePageId);
+  }
   const byWorkspace = pruneViews({ ...current, [workspaceId]: next });
   persistViews(byWorkspace);
   return byWorkspace;
@@ -278,12 +346,51 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
         const previous = state.byWorkspace[workspaceId];
         if (previous?.directoryId === directoryId) return state;
         return { byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
-          ...(previous?.directoryId ? DEFAULT_DESIGN_WORKSPACE_VIEW : {}), directoryId,
+          ...(previous?.directoryId ? { ...DEFAULT_DESIGN_WORKSPACE_VIEW, activePageId: undefined, byPage: undefined } : {}), directoryId,
         }) };
       });
     },
 
-    setSelectedFrame(workspaceId, selectedFrame) {
+    bindPages(workspaceId, directoryId, pages) {
+      if (!pages.length) return;
+      set(state => {
+        const previous = state.byWorkspace[workspaceId] ?? DEFAULT_DESIGN_WORKSPACE_VIEW;
+        const replaced = previous.directoryId !== undefined && directoryId !== undefined && previous.directoryId !== directoryId;
+        const base = replaced ? { ...DEFAULT_DESIGN_WORKSPACE_VIEW, directoryId } : previous;
+        const catalog = new Map(pages.map(page => [page.id, page]));
+        const activePageId = base.activePageId && catalog.has(base.activePageId) ? base.activePageId : pages[0].id;
+        const memory = Object.fromEntries(Object.entries(base.byPage ?? {})
+          .filter(([id]) => catalog.has(id))
+          .map(([id, view]) => [id, validatePageSelection(view, catalog.get(id)!)]));
+        const active = validatePageSelection(savedPage(memory, activePageId) ??
+          pageView(!base.activePageId || base.activePageId === activePageId ? base : DEFAULT_DESIGN_WORKSPACE_VIEW), catalog.get(activePageId)!);
+        memory[activePageId] = active;
+        const bounded = boundPageViews(memory, activePageId);
+        if (!replaced && (directoryId === undefined || previous.directoryId === directoryId) &&
+          previous.activePageId === activePageId && samePageView(previous, active) &&
+          Object.keys(previous.byPage ?? {}).length === Object.keys(bounded).length &&
+          Object.entries(bounded).every(([id, view]) => savedPage(previous.byPage, id) === view)) return state;
+        const next = { ...base, ...active, ...(directoryId ? { directoryId } : {}), activePageId, byPage: bounded, updatedAt: Date.now() };
+        const byWorkspace = pruneViews({ ...state.byWorkspace, [workspaceId]: next });
+        persistViews(byWorkspace);
+        return { byWorkspace };
+      });
+    },
+
+    setActivePage(workspaceId, pageId, directoryId) {
+      if (!designPageIdSchema.safeParse(pageId).success) return;
+      set(state => {
+        const previous = state.byWorkspace[workspaceId];
+        if (!previous || (directoryId !== undefined && previous.directoryId !== directoryId) || previous.activePageId === pageId) return state;
+        const memory = { ...previous.byPage };
+        if (previous.activePageId) memory[previous.activePageId] = pageView(previous);
+        const active = savedPage(memory, pageId) ?? pageView(DEFAULT_DESIGN_WORKSPACE_VIEW);
+        return { byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, { ...active, activePageId: pageId, byPage: memory }) };
+      });
+    },
+
+    setSelectedFrame(workspaceId, selectedFrame, owner) {
+      if (owner && (owner.workspaceId !== workspaceId || !isCurrentDesignPageOwner(owner))) return;
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           selectedFrame,
@@ -313,6 +420,7 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       selectedNodeIds,
       options,
     ) {
+      if (options?.owner && (options.owner.workspaceId !== workspaceId || !isCurrentDesignPageOwner(options.owner))) return;
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           selectedFrame,
@@ -354,9 +462,23 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       }));
     },
 
-    setCanvasBackground(workspaceId, canvasBackground) {
+    setCanvasBackground(workspaceId, canvasBackground, owner) {
+      if (owner && owner.workspaceId !== workspaceId) return;
       const normalized = normalizeDesignCanvasBackground(canvasBackground);
       if (!normalized) return;
+      if (owner && !isCurrentDesignPageOwner(owner)) {
+        set(state => {
+          const previous = state.byWorkspace[workspaceId];
+          if (!previous || previous.directoryId !== owner.directoryId || !owner.pageId) return state;
+          const captured = savedPage(previous.byPage, owner.pageId);
+          if (!captured) return state;
+          const byPage = { ...previous.byPage, [owner.pageId]: { ...captured, canvasBackground: normalized, updatedAt: Date.now() } };
+          const byWorkspace = { ...state.byWorkspace, [workspaceId]: { ...previous, byPage } };
+          persistViews(byWorkspace);
+          return { byWorkspace };
+        });
+        return;
+      }
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           canvasBackground: normalized,
@@ -364,7 +486,8 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       }));
     },
 
-    setViewport(workspaceId, viewport) {
+    setViewport(workspaceId, viewport, owner) {
+      if (owner && (owner.workspaceId !== workspaceId || !isCurrentDesignPageOwner(owner))) return;
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           ...viewport,
@@ -395,6 +518,27 @@ export function designWorkspaceView(
     useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId] ??
     (DEFAULT_DESIGN_WORKSPACE_VIEW as DesignWorkspaceViewState)
   );
+}
+
+export function captureDesignPageOwner(workspaceId: string): DesignPageOwner {
+  const view = designWorkspaceView(workspaceId);
+  return { workspaceId, directoryId: view.directoryId, pageId: view.activePageId };
+}
+
+export function isCurrentDesignPageOwner(owner: DesignPageOwner): boolean {
+  const current = designWorkspaceView(owner.workspaceId);
+  return current.directoryId === owner.directoryId && current.activePageId === owner.pageId;
+}
+
+/** Cold/revalidating catalogs must never prune remembered page identity. */
+export function bindDesignWorkspacePages(
+  workspaceId: string,
+  directoryId: string | undefined,
+  pages: readonly DesignPageSummary[],
+  settled = true,
+): string | undefined {
+  if (settled) useDesignWorkspaceUiStore.getState().bindPages(workspaceId, directoryId, pages);
+  return designWorkspaceView(workspaceId).activePageId;
 }
 
 export function useDesignWorkspaceView(

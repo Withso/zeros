@@ -236,6 +236,7 @@ import {
 } from "./state/design-workspace-cache";
 import {
   designWorkspaceView,
+  isCurrentDesignPageOwner,
   useDesignWorkspaceUiStore,
   useDesignWorkspaceView,
 } from "./state/design-workspace-ui";
@@ -440,7 +441,9 @@ export function DesignCanvas({
 }: DesignCanvasProps) {
   const view = useDesignWorkspaceView(workspaceId);
   const canvasDirectoryId = snapshot?.directoryId ?? view.directoryId;
-  const canvasDocumentOwner = `${workspaceId ?? ""}\0${canvasDirectoryId ?? ""}`;
+  const canvasPageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: canvasDirectoryId, pageId: view.activePageId } : undefined,
+    [workspaceId, canvasDirectoryId, view.activePageId]);
+  const canvasDocumentOwner = `${workspaceId ?? ""}\0${canvasDirectoryId ?? ""}\0${view.activePageId ?? ""}`;
   const canvasDocumentOwnerRef = useRef(canvasDocumentOwner);
   canvasDocumentOwnerRef.current = canvasDocumentOwner;
   const setCodeView = useDesignWorkspaceUiStore((state) => state.setCodeView);
@@ -912,7 +915,7 @@ export function DesignCanvas({
   useEffect(() => {
     hitStackGenerationRef.current += 1;
     setHitStackMenu(null);
-  }, [workspaceId, active]);
+  }, [workspaceId, active, view.activePageId]);
   const nodeActionRef = useRef(false);
   const [selectionOverlaySuppressed, setSelectionOverlaySuppressed] =
     useState(false);
@@ -1015,7 +1018,8 @@ export function DesignCanvas({
     owner: string;
     files: ReadonlySet<string>;
   }>({ owner: "", files: new Set() });
-  const liveFrameOwner = `${workspaceId ?? ""}\0${folder ?? ""}`;
+  const mountOwner = `${workspaceId ?? ""}\0${folder ?? ""}`;
+  const liveFrameOwner = `${mountOwner}\0${view.activePageId ?? ""}`;
   // Layers reads each open frame's runtime tree, so an open frame is a demand
   // for a live runtime exactly like the selection is.
   const layerDisclosures = useDesignWorkspaceDisclosure(workspaceId);
@@ -1134,7 +1138,7 @@ export function DesignCanvas({
       options?: { selected?: boolean; reveal?: boolean },
     ) => {
       if (!workspaceId) return;
-      void selectDesignFrame(workspaceId, frame, options).catch(
+      void selectDesignFrame(workspaceId, frame, { ...options, owner: canvasPageOwner }).catch(
         (selectionError) => {
           toast.error("Couldn't update the design selection", {
             description: errorMessage(selectionError),
@@ -1142,7 +1146,7 @@ export function DesignCanvas({
         },
       );
     },
-    [workspaceId],
+    [workspaceId, canvasPageOwner],
   );
 
   // The first authoritative fallback is a real activation too: publish it so
@@ -1187,6 +1191,7 @@ export function DesignCanvas({
   const fitFrames = useCallback(
     (frames: readonly DesignCanvasFrameWire[]) => {
       if (!workspaceId || frames.length === 0) return;
+      if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
       const bounds = viewportRef.current?.getBoundingClientRect();
       if (!bounds) return;
       const next = fitDesignRects(
@@ -1205,9 +1210,9 @@ export function DesignCanvas({
       // settled into the store; otherwise its old timer snaps the canvas back.
       cancelPendingWheelGesture();
       paintDesignCanvasCamera(worldRef.current, next, false);
-      setViewport(workspaceId, next);
+      setViewport(workspaceId, next, canvasPageOwner);
     },
-    [cancelPendingWheelGesture, setViewport, workspaceId],
+    [cancelPendingWheelGesture, setViewport, workspaceId, canvasPageOwner],
   );
 
   /** Zoom about a screen point so the content beneath it does not jump. */
@@ -1216,7 +1221,7 @@ export function DesignCanvas({
       nextZoom: number | ((currentZoom: number) => number),
       point?: { x: number; y: number },
     ) => {
-      if (!workspaceId) return;
+      if (!workspaceId || (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner))) return;
       const bounds = viewportRef.current?.getBoundingClientRect();
       if (!bounds) return;
       // Menu and keyboard zoom keep the centre of the visible canvas still.
@@ -1234,9 +1239,9 @@ export function DesignCanvas({
       const next = zoomDesignViewportAtPoint(current, targetZoom, anchor);
       cancelPendingWheelGesture();
       paintDesignCanvasCamera(worldRef.current, next, false);
-      setViewport(workspaceId, next);
+      setViewport(workspaceId, next, canvasPageOwner);
     },
-    [cancelPendingWheelGesture, setViewport, view, workspaceId],
+    [cancelPendingWheelGesture, setViewport, view, workspaceId, canvasPageOwner],
   );
 
   // A canvas must never open onto empty space while it has frames: a camera
@@ -1247,8 +1252,8 @@ export function DesignCanvas({
   useLayoutEffect(() => {
     if (!active || !workspaceId || !snapshot) return;
     if (viewportSize.width <= 0 || viewportSize.height <= 0) return;
-    if (openFitOwnerRef.current === liveFrameOwner) return;
-    openFitOwnerRef.current = liveFrameOwner;
+    if (openFitOwnerRef.current === mountOwner) return;
+    openFitOwnerRef.current = mountOwner;
     const rects = snapshot.frames.map((frame) => ({
       x: frame.x,
       y: frame.y,
@@ -1268,6 +1273,7 @@ export function DesignCanvas({
     active,
     fitFrames,
     liveFrameOwner,
+    mountOwner,
     snapshot,
     view,
     viewportSize,
@@ -1304,7 +1310,7 @@ export function DesignCanvas({
     if (!next) return;
     cancelPendingWheelGesture();
     paintDesignCanvasCamera(worldRef.current, next, false);
-    setViewport(workspaceId, next);
+    setViewport(workspaceId, next, canvasPageOwner);
     // Only a change of frame reveals; the camera and size are read at it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, liveFrameOwner, selectedFrame?.file, workspaceId]);
@@ -1334,10 +1340,13 @@ export function DesignCanvas({
           workspaceId,
           undefined,
           geometry,
+          undefined,
+          canvasPageOwner?.pageId,
         );
         const created = result.snapshot.frames.find(
           (frame) => frame.file === result.frame.file,
         );
+        if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return null;
         if (created) {
           publishSelection(created, { selected: true, reveal: true });
           if (!geometry) fitFrames([created]);
@@ -1353,7 +1362,7 @@ export function DesignCanvas({
         setCreatingFrame(false);
       }
     },
-    [fitFrames, publishSelection, workspaceId],
+    [fitFrames, publishSelection, workspaceId, canvasPageOwner],
   );
 
   /** Title edits are surgical source splices; filenames remain Git-stable. */
@@ -1383,6 +1392,7 @@ export function DesignCanvas({
       edit: InlineTextEdit,
       measured: { width: number; height: number },
     ) => {
+      if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
       const key = `${edit.frame ?? "canvas"}\u0000${edit.nodeId}\u0000${edit.sourceVersion ?? "draft"}`;
       if (!beginInlineTextCommit(textCommitGuardRef.current, edit, key)) return;
       const draft = inlineTextDraftRef.current.slice(0, 10_000);
@@ -1400,6 +1410,7 @@ export function DesignCanvas({
               edit.previousFrame,
               edit.previousNodeId,
               edit.previousNodeIds,
+              { owner: canvasPageOwner },
             );
         }
         setInlineTextEdit(null);
@@ -1525,6 +1536,7 @@ export function DesignCanvas({
                 text: draft,
                 fixedSize: edit.width !== undefined,
               },
+              canvasPageOwner?.pageId,
             );
             const created = result.snapshot.frames.find(
               (frame) => frame.file === result.frame.file,
@@ -1534,7 +1546,7 @@ export function DesignCanvas({
             }
             useDesignWorkspaceUiStore
               .getState()
-              .setSelection(workspaceId, created.file, edit.nodeId);
+              .setSelection(workspaceId, created.file, edit.nodeId, undefined, { owner: canvasPageOwner });
             setInlineTextEdit((current) =>
               current?.id === edit.id
                 ? {
@@ -1577,12 +1589,13 @@ export function DesignCanvas({
           }
           const currentSelection = designWorkspaceView(workspaceId);
           const editorStillOwnsSelection =
+            (!canvasPageOwner || isCurrentDesignPageOwner(canvasPageOwner)) &&
             currentSelection.selectedFrame === edit.frame &&
             currentSelection.selectedNodeId === null;
           if (editorStillOwnsSelection) {
             useDesignWorkspaceUiStore
               .getState()
-              .setSelection(workspaceId, edit.frame, edit.nodeId);
+              .setSelection(workspaceId, edit.frame, edit.nodeId, undefined, { owner: canvasPageOwner });
           }
           setInlineTextEdit((current) => {
             if (current?.id !== edit.id) return current;
@@ -1614,7 +1627,7 @@ export function DesignCanvas({
         finishInlineTextCommit(textCommitGuardRef.current, key);
       }
     },
-    [snapshot?.frames, workspaceId],
+    [snapshot?.frames, workspaceId, canvasPageOwner],
   );
 
   /** Text targeting is one-shot. Once an editable leaf is found, return to
@@ -1721,9 +1734,10 @@ export function DesignCanvas({
             edit.previousFrame,
             edit.previousNodeId,
             edit.previousNodeIds,
+            { owner: canvasPageOwner },
           );
         } else {
-          store.setSelectedFrame(workspaceId, null);
+          store.setSelectedFrame(workspaceId, null, canvasPageOwner);
         }
       }
       setInlineTextEdit((current) =>
@@ -1738,7 +1752,7 @@ export function DesignCanvas({
         }
       });
     },
-    [activateTool, workspaceId],
+    [activateTool, workspaceId, canvasPageOwner],
   );
 
   // Created and edited text settles only when the exact committed document is
@@ -1925,13 +1939,14 @@ export function DesignCanvas({
             result.snapshot?.frames.find(
               (candidate) => candidate.file === selectedFrame.file,
             ) ?? selectedFrame;
-          await selectDesignFrame(workspaceId, currentFrame);
+          await selectDesignFrame(workspaceId, currentFrame, { owner: canvasPageOwner });
           void selectDesignNodes({
             workspaceId,
             folder,
             frame: currentFrame,
             nodeIds: duplicateNodeIds,
             primaryNodeId: duplicateNodeIds[0],
+            owner: canvasPageOwner,
           }).catch(() => {
             // The replacement iframe's ready snapshot retries the semantic
             // selection after it owns the duplicate source generation.
@@ -1945,13 +1960,13 @@ export function DesignCanvas({
           // The deletion is already durable. Keep selection persistence off
           // its critical path so a transient selection write cannot turn a
           // successful delete into an error toast.
-          void selectDesignFrame(workspaceId, currentFrame).catch(() => {});
+          void selectDesignFrame(workspaceId, currentFrame, { owner: canvasPageOwner }).catch(() => {});
         }
       } finally {
         nodeActionRef.current = false;
       }
     },
-    [canvasFoundation.data, folder, selectedFrame, workspaceId],
+    [canvasFoundation.data, folder, selectedFrame, workspaceId, canvasPageOwner],
   );
 
   const duplicateSelectedNode = useCallback(
@@ -1992,6 +2007,7 @@ export function DesignCanvas({
         const result = await duplicateDesignFrameCached(
           workspaceId,
           selectedFrame.file,
+          canvasPageOwner?.pageId,
         );
         const duplicate = result.snapshot.frames.find(
           (candidate) => candidate.file === result.frame.file,
@@ -2000,6 +2016,7 @@ export function DesignCanvas({
           await selectDesignFrame(workspaceId, duplicate, {
             selected: true,
             reveal: true,
+            owner: canvasPageOwner,
           });
         }
       } catch (error) {
@@ -2013,7 +2030,7 @@ export function DesignCanvas({
         nodeActionRef.current = false;
       }
     },
-    [selectedFrame, workspaceId],
+    [selectedFrame, workspaceId, canvasPageOwner],
   );
 
   const deleteSelectedNode = useCallback(async () => {
@@ -4935,7 +4952,7 @@ export function DesignCanvas({
         // retired hand must not restore the old camera or selection into it.
         if (!ownerIsCurrent()) return;
         paintDesignCanvasCamera(worldRef.current, viewport, false);
-        setViewport(workspaceId, viewport);
+        setViewport(workspaceId, viewport, canvasPageOwner);
       };
       gestureCancelRef.current = beginDesignPointerGesture({
         target: event.currentTarget,
@@ -4952,6 +4969,7 @@ export function DesignCanvas({
       cancelPendingWheelGesture,
       canvasDirectoryId,
       canvasDocumentOwner,
+      canvasPageOwner,
       setViewport,
       view,
       workspaceId,
@@ -5330,8 +5348,29 @@ export function DesignCanvas({
         wheelSettleTimerRef.current = null;
       }
       wheelViewportRef.current = null;
+      const edit = inlineTextEditRef.current;
+      if (edit) {
+        cancelInlineTextCommit(textCommitGuardRef.current, edit);
+        if (edit.kind === "existing" && workspaceId) {
+          void clearDesignNodeTextPreviewTransient({
+            workspaceId, frame: edit.frame, sourceVersion: edit.sourceVersion, nodeId: edit.nodeId,
+          }).catch(() => {});
+        }
+      }
+      inlineTextEditRef.current = null;
+      inlineTextPreviewRef.current.pending = null;
+      renameSettledRef.current = true;
+      hitStackGenerationRef.current += 1;
+      nudgeGestureRef.current = null;
+      setInlineTextEdit(null);
+      setRenamingFrame(null);
+      setHitStackMenu(null);
+      setSelectionOverlaySuppressed(false);
+      setMotionOverlayState({ owner: "", draft: null });
+      setMotionSeekState({ owner: "", request: null });
+      activateTool("select");
     },
-    [active, canvasDocumentOwner, folder, view.directoryId, workspaceId],
+    [active, canvasDocumentOwner, folder, view.directoryId, workspaceId, activateTool],
   );
 
   // --- EVENT HANDLERS ---
@@ -5613,6 +5652,7 @@ export function DesignCanvas({
         );
         if (
           nextFrame &&
+          (!canvasPageOwner || isCurrentDesignPageOwner(canvasPageOwner)) &&
           current.selectedFrame === selection.selectedFrame &&
           current.selectedNodeId === selection.selectedNodeId
         ) {
@@ -5623,6 +5663,7 @@ export function DesignCanvas({
             folder,
             frame: nextFrame,
             nodeId,
+            owner: canvasPageOwner,
           }).catch(() => {});
         }
       } catch (error) {
@@ -5634,7 +5675,7 @@ export function DesignCanvas({
         setCreatingFrame(false);
       }
     },
-    [folder, workspaceId],
+    [folder, workspaceId, canvasPageOwner],
   );
 
   /** Pointer-down captures one canvas owner and inverse-zoom drag. */
@@ -6034,7 +6075,7 @@ export function DesignCanvas({
         const previousSelection = designWorkspaceView(workspaceId);
         useDesignWorkspaceUiStore
           .getState()
-          .setSelection(workspaceId, frame.file, null);
+          .setSelection(workspaceId, frame.file, null, undefined, { owner: canvasPageOwner });
         setInlineTextEdit({
           id: crypto.randomUUID(),
           kind: "new",
@@ -6128,6 +6169,7 @@ export function DesignCanvas({
       hideCreationDraft,
       paintCreationDraft,
       selectedNodeDetails,
+      canvasPageOwner,
       view.zoom,
       workspaceId,
     ],
@@ -6387,10 +6429,10 @@ export function DesignCanvas({
         wheelSettleTimerRef.current = null;
         const settled = wheelViewportRef.current;
         wheelViewportRef.current = null;
-        if (settled) setViewport(workspaceId, settled);
+        if (settled) setViewport(workspaceId, settled, canvasPageOwner);
       }, 80);
     },
-    [active, setViewport, view, workspaceId],
+    [active, setViewport, view, workspaceId, canvasPageOwner],
   );
 
   // --- RENDER ---

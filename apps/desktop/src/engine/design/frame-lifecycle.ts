@@ -212,6 +212,7 @@ async function readAndHealFrame(
 export async function listDesignFramesUnlocked(
   workspacePath: string,
   writeBack: boolean,
+  allowMissing = false,
 ): Promise<DesignFrameSummary[]> {
   if (writeBack) await initializeDesignDocumentUnlocked(workspacePath);
   const files = await discoverFrameFiles(workspacePath);
@@ -224,8 +225,10 @@ export async function listDesignFramesUnlocked(
     try {
       ({ source } = await readAndHealFrame(workspacePath, file, writeBack));
     } catch (error) {
-      if (!existsSync(path.join(designDirectory(workspacePath), file)))
+      if (!existsSync(path.join(designDirectory(workspacePath), file))) {
+        if (allowMissing && !writeBack) continue;
         throw new Error(`Design frame source is missing: ${file}. Update canvas.json or restore the file.`);
+      }
       if (error instanceof DesignRenderBudgetError) continue;
       throw error;
     }

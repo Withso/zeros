@@ -1023,7 +1023,7 @@ export async function readDesignWorkspaceSnapshot(
       healOids: writeBack,
       includeRuntimeAudits: false,
     });
-    const summaries = await listDesignFramesUnlocked(workspacePath, writeBack);
+    const summaries = await listDesignFramesUnlocked(workspacePath, writeBack, true);
     const pages = designCanvasPageCatalog(
       await readCanvas(workspacePath),
       summaries.map((frame) => frame.file),

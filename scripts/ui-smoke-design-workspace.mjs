@@ -27,6 +27,7 @@ import { runDesignPanelIntegritySmoke } from "./ui-smoke-design-panel-integrity.
 import { runDesignCanvasRefinementsSmoke } from "./ui-smoke-design-canvas-refinements.mjs";
 import { runDesignMotionRefinementsSmoke } from "./ui-smoke-design-motion-refinements.mjs";
 import { runDesignStyleRefinementsSmoke } from "./ui-smoke-design-style-refinements.mjs";
+import { runDesignPagesSmoke } from "./ui-smoke-design-pages.mjs";
 
 export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignFloatingChromeSmoke({ page, waitFor, check });
@@ -52,6 +53,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignCanvasRefinementsSmoke({ page, check });
   await runDesignMotionRefinementsSmoke({ page, check });
   await runDesignStyleRefinementsSmoke({ page, check });
+  await runDesignPagesSmoke({ page, check });
   await runDesignWorkspaceCanvasSmoke({ page, waitFor, check });
 }
 

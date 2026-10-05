@@ -55,6 +55,7 @@ export function designCanvasPageCatalog(
     id: page.id,
     title: page.title,
     folder: page.folder!,
+    frameIds: [...page.frames],
     frameFiles: page.frames.map((id) => {
       const file = fileById.get(id);
       if (!file) throw new Error("Design page references an unknown frame.");

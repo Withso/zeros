@@ -7,6 +7,8 @@ export interface DesignPageSummary {
   title: string;
   folder: string;
   frameFiles: string[];
+  /** Registered membership, including sources that are missing or cannot render. */
+  frameIds?: string[];
 }
 
 export const designPageIdSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,127}$/, "Invalid Design page ID.");
@@ -27,13 +29,22 @@ export const designPageCatalogSchema = z.array(z.object({
   title: z.string().max(120),
   folder: z.string().refine((folder) => folder === "" || isDesignPageFolder(folder)),
   frameFiles: z.array(designFrameFileSchema).max(256),
+  frameIds: z.array(designPageIdSchema).max(256).optional(),
 })).min(1).max(64).superRefine((pages, ctx) => {
-  const ids = new Set<string>(), folders = new Set<string>(), files = new Set<string>();
+  const ids = new Set<string>(), folders = new Set<string>(), files = new Set<string>(), frameIds = new Set<string>();
   for (const page of pages) {
     const folder = page.folder.normalize("NFC").toLowerCase();
     if (ids.has(page.id) || folders.has(folder) || (page.folder === "" && pages.length > 1))
       ctx.addIssue({ code: "custom", message: "Design pages must have distinct owners." });
     ids.add(page.id); folders.add(folder);
+    if (page.frameIds) {
+      if (page.frameIds.length !== page.frameFiles.length)
+        ctx.addIssue({ code: "custom", message: "Design page frame IDs must match its files." });
+      for (const id of page.frameIds) {
+        if (frameIds.has(id)) ctx.addIssue({ code: "custom", message: "Design frame IDs must be distinct." });
+        frameIds.add(id);
+      }
+    }
     for (const file of page.frameFiles) {
       const portable = file.normalize("NFC").toLowerCase();
       if (files.has(portable) || (page.folder ? !file.startsWith(`${page.folder}/`) : file.includes("/")))

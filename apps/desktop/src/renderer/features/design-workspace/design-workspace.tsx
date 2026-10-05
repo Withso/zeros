@@ -17,7 +17,7 @@ import {
 } from "react";
 import "./design-workspace-ui.css";
 
-import { type DesignCanvasFrameWire } from "../../platform/git";
+import { designSelectPage, type DesignCanvasFrameWire } from "../../platform/git";
 import { useThemeId } from "../../shared/theme/use-theme-variant";
 import { toast } from "../../shared/ui/primitives";
 import { clearWorkspaceSettling } from "../../state/pending-workspaces";
@@ -27,9 +27,12 @@ import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { selectDesignFrame } from "./state/design-selection";
 import { deleteDesignFrameCached } from "./state/design-workspace-cache";
 import {
+  bindDesignWorkspacePages,
+  captureDesignPageOwner,
+  isCurrentDesignPageOwner,
   useDesignWorkspaceUiStore,
-  validateDesignWorkspaceSelection,
 } from "./state/design-workspace-ui";
+import { useDesignPageSnapshot } from "./state/design-page-projection";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
 import { useDesignLifecycleFeedback } from "./state/use-design-lifecycle-feedback";
 
@@ -104,6 +107,21 @@ export function DesignWorkspaceColumn({
     surfaceActive,
   );
   useDesignLifecycleFeedback(workspaceId, surfaceActive, snapshot.error, snapshot.refresh);
+  const activePageId = useDesignWorkspaceUiStore(state =>
+    workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined,
+  );
+  const pageSnapshot = useDesignPageSnapshot(snapshot.data, activePageId);
+  const pageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: pageSnapshot?.directoryId, pageId: activePageId } : undefined,
+    [workspaceId, activePageId, pageSnapshot?.directoryId]);
+  useLayoutEffect(() => {
+    if (!surfaceActive || !workspaceId || !pageSnapshot || snapshot.loading || snapshot.refreshing || snapshot.error) return;
+    bindDesignWorkspacePages(workspaceId, pageSnapshot.directoryId, pageSnapshot.pages!);
+  }, [surfaceActive, workspaceId, pageSnapshot, snapshot.loading, snapshot.refreshing, snapshot.error]);
+  useEffect(() => {
+    if (!surfaceActive || !workspaceId || !activePageId || !pageSnapshot?.directoryId ||
+      !pageSnapshot.pages?.some(page => page.id === activePageId)) return;
+    void designSelectPage(workspaceId, pageSnapshot.directoryId, activePageId).catch(() => {});
+  }, [surfaceActive, workspaceId, pageSnapshot?.directoryId, pageSnapshot?.pages, activePageId]);
   const selectedFrameFile = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedFrame ?? null)
@@ -142,9 +160,9 @@ export function DesignWorkspaceColumn({
   const commitCanvasBackground = useCallback(
     (value: string) => {
       if (!workspaceId) return;
-      setCanvasBackground(workspaceId, value);
+      setCanvasBackground(workspaceId, value, pageOwner);
     },
-    [setCanvasBackground, workspaceId],
+    [setCanvasBackground, workspaceId, pageOwner],
   );
   const deleteFrame = useCallback(
     async (candidate: DesignCanvasFrameWire) => {
@@ -152,11 +170,13 @@ export function DesignWorkspaceColumn({
         return;
       }
       deletingFrameFilesRef.current.add(candidate.file);
+      const owner = captureDesignPageOwner(workspaceId);
       try {
         const next = await deleteDesignFrameCached(workspaceId, candidate.file);
         // Selection publishes locally before its durable bridge write. Do not
         // make that bookkeeping delay—or misreport—a completed deletion.
-        void selectDesignFrame(workspaceId, next.frames[0] ?? null).catch(
+        if (!isCurrentDesignPageOwner(owner)) return;
+        void selectDesignFrame(workspaceId, next.frames.find(frame => frame.pageId === owner.pageId) ?? null, { owner }).catch(
           () => {},
         );
       } catch (deleteError) {
@@ -170,16 +190,12 @@ export function DesignWorkspaceColumn({
     [workspaceId],
   );
 
-  const frameFiles = useMemo(
-    () => snapshot.data?.frames.map((frame) => frame.file) ?? [],
-    [snapshot.data?.frames],
-  );
   const selectedFrame = useMemo(
     () =>
-      snapshot.data?.frames.find((frame) => frame.file === selectedFrameFile) ??
-      snapshot.data?.frames[0] ??
+      pageSnapshot?.frames.find((frame) => frame.file === selectedFrameFile) ??
+      pageSnapshot?.frames[0] ??
       null,
-    [selectedFrameFile, snapshot.data?.frames],
+    [selectedFrameFile, pageSnapshot?.frames],
   );
   const selectedDetails = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame) return null;
@@ -190,13 +206,6 @@ export function DesignWorkspaceColumn({
       : (runtimeFrame?.snapshot?.frame ?? null);
   });
 
-  // Validate against authoritative data in layout, so a removed remembered
-  // frame never paints as a visibly incomplete selection.
-  useLayoutEffect(() => {
-    if (!workspaceId || !snapshot.data) return;
-    validateDesignWorkspaceSelection(workspaceId, frameFiles);
-  }, [frameFiles, snapshot.data, workspaceId]);
-
   // A freshly provisioned design surface is ready when its first exact-key
   // snapshot either resolves or fails open; code-only settling UI must not
   // remain latched for this folder.
@@ -204,6 +213,12 @@ export function DesignWorkspaceColumn({
     if (!workspace || !folder || (!snapshot.data && !snapshot.error)) return;
     clearWorkspaceSettling(folder);
   }, [folder, snapshot.data, snapshot.error, workspace]);
+
+  useEffect(() => {
+    setMotionTimelineOpen(false);
+    setMotionPropertyRequest(null);
+    setMotionProperties(EMPTY_NODE_IDS);
+  }, [activePageId]);
 
   useEffect(() => {
     setMotionPropertyRequest(null);
@@ -297,7 +312,7 @@ export function DesignWorkspaceColumn({
       <DesignCanvas
         workspaceId={workspaceId}
         folder={folder}
-        snapshot={snapshot.data}
+        snapshot={pageSnapshot}
         loading={snapshot.loading}
         error={snapshot.error}
         refresh={snapshot.refresh}
@@ -346,6 +361,9 @@ export function DesignWorkspaceColumn({
         inspector={
           <DesignInspector
             workspaceId={workspaceId}
+            pages={pageSnapshot?.pages}
+            activePageId={activePageId}
+            pageFrames={snapshot.data?.frames}
             folder={folder}
             frame={selectedFrame}
             frameSelected={frameSelected}

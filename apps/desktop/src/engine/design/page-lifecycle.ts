@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, rmdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { isDesignPageFolder } from "@zeros/protocol/design-path";
 import { designPageCreateInputSchema, designPageDeleteInputSchema, designPageRenameInputSchema, type DesignPageSummary } from "@zeros/protocol/design-pages";
@@ -26,9 +26,16 @@ export async function createDesignPage(workspace: string, input: { title?: strin
     const canvas = await readCanvas(workspace);
     const pages = canvas.pages!;
     if (pages.length >= 64) throw new Error("Design directory exceeds the 64-page limit.");
-    const title = parsed.title ?? `Page ${pages.length + 1}`;
     const occupied = new Set([...await readdir(designDirectory(workspace)), ...pages.map(page => page.folder!)].map(portable));
-    const base = pageSlug(title, pages.length + 1);
+    let number = pages.length + 1;
+    let title = parsed.title ?? `Page ${number}`;
+    if (parsed.title === undefined) {
+      while (pages.some(page => page.title === title) || occupied.has(`page-${number}`)) {
+        number++;
+        title = `Page ${number}`;
+      }
+    }
+    const base = pageSlug(title, number);
     let folder = base;
     for (let suffix = 2; !isDesignPageFolder(folder) || occupied.has(portable(folder)); suffix++) {
       const ending = `-${suffix}`;
@@ -72,7 +79,13 @@ export async function deleteDesignPage(workspace: string, pageId: string, expect
       throw new Error("The page's frame membership changed. Refresh and confirm its frames before deleting.");
     const sources: DesignStorageChange[] = [];
     for (const file of designPageFrameFiles(canvas, page)) {
-      sources.push({ file: `${designDirectoryNameFor(workspace)}/${file}`, before: await readBoundedDesignFrameSource(workspace, file), after: null });
+      const relative = `${designDirectoryNameFor(workspace)}/${file}`;
+      const target = assertSafeDesignStoragePath(workspace, relative);
+      const present = await lstat(target).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      sources.push({ file: relative, before: present ? await readBoundedDesignFrameSource(workspace, file) : null, after: null });
       delete canvas.frames[file];
       delete canvas.frame_info[file];
     }

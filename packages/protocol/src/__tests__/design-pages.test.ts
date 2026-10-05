@@ -25,4 +25,14 @@ describe("Design page operation boundaries", () => {
       { id: "two", title: "Two", folder: "checkout", frameFiles: [] },
     ]).success).toBe(false);
   });
+
+  it("retains optional registered IDs even when a frame cannot render", () => {
+    const page = { id: "one", title: "One", folder: "page-1", frameFiles: ["page-1/missing.html"], frameIds: ["missing"] };
+    expect(designPageCatalogSchema.parse([page])).toEqual([page]);
+    expect(designPageCatalogSchema.safeParse([{ ...page, frameIds: [] }]).success).toBe(false);
+    expect(designPageCatalogSchema.safeParse([{ ...page, frameIds: ["bad/id"] }]).success).toBe(false);
+    expect(designPageCatalogSchema.safeParse([
+      page, { id: "two", title: "Two", folder: "two", frameFiles: ["two/home.html"], frameIds: ["missing"] },
+    ]).success).toBe(false);
+  });
 });
