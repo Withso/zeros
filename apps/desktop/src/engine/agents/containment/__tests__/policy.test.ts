@@ -265,9 +265,7 @@ describe("ZSR host-parity policy builder", () => {
       expect(prepared.document.runtime.allowedUnixSockets).toContain(
         path.join(prepared.paths.scratch, "podman.sock"),
       );
-      expect(
-        Buffer.byteLength(path.join(prepared.paths.scratch, "podman.sock")),
-      ).toBeLessThan(108);
+      expect(Buffer.byteLength(path.join(prepared.paths.scratch, "podman.sock"))).toBeLessThan(108);
     },
   );
 

@@ -35,6 +35,9 @@ export default defineConfig({
   // main.ts reads this via `declare const __ZEROS_CHANNEL_BAKED__` and seeds
   // process.env.ZEROS_CHANNEL so the spawned engine inherits the same value.
   define: {
+    __ZEROS_LOCAL_DEVELOPMENT_BUILD__: JSON.stringify(
+      process.env.ZEROS_LOCAL_DEVELOPMENT === "1",
+    ),
     __ZEROS_CHANNEL_BAKED__: JSON.stringify(process.env.ZEROS_CHANNEL || ""),
     // Independent desktop release capability. The exact boolean is compiled
     // into main.cjs; main then pins the engine child's inherited environment.

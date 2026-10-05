@@ -1,3 +1,17 @@
+import {
+  IS_DEV,
+  IS_PACKAGED,
+  IS_LOCAL_DEVELOPMENT,
+  LOCAL_DEVELOPMENT_BUILD_ERROR,
+} from "./runtime-mode";
+
+// Shared outputs belong to one launcher mode. Fail before identity or services
+// can consume configuration rebuilt by a different launcher in this checkout.
+if (LOCAL_DEVELOPMENT_BUILD_ERROR) {
+  console.error(LOCAL_DEVELOPMENT_BUILD_ERROR);
+  process.exit(1);
+}
+
 import { hydrateShellPath } from "./shell-path";
 import { handleSharedCloudAccessSessionChange } from "./cloud-workspace-access-runtime";
 import { startElectronDesignCapture } from "./design-capture";
@@ -148,7 +162,6 @@ import { installDevToolsGuard } from "./devtools";
 import { installDevMainRestartCheck } from "./dev-main-restart";
 import { setupDeepLink } from "./deep-link";
 import { setupUpdater } from "./updater";
-import { IS_DEV, IS_PACKAGED, IS_LOCAL_DEVELOPMENT } from "./runtime-mode";
 import { pushProviderCredentialsToEngine } from "./sidecar";
 import { watchSecrets } from "./secret-store";
 import { setTokenStore as setGithubTokenStore } from "../src/engine/git/github";

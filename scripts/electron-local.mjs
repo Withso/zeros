@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Account-free native development. This launcher never imports the hosted
 // lifecycle or an auth profile. Main supplies the mode to preload and engine.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -238,6 +238,22 @@ function launcherLock(root, slug) {
 
 const quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
 
+function assertCheckoutAvailable(root, listProcesses) {
+  const scripts = new Set(
+    [path.resolve(root), fs.realpathSync(root)].map((checkout) =>
+      path.join(checkout, "scripts", "dev-instance.mjs"),
+    ),
+  );
+  const processes = listProcesses();
+  for (const script of scripts) {
+    const escaped = script.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(?:^|[\\s"'])${escaped}(?:$|[\\s"'])`, "m").test(processes))
+      throw new Error(
+        "Zeros Dev is running from this checkout. Local and Dev share build outputs; stop Dev or use a separate checkout before launching Zeros Local.",
+      );
+  }
+}
+
 export async function runLocalDevelopment({
   root = process.cwd(),
   platform = process.platform,
@@ -245,11 +261,17 @@ export async function runLocalDevelopment({
   signal,
   run = runOwnedProcess,
   prepareBundle = bundle.prepareLocalInstanceBundle,
+  listProcesses = () =>
+    execFileSync("ps", ["-axww", "-o", "pid=,command="], {
+      encoding: "utf8",
+      timeout: 2000,
+    }),
 } = {}) {
   if (platform !== "darwin")
     throw new Error(
       "Zeros Local requires macOS. Run pnpm electron:local in this checkout on the Mac.",
     );
+  assertCheckoutAvailable(root, listProcesses);
   const identity = checkoutIdentity(root);
   const unlock = launcherLock(root, identity.slug);
   try {

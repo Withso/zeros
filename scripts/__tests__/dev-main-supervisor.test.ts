@@ -29,7 +29,7 @@ afterEach(async () => {
   }
 });
 
-async function fixture(busy: boolean, responds = true) {
+async function fixture(busy: boolean, responds = true, selfExit = false) {
   const root = await mkdtemp(path.join(tmpdir(), "zeros-main-hmr-"));
   await mkdir(path.join(root, "dist-electron"));
   const output = path.join(root, "dist-electron", "main.cjs");
@@ -45,6 +45,7 @@ async function fixture(busy: boolean, responds = true) {
 import { appendFileSync, readFileSync } from "node:fs";
 const record = (event) => appendFileSync(process.env.HMR_TEST_TRACE, JSON.stringify({event, pid:process.pid}) + "\\n");
 record("launch");
+if (${selfExit}) process.exit(1);
 process.on("SIGTERM", () => { record("terminate"); process.exit(0); });
 process.on("message", (message) => {
   if (${responds} && message?.type === "zeros:dev-main-restart-check") {
@@ -83,6 +84,12 @@ setInterval(() => {}, 1000);
 }
 
 describe("development main-process restart", () => {
+  it("exits non-zero without restarting when main rejects a rebuilt launcher mode", async () => {
+    const app = await fixture(false, true, true);
+    await expect.poll(() => app.child.exitCode).toBe(1);
+    expect(await app.events()).toHaveLength(1);
+  });
+
   it("keeps the running app when a rebuild output is a symbolic link", async () => {
     const app = await fixture(false);
     const preload = path.join(path.dirname(app.output), "preload.cjs");

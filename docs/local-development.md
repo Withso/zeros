@@ -12,6 +12,13 @@ provisioning, errors, Setup and Archive behavior are unchanged. Local never
 invokes that hosted lifecycle or reads its portable profile, registry receipts,
 credentials or deployment state.
 
+Run only one launcher from a checkout at a time: Local and hosted Dev (including
+Alpha Dev) share `dist-electron` and `dist-engine`. Local refuses to build while
+a Dev launcher from the same canonical checkout is running. Native main also
+checks its baked build mode before initializing data or account services; a
+rebuild from the other mode exits with an instruction to stop the other launcher
+and relaunch. Use separate checkouts to run Local and Dev together.
+
 ## Start and stop
 
 From this checkout on macOS, with the repository's Node/pnpm toolchain and

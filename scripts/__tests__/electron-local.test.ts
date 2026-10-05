@@ -113,6 +113,33 @@ describe("Local checkout identity and environment", () => {
 });
 
 describe("Local launch ownership", () => {
+  it("refuses a same-checkout Dev process before build, bundle or lock work", async () => {
+    const root = directory();
+    const alias = path.join(directory(), "alias");
+    fs.symlinkSync(root, alias);
+    let ran = false;
+    for (const launchRoot of [root, alias]) {
+      await expect(
+        runLocalDevelopment({
+          root: launchRoot,
+          platform: "darwin",
+          environment: {},
+          listProcesses: () => `123 node ${root}/scripts/dev-instance.mjs`,
+          run: async () => {
+            ran = true;
+            return { code: 0 };
+          },
+          prepareBundle: () => {
+            ran = true;
+            return "/unused";
+          },
+        }),
+      ).rejects.toThrow(/Zeros Dev.*checkout/);
+      expect(ran).toBe(false);
+      expect(fs.existsSync(path.join(root, ".context"))).toBe(false);
+    }
+  });
+
   it("adds a separate Mac Conductor entry while preserving hosted commands and defaults", () => {
     const scripts = JSON.parse(fs.readFileSync("package.json", "utf8")).scripts;
     expect(scripts["electron:local"]).toBe("node scripts/electron-local.mjs");
@@ -180,55 +207,60 @@ describe("Local launch ownership", () => {
     process.execPath,
     "/opt/hostedtoolcache/node/22.18.0/x64/bin/node",
     "/opt/hosted-node/node/22.18.0/x64/bin/node",
-  ])("keeps Local builds, bounded retries and one profile with Node at %s", async (execPath) => {
-    const root = directory(),
-      calls: Array<{
-        command: string;
-        args: string[];
-        env: Record<string, string>;
-      }> = [];
-    const originalExecPath = process.execPath;
-    let code: number;
-    Object.defineProperty(process, "execPath", { value: execPath });
-    try {
-      code = await runLocalDevelopment({
-        root,
-        platform: "darwin",
-        environment: {},
-        prepareBundle: () => "/local/Electron",
-        run: async (
-          command: string,
-          args: string[],
-          options: { env: Record<string, string> },
-        ) => {
-          calls.push({ command, args, env: options.env });
-          return {
-            code: args.includes("concurrently") ? 98 : 0,
-            cancelled: false,
-          };
-        },
-      });
-    } finally {
-      Object.defineProperty(process, "execPath", { value: originalExecPath });
-    }
-    expect(code).not.toBe(0);
-    expect(calls[0].args).toEqual(["electron:dev:prep"]);
-    const stacks = calls.filter((call) => call.args.includes("concurrently"));
-    expect(stacks).toHaveLength(3);
-    expect(new Set(calls.map((call) => call.env.ZEROS_INSTANCE)).size).toBe(1);
-    expect(new Set(stacks.map((call) => call.env.ZEROS_VITE_PORT)).size).toBe(
-      3,
-    );
-    expect(stacks[0].args.join(" ")).toContain("dev-main-supervisor.mjs");
-    expect(stacks[0].args.join(" ")).toContain(`'${execPath}'`);
-    expect(
-      calls.some((call) =>
-        /scripts\/dev-environment\/|hosted-|\belectron:dev\b(?!:prep\b)|setup-zeros-dev|dev-instance\.mjs|\bdev:backend\b/.test(
-          call.args.join(" ").replaceAll(`'${execPath}'`, ""),
+  ])(
+    "keeps Local builds, bounded retries and one profile with Node at %s",
+    async (execPath) => {
+      const root = directory(),
+        calls: Array<{
+          command: string;
+          args: string[];
+          env: Record<string, string>;
+        }> = [];
+      const originalExecPath = process.execPath;
+      let code: number;
+      Object.defineProperty(process, "execPath", { value: execPath });
+      try {
+        code = await runLocalDevelopment({
+          root,
+          platform: "darwin",
+          environment: {},
+          prepareBundle: () => "/local/Electron",
+          run: async (
+            command: string,
+            args: string[],
+            options: { env: Record<string, string> },
+          ) => {
+            calls.push({ command, args, env: options.env });
+            return {
+              code: args.includes("concurrently") ? 98 : 0,
+              cancelled: false,
+            };
+          },
+        });
+      } finally {
+        Object.defineProperty(process, "execPath", { value: originalExecPath });
+      }
+      expect(code).not.toBe(0);
+      expect(calls[0].args).toEqual(["electron:dev:prep"]);
+      const stacks = calls.filter((call) => call.args.includes("concurrently"));
+      expect(stacks).toHaveLength(3);
+      expect(new Set(calls.map((call) => call.env.ZEROS_INSTANCE)).size).toBe(
+        1,
+      );
+      expect(new Set(stacks.map((call) => call.env.ZEROS_VITE_PORT)).size).toBe(
+        3,
+      );
+      expect(stacks[0].args.join(" ")).toContain("dev-main-supervisor.mjs");
+      expect(stacks[0].args.join(" ")).toContain(`'${execPath}'`);
+      expect(
+        calls.some((call) =>
+          /scripts\/dev-environment\/|hosted-|\belectron:dev\b(?!:prep\b)|setup-zeros-dev|dev-instance\.mjs|\bdev:backend\b/.test(
+            call.args.join(" ").replaceAll(`'${execPath}'`, ""),
+          ),
         ),
-      ),
-    ).toBe(false);
-  });
+      ).toBe(false);
+    },
+  );
 
   it("rejects Linux before any build, profile or bundle work", async () => {
     await expect(runLocalDevelopment({ platform: "linux" })).rejects.toThrow(

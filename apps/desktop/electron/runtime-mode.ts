@@ -29,9 +29,26 @@ export const IS_PACKAGED: boolean =
 
 export const IS_DEV: boolean = !IS_PACKAGED;
 
+declare const __ZEROS_LOCAL_DEVELOPMENT_BUILD__: boolean | undefined;
+declare const __ZEROS_CHANNEL_BAKED__: string | undefined;
+
+const bakedLocalBuild =
+  typeof __ZEROS_LOCAL_DEVELOPMENT_BUILD__ !== "undefined" &&
+  __ZEROS_LOCAL_DEVELOPMENT_BUILD__ === true;
+const bakedChannel =
+  typeof __ZEROS_CHANNEL_BAKED__ === "string" ? __ZEROS_CHANNEL_BAKED__ : "";
+const requested =
+  IS_DEV &&
+  process.env.ZEROS_LOCAL_DEVELOPMENT === "1" &&
+  process.env.ZEROS_CHANNEL === "dev" &&
+  (bakedChannel === "" || bakedChannel === "dev");
+
 /** Only the explicit native, unpackaged development launch may skip login.
  * Release channels and packaged executables ignore the request entirely. */
 export const IS_LOCAL_DEVELOPMENT: boolean =
-  IS_DEV &&
-  process.env.ZEROS_LOCAL_DEVELOPMENT === "1" &&
-  (!process.env.ZEROS_CHANNEL || process.env.ZEROS_CHANNEL === "dev");
+  requested && bakedLocalBuild;
+
+export const LOCAL_DEVELOPMENT_BUILD_ERROR: string | null =
+  IS_DEV && requested !== bakedLocalBuild
+    ? `[Zeros] This checkout's dist-electron was built by ${bakedLocalBuild ? "Zeros Local" : "Zeros Dev"}; both cannot run from one checkout at once — stop the other launcher and relaunch.`
+    : null;
