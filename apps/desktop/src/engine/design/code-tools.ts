@@ -7,6 +7,8 @@ import {
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ComposerModeSnapshot } from "@zeros/protocol/composer-mode";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import { designPageIdSchema } from "@zeros/protocol/design-pages";
+import { readDesignPageContext } from "./page-selection";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
@@ -170,11 +172,12 @@ const definitions = {
   },
   design_frame_create: {
     description:
-      "Create an authored frame through the Design engine. Supply a fresh durable request ID.",
+      "Create an authored frame in a page through the Design engine. Supply pageId from design_capabilities when several pages exist, and a fresh durable request ID.",
     schema: z
       .object({
         ...requestEnvelope,
         title: z.string().min(1).max(120),
+        pageId: designPageIdSchema.optional(),
         width: z.number().int().min(1).max(4096).default(1440),
         height: z.number().int().min(1).max(4096).default(900),
       })
@@ -193,8 +196,8 @@ const definitions = {
   },
   design_frame_duplicate: {
     description:
-      "Duplicate an exact authored revision with new node identities.",
-    schema: z.object({ ...exactDocument, ...requestEnvelope }).strict(),
+      "Duplicate an exact authored revision with new node identities. Supply the destination pageId from design_capabilities when several pages exist.",
+    schema: z.object({ ...exactDocument, ...requestEnvelope, pageId: designPageIdSchema.optional() }).strict(),
   },
   design_frame_delete: {
     description:
@@ -640,12 +643,15 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     signal: AbortSignal,
   ): Promise<unknown> {
     switch (name) {
-      case "design_capabilities":
+      case "design_capabilities": {
+        const { pages, activePageId } = await readDesignPageContext(this.target);
         return {
           version: 1,
           composerMode: this.mode(),
           workspaceId: this.target.workspaceId,
           directoryId: this.target.directoryId,
+          pages,
+          activePageId,
           actor: this.actor,
           serverTime: this.now(),
           expiresAt: this.expiresAt,
@@ -668,6 +674,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
           history:
             "Semantic undo/redo is local to this session; external edits or restart invalidate it. Frame lifecycle has separate history.",
         };
+      }
       case "design_document_list": {
         const input = definitions[name].schema.parse(raw);
         const frames = await listDesignFrames(this.target.workspacePath, {
@@ -851,6 +858,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
           () =>
             createDesignFrame(this.target.workspacePath, {
               title: input.title,
+              pageId: input.pageId,
               geometry: { w: input.width, h: input.height },
             }),
         );
@@ -873,7 +881,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
                 definitions[name].schema.parse(raw).title,
               );
             if (name === "design_frame_duplicate")
-              return duplicateDesignFrame(this.target.workspacePath, frame);
+              return duplicateDesignFrame(this.target.workspacePath, frame, { pageId: definitions[name].schema.parse(raw).pageId });
             await deleteDesignFrame(this.target.workspacePath, frame);
             return { documentId: input.documentId, deleted: true };
           },

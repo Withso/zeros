@@ -57,6 +57,14 @@ describe("buildAdditionalDirsNotice", () => {
 });
 
 describe("buildCodeAgentDesignTerritoryNotice", () => {
+  it("names page metadata and nested frame sources without a root-only instruction", () => {
+    const out = buildCodeAgentDesignTerritoryNotice("/workspace/Product - Design");
+    expect(out).toContain("meta/design.toml");
+    expect(out).toContain("meta/canvas.json");
+    expect(out).toContain("page folder");
+    expect(out).toContain("page IDs");
+    expect(out).toContain("Legacy root design.toml/canvas.json");
+  });
   it("is absent without an active Design directory", () => {
     expect(buildCodeAgentDesignTerritoryNotice()).toBe("");
     expect(buildCodeAgentDesignTerritoryNotice("  ")).toBe("");
@@ -92,6 +100,14 @@ describe("buildCodeAgentDesignTerritoryNotice", () => {
 });
 
 describe("buildDesignAgentNotice", () => {
+  it("names pages and the meta layout for API-only Design agents", () => {
+    const out = buildDesignAgentNotice("/workspace/Product - Design");
+    expect(out).toContain("meta/design.toml");
+    expect(out).toContain("meta/canvas.json");
+    expect(out).toContain("design_capabilities");
+    expect(out).toContain("pageId");
+    expect(out).toContain("several pages");
+  });
   it("makes filesystem and Git read-only while naming the semantic mutation path", () => {
     const out = buildDesignAgentNotice("/workspace/Zeros Design");
     expect(out).toContain("Design agent");

@@ -21,6 +21,8 @@ import { assertLegacyDesignDraftWritable, readDirectoryDesignManifest } from "./
 import { initializeDesignDocumentUnlocked } from "./document-transactions";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { openDesignVerification } from "./verification-service";
+import { readDesignPageContext } from "./page-selection";
+import { DesignTargetError } from "./target-error";
 import type { AgentWorkspaceTools } from "../agents/session-tools";
 
 /** Registration migration is an explicit Design authoring action. Merely
@@ -37,7 +39,17 @@ export async function nativeDesignContext(target: DesignCodeToolTarget | null, m
       initializeDesignDocumentUnlocked(target.workspacePath));
     target.assertCurrent();
   });
-  return `Active Design directory (relative to workspace ${JSON.stringify(target.workspacePath)}): ${JSON.stringify(target.directory)}. Its registration ID is ${JSON.stringify(target.directoryId)}.`;
+  const context = await readDesignPageContext(target);
+  assertCurrent();
+  target.assertCurrent();
+  const active = context.pages.find(page => page.id === context.activePageId)!;
+  const location = active.folder ? `${active.folder}/` : "the Design root (legacy layout)";
+  const selection = context.hinted
+    ? `The user is viewing page ${JSON.stringify(active.title)} (pageId ${JSON.stringify(active.id)}, folder ${JSON.stringify(location)}); add new frames there unless the user says otherwise.`
+    : context.pages.length > 1
+      ? `No current page hint is available; default to the first page ${JSON.stringify(active.title)} (pageId ${JSON.stringify(active.id)}, folder ${JSON.stringify(location)}) unless the user says otherwise.`
+      : `Active page: ${JSON.stringify(active.title)} (pageId ${JSON.stringify(active.id)}, folder ${JSON.stringify(location)}).`;
+  return `Active Design directory (relative to workspace ${JSON.stringify(target.workspacePath)}): ${JSON.stringify(target.directory)}. Its registration ID is ${JSON.stringify(target.directoryId)}.\nPages: ${JSON.stringify(context.pages.map(({ id, title, folder }) => ({ id, title, folder })))}. ${selection} API frame creation/duplication must supply pageId when several pages exist; the hint never selects a mutation target.`;
 }
 
 /** Design discovery is optional for local prompts, including conflict repair.
@@ -49,15 +61,18 @@ export async function designPromptContext(
   authoringMethod: DesignAuthoringMethod = "native",
 ): Promise<string> {
   assertCurrent();
+  let target: DesignCodeToolTarget | null = null;
   try {
-    const target = await resolveTarget();
+    target = await resolveTarget();
     const context = await nativeDesignContext(target, mode, assertCurrent);
     if (authoringMethod !== "native" || !target || !readDirectoryDesignManifest(target.workspacePath, target.directory)) return context;
     const verification = await openDesignVerification(target);
     assertCurrent();
-    return `${context}\nNative frame verification is available through ordinary shell commands: ${verification.command} <list|validate|capture|preview> --url '${verification.url}' --frame '<frame.html>'. Omit --frame for list. Capture requires --output '.context/frame.png'; use --revision to require a previously validated source revision. ${verification.captureAvailable ? "Capture uses the native PNG renderer; inspect its saved PNG with your normal image tool." : "PNG capture is unavailable on this host; validation and the HTTP preview remain available."} Preview returns an HTTP URL using the canvas's sanitized HTML/CSS and assets. Use the browser actually available through your provider's native browser tooling; do not assume an iab backend exists or navigate to file://. A successful lint or capture is not proof of visual inspection or application behavior. Verification URLs expire after 30 minutes; request fresh frame context if expired.`;
+    return `${context}\nNative frame verification is available through ordinary shell commands: ${verification.command} <list|validate|capture|preview> --url '${verification.url}' --frame '<page.folder>/<name>.html'. Omit --frame for list. Capture requires --output '.context/frame.png'; use --revision to require a previously validated source revision. ${verification.captureAvailable ? "Capture uses the native PNG renderer; inspect its saved PNG with your normal image tool." : "PNG capture is unavailable on this host; validation and the HTTP preview remain available."} Preview returns an HTTP URL using the canvas's sanitized HTML/CSS and assets. Use the browser actually available through your provider's native browser tooling; do not assume an iab backend exists or navigate to file://. A successful lint or capture is not proof of visual inspection or application behavior. Verification URLs expire after 30 minutes; request fresh frame context if expired.`;
   } catch (error) {
     assertCurrent();
+    target?.assertCurrent();
+    if (error instanceof DesignTargetError) throw error;
     if (authoringMethod === "api" && mode === "design") throw error;
     return authoringMethod === "native"
       ? "The Design canvas or registration is currently unavailable. Normal tools remain available to inspect and repair the existing source and Git conflicts. Preserve directory/frame IDs; do not recreate registration to bypass a conflict. Refresh the canvas after resolving the source."

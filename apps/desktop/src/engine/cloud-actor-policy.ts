@@ -10,6 +10,7 @@ import { PTY_AGENT_AUTH_CWD } from "@zeros/protocol/messages";
 type Capability="read"|"run"|"edit"|"manage";
 type WorkspacePolicy={remoteReadable(op:string):boolean;isWriteOp(op:string):boolean;isRemoteAllowed(op:string):boolean};
 const reads=new Set([
+  "design.page.select",
   "codeReview.list",
   "git.reviewHunks",
   "design.foundation.open",
@@ -21,6 +22,7 @@ const reads=new Set([
   "git.stashList","git.tagList","git.listAllBranches","cloudCommands.conversation",
 ]);
 const edits=new Set([
+  "design.page.create","design.page.rename","design.page.delete",
   "codeReview.create", "codeReview.reply", "codeReview.setResolved",
   "git.reviewHunk", "git.resolveConflict",
   "design.capture","design.review.capture","design.transaction.apply","design.review.resolve","design.history.undo","design.history.redo",

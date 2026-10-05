@@ -79,13 +79,60 @@ describe("migration reference rebasing", () => {
     expect(rebaseDesignHtmlReferences(source, "home.html", "page-1/home.html", options)).toBe(source.replace("url(assets/a.png)", "url(../assets/a.png)"));
   });
 
+  it("leaves stationary references outside the Design root byte-identical", () => {
+    const css = '@font-face { src: url(../../apps/web/public/fonts/Inter.woff2) }';
+    expect(rebaseDesignCssReferences(css, "tokens.css", "tokens.css", options)).toBe(css);
+    const html = '<a href="../README.md">Readme</a><a href="home.html">Home</a><img src="../outside/logo.png">';
+    expect(rebaseDesignHtmlReferences(html, "notes.html", "notes.html", options)).toBe(html.replace('href="home.html"', 'href="page-1/home.html"'));
+  });
+
+  it("preserves outside relative targets lexically when their containing frame moves", () => {
+    const html = '<img src="../outside/logo.png?q=1#top"><a href="../../README.md">Readme</a>';
+    expect(rebaseDesignHtmlReferences(html, "home.html", "page-1/home.html", options)).toBe(html
+      .replace('src="../outside/', 'src="../../outside/')
+      .replace('href="../../README.md"', 'href="../../../README.md"'));
+    expect(resolveDesignLocalReference("../../outside/logo.png", "page-1/home.html")).toBeNull();
+  });
+
   it.each([
-    '<base href="./"><img src="assets/a.png">',
-    '<img src="../outside.png">',
     '<img src="assets/%2e%2e/a.png">',
+    '<img src="assets/%20a.png">',
+    '<img src="..\\outside.png">',
+    '<img src="assets/\u0001a.png">',
     '<style>.a { background:url(h\\6fme.html) }</style>',
     '<style>@import "h\\6fme.html";</style>',
     '<style>.a { background:url(var(--image)) }</style>',
+  ])("retains already unrenderable spellings in moved frames: %s", (source) => {
+    expect(rebaseDesignHtmlReferences(source, "home.html", "page-1/home.html", options)).toBe(source);
+  });
+
+  it("rebases URL tokens when a moved frame has malformed style CSS", () => {
+    const source = '<style>.a { background:url(assets/a.png); broken {</style><div style="background:url(../outside/logo.png); broken {"></div>';
+    expect(rebaseDesignHtmlReferences(source, "home.html", "page-1/home.html", options)).toBe(source
+      .replace("url(assets/a.png)", "url(../assets/a.png)")
+      .replace("url(../outside/logo.png)", "url(../../outside/logo.png)"));
+  });
+
+  it("skips unrelated malformed stationary CSS before parsing", () => {
+    const source = '.a { background:url(../../outside/logo.png); broken {';
+    expect(rebaseDesignCssReferences(source, "tokens.css", "tokens.css", options)).toBe(source);
+  });
+
+  it("keeps unrelated references in a malformed stationary stylesheet containing a frame name", () => {
+    const source = '/* home.html */ .a { background:url(../../outside/logo.png); broken {';
+    expect(rebaseDesignCssReferences(source, "tokens.css", "tokens.css", options)).toBe(source);
+  });
+
+  it("does not treat unsupported-looking text in CSS comments or strings as a moved reference", () => {
+    const source = '/* image-set("home.html" 1x) */ .a { content: \'image-set("home.html" 1x)\' }';
+    expect(rebaseDesignCssReferences(source, "tokens.css", "tokens.css", options)).toBe(source);
+    const malformed = '.a { color:red } /* url(HOME.html)';
+    expect(rebaseDesignCssReferences(malformed, "home.html", "page-1/home.html", options)).toBe(malformed);
+  });
+
+  it.each([
+    '<base href="./"><img src="assets/a.png">',
+    '<a href="HOME.html">Home</a>',
     '<style>.a { background:image-set("home.html" 1x) }</style>',
   ])("rejects references whose migration cannot be proved safe: %s", (source) => {
     expect(() => rebaseDesignHtmlReferences(source, "home.html", "page-1/home.html", options)).toThrow(/safely|unsupported|ambiguous|escape/i);

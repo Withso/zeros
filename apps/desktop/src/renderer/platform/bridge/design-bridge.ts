@@ -308,8 +308,8 @@ export interface DesignApiMutationReplyWire {
   /** Structural history can restore/delete a frame independently of the frame
    * that happened to own keyboard focus when the shortcut was pressed. */
   historySelection?: string | null;
-  /** Exact document whose DesignApi history moved. Structural history omits
-   * this because it invalidates the aggregate frame set instead. */
+  /** Affected frame for semantic, structural and transfer history, including
+   * removed frames. Its folder lets the renderer reveal the affected page. */
   historyFrame?: string;
 }
 
@@ -624,18 +624,69 @@ export async function bridgeDesignSetRuntimeAudit(
   });
 }
 
+export interface DesignPageMutationReplyWire {
+  page: DesignPageSummary;
+  snapshot: DesignWorkspaceSnapshotWire;
+}
+
+function designPageMutationReply(value: unknown, operation: string): DesignPageMutationReplyWire {
+  const result = value as Partial<DesignPageMutationReplyWire> | null;
+  const snapshot = result?.snapshot;
+  if (!result?.page || !snapshot?.pages || !isDesignWorkspaceSnapshotWire(snapshot))
+    throw new Error(`${operation}: malformed engine response`);
+  const page = snapshot.pages.find(page => page.id === result.page!.id);
+  if (!page || page.title !== result.page.title || page.folder !== result.page.folder ||
+    !Array.isArray(result.page.frameFiles) || page.frameFiles.length !== result.page.frameFiles.length ||
+    page.frameFiles.some((file, index) => file !== result.page!.frameFiles[index]))
+    throw new Error(`${operation}: malformed engine response`);
+  return { page, snapshot: normalizeDesignWorkspaceSnapshotPages(snapshot) };
+}
+
+export async function bridgeDesignCreatePage(bridge: RuntimeClient, workspaceId: string, title?: string): Promise<DesignPageMutationReplyWire> {
+  return designPageMutationReply(await workspaceOp(bridge, "design.page.create", {
+    workspaceId, ...(title !== undefined ? { title } : {}),
+  }), "design.page.create");
+}
+
+export async function bridgeDesignRenamePage(bridge: RuntimeClient, workspaceId: string, pageId: string, title: string): Promise<DesignPageMutationReplyWire> {
+  return designPageMutationReply(await workspaceOp(bridge, "design.page.rename", {
+    workspaceId, pageId, title,
+  }), "design.page.rename");
+}
+
+export async function bridgeDesignDeletePage(bridge: RuntimeClient, workspaceId: string, pageId: string, expectedFrameIds: readonly string[]): Promise<{
+  deleted: { pageId: string };
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
+  const result = await workspaceOp(bridge, "design.page.delete", { workspaceId, pageId, expectedFrameIds }) as {
+    deleted?: { pageId: string }; snapshot?: DesignWorkspaceSnapshotWire;
+  } | null;
+  if (result?.deleted?.pageId !== pageId || !result.snapshot?.pages ||
+    !isDesignWorkspaceSnapshotWire(result.snapshot) || result.snapshot.pages.some(page => page.id === pageId))
+    throw new Error("design.page.delete: malformed engine response");
+  return { deleted: result.deleted, snapshot: normalizeDesignWorkspaceSnapshotPages(result.snapshot) };
+}
+
+export async function bridgeDesignSelectPage(bridge: RuntimeClient, workspaceId: string, directoryId: string, pageId: string): Promise<void> {
+  // This hint captures its owner; a newer mutation binding must not retarget it.
+  const result = await rawWorkspaceOp(bridge, "design.page.select", { workspaceId, directoryId, pageId }) as { ok?: boolean } | null;
+  if (result?.ok !== true) throw new Error("design.page.select: malformed engine response");
+}
+
 export async function bridgeDesignCreateFrame(
   bridge: RuntimeClient,
   workspaceId: string,
   title?: string,
   geometry?: DesignFrameGeometryWire,
   seed?: DesignTextFrameSeedWire,
+  pageId?: string,
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
   const result = (await workspaceOp(bridge, "design.frame.create", {
     workspaceId,
+    ...(pageId !== undefined ? { pageId } : {}),
     ...(title ? { title } : {}),
     ...(geometry ? geometry : {}),
     ...(seed
@@ -731,6 +782,7 @@ export async function bridgeDesignDuplicateFrame(
   bridge: RuntimeClient,
   workspaceId: string,
   frame: string,
+  pageId?: string,
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
@@ -738,6 +790,7 @@ export async function bridgeDesignDuplicateFrame(
   const result = (await workspaceOp(bridge, "design.frame.duplicate", {
     workspaceId,
     frame,
+    ...(pageId !== undefined ? { pageId } : {}),
   })) as {
     frame?: DesignFrameSummaryWire;
     snapshot?: DesignWorkspaceSnapshotWire;
@@ -779,6 +832,7 @@ export async function bridgeDesignDeleteFrame(
 
 export interface DesignNodeTransferInput {
   frame: string;
+  pageId?: string;
   sourceVersion: string;
   nodeId: string;
   destinationFrame?: string;

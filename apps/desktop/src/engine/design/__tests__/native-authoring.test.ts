@@ -1,5 +1,5 @@
 import { useLegacyDesignStorage } from "./storage-fixtures";
-import { mkdtemp, readFile, writeFile, rm, rename } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -96,6 +96,20 @@ describe("native Design file authoring", () => {
     expect(JSON.parse(await readFile(canvasPath, "utf8")).frames.home.x).toBe(
       500,
     );
+  });
+
+  it("reads a page added through native source tools without an API page operation", async () => {
+    const { canvas, canvasPath } = await author();
+    canvas.pages.push({ id: "checkout", title: "Checkout", folder: "checkout", frames: ["checkout_home"] });
+    canvas.frames.checkout_home = { ...canvas.frames.home, source: "checkout/home.html", title: "Checkout" };
+    await mkdir(path.join(folder, "checkout"));
+    await writeFile(path.join(folder, "checkout/home.html"), '<link rel="stylesheet" href="../tokens.css"><h1>Checkout</h1>');
+    await writeFile(canvasPath, JSON.stringify(canvas));
+    const before = await readFile(canvasPath, "utf8");
+    const snapshot = await readDesignWorkspaceSnapshot(root);
+    expect(snapshot.pages).toMatchObject([{ id: canvas.pages[0].id, frameFiles: ["page-1/home.html"] }, { id: "checkout", frameFiles: ["checkout/home.html"] }]);
+    expect(snapshot.frames).toEqual(expect.arrayContaining([expect.objectContaining({ file: "checkout/home.html", pageId: "checkout", frameId: "checkout_home" })]));
+    expect(await readFile(canvasPath, "utf8")).toBe(before);
   });
 
   it("renders and selects plain HTML without rewriting it, then visually edits the same source", async () => {

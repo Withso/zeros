@@ -23,6 +23,24 @@ function fixture(role:NonNullable<TransportClient["cloudActor"]>["role"]="viewer
   return {client,engine,send};
 }
 describe("actor roles at the worker message boundary",()=>{
+  it("treats page selection as a read and page lifecycle as edit authority", async () => {
+    for (const role of ["viewer", "prompter", "developer", "manager", "owner"] as const) {
+      const f = fixture(role);
+      await f.send({ type: "WORKSPACE_REQUEST", op: "design.page.select", params: { workspaceId: "local-main", directoryId: "design_fixture", pageId: "checkout" } });
+      expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledOnce();
+      for (const op of ["design.page.create", "design.page.rename", "design.page.delete"]) {
+        f.engine.handleWorkspaceMessage.mockClear();
+        await f.send({ type: "WORKSPACE_REQUEST", op, params: { workspaceId: "local-main", pageId: "checkout", expectedFrameIds: [] } });
+        expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledTimes(["developer", "manager", "owner"].includes(role) ? 1 : 0);
+      }
+      f.client.authorized = () => false;
+      for (const op of ["design.page.select", "design.page.create"]) {
+        f.engine.handleWorkspaceMessage.mockClear();
+        await f.send({ type: "WORKSPACE_REQUEST", op, params: { workspaceId: "local-main" } });
+        expect(f.engine.handleWorkspaceMessage).not.toHaveBeenCalled();
+      }
+    }
+  });
   it("admits review and GitHub inline/diff reads from the actual service allowlist and restricts review mutations", async () => {
     const reads = ["codeReview.list", "git.reviewHunks", "gh.prInlineReview", "gh.prReviewDiff"];
     const writes = ["codeReview.create", "codeReview.reply", "codeReview.setResolved", "git.reviewHunk", "git.resolveConflict"];

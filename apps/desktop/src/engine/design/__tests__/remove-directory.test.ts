@@ -111,7 +111,7 @@ describe("remove Design registration", () => {
   });
 
   it("preflights a v2 Settings rename before moving source or changing the index", async () => {
-    const source = '<h1>Keep me</h1><img src="../outside.png">';
+    const source = '<base href="./"><h1>Keep me</h1><img src="../outside.png">';
     writeFileSync(path.join(root, "Brand/home.html"), source);
     await runGit(root, ["add", "Brand/home.html"]);
     await runGit(root, ["commit", "-m", "unsafe reference fixture"]);

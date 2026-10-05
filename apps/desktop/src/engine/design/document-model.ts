@@ -75,6 +75,8 @@ export interface DesignFrameGeometry {
  * or written outside the active Design directory. */
 export interface DesignFrameRestorePoint {
   file: string;
+  /** Missing only on legacy points; paged restoration requires this owner. */
+  pageId?: string;
   source: string;
   geometry: DesignFrameGeometry;
   metadata?: Pick<FrameMeta, "id" | "title" | "kind">;

@@ -42,6 +42,7 @@ import {
   mutateDesignNodeHtmlSource,
   mutateDesignNodeMoveSource,
   mutateDesignNodeStyles,
+  rebaseDesignHtmlReferences,
 } from "@zeros/design-web";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
@@ -80,6 +81,7 @@ import {
 import { type DesignStorageChange } from "./metadata";
 import { legacyFrameId } from "./canvas-file";
 import { isDeepStrictEqual } from "node:util";
+import { assertDesignFrameRestorePage, designFramePage, designPageForWrite, designPageFrameFiles } from "./pages";
 
 function slugFrameTitle(title: string): string {
   const slug = title
@@ -96,6 +98,7 @@ export async function createDesignFrame(
   workspacePath: string,
   input: {
     title?: string;
+    pageId?: string;
     geometry?: Partial<DesignFrameGeometry>;
     seed?: {
       kind: "text";
@@ -109,9 +112,9 @@ export async function createDesignFrame(
     await initializeDesignDocumentUnlocked(workspacePath);
     const directory = designDirectory(workspacePath);
     const canvas = await readCanvas(workspacePath);
-    const pages = canvas.pages?.filter(page => page.folder !== undefined);
-    if (pages && pages.length !== 1) throw new Error("pageId required to create a frame in a directory with several pages.");
-    const folder = pages?.[0]?.folder;
+    const page = designPageForWrite(canvas, input.pageId);
+    if (Object.keys(canvas.frames).length >= MAX_FRAME_COUNT) throw new Error(`Design document exceeds ${MAX_FRAME_COUNT} frames.`);
+    const folder = page.folder;
     const title = input.title?.trim().slice(0, 120) || "Frame";
     const base = slugFrameTitle(title);
     let file = folder ? `${folder}/${base}.html` : `${base}.html`;
@@ -122,7 +125,7 @@ export async function createDesignFrame(
       .update(`${file}:${Date.now()}:${randomUUID()}`)
       .digest("hex")
       .slice(0, 8)}`;
-    const automaticGeometry = nextFrameGeometry(Object.values(canvas.frames), {
+    const automaticGeometry = nextFrameGeometry(designPageFrameFiles(canvas, page).map(file => canvas.frames[file]!), {
       width: DEFAULT_FRAME_WIDTH,
       height: DEFAULT_FRAME_HEIGHT,
     });
@@ -156,6 +159,8 @@ export async function createDesignFrame(
     const info = await stat(path.join(directory, file));
     return {
       file,
+      frameId: canvas.frame_info[file]!.id,
+      pageId: page.id,
       title,
       kind: textSeed ? "text" : "frame",
       width: geometry.w,
@@ -249,6 +254,7 @@ export async function listDesignFramesUnlocked(
     summaries.push({
       file,
       frameId: canvas.frame_info[file]?.id ?? legacyFrameId(file),
+      pageId: designFramePage(canvas, file).id,
       title: meta.title,
       kind: meta.kind,
       width: geometry.w,
@@ -426,11 +432,15 @@ function reseedFrameOids(source: string, salt: string): string {
 export async function duplicateDesignFrame(
   workspacePath: string,
   frame: string,
+  input: { pageId?: string } = {},
 ): Promise<DesignFrameSummary> {
   const originalFile = assertFrameFile(frame);
   return withDocumentWrite(workspacePath, async () => {
     await initializeDesignDocumentUnlocked(workspacePath);
     await designFrameTarget(workspacePath, originalFile);
+    const canvas = await readCanvas(workspacePath);
+    const page = designPageForWrite(canvas, input.pageId);
+    if (Object.keys(canvas.frames).length >= MAX_FRAME_COUNT) throw new Error(`Design document exceeds ${MAX_FRAME_COUNT} frames.`);
     const original = await readBoundedDesignFrameSource(
       workspacePath,
       originalFile,
@@ -438,23 +448,22 @@ export async function duplicateDesignFrame(
     const originalMeta = readFrameMeta(
       parse(original, { sourceCodeLocationInfo: true }),
       originalFile,
-      await readCanvas(workspacePath),
+      canvas,
     );
     const title = `${originalMeta.title} copy`.slice(0, 120);
     const directory = designDirectory(workspacePath);
     const base = `${slugFrameTitle(originalMeta.title)}-copy`;
-    const folder = originalFile.includes("/") ? originalFile.split("/")[0] : undefined;
+    const folder = page.folder;
     let file = folder ? `${folder}/${base}.html` : `${base}.html`;
     for (let suffix = 2; existsSync(path.join(directory, file)); suffix += 1) {
       file = folder ? `${folder}/${base}-${suffix}.html` : `${base}-${suffix}.html`;
     }
-    const source = reseedFrameOids(
+    const source = rebaseDesignHtmlReferences(reseedFrameOids(
       rewriteFrameTitleSource(original, title),
       `${file}:${randomUUID()}`,
-    );
-    const canvas = await readCanvas(workspacePath);
+    ), originalFile, file, { strict: true });
     const geometry = nextFrameGeometry(
-      Object.values(canvas.frames),
+      designPageFrameFiles(canvas, page).map(file => canvas.frames[file]!),
       originalMeta,
     );
     canvas.frames[file] = geometry;
@@ -470,6 +479,8 @@ export async function duplicateDesignFrame(
     const duplicated = parse(source);
     return {
       file,
+      frameId: canvas.frame_info[file]!.id,
+      pageId: page.id,
       title,
       kind: originalMeta.kind,
       width: geometry.w,
@@ -508,6 +519,7 @@ async function designFrameRestorePointUnlocked(
     target,
     restorePoint: {
       file,
+      pageId: designFramePage(canvas, file).id,
       source,
       geometry: { ...geometry },
       metadata: { ...canvas.frame_info[file], title: meta.title, kind: meta.kind },
@@ -521,6 +533,7 @@ export function sameDesignFrameRestorePoint(
 ): boolean {
   return (
     left.file === right.file &&
+    left.pageId === right.pageId &&
     left.source === right.source &&
     isDeepStrictEqual(
       { ...left.metadata, id: (left.metadata as FrameMeta | undefined)?.id ?? legacyFrameId(left.file) },
@@ -592,6 +605,8 @@ export async function restoreDesignFrame(
   }
   return withDocumentWrite(workspacePath, async () => {
     await initializeDesignDocumentUnlocked(workspacePath);
+    const canvas = await readCanvas(workspacePath);
+    const page = assertDesignFrameRestorePage(canvas, restorePoint);
     const directory = designDirectory(workspacePath);
     const target = path.join(directory, file);
     await assertSafeDesignWriteTarget(workspacePath, target);
@@ -599,7 +614,6 @@ export async function restoreDesignFrame(
       sourceCodeLocationInfo: true,
     });
     const meta = { ...readFrameMeta(document, file), ...restorePoint.metadata };
-    const canvas = await readCanvas(workspacePath);
     if (
       !Object.prototype.hasOwnProperty.call(canvas.frames, file) &&
       Object.keys(canvas.frames).length >= MAX_FRAME_COUNT
@@ -630,6 +644,8 @@ export async function restoreDesignFrame(
     const info = await stat(target);
     return {
       file,
+      frameId: canvas.frame_info[file]?.id,
+      pageId: page.id,
       title: meta.title,
       kind: meta.kind,
       width: geometry.w,
@@ -665,6 +681,8 @@ async function applyDesignFrameChangesUnlocked(
     )
       throw new Error("Invalid frame transfer identity.");
     seen.add(file);
+    if (change.before) assertDesignFrameRestorePage(canvas, change.before);
+    if (change.after) assertDesignFrameRestorePage(canvas, change.after);
     const target = path.join(designDirectory(workspacePath), file);
     await assertSafeDesignWriteTarget(workspacePath, target);
     if (change.before) {
@@ -725,6 +743,7 @@ export async function restoreDesignFrameChanges(
 export async function transferDesignNode(
   workspacePath: string,
   input: DesignFrameMutationInput & {
+    pageId?: string;
     destinationFrame?: string;
     destinationSourceVersion?: string;
     parentId?: string;
@@ -788,6 +807,8 @@ export async function transferDesignNode(
           input.destinationFrame,
         )
       ).restorePoint;
+      if (input.pageId !== undefined && destination.pageId !== designPageForWrite(await readCanvas(workspacePath), input.pageId).id)
+        throw new Error("The destination frame does not belong to the requested Design page.");
       const destinationIdentity = await readDesignFrameRenderIdentityFromSource(
         workspacePath,
         destination.file,
@@ -815,6 +836,9 @@ export async function transferDesignNode(
         "data-zeros-frame-root",
         null,
       );
+      // HTML insertion takes Design-root-relative fragments. Retain the
+      // original source origin before adapting to that existing contract.
+      fragment = rebaseDesignHtmlReferences(fragment, from.file, "", { strict: true });
       let source = mutateDesignNodeHtmlSource(
         destinationSource,
         input.parentId ?? "::zeros-document-body",
@@ -849,10 +873,10 @@ export async function transferDesignNode(
               location.endOffset <= span.endOffset)
           )
             return [];
-          const content = fromSource.slice(
+          const content = rebaseDesignHtmlReferences(fromSource.slice(
             location.startOffset,
             location.endOffset,
-          );
+          ), from.file, destination!.file, { strict: true });
           return source.includes(content) ? [] : [content];
         });
       if (dependencies.length)
@@ -860,8 +884,8 @@ export async function transferDesignNode(
       after = { ...destination, source };
     } else {
       const base = "frame";
-      const folder = path.posix.dirname(from.file);
-      const prefix = folder === "." ? "" : folder + "/";
+      const page = designPageForWrite(await readCanvas(workspacePath), input.pageId);
+      const prefix = page.folder ? page.folder + "/" : "";
       let file = `${prefix}${base}.html`;
       for (
         let suffix = 2;
@@ -877,10 +901,11 @@ export async function transferDesignNode(
       );
       after = {
         file,
-        source:
+        pageId: page.id,
+        source: rebaseDesignHtmlReferences(
           fromSource.slice(0, bodySpan.startTag.endOffset) +
           fragment +
-          fromSource.slice(bodySpan.endTag.startOffset),
+          fromSource.slice(bodySpan.endTag.startOffset), from.file, file, { strict: true }),
         geometry: normalizeGeometry(input.geometry, input.geometry),
         metadata: { id: `frame_${randomUUID().replace(/-/g, "")}`, title: "Frame", kind: "frame" },
       };
@@ -952,6 +977,7 @@ export async function replaceDesignFrameFromHistory(
     const meta = { ...readFrameMeta(document, file), ...replacement.metadata };
     const geometry = normalizeGeometry(replacement.geometry, current.geometry);
     const canvas = await readCanvas(workspacePath);
+    assertDesignFrameRestorePage(canvas, replacement);
     canvas.frames[file] = geometry;
     canvas.frame_info[file] = replacement.metadata ?? {
       title: meta.title,

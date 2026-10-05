@@ -29,6 +29,7 @@ import {
   designDirectoryFromSettings,
 } from "./metadata";
 import { hasInvalidDesignSettings } from "./directory-path";
+import { DesignTargetError } from "./target-error";
 
 /** Resolve once by registered owner. Tool arguments never choose a cwd or
  * workspace. A missing/ambiguous Design document leaves normal Code usable. */
@@ -89,7 +90,7 @@ export async function resolveCodeDesignTarget(
         options.workspaceIdForCwd &&
         options.workspaceIdForCwd(input.cwd) !== workspace.id
       ) {
-        throw new Error(
+        throw new DesignTargetError(
           "Design workspace authority changed; reopen the Code session.",
         );
       }
@@ -102,18 +103,18 @@ export async function resolveCodeDesignTarget(
         current.placement !== workspace.placement ||
         current.organizationId !== workspace.organizationId
       )
-        throw new Error(
+        throw new DesignTargetError(
           "Design workspace authority changed; reopen the Code session.",
         );
       if (
         identity()?.id !== entry.id
       )
-        throw new Error(
+        throw new DesignTargetError(
           "Design directory was removed or replaced; reopen the Code session.",
         );
       const settings = opSettingsResolve(workspace.path, workspace.repoRoot);
       if (hasInvalidDesignSettings(settings.warnings))
-        throw new Error("Design directory settings are invalid.");
+        throw new DesignTargetError("Design directory settings are invalid.");
       const selected = designDirectoryFromSettings(
         workspace.path,
         settings.effective,
@@ -122,7 +123,7 @@ export async function resolveCodeDesignTarget(
         (selected && selected !== directory) ||
         (pointer.configured && !selected)
       )
-        throw new Error(
+        throw new DesignTargetError(
           "Design directory selection changed; reopen the Code session.",
         );
     },

@@ -2,6 +2,20 @@ import { describe, expect, it } from "vitest";
 import { composerModeInstruction } from "../composer-mode";
 
 describe("native Design authoring instructions", () => {
+  it.each(["code", "design"] as const)("describes native page membership in %s intent", mode => {
+    const instruction = composerModeInstruction(mode);
+    expect(instruction).toContain("meta/canvas.json");
+    expect(instruction).toContain("<page.folder>/<name>.html");
+    expect(instruction).toContain("that page's frames array");
+    expect(instruction).not.toContain("pages[0].frames");
+  });
+  it("requires an API pageId for multi-page frame creation and duplication", () => {
+    const instruction = composerModeInstruction("design", undefined, "api");
+    expect(instruction).toContain("pageId");
+    expect(instruction).toContain("design_frame_duplicate");
+    expect(instruction).toContain("several pages");
+    expect(instruction).toContain("meta/design.toml");
+  });
   it("authorizes ordinary provider file tools without an API save loop", () => {
     const instruction = composerModeInstruction("design", 4);
     expect(instruction).toContain("Write, Edit, patch and Bash");

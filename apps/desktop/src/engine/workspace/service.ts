@@ -615,6 +615,9 @@ const WRITE_OPS = new Set<string>([
  * WRITE_OPS is a remote-security allowlist, and widening it would accidentally
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
+  "design.page.create",
+  "design.page.rename",
+  "design.page.delete",
   "git.reviewHunk",
   "git.resolveConflict",
   "design.capture",
@@ -758,6 +761,9 @@ const SERIALIZED_GIT_MUTATION_OPS = new Set<string>([
 /** These handlers write the active document or its canvas context. Resolve
  * their directory for the whole async operation, just like Design reads. */
 const DESIGN_DOCUMENT_MUTATIONS = new Set<string>([
+  "design.page.create",
+  "design.page.rename",
+  "design.page.delete",
   "design.transaction.apply",
   "design.review.resolve",
   "design.history.undo",
@@ -1116,6 +1122,7 @@ async function assertNoDesignPathWrites(
  *     nor reads — they are not gated by this allowlist (a remote client edits
  *     its own chat list freely, matching the existing WRITE_OPS exclusion). */
 const REMOTE_READABLE = new Set<string>([
+  "design.page.select",
   "git.reviewHunks",
   "codeReview.list",
   // Workspaces + projects (repository navigation / workspace picker)
@@ -2135,6 +2142,8 @@ export class WorkspaceService {
       writeBack?: boolean;
       designDirectory?: string;
       hostLocalResources?: boolean;
+      /** Mutation replies must not share a read admitted before their write. */
+      fresh?: boolean;
     } = {},
   ) {
     const root = options.root ?? workspace.path;
@@ -2150,7 +2159,7 @@ export class WorkspaceService {
     // under the same workspace root.
     const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}`;
     const current = this.designSnapshotFlights.get(key);
-    if (current) return current;
+    if (current && !options.fresh) return current;
     const request = (async () => {
       const snapshot = await readDesignWorkspaceSnapshot(root, {
         writeBack,

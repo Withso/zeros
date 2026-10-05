@@ -141,13 +141,45 @@ describe("recoverable per-directory Design pages migration", () => {
     expect((await runGit(root, ["show", ":Product - Design/home.html"], { readOnly: true })).stdout).not.toContain("unstaged draft");
   });
 
-  it("fails preflight on unsafe inbound references before moving any source", () => {
-    // check:ui ignore-next — numeric HTML entity tests an ambiguous source path.
-    write("notes.html", '<a href="h&#111;me.html">Home</a><img src="../outside.png">');
+  it("fails preflight on ambiguous inbound references before moving any source", () => {
+    write("notes.html", '<a href="HOME.html">Home</a><img src="../outside.png">');
     const before = read("home.html");
     expect(() => migrateDesignDirectoryPages(root, directory)).toThrow(/notes.html.*safely|safely.*notes.html/i);
     expect(read("home.html")).toBe(before);
     expect(existsSync(path.join(root, directory, "meta/design.toml"))).toBe(false);
+  });
+
+  it("does not refuse a stationary font URL outside the Design root", () => {
+    const css = '@font-face { src: url(../../apps/web/public/fonts/Inter.woff2) }';
+    write("tokens.css", css);
+    migrateDesignDirectoryPages(root, directory);
+    expect(read("tokens.css")).toBe(css);
+    expect(readDirectoryDesignLayout(root, directory)?.kind).toBe("meta-v3");
+  });
+
+  it("keeps an unregistered root HTML's unrelated outside references unchanged", () => {
+    const source = '<a href="../README.md">Readme</a><a href="home.html">Home</a>';
+    write("notes.html", source);
+    migrateDesignDirectoryPages(root, directory);
+    expect(read("notes.html")).toBe(source.replace('href="home.html"', 'href="page-1/home.html"'));
+  });
+
+  it("rebases moved outside URLs and malformed styles without weakening render containment", () => {
+    const source = '<img src="../outside/logo.png"><style>.a { background:url(assets/a.png); broken {</style><div style="background:url(../outside/logo.png); broken {"></div>';
+    write("home.html", source);
+    migrateDesignDirectoryPages(root, directory);
+    expect(read("page-1/home.html")).toBe(source
+      .replace('src="../outside/', 'src="../../outside/')
+      .replace('url(assets/a.png)', 'url(../assets/a.png)')
+      .replace('url(../outside/logo.png)', 'url(../../outside/logo.png)'));
+  });
+
+  it("does not let an unrelated malformed stylesheet block migration", () => {
+    const source = '.unrelated { background:url(../../outside/logo.png); broken {';
+    write("tokens.css", source);
+    migrateDesignDirectoryPages(root, directory);
+    expect(read("tokens.css")).toBe(source);
+    expect(readDirectoryDesignLayout(root, directory)?.kind).toBe("meta-v3");
   });
 
   it("does not modify root ignore rules when a nested ignore fails preflight", async () => {

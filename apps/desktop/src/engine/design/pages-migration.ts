@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
+import { mayReferenceMovedDesignFrame, rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
 import { isDesignPageFolder } from "@zeros/protocol/design-path";
 import { decodeCanvasFile, encodeCanvasFile, legacyFrameId } from "./canvas-file";
 import { parseDesignManifest, serializeDesignRegistration } from "./manifest";
@@ -413,7 +413,7 @@ function buildPlan(workspace: string, directory: string, id: string, document: R
     const target = movedFiles[file] ?? file;
     const origin = file.startsWith("components/") && /\.html$/i.test(file) ? "" : file;
     let after = source;
-    if (Object.keys(movedFiles).length) {
+    if (movedFiles[file] || mayReferenceMovedDesignFrame(source, movedFiles)) {
       try {
         after = /\.html$/i.test(file)
           ? rebaseDesignHtmlReferences(source, origin, movedFiles[file] ?? origin, { movedFiles, strict: true })
