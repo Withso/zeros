@@ -176,30 +176,40 @@ describe("Local launch ownership", () => {
       fs.existsSync(path.join(root, ".context/zeros-local/launcher.lock")),
     ).toBe(false);
   });
-  it("builds the real desktop only, retries port races at most three times and retains one profile", async () => {
+  it.each([
+    process.execPath,
+    "/opt/hostedtoolcache/node/22.18.0/x64/bin/node",
+  ])("keeps Local builds, bounded retries and one profile with Node at %s", async (execPath) => {
     const root = directory(),
       calls: Array<{
         command: string;
         args: string[];
         env: Record<string, string>;
       }> = [];
-    const code = await runLocalDevelopment({
-      root,
-      platform: "darwin",
-      environment: {},
-      prepareBundle: () => "/local/Electron",
-      run: async (
-        command: string,
-        args: string[],
-        options: { env: Record<string, string> },
-      ) => {
-        calls.push({ command, args, env: options.env });
-        return {
-          code: args.includes("concurrently") ? 98 : 0,
-          cancelled: false,
-        };
-      },
-    });
+    const originalExecPath = process.execPath;
+    let code: number;
+    Object.defineProperty(process, "execPath", { value: execPath });
+    try {
+      code = await runLocalDevelopment({
+        root,
+        platform: "darwin",
+        environment: {},
+        prepareBundle: () => "/local/Electron",
+        run: async (
+          command: string,
+          args: string[],
+          options: { env: Record<string, string> },
+        ) => {
+          calls.push({ command, args, env: options.env });
+          return {
+            code: args.includes("concurrently") ? 98 : 0,
+            cancelled: false,
+          };
+        },
+      });
+    } finally {
+      Object.defineProperty(process, "execPath", { value: originalExecPath });
+    }
     expect(code).not.toBe(0);
     expect(calls[0].args).toEqual(["electron:dev:prep"]);
     const stacks = calls.filter((call) => call.args.includes("concurrently"));
@@ -209,9 +219,12 @@ describe("Local launch ownership", () => {
       3,
     );
     expect(stacks[0].args.join(" ")).toContain("dev-main-supervisor.mjs");
+    expect(stacks[0].args.join(" ")).toContain(`'${execPath}'`);
     expect(
       calls.some((call) =>
-        /hosted|dev-environment|backend/.test(call.args.join(" ")),
+        /scripts\/dev-environment\/|hosted-|\belectron:dev\b(?!:prep\b)|setup-zeros-dev|dev-instance\.mjs|\bdev:backend\b/.test(
+          call.args.join(" "),
+        ),
       ),
     ).toBe(false);
   });
