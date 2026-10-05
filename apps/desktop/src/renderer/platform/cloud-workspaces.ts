@@ -59,6 +59,7 @@ export const CloudWorkspaceDocumentSchema = z.object({
     lastObservedAt: z.string().nullable(),
   }),
   version: z.number().int().nonnegative(),
+  setupFailure: z.object({ code: z.string().min(1).max(128), hasLog: z.boolean() }).nullable().optional(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

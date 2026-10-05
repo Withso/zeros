@@ -14,6 +14,11 @@ const document = {
 };
 
 describe("cloud workspace sharing projection", () => {
+  it("retains the additive failed-setup projection without requiring it from older servers", () => {
+    const setupFailure = { code: "setup_image_contract_invalid", hasLog: false };
+    expect(CloudWorkspaceDocumentSchema.parse({ ...document, setupFailure })).toMatchObject({ setupFailure });
+    expect(CloudWorkspaceDocumentSchema.parse(document)).not.toHaveProperty("setupFailure");
+  });
   it("retains role, revision, sharing scope and the precise edit capability", () => {
     expect(CloudWorkspaceDocumentSchema.parse({ ...document, actorRole: "prompter", sharingMode: "private", accessRevision: 7,
       capabilities: { ...document.capabilities, canEdit: false } })).toMatchObject({

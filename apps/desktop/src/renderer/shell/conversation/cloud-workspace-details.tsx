@@ -28,6 +28,7 @@ import {
   parseCloudWorkspaceKey,
 } from "../../platform/bridge/cloud-workspace-key";
 import { useTeams } from "../../features/team/team-store";
+import { CloudWorkspaceSetupFailure } from "./cloud-workspace-setup-failure";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { toast } from "../../shared/ui/primitives/elements";
 import { Checkbox } from "../../shared/ui/primitives/checkbox";
@@ -73,7 +74,7 @@ export function CloudWorkspaceDetailsContent({
 }) {
   const resources = workspace.generation.resources;
   const recoveryState = workspace.recovery?.state;
-  const setup = recoveryState ? cloudStatusLabel(recoveryState) : ["ready", "busy", "stopped", "archived"].includes(
+  const setup = workspace.setupFailure ? "Setup failed" : recoveryState ? cloudStatusLabel(recoveryState) : ["ready", "busy", "stopped", "archived"].includes(
     workspace.status,
   )
     ? "Setup succeeded"
@@ -142,7 +143,10 @@ export function CloudWorkspaceDetailsContent({
       {recoveryState && workspace.recovery?.checkpointAt && (
         <p className="text-fg3 mt-3 text-xs">Saved checkpoint · {new Date(workspace.recovery.checkpointAt).toLocaleString()}</p>
       )}
-      {workspace.error && !recoveryState && (
+      {workspace.setupFailure && (
+        <div className="mt-3"><CloudWorkspaceSetupFailure failure={workspace.setupFailure} /></div>
+      )}
+      {workspace.error && !recoveryState && !workspace.setupFailure && (
         <p className="text-error mt-3 text-xs" role="alert">
           {workspace.error.message}
         </p>

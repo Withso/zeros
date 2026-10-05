@@ -70,6 +70,12 @@ beforeEach(() => {
   api.projects.mockReturnValue([]);
 });
 describe("cloud workspace catalog ownership", () => {
+  it("retains failed setup state after compute cleanup and clears it for the next generation", () => {
+    acceptCloudWorkspaceDocument(Object.assign(doc(1, "stopped"), { setupFailure: { code: "setup_image_contract_invalid", hasLog: false } }));
+    expect(getCloudWorkspaceRows()[0].setupState).toBe("failed");
+    acceptCloudWorkspaceDocument({ ...doc(2, "setting_up"), generation: { ...doc(2).generation, number: 2 } });
+    expect(getCloudWorkspaceRows()[0].setupState).toBe("running");
+  });
   it.each(["stopped", "failed"])("retires a wake after confirmed %s so an explicit retry gets a new identity", async status => {
     acceptCloudWorkspaceDocument(doc(1, "stopped"));
     let firstKey: string;

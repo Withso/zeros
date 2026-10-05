@@ -38,6 +38,7 @@ import {
   useReducer,
   useRef,
   useState,
+  useSyncExternalStore,
   type ForwardedRef,
   type ReactNode,
 } from "react";
@@ -67,6 +68,9 @@ import { useThemeId } from "../../../shared/theme/use-theme-variant";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { createTerminalResizeScheduler } from "../../terminal/terminal-resize-scheduler";
 import { isUsableTerminalDimensions } from "../../terminal/terminal-dimensions";
+import { parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../../state/cloud-workspace-catalog";
+import { CloudWorkspaceSetupFailure } from "../../conversation/cloud-workspace-setup-failure";
 
 /** How often to re-pull the setup buffer while a run is live. The buffer is the
  *  source of truth; we delta-append, so polling is exact (no dup/gap). */
@@ -119,7 +123,18 @@ export const SetupView = forwardRef<
   }
 >(function SetupView({ workspace, visible, onBusyChange }, ref) {
   const openScripts = useOpenScriptsSettings();
+  const target = parseCloudWorkspaceKey(workspace?.id ?? "");
+  const cloud = target !== null;
+  const subscribe = useCallback((listener: () => void) =>
+    visible && cloud ? subscribeCloudWorkspaces(listener) : () => {}, [visible, cloud]);
+  const snapshot = () => target ? cloudWorkspaceDocument(target) : undefined;
+  const failure = useSyncExternalStore(subscribe, snapshot, snapshot)?.setupFailure;
   if (!workspace) return <SetupLoading />;
+  if (failure) return (
+    <div className="flex h-full min-h-0 items-center justify-center p-6">
+      <CloudWorkspaceSetupFailure failure={failure} />
+    </div>
+  );
   return (
     <WorkspaceSetup
       // Remount on workspace switch so the xterm + buffer cursor reset cleanly.

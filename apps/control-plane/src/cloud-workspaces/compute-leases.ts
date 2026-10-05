@@ -20,7 +20,7 @@ import {
 import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { assertSingleProviderResource } from "./provider.js";
 import { requestManagedComputeStop } from "./compute-credit-stop.js";
-import { classifyCloudFailure, type CloudDiagnosticPhase } from "./cloud-diagnostics.js";
+import { classifyCloudFailure, diagnosticCode, type CloudDiagnosticPhase } from "./cloud-diagnostics.js";
 import { retainCloudDiagnostic, diagnosticStorageFailed, recoverCloudDiagnostic, runCloudDiagnosticCleanup } from "./cloud-diagnostic-store.js";
 
 export type ManagedComputePolicy = {
@@ -66,6 +66,7 @@ type Scope = {
   live: boolean;
   desired_state: string;
   generation: number;
+  setup_failure_code: string | null;
 };
 function failure(code: string, retryable = false): CloudProviderError {
   return new CloudProviderError(
@@ -151,6 +152,11 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         await tx.query<Scope>(
           `SELECT workspace.owner_user_id AS user_id,workspace.current_billing_epoch AS billing_epoch,
         workspace.desired_state,workspace.current_generation AS generation,billing.entitlement_plan,
+        (
+          SELECT CASE WHEN setup.state='failed' THEN setup.error_code ELSE NULL END
+          FROM cloud_workspace_setup_runs setup WHERE setup.workspace_id=workspace.id AND setup.org_id=workspace.org_id
+            AND setup.generation=workspace.current_generation ORDER BY setup.attempt DESC LIMIT 1
+        ) AS setup_failure_code,
         version.credential_source='hosted' AND coalesce(requirement.require_credit,true) AS requires_credit,
         cloud_workspace_paid_authority_live(workspace.id,workspace.owner_user_id,$4)
           AND workspace.status<>'failed'
@@ -899,7 +905,9 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       scope.user_id !== lease.user_id ||
       money(scope.billing_epoch) !== money(lease.billing_epoch)
     ) {
-      await this.stopAtBudget(lease, "compute_scope_unavailable");
+      const setupCode = diagnosticCode(scope.setup_failure_code);
+      await this.stopAtBudget(lease, scope.generation === lease.generation && setupCode === scope.setup_failure_code
+        ? setupCode : "compute_scope_unavailable");
       return null;
     }
     if (resource.state !== "running") return null;

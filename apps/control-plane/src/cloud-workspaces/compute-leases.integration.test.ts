@@ -192,14 +192,85 @@ suite("managed compute lifecycle admission", () => {
     );
   }
 
-  async function publicWorkspaceError() {
+  async function publicWorkspace() {
     const app = new Hono();
     app.use("*", async (c,next) => { c.set("user", {id:f.userId} as AuthedUser); await next(); });
     app.route("/", createCloudWorkspaceRoutes(pool, null, {workosEnabled:false}));
     const response = await app.request(`/v1/cloud-workspaces/${f.workspaceId}`);
     expect(response.status).toBe(200);
-    return (await response.json()).workspace.error;
+    return (await response.json()).workspace;
   }
+  async function publicWorkspaceError() {
+    return (await publicWorkspace()).error;
+  }
+
+  async function failSetup(code: string, log = "") {
+    await pool.query(`UPDATE cloud_workspace_setup_runs SET state='failed',completed_at=now(),
+      lease_owner=NULL,lease_expires_at=NULL,error_code=$2,log_excerpt=$3 WHERE workspace_id=$1`,
+    [f.workspaceId, code, log]);
+    await pool.query("UPDATE cloud_workspaces SET status='failed',last_error_code=$2 WHERE id=$1", [f.workspaceId, code]);
+  }
+
+  it.each([
+    ["setup_image_contract_invalid", "image_integrity_rejected", "cloud_workspace_image_integrity_rejected", ""],
+    ["setup_command_failed", "safety_failure", "cloud_workspace_safety_failure", "Setup script exited unsuccessfully"],
+  ])("preserves the latest failed setup cause %s at the authority check and after cleanup", async (code, reason, publicCode, log) => {
+    await ready();
+    await failSetup(code, log);
+    await coordinator.runOnce();
+    expect(provider.renewComputeLease).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].last_error_code).toBe(code);
+    const incident = (await pool.query("SELECT id,reason,first_cause FROM cloud_workspace_diagnostic_incidents WHERE operation_id=$1", [input.intentId])).rows[0];
+    expect(incident).toMatchObject({ reason, first_cause: { phase: "authority_check", code } });
+    expect(await publicWorkspace()).toMatchObject({
+      setupFailure: { code, hasLog: log.length > 0 },
+      error: { code: publicCode, message: expect.stringContaining(incident.id) },
+    });
+    await pool.query("UPDATE cloud_workspaces SET status='stopped',last_error_code=NULL,last_error_message=NULL WHERE id=$1", [f.workspaceId]);
+    expect(await publicWorkspace()).toMatchObject({ setupFailure: { code, hasLog: log.length > 0 } });
+  });
+
+  it("does not preserve an unknown setup code or expose it in the workspace document", async () => {
+    await ready();
+    await failSetup("unrecognized_failure");
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].last_error_code).toBe("compute_scope_unavailable");
+    expect(await publicWorkspace()).toMatchObject({ setupFailure: { code: "compute_reconciliation_failed", hasLog: false } });
+    expect(JSON.stringify(await publicWorkspace())).not.toContain("unrecognized_failure");
+  });
+
+  it("preserves the failed setup cause if cleanup already changed the lifecycle status", async () => {
+    await ready();
+    await failSetup("setup_image_contract_invalid");
+    await pool.query("UPDATE cloud_workspaces SET status='stopping',desired_state='stopped' WHERE id=$1", [f.workspaceId]);
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].last_error_code).toBe("setup_image_contract_invalid");
+  });
+
+  it.each(["queued", "succeeded"])("ignores an older failed setup when the latest attempt is %s", async state => {
+    await ready();
+    await failSetup("setup_image_contract_invalid");
+    await pool.query(`INSERT INTO cloud_workspace_setup_runs(workspace_id,generation,org_id,attempt,state,completed_at)
+      VALUES ($1,1,$2,2,$3::cloud_workspace_setup_state,CASE WHEN $3::text='succeeded' THEN now() ELSE NULL END)`, [f.workspaceId, f.organizationId, state]);
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].last_error_code).toBe("compute_scope_unavailable");
+    expect((await publicWorkspace()).setupFailure).toBeNull();
+  });
+
+  it("does not attribute an older generation's setup failure to the current generation", async () => {
+    await ready();
+    await failSetup("setup_image_contract_invalid");
+    await pool.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,architecture,
+      cpu_millicores,memory_mib,storage_mib,created_by,provider_connection_id)
+      SELECT workspace_id,2,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,created_by,provider_connection_id
+      FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1`, [f.workspaceId]);
+    await pool.query(`INSERT INTO cloud_workspace_provider_bindings(workspace_id,generation,org_id,provider,observed_state)
+      SELECT workspace_id,2,org_id,provider,'stopped' FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=1`, [f.workspaceId]);
+    await pool.query("UPDATE cloud_workspaces SET current_generation=2 WHERE id=$1", [f.workspaceId]);
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].last_error_code).toBe("compute_scope_unavailable");
+    expect((await publicWorkspace()).setupFailure).toBeNull();
+  });
 
   it("preserves the initiating budget stop through pending checkpoint, repeated drain, failure and settlement", async () => {
     await ready(); await age();
