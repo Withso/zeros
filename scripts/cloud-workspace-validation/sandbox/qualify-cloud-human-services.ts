@@ -6,6 +6,7 @@ import { writeFile, readFile, rename } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { CloudRuntimeHumanServices } from '../../../apps/desktop/src/engine/transport/cloud-human-services';
 import { loadCloudWorkerConfiguration } from '../../../apps/desktop/src/engine/agents/containment/cloud-worker-config';
+import { cloudWorkspacePublicationPath } from '../../../apps/desktop/src/engine/agents/containment/cloud-workspace-paths';
 import { createAttachmentTemporaryDirectory, type AttachmentTemporaryDirectory } from '../../../apps/desktop/src/engine/files/attachment-temporary-directory';
 
 const { Client } = createRequire(import.meta.url)('ssh2');
@@ -56,7 +57,9 @@ async function main() {
   // interpolate a user attachment name or payload into the workload command.
   assert.match(staged, /^\/srv\/zeros\/attachment-staging\/zeros-attachment-[A-Za-z0-9_-]+\/payload$/);
   assert.notEqual((await exec(`cat ${staged}`)).code, 0);
-  await rename(staged, transfer);
+  // Computer workspaces expose the primary through a separate bind mount.
+  // Use the same admitted, shared-mount destination as real attachment writes.
+  await rename(staged, cloudWorkspacePublicationPath(transfer));
   assert.equal(await readFile(transfer, 'utf8'), 'complete attachment');
   rmSync(transfer);
   await temporary.dispose(); temporary = undefined;
