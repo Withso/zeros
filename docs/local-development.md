@@ -58,7 +58,10 @@ when the direct child exits first. A watchdog tears down owned processes if the
 launcher is killed or crashes; fatal launcher/output errors cancel and release
 the lock. One launcher per checkout is allowed. A dead
 launcher's `.context/zeros-local/launcher.lock` is recovered on the next run;
-an incomplete lock reports an actionable error instead of stealing a live run.
+recovery is serialized, ownership uses a random token, and release cannot remove
+a replacement owner's record. A live PID blocks startup only if it still
+belongs to a Local launcher. An incomplete lock reports an actionable error
+instead of stealing a live run.
 
 ## Accounts and network services
 
@@ -112,6 +115,16 @@ profile. It also starts with its own user settings instead of seeding them from
 the installed app. Stopping the command does not remove SQLite or workspace
 data. Local profiles are not pruned by the hosted Dev launcher.
 
+To delete an old profile, stop its launcher first and remove its identity's
+directories: `~/Library/Application Support/com.zeros.local.<identity>/`,
+`~/Library/Caches/com.zeros.local.<identity>/`,
+`~/Library/Logs/com.zeros.local.<identity>/`,
+`~/.zeros-local/instances/<identity>/`, the cached bundle at
+`~/.zeros-local/dev-instances/<identity>/`, and `~/zeros-local-<identity>/`.
+The visible worktree directory contains project work and uncommitted changes;
+keep any work you need before removing it. The checkout's
+`.context/zeros-local/` contains only launcher coordination state.
+
 Vite selects from ports 6200–7223. Engines use disjoint 10-port blocks in
 31000–36119, including the existing eight-port engine walk and two gateway ports.
 The launcher probes IPv4, IPv6 and wildcard listeners, checks the entire engine
@@ -136,5 +149,7 @@ Before calling the native launcher qualified on macOS, run it in two different
 checkouts with no Zeros account/profile, open a local project and restart each to
 verify retained SQLite state. Check renderer HMR, a real provider-authenticated
 agent and terminal, distinct app names/profiles, and Stop during both cold build
-and the running app. Run `pnpm smoke:engine` on macOS. Linux unit/build/browser
+and the running app, including a terminal hangup. Check that a same-checkout Dev
+run blocks Local and that a rebuild from the other mode exits with the actionable
+mode error. Run `pnpm smoke:engine` on macOS. Linux unit/build/browser
 checks do not substitute for these native macOS checks.

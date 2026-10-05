@@ -2,7 +2,7 @@
 // Account-free native development. This launcher never imports the hosted
 // lifecycle or an auth profile. Main supplies the mode to preload and engine.
 import { execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
@@ -270,42 +270,101 @@ export function runOwnedProcess(
   });
 }
 
+const activeLockTokens = new Set();
+
 function launcherLock(root, slug) {
   // A second launch of the same checkout must not rebuild its running app.
   // Different checkouts never contend, even when they share branch names.
   const directory = path.join(root, ".context", "zeros-local");
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const file = path.join(directory, "launcher.lock");
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const token = randomUUID();
+  const record = JSON.stringify({ pid: process.pid, slug, token });
+  const read = () => {
+    let raw;
     try {
-      const fd = fs.openSync(file, "wx", 0o600);
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, slug }));
-      fs.closeSync(fd);
-      return () => fs.rmSync(file, { force: true });
+      raw = fs.readFileSync(file, "utf8");
     } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      let owner;
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+    try {
+      return { raw, owner: JSON.parse(raw) };
+    } catch {
+      throw new Error(
+        "Zeros Local launcher lock is incomplete; stop Local before removing .context/zeros-local/launcher.lock.",
+      );
+    }
+  };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const temporary = path.join(directory, `launcher-${token}.tmp`);
+    try {
+      fs.writeFileSync(temporary, record, { flag: "wx", mode: 0o600 });
       try {
-        owner = JSON.parse(fs.readFileSync(file, "utf8"));
-      } catch {
-        throw new Error(
-          "Zeros Local launcher lock is incomplete; stop Local before removing .context/zeros-local/launcher.lock.",
-        );
-      }
-      if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0)
-        throw new Error("Invalid Zeros Local launcher lock.");
-      try {
-        process.kill(owner.pid, 0);
+        // Publish complete private JSON without overwriting another owner.
+        fs.linkSync(temporary, file);
+        activeLockTokens.add(token);
+        return () => {
+          try {
+            if (read()?.owner.token === token) fs.unlinkSync(file);
+          } finally {
+            activeLockTokens.delete(token);
+          }
+        };
       } catch (error) {
-        if (error.code === "ESRCH") {
-          fs.unlinkSync(file);
-          continue;
-        }
-        throw error;
+        if (error.code !== "EEXIST") throw error;
       }
+    } finally {
+      fs.rmSync(temporary, { force: true });
+    }
+    const snapshot = read();
+    if (!snapshot) continue;
+    const { owner } = snapshot;
+    if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0)
+      throw new Error("Invalid Zeros Local launcher lock.");
+    let live = true;
+    try {
+      process.kill(owner.pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") live = false;
+      else throw error;
+    }
+    if (
+      live &&
+      !(owner.pid === process.pid && activeLockTokens.has(owner.token))
+    ) {
+      // A recycled PID (including after reboot) is not a launcher owner.
+      const command = execFileSync(
+        "ps",
+        ["-o", "command=", "-p", String(owner.pid)],
+        {
+          encoding: "utf8",
+          timeout: 2000,
+        },
+      );
+      live = command.includes("electron-local.mjs");
+    }
+    if (live)
       throw new Error(
         "Zeros Local is already running for this checkout. Stop it before restarting.",
       );
+    const generation = createHash("sha256").update(snapshot.raw).digest("hex");
+    const recovery = path.join(directory, `recovery-${generation}.lock`);
+    let fd;
+    try {
+      fd = fs.openSync(recovery, "wx", 0o600);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      throw new Error(
+        "Zeros Local lock recovery is already in progress; retry after it completes.",
+      );
+    }
+    try {
+      // Retire only the stale generation inspected before taking the fence.
+      if (read()?.raw === snapshot.raw) fs.unlinkSync(file);
+    } finally {
+      fs.closeSync(fd);
+      fs.unlinkSync(recovery);
     }
   }
   throw new Error("Zeros Local launcher lock changed; retry.");
