@@ -839,6 +839,27 @@ sys.stdout.buffer.write(out.getvalue())`]);
     expect(build).not.toMatch(/chown[^\n]*(?:-R|\/opt\/\*)/);
   });
 
+  it("installs and protects every bootstrap helper the builder commands and TCB check require", () => {
+    const payload = basePayload(ROOT, "1".repeat(40), "2".repeat(32));
+    const build = payload.files.find(file => file.name === "build.sh")!.data.toString();
+    const installed = /^for name in ([^;]+); do\n  install -o root -g root -m 0555 "base\/\$name" "\/opt\/zeros-bootstrap\/\$name"$/m.exec(build)![1].split(" ");
+    const protectedBlock = /^protected = \['\/opt\/zeros-bootstrap\/' \+ name for name in \(([^\]]+)\)\]$/m.exec(build)![1];
+    const commands = fs.readFileSync(path.join(ROOT, "apps/control-plane/src/cloud-workspaces/cloud-builder-commands.ts"), "utf8");
+    const computerBuild = fs.readFileSync(path.join(BASE, "computer-build.py"), "utf8");
+    const required = new Set([...commands.matchAll(/\/opt\/zeros-bootstrap\/([\w.-]+)/g)].map(match => match[1]));
+    for (const match of computerBuild.matchAll(/"\/opt\/zeros-bootstrap\/([\w.-]+\.py)"/g)) required.add(match[1]);
+    expect(required).toEqual(new Set(["bootstrap.py", "computer-build.py", "computer-git-askpass.py"]));
+    for (const name of required) {
+      expect(payload.files.map(file => file.name)).toContain(`base/${name}`);
+      expect(installed).toContain(name);
+      expect(protectedBlock).toContain(`'${name}'`);
+    }
+    // computer-build.py protects /usr/local/lib/systemd/system; Boat stock owns its ancestors.
+    expect(build).toMatch(/^chown root:root \/usr\/local \/usr\/local\/lib$/m);
+    expect(build).toMatch(/^chmod 0755 \/usr\/local \/usr\/local\/lib$/m);
+    expect(build.indexOf("chown root:root /usr/local")).toBeLessThan(build.indexOf("compat['protectedFiles']"));
+  });
+
   it("accepts only bounded closed diagnostic output from remote commands", () => {
     const diagnostic = { schema: "zeros.diagnostic/v1", component: "base", stage: "verify", ok: true, exitCode: 0, timedOut: false, failedChecks: [] };
     expect(parseProbe({ status: 200, body: { exitCode: 0, stdout: JSON.stringify({ versions: {} }) + "\n" + JSON.stringify(diagnostic) } }, "verify")).toEqual({ versions: {} });

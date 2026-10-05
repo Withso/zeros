@@ -32,6 +32,11 @@ apt-get install -y --no-install-recommends \
 # changing ownership of any provider-managed children under /opt or /usr/local.
 chown root:root /opt
 chmod 0755 /opt
+# Cloud Computer builds protect /usr/local/lib/systemd/system, so its
+# existing ancestors must be root-owned too (computer-build.py
+# protected_ancestors). Children such as Boat's toolchains keep their owner.
+chown root:root /usr/local /usr/local/lib
+chmod 0755 /usr/local /usr/local/lib
 
 install -d -o root -g root -m 0755 /srv/zeros
 groupadd --gid 10001 zeros-agent
@@ -47,7 +52,7 @@ useradd --uid 10004 --gid 10004 --no-create-home --shell /usr/sbin/nologin zeros
 # then binds the logical paths before initializing homes/settings/workspaces.
 install -d -o root -g root -m 0700 /srv/zeros/runtime-installs /run/zeros
 install -d -o root -g root -m 0755 /opt/zeros-bootstrap /opt/zeros-infra /opt/zeros /etc/zeros
-for name in bootstrap.py boot.sh dispatch.sh install-runtime.sh; do
+for name in bootstrap.py boot.sh dispatch.sh install-runtime.sh computer-build.py computer-git-askpass.py; do
   install -o root -g root -m 0555 "base/$name" "/opt/zeros-bootstrap/$name"
 done
 install -o root -g root -m 0444 base/cloud-worker.json /etc/zeros/cloud-worker.json
@@ -62,7 +67,8 @@ def raw(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
 def sha(value):
     return hashlib.sha256(value).hexdigest()
-protected = ['/opt/zeros-bootstrap/' + name for name in ('bootstrap.py', 'boot.sh', 'dispatch.sh', 'install-runtime.sh')]
+protected = ['/opt/zeros-bootstrap/' + name for name in ('bootstrap.py', 'boot.sh', 'dispatch.sh', 'install-runtime.sh',
+                                                     'computer-build.py', 'computer-git-askpass.py')]
 protected += ['/etc/zeros/cloud-worker.json', '/etc/systemd/system/zeros-boot.service',
               '/etc/systemd/system/zeros-host.service', '/etc/tmpfiles.d/zeros.conf', '/etc/apparmor.d/zeros-cloud-engine']
 compat = json.loads(pathlib.Path('base/compatibility.json').read_bytes())
