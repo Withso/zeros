@@ -299,6 +299,7 @@ export {
   getWorkspaceRepoAccess,
   listGithubOwners,
   listPrs,
+  listRepositoryBranches,
   markPrReady,
   initRepoInPlace,
   mergePr,

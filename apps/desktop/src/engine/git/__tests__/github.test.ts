@@ -34,7 +34,7 @@ import {
 } from "..";
 // Not on the barrel: the process-local login cache is an internal hint for
 // branch prefixing, not part of the git layer's public surface.
-import { cachedGithubLogin } from "../github";
+import { listRepositoryBranches, cachedGithubLogin } from "../github";
 import { runWithGithubWriteCredential } from "../github-write-context";
 
 const execFileAsync = promisify(execFile);
@@ -216,6 +216,10 @@ function makeOctokitMock() {
       },
     },
     repos: {
+      async listBranches(args: { owner: string; repo: string; per_page: number; page: number }) {
+        calls.push({ method: "repos.listBranches", args });
+        return { data: [{ name: "main" }, { name: "feature/topic" }] };
+      },
       async compareCommitsWithBasehead(args: {
         owner: string;
         repo: string;
@@ -976,6 +980,28 @@ describe("github", () => {
     });
   });
 
+  describe("remote repository branches", () => {
+    beforeEach(() => { store.setToken("test-read-credential"); });
+    it("returns GitHub names with the actual remote default and a bounded first page", async () => {
+      mock.setRepoGetResponse(() => ({ data: { default_branch: "main" } }));
+      expect(await listRepositoryBranches({ owner: "Acme", repo: "example" })).toEqual([
+        { name: "main", isDefault: true }, { name: "feature/topic", isDefault: false },
+      ]);
+      expect(mock.calls).toContainEqual({ method: "repos.listBranches", args: { owner: "Acme", repo: "example", per_page: 100, page: 1 } });
+      mock.octokit.repos.listBranches = async () => ({ data: Array.from({ length: 150 }, (_, i) => ({ name: `branch-${i}` })) });
+      expect(await listRepositoryBranches({ owner: "Acme", repo: "example" })).toHaveLength(100);
+    });
+    it.each([[404, "GITHUB_REPO_NOT_INSTALLED"], [403, "GITHUB_API_ERROR"], [429, "GITHUB_RATE_LIMITED"]])(
+      "maps a GitHub %s through the shared read error handling", async (status, code) => {
+        mock.octokit.repos.listBranches = async () => { throw makeGithubError(status as number, "Unavailable"); };
+        await expect(listRepositoryBranches({ owner: "Acme", repo: "example" })).rejects.toMatchObject({ code });
+      },
+    );
+    it("rejects malformed repository identity before accessing GitHub", async () => {
+      await expect(listRepositoryBranches({ owner: "../other", repo: "project" })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      expect(mock.calls).toEqual([]);
+    });
+  });
   describe("getPr / listPrs", () => {
     beforeEach(() => {
       store.setToken("ghp_test_token");

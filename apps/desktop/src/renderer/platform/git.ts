@@ -72,6 +72,7 @@ import {
   bridgeGhPrMerge,
   bridgeGhPrComment,
   bridgeGhPrList,
+  bridgeGhBranchList,
   bridgeWorkspaceCreate,
   bridgeWorkspaceGet,
   bridgeWorkspaceLifecycleStatus,
@@ -1959,6 +1960,11 @@ export async function ghPrSync(workspaceId: string): Promise<PR | null> {
   });
   inflightPrSyncs.set(workspaceId, request);
   return request;
+}
+
+export interface GithubBranch { name: string; isDefault: boolean }
+export async function ghBranchList(args: { owner: string; repo: string }): Promise<GithubBranch[]> {
+  return bridgeGhBranchList(requireBridge("list GitHub branches"), args);
 }
 
 export async function ghPrList(args: {

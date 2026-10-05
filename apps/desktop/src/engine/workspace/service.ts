@@ -224,6 +224,7 @@ import {
   getCreateWorkspaceFromBranchStatus,
   proposeBranchRename,
   listPrs,
+  listRepositoryBranches,
   parseGitHubRemote,
   detachStart,
   detachStop,
@@ -1150,6 +1151,7 @@ const REMOTE_READABLE = new Set<string>([
   "gh.repoOwnerAvatar",
   "gh.repoAccess",
   "gh.prList",
+  "gh.branchList",
   "gh.prGet",
   "gh.prChecks",
   "gh.prCommits",
@@ -5270,7 +5272,8 @@ export class WorkspaceService {
       // bridge; auth ops stay in Electron main). Remote discovery is bound to
       // the admitted checkout. Local create-from pickers keep their historical
       // originUrl/owner/repo contract before a workspace exists.
-      case "gh.prList": {
+      case "gh.prList":
+      case "gh.branchList": {
         let owner: string;
         let repo: string;
         const originUrl = optStr(params, "originUrl");
@@ -5289,6 +5292,7 @@ export class WorkspaceService {
           owner = reqStr(params, "owner");
           repo = reqStr(params, "repo");
         }
+        if (op === "gh.branchList") return listRepositoryBranches({ owner, repo });
         return listPrs({
           owner,
           repo,
