@@ -23,6 +23,7 @@ import { ClaudeBackgroundFixture } from "./claude-background-fixture";
 import { SubagentPresentationFixture } from "./subagent-presentation-fixture";
 import { StreamingTextFixture } from "./streaming-text-fixture";
 import { ToolPresentationFixture } from "./tool-presentation-fixture";
+import { ToolWaitFixture } from "./tool-wait-fixture";
 import { ModelFallbackFixture } from "./model-fallback-fixture";
 import { AgentNoticeFixture } from "./agent-notice-fixture";
 
@@ -277,6 +278,7 @@ function Harness() {
         <AgentNoticeFixture ctx={ctx} />
         <ClaudeBackgroundFixture ctx={ctx} />
         <ToolPresentationFixture ctx={ctx} />
+        <ToolWaitFixture ctx={ctx} />
         <ArtifactLinksFixture ctx={ctx} />
         <SubagentPresentationFixture ctx={ctx} />
         <StreamingTextFixture ctx={ctx} />

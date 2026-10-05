@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 // @ts-expect-error — .mjs has no type declarations; it exports pure helpers.
 import {
   extractCodexMethods,
+  extractCodexThreadItems,
   validateCodexProtocolCoverage,
 } from "../codex-protocol-coverage.mjs";
 
@@ -26,10 +27,38 @@ function manifest() {
       canonical: ["notification/canonical"],
       forwarded: ["notification/forwarded"],
     },
+    threadItems: {
+      handled: ["commandExecution", "sleep"],
+      retained: ["hookPrompt", "functionCallOutput"],
+    },
   };
 }
 
 describe("Codex protocol coverage", () => {
+  it("extracts native item discriminants, including intersected generated types", () => {
+    expect(extractCodexThreadItems([
+      'export type ThreadItem = { "type": "commandExecution", id: string }',
+      ' | { "type": "sleep" } & SleepItem;',
+    ].join("\n"))).toEqual(["commandExecution", "sleep"]);
+  });
+
+  it.each([
+    ["unclassified", ["commandExecution", "sleep", "hookPrompt", "functionCallOutput", "newNativeItem"], undefined],
+    ["stale", ["commandExecution", "sleep", "hookPrompt"], undefined],
+    ["duplicate", ["commandExecution", "sleep", "hookPrompt", "functionCallOutput"], "sleep"],
+  ])("rejects %s item coverage even when every RPC method is covered", (reason, threadItems, duplicate) => {
+    const value = manifest();
+    if (duplicate) value.threadItems.retained.push(duplicate);
+    expect(() => validateCodexProtocolCoverage({
+      manifest: value,
+      pinnedVersion: "0.146.0",
+      clientRequests: ["client/handled", "client/generated"],
+      serverRequests: ["request/handled", "request/conditional"],
+      serverNotifications: ["notification/canonical", "notification/forwarded"],
+      threadItems,
+    })).toThrow(new RegExp(`${reason} thread item`, "i"));
+  });
+
   it("extracts method discriminants from generated TypeScript", () => {
     const source = [
       'export type Message = { "method": "alpha", params: A }',
@@ -53,11 +82,14 @@ describe("Codex protocol coverage", () => {
           "notification/canonical",
           "notification/forwarded",
         ],
+        threadItems: ["commandExecution", "sleep", "hookPrompt", "functionCallOutput"],
       }),
     ).toEqual({
       clientRequests: { "generated-only": 1, handled: 1 },
       serverRequests: { handled: 1, "provider-conditional": 1 },
       serverNotifications: { canonical: 1, forwarded: 1 },
+      threadItems: { handled: 2, retained: 2 },
+      totalItems: 4,
       total: 6,
     });
   });
@@ -68,6 +100,7 @@ describe("Codex protocol coverage", () => {
         manifest: manifest(),
         pinnedVersion: "0.146.0",
         clientRequests: ["client/handled", "client/generated", "client/new"],
+        threadItems: ["commandExecution", "sleep", "hookPrompt", "functionCallOutput"],
         serverRequests: ["request/handled", "request/conditional"],
         serverNotifications: [
           "notification/canonical",
@@ -86,6 +119,7 @@ describe("Codex protocol coverage", () => {
       validateCodexProtocolCoverage({
         manifest: invalid,
         pinnedVersion: "0.146.0",
+        threadItems: ["commandExecution", "sleep", "hookPrompt", "functionCallOutput"],
         clientRequests: ["client/handled", "client/generated"],
         serverRequests: ["request/handled", "request/conditional"],
         serverNotifications: [
@@ -108,6 +142,7 @@ describe("Codex protocol coverage", () => {
       validateCodexProtocolCoverage({
         manifest: invalid,
         pinnedVersion: "0.146.0",
+        threadItems: ["commandExecution", "sleep", "hookPrompt", "functionCallOutput"],
         clientRequests: ["client/handled", "client/generated"],
         serverRequests: ["request/handled", "request/conditional"],
         serverNotifications: [
@@ -123,6 +158,7 @@ describe("Codex protocol coverage", () => {
       validateCodexProtocolCoverage({
         manifest: manifest(),
         pinnedVersion: "0.147.0",
+        threadItems: ["commandExecution", "sleep", "hookPrompt", "functionCallOutput"],
         clientRequests: ["client/handled", "client/generated"],
         serverRequests: ["request/handled", "request/conditional"],
         serverNotifications: [

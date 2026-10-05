@@ -36,6 +36,7 @@ import type { ComponentType } from "react";
 
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { browserToolActivity } from "../../browser/browser-tool-activity";
+import { toolPresentationReady } from "./tool-readiness";
 
 /** Three-bucket roll-up of a working group's events, shown to the user
  *  as "<N> tool calls, <M> messages, <K> agents". A "tool call" is any
@@ -56,12 +57,13 @@ export interface EventSummaryCounts {
 export function countEventSummary(events: AgentMessage[]): EventSummaryCounts {
   let toolCalls = 0;
   let agents = 0;
-  let tools = 0;
+  let messages = 0;
   for (const e of events) {
     if (e.kind !== "tool") {
+      messages++;
       continue;
     }
-    tools++;
+    if (!toolPresentationReady(e)) continue;
     if (browserToolActivity(e)) {
       toolCalls++;
       continue;
@@ -70,7 +72,7 @@ export function countEventSummary(events: AgentMessage[]): EventSummaryCounts {
     if (tk === "subagent" || tk === "task") agents++;
     else toolCalls++;
   }
-  return { toolCalls, agents, messages: events.length - tools };
+  return { toolCalls, agents, messages };
 }
 
 /** Pure: "<N> tool calls, <M> messages, <K> agents". A zero bucket is
@@ -107,6 +109,7 @@ export function summaryIcons(
   let hasThinking = false;
   for (const e of events) {
     if (e.kind === "tool") {
+      if (!toolPresentationReady(e)) continue;
       if (designToolLabel(e)) {
         if (!seenKinds.has("design")) { seenKinds.add("design"); out.push(PenTool); }
         continue;

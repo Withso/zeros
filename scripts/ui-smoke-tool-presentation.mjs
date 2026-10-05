@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runToolWaitSmoke } from "./ui-smoke-tool-waits.mjs";
 
 export async function runToolPresentationSmoke({ page, check }) {
   const fixture = page.locator("#tool-presentation-fixture");
@@ -170,4 +171,5 @@ export async function runToolPresentationSmoke({ page, check }) {
     "Tools survive settlement/reload; shared results stay singular; highlighting never paints stale source",
     true,
   );
+  await runToolWaitSmoke({ page, check });
 }

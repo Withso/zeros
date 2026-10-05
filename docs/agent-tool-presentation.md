@@ -11,6 +11,27 @@ completed connection rows from older builds remain stored but do not create
 turns, tool counts, nested rows or copy/export content. Native tools, unknown
 records and actual interrupted-turn errors keep their normal presentation.
 
+Codex's native `sleep` item is the interruptible `clock.sleep` activity, not a
+generic tool result. Preserve its native ID, duration, input and completion in
+storage. Hide routine live/completed sleeps from rows, summaries and copied
+transcripts, including old generic records with that exact native shape. Keep
+the existing turn activity indicator and original elapsed clock. Unknown
+payloads, failures and missing-completion records remain inspectable. Stop,
+transport loss and turn replacement mark outstanding sleeps as completion
+unreported; a late native completion repairs the same row. A failed/interrupted
+turn snapshot alone cannot confirm a sleep finished. Sleeps stay in owned turn
+events for timing, but cannot create an empty standalone system turn.
+
+An unambiguous literal `gh pr checks` invocation returning exit code 8 means
+checks are pending. Present its ordinary Bash row neutrally with “Checks are
+still running.” in the existing detail surface and accessible description.
+Keep the original exit code, native failure status and output stored; use the
+same pending explanation in copied transcripts. JSON mode may return zero with
+pending buckets: recognize only the unfiltered native bucket array, without
+failed/cancelled buckets. Do not infer pending from arbitrary output, jq/template
+results, shell expansions, compound scripts or other commands' exit code 8.
+Real errors, cancellations and unreported completions retain normal treatment.
+
 ## Artifacts and links
 
 - Image generation uses `Generate` plus the native saved-file pill. Inspecting
@@ -527,6 +548,15 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   smoke passing against each replacement.
 
 ## Verification when providers change
+
+`pnpm check:codex-pin` covers every RPC method and every generated `ThreadItem`
+discriminant. The translator combines compatibility shapes with generated
+variants so adding an item also fails typechecking until a policy is chosen.
+`sleep` is explicitly handled. `hookPrompt` and `functionCallOutput` currently
+retain bounded generic diagnostics without inventing command inputs or matching
+outputs to calls by name. Runtime-unknown items retain the same bounded fallback.
+Neither method coverage nor generated protocol availability alone proves a
+native item's presentation is implemented.
 
 Claude background completion receipts are not user-turn completion. An empty
 zero-call success needs autonomous origin or indexed queued-work evidence to

@@ -44,6 +44,8 @@ import { partitionTurn } from "./turn-partition";
 import { groupMessagesIntoTurns } from "./turn-grouping";
 import { readableTextFromArray } from "./renderers/raw-output";
 import { fallbackProse } from "./model-fallback";
+import { toolPresentationReady } from "./renderers/tool-readiness";
+import { pendingChecksMessage } from "./renderers/tool-pending-checks";
 
 export type TranscriptMode = "full" | "concise";
 
@@ -108,7 +110,8 @@ interface VisibleMessages {
  *  parent tool call isn't in this window) stays top-level rather than
  *  vanishing — the same guard agent-chat.tsx applies via `presentToolIds`. */
 function selectVisible(messages: AgentMessage[]): VisibleMessages {
-  messages = messages.filter((m) => !(m.kind === "text" && m.retracted)).map((m) => fallbackProse(m) ?? m);
+  messages = messages.filter((m) => !(m.kind === "text" && m.retracted)).map((m) => fallbackProse(m) ?? m)
+    .filter((m) => m.kind !== "tool" || toolPresentationReady(m));
   const toolIds = new Set<string>();
   for (const m of messages) {
     if (m.kind === "tool") toolIds.add(m.toolCallId);
@@ -418,12 +421,13 @@ function renderText(m: AgentTextMessage, depth: Depth): string {
 }
 
 function renderTool(tool: AgentToolMessage, ctx: Ctx, depth: Depth): string {
+  const pendingChecks = pendingChecksMessage(tool);
   const rawTitle = tool.title || tool.toolKind || "tool";
   const name = relativize(rawTitle, ctx.root);
   // Only a status that ISN'T "completed" carries information. Suffixing the
   // other ~95% of rows with "— completed" is noise on every heading.
   const status =
-    tool.status === "completed" ? "" : ` — ${tool.status.replace("_", " ")}`;
+    pendingChecks ? " — checks pending" : tool.status === "completed" ? "" : ` — ${tool.status.replace("_", " ")}`;
   const out: string[] = [`${h(3, depth)} Tool · ${name}${status}`];
 
   const input = inputIsRedundant(tool.rawInput, rawTitle)
@@ -439,6 +443,7 @@ function renderTool(tool: AgentToolMessage, ctx: Ctx, depth: Depth): string {
     const b = block(result);
     if (b) out.push("", "Output:", b);
   }
+  if (pendingChecks) out.push("", pendingChecks);
 
   // The user's reply to a native ask-tool lives ONLY on the durable stamp —
   // there is no user text row for it, so a transcript without this loses the
