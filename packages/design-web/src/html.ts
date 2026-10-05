@@ -686,6 +686,7 @@ export function mutateDesignNodeAttributeSource(
   nodeId: string,
   rawName: string,
   value: string | null,
+  sourceFile = "",
 ): string {
   const name = rawName.trim();
   if (!/^[A-Za-z_:][A-Za-z0-9_.:-]*$/.test(name) || name.length > 128) {
@@ -708,7 +709,7 @@ export function mutateDesignNodeAttributeSource(
     ["href", "src", "action", "formaction", "poster", "xlink:href"].includes(
       normalized,
     ) &&
-    !isContainedDesignReference(value)
+    !isContainedDesignReference(value, sourceFile)
   ) {
     throw new Error(`URL in ${name} must stay inside the design document.`);
   }

@@ -4,11 +4,8 @@ import {
   designPageIdSchema,
   type DesignPageSummary,
 } from "@zeros/protocol/design-pages";
-import {
-  readDesignDirectoryRegistry,
-  readDirectoryDesignLayout,
-} from "./metadata";
-import { readCanvas } from "./document-storage";
+import { readDesignDirectoryRegistry } from "./metadata";
+import { readCanvasContext } from "./document-storage";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { designCanvasPageCatalog } from "./pages";
 
@@ -58,11 +55,19 @@ export function getDesignPageHint(
   }
 }
 
-export interface DesignPageContext {
-  pages: DesignPageSummary[];
-  activePageId: string;
-  hinted: boolean;
-}
+export type DesignPageContext =
+  | {
+      pages: DesignPageSummary[];
+      activePageId: string;
+      hinted: boolean;
+      pagesError?: undefined;
+    }
+  | {
+      pages: null;
+      activePageId: null;
+      hinted: false;
+      pagesError: string;
+    };
 
 /** Read the current catalog before consuming an untrusted, potentially stale
  * hint. The fallback is prompt guidance only; writes still require pageId. */
@@ -76,10 +81,8 @@ export async function readDesignPageContext(target: {
     target.workspacePath,
     target.directory,
     async () => {
-      const canvas = await readCanvas(target.workspacePath);
-      const paged =
-        readDirectoryDesignLayout(target.workspacePath, target.directory)
-          ?.canvasVersion === 2;
+      const { canvas, layout } = await readCanvasContext(target.workspacePath);
+      const paged = layout?.canvasVersion === 2;
       const pages = designCanvasPageCatalog(canvas, undefined, paged);
       const hint = getDesignPageHint(target.workspaceId, target.workspacePath);
       const hintedPage =
@@ -92,5 +95,10 @@ export async function readDesignPageContext(target: {
         hinted: !!hintedPage,
       };
     },
-  );
+  ).catch((error: unknown) => ({
+    pages: null,
+    activePageId: null,
+    hinted: false as const,
+    pagesError: error instanceof Error ? error.message : String(error),
+  }));
 }

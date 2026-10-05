@@ -9,6 +9,73 @@ import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState, webTransaction } from "./fixtures";
 
 describe("web transaction adapter", () => {
+  it("threads the page origin into attribute and component-slot mutations", () => {
+    const initial = createDesignWebDocumentState({
+      documentId: "page-attributes",
+      entryFile: "page-1/home.html",
+      files: {
+        "page-1/home.html":
+          '<!doctype html><html><body><main data-oid="root"><img data-oid="image" src="local.png"></main></body></html>',
+      },
+    });
+    const outcome = applyDesignTransaction(
+      initial,
+      webTransaction(initial, "page-urls", [
+        {
+          operationId: "image",
+          type: "node.set-attribute",
+          nodeId: "image",
+          attribute: "src",
+          value: "../assets/a.png",
+        },
+        {
+          operationId: "component",
+          type: "component.create",
+          component: {
+            id: "card",
+            name: "Card",
+            file: "components/card.html",
+            props: [],
+            slots: ["content"],
+          },
+          html: '<!doctype html><html><body><article data-zid="surface"><slot></slot></article></body></html>',
+        },
+        {
+          operationId: "slot",
+          type: "instance.create",
+          componentId: "card",
+          parentNodeId: "root",
+          instanceNodeId: "card",
+          props: {},
+          slotHtml: '<img data-oid="slot" src="../assets/a.png">',
+        },
+      ]),
+      designWebTransactionAdapter,
+    );
+    expect(outcome.receipt.status).toBe("applied");
+    expect(outcome.state.files[initial.entryFile]).toContain(
+      'data-oid="image" src="../assets/a.png"',
+    );
+    expect(outcome.state.files[initial.entryFile]).toContain(
+      'data-oid="slot" src="../assets/a.png"',
+    );
+    expect(() =>
+      applyDesignTransaction(
+        initial,
+        webTransaction(initial, "escape", [
+          {
+            operationId: "image",
+            type: "node.set-attribute",
+            nodeId: "image",
+            attribute: "src",
+            value: "../../outside.png",
+          },
+        ]),
+        designWebTransactionAdapter,
+      ),
+    ).toThrow(/inside/i);
+  });
+
   it("keeps a no-op native HTML edit byte-for-byte unchanged", () => {
     const initial = createDesignWebDocumentState({
       documentId: "native-noop",

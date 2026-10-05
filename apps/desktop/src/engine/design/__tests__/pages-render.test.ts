@@ -6,7 +6,14 @@ import {
   primeDesignDirectoryName,
   forgetDesignDirectoryName,
 } from "../directory-registry";
-import { readDesignFrame, readDesignWorkspaceSnapshot } from "../document";
+import {
+  readDesignFrame,
+  readDesignWorkspaceSnapshot,
+  updateDesignNodeStyles,
+  commitDesignWebDocumentState,
+} from "../document";
+import { applyDesignTransaction } from "@zeros/design-core";
+import { designWebTransactionAdapter } from "@zeros/design-web";
 import { readDesignProtocolResource } from "../protocol-resource";
 import { expandDesignComponents } from "../components";
 import { readDesignWebDocumentState } from "../document-transactions";
@@ -94,6 +101,70 @@ describe("page frame rendering", () => {
         (row) => row.ruleId === "local-refs-only",
       ),
     ).toEqual([]);
+  });
+
+  it("accepts inspector background URLs relative to a page and renders the asset", async () => {
+    await write("assets/hero.png", Buffer.from("hero-image"));
+    const before = await readDesignFrame(root, "page-1/home.html");
+    await updateDesignNodeStyles(root, {
+      frame: before.file,
+      sourceVersion: before.sourceVersion,
+      nodeId: "home",
+      styles: { "background-image": "url(../assets/hero.png)" },
+    });
+    const frame = await readDesignFrame(root, before.file);
+    expect(frame.source).toContain("url(../assets/hero.png)");
+    expect(frame.srcDoc).toContain(
+      `data:image/png;base64,${Buffer.from("hero-image").toString("base64")}`,
+    );
+    await expect(
+      updateDesignNodeStyles(root, {
+        frame: frame.file,
+        sourceVersion: frame.sourceVersion,
+        nodeId: "home",
+        styles: { "background-image": "url(../../outside.png)" },
+      }),
+    ).rejects.toThrow(/external|URL/i);
+    expect((await readDesignFrame(root, frame.file)).source).toBe(frame.source);
+  });
+
+  it("accepts API attribute URLs relative to a page and renders the asset", async () => {
+    await write("assets/a.png", Buffer.from("attribute-image"));
+    const state = await readDesignWebDocumentState(root, "page-1/home.html");
+    const outcome = applyDesignTransaction(
+      state,
+      {
+        schemaVersion: 1,
+        transactionId: "page-attribute",
+        documentId: state.documentId,
+        baseRevision: state.revision,
+        actor: { kind: "human", id: "tester" },
+        intent: "Image source",
+        createdAt: 1,
+        operations: [
+          {
+            operationId: "image",
+            type: "node.set-attribute",
+            nodeId: "local",
+            attribute: "src",
+            value: "../assets/a.png",
+          },
+        ],
+      },
+      designWebTransactionAdapter,
+    );
+    expect(outcome.receipt.status).toBe("applied");
+    await commitDesignWebDocumentState(
+      root,
+      state.entryFile,
+      state.revision,
+      outcome.state,
+    );
+    const frame = await readDesignFrame(root, state.entryFile);
+    expect(frame.source).toContain('data-oid="local" src="../assets/a.png"');
+    expect(frame.srcDoc).toContain(
+      `data:image/png;base64,${Buffer.from("attribute-image").toString("base64")}`,
+    );
   });
 
   it("rebases component definition URLs before mixing frame-authored slot content", async () => {

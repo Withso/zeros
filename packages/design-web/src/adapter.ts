@@ -193,6 +193,7 @@ function applyParameterBindings(
         binding.selector,
         binding.name,
         text,
+        binding.file,
       );
       continue;
     }
@@ -218,6 +219,7 @@ function applyParameterBindings(
           binding.selector,
           binding.property,
           text,
+          binding.file,
         );
         continue;
       }
@@ -228,6 +230,7 @@ function applyParameterBindings(
         binding.instanceId,
         binding.prop,
         text,
+        state.entryFile,
       );
       continue;
     }
@@ -237,6 +240,7 @@ function applyParameterBindings(
         binding.nodeId,
         binding.attribute,
         text,
+        state.entryFile,
       );
       continue;
     }
@@ -396,6 +400,7 @@ function applyOperation(
       operation.nodeId,
       operation.attribute,
       operation.value,
+      state.entryFile,
     );
     return withFiles(
       state,
@@ -509,6 +514,7 @@ function applyOperation(
         operation.name,
         operation.theme,
         operation.value,
+        operation.file,
       ),
     };
     return withFiles(state, operation, files, []);
@@ -523,7 +529,11 @@ function applyOperation(
     }
     const files = {
       ...state.files,
-      [operation.file]: mutateDesignKeyframes(source, operation),
+      [operation.file]: mutateDesignKeyframes(
+        source,
+        operation,
+        operation.file,
+      ),
     };
     return withFiles(state, operation, files, []);
   }
@@ -612,13 +622,14 @@ function applyOperation(
     if (!component)
       throw new Error(`Design component not found: ${operation.componentId}`);
     assertInstanceProps(component, operation.props);
-    assertSafeDesignHtmlFragment(operation.slotHtml);
+    assertSafeDesignHtmlFragment(operation.slotHtml, state.entryFile);
     const source = state.files[state.entryFile]!;
     const inserted = mutateDesignNodeHtmlSource(
       source,
       operation.parentNodeId,
       instanceMarkup(operation),
       "append",
+      state.entryFile,
     );
     const healed = healDesignHtmlIdentities(inserted).source;
     return withFiles(

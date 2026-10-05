@@ -465,7 +465,7 @@ describe("page operations through WorkspaceService", () => {
     expect(redo.historyFrame).toBe(transfer.frame);
   });
 
-  it("fails stale undo after page deletion without recreating that page's folder or files", async () => {
+  it("prunes stale structural history on page deletion without recreating the folder or files", async () => {
     const created = (await service.handle(
       "design.page.create",
       params,
@@ -486,15 +486,24 @@ describe("page operations through WorkspaceService", () => {
       { ...params, pageId: created.page.id, expectedFrameIds: [] },
       options,
     );
-    await expect(
-      service.handle("design.history.undo", params, options),
-    ).rejects.toThrow(/page.*not found|page.*removed|page.*missing/i);
+    for (const direction of ["undo", "redo", "undo"]) {
+      const history = await service.handle(
+        `design.history.${direction}`,
+        params,
+        options,
+      );
+      expect(history).toMatchObject({
+        result: null,
+        snapshot: { pages: initial.pages, frames: [] },
+      });
+      expect(history).not.toHaveProperty("historyFrame");
+    }
     expect(
       existsSync(path.join(root, initial.directory, created.page.folder)),
     ).toBe(false);
   });
 
-  it("fails semantic history for a frame removed with its page without recreating source", async () => {
+  it("prunes semantic history for a frame removed with its page without recreating source", async () => {
     const created = (await service.handle(
       "design.page.create",
       params,
@@ -537,9 +546,18 @@ describe("page operations through WorkspaceService", () => {
       },
       options,
     );
-    await expect(
-      service.handle("design.history.undo", params, options),
-    ).rejects.toThrow(/page|frame.*not found|missing/i);
+    for (const direction of ["undo", "redo", "undo"]) {
+      const history = await service.handle(
+        `design.history.${direction}`,
+        params,
+        options,
+      );
+      expect(history).toMatchObject({
+        result: null,
+        snapshot: { pages: initial.pages, frames: [] },
+      });
+      expect(history).not.toHaveProperty("historyFrame");
+    }
     expect(
       existsSync(path.join(root, initial.directory, created.page.folder)),
     ).toBe(false);

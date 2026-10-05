@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { designFrameFileSchema, isDesignPageFolder } from "@zeros/protocol/design-path";
+import {
+  designFrameFileSchema,
+  isDesignPageFolder,
+  portableDesignName,
+} from "@zeros/protocol/design-path";
 
 export const DESIGN_CANVAS_FILE = "canvas.json";
 const id = z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,127}$/);
@@ -71,8 +75,12 @@ export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): 
     ...rest
   } = parsed;
   const order = pages.flatMap((page) => page.frames);
-  if (parsed.version === 2 && (new Set(pages.map((page) => page.id)).size !== pages.length ||
-      new Set(pages.map((page) => String(page.folder).toLowerCase())).size !== pages.length))
+  if (
+    parsed.version === 2 &&
+    (new Set(pages.map((page) => page.id)).size !== pages.length ||
+      new Set(pages.map((page) => portableDesignName(String(page.folder))))
+        .size !== pages.length)
+  )
     throw new Error("Design pages must have distinct IDs and folders.");
   if (
     new Set(order).size !== order.length ||
@@ -101,7 +109,7 @@ export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): 
     const page = pages.find((page) => page.frames.includes(frameId))!;
     if (parsed.version === 1 ? file.includes("/") : file.split("/")[0] !== page.folder || file.split("/").length !== 2)
       throw new Error("Design frame source must be inside its page folder.");
-    const portable = file.normalize("NFC").toLowerCase();
+    const portable = portableDesignName(file);
     if (files.has(portable))
       throw new Error("Design frames must have distinct source files.");
     files.add(portable);

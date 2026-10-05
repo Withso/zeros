@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
+import { portableDesignName } from "@zeros/protocol/design-path";
 import { readdir } from "node:fs/promises";
 import { runGit } from "../git/git-exec";
 import { withWorkspaceGitMutation } from "../git/mutation-lock";
@@ -125,13 +126,16 @@ async function inspectFolder(root: string, selected: string) {
       if (entry.isDirectory()) pending.push(path.join(folder, entry.name));
   }
   const recognized = await discoverDesignDirectories(root);
-  const portable = (value: string) => value.normalize("NFC").toLowerCase();
   for (const other of recognized) {
     if (
       other !== directory &&
-      (portable(other) === portable(directory) ||
-        portable(other).startsWith(portable(directory) + "/") ||
-        portable(directory).startsWith(portable(other) + "/"))
+      (portableDesignName(other) === portableDesignName(directory) ||
+        portableDesignName(other).startsWith(
+          portableDesignName(directory) + "/",
+        ) ||
+        portableDesignName(directory).startsWith(
+          portableDesignName(other) + "/",
+        ))
     )
       throw new Error("This folder overlaps another Design directory.");
   }

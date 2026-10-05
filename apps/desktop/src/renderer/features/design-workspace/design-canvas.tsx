@@ -1244,16 +1244,29 @@ export function DesignCanvas({
     [cancelPendingWheelGesture, setViewport, view, workspaceId, canvasPageOwner],
   );
 
-  // A canvas must never open onto empty space while it has frames: a camera
-  // parked around a deleted or distant frame showed nothing, not even newly
-  // created frames. Fit once per owner when none is visible; afterwards the
-  // camera is the user's.
-  const openFitOwnerRef = useRef<string | null>(null);
+  // Fit an unvisited page when no frame is visible. Saved page cameras and
+  // later visits belong to the user; legacy root canvases retain open fitting.
+  const openFitOwnersRef = useRef(new Set<string>());
+  const rememberedPagesRef = useRef({
+    directoryId: view.directoryId,
+    views: view.byPage,
+  });
   useLayoutEffect(() => {
     if (!active || !workspaceId || !snapshot) return;
     if (viewportSize.width <= 0 || viewportSize.height <= 0) return;
-    if (openFitOwnerRef.current === mountOwner) return;
-    openFitOwnerRef.current = mountOwner;
+    if (openFitOwnersRef.current.has(canvasDocumentOwner)) return;
+    openFitOwnersRef.current.add(canvasDocumentOwner);
+    if (openFitOwnersRef.current.size > 64)
+      openFitOwnersRef.current.delete(
+        openFitOwnersRef.current.values().next().value!,
+      );
+    if (
+      snapshot.pages?.some((page) => page.folder) &&
+      view.activePageId &&
+      rememberedPagesRef.current.directoryId === canvasDirectoryId &&
+      Object.hasOwn(rememberedPagesRef.current.views ?? {}, view.activePageId)
+    )
+      return;
     const rects = snapshot.frames.map((frame) => ({
       x: frame.x,
       y: frame.y,
@@ -1272,8 +1285,8 @@ export function DesignCanvas({
   }, [
     active,
     fitFrames,
-    liveFrameOwner,
-    mountOwner,
+    canvasDocumentOwner,
+    canvasDirectoryId,
     snapshot,
     view,
     viewportSize,

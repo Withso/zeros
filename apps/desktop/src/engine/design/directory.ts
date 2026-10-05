@@ -42,6 +42,7 @@ import { existsSync } from "node:fs";
 import { constants as fsConstants } from "node:fs";
 import { lstat, mkdir, open, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { portableDesignName } from "@zeros/protocol/design-path";
 
 import { projectNameForRoot } from "../db/projects";
 import { GitError } from "../git/errors";
@@ -242,10 +243,6 @@ export async function resolveDesignDirectoryPointerState(opts: {
   };
 }
 
-function portableDirectoryKey(value: string): string {
-  return value.normalize("NFC").toLowerCase();
-}
-
 function prospectivePathError(directory: string, detail: string): Error {
   return new Error(
     `The prospective Design path must have real, symlink-free directory ` +
@@ -276,7 +273,7 @@ export async function assertSafeProspectiveDesignDirectory(
   for (const segment of sanitized.split("/")) {
     const entries = await readdir(parent);
     const aliases = entries.filter(
-      (entry) => portableDirectoryKey(entry) === portableDirectoryKey(segment),
+      (entry) => portableDesignName(entry) === portableDesignName(segment),
     );
     if (
       aliases.length > 0 &&
@@ -333,7 +330,7 @@ export async function reserveProspectiveDesignDirectory(
     }
     const entries = await readdir(parent);
     const aliases = entries.filter(
-      (entry) => portableDirectoryKey(entry) === portableDirectoryKey(segment),
+      (entry) => portableDesignName(entry) === portableDesignName(segment),
     );
     if (
       aliases.length > 0 &&

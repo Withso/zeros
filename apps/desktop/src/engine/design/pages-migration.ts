@@ -14,7 +14,10 @@ import {
   rebaseDesignCssReferences,
   rebaseDesignHtmlReferences,
 } from "@zeros/design-web";
-import { isDesignPageFolder } from "@zeros/protocol/design-path";
+import {
+  isDesignPageFolder,
+  portableDesignName,
+} from "@zeros/protocol/design-path";
 import {
   decodeCanvasFile,
   encodeCanvasFile,
@@ -45,7 +48,6 @@ import {
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_METADATA_BYTES = 16 * 1024 * 1024;
 const MAX_JOURNAL_BYTES = 8 * 1024 * 1024;
-const portable = (value: string) => value.normalize("NFC").toLowerCase();
 const digest = (value: string | null) =>
   value === null ? null : createHash("sha256").update(value).digest("hex");
 const directoryKey = (directory: string) =>
@@ -180,7 +182,8 @@ export function readDesignPagesMigrationJournal(
   if (
     new Set(journal.changes.map((change) => change.file)).size !==
       journal.changes.length ||
-    new Set(journal.folders.map(portable)).size !== journal.folders.length
+    new Set(journal.folders.map(portableDesignName)).size !==
+      journal.folders.length
   )
     throw new Error("Design page migration has duplicate paths or folders.");
   for (const [index, change] of journal.changes.entries()) {
@@ -504,16 +507,44 @@ function applyJournal(
           afterStep,
         );
     }
-    // Verify all successors, including surgical inbound edits, before deleting
-    // any old frame or registration. Recheck after every predecessor deletion.
+    // Full-tree checks bracket deletion. Each predecessor still verifies its
+    // own bytes and successor immediately before removal.
     assertInputs(workspace, journal);
     assertSuccessors(workspace, journal);
+    const successors = new Map(
+      journal.changes
+        .filter((change) => change.group !== "delete")
+        .map((change) => [change.file, change]),
+    );
     for (const change of journal.changes.filter(
       (change) => change.group === "delete",
     )) {
-      if (digest(read(workspace, change.file)) === null) continue;
-      assertInputs(workspace, journal);
-      assertSuccessors(workspace, journal);
+      const current = digest(read(workspace, change.file));
+      if (current === null) continue;
+      if (current !== change.before)
+        throw new Error(
+          "Design predecessor changed before migration deletion: " +
+            change.file,
+        );
+      const relative = change.file.slice(journal.directory.length + 1);
+      const successor = successors.get(
+        journal.directory +
+          "/" +
+          (["design.toml", "canvas.json"].includes(relative)
+            ? "meta"
+            : journal.folders[0]) +
+          "/" +
+          relative,
+      );
+      if (
+        !successor ||
+        digest(read(workspace, successor.file)) !== successor.after
+      )
+        throw new Error(
+          "Design migration successor is changed or missing: " +
+            (successor?.file ?? change.file) +
+            ". Recovery is paused before removing predecessors.",
+        );
       payloadSource(workspace, journal, change.beforePayload, change.before);
       const target = assertSafeDesignStoragePath(workspace, change.file);
       unlinkSync(target);
@@ -751,10 +782,10 @@ function buildPlan(
       "Existing meta/design.toml or meta/canvas.json conflicts with the page migration. Preserve both versions before retrying.",
     );
   const occupied = new Set(
-    readdirSync(path.join(workspace, directory)).map(portable),
+    readdirSync(path.join(workspace, directory)).map(portableDesignName),
   );
   let folder = "page-1";
-  for (let suffix = 2; occupied.has(portable(folder)); suffix++)
+  for (let suffix = 2; occupied.has(portableDesignName(folder)); suffix++)
     folder = "page-1-" + suffix;
   const pages = document.pages as Array<{
     id: string;

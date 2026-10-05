@@ -10,7 +10,11 @@ import {
   resolveCodeDesignTarget,
   DesignCodeToolAdmissions,
 } from "../code-tool-admission";
-import { parseDesignManifest, serializeDesignManifest } from "../manifest";
+import {
+  parseDesignManifest,
+  serializeDesignManifest,
+  serializeDesignRegistration,
+} from "../manifest";
 import { decodeCanvasFile } from "../canvas-file";
 import { useLegacyDesignStorage } from "./storage-fixtures";
 import { DesignAgentMcpServer } from "../design-agent-mcp";
@@ -229,6 +233,20 @@ describe("Code Design target admission", () => {
     target!.assertCurrent();
     workspace = null;
     expect(() => target!.assertCurrent()).toThrow("authority changed");
+  });
+
+  it("tolerates unreadable metadata during inspection without relaxing workspace ownership", async () => {
+    const target = await resolveCodeDesignTarget(input, options);
+    await writeFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, "design.toml"),
+      serializeDesignRegistration("design_competing"),
+    );
+    expect(() => target!.assertInspectionCurrent!()).not.toThrow();
+    expect(() => target!.assertCurrent()).toThrow(/competing|conflict/i);
+    workspace = null;
+    expect(() => target!.assertInspectionCurrent!()).toThrow(
+      "authority changed",
+    );
   });
 
   it("keeps Code inspection observational and migrates legacy metadata before a Design prompt", async () => {

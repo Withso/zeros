@@ -3,7 +3,10 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DESIGN_CAPTURE_PNG_BYTES, DESIGN_CAPTURE_TIMEOUT_MS, designCaptureRasterSize } from "@zeros/protocol/design-capture";
 import { designContextReferenceSchema } from "@zeros/protocol/design-context";
-import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import {
+  encodeDesignFramePath,
+  isDesignFrameFile,
+} from "@zeros/protocol/design-path";
 import { assertDesignCapturePng } from "./capture-service";
 
 /** Ordinary shell entrypoint; no MCP discovery, browser session or privileged
@@ -20,8 +23,12 @@ export async function runDesignVerificationCli(args: string[], output: (line: st
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || url.search || url.hash || !/^\/[a-f0-9]{48}$/.test(url.pathname))
     throw new Error("Use the local Design verification URL supplied by Zeros.");
   const frame = flag("--frame");
-  if (operation !== "list" && !isDesignFrameFile(frame)) throw new Error("--frame must name a registered HTML frame.");
-  const base = operation === "list" ? `${url}/frames` : `${url}/${frame!.split("/").map(encodeURIComponent).join("/")}`;
+  if (operation !== "list" && !isDesignFrameFile(frame))
+    throw new Error("--frame must name a registered HTML frame.");
+  const base =
+    operation === "list"
+      ? `${url}/frames`
+      : `${url}/${encodeDesignFramePath(frame!)}`;
   const request = async (target: string) => {
     const response = await fetch(target, { redirect: "error", signal: AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 3000) });
     if (!response.ok) {

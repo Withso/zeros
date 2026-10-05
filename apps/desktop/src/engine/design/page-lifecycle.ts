@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, rmdir } from "node:fs/promises";
 import path from "node:path";
-import { isDesignPageFolder } from "@zeros/protocol/design-path";
+import {
+  isDesignPageFolder,
+  portableDesignName,
+} from "@zeros/protocol/design-path";
 import {
   designPageCreateInputSchema,
   designPageDeleteInputSchema,
@@ -28,21 +31,7 @@ import {
   designPageFrameFiles,
 } from "./pages";
 import { assertDesignWriteAuthorized } from "./write-authority";
-
-const portable = (name: string) => name.normalize("NFC").toLowerCase();
-
-function pageSlug(title: string, number: number): string {
-  return (
-    title
-      .normalize("NFKD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 64)
-      .replace(/-+$/g, "") || `page-${number}`
-  );
-}
+import { designTitleSlug } from "./design-naming";
 
 export async function createDesignPage(
   workspace: string,
@@ -59,7 +48,7 @@ export async function createDesignPage(
       [
         ...(await readdir(designDirectory(workspace))),
         ...pages.map((page) => page.folder!),
-      ].map(portable),
+      ].map(portableDesignName),
     );
     let number = pages.length + 1;
     let title = parsed.title ?? `Page ${number}`;
@@ -72,11 +61,15 @@ export async function createDesignPage(
         title = `Page ${number}`;
       }
     }
-    const base = pageSlug(title, number);
+    const base = designTitleSlug(title, {
+      maxLength: 64,
+      fallback: `page-${number}`,
+      trimTrailingHyphens: true,
+    });
     let folder = base;
     for (
       let suffix = 2;
-      !isDesignPageFolder(folder) || occupied.has(portable(folder));
+      !isDesignPageFolder(folder) || occupied.has(portableDesignName(folder));
       suffix++
     ) {
       const ending = `-${suffix}`;
@@ -128,7 +121,7 @@ export async function deleteDesignPage(
   workspace: string,
   pageId: string,
   expectedFrameIds: readonly string[],
-): Promise<void> {
+): Promise<{ folder: string; frameFiles: string[] }> {
   const input = designPageDeleteInputSchema.parse({ pageId, expectedFrameIds });
   return withDesignDocumentWrite(workspace, async () => {
     await initializeDesignDocumentUnlocked(workspace);
@@ -145,7 +138,8 @@ export async function deleteDesignPage(
         "The page's frame membership changed. Refresh and confirm its frames before deleting.",
       );
     const sources: DesignStorageChange[] = [];
-    for (const file of designPageFrameFiles(canvas, page)) {
+    const files = designPageFrameFiles(canvas, page);
+    for (const file of files) {
       const relative = `${designDirectoryNameFor(workspace)}/${file}`;
       const target = assertSafeDesignStoragePath(workspace, relative);
       const present = await lstat(target).catch(
@@ -180,5 +174,6 @@ export async function deleteDesignPage(
           throw error;
       },
     );
+    return { folder: page.folder!, frameFiles: files };
   });
 }

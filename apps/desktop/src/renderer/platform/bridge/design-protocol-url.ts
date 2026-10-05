@@ -1,4 +1,7 @@
-import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import {
+  encodeDesignFramePath,
+  isDesignFrameFile,
+} from "@zeros/protocol/design-path";
 
 const CAPABILITY_PATTERN = /^[a-f0-9]{64}$/;
 const SOURCE_VERSION_PATTERN = /^[a-f0-9]{24}$/;
@@ -23,6 +26,6 @@ export function designProtocolFrameUrl(input: {
   }
   return (
     `zeros-design://workspace/${encodeURIComponent(input.workspaceId)}/` +
-    `${input.capability}/${input.frame.split("/").map(encodeURIComponent).join("/")}?v=${input.sourceVersion}`
+    `${input.capability}/${encodeDesignFramePath(input.frame)}?v=${input.sourceVersion}`
   );
 }

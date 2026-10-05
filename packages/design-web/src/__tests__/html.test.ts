@@ -14,6 +14,46 @@ import {
 import { FRAME_HTML, webState } from "./fixtures";
 
 describe("HTML source adapter", () => {
+  it("validates URL attribute mutations at the containing page and retains root behavior", () => {
+    const source = '<img data-oid="image" src="local.png">';
+    expect(
+      mutateDesignNodeAttributeSource(
+        source,
+        "image",
+        "src",
+        "../assets/a.png",
+        "page-1/home.html",
+      ),
+    ).toContain('src="../assets/a.png"');
+    expect(() =>
+      mutateDesignNodeAttributeSource(
+        source,
+        "image",
+        "src",
+        "../../outside.png",
+        "page-1/home.html",
+      ),
+    ).toThrow(/inside/i);
+    expect(
+      mutateDesignNodeAttributeSource(
+        source,
+        "image",
+        "src",
+        "assets/a.png",
+        "home.html",
+      ),
+    ).toContain('src="assets/a.png"');
+    expect(() =>
+      mutateDesignNodeAttributeSource(
+        source,
+        "image",
+        "src",
+        "../assets/a.png",
+        "home.html",
+      ),
+    ).toThrow(/inside/i);
+  });
+
   it("validates contained parent references using the source file's location", () => {
     const html = '<!doctype html><html><head><link rel="stylesheet" href="../tokens.css"><style>.hero { background-image:url(../assets/image.png); }</style></head><body><img src="../assets/image.png" style="background-image:url(./local.png)"></body></html>';
     expect(() => assertSafeDesignHtmlDocument(html, "page-1/home.html")).not.toThrow();

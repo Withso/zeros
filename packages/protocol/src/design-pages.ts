@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { designFrameFileSchema, isDesignPageFolder } from "./design-path";
+import {
+  designFrameFileSchema,
+  isDesignPageFolder,
+  portableDesignName,
+} from "./design-path";
 
 /** Directory-wide catalog. An empty folder denotes a virtual legacy root page. */
 export interface DesignPageSummary {
@@ -66,7 +70,7 @@ export const designPageCatalogSchema = z
       files = new Set<string>(),
       frameIds = new Set<string>();
     for (const page of pages) {
-      const folder = page.folder.normalize("NFC").toLowerCase();
+      const folder = portableDesignName(page.folder);
       if (
         ids.has(page.id) ||
         folders.has(folder) ||
@@ -94,7 +98,7 @@ export const designPageCatalogSchema = z
         }
       }
       for (const file of page.frameFiles) {
-        const portable = file.normalize("NFC").toLowerCase();
+        const portable = portableDesignName(file);
         if (
           files.has(portable) ||
           (page.folder

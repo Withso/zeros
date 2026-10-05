@@ -11,7 +11,7 @@ export function isDesignPageFolder(value: unknown): value is string {
     typeof value === "string" &&
     pageFolder.test(value) &&
     !value.endsWith(".") &&
-    !reservedFolders.has(value.toLowerCase())
+    !reservedFolders.has(portableDesignName(value))
   );
 }
 
@@ -23,6 +23,16 @@ export function isDesignFrameFile(value: unknown): value is string {
     : parts.length === 2 &&
         isDesignPageFolder(parts[0]) &&
         flatFrame.test(parts[1]);
+}
+
+/** Encode a validated frame path without escaping its page separator. */
+export function encodeDesignFramePath(file: string): string {
+  return file.split("/").map(encodeURIComponent).join("/");
+}
+
+/** Comparison key only; authored path spelling remains the source identity. */
+export function portableDesignName(value: string): string {
+  return value.normalize("NFC").toLowerCase();
 }
 
 export const designFrameFileSchema = z

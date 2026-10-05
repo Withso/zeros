@@ -1,9 +1,22 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import type { DesignContextReference, DesignVerificationAccess } from "@zeros/protocol/design-context";
-import { isDesignFrameFile } from "@zeros/protocol/design-path";
-import { DESIGN_CAPTURE_TIMEOUT_MS, DESIGN_STATIC_RENDER_CSS, designCaptureRasterSize } from "@zeros/protocol/design-capture";
-import { createDesignCaptureRenderer, type DesignEvidenceRenderer } from "./capture-client";
+import type {
+  DesignContextReference,
+  DesignVerificationAccess,
+} from "@zeros/protocol/design-context";
+import {
+  encodeDesignFramePath,
+  isDesignFrameFile,
+} from "@zeros/protocol/design-path";
+import {
+  DESIGN_CAPTURE_TIMEOUT_MS,
+  DESIGN_STATIC_RENDER_CSS,
+  designCaptureRasterSize,
+} from "@zeros/protocol/design-capture";
+import {
+  createDesignCaptureRenderer,
+  type DesignEvidenceRenderer,
+} from "./capture-client";
 import { assertDesignCapturePng } from "./capture-service";
 import { createDesignContextReference, inspectDesignContext } from "./context";
 import { assertDesignCheckoutReadable } from "./checkout-status";
@@ -290,5 +303,5 @@ export async function stopDesignVerification(): Promise<void> {
 export async function revokeDesignVerification(workspaceId: string): Promise<void> { if (shared) (await shared).revoke(workspaceId); }
 
 export function designFramePreviewUrl(access: Pick<DesignVerificationAccess, "url">, reference: DesignContextReference): string {
-  return `${access.url}/${reference.frame.split("/").map(encodeURIComponent).join("/")}/?frameId=${encodeURIComponent(reference.frameId ?? "")}`;
+  return `${access.url}/${encodeDesignFramePath(reference.frame)}/?frameId=${encodeURIComponent(reference.frameId ?? "")}`;
 }

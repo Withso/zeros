@@ -9,7 +9,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as canvasCodec from "../canvas-file";
 import { runGit } from "../../git/git-exec";
 import {
   discoverDesignDirectories,
@@ -65,6 +66,7 @@ describe("reading Design directory pages", () => {
     primeDesignDirectoryName(root, pagesDirectory);
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     forgetDesignDirectoryName(root);
     delete process.env.ZEROS_DATA_DIR;
     await rm(root, { recursive: true, force: true });
@@ -125,6 +127,27 @@ describe("reading Design directory pages", () => {
         "utf8",
       ),
     ).toBe(canvasBefore);
+  });
+
+  it("decodes the canvas once per aggregate refresh and observes subsequent native edits", async () => {
+    const decode = vi.spyOn(canvasCodec, "decodeCanvasFile");
+    await readDesignWorkspaceSnapshot(root);
+    expect(decode).toHaveBeenCalledTimes(1);
+    decode.mockClear();
+    await write(
+      `${pagesDirectory}/meta/canvas.json`,
+      JSON.stringify({
+        ...pagesCanvas,
+        pages: pagesCanvas.pages.map((page) =>
+          page.id === "checkout" ? { ...page, title: "Purchase" } : page,
+        ),
+      }),
+    );
+    const next = await readDesignWorkspaceSnapshot(root);
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(next.pages?.find((page) => page.id === "checkout")?.title).toBe(
+      "Purchase",
+    );
   });
 
   it("includes every page and exact frame ownership in the directory snapshot", async () => {

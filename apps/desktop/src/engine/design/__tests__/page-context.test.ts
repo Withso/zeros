@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -19,6 +19,7 @@ import { createDesignDirectoryPages, designDirectoryEntry } from "../metadata";
 import { selectDesignPageHint } from "../page-selection";
 import { DesignPageTargetError } from "../pages";
 import { resetWorkspaceDesignApisForTests } from "../design-api";
+import { serializeDesignRegistration } from "../manifest";
 
 describe("page context and agent frame targeting", () => {
   let root: string;
@@ -89,6 +90,47 @@ describe("page context and agent frame targeting", () => {
     });
     expect(canvasSource()).toBe(before);
   });
+
+  it.each(["invalid canvas", "competing manifests"])(
+    "reports %s without losing capabilities or prompt context",
+    async (failure) => {
+      if (failure === "invalid canvas") {
+        writeFileSync(
+          path.join(root, directory, "meta/canvas.json"),
+          "<<<<<<< unresolved canvas",
+        );
+      } else {
+        writeFileSync(
+          path.join(root, directory, "design.toml"),
+          serializeDesignRegistration(target.directoryId),
+        );
+      }
+      const capabilities = await call("design_capabilities");
+      expect(capabilities).toMatchObject({
+        version: 1,
+        directoryId: target.directoryId,
+        composerMode: { mode: "code", revision: 0 },
+        pages: null,
+        activePageId: null,
+        pagesError: expect.stringMatching(/canvas|competing|conflict|JSON/i),
+      });
+      expect(capabilities.tools).toContain("design_document_open");
+      for (const mode of ["code", "design"] as const) {
+        for (const method of ["native", "api"] as const) {
+          const context = await designPromptContext(
+            async () => target,
+            mode,
+            () => {},
+            method,
+          );
+          expect(context).toMatch(
+            /pages? (?:catalog )?(?:is |are )?unavailable/i,
+          );
+          expect(context).toMatch(/canvas|competing|conflict|JSON/i);
+        }
+      }
+    },
+  );
 
   it("honors only a current hint belonging to this workspace and active directory", async () => {
     const checkout = await run(() =>

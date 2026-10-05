@@ -78,37 +78,30 @@ export async function resolveCodeDesignTarget(
       ? { id: legacyDesignDirectoryId(directory), path: directory } : undefined);
   const entry = identity();
   if (!entry) return null;
-  return {
-    workspaceId: workspace.id,
-    workspacePath: workspace.path,
-    directory,
-    directoryId: entry.id,
-    actorId: input.conversationId ?? input.executionId,
-    assertCurrent: () => {
-      input.signal.throwIfAborted();
-      if (
-        options.workspaceIdForCwd &&
-        options.workspaceIdForCwd(input.cwd) !== workspace.id
-      ) {
-        throw new DesignTargetError(
-          "Design workspace authority changed; reopen the Code session.",
-        );
-      }
-      const current = resolveWorkspace(workspace.id);
-      if (
-        !current ||
-        current.archivedAt !== null ||
-        current.path !== workspace.path ||
-        current.repoRoot !== workspace.repoRoot ||
-        current.placement !== workspace.placement ||
-        current.organizationId !== workspace.organizationId
-      )
-        throw new DesignTargetError(
-          "Design workspace authority changed; reopen the Code session.",
-        );
-      if (
-        identity()?.id !== entry.id
-      )
+  const assertCurrent = (inspection = false) => {
+    input.signal.throwIfAborted();
+    if (
+      options.workspaceIdForCwd &&
+      options.workspaceIdForCwd(input.cwd) !== workspace.id
+    ) {
+      throw new DesignTargetError(
+        "Design workspace authority changed; reopen the Code session.",
+      );
+    }
+    const current = resolveWorkspace(workspace.id);
+    if (
+      !current ||
+      current.archivedAt !== null ||
+      current.path !== workspace.path ||
+      current.repoRoot !== workspace.repoRoot ||
+      current.placement !== workspace.placement ||
+      current.organizationId !== workspace.organizationId
+    )
+      throw new DesignTargetError(
+        "Design workspace authority changed; reopen the Code session.",
+      );
+    try {
+      if (identity()?.id !== entry.id)
         throw new DesignTargetError(
           "Design directory was removed or replaced; reopen the Code session.",
         );
@@ -126,7 +119,18 @@ export async function resolveCodeDesignTarget(
         throw new DesignTargetError(
           "Design directory selection changed; reopen the Code session.",
         );
-    },
+    } catch (error) {
+      if (!inspection || error instanceof DesignTargetError) throw error;
+    }
+  };
+  return {
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    directory,
+    directoryId: entry.id,
+    actorId: input.conversationId ?? input.executionId,
+    assertCurrent,
+    assertInspectionCurrent: () => assertCurrent(true),
   };
 }
 

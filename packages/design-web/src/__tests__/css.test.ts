@@ -4,15 +4,119 @@ import {
   DesignStyleAmbiguityError,
   mutateDesignKeyframes,
   mutateDesignTokenDeclaration,
+  mutateDesignCssRuleDeclaration,
   mutateDesignNodeStyles,
   readDesignKeyframes,
   readDesignStyleProvenance,
   validateDesignCssValue,
+  type DesignKeyframeInput,
 } from "../css";
 import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState } from "./fixtures";
 
 describe("CSS provenance and mutation", () => {
+  it.each(["inline", "auto", "rule"] as const)(
+    "validates %s styles against the containing page frame",
+    (scope) => {
+      const html =
+        '<html><head><style>[data-oid="card"] { background-image:none; }</style></head><body><div data-oid="card"></div></body></html>';
+      const state = createDesignWebDocumentState({
+        documentId: "page-styles",
+        entryFile: "page-1/home.html",
+        files: { "page-1/home.html": html },
+      });
+      const changed = mutateDesignNodeStyles(state, {
+        nodeId: "card",
+        scope,
+        styles: { "background-image": "url(../assets/hero.png)" },
+      });
+      expect(changed.files[state.entryFile]).toContain(
+        "url(../assets/hero.png)",
+      );
+      expect(() =>
+        mutateDesignNodeStyles(state, {
+          nodeId: "card",
+          scope,
+          styles: { "background-image": "url(../../outside.png)" },
+        }),
+      ).toThrow(/inside|URL/i);
+    },
+  );
+
+  it("validates linked-rule values against the stylesheet rather than the frame", () => {
+    const html =
+      '<html><head><link rel="stylesheet" href="../styles/deep/theme.css"></head><body><div data-oid="card"></div></body></html>';
+    const css = '[data-oid="card"] { background-image:none; }';
+    const state = createDesignWebDocumentState({
+      documentId: "linked-page-styles",
+      entryFile: "page-1/home.html",
+      files: { "page-1/home.html": html, "styles/deep/theme.css": css },
+    });
+    const changed = mutateDesignNodeStyles(state, {
+      nodeId: "card",
+      scope: "rule",
+      styles: { "background-image": "url(../../assets/hero.png)" },
+    });
+    expect(changed.files["styles/deep/theme.css"]).toContain(
+      "url(../../assets/hero.png)",
+    );
+    expect(changed.files[state.entryFile]).toBe(html);
+    const rootStyles = createDesignWebDocumentState({
+      documentId: "root-styles",
+      entryFile: "page-1/home.html",
+      files: {
+        "page-1/home.html": html.replace(
+          "../styles/deep/theme.css",
+          "../tokens.css",
+        ),
+        "tokens.css": css,
+      },
+    });
+    expect(() =>
+      mutateDesignNodeStyles(rootStyles, {
+        nodeId: "card",
+        scope: "rule",
+        styles: { "background-image": "url(../assets/hero.png)" },
+      }),
+    ).toThrow(/inside|URL/i);
+  });
+
+  it("validates parameter declarations, tokens and keyframes at their authored source", () => {
+    const value = "url(../assets/hero.png)";
+    expect(
+      mutateDesignCssRuleDeclaration(
+        ".hero { background-image:none; }",
+        ".hero",
+        "background-image",
+        value,
+        "page-1/styles.css",
+      ),
+    ).toContain(value);
+    expect(
+      mutateDesignTokenDeclaration(
+        ":root {}",
+        "--image",
+        null,
+        value,
+        "page-1/tokens.css",
+      ),
+    ).toContain(value);
+    const keyframes: DesignKeyframeInput[] = [
+      { offset: 0, styles: { "background-image": value } },
+      { offset: 100, styles: { opacity: "1" } },
+    ];
+    expect(
+      mutateDesignKeyframes(
+        "",
+        { name: "hero", keyframes },
+        "page-1/styles.css",
+      ),
+    ).toContain(value);
+    expect(() =>
+      mutateDesignKeyframes("", { name: "hero", keyframes }, "styles.css"),
+    ).toThrow(/inside|URL/i);
+  });
+
   it("validates parent references relative to the containing stylesheet", () => {
     expect(validateDesignCssValue("background-image", "url(../assets/a.png)", "page-1/styles.css")).toBe("url(../assets/a.png)");
     expect(() => validateDesignCssValue("background-image", "url(../../outside.png)", "page-1/styles.css")).toThrow();

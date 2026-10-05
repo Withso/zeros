@@ -124,6 +124,23 @@ export function forgetWorkspaceDesignApi(workspacePath: string): void {
   workspaceApis.delete(path.resolve(workspacePath));
 }
 
+export function forgetWorkspaceDesignApiFrames(
+  workspacePath: string,
+  frames: readonly string[],
+  folder?: string,
+): void {
+  const api = workspaceApis.get(path.resolve(workspacePath));
+  if (
+    api &&
+    apiLayouts.get(api)?.directory === designDirectoryNameFor(workspacePath)
+  ) {
+    api.forgetLocalSessions(
+      frames.map(designDocumentIdForFrame),
+      folder ? { prefix: `frame:${folder}/` } : undefined,
+    );
+  }
+}
+
 export function resetWorkspaceDesignApisForTests(): void {
   workspaceApis.clear();
 }

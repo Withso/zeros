@@ -62,6 +62,7 @@ import {
   invalidateDesignManifestDiscovery,
   readDirectoryDesignManifest,
   recoverWorkspaceDesignMetadata,
+  hasSettledDesignPagesLayout,
 } from "./metadata";
 
 import { designDirectoryNameFor } from "./directory-registry";
@@ -212,8 +213,12 @@ export async function writeIfMissing(
 
 export async function initializeDesignDocumentUnlocked(
   workspacePath: string,
+  options: { force?: boolean } = {},
 ): Promise<string[]> {
-  const directory = designDirectory(workspacePath), name = designDirectoryNameFor(workspacePath);
+  const directory = designDirectory(workspacePath),
+    name = designDirectoryNameFor(workspacePath);
+  if (!options.force && hasSettledDesignPagesLayout(workspacePath, name))
+    return [];
   await ensureSafeDesignRoot(workspacePath);
   recoverWorkspaceDesignMetadata(workspacePath);
   await recoverPendingDesignTransactionUnlocked(workspacePath);

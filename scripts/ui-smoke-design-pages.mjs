@@ -1,18 +1,154 @@
 import { expect } from "@playwright/test";
-import { designCanvasPoint } from "./ui-smoke-design-helpers.mjs";
+import {
+  designCanvasPoint,
+  designCanvasSafeRect,
+} from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignPagesSmoke({ page, check }) {
+  await visitPageStorage(page);
   const storage = await page.evaluate(() => Object.entries(localStorage));
   await page.evaluate(() => localStorage.clear());
   try {
+    await exerciseFirstPageVisit({ page, check });
+    await visitPageStorage(page);
+    await page.evaluate(() => localStorage.clear());
     await exercisePages({ page, check });
     await exercisePageLayersNavigation({ page, check });
   } finally {
+    await visitPageStorage(page);
     await page.evaluate((entries) => {
       localStorage.clear();
       for (const [key, value] of entries) localStorage.setItem(key, value);
     }, storage);
   }
+}
+
+async function visitPageStorage(page) {
+  // Leave the live store so its unload flush cannot overwrite fixture edits.
+  const url = `${new URL(page.url()).origin}/ui-smoke-design-pages-storage`;
+  await page.route(
+    url,
+    (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: "<!doctype html><title>Design pages fixture storage</title>",
+      }),
+    { times: 1 },
+  );
+  await page.goto(url);
+}
+
+async function exerciseFirstPageVisit({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  const harnessUrl = `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?pages=1`;
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(harnessUrl, { waitUntil: "networkidle" });
+  const picker = () => page.getByRole("button", { name: /^Page: / });
+  const switchTo = async (title) => {
+    await picker().click();
+    await page.getByRole("menuitemradio", { name: title, exact: true }).click();
+    await expect(picker()).toHaveAccessibleName("Page: " + title);
+  };
+  await picker().click();
+  await page.getByRole("menuitem", { name: "New page", exact: true }).click();
+  await expect(picker()).toHaveAccessibleName("Page: Page 2");
+  await page.getByRole("button", { name: "Frame tool", exact: true }).click();
+  const point = await designCanvasPoint(page, { empty: true });
+  await page.mouse.click(point.x, point.y);
+  await expect(
+    page.locator('[data-design-frame="page-2/frame-1.html"]'),
+  ).toBeVisible();
+  await page.locator("[data-design-canvas-viewport]").focus();
+  await page.keyboard.press("Escape");
+  await expect(picker()).toHaveAccessibleName("Page: Page 2");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const saved = JSON.parse(
+          localStorage.getItem("zeros:design-workspace-ui-v1") ?? "{}",
+        );
+        const view = saved.ws_design_pages_harness;
+        return (
+          !!view?.activePageId && !view.frameSelected && !view.selectedNodeId
+        );
+      }),
+    )
+    .toBe(true);
+  // Model an authored, unvisited page with a frame far beyond the default view.
+  await visitPageStorage(page);
+  await page.evaluate(() => {
+    const fixtureKey = "zeros:harness-design-pages-v1";
+    const fixture = JSON.parse(localStorage.getItem(fixtureKey));
+    const second = fixture.snapshot.pages[1];
+    for (const frame of [...fixture.snapshot.frames, ...fixture.documents]) {
+      if (frame.pageId === second.id) frame.x = 6000;
+    }
+    localStorage.setItem(fixtureKey, JSON.stringify(fixture));
+    const viewKey = "zeros:design-workspace-ui-v1";
+    const memory = JSON.parse(localStorage.getItem(viewKey));
+    const view = memory.ws_design_pages_harness;
+    delete view.byPage[second.id];
+    view.activePageId = fixture.snapshot.pages[0].id;
+    Object.assign(view, view.byPage[view.activePageId]);
+    view.frameSelected = false;
+    view.selectedNodeId = null;
+    view.selectedNodeIds = [];
+    localStorage.setItem(viewKey, JSON.stringify(memory));
+  });
+  await page.goto(harnessUrl, { waitUntil: "networkidle" });
+  await expect(picker()).toHaveAccessibleName("Page: Page 1");
+  await switchTo("Page 2");
+  const safe = await designCanvasSafeRect(page);
+  await expect
+    .poll(async () => {
+      const rect = await page
+        .locator('[data-design-frame="page-2/frame-1.html"]')
+        .boundingBox();
+      return (
+        rect &&
+        Math.min(rect.x + rect.width, safe.right) -
+          Math.max(rect.x, safe.left) >=
+          4
+      );
+    })
+    .toBe(true);
+  const camera = { zoom: 0.25, panX: -30000, panY: -20000 };
+  await page.evaluate(async (next) => {
+    const { useDesignWorkspaceUiStore } =
+      await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+    useDesignWorkspaceUiStore
+      .getState()
+      .setViewport("ws_design_pages_harness", next);
+  }, camera);
+  const currentCamera = () =>
+    page.evaluate(async () => {
+      const { designWorkspaceView } =
+        await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+      const { zoom, panX, panY } = designWorkspaceView(
+        "ws_design_pages_harness",
+      );
+      return { zoom, panX, panY };
+    });
+  await switchTo("Page 1");
+  await switchTo("Page 2");
+  expect(await currentCamera()).toEqual(camera);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const saved = JSON.parse(
+          localStorage.getItem("zeros:design-workspace-ui-v1"),
+        );
+        return saved.ws_design_pages_harness.panX;
+      }),
+    )
+    .toBe(camera.panX);
+  await page.reload({ waitUntil: "networkidle" });
+  await expect(picker()).toHaveAccessibleName("Page: Page 2");
+  expect(await currentCamera()).toEqual(camera);
+  check(
+    "First visits fit off-screen page frames; remembered cameras survive switches and reload",
+    true,
+  );
 }
 
 async function exercisePageLayersNavigation({ page, check }) {

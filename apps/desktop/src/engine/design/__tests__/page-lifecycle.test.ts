@@ -81,6 +81,33 @@ describe("Design page lifecycle", () => {
       expect(read("CHECKOUT")).toBe("Keep root file");
     }));
 
+  it.each([
+    { title: "Café déjà vu", folder: "cafe-deja-vu", frame: "cafe-deja-vu" },
+    { title: "✨", folder: "page-2", frame: "frame" },
+    {
+      title: `${"A".repeat(63)} b`,
+      folder: "a".repeat(63),
+      frame: `${"a".repeat(63)}-b`,
+    },
+    {
+      title: `${"A".repeat(71)} b`,
+      folder: "a".repeat(64),
+      frame: `${"a".repeat(71)}-`,
+    },
+  ])(
+    "preserves page and frame naming boundaries for $title",
+    ({ title, folder, frame }) =>
+      run(async () => {
+        const page = await createDesignPage(root, { title });
+        const created = await createDesignFrame(root, {
+          title,
+          pageId: page.id,
+        });
+        expect(page.folder).toBe(folder);
+        expect(created.file).toBe(`${folder}/${frame}.html`);
+      }),
+  );
+
   it("skips default titles still in use after an earlier page is deleted", () =>
     run(async () => {
       const second = await createDesignPage(root);

@@ -1,12 +1,34 @@
 import { describe, expect, it } from "vitest";
 import {
   designFrameFileSchema,
+  encodeDesignFramePath,
   isDesignFrameFile,
   isDesignPageFolder,
+  portableDesignName,
 } from "../design-path";
 import { designContextReferenceSchema } from "../design-context";
 
 describe("Design frame paths", () => {
+  it.each(["home.html", "Page.v2/Home.HTML"])(
+    "keeps path separators and authored spelling in frame URLs: %s",
+    (file) => {
+      const base = "zeros-design://workspace/workspace/capability/";
+      const url = new URL(`${base}${encodeDesignFramePath(file)}`);
+      expect(url.pathname).toBe(`/workspace/capability/${file}`);
+    },
+  );
+
+  it("compares case and Unicode aliases without changing source identity", () => {
+    const authored = "Cafe\u0301/Checkout.HTML";
+    expect(portableDesignName(authored)).toBe(
+      portableDesignName("CAFÉ/checkout.html"),
+    );
+    expect(authored).toBe("Cafe\u0301/Checkout.HTML");
+    expect(portableDesignName("page-b")).not.toBe(
+      portableDesignName("page-beta"),
+    );
+  });
+
   it.each([
     "home.html",
     "Home.v2.HTML",

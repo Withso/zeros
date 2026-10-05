@@ -73,11 +73,19 @@ export function designDirectory(workspacePath: string): string {
   );
 }
 
-function canvasPath(workspacePath: string): string {
-  return designDocumentMetadataPath(
+export interface DesignCanvasReadContext {
+  canvas: CanvasDocument;
+  layout: ReturnType<typeof readDirectoryDesignLayout>;
+}
+
+export async function readCanvasContext(
+  workspacePath: string,
+): Promise<DesignCanvasReadContext> {
+  const layout = readDirectoryDesignLayout(
     workspacePath,
     designDirectoryNameFor(workspacePath),
   );
+  return { layout, canvas: await readCanvas(workspacePath, layout) };
 }
 
 export function isFrameFile(value: string): boolean {
@@ -120,12 +128,22 @@ export function normalizeGeometry(
   };
 }
 
-export async function readCanvas(workspacePath: string): Promise<CanvasDocument> {
+export async function readCanvas(
+  workspacePath: string,
+  layout = readDirectoryDesignLayout(
+    workspacePath,
+    designDirectoryNameFor(workspacePath),
+  ),
+): Promise<CanvasDocument> {
   const registry = readDesignRegistrySource(workspacePath);
-  const target = canvasPath(workspacePath);
+  const directory = designDirectoryNameFor(workspacePath);
+  const registered = designDirectoryEntry(workspacePath, directory, layout);
+  const target = designDocumentMetadataPath(workspacePath, directory, {
+    layout,
+    entry: registered,
+  });
   const file = path.relative(workspacePath, target).split(path.sep).join("/");
   const source = readDesignStorageFile(workspacePath, file);
-  const layout = readDirectoryDesignLayout(workspacePath, designDirectoryNameFor(workspacePath));
   const registrationFile = layout?.manifestFile ?? `${designDirectoryNameFor(workspacePath)}/${DESIGN_MANIFEST_FILE}`;
   const registrationSource = readDesignStorageFile(workspacePath, registrationFile);
   const retainSnapshot = (canvas: CanvasDocument): CanvasDocument =>
@@ -138,10 +156,6 @@ export async function readCanvas(workspacePath: string): Promise<CanvasDocument>
         registration: { file: registrationFile, source: registrationSource },
       },
     });
-  const registered = designDirectoryEntry(
-    workspacePath,
-    designDirectoryNameFor(workspacePath),
-  );
   if (
     registered &&
     readDesignStorageFile(
@@ -396,12 +410,22 @@ export function stripLegacyFrameMeta(
   return result;
 }
 
-export async function discoverFrameFiles(workspacePath: string): Promise<string[]> {
-  const registration = readDirectoryDesignManifest(workspacePath, designDirectoryNameFor(workspacePath));
+export async function discoverFrameFiles(
+  workspacePath: string,
+  context?: DesignCanvasReadContext,
+): Promise<string[]> {
+  const registration = context
+    ? context.layout?.manifest
+    : readDirectoryDesignManifest(
+        workspacePath,
+        designDirectoryNameFor(workspacePath),
+      );
   if (registration?.canvas) {
     // canvas.json is authoritative. Shared templates are not implicitly frames,
     // and missing sources remain actionable references instead of being erased.
-    return Object.keys((await readCanvas(workspacePath)).frames);
+    return Object.keys(
+      (context?.canvas ?? (await readCanvas(workspacePath))).frames,
+    );
   }
   let entries;
   try {

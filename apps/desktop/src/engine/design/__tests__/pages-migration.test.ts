@@ -11,7 +11,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as storage from "../metadata-storage";
 import { discoverDesignDirectories } from "../directory";
 import { withDesignDirectoryNameLease } from "../directory-registry";
 import {
@@ -190,6 +191,7 @@ describe("recoverable per-directory Design pages migration", () => {
   };
   beforeEach(reset);
   afterEach(() => {
+    vi.restoreAllMocks();
     delete process.env.ZEROS_DATA_DIR;
     rmSync(root, { recursive: true, force: true });
   });
@@ -198,6 +200,48 @@ describe("recoverable per-directory Design pages migration", () => {
     migrateDesignDirectoryPages(root, directory);
     assertMigrated();
   });
+
+  it("bounds full input rechecks independently of the number of predecessor deletions", () => {
+    const originalRead = storage.readDesignStorageFile;
+    let deleting = false;
+    let guardReads = 0;
+    vi.spyOn(storage, "readDesignStorageFile").mockImplementation(
+      (workspace, file, ...args) => {
+        if (deleting && file === directory + "/tokens.css") guardReads++;
+        return originalRead(workspace, file, ...args);
+      },
+    );
+    migrateDesignDirectoryPages(root, directory, {
+      afterStep: (step) => {
+        if (step === "phase:metadata") deleting = true;
+        if (step === "phase:deleted") deleting = false;
+      },
+    });
+    expect(guardReads).toBe(2);
+    assertMigrated();
+  });
+
+  it.each(["predecessor", "successor"])(
+    "checks the current %s before each deletion",
+    (kind) => {
+      expect(() =>
+        migrateDesignDirectoryPages(root, directory, {
+          afterStep: (step) => {
+            if (step === "delete:details.html") {
+              write(
+                kind === "predecessor" ? "home.html" : "page-1/home.html",
+                "<p>Concurrent edit</p>",
+              );
+            }
+          },
+        }),
+      ).toThrow(/changed|missing/i);
+      expect(existsSync(path.join(root, directory, "home.html"))).toBe(true);
+      expect(
+        read(kind === "predecessor" ? "home.html" : "page-1/home.html"),
+      ).toBe("<p>Concurrent edit</p>");
+    },
+  );
 
   it("preserves encoded, entity and raw-space assets through migration and rendering", async () => {
     const source = `<!doctype html><html><head>

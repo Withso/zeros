@@ -188,3 +188,52 @@ it("clears all actors' visual history for the migrated directory while preservin
     expect(service.designHistoryState(other)?.undo).toHaveLength(1);
   });
 });
+
+it("prunes deleted frame history for every actor in only the current workspace and directory", async () => {
+  const service = new WorkspaceService(root) as unknown as {
+    designHistoryState(
+      workspace: string,
+      create?: boolean,
+      actorId?: string,
+    ): WorkspaceDesignHistoryState;
+    pruneDesignHistoryFrames(
+      workspace: string,
+      frames: readonly string[],
+    ): void;
+  };
+  const unrelated = service.designHistoryState(
+    path.join(root, "other-workspace"),
+    true,
+  );
+  unrelated.undo.push(documentDesignHistoryEntry("page-b/home.html"));
+  const otherDirectory = await withDesignDirectoryNameLease(
+    root,
+    "Other",
+    async () => {
+      const state = service.designHistoryState(
+        root,
+        true,
+        "other-directory-actor",
+      );
+      state.undo.push(documentDesignHistoryEntry("page-b/home.html"));
+      return state;
+    },
+  );
+  await withDesignDirectoryNameLease(root, directory, async () => {
+    const states = [undefined, "human-one", "human-two"].map((actor) => {
+      const state = service.designHistoryState(root, true, actor);
+      const kept = documentDesignHistoryEntry("page-a/home.html");
+      const removed = documentDesignHistoryEntry("page-b/home.html");
+      state.undo = [kept, removed];
+      state.redo = [removed];
+      state.bytes = kept.bytes + 2 * removed.bytes;
+      return { state, kept };
+    });
+    service.pruneDesignHistoryFrames(root, ["page-b/home.html"]);
+    for (const { state, kept } of states) {
+      expect(state).toEqual({ undo: [kept], redo: [], bytes: kept.bytes });
+    }
+    expect(unrelated.undo).toHaveLength(1);
+    expect(otherDirectory.undo).toHaveLength(1);
+  });
+});

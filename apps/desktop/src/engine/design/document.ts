@@ -92,6 +92,8 @@ import {
   nextFrameGeometry,
   readBoundedDesignFrameSource,
   readCanvas,
+  readCanvasContext,
+  type DesignCanvasReadContext,
   readFrameMeta,
   writeCanvas,
 } from "./document-storage";
@@ -167,7 +169,9 @@ export async function initializeDesignDocument(
   workspacePath: string,
 ): Promise<{ created: string[] }> {
   return withDocumentWrite(workspacePath, async () => ({
-    created: await initializeDesignDocumentUnlocked(workspacePath),
+    created: await initializeDesignDocumentUnlocked(workspacePath, {
+      force: true,
+    }),
   }));
 }
 
@@ -192,6 +196,7 @@ function validateCssMutationValue(
   workspacePath: string,
   property: string,
   value: string,
+  sourceFile: string,
 ): string {
   const normalized = value.trim();
   if (!normalized || normalized.length > 2_048) {
@@ -225,7 +230,11 @@ function validateCssMutationValue(
   }
   for (const match of normalized.matchAll(/url\(\s*(["']?)(.*?)\1\s*\)/gi)) {
     const reference = match[2]?.trim() ?? "";
-    const local = safeLocalReference(designDirectory(workspacePath), reference);
+    const local = safeLocalReference(
+      designDirectory(workspacePath),
+      reference,
+      sourceFile,
+    );
     if (
       !local &&
       !/^data:image\/(?:avif|gif|jpeg|png|webp);base64,/i.test(reference)
@@ -382,8 +391,8 @@ async function mutationResultUnlocked(
   changed: boolean,
 ): Promise<DesignMutationResult> {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  const meta = readFrameMeta(document, file, await readCanvas(workspacePath));
   const canvas = await readCanvas(workspacePath);
+  const meta = readFrameMeta(document, file, canvas);
   const geometry = canvas.frames[file] ?? {
     x: 0,
     y: 0,
@@ -549,6 +558,7 @@ export async function updateDesignNodeStyles(
     styles: Record<string, DesignStyleMutationValue>;
   },
 ): Promise<DesignMutationResult> {
+  const file = assertFrameFile(input.frame);
   const entries = Object.entries(input.styles);
   if (entries.length === 0 || entries.length > 64) {
     throw new Error("styles must contain between 1 and 64 properties.");
@@ -560,7 +570,7 @@ export async function updateDesignNodeStyles(
       property,
       rawValue === null
         ? null
-        : validateCssMutationValue(workspacePath, property, rawValue),
+        : validateCssMutationValue(workspacePath, property, rawValue, file),
     );
   }
   return mutateDesignFrameSource(
@@ -1019,15 +1029,26 @@ export async function readDesignWorkspaceSnapshot(
     // frame/token payloads from another.
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     if (writeBack) await initializeDesignDocumentUnlocked(workspacePath);
-    const lint = await lintDesignDocumentUnlocked(workspacePath, undefined, {
-      healOids: writeBack,
-      includeRuntimeAudits: false,
-    });
-    const summaries = await listDesignFramesUnlocked(workspacePath, writeBack, true);
+    const context = await readCanvasContext(workspacePath);
+    const lint = await lintDesignDocumentUnlocked(
+      workspacePath,
+      undefined,
+      {
+        healOids: writeBack,
+        includeRuntimeAudits: false,
+      },
+      context,
+    );
+    const summaries = await listDesignFramesUnlocked(
+      workspacePath,
+      writeBack,
+      true,
+      context,
+    );
     const pages = designCanvasPageCatalog(
-      await readCanvas(workspacePath),
+      context.canvas,
       summaries.map((frame) => frame.file),
-      readDirectoryDesignLayout(workspacePath, designDirectoryNameFor(workspacePath))?.canvasVersion === 2,
+      context.layout?.canvasVersion === 2,
     );
     const renderBudgetViolations: DesignLintViolation[] = [];
     const [renderedFrames, tokensDocument, assets] = await Promise.all([
@@ -1042,7 +1063,7 @@ export async function readDesignWorkspaceSnapshot(
           },
         ),
       ),
-      readDesignTokensDocument(workspacePath),
+      readDesignTokensDocument(workspacePath, context),
       listDesignAssets(workspacePath),
     ]);
     const frames = renderedFrames.filter(
@@ -1100,26 +1121,47 @@ function designRenderBudgetViolation(
   });
 }
 
-async function cssSourceFiles(workspacePath: string): Promise<string[]> {
+async function cssSourceFiles(
+  workspacePath: string,
+  context?: DesignCanvasReadContext,
+): Promise<string[]> {
   const directory = designDirectory(workspacePath);
-  const layout = readDirectoryDesignLayout(workspacePath, designDirectoryNameFor(workspacePath));
-  const folders = layout?.canvasVersion === 2
-    ? (await readCanvas(workspacePath)).pages!.map((page) => page.folder!)
-    : [];
-  const files = await Promise.all(["", ...folders].map(async (folder) => {
-    const entries = await readdir(path.join(directory, folder), { withFileTypes: true }).catch(() => []);
-    return entries.filter((entry) => entry.isFile() && /\.css$/i.test(entry.name))
-      .map((entry) => folder ? `${folder}/${entry.name}` : entry.name);
-  }));
+  const layout = context
+    ? context.layout
+    : readDirectoryDesignLayout(
+        workspacePath,
+        designDirectoryNameFor(workspacePath),
+      );
+  const folders =
+    layout?.canvasVersion === 2
+      ? (
+          context?.canvas ?? (await readCanvas(workspacePath, layout))
+        ).pages!.map((page) => page.folder!)
+      : [];
+  const files = await Promise.all(
+    ["", ...folders].map(async (folder) => {
+      const entries = await readdir(path.join(directory, folder), {
+        withFileTypes: true,
+      }).catch(() => []);
+      return entries
+        .filter((entry) => entry.isFile() && /\.css$/i.test(entry.name))
+        .map((entry) => (folder ? `${folder}/${entry.name}` : entry.name));
+    }),
+  );
   return files.flat().sort();
 }
 
-async function knownTokenNames(workspacePath: string): Promise<Set<string>> {
+async function knownTokenNames(
+  workspacePath: string,
+  context?: DesignCanvasReadContext,
+): Promise<Set<string>> {
   const names = new Set(
-    (await readDesignTokens(workspacePath)).map((token) => token.name),
+    (await readDesignTokensDocument(workspacePath, context)).tokens.map(
+      (token) => token.name,
+    ),
   );
   const directory = designDirectory(workspacePath);
-  for (const file of await cssSourceFiles(workspacePath)) {
+  for (const file of await cssSourceFiles(workspacePath, context)) {
     const source = await readSafeDesignText(
       directory,
       path.join(directory, file),
@@ -1419,11 +1461,12 @@ async function lintDesignDocumentUnlocked(
   workspacePath: string,
   frame?: string,
   options: { healOids?: boolean; includeRuntimeAudits?: boolean } = {},
+  context?: DesignCanvasReadContext,
 ): Promise<DesignLintReport> {
   const files = frame
     ? [(await designFrameTarget(workspacePath, frame)).file]
-    : await discoverFrameFiles(workspacePath);
-  const knownTokens = await knownTokenNames(workspacePath);
+    : await discoverFrameFiles(workspacePath, context);
+  const knownTokens = await knownTokenNames(workspacePath, context);
   const violations: DesignLintViolation[] = [];
   let healedOids = 0;
   for (const file of files) {
@@ -1492,6 +1535,7 @@ function sortDesignLintViolations(
 
 export async function readDesignTokensDocument(
   workspacePath: string,
+  context?: DesignCanvasReadContext,
 ): Promise<DesignTokensDocument> {
   const directory = designDirectory(workspacePath);
   const tokenFile = path.join(directory, DESIGN_TOKENS_FILE);
@@ -1560,8 +1604,8 @@ export async function readDesignTokensDocument(
   });
 
   const sources = [
-    ...(await discoverFrameFiles(workspacePath)),
-    ...(await cssSourceFiles(workspacePath)),
+    ...(await discoverFrameFiles(workspacePath, context)),
+    ...(await cssSourceFiles(workspacePath, context)),
   ];
   for (const file of sources) {
     const source =

@@ -216,8 +216,10 @@ owner. Page switching cancels gestures, hover/marquee state, inline editors and
 frame-anchored menus; an inspector blur still commits to its captured original
 page. Background edits update that page's private view memory. Directory-level
 undo/redo reveals the affected frame's page and restores its selection while
-the submitting owner is still current. Deleted-page history fails safely and
-cannot recreate its source.
+the submitting owner is still current. Page deletion prunes undo/redo entries
+and API sessions for that folder, including previously deleted frames. Permanent
+missing-page history errors drop the entry so older history remains usable;
+history cannot recreate a removed page's source.
 
 `design.initialize` is an explicit managed-workspace operation. It creates
 or adopts metadata without changing workspace kind, HEAD or the index. Directory
@@ -586,6 +588,12 @@ first. Explicit target errors remain visible. No prompt/control-plane fields,
 protocol bump or `design_page_*` agent tools are added. Native agents add a page
 record `{ "id", "title", "folder", "frames": [] }` to `meta/canvas.json` and
 create its folder, following the same portable folder rule.
+
+Unreadable or conflicted canvas metadata and competing manifests make the page
+catalog unavailable in capabilities/prompt context, with an error message.
+Mode revision and available authority/tool metadata remain inspectable so an
+agent can switch modes and help repair the existing source. Workspace ownership
+and cancellation checks still apply; write-target errors are never suppressed.
 
 Folder rename, moving frames between pages, page reorder, authored backgrounds,
 nested page folders and page-level undo remain follow-ups. Background is private
@@ -1076,9 +1084,11 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   wheel settlement. Escape restores the camera at the start of the hand drag.
   Replacing the directory cancels the hand without restoring the retired
   directory's camera or selection into the replacement view.
-  A canvas never opens onto empty space while it has frames: when no frame is
-  at least 4 screen px in view, the first display for that owner fits them all
-  (afterwards the camera is the user's). Selecting a frame nobody can see (from
+  On the first visit to a page without a remembered view, when no frame is
+  at least 4 screen px in view, the canvas fits them all. Remembered page cameras
+  survive switching and reload, including intentionally off-screen views.
+  Legacy root canvases retain their first-display fit. Selecting a frame nobody
+  can see (from
   Layers, keyboard or history) centers it at the current zoom, or fits it when it
   would be unreadable there; a frame with any visible part never moves.
   "In view" and every fit, reveal and menu/keyboard zoom centre use the

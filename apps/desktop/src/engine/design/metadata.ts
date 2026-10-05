@@ -7,12 +7,36 @@ import {
   syncDesignStorageDirectory as syncDirectory,
 } from "./metadata-storage";
 import { GENERATED_DESIGN_RULES, upgradedDesignRules } from "./design-rules";
-import { createDesignPagesLayout, designPagesMigrationOwnsManifests, migrateDesignDirectoryPages, recoverDesignPagesMigration, recoverWorkspaceDesignPagesMigrations, type DesignPagesMigrationOptions } from "./pages-migration";
-export { assertSafeDesignStoragePath, readDesignStorageFile, designPrivateStorageDirectory, writePrivateDesignState } from "./metadata-storage";
-export { DESIGN_RULES, ROOT_DESIGN_RULES, LEGACY_DESIGN_RULES, PREVIOUS_NATIVE_DESIGN_RULES } from "./design-rules";
+import {
+  createDesignPagesLayout,
+  designPagesMigrationJournalName,
+  designPagesMigrationOwnsManifests,
+  migrateDesignDirectoryPages,
+  recoverDesignPagesMigration,
+  recoverWorkspaceDesignPagesMigrations,
+  type DesignPagesMigrationOptions,
+} from "./pages-migration";
+export {
+  assertSafeDesignStoragePath,
+  readDesignStorageFile,
+  designPrivateStorageDirectory,
+  writePrivateDesignState,
+} from "./metadata-storage";
+export {
+  DESIGN_RULES,
+  ROOT_DESIGN_RULES,
+  LEGACY_DESIGN_RULES,
+  PREVIOUS_NATIVE_DESIGN_RULES,
+} from "./design-rules";
 import { createHash, randomUUID } from "node:crypto";
 import { assertDesignWriteAuthorized } from "./write-authority";
-import { existsSync, readdirSync, realpathSync, unlinkSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  realpathSync,
+  unlinkSync,
+} from "node:fs";
 import path from "node:path";
 import { parse, stringify } from "smol-toml";
 import { z } from "zod";
@@ -27,7 +51,10 @@ import {
 } from "./manifest";
 import { DESIGN_CANVAS_FILE, decodeCanvasFile, encodeCanvasFile } from "./canvas-file";
 import { resolveDesignManifestLayout } from "./layout";
-import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import {
+  isDesignFrameFile,
+  portableDesignName,
+} from "@zeros/protocol/design-path";
 import {
   assertDesignFilesNotIgnored,
   designGitignoreSource,
@@ -53,7 +80,6 @@ export const DESIGN_METADATA_PROTECTED_PATHS = [
 export const DESIGN_RULES_FILE = `${DESIGN_METADATA_ROOT}/rules.md`;
 const MAX_METADATA_BYTES = 16 * 1024 * 1024;
 const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
-const portable = (value: string) => value.normalize("NFC").toLowerCase();
 export const designDirectoryRegistrySchema = z
   .object({
     version: z.literal(1),
@@ -81,15 +107,18 @@ export const designDirectoryRegistrySchema = z
     const entries = Object.entries(registry.directories);
     for (let i = 0; i < entries.length; i++)
       for (let j = i + 1; j < entries.length; j++) {
-        if (portable(entries[i][0]) === portable(entries[j][0]))
+        if (
+          portableDesignName(entries[i][0]) ===
+          portableDesignName(entries[j][0])
+        )
           ctx.addIssue({
             code: "custom",
             message:
               "Design directory IDs must have distinct portable spelling",
             path: ["directories", entries[j][0]],
           });
-        const a = portable(entries[i][1].path),
-          b = portable(entries[j][1].path);
+        const a = portableDesignName(entries[i][1].path),
+          b = portableDesignName(entries[j][1].path);
         if (a === b || a.startsWith(b + "/") || b.startsWith(a + "/"))
           ctx.addIssue({
             code: "custom",
@@ -174,10 +203,16 @@ export function refreshDesignManifestDiscovery(workspace: string): void {
   if (manifestCandidates.size > 128)
     manifestCandidates.delete(manifestCandidates.keys().next().value!);
 }
-function rememberManifest(workspace: string, directory: string): void {
+function rememberManifest(
+  workspace: string,
+  directory: string,
+  layout = readDirectoryDesignLayout(workspace, directory),
+): void {
   const key = designDiscoveryKey(workspace);
   if (!manifestCandidates.has(key)) refreshDesignManifestDiscovery(workspace);
-  manifestCandidates.get(key)!.add(readDirectoryDesignLayout(workspace, directory)?.manifestFile ?? `${directory}/${DESIGN_MANIFEST_FILE}`);
+  manifestCandidates
+    .get(key)!
+    .add(layout?.manifestFile ?? `${directory}/${DESIGN_MANIFEST_FILE}`);
 }
 export function readDirectoryDesignLayout(
   workspace: string,
@@ -189,8 +224,9 @@ export function readDirectoryDesignLayout(
   // registration; leave that collision to explicit v3 migration preflight.
   const metaEntries = (() => {
     try {
-      return readdirSync(path.join(workspace, directory), { withFileTypes: true })
-        .filter((entry) => portable(entry.name) === "meta");
+      return readdirSync(path.join(workspace, directory), {
+        withFileTypes: true,
+      }).filter((entry) => portableDesignName(entry.name) === "meta");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
@@ -226,6 +262,7 @@ export function readDirectoryDesignManifest(workspace: string, directory: string
 }
 export function readDesignDirectoryRegistry(
   workspace: string,
+  knownLayout?: ReturnType<typeof readDirectoryDesignLayout>,
 ): DesignDirectoryRegistry | null {
   const raw = readDesignRegistrySource(workspace).source;
   const registry =
@@ -249,7 +286,10 @@ export function readDesignDirectoryRegistry(
     const candidate = source === null ? null : parseDesignManifest(source);
     if (!candidate) continue;
     const { directory } = resolveDesignManifestLayout(file, candidate);
-    const manifest = readDirectoryDesignManifest(workspace, directory)!;
+    const manifest =
+      knownLayout?.directory === directory
+        ? knownLayout.manifest
+        : readDirectoryDesignManifest(workspace, directory)!;
     const existing = registry.directories[manifest.id];
     if (existing && existing.path !== directory)
       throw new Error(
@@ -366,9 +406,13 @@ export function validateDesignSettings(
     if (entry.path === selected)
       designDocumentMetadataRelativePath(workspace, id);
     else if (
-      portable(selected).startsWith(portable(entry.path) + "/") ||
-      portable(entry.path).startsWith(portable(selected) + "/") ||
-      portable(selected) === portable(entry.path)
+      portableDesignName(selected).startsWith(
+        portableDesignName(entry.path) + "/",
+      ) ||
+      portableDesignName(entry.path).startsWith(
+        portableDesignName(selected) + "/",
+      ) ||
+      portableDesignName(selected) === portableDesignName(entry.path)
     )
       throw new Error(
         "The selected Design path overlaps a registered Design directory.",
@@ -378,10 +422,10 @@ export function validateDesignSettings(
 export function designDirectoryEntry(
   workspace: string,
   directory: string,
+  layout = readDirectoryDesignLayout(workspace, directory),
 ): { id: string; path: string } | undefined {
-  if (readDirectoryDesignManifest(workspace, directory))
-    rememberManifest(workspace, directory);
-  const registry = readDesignDirectoryRegistry(workspace);
+  if (layout) rememberManifest(workspace, directory, layout);
+  const registry = readDesignDirectoryRegistry(workspace, layout);
   const entry = Object.entries(registry?.directories ?? {}).find(
     ([, value]) => value.path === directory,
   );
@@ -419,10 +463,18 @@ function designDocumentMetadataRelativePath(
 export function designDocumentMetadataPath(
   workspace: string,
   directory: string,
+  captured?: {
+    layout: ReturnType<typeof readDirectoryDesignLayout>;
+    entry: ReturnType<typeof designDirectoryEntry>;
+  },
 ): string {
-  const layout = readDirectoryDesignLayout(workspace, directory);
+  const layout = captured
+    ? captured.layout
+    : readDirectoryDesignLayout(workspace, directory);
   const manifest = layout?.manifest;
-  const entry = designDirectoryEntry(workspace, directory);
+  const entry = captured
+    ? captured.entry
+    : designDirectoryEntry(workspace, directory, layout);
   if (manifest) {
     if (
       readDesignStorageFile(
@@ -462,7 +514,7 @@ export function designMetadataGitPaths(
     : [];
 }
 export function isDesignMetadataRepoPath(file: string): boolean {
-  const normalized = portable(
+  const normalized = portableDesignName(
     path.posix.normalize(file.replace(/\\/g, "/")),
   ).replace(/\/+$/, "");
   return (
@@ -594,6 +646,56 @@ const migrationSchema = z
   .strict();
 const journalName = (directory: string) =>
   `metadata-${createHash("sha256").update(directory).digest("hex").slice(0, 24)}.json`;
+
+/** No retained layout cache: native edits and newly appeared recovery records
+ * must be visible on the very next write. Source/CAS checks still run normally. */
+export function hasSettledDesignPagesLayout(
+  workspace: string,
+  directory: string,
+): boolean {
+  try {
+    const entries = readdirSync(path.join(workspace, directory));
+    if (
+      entries.some((name) =>
+        [
+          "design.toml",
+          ".zeros-canvas.json",
+          ".zeros-transaction.json",
+        ].includes(portableDesignName(name)),
+      )
+    )
+      return false;
+    const source = readDesignStorageFile(
+      workspace,
+      `${directory}/meta/design.toml`,
+    );
+    const manifest = source === null ? null : parseDesignManifest(source);
+    if (
+      manifest?.version !== 3 ||
+      !lstatSync(path.join(workspace, directory, "meta/canvas.json"), {
+        throwIfNoEntry: false,
+      })
+    )
+      return false;
+    const privateRoot = designPrivateStorageDirectory(workspace);
+    const directoryKey = createHash("sha256")
+      .update(directory)
+      .digest("hex")
+      .slice(0, 24);
+    return ![
+      "directory-rename.json",
+      journalName(directory),
+      designPagesMigrationJournalName(directory),
+      `transaction-${manifest.id}.json`,
+      `transaction-${directoryKey}.json`,
+    ].some((name) =>
+      lstatSync(path.join(privateRoot, name), { throwIfNoEntry: false }),
+    );
+  } catch {
+    // The full path reports missing/unsafe/ambiguous layout errors.
+    return false;
+  }
+}
 // Compatibility only: experimental builds could move authored files out of the
 // checkout. Never erase that ownership marker or silently fall back to writes.
 const privateDraftFenceName = journalName("private-draft-migration");

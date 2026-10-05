@@ -24,6 +24,7 @@ import {
 import {
   MAX_DESIGN_HISTORY_WORKSPACES,
   pruneWorkspaceDesignHistory,
+  pruneWorkspaceDesignFrameHistory,
   type WorkspaceDesignHistoryEntry,
   type WorkspaceDesignHistoryState,
 } from "../design/workspace-history";
@@ -1332,6 +1333,8 @@ export class WorkspaceService {
       this.designHistoryState(workspacePath, create),
     recordDesignHistory: (workspacePath, entry) =>
       this.recordDesignHistory(workspacePath, entry),
+    pruneDesignHistoryFrames: (workspacePath, frames, folder) =>
+      this.pruneDesignHistoryFrames(workspacePath, frames, folder),
     readDesignSnapshot: (workspace, remote, options) =>
       this.readDesignSnapshot(workspace, remote, options),
     readDesignSnapshotRequest: (workspaceId, remote, hostLocalResources) =>
@@ -1499,6 +1502,23 @@ export class WorkspaceService {
     const root = nodePath.resolve(workspacePath);
     for (const key of this.designHistoryByWorkspace.keys()) {
       if (key === root || key.startsWith(`${root}\u0000`)) this.designHistoryByWorkspace.delete(key);
+    }
+  }
+  private pruneDesignHistoryFrames(
+    workspacePath: string,
+    frames: readonly string[],
+    folder?: string,
+  ): void {
+    const root = nodePath.resolve(workspacePath);
+    const directory = designDirectoryNameFor(workspacePath);
+    const files = new Set(frames);
+    for (const [key, state] of this.designHistoryByWorkspace) {
+      if (
+        (key === root || key.startsWith(`${root}\u0000`)) &&
+        this.designHistoryLayouts.get(state)?.directory === directory
+      ) {
+        pruneWorkspaceDesignFrameHistory(state, files, folder);
+      }
     }
   }
   setDesignProtocolCapabilityProvider(

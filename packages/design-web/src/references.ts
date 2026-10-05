@@ -1,5 +1,6 @@
 import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 import postcss from "postcss";
+import { portableDesignName } from "@zeros/protocol/design-path";
 
 /** Resolve URLs against the containing source file, bounded by the Design root.
  * This is lexical; filesystem readers still check the canonical target. */
@@ -127,18 +128,17 @@ export function mayReferenceMovedDesignFrame(
   source: string,
   movedFiles: Readonly<Record<string, string>> = {},
 ): boolean {
-  const text = decodeHtmlAttributeValue(source)
-    .replace(/(?:%[0-9a-f]{2})+/gi, (value) => {
+  const text = portableDesignName(
+    decodeHtmlAttributeValue(source).replace(/(?:%[0-9a-f]{2})+/gi, (value) => {
       try {
         return decodeURIComponent(value);
       } catch {
         return value;
       }
-    })
-    .normalize("NFC")
-    .toLowerCase();
+    }),
+  );
   return Object.keys(movedFiles).some((file) =>
-    text.includes(file.split("/").at(-1)!.normalize("NFC").toLowerCase()),
+    text.includes(portableDesignName(file.split("/").at(-1)!)),
   );
 }
 
@@ -252,8 +252,7 @@ function rebaseMigrationReference(
     resolved.target !== null &&
     Object.keys(options.movedFiles ?? {}).some(
       (file) =>
-        file.normalize("NFC").toLowerCase() ===
-        resolved.target!.normalize("NFC").toLowerCase(),
+        portableDesignName(file) === portableDesignName(resolved.target!),
     )
   )
     unsafeReference(reference);

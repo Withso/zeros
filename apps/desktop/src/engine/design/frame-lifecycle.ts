@@ -70,6 +70,8 @@ import {
   normalizeGeometry,
   readBoundedDesignFrameSource,
   readCanvas,
+  readCanvasContext,
+  type DesignCanvasReadContext,
   readFrameMeta,
   stripLegacyFrameMeta,
   writeCanvas,
@@ -82,17 +84,7 @@ import { type DesignStorageChange } from "./metadata";
 import { legacyFrameId } from "./canvas-file";
 import { isDeepStrictEqual } from "node:util";
 import { assertDesignFrameRestorePage, designFramePage, designPageForWrite, designPageFrameFiles } from "./pages";
-
-function slugFrameTitle(title: string): string {
-  const slug = title
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 72);
-  return slug || "frame";
-}
+import { designTitleSlug } from "./design-naming";
 
 export async function createDesignFrame(
   workspacePath: string,
@@ -116,7 +108,7 @@ export async function createDesignFrame(
     if (Object.keys(canvas.frames).length >= MAX_FRAME_COUNT) throw new Error(`Design document exceeds ${MAX_FRAME_COUNT} frames.`);
     const folder = page.folder;
     const title = input.title?.trim().slice(0, 120) || "Frame";
-    const base = slugFrameTitle(title);
+    const base = designTitleSlug(title, { maxLength: 72, fallback: "frame" });
     let file = folder ? `${folder}/${base}.html` : `${base}.html`;
     for (let suffix = 2; existsSync(path.join(directory, file)); suffix++) {
       file = folder ? `${folder}/${base}-${suffix}.html` : `${base}-${suffix}.html`;
@@ -213,10 +205,12 @@ export async function listDesignFramesUnlocked(
   workspacePath: string,
   writeBack: boolean,
   allowMissing = false,
+  context?: DesignCanvasReadContext,
 ): Promise<DesignFrameSummary[]> {
   if (writeBack) await initializeDesignDocumentUnlocked(workspacePath);
-  const files = await discoverFrameFiles(workspacePath);
-  const canvas = await readCanvas(workspacePath);
+  const captured = context ?? (await readCanvasContext(workspacePath));
+  const files = await discoverFrameFiles(workspacePath, captured);
+  const canvas = captured.canvas;
   let canvasChanged = false;
   const sourceChanges: DesignStorageChange[] = [];
   const summaries: DesignFrameSummary[] = [];
@@ -455,7 +449,7 @@ export async function duplicateDesignFrame(
     );
     const title = `${originalMeta.title} copy`.slice(0, 120);
     const directory = designDirectory(workspacePath);
-    const base = `${slugFrameTitle(originalMeta.title)}-copy`;
+    const base = `${designTitleSlug(originalMeta.title, { maxLength: 72, fallback: "frame" })}-copy`;
     const folder = page.folder;
     let file = folder ? `${folder}/${base}.html` : `${base}.html`;
     for (let suffix = 2; existsSync(path.join(directory, file)); suffix += 1) {
@@ -838,6 +832,7 @@ export async function transferDesignNode(
         input.nodeId,
         "data-zeros-frame-root",
         null,
+        from.file,
       );
       // HTML insertion takes Design-root-relative fragments. Retain the
       // original source origin before adapting to that existing contract.
@@ -901,6 +896,7 @@ export async function transferDesignNode(
         input.nodeId,
         "data-zeros-frame-root",
         "",
+        from.file,
       );
       after = {
         file,

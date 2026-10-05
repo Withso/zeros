@@ -17,11 +17,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { portableDesignName } from "@zeros/protocol/design-path";
 import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { zerosDataDir } from "../db/paths";
 
 const MAX_METADATA_BYTES = 16 * 1024 * 1024;
-const portable = (value: string) => value.normalize("NFC").toLowerCase();
 
 /** Every segment uses its exact portable spelling and its own inode. This is
  * also used for prospective paths, before creating any parent directories. */
@@ -51,7 +51,7 @@ export function assertSafeDesignStoragePath(
     const part = parts[index],
       candidate = path.join(parent, part);
     const spelling = readdirSync(parent).find(
-      (entry) => portable(entry) === portable(part),
+      (entry) => portableDesignName(entry) === portableDesignName(part),
     );
     if (spelling !== undefined && spelling !== part)
       throw new Error("Design storage path has ambiguous spelling.");

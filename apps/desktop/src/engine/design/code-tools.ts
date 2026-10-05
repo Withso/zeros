@@ -300,6 +300,8 @@ export interface DesignCodeToolTarget {
   /** Engine-owned conversation identity survives provider reconnects. */
   actorId: string;
   assertCurrent(): void;
+  /** Owner checks for repair guidance may tolerate unreadable registration. */
+  assertInspectionCurrent?(): void;
 }
 
 /** No timers, watchers, or browser processes are allocated by this handler.
@@ -396,7 +398,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     this.abort.abort(new Error("Design authority was revoked."));
   }
 
-  assertActive(token: string): void {
+  assertActive(token: string, inspection = false): void {
     const supplied = Buffer.from(token);
     const expected = Buffer.from(this.token);
     if (
@@ -410,7 +412,9 @@ export class DesignCodeTools implements DesignMcpToolHandler {
       throw new Error("Design authority expired; reopen the Code session.");
     }
     try {
-      this.target.assertCurrent();
+      if (inspection && this.target.assertInspectionCurrent)
+        this.target.assertInspectionCurrent();
+      else this.target.assertCurrent();
     } catch (error) {
       this.dispose();
       throw error;
@@ -426,7 +430,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     raw: unknown,
     signal: AbortSignal,
   ): Promise<CallToolResult> {
-    this.assertActive(this.token);
+    this.assertActive(this.token, name === "design_capabilities");
     if (this.pending >= 4)
       throw new Error(
         "Design request capacity reached; wait for an active request to settle.",
@@ -462,7 +466,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     const joined = AbortSignal.any([signal, this.abort.signal]);
     const assertCurrent = () => {
       joined.throwIfAborted();
-      this.assertActive(this.token);
+      this.assertActive(this.token, name === "design_capabilities");
       assertMode();
     };
     this.pending += 1;
@@ -644,7 +648,9 @@ export class DesignCodeTools implements DesignMcpToolHandler {
   ): Promise<unknown> {
     switch (name) {
       case "design_capabilities": {
-        const { pages, activePageId } = await readDesignPageContext(this.target);
+        const { pages, activePageId, pagesError } = await readDesignPageContext(
+          this.target,
+        );
         return {
           version: 1,
           composerMode: this.mode(),
@@ -652,6 +658,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
           directoryId: this.target.directoryId,
           pages,
           activePageId,
+          ...(pagesError ? { pagesError } : {}),
           actor: this.actor,
           serverTime: this.now(),
           expiresAt: this.expiresAt,

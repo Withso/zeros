@@ -33,6 +33,7 @@ import {
   commitDesignWebDocumentState,
   createDesignFrame,
   initializeDesignDocument,
+  deleteDesignPage,
   readDesignFrame,
   readDesignWebDocumentState,
   readDesignWorkspaceSnapshot,
@@ -1159,6 +1160,87 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it.each(["create", "duplicate", "delete", "undo", "redo"])(
+    "returns fresh frame and history mutation snapshots for %s while an older read is pending",
+    async (operation) => {
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+      execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+      const design = await createWorkspace({
+        repoRoot: dir,
+        repoSlug: `design-fresh-${operation}`,
+        kind: "design",
+      });
+      const target = { workspaceId: design.workspaceId };
+      let release = () => {};
+      const flights = (
+        svc as unknown as {
+          designSnapshotFlights: Map<string, Promise<unknown>>;
+        }
+      ).designSnapshotFlights;
+      try {
+        const created = (await svc.handle("design.frame.create", {
+          ...target,
+          title: "Original",
+        })) as { frame: { file: string } };
+        if (operation === "undo" || operation === "redo") {
+          await svc.handle("design.frame.rename", {
+            ...target,
+            frame: created.frame.file,
+            title: "Renamed",
+          });
+          if (operation === "redo")
+            await svc.handle("design.history.undo", target);
+        }
+        const before = (await svc.handle("design.snapshot", target)) as {
+          snapshot: { frames: Array<{ file: string; title: string }> };
+        };
+        const blocked = new Promise<typeof before.snapshot>((resolve) => {
+          release = () => resolve(before.snapshot);
+        });
+        const key = `${design.workspaceId}\u0000${path.resolve(design.path)}\u0000read\u0000${designDirectoryNameFor(design.path)}\u0000host-resources`;
+        flights.set(key, blocked);
+        const getFlight = vi.spyOn(flights, "get");
+        const observing = svc.handle("design.snapshot", target) as Promise<
+          typeof before
+        >;
+        await vi.waitFor(() => expect(getFlight).toHaveBeenCalledTimes(1));
+        const op =
+          operation === "undo" || operation === "redo"
+            ? `design.history.${operation}`
+            : `design.frame.${operation}`;
+        const writing = svc.handle(op, {
+          ...target,
+          frame: created.frame.file,
+          title: "New frame",
+        }) as Promise<typeof before>;
+        await vi.waitFor(() =>
+          expect(getFlight.mock.calls.length).toBeGreaterThanOrEqual(2),
+        );
+        release();
+        const [old, reply] = await Promise.all([observing, writing]);
+        expect(old.snapshot).toBe(before.snapshot);
+        expect(reply.snapshot).not.toBe(before.snapshot);
+        const frames = reply.snapshot.frames;
+        if (operation === "delete") expect(frames).toEqual([]);
+        else if (operation === "undo" || operation === "redo")
+          expect(frames[0].title).toBe(
+            operation === "undo" ? "Original" : "Renamed",
+          );
+        else expect(frames).toHaveLength(2);
+        getFlight.mockRestore();
+      } finally {
+        release();
+        flights.clear();
+        await svc.handle("workspace.delete", {
+          ...target,
+          includeBranch: true,
+        });
+      }
+    },
+  );
+
   it("does not share an in-flight snapshot across an active Design directory change", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
     execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
@@ -1362,6 +1444,102 @@ describe("WorkspaceService", () => {
       });
     }
   });
+
+  it.each(["route", "empty page", "native"])(
+    "keeps history usable after a page is deleted through %s",
+    async (deletion) => {
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+      execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+      const design = await createWorkspace({
+        repoRoot: dir,
+        repoSlug: `design-page-history-${deletion.replace(" ", "-")}`,
+        kind: "design",
+      });
+      const target = { workspaceId: design.workspaceId };
+      try {
+        const first = (await svc.handle("design.frame.create", {
+          ...target,
+          title: "Frame A",
+        })) as { frame: { file: string } };
+        const source = await readDesignFrame(design.path, first.frame.file);
+        const oid = source.source.match(/data-oid="([^"]+)"/)![1]!;
+        await svc.handle("design.node.styles", {
+          ...target,
+          frame: first.frame.file,
+          sourceVersion: source.sourceVersion,
+          nodeId: oid,
+          styles: { color: "rebeccapurple" },
+        });
+        const page = (await svc.handle("design.page.create", {
+          ...target,
+          title: "Page B",
+        })) as { page: { id: string } };
+        const second = (await svc.handle("design.frame.create", {
+          ...target,
+          pageId: page.page.id,
+          title: "Frame B",
+        })) as { frame: { file: string; frameId: string } };
+        const api = getWorkspaceDesignApi(design.path);
+        await api.open(`frame:${second.frame.file}`);
+        if (deletion !== "native") {
+          if (deletion === "empty page")
+            await svc.handle("design.frame.delete", {
+              ...target,
+              frame: second.frame.file,
+            });
+          await svc.handle("design.page.delete", {
+            ...target,
+            pageId: page.page.id,
+            expectedFrameIds:
+              deletion === "empty page" ? [] : [second.frame.frameId],
+          });
+          const sessions = (
+            api as unknown as { sessions: Map<string, unknown> }
+          ).sessions;
+          expect(sessions.has(`frame:${second.frame.file}`)).toBe(false);
+        } else {
+          await svc.handle("design.history.undo", target);
+          await deleteDesignPage(design.path, page.page.id, []);
+          await expect(
+            svc.handle("design.history.redo", target),
+          ).rejects.toThrow(/page.*not found|page.*missing/i);
+          const history = (
+            svc as unknown as {
+              designHistoryState(workspace: string): { redo: unknown[] };
+            }
+          ).designHistoryState(design.path);
+          expect(history.redo).toEqual([]);
+        }
+        const undone = (await svc.handle("design.history.undo", target)) as {
+          historyFrame: string;
+        };
+        expect(undone.historyFrame).toBe(first.frame.file);
+        expect(
+          (await readDesignFrame(design.path, first.frame.file)).source,
+        ).not.toContain("rebeccapurple");
+        await svc.handle("design.history.redo", target);
+        expect(
+          (await readDesignFrame(design.path, first.frame.file)).source,
+        ).toContain("rebeccapurple");
+        expect(
+          fs.existsSync(
+            path.join(
+              design.path,
+              designDirectoryNameFor(design.path),
+              second.frame.file,
+            ),
+          ),
+        ).toBe(false);
+      } finally {
+        await svc.handle("workspace.delete", {
+          ...target,
+          includeBranch: true,
+        });
+      }
+    },
+  );
 
   it.each(["detach", "into-frame", "root-into-frame"])(
     "preserves edits on both sides of a %s transfer through undo and redo",
