@@ -386,7 +386,7 @@ printf ran > '${sentinel}'
     const created = await createWorkspace({ repoRoot, kind: "design" });
     expect(
       await readFile(
-        path.join(created.path, "Zeros Design", "existing.html"),
+        path.join(created.path, "Zeros Design", "page-1/existing.html"),
         "utf8",
       ),
     ).toContain("Keep me");
@@ -401,7 +401,7 @@ printf ran > '${sentinel}'
         designDocumentMetadataPath(created.path, "Zeros Design"),
         "utf8",
       ),
-    ).toContain('"version": 1');
+    ).toContain('"version": 2');
     await deleteWorkspace({
       workspaceId: created.workspaceId,
       includeBranch: true,
@@ -900,8 +900,11 @@ printf ran > '${sentinel}'
     const created = await createWorkspace({ repoRoot, kind: "design" });
     const designDirectory = designDirectoryNameFor(created.path);
     const canvas = designDocumentMetadataPath(created.path, designDirectory);
+    const original = JSON.parse(await readFile(canvas, "utf8"));
     const dirty = encodeCanvasFile(
       {
+        id: original.id,
+        pages: original.pages,
         version: 3,
         frames: {},
         frame_info: {},
@@ -912,6 +915,7 @@ printf ran > '${sentinel}'
           components: [],
         },
       },
+      { version: 2 },
     );
     const frame = path.join(created.path, designDirectory, "frame.html");
     await writeFile(canvas, dirty);
@@ -1043,10 +1047,10 @@ printf ran > '${sentinel}'
     await execFileAsync("git", ["add", folder, ".gitignore"], { cwd: repoRoot });
     await execFileAsync("git", ["commit", "-qm", "Design metadata"], { cwd: repoRoot });
     const live = await createWorkspace({ repoRoot, kind: "design", baseBranch: "main" });
-    const before = await readFile(path.join(live.path, folder, "design.toml"), "utf8");
+    const before = await readFile(path.join(live.path, folder, "meta/design.toml"), "utf8");
     try {
       await renameDesignDirectory({ repoRoot, from: folder, to: "Renamed Design" });
-      expect(await readFile(path.join(live.path, folder, "design.toml"), "utf8")).toBe(before);
+      expect(await readFile(path.join(live.path, folder, "meta/design.toml"), "utf8")).toBe(before);
       expect(existsSync(path.join(live.path, "Renamed Design"))).toBe(false);
     } finally { await deleteWorkspace({ workspaceId: live.workspaceId, includeBranch: true }); }
   });
@@ -1146,7 +1150,7 @@ printf ran > '${sentinel}'
           cwd: repoRoot,
         })
       ).stdout;
-      expect(files).toContain("New Design/design.toml");
+      expect(files).toContain("New Design/meta/design.toml");
       expect(files).toContain("New Design/rules.md");
       expect(files).not.toContain(legacyFile);
       expect(

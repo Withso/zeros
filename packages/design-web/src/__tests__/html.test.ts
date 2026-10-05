@@ -131,6 +131,15 @@ describe("HTML source adapter", () => {
     ).toBe(text);
   });
 
+  it("validates inserted asset URLs relative to a page frame and rejects escapes", () => {
+    expect(mutateDesignNodeHtmlSource(FRAME_HTML, "card", '<img src="../assets/a.png">', "append", "page-1/home.html"))
+      .toContain('<img src="../assets/a.png">');
+    expect(() => mutateDesignNodeHtmlSource(FRAME_HTML, "card", '<img src="../../outside.png">', "append", "page-1/home.html"))
+      .toThrow(/inside the design document/);
+    expect(() => mutateDesignNodeHtmlSource(FRAME_HTML, "card", '<img src="../outside.png">'))
+      .toThrow(/inside the design document/);
+  });
+
   it("rejects active HTML and heals inserted visual nodes", () => {
     expect(() =>
       mutateDesignNodeHtmlSource(FRAME_HTML, "card", "<script>bad()</script>"),

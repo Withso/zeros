@@ -650,8 +650,9 @@ export function mutateDesignNodeHtmlSource(
   nodeId: string,
   html: string,
   mode: "append" | "replace-inner" = "replace-inner",
+  sourceFile = "",
 ): string {
-  assertSafeDesignHtmlFragment(html);
+  assertSafeDesignHtmlFragment(html, sourceFile);
   if (nodeId === DESIGN_DOCUMENT_BODY_ID) {
     if (mode !== "append")
       throw new Error(

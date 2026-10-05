@@ -31,7 +31,7 @@ import {
   previewExistingDesignDirectory,
 } from "./adopt-directory";
 import { stageDesignRegistry } from "./metadata-git";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   designDirectoryFromSettings,
   designDocumentMetadataPath,
@@ -908,6 +908,7 @@ export async function handleDesignWorkspaceRoute(
           capturedAt: Date.now(),
           sourceVersion,
         }),
+        workspace.path,
       );
       return { ok: true };
     }
@@ -1130,6 +1131,7 @@ export async function handleDesignWorkspaceRoute(
         remote,
       );
       const frame = reqStr(params, "frame");
+      const coalesceKey = `frame-geometry:${frame.includes("/") ? createHash("sha256").update(frame).digest("hex").slice(0, 24) : frame}`;
       const geometry = {
         x: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "x"))),
         y: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "y"))),
@@ -1154,12 +1156,12 @@ export async function handleDesignWorkspaceRoute(
             z: geometry.z,
           },
         },
-        `frame-geometry:${frame}`,
+        coalesceKey,
       );
       if (applied.receipt.status === "applied") {
         host.recordDesignHistory(
           workspace.path,
-          documentDesignHistoryEntry(frame, `frame-geometry:${frame}`),
+          documentDesignHistoryEntry(frame, coalesceKey),
         );
       }
       return {

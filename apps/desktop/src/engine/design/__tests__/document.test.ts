@@ -182,7 +182,7 @@ describe("design document", () => {
       title: "Landing page",
       geometry: { x: 125, y: -40, w: 640, h: 360, z: 7 },
     });
-    expect(created.file).toBe("landing-page.html");
+    expect(created.file).toBe("page-1/landing-page.html");
     expect(created).toMatchObject({
       x: 125,
       y: -40,
@@ -203,7 +203,7 @@ describe("design document", () => {
     );
     expect(source).not.toContain('name="zeros-frame"');
     expect(source).not.toContain("width=640,height=360");
-    expect(source).toContain('href="./tokens.css"');
+    expect(source).toContain('href="../tokens.css"');
     expect(source).toMatch(/<main\b[^>]*style="[^"]*display:block/);
     expect(source).toContain("height:100vh;");
     expect(source).toContain("background-color:#ffffff; opacity:1;"); // check:ui ignore-line -- authored frame defaults.
@@ -294,7 +294,8 @@ describe("design document", () => {
       "utf8",
     );
 
-    await updateDesignFrameGeometry(root, "legacy.html", { x: 75 });
+    await expect(updateDesignFrameGeometry(root, "legacy.html", { x: 75 })).rejects.toThrow(/not found|stale/);
+    await updateDesignFrameGeometry(root, "page-1/legacy.html", { x: 75 });
     const migrated = parseCanvasFixture(
       await readFile(
         designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
@@ -304,7 +305,7 @@ describe("design document", () => {
     expect(migrated).toMatchObject({
       version: 3,
       frames: {
-        "legacy.html": { x: 75, y: 50, w: 800, h: 600, z: 2 },
+        "page-1/legacy.html": { x: 75, y: 50, w: 800, h: 600, z: 2 },
       },
       foundation: { schemaVersion: 1 },
     });
@@ -411,7 +412,7 @@ describe("design document", () => {
 
   it("reports a blank data-oid exactly once before healing", async () => {
     await initializeDesignDocument(root);
-    const target = path.join(root, DESIGN_DIRECTORY_NAME, "blank-oid.html");
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, "page-1/blank-oid.html");
     await writeFile(
       target,
       "<!doctype html><html><body><div data-oid></div></body></html>",
@@ -437,7 +438,7 @@ describe("design document", () => {
 
   it("returns post-heal oid lint while preserving the healed count", async () => {
     await initializeDesignDocument(root);
-    const target = path.join(root, DESIGN_DIRECTORY_NAME, "healed-report.html");
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, "page-1/healed-report.html");
     await writeFile(
       target,
       '<!doctype html><html><body><main data-oid="same"><h1>Missing</h1><p data-oid="same">Duplicate</p></main></body></html>',
@@ -454,7 +455,7 @@ describe("design document", () => {
       ),
     ).toHaveLength(2);
 
-    const after = await lintDesignDocument(root, "healed-report.html");
+    const after = await lintDesignDocument(root);
     expect(after.healedOids).toBe(2);
     expect(
       after.violations.filter((violation) =>
@@ -466,7 +467,7 @@ describe("design document", () => {
   it("requires stable ids only on rendered elements inside the body", async () => {
     await initializeDesignDocument(root);
     await writeFile(
-      path.join(root, DESIGN_DIRECTORY_NAME, "visual-nodes.html"),
+      path.join(root, DESIGN_DIRECTORY_NAME, "page-1/visual-nodes.html"),
       `<!doctype html>
 <html>
   <head>
@@ -499,7 +500,7 @@ describe("design document", () => {
   it("reports stable safety and token rule ids with useful locations", async () => {
     await initializeDesignDocument(root);
     await writeFile(
-      path.join(root, DESIGN_DIRECTORY_NAME, "unsafe.html"),
+      path.join(root, DESIGN_DIRECTORY_NAME, "page-1/unsafe.html"),
       `<!doctype html>
 <html>
   <head><link rel="stylesheet" href="https://cdn.example.com/a.css"></head>
@@ -508,7 +509,7 @@ describe("design document", () => {
       "utf8",
     );
 
-    const report = await lintDesignDocument(root, "unsafe.html", {
+    const report = await lintDesignDocument(root, "page-1/unsafe.html", {
       healOids: false,
     });
     const ids = report.violations.map((violation) => violation.ruleId);
@@ -534,13 +535,13 @@ describe("design document", () => {
   it("accepts frame-local custom properties and advises only truly unknown tokens", async () => {
     await initializeDesignDocument(root);
     await writeFile(
-      path.join(root, DESIGN_DIRECTORY_NAME, "local-tokens.html"),
+      path.join(root, DESIGN_DIRECTORY_NAME, "page-1/local-tokens.html"),
       `<!doctype html><html><head><style>:root { --frame-accent: rebeccapurple; }</style></head>
 <body><main data-oid="main" style="color:var(--frame-accent); border-color:var(--missing-accent)">Local</main></body></html>`,
       "utf8",
     );
 
-    const report = await lintDesignDocument(root, "local-tokens.html", {
+    const report = await lintDesignDocument(root, "page-1/local-tokens.html", {
       healOids: false,
     });
     const unknown = report.violations.filter(
@@ -685,7 +686,7 @@ describe("design document", () => {
       recursive: true,
     });
     await writeFile(
-      path.join(root, DESIGN_DIRECTORY_NAME, "one.html"),
+      path.join(root, DESIGN_DIRECTORY_NAME, "page-1/one.html"),
       '<!doctype html><html><body data-oid="body" style="color:var(--fg1); background:var(--bg1)"></body></html>',
       "utf8",
     );
@@ -829,7 +830,7 @@ describe("design document", () => {
   it("maps stable oids to exact parse5 source ranges for future surgical writes", async () => {
     await initializeDesignDocument(root);
     await writeFile(
-      path.join(root, DESIGN_DIRECTORY_NAME, "offsets.html"),
+      path.join(root, DESIGN_DIRECTORY_NAME, "page-1/offsets.html"),
       `<!doctype html>
 <html data-oid="page">
   <body data-oid="body">
@@ -839,7 +840,7 @@ describe("design document", () => {
       "utf8",
     );
 
-    const offsets = await readDesignElementOffsetMap(root, "offsets.html");
+    const offsets = await readDesignElementOffsetMap(root, "page-1/offsets.html");
     const hero = offsets.find((entry) => entry.oid === "hero");
     const heading = offsets.find((entry) => entry.oid === "heading");
 
@@ -903,8 +904,8 @@ describe("design document", () => {
     );
     await symlink(outsideStyles, path.join(directory, "linked-secret.css"));
     await writeFile(
-      path.join(directory, "linked.html"),
-      '<!doctype html><html><head><link rel="stylesheet" href="./linked-secret.css"></head><body data-oid="body"></body></html>',
+      path.join(directory, "page-1/linked.html"),
+      '<!doctype html><html><head><link rel="stylesheet" href="../linked-secret.css"></head><body data-oid="body"></body></html>',
       "utf8",
     );
 
@@ -947,7 +948,7 @@ describe("design document", () => {
     const directory = path.join(root, DESIGN_DIRECTORY_NAME);
     const source =
       '<!doctype html><html><head><meta name="zeros-frame" content="width=800,height=600,title=Remote"></head><body><main>Remote</main></body></html>';
-    await writeFile(path.join(directory, "remote.html"), source, "utf8");
+    await writeFile(path.join(directory, "page-1/remote.html"), source, "utf8");
     const canvasBefore = await readFile(
       designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
       "utf8",
@@ -957,11 +958,11 @@ describe("design document", () => {
       writeBack: false,
     });
 
-    expect(snapshot.frames[0]?.file).toBe("remote.html");
+    expect(snapshot.frames[0]?.file).toBe("page-1/remote.html");
     expect(
       snapshot.lint.violations.some((item) => item.ruleId === "oid-missing"),
     ).toBe(false);
-    expect(await readFile(path.join(directory, "remote.html"), "utf8")).toBe(
+    expect(await readFile(path.join(directory, "page-1/remote.html"), "utf8")).toBe(
       source,
     );
     expect(
@@ -991,7 +992,7 @@ describe("design document", () => {
     original.frame_info[frame.file].extension = "frame";
     await writeFile(
       target,
-      encodeCanvasFile(original),
+      encodeCanvasFile(original, { version: 2 }),
     );
     await updateDesignFrameGeometry(root, frame.file, { x: 200 });
     const saved = parseCanvasFixture(await readFile(target, "utf8"));
@@ -1144,7 +1145,7 @@ describe("design document", () => {
   it("sanitizes parser-decoded active content before composing a frame", async () => {
     await initializeDesignDocument(root);
     await writeFile(
-      path.join(root, DESIGN_DIRECTORY_NAME, "encoded.html"),
+      path.join(root, DESIGN_DIRECTORY_NAME, "page-1/encoded.html"),
       `<!doctype html><html><head><meta http-equiv="refresh" content="0;url=https://evil.invalid"><meta http-equiv="Content-Security-Policy" content="script-src *"></head><body>
 <a data-oid="link" href="java&#x73;cript:alert(1)" oNcLiCk=alert(2)>Open</a>
 <svg><a data-oid="svg-link" xlink:href="j&#x61;vascript:alert(4)">SVG</a></svg>
@@ -1154,7 +1155,7 @@ describe("design document", () => {
     );
 
     const rendered = (
-      await readDesignFrame(root, "encoded.html", 4, { writeBack: false })
+      await readDesignFrame(root, "page-1/encoded.html", 4, { writeBack: false })
     ).srcDoc;
 
     expect(rendered).not.toMatch(/javascript\s*:/i);
@@ -1176,13 +1177,13 @@ describe("design document", () => {
       "utf8",
     );
     await writeFile(
-      path.join(root, DESIGN_DIRECTORY_NAME, "ordered.html"),
-      '<!doctype html><html><head><link href="./ordered.css" media="all" rel="preload stylesheet"></head><body><main class="ordered" data-oid="root">Styled</main></body></html>',
+      path.join(root, DESIGN_DIRECTORY_NAME, "page-1/ordered.html"),
+      '<!doctype html><html><head><link href="../ordered.css" media="all" rel="preload stylesheet"></head><body><main class="ordered" data-oid="root">Styled</main></body></html>',
       "utf8",
     );
 
     const rendered = (
-      await readDesignFrame(root, "ordered.html", 4, { writeBack: false })
+      await readDesignFrame(root, "page-1/ordered.html", 4, { writeBack: false })
     ).srcDoc;
     expect(rendered).toContain(`color: ${fixtureColor}`);
     expect(rendered).toContain("<\\/style><script>bad()");
@@ -1192,7 +1193,7 @@ describe("design document", () => {
   it("removes every non-raster data URL while retaining bounded image payloads", async () => {
     await initializeDesignDocument(root);
     await writeFile(
-      path.join(root, DESIGN_DIRECTORY_NAME, "data-urls.html"),
+      path.join(root, DESIGN_DIRECTORY_NAME, "page-1/data-urls.html"),
       `<!doctype html><html><body><main data-oid="main">
 <iframe data-oid="plain" src="data:text/plain,active"></iframe>
 <img data-oid="svg" src="data:image/svg+xml,%3Csvg%20onload=alert(1)%3E">
@@ -1202,7 +1203,7 @@ describe("design document", () => {
     );
 
     const rendered = (
-      await readDesignFrame(root, "data-urls.html", 4, { writeBack: false })
+      await readDesignFrame(root, "page-1/data-urls.html", 4, { writeBack: false })
     ).srcDoc;
 
     expect(rendered).not.toContain("data:text/plain");
@@ -1352,7 +1353,7 @@ describe("design document", () => {
     const original = await createDesignFrame(root, { title: "Receipt" });
     const copy = await duplicateDesignFrame(root, original.file);
 
-    expect(copy.file).toBe("receipt-copy.html");
+    expect(copy.file).toBe("page-1/receipt-copy.html");
     expect(copy.title).toBe("Receipt copy");
     expect((await listDesignFrames(root)).map((frame) => frame.file)).toEqual([
       original.file,
@@ -1445,7 +1446,7 @@ describe("design document", () => {
       x: 48,
       y: 72,
     });
-    expect(mutation.frame.source).toContain('src="./assets/mark.png"');
+    expect(mutation.frame.source).toContain('src="../assets/mark.png"');
     expect(mutation.frame.source).toContain("left:48px; top:72px;");
     expect(mutation.frame.srcDoc).toContain(
       'src="data:image/png;base64,iVBORw=="',
@@ -1466,16 +1467,16 @@ describe("design document", () => {
     );
     const images = Array.from(
       { length: 13 },
-      (_, index) => `<img data-oid="image-${index}" src="./assets/large.png">`,
+      (_, index) => `<img data-oid="image-${index}" src="../assets/large.png">`,
     ).join("");
     await writeFile(
-      path.join(directory, "bounded.html"),
+      path.join(directory, "page-1/bounded.html"),
       `<!doctype html><html><head><meta name="zeros-frame" content="width=800,height=600,title=Bounded"></head><body><main data-oid="main">${images}</main></body></html>`,
       "utf8",
     );
 
     await expect(
-      readDesignFrame(root, "bounded.html", 4, { writeBack: false }),
+      readDesignFrame(root, "page-1/bounded.html", 4, { writeBack: false }),
     ).rejects.toThrow(/per-frame (?:inline budget|render limit)/);
   });
 });

@@ -1,4 +1,4 @@
-import { parseCanvasFixture } from "./storage-fixtures";
+import { parseCanvasFixture, useLegacyDesignStorage } from "./storage-fixtures";
 import {
   applyDesignTransaction,
   type DesignOperation,
@@ -269,17 +269,16 @@ describe("filesystem Design API repository", () => {
 
   it("finishes a legacy source journal before moving its metadata and stripping frame tags", async () => {
     const frame = await createDesignFrame(root, { title: "Legacy recovery" });
+    const { metadata, document } = useLegacyDesignStorage(root, DESIGN_DIRECTORY_NAME, ".zeros/design-dir.toml");
+    await rm(path.join(root, ".zeros/design-dir.toml"));
+    await rm(path.join(root, metadata));
+    const pagedFile = frame.file;
+    frame.file = path.posix.basename(frame.file);
     const sourcePath = path.join(root, DESIGN_DIRECTORY_NAME, frame.file);
-    const metadata = await readFile(
-      designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
-      "utf8",
-    );
-    await rm(path.join(root, DESIGN_DIRECTORY_NAME, "design.toml"));
     await writeFile(
       path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json"),
-      JSON.stringify(parseCanvasFixture(metadata)),
+      JSON.stringify(document),
     );
-    await rm(path.join(root, DESIGN_DIRECTORY_NAME, "canvas.json"), { force: true });
     const original = (await readFile(sourcePath, "utf8")).replace(
       "</head>",
       '<meta name="zeros-frame" content="title=Legacy recovery"></head>',
@@ -320,10 +319,11 @@ describe("filesystem Design API repository", () => {
       }),
     );
     await initializeDesignDocument(root);
-    expect(await readFile(sourcePath, "utf8")).toContain(
+    const migratedPath = path.join(root, DESIGN_DIRECTORY_NAME, pagedFile);
+    expect(await readFile(migratedPath, "utf8")).toContain(
       "recovered legacy edit",
     );
-    expect(await readFile(sourcePath, "utf8")).not.toContain(
+    expect(await readFile(migratedPath, "utf8")).not.toContain(
       'name="zeros-frame"',
     );
     await expect(readFile(journal)).rejects.toMatchObject({ code: "ENOENT" });

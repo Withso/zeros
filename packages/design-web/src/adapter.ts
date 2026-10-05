@@ -411,6 +411,7 @@ function applyOperation(
       operation.nodeId,
       operation.html,
       operation.mode,
+      state.entryFile,
     );
     const healed = healDesignHtmlIdentities(updated).source;
     return withFiles(

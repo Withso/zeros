@@ -108,11 +108,11 @@ describe("Code-session Design tools", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it.each(["Home.HTML", "Home.HtMl"])(
+  it.each(["page-1/Home.HTML", "page-1/Home.HtMl"])(
     "opens and edits the listed frame %s",
     async (file) => {
       const folder = path.join(root, DESIGN_DIRECTORY_NAME);
-      const canvasPath = path.join(folder, "canvas.json");
+      const canvasPath = path.join(folder, "meta/canvas.json");
       const canvas = JSON.parse(await readFile(canvasPath, "utf8"));
       canvas.frames.home = {
         kind: "html",

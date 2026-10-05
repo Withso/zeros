@@ -295,6 +295,21 @@ export async function writeCanvas(
   sourceChanges: DesignStorageChange[] = [],
 ): Promise<string[]> {
   const directory = designDirectoryNameFor(workspacePath);
+  if (readDirectoryDesignLayout(workspacePath, directory)?.canvasVersion === 2) {
+    const pages = canvas.pages ?? [];
+    const members = new Map(pages.map(page => [page.id, new Set<string>()]));
+    for (const file of Object.keys(canvas.frames)) {
+      const page = pages.find(page => page.folder && file.startsWith(page.folder + "/"));
+      if (!page) throw new Error("Design frame has no current page: " + file + ". Refresh before writing.");
+      const info = canvas.frame_info[file];
+      if (!info?.id) throw new Error("Design frame requires a stable canvas ID: " + file);
+      members.get(page.id)!.add(info.id);
+    }
+    for (const page of pages) {
+      const ids = members.get(page.id)!;
+      page.frames = [...page.frames.filter(id => ids.has(id)), ...[...ids].filter(id => !page.frames.includes(id))];
+    }
+  }
   if (!readDirectoryDesignManifest(workspacePath, directory)?.canvas) {
     for (const relative of ["assets/.gitkeep", "components/.gitkeep"]) {
       const file = `${directory}/${relative}`;

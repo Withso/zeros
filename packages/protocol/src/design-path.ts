@@ -1,13 +1,13 @@
 import { z } from "zod";
 
 const flatFrame = /^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i;
-const pageFolder = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const pageFolder = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const reservedFolders = new Set(["meta", "assets", "components"]);
 
 /** Authored spelling is identity. Never normalize traversal or encoded aliases
  * into a different registered frame. Legacy flat basenames remain accepted. */
 export function isDesignPageFolder(value: unknown): value is string {
-  return typeof value === "string" && pageFolder.test(value) && !reservedFolders.has(value);
+  return typeof value === "string" && pageFolder.test(value) && !value.endsWith(".") && !reservedFolders.has(value.toLowerCase());
 }
 
 export function isDesignFrameFile(value: unknown): value is string {

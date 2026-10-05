@@ -20,16 +20,17 @@ it("previews native HTML and CSS with normal flex and inline semantics, then ref
     await initializeDesignDocument(root);
     const folder = path.join(root, DESIGN_DIRECTORY_NAME);
     const html =
-      '<!doctype html><html><head><link rel="stylesheet" href="tokens.css"><style>main { display:flex; gap:20px; } p { margin:0; }</style></head><body><main><p>First <span>inline</span> text</p><p>Second</p></main></body></html>';
-    await writeFile(path.join(folder, "home.html"), html);
+      '<!doctype html><html><head><link rel="stylesheet" href="../tokens.css"><style>main { display:flex; gap:20px; } p { margin:0; }</style></head><body><main><p>First <span>inline</span> text</p><p>Second</p></main></body></html>';
+    await writeFile(path.join(folder, "page-1/home.html"), html);
     await writeFile(
-      path.join(folder, "canvas.json"),
+      path.join(folder, "meta/canvas.json"),
       JSON.stringify({
-        version: 1,
+        version: 2,
+        pages: [{ id: "main", title: "Page 1", folder: "page-1", frames: ["home"] }],
         frames: {
           home: {
             kind: "html",
-            source: "home.html",
+            source: "page-1/home.html",
             title: "Home",
             x: 0,
             y: 0,
@@ -39,7 +40,7 @@ it("previews native HTML and CSS with normal flex and inline semantics, then ref
         },
       }),
     );
-    const frame = await readDesignFrame(root, "home.html");
+    const frame = await readDesignFrame(root, "page-1/home.html");
     const page = await browser.newPage();
     await page.setContent(frame.srcDoc);
     const layout = await page.evaluate(() => ({
@@ -55,12 +56,12 @@ it("previews native HTML and CSS with normal flex and inline semantics, then ref
     expect(layout.inline).toBe("inline");
     expect(layout.positions[1].x).toBeGreaterThan(layout.positions[0].x);
     expect(layout.positions[1].y).toBe(layout.positions[0].y);
-    expect(await readFile(path.join(folder, "home.html"), "utf8")).toBe(html);
+    expect(await readFile(path.join(folder, "page-1/home.html"), "utf8")).toBe(html);
     await writeFile(
-      path.join(folder, "home.html"),
+      path.join(folder, "page-1/home.html"),
       html.replace("Second", "Updated"),
     );
-    const next = await readDesignFrame(root, "home.html");
+    const next = await readDesignFrame(root, "page-1/home.html");
     expect(next.sourceVersion).not.toBe(frame.sourceVersion);
     await page.setContent(next.srcDoc);
     expect(await page.locator("p").nth(1).textContent()).toBe("Updated");
@@ -89,6 +90,7 @@ it("renders independent page frames with shared, local and component resources i
   try {
     await write("meta/design.toml", pagesManifest);
     await write("meta/canvas.json", JSON.stringify(pagesCanvas));
+    // check:ui ignore-next — authored document CSS is the browser fixture boundary.
     await write("tokens.css", '.shared { color: rgb(255, 0, 0); background-image: url("./assets/shared.png"); }');
     await write("page-1/styles.css", ".local { padding: 12px; }");
     await write("assets/shared.png", image);
@@ -106,7 +108,7 @@ it("renders independent page frames with shared, local and component resources i
       expect(await page.locator("main").evaluate((element) => {
         const style = getComputedStyle(element);
         return { color: style.color, padding: style.padding, background: style.backgroundImage };
-      })).toMatchObject({ color: "rgb(255, 0, 0)", padding, background: expect.stringContaining("data:image/png;base64,") });
+      })).toMatchObject({ color: "rgb(255, 0, 0)", padding, background: expect.stringContaining("data:image/png;base64,") }); // check:ui ignore-line — browser computed colors use literal rgb().
     }
   } finally {
     forgetDesignDirectoryName(root);

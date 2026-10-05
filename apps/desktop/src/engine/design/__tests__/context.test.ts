@@ -53,7 +53,7 @@ describe("Design frame context ownership", () => {
     const read = documents.readDesignFrame;
     vi.spyOn(documents, "readDesignFrame").mockImplementationOnce(async (...args) => {
       const result = await read(...args);
-      const filename = path.join(root, designDirectoryNameFor(root), "canvas.json");
+      const filename = path.join(root, designDirectoryNameFor(root), "meta/canvas.json");
       const canvas = JSON.parse(await readFile(filename, "utf8"));
       const id = Object.keys(canvas.frames)[0]!;
       canvas.frames.frame_replacement = canvas.frames[id];
@@ -69,7 +69,7 @@ describe("Design frame context ownership", () => {
     const identity = documents.readDesignFrameSelectionIdentity;
     vi.spyOn(documents, "readDesignFrameSelectionIdentity").mockImplementationOnce(async (...args) => {
       const result = await identity(...args);
-      const filename = path.join(root, designDirectoryNameFor(root), "design.toml");
+      const filename = path.join(root, designDirectoryNameFor(root), "meta/design.toml");
       const manifest = await readFile(filename, "utf8");
       await writeFile(filename, manifest.replace(/^id = .*$/m, 'id = "design_replacement"'));
       return result;

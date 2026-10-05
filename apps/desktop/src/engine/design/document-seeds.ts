@@ -112,12 +112,13 @@ export const FRAME_SEED = (
   oid: string,
   _width: number,
   _height: number,
+  tokensHref = "./tokens.css",
 ): string => `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="./tokens.css">
+    <link rel="stylesheet" href="${escapeAttribute(tokensHref)}">
     <title>${escapeText(title)}</title>
   </head>
   <body>
@@ -133,12 +134,13 @@ export const TEXT_FRAME_SEED = (
   _width: number,
   _height: number,
   fixedSize: boolean,
+  tokensHref = "./tokens.css",
 ): string => `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="./tokens.css">
+    <link rel="stylesheet" href="${escapeAttribute(tokensHref)}">
     <title>${escapeText(title)}</title>
     <style>
       html, body { width: 100%; height: 100%; min-height: 0; margin: 0; background: transparent !important; overflow: visible; }

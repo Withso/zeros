@@ -14,15 +14,20 @@ import { sanitizeDesignDirectoryName } from "./directory-path";
 import { inspectDesignFilesForAdoption } from "./document";
 import { parseDesignManifest } from "./manifest";
 import { DESIGN_CANVAS_FILE, decodeCanvasFile } from "./canvas-file";
+import { resolveDesignManifestLayout } from "./layout";
 import {
   assertSafeDesignStoragePath,
   commitDesignMetadata,
+  createDesignDirectoryPages,
   designDirectoryEntry,
   legacyDesignDirectoryId,
   designDocumentMetadataPath,
   parseDesignDirectoryRegistry,
   readDesignRegistrySource,
   readDesignStorageFile,
+  readDirectoryDesignLayout,
+  ensureDesignPagesLayout,
+  invalidateDesignManifestDiscovery,
   recoverWorkspaceDesignMetadata,
   DESIGN_DIRECTORY_REGISTRY_FILES,
 } from "./metadata";
@@ -130,18 +135,21 @@ async function inspectFolder(root: string, selected: string) {
     )
       throw new Error("This folder overlaps another Design directory.");
   }
-  const file = `${directory}/design.toml`;
+  const candidates = [`${directory}/design.toml`, `${directory}/meta/design.toml`];
+  const registrations = candidates.map(file => ({ file, source: readDesignStorageFile(root, file) }));
+  for (const { file, source } of registrations)
+    if (source !== null && !parseDesignManifest(source))
+      throw new Error(`This folder already has ${file} belonging to another application.`);
+  const layout = readDirectoryDesignLayout(root, directory);
+  const file = layout?.manifestFile ?? `${directory}/meta/design.toml`;
   assertSafeDesignStoragePath(root, file);
-  const source = readDesignStorageFile(root, file);
-  const manifest = source === null ? null : parseDesignManifest(source);
-  if (source !== null && !manifest)
-    throw new Error(
-      "This folder already has a design.toml belonging to another application.",
-    );
+  const source = registrations.find(candidate => candidate.file === file)!.source;
+  const manifest = layout?.manifest;
   let id = manifest?.id ?? designDirectoryEntry(root, directory)?.id;
   let document = manifest?.document;
   let expectedFile = file;
   let expectedSource = source;
+  let preservedCanvas: string | undefined;
   let metadataSource: DesignFolderPreview["metadataSource"] = "folder";
   if (!document) {
     const previousPath = path
@@ -151,18 +159,26 @@ async function inspectFolder(root: string, selected: string) {
     const legacy = readDesignStorageFile(root, previousPath);
     if (legacy !== null) {
       document = previousPath.endsWith(`/${DESIGN_CANVAS_FILE}`)
-        ? decodeCanvasFile(legacy)
+        ? decodeCanvasFile(legacy, { version: layout?.canvasVersion ?? 1 })
         : JSON.parse(legacy) as Record<string, unknown>;
       expectedFile = previousPath;
       expectedSource = legacy;
     }
   }
   if (!document && !manifest) {
-    const preservedCanvas = readDesignStorageFile(root, `${directory}/${DESIGN_CANVAS_FILE}`);
-    if (preservedCanvas !== null) {
-      document = decodeCanvasFile(preservedCanvas);
+    const rootCanvas = readDesignStorageFile(root, `${directory}/${DESIGN_CANVAS_FILE}`);
+    const metaCanvas = readDesignStorageFile(root, `${directory}/meta/${DESIGN_CANVAS_FILE}`);
+    if (rootCanvas !== null && metaCanvas !== null)
+      throw new Error("Resolve the competing root and meta canvas metadata before adopting this folder.");
+    if (metaCanvas !== null) {
+      document = decodeCanvasFile(metaCanvas, { version: 2 });
+      preservedCanvas = metaCanvas;
+      expectedFile = `${directory}/meta/${DESIGN_CANVAS_FILE}`;
+      expectedSource = metaCanvas;
+    } else if (rootCanvas !== null) {
+      document = decodeCanvasFile(rootCanvas, { version: 1 });
       expectedFile = `${directory}/${DESIGN_CANVAS_FILE}`;
-      expectedSource = preservedCanvas;
+      expectedSource = rootCanvas;
     }
   }
   if ((!document || !id) && existsSync(path.join(root, ".git"))) {
@@ -177,9 +193,14 @@ async function inspectFolder(root: string, selected: string) {
       /* unborn */
     }
     for (const ref of [":", ...(head ? [head] : [])]) {
-      const saved = await gitFile(root, file, ref);
-      if (saved !== null) {
-        const recovered = parseDesignManifest(saved);
+      const savedRegistrations = (await Promise.all(candidates.map(async candidate => ({
+        file: candidate, source: await gitFile(root, candidate, ref),
+      })))).filter(candidate => candidate.source !== null);
+      if (savedRegistrations.length > 1)
+        throw new Error("Resolve the competing saved root and meta Design registrations before recovery.");
+      const saved = savedRegistrations[0];
+      if (saved) {
+        const recovered = parseDesignManifest(saved.source!);
         if (!recovered)
           throw new Error(
             "Git contains a different application's design.toml at this path.",
@@ -187,13 +208,17 @@ async function inspectFolder(root: string, selected: string) {
         if (id && id !== recovered.id)
           throw new Error("Saved Design metadata has a conflicting ID.");
         id = recovered.id;
+        const savedLayout = resolveDesignManifestLayout(saved.file, recovered);
+        if (savedLayout.directory !== directory)
+          throw new Error("The saved Design registration belongs to another directory.");
         if (recovered.canvas) {
-          const localCanvas = readDesignStorageFile(root, `${directory}/${recovered.canvas}`);
-          const savedCanvas = localCanvas ?? await gitFile(root, `${directory}/${recovered.canvas}`, ref);
+          const localCanvas = readDesignStorageFile(root, savedLayout.documentFile);
+          const savedCanvas = localCanvas ?? await gitFile(root, savedLayout.documentFile, ref);
           if (savedCanvas === null) throw new Error("The saved Design canvas metadata is missing.");
-          document = decodeCanvasFile(savedCanvas);
+          document = decodeCanvasFile(savedCanvas, { version: savedLayout.canvasVersion });
+          if (savedLayout.canvasVersion === 2) preservedCanvas = savedCanvas;
           if (localCanvas !== null) {
-            expectedFile = `${directory}/${recovered.canvas}`;
+            expectedFile = savedLayout.documentFile;
             expectedSource = localCanvas;
           }
         } else document ??= recovered.document;
@@ -218,7 +243,7 @@ async function inspectFolder(root: string, selected: string) {
       const entry = Object.entries(registry?.directories ?? {}).find(
         ([, value]) => value.path === directory,
       );
-      const candidates = entry
+      const metadataCandidates = entry
         ? [
             `.zeros/design/${entry[0]}/metadata.json`,
             `.zeros/design/${entry[0]}/document.json`,
@@ -226,7 +251,7 @@ async function inspectFolder(root: string, selected: string) {
         : [`${directory}/.zeros-canvas.json`];
       const sources = (
         await Promise.all(
-          candidates.map((candidate) => gitFile(root, candidate, ref)),
+          metadataCandidates.map((candidate) => gitFile(root, candidate, ref)),
         )
       ).filter((value) => value !== null);
       if (sources.length > 1)
@@ -251,7 +276,7 @@ async function inspectFolder(root: string, selected: string) {
         directory,
         id,
         document,
-        source,
+        registrations,
         registry: readDesignRegistrySource(root),
       }),
     )
@@ -265,6 +290,9 @@ async function inspectFolder(root: string, selected: string) {
     preview: { directory, metadataSource, frameCount: frames, revision },
     id,
     document,
+    preservedCanvas,
+    directCreation: !layout && !designDirectoryEntry(root, directory) &&
+      (metadataSource === "rebuild" || preservedCanvas !== undefined),
     expected: {
       file: expectedFile,
       source: expectedSource,
@@ -304,14 +332,16 @@ export async function adoptExistingDesignDirectory(
       { design: { directory, directory_id: null } },
       root,
     );
-    commitDesignMetadata(
-      root,
-      directory,
-      JSON.stringify(inspected.document),
-      [],
-      inspected.expected,
-      inspected.id,
-    );
+    if (inspected.directCreation) {
+      createDesignDirectoryPages(root, directory, inspected.document, {
+        id: inspected.id,
+        preservedCanvas: inspected.preservedCanvas,
+      });
+      invalidateDesignManifestDiscovery(root);
+    } else {
+      commitDesignMetadata(root, directory, JSON.stringify(inspected.document), [], inspected.expected, inspected.id);
+      ensureDesignPagesLayout(root, directory);
+    }
     const entry = designDirectoryEntry(root, directory)!;
     const selected = canSelect(entry.id);
     if (selected) {

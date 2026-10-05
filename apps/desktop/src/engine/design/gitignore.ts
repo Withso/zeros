@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { gitProcessOptions } from "../git/git-execution-identity";
+import { readDesignStorageFile } from "./metadata-storage";
 
 const START = "# Zeros Design metadata (managed by Zeros)";
 const END = "# End Zeros Design metadata";
@@ -49,6 +51,10 @@ export function designGitignoreSource(
           return [
             `!/${escaped(directory)}/`,
             `!/${escaped(directory)}/design.toml`,
+            `!/${escaped(directory)}/canvas.json`,
+            `!/${escaped(directory)}/meta/`,
+            `!/${escaped(directory)}/meta/design.toml`,
+            `!/${escaped(directory)}/meta/canvas.json`,
             `!/${escaped(directory)}/rules.md`,
           ];
         }),
@@ -68,6 +74,7 @@ const visibilityChecks = new Map<string, string>();
 export function assertDesignFilesNotIgnored(
   workspace: string,
   files: string[],
+  plannedRootSource?: string,
 ): void {
   if (!existsSync(path.join(workspace, ".git"))) return;
   const ignores = new Set<string>();
@@ -79,6 +86,30 @@ export function assertDesignFilesNotIgnored(
     }
   }
   ignores.add(".gitignore");
+  // Check the prospective root rules with Git before admitting a migration.
+  // A private, minimal worktree copies only ignore inputs; no authored file or
+  // index is changed to test visibility, including nested rule precedence.
+  if (plannedRootSource !== undefined && plannedRootSource !== readDesignStorageFile(workspace, ".gitignore")) {
+    const temporary = mkdtempSync(path.join(tmpdir(), "zeros-design-ignore-"));
+    try {
+      writeFileSync(path.join(temporary, ".gitignore"), plannedRootSource);
+      for (const file of ignores) {
+        if (file === ".gitignore") continue;
+        const source = readDesignStorageFile(workspace, file);
+        if (source !== null) {
+          mkdirSync(path.dirname(path.join(temporary, file)), { recursive: true });
+          writeFileSync(path.join(temporary, file), source);
+        }
+      }
+      const gitDir = execFileSync("git", ["rev-parse", "--absolute-git-dir"], {
+        cwd: workspace, encoding: "utf8", timeout: 10_000, ...gitProcessOptions(),
+      }).trim();
+      checkIgnored(temporary, files, ["--git-dir=" + gitDir, "--work-tree=" + temporary]);
+      return;
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }
   const signature = [...ignores]
     .map((file) => {
       try {
@@ -93,11 +124,19 @@ export function assertDesignFilesNotIgnored(
     .join("\0");
   const key = `${workspace}\0${files.join("\0")}`;
   if (visibilityChecks.get(key) === signature) return;
+  checkIgnored(workspace, files);
+  visibilityChecks.delete(key);
+  visibilityChecks.set(key, signature);
+  if (visibilityChecks.size > 512)
+    visibilityChecks.delete(visibilityChecks.keys().next().value!);
+}
+
+function checkIgnored(workspace: string, files: string[], prefix: string[] = []): void {
   let ignored: string;
   try {
     ignored = execFileSync(
       "git",
-      ["-c", "core.fsmonitor=false", "check-ignore", "--no-index", "-z", "--stdin"],
+      [...prefix, "-c", "core.fsmonitor=false", "check-ignore", "--no-index", "-z", "--stdin"],
       {
         cwd: workspace,
         input: files.join("\0") + "\0",
@@ -116,8 +155,4 @@ export function assertDesignFilesNotIgnored(
     throw new Error(
       `Design metadata is still ignored by a conflicting .gitignore: ${ignored.split("\0").filter(Boolean).join(", ")}. Remove the conflicting parent or nested rule before editing Design.`,
     );
-  visibilityChecks.delete(key);
-  visibilityChecks.set(key, signature);
-  if (visibilityChecks.size > 512)
-    visibilityChecks.delete(visibilityChecks.keys().next().value!);
 }

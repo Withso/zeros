@@ -30,6 +30,7 @@ import {
   WorkspaceService,
 } from "../../workspace/service";
 import { semanticDesignDirectories } from "../../git/design-draft-guard";
+import { migrateDesignDirectoryPages } from "../pages-migration";
 
 const live = vi.hoisted(() => ({
   workspaces: [] as Array<{ kind: string; repoRoot: string }>,
@@ -64,6 +65,61 @@ describe("remove Design registration", () => {
 
   it("discovers main-checkout manifests with no worktrees", async () => {
     expect(await discoverDesignDirectories(root)).toEqual(["Brand", "Other"]);
+  });
+
+  it("removes only the v3 registration and generated rules, preserving the meta canvas and authored source", async () => {
+    migrateDesignDirectoryPages(root, "Brand", { directories: ["Brand", "Other"] });
+    await runGit(root, ["add", "-A", "Brand", ".gitignore"]);
+    await runGit(root, ["commit", "-m", "Paged fixture"]);
+    const canvas = readFileSync(path.join(root, "Brand/meta/canvas.json"), "utf8");
+    writeFileSync(path.join(root, "Brand/page-1/home.html"), "staged source");
+    await runGit(root, ["add", "Brand/page-1/home.html"]);
+    writeFileSync(path.join(root, "Brand/page-1/home.html"), "dirty source");
+    await removeDesignDirectory({ repoRoot: root, directory: "Brand" });
+    expect(existsSync(path.join(root, "Brand/meta/design.toml"))).toBe(false);
+    expect(existsSync(path.join(root, "Brand/rules.md"))).toBe(false);
+    expect(readFileSync(path.join(root, "Brand/meta/canvas.json"), "utf8")).toBe(canvas);
+    expect(readFileSync(path.join(root, "Brand/page-1/home.html"), "utf8")).toBe("dirty source");
+    expect((await runGit(root, ["show", ":Brand/page-1/home.html"])).stdout).toBe("staged source");
+    expect((await runGit(root, ["show", "HEAD:Brand/page-1/home.html"])).stdout).toBe("<h1>Keep me</h1>");
+    expect(await discoverDesignDirectories(root)).toEqual(["Other"]);
+  });
+
+  it("renames a v3 Settings row with its stable ID and root rules", async () => {
+    migrateDesignDirectoryPages(root, "Brand", { directories: ["Brand", "Other"] });
+    await runGit(root, ["add", "-A", "Brand", ".gitignore"]);
+    await runGit(root, ["commit", "-m", "Paged fixture"]);
+    const before = readFileSync(path.join(root, "Brand/meta/design.toml"), "utf8");
+    await renameDesignDirectory({ repoRoot: root, from: "Brand", to: "Studio" });
+    expect(readFileSync(path.join(root, "Studio/meta/design.toml"), "utf8")).toBe(before);
+    expect(readFileSync(path.join(root, "Studio/rules.md"), "utf8")).toContain("meta/canvas.json");
+    expect(await discoverDesignDirectories(root)).toEqual(["Other", "Studio"]);
+  });
+
+  it("upgrades only the renamed v2 Settings row to pages before moving its source", async () => {
+    const id = Object.entries(readDesignDirectoryRegistry(root)!.directories).find(([, entry]) => entry.path === "Brand")![0];
+    const other = readFileSync(path.join(root, "Other/design.toml"), "utf8");
+    await renameDesignDirectory({ repoRoot: root, from: "Brand", to: "Studio" });
+    expect(readFileSync(path.join(root, "Studio/meta/design.toml"), "utf8")).toContain("version = 3");
+    expect(readDesignDirectoryRegistry(root)!.directories[id].path).toBe("Studio");
+    const canvas = JSON.parse(readFileSync(path.join(root, "Studio/meta/canvas.json"), "utf8"));
+    expect(canvas).toMatchObject({ version: 2, pages: [{ folder: "page-1" }] });
+    expect(readFileSync(path.join(root, "Studio/page-1/home.html"), "utf8")).toBe("<h1>Keep me</h1>");
+    expect(existsSync(path.join(root, "Studio/design.toml"))).toBe(false);
+    expect(readFileSync(path.join(root, "Other/design.toml"), "utf8")).toBe(other);
+    expect(existsSync(path.join(root, "Other/meta/design.toml"))).toBe(false);
+  });
+
+  it("preflights a v2 Settings rename before moving source or changing the index", async () => {
+    const source = '<h1>Keep me</h1><img src="../outside.png">';
+    writeFileSync(path.join(root, "Brand/home.html"), source);
+    await runGit(root, ["add", "Brand/home.html"]);
+    await runGit(root, ["commit", "-m", "unsafe reference fixture"]);
+    const index = readFileSync(path.join(root, ".git/index"));
+    await expect(renameDesignDirectory({ repoRoot: root, from: "Brand", to: "Studio" })).rejects.toThrow(/Cannot safely rebase Brand\/home.html/i);
+    expect(readFileSync(path.join(root, "Brand/home.html"), "utf8")).toBe(source);
+    expect(existsSync(path.join(root, "Studio"))).toBe(false);
+    expect(readFileSync(path.join(root, ".git/index"))).toEqual(index);
   });
 
   it.each([false, true])(

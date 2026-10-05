@@ -1,23 +1,18 @@
-import { createHash, randomUUID } from "node:crypto";
-import { DESIGN_FRAME_AUTHORING_INSTRUCTION } from "@zeros/protocol/composer-mode";
-import { assertDesignWriteAuthorized } from "./write-authority";
-import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import {
-  closeSync,
-  constants,
-  existsSync,
-  fstatSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readSync,
-  readdirSync,
-  realpathSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+  assertSafeDesignStoragePath,
+  readDesignStorageFile,
+  designPrivateStorageDirectory,
+  writePrivateDesignState,
+  atomicWriteDesignStorageFile as atomicWrite,
+  syncDesignStorageDirectory as syncDirectory,
+} from "./metadata-storage";
+import { GENERATED_DESIGN_RULES, upgradedDesignRules } from "./design-rules";
+import { createDesignPagesLayout, designPagesMigrationOwnsManifests, migrateDesignDirectoryPages, recoverDesignPagesMigration, recoverWorkspaceDesignPagesMigrations, type DesignPagesMigrationOptions } from "./pages-migration";
+export { assertSafeDesignStoragePath, readDesignStorageFile, designPrivateStorageDirectory, writePrivateDesignState } from "./metadata-storage";
+export { DESIGN_RULES, ROOT_DESIGN_RULES, LEGACY_DESIGN_RULES, PREVIOUS_NATIVE_DESIGN_RULES } from "./design-rules";
+import { createHash, randomUUID } from "node:crypto";
+import { assertDesignWriteAuthorized } from "./write-authority";
+import { existsSync, readdirSync, realpathSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { parse, stringify } from "smol-toml";
 import { z } from "zod";
@@ -37,7 +32,6 @@ import {
   assertDesignFilesNotIgnored,
   designGitignoreSource,
 } from "./gitignore";
-import { zerosDataDir } from "../db/paths";
 import {
   DESIGN_DIRECTORY_ID_PATTERN,
   sanitizeDesignDirectoryName,
@@ -57,42 +51,6 @@ export const DESIGN_METADATA_PROTECTED_PATHS = [
   LEGACY_DESIGN_DIRECTORY_REGISTRY_FILE,
 ] as const;
 export const DESIGN_RULES_FILE = `${DESIGN_METADATA_ROOT}/rules.md`;
-export const LEGACY_DESIGN_RULES = `# Zeros Design
-This is a Design directory; design.toml identifies it and stores its shared metadata.
-Commit this folder and design.toml together. Do not gitignore them.
-Edit through Zeros Settings or Design mode using the Design API.
-Code agents may read this folder but must not create, edit, move, delete, stage, or commit its files through generic tools.
-`;
-/** Exact previously generated content is a migration/cleanup compatibility contract. */
-export const PREVIOUS_NATIVE_DESIGN_RULES = `# Zeros Design
-design.toml registers this directory; canvas.json owns its canvas metadata. Commit this folder together. Do not gitignore it.
-In Design mode, use normal Read, Write, Edit, patch or Bash tools to author HTML, CSS, assets and canvas.json. No API apply or publish is required.
-Code agents may inspect this folder; switch to Design mode only for user-authorized Design edits. Provider permissions and Plan still apply.
-Create a frame by writing a complete HTML file and adding a stable ID to canvas.json frames and pages[0].frames. Example frame: {"kind":"html","source":"home.html","title":"Home","x":0,"y":0,"width":390,"height":844}.
-Keep existing IDs and unrelated metadata. Patch existing source; canvas dimensions set its viewport. HTML uses normal browser layout. Only listed HTML files are frames; one page is supported.
-Use Zeros Settings or Design mode lifecycle tools for directory registration and design.toml. Design API inspect, styles, validate and capture are optional helpers; visual controls edit the same source.
-Save sources before canvas references. Re-read changed files before edits; do not overwrite concurrent work. Normal authorized Git operations publish these checkout files; saving never auto-commits.
-`;
-export const DESIGN_RULES = `# Zeros Design
-design.toml registers this directory; canvas.json owns its canvas metadata. Commit this folder together. Do not gitignore it.
-For authorized local Design edits, use normal Read, Write, Edit, patch or Bash tools to author HTML, CSS, assets and canvas.json. No API apply, publish or mode switch is required. Cloud executions follow their composer authoring policy.
-Code agents may inspect or edit this folder when the user's request calls for it. The Design tag sets the default editing target; an attached frame in Code context is normally a reference for application implementation. Provider permissions and Plan still apply.
-Create a frame by writing a complete HTML file and adding a stable ID to canvas.json frames and pages[0].frames. Example frame: {"kind":"html","source":"home.html","title":"Home","x":0,"y":0,"width":390,"height":844}.
-Keep existing IDs and unrelated metadata. Patch existing source; canvas dimensions set its viewport. ${DESIGN_FRAME_AUTHORING_INSTRUCTION} Only listed HTML files are frames; one page is supported.
-Use Zeros Settings or Design mode lifecycle tools to create, migrate or remove directory registration. Preserve directory and frame IDs when repairing existing source conflicts. Design API inspect, styles, validate and capture are optional helpers; visual controls edit the same source.
-Save sources before canvas references. Re-read changed files before edits; do not overwrite concurrent work. Normal authorized Git operations integrate these same checkout files; saving never auto-commits.
-`;
-const GENERATED_DESIGN_RULES = [
-  DESIGN_RULES,
-  PREVIOUS_NATIVE_DESIGN_RULES,
-  LEGACY_DESIGN_RULES,
-];
-
-function upgradedDesignRules(source: string | null): string {
-  if (source === null) return DESIGN_RULES;
-  const generated = GENERATED_DESIGN_RULES.find((rules) => source.startsWith(rules));
-  return generated ? DESIGN_RULES + source.slice(generated.length) : source;
-}
 const MAX_METADATA_BYTES = 16 * 1024 * 1024;
 const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
 const portable = (value: string) => value.normalize("NFC").toLowerCase();
@@ -151,119 +109,6 @@ export function parseDesignDirectoryRegistry(
   if (Buffer.byteLength(source) > MAX_METADATA_BYTES)
     throw new Error("Design directory registry is too large.");
   return designDirectoryRegistrySchema.parse(parse(source));
-}
-
-/** Every segment uses its exact portable spelling and its own inode. This is
- * also used for prospective paths, before creating any parent directories. */
-export function assertSafeDesignStoragePath(
-  root: string,
-  relative: string,
-  createParents = false,
-): string {
-  const parts = relative.split("/");
-  if (
-    !relative ||
-    path.isAbsolute(relative) ||
-    parts.some(
-      (part) =>
-        !part ||
-        part === "." ||
-        part === ".." ||
-        part.includes("\\") ||
-        Array.from(part).some(
-          (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
-        ),
-    )
-  )
-    throw new Error("Unsafe Design storage path.");
-  let parent = realpathSync(root);
-  for (let index = 0; index < parts.length; index++) {
-    const part = parts[index],
-      candidate = path.join(parent, part);
-    const spelling = readdirSync(parent).find(
-      (entry) => portable(entry) === portable(part),
-    );
-    if (spelling !== undefined && spelling !== part)
-      throw new Error("Design storage path has ambiguous spelling.");
-    let info;
-    try {
-      info = lstatSync(candidate);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    if (info) {
-      if (
-        info.isSymbolicLink() ||
-        realpathSync(candidate) !== candidate ||
-        (index < parts.length - 1
-          ? !info.isDirectory()
-          : !info.isFile() || info.nlink !== 1)
-      )
-        throw new Error(
-          "Design storage must use real directories and unlinked regular files.",
-        );
-    } else if (index < parts.length - 1) {
-      if (createParents) mkdirSync(candidate);
-      else return path.join(parent, ...parts.slice(index));
-    }
-    parent = candidate;
-  }
-  return parent;
-}
-
-export function readDesignStorageFile(
-  root: string,
-  relative: string,
-  limit = MAX_METADATA_BYTES,
-): string | null {
-  let target: string;
-  try {
-    target = assertSafeDesignStoragePath(root, relative);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  }
-  let fd: number;
-  try {
-    fd = openSync(
-      target,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-      0o600,
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  }
-  try {
-    const info = fstatSync(fd);
-    if (!info.isFile() || info.nlink !== 1 || info.size > limit)
-      throw new Error("Unsafe or oversized Design metadata file.");
-    const bytes = Buffer.alloc(info.size + 1);
-    let offset = 0,
-      count = 0;
-    do {
-      count = readSync(fd, bytes, offset, bytes.length - offset, null);
-      offset += count;
-    } while (count && offset < bytes.length);
-    if (offset !== info.size)
-      throw new Error("Design metadata changed during read.");
-    const current = lstatSync(target);
-    if (
-      current.ino !== info.ino ||
-      current.dev !== info.dev ||
-      current.mtimeMs !== info.mtimeMs ||
-      current.nlink !== 1
-    )
-      throw new Error("Design metadata changed during read.");
-    const content = bytes.subarray(0, offset);
-    return content.toString("utf8");
-  } finally {
-    closeSync(fd);
-  }
 }
 
 // Cache only discovery candidates, never metadata bytes. Watchers invalidate
@@ -364,8 +209,16 @@ export function readDirectoryDesignLayout(
       throw new Error("The Design manifest belongs to a different directory layout.");
     return [{ ...layout, manifest }];
   });
-  if (layouts.length > 1)
+  if (layouts.length > 1) {
+    const root = layouts.find(layout => layout.kind === "root-v2");
+    const meta = layouts.find(layout => layout.kind === "meta-v3");
+    if (root && meta && root.manifest.id === meta.manifest.id &&
+        designPagesMigrationOwnsManifests(workspace, directory,
+          sources.find(source => source.file === root.manifestFile)!.source!,
+          sources.find(source => source.file === meta.manifestFile)!.source!))
+      return meta;
     throw new Error("Competing root and meta Design manifests exist. Resolve both registrations before editing.");
+  }
   return layouts[0] ?? null;
 }
 export function readDirectoryDesignManifest(workspace: string, directory: string) {
@@ -627,10 +480,11 @@ export function ensureDesignMetadataLayout(
   // A current canvas is agent-authored input, not a normalization job. Only
   // recognized generated guidance is upgraded in this authoring lifecycle.
   recoverDesignMetadataMigration(workspace, directory);
-  if (readDirectoryDesignManifest(workspace, directory)?.canvas) {
+  const layout = readDirectoryDesignLayout(workspace, directory);
+  if (layout?.manifest.canvas) {
     const file = `${directory}/rules.md`;
     const before = readDesignStorageFile(workspace, file);
-    const after = upgradedDesignRules(before);
+    const after = upgradedDesignRules(before, layout.canvasVersion);
     if (before === after) return [];
     assertDesignWriteAuthorized();
     if (Buffer.byteLength(after) > MAX_METADATA_BYTES)
@@ -668,59 +522,49 @@ export function ensureDesignMetadataLayout(
   });
 }
 
-export function designPrivateStorageDirectory(workspace: string): string {
-  const key = createHash("sha256")
-    .update(path.resolve(workspace))
-    .digest("hex")
-    .slice(0, 32);
-  return path.join(zerosDataDir(), "design-storage", key);
+/** Explicit authoring only. Keep the legacy all-entries upgrade unchanged,
+ * then upgrade exactly the requested v2 root to the paged layout. */
+export function ensureDesignPagesLayout(workspace: string, directory: string): string[] {
+  const recovered = recoverDesignPagesMigration(workspace, directory);
+  if (recovered.length) invalidateDesignManifestDiscovery(workspace);
+  const legacy = ensureDesignMetadataLayout(workspace, directory);
+  const directories = Object.values(readDesignDirectoryRegistry(workspace)?.directories ?? {}).map(entry => entry.path);
+  const migrated = migrateDesignDirectoryPages(workspace, directory, { directories });
+  if (migrated.length) invalidateDesignManifestDiscovery(workspace);
+  return [...recovered, ...legacy, ...migrated];
 }
-function syncDirectory(directory: string): void {
-  const fd = openSync(directory, constants.O_RDONLY);
-  try {
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-}
-function atomicWrite(root: string, relative: string, source: string): void {
-  const target = assertSafeDesignStoragePath(root, relative, true);
-  const temporary = `${target}.${randomUUID()}.zeros-tmp`;
-  const fd = openSync(
-    temporary,
-    constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_WRONLY |
-      constants.O_NOFOLLOW,
-    0o600,
-  );
-  try {
-    writeFileSync(fd, source, "utf8");
-    publishCloudWorkspacePath(temporary, fd);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    assertSafeDesignStoragePath(root, relative);
-    renameSync(temporary, target);
-    syncDirectory(path.dirname(target));
-  } finally {
-    if (existsSync(temporary)) unlinkSync(temporary);
-  }
-}
-export function writePrivateDesignState(
+
+/** Fresh lifecycle creation keeps the same registration identity, overlap and
+ * directory-budget checks as legacy commitDesignMetadata. No source is written
+ * until the authoritative catalog accepts the prospective registration. */
+export function createDesignDirectoryPages(
   workspace: string,
-  name: string,
-  source: string,
-): string {
-  if (!/^[a-zA-Z0-9_-]+\.json$/.test(name))
-    throw new Error("Invalid private Design state name.");
-  const root = designPrivateStorageDirectory(workspace);
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  atomicWrite(root, name, source);
-  return path.join(root, name);
+  directory: string,
+  document: Record<string, unknown>,
+  options: DesignPagesMigrationOptions & { id?: string; preservedCanvas?: string } = {},
+): string[] {
+  assertDesignWriteAuthorized();
+  if (sanitizeDesignDirectoryName(directory) !== directory)
+    throw new Error("Invalid Design directory.");
+  refreshDesignManifestDiscovery(workspace);
+  const registry = readDesignDirectoryRegistry(workspace) ?? { version: 1 as const, directories: {} };
+  const existing = Object.entries(registry.directories).find(([, entry]) => entry.path === directory);
+  const id = options.id ?? existing?.[0] ?? `design_${randomUUID().replace(/-/g, "")}`;
+  if (!DESIGN_DIRECTORY_ID_PATTERN.test(id) || (existing && existing[0] !== id))
+    throw new Error("The restored Design identity conflicts with this folder.");
+  if (registry.directories[id] && registry.directories[id].path !== directory)
+    throw new Error("A Design directory conflicts with an existing identity.");
+  registry.directories[id] = { path: directory };
+  designDirectoryRegistrySchema.parse(registry);
+  const created = createDesignPagesLayout(workspace, directory, document, {
+    ...options,
+    id,
+    directories: Object.values(registry.directories).map((entry) => entry.path),
+  });
+  invalidateDesignManifestDiscovery(workspace);
+  return created;
 }
+
 export interface DesignStorageChange {
   file: string;
   before: string | null;
@@ -831,6 +675,8 @@ export function recoverWorkspaceDesignMetadata(workspace: string): void {
       throw new Error("Invalid Design recovery record identity.");
     recoverDesignMetadataMigration(workspace, journal.directory);
   }
+  if (recoverWorkspaceDesignPagesMigrations(workspace).length)
+    invalidateDesignManifestDiscovery(workspace);
 }
 export function recoverDesignMetadataMigration(
   workspace: string,
@@ -995,7 +841,7 @@ export function commitDesignMetadata(
     changes.push({ file: metadata, before, after: manifest?.canvas ? before : serializeDesignRegistration(entryId) });
     const rules = `${folder}/rules.md`;
     const rulesBefore = readDesignStorageFile(workspace, rules);
-    const rulesAfter = upgradedDesignRules(rulesBefore);
+    const rulesAfter = upgradedDesignRules(rulesBefore, layout?.canvasVersion ?? 1);
     if (rulesBefore !== rulesAfter)
       changes.push({ file: rules, before: rulesBefore, after: rulesAfter });
     visibleFiles.push(metadata, canvasFile, rules);
@@ -1090,6 +936,7 @@ export function prepareDesignMetadataRemoval(
   if (sanitizeDesignDirectoryName(directory) !== directory)
     throw new Error("Invalid Design directory.");
   recoverWorkspaceDesignMetadata(workspace);
+  const layout = readDirectoryDesignLayout(workspace, directory);
   const manifestSource = readDesignStorageFile(
     workspace,
     `${directory}/${DESIGN_MANIFEST_FILE}`,
@@ -1107,7 +954,9 @@ export function prepareDesignMetadataRemoval(
     const before = readDesignStorageFile(workspace, file);
     if (before !== null) changes.push({ file, before, after: null });
   };
-  remove(`${directory}/${DESIGN_MANIFEST_FILE}`);
+  remove(layout?.manifestFile ?? `${directory}/${DESIGN_MANIFEST_FILE}`);
+  // Both public canvas layouts are authored source. Unregistering retains the
+  // scene/catalog for explicit re-adoption, just as root canvas.json is kept.
   remove(legacy);
   const rules = `${directory}/rules.md`;
   if (GENERATED_DESIGN_RULES.includes(readDesignStorageFile(workspace, rules) ?? "")) remove(rules);

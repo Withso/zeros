@@ -26,7 +26,7 @@ describe("native Design verification", () => {
     await initializeDesignDocument(root);
     directory = designDirectoryNameFor(root);
     frame = (await createDesignFrame(root, { title: "Phone", geometry: { x: 0, y: 0, w: 390, h: 844, z: 0 } })).file;
-    await writeFile(path.join(root, directory, frame), '<html><head><link rel="stylesheet" href="tokens.css"></head><body><main data-oid="screen">Phone</main></body></html>');
+    await writeFile(path.join(root, directory, frame), '<html><head><link rel="stylesheet" href="../tokens.css"></head><body><main data-oid="screen">Phone</main></body></html>');
     await writeFile(path.join(root, directory, "tokens.css"), "body{margin:0;background:seagreen} @keyframes appear{from{opacity:0}to{opacity:1}}");
     render = vi.fn(async ({ state, viewport, html, sourceVersion }) => {
       expect(html).toContain("seagreen");
@@ -66,7 +66,7 @@ describe("native Design verification", () => {
     const reference = await createDesignContextReference(root, "workspace", frame);
     const otherDirectory = "Other Design";
     await cp(path.join(root, directory), path.join(root, otherDirectory), { recursive: true });
-    const manifest = path.join(root, otherDirectory, "design.toml");
+    const manifest = path.join(root, otherDirectory, "meta/design.toml");
     await writeFile(manifest, (await readFile(manifest, "utf8")).replace(reference.directoryId, "design_other"));
     await writeFile(path.join(root, otherDirectory, frame), "<main>Other directory</main>");
     await service.stop();
@@ -164,7 +164,7 @@ describe("native Design verification", () => {
 
   it("revokes expired and replaced directory access and rejects foreign origins", async () => {
     expect((await fetch(`${url}/${frame}/state`, { headers: { Origin: "https://unrelated.example" } })).status).toBe(403);
-    const manifest = path.join(root, directory, "design.toml");
+    const manifest = path.join(root, directory, "meta/design.toml");
     const original = await readFile(manifest, "utf8");
     const reference = await createDesignContextReference(root, "workspace", frame);
     await writeFile(manifest, original.replace(reference.directoryId, "design_replaced"));

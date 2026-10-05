@@ -17,7 +17,7 @@ import {
 import type { DesignMcpToolHandler } from "./design-agent-mcp";
 import type { ConversationModePort } from "./conversation-mode";
 import { withDesignWorkspaceMutation } from "./document-write-lock";
-import { assertLegacyDesignDraftWritable, ensureDesignMetadataLayout, readDirectoryDesignManifest } from "./metadata";
+import { assertLegacyDesignDraftWritable, readDirectoryDesignManifest } from "./metadata";
 import { initializeDesignDocumentUnlocked } from "./document-transactions";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { openDesignVerification } from "./verification-service";
@@ -33,9 +33,7 @@ export async function nativeDesignContext(target: DesignCodeToolTarget | null, m
     assertCurrent();
     target.assertCurrent();
     assertLegacyDesignDraftWritable(target.workspacePath);
-    if (readDirectoryDesignManifest(target.workspacePath, target.directory)?.canvas)
-      ensureDesignMetadataLayout(target.workspacePath, target.directory);
-    else await withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
+    await withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
       initializeDesignDocumentUnlocked(target.workspacePath));
     target.assertCurrent();
   });

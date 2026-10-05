@@ -276,6 +276,7 @@ import {
   personalWorkspaceRoot,
 } from "../settings/personal-repo";
 import { forgetWorkspaceDesignApi } from "../design/design-api";
+import { designPagesMigrationGeneration } from "../design/pages-migration";
 import {
   designDirectoryNameFor,
   DESIGN_CANVAS_FILE,
@@ -295,7 +296,7 @@ import {
   withDesignDirectoryNameLease,
 } from "../design/directory-registry";
 import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
-import { readDirectoryDesignManifest } from "../design/metadata";
+import { readDirectoryDesignLayout } from "../design/metadata";
 import { designRegistryAtGitRef } from "../design/metadata-git";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
@@ -941,10 +942,14 @@ function normalizeRepoMutationPath(candidate: string): string | null {
 async function isExistingDesignManifest(cwd: string, candidate: string): Promise<boolean> {
   const normalized = normalizeRepoMutationPath(candidate);
   if (!normalized || !fs.existsSync(nodePath.resolve(cwd, normalized))) return false;
-  const directory = nodePath.posix.dirname(normalized);
+  const parent = nodePath.posix.dirname(normalized);
+  const directory = nodePath.posix.basename(parent) === "meta" ? nodePath.posix.dirname(parent) : parent;
+  try {
+    const layout = readDirectoryDesignLayout(cwd, directory);
+    if (layout) return layout.manifestFile === normalized;
+  } catch { /* Source repair may need HEAD's identity. */ }
   if (activeDesignDirectoryNameFor(cwd) === directory ||
       (await stickyRecognizedDesignDirectories(cwd)).includes(directory)) return true;
-  try { if (readDirectoryDesignManifest(cwd, directory)) return true; } catch { /* Source repair may need HEAD's identity. */ }
   const registered = await designRegistryAtGitRef(cwd, "HEAD").catch(() => null);
   return Object.values(registered?.directories ?? {}).some(entry => entry.path === directory);
 }
@@ -1419,6 +1424,10 @@ export class WorkspaceService {
     string,
     WorkspaceDesignHistoryState
   >();
+  private readonly designHistoryLayouts = new WeakMap<
+    WorkspaceDesignHistoryState,
+    { directory: string; generation: string | null }
+  >();
 
   private designHistoryState(
     workspacePath: string,
@@ -1427,6 +1436,14 @@ export class WorkspaceService {
   ): WorkspaceDesignHistoryState | undefined {
     const key = nodePath.resolve(workspacePath) + (actorId ? `\u0000${actorId}` : "");
     let state = this.designHistoryByWorkspace.get(key);
+    const directory = designDirectoryNameFor(workspacePath);
+    const generation = designPagesMigrationGeneration(workspacePath, directory);
+    const layout = state && this.designHistoryLayouts.get(state);
+    if (state && layout && (layout.directory !== directory || layout.generation !== generation)) {
+      state.undo = [];
+      state.redo = [];
+      state.bytes = 0;
+    }
     if (!state && create) {
       state = { undo: [], redo: [], bytes: 0 };
       this.designHistoryByWorkspace.set(key, state);
@@ -1434,6 +1451,7 @@ export class WorkspaceService {
       this.designHistoryByWorkspace.delete(key);
       this.designHistoryByWorkspace.set(key, state);
     }
+    if (state) this.designHistoryLayouts.set(state, { directory, generation });
     while (this.designHistoryByWorkspace.size > MAX_DESIGN_HISTORY_WORKSPACES) {
       const oldest = this.designHistoryByWorkspace.keys().next().value as
         | string

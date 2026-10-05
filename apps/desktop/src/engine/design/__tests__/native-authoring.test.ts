@@ -1,3 +1,4 @@
+import { useLegacyDesignStorage } from "./storage-fixtures";
 import { mkdtemp, readFile, writeFile, rm, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -39,11 +40,11 @@ describe("native Design file authoring", () => {
   });
 
   async function author() {
-    const canvasPath = path.join(folder, "canvas.json");
+    const canvasPath = path.join(folder, "meta/canvas.json");
     const canvas = JSON.parse(await readFile(canvasPath, "utf8"));
     canvas.frames.home = {
       kind: "html",
-      source: "home.html",
+      source: "page-1/home.html",
       title: "Home",
       x: 0,
       y: 0,
@@ -53,32 +54,32 @@ describe("native Design file authoring", () => {
     canvas.pages[0].frames.push("home");
     const html =
       "<!doctype html><html><body><main><h1>Hello</h1></main></body></html>";
-    await writeFile(path.join(folder, "home.html"), html);
+    await writeFile(path.join(folder, "page-1/home.html"), html);
     await writeFile(canvasPath, JSON.stringify(canvas));
     return { canvas, html, canvasPath };
   }
 
   it("creates registration-only metadata and discovers native source without an API apply", async () => {
     const manifest = parseDesignManifest(
-      await readFile(path.join(folder, "design.toml"), "utf8"),
+      await readFile(path.join(folder, "meta/design.toml"), "utf8"),
     );
     expect(manifest).toMatchObject({ canvas: "canvas.json" });
     expect(manifest?.document).toBeUndefined();
     expect(designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME)).toBe(
-      path.join(folder, "canvas.json"),
+      path.join(folder, "meta/canvas.json"),
     );
     const { html } = await author();
     const frames = await listDesignFrames(root, { writeBack: false });
     expect(frames).toMatchObject([
-      { file: "home.html", title: "Home", width: 390, height: 844 },
+      { file: "page-1/home.html", title: "Home", width: 390, height: 844 },
     ]);
-    expect(await readFile(path.join(folder, "home.html"), "utf8")).toBe(html);
+    expect(await readFile(path.join(folder, "page-1/home.html"), "utf8")).toBe(html);
     await writeFile(
-      path.join(folder, "home.html"),
+      path.join(folder, "page-1/home.html"),
       html.replace("Hello", "Updated"),
     );
     expect(
-      (await readDesignFrame(root, "home.html", 4, { writeBack: false }))
+      (await readDesignFrame(root, "page-1/home.html", 4, { writeBack: false }))
         .source,
     ).toContain("Updated");
   });
@@ -90,8 +91,8 @@ describe("native Design file authoring", () => {
       (await listDesignFrames(root, { writeBack: false })).map(
         (frame) => frame.file,
       ),
-    ).toEqual(["home.html"]);
-    await updateDesignFrameGeometry(root, "home.html", { x: 500 });
+    ).toEqual(["page-1/home.html"]);
+    await updateDesignFrameGeometry(root, "page-1/home.html", { x: 500 });
     expect(JSON.parse(await readFile(canvasPath, "utf8")).frames.home.x).toBe(
       500,
     );
@@ -101,41 +102,41 @@ describe("native Design file authoring", () => {
     const { html, canvasPath } = await author();
     const canvasBefore = await readFile(canvasPath, "utf8");
     const snapshot = await readDesignWorkspaceSnapshot(root);
-    const frame = await readDesignFrame(root, "home.html");
-    expect(await readFile(path.join(folder, "home.html"), "utf8")).toBe(html);
+    const frame = await readDesignFrame(root, "page-1/home.html");
+    expect(await readFile(path.join(folder, "page-1/home.html"), "utf8")).toBe(html);
     expect(await readFile(canvasPath, "utf8")).toBe(canvasBefore);
     expect(
       snapshot.lint.violations.some((v) => v.ruleId === "oid-missing"),
     ).toBe(false);
     const heading = frame.tree[0].children[0];
     expect(heading.oid).toBeTruthy();
-    const offsets = await readDesignElementOffsetMap(root, "home.html");
+    const offsets = await readDesignElementOffsetMap(root, "page-1/home.html");
     const offset = offsets.find((entry) => entry.oid === heading.oid)!;
     expect(html.slice(offset.startOffset, offset.endOffset)).toBe(
       "<h1>Hello</h1>",
     );
     await setDesignNodeText(root, {
-      frame: "home.html",
+      frame: "page-1/home.html",
       nodeId: heading.oid!,
       sourceVersion: frame.sourceVersion,
       text: "Visual edit",
     });
-    expect(await readFile(path.join(folder, "home.html"), "utf8")).toContain(
+    expect(await readFile(path.join(folder, "page-1/home.html"), "utf8")).toContain(
       "Visual edit",
     );
     await writeFile(
-      path.join(folder, "home.html"),
+      path.join(folder, "page-1/home.html"),
       html.replace("Hello", "Native edit"),
     );
     await expect(
       setDesignNodeText(root, {
-        frame: "home.html",
+        frame: "page-1/home.html",
         nodeId: heading.oid!,
         sourceVersion: frame.sourceVersion,
         text: "Stale",
       }),
     ).rejects.toThrow(/changed/);
-    expect(await readFile(path.join(folder, "home.html"), "utf8")).toContain(
+    expect(await readFile(path.join(folder, "page-1/home.html"), "utf8")).toContain(
       "Native edit",
     );
   });
@@ -143,8 +144,8 @@ describe("native Design file authoring", () => {
   it("preserves identity on native rename and does not erase missing references", async () => {
     const { canvasPath, canvas } = await author();
     await rename(
-      path.join(folder, "home.html"),
-      path.join(folder, "welcome.html"),
+      path.join(folder, "page-1/home.html"),
+      path.join(folder, "page-1/welcome.html"),
     );
     await expect(listDesignFrames(root, { writeBack: false })).rejects.toThrow(
       /home.html|missing/i,
@@ -152,22 +153,22 @@ describe("native Design file authoring", () => {
     expect(
       JSON.parse(await readFile(canvasPath, "utf8")).frames.home,
     ).toBeDefined();
-    canvas.frames.home.source = "welcome.html";
+    canvas.frames.home.source = "page-1/welcome.html";
     await writeFile(canvasPath, JSON.stringify(canvas));
     expect((await listDesignFrames(root, { writeBack: false }))[0].file).toBe(
-      "welcome.html",
+      "page-1/welcome.html",
     );
   });
 
   it("assigns a fresh canvas identity when a deleted source filename is reused", async () => {
     const original = await createDesignFrame(root, { title: "Reusable" });
     const first = JSON.parse(
-      await readFile(path.join(folder, "canvas.json"), "utf8"),
+      await readFile(path.join(folder, "meta/canvas.json"), "utf8"),
     );
     await deleteDesignFrame(root, original.file);
     const replacement = await createDesignFrame(root, { title: "Reusable" });
     const second = JSON.parse(
-      await readFile(path.join(folder, "canvas.json"), "utf8"),
+      await readFile(path.join(folder, "meta/canvas.json"), "utf8"),
     );
     expect(replacement.file).toBe(original.file);
     expect(Object.keys(second.frames)).not.toEqual(Object.keys(first.frames));
@@ -176,9 +177,9 @@ describe("native Design file authoring", () => {
   it("lets optional inspection and semantic tools use native HTML without a repair pass", async () => {
     const { html } = await author();
     const api = getWorkspaceDesignApi(root);
-    const opened = await api.open("frame:home.html");
+    const opened = await api.open("frame:page-1/home.html");
     const inspected = await api.readProjection({
-      documentId: "frame:home.html",
+      documentId: "frame:page-1/home.html",
     });
     expect(inspected.diagnostics).not.toEqual(
       expect.arrayContaining([
@@ -187,21 +188,21 @@ describe("native Design file authoring", () => {
     );
     const heading = inspected.nodes.find((node) => node.tag === "h1")!;
     expect(heading.id).toBe(
-      (await readDesignFrame(root, "home.html")).tree[0].children[0].oid,
+      (await readDesignFrame(root, "page-1/home.html")).tree[0].children[0].oid,
     );
     await api.readProvenance({
-      documentId: "frame:home.html",
+      documentId: "frame:page-1/home.html",
       nodeId: heading.id,
       property: "color",
     });
-    expect(await readFile(path.join(folder, "home.html"), "utf8")).toBe(html);
+    expect(await readFile(path.join(folder, "page-1/home.html"), "utf8")).toBe(html);
     await api.apply({
       schemaVersion: 1,
       actor: { kind: "human", id: "tester" },
       intent: "Edit heading",
       createdAt: 1,
       transactionId: "native-semantic",
-      documentId: "frame:home.html",
+      documentId: "frame:page-1/home.html",
       baseRevision: opened.revision,
       operations: [
         {
@@ -212,33 +213,30 @@ describe("native Design file authoring", () => {
         },
       ],
     });
-    expect(await readFile(path.join(folder, "home.html"), "utf8")).toContain(
+    expect(await readFile(path.join(folder, "page-1/home.html"), "utf8")).toContain(
       "Semantic edit",
     );
-    await api.undo("frame:home.html");
-    expect(await readFile(path.join(folder, "home.html"), "utf8")).toBe(html);
+    await api.undo("frame:page-1/home.html");
+    expect(await readFile(path.join(folder, "page-1/home.html"), "utf8")).toBe(html);
   });
 
   it("reads an old branch without migrating and explicitly migrates with its identity intact", async () => {
-    const { canvasPath } = await author();
+    await author();
+    const { id, document } = useLegacyDesignStorage(root, DESIGN_DIRECTORY_NAME, ".zeros/design-dir.toml");
+    await rm(path.join(root, ".zeros"), { recursive: true });
     const manifestPath = path.join(folder, "design.toml");
-    const id = parseDesignManifest(await readFile(manifestPath, "utf8"))!.id;
-    const document = decodeCanvasFile(await readFile(canvasPath, "utf8"));
+    const canvasPath = path.join(folder, "canvas.json");
     const legacy = serializeDesignManifest(id, document);
     await writeFile(manifestPath, legacy);
-    await rm(canvasPath);
-    expect((await listDesignFrames(root, { writeBack: false }))[0].file).toBe(
-      "home.html",
-    );
+    expect((await listDesignFrames(root, { writeBack: false }))[0].file).toBe("home.html");
     expect(await readFile(manifestPath, "utf8")).toBe(legacy);
     ensureDesignMetadataLayout(root, DESIGN_DIRECTORY_NAME);
-    expect(parseDesignManifest(await readFile(manifestPath, "utf8"))).toEqual({
-      version: 2,
-      id,
-      canvas: "canvas.json",
-    });
-    expect(decodeCanvasFile(await readFile(canvasPath, "utf8"))).toMatchObject(
-      document,
-    );
+    expect(parseDesignManifest(await readFile(manifestPath, "utf8"))).toEqual({ version: 2, id, canvas: "canvas.json" });
+    expect(decodeCanvasFile(await readFile(canvasPath, "utf8"))).toMatchObject(document);
+    await initializeDesignDocument(root);
+    expect(parseDesignManifest(await readFile(path.join(folder, "meta/design.toml"), "utf8"))).toMatchObject({ version: 3, id });
+    expect((await listDesignFrames(root, { writeBack: false }))[0].file).toBe("page-1/home.html");
+    const migrated = JSON.parse(await readFile(path.join(folder, "meta/canvas.json"), "utf8"));
+    expect(migrated.frames.home.source).toBe("page-1/home.html");
   });
 });

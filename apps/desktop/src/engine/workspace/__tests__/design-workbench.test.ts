@@ -191,7 +191,7 @@ describe("Design in the shared workbench", () => {
     );
     expect(
       await readFile(
-        path.join(workspace.path, directory, "design.toml"),
+        path.join(workspace.path, directory, "meta/design.toml"),
         "utf8",
       ),
     ).toContain('format = "zeros-design"');
@@ -306,7 +306,7 @@ describe("Design in the shared workbench", () => {
     await service.handle("git.stage", { ...params, paths: [directory] });
     await service.handle("git.commit", { ...params, message: "Design base" });
     const branch = git(workspace.path, "branch", "--show-current");
-    const manifestPath = path.join(workspace.path, directory, "design.toml");
+    const manifestPath = path.join(workspace.path, directory, "meta/design.toml");
     const base = await readFile(manifestPath, "utf8");
     git(workspace.path, "checkout", "-qb", "conflicting-design");
     await writeFile(manifestPath, "# theirs\n" + base);
@@ -323,7 +323,7 @@ describe("Design in the shared workbench", () => {
       service.handle("design.status", params),
     ).resolves.toMatchObject({
       operation: "merge",
-      conflicts: [`${directory}/design.toml`],
+      conflicts: [`${directory}/meta/design.toml`],
     });
     await expect(service.handle("design.snapshot", params)).rejects.toThrow(
       "Design is paused",
@@ -354,7 +354,7 @@ describe("Design in the shared workbench", () => {
     const index = git(workspace.path, "write-tree");
     await expect(
       service.handle("git.commit", { ...params, message: "Incomplete" }),
-    ).rejects.toThrow("design.toml");
+    ).rejects.toThrow("meta/design.toml");
     expect(git(workspace.path, "rev-parse", "HEAD")).toBe(head);
     expect(git(workspace.path, "write-tree")).toBe(index);
   });

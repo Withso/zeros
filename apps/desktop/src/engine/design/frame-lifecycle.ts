@@ -108,17 +108,20 @@ export async function createDesignFrame(
   return withDocumentWrite(workspacePath, async () => {
     await initializeDesignDocumentUnlocked(workspacePath);
     const directory = designDirectory(workspacePath);
+    const canvas = await readCanvas(workspacePath);
+    const pages = canvas.pages?.filter(page => page.folder !== undefined);
+    if (pages && pages.length !== 1) throw new Error("pageId required to create a frame in a directory with several pages.");
+    const folder = pages?.[0]?.folder;
     const title = input.title?.trim().slice(0, 120) || "Frame";
     const base = slugFrameTitle(title);
-    let file = `${base}.html`;
+    let file = folder ? `${folder}/${base}.html` : `${base}.html`;
     for (let suffix = 2; existsSync(path.join(directory, file)); suffix++) {
-      file = `${base}-${suffix}.html`;
+      file = folder ? `${folder}/${base}-${suffix}.html` : `${base}-${suffix}.html`;
     }
     const oid = `f-${createHash("sha256")
       .update(`${file}:${Date.now()}:${randomUUID()}`)
       .digest("hex")
       .slice(0, 8)}`;
-    const canvas = await readCanvas(workspacePath);
     const automaticGeometry = nextFrameGeometry(Object.values(canvas.frames), {
       width: DEFAULT_FRAME_WIDTH,
       height: DEFAULT_FRAME_HEIGHT,
@@ -138,8 +141,9 @@ export async function createDesignFrame(
           geometry.w,
           geometry.h,
           textSeed.fixedSize,
+          folder ? "../tokens.css" : "./tokens.css",
         )
-      : FRAME_SEED(title, oid, geometry.w, geometry.h);
+      : FRAME_SEED(title, oid, geometry.w, geometry.h, folder ? "../tokens.css" : "./tokens.css");
     canvas.frames[file] = geometry;
     canvas.frame_info[file] = { id: `frame_${randomUUID().replace(/-/g, "")}`, title, kind: textSeed ? "text" : "frame" };
     await writeCanvas(workspacePath, canvas, [
@@ -287,6 +291,7 @@ export async function updateDesignFrameGeometry(
   geometry: Partial<DesignFrameGeometry>,
 ): Promise<DesignFrameGeometry> {
   return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
     const { file } = await designFrameTarget(workspacePath, frame);
     const canvas = await readCanvas(workspacePath);
     const current = canvas.frames[file] ?? {
@@ -315,6 +320,7 @@ export async function renameDesignFrame(
   if (!title) throw new Error("Design frame title cannot be empty.");
 
   await withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
     await designFrameTarget(workspacePath, file);
     const source = await readBoundedDesignFrameSource(workspacePath, file);
     const canvas = await readCanvas(workspacePath);
@@ -423,6 +429,7 @@ export async function duplicateDesignFrame(
 ): Promise<DesignFrameSummary> {
   const originalFile = assertFrameFile(frame);
   return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
     await designFrameTarget(workspacePath, originalFile);
     const original = await readBoundedDesignFrameSource(
       workspacePath,
@@ -436,9 +443,10 @@ export async function duplicateDesignFrame(
     const title = `${originalMeta.title} copy`.slice(0, 120);
     const directory = designDirectory(workspacePath);
     const base = `${slugFrameTitle(originalMeta.title)}-copy`;
-    let file = `${base}.html`;
+    const folder = originalFile.includes("/") ? originalFile.split("/")[0] : undefined;
+    let file = folder ? `${folder}/${base}.html` : `${base}.html`;
     for (let suffix = 2; existsSync(path.join(directory, file)); suffix += 1) {
-      file = `${base}-${suffix}.html`;
+      file = folder ? `${folder}/${base}-${suffix}.html` : `${base}-${suffix}.html`;
     }
     const source = reseedFrameOids(
       rewriteFrameTitleSource(original, title),
@@ -547,6 +555,7 @@ export async function deleteDesignFrame(
 ): Promise<DesignFrameRestorePoint> {
   const file = assertFrameFile(frame);
   return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
     const { restorePoint } = await designFrameRestorePointUnlocked(
       workspacePath,
       file,
@@ -700,14 +709,15 @@ export async function restoreDesignFrameChanges(
   changes: readonly DesignFrameChange[],
   direction: "undo" | "redo",
 ): Promise<void> {
-  return withDocumentWrite(workspacePath, () =>
-    applyDesignFrameChangesUnlocked(
+  return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
+    return applyDesignFrameChangesUnlocked(
       workspacePath,
       direction === "undo"
         ? changes.map(({ before, after }) => ({ before: after, after: before }))
         : changes,
-    ),
-  );
+    );
+  });
 }
 
 /** The Design surface owns cross-document moves. Source is extracted inside
@@ -724,6 +734,7 @@ export async function transferDesignNode(
   },
 ): Promise<{ frame: string; nodeId: string; changes: DesignFrameChange[] }> {
   return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
     const { restorePoint: from } = await designFrameRestorePointUnlocked(
       workspacePath,
       input.frame,
@@ -809,6 +820,7 @@ export async function transferDesignNode(
         input.parentId ?? "::zeros-document-body",
         fragment,
         "append",
+        destination.file,
       );
       if (input.beforeId)
         source = mutateDesignNodeMoveSource(
@@ -848,13 +860,15 @@ export async function transferDesignNode(
       after = { ...destination, source };
     } else {
       const base = "frame";
-      let file = `${base}.html`;
+      const folder = path.posix.dirname(from.file);
+      const prefix = folder === "." ? "" : folder + "/";
+      let file = `${prefix}${base}.html`;
       for (
         let suffix = 2;
         existsSync(path.join(designDirectory(workspacePath), file));
         suffix++
       )
-        file = `${base}-${suffix}.html`;
+        file = `${prefix}${base}-${suffix}.html`;
       fragment = mutateDesignNodeAttributeSource(
         fragment,
         input.nodeId,
@@ -926,6 +940,7 @@ export async function replaceDesignFrameFromHistory(
     throw new Error(`Design frame restore source is invalid: ${file}`);
   }
   return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
     const { target, restorePoint: current } =
       await designFrameRestorePointUnlocked(workspacePath, file);
     if (!sameDesignFrameRestorePoint(current, expected)) {

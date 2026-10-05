@@ -1,6 +1,4 @@
-import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { readDirectoryDesignManifest } from "./metadata";
-import { TOKENS_SEED } from "./document-seeds";
 import { escapeText, escapeAttribute } from "./source";
 import {
   listDesignAssets,
@@ -28,19 +26,22 @@ import { elementRecords } from "./source";
 // A design workspace is still a Git worktree, but its authored surface is one
 // deliberately small directory:
 //
-//   Zeros Design/*.html      one top-level file per frame
-//   Zeros Design/*.css       shared authored styles
-//   Zeros Design/tokens.css  typed design tokens + layout reset
-//   Zeros Design/design.toml  engine-managed directory registration
-//   Zeros Design/canvas.json  editable scene, frame and Foundation metadata
-//   Zeros Design/rules.md     short native-authoring instructions
+//   Zeros Design/<page>/*.html  registered frames in each page folder
+//   Zeros Design/*.css          shared authored styles
+//   Zeros Design/tokens.css     typed design tokens + layout reset
+//   Zeros Design/meta/design.toml  engine-managed directory registration
+//   Zeros Design/meta/canvas.json  editable pages, frames and Foundation metadata
+//   Zeros Design/rules.md       short native-authoring instructions
+//
+// Legacy root metadata and flat sources remain readable. Explicit Design
+// authoring upgrades them recoverably into the meta/pages layout.
 //
 // This module is the single engine-side interpretation of that format. The
 // renderer and first-party MCP server both consume these functions, so frame
 // discovery, OID healing, constraints, and token parsing cannot drift.
 
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { migrateDesignFoundationManifest } from "@zeros/design-core";
@@ -50,7 +51,6 @@ import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss from "postcss";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
-import { ensureDesignMetadataLayout } from "./metadata";
 
 import { expandDesignComponents } from "./components";
 import {
@@ -97,10 +97,8 @@ import {
 } from "./document-storage";
 import {
   DESIGN_TOKENS_FILE,
-  ensureSafeDesignRoot,
   initializeDesignDocumentUnlocked,
   recoverPendingDesignTransactionUnlocked,
-  writeIfMissing,
 } from "./document-transactions";
 import {
   assertDesignNodeId,
@@ -111,10 +109,6 @@ import {
   listDesignFramesUnlocked,
   prepareFrameRenderSourceForFile,
 } from "./frame-lifecycle";
-import {
-  designDirectoryEntry,
-  recoverDesignMetadataMigration,
-} from "./metadata";
 import { getDesignRuntimeAudit } from "./runtime-audits";
 import { readSafeRegularFile } from "./safe-files";
 
@@ -171,44 +165,9 @@ export async function inspectDesignFilesForAdoption(
 export async function initializeDesignDocument(
   workspacePath: string,
 ): Promise<{ created: string[] }> {
-  return withDocumentWrite(workspacePath, async () => {
-    const directory = designDirectory(workspacePath);
-    await ensureSafeDesignRoot(workspacePath);
-    await Promise.all([
-      mkdir(path.join(directory, "assets"), { recursive: true }),
-      mkdir(path.join(directory, "components"), { recursive: true }),
-    ]);
-    publishCloudWorkspacePath(path.join(directory, "assets"));
-    publishCloudWorkspacePath(path.join(directory, "components"));
-    const created: string[] = [];
-    await writeIfMissing(
-      path.join(directory, DESIGN_TOKENS_FILE),
-      TOKENS_SEED,
-      created,
-      workspacePath,
-    );
-    recoverDesignMetadataMigration(
-      workspacePath,
-      designDirectoryNameFor(workspacePath),
-    );
-    await recoverPendingDesignTransactionUnlocked(workspacePath);
-    const canvas = await readCanvas(workspacePath);
-    if (
-      !designDirectoryEntry(
-        workspacePath,
-        designDirectoryNameFor(workspacePath),
-      )
-    )
-      created.push(...(await writeCanvas(workspacePath, canvas)));
-    else
-      created.push(
-        ...ensureDesignMetadataLayout(
-          workspacePath,
-          designDirectoryNameFor(workspacePath),
-        ),
-      );
-    return { created };
-  });
+  return withDocumentWrite(workspacePath, async () => ({
+    created: await initializeDesignDocumentUnlocked(workspacePath),
+  }));
 }
 
 function normalizeCssProperty(value: string): string {
@@ -508,6 +467,7 @@ async function mutateDesignFrameSource(
     throw new Error("sourceVersion must be an exact design render generation.");
   }
   return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
     await designFrameTarget(workspacePath, file);
     const before = await readBoundedDesignFrameSource(workspacePath, file);
     const source = healDesignOids(before).html;
@@ -764,9 +724,11 @@ export async function prepareDesignAssetInsertion(
     .update(`${input.frame}:${asset.path}:${Date.now()}:${randomUUID()}`)
     .digest("hex")
     .slice(0, 9)}`;
+  const relative = path.posix.relative(path.posix.dirname(assertFrameFile(input.frame)), asset.path);
+  const reference = relative.startsWith(".") ? relative : "./" + relative;
   return {
     nodeId: root.oid,
-    html: `<img data-oid="${oid}" src="./${escapeAttribute(asset.path)}" alt="${escapeAttribute(path.basename(asset.name, path.extname(asset.name)))}" style="position:absolute; left:${x}px; top:${y}px; max-width:320px; height:auto;">`,
+    html: `<img data-oid="${oid}" src="${escapeAttribute(reference)}" alt="${escapeAttribute(path.basename(asset.name, path.extname(asset.name)))}" style="position:absolute; left:${x}px; top:${y}px; max-width:320px; height:auto;">`,
   };
 }
 
@@ -1509,7 +1471,10 @@ export function lintDesignDocument(
   const lint = () => lintDesignDocumentUnlocked(workspacePath, frame, options);
   return options.healOids === false
     ? lint()
-    : withDocumentWrite(workspacePath, lint);
+    : withDocumentWrite(workspacePath, async () => {
+        await initializeDesignDocumentUnlocked(workspacePath);
+        return lint();
+      });
 }
 
 function sortDesignLintViolations(
@@ -1665,6 +1630,7 @@ export async function updateDesignToken(
     throw new Error("Design token value is invalid CSS.");
   }
   return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
     const directory = designDirectory(workspacePath);
     const target = path.join(directory, DESIGN_TOKENS_FILE);
     const source = (await readSafeDesignText(directory, target)) ?? "";

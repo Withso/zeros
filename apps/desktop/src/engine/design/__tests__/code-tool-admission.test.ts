@@ -65,7 +65,7 @@ describe("Code Design target admission", () => {
       "-qm",
       "Initial",
     );
-    const file = `${DESIGN_DIRECTORY_NAME}/design.toml`;
+    const file = `${DESIGN_DIRECTORY_NAME}/meta/design.toml`;
     const oid = git("rev-parse", `HEAD:${file}`);
     execFileSync("git", ["update-index", "--index-info"], {
       cwd: root,
@@ -97,7 +97,7 @@ describe("Code Design target admission", () => {
         mode = "design";
         await expect(tools!.preparePrompt!()).resolves.toContain("repair");
         mode = "code";
-        execFileSync("git", ["add", `${DESIGN_DIRECTORY_NAME}/design.toml`], {
+        execFileSync("git", ["add", `${DESIGN_DIRECTORY_NAME}/meta/design.toml`], {
           cwd: root,
         });
         expect(await tools!.preparePrompt!()).toContain(DESIGN_DIRECTORY_NAME);
@@ -232,12 +232,11 @@ describe("Code Design target admission", () => {
   });
 
   it("keeps Code inspection observational and migrates legacy metadata before a Design prompt", async () => {
+    const { id, document } = useLegacyDesignStorage(root, DESIGN_DIRECTORY_NAME, ".zeros/design-dir.toml");
+    await rm(path.join(root, ".zeros"), { recursive: true });
     const manifestFile = path.join(root, DESIGN_DIRECTORY_NAME, "design.toml");
-    const canvasFile = path.join(root, DESIGN_DIRECTORY_NAME, "canvas.json");
-    const id = parseDesignManifest(await readFile(manifestFile, "utf8"))!.id;
-    const legacy = serializeDesignManifest(id, decodeCanvasFile(await readFile(canvasFile, "utf8")));
+    const legacy = serializeDesignManifest(id, document);
     await writeFile(manifestFile, legacy);
-    await rm(canvasFile);
     let mode: "code" | "design" = "code";
     const owner = new DesignCodeToolAdmissions({ ...options, mode: () => ({ get: () => ({ mode, revision: mode === "code" ? 0 : 1 }), set: () => { throw new Error("unused"); } }) });
     const tools = await owner.admit(input);
@@ -246,8 +245,9 @@ describe("Code Design target admission", () => {
       expect(await readFile(manifestFile, "utf8")).toBe(legacy);
       mode = "design";
       expect(await tools!.preparePrompt!()).toContain("normal Read, Write, Edit");
-      expect(parseDesignManifest(await readFile(manifestFile, "utf8"))).toEqual({ version: 2, id, canvas: "canvas.json" });
-      expect(JSON.parse(await readFile(canvasFile, "utf8")).version).toBe(1);
+      expect(parseDesignManifest(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, "meta/design.toml"), "utf8"))).toEqual({ version: 3, id, canvas: "canvas.json" });
+      expect(JSON.parse(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, "meta/canvas.json"), "utf8")).version).toBe(2);
+      await expect(readFile(manifestFile)).rejects.toMatchObject({ code: "ENOENT" });
     } finally { await tools!.dispose(); }
   });
 
@@ -258,8 +258,8 @@ describe("Code Design target admission", () => {
     const tools = await owner.admit(input);
     try {
       await tools!.preparePrompt!();
-      const canvas = decodeCanvasFile(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, "canvas.json"), "utf8"));
-      expect(canvas.frame_info).toMatchObject({ "old.html": { title: "Legacy title" } });
+      const canvas = decodeCanvasFile(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, "meta/canvas.json"), "utf8"));
+      expect(canvas.frame_info).toMatchObject({ "page-1/old.html": { title: "Legacy title" } });
     } finally { await tools!.dispose(); }
   });
 

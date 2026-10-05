@@ -17,6 +17,7 @@ import {
 } from "@zeros/design-core";
 import { DesignApi, type DesignHeadlessRenderer } from "@zeros/design-web";
 import { DesignDraftStore } from "./design-api";
+import { designPagesMigrationGeneration } from "./pages-migration";
 import { DESIGN_AGENT_SAFE_OPERATION_TYPES } from "./design-agent-capability";
 import type { DesignMcpToolHandler } from "./design-agent-mcp";
 import { withDesignDirectoryNameLease } from "./directory-registry";
@@ -305,7 +306,8 @@ export interface DesignCodeToolTarget {
 export class DesignCodeTools implements DesignMcpToolHandler {
   readonly token = randomBytes(32).toString("hex");
   private readonly abort = new AbortController();
-  private readonly api: DesignApi;
+  private apiInstance: DesignApi;
+  private apiGeneration: string | null;
   private readonly requests: DesignRequestStore;
   private pending = 0;
   private readonly actor;
@@ -332,9 +334,23 @@ export class DesignCodeTools implements DesignMcpToolHandler {
       target.directoryId,
       options.now,
     );
-    this.api = new DesignApi(
-      new DesignDraftStore(target.workspacePath, {
-        directory: target.directory,
+    this.apiGeneration = designPagesMigrationGeneration(target.workspacePath, target.directory);
+    this.apiInstance = this.createApi();
+  }
+
+  private get api(): DesignApi {
+    const generation = designPagesMigrationGeneration(this.target.workspacePath, this.target.directory);
+    if (generation !== this.apiGeneration) {
+      this.apiInstance = this.createApi();
+      this.apiGeneration = generation;
+    }
+    return this.apiInstance;
+  }
+
+  private createApi(): DesignApi {
+    return new DesignApi(
+      new DesignDraftStore(this.target.workspacePath, {
+        directory: this.target.directory,
         assertAuthorized: () => this.assertActive(this.token),
       }),
       {
@@ -368,7 +384,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
             );
           },
         },
-        ...(options.renderer ? { renderer: options.renderer } : {}),
+        ...(this.options.renderer ? { renderer: this.options.renderer } : {}),
       },
     );
   }

@@ -57,7 +57,9 @@ import {
   withDesignDocumentWrite as withDocumentWrite,
 } from "./document-write-lock";
 import {
-  ensureDesignMetadataLayout,
+  createDesignDirectoryPages,
+  ensureDesignPagesLayout,
+  invalidateDesignManifestDiscovery,
   readDirectoryDesignManifest,
   recoverWorkspaceDesignMetadata,
 } from "./metadata";
@@ -77,6 +79,7 @@ import {
   discoverFrameFiles,
   isFrameFile,
   normalizeGeometry,
+  nextFrameGeometry,
   readBoundedDesignFrameSource,
   readCanvas,
   readFrameMeta,
@@ -209,38 +212,37 @@ export async function writeIfMissing(
 
 export async function initializeDesignDocumentUnlocked(
   workspacePath: string,
-): Promise<void> {
-  const directory = designDirectory(workspacePath);
+): Promise<string[]> {
+  const directory = designDirectory(workspacePath), name = designDirectoryNameFor(workspacePath);
   await ensureSafeDesignRoot(workspacePath);
-  await Promise.all([
-    mkdir(path.join(directory, "assets"), { recursive: true }),
-    mkdir(path.join(directory, "components"), { recursive: true }),
-  ]);
-  publishCloudWorkspacePath(path.join(directory, "assets"));
-  publishCloudWorkspacePath(path.join(directory, "components"));
-  const ignored: string[] = [];
-  await writeIfMissing(
-    path.join(directory, DESIGN_TOKENS_FILE),
-    TOKENS_SEED,
-    ignored,
-    workspacePath,
-  );
-  recoverDesignMetadataMigration(
-    workspacePath,
-    designDirectoryNameFor(workspacePath),
-  );
+  recoverWorkspaceDesignMetadata(workspacePath);
   await recoverPendingDesignTransactionUnlocked(workspacePath);
-  // Reading validates existing metadata as well as seeding a new document.
+  const manifest = readDirectoryDesignManifest(workspacePath, name);
   const canvas = await readCanvas(workspacePath);
-  if (
-    !readDirectoryDesignManifest(workspacePath, designDirectoryNameFor(workspacePath))?.canvas
-  )
-    await writeCanvas(workspacePath, canvas);
-  else
-    ensureDesignMetadataLayout(
-      workspacePath,
-      designDirectoryNameFor(workspacePath),
-    );
+  const created: string[] = [];
+  if (!manifest?.canvas) {
+    if (designDirectoryEntry(workspacePath, name) || readDesignStorageFile(workspacePath, name + "/.zeros-canvas.json") !== null) {
+      // The existing legacy path captures every central entry unchanged.
+      created.push(...await writeCanvas(workspacePath, canvas));
+      created.push(...ensureDesignPagesLayout(workspacePath, name));
+    } else {
+      for (const file of await discoverFrameFiles(workspacePath)) {
+        const source = await readBoundedDesignFrameSource(workspacePath, file);
+        const meta = readFrameMeta(parse(source, { sourceCodeLocationInfo: true }), file, canvas);
+        canvas.frames[file] ??= nextFrameGeometry(Object.values(canvas.frames), meta);
+        canvas.frame_info[file] = { ...canvas.frame_info[file], title: meta.title, kind: meta.kind };
+      }
+      created.push(...createDesignDirectoryPages(workspacePath, name, { ...canvas }));
+      invalidateDesignManifestDiscovery(workspacePath);
+    }
+  } else created.push(...ensureDesignPagesLayout(workspacePath, name));
+  for (const folder of ["assets", "components"]) {
+    const target = path.join(directory, folder);
+    await assertSafeDesignWriteTarget(workspacePath, path.join(target, ".zeros-validation"));
+    publishCloudWorkspacePath(target);
+  }
+  await writeIfMissing(path.join(directory, DESIGN_TOKENS_FILE), TOKENS_SEED, created, workspacePath);
+  return created;
 }
 
 const MAX_QUARANTINED_DESIGN_TRANSACTIONS = 16;
@@ -897,12 +899,7 @@ export async function commitDesignWebDocumentState(
     // A new transaction must capture its recovery identity in the current
     // storage format. Legacy migration can change authored revisions; the
     // ordinary comparison below then asks that caller to refresh first.
-    if (
-      !designDirectoryEntry(
-        workspacePath,
-        designDirectoryNameFor(workspacePath),
-      )
-    )
+    if (readDirectoryDesignManifest(workspacePath, designDirectoryNameFor(workspacePath))?.version !== 3)
       await initializeDesignDocumentUnlocked(workspacePath);
     const current = await readDesignWebDocumentStateUnlocked(
       workspacePath,
