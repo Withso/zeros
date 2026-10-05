@@ -9,6 +9,7 @@ import {
   CloudComputerV2BuildStageSchema,
   CloudComputerV2BuildStateSchema,
   CloudComputerV2RepositorySchema,
+  CloudComputerV2ActiveRepositorySchema,
   CloudComputerV2RevisionSchema,
   CloudComputerV2SaveDraftSchema,
   CloudComputerV2TemplateStateSchema,
@@ -87,6 +88,7 @@ export const cloudComputerV2StateSchema: z.ZodType<CloudComputerV2State> = z
       })
       .strict(),
     active: cloudComputerV2BuildSchema.nullable(),
+    activeRepositories: z.array(CloudComputerV2ActiveRepositorySchema).max(20).default([]),
     previous: cloudComputerV2BuildSchema.nullable(),
     latestBuild: cloudComputerV2BuildSchema.nullable(),
     unbuiltChanges: z.boolean(),
@@ -184,6 +186,7 @@ function reconcileState(
     ...next,
     draft: same(previous.draft, next.draft) ? previous.draft : next.draft,
     active: share(next.active),
+    activeRepositories: same(previous.activeRepositories, next.activeRepositories) ? previous.activeRepositories : next.activeRepositories,
     previous: share(next.previous),
     latestBuild: share(next.latestBuild),
     history: {

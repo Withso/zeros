@@ -9,7 +9,7 @@ import { createCloudWorkspaceHistoryRoutes } from "./history-routes.js";
 import { authorizeCloudComputerBuild } from "./computer.js";
 import { resolveComputerImage } from "./computer-image.js";
 import { selectCloudRuntime, cloudRuntimePin, cloudRuntimePinValues, CloudRuntimeError, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
-import { pinComputerWorkspaceSource, resolveComputerRepositoryGrant, selectComputerWorkspaceSource, type CloudComputerWorkspaceSource } from "./computer-workspace-source.js";
+import { pinComputerWorkspaceSource, readActiveComputerRepositoryGrant, resolveComputerRepositoryGrant, selectComputerWorkspaceSource, type CloudComputerWorkspaceSource } from "./computer-workspace-source.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { copyGenerationPins, loadGenerationSource, requireGenerationRuntime } from "./generation-pins.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
@@ -1233,10 +1233,17 @@ export function createCloudWorkspaceRoutes(
     const owner = parse(GithubNameSchema, c.req.query("owner"));
     const repositoryName = c.req.query("repository") === undefined ? null : parse(GithubNameSchema, c.req.query("repository"));
     const actorUserId = c.get("user").id;
-    const installations = await withSystemTx(pool, async (tx) => {
+    const computerV2 = c.req.query("cloudComputerV2") === "true" &&
+      (c.get("user").staffRole === "developer" || c.get("user").staffRole === "platform_owner");
+    const readComputerGrant = (tx: Tx) => readActiveComputerRepositoryGrant(tx, {
+      organizationId, actorUserId, owner, name: repositoryName!,
+    });
+    const source = await withSystemTx(pool, async (tx) => {
       const teamId = await resolveAuthorizedTeam(tx, { organizationId, actorUserId, requestedTeamId: null });
       await authorizeCloudWorkspaceOperation(tx, { organizationId, teamId, actorUserId,
         billingOwnerUserId: actorUserId, workosEnabled: options.workosEnabled === true, requireWorkspaceOwner: true });
+      const computer = computerV2 && repositoryName ? await readComputerGrant(tx) : null;
+      if (computer) return { computer, installations: [{ id: computer.id, accountLogin: computer.accountLogin }] };
       const result = await tx.query<{ id: string; accountLogin: string }>(
         `SELECT gi.id, gi.account_login AS "accountLogin" FROM github_installations gi
          WHERE gi.suspended_at IS NULL AND lower(gi.account_login) = lower($3)
@@ -1247,17 +1254,19 @@ export function createCloudWorkspaceRoutes(
          ORDER BY gi.last_verified_at DESC, gi.id LIMIT 100`,
         [organizationId, actorUserId, owner],
       );
-      return result.rows;
+      return { computer: null, installations: result.rows };
     });
+    const { computer, installations } = source;
     let repository: { owner: string; name: string; defaultBranch: string } | undefined;
     if (repositoryName && repositoryResolver && installations[0]) {
       const authorizeSource = (tx: Tx) => resolveAuthorizedGithubInstallation(tx, {
         installationRecordId: installations[0]!.id, organizationId, actorUserId, repositoryOwner: owner, repositoryName,
       });
-      const installation = await withSystemTx(pool, authorizeSource);
+      const installation = computer ?? await withSystemTx(pool, authorizeSource);
       let resolved: CloudWorkspaceRepositoryIdentity;
       try {
-        resolved = await repositoryResolver.resolve({ installationId: installation.githubInstallationId, owner, repository: repositoryName });
+        resolved = await repositoryResolver.resolve({ installationId: installation.githubInstallationId, owner, repository: repositoryName,
+          ...(computer ? { repositoryId: computer.repositoryId } : {}) });
       } catch {
         throw new HttpError(503, "github_repository_verification_unavailable", "GitHub repository verification is temporarily unavailable");
       }
@@ -1265,9 +1274,15 @@ export function createCloudWorkspaceRoutes(
         const teamId = await resolveAuthorizedTeam(tx, { organizationId, actorUserId, requestedTeamId: null });
         await authorizeCloudWorkspaceOperation(tx, { organizationId, teamId, actorUserId, billingOwnerUserId: actorUserId,
           workosEnabled: options.workosEnabled === true, requireWorkspaceOwner: true });
-        await authorizeSource(tx);
-        await assertCloudGithubSource(tx, { organizationId, actorUserId, installationRecordId: installation.id,
-          repositoryOwner: owner, repositoryName, forgeRepositoryId: resolved.forgeRepositoryId });
+        if (computer) {
+          const current = await readComputerGrant(tx);
+          if (!current || current.buildId !== computer.buildId || current.id !== computer.id || current.repositoryId !== resolved.forgeRepositoryId)
+            throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed. Refresh before trying again.");
+        } else {
+          await authorizeSource(tx);
+          await assertCloudGithubSource(tx, { organizationId, actorUserId, installationRecordId: installation.id,
+            repositoryOwner: owner, repositoryName, forgeRepositoryId: resolved.forgeRepositoryId });
+        }
       });
       repository = { owner: resolved.owner, name: resolved.name, defaultBranch: resolved.defaultBranch };
     }
