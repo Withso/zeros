@@ -3,8 +3,29 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { afterEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runLocalDevelopment } from "../electron-local.mjs";
+
+const { pidProbe } = vi.hoisted(() => ({ pidProbe: { mode: "normal" } }));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execFileSync: ((...args: Parameters<typeof actual.execFileSync>) => {
+      if (
+        args[0] === "ps" &&
+        Array.isArray(args[1]) &&
+        args[1].includes("command=")
+      ) {
+        if (pidProbe.mode === "failed")
+          throw new Error("synthetic exited PID probe");
+        if (pidProbe.mode === "empty") return "";
+      }
+      return actual.execFileSync(...args);
+    }) as typeof actual.execFileSync,
+  };
+});
 
 const roots: string[] = [];
 const workers: ChildProcess[] = [];
@@ -17,6 +38,7 @@ function directory() {
 const lockPath = (root: string) =>
   path.join(root, ".context/zeros-local/launcher.lock");
 afterEach(async () => {
+  pidProbe.mode = "normal";
   await Promise.all(
     workers.splice(0).map(async (child) => {
       if (child.exitCode !== null || child.signalCode !== null) return;
@@ -80,6 +102,87 @@ describe("Local launcher lock ownership", () => {
     expect(code).toBe(1);
     expect(fs.existsSync(lockPath(root))).toBe(false);
   });
+  it.each(["failed", "empty"])(
+    "recovers when the PID command probe is %s",
+    async (mode) => {
+      const root = directory();
+      fs.writeFileSync(
+        lockPath(root),
+        JSON.stringify({
+          pid: process.pid,
+          slug: "old",
+          token: "exited-before-ps",
+        }),
+      );
+      pidProbe.mode = mode;
+      let entered = false;
+      await expect(
+        runLocalDevelopment({
+          root,
+          platform: "darwin",
+          environment: {},
+          listProcesses: () => "",
+          portProber: async () => true,
+          run: async () => {
+            entered = true;
+            return { code: 1, cancelled: false };
+          },
+        }),
+      ).resolves.toBe(1);
+      expect(entered).toBe(true);
+      expect(fs.existsSync(lockPath(root))).toBe(false);
+    },
+  );
+
+  it.each([false, true])(
+    "handles a recovery fence (abandoned=%s)",
+    async (abandoned) => {
+      const root = directory();
+      const stale = JSON.stringify({
+        pid: 2147483647,
+        slug: "old",
+        token: "stale-fence-owner",
+      });
+      fs.writeFileSync(lockPath(root), stale);
+      const generation = createHash("sha256").update(stale).digest("hex");
+      const fence = path.join(
+        root,
+        ".context/zeros-local",
+        `recovery-${generation}.lock`,
+      );
+      fs.writeFileSync(fence, "");
+      if (abandoned)
+        fs.utimesSync(
+          fence,
+          new Date(Date.now() - 31_000),
+          new Date(Date.now() - 31_000),
+        );
+      let entered = false;
+      const launch = runLocalDevelopment({
+        root,
+        platform: "darwin",
+        environment: {},
+        listProcesses: () => "",
+        portProber: async () => true,
+        run: async () => {
+          entered = true;
+          return { code: 1, cancelled: false };
+        },
+      });
+      if (abandoned) {
+        await expect(launch).resolves.toBe(1);
+        expect(entered).toBe(true);
+        expect(fs.existsSync(fence)).toBe(false);
+        expect(fs.existsSync(lockPath(root))).toBe(false);
+      } else {
+        await expect(launch).rejects.toThrow("recovery is already in progress");
+        expect(entered).toBe(false);
+        expect(fs.readFileSync(lockPath(root), "utf8")).toBe(stale);
+        expect(fs.existsSync(fence)).toBe(true);
+      }
+    },
+  );
+
   it("serializes concurrent stale recovery and leaves the winner's lock intact", async () => {
     const root = directory();
     fs.writeFileSync(

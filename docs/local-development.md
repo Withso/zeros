@@ -127,6 +127,8 @@ best-effort when preparing the new one.
 The visible worktree directory contains project work and uncommitted changes;
 keep any work you need before removing it. The checkout's
 `.context/zeros-local/` contains only launcher coordination state.
+Launcher locks use ownership tokens, verify stale PIDs, and serialize recovery.
+An abandoned recovery fence can be reclaimed after 30 seconds.
 
 The bundle path and state root use one shared path resolver. Local uses the same
 containment policy as the hosted and packaged app, including host access for code

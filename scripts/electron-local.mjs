@@ -296,7 +296,7 @@ function launcherLock(root, slug) {
       );
     }
   };
-  for (let attempt = 0; attempt < 3; attempt++) {
+  acquire: for (let attempt = 0; attempt < 3; attempt++) {
     const temporary = path.join(directory, `launcher-${token}.tmp`);
     try {
       fs.writeFileSync(temporary, record, { flag: "wx", mode: 0o600 });
@@ -334,15 +334,17 @@ function launcherLock(root, slug) {
       !(owner.pid === process.pid && activeLockTokens.has(owner.token))
     ) {
       // A recycled PID (including after reboot) is not a launcher owner.
-      const command = execFileSync(
-        "ps",
-        ["-o", "command=", "-p", String(owner.pid)],
-        {
-          encoding: "utf8",
-          timeout: 2000,
-        },
-      );
-      live = command.includes("electron-local.mjs");
+      try {
+        const command = execFileSync(
+          "ps",
+          ["-o", "command=", "-p", String(owner.pid)],
+          { encoding: "utf8", timeout: 2000 },
+        );
+        live = command.includes("electron-local.mjs");
+      } catch {
+        // The PID can disappear between kill(0) and this read-only probe.
+        live = false;
+      }
     }
     if (live)
       throw new Error(
@@ -351,10 +353,28 @@ function launcherLock(root, slug) {
     const generation = createHash("sha256").update(snapshot.raw).digest("hex");
     const recovery = path.join(directory, `recovery-${generation}.lock`);
     let fd;
-    try {
-      fd = fs.openSync(recovery, "wx", 0o600);
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
+    for (let fenceAttempt = 0; fenceAttempt < 3; fenceAttempt++) {
+      try {
+        fd = fs.openSync(recovery, "wx", 0o600);
+        break;
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        try {
+          const abandoned = fs.statSync(recovery);
+          if (Date.now() - abandoned.mtimeMs <= 30_000) break;
+          if (read()?.raw !== snapshot.raw) continue acquire;
+          const current = fs.statSync(recovery);
+          if (
+            current.ino === abandoned.ino &&
+            current.mtimeMs === abandoned.mtimeMs
+          )
+            fs.unlinkSync(recovery);
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+      }
+    }
+    if (fd === undefined) {
       throw new Error(
         "Zeros Local lock recovery is already in progress; retry after it completes.",
       );
@@ -363,8 +383,13 @@ function launcherLock(root, slug) {
       // Retire only the stale generation inspected before taking the fence.
       if (read()?.raw === snapshot.raw) fs.unlinkSync(file);
     } finally {
+      const held = fs.fstatSync(fd);
       fs.closeSync(fd);
-      fs.unlinkSync(recovery);
+      try {
+        if (fs.statSync(recovery).ino === held.ino) fs.unlinkSync(recovery);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
     }
   }
   throw new Error("Zeros Local launcher lock changed; retry.");
