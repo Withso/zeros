@@ -1,0 +1,290 @@
+{
+  "description": "Declared foreground/background pairings for the Zeros token palette, with WCAG 2.2 contrast ratios and reviewed supplemental/boundary floors in BOTH themes. Asserted by apps/desktop/src/renderer/shared/theme/__tests__/contrast-contract.test.ts and rendered into docs/design-tokens.md. A pairing that is not listed here is not a sanctioned combination.",
+  "surfaces": {
+    "rest": [
+      "bg0",
+      "bg1",
+      "bg1-highlight",
+      "bg1-bright",
+      "bg2",
+      "bg3",
+      "sidebar-bg",
+      "highlighted-bg"
+    ],
+    "hover": [
+      "bg1-hover",
+      "bg2-hover",
+      "bg2-highlight",
+      "bg3-hover",
+      "sidebar-bg-hover"
+    ]
+  },
+  "roles": {
+    "text": {
+      "min": 4.5,
+      "why": "WCAG 1.4.3 AA for normal-size text; Zeros chrome text is 10–14px, never 'large'."
+    },
+    "graphic": {
+      "min": 3,
+      "why": "WCAG 1.4.11: icons, status dots, and control boundaries that carry meaning."
+    },
+    "focus": {
+      "min": 3,
+      "why": "WCAG 1.4.11 / 2.4.11: an opaque focus indicator against every surface it can sit on."
+    },
+    "supplemental": {
+      "min": 3,
+      "why": "Quietest metadata tier: owner-chosen 3:1 floor, below AA by design. Hovered/selected rows step it up to fg3."
+    },
+    "boundary": {
+      "min": 1.45,
+      "why": "Control outlines must stay perceptible on every surface controls sit on: a perceptibility floor, not a WCAG claim. highlighted-bg is excluded because controls do not sit on the user-message bubble. Resting outlines are subtle by reviewed design, below WCAG 1.4.11’s 3:1; focus is the strong cue."
+    },
+    "boundary-hover": {
+      "min": 1.6,
+      "why": "Hover/open outlines must read stronger on every control surface: a perceptibility floor, not a WCAG claim. highlighted-bg is excluded because controls do not sit on the user-message bubble."
+    }
+  },
+  "pairs": [
+    {
+      "role": "text",
+      "fg": [
+        "fg1",
+        "fg2",
+        "fg3"
+      ],
+      "on": "@rest",
+      "why": "Emphasis, default and secondary text meet AA at rest."
+    },
+    {
+      "role": "supplemental",
+      "fg": [
+        "muted-fg"
+      ],
+      "on": "@rest",
+      "why": "Supplemental metadata at rest; hovered/selected rows use fg3."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "fg1",
+        "fg2",
+        "fg3"
+      ],
+      "on": "@hover",
+      "why": "Hovered/selected rows step text up one tier; muted-fg is never the resting tier on a hover fill."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "red-primary",
+        "green-primary",
+        "yellow-primary",
+        "blue-primary",
+        "violet-primary",
+        "brown-primary"
+      ],
+      "on": [
+        "@rest",
+        "@hover"
+      ],
+      "why": "Standalone status text and counts (+N / −N) on app surfaces, including hovered rows and buttons."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "red-fg"
+      ],
+      "on": [
+        "red-bg"
+      ],
+      "why": "Text on a tinted container uses the family -fg."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "green-fg"
+      ],
+      "on": [
+        "green-bg"
+      ]
+    },
+    {
+      "role": "text",
+      "fg": [
+        "yellow-fg"
+      ],
+      "on": [
+        "yellow-bg"
+      ]
+    },
+    {
+      "role": "text",
+      "fg": [
+        "blue-fg"
+      ],
+      "on": [
+        "blue-bg"
+      ]
+    },
+    {
+      "role": "text",
+      "fg": [
+        "violet-fg"
+      ],
+      "on": [
+        "violet-bg"
+      ]
+    },
+    {
+      "role": "text",
+      "fg": [
+        "brown-fg"
+      ],
+      "on": [
+        "brown-bg"
+      ]
+    },
+    {
+      "role": "text",
+      "fg": [
+        "fg1"
+      ],
+      "on": [
+        "yellow-wash/0.35@bg1",
+        "yellow-wash/0.55@bg1",
+        "yellow-wash/0.35@sidebar-bg",
+        "yellow-wash/0.55@sidebar-bg"
+      ],
+      "why": "Text over code-editor search-match washes (35% match, 55% selected match). Editor text uses the syntax theme foreground, which sits at the fg1 end of the ladder; syntax token colors are a separate system."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "red-secondary-fg"
+      ],
+      "on": [
+        "red-secondary",
+        "red-secondary-hover"
+      ],
+      "why": "Solid destructive fills at rest and on hover."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "inverted-fg"
+      ],
+      "on": [
+        "inverted-bg"
+      ]
+    },
+    {
+      "role": "text",
+      "fg": [
+        "primary-button-fg"
+      ],
+      "on": [
+        "primary-button-bg",
+        "primary-button-hover"
+      ]
+    },
+    {
+      "role": "graphic",
+      "fg": [
+        "yellow-icon"
+      ],
+      "on": [
+        "@rest",
+        "@hover"
+      ],
+      "why": "Yellow icons and status dots; yellow-primary is the darker text role."
+    },
+    {
+      "role": "boundary",
+      "fg": [
+        "border3"
+      ],
+      "on": [
+        "bg0",
+        "bg1",
+        "bg1-highlight",
+        "bg1-bright",
+        "bg2",
+        "bg3",
+        "sidebar-bg"
+      ],
+      "why": "Subtle resting control outlines on the surfaces controls sit on."
+    },
+    {
+      "role": "boundary-hover",
+      "fg": [
+        "border4"
+      ],
+      "on": [
+        "bg0",
+        "bg1",
+        "bg1-highlight",
+        "bg1-bright",
+        "bg2",
+        "bg3",
+        "sidebar-bg"
+      ],
+      "why": "Hover/open outline on the same control surfaces."
+    },
+    {
+      "role": "focus",
+      "fg": [
+        "highlighted-bright"
+      ],
+      "on": [
+        "@rest",
+        "@hover"
+      ],
+      "why": "The opaque focus core; halos (/50) are decoration on top of it."
+    }
+  ],
+  "ladders": [
+    {
+      "tiers": [
+        "fg1",
+        "fg2",
+        "fg3",
+        "muted-fg"
+      ],
+      "on": "bg1",
+      "minStep": 1.15,
+      "why": "Each foreground tier is at least 15% less contrast than the one above it, in both themes."
+    },
+    {
+      "tiers": [
+        "border4",
+        "border3"
+      ],
+      "on": "bg2",
+      "minStep": 1.15,
+      "why": "The hover/open control outline must have at least 15% more contrast than its resting outline on bg2."
+    }
+  ],
+  "exempt": [
+    {
+      "tokens": [
+        "border1",
+        "border2"
+      ],
+      "why": "Decorative surface separators; never the only cue for a control or state. Control outlines border3/4 have their own reviewed perceptibility floors."
+    },
+    {
+      "tokens": [
+        "red-bg",
+        "green-bg",
+        "yellow-bg",
+        "blue-bg",
+        "violet-bg",
+        "brown-bg",
+        "bg1-highlight",
+        "bg1-hover"
+      ],
+      "why": "Tinted/grouping washes; meaning is carried by their text and icons."
+    }
+  ]
+}

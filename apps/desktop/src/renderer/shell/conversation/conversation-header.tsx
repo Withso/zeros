@@ -93,6 +93,7 @@ import {
 import { canOpenPathLocally } from "../../platform/app";
 import { OpenAppIcon } from "../../features/agent/open-app-icon";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 // ── className constants ──────────────────────────────────
 
@@ -128,9 +129,6 @@ const WORKSPACE_NAME_INPUT_CLS =
 
 /** "Open in" split button — the logo half (opens the default app directly)
  *  and the chevron half (opens the menu) are two separate targets. */
-const OPEN_IN_LOGO_BTN_CLS =
-  "size-7 shrink-0 rounded-sm text-fg2 hover:text-fg1 hover:bg-bg2-hover/40 transition-[background-color,color] duration-120 ease-out";
-
 const OPEN_IN_CHEVRON_BTN_CLS =
   "h-7 w-5 px-0 shrink-0 rounded-sm text-fg2 hover:text-fg1 hover:bg-bg2-hover/40 transition-[background-color,color] duration-120 ease-out";
 
@@ -478,16 +476,16 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
   return (
     <div className="flex shrink-0 items-center">
       <Tooltip label={`Open in ${defaultApp.name} (⌘O)`}>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className={OPEN_IN_LOGO_BTN_CLS}
+        <IconButton
+          size="standard"
+          hover="subtle"
+          className="shrink-0"
           disabled={!menu.canOpenLocally}
           onClick={() => void openWith(defaultApp)}
-          aria-label={`Open in ${defaultApp.name}`}
+          label={`Open in ${defaultApp.name}`}
         >
           <OpenAppIcon app={defaultApp} />
-        </Button>
+        </IconButton>
       </Tooltip>
       <DropdownMenu>
         <Tooltip label="Open in…">

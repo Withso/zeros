@@ -22,14 +22,20 @@ export function ReviewSelectionToolbar({
       className="border-border2 bg-bg1 text-fg2 flex w-fit max-w-full items-center gap-2 rounded-md border px-2 py-1 font-sans text-xs"
     >
       <span className="truncate">{reviewRangeLabel(anchor)}</span>
-      <Button variant="ghost" disabled={!active} onClick={onComment}>
+      {/* One control height for the whole row: both actions are compact
+          (24px). Comment was the 28px default beside a 24px Cancel. */}
+      <Button
+        variant="ghost"
+        size="compact"
+        disabled={!active}
+        onClick={onComment}
+      >
         <MessageSquare className="size-3" />
         Comment
       </Button>
       <Button
         variant="ghost"
-        size="icon-sm"
-        className="size-6"
+        size="icon-compact"
         aria-label="Cancel line selection"
         disabled={!active}
         onClick={onCancel}

@@ -1706,7 +1706,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         ref={timelineRef}
         data-design-controls
         data-design-motion-timeline=""
-        className="zd-motion-timeline bg-bg1 absolute z-40 flex min-w-0 flex-col"
+        className="zd-motion-timeline bg-bg1 absolute z-chrome flex min-w-0 flex-col"
         aria-label="Motion timeline"
         onPointerDown={(event) => event.stopPropagation()}
       >
@@ -1800,7 +1800,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
       ref={timelineRef}
       data-design-controls
       data-design-motion-timeline=""
-      className="zd-motion-timeline bg-bg1 absolute z-40 flex min-w-0 flex-col"
+      className="zd-motion-timeline bg-bg1 absolute z-chrome flex min-w-0 flex-col"
       aria-label="Motion timeline"
       tabIndex={-1}
       onPointerDown={(event) => event.stopPropagation()}

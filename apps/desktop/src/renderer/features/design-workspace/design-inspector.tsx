@@ -155,6 +155,7 @@ import {
   paintedDesignFrameGeometry,
 } from "./design-workspace-overlays";
 import { type DesignInspectorProps } from "./design-workspace-types";
+import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
 
 
 /** What canvas metadata can store; frame fields settle inside it. */
@@ -676,7 +677,7 @@ function InspectorEditField({
           >
             <SelectTrigger
               size="sm"
-              className="zd-design-unit-trigger h-full w-auto shrink-0 gap-0 rounded-none border-0 bg-transparent py-0 pr-2 pl-1 text-[12px] shadow-none [&>svg]:hidden"
+              className="zd-design-unit-trigger h-full w-auto shrink-0 gap-0 rounded-none border-0 bg-transparent py-0 pr-2 pl-1 text-3xxs shadow-none [&>svg]:hidden"
               aria-label={`Unit for ${label}`}
               onPointerDown={() => {
                 unitMenuOpenRef.current = true;
@@ -2201,10 +2202,7 @@ export function DesignInspector({
       data-design-inspector=""
       className="bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
     >
-      <div
-        data-design-style-panel-header=""
-        className="border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b px-2"
-      >
+      <PanelHeader data-design-style-panel-header="" size="window">
         <div
           role="group"
           aria-label="Inspector view"
@@ -2267,7 +2265,7 @@ export function DesignInspector({
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-      </div>
+      </PanelHeader>
       {cssMode && styleContext && elementDetails ? (
         <div
           data-design-style-panel-css-mode=""
@@ -2290,12 +2288,12 @@ export function DesignInspector({
 
             {styleTargetNodeId && errors.length > 0 ? (
               <Tooltip label={`${firstBlockingReason}: ${errors[0]?.message}`}>
-                <section className="text-red-primary border-border1 flex h-9 items-center gap-2 border-b px-3">
+                <PanelHeader as="section" size="panel" className="text-red-primary">
                   <AlertTriangle className="size-3.5 shrink-0" />
                   <span className="text-3xxs min-w-0 flex-1 truncate">
                     {firstBlockingReason}
                   </span>
-                </section>
+                </PanelHeader>
               </Tooltip>
             ) : null}
 

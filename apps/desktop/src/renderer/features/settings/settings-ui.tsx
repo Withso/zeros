@@ -11,7 +11,7 @@
 // Build these ONCE; every panel composes them so User and Repo scopes
 // read identically.
 //
-// Zeros Foundation (styles/zeros-foundation.md): section heading /
+// Design system (docs/design-system.md): section heading /
 // row label `font-medium text-fg1`; hints `text-xs text-fg2`; dividers
 // `border-border1`; default text fg2, focal/selected fg1; 4 px grid.
 //
@@ -107,10 +107,10 @@ export function SettingsGroup({
       {(title || description) && (
         <div className="flex flex-col gap-0.5">
           {title && (
-            <h2 className="text-fg2 m-0 text-[12px] font-medium">{title}</h2>
+            <h2 className="text-fg2 text-3xxs m-0 font-medium">{title}</h2>
           )}
           {description && (
-            <p className="text-muted-fg m-0 text-[12px]">{description}</p>
+            <p className="text-muted-fg text-3xxs m-0">{description}</p>
           )}
         </div>
       )}

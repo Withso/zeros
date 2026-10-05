@@ -6,6 +6,7 @@ import { workspacePreviewAvailable, warmCloudPreviewContext } from "../../platfo
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { useInternalFeatureActive } from "../../features/settings/internal-features";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 /** Headers show labels while their own container has room; sidebar rows always
  * use compact icons. Both placements share the same actions and accessible names. */
@@ -43,8 +44,10 @@ export function RunSessionButtons({
   );
   const labelClass = "hidden @[480px]/terminal-header:inline";
   return (
-    <div
-      className="flex shrink-0 items-center gap-1"
+    <Inline
+      gap={1}
+      align="center"
+      className="shrink-0"
       role="group"
       aria-label={`${title} run controls`}
     >
@@ -92,6 +95,6 @@ export function RunSessionButtons({
           {showLabels && <span className={labelClass}>Stop</span>}
         </Button>
       </Tooltip>
-    </div>
+    </Inline>
   );
 }

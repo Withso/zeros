@@ -143,7 +143,7 @@ export function CloudWorkspaceDetailsContent({
         <p className="text-fg3 mt-3 text-xs">Saved checkpoint · {new Date(workspace.recovery.checkpointAt).toLocaleString()}</p>
       )}
       {workspace.error && !recoveryState && (
-        <p className="text-error mt-3 text-xs" role="alert">
+        <p className="text-red-primary mt-3 text-xs" role="alert">
           {workspace.error.message}
         </p>
       )}

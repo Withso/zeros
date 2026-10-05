@@ -1316,7 +1316,9 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       // recessed/dull. The override is set HERE and inherited by everything
       // inside the window (tab strip fades, the portaled chat deck fill, the
       // transcript scroll mask), so the whole window re-tints as one when
-      // focus moves. Inactive panes additionally get the bg0/30 veil below.
+      // focus moves. That window fill is the ONLY inactive-pane treatment:
+      // text, icons and controls keep full contrast (the former bg0/30 veil
+      // over the content dropped readable text below WCAG AA).
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)",
         !isFocused && "[--pane-bg:var(--bg0)]",
@@ -1359,25 +1361,6 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         </div>
         {paneId === topRightLeafId(ctx.layout.root) ? ctx.bodyAside : null}
       </div>
-      {/* Inactive-window veil: every pane EXCEPT the one holding the global
-          active chat gets a bg0/30 wash over its whole surface (strip + body)
-          — on top of its bg0 window fill — so exactly one "active chat
-          window" reads at full brightness. It sits above the portaled
-          chat/terminal layer (z-auto) but below the drag drop overlay (z-40).
-          Pointer-transparent, so clicking a dimmed pane still activates it
-          via the section's native capture listeners — the wash then lifts on
-          the next render as this pane becomes focused.
-          EXCEPTION: the two column-level strip slots above ride at z-40, so the
-          mode toggle and the workbench expand control stay at full brightness
-          no matter which pane owns them (CHAT_STRIP_LEADING_CLS /
-          CHAT_STRIP_TRAILING_CLS in conversation/chat-tabs.tsx). They are
-          workspace/column controls, not this pane's chrome. */}
-      {!isFocused && (
-        <div
-          className="bg-bg0/30 pointer-events-none absolute inset-0 z-30"
-          aria-hidden="true"
-        />
-      )}
       {/* Drop overlay covers the WHOLE pane (strip + body) so dropping
           a dragged tab onto another pane's strip moves it there too. */}
       {!ctx.readOnly && (
@@ -1504,7 +1487,7 @@ function PaneDropOverlay({
 
   return (
     <div
-      className="absolute inset-0 z-40"
+      className="absolute inset-0 z-chrome"
       onDragOver={handleDragOver}
       onDragLeave={() => setZone(null)}
       onDrop={handleDrop}

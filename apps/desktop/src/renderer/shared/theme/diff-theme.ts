@@ -80,12 +80,12 @@ function diffShadowCss(surface: "bg1" | "bg2" | "sidebar-bg"): string {
     background: var(--${surface});
     --diffs-gap-block: 0px;
     --diffs-bg: var(--${surface});
-    --diffs-addition-color-override: var(--green-primary);
-    --diffs-deletion-color-override: var(--red-primary);
+    --diffs-addition-color-override: var(--diff-addition);
+    --diffs-deletion-color-override: var(--diff-deletion);
     --diffs-modified-color-override: var(--highlighted-bright);
     --diffs-bg-separator-override: var(--bg2);
-    --diffs-bg-addition-override: color-mix(in lab, var(--diffs-bg) 15%, color-mix(in srgb, var(--green-primary) 65%, var(--fg2)));
-    --diffs-bg-deletion-override: color-mix(in lab, var(--diffs-bg) 15%, color-mix(in srgb, var(--red-primary) 65%, var(--fg2)));
+    --diffs-bg-addition-override: color-mix(in lab, var(--diffs-bg) 15%, color-mix(in srgb, var(--diff-addition) 65%, var(--diff-neutral)));
+    --diffs-bg-deletion-override: color-mix(in lab, var(--diffs-bg) 15%, color-mix(in srgb, var(--diff-deletion) 65%, var(--diff-neutral)));
   }
   [data-separator="line-info"] {
     height: ${HUNK_SEPARATOR_HEIGHT}px;

@@ -141,7 +141,7 @@ export function CloudWorkspaceSyncControls({ workspace, active }: { workspace: C
               {detached && <p className="text-fg2 text-xs">This Mac no longer has sync access. Your downloaded files are kept.</p>}
               {replica?.observedState === "failed" && <p className="text-fg2 text-xs">Sync needs attention. Your downloaded files are kept; retry when the connection is available.</p>}
               {(identity.error || snapshot.error) && <p className="text-fg3 text-xs" role="status">Couldn’t refresh. Showing the last confirmed sync state when available.</p>}
-              {error?.key === key && <p className="text-error text-xs" role="alert">{error.message}</p>}
+              {error?.key === key && <p className="text-red-primary text-xs" role="alert">{error.message}</p>}
               {divergences.length > 0 && (
                 <div className="space-y-2">
                   <p className="text-fg2 text-xs">Local changes are preserved. Cloud updates wait for these files:</p>

@@ -6,6 +6,7 @@ import { Profiler, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatTabs } from "../shell/conversation/chat-tabs";
 import { SidebarWorkspaceRow } from "../shell/sidebar-workspace-row";
+import { Surface } from "../shared/ui/layout/surface";
 import { rememberChangeLines } from "../shell/use-workspace-change-lines";
 import { useWorkspaceStore } from "../state/workspace-store";
 import { useChatPanesStore, usePaneLayout } from "../state/chat-panes-store";
@@ -261,8 +262,9 @@ function Harness() {
   return (
     <main className="bg-bg1 text-fg1 min-h-screen p-4">
       {/* A sidebar-width column: rows fill it, so a long name truncates. */}
-      <div
-        className="bg-sidebar-bg flex w-[220px] flex-col gap-px p-1"
+      <Surface
+        kind="sidebar"
+        className="flex w-[220px] flex-col gap-px p-1"
         data-testid="workspace-tabs"
       >
         {workspaces.map((owner) => (
@@ -285,7 +287,7 @@ function Harness() {
             />
           </Profiler>
         ))}
-      </div>
+      </Surface>
       <div
         className={
           layout.root.type === "split" && layout.root.direction === "row"

@@ -70,8 +70,10 @@ These instructions apply to the entire repository. Read and follow
 - Internal-only runtime surfaces must use `useInternalFeatureActive(...)`, not a
   raw flag, and may attach hotkeys only while that gate is active.
 
-For Design work, read `docs/design-mode-roadmap.md`, the single Design
-architecture, implementation and future-phase reference.
+For renderer UI, styling, tokens, or colors, read `docs/design-system.md`
+first; its agent brief is mirrored into the generated `zeros-ui` skills for
+Claude, Codex, and Cursor. For Design work, read `docs/design-mode-roadmap.md`,
+the single Design architecture, implementation and future-phase reference.
 For renderer state, navigation, loading, tabs, panels, or list work, also read
 `docs/ui-interaction-performance.md` when it is present.
 For provider event handling or tool transcript UI, also read
@@ -104,6 +106,10 @@ Before handoff, run `pnpm typecheck`, `pnpm lint`, `pnpm check:ui`,
 `pnpm test:git`, `pnpm check:secrets`, and every applicable `check:*` command.
 Additional requirements:
 
+- UI or styling: `pnpm check:ui` fails on classes that compile to nothing, new
+  design-system policy findings, and stale generated design docs. After a token
+  or contrast-contract change run `pnpm design:docs`; never raise
+  `styles/policy/ui-debt.json` to pass.
 - Performance-sensitive UI: exact-key/race tests and `pnpm build:ui`.
 - Composer, overlay, focus, or popover: `pnpm test:ui-smoke`.
 - Electron IPC/preload: `pnpm check:preload` and relevant Electron tests.

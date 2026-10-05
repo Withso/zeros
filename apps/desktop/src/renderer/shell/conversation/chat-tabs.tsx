@@ -56,7 +56,6 @@ import {
 } from "lucide-react";
 
 import { cn } from "../../shared/ui/cn";
-import { Button } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   ContextMenu,
@@ -110,6 +109,7 @@ import {
   workspacePinSide as stickyTabPinSide,
   workspaceScrollLeftForTab as scrollLeftForStickyTab,
 } from "../workspace-tabs";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 // ── className constants ──────────────────────────────────
 
@@ -137,22 +137,19 @@ export const CHAT_STRIP_SHELL_CLS =
  * matches its inter-tab gap after the toggle. Exported so the no-workspace
  * placeholder band in conversation/pane-layout.tsx seats them identically.
  *
- * `relative z-40` lifts both slots ABOVE the host pane's inactive-window veil
- * (`bg-bg0/30`, z-30 — see ChatPane in conversation/pane-layout.tsx). That veil
- * exists to dim a pane's own chrome and transcript when it isn't the focused
- * window, and it should keep doing that for the pane's tabs, history, "+" and
- * "⋯". These two controls are NOT pane-scoped: they act on the whole workspace
- * (Code↔Design) and the whole column (expand Workbench), and they only borrow a
- * corner of one pane's strip because the column no longer has a row of its own.
- * Dimming them by 30% toward bg0 made the mode toggle read as unavailable
- * whenever the top-left pane happened to be unfocused. z-40 matches the drag
- * drop overlay, which is a LATER sibling and so still paints over the strip
- * mid-drag. The pane's bg0 window fill still shows behind them (a ~1% shift
- * against bg1), so the surrounding strip keeps reading as recessed. */
+ * `relative z-chrome` keeps both slots above anything a pane layers over its own
+ * strip. These two controls are NOT pane-scoped: they act on the whole
+ * workspace (Code↔Design) and the whole column (expand Workbench), and they
+ * only borrow a corner of one pane's strip because the column no longer has a
+ * row of its own, so pane-level treatments must never dim them. (They were
+ * lifted above the former bg0/30 inactive-window veil; inactive panes now
+ * recede through their bg0 window fill alone, which keeps text at full
+ * contrast.) z-chrome (40) matches the drag drop overlay, a LATER sibling that
+ * so still paints over the strip mid-drag. */
 export const CHAT_STRIP_LEADING_CLS =
-  "relative z-40 flex h-full shrink-0 items-center pl-2";
+  "relative z-chrome flex h-full shrink-0 items-center pl-2";
 export const CHAT_STRIP_TRAILING_CLS =
-  "relative z-40 flex h-full shrink-0 items-center pr-2";
+  "relative z-chrome flex h-full shrink-0 items-center pr-2";
 
 /** History, plus, and the "⋯" menu all sit outside the scroll viewport. The lane
  * shrink-wraps while tabs fit, then consumes the available room and scrolls.
@@ -194,9 +191,6 @@ const TAB_HOVER_OVERLAY_CLS =
 const TAB_DRAFT_ACTION_OVERLAY_CLS =
   "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-sm bg-bg2 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
 
-const TAB_AFFORDANCE_BTN_CLS =
-  "pointer-events-auto size-5 inline-flex items-center justify-center rounded-sm shrink-0 text-fg2 hover:text-fg1 hover:bg-bg2-hover transition-[background-color,color] duration-120 ease-out";
-
 const TITLE_INPUT_CLS =
   "flex-1 min-w-0 h-5 px-1.5 text-xs font-medium text-fg1 bg-transparent border border-border1 rounded-sm outline-none focus-visible:border-highlighted-bright focus-visible:ring-2 focus-visible:ring-highlighted-bright/30";
 
@@ -204,9 +198,6 @@ const TITLE_INPUT_CLS =
  *  visible chats (the selection keeper is mid-spawn). */
 const TAB_UNTITLED_CLS =
   "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-default select-none items-center gap-2 overflow-hidden rounded-lg bg-bg2 px-2 text-xs font-medium text-fg1";
-
-const PANE_MENU_BTN_CLS =
-  "size-7 shrink-0 rounded-sm text-fg2 hover:bg-bg2-hover/40 hover:text-fg1 transition-[background-color,color] duration-120 ease-out";
 
 const CHAT_CONTENT_INSET_PX = 4;
 const CHAT_STICKY_EDGE_INSET_PX = 4;
@@ -619,14 +610,14 @@ export function ChatTabs({
         <DropdownMenu>
           <Tooltip label="Pane options">
             <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className={PANE_MENU_BTN_CLS}
-                aria-label="Pane options"
+              <IconButton
+                size="standard"
+                hover="subtle"
+                className="shrink-0"
+                label="Pane options"
               >
                 <Ellipsis className="size-3.5" />
-              </Button>
+              </IconButton>
             </DropdownMenuTrigger>
           </Tooltip>
           <DropdownMenuContent align="end" sideOffset={6} className="w-44">
@@ -846,14 +837,14 @@ function TabRow({
       }
     >
       <Tooltip label="Close chat">
-        <button
+        <IconButton
           type="button"
-          className={TAB_AFFORDANCE_BTN_CLS}
+          className="pointer-events-auto shrink-0"
           onClick={(e) => onClose(chat, e)}
-          aria-label="Close chat"
+          label="Close chat"
         >
           <X className="size-3.5" />
-        </button>
+        </IconButton>
       </Tooltip>
     </span>
   );

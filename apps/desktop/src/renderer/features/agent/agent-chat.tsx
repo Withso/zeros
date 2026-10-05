@@ -4639,7 +4639,7 @@ export function AgentChat({
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
             {showTranscriptLoading && (
-              <div className="text-muted-foreground flex items-center gap-2 py-2 text-xs">
+              <div className="text-muted-fg flex items-center gap-2 py-2 text-xs">
                 <ZerosSpinner
                   size={14}
                   label="Loading conversation"

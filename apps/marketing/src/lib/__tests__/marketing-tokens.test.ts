@@ -82,6 +82,25 @@ describe("marketing appearance tokens", () => {
   const app = readFileSync(APP_TOKENS, "utf8");
   const marketing = readFileSync(MARKETING_TOKENS, "utf8");
 
+  it("generates exactly the 26 shared tokens in each appearance scope", () => {
+    const dark = cssBlockAfter(marketing, ":root {");
+    const light = cssBlockAfter(
+      cssBlockAfter(marketing, "@media (prefers-color-scheme: light) {"),
+      ":root {",
+    );
+    for (const [name, block] of [
+      ["dark", dark],
+      ["light", light],
+    ]) {
+      const names = [
+        ...block.matchAll(
+          /\/\* @generated tokens:marketing-[a-z0-9-]+:start \*\/([\s\S]*?)\/\* @generated tokens:marketing-[a-z0-9-]+:end \*\//g,
+        ),
+      ].flatMap((match) => [...tokenMap(match[1]).keys()]);
+      expect(names, name).toEqual([...DARK_TOKENS]);
+    }
+  });
+
   it("clones Neutral Dark primitives from the app :root", () => {
     const appDark = tokenMap(cssBlockAfter(app, ":root {"));
     const marketingDark = tokenMap(cssBlockAfter(marketing, ":root {"));

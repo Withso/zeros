@@ -753,7 +753,7 @@ export const CheckpointRail = memo(function CheckpointRail({
                 i === activeIndex ? "bg-fg1" : "bg-muted-fg/45",
               )}
             />
-            <span className="min-w-0 flex-1 truncate text-[13px] leading-snug">
+            <span className="min-w-0 flex-1 truncate text-xs leading-snug">
               {summarizeCheckpointText(c.text)}
             </span>
           </button>

@@ -259,7 +259,7 @@ export function CloudComputerV2History({
         </Button>
       )}
       {error && (
-        <p className="text-error text-xs" role="alert">
+        <p className="text-red-primary text-xs" role="alert">
           History could not be refreshed. Refresh Cloud Computer and try again.
         </p>
       )}

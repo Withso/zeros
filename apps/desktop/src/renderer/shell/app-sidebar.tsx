@@ -177,6 +177,7 @@ import {
   resolveRepoWorkspaceDestination,
   workspaceLabel,
 } from "./workspace-tabs";
+import { Surface } from "@/renderer/shared/ui/layout/surface";
 
 // --- CONSTANTS ---
 
@@ -187,10 +188,10 @@ import {
 // Selection is colour-only; rows never shift width. Icons are 14px via the
 // primitive's own `[&_svg]:` selector so twMerge drops its default size.
 const SIDEBAR_ENTRY_CLS =
-  "flex h-7.5 w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-0 text-left text-xs font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
+  "flex h-7.5 w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-0 text-left text-xs font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-(--surface-hover) hover:text-fg2 data-[state=active]:bg-(--surface-hover) data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
 // Title-band controls: 28px squares centred in the 40px band.
 const TITLE_ICON_BUTTON_CLS =
-  "h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1";
+  "h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-(--surface-hover) hover:text-fg1 data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1";
 // The list's section label: 12px on the default fg2 tier.
 const SECTION_LABEL_CLS = "select-none truncate text-3xxs text-fg2";
 // The sidebar never squeezes the workspace below its column floors
@@ -880,8 +881,10 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       style={{ width: `${railWidth}px` }}
       data-app-sidebar=""
     >
-      <nav
-        className="bg-sidebar-bg flex min-w-0 flex-1 flex-col overflow-hidden"
+      <Surface
+        as="nav"
+        kind="sidebar"
+        className="flex min-w-0 flex-1 flex-col overflow-hidden"
         aria-label="Workspace navigation"
       >
         {/* 40px title band: the macOS traffic lights sit in its first 74px
@@ -1149,7 +1152,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             </Button>
           </Tooltip>
         </div>
-      </nav>
+      </Surface>
       {/* Right-edge resize seam — a 1px border line with a wider invisible
           hit strip. Drag to resize (persists per user); double-click resets. */}
       <div className="bg-border1 relative w-px shrink-0">

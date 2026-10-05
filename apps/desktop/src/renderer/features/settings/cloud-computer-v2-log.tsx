@@ -92,7 +92,7 @@ export function CloudComputerV2Log({
       </p>
       {(log.error || build.error) && (
         <div className="flex items-center justify-between gap-2">
-          <p role="alert" className="text-error text-xs">
+          <p role="alert" className="text-red-primary text-xs">
             The build log could not be refreshed. Confirmed output is preserved.
           </p>
           <Button

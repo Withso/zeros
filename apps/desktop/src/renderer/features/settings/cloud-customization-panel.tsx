@@ -52,7 +52,7 @@ function CustomizationEditor({ org, cacheKey, scope, kind, settings, active }: {
   }
   const rows = kind === "servers" ? view.servers : view.skills;
   return <SettingsSection action={canEdit && <Button disabled={busy} onClick={() => { setDraftRevision(view.revision); setSelected(""); }}>Add {kind === "servers" ? "server" : "skill"}</Button>}>
-    {error && <p role="alert" className="text-error text-xs">{error}</p>}
+    {error && <p role="alert" className="text-red-primary text-xs">{error}</p>}
     <SettingsList>{rows.map(row => <SettingsRow key={row.name} label={row.name}
       hint={"transport" in row ? `${row.transport}${row.secretRef ? " · credentials saved" : ""}` : undefined}>
       <Button variant="ghost" disabled={!canEdit || busy} onClick={() => { setDraftRevision(view.revision); setSelected(row.name); }}>Edit</Button>
@@ -94,7 +94,7 @@ function CustomizationForm({ view, kind, name, disabled, onSave, onCancel }: { v
     {kind === "servers" && <SettingsRow label="Credentials" hint="Environment or header values as a JSON object. Leave blank to keep saved values; use {} to remove them.">
       <Input type="password" autoComplete="off" aria-label="MCP credentials JSON" value={secretMap} onChange={event => setSecretMap(event.target.value)} disabled={disabled} />
     </SettingsRow>}
-    {error && <p role="alert" className="text-error text-xs">{error}</p>}
+    {error && <p role="alert" className="text-red-primary text-xs">{error}</p>}
     <div className="flex gap-2"><Button disabled={disabled} onClick={submit}>Save</Button><Button variant="ghost" onClick={onCancel}>Cancel</Button></div>
   </div>;
 }

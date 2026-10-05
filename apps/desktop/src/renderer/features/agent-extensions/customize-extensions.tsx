@@ -131,7 +131,7 @@ function SkillForm({
         sessions discover saved skills automatically.
       </p>
       {error && (
-        <p role="alert" className="text-danger-fg text-sm">
+        <p role="alert" className="text-red-primary text-sm">
           {error}
         </p>
       )}
@@ -289,7 +289,7 @@ export function CustomizeExtensionsSection({
         </p>
       ))}
       {(error || read.error) && (
-        <p role="alert" className="text-danger-fg text-sm">
+        <p role="alert" className="text-red-primary text-sm">
           {error || read.error?.message}
         </p>
       )}

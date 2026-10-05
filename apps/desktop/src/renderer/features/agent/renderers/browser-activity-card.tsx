@@ -21,6 +21,7 @@ import type { AgentToolMessage } from "../use-agent-session";
 import type { RendererContext } from "./types";
 import { NativeBrowserToolRow } from "./event-row-renderer";
 import { ToolIdentityIcon } from "./tool-identity-icon";
+import { ListRow } from "@/renderer/shared/ui/primitives/list-row";
 
 const MAX_VISIBLE_ACTIONS = 24;
 
@@ -73,9 +74,9 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
 
   return (
     <div className="max-w-full" data-browser-activity-count={actions.length}>
-      <button
+      <ListRow
         type="button"
-        className="hover:bg-bg2-hover/40 -ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors"
+        className="min-w-0 transition-colors"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
         aria-label={statusLabel}
@@ -104,7 +105,7 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
           </span>
         ) : null}
         <Chevron className="text-fg3 size-3 shrink-0" aria-hidden="true" />
-      </button>
+      </ListRow>
       {open ? (
         <div className="border-border1 mt-1 ml-2 flex max-w-[680px] flex-col border-l pl-3">
           {omitted > 0 ? (

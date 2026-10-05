@@ -59,16 +59,21 @@
 /* ──────────────────────────────────────────────────────────
    Stacking layers — semantic z-index tokens
    ──────────────────────────────────────────────────────────
-   Components claiming a global layer
-   reference a semantic token, not a magic number. Local
-   stacking contexts (z-1/z-2 inside a card) can stay raw.
+   Components claiming a global layer use the named utilities
+   (z-panel, z-chrome, z-dropdown, z-modal, z-toast — @utility in
+   zeros-tokens.css), not a magic number. Local stacking contexts
+   (z-1/z-2 inside a card) can stay raw.
    Tiers: panel (chrome overlays like the floating terminal)
-   < chrome (window and panel toggles) < dropdown/modal/toast
-   (owned by their primitives). */
+   < chrome (window and column toggles) < modal = dropdown
+   (owned by their primitives) < toast.
+   Modal and dropdown share ONE layer on purpose: a menu, select,
+   or tooltip opened from a dialog is portaled after it, so DOM
+   order paints it above the dialog. A higher modal tier would
+   bury every menu opened inside a dialog. */
 :root {
   --z-panel: 30;
   --z-chrome: 40;
   --z-dropdown: 50;
-  --z-modal: 60;
+  --z-modal: 50;
   --z-toast: 70;
 }

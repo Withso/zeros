@@ -54,7 +54,7 @@ const VIEWPORT_MARGIN_PX = 8;
 // The same glass chip the app Tooltip renders, minus Radix's anchored
 // positioning — this one follows the pointer.
 const CHIP_CLS =
-  "pointer-events-none fixed z-50 w-fit select-none whitespace-nowrap rounded-md border border-border2/50 bg-bg2/40 px-2.5 py-1.5 text-xs text-fg1 shadow-[var(--shadow-dropdown)] backdrop-blur-[10px] backdrop-saturate-[1.7] animate-in fade-in-0 zoom-in-95";
+  "pointer-events-none fixed z-dropdown w-fit select-none whitespace-nowrap rounded-md border border-border2/50 bg-bg2/40 px-2.5 py-1.5 text-xs text-fg1 shadow-[var(--shadow-dropdown)] backdrop-blur-[10px] backdrop-saturate-[1.7] animate-in fade-in-0 zoom-in-95";
 
 interface HintPos {
   x: number;

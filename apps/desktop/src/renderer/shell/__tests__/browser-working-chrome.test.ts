@@ -33,7 +33,7 @@ describe("browser working chrome", () => {
     expect(css).toMatch(
       /@keyframes zeros-browser-tab-shimmer[\s\S]*?0%\s*\{\s*background-position:\s*120% 0[\s\S]*?100%\s*\{\s*background-position:\s*-120% 0/,
     );
-    expect(strip).toContain('aria-label="Stop agent browser work"');
+    expect(strip).toMatch(/<IconButton\b[^>]*label="Stop agent browser work"/);
     expect(strip).toContain("CircleStop");
     expect(strip).not.toContain("sessions.cancel(conversationId)");
     expect(strip).toMatch(/sessions\s*\.stopBrowserUse\(/);

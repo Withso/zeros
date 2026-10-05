@@ -171,7 +171,7 @@ function Harness() {
           />
         ))}
         <div
-          className="border-border1 bg-bg2 mt-6 rounded-xl border p-3"
+          className="border-border1 bg-bg2 mt-6 rounded-lg border p-3"
           {...(concealed ? { inert: "" } : {})}
         >
           {composer.editorContent}

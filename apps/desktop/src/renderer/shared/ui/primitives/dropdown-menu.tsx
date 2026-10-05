@@ -68,7 +68,7 @@ const DropdownMenuSubTrigger = React.forwardRef<
   <DropdownMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover data-[state=open]:bg-bg3-hover flex cursor-default items-center gap-2 px-2 py-1.5 text-xs outline-none select-none",
+      "focus:bg-bg3-hover focus:[&_.text-muted-fg]:text-fg3 data-[state=open]:bg-bg3-hover data-[state=open]:[&_.text-muted-fg]:text-fg3 flex cursor-default items-center gap-2 px-2 py-1.5 text-xs outline-none select-none",
       MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,
       inset && "pl-8",
@@ -92,7 +92,7 @@ const DropdownMenuSubContent = React.forwardRef<
       ref={ref}
       collisionPadding={8}
       className={cn(
-        "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-50 min-w-[min(8rem,var(--radix-dropdown-menu-content-available-width))] max-w-(--radix-dropdown-menu-content-available-width) max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
+        "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-dropdown min-w-[min(8rem,var(--radix-dropdown-menu-content-available-width))] max-w-(--radix-dropdown-menu-content-available-width) max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
         MENU_SURFACE_RADIUS,
         MENU_SURFACE_INSET,
         className,
@@ -173,7 +173,7 @@ const DropdownMenuContent = React.forwardRef<
           onCloseAutoFocus?.(event);
         }}
         className={cn(
-          "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-50 min-w-[min(8rem,var(--radix-dropdown-menu-content-available-width))] max-w-(--radix-dropdown-menu-content-available-width) max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
+          "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-dropdown min-w-[min(8rem,var(--radix-dropdown-menu-content-available-width))] max-w-(--radix-dropdown-menu-content-available-width) max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
           MENU_SURFACE_RADIUS,
           MENU_SURFACE_INSET,
           className,
@@ -193,7 +193,7 @@ const DropdownMenuItem = React.forwardRef<
   <DropdownMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center gap-2 px-2 py-1.5 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center gap-2 px-2 py-1.5 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,
       inset && "pl-8",
@@ -218,7 +218,7 @@ const DropdownMenuCheckboxItem = React.forwardRef<
     <DropdownMenuPrimitive.CheckboxItem
       ref={ref}
       className={cn(
-        "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         MENU_ITEM_RADIUS,
         indicatorSide === "end" && "pr-8 pl-2",
         className,
@@ -255,7 +255,7 @@ const DropdownMenuRadioItem = React.forwardRef<
   <DropdownMenuPrimitive.RadioItem
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       MENU_ITEM_RADIUS,
       className,
     )}
