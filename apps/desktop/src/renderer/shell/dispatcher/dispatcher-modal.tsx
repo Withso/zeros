@@ -68,7 +68,7 @@ import {
 import type { ChatThread } from "../../state/store";
 import { createDispatcherChat } from "./dispatcher-chat";
 import { useCloudCreate } from "./cloud-create";
-import { cloudCreateRequest, refreshChangedCloudComputer } from "./cloud-create-request";
+import { cloudCreateRequest } from "./cloud-create-request";
 import { CloudComputerRepositoryPicker } from "./cloud-computer-repository-picker";
 import { CloudComputerSourcePicker, computerSourceReadKey, warmComputerSources } from "./cloud-computer-source";
 import type { DispatcherBase } from "./dispatcher-source";
@@ -295,7 +295,9 @@ export function DispatcherPage({
       if (payload) createDispatcherChat({ dispatch, repoRoot, folder, payload, validationPending: true });
       else spawnPreparedDefaultChat({ folder, repoRoot, dispatch });
     } catch (error) {
-      const changed = cloud.computerMode ? refreshChangedCloudComputer(error, cloud.refreshComputer) : null;
+      if (creationGeneration !== getOrganizationStoreGeneration()) return;
+      if (cloud.computerMode && !cloud.isCurrentComputerSource(cloud.sourceOwner)) return;
+      const changed = cloud.computerMode ? cloud.recoverComputerError(error, cloud.sourceOwner) : null;
       if (changed && cloud.computerOwner) {
         cloudCreateIntent.current = null;
         setComputerCreateNotice({ owner: cloud.computerOwner, message: changed });

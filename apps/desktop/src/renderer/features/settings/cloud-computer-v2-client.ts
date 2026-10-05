@@ -274,9 +274,9 @@ export async function readCloudComputerV2(
 ): Promise<CloudComputerV2State> {
   const epoch = getOrganizationStoreGeneration();
   assertAccount(key, epoch);
-  const query = cursor
-    ? `?cursor=${encodeURIComponent(z.string().min(1).max(512).parse(cursor))}&limit=30`
-    : "";
+  const query = "?activeRepositories=true" + (cursor
+    ? `&cursor=${encodeURIComponent(z.string().min(1).max(512).parse(cursor))}&limit=30`
+    : "");
   const result = await cloudAccountRequest(
     `${root(key)}${query}`,
     cloudComputerV2StateSchema,

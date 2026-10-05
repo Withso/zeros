@@ -68,6 +68,13 @@ beforeEach(() => {
 });
 
 describe("Cloud Computer v2 exact-key server state", () => {
+  it("opts in to active repositories on current-state and history reads", async () => {
+    transport.request.mockResolvedValue(computerState());
+    await loadCloudComputerV2(key);
+    expect(transport.request).toHaveBeenLastCalledWith(`${root}?activeRepositories=true`, expect.anything());
+    await loadCloudComputerV2History(key, "older/page");
+    expect(transport.request).toHaveBeenLastCalledWith(`${root}?activeRepositories=true&cursor=older%2Fpage&limit=30`, expect.anything());
+  });
   it("shares intent and panel reads, restores A → B → A synchronously, and keeps unchanged references", async () => {
     const pending = deferred<CloudComputerV2State>();
     transport.request.mockReturnValueOnce(pending.promise);
@@ -297,7 +304,7 @@ describe("Cloud Computer v2 typed API", () => {
     ]);
     expect(transport.request).toHaveBeenCalledTimes(2);
     expect(transport.request).toHaveBeenLastCalledWith(
-      `${root}?cursor=older%2Fpage&limit=30`,
+      `${root}?activeRepositories=true&cursor=older%2Fpage&limit=30`,
       expect.anything(),
     );
     expect(cloudComputerV2Cache.getSnapshot(key).data).toBe(current);

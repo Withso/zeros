@@ -76,6 +76,7 @@ export async function runCloudComputerV2Smoke({
   const requests = [];
   const adminWorkspaces = new Map(), adminReceipts = new Map();
   let heldAdmin = null, holdNextAdmin = false, failNextAdmin = false;
+  let createOptionsDrift = false, holdNextCreateConflict = false, heldCreateConflict = null;
   let conflictNextSave = false,
     heldState = null,
     holdNextState = false,
@@ -124,7 +125,9 @@ export async function runCloudComputerV2Smoke({
         contentType: "application/json",
         body: JSON.stringify(body),
       });
-    if (path.endsWith("/create-options"))
+    if (path.endsWith("/create-options")) {
+      if (createOptionsDrift)
+        return reply({ error: { code: "cloud_computer_changed", message: "Raw server drift text" } }, 409);
       result = {
         configured: true,
         repository: {
@@ -134,7 +137,12 @@ export async function runCloudComputerV2Smoke({
         },
         installations: [{ id: installation, accountLogin: "example" }],
       };
-    else if (path.endsWith("/cloud-workspaces") && method === "POST") {
+    } else if (path.endsWith("/cloud-workspaces") && method === "POST") {
+      if (holdNextCreateConflict) {
+        holdNextCreateConflict = false;
+        heldCreateConflict = route;
+        return;
+      }
       if (computer.active && !computer.activeRepositories.some(repo =>
         repo.owner === input.repository.owner && repo.name === input.repository.name && repo.installationId === input.repository.githubInstallationId))
         return reply({ error: { code: "cloud_computer_repository_not_configured", message: "Choose a repository from the active Cloud Computer." } }, 409);
@@ -168,6 +176,10 @@ export async function runCloudComputerV2Smoke({
       result = cursor
         ? { ...computer, history: olderPages.get(cursor) }
         : computer;
+      if (url.searchParams.get("activeRepositories") !== "true") {
+        const { activeRepositories: _activeRepositories, ...legacy } = result;
+        result = legacy;
+      }
     } else if (path === `${root}/admin-workspaces`) {
       if (input.expectedActiveVersion !== computer.active?.version)
         return reply({ error: { code: "cloud_computer_changed", message: "Review the active version." } }, 409);
@@ -435,10 +447,16 @@ export async function runCloudComputerV2Smoke({
       const choose = () => button("Choose project");
       const create = () => button("Create");
       const source = () => page.locator("[data-create-source-trigger]");
+      const message = page.locator('[contenteditable="true"][aria-label="Message"]');
+      const optionsReads = () => requests.filter(row => row.path.endsWith("/create-options")).length;
       await button("Create section").click();
       await expect(choose()).toContainText("example/project");
       await expect(source()).toContainText("main");
       await expect(source()).toHaveAccessibleName("Create from GitHub branch: main");
+      expect(requests.filter(row => row.path.endsWith("/v2")).every(row => row.query.get("activeRepositories") === "true")).toBe(true);
+      await message.fill("Keep this prompt through metadata refresh");
+      createOptionsDrift = true;
+      const metadataStateReads = stateReads();
       await choose().click();
       const menu = page.getByRole("menu");
       await expect(menu.getByRole("menuitem")).toHaveCount(3);
@@ -448,7 +466,17 @@ export async function runCloudComputerV2Smoke({
       await menu.getByRole("menuitem", { name: "example/another", exact: true }).hover();
       await menu.getByRole("menuitem", { name: "example/another", exact: true }).click();
       await expect(choose()).toContainText("example/another");
+      await expect(page.getByText("Cloud Computer changed — refresh", { exact: true })).toBeVisible();
+      await expect(page.getByText("Raw server drift text", { exact: true })).toHaveCount(0);
+      await expect.poll(stateReads).toBeGreaterThan(metadataStateReads);
+      await expect(message).toHaveText("Keep this prompt through metadata refresh");
+      const settledMetadataReads = { state: stateReads(), options: optionsReads() };
+      await page.clock.runFor(30_001);
+      expect({ state: stateReads(), options: optionsReads() }).toEqual(settledMetadataReads);
+      createOptionsDrift = false;
+      await choose().hover();
       await expect(create()).toBeEnabled();
+      await message.fill("");
       await source().hover();
       await expect.poll(() => page.evaluate(() => window.cloudComputerSourceFixture.reads.filter(row => row.op === "gh.prList").length)).toBeGreaterThan(0);
       await source().click();
@@ -483,7 +511,6 @@ export async function runCloudComputerV2Smoke({
       current.revision++;
       current.history.builds.unshift(current.active);
       current.activeRepositories = [activeRepositories[0]];
-      const message = page.locator('[contenteditable="true"][aria-label="Message"]');
       await message.fill("Keep this prompt through repository refresh");
       await create().click();
       await expect.poll(() => writes("/cloud-workspaces").length).toBe(2);
@@ -502,6 +529,23 @@ export async function runCloudComputerV2Smoke({
       await expect.poll(() => writes("/cloud-workspaces").length).toBe(4);
       expect(writes("/cloud-workspaces")[3].input).not.toHaveProperty("cloudComputerBuild");
       expect(await page.evaluate(() => window.cloudComputerSourceFixture.pendingDesign().length)).toBe(1);
+      await button("Code mode").click();
+      holdNextCreateConflict = true;
+      await message.fill("Keep this prompt through hidden recovery");
+      await create().click();
+      await expect.poll(() => writes("/cloud-workspaces").length).toBe(5);
+      await button("Toggle settings activity").click();
+      const hiddenReads = { state: stateReads(), options: optionsReads() };
+      await heldCreateConflict.fulfill({ status: 409, contentType: "application/json",
+        body: JSON.stringify({ error: { code: "cloud_computer_template_unavailable", message: "Template changed" } }) });
+      await expect(source()).toBeEnabled();
+      await page.clock.runFor(5_000);
+      expect({ state: stateReads(), options: optionsReads() }).toEqual(hiddenReads);
+      await button("Toggle settings activity").click();
+      await expect.poll(stateReads).toBeGreaterThan(hiddenReads.state);
+      await expect.poll(optionsReads).toBeGreaterThan(hiddenReads.options);
+      await expect(message).toHaveText("Keep this prompt through hidden recovery");
+      await expect(create()).toBeEnabled();
       await button("Computer section").click();
       current.activeRepositories = [activeRepositories[0]];
       current.revision++;
@@ -525,7 +569,7 @@ export async function runCloudComputerV2Smoke({
       await expect(menu).toContainText("Open GitHub project");
       await expect(menu).toContainText("Start from scratch");
       await page.keyboard.press("Escape");
-      check("Cloud Create uses built repositories without a project, restores/prunes per-org choices, searches remote branches/PRs, creates Code/Design, and preserves the prompt while refreshing repository conflicts", true);
+      check("Cloud Create uses built repositories without a project, restores/prunes per-org choices, creates Code/Design, bounds metadata recovery, and defers hidden conflicts without losing the prompt", true);
     } else if (regression === "role-loss") {
 
       await expect(

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { Project } from "../../state/projects-store";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useCachedRead } from "../../state/use-cached-read";
@@ -22,6 +22,7 @@ import { gitRepoBranchCatalog, type RepoRemote } from "../../platform/git";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { useComputerRepositorySelection } from "./cloud-computer-repository-selection";
 import { useCloudComputerV2CreateGate } from "../../features/settings/cloud-computer-v2-create-gate";
+import { cloudComputerChangedMessage, createCloudComputerRecovery } from "./cloud-create-request";
 
 const capabilityCache = new KeyedAsyncCache<{ enabled: boolean }>(1);
 const optionsCache = new KeyedAsyncCache<CloudWorkspaceCreateOptions>(32);
@@ -51,10 +52,11 @@ export function useCloudCreateSource(
   const key = readCloud && organization && !organization.isPersonal && repository?.host === "github.com" && me
     ? optionsKey(me.user.id, organization.id, repository, computer) : null;
   const options = useCachedRead(optionsCache, key, readOptions, { maxAgeMs: 30_000 });
+  const computerConflict = computer ? cloudComputerChangedMessage(options.error) : null;
   const reason = !canCreateCloud ? "Select an organization with Cloud access."
     : !capability.data?.enabled ? capability.loading ? "Checking Cloud availability…" : "Cloud workspaces are not enabled in this desktop build."
     : repository?.host !== "github.com" ? "Cloud requires a repository hosted on GitHub."
-    : options.error ? options.error.message
+    : options.error ? computerConflict ?? options.error.message
     : !options.data ? "Checking repository access…"
     : !options.data.configured ? "Cloud creation is not enabled for this environment."
     : !options.data.repository || options.data.installations.length === 0 ? "Connect the GitHub App to this repository in Settings → Integrations."
@@ -69,7 +71,7 @@ export function useCloudCreateSource(
     const nextKey = optionsKey(me.user.id, organization.id, next, next);
     void optionsCache.load(nextKey, () => readOptions(nextKey), { maxAgeMs: 30_000 }).catch(() => {});
   };
-  return { organization, canCreateCloud, readCloud, options, reason, warm, warmRepository };
+  return { organization, canCreateCloud, readCloud, options, reason, computerConflict, warm, warmRepository };
 }
 
 export function cloudSourceRepositoryReason(
@@ -133,13 +135,25 @@ export function useCloudCreate(
       : parseRemote(project?.originUrl ?? null),
     [computerMode, computerRepository, project?.originUrl],
   );
-  const { organization, canCreateCloud, readCloud, options, reason: sourceReason, warm, warmRepository } = useCloudCreateSource(repository, active,
+  const { organization, canCreateCloud, readCloud, options, reason: sourceReason, computerConflict, warm, warmRepository } = useCloudCreateSource(repository, active,
     computerRepository ? { repositoryId: computerRepository.id, installationId: computerRepository.installationId } : undefined);
   // The first/default Cloud create needs no live checkout. An explicit branch
   // keeps its existing remote-identity checks; local projects retain their
   // configured target branch through the normal catalog.
   const sourceOwner = computerMode && computerRepository
     ? JSON.stringify([computer.key, computerRepository]) : null;
+  const recovery = useRef<ReturnType<typeof createCloudComputerRecovery> | null>(null);
+  recovery.current ??= createCloudComputerRecovery();
+  const recoverySurface = useRef({ active, owner: sourceOwner, refresh: () => {} });
+  recoverySurface.current = {
+    active, owner: sourceOwner,
+    refresh: () => { computer.snapshot.refresh(); options.refresh(); },
+  };
+  useEffect(() => {
+    if (recovery.current!.resume(recoverySurface.current) || !active || !sourceOwner) return;
+    if (computerConflict) recovery.current!.recover(options.error, sourceOwner, recoverySurface.current, true);
+    else if (options.data && !options.error && !options.loading && !options.refreshing) recovery.current!.confirm(sourceOwner);
+  }, [active, sourceOwner, computerConflict, options.error, options.data, options.loading, options.refreshing]);
   const computerBase = computerSource?.owner === sourceOwner ? computerSource?.base ?? null : null;
   const selectedBase = computerMode ? computerBase : base;
   const cloudDefault = computerMode || Boolean(project && isCloudWorkspace(project.repoRoot) && !base);
@@ -190,6 +204,8 @@ export function useCloudCreate(
     computerBase,
     defaultBranch: options.data?.repository?.defaultBranch ?? null,
     refreshComputer: () => { computer.snapshot?.refresh(); options.refresh?.(); },
+    recoverComputerError: (error: unknown, observedOwner: string | null) => recovery.current!.recover(error, observedOwner, recoverySurface.current),
+    isCurrentComputerSource: (owner: string | null) => owner !== null && owner === recoverySurface.current.owner,
     warmComputerRepository: (next: NonNullable<typeof computerRepository>) => warmRepository({ owner: next.owner, repo: next.name, repositoryId: next.id, installationId: next.installationId }),
     warm: () => { warm(); computer.warm(); },
     computerRequired: computer.required,

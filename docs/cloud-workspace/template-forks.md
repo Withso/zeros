@@ -9,6 +9,8 @@ without a v2 head retain the existing image and v4-base selection behavior.
 
 The desktop Create composer uses the active build's ordered `activeRepositories`
 when its internal `cloudComputerV2` gate is active and the template is ready.
+State and history reads opt in with `activeRepositories=true`; responses without
+that query flag retain the exact legacy shape for shipped strict-schema clients.
 Draft-only additions are excluded. A repository choice is restored synchronously
 per user and organization, then pruned against the active list. Add repository
 opens Cloud Computer settings; no registered local project is required.
@@ -31,7 +33,10 @@ record ID and omit the retired `cloudComputerBuild` builder field. Create choose
 the active template at submission: a newer build containing the same repository
 is valid. Computer/repository/template admission conflicts show
 “Cloud Computer changed — refresh”, revalidate the state and picker selection,
-and preserve the composer prompt.
+and preserve the composer prompt. Create-options drift uses the same recovery,
+bounded to one automatic attempt until a confirmed metadata read succeeds.
+Completions are fenced to their current account and repository owner; a hidden
+Create surface defers recovery reads until that same owner is visible again.
 
 ## Accepted source and runtime
 

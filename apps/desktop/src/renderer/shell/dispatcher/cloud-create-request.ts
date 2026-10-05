@@ -39,6 +39,11 @@ export function refreshChangedCloudComputer(
   error: unknown,
   refresh: () => void,
 ): string | null {
+  const message = cloudComputerChangedMessage(error);
+  if (message) refresh();
+  return message;
+}
+export function cloudComputerChangedMessage(error: unknown): string | null {
   if (
     !(error instanceof ControlPlaneError) ||
     error.status !== 409 ||
@@ -50,6 +55,34 @@ export function refreshChangedCloudComputer(
     ].includes(error.code)
   )
     return null;
-  refresh();
   return "Cloud Computer changed — refresh";
+}
+
+type RecoverySurface = { active: boolean; owner: string | null; refresh: () => void };
+/** One pending exact-owner recovery; automatic metadata retries are bounded. */
+export function createCloudComputerRecovery() {
+  let pendingOwner: string | null = null;
+  let attemptedOwner: string | null = null;
+  const resume = (current: RecoverySurface) => {
+    if (pendingOwner !== current.owner) pendingOwner = null;
+    if (!current.active || !pendingOwner) return false;
+    pendingOwner = null;
+    current.refresh();
+    return true;
+  };
+  return {
+    resume,
+    confirm(owner: string) {
+      if (attemptedOwner === owner) attemptedOwner = null;
+    },
+    recover(error: unknown, observedOwner: string | null, current: RecoverySurface, metadata = false) {
+      const message = cloudComputerChangedMessage(error);
+      if (!message || !observedOwner || observedOwner !== current.owner) return message;
+      if (metadata && attemptedOwner === observedOwner) return message;
+      attemptedOwner = observedOwner;
+      pendingOwner = observedOwner;
+      resume(current);
+      return message;
+    },
+  };
 }

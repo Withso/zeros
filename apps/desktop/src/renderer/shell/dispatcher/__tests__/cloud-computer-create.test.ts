@@ -20,6 +20,7 @@ const state = vi.hoisted(() => ({
   user: "",
   reads: [] as (string | null)[],
   refresh: vi.fn(),
+  optionsError: null as Error | null,
 }));
 vi.mock("../../../features/team/team-store", () => ({
   useActiveOrganization: () => ({
@@ -51,6 +52,7 @@ vi.mock("../../../state/use-cached-read", () => ({
       ? { data: { enabled: true } }
         : key && [4, 6].includes(JSON.parse(key).length)
         ? {
+            error: state.optionsError,
             data: {
               configured: true,
               installations: [{ id: "other-installation" }],
@@ -68,6 +70,7 @@ import { useCloudCreate } from "../cloud-create";
 import {
   cloudCreateRequest,
   refreshChangedCloudComputer,
+  createCloudComputerRecovery,
 } from "../cloud-create-request";
 import { computerBranchBase } from "../cloud-computer-source";
 import {
@@ -125,6 +128,7 @@ beforeEach(() => {
   });
   state.reads = [];
   state.refresh.mockReset();
+  state.optionsError = null;
   rememberComputerRepository(JSON.stringify([computerUser, computerOrg]), null);
 });
 describe("Create from the active Cloud Computer", () => {
@@ -231,6 +235,46 @@ describe("Create from the active Cloud Computer", () => {
       new ControlPlaneError(409, "other", "other"),
     ])
       expect(refreshChangedCloudComputer(error, state.refresh)).toBeNull();
+    expect(state.refresh).not.toHaveBeenCalled();
+  });
+  it("maps a v2 create-options drift inline without changing legacy errors", () => {
+    state.optionsError = new ControlPlaneError(409, "cloud_computer_changed", "Raw server drift text");
+    expect(create().reason).toBe("Cloud Computer changed — refresh");
+    state.enabled = false;
+    expect(create({ repoRoot: `cloud://${computerOrg}/${computerOrg}`, originUrl: "https://github.com/example/project.git" } as Project).reason).toBe("Raw server drift text");
+  });
+  it("bounds automatic metadata recovery until a confirmed read succeeds", () => {
+    const recovery = createCloudComputerRecovery();
+    const owner = "repository-owner";
+    const current = { active: true, owner, refresh: state.refresh };
+    const error = new ControlPlaneError(409, "cloud_computer_changed", "changed");
+    for (let i = 0; i < 3; i++) expect(recovery.recover(error, owner, current, true)).toBe("Cloud Computer changed — refresh");
+    expect(state.refresh).toHaveBeenCalledOnce();
+    recovery.confirm(owner);
+    recovery.recover(error, owner, current, true);
+    expect(state.refresh).toHaveBeenCalledTimes(2);
+  });
+  it("defers a hidden submit conflict and recovers once when its owner is visible", () => {
+    const recovery = createCloudComputerRecovery();
+    const owner = "repository-owner";
+    const current = { active: false, owner, refresh: state.refresh };
+    const error = new ControlPlaneError(409, "cloud_computer_repository_not_configured", "changed");
+    expect(recovery.recover(error, owner, current)).toBe("Cloud Computer changed — refresh");
+    recovery.resume(current);
+    expect(state.refresh).not.toHaveBeenCalled();
+    recovery.resume({ ...current, active: true });
+    expect(state.refresh).toHaveBeenCalledOnce();
+    recovery.resume({ ...current, active: true });
+    expect(state.refresh).toHaveBeenCalledOnce();
+  });
+  it("discards pending recovery across owner changes and fences late conflicts", () => {
+    const recovery = createCloudComputerRecovery();
+    const error = new ControlPlaneError(409, "cloud_computer_changed", "changed");
+    const current = { active: false, owner: "first-owner", refresh: state.refresh };
+    recovery.recover(error, current.owner, current);
+    recovery.resume({ ...current, active: true, owner: "second-owner" });
+    recovery.recover(error, "first-owner", { ...current, active: true, owner: "second-owner" });
+    recovery.resume({ ...current, active: true });
     expect(state.refresh).not.toHaveBeenCalled();
   });
   it("bounds and type-guards persisted owner selections", () => {
