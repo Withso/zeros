@@ -23,6 +23,7 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { channel, isLocalDevelopmentRuntime } from "../runtime";
+import { localInstanceStateRoot } from "./local-development-paths.cjs";
 
 /** Reverse-DNS application id for the macOS/Windows app-data folder. */
 const APP_ID = "com.zeros";
@@ -155,7 +156,7 @@ export function zerosDotDirName(): string {
  *  MUST resolve through here so no channel writes into another's state. */
 export function zerosStateRoot(): string {
   if (isLocalDevelopmentRuntime()) {
-    return path.join(homedir(), ".zeros-local", "instances", devInstanceSlug());
+    return localInstanceStateRoot(devInstanceSlug());
   }
   return path.join(homedir(), zerosDotDirName());
 }

@@ -425,7 +425,10 @@ export async function runLocalDevelopment({
     });
     if (prepared.cancelled || signal?.aborted || prepared.code !== 0)
       return prepared.code;
-    const result = prepareBundle(identity);
+    const result = prepareBundle({
+      ...identity,
+      paths: bundle.localInstanceBundlePaths(identity),
+    });
     const binary = typeof result === "string" ? result : result?.binPath;
     if (!binary)
       throw new Error(

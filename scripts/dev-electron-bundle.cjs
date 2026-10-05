@@ -30,6 +30,7 @@
 // ──────────────────────────────────────────────────────────
 
 const fs = require("node:fs");
+const { localInstanceBundlePaths } = require("../apps/desktop/src/engine/db/local-development-paths.cjs");
 const os = require("node:os");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
@@ -466,18 +467,19 @@ module.exports = {
   discardBundle,
   patchPlist,
   prepareLocalInstanceBundle,
+  localInstanceBundlePaths,
 };
 
 /** Local clones the base without branding/mutating hosted Dev's shared bundle.
  * A separate cache and no URL schemes keep it out of hosted OAuth routing. */
-function prepareLocalInstanceBundle({ slug, name }) {
+function prepareLocalInstanceBundle({ slug, name, paths = localInstanceBundlePaths({slug,name}) }) {
   if (process.platform !== "darwin") return { ok: false, binPath: null };
   const base = findBaseElectronApp();
   if (!base) return { ok: false, binPath: null };
-  const dest = path.join(
-    os.homedir(), ".zeros-local", "dev-instances", slug, `${name}.app`,
-  );
-  const marker = `${dest}.version`;
+  const dest = paths.bundlePath;
+  const marker = paths.versionMarker;
+  try { fs.rmSync(paths.legacyBundleRoot, { recursive: true, force: true }); }
+  catch { /* Previous Local bundles were only a cache. */ }
   const version = readElectronVersion(base);
   let cached = "";
   try {

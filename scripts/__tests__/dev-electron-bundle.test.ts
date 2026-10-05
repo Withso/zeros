@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
 // @ts-expect-error — .cjs has no type declarations; it exports plain functions.
 import {
   instanceBundleDir,
@@ -28,11 +29,37 @@ import {
   pruneStaleBundles,
   discardBundle,
   patchPlist,
+  localInstanceBundlePaths,
 } from "../dev-electron-bundle.cjs";
 
 // A realistic pair: the slug carries the uniqueness hash, the name never does.
 const SLUG = "coralline-ebf2";
 const NAME = "zeros-coralline";
+
+describe("Local bundle containment",()=>{
+  it.each([false,true])("creates a protected Local bundle and cleans the old cache best-effort (failure=%s)",(failure)=>{
+    const home=tmp();
+    const name="Zeros Local test abcdef";
+    const slug="a123456789abcdef";
+    const expected=path.join(home,".zeros-local","instances",slug,"bundle",`${name}.app`);
+    const legacy=path.join(home,".zeros-local","dev-instances",slug);
+    fs.mkdirSync(path.join(legacy,"old.app"),{recursive:true});
+    const source=fs.readFileSync("scripts/dev-electron-bundle.cjs","utf8");
+    const context={
+      module:{exports:{} as {prepareLocalInstanceBundle:(identity:object)=>unknown}},process:{platform:"darwin"},os:{homedir:()=>home},path,
+      localInstanceBundlePaths:(identity:{slug:string;name:string})=>localInstanceBundlePaths({...identity,home}),
+      fs:{...fs,readFileSync:()=>"",existsSync:()=>false,rmSync:(file:string,options:object)=>{if(file===legacy && failure)throw new Error("synthetic cache cleanup failure");fs.rmSync(file,options);},mkdirSync:()=>{},writeFileSync:(file:string)=>{markers.push(file);}},
+      findBaseElectronApp:()=>"/base/Electron.app",readElectronVersion:()=>"38.0.0",
+      cloneBundleHardlink:(_base:string,dest:string)=>{clones.push(dest);},readPlistValue:()=>"Electron",patchExecutable:()=>{},patchPlist:()=>{},patchIcon:()=>{},
+    };
+    const clones:string[]=[],markers:string[]=[];
+    vm.runInNewContext(source.slice(source.indexOf("function prepareLocalInstanceBundle("))+"\nmodule.exports={prepareLocalInstanceBundle};",context);
+    context.module.exports.prepareLocalInstanceBundle({slug,name});
+    expect(clones).toEqual([expected]);
+    expect(markers).toEqual([`${expected}.version`]);
+    expect(fs.existsSync(legacy)).toBe(failure);
+  });
+});
 
 const tmpdirs: string[] = [];
 

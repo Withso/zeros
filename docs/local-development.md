@@ -107,7 +107,7 @@ suffix so identically named folders can be distinguished.
 | Chromium cache, cookies and renderer storage                    | `~/Library/Caches/com.zeros.local.<identity>/`                            |
 | Native logs                                                     | The existing per-identity log location under `com.zeros.local.<identity>` |
 | User settings, default-project sentinel and engine state        | `~/.zeros-local/instances/<identity>/`                                    |
-| Native development bundle                                       | `~/.zeros-local/dev-instances/<identity>/Zeros Local … .app`              |
+| Native development bundle and version marker                   | `~/.zeros-local/instances/<identity>/bundle/`                              |
 | Product worktrees                                               | `~/zeros-local-<identity>/workspaces/` and sibling `design workspaces/`   |
 
 Local never migrates hosted Dev/packaged secrets or Chromium state into its
@@ -119,11 +119,17 @@ To delete an old profile, stop its launcher first and remove its identity's
 directories: `~/Library/Application Support/com.zeros.local.<identity>/`,
 `~/Library/Caches/com.zeros.local.<identity>/`,
 `~/Library/Logs/com.zeros.local.<identity>/`,
-`~/.zeros-local/instances/<identity>/`, the cached bundle at
-`~/.zeros-local/dev-instances/<identity>/`, and `~/zeros-local-<identity>/`.
+`~/.zeros-local/instances/<identity>/` (including its `bundle/` cache), and
+`~/zeros-local-<identity>/`. Older runs may also have
+`~/.zeros-local/dev-instances/<identity>/`; Local removes that old bundle cache
+best-effort when preparing the new one.
 The visible worktree directory contains project work and uncommitted changes;
 keep any work you need before removing it. The checkout's
 `.context/zeros-local/` contains only launcher coordination state.
+
+The bundle path and state root use one shared path resolver. Local code actors
+cannot write its app executable/plist, settings, terminal initialization,
+sentinel or engine authority through their normal provider tools.
 
 Vite selects from ports 6200–7223. Engines use disjoint 10-port blocks in
 31000–36119, including the existing eight-port engine walk and two gateway ports.

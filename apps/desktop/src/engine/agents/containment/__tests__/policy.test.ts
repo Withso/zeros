@@ -55,6 +55,8 @@ import {
   stateDbPath,
   legacyWorktreesRoot,
 } from "../../../git/state";
+import { userSettingsDir } from "../../../settings/files";
+import { localInstanceBundlePaths } from "../../../db/local-development-paths.cjs";
 
 function territory(
   workspaceRoot: string,
@@ -603,6 +605,25 @@ describe("ZSR host-parity policy builder", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("denies code writes to every Local-owned instance surface", async () => {
+    const workspace = path.join(temporaryRoot, "workspace");
+    await mkdir(workspace, { recursive: true });
+    vi.stubEnv("ZEROS_DEV", "1");
+    vi.stubEnv("ZEROS_CHANNEL", "dev");
+    vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", "1");
+    vi.stubEnv("ZEROS_INSTANCE", "a123456789abcdef");
+    try {
+      const root = zerosStateRoot();
+      const prepared = await prepare({ actor: "agent-code", cwd: workspace, workspaceRoot: workspace });
+      expect(prepared.document.filesystem.denyWrite).toContain(root);
+      const bundle = localInstanceBundlePaths({slug:process.env.ZEROS_INSTANCE!,name:"Zeros Local test"});
+      expect(bundle.stateRoot).toBe(root);
+      for (const ownedPath of [bundle.bundlePath, bundle.versionMarker, detachLockPath(), path.join(root,"agent-auth"), userSettingsDir(), path.join(userSettingsDir(),"settings.toml"), path.join(root,"term-zdotdir"), path.join(root,"default-project")]) {
+        expect(prepared.document.filesystem.denyWrite.some(denied => ownedPath === denied || ownedPath.startsWith(`${denied}${path.sep}`))).toBe(true);
+      }
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it("rejects a foreign territory and traversal-shaped execution id", async () => {
