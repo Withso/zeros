@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { portFree } from "./dev-ports.mjs";
 import { groupAlive, signalGroup } from "./electron-local-process-group.mjs";
@@ -512,10 +512,19 @@ export async function runLocalDevelopment({
   }
 }
 
-if (
-  process.argv[1] &&
-  pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
-) {
+function isMainModule() {
+  try {
+    return (
+      process.argv[1] &&
+      fs.realpathSync(process.argv[1]) ===
+        fs.realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   const controller = new AbortController();
   let failed = false;
   const fatal = () => {

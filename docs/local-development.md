@@ -97,7 +97,8 @@ introduced. A stale collaborative selection cannot take over Local startup.
 
 Each canonical checkout path derives a stable 16-character SHA-256 identity.
 Ordinary clones, synced checkouts with a `.git` directory and linked worktrees
-all get separate profiles. Symlink aliases of one checkout share its profile.
+all get separate profiles. Launching through a symlink alias of a checkout uses
+the same canonical checkout and profile.
 Branch switches and relaunches preserve data. Moving the checkout to a different
 canonical path selects a new profile; keep the old directory if its data is
 needed. The readable app name includes the checkout folder and a short identity

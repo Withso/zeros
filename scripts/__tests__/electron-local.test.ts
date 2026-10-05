@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { once } from "node:events";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
 import {
@@ -164,7 +164,9 @@ describe("Local launch ownership", () => {
       icon: "monitor",
     });
     expect(settings.scripts.run["Zeros Local"]).not.toHaveProperty("default");
-    expect(settings.scripts.run["Zeros Local"].command).toContain("zeros_dev_select_tools");
+    expect(settings.scripts.run["Zeros Local"].command).toContain(
+      "zeros_dev_select_tools",
+    );
     expect(settings.scripts.run.dev.default).toBe(true);
     expect(settings.scripts.run.backend.default).toBe(true);
   });
@@ -271,6 +273,41 @@ describe("Local launch ownership", () => {
         ),
       ).toBe(false);
     },
+  );
+
+  it.skipIf(process.platform === "win32").each([false, true])(
+    "executes a symlinked checkout path (preserve main symlink=%s)",
+    (preserve) => {
+      const root = directory();
+      const alias = path.join(root, "linked checkout");
+      const preload = path.join(root, "platform.cjs");
+      fs.symlinkSync(path.resolve("."), alias, "dir");
+      fs.writeFileSync(
+        preload,
+        "Object.defineProperty(process,'platform',{value:'linux'});",
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          ...(preserve ? ["--preserve-symlinks-main"] : []),
+          "--require",
+          preload,
+          path.join(alias, "scripts/electron-local.mjs"),
+        ],
+        {
+          cwd: root,
+          env: { PATH: process.env.PATH },
+          encoding: "utf8",
+          timeout: 15_000,
+        },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Zeros Local requires macOS.");
+      expect(fs.existsSync(path.join(root, ".context/zeros-local"))).toBe(
+        false,
+      );
+    },
+    30_000,
   );
 
   it("rejects Linux before any build, profile or bundle work", async () => {
