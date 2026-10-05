@@ -513,7 +513,7 @@ export function instrumentSetupDiagnosticSource(source, name) {
     );
   }
   source = source.replace(
-    "const runtime = resolveCloudRuntimeChild();",
+    /const runtime = (?:privileged \? resolveCloudRuntime\(\) : )?resolveCloudRuntimeChild\(\);/,
     (match) =>
       match +
       event(

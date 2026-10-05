@@ -192,6 +192,37 @@ controllers must still be enabled by the delegate. [Node 22 child-process docume
 states that synchronous process timeout sends a signal and waits for process
 exit. This supports measuring elapsed time and signal/retirement separately.
 
+## Confirmed setup worker admission failure (2026-10-05)
+
+The orchestrator's run of `cfbc9dd7` on fork `bx_fp8gectj` from template
+`bx_dxzfh3p6` confirmed the first audit candidate. Engine qualification passed
+in 6.1 seconds; `run_setup` failed in 68 milliseconds with exit 125. The root
+worker resolved only `runtimeId`, with manifest, base, boot, supervisor session
+and cgroup identity absent. The root-owned, mode-0600 computer admission was
+then rejected at `cloud-computer-checkout.mjs:158`. The missing qualification
+marker was a consequence, and the later hook worker hit the same failure in
+29 milliseconds. Proof preconditions, serve projection/writability and local
+checkout identity/branch/revision checks passed. The orchestrator verified fork
+cleanup; this workspace performed no live provider operations.
+
+`sandbox/cloud-setup-process.mjs` now uses the full host runtime resolver in the
+root worker, before computer admission and privilege drop. The UID-10001 child
+continues using the restricted executable/path resolver. Both attestation and
+hooks use this same worker. Admission bindings, cgroup containment, capabilities,
+timeouts and the unprivileged command environment are unchanged. Regression
+tests execute the actual worker and admission code with both resolver outputs,
+reject each mismatched admission identity field, and exercise the child with
+private runtime/admission files unavailable. The diagnostic observer supports
+both the former and corrected worker source.
+
+Adoption requires a new Alpha runtime release and a Cloud Computer rebuild with
+that runtime, followed by a new workspace. No new base image is required. The
+template's still-qualified runtime pin remains preferred during workspace
+creation (`apps/control-plane/src/cloud-workspaces/computer-workspace-source.ts:144–151`),
+so publishing a runtime alone does not update existing template builds or failed
+workspace generations. The corrected runtime still needs operator live
+verification through attestation, hooks, engine registration and readiness.
+
 ## Confirmed attachment qualification failure (2026-10-05)
 
 The orchestrator's run of `d63e6622` on fork `bx_cmscg8v2` reported

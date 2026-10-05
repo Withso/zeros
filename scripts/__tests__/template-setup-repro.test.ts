@@ -241,9 +241,13 @@ try { worker(); } catch {
     }
   });
 
-  it("locates the actual setup worker repository exception before privilege drop", async () => {
+  it.each(["host", "child-only"])("locates the setup worker repository exception with the %s resolver before privilege drop", async resolver => {
     const file = path.resolve("scripts/cloud-workspace-validation/sandbox/cloud-setup-process.mjs");
-    const original = readFileSync(file, "utf8");
+    const current = readFileSync(file, "utf8");
+    const original = resolver === "host" ? current : current.replace(
+      "const runtime = privileged ? resolveCloudRuntime() : resolveCloudRuntimeChild();",
+      "const runtime = resolveCloudRuntimeChild();",
+    );
     const source = instrumentSetupDiagnosticSource(original, path.basename(file)).replaceAll("import.meta.url", JSON.stringify(pathToFileURL(file).href));
     const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
     const input = Buffer.from(JSON.stringify({ version: 1, command: "true", environment: {}, timeoutMs: 1000 }));
@@ -261,7 +265,12 @@ try { worker(); } catch {
           if (read) return 0; read = true; input.copy(target); return input.length;
         } };
         if (name === "node:child_process") return { spawnSync: spawn };
-        if (name === "./cloud-runtime-root.mjs") return { resolveCloudRuntimeChild: () => ({ profile: "v4", binRoot: "/opt/runtime/bin" }) };
+        if (name === "./cloud-runtime-root.mjs") return {
+          resolveCloudRuntime: () => ({ profile: "v4", binRoot: "/opt/runtime/bin", runtimeId: "fixture",
+            manifestSha256: "fixture", baseCompatibilityId: "fixture", bootId: "fixture",
+            supervisorSessionId: "fixture", cgroupRoot: "fixture" }),
+          resolveCloudRuntimeChild: () => ({ profile: "v4", binRoot: "/opt/runtime/bin", runtimeId: "fixture" }),
+        };
         if (name === "./cloud-computer-checkout.mjs") return { cloudComputerHostRepository: () => { throw new Error("image_contract_invalid"); } };
         if (name === "./cloud-engine-cgroup.mjs" || name === "./runtime-layout.json") return {};
         return createRequire(import.meta.url)(name);
@@ -272,6 +281,9 @@ try { worker(); } catch {
     expect(spawn).not.toHaveBeenCalled();
     expect(events.filter(event => event.kind === "phase").map(event => event.phase))
       .toEqual(["worker_runtime", "worker_gate", "worker_payload", "worker_repository"]);
+    expect(events.find(event => event.kind === "identity")?.identity).toEqual({ runtimeId: true,
+      manifestSha256: resolver === "host", baseCompatibilityId: resolver === "host", bootId: resolver === "host",
+      supervisorSessionId: resolver === "host", cgroupRoot: resolver === "host" });
     expect(events.at(-1)?.error.message).toBe("image_contract_invalid");
   });
 
