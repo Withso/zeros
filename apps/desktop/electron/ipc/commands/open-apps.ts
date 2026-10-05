@@ -19,6 +19,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { execFile, spawn } from "node:child_process";
+import { withoutLocalDevelopment } from "../../../src/engine/env/local-development";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
@@ -217,7 +218,7 @@ function execFileText(
     execFile(
       cmd,
       args,
-      { timeout: timeoutMs, maxBuffer: 1 << 20 },
+      { timeout: timeoutMs, maxBuffer: 1 << 20, env: withoutLocalDevelopment(process.env) },
       (err, stdout) => (err ? reject(err) : resolve(String(stdout))),
     );
   });
@@ -359,6 +360,7 @@ function shellQuote(s: string): string {
 function openViaOpen(appPath: string, dir: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const child = spawn("open", ["-a", appPath, dir], {
+      env: withoutLocalDevelopment(process.env),
       stdio: ["ignore", "ignore", "pipe"],
     });
     let stderr = "";
@@ -384,6 +386,7 @@ function openCliInTerminal(binPath: string, dir: string): Promise<void> {
 end tell`;
   return new Promise<void>((resolve, reject) => {
     const child = spawn("osascript", ["-e", script], {
+      env: withoutLocalDevelopment(process.env),
       stdio: "ignore",
       detached: true,
     });

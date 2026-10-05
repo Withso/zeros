@@ -22,7 +22,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { useEffect } from "react";
-import { isNativeRuntime } from "../../platform/runtime";
+import { isLocalDevelopment, isNativeRuntime } from "../../platform/runtime";
 import { useAuth } from "../auth";
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { bridgeTeamSetContext } from "../../platform/bridge/workspace-bridge";
@@ -72,6 +72,10 @@ export function useTeamEngineSync(): void {
         error instanceof Error ? error.message : error,
       );
     });
+    if (isLocalDevelopment()) {
+      void bridgeTeamSetContext(bridge, { teamId: null, doc: null }).catch(() => {});
+      return;
+    }
     if (!CONTROL_PLANE_URL) return;
 
     let disposed = false;

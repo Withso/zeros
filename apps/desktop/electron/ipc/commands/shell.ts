@@ -23,6 +23,7 @@ import path from "node:path";
 import type { CommandHandler } from "../router";
 import { isKnownInstallCommand } from "../../../src/engine/agents/install-commands";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
+import { withoutLocalDevelopment } from "../../../src/engine/env/local-development";
 
 /** Open an external http(s) URL in the user's default browser.
  *  Scheme allowlist prevents a rogue caller from
@@ -53,6 +54,7 @@ export const openInTerminal: CommandHandler = (args) => {
 
   return new Promise<void>((resolve, reject) => {
     const child = spawn("open", ["-a", "Terminal", p], {
+      env: withoutLocalDevelopment(process.env),
       stdio: "ignore",
       detached: true,
     });
@@ -158,6 +160,7 @@ end tell`;
 
   return new Promise<void>((resolve, reject) => {
     const child = spawn("osascript", ["-e", script], {
+      env: withoutLocalDevelopment(process.env),
       stdio: "ignore",
       detached: true,
     });

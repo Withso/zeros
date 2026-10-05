@@ -45,6 +45,7 @@ import { useEffect, useState } from "react";
 import { parseNativeErrorMessage } from "@zeros/protocol/native-error";
 
 interface ZerosNativeBridge {
+  readonly localDevelopment?: boolean;
   maintainAttachmentSources?(retainedIds: string[]): Promise<string[]>;
   beforeQuit?(prepare: () => Promise<void>): () => void;
   prepareAttachmentFile?(file: File, id: string): Promise<string | null>;
@@ -77,6 +78,14 @@ declare global {
  *  preload bridge becomes available. */
 export function isElectron(): boolean {
   return typeof window !== "undefined" && !!window.__ZEROS_NATIVE__;
+}
+
+/** Synchronous, native-main-owned mode, available before the first app render. */
+export function isLocalDevelopment(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.__ZEROS_NATIVE__?.localDevelopment === true
+  );
 }
 
 /** Back-compat alias — same semantics as isElectron() now that

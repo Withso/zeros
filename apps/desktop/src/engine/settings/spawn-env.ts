@@ -31,6 +31,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { withoutLocalDevelopment } from "../env/local-development";
 import { zerosSkillInstructions } from "../agents/zeros-skills";
 import { spawnEnvNameHazard, type SpawnEnvHazard } from "./env-names";
 import { opSettingsResolve } from "./ops";
@@ -319,6 +320,6 @@ export function mergeSpawnEnv(
   const { env, warnings } = resolveSpawnEnv(cwd, mainRepoRoot);
   for (const w of warnings)
     console.warn(`[agents] settings env (${cwd}): ${w}`);
-  if (Object.keys(env).length === 0) return callerEnv;
-  return { ...env, ...(callerEnv ?? {}) };
+  if (Object.keys(env).length === 0) return callerEnv ? withoutLocalDevelopment(callerEnv) : callerEnv;
+  return withoutLocalDevelopment({ ...env, ...(callerEnv ?? {}) });
 }

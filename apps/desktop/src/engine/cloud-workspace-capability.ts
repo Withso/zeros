@@ -7,6 +7,8 @@
  * cannot override that release decision. Source/dev entrypoints without a
  * compiled value may opt in with the same exact-true environment contract.
  */
+import { isLocalDevelopmentRuntime } from "./runtime";
+
 export const CLOUD_WORKSPACES_DESKTOP_CAPABILITY_ENV =
   "ZEROS_CLOUD_WORKSPACES_ENABLED" as const;
 
@@ -29,6 +31,7 @@ function compiledCapability(): boolean | undefined {
 export function cloudWorkspaceDesktopCapabilityEnabled(
   options: CloudWorkspaceDesktopCapabilityOptions = {},
 ): boolean {
+  if (isLocalDevelopmentRuntime()) return false;
   const baked = options.bakedCapability ?? compiledCapability();
   if (typeof baked === "boolean") return baked;
   const environment = options.environment ?? process.env;

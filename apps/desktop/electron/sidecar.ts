@@ -36,7 +36,7 @@ import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import { emitEvent } from "./ipc/events";
-import { IS_DEV, IS_PACKAGED } from "./runtime-mode";
+import { IS_DEV, IS_PACKAGED, IS_LOCAL_DEVELOPMENT } from "./runtime-mode";
 import { engineTurnIsActive } from "./dev-main-restart";
 import { ownedEngineResponsive } from "./engine-health-probe";
 import { createEngineWatchdogTick, sameEngineTarget } from "./engine-watchdog";
@@ -1494,10 +1494,12 @@ async function doSpawnEngine(
   // this pins RS256, exact issuer/audience/client, and the complete required
   // application claim set. The engine receives public verification material
   // only; management API keys are scrubbed below.
-  Object.assign(
-    extraEnv,
-    resolveDesktopEngineAuthEnv(desktopAuthConfig(), process.env, IS_DEV),
-  );
+  if (!IS_LOCAL_DEVELOPMENT) {
+    Object.assign(
+      extraEnv,
+      resolveDesktopEngineAuthEnv(desktopAuthConfig(), process.env, IS_DEV),
+    );
+  }
 
   // Tell the engine that fd 3 is a private engine→host control pipe (added to
   // `stdio` below). The engine publishes its per-process loopback authority and
@@ -1920,7 +1922,7 @@ export async function pushGithubCredentialToEngine(): Promise<void> {
   }
   const engineCredential = githubCredentialForEngine(
     credential,
-    getProductAccountIdForMain(),
+    IS_LOCAL_DEVELOPMENT ? null : getProductAccountIdForMain(),
   );
   try {
     child.stdin.write(

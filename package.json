@@ -52,6 +52,7 @@
     "electron:rename-dev": "node scripts/rename-electron-dev-binary.cjs",
     "electron:dev:prep": "node scripts/check-deps-installed.mjs && pnpm electron:rebuild && pnpm build:zsr-supervisor && pnpm build:engine && pnpm electron:compile",
     "electron:dev": "node scripts/dev-environment/hosted-entry.mjs start",
+    "electron:local": "node scripts/electron-local.mjs",
     "electron:dev:watch": "node scripts/dev-environment/hosted-entry.mjs start",
     "electron:run": "node scripts/dev-environment/hosted-entry.mjs start --run-only",
     "electron:alpha": "node scripts/dev-environment/launcher.mjs alpha",

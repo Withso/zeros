@@ -22,6 +22,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { spawn } from "node:child_process";
+import { withoutLocalDevelopment } from "../../../src/engine/env/local-development";
 import { shell } from "electron";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
 import {
@@ -107,6 +108,7 @@ export const logsExportOpen: CommandHandler = async () => {
     // TextEdit specifically — the default .jsonl handler is often an IDE or
     // nothing at all; TextEdit opens instantly and is universally present.
     const child = spawn("open", ["-a", "TextEdit", file], {
+      env: withoutLocalDevelopment(process.env),
       detached: true,
       stdio: "ignore",
     });

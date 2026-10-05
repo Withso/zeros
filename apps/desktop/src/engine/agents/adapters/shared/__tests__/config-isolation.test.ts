@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 
 import {
   completeAgentSpawnEnv,
@@ -8,6 +9,8 @@ import {
   stripEngineAuthorityEnv,
 } from "../config-isolation";
 import { buildSpawnEnvWithLoginPath } from "../login-shell-path";
+
+afterEach(() => vi.unstubAllEnvs());
 
 // Zeros must never point a spawned agent at an isolated
 // config dir, or the agent silently stops loading the user's native MCP
@@ -83,6 +86,13 @@ describe("preserveAmbientConfigRoots", () => {
 });
 
 describe("stripEngineAuthorityEnv", () => {
+  it("never gives agent/tool children ambient or injected Local admission", async () => {
+    vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", "1");
+    const env = await buildSpawnEnvWithLoginPath(completeAgentSpawnEnv({ZEROS_LOCAL_DEVELOPMENT:"1"}));
+    expect(env.ZEROS_LOCAL_DEVELOPMENT).toBeUndefined();
+    expect(execFileSync(process.execPath,["-e","process.stdout.write(String('ZEROS_LOCAL_DEVELOPMENT' in process.env))"],{env,encoding:"utf8"})).toBe("false");
+  });
+
   it("removes every documented engine capability without mutating input", () => {
     const input: Record<string, string> = {
       ...Object.fromEntries(

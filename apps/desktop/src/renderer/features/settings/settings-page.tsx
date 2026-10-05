@@ -85,6 +85,7 @@ import {
   PROVIDER_DIAGNOSTIC_MAX_AGE_MS,
 } from "../../state/read-caches";
 import { Button } from "../../shared/ui";
+import { isLocalDevelopment } from "../../platform/runtime";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -1065,7 +1066,11 @@ function AccountPanel() {
           </SettingsGroup>
         </>
       ) : (
-        <p className={HINT_CLS}>You're not signed in.</p>
+        <p className={HINT_CLS}>
+          {isLocalDevelopment()
+            ? "Zeros Local runs without a Zeros account. Use Zeros Dev to test sign-in."
+            : "You're not signed in."}
+        </p>
       )}
     </div>
   );

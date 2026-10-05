@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
   chats: [{ id: "chat-1", title: "Untitled", folder: "/repo", createdAt: 1 }],
 }));
 vi.mock("@/renderer/platform/runtime", () => ({
+  isLocalDevelopment: () => false,
   isElectron: () => true,
   nativeInvoke: state.appInfo,
 }));

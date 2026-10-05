@@ -176,6 +176,9 @@ ipcRenderer.on("zeros:prepare-attachment-quit", (_event, token: unknown) => {
 });
 
 const bridge = {
+  // A synchronous metadata snapshot is available before page scripts run.
+  // Main is authoritative; argv and renderer/Vite flags cannot opt in.
+  localDevelopment: ipcRenderer.sendSync("zeros:local-development") === true,
   maintainAttachmentSources(retainedIds: string[]): Promise<string[]> {
     return ipcRenderer.invoke("zeros:attachment-source-maintenance", retainedIds);
   },

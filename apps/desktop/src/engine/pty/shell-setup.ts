@@ -366,6 +366,7 @@ export function buildPtyEnv(opts?: {
   // are set deliberately just below.
   delete env.ZEROS_INSTANCE;
   delete env.ZEROS_INSTANCE_NAME;
+  delete env.ZEROS_LOCAL_DEVELOPMENT;
   // A nested checkout resolves its own backend/auth profile and credentials.
   delete env.ZEROS_DEV_ENVIRONMENT;
   delete env.ZEROS_DEV_AUTH_PROFILE;

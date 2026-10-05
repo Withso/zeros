@@ -32,7 +32,7 @@
 import type { PostHog } from "posthog-js";
 import { scrubError } from "@zeros/protocol/scrub";
 import { isAnalyticsOptedOut, setAnalyticsOptedOut } from "./consent";
-import { isElectron, nativeInvoke } from "../../runtime";
+import { isElectron, isLocalDevelopment, nativeInvoke } from "../../runtime";
 import { subscribePreferenceCache } from "../../personal-preferences";
 import { CHANNEL } from "../../../config/release-channel";
 import { clientReleaseChannel } from "../../../../../shared/client-compatibility";
@@ -114,6 +114,7 @@ function flushBuffer(): void {
 /** Initialize PostHog. Idempotent. No-ops when the user opted out or when no
  * project key is configured, including open-source/contributor builds. */
 export function initAnalytics(): Promise<void> {
+  if (isLocalDevelopment()) return Promise.resolve();
   if (initPromise) return initPromise;
   initPromise = (async () => {
     if (isAnalyticsOptedOut()) return;

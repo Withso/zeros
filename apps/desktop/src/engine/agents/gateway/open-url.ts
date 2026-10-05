@@ -11,6 +11,7 @@
 import { spawn } from "node:child_process";
 import type { EventEmitter } from "node:events";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
+import { withoutLocalDevelopment } from "../../env/local-development";
 
 /** Open `url` in the default browser via the OS. Best-effort — a failure is
  *  logged, never thrown (the caller's auth flow surfaces the timeout instead). */
@@ -30,7 +31,7 @@ export function openExternalUrl(url: string): void {
         ? ["cmd", ["/c", "start", "", `"${normalized}"`]]
         : ["xdg-open", [normalized]];
   try {
-    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true, env: withoutLocalDevelopment(process.env) });
     // Attach via EventEmitter (ChildProcess's inherited .on isn't seen by this
     // tsconfig — the same quirk the other host spawners tolerate). The listener
     // is required: an unhandled "error" (e.g. opener missing) would otherwise throw.

@@ -1,5 +1,5 @@
 import { CHANNEL } from "../../config/release-channel";
-import { isElectron, nativeInvoke } from "../../platform/runtime";
+import { isElectron, isLocalDevelopment, nativeInvoke } from "../../platform/runtime";
 import { useRequiredUpdateStore } from "./required-update-state";
 import {
   createClientCompatibilityFetch,
@@ -33,7 +33,7 @@ function clientHeader(): Promise<string> {
   return identity;
 }
 
-export const controlPlaneFetch = createClientCompatibilityFetch({
+const hostedControlPlaneFetch = createClientCompatibilityFetch({
   header: clientHeader,
   requireUpgrade: (required) => {
     useRequiredUpdateStore.getState().requireUpdate(required);
@@ -41,3 +41,12 @@ export const controlPlaneFetch = createClientCompatibilityFetch({
       void nativeInvoke("updater_require", required).catch(() => {});
   },
 });
+
+export const controlPlaneFetch: typeof hostedControlPlaneFetch = (...args) => {
+  if (isLocalDevelopment()) {
+    return Promise.reject(
+      new Error("Account and cloud services are unavailable in Zeros Local."),
+    );
+  }
+  return hostedControlPlaneFetch(...args);
+};
