@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { runLocalDevelopment, runOwnedProcess } from "../electron-local.mjs";
@@ -96,6 +97,90 @@ async function cliFixture(failure?: "stdout" | "exception") {
 }
 
 describe("Local process ownership", () => {
+  it.each([
+    ["quit", 0],
+    ["crash", 1],
+    ["collision", 98],
+    ["cancel", 0],
+  ] as const)(
+    "returns the owned stack result for %s",
+    async (scenario, expected) => {
+      const root = directory();
+      const controller = new AbortController();
+      let output = "";
+      const cli = path.join(
+        path.dirname(
+          createRequire(import.meta.url).resolve("concurrently/package.json"),
+        ),
+        "dist/bin/concurrently.js",
+      );
+      const code = await runLocalDevelopment({
+        root,
+        platform: "darwin",
+        environment: { PATH: process.env.PATH },
+        signal: controller.signal,
+        listProcesses: () => "",
+        portProber: async () => true,
+        prepareBundle: () => "/fake/Electron",
+        run: async (
+          _command: string,
+          args: string[],
+          options: Parameters<typeof runOwnedProcess>[2],
+        ) => {
+          if (!args.includes("concurrently"))
+            return { code: 0, cancelled: false };
+          const index = args.indexOf("--success");
+          const success = index === -1 ? [] : args.slice(index, index + 2);
+          const script =
+            scenario === "collision"
+              ? `console.log('[vite] Error: Port ${options.startup.vitePort} is already in use');setInterval(()=>{},1000);`
+              : `console.log('ready');${scenario === "cancel" ? "setInterval(()=>{},1000);" : `setTimeout(()=>process.exit(${expected}),300);`}`;
+          const fakeSupervisor = path.join(root, "fake-supervisor.cjs");
+          fs.writeFileSync(fakeSupervisor, script);
+          const app = args.find((arg) =>
+            arg.includes("scripts/dev-main-supervisor.mjs"),
+          )!;
+          // Preparation/readiness are injected, but preserve the actual shell
+          // command shape passed to concurrently for the desktop supervisor.
+          const realApp =
+            `true && ${app.slice(app.indexOf(" && ") + 4)}`.replace(
+              "scripts/dev-main-supervisor.mjs",
+              quote(fakeSupervisor),
+            );
+          const command = (source: string) =>
+            `exec ${quote(process.execPath)} -e ${quote(source)}`;
+          return runOwnedProcess(
+            process.execPath,
+            [
+              cli,
+              "-k",
+              "--kill-timeout",
+              "1000",
+              ...success,
+              realApp,
+              command("setInterval(()=>{},1000);"),
+            ],
+            {
+              ...options,
+              killGraceMs: 1000,
+              output: (text: string) => {
+                output += text;
+                if (scenario === "cancel" && text.includes("ready"))
+                  controller.abort();
+              },
+            },
+          );
+        },
+      });
+      expect(output).toContain(scenario === "collision" ? "Port " : "ready");
+      expect(code, output).toBe(expected);
+      expect(
+        fs.existsSync(path.join(root, ".context/zeros-local/launcher.lock")),
+      ).toBe(false);
+    },
+    30000,
+  );
+
   it.each([false, true])(
     "runs steady watchdog ticks without invoking ps (guardian=%s)",
     async (guardian) => {
@@ -252,14 +337,9 @@ require('node:module').syncBuiltinESMExports();
   }, 30000);
 
   it("has a watchdog that exits when a SIGKILLed launcher disappears", async () => {
-    const parent = spawn(
-      process.execPath,
-      ["-e", "setInterval(()=>{},1000)"],
-      {
-        stdio: "ignore",
-      },
-      30000,
-    );
+    const parent = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
+      stdio: "ignore",
+    });
     processes.push(parent);
     const watcher = spawn(
       process.execPath,

@@ -51,6 +51,7 @@ on the Mac: the Linux VM cannot launch the native macOS application, and file
 sync does not install the Mac's dependencies.
 
 Stop with Ctrl+C or Conductor Stop. Hangup and SIGQUIT also cancel the launch.
+Quitting the app normally returns success; a crashed command still fails the run.
 Cancellation signals the owned preparation
 or development process group and waits for shutdown; the existing native main
 supervisor and sidecar clean up the engine and its children. Forced escalation

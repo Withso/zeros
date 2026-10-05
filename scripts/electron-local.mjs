@@ -481,6 +481,8 @@ export async function runLocalDevelopment({
           "exec",
           "concurrently",
           "-k",
+          "--success",
+          "first",
           "--kill-timeout",
           "20000",
           "-n",
