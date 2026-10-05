@@ -28,6 +28,8 @@
     "./agent-messages": "./src/agent-messages.ts",
     "./design-runtime": "./src/design-runtime.ts",
     "./design-context": "./src/design-context.ts",
+    "./design-path": "./src/design-path.ts",
+    "./design-pages": "./src/design-pages.ts",
     "./design-review": "./src/design-review.ts",
     "./design-capture": "./src/design-capture.ts",
     "./system-instructions": "./src/system-instructions/index.ts",

@@ -52,6 +52,117 @@ function styleTransaction() {
 }
 
 describe("headless Design API", () => {
+  it("forgets only the selected local sessions and does not retain an in-flight read", async () => {
+    const storage = repository();
+    const api = trustedApi(storage);
+    await api.apply(styleTransaction());
+    const read = vi.spyOn(storage, "read");
+    const state = await storage.read("document-1");
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    read.mockImplementationOnce(async () => {
+      started();
+      await pending;
+      return state;
+    });
+    const reading = api.open("document-1");
+    await ready;
+    api.forgetLocalSessions(["unrelated-document"]);
+    api.forgetLocalSessions(["document-1"]);
+    release();
+    await reading;
+    expect((await api.open("document-1")).history.undoDepth).toBe(0);
+  });
+
+  it("keeps surviving document history when another local session is forgotten", async () => {
+    const api = trustedApi(repository());
+    await api.apply(styleTransaction());
+    api.forgetLocalSessions(["deleted-document"]);
+    expect((await api.open("document-1")).history.undoDepth).toBe(1);
+    const denied = new DesignApi(repository());
+    expect(() => denied.forgetLocalSessions(["document-1"])).toThrow(
+      DesignApiAuthorizationError,
+    );
+  });
+
+  it("evicts old sessions in a removed page folder without affecting a similarly named page", async () => {
+    const state = webState();
+    const ids = ["frame:page-b/home.html", "frame:page-beta/home.html"];
+    const api = trustedApi(
+      new InMemoryDesignDocumentRepository(
+        ids.map((documentId) => ({
+          documentId,
+          entryFile: state.entryFile,
+          files: state.files,
+          manifest: state.manifest,
+          frames: state.frames,
+        })),
+      ),
+    );
+    for (const documentId of ids) {
+      const opened = await api.open(documentId);
+      await api.apply({
+        ...styleTransaction(),
+        documentId,
+        baseRevision: opened.revision,
+      });
+    }
+    api.forgetLocalSessions([], { prefix: "frame:page-b/" });
+    expect((await api.open(ids[0])).history.undoDepth).toBe(0);
+    expect((await api.open(ids[1])).history.undoDepth).toBe(1);
+  });
+
+  it("does not retain active or queued sessions for a removed page folder", async () => {
+    const state = webState();
+    const documentId = "frame:page-b/home.html";
+    const storage = new InMemoryDesignDocumentRepository([
+      {
+        documentId,
+        entryFile: state.entryFile,
+        files: state.files,
+        manifest: state.manifest,
+        frames: state.frames,
+      },
+    ]);
+    const api = trustedApi(storage);
+    const read = vi.spyOn(storage, "read");
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const captured = await storage.read(documentId);
+    read.mockImplementationOnce(async () => {
+      started();
+      await pending;
+      return captured;
+    });
+    const reading = api.open(documentId);
+    await ready;
+    const queued = api.open(documentId);
+    api.forgetLocalSessions([], { prefix: "frame:page-b/" });
+    release();
+    await Promise.all([reading, queued]);
+    expect(
+      (api as unknown as { sessions: Map<string, unknown> }).sessions.has(
+        documentId,
+      ),
+    ).toBe(false);
+    expect(
+      (api as unknown as { invalidatedSessions: Set<string> })
+        .invalidatedSessions.size,
+    ).toBe(0);
+  });
+
   it("restores local history only at its exact repository revision", async () => {
     const storage = repository();
     const api = trustedApi(storage);

@@ -45,6 +45,7 @@ import {
   designDocumentMetadataPath,
   commitDesignMetadata,
   ensureDesignMetadataLayout,
+  ensureDesignPagesLayout,
   designMetadataGitPaths,
   prepareDesignDirectoryRename,
   recoverDesignDirectoryRename,
@@ -389,6 +390,9 @@ async function renameDesignDirectoryAdmitted(opts: {
       commitDesignMetadata(opts.repoRoot, from, source);
     }
   }
+  // Settings rename is explicit authoring. Complete its page migration and
+  // unsafe-reference preflight before staging or moving any source.
+  ensureDesignPagesLayout(opts.repoRoot, from);
   const entry = designDirectoryEntry(opts.repoRoot, from)!;
   if (renameSelected)
     opSettingsWrite(

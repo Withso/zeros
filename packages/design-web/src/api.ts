@@ -439,6 +439,7 @@ export class DesignApi {
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly documentTurns = new Map<string, Promise<void>>();
   private readonly activeDocuments = new Set<string>();
+  private readonly invalidatedSessions = new Set<string>();
   private readonly maxSessions: number;
   private readonly maxSessionBytes: number;
 
@@ -487,6 +488,31 @@ export class DesignApi {
         bytes: estimatedSessionMemory(entry),
       };
     });
+  }
+
+  /** Evict removed documents without waiting on a repository mutation lane.
+   * A read already in flight must not retain its session after it finishes. */
+  forgetLocalSessions(
+    documentIds: readonly string[],
+    options: { prefix?: string } = {},
+  ): void {
+    if (this.options.authorization?.kind !== "trusted-in-process") {
+      throw new DesignApiAuthorizationError();
+    }
+    const removed = new Set(documentIds);
+    if (options.prefix) {
+      for (const documentId of [
+        ...this.sessions.keys(),
+        ...this.documentTurns.keys(),
+      ]) {
+        if (documentId.startsWith(options.prefix)) removed.add(documentId);
+      }
+    }
+    for (const documentId of removed) {
+      this.sessions.delete(documentId);
+      if (this.documentTurns.has(documentId))
+        this.invalidatedSessions.add(documentId);
+    }
   }
 
   /** Reattach a checkpoint only to its exact restored source revision. A
@@ -928,11 +954,14 @@ export class DesignApi {
     try {
       return await work();
     } finally {
+      if (this.invalidatedSessions.has(documentId))
+        this.sessions.delete(documentId);
       this.activeDocuments.delete(documentId);
       release();
       void tail.finally(() => {
         if (this.documentTurns.get(documentId) === tail) {
           this.documentTurns.delete(documentId);
+          this.invalidatedSessions.delete(documentId);
         }
       });
       this.pruneSessions();

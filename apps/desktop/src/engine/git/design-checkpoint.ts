@@ -1,6 +1,7 @@
 import path from "node:path";
 import { parseDesignManifest } from "../design/manifest";
 import { decodeCanvasFile } from "../design/canvas-file";
+import { resolveDesignManifestLayout, type DesignDirectoryLayout } from "../design/layout";
 import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
 import { designRegistryAtGitRef } from "../design/metadata-git";
 import { runGit } from "./git-exec";
@@ -23,29 +24,40 @@ export async function assertDesignCommitMetadata(
       .filter(Boolean)
       .map((row) => {
         const separator = row.indexOf("\t");
-        const [mode, oid] = row.slice(0, separator).split(" ");
-        return [row.slice(separator + 1), { mode, oid }] as const;
+        const [mode, oid, stage] = row.slice(0, separator).split(" ");
+        return [row.slice(separator + 1), { mode, oid, stage }] as const;
       }),
   );
   const roots = new Set(await stickyRecognizedDesignDirectories(cwd));
+  const layouts = new Map<string, DesignDirectoryLayout>();
+  const regular = (entry: { mode?: string; stage?: string } | undefined) =>
+    !!entry && (entry.mode === "100644" || entry.mode === "100755") && entry.stage === "0";
   for (const file of entries.keys())
     if (path.posix.basename(file) === "design.toml") {
-      const root = path.posix.dirname(file);
-      if (selected.some((changed) => changed.startsWith(`${root}/`))) {
+      const parent = path.posix.dirname(file);
+      const candidate = path.posix.basename(parent) === "meta" ? path.posix.dirname(parent) : parent;
+      if (selected.some((changed) => changed.startsWith(`${candidate}/`))) {
         const entry = entries.get(file)!;
         const { stdout } = await runGit(cwd, ["cat-file", "blob", entry.oid!], {
           env,
           readOnly: true,
+          maxBufferBytes: 16 * 1024 * 1024,
         });
-        if (parseDesignManifest(stdout)) roots.add(root);
+        const manifest = parseDesignManifest(stdout);
+        if (!manifest) continue;
+        const layout = resolveDesignManifestLayout(file, manifest);
+        if (layouts.has(layout.directory))
+          throw new GitError({ code: "VALIDATION_FAILED", message: `Competing staged root and meta Design registrations exist: ${layout.directory}` });
+        layouts.set(layout.directory, layout);
+        roots.add(layout.directory);
       }
     }
   for (const root of roots) {
     if (!selected.some((file) => file.startsWith(`${root}/`))) continue;
     if (![...entries.keys()].some((file) => file.startsWith(`${root}/`)))
       continue; // Whole-folder deletion.
-    const manifest = entries.get(`${root}/design.toml`);
-    if (!manifest) {
+    const layout = layouts.get(root);
+    if (!layout) {
       // Existing portable legacy documents remain committable until explicit
       // initialization migrates them. A new document must carry its manifest.
       if (entries.has(`${root}/.zeros-canvas.json`)) continue;
@@ -58,16 +70,15 @@ export async function assertDesignCommitMetadata(
         continue;
       throw new GitError({
         code: "VALIDATION_FAILED",
-        message: `Stage ${root}/design.toml and rules.md with this Design folder before committing.`,
+        message: `Stage the Design registration (${root}/meta/design.toml or the legacy ${root}/design.toml) and ${root}/rules.md with this Design folder before committing.`,
       });
     }
-    const rules = entries.get(`${root}/rules.md`);
-    const regular = (mode: string | undefined) =>
-      mode === "100644" || mode === "100755";
-    if (!regular(manifest.mode) || !rules || !regular(rules.mode))
+    const manifest = entries.get(layout.manifestFile)!;
+    const rules = entries.get(layout.rulesFile);
+    if (!regular(manifest) || !regular(rules))
       throw new GitError({
         code: "VALIDATION_FAILED",
-        message: `The staged Design folder must include regular design.toml and rules.md files: ${root}`,
+        message: `The staged Design folder must include regular ${layout.manifestFile} and ${layout.rulesFile} files.`,
       });
     const { stdout } = await runGit(cwd, ["cat-file", "blob", manifest.oid!], {
       env,
@@ -77,22 +88,22 @@ export async function assertDesignCommitMetadata(
     if (!registration)
       throw new GitError({
         code: "VALIDATION_FAILED",
-        message: `The staged Design manifest is invalid: ${root}/design.toml`,
+        message: `The staged Design manifest is invalid: ${layout.manifestFile}`,
       });
     if (registration.canvas) {
-      const canvas = entries.get(`${root}/${registration.canvas}`);
-      if (!canvas || !regular(canvas.mode))
-        throw new GitError({ code: "VALIDATION_FAILED", message: `Stage ${root}/canvas.json with this Design folder before committing.` });
-      const { stdout: source } = await runGit(cwd, ["cat-file", "blob", canvas.oid!], { env, readOnly: true });
+      const canvas = entries.get(layout.documentFile);
+      if (!regular(canvas))
+        throw new GitError({ code: "VALIDATION_FAILED", message: `Stage ${layout.documentFile} with this Design folder before committing.` });
+      const { stdout: source } = await runGit(cwd, ["cat-file", "blob", canvas!.oid!], { env, readOnly: true, maxBufferBytes: 16 * 1024 * 1024 });
       let document: Record<string, unknown>;
       try {
         if (Buffer.byteLength(source) > 16 * 1024 * 1024) throw new Error("Canvas is too large.");
-        document = decodeCanvasFile(source);
+        document = decodeCanvasFile(source, { version: layout.canvasVersion });
       } catch {
-        throw new GitError({ code: "VALIDATION_FAILED", message: `The staged Design canvas is invalid: ${root}/canvas.json` });
+        throw new GitError({ code: "VALIDATION_FAILED", message: `The staged Design canvas is invalid: ${layout.documentFile}` });
       }
       for (const file of Object.keys(document.frames as Record<string, unknown>)) {
-        if (!regular(entries.get(`${root}/${file}`)?.mode))
+        if (!regular(entries.get(`${root}/${file}`)))
           throw new GitError({ code: "VALIDATION_FAILED", message: `The staged canvas references a missing or unsafe frame source: ${root}/${file}` });
       }
     }

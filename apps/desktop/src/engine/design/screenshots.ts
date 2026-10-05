@@ -6,6 +6,11 @@
 // The trusted desktop bridge can then export those pixels without giving the
 // renderer filesystem paths or native write authority.
 
+import path from "node:path";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import { designDirectoryNameFor } from "./directory-registry";
+import { designPagesMigrationGeneration } from "./pages-migration";
+
 const MAX_SCREENSHOTS = 64;
 const MAX_BASE64_LENGTH = 12_000_000;
 const ALLOWED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
@@ -27,7 +32,11 @@ export interface DesignScreenshot {
   sourceVersion: string;
 }
 
-const screenshots = new Map<string, DesignScreenshot>();
+interface DesignScreenshotEntry {
+  screenshot: DesignScreenshot;
+  owner?: { workspacePath: string; directory: string; migrationGeneration: string | null };
+}
+const screenshots = new Map<string, DesignScreenshotEntry>();
 
 function screenshotKey(
   workspaceId: string,
@@ -94,7 +103,7 @@ export function normalizeDesignScreenshot(
   input: DesignScreenshot,
 ): DesignScreenshot {
   if (!input.workspaceId.trim()) throw new Error("workspaceId is required.");
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(input.frame)) {
+  if (!isDesignFrameFile(input.frame)) {
     throw new Error(`Invalid design frame file: ${input.frame}`);
   }
   if (
@@ -127,11 +136,17 @@ export function normalizeDesignScreenshot(
   return next;
 }
 
-export function setDesignScreenshot(input: DesignScreenshot): void {
+export function setDesignScreenshot(input: DesignScreenshot, workspacePath?: string): void {
   const next = normalizeDesignScreenshot(input);
   const key = screenshotKey(next.workspaceId, next.frame, next.nodeId);
+  const directory = workspacePath ? designDirectoryNameFor(workspacePath) : undefined;
+  const owner = workspacePath && directory ? {
+    workspacePath: path.resolve(workspacePath),
+    directory,
+    migrationGeneration: designPagesMigrationGeneration(workspacePath, directory),
+  } : undefined;
   screenshots.delete(key);
-  screenshots.set(key, next);
+  screenshots.set(key, { screenshot: next, owner });
   while (screenshots.size > MAX_SCREENSHOTS) {
     const oldest = screenshots.keys().next().value as string | undefined;
     if (!oldest) break;
@@ -146,11 +161,17 @@ export function getDesignScreenshot(
   sourceVersion: string,
 ): DesignScreenshot | null {
   const key = screenshotKey(workspaceId, frame, nodeId);
-  const screenshot = screenshots.get(key) ?? null;
-  if (!screenshot) return null;
+  const entry = screenshots.get(key);
+  if (!entry) return null;
+  if (entry.owner && entry.owner.migrationGeneration !==
+      designPagesMigrationGeneration(entry.owner.workspacePath, entry.owner.directory)) {
+    screenshots.delete(key);
+    return null;
+  }
+  const screenshot = entry.screenshot;
   if (screenshot.sourceVersion !== sourceVersion) return null;
   screenshots.delete(key);
-  screenshots.set(key, screenshot);
+  screenshots.set(key, entry);
   return screenshot;
 }
 

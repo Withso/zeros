@@ -289,20 +289,21 @@ describe("advanced Git operations", () => {
       await writeFile(path.join(designDir, frame), source.replace("Base heading", "Local heading"));
       await git(wsPath, "commit", "-aqm", "Local heading");
       const before = await readDesignFrame(wsPath, frame, 0, { writeBack: false });
-      const canvasBefore = await readFile(path.join(designDir, "canvas.json"), "utf8");
+      const canvasBefore = await readFile(path.join(designDir, "meta/canvas.json"), "utf8");
       expect(await merge({ workspaceId, branch: "design-clean" })).toMatchObject({ merged: true, conflicts: [] });
       const after = await readDesignFrame(wsPath, frame, 0, { writeBack: false });
       expect(after.source).toContain("Local heading");
       expect(after.source).toContain("Incoming footer");
       expect(after.sourceVersion).not.toBe(before.sourceVersion);
-      expect(await readFile(path.join(designDir, "canvas.json"), "utf8")).toBe(canvasBefore);
+      expect(await readFile(path.join(designDir, "meta/canvas.json"), "utf8")).toBe(canvasBefore);
       expect((await git(wsPath, "status", "--porcelain")).trim()).toBe("");
     });
 
     it.each(["tokens.css", "canvas.json", "design.toml"])("repairs a genuine %s merge conflict with stable identities and validates metadata before continue", async (filename) => {
       const { directory, designDir } = await seedPortableDesign();
-      const file = `${directory}/${filename}`;
-      const destination = path.join(designDir, filename);
+      const relative = filename === "tokens.css" ? filename : "meta/" + filename;
+      const file = `${directory}/${relative}`;
+      const destination = path.join(designDir, relative);
       let baseline: string;
       if (filename === "tokens.css") baseline = "body { color: black; } /* Base */\n";
       else if (filename === "design.toml") baseline = `# Base\n${await readFile(destination, "utf8")}`;
@@ -311,8 +312,8 @@ describe("advanced Git operations", () => {
         baseline = JSON.stringify({ ...canvas, title: "Base" }, null, 2) + "\n";
       }
       await writeFile(destination, baseline);
-      const manifestBefore = await readFile(path.join(designDir, "design.toml"), "utf8");
-      const frameIds = Object.keys(JSON.parse(await readFile(path.join(designDir, "canvas.json"), "utf8")).frames);
+      const manifestBefore = await readFile(path.join(designDir, "meta/design.toml"), "utf8");
+      const frameIds = Object.keys(JSON.parse(await readFile(path.join(designDir, "meta/canvas.json"), "utf8")).frames);
       await git(wsPath, "add", "--", directory, ".gitignore");
       await git(wsPath, "commit", "-qm", "Portable Design baseline");
       await git(repoRoot, "checkout", "-qb", "design-conflict", getWorkspace(workspaceId).branch);
@@ -341,8 +342,8 @@ describe("advanced Git operations", () => {
       expect(await continueOperation(workspaceId)).toMatchObject({ kind: "merge", conflicts: [] });
       await expect(assertDesignCheckoutReadable(wsPath)).resolves.toBeUndefined();
       expect(await git(wsPath, "show", `HEAD:${file}`)).toBe(resolved);
-      expect(Object.keys(JSON.parse(await readFile(path.join(designDir, "canvas.json"), "utf8")).frames)).toEqual(frameIds);
-      expect((await readFile(path.join(designDir, "design.toml"), "utf8")).split("\n").filter(line => line.startsWith("id =")))
+      expect(Object.keys(JSON.parse(await readFile(path.join(designDir, "meta/canvas.json"), "utf8")).frames)).toEqual(frameIds);
+      expect((await readFile(path.join(designDir, "meta/design.toml"), "utf8")).split("\n").filter(line => line.startsWith("id =")))
         .toEqual(manifestBefore.split("\n").filter(line => line.startsWith("id =")));
     });
   });

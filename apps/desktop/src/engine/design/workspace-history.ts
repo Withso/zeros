@@ -69,6 +69,39 @@ export function pruneWorkspaceDesignHistory(
   state.bytes = Math.max(0, state.bytes);
 }
 
+export function pruneWorkspaceDesignFrameHistory(
+  state: WorkspaceDesignHistoryState,
+  files: ReadonlySet<string>,
+  folder?: string,
+): void {
+  const deletedFile = (file: string): boolean =>
+    files.has(file) || (folder !== undefined && file.startsWith(`${folder}/`));
+  const keep = (entry: WorkspaceDesignHistoryEntry): boolean => {
+    const deleted =
+      entry.kind === "frame"
+        ? [entry.before, entry.after].some(
+            (point) => point && deletedFile(point.file),
+          )
+        : deletedFile(entry.frame) ||
+          (entry.kind === "transfer" &&
+            (entry.changes.some((change) =>
+              [change.before, change.after].some(
+                (point) => point && deletedFile(point.file),
+              ),
+            ) ||
+              [...entry.beforeHistory, ...entry.afterHistory].some(
+                (checkpoint) =>
+                  checkpoint.documentId.startsWith("frame:") &&
+                  deletedFile(checkpoint.documentId.slice(6)),
+              )));
+    if (deleted) state.bytes -= entry.bytes;
+    return !deleted;
+  };
+  state.undo = state.undo.filter(keep);
+  state.redo = state.redo.filter(keep);
+  state.bytes = Math.max(0, state.bytes);
+}
+
 export function documentDesignHistoryEntry(
   frame: string,
   coalesceKey?: string,

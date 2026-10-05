@@ -48,7 +48,7 @@ describe("design protocol resources", () => {
       target,
       source.replace(
         "</main>",
-        '<img data-oid="pixel" src="./assets/pixel.png" alt="Pixel"></main>',
+        '<img data-oid="pixel" src="../assets/pixel.png" alt="Pixel"></main>',
       ),
     );
     const identity = await readDesignFrameRenderIdentity(root, frame.file);

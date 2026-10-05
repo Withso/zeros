@@ -1,6 +1,4 @@
-import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { readDirectoryDesignManifest } from "./metadata";
-import { TOKENS_SEED } from "./document-seeds";
 import { escapeText, escapeAttribute } from "./source";
 import {
   listDesignAssets,
@@ -28,19 +26,22 @@ import { elementRecords } from "./source";
 // A design workspace is still a Git worktree, but its authored surface is one
 // deliberately small directory:
 //
-//   Zeros Design/*.html      one top-level file per frame
-//   Zeros Design/*.css       shared authored styles
-//   Zeros Design/tokens.css  typed design tokens + layout reset
-//   Zeros Design/design.toml  engine-managed directory registration
-//   Zeros Design/canvas.json  editable scene, frame and Foundation metadata
-//   Zeros Design/rules.md     short native-authoring instructions
+//   Zeros Design/<page>/*.html  registered frames in each page folder
+//   Zeros Design/*.css          shared authored styles
+//   Zeros Design/tokens.css     typed design tokens + layout reset
+//   Zeros Design/meta/design.toml  engine-managed directory registration
+//   Zeros Design/meta/canvas.json  editable pages, frames and Foundation metadata
+//   Zeros Design/rules.md       short native-authoring instructions
+//
+// Legacy root metadata and flat sources remain readable. Explicit Design
+// authoring upgrades them recoverably into the meta/pages layout.
 //
 // This module is the single engine-side interpretation of that format. The
 // renderer and first-party MCP server both consume these functions, so frame
 // discovery, OID healing, constraints, and token parsing cannot drift.
 
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { migrateDesignFoundationManifest } from "@zeros/design-core";
@@ -50,7 +51,6 @@ import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss from "postcss";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
-import { ensureDesignMetadataLayout } from "./metadata";
 
 import { expandDesignComponents } from "./components";
 import {
@@ -81,6 +81,8 @@ import {
   type DesignWorkspaceSnapshot,
   type InlineStyleDeclaration,
 } from "./document-model";
+import { designCanvasPageCatalog } from "./pages";
+import { readDirectoryDesignLayout } from "./metadata";
 import {
   assertFrameFile,
   atomicWriteDesignSource,
@@ -90,15 +92,15 @@ import {
   nextFrameGeometry,
   readBoundedDesignFrameSource,
   readCanvas,
+  readCanvasContext,
+  type DesignCanvasReadContext,
   readFrameMeta,
   writeCanvas,
 } from "./document-storage";
 import {
   DESIGN_TOKENS_FILE,
-  ensureSafeDesignRoot,
   initializeDesignDocumentUnlocked,
   recoverPendingDesignTransactionUnlocked,
-  writeIfMissing,
 } from "./document-transactions";
 import {
   assertDesignNodeId,
@@ -109,15 +111,12 @@ import {
   listDesignFramesUnlocked,
   prepareFrameRenderSourceForFile,
 } from "./frame-lifecycle";
-import {
-  designDirectoryEntry,
-  recoverDesignMetadataMigration,
-} from "./metadata";
 import { getDesignRuntimeAudit } from "./runtime-audits";
 import { readSafeRegularFile } from "./safe-files";
 
 export { listDesignAssets,type DesignAssetSummary } from "./assets";
 export { designDirectoryNameFor } from "./directory-registry";
+export { createDesignPage, deleteDesignPage, renameDesignPage } from "./page-lifecycle";
 export { type DesignCanvasFrame,type DesignElementOffset,type DesignFrameChange,type DesignFrameDocument,type DesignFrameGeometry,type DesignFrameRenderIdentity,type DesignFrameRenderSource,type DesignFrameRestorePoint,type DesignFrameSelectionIdentity,type DesignFrameSummary,type DesignFrameTreeNode,type DesignLintReport,type DesignLintSeverity,type DesignLintViolation,type DesignMutationResult,type DesignSourceSpan,type DesignTokenMutationResult,type DesignTokenSummary,type DesignTokensDocument,type DesignWorkspaceSnapshot } from "./document-model";
 export { DESIGN_TOKENS_FILE,DESIGN_TRANSACTION_JOURNAL_FILE,commitDesignWebDocumentState,designTransactionJournalPath,designTransactionRecoveryDirectory,designWebDocumentId,readDesignWebDocumentState,recoverDesignStorageForArchive,recoverPendingDesignTransaction } from "./document-transactions";
 export { captureDesignFrameRestorePoint,createDesignFrame,deleteDesignFrame,duplicateDesignFrame,healDesignOids,listDesignFrames,readDesignFrameRenderIdentityFromSource,renameDesignFrame,replaceDesignFrameFromHistory,restoreDesignFrame,restoreDesignFrameChanges,sameDesignFrameRestorePoint,transferDesignNode,updateDesignFrameGeometry } from "./frame-lifecycle";
@@ -169,44 +168,11 @@ export async function inspectDesignFilesForAdoption(
 export async function initializeDesignDocument(
   workspacePath: string,
 ): Promise<{ created: string[] }> {
-  return withDocumentWrite(workspacePath, async () => {
-    const directory = designDirectory(workspacePath);
-    await ensureSafeDesignRoot(workspacePath);
-    await Promise.all([
-      mkdir(path.join(directory, "assets"), { recursive: true }),
-      mkdir(path.join(directory, "components"), { recursive: true }),
-    ]);
-    publishCloudWorkspacePath(path.join(directory, "assets"));
-    publishCloudWorkspacePath(path.join(directory, "components"));
-    const created: string[] = [];
-    await writeIfMissing(
-      path.join(directory, DESIGN_TOKENS_FILE),
-      TOKENS_SEED,
-      created,
-      workspacePath,
-    );
-    recoverDesignMetadataMigration(
-      workspacePath,
-      designDirectoryNameFor(workspacePath),
-    );
-    await recoverPendingDesignTransactionUnlocked(workspacePath);
-    const canvas = await readCanvas(workspacePath);
-    if (
-      !designDirectoryEntry(
-        workspacePath,
-        designDirectoryNameFor(workspacePath),
-      )
-    )
-      created.push(...(await writeCanvas(workspacePath, canvas)));
-    else
-      created.push(
-        ...ensureDesignMetadataLayout(
-          workspacePath,
-          designDirectoryNameFor(workspacePath),
-        ),
-      );
-    return { created };
-  });
+  return withDocumentWrite(workspacePath, async () => ({
+    created: await initializeDesignDocumentUnlocked(workspacePath, {
+      force: true,
+    }),
+  }));
 }
 
 function normalizeCssProperty(value: string): string {
@@ -230,6 +196,7 @@ function validateCssMutationValue(
   workspacePath: string,
   property: string,
   value: string,
+  sourceFile: string,
 ): string {
   const normalized = value.trim();
   if (!normalized || normalized.length > 2_048) {
@@ -263,7 +230,11 @@ function validateCssMutationValue(
   }
   for (const match of normalized.matchAll(/url\(\s*(["']?)(.*?)\1\s*\)/gi)) {
     const reference = match[2]?.trim() ?? "";
-    const local = safeLocalReference(designDirectory(workspacePath), reference);
+    const local = safeLocalReference(
+      designDirectory(workspacePath),
+      reference,
+      sourceFile,
+    );
     if (
       !local &&
       !/^data:image\/(?:avif|gif|jpeg|png|webp);base64,/i.test(reference)
@@ -420,8 +391,8 @@ async function mutationResultUnlocked(
   changed: boolean,
 ): Promise<DesignMutationResult> {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  const meta = readFrameMeta(document, file, await readCanvas(workspacePath));
   const canvas = await readCanvas(workspacePath);
+  const meta = readFrameMeta(document, file, canvas);
   const geometry = canvas.frames[file] ?? {
     x: 0,
     y: 0,
@@ -433,7 +404,7 @@ async function mutationResultUnlocked(
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: geometry.w,
     height: geometry.h,
-  });
+  }, file);
   const knownTokens = await knownTokenNames(workspacePath);
   const linted = await lintFrame(
     workspacePath,
@@ -506,6 +477,7 @@ async function mutateDesignFrameSource(
     throw new Error("sourceVersion must be an exact design render generation.");
   }
   return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
     await designFrameTarget(workspacePath, file);
     const before = await readBoundedDesignFrameSource(workspacePath, file);
     const source = healDesignOids(before).html;
@@ -516,7 +488,7 @@ async function mutateDesignFrameSource(
     const current = await prepareFrameRenderSource(workspacePath, before, {
       width: geometry?.w ?? meta.width,
       height: geometry?.h ?? meta.height,
-    });
+    }, undefined, undefined, file);
     if (current.sourceVersion !== input.sourceVersion) {
       throw new Error(
         `Design frame changed before the mutation: ${file}. Re-read it and retry.`,
@@ -586,6 +558,7 @@ export async function updateDesignNodeStyles(
     styles: Record<string, DesignStyleMutationValue>;
   },
 ): Promise<DesignMutationResult> {
+  const file = assertFrameFile(input.frame);
   const entries = Object.entries(input.styles);
   if (entries.length === 0 || entries.length > 64) {
     throw new Error("styles must contain between 1 and 64 properties.");
@@ -597,7 +570,7 @@ export async function updateDesignNodeStyles(
       property,
       rawValue === null
         ? null
-        : validateCssMutationValue(workspacePath, property, rawValue),
+        : validateCssMutationValue(workspacePath, property, rawValue, file),
     );
   }
   return mutateDesignFrameSource(
@@ -762,9 +735,11 @@ export async function prepareDesignAssetInsertion(
     .update(`${input.frame}:${asset.path}:${Date.now()}:${randomUUID()}`)
     .digest("hex")
     .slice(0, 9)}`;
+  const relative = path.posix.relative(path.posix.dirname(assertFrameFile(input.frame)), asset.path);
+  const reference = relative.startsWith(".") ? relative : "./" + relative;
   return {
     nodeId: root.oid,
-    html: `<img data-oid="${oid}" src="./${escapeAttribute(asset.path)}" alt="${escapeAttribute(path.basename(asset.name, path.extname(asset.name)))}" style="position:absolute; left:${x}px; top:${y}px; max-width:320px; height:auto;">`,
+    html: `<img data-oid="${oid}" src="${escapeAttribute(reference)}" alt="${escapeAttribute(path.basename(asset.name, path.extname(asset.name)))}" style="position:absolute; left:${x}px; top:${y}px; max-width:320px; height:auto;">`,
   };
 }
 
@@ -992,7 +967,7 @@ async function readDesignFrameFromSummary(
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: summary.width,
     height: summary.height,
-  });
+  }, summary.file);
   return {
     ...summary,
     sourceVersion: composed.sourceVersion,
@@ -1013,7 +988,7 @@ async function readDesignCanvasFrameFromSummary(
   const render = await prepareFrameRenderSource(workspacePath, source, {
     width: summary.width,
     height: summary.height,
-  });
+  }, undefined, undefined, summary.file);
   return { ...summary, sourceVersion: render.sourceVersion };
 }
 
@@ -1054,11 +1029,27 @@ export async function readDesignWorkspaceSnapshot(
     // frame/token payloads from another.
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     if (writeBack) await initializeDesignDocumentUnlocked(workspacePath);
-    const lint = await lintDesignDocumentUnlocked(workspacePath, undefined, {
-      healOids: writeBack,
-      includeRuntimeAudits: false,
-    });
-    const summaries = await listDesignFramesUnlocked(workspacePath, writeBack);
+    const context = await readCanvasContext(workspacePath);
+    const lint = await lintDesignDocumentUnlocked(
+      workspacePath,
+      undefined,
+      {
+        healOids: writeBack,
+        includeRuntimeAudits: false,
+      },
+      context,
+    );
+    const summaries = await listDesignFramesUnlocked(
+      workspacePath,
+      writeBack,
+      true,
+      context,
+    );
+    const pages = designCanvasPageCatalog(
+      context.canvas,
+      summaries.map((frame) => frame.file),
+      context.layout?.canvasVersion === 2,
+    );
     const renderBudgetViolations: DesignLintViolation[] = [];
     const [renderedFrames, tokensDocument, assets] = await Promise.all([
       mapDesignFramesBounded(summaries, (summary) =>
@@ -1072,7 +1063,7 @@ export async function readDesignWorkspaceSnapshot(
           },
         ),
       ),
-      readDesignTokensDocument(workspacePath),
+      readDesignTokensDocument(workspacePath, context),
       listDesignAssets(workspacePath),
     ]);
     const frames = renderedFrames.filter(
@@ -1082,7 +1073,8 @@ export async function readDesignWorkspaceSnapshot(
       getDesignRuntimeAudit(workspacePath, frame.file, frame.sourceVersion),
     );
     return {
-      frames,
+      pages,
+      frames: frames.map((frame) => ({ ...frame, pageId: pages.find((page) => page.frameFiles.includes(frame.file))!.id })),
       tokens: tokensDocument.tokens,
       tokenSourceVersion: tokensDocument.sourceVersion,
       assets,
@@ -1129,27 +1121,47 @@ function designRenderBudgetViolation(
   });
 }
 
-async function cssSourceFiles(workspacePath: string): Promise<string[]> {
-  let entries;
-  try {
-    entries = await readdir(designDirectory(workspacePath), {
-      withFileTypes: true,
-    });
-  } catch {
-    return [];
-  }
-  return entries
-    .filter((entry) => entry.isFile() && /\.css$/i.test(entry.name))
-    .map((entry) => entry.name)
-    .sort();
+async function cssSourceFiles(
+  workspacePath: string,
+  context?: DesignCanvasReadContext,
+): Promise<string[]> {
+  const directory = designDirectory(workspacePath);
+  const layout = context
+    ? context.layout
+    : readDirectoryDesignLayout(
+        workspacePath,
+        designDirectoryNameFor(workspacePath),
+      );
+  const folders =
+    layout?.canvasVersion === 2
+      ? (
+          context?.canvas ?? (await readCanvas(workspacePath, layout))
+        ).pages!.map((page) => page.folder!)
+      : [];
+  const files = await Promise.all(
+    ["", ...folders].map(async (folder) => {
+      const entries = await readdir(path.join(directory, folder), {
+        withFileTypes: true,
+      }).catch(() => []);
+      return entries
+        .filter((entry) => entry.isFile() && /\.css$/i.test(entry.name))
+        .map((entry) => (folder ? `${folder}/${entry.name}` : entry.name));
+    }),
+  );
+  return files.flat().sort();
 }
 
-async function knownTokenNames(workspacePath: string): Promise<Set<string>> {
+async function knownTokenNames(
+  workspacePath: string,
+  context?: DesignCanvasReadContext,
+): Promise<Set<string>> {
   const names = new Set(
-    (await readDesignTokens(workspacePath)).map((token) => token.name),
+    (await readDesignTokensDocument(workspacePath, context)).tokens.map(
+      (token) => token.name,
+    ),
   );
   const directory = designDirectory(workspacePath);
-  for (const file of await cssSourceFiles(workspacePath)) {
+  for (const file of await cssSourceFiles(workspacePath, context)) {
     const source = await readSafeDesignText(
       directory,
       path.join(directory, file),
@@ -1303,6 +1315,7 @@ async function lintFrame(
         const local = safeLocalReference(
           designDirectory(workspacePath),
           attribute.value,
+          file,
         );
         if (external) {
           violations.push(
@@ -1397,6 +1410,8 @@ async function lintFrame(
   const componentExpansion = await expandDesignComponents(
     workspacePath,
     source,
+    undefined,
+    file,
   );
   const usedComponents = new Set(componentExpansion.usedComponents);
   const componentRecords = designNodeRecords(document).filter(({ element }) =>
@@ -1446,11 +1461,12 @@ async function lintDesignDocumentUnlocked(
   workspacePath: string,
   frame?: string,
   options: { healOids?: boolean; includeRuntimeAudits?: boolean } = {},
+  context?: DesignCanvasReadContext,
 ): Promise<DesignLintReport> {
   const files = frame
     ? [(await designFrameTarget(workspacePath, frame)).file]
-    : await discoverFrameFiles(workspacePath);
-  const knownTokens = await knownTokenNames(workspacePath);
+    : await discoverFrameFiles(workspacePath, context);
+  const knownTokens = await knownTokenNames(workspacePath, context);
   const violations: DesignLintViolation[] = [];
   let healedOids = 0;
   for (const file of files) {
@@ -1499,7 +1515,10 @@ export function lintDesignDocument(
   const lint = () => lintDesignDocumentUnlocked(workspacePath, frame, options);
   return options.healOids === false
     ? lint()
-    : withDocumentWrite(workspacePath, lint);
+    : withDocumentWrite(workspacePath, async () => {
+        await initializeDesignDocumentUnlocked(workspacePath);
+        return lint();
+      });
 }
 
 function sortDesignLintViolations(
@@ -1516,6 +1535,7 @@ function sortDesignLintViolations(
 
 export async function readDesignTokensDocument(
   workspacePath: string,
+  context?: DesignCanvasReadContext,
 ): Promise<DesignTokensDocument> {
   const directory = designDirectory(workspacePath);
   const tokenFile = path.join(directory, DESIGN_TOKENS_FILE);
@@ -1584,8 +1604,8 @@ export async function readDesignTokensDocument(
   });
 
   const sources = [
-    ...(await discoverFrameFiles(workspacePath)),
-    ...(await cssSourceFiles(workspacePath)),
+    ...(await discoverFrameFiles(workspacePath, context)),
+    ...(await cssSourceFiles(workspacePath, context)),
   ];
   for (const file of sources) {
     const source =
@@ -1655,6 +1675,7 @@ export async function updateDesignToken(
     throw new Error("Design token value is invalid CSS.");
   }
   return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
     const directory = designDirectory(workspacePath);
     const target = path.join(directory, DESIGN_TOKENS_FILE);
     const source = (await readSafeDesignText(directory, target)) ?? "";
@@ -1703,10 +1724,10 @@ export async function updateDesignToken(
 }
 
 export const DESIGN_GUIDES = Object.freeze({
-  frame: `One top-level .html file is one frame. Link ./tokens.css and keep the body as the design. Frame titles, kinds, geometry and foundation metadata are stored separately in this Design folder’s design.toml; use the Design API to change them. Give every rendered element inside body a stable unique data-oid, but leave html, head, body, meta, link, title, style, script, and template as non-selectable document plumbing.`,
+  frame: `One registered HTML file in a page folder is one frame. Link ../tokens.css and keep the body as the design. Frame titles, kinds, geometry, page membership and Foundation metadata live in the active Design directory's meta/canvas.json. Native agents write <page.folder>/<name>.html and add its stable frame ID to the frames map and that page's frames array; API agents supply pageId when creating or duplicating a frame in a directory with several pages. Preserve directory, page and frame IDs. Legacy root canvas.json and flat HTML remain readable. Give every rendered element inside body a stable unique data-oid, but leave html, head, body, meta, link, title, style, script, and template as non-selectable document plumbing.`,
   layout: `Use normal HTML flow and flexbox for structural layout. Prefer flex containers, gap, padding, alignment, and intrinsic sizing over absolute positioning inside a frame.`,
   tokens: `Use var(--token) from tokens.css whenever a matching color, spacing, radius, or type token exists. Add typed @property declarations before introducing a new token.`,
-  workflow: `Inspect the live element selection and frames and make targeted HTML/CSS edits only under Zeros Design/. Call lint_design, re-read the affected frame, use screenshot_frame to visually verify it, then call lint_design again so exact-generation browser contrast, overflow, and spacing checks are included. Resolve errors and review non-blocking advisories. JavaScript and external URLs are not part of design documents.`,
+  workflow: `Read the active Design directory's rules.md, meta/canvas.json page catalog and relevant sources. Follow the active page named in context unless the user says otherwise; always supply an explicit pageId to frame API writes when several pages exist. Inspect the live element selection and frames and make targeted HTML/CSS edits in that directory. Call lint_design, re-read the affected frame using its full page-folder path, use screenshot_frame to visually verify it, then call lint_design again so exact-generation browser contrast, overflow, and spacing checks are included. Resolve errors and review non-blocking advisories. JavaScript and external URLs are not part of design documents.`,
   components: `Define a reusable component as one direct components/name.html file and instantiate it with <zd-name data-oid="stable-instance">. Give every selectable definition-body element except <slot> a unique, stable data-zid, for example <article data-zid="surface">. The definition body expands only at render time; <slot> accepts instance children and <slot data-zd-attr="label"> accepts escaped attributes. Keep scripts, event handlers, external URLs, and data-oid attributes out of definitions—the authored zd-* wrapper owns selection and editing. Legacy definitions with no data-zid remain renderable, but new component.create operations require complete definition-local identity.`,
 });
 

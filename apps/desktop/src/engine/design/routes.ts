@@ -1,4 +1,7 @@
 import { designContextReferenceSchema } from "@zeros/protocol/design-context";
+import { encodeDesignFramePath } from "@zeros/protocol/design-path";
+import { designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
+import { selectDesignPageHint } from "./page-selection";
 import { DESIGN_CAPTURE_TIMEOUT_MS, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
 import { captureWorkspaceDesign } from "./workspace-capture";
 import { openDesignVerification, designFramePreviewUrl } from "./verification-service";
@@ -31,7 +34,7 @@ import {
   previewExistingDesignDirectory,
 } from "./adopt-directory";
 import { stageDesignRegistry } from "./metadata-git";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   designDirectoryFromSettings,
   designDocumentMetadataPath,
@@ -60,12 +63,20 @@ import {
   opSettingsResolveWithOverride,
 } from "../settings/ops";
 import { personalRepoRoot } from "../settings/personal-repo";
-import { designDocumentIdForFrame, getWorkspaceDesignApi } from "./design-api";
+import {
+  designDocumentIdForFrame,
+  forgetWorkspaceDesignApiFrames,
+  getWorkspaceDesignApi,
+} from "./design-api";
+import { DesignPageTargetError } from "./pages";
 import {
   captureDesignFrameRestorePoint,
   transferDesignNode,
   restoreDesignFrameChanges,
   createDesignFrame,
+  createDesignPage,
+  renameDesignPage,
+  deleteDesignPage,
   deleteDesignFrame,
   designDirectoryNameFor,
   DESIGN_TOKENS_FILE,
@@ -172,6 +183,11 @@ export interface DesignWorkspaceRouteHost {
     workspacePath: string,
     entry: WorkspaceDesignHistoryEntry,
   ): void;
+  pruneDesignHistoryFrames(
+    workspacePath: string,
+    frames: readonly string[],
+    folder?: string,
+  ): void;
   readDesignSnapshot(
     workspace: Workspace,
     remote: boolean,
@@ -180,6 +196,7 @@ export interface DesignWorkspaceRouteHost {
       writeBack?: boolean;
       designDirectory?: string;
       hostLocalResources?: boolean;
+      fresh?: boolean;
     },
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
   readDesignSnapshotRequest(
@@ -217,6 +234,10 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.screenshot.set",
   "design.runtime.audit",
   "design.frame.create",
+  "design.page.create",
+  "design.page.rename",
+  "design.page.delete",
+  "design.page.select",
   "design.frame.rename",
   "design.frame.duplicate",
   "design.frame.delete",
@@ -426,6 +447,7 @@ export async function handleDesignWorkspaceRoute(
         result,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
       };
     }
@@ -461,7 +483,9 @@ export async function handleDesignWorkspaceRoute(
               direction,
             );
           } catch (error) {
-            source.push(entry);
+            if (error instanceof DesignPageTargetError)
+              history.bytes = Math.max(0, history.bytes - entry.bytes);
+            else source.push(entry);
             throw error;
           }
           const replacementHistory =
@@ -480,6 +504,7 @@ export async function handleDesignWorkspaceRoute(
           pruneWorkspaceDesignHistory(history);
           const snapshot = await host.readDesignSnapshot(workspace, remote, {
             hostLocalResources,
+            fresh: true,
           });
           return {
             result: null,
@@ -488,6 +513,7 @@ export async function handleDesignWorkspaceRoute(
               direction === "redo"
                 ? entry.frame
                 : (entry.changes[0]?.before?.file ?? null),
+            historyFrame: direction === "redo" ? entry.frame : (entry.changes[0]?.before?.file ?? entry.frame),
           };
         }
         if (entry.kind === "frame") {
@@ -508,18 +534,22 @@ export async function handleDesignWorkspaceRoute(
               throw new Error("Design frame history entry is empty.");
             }
           } catch (error) {
-            source.push(entry);
+            if (error instanceof DesignPageTargetError)
+              history.bytes = Math.max(0, history.bytes - entry.bytes);
+            else source.push(entry);
             throw error;
           }
           destination.push(entry);
           const snapshot = await host.readDesignSnapshot(workspace, remote, {
             hostLocalResources,
+            fresh: true,
           });
           return {
             result: null,
             snapshot,
             historySelection:
               replacement?.file ?? snapshot.frames[0]?.file ?? null,
+            historyFrame: (replacement ?? expected)!.file,
           };
         }
 
@@ -533,7 +563,9 @@ export async function handleDesignWorkspaceRoute(
               : await api.redo(documentId, options.actor, options.actor ? { expectedRevision: reqStr(params, "expectedRevision") } : {});
           if (!result && options.actor) throw new GitError({ code: "VALIDATION_FAILED", message: "Another collaborator changed Design history. Refresh before undoing." });
         } catch (error) {
-          source.push(entry);
+          if (error instanceof DesignPageTargetError)
+            history.bytes = Math.max(0, history.bytes - entry.bytes);
+          else source.push(entry);
           throw error;
         }
         if (result) destination.push(entry);
@@ -542,6 +574,7 @@ export async function handleDesignWorkspaceRoute(
           result,
           snapshot: await host.readDesignSnapshot(workspace, remote, {
             hostLocalResources,
+            fresh: true,
           }),
           ...(result ? { historyFrame: entry.frame } : {}),
         };
@@ -556,6 +589,7 @@ export async function handleDesignWorkspaceRoute(
           result: null,
           snapshot: await host.readDesignSnapshot(workspace, remote, {
             hostLocalResources,
+            fresh: true,
           }),
         };
       }
@@ -569,7 +603,9 @@ export async function handleDesignWorkspaceRoute(
         result,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
+        ...(result ? { historyFrame: frame } : {}),
       };
     }
     case "design.context.create": {
@@ -600,17 +636,40 @@ export async function handleDesignWorkspaceRoute(
     case "design.context.capture": {
       if (remote || !hostLocalResources) throw new Error("Frame image attachments are currently available in local workspaces.");
       const reference = designContextReferenceSchema.parse(params.reference);
-      if (reqStr(params, "workspaceId") !== reference.workspaceId) throw new Error("The frame belongs to another workspace.");
-      return host.withDesignReadWorkspace(reference.workspaceId, false, async ({ root, designDirectory }) => {
-        if ((await inspectDesignContext(root, reference)).status !== "ready") throw new Error("The selected frame changed. Send again to capture its current revision.");
-        const access = await openDesignVerification({ workspaceId: reference.workspaceId, workspacePath: root, directory: designDirectory, directoryId: reference.directoryId });
-        const response = await fetch(`${access.url}/${encodeURIComponent(reference.frame)}/capture?revision=${reference.revision}&frameId=${encodeURIComponent(reference.frameId ?? "")}`, { signal: AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 3_000), redirect: "error" });
-        if (!response.ok) {
-          const error = await response.json() as { error: string };
-          throw new Error(error.error);
-        }
-        return { reference, mimeType: "image/png", data: Buffer.from(await response.arrayBuffer()).toString("base64") };
-      });
+      if (reqStr(params, "workspaceId") !== reference.workspaceId)
+        throw new Error("The frame belongs to another workspace.");
+      return host.withDesignReadWorkspace(
+        reference.workspaceId,
+        false,
+        async ({ root, designDirectory }) => {
+          if ((await inspectDesignContext(root, reference)).status !== "ready")
+            throw new Error(
+              "The selected frame changed. Send again to capture its current revision.",
+            );
+          const access = await openDesignVerification({
+            workspaceId: reference.workspaceId,
+            workspacePath: root,
+            directory: designDirectory,
+            directoryId: reference.directoryId,
+          });
+          const response = await fetch(
+            `${access.url}/${encodeDesignFramePath(reference.frame)}/capture?revision=${reference.revision}&frameId=${encodeURIComponent(reference.frameId ?? "")}`,
+            {
+              signal: AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 3_000),
+              redirect: "error",
+            },
+          );
+          if (!response.ok) {
+            const error = (await response.json()) as { error: string };
+            throw new Error(error.error);
+          }
+          return {
+            reference,
+            mimeType: "image/png",
+            data: Buffer.from(await response.arrayBuffer()).toString("base64"),
+          };
+        },
+      );
     }
     case "design.frames": {
       return host.withDesignReadWorkspace(
@@ -725,6 +784,7 @@ export async function handleDesignWorkspaceRoute(
         mutation,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -908,6 +968,7 @@ export async function handleDesignWorkspaceRoute(
           capturedAt: Date.now(),
           sourceVersion,
         }),
+        workspace.path,
       );
       return { ok: true };
     }
@@ -999,6 +1060,58 @@ export async function handleDesignWorkspaceRoute(
       });
       return { ok: true };
     }
+    case "design.page.select": {
+      const workspaceId = reqStr(params, "workspaceId");
+      const root = host.resolveReadCwd(workspaceId, remote);
+      selectDesignPageHint(workspaceId, root, {
+        directoryId: reqStr(params, "directoryId"),
+        pageId: designPageIdSchema.parse(params.pageId),
+      });
+      return { ok: true };
+    }
+    case "design.page.create":
+    case "design.page.rename":
+    case "design.page.delete": {
+      const workspace = host.resolveDesignWorkspace(reqStr(params, "workspaceId"), remote);
+      return withDesignWorkspaceMutation(workspace.path, async () => {
+        if (op === "design.page.delete") {
+          const input = designPageDeleteInputSchema.parse({
+            pageId: params.pageId,
+            expectedFrameIds: params.expectedFrameIds,
+          });
+          const deleted = await deleteDesignPage(
+            workspace.path,
+            input.pageId,
+            input.expectedFrameIds,
+          );
+          host.pruneDesignHistoryFrames(
+            workspace.path,
+            deleted.frameFiles,
+            deleted.folder,
+          );
+          forgetWorkspaceDesignApiFrames(
+            workspace.path,
+            deleted.frameFiles,
+            deleted.folder,
+          );
+          return {
+            deleted: { pageId: input.pageId },
+            snapshot: await host.readDesignSnapshot(workspace, remote, {
+              hostLocalResources,
+              fresh: true,
+            }),
+          };
+        }
+        let page;
+        if (op === "design.page.create") {
+          page = await createDesignPage(workspace.path, designPageCreateInputSchema.parse({ title: params.title }));
+        } else {
+          const input = designPageRenameInputSchema.parse({ pageId: params.pageId, title: params.title });
+          page = await renameDesignPage(workspace.path, input.pageId, input.title);
+        }
+        return { page, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
+      });
+    }
     case "design.frame.create": {
       const workspace = host.resolveDesignWorkspace(
         reqStr(params, "workspaceId"),
@@ -1019,6 +1132,7 @@ export async function handleDesignWorkspaceRoute(
       }
       const frame = await createDesignFrame(workspace.path, {
         title: optStr(params, "title"),
+        pageId: designPageIdSchema.optional().parse(params.pageId),
         ...(suppliedGeometryKeys.length === geometryKeys.length
           ? {
               geometry: {
@@ -1052,6 +1166,7 @@ export async function handleDesignWorkspaceRoute(
         frame,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
       };
     }
@@ -1078,6 +1193,7 @@ export async function handleDesignWorkspaceRoute(
         frame,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
       };
     }
@@ -1089,6 +1205,7 @@ export async function handleDesignWorkspaceRoute(
       const frame = await duplicateDesignFrame(
         workspace.path,
         reqStr(params, "frame"),
+        { pageId: designPageIdSchema.optional().parse(params.pageId) },
       );
       host.recordDesignHistory(
         workspace.path,
@@ -1101,6 +1218,7 @@ export async function handleDesignWorkspaceRoute(
         frame,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
       };
     }
@@ -1121,6 +1239,7 @@ export async function handleDesignWorkspaceRoute(
         deleted: { file: restorePoint.file },
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
       };
     }
@@ -1130,6 +1249,7 @@ export async function handleDesignWorkspaceRoute(
         remote,
       );
       const frame = reqStr(params, "frame");
+      const coalesceKey = `frame-geometry:${frame.includes("/") ? createHash("sha256").update(frame).digest("hex").slice(0, 24) : frame}`;
       const geometry = {
         x: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "x"))),
         y: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "y"))),
@@ -1154,18 +1274,19 @@ export async function handleDesignWorkspaceRoute(
             z: geometry.z,
           },
         },
-        `frame-geometry:${frame}`,
+        coalesceKey,
       );
       if (applied.receipt.status === "applied") {
         host.recordDesignHistory(
           workspace.path,
-          documentDesignHistoryEntry(frame, `frame-geometry:${frame}`),
+          documentDesignHistoryEntry(frame, coalesceKey),
         );
       }
       return {
         geometry,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1192,6 +1313,7 @@ export async function handleDesignWorkspaceRoute(
       }
       const result = await transferDesignNode(workspace.path, {
         frame,
+        pageId: designPageIdSchema.optional().parse(params.pageId),
         sourceVersion: reqStr(params, "sourceVersion"),
         nodeId: reqStr(params, "nodeId"),
         ...(destinationFrame
@@ -1232,6 +1354,7 @@ export async function handleDesignWorkspaceRoute(
         nodeId: result.nodeId,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
       };
     }
@@ -1289,6 +1412,7 @@ export async function handleDesignWorkspaceRoute(
         mutation,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1351,6 +1475,7 @@ export async function handleDesignWorkspaceRoute(
         mutation,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1421,6 +1546,7 @@ export async function handleDesignWorkspaceRoute(
         mutation,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1482,6 +1608,7 @@ export async function handleDesignWorkspaceRoute(
         mutation,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
+          fresh: true,
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,

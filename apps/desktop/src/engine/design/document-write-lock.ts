@@ -7,6 +7,7 @@ import { hasInvalidDesignSettings } from "./directory-path";
 import {
   designDirectoryFromSettings,
   recoverWorkspaceDesignMetadata,
+  hasSettledDesignPagesLayout,
   validateDesignSettings,
   assertLegacyDesignDraftWritable,
 } from "./metadata";
@@ -32,7 +33,13 @@ export async function withDesignDocumentWrite<T>(
 ): Promise<T> {
   return withDesignWorkspaceMutation(workspacePath, async () => {
     assertLegacyDesignDraftWritable(workspacePath);
-    recoverWorkspaceDesignMetadata(workspacePath);
+    if (
+      !hasSettledDesignPagesLayout(
+        workspacePath,
+        designDirectoryNameFor(workspacePath),
+      )
+    )
+      recoverWorkspaceDesignMetadata(workspacePath);
     if (existsSync(path.join(workspacePath, ".git"))) {
       const resolved = opSettingsResolve(workspacePath);
       if (hasInvalidDesignSettings(resolved.warnings))

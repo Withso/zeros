@@ -56,6 +56,27 @@ const REALISTIC_LISTING = [
 ];
 
 describe("recognizing the design directory", () => {
+  it("groups a v3 root's meta files, guidance and all pages in the same Design section", () => {
+    const design = [
+      "Screens/meta/design.toml",
+      "Screens/meta/canvas.json",
+      "Screens/rules.md",
+      "Screens/tokens.css",
+      "Screens/page-1/home.html",
+      "Screens/Checkout/home.html",
+      "Screens/components/header.html",
+      "Screens/assets/icon.svg",
+    ];
+    const code = ["ScreensArchive/notes.md", "Application/meta/design.toml"];
+    const files = [...design, ...code, "apps/web/designs/meta/design.toml"];
+    const roots = designSectionDirectories(files, ["Screens", "apps/web/designs"]);
+    expect(roots).toEqual(["Screens"]);
+    expect(filterDesignListing(files, "only-design", roots)).toEqual(design);
+    expect(filterDesignListing(files, "exclude-design", roots)).toEqual([...code, "apps/web/designs/meta/design.toml"]);
+    expect(designSectionDirectories(files, [])).toEqual([]);
+    expect(designSectionDirectories(files)).toEqual([]);
+  });
+
   it("sections portable manifests using the engine's validated roots", () => {
     const files = [
       "0kit -Design/design.toml",

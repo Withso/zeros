@@ -12,10 +12,12 @@ import {
   designWebDocumentId,
   readDesignWebDocumentState,
 } from "./document";
-import { withDesignDirectoryNameLease } from "./directory-registry";
+import { designDirectoryNameFor, withDesignDirectoryNameLease } from "./directory-registry";
+import { designPagesMigrationGeneration } from "./pages-migration";
 
 const MAX_WORKSPACE_DESIGN_APIS = 8;
 const workspaceApis = new Map<string, DesignApi>();
+const apiLayouts = new WeakMap<DesignApi, { directory: string; generation: string | null }>();
 
 function frameFromDocumentId(documentId: string): string {
   if (!documentId.startsWith("frame:")) {
@@ -87,8 +89,11 @@ export class DesignDraftStore implements DesignDocumentRepository {
 
 export function getWorkspaceDesignApi(workspacePath: string): DesignApi {
   const key = path.resolve(workspacePath);
+  const directory = designDirectoryNameFor(workspacePath);
+  const generation = designPagesMigrationGeneration(key, directory);
   const retained = workspaceApis.get(key);
-  if (retained) {
+  const layout = retained && apiLayouts.get(retained);
+  if (retained && layout?.directory === directory && layout.generation === generation) {
     workspaceApis.delete(key);
     workspaceApis.set(key, retained);
     return retained;
@@ -101,6 +106,7 @@ export function getWorkspaceDesignApi(workspacePath: string): DesignApi {
     maxSessions: 16,
     maxSessionBytes: 32 * 1024 * 1024,
   });
+  apiLayouts.set(api, { directory, generation });
   workspaceApis.set(key, api);
   while (workspaceApis.size > MAX_WORKSPACE_DESIGN_APIS) {
     const oldest = workspaceApis.keys().next().value as string | undefined;
@@ -116,6 +122,23 @@ export function designDocumentIdForFrame(frame: string): string {
 
 export function forgetWorkspaceDesignApi(workspacePath: string): void {
   workspaceApis.delete(path.resolve(workspacePath));
+}
+
+export function forgetWorkspaceDesignApiFrames(
+  workspacePath: string,
+  frames: readonly string[],
+  folder?: string,
+): void {
+  const api = workspaceApis.get(path.resolve(workspacePath));
+  if (
+    api &&
+    apiLayouts.get(api)?.directory === designDirectoryNameFor(workspacePath)
+  ) {
+    api.forgetLocalSessions(
+      frames.map(designDocumentIdForFrame),
+      folder ? { prefix: `frame:${folder}/` } : undefined,
+    );
+  }
 }
 
 export function resetWorkspaceDesignApisForTests(): void {

@@ -74,6 +74,8 @@ import {
 } from "./design-auto-layout-values";
 import { normalizeDesignCanvasBackground } from "./design-canvas-background";
 import { DesignCanvasBackgroundEditor } from "./design-canvas-background-editor";
+import { DesignPagePicker } from "./design-page-picker";
+import { restoreDesignPageHistorySelection } from "./state/design-page-history";
 import { DesignComputedCssEditor } from "./design-computed-css-editor";
 import {
   InspectorGlyph,
@@ -126,7 +128,6 @@ import {
   clearDesignNodeStylePreviewTransient,
   inspectDesignNodeStyleProvenance,
   previewDesignNodeGeometry,
-  selectDesignFrame,
 } from "./state/design-selection";
 import {
   applyDesignEditCached,
@@ -141,6 +142,8 @@ import {
   DESIGN_MAX_ZOOM,
   DESIGN_MIN_ZOOM,
   designWorkspaceView,
+  captureDesignPageOwner,
+  isCurrentDesignPageOwner,
   useDesignWorkspaceUiStore,
 } from "./state/design-workspace-ui";
 import { useDesignFoundation } from "./state/use-design-foundation";
@@ -923,6 +926,9 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
 
 export function DesignInspector({
   workspaceId,
+  pages,
+  activePageId,
+  pageFrames,
   folder,
   frame,
   frameSelected,
@@ -1003,17 +1009,20 @@ export function DesignInspector({
   const inspectorId = workspaceId
     ? `design-style-panel-${workspaceId}`
     : "design-style-panel";
+  const backgroundOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: previewDirectoryId, pageId: activePageId } : undefined,
+    [workspaceId, previewDirectoryId, activePageId]);
 
   // The inspector sits in the floating panel above the canvas; its owning
   // Design surface holds exactly one canvas viewport for this workspace.
   const paintCanvasBackground = useCallback((value: string) => {
+    if (backgroundOwner && !isCurrentDesignPageOwner(backgroundOwner)) return;
     const normalized = normalizeDesignCanvasBackground(value);
     if (!normalized) return;
     inspectorRef.current
       ?.closest("[data-design-workspace-surface]")
       ?.querySelector<HTMLElement>("[data-design-canvas-viewport]")
       ?.style.setProperty("background-color", normalized);
-  }, []);
+  }, [backgroundOwner]);
   const previewCanvasBackground = useCallback(
     (value: string) => paintCanvasBackground(value),
     [paintCanvasBackground],
@@ -1133,6 +1142,7 @@ export function DesignInspector({
   const runHistory = useCallback(
     (direction: "undo" | "redo") => {
       if (!workspaceId) return;
+      const owner = captureDesignPageOwner(workspaceId);
       // Start every request immediately. applyDesignHistoryCached registers it
       // with the workspace mutation lane before returning its promise, so two
       // fast keypresses become two ordered history steps rather than one being
@@ -1142,17 +1152,7 @@ export function DesignInspector({
         applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction),
       )
         .then((result) => {
-          if (result.historySelection === undefined) return;
-          const selected = result.historySelection
-            ? (result.snapshot?.frames.find(
-                (candidate) => candidate.file === result.historySelection,
-              ) ?? null)
-            : null;
-          const restoredFrame = direction === "undo" && selected !== null;
-          void selectDesignFrame(workspaceId, selected, {
-            selected: restoredFrame,
-            reveal: restoredFrame,
-          }).catch((selectionError: unknown) => {
+          void restoreDesignPageHistorySelection(workspaceId, owner, result, direction).catch((selectionError: unknown) => {
             toast.error("Couldn't save the restored frame selection", {
               description: errorMessage(selectionError),
             });
@@ -1289,6 +1289,7 @@ export function DesignInspector({
     : "";
   const styleEditContextRef = useRef({
     active,
+    pageId: activePageId,
     directoryKey: styleDirectoryKey,
     workspaceId,
     folder,
@@ -1300,6 +1301,7 @@ export function DesignInspector({
   });
   styleEditContextRef.current = {
     active,
+    pageId: activePageId,
     directoryKey: styleDirectoryKey,
     workspaceId,
     folder,
@@ -1309,7 +1311,7 @@ export function DesignInspector({
     elementDetails,
     layoutRootId,
   };
-  const styleOwnerKey = `${workspaceId ?? ""}\u0000${styleDirectoryKey}\u0000${frame?.file ?? ""}\u0000${styleNodeIds.join("\u0000")}`;
+  const styleOwnerKey = `${workspaceId ?? ""}\u0000${styleDirectoryKey}\u0000${activePageId ?? ""}\u0000${frame?.file ?? ""}\u0000${styleNodeIds.join("\u0000")}`;
   // A keyed editor's cleanup runs after the new selection has rendered. Keep
   // its callbacks and cancellation baseline attached to its own owner; using
   // the live selection here would restore the incoming layer instead.
@@ -2152,10 +2154,13 @@ export function DesignInspector({
         data-design-inspector-header=""
         className="flex h-10 min-w-0 items-center gap-2 px-3"
       >
-        <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
-        <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">
-          {selectionName}
-        </span>
+        {selectionName === "Page" && workspaceId && pages?.length ? (
+          <DesignPagePicker workspaceId={workspaceId} directoryId={previewDirectoryId} pages={pages}
+            activePageId={activePageId} frames={pageFrames ?? []} active={active} />
+        ) : <>
+          <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
+          <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">{selectionName}</span>
+        </>}
       </div>
     </section>
   );
@@ -2326,6 +2331,7 @@ export function DesignInspector({
               />
             ) : workspaceId && !frameSelected && !selectedNodeId ? (
               <DesignCanvasBackgroundEditor
+                key={activePageId ?? "legacy"}
                 value={canvasBackground}
                 disabled={!active}
                 onPreview={previewCanvasBackground}

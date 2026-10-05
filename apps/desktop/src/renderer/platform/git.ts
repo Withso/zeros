@@ -110,6 +110,10 @@ import { resolveBridgeWorkspaceIdForCwd } from "./bridge/workspace-id-resolver";
 import { isKnownProjectRoot } from "../state/projects-store";
 import {
   bridgeDesignCreateFrame,
+  bridgeDesignCreatePage,
+  bridgeDesignRenamePage,
+  bridgeDesignDeletePage,
+  bridgeDesignSelectPage,
   bridgeDesignApplyTransaction,
   bridgeDesignDeleteFrame,
   bridgeDesignDuplicateFrame,
@@ -615,11 +619,28 @@ export async function designSetRuntimeAudit(
   );
 }
 
+export async function designCreatePage(workspaceId: string, title?: string) {
+  return bridgeDesignCreatePage(requireBridge("create a design page"), workspaceId, title);
+}
+
+export async function designRenamePage(workspaceId: string, pageId: string, title: string) {
+  return bridgeDesignRenamePage(requireBridge("rename a design page"), workspaceId, pageId, title);
+}
+
+export async function designDeletePage(workspaceId: string, pageId: string, expectedFrameIds: readonly string[]) {
+  return bridgeDesignDeletePage(requireBridge("delete a design page"), workspaceId, pageId, expectedFrameIds);
+}
+
+export async function designSelectPage(workspaceId: string, directoryId: string, pageId: string): Promise<void> {
+  return bridgeDesignSelectPage(requireBridge("select a design page"), workspaceId, directoryId, pageId);
+}
+
 export async function designCreateFrame(
   workspaceId: string,
   title?: string,
   geometry?: DesignFrameGeometryWire,
   seed?: DesignTextFrameSeedWire,
+  pageId?: string,
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
@@ -630,6 +651,7 @@ export async function designCreateFrame(
     title,
     geometry,
     seed,
+    pageId,
   );
 }
 
@@ -669,6 +691,7 @@ export async function designUpdateCanvas(
 export async function designDuplicateFrame(
   workspaceId: string,
   frame: string,
+  pageId?: string,
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
@@ -677,6 +700,7 @@ export async function designDuplicateFrame(
     requireBridge("duplicate a design frame"),
     workspaceId,
     frame,
+    pageId,
   );
 }
 

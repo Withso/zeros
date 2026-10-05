@@ -1,3 +1,5 @@
+import { portableDesignName } from "@zeros/protocol/design-path";
+
 /** Shared lexical guard for settings, registry entries and runtime admission.
  * Filesystem spelling, links and overlaps are checked by the Design engine. */
 export function sanitizeDesignDirectoryName(raw: unknown): string | null {
@@ -17,7 +19,7 @@ export function sanitizeDesignDirectoryName(raw: unknown): string | null {
         !segment ||
         segment === "." ||
         segment === ".." ||
-        [".git", ".zeros"].includes(segment.normalize("NFC").toLowerCase()) ||
+        [".git", ".zeros"].includes(portableDesignName(segment)) ||
         /[. ]$/.test(segment),
     )
   )

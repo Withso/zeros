@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,8 @@ import {
   readDesignWebDocumentState,
 } from "../document";
 import type { Workspace } from "../../git";
+import { designDirectoryNameFor } from "../directory-registry";
+import { serializeDesignRegistration } from "../manifest";
 
 describe("shared conversation Design tools over MCP", () => {
   let root: string;
@@ -188,6 +190,73 @@ describe("shared conversation Design tools over MCP", () => {
     ).rejects.toThrow("changed");
     expect(await handler.preparePrompt()).toContain("Current composer mode: Design");
   });
+
+  it.each(["invalid canvas", "competing manifests"])(
+    "retains mode inspection and switching with %s",
+    async (failure) => {
+      await initializeDesignDocument(root);
+      const initial = await call("design_capabilities");
+      const directory = designDirectoryNameFor(root);
+      if (failure === "invalid canvas") {
+        await writeFile(
+          path.join(root, directory, "meta/canvas.json"),
+          "<<<<<<< unresolved canvas",
+        );
+      } else {
+        await writeFile(
+          path.join(root, directory, "design.toml"),
+          serializeDesignRegistration(initial.directoryId),
+        );
+      }
+      const capabilities = await call("design_capabilities");
+      expect(capabilities).toMatchObject({
+        directoryId: initial.directoryId,
+        composerMode: { mode: "code", revision: 0 },
+        pages: null,
+        pagesError: expect.stringMatching(/canvas|competing|conflict|JSON/i),
+      });
+      const selected = await call("design_mode_set", {
+        mode: "design",
+        expectedRevision: 0,
+      });
+      expect(selected.composerMode).toEqual({ mode: "design", revision: 1 });
+      expect(selected.systemInstruction).toMatch(
+        /pages? (?:catalog )?(?:is |are )?unavailable/i,
+      );
+      expect(await call("design_capabilities")).toMatchObject({
+        composerMode: mode,
+        pages: null,
+      });
+      const cold = new ConversationDesignTools({
+        ...options,
+        authoringMethod: "api",
+      });
+      try {
+        const result = await cold.callTool(
+          "design_capabilities",
+          {},
+          new AbortController().signal,
+        );
+        const first = result.content[0];
+        expect(first?.type).toBe("text");
+        const metadata = JSON.parse((first as { text: string }).text);
+        expect(metadata).toMatchObject({
+          composerMode: mode,
+          pages: null,
+          pagesError: expect.any(String),
+        });
+        if (failure === "competing manifests") {
+          expect(metadata.instruction).toMatch(/repair.*existing/i);
+          expect(metadata.instruction).not.toContain("Create design directory");
+        }
+        expect(await cold.preparePrompt()).toMatch(
+          /pages? (?:catalog )?(?:is |are )?unavailable/i,
+        );
+      } finally {
+        cold.dispose();
+      }
+    },
+  );
 
   it.each(["code", "design"] as const)("authors with native helpers in %s context without switching modes", async (selected) => {
     mode = { mode: selected, revision: 3 };

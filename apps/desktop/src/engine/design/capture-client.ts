@@ -163,6 +163,8 @@ export function createDesignCaptureRenderer(
         input.state.files[input.state.entryFile]!,
         input.viewport,
         input.state.files,
+        undefined,
+        input.state.entryFile,
       );
       return renderComposed({
         ...input,

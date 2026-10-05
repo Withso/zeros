@@ -17,29 +17,58 @@ import {
 import type { DesignMcpToolHandler } from "./design-agent-mcp";
 import type { ConversationModePort } from "./conversation-mode";
 import { withDesignWorkspaceMutation } from "./document-write-lock";
-import { assertLegacyDesignDraftWritable, ensureDesignMetadataLayout, readDirectoryDesignManifest } from "./metadata";
+import { assertLegacyDesignDraftWritable, readDirectoryDesignManifest } from "./metadata";
 import { initializeDesignDocumentUnlocked } from "./document-transactions";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { openDesignVerification } from "./verification-service";
+import { readDesignPageContext } from "./page-selection";
+import { DesignTargetError } from "./target-error";
 import type { AgentWorkspaceTools } from "../agents/session-tools";
 
 /** Registration migration is an explicit Design authoring action. Merely
  * inspecting a legacy branch never rewrites its checked-out metadata. */
 export async function nativeDesignContext(target: DesignCodeToolTarget | null, mode: "code" | "design", assertCurrent: () => void = () => {}): Promise<string> {
   assertCurrent();
-  if (!target) return "No unique active Design directory is selected. Use Create design directory or select one in the Design tab before authoring; do not guess or create registration files yourself.";
-  target.assertCurrent();
-  if (mode === "design") await withDesignWorkspaceMutation(target.workspacePath, async () => {
-    assertCurrent();
-    target.assertCurrent();
-    assertLegacyDesignDraftWritable(target.workspacePath);
-    if (readDirectoryDesignManifest(target.workspacePath, target.directory)?.canvas)
-      ensureDesignMetadataLayout(target.workspacePath, target.directory);
-    else await withDesignDirectoryNameLease(target.workspacePath, target.directory, () =>
-      initializeDesignDocumentUnlocked(target.workspacePath));
-    target.assertCurrent();
-  });
-  return `Active Design directory (relative to workspace ${JSON.stringify(target.workspacePath)}): ${JSON.stringify(target.directory)}. Its registration ID is ${JSON.stringify(target.directoryId)}.`;
+  if (!target)
+    return "No unique active Design directory is selected. Use Create design directory or select one in the Design tab before authoring; do not guess or create registration files yourself.";
+  const assertTarget = () =>
+    target.assertInspectionCurrent
+      ? target.assertInspectionCurrent()
+      : target.assertCurrent();
+  assertTarget();
+  if (mode === "design")
+    await withDesignWorkspaceMutation(target.workspacePath, async () => {
+      assertCurrent();
+      target.assertCurrent();
+      assertLegacyDesignDraftWritable(target.workspacePath);
+      await withDesignDirectoryNameLease(
+        target.workspacePath,
+        target.directory,
+        () =>
+          initializeDesignDocumentUnlocked(target.workspacePath, {
+            force: true,
+          }),
+      );
+      target.assertCurrent();
+    });
+  const context = await readDesignPageContext(target);
+  assertCurrent();
+  assertTarget();
+  const directory = `Active Design directory (relative to workspace ${JSON.stringify(target.workspacePath)}): ${JSON.stringify(target.directory)}. Its registration ID is ${JSON.stringify(target.directoryId)}.`;
+  if (!context.pages)
+    return `${directory}\nPages unavailable: ${context.pagesError}. Repair the existing metadata before authoring Design frames; preserve directory/frame IDs.`;
+  const active = context.pages.find(
+    (page) => page.id === context.activePageId,
+  )!;
+  const location = active.folder
+    ? `${active.folder}/`
+    : "the Design root (legacy layout)";
+  const selection = context.hinted
+    ? `The user is viewing page ${JSON.stringify(active.title)} (pageId ${JSON.stringify(active.id)}, folder ${JSON.stringify(location)}); add new frames there unless the user says otherwise.`
+    : context.pages.length > 1
+      ? `No current page hint is available; default to the first page ${JSON.stringify(active.title)} (pageId ${JSON.stringify(active.id)}, folder ${JSON.stringify(location)}) unless the user says otherwise.`
+      : `Active page: ${JSON.stringify(active.title)} (pageId ${JSON.stringify(active.id)}, folder ${JSON.stringify(location)}).`;
+  return `${directory}\nPages: ${JSON.stringify(context.pages.map(({ id, title, folder }) => ({ id, title, folder })))}. ${selection} API frame creation/duplication must supply pageId when several pages exist; the hint never selects a mutation target.`;
 }
 
 /** Design discovery is optional for local prompts, including conflict repair.
@@ -51,19 +80,25 @@ export async function designPromptContext(
   authoringMethod: DesignAuthoringMethod = "native",
 ): Promise<string> {
   assertCurrent();
+  let target: DesignCodeToolTarget | null = null;
   try {
-    const target = await resolveTarget();
+    target = await resolveTarget();
     const context = await nativeDesignContext(target, mode, assertCurrent);
     if (authoringMethod !== "native" || !target || !readDirectoryDesignManifest(target.workspacePath, target.directory)) return context;
     const verification = await openDesignVerification(target);
     assertCurrent();
-    return `${context}\nNative frame verification is available through ordinary shell commands: ${verification.command} <list|validate|capture|preview> --url '${verification.url}' --frame '<frame.html>'. Omit --frame for list. Capture requires --output '.context/frame.png'; use --revision to require a previously validated source revision. ${verification.captureAvailable ? "Capture uses the native PNG renderer; inspect its saved PNG with your normal image tool." : "PNG capture is unavailable on this host; validation and the HTTP preview remain available."} Preview returns an HTTP URL using the canvas's sanitized HTML/CSS and assets. Use the browser actually available through your provider's native browser tooling; do not assume an iab backend exists or navigate to file://. A successful lint or capture is not proof of visual inspection or application behavior. Verification URLs expire after 30 minutes; request fresh frame context if expired.`;
+    return `${context}\nNative frame verification is available through ordinary shell commands: ${verification.command} <list|validate|capture|preview> --url '${verification.url}' --frame '<page.folder>/<name>.html'. Omit --frame for list. Capture requires --output '<png-output-path>'; use --revision to require a previously validated source revision. ${verification.captureAvailable ? "Capture uses the native PNG renderer; inspect its saved PNG with your normal image tool." : "PNG capture is unavailable on this host; validation and the HTTP preview remain available."} Preview returns an HTTP URL using the canvas's sanitized HTML/CSS and assets. Use the browser actually available through your provider's native browser tooling; do not assume an iab backend exists or navigate to file://. A successful lint or capture is not proof of visual inspection or application behavior. Verification URLs expire after 30 minutes; request fresh frame context if expired.`;
   } catch (error) {
     assertCurrent();
-    if (authoringMethod === "api" && mode === "design") throw error;
+    if (target?.assertInspectionCurrent) target.assertInspectionCurrent();
+    else target?.assertCurrent();
+    if (error instanceof DesignTargetError) throw error;
+    const unavailable = `Pages unavailable: ${error instanceof Error ? error.message : String(error)}. `;
     return authoringMethod === "native"
-      ? "The Design canvas or registration is currently unavailable. Normal tools remain available to inspect and repair the existing source and Git conflicts. Preserve directory/frame IDs; do not recreate registration to bypass a conflict. Refresh the canvas after resolving the source."
-      : "Design inspection is currently unavailable. Resolve the Design directory configuration before using Design tools.";
+      ? unavailable +
+          "The Design canvas or registration is currently unavailable. Normal tools remain available to inspect and repair the existing source and Git conflicts. Preserve directory/frame IDs; do not recreate registration to bypass a conflict. Refresh the canvas after resolving the source."
+      : unavailable +
+          "Design inspection is currently unavailable. Resolve the Design directory configuration before using Design tools.";
   }
 }
 
@@ -258,7 +293,18 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
     const modeRequired = this.options.authoringMethod === "api";
     if (writes && modeRequired && before.mode !== "design")
       throw new Error("Switch to Design mode before editing designs.");
-    const handler = await this.target();
+    let handler: DesignCodeTools | null;
+    let pagesError: string | undefined;
+    try {
+      handler = await this.target();
+    } catch (error) {
+      this.assertActive(this.token);
+      joined.throwIfAborted();
+      if (name !== "design_capabilities" || error instanceof DesignTargetError)
+        throw error;
+      handler = null;
+      pagesError = error instanceof Error ? error.message : String(error);
+    }
     joined.throwIfAborted();
     if (writes && modeRequired && this.options.mode.get().revision !== before.revision)
       throw new Error(
@@ -271,19 +317,27 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
       const capabilities =
         first?.type === "text"
           ? JSON.parse(first.text)
-          : { version: 1, directoryId: null };
+          : {
+              version: 1,
+              directoryId: null,
+              ...(pagesError
+                ? { pages: null, activePageId: null, pagesError }
+                : {}),
+            };
       joined.throwIfAborted();
-      this.directoryAcknowledged = !!handler;
+      this.directoryAcknowledged = !!handler && !capabilities.pagesError;
       return textResult({
         ...capabilities,
         composerMode: this.options.mode.get(),
         tools: this.listTools().map((tool) => tool.name),
         designWritesEnabled:
-          (!modeRequired || this.options.mode.get().mode === "design") && !!handler,
+          (!modeRequired || this.options.mode.get().mode === "design") &&
+          this.directoryAcknowledged,
         ...(!handler
           ? {
-              instruction:
-                "Open the Design tab and use Create design directory, then call design_capabilities again in this conversation.",
+              instruction: pagesError
+                ? "Repair the existing Design metadata or configuration, preserving directory/frame IDs, then call design_capabilities again in this conversation."
+                : "Open the Design tab and use Create design directory, then call design_capabilities again in this conversation.",
             }
           : {}),
       });

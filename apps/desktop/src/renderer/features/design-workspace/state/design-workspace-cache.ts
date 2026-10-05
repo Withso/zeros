@@ -17,6 +17,9 @@ import {
   designCreateFrame,
   designDeleteFrame,
   designDuplicateFrame,
+  designCreatePage,
+  designRenamePage,
+  designDeletePage,
   designFrame,
   designInsertAsset,
   designFoundationOpen,
@@ -692,6 +695,7 @@ function sameFrame(
   return (
     left.file === right.file &&
     left.frameId === right.frameId &&
+    left.pageId === right.pageId &&
     left.title === right.title &&
     left.kind === right.kind &&
     left.width === right.width &&
@@ -883,6 +887,10 @@ export function stabilizeDesignWorkspaceSnapshot(
   next: DesignWorkspaceSnapshotWire,
 ): DesignWorkspaceSnapshotWire {
   if (!previous || previous.directoryId !== next.directoryId) return next;
+  const pages = previous.pages && next.pages ? stableArray(previous.pages, next.pages, (left, right) =>
+    left.id === right.id && left.title === right.title && left.folder === right.folder &&
+    left.frameFiles.length === right.frameFiles.length && left.frameFiles.every((file, index) => file === right.frameFiles[index]) &&
+    left.frameIds?.length === right.frameIds?.length && (left.frameIds?.every((id, index) => id === right.frameIds?.[index]) ?? true)) : next.pages;
   const frames = stableArray(previous.frames, next.frames, sameFrame);
   const tokens = stableArray(previous.tokens, next.tokens, sameToken);
   const assets = stableArray(previous.assets, next.assets, sameAsset);
@@ -902,6 +910,7 @@ export function stabilizeDesignWorkspaceSnapshot(
       ? previous.lint
       : { ...next.lint, violations };
   return frames === previous.frames &&
+    pages === previous.pages &&
     next.directory === previous.directory &&
     next.protocolCapability === previous.protocolCapability &&
     tokens === previous.tokens &&
@@ -912,6 +921,7 @@ export function stabilizeDesignWorkspaceSnapshot(
     : {
         directoryId: next.directoryId,
         directory: next.directory,
+        ...(pages ? { pages } : {}),
         protocolCapability: next.protocolCapability,
         frames,
         tokens,
@@ -1067,12 +1077,13 @@ export async function createDesignFrameAndRefresh(
   title?: string,
   geometry?: DesignFrameGeometryWire,
   seed?: DesignTextFrameSeedWire,
+  pageId?: string,
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
   return runLocalDesignMutation(workspaceId, async () => {
-    const result = await designCreateFrame(workspaceId, title, geometry, seed);
+    const result = await designCreateFrame(workspaceId, title, geometry, seed, pageId);
     const snapshot = publishDesignWorkspaceSnapshot(
       workspaceId,
       result.snapshot,
@@ -1104,12 +1115,13 @@ export async function renameDesignFrameAndRefresh(
 export async function duplicateDesignFrameCached(
   workspaceId: string,
   frame: string,
+  pageId?: string,
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
   return runLocalDesignMutation(workspaceId, async () => {
-    const result = await designDuplicateFrame(workspaceId, frame);
+    const result = await designDuplicateFrame(workspaceId, frame, pageId);
     const snapshot = publishDesignWorkspaceSnapshot(
       workspaceId,
       result.snapshot,
@@ -1134,6 +1146,29 @@ export async function deleteDesignFrameCached(
     );
     settleFoundationMutation(workspaceId, null, snapshot);
     return snapshot;
+  });
+}
+
+export async function createDesignPageCached(workspaceId: string, title?: string) {
+  return runLocalDesignMutation(workspaceId, async () => {
+    const result = await designCreatePage(workspaceId, title);
+    return { ...result, snapshot: publishDesignWorkspaceSnapshot(workspaceId, result.snapshot) };
+  });
+}
+
+export async function renameDesignPageCached(workspaceId: string, pageId: string, title: string) {
+  return runLocalDesignMutation(workspaceId, async () => {
+    const result = await designRenamePage(workspaceId, pageId, title);
+    return { ...result, snapshot: publishDesignWorkspaceSnapshot(workspaceId, result.snapshot) };
+  });
+}
+
+export async function deleteDesignPageCached(workspaceId: string, pageId: string, expectedFrameIds: readonly string[], onConfirmed?: (snapshot: DesignWorkspaceSnapshotWire) => void) {
+  return runLocalDesignMutation(workspaceId, async () => {
+    const result = await designDeletePage(workspaceId, pageId, expectedFrameIds);
+    // Resolve the UI owner before publication can prune the deleted page.
+    onConfirmed?.(result.snapshot);
+    return { ...result, snapshot: publishDesignWorkspaceSnapshot(workspaceId, result.snapshot) };
   });
 }
 

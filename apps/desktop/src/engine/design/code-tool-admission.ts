@@ -29,6 +29,7 @@ import {
   designDirectoryFromSettings,
 } from "./metadata";
 import { hasInvalidDesignSettings } from "./directory-path";
+import { DesignTargetError } from "./target-error";
 
 /** Resolve once by registered owner. Tool arguments never choose a cwd or
  * workspace. A missing/ambiguous Design document leaves normal Code usable. */
@@ -77,43 +78,36 @@ export async function resolveCodeDesignTarget(
       ? { id: legacyDesignDirectoryId(directory), path: directory } : undefined);
   const entry = identity();
   if (!entry) return null;
-  return {
-    workspaceId: workspace.id,
-    workspacePath: workspace.path,
-    directory,
-    directoryId: entry.id,
-    actorId: input.conversationId ?? input.executionId,
-    assertCurrent: () => {
-      input.signal.throwIfAborted();
-      if (
-        options.workspaceIdForCwd &&
-        options.workspaceIdForCwd(input.cwd) !== workspace.id
-      ) {
-        throw new Error(
-          "Design workspace authority changed; reopen the Code session.",
-        );
-      }
-      const current = resolveWorkspace(workspace.id);
-      if (
-        !current ||
-        current.archivedAt !== null ||
-        current.path !== workspace.path ||
-        current.repoRoot !== workspace.repoRoot ||
-        current.placement !== workspace.placement ||
-        current.organizationId !== workspace.organizationId
-      )
-        throw new Error(
-          "Design workspace authority changed; reopen the Code session.",
-        );
-      if (
-        identity()?.id !== entry.id
-      )
-        throw new Error(
+  const assertCurrent = (inspection = false) => {
+    input.signal.throwIfAborted();
+    if (
+      options.workspaceIdForCwd &&
+      options.workspaceIdForCwd(input.cwd) !== workspace.id
+    ) {
+      throw new DesignTargetError(
+        "Design workspace authority changed; reopen the Code session.",
+      );
+    }
+    const current = resolveWorkspace(workspace.id);
+    if (
+      !current ||
+      current.archivedAt !== null ||
+      current.path !== workspace.path ||
+      current.repoRoot !== workspace.repoRoot ||
+      current.placement !== workspace.placement ||
+      current.organizationId !== workspace.organizationId
+    )
+      throw new DesignTargetError(
+        "Design workspace authority changed; reopen the Code session.",
+      );
+    try {
+      if (identity()?.id !== entry.id)
+        throw new DesignTargetError(
           "Design directory was removed or replaced; reopen the Code session.",
         );
       const settings = opSettingsResolve(workspace.path, workspace.repoRoot);
       if (hasInvalidDesignSettings(settings.warnings))
-        throw new Error("Design directory settings are invalid.");
+        throw new DesignTargetError("Design directory settings are invalid.");
       const selected = designDirectoryFromSettings(
         workspace.path,
         settings.effective,
@@ -122,10 +116,21 @@ export async function resolveCodeDesignTarget(
         (selected && selected !== directory) ||
         (pointer.configured && !selected)
       )
-        throw new Error(
+        throw new DesignTargetError(
           "Design directory selection changed; reopen the Code session.",
         );
-    },
+    } catch (error) {
+      if (!inspection || error instanceof DesignTargetError) throw error;
+    }
+  };
+  return {
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    directory,
+    directoryId: entry.id,
+    actorId: input.conversationId ?? input.executionId,
+    assertCurrent,
+    assertInspectionCurrent: () => assertCurrent(true),
   };
 }
 

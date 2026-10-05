@@ -1,6 +1,7 @@
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 
 import { assertSafeDesignHtmlDocument } from "./html";
+import { rebaseDesignCssReferences, resolveDesignLocalReference } from "./references";
 import type {
   DesignHeadlessRenderer,
   DesignRenderArtifact,
@@ -211,7 +212,7 @@ export function prepareDesignHeadlessHtml(
   if (authored === undefined) {
     throw new Error(`Design entry source is missing: ${state.entryFile}`);
   }
-  assertSafeDesignHtmlDocument(authored);
+  assertSafeDesignHtmlDocument(authored, state.entryFile);
   const document = parse(authored, { sourceCodeLocationInfo: true });
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const stylesheetElements = elements(document).filter((element) => {
@@ -233,12 +234,13 @@ export function prepareDesignHeadlessHtml(
       (attribute) => attribute.name === "href",
     )?.value;
     if (!href) throw new Error("A design stylesheet link is missing href.");
-    const path = href.replace(/^\.\//, "").split(/[?#]/, 1)[0] ?? "";
+    const path = resolveDesignLocalReference(href, state.entryFile) ?? "";
     const css = state.files[path];
     if (css === undefined || !path.toLowerCase().endsWith(".css")) {
       throw new Error(`Linked design stylesheet is missing: ${href}`);
     }
-    const text = `<style data-zeros-source="${escapeAttribute(path)}">${css.replace(/<\/style/gi, "<\\/style")}</style>`;
+    const rebased = rebaseDesignCssReferences(css, path, state.entryFile);
+    const text = `<style data-zeros-source="${escapeAttribute(path)}">${rebased.replace(/<\/style/gi, "<\\/style")}</style>`;
     outputBytes +=
       utf8Bytes(text) -
       utf8Bytes(

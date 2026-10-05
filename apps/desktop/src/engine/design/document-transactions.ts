@@ -39,6 +39,7 @@ import path from "node:path";
 
 import {
   designFrameGeometryError,
+  designRelativeFileSchema,
   migrateDesignFoundationManifest,
 } from "@zeros/design-core";
 import {
@@ -56,9 +57,12 @@ import {
   withDesignDocumentWrite as withDocumentWrite,
 } from "./document-write-lock";
 import {
-  ensureDesignMetadataLayout,
+  createDesignDirectoryPages,
+  ensureDesignPagesLayout,
+  invalidateDesignManifestDiscovery,
   readDirectoryDesignManifest,
   recoverWorkspaceDesignMetadata,
+  hasSettledDesignPagesLayout,
 } from "./metadata";
 
 import { designDirectoryNameFor } from "./directory-registry";
@@ -76,6 +80,7 @@ import {
   discoverFrameFiles,
   isFrameFile,
   normalizeGeometry,
+  nextFrameGeometry,
   readBoundedDesignFrameSource,
   readCanvas,
   readFrameMeta,
@@ -93,6 +98,7 @@ import {
   writePrivateDesignState,
 } from "./metadata";
 import { readSafeRegularFile } from "./safe-files";
+import { safeLocalReference } from "./assets";
 
 async function unlinkDesignArtifact(target: string): Promise<void> {
   await unlink(target);
@@ -207,38 +213,41 @@ export async function writeIfMissing(
 
 export async function initializeDesignDocumentUnlocked(
   workspacePath: string,
-): Promise<void> {
-  const directory = designDirectory(workspacePath);
+  options: { force?: boolean } = {},
+): Promise<string[]> {
+  const directory = designDirectory(workspacePath),
+    name = designDirectoryNameFor(workspacePath);
+  if (!options.force && hasSettledDesignPagesLayout(workspacePath, name))
+    return [];
   await ensureSafeDesignRoot(workspacePath);
-  await Promise.all([
-    mkdir(path.join(directory, "assets"), { recursive: true }),
-    mkdir(path.join(directory, "components"), { recursive: true }),
-  ]);
-  publishCloudWorkspacePath(path.join(directory, "assets"));
-  publishCloudWorkspacePath(path.join(directory, "components"));
-  const ignored: string[] = [];
-  await writeIfMissing(
-    path.join(directory, DESIGN_TOKENS_FILE),
-    TOKENS_SEED,
-    ignored,
-    workspacePath,
-  );
-  recoverDesignMetadataMigration(
-    workspacePath,
-    designDirectoryNameFor(workspacePath),
-  );
+  recoverWorkspaceDesignMetadata(workspacePath);
   await recoverPendingDesignTransactionUnlocked(workspacePath);
-  // Reading validates existing metadata as well as seeding a new document.
+  const manifest = readDirectoryDesignManifest(workspacePath, name);
   const canvas = await readCanvas(workspacePath);
-  if (
-    !readDirectoryDesignManifest(workspacePath, designDirectoryNameFor(workspacePath))?.canvas
-  )
-    await writeCanvas(workspacePath, canvas);
-  else
-    ensureDesignMetadataLayout(
-      workspacePath,
-      designDirectoryNameFor(workspacePath),
-    );
+  const created: string[] = [];
+  if (!manifest?.canvas) {
+    if (designDirectoryEntry(workspacePath, name) || readDesignStorageFile(workspacePath, name + "/.zeros-canvas.json") !== null) {
+      // The existing legacy path captures every central entry unchanged.
+      created.push(...await writeCanvas(workspacePath, canvas));
+      created.push(...ensureDesignPagesLayout(workspacePath, name));
+    } else {
+      for (const file of await discoverFrameFiles(workspacePath)) {
+        const source = await readBoundedDesignFrameSource(workspacePath, file);
+        const meta = readFrameMeta(parse(source, { sourceCodeLocationInfo: true }), file, canvas);
+        canvas.frames[file] ??= nextFrameGeometry(Object.values(canvas.frames), meta);
+        canvas.frame_info[file] = { ...canvas.frame_info[file], title: meta.title, kind: meta.kind };
+      }
+      created.push(...createDesignDirectoryPages(workspacePath, name, { ...canvas }));
+      invalidateDesignManifestDiscovery(workspacePath);
+    }
+  } else created.push(...ensureDesignPagesLayout(workspacePath, name));
+  for (const folder of ["assets", "components"]) {
+    const target = path.join(directory, folder);
+    await assertSafeDesignWriteTarget(workspacePath, path.join(target, ".zeros-validation"));
+    publishCloudWorkspacePath(target);
+  }
+  await writeIfMissing(path.join(directory, DESIGN_TOKENS_FILE), TOKENS_SEED, created, workspacePath);
+  return created;
 }
 
 const MAX_QUARANTINED_DESIGN_TRANSACTIONS = 16;
@@ -354,7 +363,7 @@ export function designTransactionJournalPath(workspacePath: string): string {
 function isDesignWebSourceFile(file: string, entryFile: string): boolean {
   return (
     file === entryFile ||
-    /^[A-Za-z0-9][A-Za-z0-9._-]*\.css$/i.test(file) ||
+    (file.toLowerCase().endsWith(".css") && designRelativeFileSchema.safeParse(file).success) ||
     /^components\/[a-z][a-z0-9-]*\.html$/.test(file)
   );
 }
@@ -412,6 +421,20 @@ async function readDesignWebDocumentStateUnlocked(
       MAX_DESIGN_TEXT_BYTES,
     );
     if (safe) retainSource(item.name, safe);
+  }
+  // Root styles remain available for tokens/provenance. Also retain each CSS
+  // link from this entry at its actual source path for immutable composition.
+  const document = parse(files[file]!, { sourceCodeLocationInfo: true });
+  for (const { element } of elementRecords(document)) {
+    if (element.tagName !== "link" || !element.attrs.some((attribute) =>
+      attribute.name === "rel" && attribute.value.split(/\s+/).some((value) => value.toLowerCase() === "stylesheet"))) continue;
+    const href = element.attrs.find((attribute) => attribute.name === "href")?.value ?? "";
+    const target = safeLocalReference(directory, href, file);
+    if (!target?.toLowerCase().endsWith(".css")) continue;
+    const sourceFile = path.relative(directory, target).split(path.sep).join("/");
+    if (Object.hasOwn(files, sourceFile)) continue;
+    const safe = await readSafeRegularFile(directory, target, MAX_DESIGN_TEXT_BYTES);
+    if (safe) retainSource(sourceFile, safe);
   }
   const componentDirectory = path.join(directory, "components");
   const componentEntries = await readdir(componentDirectory, {
@@ -881,12 +904,7 @@ export async function commitDesignWebDocumentState(
     // A new transaction must capture its recovery identity in the current
     // storage format. Legacy migration can change authored revisions; the
     // ordinary comparison below then asks that caller to refresh first.
-    if (
-      !designDirectoryEntry(
-        workspacePath,
-        designDirectoryNameFor(workspacePath),
-      )
-    )
+    if (readDirectoryDesignManifest(workspacePath, designDirectoryNameFor(workspacePath))?.version !== 3)
       await initializeDesignDocumentUnlocked(workspacePath);
     const current = await readDesignWebDocumentStateUnlocked(
       workspacePath,

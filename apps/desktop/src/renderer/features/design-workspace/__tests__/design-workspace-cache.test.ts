@@ -21,6 +21,11 @@ const platformMocks = vi.hoisted(() => ({
   updateCanvas: vi.fn(),
   updateStyles: vi.fn(),
   writeHtml: vi.fn(),
+  createFrame: vi.fn(),
+  duplicateFrame: vi.fn(),
+  createPage: vi.fn(),
+  renamePage: vi.fn(),
+  deletePage: vi.fn(),
 }));
 
 const runtimeMocks = vi.hoisted(() => ({
@@ -47,6 +52,11 @@ vi.mock("../../../platform/git", async (importOriginal) => ({
   designUpdateCanvas: platformMocks.updateCanvas,
   designUpdateStyles: platformMocks.updateStyles,
   designWriteHtml: platformMocks.writeHtml,
+  designCreateFrame: platformMocks.createFrame,
+  designDuplicateFrame: platformMocks.duplicateFrame,
+  designCreatePage: platformMocks.createPage,
+  designRenamePage: platformMocks.renamePage,
+  designDeletePage: platformMocks.deletePage,
 }));
 
 vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
@@ -89,6 +99,11 @@ import {
   updateDesignTokenCached,
   updateDesignFrameGeometryCached,
   warmDesignFrameDocument,
+  createDesignFrameAndRefresh,
+  duplicateDesignFrameCached,
+  createDesignPageCached,
+  renameDesignPageCached,
+  deleteDesignPageCached,
 } from "../state/design-workspace-cache";
 import {
   designWorkspaceSnapshotMatchesPath,
@@ -161,6 +176,38 @@ function snapshot(
 }
 
 describe("design workspace cache", () => {
+  it("retains identical catalogs but publishes changed registered IDs even without rendered frames", () => {
+    const previous = { ...snapshot([]), pages: [{ id: "a", title: "A", folder: "a", frameFiles: ["a/missing.html"], frameIds: ["before"] }] };
+    expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);
+    const changed = { ...previous, pages: [{ ...previous.pages[0], frameIds: ["after"] }] };
+    const published = stabilizeDesignWorkspaceSnapshot(previous, changed);
+    expect(published.pages).not.toBe(previous.pages);
+    expect(published.pages?.[0]).toBe(changed.pages[0]);
+    expect(safeDesignWorkspaceBootSnapshot(previous)?.pages).toEqual(previous.pages);
+  });
+  it("forwards the submitted page through frame creation and duplicate without a read", async () => {
+    const result = { frame: snapshot().frames[0], snapshot: snapshot() };
+    platformMocks.createFrame.mockResolvedValue(result);
+    platformMocks.duplicateFrame.mockResolvedValue(result);
+    await createDesignFrameAndRefresh("workspace-a", "Home", undefined, undefined, "a");
+    await duplicateDesignFrameCached("workspace-a", "a/home.html", "a");
+    expect(platformMocks.createFrame).toHaveBeenCalledWith("workspace-a", "Home", undefined, undefined, "a");
+    expect(platformMocks.duplicateFrame).toHaveBeenCalledWith("workspace-a", "a/home.html", "a");
+    expect(platformMocks.readSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("publishes confirmed page lifecycle replies without a second snapshot request", async () => {
+    const page = { id: "a", title: "A", folder: "a", frameFiles: [], frameIds: [] };
+    platformMocks.createPage.mockResolvedValue({ page, snapshot: { ...snapshot(), pages: [page] } });
+    platformMocks.renamePage.mockResolvedValue({ page: { ...page, title: "New" }, snapshot: { ...snapshot(), pages: [{ ...page, title: "New" }] } });
+    platformMocks.deletePage.mockResolvedValue({ snapshot: snapshot() });
+    expect((await createDesignPageCached("workspace-a")).page).toBe(page);
+    await renameDesignPageCached("workspace-a", "a", "New");
+    await deleteDesignPageCached("workspace-a", "a", ["registered_missing"]);
+    expect(platformMocks.deletePage).toHaveBeenCalledWith("workspace-a", "a", ["registered_missing"]);
+    expect(platformMocks.readSnapshot).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     platformMocks.applyTransaction.mockReset();
     platformMocks.foundationOpen.mockReset();
@@ -1165,6 +1212,20 @@ describe("design workspace cache", () => {
     expect(stable).toBe(previous);
   });
 
+  it("retains page catalog references and publishes page-only changes", () => {
+    const previous = snapshot([{ file: "page-1/home.html" }]);
+    previous.pages = [{ id: "screens", title: "Screens", folder: "page-1", frameFiles: ["page-1/home.html"] }];
+    previous.frames[0].pageId = "screens";
+    const next = structuredClone(previous);
+    expect(stabilizeDesignWorkspaceSnapshot(previous, next)).toBe(previous);
+    next.pages![0].title = "New title";
+    const changed = stabilizeDesignWorkspaceSnapshot(previous, next);
+    expect(changed.pages?.[0].title).toBe("New title");
+    expect(changed.frames).toBe(previous.frames);
+    next.frames[0].pageId = "new-owner";
+    expect(stabilizeDesignWorkspaceSnapshot(changed, next).frames[0].pageId).toBe("new-owner");
+  });
+
   it("replaces only the changed frame and retains every unaffected collection", () => {
     const previous = snapshot([
       { file: "home.html" },
@@ -2126,7 +2187,8 @@ describe("design workspace cache", () => {
     const boot =
       reloaded.designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
 
-    expect(boot.data?.frames).toEqual(expected.frames);
+    expect(boot.data?.frames).toEqual(expected.frames.map((frame) => ({ ...frame, pageId: "main" })));
+    expect(boot.data?.pages).toEqual([{ id: "main", title: "Design", folder: "", frameFiles: expected.frames.map((frame) => frame.file) }]);
     expect(boot.data?.tokens).toEqual(expected.tokens);
     // The HTTP capability is derived from the engine's per-process secret and
     // embedded asset bytes can be large; neither belongs in a renderer boot

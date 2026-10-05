@@ -1,4 +1,7 @@
 import path from "node:path";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import { designDirectoryNameFor } from "./directory-registry";
+import { designPagesMigrationGeneration } from "./pages-migration";
 
 import type { DesignLintViolation } from "./document";
 
@@ -21,6 +24,8 @@ interface DesignRuntimeAuditInput {
 
 interface DesignRuntimeAuditEntry extends DesignRuntimeAuditInput {
   warnings: readonly DesignLintViolation[];
+  directory: string;
+  migrationGeneration: string | null;
 }
 
 const audits = new Map<string, DesignRuntimeAuditEntry>();
@@ -30,7 +35,7 @@ function auditKey(workspacePath: string, frame: string): string {
 }
 
 export function setDesignRuntimeAudit(input: DesignRuntimeAuditInput): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(input.frame)) {
+  if (!isDesignFrameFile(input.frame)) {
     throw new Error(`Invalid design frame file: ${input.frame}`);
   }
   if (!/^[a-f0-9]{24}$/.test(input.sourceVersion)) {
@@ -52,11 +57,14 @@ export function setDesignRuntimeAudit(input: DesignRuntimeAuditInput): void {
     return Object.freeze({ ...warning });
   });
   const key = auditKey(input.workspacePath, input.frame);
+  const directory = designDirectoryNameFor(input.workspacePath);
   audits.delete(key);
   audits.set(key, {
     ...input,
     workspacePath: path.resolve(input.workspacePath),
     warnings: Object.freeze(warnings),
+    directory,
+    migrationGeneration: designPagesMigrationGeneration(input.workspacePath, directory),
   });
   while (audits.size > MAX_AUDITS) {
     const oldest = audits.keys().next().value as string | undefined;
@@ -73,7 +81,8 @@ export function getDesignRuntimeAudit(
   const key = auditKey(workspacePath, frame);
   const audit = audits.get(key);
   if (!audit) return [];
-  if (audit.sourceVersion !== sourceVersion) {
+  if (audit.sourceVersion !== sourceVersion ||
+      audit.migrationGeneration !== designPagesMigrationGeneration(workspacePath, audit.directory)) {
     audits.delete(key);
     return [];
   }

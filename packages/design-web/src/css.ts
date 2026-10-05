@@ -3,6 +3,7 @@ import postcss, { type AtRule, type Declaration, type Rule } from "postcss";
 import { DESIGN_DOCUMENT_BODY_ID } from "@zeros/design-core";
 import { designDocumentBody, withExplicitDesignBody } from "./document-body";
 import { identifyDesignHtmlNodes } from "./html";
+import { isContainedDesignReference } from "./references";
 
 import type {
   DesignAuthoredKeyframes,
@@ -95,6 +96,7 @@ export function normalizeDesignCssProperty(value: string): string {
 export function validateDesignCssValue(
   property: string,
   value: string,
+  sourceFile = "",
 ): string {
   const normalized = value.trim();
   if (!normalized || normalized.length > 2_048) {
@@ -132,34 +134,13 @@ export function validateDesignCssValue(
   }
   for (const match of urlFunctions) {
     const reference = (match[2] ?? match[3] ?? "").trim();
-    if (!isContainedDesignReference(reference)) {
+    if (!isContainedDesignReference(reference, sourceFile)) {
       throw new Error(
         `Invalid CSS value for ${property}: URL must stay inside the design document.`,
       );
     }
   }
   return normalized;
-}
-
-function isContainedDesignReference(reference: string): boolean {
-  if (!reference || reference.startsWith("#")) return true;
-  if (
-    /[\\\u0000-\u001f\u007f]/.test(reference) ||
-    reference.startsWith("/") ||
-    reference.startsWith("//") ||
-    /^[a-z][a-z0-9+.-]*:/i.test(reference) ||
-    /%(?:2e|2f|5c)/i.test(reference)
-  ) {
-    return false;
-  }
-  const pathname = reference.split(/[?#]/, 1)[0] ?? "";
-  try {
-    return decodeURIComponent(pathname)
-      .split("/")
-      .every((segment) => segment !== "..");
-  } catch {
-    return false;
-  }
 }
 
 function inlineDeclarations(value: string): InlineDeclaration[] {
@@ -931,16 +912,15 @@ export function mutateDesignNodeStyles(
   }
   const normalized = entries.map(([rawProperty, rawValue]) => {
     const property = normalizeDesignCssProperty(rawProperty);
-    return [
-      property,
-      rawValue === null ? null : validateDesignCssValue(property, rawValue),
-    ] as const;
+    return [property, rawValue] as const;
   });
   const files = { ...state.files };
   const inlineMutations = new Map<string, DesignStyleMutationValue>();
   const stylesheetEdits = new Map<string, SourceEdit[]>();
   const decisions: DesignStyleMutationDecision[] = [];
   for (const [property, value] of normalized) {
+    const validateFor = (file: string) =>
+      value === null ? null : validateDesignCssValue(property, value, file);
     const inline = inlineAuthoredDeclarations(state, input.nodeId, property);
     const allRules = stylesheetCandidates(state, input.nodeId, property);
     const rules =
@@ -960,7 +940,7 @@ export function mutateDesignNodeStyles(
               ),
           );
     if (scope === "inline" || inline.length > 0) {
-      inlineMutations.set(property, value);
+      inlineMutations.set(property, validateFor(state.entryFile));
       decisions.push({
         property,
         requestedScope: scope,
@@ -973,6 +953,7 @@ export function mutateDesignNodeStyles(
     }
     if (rules.length === 1) {
       const rule = rules[0]!;
+      const validated = validateFor(rule.declaration.file);
       const offsets = declarationOffsets(rule.source, rule.node);
       if (!offsets)
         throw new Error(`CSS declaration has no source span: ${property}`);
@@ -987,7 +968,7 @@ export function mutateDesignNodeStyles(
         edits.push({
           start: rule.offsetBase + offsets.valueStart,
           end: rule.offsetBase + offsets.valueEnd,
-          text: value,
+          text: validated!,
         });
       }
       stylesheetEdits.set(rule.declaration.file, edits);
@@ -1014,7 +995,7 @@ export function mutateDesignNodeStyles(
         allRules.length,
       );
     }
-    inlineMutations.set(property, value);
+    inlineMutations.set(property, validateFor(state.entryFile));
     decisions.push({
       property,
       requestedScope: scope,
@@ -1049,9 +1030,10 @@ export function mutateDesignCssRuleDeclaration(
   selector: string,
   rawProperty: string,
   rawValue: string,
+  sourceFile = "",
 ): string {
   const property = normalizeDesignCssProperty(rawProperty);
-  const value = validateDesignCssValue(property, rawValue);
+  const value = validateDesignCssValue(property, rawValue, sourceFile);
   const root = postcss.parse(source);
   const rules: Rule[] = [];
   root.walkRules((rule) => {
@@ -1107,6 +1089,7 @@ export function mutateDesignTokenDeclaration(
   rawName: string,
   theme: string | null,
   rawValue: string | null,
+  sourceFile = "",
 ): string {
   const name = normalizeDesignCssProperty(rawName);
   if (!name.startsWith("--")) {
@@ -1117,7 +1100,9 @@ export function mutateDesignTokenDeclaration(
   }
   const selector = theme === null ? ":root" : `[data-zd-theme="${theme}"]`;
   const value =
-    rawValue === null ? null : validateDesignCssValue(name, rawValue);
+    rawValue === null
+      ? null
+      : validateDesignCssValue(name, rawValue, sourceFile);
   const root = postcss.parse(source);
   const rules: Rule[] = [];
   root.walkRules((rule) => {
@@ -1252,6 +1237,7 @@ export function readDesignKeyframes(
 export function mutateDesignKeyframes(
   source: string,
   input: { name: string; keyframes: readonly DesignKeyframeInput[] },
+  sourceFile = "",
 ): string {
   if (!/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(input.name)) {
     throw new Error("Design keyframe name is invalid.");
@@ -1281,7 +1267,7 @@ export function mutateDesignKeyframes(
       }
       const styles = entries.map(([rawProperty, rawValue]) => {
         const property = normalizeDesignCssProperty(rawProperty);
-        const value = validateDesignCssValue(property, rawValue);
+        const value = validateDesignCssValue(property, rawValue, sourceFile);
         return `${property}: ${value};`;
       });
       return { offset: keyframe.offset, styles };

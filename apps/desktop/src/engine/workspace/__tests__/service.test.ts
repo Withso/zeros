@@ -1,3 +1,4 @@
+import { createDesignDirectoryPages } from "../../design/metadata";
 import {
   parseCanvasFixture,
   useLegacyDesignStorage,
@@ -32,6 +33,7 @@ import {
   commitDesignWebDocumentState,
   createDesignFrame,
   initializeDesignDocument,
+  deleteDesignPage,
   readDesignFrame,
   readDesignWebDocumentState,
   readDesignWorkspaceSnapshot,
@@ -818,7 +820,7 @@ describe("WorkspaceService", () => {
           revision: preview.revision,
         }),
       ).resolves.toMatchObject({ selected: false });
-      expect(fs.existsSync(path.join(dir, "Brand/design.toml"))).toBe(true);
+      expect(fs.existsSync(path.join(dir, "Brand/meta/design.toml"))).toBe(true);
       expect(designDirectoryNameFor(workspace.path)).toBe(before);
       await expect(
         svc.handle(
@@ -1158,6 +1160,87 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it.each(["create", "duplicate", "delete", "undo", "redo"])(
+    "returns fresh frame and history mutation snapshots for %s while an older read is pending",
+    async (operation) => {
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+      execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+      const design = await createWorkspace({
+        repoRoot: dir,
+        repoSlug: `design-fresh-${operation}`,
+        kind: "design",
+      });
+      const target = { workspaceId: design.workspaceId };
+      let release = () => {};
+      const flights = (
+        svc as unknown as {
+          designSnapshotFlights: Map<string, Promise<unknown>>;
+        }
+      ).designSnapshotFlights;
+      try {
+        const created = (await svc.handle("design.frame.create", {
+          ...target,
+          title: "Original",
+        })) as { frame: { file: string } };
+        if (operation === "undo" || operation === "redo") {
+          await svc.handle("design.frame.rename", {
+            ...target,
+            frame: created.frame.file,
+            title: "Renamed",
+          });
+          if (operation === "redo")
+            await svc.handle("design.history.undo", target);
+        }
+        const before = (await svc.handle("design.snapshot", target)) as {
+          snapshot: { frames: Array<{ file: string; title: string }> };
+        };
+        const blocked = new Promise<typeof before.snapshot>((resolve) => {
+          release = () => resolve(before.snapshot);
+        });
+        const key = `${design.workspaceId}\u0000${path.resolve(design.path)}\u0000read\u0000${designDirectoryNameFor(design.path)}\u0000host-resources`;
+        flights.set(key, blocked);
+        const getFlight = vi.spyOn(flights, "get");
+        const observing = svc.handle("design.snapshot", target) as Promise<
+          typeof before
+        >;
+        await vi.waitFor(() => expect(getFlight).toHaveBeenCalledTimes(1));
+        const op =
+          operation === "undo" || operation === "redo"
+            ? `design.history.${operation}`
+            : `design.frame.${operation}`;
+        const writing = svc.handle(op, {
+          ...target,
+          frame: created.frame.file,
+          title: "New frame",
+        }) as Promise<typeof before>;
+        await vi.waitFor(() =>
+          expect(getFlight.mock.calls.length).toBeGreaterThanOrEqual(2),
+        );
+        release();
+        const [old, reply] = await Promise.all([observing, writing]);
+        expect(old.snapshot).toBe(before.snapshot);
+        expect(reply.snapshot).not.toBe(before.snapshot);
+        const frames = reply.snapshot.frames;
+        if (operation === "delete") expect(frames).toEqual([]);
+        else if (operation === "undo" || operation === "redo")
+          expect(frames[0].title).toBe(
+            operation === "undo" ? "Original" : "Renamed",
+          );
+        else expect(frames).toHaveLength(2);
+        getFlight.mockRestore();
+      } finally {
+        release();
+        flights.clear();
+        await svc.handle("workspace.delete", {
+          ...target,
+          includeBranch: true,
+        });
+      }
+    },
+  );
+
   it("does not share an in-flight snapshot across an active Design directory change", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
     execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
@@ -1188,20 +1271,11 @@ describe("WorkspaceService", () => {
         path.join(design.path, alternateDirectory),
         { recursive: true },
       );
-      fs.rmSync(path.join(design.path, alternateDirectory, "design.toml"));
-      fs.rmSync(path.join(design.path, alternateDirectory, "canvas.json"));
-      commitDesignMetadata(
-        design.path,
-        alternateDirectory,
-        JSON.stringify(
-          parseCanvasFixture(
-            fs.readFileSync(
-              designDocumentMetadataPath(design.path, originalDirectory),
-              "utf8",
-            ),
-          ),
-        ),
-      );
+      fs.rmSync(path.join(design.path, alternateDirectory, "meta/design.toml"));
+      const copiedCanvas = fs.readFileSync(path.join(design.path, alternateDirectory, "meta/canvas.json"), "utf8");
+      createDesignDirectoryPages(design.path, alternateDirectory, parseCanvasFixture(copiedCanvas), {
+        preservedCanvas: copiedCanvas, directories: [originalDirectory, alternateDirectory],
+      });
       execFileSync(
         "git",
         ["add", "-f", "--", originalDirectory, alternateDirectory],
@@ -1370,6 +1444,102 @@ describe("WorkspaceService", () => {
       });
     }
   });
+
+  it.each(["route", "empty page", "native"])(
+    "keeps history usable after a page is deleted through %s",
+    async (deletion) => {
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+      execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+      const design = await createWorkspace({
+        repoRoot: dir,
+        repoSlug: `design-page-history-${deletion.replace(" ", "-")}`,
+        kind: "design",
+      });
+      const target = { workspaceId: design.workspaceId };
+      try {
+        const first = (await svc.handle("design.frame.create", {
+          ...target,
+          title: "Frame A",
+        })) as { frame: { file: string } };
+        const source = await readDesignFrame(design.path, first.frame.file);
+        const oid = source.source.match(/data-oid="([^"]+)"/)![1]!;
+        await svc.handle("design.node.styles", {
+          ...target,
+          frame: first.frame.file,
+          sourceVersion: source.sourceVersion,
+          nodeId: oid,
+          styles: { color: "rebeccapurple" },
+        });
+        const page = (await svc.handle("design.page.create", {
+          ...target,
+          title: "Page B",
+        })) as { page: { id: string } };
+        const second = (await svc.handle("design.frame.create", {
+          ...target,
+          pageId: page.page.id,
+          title: "Frame B",
+        })) as { frame: { file: string; frameId: string } };
+        const api = getWorkspaceDesignApi(design.path);
+        await api.open(`frame:${second.frame.file}`);
+        if (deletion !== "native") {
+          if (deletion === "empty page")
+            await svc.handle("design.frame.delete", {
+              ...target,
+              frame: second.frame.file,
+            });
+          await svc.handle("design.page.delete", {
+            ...target,
+            pageId: page.page.id,
+            expectedFrameIds:
+              deletion === "empty page" ? [] : [second.frame.frameId],
+          });
+          const sessions = (
+            api as unknown as { sessions: Map<string, unknown> }
+          ).sessions;
+          expect(sessions.has(`frame:${second.frame.file}`)).toBe(false);
+        } else {
+          await svc.handle("design.history.undo", target);
+          await deleteDesignPage(design.path, page.page.id, []);
+          await expect(
+            svc.handle("design.history.redo", target),
+          ).rejects.toThrow(/page.*not found|page.*missing/i);
+          const history = (
+            svc as unknown as {
+              designHistoryState(workspace: string): { redo: unknown[] };
+            }
+          ).designHistoryState(design.path);
+          expect(history.redo).toEqual([]);
+        }
+        const undone = (await svc.handle("design.history.undo", target)) as {
+          historyFrame: string;
+        };
+        expect(undone.historyFrame).toBe(first.frame.file);
+        expect(
+          (await readDesignFrame(design.path, first.frame.file)).source,
+        ).not.toContain("rebeccapurple");
+        await svc.handle("design.history.redo", target);
+        expect(
+          (await readDesignFrame(design.path, first.frame.file)).source,
+        ).toContain("rebeccapurple");
+        expect(
+          fs.existsSync(
+            path.join(
+              design.path,
+              designDirectoryNameFor(design.path),
+              second.frame.file,
+            ),
+          ),
+        ).toBe(false);
+      } finally {
+        await svc.handle("workspace.delete", {
+          ...target,
+          includeBranch: true,
+        });
+      }
+    },
+  );
 
   it.each(["detach", "into-frame", "root-into-frame"])(
     "preserves edits on both sides of a %s transfer through undo and redo",
@@ -2490,28 +2660,10 @@ describe("WorkspaceService", () => {
       );
       const alternateDesign = path.join(created.path, "Alternate Design");
       fs.cpSync(currentDesign, alternateDesign, { recursive: true });
-      fs.rmSync(path.join(alternateDesign, "design.toml"));
-      fs.rmSync(path.join(alternateDesign, "canvas.json"));
-      commitDesignMetadata(
-        created.path,
-        "Alternate Design",
-        JSON.stringify(
-          parseCanvasFixture(
-            fs.readFileSync(
-              designDocumentMetadataPath(
-                created.path,
-                designDirectoryNameFor(created.path),
-              ),
-              "utf8",
-            ),
-          ),
-        ),
-      );
-      execFileSync("git", ["add", "-f", "--", "Alternate Design"], {
-        cwd: created.path,
-      });
-      execFileSync("git", ["commit", "-q", "-m", "add alternate design"], {
-        cwd: created.path,
+      fs.rmSync(path.join(alternateDesign, "meta/design.toml"));
+      const copiedCanvas = fs.readFileSync(path.join(alternateDesign, "meta/canvas.json"), "utf8");
+      createDesignDirectoryPages(created.path, "Alternate Design", parseCanvasFixture(copiedCanvas), {
+        preservedCanvas: copiedCanvas, directories: [designDirectoryNameFor(created.path), "Alternate Design"],
       });
       await expect(
         svc.handle("settings.write", {
@@ -2741,7 +2893,7 @@ describe("WorkspaceService", () => {
       await svc.handle("git.discardHunk", { workspaceId: created.workspaceId, patch });
       expect(fs.readFileSync(path.join(created.path, file), "utf8")).toContain("before");
       // Conflict repair does not require the manifest or canvas to parse first.
-      for (const name of ["design.toml", "canvas.json"]) {
+      for (const name of ["meta/design.toml", "meta/canvas.json"]) {
         const target = `${directory}/${name}`;
         const original = fs.readFileSync(path.join(created.path, target), "utf8");
         const conflicted = `<<<<<<< ours\n${original}\n=======\n${original}\n>>>>>>> theirs\n`;
@@ -3854,16 +4006,14 @@ describe("WorkspaceService", () => {
     await initializeDesignDocument(dir);
     const frame = await createDesignFrame(dir, { title: "Shared changes" });
     const directory = designDirectoryNameFor(dir);
-    const paths = ["hello.txt", ...fs.readdirSync(path.join(dir, directory)).filter(
-      (file) => fs.statSync(path.join(dir, directory, file)).isFile(),
-    ).map((file) => `${directory}/${file}`)];
+    const paths = ["hello.txt", directory];
     await svc.handle("git.stage", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, paths });
     fs.writeFileSync(path.join(dir, "hello.txt"), "newer unstaged code\n");
     await svc.handle("git.commit", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, message: "Code and Design together" });
     const show = (file: string) => execFileSync("git", ["show", `HEAD:${file}`], { cwd: dir, encoding: "utf8" });
     expect(show("hello.txt")).toBe("hi there");
     expect(show(`${directory}/${frame.file}`)).toContain("Shared changes");
-    expect(show(`${directory}/design.toml`)).toContain("canvas.json");
+    expect(show(`${directory}/meta/design.toml`)).toContain("canvas.json");
     expect(show(`${directory}/rules.md`)).toContain("# Zeros Design");
     expect(fs.readFileSync(path.join(dir, "hello.txt"), "utf8")).toBe("newer unstaged code\n");
     expect(execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: dir, encoding: "utf8" })).toBe("");
@@ -4453,7 +4603,7 @@ describe("WorkspaceService", () => {
       snapshot: { frames: Array<{ file: string; sourceVersion: string }> };
     };
     expect(assetReply.mutation.frame.source).toContain(
-      'src="./assets/mark.png"',
+      'src="../assets/mark.png"',
     );
     const afterAssetFoundation = (await svc.handle("design.foundation.open", {
       workspaceId: workspace.workspaceId,
@@ -4743,8 +4893,9 @@ describe("WorkspaceService", () => {
       ["diff", "--cached", "--name-only", "--no-renames"],
       { cwd: workspace.path, encoding: "utf8" },
     );
-    expect(staged).toContain(`${designDirectory}/checkout.html`);
-    expect(staged).toContain(`${designDirectory}/design.toml`);
+    expect(staged).toContain(`${designDirectory}/${frame.file}`);
+    expect(staged).toContain(`${designDirectory}/meta/design.toml`);
+    expect(staged).toContain(`${designDirectory}/meta/canvas.json`);
     expect(staged).toContain(`${designDirectory}/rules.md`);
     expect(staged).not.toContain("outside.txt");
 
@@ -4781,8 +4932,9 @@ describe("WorkspaceService", () => {
       ["show", "--pretty=format:", "--name-only", "HEAD"],
       { cwd: workspace.path, encoding: "utf8" },
     );
-    expect(committedPaths).toContain(`${designDirectory}/checkout.html`);
-    expect(committedPaths).toContain(`${designDirectory}/design.toml`);
+    expect(committedPaths).toContain(`${designDirectory}/${frame.file}`);
+    expect(committedPaths).toContain(`${designDirectory}/meta/design.toml`);
+    expect(committedPaths).toContain(`${designDirectory}/meta/canvas.json`);
     expect(committedPaths).toContain(`${designDirectory}/rules.md`);
     expect(committedPaths).not.toContain("outside.txt");
     expect(

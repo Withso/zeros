@@ -2,12 +2,21 @@ import { describe, expect, it } from "vitest";
 import {
   assertDesignTransactionInputSize,
   designComponentNodeAddressSchema,
+  designDocumentIdSchema,
+  designPortableIdSchema,
   designFoundationManifestSchema,
   designTransactionSchema,
   migrateDesignFoundationManifest,
 } from "../schema";
 
 describe("Design Foundation schemas", () => {
+  it("accepts portable nested document identities without changing node or component IDs", () => {
+    expect(designDocumentIdSchema.parse("frame:page-1/home.html")).toBe("frame:page-1/home.html");
+    expect(designDocumentIdSchema.parse(`frame:${"p".repeat(64)}/${"h".repeat(240)}.html`)).toContain("/");
+    expect(designPortableIdSchema.safeParse("page-1/home").success).toBe(false);
+    for (const id of ["frame:../home.html", "frame:page//home.html", "frame:page/sub/home.html", "frame:page\\home.html"])
+      expect(designDocumentIdSchema.safeParse(id).success).toBe(false);
+  });
   it("fills bounded manifest defaults and migrates the pre-version shape", () => {
     expect(migrateDesignFoundationManifest(undefined)).toEqual({
       schemaVersion: 1,

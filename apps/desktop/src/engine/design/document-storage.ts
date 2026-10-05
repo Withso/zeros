@@ -3,6 +3,7 @@ import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 export { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
 import { DESIGN_MANIFEST_FILE, parseDesignManifest } from "./manifest";
 import { DESIGN_CANVAS_FILE, decodeCanvasFile } from "./canvas-file";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import {
   DesignRenderBudgetError,
   MAX_DESIGN_TEXT_BYTES,
@@ -34,7 +35,7 @@ import path from "node:path";
 
 import { migrateDesignFoundationManifest } from "@zeros/design-core";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
-import { readDesignRegistrySource, readDirectoryDesignManifest } from "./metadata";
+import { assertSafeDesignStoragePath, readDesignRegistrySource, readDirectoryDesignLayout, readDirectoryDesignManifest } from "./metadata";
 
 import { designDirectoryNameFor } from "./directory-registry";
 import {
@@ -72,19 +73,23 @@ export function designDirectory(workspacePath: string): string {
   );
 }
 
-function canvasPath(workspacePath: string): string {
-  return designDocumentMetadataPath(
+export interface DesignCanvasReadContext {
+  canvas: CanvasDocument;
+  layout: ReturnType<typeof readDirectoryDesignLayout>;
+}
+
+export async function readCanvasContext(
+  workspacePath: string,
+): Promise<DesignCanvasReadContext> {
+  const layout = readDirectoryDesignLayout(
     workspacePath,
     designDirectoryNameFor(workspacePath),
   );
+  return { layout, canvas: await readCanvas(workspacePath, layout) };
 }
 
 export function isFrameFile(value: string): boolean {
-  return (
-    /^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(value) &&
-    value !== "." &&
-    value !== ".."
-  );
+  return isDesignFrameFile(value);
 }
 
 export function assertFrameFile(value: string): string {
@@ -123,12 +128,23 @@ export function normalizeGeometry(
   };
 }
 
-export async function readCanvas(workspacePath: string): Promise<CanvasDocument> {
+export async function readCanvas(
+  workspacePath: string,
+  layout = readDirectoryDesignLayout(
+    workspacePath,
+    designDirectoryNameFor(workspacePath),
+  ),
+): Promise<CanvasDocument> {
   const registry = readDesignRegistrySource(workspacePath);
-  const target = canvasPath(workspacePath);
+  const directory = designDirectoryNameFor(workspacePath);
+  const registered = designDirectoryEntry(workspacePath, directory, layout);
+  const target = designDocumentMetadataPath(workspacePath, directory, {
+    layout,
+    entry: registered,
+  });
   const file = path.relative(workspacePath, target).split(path.sep).join("/");
   const source = readDesignStorageFile(workspacePath, file);
-  const registrationFile = `${designDirectoryNameFor(workspacePath)}/${DESIGN_MANIFEST_FILE}`;
+  const registrationFile = layout?.manifestFile ?? `${designDirectoryNameFor(workspacePath)}/${DESIGN_MANIFEST_FILE}`;
   const registrationSource = readDesignStorageFile(workspacePath, registrationFile);
   const retainSnapshot = (canvas: CanvasDocument): CanvasDocument =>
     Object.defineProperty(canvas, canvasReadSnapshot, {
@@ -140,10 +156,6 @@ export async function readCanvas(workspacePath: string): Promise<CanvasDocument>
         registration: { file: registrationFile, source: registrationSource },
       },
     });
-  const registered = designDirectoryEntry(
-    workspacePath,
-    designDirectoryNameFor(workspacePath),
-  );
   if (
     registered &&
     readDesignStorageFile(
@@ -179,7 +191,7 @@ export async function readCanvas(workspacePath: string): Promise<CanvasDocument>
       file.endsWith(`/${DESIGN_MANIFEST_FILE}`)
         ? parseDesignManifest(source)?.document
         : file.endsWith(`/${DESIGN_CANVAS_FILE}`)
-          ? decodeCanvasFile(source)
+          ? decodeCanvasFile(source, { version: layout?.canvasVersion ?? 1 })
           : JSON.parse(source)
     ) as typeof raw;
   } catch (error) {
@@ -189,6 +201,10 @@ export async function readCanvas(workspacePath: string): Promise<CanvasDocument>
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     throw new Error("Design canvas metadata must be an object.");
+  if (layout?.kind === "meta-v3") {
+    for (const page of (raw as CanvasDocument).pages ?? [])
+      assertSafeDesignStoragePath(workspacePath, `${layout.directory}/${page.folder}/.zeros-validation`);
+  }
   if (
     raw.version !== undefined &&
     raw.version !== 1 &&
@@ -293,6 +309,21 @@ export async function writeCanvas(
   sourceChanges: DesignStorageChange[] = [],
 ): Promise<string[]> {
   const directory = designDirectoryNameFor(workspacePath);
+  if (readDirectoryDesignLayout(workspacePath, directory)?.canvasVersion === 2) {
+    const pages = canvas.pages ?? [];
+    const members = new Map(pages.map(page => [page.id, new Set<string>()]));
+    for (const file of Object.keys(canvas.frames)) {
+      const page = pages.find(page => page.folder && file.startsWith(page.folder + "/"));
+      if (!page) throw new Error("Design frame has no current page: " + file + ". Refresh before writing.");
+      const info = canvas.frame_info[file];
+      if (!info?.id) throw new Error("Design frame requires a stable canvas ID: " + file);
+      members.get(page.id)!.add(info.id);
+    }
+    for (const page of pages) {
+      const ids = members.get(page.id)!;
+      page.frames = [...page.frames.filter(id => ids.has(id)), ...[...ids].filter(id => !page.frames.includes(id))];
+    }
+  }
   if (!readDirectoryDesignManifest(workspacePath, directory)?.canvas) {
     for (const relative of ["assets/.gitkeep", "components/.gitkeep"]) {
       const file = `${directory}/${relative}`;
@@ -379,12 +410,22 @@ export function stripLegacyFrameMeta(
   return result;
 }
 
-export async function discoverFrameFiles(workspacePath: string): Promise<string[]> {
-  const registration = readDirectoryDesignManifest(workspacePath, designDirectoryNameFor(workspacePath));
+export async function discoverFrameFiles(
+  workspacePath: string,
+  context?: DesignCanvasReadContext,
+): Promise<string[]> {
+  const registration = context
+    ? context.layout?.manifest
+    : readDirectoryDesignManifest(
+        workspacePath,
+        designDirectoryNameFor(workspacePath),
+      );
   if (registration?.canvas) {
     // canvas.json is authoritative. Shared templates are not implicitly frames,
     // and missing sources remain actionable references instead of being erased.
-    return Object.keys((await readCanvas(workspacePath)).frames);
+    return Object.keys(
+      (context?.canvas ?? (await readCanvas(workspacePath))).frames,
+    );
   }
   let entries;
   try {

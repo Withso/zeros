@@ -50,6 +50,9 @@ describe("zeros-design protocol", () => {
       path: "home.html",
       sourceVersion: "aaaaaaaaaaaaaaaaaaaaaaaa",
     });
+    expect(parseDesignProtocolUrl(`zeros-design://workspace/ws_abc123/${capability}/page-1/home.html?v=aaaaaaaaaaaaaaaaaaaaaaaa`)).toEqual({
+      workspaceId: "ws_abc123", capability, path: "page-1/home.html", sourceVersion: "aaaaaaaaaaaaaaaaaaaaaaaa",
+    });
     expect(
       parseDesignProtocolUrl("zeros-design://other/ws_abc123/home.html"),
     ).toBeNull();

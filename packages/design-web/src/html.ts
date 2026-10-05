@@ -14,6 +14,7 @@ import {
 import { designDocumentBody, withExplicitDesignBody } from "./document-body";
 
 import { normalizeDesignCssProperty, validateDesignCssValue } from "./css";
+import { designSrcsetReferences, isContainedDesignReference } from "./references";
 
 import type {
   DesignSourceSpan,
@@ -461,29 +462,7 @@ function fragmentElements(
   return result;
 }
 
-function isContainedDesignReference(reference: string): boolean {
-  const value = reference.trim();
-  if (!value || value.startsWith("#")) return true;
-  if (
-    /[\\\u0000-\u001f\u007f]/.test(value) ||
-    value.startsWith("/") ||
-    value.startsWith("//") ||
-    /^[a-z][a-z0-9+.-]*:/i.test(value) ||
-    /%(?:2e|2f|5c)/i.test(value)
-  ) {
-    return false;
-  }
-  const pathname = value.split(/[?#]/, 1)[0] ?? "";
-  try {
-    return decodeURIComponent(pathname)
-      .split("/")
-      .every((segment) => segment !== "..");
-  } catch {
-    return false;
-  }
-}
-
-function assertSafeStyleSource(source: string, owner: string): void {
+function assertSafeStyleSource(source: string, owner: string, sourceFile: string): void {
   let root: postcss.Root;
   try {
     root = postcss.parse(source);
@@ -497,11 +476,11 @@ function assertSafeStyleSource(source: string, owner: string): void {
   });
   root.walkDecls((declaration) => {
     const property = normalizeDesignCssProperty(declaration.prop);
-    validateDesignCssValue(property, declaration.value);
+    validateDesignCssValue(property, declaration.value, sourceFile);
   });
 }
 
-function assertSafeInlineStyle(source: string): void {
+function assertSafeInlineStyle(source: string, sourceFile: string): void {
   let root: postcss.Root;
   try {
     root = postcss.parse(`a{${source}}`);
@@ -517,7 +496,7 @@ function assertSafeInlineStyle(source: string): void {
       throw new Error("Nested CSS is not allowed in a style attribute.");
     }
     const property = normalizeDesignCssProperty(node.prop);
-    validateDesignCssValue(property, node.value);
+    validateDesignCssValue(property, node.value, sourceFile);
   }
 }
 
@@ -528,7 +507,7 @@ function elementText(element: Element): string {
     .join("");
 }
 
-function assertSafeElements(records: readonly Element[]): void {
+function assertSafeElements(records: readonly Element[], sourceFile: string): void {
   for (const element of records) {
     if (ACTIVE_ELEMENTS.has(element.tagName)) {
       throw new Error(
@@ -546,7 +525,7 @@ function assertSafeElements(records: readonly Element[]): void {
       throw new Error(`Active design metadata is not allowed: ${httpEquiv}.`);
     }
     if (element.tagName === "style") {
-      assertSafeStyleSource(elementText(element), "<style>");
+      assertSafeStyleSource(elementText(element), "<style>", sourceFile);
     }
     for (const attribute of element.attrs) {
       const name = attribute.name.toLowerCase();
@@ -559,17 +538,14 @@ function assertSafeElements(records: readonly Element[]): void {
         throw new Error("The srcdoc attribute is not allowed in design HTML.");
       }
       if (name === "style") {
-        assertSafeInlineStyle(attribute.value);
+        assertSafeInlineStyle(attribute.value, sourceFile);
         continue;
       }
       if (name === "srcset") {
-        const candidates = attribute.value
-          .split(",")
-          .map((candidate) => candidate.trim().split(/\s+/, 1)[0] ?? "")
-          .filter(Boolean);
+        const candidates = designSrcsetReferences(attribute.value).map((candidate) => candidate.url);
         if (
           candidates.length === 0 ||
-          candidates.some((candidate) => !isContainedDesignReference(candidate))
+          candidates.some((candidate) => !isContainedDesignReference(candidate, sourceFile))
         ) {
           throw new Error(
             "srcset references must stay inside the design document.",
@@ -579,7 +555,7 @@ function assertSafeElements(records: readonly Element[]): void {
       }
       if (
         URL_ATTRIBUTES.has(name) &&
-        !isContainedDesignReference(attribute.value)
+        !isContainedDesignReference(attribute.value, sourceFile)
       ) {
         throw new Error(
           `URL in ${attribute.name} must stay inside the design document.`,
@@ -589,7 +565,7 @@ function assertSafeElements(records: readonly Element[]): void {
   }
 }
 
-export function assertSafeDesignHtmlFragment(html: string): void {
+export function assertSafeDesignHtmlFragment(html: string, sourceFile = ""): void {
   if (html.length > 500_000) throw new Error("Design HTML is too long.");
   const parseErrors: ParserError[] = [];
   const fragment = parseFragment(html, {
@@ -599,10 +575,10 @@ export function assertSafeDesignHtmlFragment(html: string): void {
   if (parseErrors.length > 0) {
     throw new Error(`Invalid design HTML (${parseErrors[0]!.code}).`);
   }
-  assertSafeElements(fragmentElements(fragment));
+  assertSafeElements(fragmentElements(fragment), sourceFile);
 }
 
-export function assertSafeDesignHtmlDocument(html: string): void {
+export function assertSafeDesignHtmlDocument(html: string, sourceFile = ""): void {
   if (new TextEncoder().encode(html).byteLength > 2 * 1024 * 1024) {
     throw new Error("Design HTML exceeds the 2 MiB source limit.");
   }
@@ -626,7 +602,7 @@ export function assertSafeDesignHtmlDocument(html: string): void {
   if (!/^\s*<!doctype\s+html\b/i.test(html) || !authoredHtml || !authoredBody) {
     throw new Error("A component must be a complete HTML document.");
   }
-  assertSafeElements(records);
+  assertSafeElements(records, sourceFile);
 }
 
 /** Component internals keep definition-local IDs. A runtime address combines
@@ -674,8 +650,9 @@ export function mutateDesignNodeHtmlSource(
   nodeId: string,
   html: string,
   mode: "append" | "replace-inner" = "replace-inner",
+  sourceFile = "",
 ): string {
-  assertSafeDesignHtmlFragment(html);
+  assertSafeDesignHtmlFragment(html, sourceFile);
   if (nodeId === DESIGN_DOCUMENT_BODY_ID) {
     if (mode !== "append")
       throw new Error(
@@ -709,6 +686,7 @@ export function mutateDesignNodeAttributeSource(
   nodeId: string,
   rawName: string,
   value: string | null,
+  sourceFile = "",
 ): string {
   const name = rawName.trim();
   if (!/^[A-Za-z_:][A-Za-z0-9_.:-]*$/.test(name) || name.length > 128) {
@@ -731,7 +709,7 @@ export function mutateDesignNodeAttributeSource(
     ["href", "src", "action", "formaction", "poster", "xlink:href"].includes(
       normalized,
     ) &&
-    !isContainedDesignReference(value)
+    !isContainedDesignReference(value, sourceFile)
   ) {
     throw new Error(`URL in ${name} must stay inside the design document.`);
   }

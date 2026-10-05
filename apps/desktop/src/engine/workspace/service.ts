@@ -24,6 +24,7 @@ import {
 import {
   MAX_DESIGN_HISTORY_WORKSPACES,
   pruneWorkspaceDesignHistory,
+  pruneWorkspaceDesignFrameHistory,
   type WorkspaceDesignHistoryEntry,
   type WorkspaceDesignHistoryState,
 } from "../design/workspace-history";
@@ -276,6 +277,7 @@ import {
   personalWorkspaceRoot,
 } from "../settings/personal-repo";
 import { forgetWorkspaceDesignApi } from "../design/design-api";
+import { designPagesMigrationGeneration } from "../design/pages-migration";
 import {
   designDirectoryNameFor,
   DESIGN_CANVAS_FILE,
@@ -295,7 +297,7 @@ import {
   withDesignDirectoryNameLease,
 } from "../design/directory-registry";
 import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
-import { readDirectoryDesignManifest } from "../design/metadata";
+import { readDirectoryDesignLayout } from "../design/metadata";
 import { designRegistryAtGitRef } from "../design/metadata-git";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
@@ -614,6 +616,9 @@ const WRITE_OPS = new Set<string>([
  * WRITE_OPS is a remote-security allowlist, and widening it would accidentally
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
+  "design.page.create",
+  "design.page.rename",
+  "design.page.delete",
   "git.reviewHunk",
   "git.resolveConflict",
   "design.capture",
@@ -757,6 +762,9 @@ const SERIALIZED_GIT_MUTATION_OPS = new Set<string>([
 /** These handlers write the active document or its canvas context. Resolve
  * their directory for the whole async operation, just like Design reads. */
 const DESIGN_DOCUMENT_MUTATIONS = new Set<string>([
+  "design.page.create",
+  "design.page.rename",
+  "design.page.delete",
   "design.transaction.apply",
   "design.review.resolve",
   "design.history.undo",
@@ -941,10 +949,14 @@ function normalizeRepoMutationPath(candidate: string): string | null {
 async function isExistingDesignManifest(cwd: string, candidate: string): Promise<boolean> {
   const normalized = normalizeRepoMutationPath(candidate);
   if (!normalized || !fs.existsSync(nodePath.resolve(cwd, normalized))) return false;
-  const directory = nodePath.posix.dirname(normalized);
+  const parent = nodePath.posix.dirname(normalized);
+  const directory = nodePath.posix.basename(parent) === "meta" ? nodePath.posix.dirname(parent) : parent;
+  try {
+    const layout = readDirectoryDesignLayout(cwd, directory);
+    if (layout) return layout.manifestFile === normalized;
+  } catch { /* Source repair may need HEAD's identity. */ }
   if (activeDesignDirectoryNameFor(cwd) === directory ||
       (await stickyRecognizedDesignDirectories(cwd)).includes(directory)) return true;
-  try { if (readDirectoryDesignManifest(cwd, directory)) return true; } catch { /* Source repair may need HEAD's identity. */ }
   const registered = await designRegistryAtGitRef(cwd, "HEAD").catch(() => null);
   return Object.values(registered?.directories ?? {}).some(entry => entry.path === directory);
 }
@@ -1111,6 +1123,7 @@ async function assertNoDesignPathWrites(
  *     nor reads — they are not gated by this allowlist (a remote client edits
  *     its own chat list freely, matching the existing WRITE_OPS exclusion). */
 const REMOTE_READABLE = new Set<string>([
+  "design.page.select",
   "git.reviewHunks",
   "codeReview.list",
   // Workspaces + projects (repository navigation / workspace picker)
@@ -1320,6 +1333,8 @@ export class WorkspaceService {
       this.designHistoryState(workspacePath, create),
     recordDesignHistory: (workspacePath, entry) =>
       this.recordDesignHistory(workspacePath, entry),
+    pruneDesignHistoryFrames: (workspacePath, frames, folder) =>
+      this.pruneDesignHistoryFrames(workspacePath, frames, folder),
     readDesignSnapshot: (workspace, remote, options) =>
       this.readDesignSnapshot(workspace, remote, options),
     readDesignSnapshotRequest: (workspaceId, remote, hostLocalResources) =>
@@ -1419,6 +1434,10 @@ export class WorkspaceService {
     string,
     WorkspaceDesignHistoryState
   >();
+  private readonly designHistoryLayouts = new WeakMap<
+    WorkspaceDesignHistoryState,
+    { directory: string; generation: string | null }
+  >();
 
   private designHistoryState(
     workspacePath: string,
@@ -1427,6 +1446,14 @@ export class WorkspaceService {
   ): WorkspaceDesignHistoryState | undefined {
     const key = nodePath.resolve(workspacePath) + (actorId ? `\u0000${actorId}` : "");
     let state = this.designHistoryByWorkspace.get(key);
+    const directory = designDirectoryNameFor(workspacePath);
+    const generation = designPagesMigrationGeneration(workspacePath, directory);
+    const layout = state && this.designHistoryLayouts.get(state);
+    if (state && layout && (layout.directory !== directory || layout.generation !== generation)) {
+      state.undo = [];
+      state.redo = [];
+      state.bytes = 0;
+    }
     if (!state && create) {
       state = { undo: [], redo: [], bytes: 0 };
       this.designHistoryByWorkspace.set(key, state);
@@ -1434,6 +1461,7 @@ export class WorkspaceService {
       this.designHistoryByWorkspace.delete(key);
       this.designHistoryByWorkspace.set(key, state);
     }
+    if (state) this.designHistoryLayouts.set(state, { directory, generation });
     while (this.designHistoryByWorkspace.size > MAX_DESIGN_HISTORY_WORKSPACES) {
       const oldest = this.designHistoryByWorkspace.keys().next().value as
         | string
@@ -1474,6 +1502,23 @@ export class WorkspaceService {
     const root = nodePath.resolve(workspacePath);
     for (const key of this.designHistoryByWorkspace.keys()) {
       if (key === root || key.startsWith(`${root}\u0000`)) this.designHistoryByWorkspace.delete(key);
+    }
+  }
+  private pruneDesignHistoryFrames(
+    workspacePath: string,
+    frames: readonly string[],
+    folder?: string,
+  ): void {
+    const root = nodePath.resolve(workspacePath);
+    const directory = designDirectoryNameFor(workspacePath);
+    const files = new Set(frames);
+    for (const [key, state] of this.designHistoryByWorkspace) {
+      if (
+        (key === root || key.startsWith(`${root}\u0000`)) &&
+        this.designHistoryLayouts.get(state)?.directory === directory
+      ) {
+        pruneWorkspaceDesignFrameHistory(state, files, folder);
+      }
     }
   }
   setDesignProtocolCapabilityProvider(
@@ -2117,6 +2162,8 @@ export class WorkspaceService {
       writeBack?: boolean;
       designDirectory?: string;
       hostLocalResources?: boolean;
+      /** Mutation replies must not share a read admitted before their write. */
+      fresh?: boolean;
     } = {},
   ) {
     const root = options.root ?? workspace.path;
@@ -2132,7 +2179,7 @@ export class WorkspaceService {
     // under the same workspace root.
     const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}`;
     const current = this.designSnapshotFlights.get(key);
-    if (current) return current;
+    if (current && !options.fresh) return current;
     const request = (async () => {
       const snapshot = await readDesignWorkspaceSnapshot(root, {
         writeBack,

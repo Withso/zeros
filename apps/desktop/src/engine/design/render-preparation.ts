@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { parse } from "parse5";
 import postcss from "postcss";
+import { designCssUrlReferences, designSrcsetReferences, rebaseDesignCssReferences } from "@zeros/design-web";
 import { expandDesignComponents } from "./components";
 import { designDirectoryNameFor } from "./directory-registry";
 import {
@@ -50,6 +51,7 @@ async function inlineLocalStyles(
   workspacePath: string,
   source: string,
   sources?: Readonly<Record<string, string>>,
+  entryFile = "",
 ): Promise<string> {
   const directory = designDirectory(workspacePath);
   const document = parse(source, { sourceCodeLocationInfo: true });
@@ -77,7 +79,7 @@ async function inlineLocalStyles(
     const location = element.sourceCodeLocation!;
     const href =
       element.attrs.find((attribute) => attribute.name === "href")?.value ?? "";
-    const resolved = safeLocalReference(directory, href);
+    const resolved = safeLocalReference(directory, href, entryFile);
     let replacement = "";
     if (resolved?.toLowerCase().endsWith(".css")) {
       const css = sources
@@ -86,7 +88,11 @@ async function inlineLocalStyles(
           ] ?? null)
         : await readSafeDesignText(directory, resolved);
       if (css !== null) {
-        replacement = `<style data-zeros-source="${escapeAttribute(href)}">${css.replace(/<\/style/gi, "<\\/style")}</style>`;
+        const cssFile = path.relative(directory, resolved).split(path.sep).join("/");
+        let rebased = css;
+        try { rebased = rebaseDesignCssReferences(css, cssFile, entryFile); }
+        catch { /* Lint reports malformed authored CSS; keep its repair preview. */ }
+        replacement = `<style data-zeros-source="${escapeAttribute(cssFile)}">${rebased.replace(/<\/style/gi, "<\\/style")}</style>`;
       }
     }
     resultBytes +=
@@ -116,14 +122,15 @@ async function inlineCssUrlValue(
   value: string,
   budget: { inlineAssetBytes: number },
   readAsset: DesignRenderAssetReader = readSafeDesignBuffer,
+  sourceFile = "",
 ): Promise<string> {
-  const matches = [...value.matchAll(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi)];
+  const matches = designCssUrlReferences(value);
   let result = value;
   let resultBytes = utf8Bytes(value);
   for (const match of matches.reverse()) {
-    const reference = match[2] ?? "";
+    const reference = match.url;
     const mimeType = designAssetMimeType(reference);
-    const resolved = mimeType ? safeLocalReference(directory, reference) : null;
+    const resolved = mimeType ? safeLocalReference(directory, reference, sourceFile) : null;
     if (!resolved || !mimeType) continue;
     const data = await readAsset(directory, resolved);
     if (!data || data.length > MAX_ASSET_BYTES) continue;
@@ -136,15 +143,15 @@ async function inlineCssUrlValue(
       );
     }
     budget.inlineAssetBytes += data.length;
-    const start = match.index ?? 0;
+    const start = match.functionStart;
     const replacement = `url("data:${mimeType};base64,${data.toString("base64")}")`;
-    resultBytes += utf8Bytes(replacement) - utf8Bytes(match[0]);
+    resultBytes += utf8Bytes(replacement) - utf8Bytes(value.slice(start, match.functionEnd));
     if (resultBytes > MAX_SANITIZED_RENDER_BYTES) {
       throw new DesignRenderBudgetError(
         "Inlined CSS exceeded the 15 MiB per-frame render limit.",
       );
     }
-    result = `${result.slice(0, start)}${replacement}${result.slice(start + match[0].length)}`;
+    result = `${result.slice(0, start)}${replacement}${result.slice(match.functionEnd)}`;
   }
   return result;
 }
@@ -154,6 +161,7 @@ async function inlineCssLocalAssets(
   source: string,
   budget: { inlineAssetBytes: number },
   readAsset?: DesignRenderAssetReader,
+  sourceFile = "",
 ): Promise<string> {
   let root: postcss.Root;
   try {
@@ -171,6 +179,7 @@ async function inlineCssLocalAssets(
       declaration.value,
       budget,
       readAsset,
+      sourceFile,
     );
   }
   const result = root.toString();
@@ -186,6 +195,7 @@ async function inlineLocalAssets(
   workspacePath: string,
   source: string,
   readAsset: DesignRenderAssetReader = readSafeDesignBuffer,
+  sourceFile = "",
 ): Promise<string> {
   const directory = designDirectory(workspacePath);
   const document = parse(source, { sourceCodeLocationInfo: true });
@@ -210,7 +220,7 @@ async function inlineLocalAssets(
       const start = element.sourceCodeLocation.startTag.endOffset;
       const end = element.sourceCodeLocation.endTag.startOffset;
       const css = source.slice(start, end);
-      const inlined = await inlineCssLocalAssets(directory, css, budget, readAsset);
+      const inlined = await inlineCssLocalAssets(directory, css, budget, readAsset, sourceFile);
       if (inlined !== css) reserveEdit(start, end, inlined);
     }
     for (const attribute of element.attrs) {
@@ -222,6 +232,7 @@ async function inlineLocalAssets(
           attribute.value,
           budget,
           readAsset,
+          sourceFile,
         );
         if (inlined !== attribute.value) {
           reserveEdit(
@@ -232,10 +243,28 @@ async function inlineLocalAssets(
         }
         continue;
       }
+      if (attribute.name === "srcset") {
+        const location = element.sourceCodeLocation?.attrs?.[attribute.name];
+        if (!location) continue;
+        let value = attribute.value;
+        for (const reference of designSrcsetReferences(value).reverse()) {
+          const mimeType = designAssetMimeType(reference.url);
+          const resolved = mimeType ? safeLocalReference(directory, reference.url, sourceFile) : null;
+          if (!mimeType || !resolved) continue;
+          const data = await readAsset(directory, resolved);
+          if (!data || data.length > MAX_ASSET_BYTES) continue;
+          if (budget.inlineAssetBytes + data.length > MAX_INLINE_ASSET_BYTES_PER_FRAME)
+            throw new DesignRenderBudgetError("Local assets exceeded the 12 MiB per-frame inline budget.");
+          budget.inlineAssetBytes += data.length;
+          value = value.slice(0, reference.start) + `data:${mimeType};base64,${data.toString("base64")}` + value.slice(reference.end);
+        }
+        if (value !== attribute.value) reserveEdit(location.startOffset, location.endOffset, `srcset="${escapeAttribute(value)}"`);
+        continue;
+      }
       if (attribute.name !== "src" && attribute.name !== "poster") continue;
       const mimeType = designAssetMimeType(attribute.value);
       const resolved = mimeType
-        ? safeLocalReference(directory, attribute.value)
+        ? safeLocalReference(directory, attribute.value, sourceFile)
         : null;
       const location = element.sourceCodeLocation?.attrs?.[attribute.name];
       if (!resolved || !location || !mimeType) continue;
@@ -275,13 +304,14 @@ export async function prepareFrameRenderSource(
   viewport: { width: number; height: number },
   sources?: Readonly<Record<string, string>>,
   readAsset?: DesignRenderAssetReader,
+  entryFile = "",
 ): Promise<{ sanitized: string; sourceVersion: string }> {
   assertRenderByteLimit(
     source,
     MAX_DESIGN_TEXT_BYTES,
     "Authored frame HTML exceeded the 2 MiB source limit.",
   );
-  const expanded = await expandDesignComponents(workspacePath, healDesignOids(source).html, sources);
+  const expanded = await expandDesignComponents(workspacePath, healDesignOids(source).html, sources, entryFile);
   assertRenderByteLimit(
     expanded.html,
     MAX_SANITIZED_RENDER_BYTES,
@@ -291,8 +321,9 @@ export async function prepareFrameRenderSource(
     workspacePath,
     expanded.html,
     sources,
+    entryFile,
   );
-  const inlined = await inlineLocalAssets(workspacePath, withStyles, readAsset);
+  const inlined = await inlineLocalAssets(workspacePath, withStyles, readAsset, entryFile);
   const sanitized = stripNonDesignOidsForRender(
     sanitizeDesignFrameMarkup(inlined),
   );
@@ -316,11 +347,15 @@ export async function composeFrameSrcDoc(
   workspacePath: string,
   source: string,
   viewport: { width: number; height: number },
+  entryFile = "",
 ): Promise<{ sourceVersion: string; srcDoc: string }> {
   const { sanitized, sourceVersion } = await prepareFrameRenderSource(
     workspacePath,
     source,
     viewport,
+    undefined,
+    undefined,
+    entryFile,
   );
   const runtime = createDesignRuntimeScript(sourceVersion);
   const csp =

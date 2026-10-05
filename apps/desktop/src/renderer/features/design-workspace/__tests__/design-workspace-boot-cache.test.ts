@@ -32,6 +32,18 @@ function snapshot(file: string): DesignWorkspaceSnapshotWire {
 }
 
 describe("Design workspace boot cache", () => {
+  it("retains the page catalog and exact nested ownership while dropping capability", async () => {
+    const cache = await import("../state/design-workspace-boot-cache");
+    const current = snapshot("page-1/home.html");
+    current.pages = [{ id: "screens", title: "Screens", folder: "page-1", frameFiles: ["page-1/home.html"] }];
+    current.frames[0].pageId = "screens";
+    const safe = cache.safeDesignWorkspaceBootSnapshot(current);
+    expect(safe?.pages).toEqual(current.pages);
+    expect(safe?.frames[0].pageId).toBe("screens");
+    expect(safe?.protocolCapability).toBeNull();
+    expect(cache.safeDesignWorkspaceBootSnapshot({ ...current, pages: [{ ...current.pages[0], folder: "../escape" }] })).toBeNull();
+    expect(cache.safeDesignWorkspaceBootSnapshot({ ...current, frames: [{ ...current.frames[0], pageId: "wrong" }] })).toBeNull();
+  });
   beforeEach(() => {
     const storage = new Map<string, string>();
     vi.stubGlobal("localStorage", {

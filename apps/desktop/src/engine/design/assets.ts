@@ -3,6 +3,7 @@ import { opendir } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { designDirectoryNameFor } from "./directory-registry";
 import { inspectSafeRegularFile, readSafeRegularFile } from "./safe-files";
+import { resolveDesignLocalReference } from "@zeros/design-web";
 const MAX_DESIGN_TEXT_BYTES = 2 * 1024 * 1024;
 function designDirectory(workspacePath: string): string {
   return path.join(
@@ -39,18 +40,11 @@ export interface DesignAssetSummary {
 export function safeLocalReference(
   directory: string,
   reference: string,
+  sourceFile = "",
 ): string | null {
-  const clean = reference.trim();
-  if (!clean || clean.startsWith("#")) return null;
-  if (
-    clean.startsWith("/") ||
-    clean.startsWith("//") ||
-    /^[a-z][a-z0-9+.-]*:/i.test(clean)
-  ) {
-    return null;
-  }
-  const withoutQuery = clean.split(/[?#]/, 1)[0] ?? "";
-  const resolved = path.resolve(directory, withoutQuery);
+  const local = resolveDesignLocalReference(reference, sourceFile);
+  if (!local) return null;
+  const resolved = path.resolve(directory, local);
   return resolved.startsWith(`${path.resolve(directory)}${path.sep}`)
     ? resolved
     : null;

@@ -9,6 +9,7 @@
 import React from "react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import type { DesignPageSummary } from "@zeros/protocol/design-pages";
 
 import {
   type DesignCanvasFrameWire,
@@ -58,6 +59,9 @@ export interface DesignCanvasProps {
 
 export interface DesignInspectorProps {
   workspaceId: string | null;
+  pages?: DesignPageSummary[];
+  activePageId?: string;
+  pageFrames?: DesignCanvasFrameWire[];
   folder: string | null;
   /** Selected frame document, or null for an empty canvas selection. */
   frame: DesignCanvasFrameWire | null;

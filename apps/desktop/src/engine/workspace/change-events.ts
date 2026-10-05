@@ -67,6 +67,9 @@ const WORKSPACE_MUTATIONS = new Set([
   // app-owned canvas document, so every preview/lint consumer must advance in
   // the same exact workspace generation as Files and Changes.
   "design.frame.create",
+  "design.page.create",
+  "design.page.rename",
+  "design.page.delete",
   "design.initialize",
   "design.transaction.apply",
   "design.history.undo",

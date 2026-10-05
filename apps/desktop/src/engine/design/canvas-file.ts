@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import {
+  designFrameFileSchema,
+  isDesignPageFolder,
+  portableDesignName,
+} from "@zeros/protocol/design-path";
 
 export const DESIGN_CANVAS_FILE = "canvas.json";
 const id = z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,127}$/);
 const title = z.string().max(120);
-const source = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i);
+const source = designFrameFileSchema;
 const coordinate = z.number().finite().min(-1_000_000).max(1_000_000);
 const size = z.number().finite().min(1).max(16_384);
 const frameSchema = z
@@ -38,6 +43,10 @@ const canvasSchema = z
       .refine((frames) => Object.keys(frames).length <= 256),
   })
   .passthrough();
+const pagedCanvasSchema = canvasSchema.extend({
+  version: z.literal(2),
+  pages: z.array(pageSchema.extend({ folder: z.string().refine(isDesignPageFolder) })).min(1).max(64),
+});
 
 type RecordValue = Record<string, unknown>;
 const record = (value: unknown): RecordValue => {
@@ -48,11 +57,13 @@ const record = (value: unknown): RecordValue => {
 
 /** The public file is a small scene index. The existing HTML engine continues
  * to address documents by source path; its IPC/document IDs remain compatible. */
-export function decodeCanvasFile(source: string): RecordValue {
+export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): RecordValue {
   const value = JSON.parse(source);
-  if (value?.version !== 1)
+  if (value?.version !== 1 && value?.version !== 2)
     throw new Error(`Unsupported design canvas version: ${value?.version}`);
-  const result = canvasSchema.safeParse(value);
+  if (options && options.version !== value.version)
+    throw new Error(`Design layout requires canvas version ${options.version}; found ${value.version}.`);
+  const result = (value.version === 2 ? pagedCanvasSchema : canvasSchema).safeParse(value);
   if (!result.success)
     throw new Error(
       `Invalid Design canvas frame geometry or metadata: ${result.error.message}`,
@@ -63,14 +74,21 @@ export function decodeCanvasFile(source: string): RecordValue {
     pages = [{ id: "main", title: "Design", frames: Object.keys(frames) }],
     ...rest
   } = parsed;
-  const order = pages[0].frames;
+  const order = pages.flatMap((page) => page.frames);
+  if (
+    parsed.version === 2 &&
+    (new Set(pages.map((page) => page.id)).size !== pages.length ||
+      new Set(pages.map((page) => portableDesignName(String(page.folder))))
+        .size !== pages.length)
+  )
+    throw new Error("Design pages must have distinct IDs and folders.");
   if (
     new Set(order).size !== order.length ||
     order.length !== Object.keys(frames).length ||
     order.some((frameId) => !Object.hasOwn(frames, frameId))
   )
     throw new Error(
-      "Every Design frame must appear exactly once on the canvas page.",
+      "Every Design frame must appear exactly once on a canvas page.",
     );
   const files = new Set<string>();
   const geometry: RecordValue = {};
@@ -88,7 +106,10 @@ export function decodeCanvasFile(source: string): RecordValue {
       geometryMetadata,
       ...extensions
     } = frame;
-    const portable = file.normalize("NFC").toLowerCase();
+    const page = pages.find((page) => page.frames.includes(frameId))!;
+    if (parsed.version === 1 ? file.includes("/") : file.split("/")[0] !== page.folder || file.split("/").length !== 2)
+      throw new Error("Design frame source must be inside its page folder.");
+    const portable = portableDesignName(file);
     if (files.has(portable))
       throw new Error("Design frames must have distinct source files.");
     files.add(portable);
@@ -98,7 +119,7 @@ export function decodeCanvasFile(source: string): RecordValue {
       y,
       w: width,
       h: height,
-      z: z ?? order.indexOf(frameId),
+      z: z ?? page.frames.indexOf(frameId),
     };
     info[file] = {
       ...extensions,
@@ -116,7 +137,7 @@ export function legacyFrameId(file: string): string {
 
 /** Preserve unknown fields and source identities when canvas controls write
  * geometry. No live DOM, local camera, credentials or caches enter this file. */
-export function encodeCanvasFile(document: RecordValue): string {
+export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 2 } = { version: 1 }): string {
   if (
     document.version !== undefined &&
     ![1, 2, 3].includes(document.version as number)
@@ -130,6 +151,10 @@ export function encodeCanvasFile(document: RecordValue): string {
     pages,
     ...rest
   } = document;
+  const pagedPages = options.version === 2 ? pagedCanvasSchema.shape.pages.parse(pages) : undefined;
+  const pageOrder = pagedPages && new Map(pagedPages.flatMap((page) =>
+    page.frames.map((frameId, index) => [frameId, index] as const),
+  ));
   const information = frame_info === undefined ? {} : record(frame_info);
   const geometryFor = (value: unknown): RecordValue => {
     if (document.version === 3) return record(value);
@@ -191,18 +216,17 @@ export function encodeCanvasFile(document: RecordValue): string {
       y: geometry.y,
       width: geometry.w,
       height: geometry.h,
-      ...(geometry.z !== Object.keys(authored).length ? { z: geometry.z } : {}),
+      ...(geometry.z !== (pageOrder?.get(frameId) ?? Object.keys(authored).length) ? { z: geometry.z } : {}),
       ...(Object.keys(geometryMetadata).length ? { geometryMetadata } : {}),
     });
   }
-  const page =
-    pages === undefined
-      ? { id: "main", title: "Design" }
-      : z.array(pageSchema).length(1).parse(pages)[0];
-  const result = canvasSchema.parse({
+  const outputPages = options.version === 2
+    ? pagedPages
+    : [{ ...(pages === undefined ? { id: "main", title: "Design" } : z.array(pageSchema).length(1).parse(pages)[0]), frames: Object.keys(authored) }];
+  const result = (options.version === 2 ? pagedCanvasSchema : canvasSchema).parse({
     ...rest,
-    version: 1,
-    pages: [{ ...page, frames: Object.keys(authored) }],
+    version: options.version,
+    pages: outputPages,
     frames: authored,
   });
   // Validate cross references and portable source aliases before persistence.

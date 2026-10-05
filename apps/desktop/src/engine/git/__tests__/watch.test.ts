@@ -189,6 +189,7 @@ describe("startGitWatcher", () => {
       workspaceIds: ["later-directory"],
       coarse: false,
       worktreeChanged: true,
+      designRecognitionChanged: true,
     });
     const cost = {
       directoryStats: tree.directoryStats.mock.calls.length,
@@ -256,6 +257,7 @@ describe("startGitWatcher", () => {
           workspaceIds: ["first-poll"],
           coarse: false,
           worktreeChanged: true,
+          ...(kind === "canvas" ? { designRecognitionChanged: true } : {}),
           ...(kind === "directory" ? { designRecognitionChanged: true } : {}),
         }),
       );
@@ -382,6 +384,29 @@ describe("startGitWatcher", () => {
       coarse: false,
       worktreeChanged: true,
       designRecognitionChanged: true,
+    });
+  });
+
+  it.each(["design.toml", "canvas.json"])("refreshes Design recognition on an existing meta/%s edit", async (file) => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-design-meta-watch-"));
+    roots.push(root);
+    await mkdir(join(root, ".git", "logs"), { recursive: true });
+    await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(root, ".git", "index"), "index");
+    await writeFile(join(root, ".git", "logs", "HEAD"), "");
+    await mkdir(join(root, "Design", "meta"), { recursive: true });
+    const edited = join(root, "Design", "meta", file);
+    await writeFile(edited, "before\n");
+    const changes: GitWatchChange[] = [];
+    const watcher = startGitWatcher(() => [{ root, workspaceId: "workspace-pages" }], change => changes.push(change), {
+      pollIntervalMs: 25, worktreeDebounceMs: 10, awaitWriteFinishMs: 20, usePolling: true, worktreePollIntervalMs: 10,
+    });
+    watchers.push(watcher);
+    await watcher.ready;
+    await writeFile(edited, "after, with a different size\n");
+    await waitFor(() => changes.some(change => change.designRecognitionChanged));
+    expect(changes.find(change => change.designRecognitionChanged)).toMatchObject({
+      workspaceIds: ["workspace-pages"], worktreeChanged: true, designRecognitionChanged: true,
     });
   });
 

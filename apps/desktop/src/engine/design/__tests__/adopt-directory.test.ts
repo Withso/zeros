@@ -12,8 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runGit } from "../../git/git-exec";
-import { commitDesignMetadata, readDesignDirectoryRegistry } from "../metadata";
-import { parseDesignManifest } from "../manifest";
+import { commitDesignMetadata, readDesignDirectoryRegistry, readDirectoryDesignManifest } from "../metadata";
 import {
   adoptExistingDesignDirectory,
   previewExistingDesignDirectory,
@@ -37,9 +36,7 @@ describe("explicit existing Design folder adoption", () => {
     rmSync(root, { recursive: true, force: true });
   });
   const manifest = () =>
-    parseDesignManifest(
-      readFileSync(path.join(root, "Brand/design.toml"), "utf8"),
-    )!;
+    readDirectoryDesignManifest(root, "Brand")!;
 
   it("previews without writing and rebuilds metadata while preserving every authored file", async () => {
     const preview = await previewExistingDesignDirectory(
@@ -53,8 +50,8 @@ describe("explicit existing Design folder adoption", () => {
     });
     expect(existsSync(path.join(root, "Brand/design.toml"))).toBe(false);
     await adoptExistingDesignDirectory(root, "Brand", preview.revision);
-    expect(readCanvasFixture(root, "Brand").frames).toHaveProperty("home.html");
-    expect(readFileSync(path.join(root, "Brand/home.html"), "utf8")).toBe(
+    expect(readCanvasFixture(root, "Brand").frames).toHaveProperty("page-1/home.html");
+    expect(readFileSync(path.join(root, "Brand/page-1/home.html"), "utf8")).toBe(
       source,
     );
     expect(
@@ -78,7 +75,8 @@ describe("explicit existing Design folder adoption", () => {
     const preview = await previewExistingDesignDirectory(root, "Brand");
     expect(preview.metadataSource).toBe("folder");
     await adoptExistingDesignDirectory(root, "Brand", preview.revision);
-    expect(manifest()).toEqual(before);
+    expect(manifest()).toEqual({ ...before, version: 3 });
+    expect(readCanvasFixture(root, "Brand")).toMatchObject({ extension: { value: null } });
     rmSync(path.join(root, ".zeros"), { recursive: true });
     expect(readDesignDirectoryRegistry(root)?.directories[before.id].path).toBe(
       "Brand",
@@ -98,7 +96,8 @@ describe("explicit existing Design folder adoption", () => {
     const preview = await previewExistingDesignDirectory(root, "Brand");
     expect(preview.metadataSource).toBe("git");
     await adoptExistingDesignDirectory(root, "Brand", preview.revision);
-    expect(manifest()).toEqual(before);
+    expect(manifest()).toEqual({ ...before, version: 3 });
+    expect(readCanvasFixture(root, "Brand")).toMatchObject({ extension: { value: null } });
     expect(
       (await runGit(root, ["diff", "--cached", "--name-only"])).stdout,
     ).toBe("");
@@ -121,6 +120,7 @@ describe("explicit existing Design folder adoption", () => {
     expect(preview.metadataSource).toBe("git");
     await adoptExistingDesignDirectory(root, "Brand", preview.revision);
     expect(manifest()).toEqual({
+      version: 3,
       id: "design_old",
       canvas: "canvas.json",
     });

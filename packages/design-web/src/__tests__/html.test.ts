@@ -14,6 +14,52 @@ import {
 import { FRAME_HTML, webState } from "./fixtures";
 
 describe("HTML source adapter", () => {
+  it("validates URL attribute mutations at the containing page and retains root behavior", () => {
+    const source = '<img data-oid="image" src="local.png">';
+    expect(
+      mutateDesignNodeAttributeSource(
+        source,
+        "image",
+        "src",
+        "../assets/a.png",
+        "page-1/home.html",
+      ),
+    ).toContain('src="../assets/a.png"');
+    expect(() =>
+      mutateDesignNodeAttributeSource(
+        source,
+        "image",
+        "src",
+        "../../outside.png",
+        "page-1/home.html",
+      ),
+    ).toThrow(/inside/i);
+    expect(
+      mutateDesignNodeAttributeSource(
+        source,
+        "image",
+        "src",
+        "assets/a.png",
+        "home.html",
+      ),
+    ).toContain('src="assets/a.png"');
+    expect(() =>
+      mutateDesignNodeAttributeSource(
+        source,
+        "image",
+        "src",
+        "../assets/a.png",
+        "home.html",
+      ),
+    ).toThrow(/inside/i);
+  });
+
+  it("validates contained parent references using the source file's location", () => {
+    const html = '<!doctype html><html><head><link rel="stylesheet" href="../tokens.css"><style>.hero { background-image:url(../assets/image.png); }</style></head><body><img src="../assets/image.png" style="background-image:url(./local.png)"></body></html>';
+    expect(() => assertSafeDesignHtmlDocument(html, "page-1/home.html")).not.toThrow();
+    expect(() => assertSafeDesignHtmlDocument(html)).toThrow();
+    expect(() => assertSafeDesignHtmlDocument(html.replaceAll("../assets", "../../assets"), "page-1/home.html")).toThrow();
+  });
   it.each([
     '<!doctype html><html><body><main data-oid="red"></main></body></html>',
     '<!doctype html><html><head><title>Design</title></head><main data-oid="red"></main></html>',
@@ -123,6 +169,15 @@ describe("HTML source adapter", () => {
     expect(
       mutateDesignNodeAttributeSource(attributed, "card", "aria-label", null),
     ).toBe(text);
+  });
+
+  it("validates inserted asset URLs relative to a page frame and rejects escapes", () => {
+    expect(mutateDesignNodeHtmlSource(FRAME_HTML, "card", '<img src="../assets/a.png">', "append", "page-1/home.html"))
+      .toContain('<img src="../assets/a.png">');
+    expect(() => mutateDesignNodeHtmlSource(FRAME_HTML, "card", '<img src="../../outside.png">', "append", "page-1/home.html"))
+      .toThrow(/inside the design document/);
+    expect(() => mutateDesignNodeHtmlSource(FRAME_HTML, "card", '<img src="../outside.png">'))
+      .toThrow(/inside the design document/);
   });
 
   it("rejects active HTML and heals inserted visual nodes", () => {

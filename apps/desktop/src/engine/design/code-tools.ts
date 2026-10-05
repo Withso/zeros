@@ -6,6 +6,9 @@ import {
 } from "./result-store";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ComposerModeSnapshot } from "@zeros/protocol/composer-mode";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import { designPageIdSchema } from "@zeros/protocol/design-pages";
+import { readDesignPageContext } from "./page-selection";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
@@ -16,6 +19,7 @@ import {
 } from "@zeros/design-core";
 import { DesignApi, type DesignHeadlessRenderer } from "@zeros/design-web";
 import { DesignDraftStore } from "./design-api";
+import { designPagesMigrationGeneration } from "./pages-migration";
 import { DESIGN_AGENT_SAFE_OPERATION_TYPES } from "./design-agent-capability";
 import type { DesignMcpToolHandler } from "./design-agent-mcp";
 import { withDesignDirectoryNameLease } from "./directory-registry";
@@ -42,8 +46,8 @@ import {
 
 const documentId = z
   .string()
-  .regex(/^frame:[A-Za-z0-9][A-Za-z0-9._-]*\.[hH][tT][mM][lL]$/)
-  .max(260);
+  .refine((value) => value.startsWith("frame:") && isDesignFrameFile(value.slice("frame:".length)))
+  .max(512);
 const revision = z.string().min(1).max(128);
 const exactDocument = { documentId, expectedRevision: revision };
 const requestId = designRequestIdSchema;
@@ -168,11 +172,12 @@ const definitions = {
   },
   design_frame_create: {
     description:
-      "Create an authored frame through the Design engine. Supply a fresh durable request ID.",
+      "Create an authored frame in a page through the Design engine. Supply pageId from design_capabilities when several pages exist, and a fresh durable request ID.",
     schema: z
       .object({
         ...requestEnvelope,
         title: z.string().min(1).max(120),
+        pageId: designPageIdSchema.optional(),
         width: z.number().int().min(1).max(4096).default(1440),
         height: z.number().int().min(1).max(4096).default(900),
       })
@@ -191,8 +196,8 @@ const definitions = {
   },
   design_frame_duplicate: {
     description:
-      "Duplicate an exact authored revision with new node identities.",
-    schema: z.object({ ...exactDocument, ...requestEnvelope }).strict(),
+      "Duplicate an exact authored revision with new node identities. Supply the destination pageId from design_capabilities when several pages exist.",
+    schema: z.object({ ...exactDocument, ...requestEnvelope, pageId: designPageIdSchema.optional() }).strict(),
   },
   design_frame_delete: {
     description:
@@ -295,6 +300,8 @@ export interface DesignCodeToolTarget {
   /** Engine-owned conversation identity survives provider reconnects. */
   actorId: string;
   assertCurrent(): void;
+  /** Owner checks for repair guidance may tolerate unreadable registration. */
+  assertInspectionCurrent?(): void;
 }
 
 /** No timers, watchers, or browser processes are allocated by this handler.
@@ -304,7 +311,8 @@ export interface DesignCodeToolTarget {
 export class DesignCodeTools implements DesignMcpToolHandler {
   readonly token = randomBytes(32).toString("hex");
   private readonly abort = new AbortController();
-  private readonly api: DesignApi;
+  private apiInstance: DesignApi;
+  private apiGeneration: string | null;
   private readonly requests: DesignRequestStore;
   private pending = 0;
   private readonly actor;
@@ -331,9 +339,23 @@ export class DesignCodeTools implements DesignMcpToolHandler {
       target.directoryId,
       options.now,
     );
-    this.api = new DesignApi(
-      new DesignDraftStore(target.workspacePath, {
-        directory: target.directory,
+    this.apiGeneration = designPagesMigrationGeneration(target.workspacePath, target.directory);
+    this.apiInstance = this.createApi();
+  }
+
+  private get api(): DesignApi {
+    const generation = designPagesMigrationGeneration(this.target.workspacePath, this.target.directory);
+    if (generation !== this.apiGeneration) {
+      this.apiInstance = this.createApi();
+      this.apiGeneration = generation;
+    }
+    return this.apiInstance;
+  }
+
+  private createApi(): DesignApi {
+    return new DesignApi(
+      new DesignDraftStore(this.target.workspacePath, {
+        directory: this.target.directory,
         assertAuthorized: () => this.assertActive(this.token),
       }),
       {
@@ -367,7 +389,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
             );
           },
         },
-        ...(options.renderer ? { renderer: options.renderer } : {}),
+        ...(this.options.renderer ? { renderer: this.options.renderer } : {}),
       },
     );
   }
@@ -376,7 +398,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     this.abort.abort(new Error("Design authority was revoked."));
   }
 
-  assertActive(token: string): void {
+  assertActive(token: string, inspection = false): void {
     const supplied = Buffer.from(token);
     const expected = Buffer.from(this.token);
     if (
@@ -390,7 +412,9 @@ export class DesignCodeTools implements DesignMcpToolHandler {
       throw new Error("Design authority expired; reopen the Code session.");
     }
     try {
-      this.target.assertCurrent();
+      if (inspection && this.target.assertInspectionCurrent)
+        this.target.assertInspectionCurrent();
+      else this.target.assertCurrent();
     } catch (error) {
       this.dispose();
       throw error;
@@ -406,7 +430,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     raw: unknown,
     signal: AbortSignal,
   ): Promise<CallToolResult> {
-    this.assertActive(this.token);
+    this.assertActive(this.token, name === "design_capabilities");
     if (this.pending >= 4)
       throw new Error(
         "Design request capacity reached; wait for an active request to settle.",
@@ -442,7 +466,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     const joined = AbortSignal.any([signal, this.abort.signal]);
     const assertCurrent = () => {
       joined.throwIfAborted();
-      this.assertActive(this.token);
+      this.assertActive(this.token, name === "design_capabilities");
       assertMode();
     };
     this.pending += 1;
@@ -623,12 +647,18 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     signal: AbortSignal,
   ): Promise<unknown> {
     switch (name) {
-      case "design_capabilities":
+      case "design_capabilities": {
+        const { pages, activePageId, pagesError } = await readDesignPageContext(
+          this.target,
+        );
         return {
           version: 1,
           composerMode: this.mode(),
           workspaceId: this.target.workspaceId,
           directoryId: this.target.directoryId,
+          pages,
+          activePageId,
+          ...(pagesError ? { pagesError } : {}),
           actor: this.actor,
           serverTime: this.now(),
           expiresAt: this.expiresAt,
@@ -651,6 +681,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
           history:
             "Semantic undo/redo is local to this session; external edits or restart invalidate it. Frame lifecycle has separate history.",
         };
+      }
       case "design_document_list": {
         const input = definitions[name].schema.parse(raw);
         const frames = await listDesignFrames(this.target.workspacePath, {
@@ -834,6 +865,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
           () =>
             createDesignFrame(this.target.workspacePath, {
               title: input.title,
+              pageId: input.pageId,
               geometry: { w: input.width, h: input.height },
             }),
         );
@@ -856,7 +888,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
                 definitions[name].schema.parse(raw).title,
               );
             if (name === "design_frame_duplicate")
-              return duplicateDesignFrame(this.target.workspacePath, frame);
+              return duplicateDesignFrame(this.target.workspacePath, frame, { pageId: definitions[name].schema.parse(raw).pageId });
             await deleteDesignFrame(this.target.workspacePath, frame);
             return { documentId: input.documentId, deleted: true };
           },

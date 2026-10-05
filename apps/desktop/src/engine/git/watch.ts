@@ -58,6 +58,7 @@ import {
 import chokidar, { type ChokidarOptions, type FSWatcher } from "chokidar";
 
 import { DESIGN_CANVAS_FILE } from "../design/directory-registry";
+import { DESIGN_CANVAS_FILE as PUBLIC_DESIGN_CANVAS_FILE } from "../design/canvas-file";
 import { isDesignMetadataRepoPath } from "../design/metadata";
 import {
   invalidateWorkspaceChangeProbes,
@@ -368,6 +369,7 @@ function isDesignRecognitionChange(
     directory ||
     basename(filePath) === "design.toml" ||
     basename(filePath) === DESIGN_CANVAS_FILE ||
+    basename(filePath) === PUBLIC_DESIGN_CANVAS_FILE ||
     /(?:^|[\\/])\.zeros[\\/](?:design-dir\.toml|design[\\/])/.test(filePath) ||
     isDesignMetadataRepoPath(filePath)
   );

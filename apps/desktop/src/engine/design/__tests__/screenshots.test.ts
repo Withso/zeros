@@ -27,6 +27,14 @@ function screenshot(workspaceId: string, frame: string, nodeId: string | null) {
 describe("design screenshot registry", () => {
   beforeEach(() => resetDesignScreenshotsForTests());
 
+  it("keeps repeated basenames on separate pages isolated", () => {
+    for (const frame of ["page-1/home.html", "checkout/home.html"])
+      setDesignScreenshot(screenshot("workspace", frame, null));
+    expect(getDesignScreenshot("workspace", "page-1/home.html", null, "a".repeat(24))?.frame).toBe("page-1/home.html");
+    expect(getDesignScreenshot("workspace", "checkout/home.html", null, "a".repeat(24))?.frame).toBe("checkout/home.html");
+    expect(() => setDesignScreenshot(screenshot("workspace", "page-1/../home.html", null))).toThrow();
+  });
+
   it("isolates whole-frame and node captures by exact workspace key", () => {
     setDesignScreenshot(screenshot("workspace-a", "home.html", null));
     setDesignScreenshot(screenshot("workspace-a", "home.html", "hero"));

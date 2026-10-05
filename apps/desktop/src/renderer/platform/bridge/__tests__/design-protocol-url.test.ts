@@ -9,12 +9,19 @@ describe("design protocol frame URLs", () => {
       designProtocolFrameUrl({
         workspaceId: "ws_a",
         capability,
-        frame: "landing page.html",
+        frame: "landing.html",
         sourceVersion: "a".repeat(24),
       }),
     ).toBe(
-      `zeros-design://workspace/ws_a/${capability}/landing%20page.html?v=${"a".repeat(24)}`,
+      `zeros-design://workspace/ws_a/${capability}/landing.html?v=${"a".repeat(24)}`,
     );
+  });
+
+  it("encodes nested frame routes by segment and rejects aliases", () => {
+    const input = { workspaceId: "ws_a", capability: "c".repeat(64), sourceVersion: "a".repeat(24) };
+    expect(designProtocolFrameUrl({ ...input, frame: "page-1/home.html" })).toBe(`zeros-design://workspace/ws_a/${input.capability}/page-1/home.html?v=${input.sourceVersion}`);
+    for (const frame of ["../home.html", "page-1/sub/home.html", "page-1%2fhome.html", "landing page.html"])
+      expect(designProtocolFrameUrl({ ...input, frame })).toBeNull();
   });
 
   it("fails closed when no workspace capability is available", () => {

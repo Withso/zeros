@@ -52,6 +52,8 @@ import {
   resetDesignLivePreviewForTests,
 } from "../state/design-live-preview";
 import {
+  bindDesignWorkspacePages,
+  captureDesignPageOwner,
   designWorkspaceView,
   resetDesignWorkspaceUiForTests,
   useDesignWorkspaceUiStore,
@@ -109,6 +111,37 @@ describe("design selection workflows", () => {
     resetDesignLayerDisclosureForTests();
     mocks.designFrameRuntime.mockReset();
     vi.clearAllMocks();
+  });
+
+  it("ignores a late frame activation and null reply owned by a page the user left", async () => {
+    const workspaceId = "workspace-a";
+    bindDesignWorkspacePages(workspaceId, "design", [
+      { id: "a", title: "A", folder: "a", frameFiles: ["a/home.html"] },
+      { id: "b", title: "B", folder: "b", frameFiles: ["b/home.html"] },
+    ]);
+    const owner = captureDesignPageOwner(workspaceId);
+    useDesignWorkspaceUiStore.getState().setActivePage(workspaceId, "b", "design");
+    const before = designWorkspaceView(workspaceId);
+    await selectDesignFrame(workspaceId, { ...FRAME, file: "a/home.html", pageId: "a" }, { owner, selected: true });
+    await selectDesignFrame(workspaceId, null, { owner });
+    expect(designWorkspaceView(workspaceId)).toBe(before);
+    expect(mocks.designSetSelection).not.toHaveBeenCalled();
+  });
+
+  it("retires a pending hit test when the active page changes", async () => {
+    const workspaceId = "workspace-a";
+    bindDesignWorkspacePages(workspaceId, "design", [
+      { id: "a", title: "A", folder: "a", frameFiles: ["a/home.html"] },
+      { id: "b", title: "B", folder: "b", frameFiles: ["b/home.html"] },
+    ]);
+    let release!: (node: DesignRuntimeNodeDetails) => void;
+    mocks.designFrameRuntime.mockReturnValue({ getElementAtLoc: () => new Promise(resolve => { release = resolve; }) });
+    const pending = selectDesignNodeAtLocation({ workspaceId, folder: "/design/a", frame: { ...FRAME, file: "a/home.html", pageId: "a" }, x: 1, y: 1 });
+    useDesignWorkspaceUiStore.getState().setActivePage(workspaceId, "b", "design");
+    const before = designWorkspaceView(workspaceId);
+    release(details("late"));
+    expect(await pending).toBeNull();
+    expect(designWorkspaceView(workspaceId)).toBe(before);
   });
 
   it("retries a click against the adopted generation when a style save settles during hit testing", async () => {
