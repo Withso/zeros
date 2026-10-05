@@ -295,8 +295,7 @@ export function DispatcherPage({
       if (payload) createDispatcherChat({ dispatch, repoRoot, folder, payload, validationPending: true });
       else spawnPreparedDefaultChat({ folder, repoRoot, dispatch });
     } catch (error) {
-      if (creationGeneration !== getOrganizationStoreGeneration()) return;
-      if (cloud.computerMode && !cloud.isCurrentComputerSource(cloud.sourceOwner)) return;
+      if (cloud.computerMode && (creationGeneration !== getOrganizationStoreGeneration() || !cloud.isCurrentComputerSource(cloud.sourceOwner))) return;
       const changed = cloud.computerMode ? cloud.recoverComputerError(error, cloud.sourceOwner) : null;
       if (changed && cloud.computerOwner) {
         cloudCreateIntent.current = null;
