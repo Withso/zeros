@@ -127,9 +127,9 @@ The visible worktree directory contains project work and uncommitted changes;
 keep any work you need before removing it. The checkout's
 `.context/zeros-local/` contains only launcher coordination state.
 
-The bundle path and state root use one shared path resolver. Local code actors
-cannot write its app executable/plist, settings, terminal initialization,
-sentinel or engine authority through their normal provider tools.
+The bundle path and state root use one shared path resolver. Local uses the same
+containment policy as the hosted and packaged app, including host access for code
+actors and protected engine roots for Design agents.
 
 Vite selects from ports 6200–7223. Engines use disjoint 10-port blocks in
 31000–36119, including the existing eight-port engine walk and two gateway ports.

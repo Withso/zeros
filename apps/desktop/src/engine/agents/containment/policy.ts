@@ -29,7 +29,6 @@ import {
   ENGINE_BASE_PORT_PROD,
   ENGINE_PORT_SPAN,
   engineBasePort,
-  isLocalDevelopmentRuntime,
 } from "../../runtime";
 import type {
   BoundaryRequest,
@@ -742,7 +741,7 @@ export async function prepareZsrPolicy(
     // A Design actor must not reach durable engine authority through the
     // desktop's shared uid. Cloud workers keep the same deny for root-owned
     // tenant state.
-    ...(protectEngineReads || isLocalDevelopmentRuntime() ? engineRoots : []),
+    ...(protectEngineReads ? engineRoots : []),
     paths.policy,
     paths.commands,
     paths.tools,
