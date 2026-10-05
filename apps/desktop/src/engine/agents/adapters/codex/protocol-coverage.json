@@ -1,6 +1,28 @@
 {
   "schemaVersion": 1,
   "codexProtocolVersion": "0.160.0",
+  "threadItems": {
+    "handled": [
+      "userMessage",
+      "agentMessage",
+      "plan",
+      "reasoning",
+      "commandExecution",
+      "fileChange",
+      "mcpToolCall",
+      "dynamicToolCall",
+      "collabAgentToolCall",
+      "subAgentActivity",
+      "webSearch",
+      "imageView",
+      "sleep",
+      "imageGeneration",
+      "enteredReviewMode",
+      "exitedReviewMode",
+      "contextCompaction"
+    ],
+    "retained": ["hookPrompt", "functionCallOutput"]
+  },
   "clientRequests": {
     "handled": [
       "initialize",

@@ -20,6 +20,7 @@ import type { RendererContext } from "./types";
 import { DiffHoverCard } from "./diff-hover-preview";
 import { ToolIdentityIcon } from "./tool-identity-icon";
 import { nativeToolSurface, toolRecord } from "./native-tool-presentation";
+import { pendingChecksMessage } from "./tool-pending-checks";
 
 interface EventRowProps {
   message: AgentMessage;
@@ -98,8 +99,9 @@ export const EventRow = memo(function EventRow({
   const transportTruncated =
     isTool && hasTransportTruncation(message as AgentToolMessage);
   const status = isTool ? (message as AgentToolMessage).status : undefined;
+  const pendingChecks = isTool ? pendingChecksMessage(message) : null;
   const sTone =
-    toneOverride ?? (isTool ? statusTone(status as any) : undefined);
+    toneOverride ?? (pendingChecks ? "ok" : isTool ? statusTone(status as any) : undefined);
   const expandable = meta.expandable && detail !== undefined && detail !== null;
   const Icon = sTone === "fail" ? CircleX : meta.Icon;
   const surface = isTool
@@ -130,7 +132,7 @@ export const EventRow = memo(function EventRow({
         }
       }}
       aria-label={[meta.label, accessibleTarget, meta.trailing].filter(Boolean).join(" ")}
-      aria-description={status === "failed" ? "Tool failed" : undefined}
+      aria-description={pendingChecks ?? (sTone === "fail" ? "Tool failed" : undefined)}
       aria-controls={expandable && open ? detailId : undefined}
       aria-expanded={expandable ? open : undefined}
       disabled={!expandable}

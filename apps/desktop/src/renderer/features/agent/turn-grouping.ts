@@ -16,7 +16,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { AgentMessage, AgentTextMessage } from "./use-agent-session";
-import { isLegacyEnvironmentConnection } from "./renderers/tool-readiness";
+import { isLegacyEnvironmentConnection, isRoutineNativeSleep } from "./renderers/tool-readiness";
 
 export interface Turn {
   /** Renderer-only identity carried by stabilizeTurns while a resident
@@ -100,7 +100,7 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
         steeredTurnId && current?.recordedTurnId === steeredTurnId
           ? current.recordedStartedAt
           : m.createdAt;
-      if (current) turns.push(current);
+      if (current && !isSleepOnlySystemTurn(current)) turns.push(current);
       const events: AgentMessage[] = [];
       current = {
         userPrompt: m,
@@ -126,7 +126,7 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
       current.events.push(m);
     }
   }
-  if (current) turns.push(current);
+  if (current && !isSleepOnlySystemTurn(current)) turns.push(current);
   let providerStart = 0;
   for (let index = 0; index < turns.length; index += 1) {
     if (!isProviderTurnTail(turns, index)) continue;
@@ -138,6 +138,13 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
     providerStart = index + 1;
   }
   return turns;
+}
+
+/** Keep sleeps in owned turns for duration/identity, but don't manufacture an
+ * empty system turn from a window containing only routine wait bookkeeping. */
+function isSleepOnlySystemTurn(turn: Turn): boolean {
+  return !turn.userPrompt && turn.events.every((event) =>
+    event.kind === "tool" && isRoutineNativeSleep(event));
 }
 
 /** True only for the last visual segment belonging to a provider turn. The

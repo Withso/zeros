@@ -31,7 +31,23 @@ function quoteWord(word: string): string {
   return /^[\w./:=+-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
-function literalWords(command: string): string[] | null {
+/** A single literal invocation for result classification, including one safe
+ * shell launcher. Unlike display formatting, unquoted newlines are command
+ * boundaries. Reject expansions/operators rather than guessing their result. */
+export function literalCommandWords(rawInput: unknown): string[] | null {
+  const input = toolRecord(rawInput);
+  const command = input.command ?? input.cmd ?? input.script;
+  const words = Array.isArray(command) && command.every((part) => typeof part === "string")
+    ? command as string[]
+    : typeof command === "string" && command.length <= 64_000
+      ? literalWords(command, true)
+      : null;
+  if (!words) return null;
+  const body = shellBody(words);
+  return body === null ? words : literalWords(body, true);
+}
+
+function literalWords(command: string, singleCommand = false): string[] | null {
   const words: string[] = [];
   let word = "";
   let quote = "";
@@ -59,6 +75,8 @@ function literalWords(command: string): string[] | null {
       char === "`" ||
       (!quote && /[;&|<>()*?[\]{}~#]/.test(char))
     ) {
+      return null;
+    } else if (!quote && singleCommand && (char === "\n" || char === "\r")) {
       return null;
     } else if (!quote && /\s/.test(char)) {
       if (started) words.push(word);

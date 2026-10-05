@@ -48,6 +48,7 @@ import type { ToolCallContent } from "@zeros/protocol/agent-events";
 import { isDevRuntime } from "../../../runtime";
 import type { ContentBlock, QuestionRequest, SessionNotification, TurnUsage } from "../../types";
 import type { AsyncUserInputQuestion } from "./generated/v2/AsyncUserInputQuestion";
+import type { ThreadItem } from "./generated/v2/ThreadItem";
 import type { WebSearchAction } from "./generated/WebSearchAction";
 import type { ImageGenerationItem } from "./generated/ImageGenerationItem";
 
@@ -223,6 +224,7 @@ export class CodexAppServerTranslator {
    * however, replace a tool card's rawOutput snapshot. Retain one cumulative
    * value per live item so every replacement grows monotonically. */
   private readonly emittedToolOutput = new Map<string, string>();
+  private readonly pendingSleepItems = new Set<string>();
 
   /** Per-turn messageId prefix. Codex's item ids reset across turns,
    *  so prefixing keeps streaming deltas of the same item coalesced
@@ -420,6 +422,7 @@ export class CodexAppServerTranslator {
   /** Reset terminal/streaming state at the start of a new turn. The
    *  thread id is not reset — it persists across turns. */
   startTurn(): void {
+    this.markUnreportedSleeps();
     this.usageAccounting.start();
     this.agentActivityStopped = false;
     this.turnPrefix = randomUUID();
@@ -606,13 +609,16 @@ export class CodexAppServerTranslator {
         if (!item || typeof item.id !== "string" || typeof item.type !== "string") continue;
         const status = (item as { status?: string }).status;
         const requiresStatus = ["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "imageGeneration"].includes(item.type);
-        if ((requiresStatus && !status) || (status && !["completed", "failed", "declined"].includes(status))) {
+        if ((requiresStatus && !status) ||
+            (item.type === "sleep" && !status && p.turn.status !== "completed") ||
+            (status && !["completed", "failed", "declined"].includes(status))) {
           this.onItemStarted({ item });
         } else {
           this.onItemCompleted({ item });
         }
       }
     }
+    this.markUnreportedSleeps();
     this.hasSeenTurnTerminal = true;
     const status = p?.turn?.status;
     // Generated TurnStatus = completed | interrupted | failed | inProgress.
@@ -789,6 +795,7 @@ export class CodexAppServerTranslator {
   /** The transport or local Stop ended observation of these children. Never
    * leave a loader active just because their final activity event was lost. */
   endAgentActivity(): void {
+    this.markUnreportedSleeps();
     this.agentActivityStopped = true;
     for (const group of this.agentGroups.values()) {
       if (group.terminal) continue;
@@ -933,7 +940,9 @@ export class CodexAppServerTranslator {
       case "dynamicToolCall":
       case "webSearch":
       case "imageView":
+      case "sleep":
       case "imageGeneration": {
+        if (item.type === "sleep") this.pendingSleepItems.add(item.id);
         const toolCallId = this.ensureToolCallId(item.id);
         const mergeKey = computeMergeKey(item);
         // For shell executions, prefer codex's own command parse
@@ -979,21 +988,14 @@ export class CodexAppServerTranslator {
         return;
       }
 
-      default: {
-        // Unknown item kind — emit a generic tool card rather than
-        // silently dropping. `item` is narrowed to `never` here by the
-        // exhaustive switch; cast back to read id/type defensively for
-        // forward-compat with new item types from future codex versions.
-        const unknownItem = item as { id: string; type?: string };
-        const toolCallId = this.ensureToolCallId(unknownItem.id);
-        this.emitToolCallUpsert(toolCallId, {
-          nativeToolCallId: unknownItem.id,
-          title: unknownItem.type || "tool",
-          kind: "other",
-          status: "in_progress",
-          rawInput: unknownItem,
-        });
-      }
+      case "hookPrompt":
+      case "functionCallOutput":
+      default:
+        // Explicit retained shapes have no ordinary command invocation. Don't
+        // invent a command or correlate an output by name. Runtime-unknown
+        // items take the same bounded path; a newly generated discriminant
+        // fails this call's typecheck until its policy is chosen.
+        this.onRetainedItemStarted(item);
     }
   }
 
@@ -1019,6 +1021,7 @@ export class CodexAppServerTranslator {
       };
     }
     this.completedItemIds.add(item.id);
+    this.pendingSleepItems.delete(item.id);
     this.emittedToolOutput.delete(item.id);
     if (item.type === "agentMessage" && this.emitAsyncQuestion(item)) return;
     if (item.type === "agentMessage" && item.delivery !== "async" && item.text &&
@@ -1067,6 +1070,7 @@ export class CodexAppServerTranslator {
       case "dynamicToolCall":
       case "collabAgentToolCall":
       case "imageView":
+      case "sleep":
       case "imageGeneration":
       case "webSearch": {
         const toolCallId = this.toolCallIds.get(item.id);
@@ -1168,20 +1172,56 @@ export class CodexAppServerTranslator {
         return;
       }
 
-      default: {
-        const toolCallId = this.toolCallIds.get((item as { id: string }).id);
-        if (!toolCallId) return;
-        this.emit({
-          sessionId: this.sessionId,
-          update: {
-            sessionUpdate: "tool_call_update",
-            toolCallId,
-            status: computeStatus(item),
-            rawOutput: item,
-          },
-        });
-      }
+      case "hookPrompt":
+      case "functionCallOutput":
+      default:
+        this.onRetainedItemCompleted(item);
     }
+  }
+
+  private onRetainedItemStarted(item: RetainedThreadItem): void {
+    const toolCallId = this.ensureToolCallId(item.id);
+    this.emitToolCallUpsert(toolCallId, {
+      nativeToolCallId: item.id,
+      title: item.type || "tool",
+      kind: "other",
+      status: "in_progress",
+      rawInput: boundedStructuredOutput(item),
+    });
+  }
+
+  /** A stopped/disconnected wait is inspectable until a native completion
+   * arrives. Keep the same row and permit an authoritative late result to
+   * repair it; do not fabricate success or mark the turn itself failed. */
+  private markUnreportedSleeps(): void {
+    for (const itemId of this.pendingSleepItems) {
+      const toolCallId = this.toolCallIds.get(itemId);
+      if (!toolCallId) continue;
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "pending",
+          rawOutput: { _zerosToolCompletion: "unreported" },
+        },
+      });
+    }
+    this.pendingSleepItems.clear();
+  }
+
+  private onRetainedItemCompleted(item: RetainedThreadItem): void {
+    const toolCallId = this.toolCallIds.get(item.id);
+    if (!toolCallId) return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: computeStatus(item),
+        rawOutput: boundedStructuredOutput(item),
+      },
+    });
   }
 
   private onAgentMessageDelta(params: unknown, phase?: "commentary"): void {
@@ -1670,6 +1710,7 @@ export class CodexAppServerTranslator {
       });
       return;
     }
+    this.markUnreportedSleeps();
     this.hasSeenTurnTerminal = true;
     this.turnNativeFailure = normalizeProviderError("codex", p?.error ?? { message: cls.label });
     this.turnFailureLabel = this.turnNativeFailure.category === "auth-required" ? cls.label : null;
@@ -1845,7 +1886,12 @@ type CommandActionLite =
     }
   | { type: "unknown"; command?: string };
 
-type ThreadItemUnion =
+/** Optional fields retain compatibility with older native snapshots. Every
+ * discriminant in the generated pin must still reach an explicit policy. */
+type ThreadItemUnion = CompatibleThreadItem | Exclude<ThreadItem, { type: CompatibleThreadItem["type"] }>;
+type RetainedThreadItem = Extract<ThreadItem, { type: "hookPrompt" | "functionCallOutput" }>;
+
+type CompatibleThreadItem =
   | SubagentActivityItem
   | { type: "userMessage"; id: string; content?: unknown[] }
   | {
@@ -1904,13 +1950,14 @@ type ThreadItemUnion =
   | CollabItem
   | { type: "webSearch"; id: string; query?: string; action?: WebSearchAction | null; results?: unknown[] | null }
   | { type: "imageView"; id: string; path?: string }
+  | Extract<ThreadItem, { type: "sleep" }>
   | ({ type: "imageGeneration"; id: string } & Partial<ImageGenerationItem>)
   | { type: "enteredReviewMode"; id: string; review: string }
   | { type: "exitedReviewMode"; id: string; review: string }
   | { type: "contextCompaction"; id: string };
 
 type SubagentActivityItem = Extract<
-  import("./generated/v2/ThreadItem").ThreadItem,
+  ThreadItem,
   { type: "subAgentActivity" }
 >;
 
@@ -2008,6 +2055,8 @@ function describeItem(item: ThreadItemUnion): string {
           : `Searching ${truncate(item.query || "web", 40)}`;
     case "imageView":
       return "Read image";
+    case "sleep":
+      return "Sleep";
     case "imageGeneration":
       return `Generating image`;
     case "contextCompaction":
@@ -2282,6 +2331,7 @@ function toolInput(item: ThreadItemUnion): unknown {
 }
 
 function toolOutput(item: ThreadItemUnion, streamedOutput?: string): unknown {
+  if (item.type === "sleep") return item;
   if (item.type === "commandExecution") {
     return {
       exitCode: item.exitCode,

@@ -15,11 +15,30 @@ export function isLegacyEnvironmentConnection(tool: AgentToolMessage): boolean {
     tool.title === `Environment ${output.state}`;
 }
 
+/** Native clock.sleep is activity between tools. Match native identity and the
+ * pinned display-item shape, including old generic rows, never a tool's name.
+ * Unexpected results, failures and unreported completions stay inspectable. */
+export function isRoutineNativeSleep(tool: AgentToolMessage): boolean {
+  if (tool.toolKind !== "other" || !tool.nativeToolCallId ||
+      !["pending", "in_progress", "completed"].includes(tool.status) ||
+      toolCompletionUnreported(tool.rawOutput) || tool.content?.length ||
+      tool.resourceLinks?.length) return false;
+  const isSleepItem = (value: unknown) => {
+    const item = toolRecord(value);
+    return item.type === "sleep" && item.id === tool.nativeToolCallId &&
+      typeof item.durationMs === "number" && Number.isFinite(item.durationMs) && item.durationMs >= 0 &&
+      Object.keys(item).every((key) => ["type", "id", "durationMs"].includes(key));
+  };
+  return isSleepItem(tool.rawInput) && (tool.rawOutput == null
+    ? tool.status !== "completed"
+    : isSleepItem(tool.rawOutput));
+}
+
 /** Keep provisional native records in state; expose the same durable row when
  * its command/target is ready. Terminal and missing-completion records always
  * remain inspectable, even when the producer never supplied arguments. */
 export function toolPresentationReady(tool: AgentToolMessage): boolean {
-  if (isLegacyEnvironmentConnection(tool)) return false;
+  if (isLegacyEnvironmentConnection(tool) || isRoutineNativeSleep(tool)) return false;
   if (
     !["pending", "in_progress"].includes(tool.status) ||
     toolCompletionUnreported(tool.rawOutput)
