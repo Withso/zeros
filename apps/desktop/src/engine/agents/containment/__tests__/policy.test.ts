@@ -49,6 +49,12 @@ import {
 } from "../policy";
 import { newTerritoryGeneration } from "../status";
 import type { BoundaryRequest } from "../types";
+import { zerosStateRoot } from "../../../db/paths";
+import {
+  detachLockPath,
+  stateDbPath,
+  legacyWorktreesRoot,
+} from "../../../git/state";
 
 function territory(
   workspaceRoot: string,
@@ -259,7 +265,9 @@ describe("ZSR host-parity policy builder", () => {
       expect(prepared.document.runtime.allowedUnixSockets).toContain(
         path.join(prepared.paths.scratch, "podman.sock"),
       );
-      expect(Buffer.byteLength(path.join(prepared.paths.scratch, "podman.sock"))).toBeLessThan(108);
+      expect(
+        Buffer.byteLength(path.join(prepared.paths.scratch, "podman.sock")),
+      ).toBeLessThan(108);
     },
   );
 
@@ -567,6 +575,36 @@ describe("ZSR host-parity policy builder", () => {
     expect(prepared.document.filesystem.denyWrite).toContain(
       path.join(process.env.ZEROS_DATA_DIR!, "zeros.db"),
     );
+  });
+
+  it("contains each Local instance's git state in its protected engine root", async () => {
+    const workspace = path.join(temporaryRoot, "workspace");
+    await mkdir(workspace, { recursive: true });
+    vi.stubEnv("ZEROS_DEV", "1");
+    vi.stubEnv("ZEROS_CHANNEL", "dev");
+    vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", "1");
+    try {
+      for (const instance of ["a123456789abcdef", "b123456789abcdef"]) {
+        vi.stubEnv("ZEROS_INSTANCE", instance);
+        const root = zerosStateRoot();
+        const prepared = await prepare({
+          actor: "design-agent",
+          cwd: workspace,
+          workspaceRoot: workspace,
+        });
+        expect(prepared.document.filesystem.denyRead).toContain(root);
+        for (const ownedPath of [
+          detachLockPath(),
+          stateDbPath(),
+          legacyWorktreesRoot(),
+          path.join(root, "agent-auth"),
+        ]) {
+          expect(ownedPath.startsWith(`${root}${path.sep}`)).toBe(true);
+        }
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("rejects a foreign territory and traversal-shaped execution id", async () => {
