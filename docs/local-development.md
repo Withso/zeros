@@ -109,7 +109,11 @@ Vite selects from ports 6200–7223. Engines use disjoint 10-port blocks in
 31000–36119, including the existing eight-port engine walk and two gateway ports.
 The launcher probes IPv4, IPv6 and wildcard listeners, checks the entire engine
 block and retries observed bind races up to three launches without changing the
-profile. Local ignores inherited desktop identity, profile, port and data-root
+profile. Failed Vite ports and engine blocks are excluded from subsequent
+attempts. Collision detection covers only Vite strict-port and engine bind
+failures during startup; it stops after Vite and the engine are ready or after
+two minutes. Later diagnostics or MCP gateway errors do not restart the app.
+Local ignores inherited desktop identity, profile, port and data-root
 variables. The engine also strips the Local mode from terminals/provider shells,
 so launching another checkout there cannot inherit its parent's admission.
 

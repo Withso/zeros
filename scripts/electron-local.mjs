@@ -94,7 +94,11 @@ export function localEnvironment({
   return env;
 }
 
-export async function pickLocalPorts(slug, attempt = 0) {
+export async function pickLocalPorts(
+  slug,
+  attempt = 0,
+  { portFree: probe = portFree, excluded = new Set() } = {},
+) {
   const hash = createHash("sha256")
     .update(`${slug}:${attempt}`)
     .digest()
@@ -102,7 +106,7 @@ export async function pickLocalPorts(slug, attempt = 0) {
   let vitePort;
   for (let i = 0; i < VITE_SLOTS; i++) {
     const port = VITE_BASE + ((hash + i) % VITE_SLOTS);
-    if (await portFree(port)) {
+    if (!excluded.has(port) && (await probe(port))) {
       vitePort = port;
       break;
     }
@@ -112,7 +116,7 @@ export async function pickLocalPorts(slug, attempt = 0) {
     const base = ENGINE_BASE + ((hash + i) % ENGINE_SLOTS) * STRIDE;
     let free = true;
     for (let offset = 0; offset < STRIDE; offset++) {
-      if (!(await portFree(base + offset))) {
+      if (excluded.has(base + offset) || !(await probe(base + offset))) {
         free = false;
         break;
       }
@@ -135,7 +139,7 @@ export async function pickLocalPorts(slug, attempt = 0) {
 export function runOwnedProcess(
   command,
   args,
-  { cwd, env, signal, output, killGraceMs = 20_000 },
+  { cwd, env, signal, output, killGraceMs = 20_000, startup },
 ) {
   if (signal?.aborted) return Promise.resolve({ code: 0, cancelled: true });
   return new Promise((resolve, reject) => {
@@ -175,6 +179,10 @@ export function runOwnedProcess(
       recent = "",
       stopping = false,
       failure;
+    const startupDeadline = Date.now() + (startup?.timeoutMs ?? 120_000);
+    let viteReady = false,
+      engineReady = false,
+      startupArmed = Boolean(startup);
     const stop = async (error) => {
       failure ??= error;
       if (stopping) return;
@@ -212,10 +220,34 @@ export function runOwnedProcess(
         } catch (error) {
           void stop(error);
         }
-        recent = (recent + chunk.toString()).slice(-4096);
+        recent = (recent + chunk.toString())
+          .replace(/\x1b\[[0-9;]*m/g, "")
+          .slice(-4096);
+        if (!startupArmed) return;
+        viteReady ||= /\[vite\]\s+VITE v[^\n]*\bready in\b/.test(recent);
+        const readyPort = recent.match(
+          /\[Zeros\] engine ready and externally verified on port (\d+)/,
+        )?.[1];
+        engineReady ||=
+          readyPort !== undefined &&
+          Number(readyPort) >= startup.engineBase &&
+          Number(readyPort) < startup.engineBase + 8;
+        if ((viteReady && engineReady) || Date.now() >= startupDeadline) {
+          startupArmed = false;
+          return;
+        }
+        const viteFailure = new RegExp(
+          `\\[vite\\]\\s+(?:Error: )?Port ${startup.vitePort} is already in use\\b`,
+        );
+        const engineFailure = recent.match(
+          /\[engine\]\s+Failed to start engine:\s*Error: listen EADDRINUSE: address already in use 127\.0\.0\.1:(\d+)\b/,
+        );
         if (
           !collision &&
-          /EADDRINUSE|Port [0-9]+ is already in use/.test(recent)
+          (viteFailure.test(recent) ||
+            (engineFailure &&
+              Number(engineFailure[1]) >= startup.engineBase &&
+              Number(engineFailure[1]) < startup.engineBase + 8))
         ) {
           collision = true;
           void stop();
@@ -304,6 +336,7 @@ export async function runLocalDevelopment({
   signal,
   run = runOwnedProcess,
   prepareBundle = bundle.prepareLocalInstanceBundle,
+  portProber = portFree,
   listProcesses = () =>
     execFileSync("ps", ["-axww", "-o", "pid=,command="], {
       encoding: "utf8",
@@ -318,7 +351,11 @@ export async function runLocalDevelopment({
   const identity = checkoutIdentity(root);
   const unlock = launcherLock(root, identity.slug);
   try {
-    let ports = await pickLocalPorts(identity.slug);
+    const excluded = new Set();
+    let ports = await pickLocalPorts(identity.slug, 0, {
+      portFree: portProber,
+      excluded,
+    });
     let env = localEnvironment({ identity, ...ports, environment });
     // Exactly the existing real local build (ABI, ZSR, engine, main), with the
     // Local environment present BEFORE build-time defines are baked.
@@ -337,7 +374,11 @@ export async function runLocalDevelopment({
       );
     for (let attempt = 0; attempt < 3; attempt++) {
       if (signal?.aborted) return 0;
-      if (attempt) ports = await pickLocalPorts(identity.slug, attempt);
+      if (attempt)
+        ports = await pickLocalPorts(identity.slug, attempt, {
+          portFree: portProber,
+          excluded,
+        });
       env = localEnvironment({ identity, ...ports, environment });
       const launch =
         env.ZEROS_NO_MAIN_HMR === "1"
@@ -365,9 +406,12 @@ export async function runLocalDevelopment({
           app,
           `${quote(process.execPath)} ${quote(watchdogPath)} ${process.pid}`,
         ],
-        { cwd: root, env, signal },
+        { cwd: root, env, signal, startup: ports },
       );
       if (stack.cancelled || stack.code !== 98) return stack.code;
+      excluded.add(ports.vitePort);
+      for (let offset = 0; offset < STRIDE; offset++)
+        excluded.add(ports.engineBase + offset);
       console.warn(`[electron:local] port race; retry ${attempt + 1}/3`);
     }
     console.error(

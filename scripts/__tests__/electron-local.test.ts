@@ -225,6 +225,16 @@ describe("Local launch ownership", () => {
           platform: "darwin",
           environment: {},
           prepareBundle: () => "/local/Electron",
+          portProber: async (port: number) => {
+            for (const previous of calls.filter((call) =>
+              call.args.includes("concurrently"),
+            )) {
+              expect(port).not.toBe(Number(previous.env.ZEROS_VITE_PORT));
+              const base = Number(previous.env.ZEROS_ENGINE_BASE_PORT);
+              expect(port < base || port >= base + 10).toBe(true);
+            }
+            return true;
+          },
           run: async (
             command: string,
             args: string[],
