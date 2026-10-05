@@ -179,6 +179,7 @@ describe("Local launch ownership", () => {
   it.each([
     process.execPath,
     "/opt/hostedtoolcache/node/22.18.0/x64/bin/node",
+    "/opt/hosted-node/node/22.18.0/x64/bin/node",
   ])("keeps Local builds, bounded retries and one profile with Node at %s", async (execPath) => {
     const root = directory(),
       calls: Array<{
@@ -223,7 +224,7 @@ describe("Local launch ownership", () => {
     expect(
       calls.some((call) =>
         /scripts\/dev-environment\/|hosted-|\belectron:dev\b(?!:prep\b)|setup-zeros-dev|dev-instance\.mjs|\bdev:backend\b/.test(
-          call.args.join(" "),
+          call.args.join(" ").replaceAll(`'${execPath}'`, ""),
         ),
       ),
     ).toBe(false);
