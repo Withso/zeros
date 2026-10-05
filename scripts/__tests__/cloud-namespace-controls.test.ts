@@ -33,3 +33,26 @@ int main(int argc,char **argv) { if(argc!=4)return 2; probe_uid=strtoul(argv[1],
     },
   );
 });
+
+describe.skipIf(process.platform !== "linux")("native runtime identity selection",()=>{
+  let directory:string,binary:string;
+  beforeAll(()=>{
+    directory=mkdtempSync(path.join(tmpdir(),"zeros-native-runtime-"));binary=path.join(directory,"probe");
+    const source=path.join(directory,"probe.c");
+    writeFileSync(source,`#define main zeros_namespace_main
+#include ${JSON.stringify(path.resolve("scripts/cloud-workspace-validation/sandbox/cloud-engine-namespace.c"))}
+#undef main
+int main(int argc,char **argv) { if(argc!=2)return 2; select_runtime(argv[1]); printf("%s\\n%s\\n%s\\n%d\\n",runtime_root,worker_root,runtime_node,runtime_version); return 0; }
+`);
+    execFileSync("cc",["-std=c11","-O2","-Wall","-Wextra","-Werror",source,"-o",binary],{timeout:15000,stdio:"pipe"});
+  });
+  afterAll(()=>{if(directory)rmSync(directory,{recursive:true,force:true});});
+  it("constructs only physical entrypoints from a validated runtime ID",()=>{
+    const id=`r1-${"a".repeat(64)}`,root=`/opt/zeros-infra/${id}`;
+    const result=spawnSync(binary,[id],{encoding:"utf8",timeout:3000});
+    expect(result.status).toBe(0);expect(result.stdout).toBe(`${root}\n${root}/worker\n${root}/bin/node\n4\n`);
+  });
+  it.each(["/zeros/current","../../untrusted",`r1-${"A".repeat(64)}`,`r1-${"a".repeat(63)}`,`r1-${"a".repeat(64)}/../other`,"--v3"])("rejects an untrusted runtime argument %s",value=>{
+    expect(spawnSync(binary,[value],{timeout:3000}).status).toBe(125);
+  });
+});

@@ -22,7 +22,7 @@ import React, {
   useState,
 } from "react";
 import { useOpenChatPreviewInWorkbench } from "@/renderer/shell/workbench/use-open-browser";
-import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
+import { workspacePreviewAvailable, warmCloudPreviewContext } from "../../platform/cloud-workspace-access";
 import { useOpenChatFileInWorkbench, warmChatFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
 import { chatFileOpenCwd } from "@/renderer/shell/workbench/direct-file-open";
 import {
@@ -96,6 +96,7 @@ import {
 } from "./encode-attachments";
 import type { ComposerAttachment } from "./composer-attachments";
 import { isSubmittedComposerDocument } from "./composer-submission";
+import { useInternalFeatureActive } from "../settings/internal-features";
 // Wave 4 (2026-05-16): the composer card is now built on the canonical
 // AI Elements PromptInput recipe (form-shaped InputGroup with a
 // block-end addon toolbar). Only COMPOSER_FILE_ACCEPT survives here
@@ -178,6 +179,7 @@ import {
 } from "./session-tools-cache";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { BoundaryPortsPill } from "./boundary-ports";
+import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
 import { createBrowserTab } from "@/renderer/shell/workbench/tab-model";
 import {
@@ -235,7 +237,8 @@ import {
   refreshAgents,
 } from "./agents-cache";
 import { useWorkspaceAgents } from "./workspace-agent-registry";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings } from "../settings/settings-navigation";
 import { isSubscriptionProvider } from "../settings/subscription-connection";
@@ -751,7 +754,9 @@ export function AgentChat({
     [readOnly],
   );
   const openChatPreview = useOpenChatPreviewInWorkbench();
-  const openPreviewUrlThroughRef = useCallback((url: string) => openChatPreview(chatCwdRef.current, url), [openChatPreview]);
+  const chatPreviewRef = useRef({ chatId: chatId ?? "", executionId: session.executionId ?? undefined, ports: session.boundaryPorts ?? undefined });
+  chatPreviewRef.current = { chatId: chatId ?? "", executionId: session.executionId ?? undefined, ports: session.boundaryPorts ?? undefined };
+  const openPreviewUrlThroughRef = useCallback((url: string) => openChatPreview(chatCwdRef.current, url, chatPreviewRef.current), [openChatPreview]);
   const openFileThroughRef = useCallback(
     (path: string) => {
       if (!readOnly) openChatFileRef.current(chatCwdRef.current, path);
@@ -859,6 +864,7 @@ export function AgentChat({
   // first render. The original declaration here was removed.)
   const agentsList = useWorkspaceAgents(chatThread?.folder, interactive);
   const agentSessions = useAgentSessions();
+  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
   const retryTurn = useCallback(
     (prompt: AgentTextMessage, events: AgentMessage[], newChat: boolean) => {
       if (!chatId || !interactive) return Promise.resolve();
@@ -1455,9 +1461,24 @@ export function AgentChat({
   ]);
 
   const openBoundaryPort = session.openBoundaryPort;
+  const cloudPreviewsEnabled = useInternalFeatureActive("cloudComputerV2");
+  const cloudCanEdit = useCloudWorkspaceCanEdit(chatThread?.folder);
+  const cloudPreviewsActive = cloudPreviewsEnabled && cloudCanEdit;
+  const warmBoundaryPreview = useCallback(() => {
+    if (interactive && cloudPreviewsActive && isCloudWorkspace(chatThread?.folder))
+      void warmCloudPreviewContext().catch(() => undefined);
+  }, [interactive, cloudPreviewsActive, chatThread?.folder]);
   const openBoundaryPreview = useCallback(
     (port: ExecutionBoundaryPortStatus) => {
       if (!workspacePreviewAvailable(chatThread?.folder ?? "")) return;
+      if (isCloudWorkspace(chatThread?.folder)) {
+        if (!cloudPreviewsActive || !chatId || !session.executionId) return;
+        dispatch({ type: "ADD_WORKBENCH_TAB", scope: chatThread?.folder, tab: createBrowserTab({
+          url: `http://localhost:${port.port}/`, title: `localhost:${port.port}`,
+          previewSource: { chatId, port: port.port, executionId: session.executionId, portId: port.id },
+        }) });
+        return;
+      }
       void (async () => {
         try {
           if (!openBoundaryPort) {
@@ -1500,7 +1521,7 @@ export function AgentChat({
         }
       })();
     },
-    [chatId, chatThread?.folder, dispatch, nativeReady, openBoundaryPort],
+    [chatId, chatThread?.folder, dispatch, nativeReady, openBoundaryPort, cloudPreviewsActive, session.executionId],
   );
 
   // 2026-05-21: handleAgentSwitch + folderLabel removed. The old
@@ -1929,6 +1950,7 @@ export function AgentChat({
   // spinner ("submitted") for it, so a composer that still holds the text reads
   // as "working on it" instead of an unresponsive button.
   const [sendPreparing, setSendPreparing] = useState(false);
+  const [cloudSendPreparing, setCloudSendPreparing] = useState(false);
 
   // "Is this chat attached" is derived from the composer DOCUMENT, never from
   // a second list: that is what makes removing a chip with its × un-add the
@@ -3189,7 +3211,7 @@ export function AgentChat({
 
   // During plan review the turn is PAUSED on the user, so the composer reads as
   // idle (Send a follow-up / Approve) rather than streaming (Stop).
-  const composerStreaming = composerShowsStopControl({
+  const composerStreaming = cloudSendPreparing || composerShowsStopControl({
     status: backgroundContinuationActive ? "streaming" : session.status,
     hasPendingLocalTurn: pendingLocalTurnId !== null,
     planReview: Boolean(planReview),
@@ -3562,6 +3584,7 @@ export function AgentChat({
     // opens a window in which a second Enter re-enters, snapshots the same
     // composer state, and sends it again.
     const submittedDesignFrame = override === undefined ? designFrameContext.capture() : null;
+    const sendGeneration = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
     const hydrateNeeded = session.transcriptState !== "resident";
     const forkAttachmentPending = chatId
       ? hasPendingTextAttachmentDelivery(chatId)
@@ -3668,12 +3691,29 @@ export function AgentChat({
     ) {
       return;
     }
+    const cloudTarget = cloudComputerV2 && chatId ? parseCloudWorkspaceKey(chatThread?.folder) : null;
+    const prepareCloud = !!cloudTarget && ["stopped", "stopping", "waking", "ready", "busy"].includes(
+      cloudWorkspaceDocument(cloudTarget)?.status ?? "",
+    );
+    if (prepareCloud && chatId) {
+      // Stopped compute also reads as "provisioning" to passive session setup.
+      // An explicit send must wake before that queue, keeping its rich draft
+      // here until fresh admission succeeds. New forks keep their usual queue.
+      if (recordActivity && chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
+      setCloudSendPreparing(true);
+      try {
+        await agentSessions.prepareForSend(chatId);
+      } finally {
+        setCloudSendPreparing(false);
+      }
+      if (agentSessions.getSendGeneration(chatId) !== sendGeneration) return;
+    }
     // A prepared worktree has a complete semantic identity but no usable cwd
     // yet. Keep the TipTap document intact, persist its exact rich snapshot,
     // and enqueue only this chat. Many rapid workspace creates can therefore
     // accept independent first messages without spawning into missing paths or
     // letting the newest request overwrite an older one.
-    if (workspaceProvisioning && chatId && override === undefined && snapshot) {
+    if (workspaceProvisioning && !prepareCloud && chatId && override === undefined && snapshot) {
       designFrameContext.pin(submittedDesignFrame);
       if (recordActivity && chatThread?.folder) {
         recordWorkspaceActivity(chatThread.folder);
@@ -3746,7 +3786,7 @@ export function AgentChat({
     // any admission/attachment await so a slow send cannot jump ahead of work
     // the user performs elsewhere in the meantime. Provisioning sends record
     // above when they are accepted into the exact-chat queue.
-    if (recordActivity && chatThread?.folder) {
+    if (recordActivity && chatThread?.folder && !prepareCloud) {
       recordWorkspaceActivity(chatThread.folder);
     }
     // If the session bounced to reconnecting / failed / auth-required (or never
@@ -3892,6 +3932,31 @@ export function AgentChat({
         }], [attachment], localBubbleAttachmentById));
       }
     }
+    if (cloudComputerV2 && chatId && isCloudWorkspace(chatThread?.folder) &&
+        agentSessions.getSendGeneration(chatId) !== sendGeneration) return;
+    const submit = (onAccepted?: () => void) => session.sendPrompt(
+      wireText, displayText, extraBlocks,
+      bubbleAttachments.length > 0 ? bubbleAttachments : undefined,
+      messageSegments && messageSegments.length > 0 ? messageSegments : undefined,
+      onAccepted,
+    );
+    const cloudSubmission = cloudComputerV2 && isCloudWorkspace(chatThread?.folder);
+    if (cloudSubmission) {
+      // Attachments/session work can outlive the first wake. Keep the rich
+      // draft until the provider's final preparation and pending-message handoff
+      // succeed; do not await the agent's entire turn or hide an early failure.
+      setCloudSendPreparing(true);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          let accepted = false;
+          submit(() => { accepted = true; resolve(); }).then(() => {
+            if (!accepted) reject(new Error("The message was not accepted. Try sending it again."));
+          }, reject);
+        });
+      } finally {
+        setCloudSendPreparing(false);
+      }
+    }
     const submittedDraftUnchanged = override === undefined && snapshot &&
       isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
     if (submittedDraftUnchanged) {
@@ -3913,19 +3978,9 @@ export function AgentChat({
     // sends each get their own visibility check as they dispatch one
     // per turn.
     pendingSendScrollCountRef.current += 1;
-    session
-      .sendPrompt(
-        wireText,
-        displayText,
-        extraBlocks,
-        bubbleAttachments.length > 0 ? bubbleAttachments : undefined,
-        messageSegments && messageSegments.length > 0
-          ? messageSegments
-          : undefined,
-      )
-      .catch(() => {
-        /* error surfaces via session.error */
-      });
+    if (!cloudSubmission) submit().catch(() => {
+      /* error surfaces via session.error */
+    });
     return true;
   };
 
@@ -3952,11 +4007,13 @@ export function AgentChat({
     // Queueing behind a streaming turn cannot own that turn's next chunk.
     const cancelLatency = chatId && session.status !== "streaming"
       ? startCloudSubmitSpan(chatId) : undefined;
+    const generation = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
     try {
       const submitted = await runSend(override, extras, recordActivity);
       if (!submitted) cancelLatency?.();
     } catch (error) {
       cancelLatency?.();
+      if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return;
       toast.error("Message wasn't sent", {
         description: error instanceof Error ? error.message : String(error),
       });
@@ -5216,9 +5273,10 @@ export function AgentChat({
                       (also used in the edit composer). Effort/Fast are part of
                       the model label and edited in its popover. */}
                       {editToolbarPills}
-                      {workspacePreviewAvailable(chatFolder ?? "") && <BoundaryPortsPill
+                      {workspacePreviewAvailable(chatFolder ?? "") && (!isCloudWorkspace(chatFolder) || cloudPreviewsActive) && <BoundaryPortsPill
                         snapshot={session.boundaryPorts}
                         onOpenPort={openBoundaryPreview}
+                        onIntent={warmBoundaryPreview}
                       />}
                     </PromptInputTools>
                     {/* Right cluster: [context ring] [send] (+ save tick while
@@ -5269,11 +5327,13 @@ export function AgentChat({
                     the affordance still reads. */}
                       <Tooltip
                         label={
-                          composerStreaming
-                            ? "Stop agent"
-                            : editingQueuedId
-                              ? "Save message"
-                              : "Send"
+                          cloudSendPreparing
+                            ? "Cancel send"
+                            : composerStreaming
+                              ? "Stop agent"
+                              : editingQueuedId
+                                ? "Save message"
+                                : "Send"
                         }
                         shortcut={
                           composerStreaming || sendPreparing ? undefined : "↵"

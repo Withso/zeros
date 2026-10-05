@@ -19,6 +19,7 @@ import {
   hasCloudEngineUserNamespace,
   isCloudDeploymentOwner,
 } from "../../../apps/desktop/src/engine/agents/containment/cloud-deployment-authority.mjs";
+import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 import { effectiveCloudResourceLimits } from "./cgroup-resources.mjs";
 
 function optional(file) {
@@ -33,7 +34,7 @@ function command(file, args, options = {}) {
     encoding: "utf8",
     timeout: 5000,
     maxBuffer: 65536,
-    env: { PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin", HOME: "/tmp" },
+    env: { PATH: `${resolveCloudRuntime().binRoot}:/usr/bin:/bin`, HOME: "/tmp" },
     ...options,
   });
   return !child.error && child.signal === null && child.status === 0;
@@ -50,6 +51,7 @@ function denied(file) {
 /** Runs INSIDE the exact engine view. Host assertions alone cannot prove that
  * the engine lost VM authority or that its children inherit finite limits. */
 export function qualifyCloudEngineIdentity() {
+  const runtime=resolveCloudRuntime();
   const checks = [];
   const check = (name, pass) =>
     checks.push({ name, status: pass ? "pass" : "fail" });
@@ -60,12 +62,12 @@ export function qualifyCloudEngineIdentity() {
     "engine-no-new-privileges-and-seccomp",
     noNewPrivs === 1 && seccompMode === 2,
   );
-  check("fixed-engine-user-namespace", hasCloudEngineUserNamespace());
+  check("fixed-engine-user-namespace", hasCloudEngineUserNamespace(runtime.profile === "v4" ? 4 : undefined));
   check(
     "readonly-image-authority",
     isCloudDeploymentOwner(
-      "/opt/zeros/dist-engine/cli.js",
-      statSync("/opt/zeros/dist-engine/cli.js").uid,
+      `${runtime.workerRoot}/dist-engine/cli.js`,
+      statSync(`${runtime.workerRoot}/dist-engine/cli.js`).uid,
     ),
   );
   check(
@@ -78,6 +80,8 @@ export function qualifyCloudEngineIdentity() {
       "/run/zeros/cloud-worker-supervisor.sock",
       "/etc/shadow",
       "/etc/ssh",
+      "/opt/zeros-bootstrap",
+      "/srv/zeros/runtime-installs",
     ].every((file) => !existsSync(file)),
   );
   check(
@@ -121,13 +125,13 @@ export function qualifyCloudEngineIdentity() {
   );
   check(
     "readonly-mounts-locked",
-    ["/usr", "/opt/zeros", "/opt/zeros-runtime", "/sys/fs/cgroup", "/"].every(
+    ["/usr", runtime.workerRoot, runtime.root, "/sys/fs/cgroup", "/"].every(
       (file) => !command("/usr/bin/mount", ["-o", "remount,rw", file]),
     ),
   );
   check(
     "inherited-unmount-denied",
-    !command("/usr/bin/umount", ["/opt/zeros-runtime"]),
+    !command("/usr/bin/umount", [runtime.root]),
   );
   check(
     "worker-nested-user-namespace",
@@ -153,7 +157,7 @@ export function qualifyCloudEngineIdentity() {
     check(
       "worker-cannot-read-engine-or-become-engine",
       command(
-        process.execPath,
+        runtime.profile === "v4" ? runtime.node : process.execPath,
         [
           "-e",
           `
@@ -190,6 +194,7 @@ export function qualifyCloudEngineIdentity() {
 }
 
 async function main() {
+  const runtime=resolveCloudRuntime();
   // Bootstrap uses a private umask while handling admission material. Keep the
   // live gate under that same constraint even when an operator runs it from a
   // more permissive shell; fixtures must explicitly grant intended reads.
@@ -202,9 +207,9 @@ async function main() {
   let actorTools = null;
   if (identity.secure) {
     const child = spawnSync(
-      process.execPath,
+      runtime.profile === "v4" ? runtime.node : process.execPath,
       [
-        "/opt/zeros/scripts/zsr-qualification/run.mjs",
+        `${runtime.workerRoot}/scripts/zsr-qualification/run.mjs`,
         "--cloud-worker",
         "--require-secure",
       ],
@@ -238,14 +243,14 @@ async function main() {
   }
   if (identity.secure && workload?.secure === true) {
     const child = spawnSync(
-      process.execPath,
+      runtime.profile === "v4" ? runtime.node : process.execPath,
       [
         "--import",
         "tsx",
-        "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-capture.ts",
+        `${runtime.workerRoot}/scripts/cloud-workspace-validation/sandbox/qualify-cloud-capture.ts`,
       ],
       {
-        cwd: "/opt/zeros",
+        cwd: runtime.workerRoot,
         env: process.env,
         encoding: "utf8",
         timeout: 35000,
@@ -266,9 +271,9 @@ async function main() {
       };
   }
   if (identity.secure && workload?.secure === true && capture?.secure === true) {
-    const child = spawnSync(process.execPath, ["--import", "tsx",
-      "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-human-services.ts"], {
-      cwd: "/opt/zeros", env: process.env, encoding: "utf8", timeout: 35000, maxBuffer: 65536,
+    const child = spawnSync(runtime.profile === "v4" ? runtime.node : process.execPath, ["--import", "tsx",
+      `${runtime.workerRoot}/scripts/cloud-workspace-validation/sandbox/qualify-cloud-human-services.ts`], {
+      cwd: runtime.workerRoot, env: process.env, encoding: "utf8", timeout: 35000, maxBuffer: 65536,
     });
     if (!child.error && !child.signal) {
       try { humanServices = JSON.parse(child.stdout); } catch { /* fail closed */ }
@@ -278,9 +283,9 @@ async function main() {
     if (child.status !== 0 || child.error || child.signal) humanServices.secure = false;
   }
   if (identity.secure && workload?.secure === true && humanServices?.secure === true) {
-    const child = spawnSync(process.execPath, ["--import", "tsx",
-      "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-actor-tools.ts"], {
-      cwd: "/opt/zeros", env: process.env, encoding: "utf8", timeout: 45000, maxBuffer: 65536,
+    const child = spawnSync(runtime.profile === "v4" ? runtime.node : process.execPath, ["--import", "tsx",
+      `${runtime.workerRoot}/scripts/cloud-workspace-validation/sandbox/qualify-cloud-actor-tools.ts`], {
+      cwd: runtime.workerRoot, env: process.env, encoding: "utf8", timeout: 45000, maxBuffer: 65536,
     });
     if (!child.error && !child.signal) {
       try { actorTools = JSON.parse(child.stdout); } catch { /* fail closed */ }

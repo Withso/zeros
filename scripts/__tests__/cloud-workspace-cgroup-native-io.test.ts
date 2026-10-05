@@ -12,12 +12,15 @@ vi.mock("node:fs", () => ({
   closeSync: calls.close,
   chmodSync: vi.fn(),
   openSync: () => 31,
-  lstatSync: (file: string) => ({
+  lstatSync: (file: string) => {
+    if (file === "/etc/zeros/cloud-worker.json") throw Object.assign(new Error("absent marker"), {code:"ENOENT"});
+    return {
     isDirectory: () => true,
     isSymbolicLink: () => false,
     uid: calls.overflowAncestor && ["/sys", "/sys/fs"].includes(file) ? 65534 : 0,
     mode: 0o700,
-  }),
+    };
+  },
   fstatSync: () => {
     if (calls.statFailure) throw new Error("stat failed");
     return { isFile: () => true, uid: 0, mode: 0o600 };

@@ -4,6 +4,7 @@
 // refresh material to renderer IPC.
 
 import type { CommandHandler } from "../router";
+import { IS_LOCAL_DEVELOPMENT } from "../../runtime-mode";
 import {
   deleteSecret,
   getSecret,
@@ -377,6 +378,7 @@ async function getValidSessionFromTokens(
 }
 
 export async function getValidSessionForMain(): Promise<MainAuthSession | null> {
+  if (IS_LOCAL_DEVELOPMENT) return null;
   return getValidSessionFromTokens(readTokens());
 }
 
@@ -388,6 +390,7 @@ export function getSessionUserForMain(): Omit<
   MainAuthSession,
   "accessToken"
 > | null {
+  if (IS_LOCAL_DEVELOPMENT) return null;
   const tokens = readTokens();
   if (!tokens) return null;
   const { accessToken: _accessToken, ...user } = toMainSession(tokens);

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { lstatSync } from "node:fs";
 import path from "node:path";
 import { isCloudDeploymentOwner } from "../agents/containment/cloud-deployment-authority.mjs";
+import { resolveCloudRuntime } from "../agents/containment/cloud-runtime-root.mjs";
 import {
   DESIGN_CAPTURE_PNG_BYTES,
   DESIGN_CAPTURE_TIMEOUT_MS,
@@ -12,8 +13,6 @@ import {
   type DesignCaptureService,
 } from "./capture-service";
 
-const WORKER = "/opt/zeros/dist-engine/design-capture-worker.js";
-const BROWSERS = "/opt/zeros/design-browsers";
 const CAPTURE_UID = 10002;
 
 function rootControlled(file: string): boolean {
@@ -34,6 +33,7 @@ function rootControlled(file: string): boolean {
  * Playwright or Chromium, and the renderer receives no provider/capture token.
  * Only the immutable cloud image can provide this worker and browser install. */
 export function createCloudDesignCaptureHost(): DesignCaptureHost {
+  const runtime = resolveCloudRuntime();
   return (input, signal) =>
     new Promise((resolve, reject) => {
       signal.throwIfAborted();
@@ -44,8 +44,8 @@ export function createCloudDesignCaptureHost(): DesignCaptureHost {
           `--regid=${CAPTURE_UID}`,
           "--clear-groups",
           "--no-new-privs",
-          process.execPath,
-          WORKER,
+          runtime.profile === "v4" ? runtime.node : process.execPath,
+          `${runtime.workerRoot}/dist-engine/design-capture-worker.js`,
         ],
         {
           cwd: "/tmp",
@@ -55,7 +55,7 @@ export function createCloudDesignCaptureHost(): DesignCaptureHost {
             PATH: "/usr/local/bin:/usr/bin:/bin",
             LANG: "C.UTF-8",
             HOME: "/srv/zeros/home/capture",
-            PLAYWRIGHT_BROWSERS_PATH: BROWSERS,
+            PLAYWRIGHT_BROWSERS_PATH: `${runtime.workerRoot}/design-browsers`,
           },
         },
       );
@@ -135,10 +135,11 @@ export async function startCloudDesignCapture(): Promise<
     !process.env.ZEROS_CLOUD_PORT
   )
     return undefined;
+  const runtime = resolveCloudRuntime();
   if (
     !rootControlled("/etc/zeros/cloud-worker.json") ||
-    !rootControlled(WORKER) ||
-    !rootControlled(BROWSERS)
+    !rootControlled(`${runtime.workerRoot}/dist-engine/design-capture-worker.js`) ||
+    !rootControlled(`${runtime.workerRoot}/design-browsers`)
   )
     return undefined;
   const host = createCloudDesignCaptureHost();

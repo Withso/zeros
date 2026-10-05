@@ -21,6 +21,81 @@ function baseEnv(): NodeJS.ProcessEnv {
   };
 }
 
+describe("runtime publication configuration", () => {
+  const publicationEnv = () => ({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "alpha",
+    CLOUD_RUNTIME_PUBLICATION_ENABLED: "true", CLOUD_WORKSPACE_S3_ENDPOINT: "https://objects.example.test",
+    CLOUD_WORKSPACE_S3_BUCKET: "runtime-artifacts", CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: "synthetic-runtime-access",
+    CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: "synthetic-runtime-secret" });
+
+  it("defaults publication off without requiring provider or artifact credentials", () => {
+    const config = loadConfig(baseEnv());
+    expect(config.cloudRuntimePublication).toEqual({ enabled: false, audience: "zeros-control-plane-development",
+      repository: "Withso/zeros", environment: "alpha", s3: null });
+    expect(config.cloudWorkspaceNewRuntimeProfile).toBe("legacy");
+  });
+
+  it("reuses CP-held S3 credentials independently of workspace provisioning", () => {
+    const config = loadConfig(publicationEnv());
+    expect(config.cloudWorkspaces).toBeNull();
+    expect(config.cloudRuntimePublication).toMatchObject({ enabled: true, audience: "zeros-control-plane-alpha",
+      repository: "Withso/zeros", environment: "alpha", s3: { bucket: "runtime-artifacts", region: "auto" } });
+    expect(loadConfig({ ...publicationEnv(), CLOUD_WORKSPACE_S3_KEY_PREFIX: "private-prefix" }).cloudRuntimePublication?.s3)
+      .not.toHaveProperty("prefix");
+  });
+
+  it("accepts explicit audience/repository and optional environment enforcement", () => {
+    const config = loadConfig({ ...publicationEnv(), CLOUD_RUNTIME_OIDC_AUDIENCE: "runtime-alpha",
+      CLOUD_RUNTIME_OIDC_REPOSITORY: "Example/zeros", CLOUD_RUNTIME_OIDC_ENVIRONMENT: "",
+      CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: "v4" });
+    expect(config.cloudRuntimePublication).toMatchObject({ audience: "runtime-alpha", repository: "Example/zeros", environment: null });
+    expect(config.cloudWorkspaceNewRuntimeProfile).toBe("v4");
+  });
+
+  it.each(["CLOUD_WORKSPACE_S3_ENDPOINT", "CLOUD_WORKSPACE_S3_BUCKET", "CLOUD_WORKSPACE_S3_ACCESS_KEY_ID", "CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY"])(
+    "requires %s only when publication is enabled", name => {
+      expect(() => loadConfig({ ...publicationEnv(), [name]: undefined })).toThrow(/runtime publication/);
+      expect(loadConfig({ ...publicationEnv(), [name]: undefined, CLOUD_RUNTIME_PUBLICATION_ENABLED: "false" })
+        .cloudRuntimePublication?.enabled).toBe(false);
+    });
+
+  it.each([
+    { CLOUD_RUNTIME_PUBLICATION_ENABLED: "private-invalid-sentinel" },
+    { CLOUD_RUNTIME_OIDC_REPOSITORY: "https://private.example.test/repository" },
+    { CLOUD_RUNTIME_OIDC_ENVIRONMENT: "beta" },
+    { CLOUD_RUNTIME_OIDC_AUDIENCE: "private\nsentinel" },
+    { CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: "private-invalid-sentinel" },
+    { CLOUD_WORKSPACE_S3_ENDPOINT: "http://objects.example.test" },
+  ])("rejects invalid publication config without reflecting values: %j", changed => {
+    let message = "";
+    try { loadConfig({ ...publicationEnv(), ...changed }); } catch (error) { message = (error as Error).message; }
+    expect(message.length).toBeGreaterThan(0);
+    expect(message.includes("private")).toBe(false);
+    expect(message.includes("http:")).toBe(false);
+  });
+
+  it("admits publication only on the Alpha channel", () => {
+    for (const channel of ["development", "beta", "production"]) {
+      expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel })).toThrow(/runtime publication.*Alpha/);
+    }
+  });
+});
+
+describe("v4 runtime admission configuration", () => {
+  it("defaults new workspaces to legacy and qualifications to full, with the staff gate enabled", () => {
+    expect(loadConfig(cloudSetupEnv()).cloudWorkspaces?.runtime).toEqual({
+      newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full", qualificationEnabled: false,
+    });
+  });
+  it("accepts only the explicit runtime switches", () => {
+    expect(loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: "v4",
+      CLOUD_RUNTIME_V4_STAFF_ONLY: "false", CLOUD_RUNTIME_QUALIFICATION_MODE: "smoke", CLOUD_RUNTIME_QUALIFICATION_ENABLED: "true" }).cloudWorkspaces?.runtime)
+      .toEqual({ newWorkspaceProfile: "v4", staffOnly: false, qualificationMode: "smoke", qualificationEnabled: true });
+    for (const name of ["CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE", "CLOUD_RUNTIME_V4_STAFF_ONLY", "CLOUD_RUNTIME_QUALIFICATION_MODE", "CLOUD_RUNTIME_QUALIFICATION_ENABLED"]) {
+      expect(() => loadConfig({ ...cloudSetupEnv(), [name]: "invalid" })).toThrow(name);
+    }
+  });
+});
+
 describe("cloud-off release bootstrap configuration", () => {
   it("loads the existing encrypted account keyring without admitting customer cloud or requiring a worker image", () => {
     const encoded = randomBytes(32).toString("base64url");
@@ -819,8 +894,17 @@ describe("cloud workspace backend configuration", () => {
     for(const enabled of ["true", "false"])expect(()=>loadConfig({...cloudEnv(), CLOUD_WORKSPACES_ENABLED:enabled, CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED:"typo"})).toThrow(/BACKGROUND_WORKERS_ENABLED/);
   });
 
+  it("validates the global Cloud Computer build cap", () => {
+    expect(loadConfig(cloudEnv()).cloudWorkspaces?.computerMaxConcurrentBuilds).toBe(2);
+    expect(loadConfig({ ...cloudEnv(), CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: "4" }).cloudWorkspaces?.computerMaxConcurrentBuilds).toBe(4);
+    for (const value of ["0", "33", "1.5", "unbounded"]) {
+      expect(() => loadConfig({ ...cloudEnv(), CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: value })).toThrow(/CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS/);
+    }
+  });
+
   it("loads one pinned Daytona provider contract behind the gate", () => {
     expect(loadConfig(cloudEnv()).cloudWorkspaces).toEqual({
+      runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full", qualificationEnabled: false },
       provider: "daytona",
       apiKey: "daytona-api-key-for-control-plane-tests",
       apiUrl: "https://app.daytona.io/api",
@@ -836,6 +920,7 @@ describe("cloud workspace backend configuration", () => {
       autoArchiveMinutes: 10_080,
       reconcileIntervalMs: 5_000,
       backgroundWorkersEnabled: true,
+      computerMaxConcurrentBuilds: 2,
       access: {
         allowedSshHosts: ["ssh.app.daytona.io"],
         allowedPreviewHostSuffixes: ["proxy.daytona.work"],

@@ -7,6 +7,9 @@ const prefetchWorkspaceSurface = vi.fn();
 const prepareChatView = vi.fn();
 const selectChatToRestoreForFolder = vi.fn();
 const pendingWorkspaceMode = vi.fn();
+const wake = vi.hoisted(() => ({ enabled: true, request: vi.fn() }));
+vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => wake.enabled }));
+vi.mock("../cloud-workspace-open-intent", () => ({ requestCloudWorkspaceOpen: wake.request }));
 
 vi.mock("react", async (importOriginal) => ({
   ...await importOriginal<typeof import("react")>(),
@@ -41,9 +44,26 @@ const { useOpenWorkspace } = await import("../use-open-workspace");
 beforeEach(() => {
   vi.clearAllMocks();
   pendingWorkspaceMode.mockReturnValue(null);
+  wake.enabled = true;
 });
 
 describe("useOpenWorkspace", () => {
+  it("publishes the exact destination before requesting a wake on explicit cloud open", () => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    selectChatToRestoreForFolder.mockReturnValue("saved-chat");
+    const open = useOpenWorkspace();
+    expect(wake.request).not.toHaveBeenCalled();
+    open({ id: folder, path: folder, repoRoot: folder, kind: "code" });
+    expect(wake.request).toHaveBeenCalledExactlyOnceWith(folder);
+    expect(dispatch.mock.invocationCallOrder[0]).toBeLessThan(wake.request.mock.invocationCallOrder[0]);
+  });
+  it.each(["gate", "archive"])("does not request compute for a cloud open blocked by %s", reason => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    wake.enabled = reason !== "gate";
+    selectChatToRestoreForFolder.mockReturnValue("saved-chat");
+    useOpenWorkspace()({ id: folder, path: folder, repoRoot: folder, ...(reason === "archive" ? { archivedAt: 100 } : {}) });
+    expect(wake.request).not.toHaveBeenCalled();
+  });
   it("waits for cloud conversation discovery before creating an Untitled tab", () => {
     const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
     selectChatToRestoreForFolder.mockReturnValue(null);

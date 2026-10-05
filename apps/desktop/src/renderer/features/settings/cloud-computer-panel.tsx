@@ -11,6 +11,8 @@ import {
 import { useCachedRead } from "../../state/use-cached-read";
 import { CloudRepositoryPicker } from "./cloud-repository-picker";
 import { cloudGithubScopeKey } from "../../platform/cloud-github";
+import { useInternalFeatureActive } from "./internal-features";
+import { CloudComputerV2Panel } from "./cloud-computer-v2-panel";
 import {
   activateCloudComputer,
   rollbackCloudComputer,
@@ -34,6 +36,8 @@ export function CloudComputerPanel({
 }) {
   const organization = useActiveOrganization(),
     { me } = useTeams();
+  const v2 = useInternalFeatureActive("cloudComputerV2");
+  if (v2) return <CloudComputerV2Panel surfaceActive={surfaceActive} />;
   return organization && !organization.isPersonal && me ? (
     <CloudComputerScope
       key={cloudGithubScopeKey(me.user.id, organization.id)}

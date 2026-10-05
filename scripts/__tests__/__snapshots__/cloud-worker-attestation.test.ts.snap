@@ -1,0 +1,592 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`cloud worker attestation > keeps the v1 report and launch proof byte-for-byte 1`] = `
+"{
+  "version": 1,
+  "profile": "zeros-cloud-worker-v1",
+  "qualified": true,
+  "metadata": {
+    "markerSha256": "6bbdeac246bbec5005f31464cfcf8bce475f192819821bf7c072599781f44c95",
+    "buildSha256": "9a22da50684016eb57c387da85c0071d0ffe5fa601bb051647d3da716c133798",
+    "build": {
+      "version": 1,
+      "profile": "zeros-cloud-worker-v1",
+      "runtimeLayout": {
+        "version": 3,
+        "root": "/srv/zeros",
+        "engine": "/opt/zeros",
+        "repository": "/srv/zeros/files/workspace",
+        "logicalRepository": "/srv/zeros/workspace",
+        "engineFilesRoot": "/srv/zeros/files",
+        "attachmentTemporaryRoot": "/srv/zeros/files/attachment-staging",
+        "seedBackup": "/srv/zeros/.zeros-image-seed",
+        "data": "/srv/zeros/state",
+        "agentHome": "/srv/zeros/home/agent",
+        "captureHome": "/srv/zeros/home/capture",
+        "log": "/srv/zeros/log/engine.log"
+      }
+    }
+  },
+  "platform": {
+    "architecture": "x64",
+    "kernel": null,
+    "lsm": null,
+    "unprivilegedUserNamespaces": null,
+    "apparmorRestrictUnprivilegedUserns": null,
+    "seccompMode": "2",
+    "noNewPrivs": "1",
+    "namespaces": {
+      "mnt": "mnt:[100]",
+      "pid": "pid:[101]",
+      "net": "net:[103]",
+      "ipc": "ipc:[104]",
+      "uts": "uts:[105]",
+      "cgroup": "cgroup:[102]",
+      "user": "user:[106]"
+    }
+  },
+  "helpers": {
+    "trusted": {
+      "node": true,
+      "bwrap": true,
+      "setpriv": true,
+      "supervisor": true
+    },
+    "deploymentTrusted": {
+      "runtimeProfile": true,
+      "supervisorRecovery": true,
+      "runtimeLayout": true,
+      "resourceInspector": true,
+      "resourceAdmission": true,
+      "imageContract": true,
+      "setupProcess": true,
+      "sourceIntegrity": true,
+      "marker": true,
+      "build": true,
+      "engine": true,
+      "engineTree": true,
+      "launcher": true,
+      "admissionConsumer": true,
+      "previewLinkInstaller": true,
+      "githubCredentialInstaller": true,
+      "githubRefreshRequestHelper": true,
+      "gitAskpass": true,
+      "workerSupervisor": true,
+      "setupHelper": true,
+      "attester": true,
+      "admissionDirectory": true
+    },
+    "versions": {
+      "node": "fixture-version",
+      "bwrap": "fixture-version",
+      "setpriv": "fixture-version",
+      "podman": "fixture-version",
+      "git": "fixture-version",
+      "gitLfs": "fixture-version",
+      "rg": "fixture-version"
+    }
+  },
+  "mounts": {
+    "/": {
+      "target": "/",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/opt/zeros": {
+      "target": "/opt/zeros",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/srv/zeros/files/workspace": {
+      "target": "/srv/zeros/files/workspace",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/srv/zeros/state": {
+      "target": "/srv/zeros/state",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/sys/fs/cgroup": {
+      "target": "/sys/fs/cgroup",
+      "fstype": "fixture",
+      "options": "ro"
+    }
+  },
+  "resources": {
+    "memoryMax": "8589934592",
+    "cpuMax": "400000 100000",
+    "pidsMax": "4096",
+    "finite": true,
+    "hierarchy": [
+      {
+        "path": "/ssh.scope",
+        "memoryMax": null,
+        "cpuMax": null,
+        "pidsMax": null
+      },
+      {
+        "path": "/",
+        "memoryMax": "8589934592",
+        "cpuMax": "400000 100000",
+        "pidsMax": "4096"
+      }
+    ],
+    "allocation": {
+      "architecture": "linux/amd64",
+      "cpuMillicores": 4000,
+      "memoryBytes": 8589934592,
+      "storageBytes": 21474836480
+    }
+  },
+  "qualification": {
+    "version": 1,
+    "secure": true,
+    "identity": {
+      "secure": true,
+      "hostUid": 10003,
+      "namespaceUid": 0,
+      "noNewPrivs": 1,
+      "seccompMode": 2,
+      "resources": {
+        "finite": true,
+        "cpuMax": "400000 100000",
+        "memoryMax": "7516192768",
+        "pidsMax": "4096",
+        "hierarchy": [
+          {
+            "path": "/system.slice/zeros-host.service/engine-32345678-1234-4234-8234-123456789abc",
+            "cpuMax": "400000 100000",
+            "memoryMax": "7516192768",
+            "pidsMax": "4096"
+          }
+        ]
+      },
+      "checks": [
+        {
+          "name": "fixed-engine-user-namespace",
+          "status": "pass"
+        }
+      ]
+    },
+    "workload": {
+      "secure": true
+    },
+    "capture": {
+      "secure": true
+    },
+    "humanServices": {
+      "secure": true
+    },
+    "actorTools": {
+      "secure": true
+    }
+  },
+  "setupQualification": null,
+  "qualificationError": null
+}
+"
+`;
+
+exports[`cloud worker attestation > keeps the v1 report and launch proof byte-for-byte 2`] = `
+"{"version":1,"profile":"zeros-cloud-worker-v1","qualifiedAtMs":1791072000000,"reportSha256":"564ec1327ef23e2a4010c3bc2ddf37bafedf62a94876016927d63d20e84804a5","markerSha256":"6bbdeac246bbec5005f31464cfcf8bce475f192819821bf7c072599781f44c95","buildSha256":"9a22da50684016eb57c387da85c0071d0ffe5fa601bb051647d3da716c133798","bootId":"12345678-1234-4234-8234-123456789abc","containerInitStartTicks":"12345","namespaces":{"mnt":"mnt:[100]","pid":"pid:[101]","cgroup":"cgroup:[102]"}}
+"
+`;
+
+exports[`cloud worker attestation > keeps the v2 report and launch proof byte-for-byte 1`] = `
+"{
+  "version": 1,
+  "profile": "zeros-cloud-worker-v2",
+  "qualified": true,
+  "metadata": {
+    "markerSha256": "6ad69db177419aec1aecabcccc43420ce0178e5b122538c4a9ddd888b4bf8c6f",
+    "buildSha256": "2db12049dfeea758feef53feb33d1991248d137885e6d204032ccbc85f2499b0",
+    "build": {
+      "version": 1,
+      "profile": "zeros-cloud-worker-v2",
+      "runtimeLayout": {
+        "version": 3,
+        "root": "/srv/zeros",
+        "engine": "/opt/zeros",
+        "repository": "/srv/zeros/files/workspace",
+        "logicalRepository": "/srv/zeros/workspace",
+        "engineFilesRoot": "/srv/zeros/files",
+        "attachmentTemporaryRoot": "/srv/zeros/files/attachment-staging",
+        "seedBackup": "/srv/zeros/.zeros-image-seed",
+        "data": "/srv/zeros/state",
+        "agentHome": "/srv/zeros/home/agent",
+        "captureHome": "/srv/zeros/home/capture",
+        "log": "/srv/zeros/log/engine.log"
+      }
+    }
+  },
+  "platform": {
+    "architecture": "x64",
+    "kernel": null,
+    "lsm": null,
+    "unprivilegedUserNamespaces": null,
+    "apparmorRestrictUnprivilegedUserns": null,
+    "seccompMode": "2",
+    "noNewPrivs": "1",
+    "namespaces": {
+      "mnt": "mnt:[100]",
+      "pid": "pid:[101]",
+      "net": "net:[103]",
+      "ipc": "ipc:[104]",
+      "uts": "uts:[105]",
+      "cgroup": "cgroup:[102]",
+      "user": "user:[106]"
+    }
+  },
+  "helpers": {
+    "trusted": {
+      "node": true,
+      "bwrap": true,
+      "setpriv": true,
+      "supervisor": true
+    },
+    "deploymentTrusted": {
+      "runtimeProfile": true,
+      "engineLauncher": true,
+      "engineView": true,
+      "engineCgroup": true,
+      "engineNamespace": true,
+      "engineAppArmor": true,
+      "runtimeTree": true,
+      "engineQualification": true,
+      "supervisorRecovery": true,
+      "runtimeLayout": true,
+      "resourceInspector": true,
+      "resourceAdmission": true,
+      "imageContract": true,
+      "setupProcess": true,
+      "sourceIntegrity": true,
+      "marker": true,
+      "build": true,
+      "engine": true,
+      "engineTree": true,
+      "launcher": true,
+      "admissionConsumer": true,
+      "previewLinkInstaller": true,
+      "githubCredentialInstaller": true,
+      "githubRefreshRequestHelper": true,
+      "gitAskpass": true,
+      "workerSupervisor": true,
+      "setupHelper": true,
+      "attester": true,
+      "admissionDirectory": true
+    },
+    "versions": {
+      "node": "fixture-version",
+      "bwrap": "fixture-version",
+      "setpriv": "fixture-version",
+      "podman": "fixture-version",
+      "git": "fixture-version",
+      "gitLfs": "fixture-version",
+      "rg": "fixture-version"
+    }
+  },
+  "mounts": {
+    "/": {
+      "target": "/",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/opt/zeros": {
+      "target": "/opt/zeros",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/srv/zeros/files/workspace": {
+      "target": "/srv/zeros/files/workspace",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/srv/zeros/state": {
+      "target": "/srv/zeros/state",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/sys/fs/cgroup": {
+      "target": "/sys/fs/cgroup",
+      "fstype": "fixture",
+      "options": "ro"
+    }
+  },
+  "resources": {
+    "finite": true,
+    "cpuMax": "400000 100000",
+    "memoryMax": "7516192768",
+    "pidsMax": "4096",
+    "hierarchy": [
+      {
+        "path": "/system.slice/zeros-host.service/engine-32345678-1234-4234-8234-123456789abc",
+        "cpuMax": "400000 100000",
+        "memoryMax": "7516192768",
+        "pidsMax": "4096"
+      }
+    ],
+    "allocation": {
+      "architecture": "linux/amd64",
+      "cpuMillicores": 4000,
+      "memoryBytes": 8589934592,
+      "storageBytes": 21474836480
+    }
+  },
+  "qualification": {
+    "version": 1,
+    "secure": true,
+    "identity": {
+      "secure": true,
+      "hostUid": 10003,
+      "namespaceUid": 0,
+      "noNewPrivs": 1,
+      "seccompMode": 2,
+      "resources": {
+        "finite": true,
+        "cpuMax": "400000 100000",
+        "memoryMax": "7516192768",
+        "pidsMax": "4096",
+        "hierarchy": [
+          {
+            "path": "/system.slice/zeros-host.service/engine-32345678-1234-4234-8234-123456789abc",
+            "cpuMax": "400000 100000",
+            "memoryMax": "7516192768",
+            "pidsMax": "4096"
+          }
+        ]
+      },
+      "checks": [
+        {
+          "name": "fixed-engine-user-namespace",
+          "status": "pass"
+        }
+      ]
+    },
+    "workload": {
+      "secure": true
+    },
+    "capture": {
+      "secure": true
+    },
+    "humanServices": {
+      "secure": true
+    },
+    "actorTools": {
+      "secure": true
+    }
+  },
+  "setupQualification": {
+    "secure": true,
+    "unprivileged": true,
+    "detachedDescendantsRetired": true,
+    "timeoutRetired": true
+  },
+  "qualificationError": null
+}
+"
+`;
+
+exports[`cloud worker attestation > keeps the v2 report and launch proof byte-for-byte 2`] = `
+"{"version":1,"profile":"zeros-cloud-worker-v2","qualifiedAtMs":1791072000000,"reportSha256":"62fbc49ae915770ad7078802964bef592e4cdd9fdefc58041710fcb002162a99","markerSha256":"6ad69db177419aec1aecabcccc43420ce0178e5b122538c4a9ddd888b4bf8c6f","buildSha256":"2db12049dfeea758feef53feb33d1991248d137885e6d204032ccbc85f2499b0","bootId":"12345678-1234-4234-8234-123456789abc","containerInitStartTicks":"12345","namespaces":{"mnt":"mnt:[100]","pid":"pid:[101]","cgroup":"cgroup:[102]"}}
+"
+`;
+
+exports[`cloud worker attestation > keeps the v3 report and launch proof byte-for-byte 1`] = `
+"{
+  "version": 1,
+  "profile": "zeros-cloud-worker-v3",
+  "qualified": true,
+  "metadata": {
+    "markerSha256": "9e97c5f100170bdd9782984755e39dd42e4f911a6c71c9e51df62928a3cf7c11",
+    "buildSha256": "febc2dc42de7ea6f14d73f0c4398603c534f04ad272d1d46021b3dfc46061d08",
+    "build": {
+      "version": 1,
+      "profile": "zeros-cloud-worker-v3",
+      "runtimeLayout": {
+        "version": 3,
+        "root": "/srv/zeros",
+        "engine": "/opt/zeros",
+        "repository": "/srv/zeros/files/workspace",
+        "logicalRepository": "/srv/zeros/workspace",
+        "engineFilesRoot": "/srv/zeros/files",
+        "attachmentTemporaryRoot": "/srv/zeros/files/attachment-staging",
+        "seedBackup": "/srv/zeros/.zeros-image-seed",
+        "data": "/srv/zeros/state",
+        "agentHome": "/srv/zeros/home/agent",
+        "captureHome": "/srv/zeros/home/capture",
+        "log": "/srv/zeros/log/engine.log"
+      }
+    }
+  },
+  "platform": {
+    "architecture": "x64",
+    "kernel": null,
+    "lsm": null,
+    "unprivilegedUserNamespaces": null,
+    "apparmorRestrictUnprivilegedUserns": null,
+    "seccompMode": "2",
+    "noNewPrivs": "1",
+    "namespaces": {
+      "mnt": "mnt:[100]",
+      "pid": "pid:[101]",
+      "net": "net:[103]",
+      "ipc": "ipc:[104]",
+      "uts": "uts:[105]",
+      "cgroup": "cgroup:[102]",
+      "user": "user:[106]"
+    }
+  },
+  "helpers": {
+    "trusted": {
+      "node": true,
+      "bwrap": true,
+      "setpriv": true,
+      "supervisor": true
+    },
+    "deploymentTrusted": {
+      "runtimeProfile": true,
+      "engineLauncher": true,
+      "engineView": true,
+      "engineCgroup": true,
+      "engineNamespace": true,
+      "engineAppArmor": true,
+      "runtimeTree": true,
+      "engineQualification": true,
+      "supervisorRecovery": true,
+      "runtimeLayout": true,
+      "resourceInspector": true,
+      "resourceAdmission": true,
+      "imageContract": true,
+      "setupProcess": true,
+      "sourceIntegrity": true,
+      "marker": true,
+      "build": true,
+      "engine": true,
+      "engineTree": true,
+      "launcher": true,
+      "admissionConsumer": true,
+      "previewLinkInstaller": true,
+      "githubCredentialInstaller": true,
+      "githubRefreshRequestHelper": true,
+      "gitAskpass": true,
+      "workerSupervisor": true,
+      "setupHelper": true,
+      "attester": true,
+      "admissionDirectory": true
+    },
+    "versions": {
+      "node": "fixture-version",
+      "bwrap": "fixture-version",
+      "setpriv": "fixture-version",
+      "podman": "fixture-version",
+      "git": "fixture-version",
+      "gitLfs": "fixture-version",
+      "rg": "fixture-version"
+    }
+  },
+  "mounts": {
+    "/": {
+      "target": "/",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/opt/zeros": {
+      "target": "/opt/zeros",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/srv/zeros/files/workspace": {
+      "target": "/srv/zeros/files/workspace",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/srv/zeros/state": {
+      "target": "/srv/zeros/state",
+      "fstype": "fixture",
+      "options": "ro"
+    },
+    "/sys/fs/cgroup": {
+      "target": "/sys/fs/cgroup",
+      "fstype": "fixture",
+      "options": "ro"
+    }
+  },
+  "resources": {
+    "finite": true,
+    "cpuMax": "400000 100000",
+    "memoryMax": "7516192768",
+    "pidsMax": "4096",
+    "hierarchy": [
+      {
+        "path": "/system.slice/zeros-host.service/engine-32345678-1234-4234-8234-123456789abc",
+        "cpuMax": "400000 100000",
+        "memoryMax": "7516192768",
+        "pidsMax": "4096"
+      }
+    ],
+    "allocation": {
+      "architecture": "linux/amd64",
+      "cpuMillicores": 4000,
+      "memoryBytes": 8589934592,
+      "storageBytes": 21474836480
+    }
+  },
+  "qualification": {
+    "version": 1,
+    "secure": true,
+    "identity": {
+      "secure": true,
+      "hostUid": 10003,
+      "namespaceUid": 0,
+      "noNewPrivs": 1,
+      "seccompMode": 2,
+      "resources": {
+        "finite": true,
+        "cpuMax": "400000 100000",
+        "memoryMax": "7516192768",
+        "pidsMax": "4096",
+        "hierarchy": [
+          {
+            "path": "/system.slice/zeros-host.service/engine-32345678-1234-4234-8234-123456789abc",
+            "cpuMax": "400000 100000",
+            "memoryMax": "7516192768",
+            "pidsMax": "4096"
+          }
+        ]
+      },
+      "checks": [
+        {
+          "name": "fixed-engine-user-namespace",
+          "status": "pass"
+        }
+      ]
+    },
+    "workload": {
+      "secure": true
+    },
+    "capture": {
+      "secure": true
+    },
+    "humanServices": {
+      "secure": true
+    },
+    "actorTools": {
+      "secure": true
+    }
+  },
+  "setupQualification": {
+    "secure": true,
+    "unprivileged": true,
+    "detachedDescendantsRetired": true,
+    "timeoutRetired": true
+  },
+  "qualificationError": null
+}
+"
+`;
+
+exports[`cloud worker attestation > keeps the v3 report and launch proof byte-for-byte 2`] = `
+"{"version":1,"profile":"zeros-cloud-worker-v3","qualifiedAtMs":1791072000000,"reportSha256":"f7268207b129667370659c25ffa2b8cdef7be2cd56aea04fd8af864ec0636e34","markerSha256":"9e97c5f100170bdd9782984755e39dd42e4f911a6c71c9e51df62928a3cf7c11","buildSha256":"febc2dc42de7ea6f14d73f0c4398603c534f04ad272d1d46021b3dfc46061d08","bootId":"12345678-1234-4234-8234-123456789abc","containerInitStartTicks":"12345","namespaces":{"mnt":"mnt:[100]","pid":"pid:[101]","cgroup":"cgroup:[102]"}}
+"
+`;

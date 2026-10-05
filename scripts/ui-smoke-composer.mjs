@@ -90,8 +90,14 @@ import {
   runCreateSourceTooltipEscapeSmoke,
 } from "./ui-smoke-create-source-focus.mjs";
 import { runCloudWorkspaceSmoke } from "./ui-smoke-cloud-workspace.mjs";
+import { runCloudReplicaSmoke } from "./ui-smoke-cloud-replicas.mjs";
+import { runCloudPreviewSmoke } from "./ui-smoke-cloud-previews.mjs";
 import { runCloudTerminalSmoke } from "./ui-smoke-cloud-terminal.mjs";
 import { runCloudSettingsSmoke } from "./ui-smoke-cloud-settings.mjs";
+import {
+  cloudComputerV2ReviewRegressions,
+  runCloudComputerV2Smoke,
+} from "./ui-smoke-cloud-computer-v2.mjs";
 import { runDesignModeSmoke } from "./ui-smoke-design-mode.mjs";
 import { runAttachmentPersistenceSmoke } from "./ui-smoke-attachment-persistence.mjs";
 import { runAttachmentLayoutSmoke } from "./ui-smoke-attachment-layout.mjs";
@@ -164,7 +170,7 @@ const vite = spawn(
     stdio: ["ignore", "pipe", "pipe"],
     // Keep API-backed browser contracts deterministic even without a local
     // .env. Each exercised endpoint is intercepted by its smoke test.
-    env: { ...process.env, VITE_CONTROL_PLANE_URL: "https://api.example.test" },
+    env: { ...process.env, VITE_CONTROL_PLANE_URL: "https://api.example.test", VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "preview.example.test" },
     detached: true,
   },
 );
@@ -206,7 +212,13 @@ try {
   }
   const cloudPage = await newPage({ viewport: { width: 900, height: 650 } });
   await runCloudWorkspaceSmoke({ page: cloudPage, check, harnessBase });
+  const cloudReplicaPage = await newPage({ viewport: { width: 1100, height: 850 } });
+  await runCloudReplicaSmoke({ page: cloudReplicaPage, check, harnessBase });
+  await cloudReplicaPage.close();
   await cloudPage.close();
+  const cloudPreviewPage = await newPage({ viewport: { width: 900, height: 650 } });
+  await runCloudPreviewSmoke({ page: cloudPreviewPage, check, harnessBase });
+  await cloudPreviewPage.close();
   const cloudTerminalPage = await newPage({
     viewport: { width: 1100, height: 780 },
   });
@@ -217,6 +229,19 @@ try {
   });
   await runCloudSettingsSmoke({ page: cloudSettingsPage, check, harnessBase });
   await cloudSettingsPage.close();
+  const computerV2Page = await newPage({ viewport: { width: 1100, height: 900 } });
+  await runCloudComputerV2Smoke({ page: computerV2Page, check, harnessBase });
+  await computerV2Page.close();
+  for (const regression of cloudComputerV2ReviewRegressions) {
+    const reviewPage = await newPage({ viewport: { width: 1100, height: 900 } });
+    await runCloudComputerV2Smoke({
+      page: reviewPage,
+      check,
+      harnessBase,
+      regression,
+    });
+    await reviewPage.close();
+  }
   const contextPage = await newPage();
   await runContextGaugeSmoke({ page: contextPage, harnessBase });
   await contextPage.close();

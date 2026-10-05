@@ -9,7 +9,7 @@ import { CloudCustomizationRedactor } from "../cloud-customization-redaction";
 
 export type HistoryCustomization = { authority: CloudCustomizationHistoryAuthority; secrets: string[] };
 const LIMIT = 4 * 1024 * 1024;
-const stateSchema = z.object({ owner: z.string().regex(/^[a-f0-9]{64}$/), secrets: z.array(z.string().max(4096)).max(32768), handoff: z.string().max(65536), resetRequired: z.boolean() }).strict();
+const stateSchema = z.object({ owner: z.string().regex(/^[a-f0-9]{64}$/), secrets: z.array(z.string().max(65536).refine(value => Buffer.byteLength(value) <= 65536)).max(32768), handoff: z.string().max(65536), resetRequired: z.boolean() }).strict();
 const envelopeSchema = z.object({ version: z.literal(1), context: z.string().min(1).max(128), keyVersion: z.number().int().positive(), nonce: z.string(), tag: z.string(), ciphertext: z.string() }).strict();
 const file = (parent: string, provider: string) => path.join(parent, `.customization-${provider}.json`);
 const aad = (context: string, provider: string, version: number) => Buffer.from(JSON.stringify(["zeros-native-history-v1", context, provider, version]));

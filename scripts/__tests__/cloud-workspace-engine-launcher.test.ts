@@ -1,7 +1,10 @@
 import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { launchCloudEngine } from "../cloud-workspace-validation/sandbox/cloud-engine-launcher.mjs";
+import { launchCloudEngine, assertCloudEngineFilesProjection } from "../cloud-workspace-validation/sandbox/cloud-engine-launcher.mjs";
 
 function fixture() {
   const order: string[] = [];
@@ -53,6 +56,25 @@ function fixture() {
 }
 
 describe("cloud engine admission and lifecycle", () => {
+  it("admits the protected repos root only on v4 while rejecting setup and broker authority", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "zeros-v2-test-projection-"));
+    const rootPath = vi.fn();
+    try {
+      mkdirSync(path.join(root, "workspace"));
+      mkdirSync(path.join(root, "repos"));
+      assertCloudEngineFilesProjection({ profile: "v4" }, { root, rootPath });
+      expect(rootPath).toHaveBeenCalledWith(path.join(root, "repos"), true);
+      expect(() => assertCloudEngineFilesProjection({ profile: "v3" }, { root, rootPath })).toThrow();
+      for (const name of ["setup", "broker", ".zeros-setup-private", "computer-template.json"]) {
+        mkdirSync(path.join(root, name));
+        expect(() => assertCloudEngineFilesProjection({ profile: "v4" }, { root, rootPath })).toThrow();
+        rmSync(path.join(root, name), { recursive: true });
+      }
+      rmSync(path.join(root, "repos"), { recursive: true });
+      symlinkSync("/srv/zeros/setup", path.join(root, "repos"));
+      expect(() => assertCloudEngineFilesProjection({ profile: "v4" }, { root, rootPath })).toThrow();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   it("blocks before bubblewrap can fork, so every descendant inherits the admitted scope", async () => {
     const f = fixture();
     f.barrier.once("finish", () => queueMicrotask(() => f.finish()));

@@ -27,7 +27,11 @@ import {
   seedCanonicalWorkspaceSettingsVersion,
 } from "./test-fixtures.js";
 import type { CloudWorkspaceSetupExecution } from "./setup-worker.js";
+import { runtimeBase, runtimeWitness, seedRuntimeGeneration } from "./runtime-test-fixtures.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { consentTestPersonalEnvironment, persistTestComputerSettings, pinTestComputerEnvironment } from "./computer-environment-test-fixtures.js";
+import { resolveDatabaseCloudWorkspaceSettings, sealCloudWorkspaceSecretBinding } from "./settings.js";
+import { seedComputerTemplate } from "./computer-workspace-test-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
@@ -141,8 +145,11 @@ d("cloud workspace setup material redemption", () => {
     await pool.end();
   });
 
-  beforeEach(async () => {
+  async function seedMaterials(v4 = false, template = false, templateEnvironment: Record<string, string> = {}, repositorySettings?: Record<string, unknown>) {
     await resetMigratedTestDatabase(pool);
+    // These tests isolate setup authority; funded compute leases have their
+    // own integration suite. Only this disposable test database is configured.
+    if (v4) await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
 
     const accountUserId = randomUUID();
     const accountEmail = `setup-materials-${accountUserId}@example.test`;
@@ -159,7 +166,7 @@ d("cloud workspace setup material redemption", () => {
     };
     await pool.query(`INSERT INTO users(id,email,display_name,staff_role)
       VALUES ($1,$2,'Setup Materials Owner','developer')`, [accountUserId, accountEmail]);
-    const setup = await withSystemTx(pool, async (tx) => {
+    const setup: CloudWorkspaceSetupExecution = await withSystemTx(pool, async (tx) => {
 
       await tx.query(
         `INSERT INTO user_identities (
@@ -222,6 +229,11 @@ d("cloud workspace setup material redemption", () => {
         ownerUserId: accountUserId,
         githubInstallationId: installationId,
       });
+      if (repositorySettings) {
+        await tx.query(`INSERT INTO repository_settings_versions(repository_id,org_id,scope,version,document,created_by)
+          VALUES($1,$2,'cloud',1,$3::jsonb,$4)`, [canonical.repositoryId,organizationId,JSON.stringify(repositorySettings),accountUserId]);
+        await tx.query(`INSERT INTO repository_settings_heads(repository_id,org_id,scope,current_version) VALUES($1,$2,'cloud',1)`, [canonical.repositoryId,organizationId]);
+      }
       await tx.query(
         `INSERT INTO cloud_workspaces (
            id, org_id, team_id, created_by, display_name,
@@ -245,6 +257,28 @@ d("cloud workspace setup material redemption", () => {
         organizationId,
         ownerUserId: accountUserId,
       });
+      const sourceSandboxId = `zeros-v2-test-template-${workspaceId}`;
+      const imageRef = template ? `boat-template:${sourceSandboxId}` : runtimeBase.imageRef;
+      const repositoryRevision = template ? "4".repeat(40) : "refs/heads/main";
+      // C3's build foreign keys require the base/runtime registry before the
+      // succeeded version.
+      const runtime = v4 ? await seedRuntimeGeneration(tx, { workspaceId, organizationId, ownerUserId: accountUserId, imageRef }) : null;
+      const environment = [];
+      for (const [name, value] of Object.entries(templateEnvironment)) {
+        const bindingId = randomUUID();
+        const sealed = sealCloudWorkspaceSecretBinding(value, { bindingId, organizationId, version: 1, name }, SECRET_KEY);
+        await tx.query(`INSERT INTO secret_bindings(id,org_id,owner_kind,name,purpose,placement,current_version,state)
+          VALUES($1,$2,'organization',$3,'environment','cloud',1,'active')`, [bindingId,organizationId,name]);
+        await tx.query(`INSERT INTO secret_binding_versions(binding_id,org_id,version,key_version,nonce,ciphertext,auth_tag,verifier_scheme,value_verifier,created_by)
+          VALUES($1,$2,1,1,$3,$4,$5,1,$6,$7)`, [bindingId,organizationId,sealed.nonce,sealed.ciphertext,sealed.authTag,sealed.valueVerifier,accountUserId]);
+        environment.push({ name, bindingId, bindingVersion: 1 });
+      }
+      const computer = template ? await seedComputerTemplate(tx, { organizationId, ownerUserId: accountUserId, installationId, sourceSandboxId, environment }) : null;
+      if (computer) {
+        await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
+          VALUES($1,1,$2,$3,$3,$4)`, [workspaceId, organizationId, computer.buildId, computer.configId]);
+      }
+      if (!v4) {
       await tx.query(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
@@ -260,12 +294,13 @@ d("cloud workspace setup material redemption", () => {
           canonical.providerConnectionId,
         ],
       );
+      }
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider,
            provider_resource_id, observed_state
-         ) VALUES ($1, 1, $2, 'daytona', $3, 'running')`,
-        [workspaceId, organizationId, `sandbox-${workspaceId}`],
+         ) VALUES ($1, 1, $2, $4, $3, 'running')`,
+        [workspaceId, organizationId, `sandbox-${workspaceId}`, v4 ? 'boat' : 'daytona'],
       );
       const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(
         tx,
@@ -284,7 +319,7 @@ d("cloud workspace setup material redemption", () => {
            github_installation_id, settings_snapshot,
            settings_snapshot_sha256, workspace_settings_version_id
          ) VALUES ($1, 1, $2, 'github.com', 'withso', 'zeros',
-                   'refs/heads/main', $3, $4::jsonb,
+                   $6, $3, $4::jsonb,
                    digest($4::jsonb::text, 'sha256'), $5)`,
         [
           workspaceId,
@@ -292,6 +327,7 @@ d("cloud workspace setup material redemption", () => {
           installationId,
           JSON.stringify(settings),
           settingsVersionId,
+          repositoryRevision,
         ],
       );
       const sealed = sealCloudWorkspaceSetupSecret(
@@ -345,18 +381,18 @@ d("cloud workspace setup material redemption", () => {
         attempt: 1,
         executionFence: 5,
         provider: {
-          name: "daytona",
+          name: v4 ? "boat" : "daytona",
           resourceId: `sandbox-${workspaceId}`,
         },
         image: {
-          ref: "snapshot-pinned-id",
-          sourceCommit: "a".repeat(40),
+          ref: v4 ? imageRef : "snapshot-pinned-id",
+          sourceCommit: v4 ? runtimeBase.sourceCommit : "a".repeat(40),
         },
         repository: {
           forge: "github.com",
           owner: "withso",
           name: "zeros",
-          revision: "refs/heads/main",
+          revision: repositoryRevision,
           githubInstallationId: installationId,
         },
         settings: {
@@ -364,6 +400,7 @@ d("cloud workspace setup material redemption", () => {
           snapshot: settings,
           sha256: settingsDigest.rows[0]!.digest,
         },
+        ...(runtime ? { runtime: runtime.pin } : {}),
       } satisfies CloudWorkspaceSetupExecution;
     });
 
@@ -377,8 +414,10 @@ d("cloud workspace setup material redemption", () => {
       new AbortController().signal,
     );
     seed = { execution: setup, setupAdmission, secretId };
+    if (template) await refreshTemplateSettings();
 
     github = {
+      mintContentsRead: vi.fn(async () => ({ token: "fixture-template-read-token", expiresAtMs: Date.now() + 60 * 60_000 })),
       mint: vi.fn(async () => ({
         token: "ghs_setup_repository_credential",
         expiresAtMs: Date.now() + 60 * 60_000,
@@ -403,7 +442,8 @@ d("cloud workspace setup material redemption", () => {
         clientId: "client_desktop_example",
       },
     });
-  });
+  }
+  beforeEach(() => seedMaterials());
 
   function redemptionInput() {
     const execution = seed.execution;
@@ -423,6 +463,186 @@ d("cloud workspace setup material redemption", () => {
       },
     };
   }
+
+  const outcome = (promise: Promise<unknown>) => promise.then(() => "accepted", error => error.code);
+
+  async function refreshTemplateSettings() {
+    const fixture = { ...seed.execution, userId: seed.execution.authority.accountUserId };
+    const repositoryId = (await pool.query("SELECT repository_id FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].repository_id;
+    const settings = await withSystemTx(pool, tx => resolveDatabaseCloudWorkspaceSettings(tx, {
+      ...fixture, repositoryId, actorUserId: fixture.userId, isPersonal: false, setupSecretKeyV1: SECRET_KEY,
+    }));
+    const snapshot = await persistTestComputerSettings(pool, fixture, settings);
+    seed.execution.settings = { version: 1, snapshot: settings.resolved.snapshot, sha256: snapshot.sha256 };
+    return { ...fixture, repositoryId };
+  }
+
+  it("redeems template generations with C4's pinned org environment and primary repository hook", async () => {
+    const name = "ORG_TEMPLATE_VALUE", value = "synthetic-template-org-value";
+    await seedMaterials(true, true, { [name]: value }, {
+      values: { env: { REPO_VALUE: "synthetic-repository-value" } },
+      setupCommands: [{ command: "printf primary-hook", timeoutSeconds: 30 }],
+    });
+    const material = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
+    expect(material.settings.setupEnvironment).toEqual([{ name, value }, { name: "REPO_VALUE", value: "synthetic-repository-value" }]);
+    expect(material.settings.setupCommands).toEqual([{ command: "printf primary-hook", timeoutSeconds: 30 }]);
+    expect(material.computer?.primaryRepositoryId).toBe("123456789");
+    const document = Buffer.from(material.settings.documentB64, "base64url").toString("utf8");
+    expect(document).not.toContain(value);
+    expect(document).not.toContain("synthetic-repository-value");
+  });
+
+  it("redeems a saved template with the org contents-only grant and fresh engine authority", async () => {
+    await seedMaterials(true, true);
+    const other = randomUUID();
+    await withSystemTx(pool, async tx => {
+      await tx.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Template approver')", [other, `${other}@example.test`]);
+      await tx.query("UPDATE github_installations SET owner_user_id=$1", [other]);
+      await tx.query("DELETE FROM github_authorizations");
+    });
+    const material = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
+    expect(github.mint).not.toHaveBeenCalled();
+    expect(github.mintContentsRead).toHaveBeenCalledWith({ installationId: 987654, repositoryId: 123456789 });
+    expect(material).toMatchObject({ computer: { primaryRepositoryId: "123456789", requestedRevision: "refs/heads/main",
+      template: { schema: "zeros.computer-template/v1", repositoryManifest: [
+        { id: "123456789", owner: "withso", name: "zeros", sha: "1".repeat(40) },
+        { id: "987654321", owner: "withso", name: "secondary", sha: "2".repeat(40) },
+      ] } }, repository: { revision: "4".repeat(40) } });
+    const engines = await pool.query("SELECT id,registration_grant_id,runtime_boot_id FROM cloud_workspace_engine_instances");
+    expect(engines.rows).toEqual([{ id: material.engine.instanceId, registration_grant_id: expect.any(String), runtime_boot_id: runtimeWitness.bootId }]);
+    expect(await outcome(service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness }))).toBe("setup_admission_rejected");
+    const persisted = await pool.query(`SELECT row_to_json(source) AS document FROM cloud_workspace_computer_sources source
+      UNION ALL SELECT row_to_json(spec) FROM cloud_workspace_setup_specs spec
+      UNION ALL SELECT row_to_json(engine) FROM cloud_workspace_engine_instances engine`);
+    expect(JSON.stringify(persisted.rows).includes("fixture-template-read-token")).toBe(false);
+  });
+
+  it("rechecks the org read grant after minting and revokes a token whose installation was suspended", async () => {
+    await seedMaterials(true, true);
+    vi.mocked(github.mintContentsRead!).mockImplementationOnce(async () => {
+      await pool.query("UPDATE github_installations SET suspended_at=now()");
+      return { token: "fixture-template-read-token", expiresAtMs: Date.now() + 3_600_000 };
+    });
+    expect(await outcome(service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness }))).toBe("setup_authority_changed");
+    expect(github.revoke).toHaveBeenCalledWith("fixture-template-read-token");
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_engine_instances WHERE state='starting'")).rowCount).toBe(0);
+  });
+
+  it("rejects an installation witness on a legacy generation", async () => {
+    expect(await outcome(service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness })))
+      .toBe("setup_admission_rejected");
+    expect(github.mint).not.toHaveBeenCalled();
+  });
+  it("requires an exact v4 installation witness before materials or engine creation", async () => {
+    await seedMaterials(true);
+    for (const runtime of [undefined, { ...runtimeWitness, manifestSha256: "b".repeat(64) },
+      { ...runtimeWitness, runtimeId: `r1-${"b".repeat(64)}`, manifestSha256: "b".repeat(64) },
+      { ...runtimeWitness, baseCompatibilityId: `bc1-${"c".repeat(64)}` },
+      { ...runtimeWitness, installerReceiptSha256: "invalid" }, { ...runtimeWitness, bootId: "invalid" },
+      { ...runtimeWitness, supervisorSessionId: "invalid" }]) {
+      expect(await outcome(service.redeem({ ...redemptionInput(), materialVersion: 2, ...(runtime ? { runtime } : {}) })))
+        .toBe("setup_admission_rejected");
+    }
+    expect(github.mint).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_engine_instances")).rowCount).toBe(0);
+  });
+  it("persists all nine v4 fields at redemption and rejects every differing registration identity", async () => {
+    await seedMaterials(true);
+    const materials = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
+    const row = (await pool.query("SELECT * FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0];
+    expect(row).toMatchObject({ state: "starting", runtime_id: runtimeWitness.runtimeId,
+      runtime_manifest_sha256: runtimeWitness.manifestSha256, runtime_base_image_id: runtimeBase.id,
+      runtime_base_compatibility_id: runtimeBase.compatibilityId, runtime_profile: "zeros-cloud-worker-v4",
+      runtime_engine_protocol_version: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+      runtime_installer_receipt_sha256: runtimeWitness.installerReceiptSha256,
+      runtime_boot_id: runtimeWitness.bootId, runtime_supervisor_session_id: runtimeWitness.supervisorSessionId,
+      agent_runtime_profile: null, agent_runtime_contract_sha256: null });
+    const input = { token: materials.engine.registration.token, workspaceId: seed.execution.workspaceId,
+      organizationId: seed.execution.organizationId, generation: seed.execution.generation, setupRunId: seed.execution.setupRunId,
+      executionFence: seed.execution.executionFence, engineInstanceId: materials.engine.instanceId,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2 as const };
+    const identity = { ...runtimeWitness, profile: "zeros-cloud-worker-v4" as const };
+    const variants = [undefined, { profile: "zeros-cloud-worker-v3" as const, contractSha256: "a".repeat(64) },
+      { ...identity, runtimeId: `r1-${"b".repeat(64)}`, manifestSha256: "b".repeat(64) },
+      { ...identity, manifestSha256: "b".repeat(64) }, { ...identity, baseCompatibilityId: `bc1-${"d".repeat(64)}` },
+      { ...identity, installerReceiptSha256: "f".repeat(64) }, { ...identity, bootId: randomUUID() },
+      { ...identity, supervisorSessionId: randomUUID() }];
+    for (const agentRuntime of variants) {
+      expect(await outcome(service.registerEngine({ ...input, ...(agentRuntime ? { agentRuntime } : {}) })))
+        .toBe("engine_registration_rejected");
+    }
+    // Failed comparisons roll back grant consumption; the exact witness can register once.
+    expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity }))).toBe("accepted");
+    expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity }))).toBe("engine_registration_rejected");
+  });
+  it.each(["before redemption", "during repository mint"])("rejects runtime revocation %s without releasing materials", async stage => {
+    await seedMaterials(true);
+    const revoke = () => withSystemTx(pool, tx => tx.query(
+      "UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [runtimeWitness.runtimeId]));
+    if (stage === "before redemption") await revoke();
+    else {
+      const mint = vi.mocked(github.mint).getMockImplementation()!;
+      vi.mocked(github.mint).mockImplementationOnce(async input => { await revoke(); return mint(input); });
+    }
+    expect(await outcome(service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness })))
+      .toBe(stage === "before redemption" ? "setup_admission_rejected" : "setup_authority_changed");
+    if (stage === "before redemption") expect(github.mint).not.toHaveBeenCalled();
+    else expect(github.revoke).toHaveBeenCalledOnce();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_engine_instances WHERE revoked_at IS NULL")).rowCount).toBe(0);
+  });
+  it("rechecks the saved runtime qualification before consuming its registration grant", async () => {
+    await seedMaterials(true);
+    const materials = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
+    await withSystemTx(pool, tx => tx.query(`UPDATE cloud_runtime_qualifications SET enabled=false,mcp_qualified=false,revoked_at=now()
+      WHERE runtime_id=$1 AND credential_kind='codex-chatgpt'`, [runtimeWitness.runtimeId]));
+    expect(await outcome(service.registerEngine({ token: materials.engine.registration.token,
+      workspaceId: seed.execution.workspaceId, organizationId: seed.execution.organizationId,
+      generation: seed.execution.generation, setupRunId: seed.execution.setupRunId,
+      executionFence: seed.execution.executionFence, engineInstanceId: materials.engine.instanceId,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2,
+      agentRuntime: { ...runtimeWitness, profile: "zeros-cloud-worker-v4" } }))).toBe("engine_registration_rejected");
+    expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0].state).toBe("starting");
+  });
+
+  async function computerEnvironment() {
+    const fixture = { ...seed.execution, userId: seed.execution.authority.accountUserId };
+    const repositoryId = (await pool.query("SELECT repository_id FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].repository_id;
+    await pinTestComputerEnvironment(pool, fixture, SECRET_KEY, { ORG_SETTING: "synthetic-org-setting", COLLISION: "org-default" });
+    const consent = await consentTestPersonalEnvironment(pool, fixture.organizationId, fixture.userId, { COLLISION: "creator-personal-value", PERSONAL_ONLY: "creator-only-value" });
+    const settings = await withSystemTx(pool, tx => resolveDatabaseCloudWorkspaceSettings(tx, { ...fixture, repositoryId, actorUserId: fixture.userId, isPersonal: false, setupSecretKeyV1: SECRET_KEY }));
+    const snapshot = await persistTestComputerSettings(pool, fixture, settings);
+    seed.execution.settings.sha256 = snapshot.sha256;
+    return { consent };
+  }
+  it("redeems v2 setup env with fresh creator consent and keeps the managed document value-free", async () => {
+    const { consent } = await computerEnvironment();
+    await pool.query("UPDATE personal_profile_inheritance_consents SET state='revoked',revoked_at=now() WHERE id=$1", [consent]);
+    const material = await service.redeem(redemptionInput());
+    expect(material.settings.setupEnvironment).toEqual([{ name: "COLLISION", value: "org-default" }, { name: "ORG_SETTING", value: "synthetic-org-setting" }]);
+    const text = Buffer.from(material.settings.documentB64, "base64url").toString("utf8");
+    expect(JSON.parse(text).secretRefs.map((ref: { name: string }) => ref.name)).toEqual(["COLLISION", "ORG_SETTING"]);
+    for (const value of ["org-default", "synthetic-org-setting", "creator-personal-value", "creator-only-value"]) expect(text.includes(value)).toBe(false);
+  });
+  it.each(["before redemption", "during Git mint"])("rejects a retired org version %s instead of opening saved setup secrets", async when => {
+    await computerEnvironment();
+    const retire = () => pool.query("UPDATE secret_binding_versions SET retired_at=now()");
+    if (when === "before redemption") await retire();
+    else vi.mocked(github.mint).mockImplementationOnce(async () => { await retire(); return { token: "synthetic-github-material", expiresAtMs: Date.now()+3600_000 }; });
+    await expect(service.redeem(redemptionInput())).rejects.toMatchObject({ code: "computer_environment_revoked" });
+    if (when === "before redemption") expect(github.mint).not.toHaveBeenCalled();
+    else expect(github.revoke).toHaveBeenCalledOnce();
+  });
+  it("keeps binding contention retryable and rolls back admission before minting", async () => {
+    await computerEnvironment();
+    const lock = await pool.connect();
+    try {
+      await lock.query("BEGIN");
+      await lock.query("SELECT id FROM secret_bindings FOR UPDATE");
+      await expect(service.redeem(redemptionInput())).rejects.toMatchObject({ code: "computer_environment_busy", retryable: true });
+      expect(github.mint).not.toHaveBeenCalled();
+    } finally { await lock.query("ROLLBACK"); lock.release(); }
+    await expect(service.redeem(redemptionInput())).resolves.toHaveProperty("settings.setupEnvironment");
+  });
 
   it("returns generation-pinned resources only to version-2 material consumers", async () => {
     const materials = await service.redeem({

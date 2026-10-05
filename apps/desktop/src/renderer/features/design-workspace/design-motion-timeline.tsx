@@ -790,6 +790,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   const motionPropertiesListId = useId();
   const timelineRef = useRef<HTMLElement | null>(null);
   const [compactTiming, setCompactTiming] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
     if (!open || disabled || !timeline) return;
@@ -1692,6 +1693,11 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     sessionOwnerKey,
   ]);
 
+  const settingsAvailable = open && details !== null && draft !== null;
+  useEffect(() => {
+    if (!settingsAvailable) setSettingsOpen(false);
+  }, [settingsAvailable]);
+
   if (!open) return null;
 
   if (!details || !draft) {
@@ -1915,7 +1921,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             </>
           ) : null}
         </div>
-        <Popover>
+        <Popover open={settingsOpen} onOpenChange={setSettingsOpen}>
           <Tooltip label="More motion settings">
             <PopoverTrigger asChild>
               <Button
@@ -1939,6 +1945,14 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             className="zd-popover zd-motion-settings-popover"
             onOpenAutoFocus={focusDesignPopoverSurface}
             onEscapeKeyDown={keepDesignPopoverWhileEditing}
+            onKeyDown={(event) => {
+              // Radix's Escape layer index can lag behind the initial focus.
+              // Field Escape handlers prevent default when reverting a draft.
+              if (event.key === "Escape" && !event.defaultPrevented) {
+                event.preventDefault();
+                setSettingsOpen(false);
+              }
+            }}
           >
             <div className="zd-popover-header">
               <span className="zd-popover-title">Motion settings</span>

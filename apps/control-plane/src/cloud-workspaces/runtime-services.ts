@@ -212,6 +212,12 @@ export class DatabaseCloudRuntimeServiceAccess {
       grant.provider_resource_id === expected.resourceId && grant.remote_port === expected.remotePort ? grant.leaseExpiresAtMs : null;
   }
 
+  /** Read-only authority for idle native listeners; never opens a provider or application connection. */
+  async check(request: Request): Promise<number | null> {
+    const grant = await withSystemTx(this.options.pool, tx => this.authorize(tx, request)).catch(() => null);
+    return grant?.leaseExpiresAtMs ?? null;
+  }
+
   async revoke(input: { organizationId: string; workspaceId: string; accountUserId: string; grantId: string }): Promise<void> {
     if (![input.organizationId, input.workspaceId, input.accountUserId, input.grantId].every(value => UUID.test(value))) throw rejected();
     // Only the authenticated owning account can revoke its grant. Revocation

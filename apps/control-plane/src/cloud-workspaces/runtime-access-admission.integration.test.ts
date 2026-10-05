@@ -86,6 +86,18 @@ d("runtime access admission", () => {
     });
   });
 
+  it("passes only the stored opaque agent target to the current runtime", async () => {
+    const previewTarget = { executionId: "execution-native", portId: "A".repeat(32) };
+    const deviceId = randomUUID();
+    await pool.query("INSERT INTO devices(id,user_id,label,platform,public_key,key_fingerprint) VALUES($1,$2,'Preview device','macos',$3,$4)", [deviceId, fixture.userId, Buffer.alloc(32, 2), Buffer.alloc(32, 3)]);
+    await pool.query("UPDATE cloud_workspace_client_access_grants SET preview_target=$2, preview_device_id=$3, preview_device_key_version=1 WHERE id=$1", [grantId, previewTarget, deviceId]);
+    await expect(service.admit(input())).resolves.toMatchObject({ previewTarget, remotePort: 3000 });
+    await pool.query("UPDATE devices SET trust_state='revoked',revoked_at=now() WHERE id=$1", [deviceId]);
+    await expect(service.admit(input())).rejects.toMatchObject({ code: "runtime_access_rejected" });
+    await pool.query("UPDATE cloud_workspace_client_access_grants SET state='revoked', revoked_at=now() WHERE id=$1", [grantId]);
+    await expect(service.admit(input())).rejects.toMatchObject({ code: "runtime_access_rejected" });
+  });
+
   it("rejects wrong engine, bearer, generation and owner without changing the grant", async () => {
     for (const change of [
       { heartbeatToken: `zwh_${"C".repeat(43)}` },

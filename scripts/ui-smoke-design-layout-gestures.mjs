@@ -414,7 +414,9 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
       return ready;
     }, describe);
   try {
-    await expect.poll(() => dragPixels()).toBe(true);
+    // A stale capture can occupy the lane before the current one starts;
+    // each runtime screenshot has a 12s budget. Keep the exact-version check.
+    await expect.poll(() => dragPixels(), { timeout: 30_000 }).toBe(true);
   } catch (error) {
     const state = await dragPixels(true).catch((reason) => ({
       unavailable: reason.message,

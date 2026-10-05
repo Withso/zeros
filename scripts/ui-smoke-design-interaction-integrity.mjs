@@ -553,6 +553,39 @@ export async function runDesignMotionResumePlaybackSmoke({ page, check }) {
   );
 }
 
+export async function runDesignMotionSettingsFocusSmoke({ page, check }) {
+  const timeline = await openMotion(page);
+  // Radix's document Escape handler can still have a stale layer index at
+  // first focus. Exercise that exact turn instead of depending on CPU speed.
+  await page.evaluate(() => {
+    window.__motionSettingsEscapeSent = false;
+    const escapeAtFocus = (event) => {
+      if (!event.target.hasAttribute?.("data-design-motion-settings")) return;
+      document.removeEventListener("focusin", escapeAtFocus, true);
+      event.target.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      window.__motionSettingsEscapeSent = true;
+    };
+    document.addEventListener("focusin", escapeAtFocus, true);
+  });
+  const trigger = timeline.getByRole("button", {
+    name: "More motion settings",
+    exact: true,
+  });
+  await trigger.click();
+  await expect
+    .poll(() => page.evaluate(() => window.__motionSettingsEscapeSent))
+    .toBe(true);
+  await expect(page.locator("[data-design-motion-settings]")).toBeHidden();
+  await expect(trigger).toBeFocused();
+  check("motion settings handle Escape at their first focus", true);
+}
+
 export async function runDesignMotionFieldIntegritySmoke({ page, check }) {
   const timeline = await openMotion(page);
   const duration = timeline.getByLabel("Animation duration", { exact: true });
@@ -712,6 +745,7 @@ export async function runDesignInteractionIntegritySmoke(context) {
   await runDesignMotionCustomPropertySmoke(context);
   await runDesignMotionFractionalPlaybackSmoke(context);
   await runDesignMotionResumePlaybackSmoke(context);
+  await runDesignMotionSettingsFocusSmoke(context);
   await runDesignMotionFieldIntegritySmoke(context);
   await runDesignMotionScrubFocusSmoke(context);
   await runDesignMotionRetainedSizeSmoke(context);

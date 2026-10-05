@@ -4,7 +4,12 @@ import type pg from "pg";
 
 import { audit } from "../audit.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { parseCloudWorkspaceSetupHookLog, type CloudWorkspaceSetupHookLog } from "./setup-log.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
+import { cloudRuntimePin, cloudRuntimePinValues, requirePinnedCloudRuntime, CloudRuntimeError, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
+import { publicCloudError } from "./public-contract.js";
+import type { CloudRuntimeWitnessRow } from "./runtime-contract.js";
+import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 import { advanceCloudAutomaticRecovery, classifyCloudRestoreEvidence, enqueueCloudAutomaticRecovery, recordCloudRestoreEvidence } from "./automatic-recovery.js";
 import {
   completeCloudWorkspaceGenerationTransition,
@@ -23,6 +28,7 @@ const SETUP_EXECUTION_ABORTED = Symbol("setup-execution-aborted");
 type SetupWorkerLogger = Pick<Console, "info" | "warn" | "error">;
 
 export type CloudWorkspaceSetupExecution = {
+  runtime?: CloudRuntimePin;
   setupRunId: string;
   workspaceId: string;
   organizationId: string;
@@ -104,6 +110,7 @@ export interface CloudWorkspaceSetupExecutor {
 }
 
 export class CloudWorkspaceSetupError extends Error {
+  hookLog?: CloudWorkspaceSetupHookLog;
   constructor(
     public readonly code: string,
     message: string,
@@ -145,6 +152,7 @@ type SafeSetupFailure = {
   code: string;
   retryable: boolean;
   restoreEvidence?: string | undefined;
+  hookLog?: CloudWorkspaceSetupHookLog | undefined;
 };
 
 function safeInteger(
@@ -208,17 +216,20 @@ export function cloudWorkspaceSetupReadinessMatches(
     (value.engine.protocolVersion ?? 0) > 0 &&
     (value.engine.protocolVersion ?? 0) <= 65_535 &&
     value.engine.health === "ready" &&
+    (!execution.runtime || value.engine.protocolVersion === execution.runtime.engineProtocolVersion) &&
     value.engine.durableRecordConnected === true
   );
 }
 
 function safeFailure(error: unknown): SafeSetupFailure {
+  if (error instanceof CloudRuntimeError) return { code: error.code, retryable: false };
   if (error instanceof CloudWorkspaceSetupError) {
     return {
       code: /^[a-z][a-z0-9_]{0,127}$/.test(error.code)
         ? error.code
         : "setup_executor_failure",
       retryable: error.retryable,
+      hookLog: ["setup_command_failed", "setup_hook_retry_required"].includes(error.code) ? parseCloudWorkspaceSetupHookLog(error.hookLog) ?? undefined : undefined,
       restoreEvidence: classifyCloudRestoreEvidence(error.code, "diagnostic" in error ? error.diagnostic : null) ?? undefined,
     };
   }
@@ -444,7 +455,7 @@ export class CloudWorkspaceSetupWorker {
       const workspace = candidate.rows[0];
       if (!workspace) return { kind: "none" };
 
-      const selected = await tx.query<{
+      const selected = await tx.query<CloudRuntimePinRow & {
         id: string;
         attempt: number;
         state: "queued" | "running";
@@ -465,7 +476,8 @@ export class CloudWorkspaceSetupWorker {
       }>(
         `SELECT sr.id, sr.attempt, sr.state, sr.claim_count,
                 sr.execution_fence, g.provider, g.image_ref, g.source_commit,
-                pb.provider_resource_id,
+                pb.provider_resource_id, g.runtime_id, g.runtime_manifest_sha256, g.runtime_base_image_id,
+                g.runtime_base_compatibility_id, g.runtime_profile, g.runtime_engine_protocol_version,
                 ss.spec_version, ss.repository_forge, ss.repository_owner,
                 ss.repository_name, ss.repository_revision,
                 ss.github_installation_id, ss.settings_snapshot,
@@ -593,6 +605,7 @@ export class CloudWorkspaceSetupWorker {
       );
       const lease = claimed.rows[0]!;
       const executionFence = safeFence(lease.execution_fence);
+      const runtime = cloudRuntimePin(row);
       await audit(
         tx,
         workspace.org_id,
@@ -612,6 +625,7 @@ export class CloudWorkspaceSetupWorker {
       return {
         kind: "claimed",
         setup: {
+          ...(runtime ? { runtime } : {}),
           setupRunId: row.id,
           workspaceId: workspace.id,
           organizationId: workspace.org_id,
@@ -815,8 +829,10 @@ export class CloudWorkspaceSetupWorker {
       );
       const registrationGrantId = registrationGrant.rows[0]?.id;
       const registeredEngine = registrationGrantId
-        ? await tx.query(
-            `SELECT 1
+        ? await tx.query<CloudRuntimePinRow & CloudRuntimeWitnessRow>(
+            `SELECT ei.runtime_id, ei.runtime_manifest_sha256, ei.runtime_base_image_id, ei.runtime_base_compatibility_id,
+                    ei.runtime_profile, ei.runtime_engine_protocol_version, ei.runtime_installer_receipt_sha256,
+                    ei.runtime_boot_id, ei.runtime_supervisor_session_id
              FROM cloud_workspace_engine_instances ei
              WHERE ei.id = $1 AND ei.workspace_id = $2
                AND ei.generation = $3 AND ei.org_id = $4
@@ -840,7 +856,11 @@ export class CloudWorkspaceSetupWorker {
           )
         : null;
 
-      const eligible =
+      const registeredIdentity = registeredEngine?.rows[0];
+      const registeredPin = registeredIdentity ? cloudRuntimePin(registeredIdentity) : null;
+      const expectedPin = cloudRuntimePinValues(setup.runtime);
+      const runtimeEligible = cloudRuntimePinValues(registeredPin).every((value, index) => value === expectedPin[index]);
+      const eligible = runtimeEligible &&
         current?.current_generation === setup.generation &&
         current.authority_live &&
         current.desired_state === "running" &&
@@ -862,6 +882,9 @@ export class CloudWorkspaceSetupWorker {
         return false;
       }
 
+      // Revocation after execution is a terminal runtime refusal too. Keep its
+      // actionable error instead of cancelling an otherwise current setup.
+      if (registeredPin) await requirePinnedCloudRuntime(tx, registeredPin, cloudRuntimeQualificationMode());
       await revokeSetupExecutionGrants(tx, setup);
       await retireCloudWorkspaceEngineInstances(tx, {
         ...setup,
@@ -873,9 +896,11 @@ export class CloudWorkspaceSetupWorker {
            image_ref, image_source_commit, repository_revision,
            repository_commit, settings_version, settings_snapshot_sha256,
            engine_instance_id, engine_protocol_version, engine_health,
-           durable_record_connected
+           durable_record_connected, runtime_id, runtime_manifest_sha256, runtime_base_image_id,
+           runtime_base_compatibility_id, runtime_profile, runtime_engine_protocol_version,
+           runtime_installer_receipt_sha256, runtime_boot_id, runtime_supervisor_session_id
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                   decode($11, 'hex'), $12, $13, 'ready', true)`,
+                   decode($11, 'hex'), $12, $13, 'ready', true, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
         [
           setup.setupRunId,
           setup.workspaceId,
@@ -890,6 +915,10 @@ export class CloudWorkspaceSetupWorker {
           readiness.settings.sha256,
           readiness.engine.instanceId,
           readiness.engine.protocolVersion,
+          ...cloudRuntimePinValues(registeredPin),
+          registeredIdentity!.runtime_installer_receipt_sha256,
+          registeredIdentity!.runtime_boot_id,
+          registeredIdentity!.runtime_supervisor_session_id,
         ],
       );
       await tx.query(
@@ -937,6 +966,8 @@ export class CloudWorkspaceSetupWorker {
     setup: ClaimedSetup,
     failure: SafeSetupFailure,
   ): Promise<boolean> {
+    const message = failure.code === "cloud_runtime_revoked" || failure.code === "cloud_runtime_unavailable"
+      ? publicCloudError(failure.code).message : "Cloud workspace setup did not complete";
     return withSystemTx(this.pool, async (tx) => {
       await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [setup.organizationId]);
       const workspace = await tx.query<{
@@ -1051,34 +1082,35 @@ export class CloudWorkspaceSetupWorker {
       await tx.query(
         `UPDATE cloud_workspace_setup_runs
          SET state = 'failed', completed_at = now(), updated_at = now(),
-             error_code = $2, lease_owner = NULL, lease_expires_at = NULL
+             error_code = $2, lease_owner = NULL, lease_expires_at = NULL,
+             log_excerpt = coalesce($3, log_excerpt), log_truncated = coalesce($4, log_truncated)
          WHERE id = $1`,
-        [setup.setupRunId, failure.code],
+        [setup.setupRunId, failure.code, setup.runtime ? failure.hookLog?.text ?? null : null, setup.runtime ? failure.hookLog?.truncated ?? null : null],
       );
       const rolledBack = await rollbackCloudWorkspaceGenerationTransition(tx, {
         workspaceId: setup.workspaceId,
         organizationId: setup.organizationId,
         candidateGeneration: setup.generation,
         errorCode: failure.code,
-        errorMessage: "Cloud workspace setup did not complete",
+        errorMessage: message,
       });
-      const recovering = !rolledBack && this.recoveryConfig && await enqueueCloudAutomaticRecovery(tx, setup);
+      const recovering = !rolledBack && !failure.hookLog && this.recoveryConfig && await enqueueCloudAutomaticRecovery(tx, setup);
       if (!rolledBack && !recovering) {
         await tx.query(
           `UPDATE cloud_workspaces
            SET status = 'failed', version = version + 1,
                last_error_code = $2,
-               last_error_message = 'Cloud workspace setup did not complete',
+               last_error_message = $3,
                updated_at = now()
            WHERE id = $1`,
-          [setup.workspaceId, failure.code],
+          [setup.workspaceId, failure.code, message],
         );
         await failCloudWorkspaceGenerationRollback(tx, {
           workspaceId: setup.workspaceId,
           organizationId: setup.organizationId,
           sourceGeneration: setup.generation,
           errorCode: failure.code,
-          errorMessage: "Cloud workspace setup did not complete",
+          errorMessage: message,
         });
         await retireCloudWorkspaceRuntimeAccess(tx, {
           workspaceId: setup.workspaceId,
@@ -1175,9 +1207,10 @@ export class CloudWorkspaceSetupWorker {
     // regression must not make process shutdown or lease recovery hang forever.
     // Admission expiry and the execution fence make a late ignored command
     // unable to publish readiness after this bounded side wins the race.
-    const execution = Promise.resolve().then(() =>
-      this.executor.execute(setup, controller.signal),
-    );
+    const execution = Promise.resolve().then(async () => {
+      if (setup.runtime) await withSystemTx(this.pool, tx => requirePinnedCloudRuntime(tx, setup.runtime!, cloudRuntimeQualificationMode()));
+      return this.executor.execute(setup, controller.signal);
+    });
     try {
       result = await Promise.race([execution, aborted]);
     } catch (error) {
@@ -1219,11 +1252,12 @@ export class CloudWorkspaceSetupWorker {
       });
       return;
     }
-    await this.recordSuccess(
-      setup,
-      result.readiness,
-      this.executionLog(result),
-    );
+    try {
+      await this.recordSuccess(setup, result.readiness, this.executionLog(result));
+    } catch (error) {
+      if (!(error instanceof CloudRuntimeError)) throw error;
+      await this.recordFailure(setup, safeFailure(error));
+    }
   }
 
   async runOnce(): Promise<boolean> {

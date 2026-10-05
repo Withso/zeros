@@ -333,6 +333,80 @@ agent command automatically.
 
 ### Authenticated previews
 
+Native desktop Browser, Run and agent previews use the existing
+`POST .../access/previews` HTTP/HMR grant with `native:true`, `port` (logical
+display metadata), `expiresInMinutes` and an optional
+`target:{executionId,portId}`. Native issuance is engineering-staff-only and
+requires the current Ed25519 device proof. Its `preview.issue` payload is
+`{organizationId,workspaceId,port,target:null|{executionId,portId},expiresInMinutes,idempotencyKey}`.
+Migration 0130 adds nullable `preview_target`, `preview_device_id` and
+`preview_device_key_version`; legacy scalar grants keep their existing shape.
+Both public preview routing and runtime admission check the native device's
+current trusted key. Device rotation/revocation, actor changes, expired grants,
+engine authority loss and generation retirement deny requests and renewals.
+The authoritative generation's provider and accepted runtime pin determine
+whether a scalar preview requires native device admission, even when the caller
+omits `native` and `target`. Only a verified legacy Daytona generation without
+a v4 pin retains the proof-free scalar exception. Existing unbound native
+grants fail at ingress and runtime admission and must be issued again.
+
+The optional `AGENT_BOUNDARY_PORT_OPENED.nativeTarget` carries the same opaque
+execution/listener identity. On v4 the native factory returns bearer-free
+logical URLs with that target. v1–v3 retain the signed-link factory; local
+execution retains its ZSR factory. The runtime resolves opaque identity from
+the current execution boundary, connects only to its actual loopback mapping,
+and checks that mapping during every short HTTP/HMR lease. A missing or changed
+listener fails closed; the display port never selects an agent socket.
+Browser uses the engine's native target response to choose admission; legacy
+signed navigations retain their existing factory. A restored legacy source
+without exact execution/listener identity cannot admit a native target by
+display port. Open the current published listener to create that identity.
+The optional wire field preserves the existing protocol range. Older runtimes
+that cannot interpret opaque targets reject admission rather than selecting a
+scalar listener. Deploy the control plane and a qualified E2 runtime before
+running native agent acceptance.
+
+Electron's `browser:open-cloud-preview` accepts an optional opaque `target`
+beside workspace, logical port, frame name and exact account/device context.
+Only the owned main renderer may invoke it. The Browser mounts a blank frame
+first; after grant issuance, main must find the original frame object and its
+still-current admission request before installing the capability. Replacement,
+revoke, hidden-tab cleanup and account/device changes fence pending responses.
+Native navigation and renewal replace history inside that admitted iframe;
+they never remount it and transfer authority to a new frame.
+Only origin/expiry/access ID return to renderer code. Capability headers stay
+bound to that exact iframe's ancestry; ordinary renderer fetches and external
+browsers receive no authority.
+Header injection covers HTTPS and WSS. Secure WebSocket origins normalize to
+their equivalent HTTPS origin while preserving the exact host, port and frame
+ancestry; sibling frames never inherit HMR authority.
+
+Native preview surfaces use `useInternalFeatureActive("cloudComputerV2")`.
+Browser, Run and agent admission also require the exact workspace's confirmed
+`capabilities.canEdit === true`. They subscribe to that cached authority;
+missing or denied capabilities retire the grant and cancel admission retries.
+The tab retains its semantic workspace and opaque listener identity; human and
+agent tabs with equal display URLs remain separate. Native origins are volatile.
+Active visible frames re-admit five minutes before the 30-minute grant expires;
+hidden frames retire access and do no renewal work. On return they re-admit
+their exact target. A stale response revokes its own grant without replacing
+a successor. The last same-key page remains visible during revalidation.
+Run addresses resolve through the owning Browser's native human-port admission.
+Agent buttons and transcript links carry the exact current execution/port ID.
+Unavailable cloud-local links never open a coincidental Mac-local service.
+Cloud Browser address entry, empty-tab entry and toolbar history publish logical
+tab state before admission. History retains logical URLs and opaque owners,
+not grant origins. Only the admitted HTTPS URL navigates the frame; back,
+forward and reload re-admit their destination without requesting Mac loopback.
+Trusted page links and SPA navigation also enter this logical history, retaining
+the opaque owner and translating the current admitted origin to localhost.
+Path changes retain their current grant; renewal uses the latest logical URL.
+Leaving the preview origin clears preview ownership and resumes ordinary URL
+persistence and reload for the external page.
+
+See [native preview acceptance](native-preview-acceptance.md) for the signed Mac
+Alpha procedure and its C5/B8/B10 prerequisite boundary.
+
 Runtime service admission can request `relativeLease: true`. The control plane
 then includes a `leaseDurationMs` of at most ten seconds. The runtime anchors that
 duration to the beginning of its request and rejects responses that arrive after
@@ -536,6 +610,11 @@ issues native access independently of provider SSH administration APIs:
   `protocol:"zeros.service.v1"`. Connect with that header; browser clients offer
   `zeros.service.v1` and `zeros.authorization.<capability>` as subprotocols.
   Only the public protocol is selected. Capabilities never belong in URLs.
+- `GET /v1/cloud-workspaces/services/:kind/:grant` with the same capability header
+  checks current grant, device, actor, epoch and engine authority without opening
+  a provider/application connection or consuming a relay slot. Its noncacheable
+  response is `{expiresAtMs:number}` (at most ten seconds of authority), or 401.
+  This route uses native capability authentication, independently of account JWTs.
 - The first text frame is a version-1 introduction. For SSH it includes the
   ephemeral Ed25519 `publicKey` and unprefixed SHA-256/base64 `hostKeySha256`;
   verify the SSH host key against this authenticated introduction and use the
@@ -566,6 +645,71 @@ drain retires engine authority; it cannot publish a successful checkpoint.
 The provider routing credential stays in the control-plane relay. Provider
 legacy SSH grants do not authorize these native workload services.
 
-These are backend contracts. A future SSH ProxyCommand helper and each native
-client must implement the authenticated introduction, framing, device proof
-and explicit reconnect behavior before claiming client support.
+### Desktop native access
+
+Electron main implements native service admission and transport in
+`cloud-runtime-service-client.ts` and `cloud-runtime-service-transport.ts`.
+The existing SSH copy, Terminal and tunnel IPC names now use these native
+services. Provider SSH remains a distinct compatibility path for legacy engine
+dispatch; a refused native service never falls back to provider administration.
+The main process signs the exact device proof, validates the returned workspace,
+device, service, port and expiry, and accepts only the exact control-plane WSS
+service URL. Account replacement and local device-key rotation fence pending
+admissions. The backend remains authoritative for generation, epoch, engine,
+membership and device revocation; the introduction does not invent those fields.
+
+SSH uses macOS's OpenSSH and `/usr/bin/nc -U` through a private, single-use Unix
+socket. A copied command contains only the path to a private OpenSSH config.
+Connecting that socket opens the authenticated WSS stream on demand, validates
+the introduction's Ed25519 encoding and fingerprint, and writes its public key
+before releasing SSH handshake bytes. OpenSSH independently enforces the pin
+with `StrictHostKeyChecking yes`. Delaying WSS admission until command use avoids
+consuming the worker's ten-second SSH handshake deadline while the user copies
+the command. Each new SSH/SFTP connection needs a new command; there is no
+persistent SSH host alias or connection multiplexing. Terminal launch uses a
+private `.command` wrapper. The service capability never enters these files,
+argv, the clipboard, the renderer or a child environment. Config/key/socket
+files are removed on close, expiry or account retirement, and are never resumed
+as authority after app restart. IDE actions remain unavailable until their actual
+connection and forwarding sequence is qualified.
+
+Port forwarding binds only the requested Mac `127.0.0.1` application port.
+Each local connection opens a native binary stream under the same port-scoped
+grant; listener collisions fail visibly and cannot displace another listener.
+The client splits writes at the 64 KiB frame boundary, honors backpressure and
+limits each forward to four concurrent connections, matching the relay. Excess
+clients, including relay 429 responses, are refused individually. It rejects remote port 22222 and the
+default engine port 39393 before signing; the backend also rejects configured
+engine/service ports. Non-capacity admission failures close the local listener.
+An independent read-only check renews listener authority at most every five
+seconds, including while idle. Revocation or failure to revalidate within the
+existing ten-second bound closes the listener and retires its broker row;
+ordinary application EOF leaves it available. Older control planes without the
+authority-check route fail closed. No wake,
+retry, persisted config or account change silently reissues service authority.
+
+Closing an SSH connection or explicitly closing a forwarding listener stops
+local access and deletes only its exact grant, using the issuing account.
+Sibling grants (including other devices) are unaffected. Failed retirement in
+the current session remains visible as **Retry close**, including admission
+whose local bind failed. Account retirement attempts cleanup with the original
+account token; if offline cleanup cannot complete, backend expiry still bounds
+the abandoned grant. Unused copied commands and idle forwarding listeners hold
+their fifteen-minute grant until closed or expired and can therefore delay idle
+sleep. The user must close them when finished.
+
+The workspace details controls require
+`useInternalFeatureActive("cloudComputerV2")`, a running workspace, the native
+desktop bridge, and `capabilities.canEdit === true`. `canEdit` is optional for
+mixed-version documents and fails closed when absent. Read-only
+`cloud_workspace_access_context` / `cloud_workspace_access_list` return safe
+metadata only. Their bounded renderer caches include account epoch, broker
+authority, device/key version, organization and workspace. Pointer/focus intent
+warms metadata without issuing grants; same-key refresh retains confirmed rows;
+hidden surfaces do not poll. Staff actions return the captured authority context
+to main so a stale click cannot issue into a replacement account or device.
+
+Local tests cover real OpenSSH exec/SFTP, key mismatch, framing, authority races,
+cleanup and the staff UI. They do not qualify a signed Mac build against a v4
+template workspace. Run the [Mac Alpha acceptance procedure](native-access-acceptance.md)
+after the template, wake and persistence prerequisites have been qualified.

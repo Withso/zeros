@@ -9,7 +9,7 @@
 
 export const EXECUTION_BOUNDARY_STATUS_VERSION = 1 as const;
 export const EXECUTION_BOUNDARY_PORTS_VERSION = 1 as const;
-import { CloudBrowserCapabilitySchema, type CloudBrowserCapability, type CloudNativeCapabilities } from "./cloud-agent-execution";
+import { CloudBrowserCapabilitySchema, type CloudBrowserCapability, type CloudNativeCapabilities, type CloudWorkerRuntimeProfile } from "./cloud-agent-execution";
 
 export type ExecutionBoundaryActor =
   | "agent-code"
@@ -60,8 +60,9 @@ export function cloudBrowserUnavailable(
   credentialKind: CloudBrowserCapability["credentialKind"] = "unknown",
   reason: Extract<CloudBrowserCapability, { state: "unavailable" }>["reason"] =
     provider === "codex" ? "codex-runtime-unavailable" : provider === "claude" ? "claude-direct-login-required" : "provider-unsupported",
+  runtimeProfile: CloudWorkerRuntimeProfile = "zeros-cloud-worker-v3",
 ): CloudBrowserCapability {
-  return { version: 1, provider, runtimeProfile: "zeros-cloud-worker-v3", credentialKind, state: "unavailable", reason };
+  return { version: 1, provider, runtimeProfile, credentialKind, state: "unavailable", reason };
 }
 
 /** Rolling upgrades: old/malformed diagnostics are unavailable. Only an exact
@@ -125,7 +126,7 @@ export interface ExecutionBoundaryStatus {
   cloudExecution?: {
     version: 1;
     profile: typeof CLOUD_CORE_EXECUTION_PROFILE | typeof CLOUD_NATIVE_EXECUTION_PROFILE;
-    runtimeProfile: "zeros-cloud-worker-v3";
+    runtimeProfile: CloudWorkerRuntimeProfile;
     provider: CloudCoreProvider;
     capabilities?: CloudNativeCapabilities;
     designApi: "admitted" | "unavailable";
@@ -225,6 +226,22 @@ export interface ExecutionBoundaryPortStatus {
   port: number;
   purpose: "dev-server" | "preview" | "debug" | "other";
   source: "requested" | "discovered";
+}
+
+/** Redacted target for native HTTP/HMR admission. Only the trusted engine can
+ * resolve these identities into listener coordinates; display ports are UI
+ * metadata and never select the agent application's socket. */
+export interface CloudAgentPreviewTarget {
+  executionId: string;
+  portId: string;
+}
+
+export function isCloudAgentPreviewTarget(value: unknown): value is CloudAgentPreviewTarget {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const target = value as Record<string, unknown>;
+  return Object.keys(target).length === 2 &&
+    typeof target.executionId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(target.executionId) &&
+    typeof target.portId === "string" && /^[A-Za-z0-9_-]{32}$/.test(target.portId);
 }
 
 export interface ExecutionBoundaryPortsSnapshot {

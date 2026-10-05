@@ -26,6 +26,9 @@ import React, {
   useState,
 } from "react";
 import { workspacePreviewAvailable } from "../../../platform/cloud-workspace-access";
+import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
+import { useInternalFeatureActive } from "../../../features/settings/internal-features";
+import { useCloudPreviewAdmission } from "../../../features/browser/use-cloud-preview-admission";
 import {
   ChevronLeft,
   ChevronRight,
@@ -95,6 +98,7 @@ import {
   previewNavigationForTab,
   previewNavigationDescriptor,
   previewRuntimeStateForTab,
+  reconcilePreviewRuntimeUrlForTab,
   redactPreviewRuntimeTextForTab,
   stagePreviewNavigation,
 } from "../../../features/browser/preview-navigation";
@@ -125,12 +129,15 @@ interface BrowserTabProps {
 }
 
 export function BrowserTab(props: BrowserTabProps) {
+  const cloudPreviews = useInternalFeatureActive("cloudComputerV2");
   const previewFolder = useWorkspaceStore((state) =>
     props.tab.previewSource
       ? state.chats.find((chat) => chat.id === props.tab.previewSource?.chatId)
           ?.folder
       : undefined,
   );
+  const folder = props.scope ?? previewFolder ?? "";
+  if (!props.tab.browserConversationId && (props.tab.previewSource || isLoopbackUrl(normalizeBrowserUrl(props.tab.url ?? "") ?? "")) && isCloudWorkspace(folder) && !cloudPreviews) return null;
   if (
     !props.tab.browserConversationId &&
     (props.tab.previewSource ||
@@ -149,7 +156,7 @@ export function BrowserTab(props: BrowserTabProps) {
   return props.tab.browserConversationId ? (
     <NativeAgentBrowserTab {...props} />
   ) : (
-    <IframeBrowserTab {...props} />
+    <IframeBrowserTab {...props} scope={folder} />
   );
 }
 
@@ -633,6 +640,39 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   // Persisted URLs are still treated as untrusted input: only canonical http(s)
   // pages are restored. External http(s) sites are valid browser content.
   const safeTabUrl = normalizeBrowserUrl(tab.url ?? "") ?? "";
+  const cloudBrowser = isCloudWorkspace(scope ?? "");
+  const nativeCloudPreview = cloudBrowser && Boolean(tab.previewSource || isLoopbackUrl(safeTabUrl));
+  const [cloudNavigationVersion, setCloudNavigationVersion] = useState(0);
+  // Chromium history contains volatile grant origins. Cloud toolbar history
+  // instead retains logical URLs and opaque owners, then re-admits each entry.
+  const logicalHistory = useRef<{
+    owner: string;
+    entries: Array<{ url: string; source: WorkbenchTab["previewSource"] }>;
+    index: number;
+  }>({
+    owner: `${scope}/${tab.id}`,
+    entries: safeTabUrl ? [{ url: safeTabUrl, source: tab.previewSource }] : [],
+    index: safeTabUrl ? 0 : -1,
+  });
+  if (logicalHistory.current.owner !== `${scope}/${tab.id}`)
+    logicalHistory.current = {
+      owner: `${scope}/${tab.id}`,
+      entries: safeTabUrl ? [{ url: safeTabUrl, source: tab.previewSource }] : [],
+      index: safeTabUrl ? 0 : -1,
+    };
+  const recordLogicalHistory = useCallback((url: string, source: WorkbenchTab["previewSource"]) => {
+    const history = logicalHistory.current;
+    const current = history.entries[history.index];
+    if (url === current?.url &&
+      source?.chatId === current.source?.chatId &&
+      source?.port === current.source?.port &&
+      source?.executionId === current.source?.executionId &&
+      source?.portId === current.source?.portId) return;
+    history.entries = [
+      ...history.entries.slice(0, history.index + 1), { url, source },
+    ].slice(-128);
+    history.index = history.entries.length - 1;
+  }, []);
   const [previewRuntime, setPreviewRuntime] = useState(() => {
     const runtime = previewRuntimeStateForTab(tab.id, safeTabUrl);
     return runtime && runtime.expiresAt > Date.now() ? runtime : null;
@@ -646,7 +686,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const [initialFrameUrl] = useState(
     () =>
       previewNavigationForTab(tab.id, safeTabUrl) ??
-      (tab.previewSource ? "about:blank" : safeTabUrl),
+      (tab.previewSource || nativeCloudPreview ? "about:blank" : safeTabUrl),
   );
   useEffect(() => {
     consumePreviewNavigation(tab.id);
@@ -656,8 +696,89 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     initialUrl: initialFrameUrl,
     frameName,
     trustedPreviewOrigin: previewRuntime?.origin,
+    onNavigation: (url) => {
+      if (!cloudBrowser) return;
+      const current = logicalHistory.current.entries[logicalHistory.current.index];
+      const logicalUrl = reconcilePreviewRuntimeUrlForTab(tab.id, current?.url ?? safeTabUrl, url);
+      if (logicalUrl) {
+        recordLogicalHistory(logicalUrl, current?.source);
+        if (logicalUrl !== safeTabUrl) updateTab({ url: logicalUrl });
+        return;
+      }
+      // The old frame can finish while a toolbar admission is pending. It
+      // cannot replace the newer logical intent before its grant arrives.
+      if (nativeCloudPreview && !previewRuntimeStateForTab(tab.id, current?.url ?? safeTabUrl)) return;
+      recordLogicalHistory(url, undefined);
+      clearPreviewRuntimeForTab(tab.id);
+      setPreviewRuntime(null);
+      void nativeInvoke("browser:revoke-preview-origin", { frameName }).catch(() => undefined);
+      if (url !== tab.url || tab.previewSource)
+        updateTab({ url, previewSource: undefined });
+    },
   });
+  const [previewFrameMounted, setPreviewFrameMounted] = useState(false);
+  const attachWebviewFrame = webview.ref;
+  const attachPreviewFrame = useCallback((node: HTMLIFrameElement | null) => {
+    attachWebviewFrame(node);
+    setPreviewFrameMounted(Boolean(node));
+  }, [attachWebviewFrame]);
   const replacePreviewUrl = webview.replace;
+  const navigateFrame = webview.navigate;
+  const navigateCloudPreview = useCallback((input: Parameters<typeof stagePreviewNavigation>[1]) => {
+    const staged = stagePreviewNavigation(tab.id, input);
+    setPreviewRuntime({ origin: staged.runtimeOrigin, expiresAt: staged.expiresAt, volatileOrigin: staged.volatileOrigin });
+    consumePreviewNavigation(tab.id);
+    return replacePreviewUrl(input.admissionUrl, input.native ? { preserveFrame: true } : undefined);
+  }, [tab.id, replacePreviewUrl]);
+  useCloudPreviewAdmission({ scope: nativeCloudPreview ? scope ?? "" : "", url: safeTabUrl, frameName,
+    active, ready: electron && previewFrameMounted, source: tab.previewSource, agentPreview: Boolean(tab.previewSource), navigate: navigateCloudPreview, navigationVersion: cloudNavigationVersion });
+  const navigateLogicalCloud = useCallback(
+    (url: string, source: WorkbenchTab["previewSource"], record = true) => {
+      if (!previewAvailable && isLoopbackUrl(url)) return;
+      if (record) recordLogicalHistory(url, source);
+      clearPreviewRuntimeForTab(tab.id);
+      setPreviewRuntime(null);
+      if (electron)
+        void nativeInvoke("browser:revoke-preview-origin", { frameName }).catch(() => undefined);
+      updateTab({ url, previewSource: source });
+      setCloudNavigationVersion(value => value + 1);
+      if (!isLoopbackUrl(url)) navigateFrame(url);
+    },
+    [previewAvailable, recordLogicalHistory, tab.id, electron, frameName, updateTab, navigateFrame],
+  );
+  const navigateAddress = (url: string) => {
+    if (cloudBrowser) {
+      navigateLogicalCloud(url, undefined);
+      return;
+    }
+    clearPreviewRuntimeForTab(tab.id);
+    setPreviewRuntime(null);
+    if (electron) void nativeInvoke("browser:revoke-preview-origin", { frameName }).catch(() => undefined);
+    updateTab({ previewSource: undefined });
+    webview.navigate(url);
+  };
+  const navigateHistory = (offset: number) => {
+    const history = logicalHistory.current;
+    const index = history.index + offset;
+    const entry = history.entries[index];
+    if (!entry) return;
+    history.index = index;
+    navigateLogicalCloud(entry.url, entry.source, false);
+  };
+  const reloadCloudPreview = () =>
+    navigateLogicalCloud(safeTabUrl, tab.previewSource, false);
+  const chromeWebview = cloudBrowser ? {
+    ...webview,
+    state: {
+      ...webview.state,
+      canGoBack: logicalHistory.current.index > 0,
+      canGoForward: logicalHistory.current.index < logicalHistory.current.entries.length - 1,
+    },
+    back: () => navigateHistory(-1),
+    forward: () => navigateHistory(1),
+    reload: nativeCloudPreview ? reloadCloudPreview : webview.reload,
+    hardReload: nativeCloudPreview ? reloadCloudPreview : webview.hardReload,
+  } : webview;
 
   // Browser credentials are deliberately volatile. Re-exchange the safe
   // chat/display-port identity before the one-hour inner cookie (or provider
@@ -665,7 +786,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   // performs an immediate catch-up when their prior grant elapsed.
   useEffect(() => {
     const source = tab.previewSource;
-    if (!active || !source || !safeTabUrl) return;
+    if (!active || nativeCloudPreview || !source || !safeTabUrl) return;
     const current = previewRuntimeStateForTab(tab.id, safeTabUrl);
     const now = Date.now();
     const dueAt = Math.max(
@@ -751,6 +872,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     };
   }, [
     active,
+    nativeCloudPreview,
     electron,
     frameName,
     previewRenewRetryAt,
@@ -763,7 +885,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   ]);
 
   const observedUrl =
-    webview.state.currentUrl === "about:blank" && tab.previewSource
+    webview.state.currentUrl === "about:blank" && (tab.previewSource || nativeCloudPreview)
       ? safeTabUrl
       : webview.state.currentUrl || initialFrameUrl || safeTabUrl;
   const previewRuntimeActive = isPreviewRuntimeUrlForTab(
@@ -771,7 +893,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     safeTabUrl,
     observedUrl,
   );
-  const effectiveUrl = previewRuntimeActive
+  const effectiveUrl = nativeCloudPreview || previewRuntimeActive
     ? safeTabUrl
     : webview.state.currentUrl || safeTabUrl;
   const localToolsEnabled = isLoopbackUrl(effectiveUrl);
@@ -863,9 +985,12 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   // The webview drives canonical state (final URL after redirects,
   // page title once <title> resolves). Mirror to the tab so the
   // tab strip label updates and a reload restores the right URL.
+  // Cloud URL persistence uses committed native observations above, so an
+  // optimistic frame URL cannot overwrite a pending logical admission.
   useEffect(() => {
+    if (nativeCloudPreview || (cloudBrowser && electron)) return;
     const url = webview.state.currentUrl;
-    if (url === "about:blank" && tab.previewSource) return;
+    if (url === "about:blank" && (tab.previewSource || nativeCloudPreview)) return;
     if (url && isPreviewRuntimeUrlForTab(tab.id, safeTabUrl, url)) return;
     if (!webview.state.isLoading && url && url !== tab.url) {
       clearPreviewRuntimeForTab(tab.id);
@@ -885,6 +1010,8 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     safeTabUrl,
     tab.id,
     tab.previewSource,
+    nativeCloudPreview,
+    cloudBrowser,
     tab.url,
     updateTab,
   ]);
@@ -1410,22 +1537,14 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   return (
     <div className="bg-bg1 flex h-full min-h-0 flex-col">
       <BrowserChrome
-        webview={webview}
+        webview={chromeWebview}
         displayUrl={effectiveUrl}
         onNavigate={(url) => {
           if (!previewAvailable && isLoopbackUrl(url)) {
             toast.error("Cloud preview URLs are not configured for this build.");
             return;
           }
-          clearPreviewRuntimeForTab(tab.id);
-          setPreviewRuntime(null);
-          if (electron) {
-            void nativeInvoke("browser:revoke-preview-origin", {
-              frameName,
-            }).catch(() => undefined);
-          }
-          updateTab({ previewSource: undefined });
-          webview.navigate(url);
+          navigateAddress(url);
         }}
         electron={electron}
         localToolsEnabled={localToolsEnabled}
@@ -1463,7 +1582,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
       >
         {electron && !hasUrl ? (
           <EmptyState
-            onNavigate={webview.navigate}
+            onNavigate={navigateAddress}
             previewAvailable={previewAvailable}
           />
         ) : (
@@ -1510,11 +1629,13 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
               >
                 <iframe
                   key={webview.frameNavigationKey}
-                  ref={webview.ref}
+                  ref={attachPreviewFrame}
                   name={frameName}
                   src={
                     hasUrl
-                      ? webview.frameSrc || safeTabUrl || ""
+                      ? nativeCloudPreview && (!webview.frameSrc || isLoopbackUrl(webview.frameSrc))
+                        ? "about:blank"
+                        : webview.frameSrc || safeTabUrl || ""
                       : "about:blank"
                   }
                   // `title` is the iframe's accessible name for screen readers.

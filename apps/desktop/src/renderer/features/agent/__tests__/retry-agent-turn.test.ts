@@ -50,6 +50,7 @@ function harness() {
       status: "ready",
     })),
     getCloseActivity: vi.fn(() => ({ running: false, queuedCount: 0 })),
+    prepareForSend: vi.fn<() => Promise<void> | null>(() => null),
     ensureSession: vi.fn(async () => {}),
     sendPrompt: vi.fn(async () => {}),
   };
@@ -89,6 +90,22 @@ beforeEach(() => {
 });
 
 describe("explicit failed-turn recovery", () => {
+  it.each([false, true])("prepares cloud use before admission and honors cancellation: %s", async cancel => {
+    const h = harness();
+    let ready!: () => void;
+    h.sessions.prepareForSend.mockReturnValue(new Promise<void>(resolve => { ready = resolve; }));
+    const retry = retryAgentTurn({ chatId: "source", prompt, events: [], newChat: false }, h.dependencies);
+    try {
+      await Promise.resolve();
+      expect(h.sessions.prepareForSend).toHaveBeenCalledExactlyOnceWith("source");
+      expect(h.sessions.ensureSession).not.toHaveBeenCalled();
+      expect(h.sessions.sendPrompt).not.toHaveBeenCalled();
+      if (cancel) h.cancel();
+    } finally { ready(); await retry; }
+    expect(h.sessions.ensureSession).toHaveBeenCalledTimes(cancel ? 0 : 1);
+    expect(h.sessions.sendPrompt).toHaveBeenCalledTimes(cancel ? 0 : 1);
+    expect(h.sessions.getSession("source").messages).toEqual([prompt]);
+  });
   it("refreshes inline attachment metadata without changing text or mention order", async () => {
     const oldPath = ".context/local/attachments/attachment/report.pdf";
     const newPath = ".context/shared/attachments/attachment/report.pdf";

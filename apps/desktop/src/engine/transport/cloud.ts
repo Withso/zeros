@@ -220,6 +220,7 @@ export interface CloudTransportOptions {
   ) => Promise<CloudRuntimeServiceAccess | null>;
   openServiceStream?: (grant: CloudRuntimeServiceAccess) => Promise<CloudRuntimeServiceStream>;
   forbiddenPreviewPorts?: readonly number[];
+  resolveAgentPreviewTarget?: (target: import("@zeros/protocol/containment").CloudAgentPreviewTarget) => import("./cloud-preview-gateway").CloudResolvedPreviewTarget | null;
   /** Bounded test/operator tuning. Production uses the conservative defaults;
    * callers cannot raise any value above its package-owned security ceiling. */
   maxConnections?: number;
@@ -428,6 +429,7 @@ export class CloudTransport implements Transport {
     this.previewGateway = opts.verifyServiceAccess
       ? new CloudRuntimePreviewGateway({
           verify: opts.verifyServiceAccess,
+          resolveAgentTarget: opts.resolveAgentPreviewTarget,
           forbiddenPorts: () => [
             this.port,
             22222,

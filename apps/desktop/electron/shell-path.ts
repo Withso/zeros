@@ -29,6 +29,7 @@ function restoreDevNodePath(env: NodeJS.ProcessEnv): void {
 /** Load user-installed CLIs before the engine inherits the desktop environment. */
 export async function hydrateShellPath(options: {
   development: boolean;
+  localDevelopment?: boolean;
   env?: NodeJS.ProcessEnv;
   loadShellPath?: () => void | Promise<void>;
 }): Promise<void> {
@@ -38,7 +39,20 @@ export async function hydrateShellPath(options: {
     else {
       // fix-path is ESM-only; Electron main is bundled as CommonJS.
       const mod = (await import("fix-path")) as { default: () => void };
-      mod.default();
+      const localFlag = process.env.ZEROS_LOCAL_DEVELOPMENT;
+      try {
+        // fix-path synchronously spawns its login shell. Omit admission only
+        // during that call, retaining the same PATH hydration in every mode.
+        if (options.localDevelopment)
+          delete process.env.ZEROS_LOCAL_DEVELOPMENT;
+        mod.default();
+      } finally {
+        if (options.localDevelopment) {
+          if (localFlag === undefined)
+            delete process.env.ZEROS_LOCAL_DEVELOPMENT;
+          else process.env.ZEROS_LOCAL_DEVELOPMENT = localFlag;
+        }
+      }
     }
   } catch (err) {
     console.warn(

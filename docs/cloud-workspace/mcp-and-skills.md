@@ -12,7 +12,9 @@ server with that name; it never inherits the earlier entry's credentials.
 Repository sources, in increasing precedence, are `.codex/config.toml`
 `[mcp_servers]`, `.cursor/mcp.json`, and `.mcp.json`. Reads are bounded regular
 files inside the checkout; symlinks that escape it are rejected. These reads
-run on the Linux worker. Product names, including `design-draft`, remain reserved.
+run on the Linux worker. Product names, including `design-draft` and
+`cloud-computer`, remain reserved. [Computer agent tools](computer-tools.md) are
+admitted separately for the immutable creator of a marked admin workspace.
 
 Stdio servers run as children of the provider inside its existing VM execution
 boundary and UID. Streamable HTTP and legacy SSE accept literal header maps;

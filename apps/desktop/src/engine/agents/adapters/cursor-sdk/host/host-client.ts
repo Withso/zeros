@@ -1,3 +1,4 @@
+import {resolveCloudRuntime} from "../../../containment/cloud-runtime-root.mjs";
 // ──────────────────────────────────────────────────────────
 // Cursor host client — engine-side driver for the Node @cursor/sdk subprocess
 // ──────────────────────────────────────────────────────────
@@ -784,14 +785,15 @@ export function spawnSubprocessTransport(
   options?: CursorHostSpawnOptions,
 ): HostTransport | null {
   const cloud=cloudProviderExecution(options?.executionBoundary);
-  const script = cloud?"/opt/zeros/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs":resolveHostScript();
+  const cloudRuntime = cloud ? resolveCloudRuntime() : undefined;
+  const script = cloudRuntime?`${cloudRuntime.workerRoot}/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs`:resolveHostScript();
   if (!script) {
     console.error(
       "[cursor-host] cannot locate cursor-host.cjs (set ZEROS_CURSOR_HOST_SCRIPT) — Cursor unavailable",
     );
     return null;
   }
-  const runtime = cloud?{cmd:"/opt/zeros-runtime/bin/node",electron:false}:resolveRuntime();
+  const runtime = cloudRuntime?{cmd:cloudRuntime.node,electron:false}:resolveRuntime();
   const cmd = options ? resolveExecutable(runtime.cmd) : runtime.cmd;
   if (!cmd) {
     console.error(
@@ -817,6 +819,8 @@ export function spawnSubprocessTransport(
     env.NODE_USE_ENV_PROXY = "1";
   }
   if (runtime.electron) env.ELECTRON_RUN_AS_NODE = "1";
+  // A cloud host resolves its SDK beside the verified source script.
+  if (cloudRuntime) delete env.ZEROS_CURSOR_SDK_ENTRY;
 
   // cwd is deliberately a non-repo dir — see resolveHostCwd(). NEVER inherit the
   // engine's cwd here, or a missing per-agent cwd corrupts the Zeros repo.

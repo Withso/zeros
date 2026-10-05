@@ -141,11 +141,40 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await page
     .getByRole("button", { name: "More actions for 0colors", exact: true })
     .click();
+  // A pointer can leave the selected item after the new picker takes focus,
+  // while Radix still retains the closing menu for its exit animation.
+  await page.evaluate(() => {
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find(
+      (element) => element.textContent === "Create from…",
+    );
+    const menu = item.closest('[data-radix-menu-content]');
+    // Hold the exit phase until the event is delivered, even on a slow host.
+    menu.style.animationPlayState = "paused";
+    window.__sidebarSourceLeaveSent = false;
+    const leaveAfterFocus = (event) => {
+      if (event.target.getAttribute?.("aria-label") !== "Search sources") return;
+      document.removeEventListener("focusin", leaveAfterFocus, true);
+      if (!item?.isConnected) return;
+      item.dispatchEvent(
+        new PointerEvent("pointerout", {
+          bubbles: true,
+          pointerType: "mouse",
+          relatedTarget: event.target,
+        }),
+      );
+      menu.style.animationPlayState = "";
+      window.__sidebarSourceLeaveSent = true;
+    };
+    document.addEventListener("focusin", leaveAfterFocus, true);
+  });
   await page.getByRole("menuitem", { name: "Create from…" }).click();
   await expect(
     page.getByRole("button", { name: "Choose project" }),
   ).toContainText("0colors");
   const source = page.getByRole("dialog", { name: "Create from source" });
+  await expect
+    .poll(() => page.evaluate(() => window.__sidebarSourceLeaveSent))
+    .toBe(true);
   await expect(source).toBeVisible();
   await expect(
     source.getByRole("searchbox", { name: "Search sources" }),

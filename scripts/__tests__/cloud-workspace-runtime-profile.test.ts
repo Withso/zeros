@@ -32,7 +32,7 @@ describe("cloud host runtime identities", () => {
       }),
     ).toBe(false);
     expect(
-      cloudRuntimeProcessSecurityQualified(4, "2", {
+      cloudRuntimeProcessSecurityQualified(5, "2", {
         secure: true,
         noNewPrivs: 1,
         seccompMode: 2,
@@ -60,6 +60,10 @@ describe("cloud host runtime identities", () => {
       version:3,profile:"zeros-cloud-worker-v3",engineUid:10003,engineGid:10003,
     });
     expect(cloudRuntimeProcessSecurityQualified(3,"0",{secure:true,noNewPrivs:1,seccompMode:2})).toBe(true);
+    expect(cloudHostRuntimeProfile({...marker,version:4,profile:"zeros-cloud-worker-v4"})).toMatchObject({
+      version:4,profile:"zeros-cloud-worker-v4",engineUid:10003,engineGid:10003,
+    });
+    expect(cloudRuntimeProcessSecurityQualified(4,"0",{secure:true,noNewPrivs:1,seccompMode:2})).toBe(true);
   });
   it("retains version-one paths for already accepted legacy images", () => {
     expect(

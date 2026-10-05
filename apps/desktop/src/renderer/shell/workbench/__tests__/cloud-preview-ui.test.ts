@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createBrowserTab } from "../tab-model";
+vi.mock("../../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => true }));
 
 vi.mock("../../../features/agent/sessions-hooks", async (importOriginal) => ({
   ...(await importOriginal<
@@ -19,6 +20,13 @@ const folder =
 afterEach(() => vi.unstubAllEnvs());
 
 describe("preview-free cloud UI", () => {
+  it("mounts a blank admission frame instead of navigating to Mac localhost", async () => {
+    vi.stubEnv("VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES", "preview.example.test");
+    const { BrowserTab } = await import("../tabs/browser-tab");
+    const { TooltipProvider } = await import("../../../shared/ui/primitives");
+    const markup = renderToStaticMarkup(createElement(TooltipProvider, null, createElement(BrowserTab, { tab: createBrowserTab({ url: "http://localhost:5173/" }), active: true, scope: folder })));
+    expect(markup).not.toContain('src="http://localhost:5173/"');
+  });
   it("hides cloud Open controls but retains Stop and Local controls", async () => {
     vi.stubEnv("VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES", "");
     const { RunSessionButtons } =

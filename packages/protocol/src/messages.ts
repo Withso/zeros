@@ -986,6 +986,9 @@ export interface AgentBoundaryPortOpenedMessage extends BaseMessage {
   admissionUrl: string;
   /** Absolute deadline for renewing the volatile browser admission. */
   expiresAt: number;
+  /** Native cloud admission carries opaque identity, never a listener host or
+   * port. The URLs above remain bearer-free logical display URLs in this case. */
+  nativeTarget?: import("./containment").CloudAgentPreviewTarget;
 }
 
 export interface AgentPermissionRequestMessage extends BaseMessage {

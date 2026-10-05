@@ -9,6 +9,7 @@ vi.mock("../../../features/team/team-store", () => ({
   useTeams: () => ({ me: { user: { id: "user" } } }),
 }));
 vi.mock("../../../platform/cloud-workspaces", () => ({ getCloudWorkspaceCreateOptions: state.options }));
+vi.mock("../../../features/settings/cloud-computer-v2-create-gate", () => ({ useCloudComputerV2CreateGate: () => ({ reason: null, required: false, canManage: false, warm: vi.fn() }) }));
 import { useCloudCreate } from "../cloud-create";
 
 beforeEach(() => {

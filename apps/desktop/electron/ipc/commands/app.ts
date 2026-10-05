@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
-import { IS_DEV } from "../../runtime-mode";
+import { IS_DEV, IS_LOCAL_DEVELOPMENT } from "../../runtime-mode";
 import { channel, type Channel } from "../../../src/engine/runtime";
 import { currentRoot, spawnEngine } from "../../sidecar";
 import { emitEvent } from "../events";
@@ -24,6 +24,7 @@ import type { CommandHandler } from "../router";
 
 export interface AppInfo {
   runtimeMode: "dev" | "prod";
+  localDevelopment: boolean;
   /** Release channel — the authoritative value from the main process (keyed off
    *  the seeded ZEROS_CHANNEL). The renderer derives the deep-link scheme from
    *  this (schemeForChannel) so the /launch URL it builds always matches the
@@ -38,6 +39,7 @@ export interface AppInfo {
 export const appInfo: CommandHandler = async (): Promise<AppInfo> => {
   return {
     runtimeMode: IS_DEV ? "dev" : "prod",
+    localDevelopment: IS_LOCAL_DEVELOPMENT,
     channel: channel(),
     version: app.getVersion(),
     platform: process.platform,

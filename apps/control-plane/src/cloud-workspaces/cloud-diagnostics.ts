@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CloudProviderError } from "./provider.js";
+import { ClosedDiagnosticSchema } from "./runtime-contract.js";
 
 export const diagnosticPhases = ["provider_inspect", "meter_read", "ledger_commit", "authority_check", "provider_renew", "final_settlement",
   "setup_admission", "bootstrap", "runtime", "supervisor", "image_preflight", "repository", "credential_projection", "image_launch", "engine_launch", "engine_readiness"] as const;
@@ -14,6 +15,7 @@ export const setupDiagnosticSchema = z.object({ version: z.literal(1), phase: z.
   digests: z.object({ osRelease: digestPair.optional(), packageInventory: digestPair.optional(), node: digestPair.optional() }).strict().optional(),
   files: z.object({ node: z.boolean(), supervisor: z.boolean(), setup: z.boolean(), engine: z.boolean() }).strict().optional(),
   exit: z.enum(["nonzero", "timeout", "signal", "overflow", "unknown"]).optional(),
+  installer: ClosedDiagnosticSchema.refine(value => value.component === "installer").optional(),
 }).strict();
 export type SetupDiagnostic = z.infer<typeof setupDiagnosticSchema>;
 export function parseSetupDiagnostic(value: unknown): SetupDiagnostic | null {
@@ -38,6 +40,7 @@ const codes = new Set([
   "setup_checkpoint_restore_unavailable", "setup_repository_revision_invalid", "setup_repository_unavailable", "setup_command_failed",
   "setup_request_invalid", "setup_settings_invalid", "setup_execution_aborted", "setup_readiness_invalid", "setup_helper_response_invalid",
   "setup_helper_response_truncated", "setup_helper_secret_echo", "setup_admission_invalid", "setup_admission_revoke_failed",
+  "setup_runtime_install_failed", "setup_runtime_input_invalid",
 ]);
 export function diagnosticCode(value: unknown): string { return typeof value === "string" && codes.has(value) ? value : "compute_reconciliation_failed"; }
 const sqlState = /^(?:08|22|23|25|28|40|42|53|54|55|57|58|XX)[A-Z0-9]{3}$/;

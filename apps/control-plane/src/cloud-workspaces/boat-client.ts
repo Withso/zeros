@@ -264,7 +264,8 @@ export class BoatApiClient {
         const retrySeconds = Number(response.headers.get("retry-after"));
         const retryOptions = { httpStatus: response.status, ...(Number.isFinite(retrySeconds) && retrySeconds > 0
           ? { retryAfterMs: Math.min(retrySeconds * 1000, 300_000) } : {}) };
-        const createRefusal = path === "/sandboxes" && input.method === "POST" && Boolean(input.idempotencyKey) && response.status === 429;
+        const createRefusal = (path === "/sandboxes" || /^\/sandboxes\/[A-Za-z0-9_-]+\/fork$/.test(path)) &&
+          input.method === "POST" && Boolean(input.idempotencyKey) && response.status === 429;
         const assessment = createRefusal ? assessCreateRefusal(value) : null;
         if (assessment?.code) throw new BoatCreateRejectedError(code, retryable, assessment.code, retryOptions);
         if (assessment) this.reportUncertifiedRefusal(value, assessment.reasons);

@@ -4,6 +4,11 @@ import { afterEach, expect, it, vi } from "vitest";
 const launch = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ spawn: launch }));
 import { createCloudDesignCaptureHost } from "../capture-cloud";
+import { resolveCloudRuntime } from "../../agents/containment/cloud-runtime-root.mjs";
+vi.mock("../../agents/containment/cloud-runtime-root.mjs",async original=>{
+  const actual=await original<typeof import("../../agents/containment/cloud-runtime-root.mjs")>();
+  return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime)};
+});
 const input = {
   version: 1 as const,
   html: "<body>Fixture</body>",
@@ -21,7 +26,18 @@ function child() {
 }
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.mocked(resolveCloudRuntime).mockReset();
   vi.useRealTimers();
+});
+it("uses the pinned v4 Node, worker and browser cache for the separate capture UID",async()=>{
+  const root=`/opt/zeros-infra/r1-${"a".repeat(64)}`;
+  vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile:"v4",root,workerRoot:`${root}/worker`,node:`${root}/bin/node`} as ReturnType<typeof resolveCloudRuntime>);
+  const worker=child();launch.mockReturnValue(worker);vi.spyOn(process,"kill").mockReturnValue(true);
+  const promise=createCloudDesignCaptureHost()(input,new AbortController().signal);
+  expect(launch.mock.calls.at(-1)?.[1].slice(-2)).toEqual([`${root}/bin/node`,`${root}/worker/dist-engine/design-capture-worker.js`]);
+  expect(launch.mock.calls.at(-1)?.[2].env.PLAYWRIGHT_BROWSERS_PATH).toBe(`${root}/worker/design-browsers`);
+  worker.stdout.emit("data",Buffer.from(JSON.stringify({data:Buffer.from("png").toString("base64"),renderer:"fixture"})));
+  worker.emit("close",0);await promise;
 });
 it("runs under a separate UID with no inherited provider or capture authority", async () => {
   const worker = child();

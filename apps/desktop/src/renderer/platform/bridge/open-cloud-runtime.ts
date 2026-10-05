@@ -19,19 +19,24 @@ import { cloudAgentGrant } from "../cloud-workspaces";
 import { CloudAgentConnection } from "./cloud-agent-connection";
 import { CloudEventReader } from "./cloud-event-reader";
 import { installCloudGithubNative } from "./cloud-github-native";
+import { wakeCloudWorkspace } from "../../state/cloud-workspace-wake";
 
 export async function openCloudRuntime(
   target: CloudWorkspaceTarget,
-  options?: { signal: AbortSignal },
+  options?: { signal?: AbortSignal; wake?: boolean },
 ): Promise<CloudPeer> {
   const generation = cloudCatalogGeneration();
   const assertAccount = () => {
-    if (options?.signal.aborted) throw new Error("Cloud connection cancelled");
+    if (options?.signal?.aborted) throw new Error("Cloud connection cancelled");
     if (generation !== cloudCatalogGeneration()) throw new Error("Cloud account changed while connecting");
   };
   assertAccount();
-  const document = await refreshCloudWorkspace(target);
+  let document = await refreshCloudWorkspace(target);
   assertAccount();
+  if (options?.wake) {
+    document = await wakeCloudWorkspace(target, document, options.signal);
+    assertAccount();
+  }
   if (!canReadCloudWorkspace(document) || !["ready", "busy"].includes(document.status))
     throw new Error(
       document.error?.message ??
@@ -77,8 +82,8 @@ export async function openCloudRuntime(
     assertCurrent();
     if (released) throw new Error("Cloud connection cancelled");
   };
-  options?.signal.addEventListener("abort", release, { once: true });
-  listeners.push(() => options?.signal.removeEventListener("abort", release));
+  options?.signal?.addEventListener("abort", release, { once: true });
+  listeners.push(() => options?.signal?.removeEventListener("abort", release));
   listeners.push(subscribeCloudWorkspaces(() => {
     try { assertCurrent(); } catch { release(); }
   }));
@@ -152,6 +157,25 @@ export async function openCloudRuntime(
         },
       },
       runtimeId: descriptor.runtimeId,
+      async prepareForRun(signal) {
+        const current = await refreshCloudWorkspace(target);
+        assertAccount();
+        await wakeCloudWorkspace(target, current, signal);
+        if (signal.aborted) throw new Error("Cloud workspace open cancelled");
+        assertCurrent();
+        // A committed capture retires this runtime while preparation waits.
+        // The caller must obtain a fresh native admission in that case.
+        if (released) return false;
+        // Revalidate the still-live connection and root without disrupting an
+        // active turn. Reads do not prove the capture fence has cleared;
+        // CloudAgentConnection waits on explicit checkpointing rejections.
+        const rows = await bridgeWorkspaceList(client, {});
+        if (signal.aborted) throw new Error("Cloud workspace open cancelled");
+        checkConnection();
+        if (!rows.some(row => row.id === workspace.id && row.path === workspace.path))
+          throw new Error("Cloud workspace root changed while preparing to run");
+        return true;
+      },
       scope: {
         ...target,
         root: workspace.path,

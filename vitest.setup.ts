@@ -7,6 +7,8 @@ import path from "node:path";
 
 import { afterAll } from "vitest";
 
+delete process.env.ZEROS_LOCAL_DEVELOPMENT;
+
 // Why this exists: several renderer modules now under test transitively import
 // `@pierre/diffs` (the agent EditCard via apps/desktop/src/renderer/features/agent/renderers/tool-edit.tsx;
 // the Changes/Review tabs use it too). Its `CodeView` reads

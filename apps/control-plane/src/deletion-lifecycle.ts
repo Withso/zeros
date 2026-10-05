@@ -9,6 +9,10 @@ import { audit } from "./audit.js";
 import { withSystemTx, type Tx } from "./db.js";
 import { eraseCloudWorkspaceCollaborationIdentity } from "./cloud-workspaces/actors.js";
 import {
+  computerTemplateCleanupPending,
+  type ComputerTemplateDeletionJournal,
+} from "./cloud-workspaces/computer-template-retention.js";
+import {
   enqueueWorkOSCommand,
   enqueueWorkOSUserDeletionCommand,
   workOSInvitationOrderingKey,
@@ -293,7 +297,13 @@ async function assertOrganizationCloudPurgeReady(
   tx: Tx,
   organizationId: string,
   consumeFencedDeletions: boolean,
+  computerTemplateJournal?: Pick<ComputerTemplateDeletionJournal, "find">,
 ): Promise<void> {
+  if (
+    await computerTemplateCleanupPending(tx, organizationId, computerTemplateJournal)
+  ) {
+    throw new Error("organization_computer_template_cleanup_not_verified");
+  }
   const retainedProviderOperation = await tx.query(
     `SELECT 1 FROM cloud_workspace_provider_operations
      WHERE org_id = $1 AND deleted_at IS NULL AND create_closed_at IS NULL AND lost_at IS NULL
@@ -1334,6 +1344,7 @@ function lifecycleRetryMs(attempt: number): number {
 }
 
 const ORGANIZATION_PURGE_READINESS_ERRORS = new Set([
+  "organization_computer_template_cleanup_not_verified",
   "organization_cloud_deletion_not_verified",
   "organization_provider_deletion_not_verified",
   "organization_blob_deletion_not_verified",
@@ -1350,6 +1361,9 @@ export class DeletionLifecycleProcessor {
   private readonly workerId: string;
   private readonly logger: Pick<Console, "warn" | "error">;
   private readonly providerLockTimeoutMs: number;
+  private readonly computerTemplateJournal:
+    | Pick<ComputerTemplateDeletionJournal, "find">
+    | undefined;
 
   constructor(
     private readonly pool: pg.Pool,
@@ -1357,10 +1371,12 @@ export class DeletionLifecycleProcessor {
       workerId?: string;
       logger?: Pick<Console, "warn" | "error">;
       providerLockTimeoutMs?: number;
+      computerTemplateJournal?: Pick<ComputerTemplateDeletionJournal, "find">;
     } = {},
   ) {
     this.workerId = options.workerId ?? `deletion:${randomUUID()}`;
     this.logger = options.logger ?? console;
+    this.computerTemplateJournal = options.computerTemplateJournal;
     this.providerLockTimeoutMs = Math.max(
       1,
       Math.trunc(options.providerLockTimeoutMs ?? 30_000),
@@ -1693,6 +1709,7 @@ export class DeletionLifecycleProcessor {
           tx,
           request.target_organization_id,
           false,
+          this.computerTemplateJournal,
         );
         const link = await tx.query<{
           workos_organization_id: string | null;
@@ -2160,7 +2177,9 @@ export class DeletionLifecycleProcessor {
       // prove that every coordinator-owned byte has reached a terminal,
       // fenced state. The Organization row lock also serializes this check
       // against new FK-backed detached-object identities.
-      await assertOrganizationCloudPurgeReady(tx, organizationId, true);
+      await assertOrganizationCloudPurgeReady(
+        tx, organizationId, true, this.computerTemplateJournal,
+      );
       const members = await tx.query<{ user_id: string; email: string }>(
         `SELECT om.user_id, u.email
          FROM organization_members om
@@ -2211,6 +2230,33 @@ export class DeletionLifecycleProcessor {
             OR ($2::text IS NOT NULL AND command.provider_object_id = $2)`,
         [organizationId, workosOrganizationId],
       );
+      // Immutable v2 records permit only this final-erasure transaction, with
+      // the organization/request and the current worker lease still locked.
+      await tx.query(
+        `SELECT set_config('app.cloud_computer_v2_purge_request_id', $1, true),
+                set_config('app.cloud_computer_v2_purge_worker_id', $2, true),
+                set_config('app.cloud_computer_v2_purge_lease_revision', $3::text, true)`,
+        [request.id, this.workerId, request.lease_revision],
+      );
+      // Sources precede generations; logs/receipts/templates precede builds;
+      // the deferred head pointers disappear before their configurations.
+      for (const table of [
+        "cloud_computer_admin_workspace_requests",
+        "cloud_computer_admin_workspaces",
+        "cloud_workspace_computer_sources",
+        "cloud_computer_build_logs",
+        "cloud_computer_v2_operations",
+        "cloud_computer_templates",
+        "cloud_computer_v2_builds",
+        "cloud_computer_v2_heads",
+        "cloud_computer_v2_config_repositories",
+        "cloud_computer_environment_refs",
+        "cloud_computer_v2_configs",
+      ]) {
+        await tx.query(`DELETE FROM ${table} WHERE org_id = $1`, [
+          organizationId,
+        ]);
+      }
       await tx.query(
         `SELECT public.purge_cloud_workspace_operator_configuration($1)`,
         [request.target_organization_id],

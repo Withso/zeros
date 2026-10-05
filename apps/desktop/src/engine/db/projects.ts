@@ -17,10 +17,9 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
 import * as path from "node:path";
 import { openZerosDb, zerosWorkspacesRoot } from "./index";
-import { zerosDotDirName } from "./paths";
+import { zerosStateRoot } from "./paths";
 
 /** Mirror of the renderer's Project (projects-store.ts). originUrl maps to the
  *  repos.remote_url column; addedAt to repos.added_at. */
@@ -289,7 +288,7 @@ export function pruneWorktreeRepos(): number {
       zerosWorkspacesRoot(),
       // Legacy hidden root (pre Phase-0 relocation), CHANNEL-aware. Was a 2-way
       // isDevRuntime() split, so Beta pruned against PRODUCTION's legacy root.
-      path.join(homedir(), zerosDotDirName(), "worktrees"),
+      path.join(zerosStateRoot(), "worktrees"),
     ]),
   ).map((r) => canonicalRepoRoot(r).replace(/\/+$/, "") + "/");
   const db = openZerosDb();

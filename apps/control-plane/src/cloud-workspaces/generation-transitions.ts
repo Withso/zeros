@@ -103,8 +103,10 @@ export async function rollbackCloudWorkspaceGenerationTransition(
     await tx.query(`UPDATE cloud_workspace_generation_transitions SET state='rollback_failed',completed_at=now(),updated_at=now(),
       error_code=$2,error_message=$3 WHERE id=$1`, [transition.id,input.errorCode.slice(0,128),input.errorMessage.slice(0,2048)]);
     await tx.query(`UPDATE cloud_workspaces SET current_generation=$2,status='failed',desired_state='stopped',authority_epoch=authority_epoch+1,
-      version=version+1,updated_at=now(),last_error_code='recovery_needed',last_error_message='Recovery did not complete. The source is preserved.'
-      WHERE id=$1 AND org_id=$3`, [input.workspaceId,transition.source_generation,input.organizationId]);
+      version=version+1,updated_at=now(),last_error_code=$4,last_error_message=$5
+      WHERE id=$1 AND org_id=$3`, [input.workspaceId,transition.source_generation,input.organizationId,
+      input.errorCode === "cloud_runtime_revoked" ? input.errorCode : "recovery_needed",
+      input.errorCode === "cloud_runtime_revoked" ? "This workspace runtime was revoked. Request an explicit runtime upgrade to continue." : "Recovery did not complete. The source is preserved."]);
     await tx.query(`UPDATE cloud_workspace_restore_incidents SET state='recovery_needed',reason=$2,updated_at=now() WHERE transition_id=$1`,[transition.id,input.errorCode.slice(0,128)]);
     await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),updated_at=now()
       WHERE generation_transition_id=$1 AND state IN ('queued','observing')`,[transition.id]);
@@ -160,6 +162,8 @@ export async function rollbackCloudWorkspaceGenerationTransition(
        AND state IN ('queued', 'observing')`,
     [input.workspaceId, transition.candidate_generation],
   );
+  // The source row already carries its immutable pins. The reconciler checks
+  // those pins again before this wake; rollback never consults channel head.
   const wakeIntentId = await queueTransitionIntent(tx, {
     workspaceId: input.workspaceId,
     organizationId: input.organizationId,
@@ -227,7 +231,7 @@ export async function advanceCloudWorkspaceGenerationTransitionAfterDrain(
        ON candidate.workspace_id = gt.workspace_id AND candidate.org_id = gt.org_id
       AND candidate.generation = gt.candidate_generation
      JOIN workspace_checkpoints checkpoint
-       ON checkpoint.id = CASE WHEN gt.operation::text = 'recover'
+       ON checkpoint.id = CASE WHEN candidate.recovery_checkpoint_id IS NOT NULL
          THEN candidate.recovery_checkpoint_id ELSE checkpoint_request.checkpoint_id END
       AND checkpoint.workspace_id = gt.workspace_id AND checkpoint.org_id = gt.org_id
       AND checkpoint.state = 'durable'

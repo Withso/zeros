@@ -49,6 +49,8 @@ const ALLOWED_COMMANDS = new Set<string>([
   "auth_redeem_handoff",
   "auth_sign_out_everywhere",
   "auth_start_signin",
+  "cloud_workspace_access_context",
+  "cloud_workspace_access_list",
   "cloud_workspace_access_revoke",
   "cloud_workspace_capability",
   "cloud_workspace_runtime_close",
@@ -174,6 +176,9 @@ ipcRenderer.on("zeros:prepare-attachment-quit", (_event, token: unknown) => {
 });
 
 const bridge = {
+  // A synchronous metadata snapshot is available before page scripts run.
+  // Main is authoritative; argv and renderer/Vite flags cannot opt in.
+  localDevelopment: ipcRenderer.sendSync("zeros:local-development") === true,
   maintainAttachmentSources(retainedIds: string[]): Promise<string[]> {
     return ipcRenderer.invoke("zeros:attachment-source-maintenance", retainedIds);
   },

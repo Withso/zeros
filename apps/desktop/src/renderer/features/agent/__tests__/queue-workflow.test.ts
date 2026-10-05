@@ -3,6 +3,7 @@ import vm from "node:vm";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SendQueue } from "../send-queue";
+import { CloudSendPreparation } from "../cloud-send-preparation";
 import * as lifecycle from "../session-reload-lifecycle";
 
 // Exercise the actual provider callbacks with an in-memory bridge/store. This
@@ -107,6 +108,7 @@ function setup(agentId = "claude", status = "streaming") {
     sendQueueRef: { current: queue },
     queueHeldRef: { current: new Set() },
     cancelGenerationsRef: { current: new Map() },
+    cloudSendPreparationRef: { current: new CloudSendPreparation() },
     sendingChatsRef: { current: sending },
     flushBubbleRef: { current: flush },
     ensureInFlightRef: { current: new Map() },

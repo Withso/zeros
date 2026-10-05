@@ -6,6 +6,8 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
+  readdirSync,
   readSync,
   realpathSync,
   rmdirSync,
@@ -14,6 +16,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { resolveCloudRuntime, isCloudRuntimeCgroupRoot } from "./cloud-runtime-root.mjs";
 
 export const CLOUD_ENGINE_CGROUP = "/sys/fs/cgroup/zeros-cloud-engine";
 export const CLOUD_SETUP_CGROUP = "/sys/fs/cgroup/zeros-cloud-setup";
@@ -23,11 +26,20 @@ export const CLOUD_ENGINE_LIMITS = Object.freeze({
   "pids.max": "4096",
   "memory.oom.group": "1",
 });
+export const CLOUD_HOST_LIMITS = Object.freeze({
+  "cpu.max": "100000 100000",
+  "memory.max": String(256 * 1024 * 1024),
+  "pids.max": "256",
+  "memory.oom.group": "1",
+});
+const INSTANCE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const CONTROL_NAMES = new Set([
   ...Object.keys(CLOUD_ENGINE_LIMITS),
   "cgroup.procs",
   "cgroup.events",
   "cgroup.kill",
+  "cgroup.controllers",
+  "cgroup.subtree_control",
 ]);
 
 function assertDirectory(directory) {
@@ -79,6 +91,10 @@ function openControl(directory, name, writing) {
 }
 
 const nativeIo = {
+  children(directory) {
+    assertDirectory(directory);
+    return readdirSync(directory, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name);
+  },
   exists(directory) {
     try {
       assertDirectory(directory);
@@ -149,17 +165,22 @@ function populated(source) {
  * A caller holds the engine's existing exclusive launch lock throughout. */
 export class CloudEngineCgroup {
   constructor({
-    directory = CLOUD_ENGINE_CGROUP,
+    directory,
+    runtime = resolveCloudRuntime(),
+    kind = "engine",
+    instanceId,
     io = nativeIo,
     now = () => performance.now(),
     pause = (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
   } = {}) {
-    if (
-      !/^\/sys\/fs\/cgroup\/zeros-cloud-(?:engine(?:-[a-f0-9-]{36})?|setup)$/.test(
-        directory,
-      )
-    )
+    directory ??= cloudCgroupDirectory(runtime, kind, instanceId);
+    const leaf = directory.slice(runtime.cgroupRoot.length + 1);
+    const valid = runtime.profile === "v4"
+      ? isCloudRuntimeCgroupRoot(runtime.cgroupRoot) && path.dirname(directory) === runtime.cgroupRoot &&
+        (leaf === "setup" || leaf.startsWith("engine-") && INSTANCE.test(leaf.slice(7)))
+      : /^\/sys\/fs\/cgroup\/zeros-cloud-(?:engine(?:-[a-f0-9-]{36})?|setup)$/.test(directory);
+    if (!valid)
       throw new Error("Invalid cloud engine scope identity");
     this.directory = directory;
     this.io = io;
@@ -212,5 +233,60 @@ export class CloudEngineCgroup {
     // Nested cgroups are never delegated. An unexpected child group makes
     // rmdir fail rather than authorizing a recursive deletion or a new engine.
     this.io.remove(this.directory);
+  }
+}
+
+export function cloudCgroupDirectory(runtime, kind, instanceId) {
+  if (kind !== "setup" && kind !== "engine") throw new Error("Invalid cloud engine scope identity");
+  if (runtime.profile !== "v4") return kind === "setup" ? CLOUD_SETUP_CGROUP : CLOUD_ENGINE_CGROUP;
+  if (!isCloudRuntimeCgroupRoot(runtime.cgroupRoot) || kind === "engine" && !INSTANCE.test(instanceId ?? ""))
+    throw new Error("Invalid cloud engine scope identity");
+  return `${runtime.cgroupRoot}/${kind === "setup" ? "setup" : `engine-${instanceId}`}`;
+}
+
+/** The systemd dispatcher already occupies DelegateSubgroup=host. Only VM
+ * root writes controllers; workload UIDs receive no delegated control files. */
+export class CloudDelegatedCgroups {
+  constructor({ runtime = resolveCloudRuntime(), io = nativeIo,
+    readMembership = () => readFileSync("/proc/self/cgroup", "utf8") } = {}) {
+    if (runtime.profile !== "v4" || !isCloudRuntimeCgroupRoot(runtime.cgroupRoot))
+      throw new Error("Invalid delegated cloud cgroup root");
+    this.runtime = runtime;
+    this.io = io;
+    this.readMembership = readMembership;
+  }
+  leaves() {
+    const root = this.runtime.cgroupRoot;
+    if (!this.io.exists(root)) throw new Error("Cloud delegated parent is missing");
+    const children = this.io.children(root);
+    if (children.length > 1024 || children.some(name => name !== "host" && name !== "setup" &&
+      !(name.startsWith("engine-") && INSTANCE.test(name.slice(7)))))
+      throw new Error("Unexpected cloud delegated cgroup child");
+    return children;
+  }
+  prepareHost() {
+    const root = this.runtime.cgroupRoot;
+    if (this.readMembership().trim() !== `0::${root.slice("/sys/fs/cgroup".length)}/host`)
+      throw new Error("Cloud host cgroup membership is invalid");
+    if (!this.leaves().includes("host") || this.io.read(root, "cgroup.procs") !== "")
+      throw new Error("Cloud delegated parent must be empty");
+    const controllers = ["cpu", "memory", "pids"];
+    const available = this.io.read(root, "cgroup.controllers").split(/\s+/);
+    if (controllers.some(name => !available.includes(name))) throw new Error("Cloud cgroup controllers are unavailable");
+    this.io.write(root, "cgroup.subtree_control", controllers.map(name => `+${name}`).join(" "));
+    const enabled = this.io.read(root, "cgroup.subtree_control").split(/\s+/);
+    if (controllers.some(name => !enabled.includes(name))) throw new Error("Cloud cgroup delegation was not confirmed");
+    const host = `${root}/host`;
+    if (!this.io.exists(host) || this.io.children(host).length) throw new Error("Unexpected cloud host cgroup child");
+    for (const [name, value] of Object.entries(CLOUD_HOST_LIMITS)) {
+      this.io.write(host, name, value);
+      if (this.io.read(host, name) !== value) throw new Error("Cloud host limit was not confirmed");
+    }
+  }
+  async retire() {
+    // Keep the service process in host alive to prove every workload leaf
+    // empty. systemd's KillMode=control-group owns the final host-leaf exit.
+    for (const name of this.leaves().filter(name => name !== "host"))
+      await new CloudEngineCgroup({ runtime: this.runtime, directory: `${this.runtime.cgroupRoot}/${name}`, io: this.io }).retire();
   }
 }

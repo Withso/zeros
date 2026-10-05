@@ -29,6 +29,7 @@
 import { spawn } from "node:child_process";
 
 import { stripEngineAuthorityEnv } from "./config-isolation";
+import { withoutLocalDevelopment } from "../../../env/local-development";
 import {
   pruneLauncherScriptEnv,
   sanitizeProbedPath,
@@ -157,6 +158,7 @@ async function resolveOnce(): Promise<ProbeResult> {
     let settled = false;
 
     const child = spawn(shell, ["-ilc", "echo $PATH"], {
+      env: withoutLocalDevelopment(process.env),
       stdio: ["ignore", "pipe", "pipe"],
       // Detached so a misbehaving init can't keep the parent waiting
       // past our timer (we kill it explicitly on timeout).

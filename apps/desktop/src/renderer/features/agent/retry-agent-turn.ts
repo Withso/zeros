@@ -66,6 +66,7 @@ interface RetryDependencies {
     | "getSession"
     | "getSendGeneration"
     | "getCloseActivity"
+    | "prepareForSend"
     | "ensureSession"
     | "sendPrompt"
   >;
@@ -124,6 +125,9 @@ export async function retryAgentTurn(
         (!request.newChat || !slot || !lastUserPrompt(slot.messages))
       );
     };
+    const preparation = deps.sessions.prepareForSend(destination.id);
+    if (preparation) await preparation;
+    if (!ownsDestination() || !ownsSource()) return;
     const attachments: ComposerAttachment[] = [
       ...messageToEditorContent(prompt).attachments,
     ];

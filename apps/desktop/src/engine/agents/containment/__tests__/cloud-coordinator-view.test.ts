@@ -1,5 +1,24 @@
 import {describe,expect,it} from "vitest";
 import {cloudCoordinatorArguments,cloudCoordinatorEnvironment} from "../cloud-coordinator-view.mjs";
+import {createCloudRuntimeResolver} from "../cloud-runtime-root.mjs";
+import {cloudRuntimeFixture} from "./cloud-runtime-fixture";
+
+it("pins v4 coordinator mounts and children without exposing host or engine authority",()=>{
+  const tree=cloudRuntimeFixture();
+  try {
+    const runtime=createCloudRuntimeResolver({filesystem:tree.filesystem}).resolve();
+    const directory=`/run/zeros/coordinators/${"a".repeat(32)}`;
+    const args=cloudCoordinatorArguments(directory,runtime.node,[],undefined,runtime);
+    const mounts=args.flatMap((value,index)=>value==="--ro-bind"?[args.slice(index+1,index+3)]:[]);
+    expect(mounts).toContainEqual([runtime.root,runtime.root]);
+    for(const forbidden of ["/zeros","/opt/zeros","/opt/zeros-runtime","/opt/zeros-infra","/opt/zeros-bootstrap","/srv/zeros/runtime-installs","/etc/zeros","/run/zeros"])
+      expect(mounts.some(([source])=>source===forbidden)).toBe(false);
+    expect(args.at(-1)).toBe(runtime.node);
+    expect(()=>cloudCoordinatorArguments(directory,"/opt/zeros/current/bin/node",[],undefined,runtime)).toThrow();
+    expect(cloudCoordinatorEnvironment({kind:"codex-api-key",apiKey:"synthetic-key"},"model",{},runtime).PATH)
+      .toBe(`${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`);
+  } finally { tree.dispose(); }
+});
 
 it("carries explicit effort and fast settings without accepting credential or loader overrides",()=>{
   const env=cloudCoordinatorEnvironment({kind:"codex-api-key",apiKey:"synthetic-admitted-key"},"gpt-5.6-sol",{

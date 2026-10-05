@@ -20,6 +20,7 @@ import {
   CloudReplicaDeviceStoreError,
 } from "./cloud-replica-device-store";
 import {
+  getSessionUserForMain,
   getValidSessionForMain,
   type MainAuthSession,
 } from "./ipc/commands/auth-session";
@@ -174,13 +175,24 @@ export class CloudAccessDeviceAuthority {
   ) {}
 
   async signEngineAdmission(accessToken:string, target:{organizationId:string;workspaceId:string}) {
+    return this.signAccess(accessToken, "engine.connect", target);
+  }
+
+  async signRuntimeService(accessToken: string, payload: import("./cloud-runtime-service-client").CloudRuntimeServiceProofPayload) {
+    return this.signAccess(accessToken, "runtime-service.issue", payload);
+  }
+  async signPreview(accessToken: string, payload: import("./cloud-workspace-access-client").CloudPreviewProofPayload) {
+    return this.signAccess(accessToken, "preview.issue", payload);
+  }
+
+  private async signAccess(accessToken: string, action: string, payload: unknown) {
     const device=await this.ensure();
     const session=workosAccountSession(await this.dependencies.getSession());
     if(!this.dependencies.capabilityEnabled() || !session || session.accountId!==device.accountUserId || session.accessToken!==accessToken)
       throw new Error("Cloud device admission session changed");
     const envelope=this.dependencies.store.load(session.accountId);
     if(!envelope || envelope.active.deviceId!==device.deviceId)throw new Error("Cloud device admission identity changed");
-    return new CloudReplicaDeviceSigner(envelope.active).proof("engine.connect",target);
+    return new CloudReplicaDeviceSigner(envelope.active).proof(action,payload);
   }
 
   async ensure(): Promise<{ accountUserId: string; deviceId: string }> {
@@ -265,6 +277,14 @@ export class CloudAccessDeviceAuthority {
 
 let accessDeviceAuthority: CloudAccessDeviceAuthority | null = null;
 
+/** Metadata reads never register a device or refresh account tokens. */
+export function readCloudAccessDeviceForMain(): { deviceId: string; keyVersion: number } | null {
+  const user = getSessionUserForMain();
+  if (user?.provider !== "workos" || !user.accountId) return null;
+  const active = store().load(user.accountId)?.active;
+  return active?.deviceId ? { deviceId: active.deviceId, keyVersion: active.keyVersion } : null;
+}
+
 export function ensureCloudAccessDeviceForMain(): Promise<{
   accountUserId: string;
   deviceId: string;
@@ -294,6 +314,15 @@ export function ensureCloudAccessDeviceForMain(): Promise<{
 export async function signCloudEngineAdmissionForMain(accessToken:string,target:{organizationId:string;workspaceId:string}) {
   await ensureCloudAccessDeviceForMain();
   return accessDeviceAuthority!.signEngineAdmission(accessToken,target);
+}
+
+export async function signCloudRuntimeServiceForMain(accessToken: string, payload: import("./cloud-runtime-service-client").CloudRuntimeServiceProofPayload) {
+  await ensureCloudAccessDeviceForMain();
+  return accessDeviceAuthority!.signRuntimeService(accessToken, payload);
+}
+export async function signCloudPreviewForMain(accessToken: string, payload: import("./cloud-workspace-access-client").CloudPreviewProofPayload) {
+  await ensureCloudAccessDeviceForMain();
+  return accessDeviceAuthority!.signPreview(accessToken, payload);
 }
 
 /** Build the private stdin seed. Auth0 compatibility sessions deliberately

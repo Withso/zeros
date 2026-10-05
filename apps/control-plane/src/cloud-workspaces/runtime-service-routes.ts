@@ -1,10 +1,29 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
+import { isIP } from "node:net";
 import { HttpError } from "../authz.js";
+import { rateLimit } from "../ratelimit.js";
 import { CloudWorkspaceAuthorizationError } from "./authorization.js";
+import { previewRequestFromEdge } from "./access.js";
 import { WorkspaceReplicaError } from "./replicas.js";
-import type { DatabaseCloudRuntimeServiceAccess } from "./runtime-services.js";
+import { CLOUD_RUNTIME_SERVICE_PATH, runtimeServiceToken, type DatabaseCloudRuntimeServiceAccess } from "./runtime-services.js";
+
+/** Same capability/path as the WSS relay, without consuming an application stream. */
+export function createCloudRuntimeServiceAuthorityRoutes(service: Pick<DatabaseCloudRuntimeServiceAccess, "check">): Hono {
+  const routes = new Hono();
+  routes.use(`${CLOUD_RUNTIME_SERVICE_PATH}/*`, async (c, next) => { c.header("Cache-Control", "no-store"); await next(); });
+  routes.use(`${CLOUD_RUNTIME_SERVICE_PATH}/*`, rateLimit("cloud-service-authority", 600, 60_000, c => {
+    const ip = c.req.header("X-Real-IP")?.trim() ?? c.req.header("CF-Connecting-IP")?.trim() ?? "";
+    return isIP(ip) ? ip : "unknown";
+  }));
+  routes.get(`${CLOUD_RUNTIME_SERVICE_PATH}/:kind/:grant`, async c => {
+    if (!runtimeServiceToken(c.req.raw.headers)) return c.body(null, 401);
+    const expiresAtMs = await service.check(previewRequestFromEdge(c.req.raw));
+    return expiresAtMs === null ? c.body(null, 401) : c.json({ expiresAtMs });
+  });
+  return routes;
+}
 
 const proof = z.object({ deviceId: z.string().uuid(), keyVersion: z.number().int().safe().positive(),
   timestampMs: z.number().int().safe().nonnegative(), nonce: z.string().regex(/^[A-Za-z0-9_-]{32}$/),

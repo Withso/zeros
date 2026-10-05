@@ -9,12 +9,23 @@ import { createCloudComputerBuildWorker } from "./cloud-workspaces/computer.js";
 import { serve } from "@hono/node-server";
 import {cloudAgentCredentialKeys} from "./cloud-workspaces/agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./cloud-workspaces/agent-executions.js";
+import {DatabaseCloudComputerV2Service} from "./cloud-workspaces/computer-v2.js";
+import { createComputerTemplateWorker } from "./cloud-workspaces/computer-template-worker-factory.js";
+import { sanitizeComputerTemplateLog } from "./cloud-workspaces/computer-template-logs.js";
+import {createRepositorySetupScriptWriter} from "./cloud-workspaces/computer-repository-setup.js";
 import { S3Client } from "@aws-sdk/client-s3";
 import { Agent as HttpsAgent } from "node:https";
 import { S3CloudWorkspaceObjectStore } from "./cloud-workspaces/s3-object-store.js";
+import { createRuntimeArtifactStore } from "./cloud-workspaces/runtime-artifact-store.js";
+import { cloudRuntimeQualificationMode } from "./cloud-workspaces/runtime-config.js";
+import { loadPinnedCloudRuntime } from "./cloud-workspaces/runtime-selection.js";
+import { createRuntimeQualificationWorker } from "./cloud-workspaces/runtime-qualification.js";
+import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
+import { DatabaseBuilderVmOperationStore } from "./cloud-workspaces/cloud-builder-vm-store.js";
+import { CloudComputerTemplateRetentionWorker } from "./cloud-workspaces/computer-template-retention.js";
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
-import { createPool, createMigrationPool } from "./db.js";
+import { createPool, createMigrationPool, withSystemTx } from "./db.js";
 import { assertHostedDatabaseOwnership } from "./development-environment.js";
 import { runServiceBootMigrations, verifyMigrations, type ServiceBootMigrationResult } from "./migrate.js";
 import { loadEmailConfig, sendEmailStrict } from "./email.js";
@@ -48,6 +59,9 @@ import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
 
 const config = loadConfig();
+const runtimeArtifacts = createRuntimeArtifactStore({
+  s3: config.cloudRuntimePublication?.s3 ?? config.cloudWorkspaces?.durability?.s3 ?? null,
+});
 const pool = createPool(config.databaseUrl, { maxConnections: config.databasePoolMax ?? 10 });
 if (config.development && "generation" in config.development) {
   await assertHostedDatabaseOwnership(pool, config.development);
@@ -109,6 +123,9 @@ let stopCloudReconciler = async () => {};
 let stopCloudProAllowances = async () => {};
 let stopCloudSetupWorker = async () => {};
 let stopCloudComputerBuildWorker = async () => {};
+let stopCloudComputerTemplateWorker = async () => {};
+let stopCloudRuntimeQualificationWorker = async () => {};
+let stopCloudComputerTemplateRetentionWorker = async () => {};
 let stopCloudAccessRevocationWorker = async () => {};
 let stopCloudCheckpointRequestWorker = async () => {};
 let stopCloudForkWorker = async () => {};
@@ -141,6 +158,8 @@ let cloudWorkspaceHealthService:
 let cloudWorkspaceEngineClientAdmissionService:
   | DatabaseCloudWorkspaceEngineClientAdmissionService
   | undefined;
+const runtimeQualificationWorker = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending"
+  ? createRuntimeQualificationWorker(config, pool, runtimeArtifacts) : null;
 if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   const [
     { createCloudProviderDeployment },
@@ -213,6 +232,9 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     outboxDeliveryEnabled: cloud.outbox !== null,
   });
   const github = new GithubCloudWorkspaceCredentialBroker(config.github!);
+  const computerV2 = new DatabaseCloudComputerV2Service(pool, cloud, { sanitizeLog: sanitizeComputerTemplateLog });
+  const computerTemplateWorker = migrationResult.status.state !== "controlled_migration_pending"
+    ? createComputerTemplateWorker(config, pool, runtimeArtifacts, github, computerV2) : null;
   cloudWorkspaceRepositoryResolver = new GithubCloudWorkspaceRepositoryResolver(
     { credential: github },
   );
@@ -447,7 +469,10 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       workosEnabled: config.auth.provider === "workos",
     });
     cloudWorkspaceInternalSetupService = {
-      ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos")}:{}),
+      ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos",undefined,
+        {computer:computerV2,updateRepositorySetupScript:createRepositorySetupScriptWriter(pool)}, {
+          secretEncryptionKeys:cloud.settingsSecretEncryptionKeys,currentSecretEncryptionKeyVersion:cloud.currentSettingsSecretEncryptionKeyVersion,setupSecretKeyV1:cloud.settingsSecretKeyV1,
+        })}:{}),
       commands: new DatabaseCloudWorkspaceCommandService({ pool, workosEnabled: config.auth.provider === "workos" }),
       events: new DatabaseCloudWorkspaceEventService({ pool, workosEnabled: config.auth.provider === "workos" }),
       actions: new DatabaseCloudWorkspaceActionService({ pool, workosEnabled: config.auth.provider === "workos" }),
@@ -480,6 +505,9 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     const executor = new CloudWorkspaceLinuxSetupExecutor({
       diagnosticPool: pool,
       admissionBroker: admission,
+      runtimeArtifacts,
+      resolveRuntimeArtifact: (pin) => withSystemTx(pool, (tx) =>
+        loadPinnedCloudRuntime(tx, pin, cloudRuntimeQualificationMode())),
       commandRunnerResolver: async (execution) => {
         const resolved = await providerResolver.resolve({
           workspaceId: execution.workspaceId,
@@ -556,6 +584,37 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
 
     if (setupWorker) { stopCloudSetupWorker = setupWorker.start(); stopCloudComputerBuildWorker = createCloudComputerBuildWorker(pool, cloud).start(); }
+    if (runtimeQualificationWorker) stopCloudRuntimeQualificationWorker = runtimeQualificationWorker.start();
+    if (computerTemplateWorker) stopCloudComputerTemplateWorker = computerTemplateWorker.start();
+    if (
+      config.deploymentChannel === "alpha" &&
+      cloud.provider === "boat" &&
+      cloud.boat
+    ) {
+      const retentionListenerPool = config.databaseListenUrl
+        ? createPool(config.databaseListenUrl, {
+            maxConnections: 1,
+            applicationName: "zeros-template-retention-listener",
+          })
+        : pool;
+      const stop = new CloudComputerTemplateRetentionWorker(pool, {
+        accountScope: cloud.boat.accountScope,
+        billingOrg: cloud.boat.billingOrg,
+        journal: new DatabaseBuilderVmOperationStore(pool, cloud.boat.accountScope),
+        client: new BoatApiClient({
+          apiKey: cloud.apiKey,
+          billingOrg: cloud.boat.billingOrg,
+          timeoutMs: 45_000,
+        }),
+      }).start(retentionListenerPool);
+      stopCloudComputerTemplateRetentionWorker = async () => {
+        try {
+          await stop();
+        } finally {
+          if (retentionListenerPool !== pool) await retentionListenerPool.end();
+        }
+      };
+    }
     console.log(
       `[control-plane] cloud workspace reconciliation enabled (${provider.name}/${cloud.target}); setup=${setupWorker ? "enabled" : "paused"}; durability=${blobService ? "enabled" : "disabled"}; outbox=${outboxWorker ? "enabled" : "queued"}`,
     );
@@ -568,6 +627,9 @@ let githubWriteCleanup: ReturnType<typeof setInterval> | undefined;
 let githubWriteCleanupPending = Promise.resolve();
 let githubWriteCleanupRunning = false;
 const app = createApp(config, pool, emailConfig, {
+  runtimePublication: { artifacts: runtimeArtifacts,
+    ...(runtimeQualificationWorker ? { enqueueSmoke: (id: string) => runtimeQualificationWorker.enqueue(id),
+      requalify: (id: string) => runtimeQualificationWorker.enqueue(id, { force: true }) } : {}) },
   ...(cloudWorkspaceInternalSetupService ? { cloudIdleStop: new DatabaseCloudIdleStop(pool, config.auth.provider === "workos") } : {}),
   ...(cloudGithubWriteGrants ? { cloudGithubWriteGrants } : {}),
   securityEventBroker,
@@ -636,6 +698,9 @@ function shutdown(signal: string): void {
     githubWriteCleanupPending,
     stopCloudSetupWorker(),
     stopCloudComputerBuildWorker(),
+    stopCloudComputerTemplateWorker(),
+    stopCloudRuntimeQualificationWorker(),
+    stopCloudComputerTemplateRetentionWorker(),
     stopCloudAccessRevocationWorker(),
     stopCloudCheckpointRequestWorker(),
     stopCloudForkWorker(),

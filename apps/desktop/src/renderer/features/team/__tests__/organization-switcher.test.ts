@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { organizationSwitcherSessionActions } from "../organization-switcher";
 
 describe("organization switcher session actions", () => {
+  it.each(["loading","authenticated","unauthenticated"] as const)("hides every account action in Local (%s)",(status)=>{
+    expect(organizationSwitcherSessionActions(status,true,true)).toEqual({showManagement:false,showCreateOrganization:false,sessionAction:null});
+  });
   it("never exposes account management or logout while signed out", () => {
     expect(organizationSwitcherSessionActions("unauthenticated", true)).toEqual(
       {

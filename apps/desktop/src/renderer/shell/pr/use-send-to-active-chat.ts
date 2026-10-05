@@ -21,6 +21,8 @@ import { envForChat } from "../../features/agent/model-catalog";
 import type { AutoActionKind } from "../../features/agent/auto-action";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { useInternalFeatureActive } from "../../features/settings/internal-features";
 import type {
   AgentTextMessageAttachment,
   MessageContentSegment,
@@ -55,6 +57,7 @@ export function useSendToActiveChat(
 ): (args: SendToActiveChatArgs) => boolean {
   const sessions = useAgentSessions();
   const bridge = useBridge();
+  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
   // Capture the click's chat across PR preflight awaits. Reading the global
   // active id when those finish would redirect the action after navigation.
   const activeChatId = useActiveChatId();
@@ -68,7 +71,7 @@ export function useSendToActiveChat(
       autoAction,
       onSettled,
     }: SendToActiveChatArgs) => {
-      const targetChat = () => {
+      const targetChat = (preparing = false) => {
         const chat = useWorkspaceStore
           .getState()
           .chats.find((chat) => chat.id === activeChatId);
@@ -88,7 +91,7 @@ export function useSendToActiveChat(
         const connectionStatus = bridge instanceof WorkspaceRuntimeClient
           ? bridge.statusForWorkspace(chat.folder)
           : bridge?.status;
-        if (connectionStatus !== "connected") {
+        if (connectionStatus !== "connected" && !(preparing && cloudComputerV2 && isCloudWorkspace(chat.folder))) {
           throw new Error(
             "The engine is reconnecting. Try again once connected.",
           );
@@ -101,14 +104,17 @@ export function useSendToActiveChat(
         });
       };
       try {
-        targetChat();
+        targetChat(true);
       } catch (error) {
         reportError(error);
         return false;
       }
       recordWorkspaceActivity(workspacePath);
       void (async () => {
-        let chat = targetChat();
+        let chat = targetChat(true);
+        const preparation = sessions.prepareForSend(chat.id);
+        if (preparation) await preparation;
+        chat = targetChat();
         if (sessions.getSession(chat.id)?.transcriptState !== "resident") {
           await sessions.hydrateChat(chat.id);
           chat = targetChat();
@@ -172,6 +178,6 @@ export function useSendToActiveChat(
         .finally(() => onSettled?.());
       return true;
     },
-    [sessions, bridge, activeChatId, workspacePath],
+    [sessions, bridge, activeChatId, workspacePath, cloudComputerV2],
   );
 }

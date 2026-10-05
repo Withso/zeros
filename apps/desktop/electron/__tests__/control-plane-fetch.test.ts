@@ -8,7 +8,7 @@ vi.mock("electron", () => ({ app: { getVersion: () => "0.1.20-alpha.180" } }));
 vi.mock("../client-upgrade-signal", () => ({
   signalClientUpgrade: state.requireClientUpgrade,
 }));
-vi.mock("../runtime-mode", () => ({ IS_DEV: false }));
+vi.mock("../runtime-mode", () => ({ IS_DEV: false, IS_LOCAL_DEVELOPMENT: false }));
 vi.mock("../../src/engine/runtime", () => ({ channel: () => state.channel }));
 import { controlPlaneFetch } from "../control-plane-fetch";
 

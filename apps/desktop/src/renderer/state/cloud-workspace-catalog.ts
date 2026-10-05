@@ -15,6 +15,7 @@ import {
   type CloudWorkspaceTarget,
 } from "../platform/bridge/cloud-workspace-key";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
+import { ControlPlaneError } from "../features/team/control-plane";
 import type { Project } from "./projects-store";
 import { clearCloudComposerPrs } from "./read-caches";
 
@@ -347,11 +348,16 @@ export function clearCloudWorkspaceCatalog(): void {
   rebuild(hadDocuments);
 }
 
-const lifecycleIntents = new Map<
-  string,
-  { id: string; task?: Promise<CloudWorkspaceDocument> }
->();
+type LifecycleIntent = { id: string; task?: Promise<CloudWorkspaceDocument>; owner?: number; generation?: number; version?: number };
+const lifecycleIntents = new Map<string, LifecycleIntent>();
 function settleLifecycleIntents(doc: CloudWorkspaceDocument): void {
+  const wakeKey = `${epoch}:${cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id })}:wake`;
+  const wake = lifecycleIntents.get(wakeKey);
+  // A later Stop/failure is a confirmed outcome, not an uncertain transport
+  // retry. An unchanged stopped read must keep the original idempotency key.
+  if (wake && doc.version > (wake.version ?? -1) &&
+      ["stopping", "stopped", "failed", "error", "archiving", "archived", "deleting", "deleted"].includes(doc.status))
+    lifecycleIntents.delete(wakeKey);
   const operation = ["ready", "busy"].includes(doc.status)
     ? "wake"
     : (
@@ -360,7 +366,7 @@ function settleLifecycleIntents(doc: CloudWorkspaceDocument): void {
           string
         >
       )[doc.status];
-  if (operation)
+  if (operation && (operation !== "wake" || !wake || doc.version > (wake.version ?? -1)))
     lifecycleIntents.delete(
       `${epoch}:${cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id })}:${operation}`,
     );
@@ -370,14 +376,33 @@ export async function manageCloudWorkspace(
   operation: "wake" | "stop" | "archive" | "delete",
   wait = false,
 ): Promise<CloudWorkspaceDocument> {
-  const key = `${epoch}:${cloudWorkspaceKey(target)}:${operation}`;
-  const intent = lifecycleIntents.get(key) ?? { id: crypto.randomUUID() };
+  const workspaceKey = cloudWorkspaceKey(target);
+  const key = `${epoch}:${workspaceKey}:${operation}`;
+  const owner = operation === "wake"
+    ? detailOwnerGenerations.get(workspaceKey) ?? ++nextDetailOwnerGeneration : undefined;
+  if (owner !== undefined) detailOwnerGenerations.set(workspaceKey, owner);
+  const generation = cloudWorkspaceDocument(target)?.generation.number;
+  const previous = lifecycleIntents.get(key);
+  const intent: LifecycleIntent = previous && (operation !== "wake" || previous.owner === owner && previous.generation === generation)
+    ? previous : { id: crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version };
   if (intent.task) return intent.task;
   const version = epoch;
   const task = (async () => {
     let doc = await changeCloudWorkspaceLifecycle(target, operation, intent.id);
     if (version !== epoch) throw new Error("Cloud account changed");
+    if (operation === "wake") {
+      if (detailOwnerGenerations.get(workspaceKey) !== owner)
+        throw new Error("Cloud workspace was removed while waking");
+      if (doc.id !== target.workspaceId || doc.organizationId !== target.organizationId)
+        throw new Error("Cloud wake returned a different workspace");
+      const current = cloudWorkspaceDocument(target);
+      if (generation !== undefined && (doc.generation.number !== generation || current?.generation.number !== generation))
+        throw new Error("Cloud workspace generation changed while waking");
+    }
     acceptCloudWorkspaceDocument(doc);
+    if (operation === "wake") doc = cloudWorkspaceDocument(target)!;
+    if (operation === "wake" && !["waking", "provisioning", "setting_up"].includes(doc.status) && lifecycleIntents.get(key) === intent)
+      lifecycleIntents.delete(key);
     const terminal =
       operation === "wake"
         ? ["ready", "busy"]
@@ -401,7 +426,15 @@ export async function manageCloudWorkspace(
     }
     if (terminal.includes(doc.status)) lifecycleIntents.delete(key);
     return doc;
-  })().finally(() => {
+  })().catch(error => {
+    // A definitive rejection cannot become a successful replay. Retain the
+    // identity only when the server's outcome is still unknown (network/5xx).
+    if (operation === "wake" && error instanceof ControlPlaneError &&
+        error.status >= 400 && error.status < 500 && error.status !== 408 &&
+        lifecycleIntents.get(key) === intent)
+      lifecycleIntents.delete(key);
+    throw error;
+  }).finally(() => {
     if (intent.task === task) delete intent.task;
   });
   intent.task = task;
