@@ -470,8 +470,18 @@ export async function runCloudComputerV2Smoke({
       await expect(page.getByText("Raw server drift text", { exact: true })).toHaveCount(0);
       await expect.poll(stateReads).toBeGreaterThan(metadataStateReads);
       await expect(message).toHaveText("Keep this prompt through metadata refresh");
+      // Wait for the bounded recovery reads to settle, then stay inside the 30 s
+      // create-options cache age so only an unbounded recovery loop could read.
+      const readCounts = () => JSON.stringify({ state: stateReads(), options: optionsReads() });
+      let lastCounts = readCounts();
+      await expect.poll(async () => {
+        await page.waitForTimeout(300);
+        const next = readCounts(), settled = next === lastCounts;
+        lastCounts = next;
+        return settled;
+      }).toBe(true);
       const settledMetadataReads = { state: stateReads(), options: optionsReads() };
-      await page.clock.runFor(30_001);
+      await page.clock.runFor(29_000);
       expect({ state: stateReads(), options: optionsReads() }).toEqual(settledMetadataReads);
       createOptionsDrift = false;
       await choose().hover();
