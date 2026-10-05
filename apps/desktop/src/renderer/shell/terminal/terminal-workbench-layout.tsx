@@ -315,7 +315,7 @@ export function TerminalWorkbenchLayout({
                               aria-hidden
                               className={cn(
                                 "size-1.5 shrink-0 rounded-full",
-                                entry.dot === "running" && "bg-yellow-primary",
+                                entry.dot === "running" && "bg-yellow-icon",
                                 entry.dot === "passed" && "bg-green-primary",
                                 (entry.dot === "failed" ||
                                   entry.dot === "stopped") &&

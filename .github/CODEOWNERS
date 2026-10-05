@@ -33,3 +33,16 @@
 /apps/desktop/src/renderer/features/agent/agent-brands.ts        @withso/zeros-maintainers
 /apps/desktop/src/engine/agents/registry.ts          @withso/zeros-maintainers
 /apps/desktop/src/engine/agents/adapters/            @withso/zeros-maintainers
+
+# ── Design system (docs/design-system.md) ─────────────────
+# Tokens, the contrast contract, the policy ledger, shared primitives, and the
+# checks that gate them. Feature UI composes these; changing them changes every
+# screen, so they need the design-system owner's review. Generated files
+# (docs/design-tokens.md, the zeros-ui skills) follow their sources.
+/styles/                                             @iamarunrk @withso/zeros-maintainers
+/apps/desktop/src/renderer/shared/ui/                @iamarunrk @withso/zeros-maintainers
+/apps/desktop/src/renderer/shared/theme/             @iamarunrk @withso/zeros-maintainers
+/scripts/check-ui-consistency.mjs                    @iamarunrk @withso/zeros-maintainers
+/scripts/design-system/                              @iamarunrk @withso/zeros-maintainers
+/docs/design-system.md                               @iamarunrk @withso/zeros-maintainers
+/docs/design-system-history.md                       @iamarunrk @withso/zeros-maintainers

@@ -1,0 +1,775 @@
+{
+  "description": "Design-system debt ledger for renderer class markup (scripts/design-system/ui-policy.mjs, run by `pnpm check:ui`). `debt` records findings that existed when each rule was introduced; counts may only shrink — new findings fail, and paid debt must be pruned with `pnpm check:ui --prune-debt`. `exceptions` are reviewed, intentional deviations with a reason. Never edit counts upward by hand.",
+  "exceptions": [
+    {
+      "rule": "status-pairing",
+      "file": "apps/desktop/src/renderer/shared/ui/primitives/badge.tsx",
+      "key": "text-blue-primary on bg-blue-bg",
+      "reason": "Badge `accent` (the chat's \"Created <workspace>\" chip): founder-directed blue-primary on blue-bg, 2026-07-29. Clears AA in both themes (see badge.tsx)."
+    }
+  ],
+  "debt": {
+    "arbitrary-value": {
+      "apps/desktop/src/renderer/features/agent-extensions/customize-mcp.tsx": {
+        "text-[14px]": 4
+      },
+      "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
+        "pl-[clamp(1.5rem,5vw,6.25rem)]": 1
+      },
+      "apps/desktop/src/renderer/features/agent-extensions/mcp-server-form.tsx": {
+        "text-[14px]": 6
+      },
+      "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
+        "z-[5]": 1,
+        "z-[6]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/agent-model-menu.tsx": {
+        "text-[12px]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/chat-transcript-pills.tsx": {
+        "ml-[22px]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/checkpoint-rail.tsx": {
+        "text-[13px]": 1,
+        "z-[8]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/composer-attachments.tsx": {
+        "pl-[2px]": 1,
+        "py-[3px]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/composer-editor/pill-views.tsx": {
+        "mx-[1.5px]": 3
+      },
+      "apps/desktop/src/renderer/features/agent/composer-editor/pills.tsx": {
+        "mx-[1.5px]": 2
+      },
+      "apps/desktop/src/renderer/features/agent/composer-editor/use-composer-editor.tsx": {
+        "z-[1000]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/composer-pills.tsx": {
+        "z-[3]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/composer-shell.tsx": {
+        "rounded-[18px]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/context-gauge.tsx": {
+        "rounded-[6px]": 2,
+        "text-[12.5px]": 2
+      },
+      "apps/desktop/src/renderer/features/agent/mention-picker.tsx": {
+        "z-[25]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/pr-picker.tsx": {
+        "z-[25]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/question-card.tsx": {
+        "rounded-[3px]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/budget-stop-card.tsx": {
+        "text-[11.5px]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/event-row.tsx": {
+        "text-[10px]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/highlighted-code.tsx": {
+        "leading-[1.6]": 4
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/markdown-code-block.tsx": {
+        "leading-[1.6]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/text-message.tsx": {
+        "py-[3px]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/slash-command-picker.tsx": {
+        "z-[25]": 1
+      },
+      "apps/desktop/src/renderer/features/agent/workflow-activity.tsx": {
+        "gap-[2px]": 1
+      },
+      "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx": {
+        "rounded-[2px]": 1,
+        "shadow-[0_14px_42px_rgba(0,0,0,.38)]": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-canvas.tsx": {
+        "z-[100000]": 2,
+        "z-[100001]": 1,
+        "z-[3]": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-color-picker.tsx": {
+        "bg-[linear-gradient(to_right,white,transparent)]": 1,
+        "bg-[linear-gradient(to_top,black,transparent)]": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-inspector.tsx": {
+        "text-[12px]": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-layout-tools-overlay.tsx": {
+        "z-[45]": 1,
+        "z-[46]": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-workspace-overlays.tsx": {
+        "rounded-[1px]": 1
+      },
+      "apps/desktop/src/renderer/features/repositories/design-section.tsx": {
+        "text-[13px]": 2
+      },
+      "apps/desktop/src/renderer/features/repositories/files-to-copy-section.tsx": {
+        "text-[14px]": 2
+      },
+      "apps/desktop/src/renderer/features/repositories/repo-page.tsx": {
+        "pl-[clamp(1.5rem,5vw,6.25rem)]": 1
+      },
+      "apps/desktop/src/renderer/features/repositories/repositories-panel.tsx": {
+        "leading-[1.6]": 3,
+        "text-[14px]": 1,
+        "tracking-[0.25em]": 1
+      },
+      "apps/desktop/src/renderer/features/settings/code-theme-preview.tsx": {
+        "leading-[1.6]": 4
+      },
+      "apps/desktop/src/renderer/features/settings/github-section.tsx": {
+        "text-[14px]": 2
+      },
+      "apps/desktop/src/renderer/features/settings/provider-information.tsx": {
+        "text-[14px]": 1
+      },
+      "apps/desktop/src/renderer/features/settings/providers-panel.tsx": {
+        "text-[14px]": 2
+      },
+      "apps/desktop/src/renderer/features/settings/settings-page.tsx": {
+        "text-[13px]": 3
+      },
+      "apps/desktop/src/renderer/features/settings/settings-ui.tsx": {
+        "text-[12px]": 2,
+        "text-[13px]": 1,
+        "text-[14px]": 4
+      },
+      "apps/desktop/src/renderer/features/team/members-panel.tsx": {
+        "text-[14px]": 1
+      },
+      "apps/desktop/src/renderer/features/team/team-panel.tsx": {
+        "text-[10px]": 1,
+        "text-[14px]": 1,
+        "text-[15px]": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/input-group.tsx": {
+        "ml-[-0.35rem]": 1,
+        "ml-[-0.45rem]": 1,
+        "mr-[-0.35rem]": 1,
+        "mr-[-0.45rem]": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/radio-group.tsx": {
+        "text-[14px]": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/scroll-area.tsx": {
+        "p-[1px]": 2
+      },
+      "apps/desktop/src/renderer/shell/dispatcher/dispatcher-composer.tsx": {
+        "z-[5]": 1
+      },
+      "apps/desktop/src/renderer/shell/pr/pr-status-island.tsx": {
+        "text-[13px]": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tab-strip.tsx": {
+        "rounded-[2px]": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
+        "leading-[1.55]": 1,
+        "rounded-[2px]": 2
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/changes-tab.tsx": {
+        "leading-[1.55]": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
+        "text-[0.85em]": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/review-changes.tsx": {
+        "text-[10px]": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/review-shared-components.tsx": {
+        "leading-[1.55]": 1,
+        "text-[10px]": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/review-timeline.tsx": {
+        "text-[10px]": 1
+      }
+    },
+    "ignore-directive": {
+      "apps/desktop/src/renderer/features/agent/agent-brands.ts": {
+        "check:ui ignore": 11
+      },
+      "apps/desktop/src/renderer/features/agent/composer-editor/use-composer-editor.tsx": {
+        "check:ui ignore": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-canvas-background.ts": {
+        "check:ui ignore": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-color-picker.tsx": {
+        "check:ui ignore": 6
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-color-values.ts": {
+        "check:ui ignore": 4
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-effect-values.ts": {
+        "check:ui ignore": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-fill-editor.tsx": {
+        "check:ui ignore": 2
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-frame-insertion.ts": {
+        "check:ui ignore": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-stroke-editor.tsx": {
+        "check:ui ignore": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-style-editor.tsx": {
+        "check:ui ignore": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-style-values.ts": {
+        "check:ui ignore": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/error-boundary.tsx": {
+        "check:ui ignore": 7
+      },
+      "apps/desktop/src/renderer/shared/ui/loading/glass-combos.ts": {
+        "check:ui ignore": 29
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/switch.tsx": {
+        "check:ui ignore": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/changes-tab.tsx": {
+        "check:ui ignore": 2
+      },
+      "apps/desktop/src/renderer/state/store.tsx": {
+        "check:ui ignore": 1
+      }
+    },
+    "numeric-z": {
+      "apps/desktop/src/renderer/features/agent/agent-model-menu.tsx": {
+        "z-10": 3,
+        "z-20": 1
+      },
+      "apps/desktop/src/renderer/features/agent/jump-pills.tsx": {
+        "z-10": 2
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/highlighted-code.tsx": {
+        "z-10": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/markdown-code-block.tsx": {
+        "z-10": 1
+      },
+      "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx": {
+        "z-10": 1,
+        "z-40": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-canvas.tsx": {
+        "z-40": 2
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-layout-tools-overlay.tsx": {
+        "z-20": 2,
+        "z-50": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-motion-timeline.tsx": {
+        "z-40": 2
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-panel-resize-handle.tsx": {
+        "z-20": 2
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-workspace-overlays.tsx": {
+        "z-20": 1,
+        "z-30": 5,
+        "z-40": 2
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/avatar.tsx": {
+        "z-10": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/elements/conversation.tsx": {
+        "z-10": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/sidebar.tsx": {
+        "z-10": 1,
+        "z-20": 1
+      },
+      "apps/desktop/src/renderer/shell/app-sidebar.tsx": {
+        "z-20": 1
+      },
+      "apps/desktop/src/renderer/shell/conversation/chat-tabs.tsx": {
+        "z-10": 4,
+        "z-20": 1,
+        "z-30": 2
+      },
+      "apps/desktop/src/renderer/shell/conversation/conversation-pane.tsx": {
+        "z-10": 1
+      },
+      "apps/desktop/src/renderer/shell/conversation/pane-layout.tsx": {
+        "z-10": 1,
+        "z-40": 1
+      },
+      "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx": {
+        "z-10": 1
+      },
+      "apps/desktop/src/renderer/shell/terminal/terminal-panel-resizer.tsx": {
+        "z-20": 1
+      },
+      "apps/desktop/src/renderer/shell/terminal/terminal-workbench-layout.tsx": {
+        "z-20": 1
+      },
+      "apps/desktop/src/renderer/shell/use-sticky-tab-strip.tsx": {
+        "z-10": 4,
+        "z-30": 2
+      },
+      "apps/desktop/src/renderer/shell/workbench/tab-chrome.ts": {
+        "z-20": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
+        "z-10": 1,
+        "z-20": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/changes-surface.tsx": {
+        "z-20": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/changes-tab.tsx": {
+        "z-10": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/code-editor/source-editor.tsx": {
+        "z-10": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/files-tab.tsx": {
+        "z-20": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/review-commits.tsx": {
+        "z-10": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/workspace-file-tree.tsx": {
+        "z-10": 1
+      }
+    },
+    "off-scale-spacing": {
+      "apps/desktop/src/renderer/features/agent-extensions/customize-mcp.tsx": {
+        "ml-9": 1
+      },
+      "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
+        "pb-16": 1
+      },
+      "apps/desktop/src/renderer/features/repositories/repo-page.tsx": {
+        "pb-16": 1,
+        "py-16": 1
+      },
+      "apps/desktop/src/renderer/features/repositories/repositories-panel.tsx": {
+        "gap-9": 2
+      },
+      "apps/desktop/src/renderer/features/settings/github-section.tsx": {
+        "pr-9": 1
+      },
+      "apps/desktop/src/renderer/features/settings/providers-panel.tsx": {
+        "pr-9": 1
+      },
+      "apps/desktop/src/renderer/features/settings/settings-page.tsx": {
+        "gap-9": 1,
+        "pb-16": 1
+      },
+      "apps/desktop/src/renderer/shell/dialogs/add-local-project.tsx": {
+        "pl-5.5": 2
+      },
+      "apps/desktop/src/renderer/shell/terminal/terminal-workbench-layout.tsx": {
+        "pr-16": 1,
+        "pr-9": 1
+      }
+    },
+    "off-scale-text": {
+      "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
+        "text-xl": 1
+      }
+    },
+    "raw-control": {
+      "apps/desktop/src/renderer/features/agent-extensions/customize-extensions.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent-extensions/customize-mcp.tsx": {
+        "button": 4
+      },
+      "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent-extensions/mcp-import-dialog.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent-extensions/mcp-server-form.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/agent-model-menu.tsx": {
+        "button": 5
+      },
+      "apps/desktop/src/renderer/features/agent/chat-provenance.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/checkpoint-rail.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/agent/composer-attachments.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/agent/composer-editor/pill-views.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/composer-editor/pills.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/agent/composer-editor/use-composer-editor.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/composer-pills.tsx": {
+        "button": 4
+      },
+      "apps/desktop/src/renderer/features/agent/context-gauge.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/agent/jump-pills.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/agent/permission-card.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/project-context-chip.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/agent/question-card.tsx": {
+        "button": 6,
+        "textarea": 1
+      },
+      "apps/desktop/src/renderer/features/agent/queued-messages-card.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/browser-activity-card.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/event-row.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/event-stripe.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/text-message.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/tool-resource-link.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/tool-subagent.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/agent/slash-command-picker.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/turn-container.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/agent/turn-footer.tsx": {
+        "button": 5
+      },
+      "apps/desktop/src/renderer/features/agent/turn-usage-card.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/agent/workflow-activity.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/auth/login-screen.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx": {
+        "button": 3
+      },
+      "apps/desktop/src/renderer/features/browser/browser-variant-frame.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/dashboard/dashboard-page.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-auto-layout-controls.tsx": {
+        "button": 3,
+        "input": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-canvas.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-color-picker.tsx": {
+        "button": 1,
+        "input": 4
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-directory-menu.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-effect-editor.tsx": {
+        "button": 2,
+        "input": 2
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-fill-editor.tsx": {
+        "button": 3,
+        "input": 4
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-inspector-kit.tsx": {
+        "button": 3,
+        "input": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-inspector.tsx": {
+        "button": 4
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-layout-controls.tsx": {
+        "button": 4
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-layout-tools-overlay.tsx": {
+        "button": 2,
+        "input": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-motion-timeline.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-style-editor.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-theme-editor.tsx": {
+        "button": 3
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-typography-editor.tsx": {
+        "button": 1,
+        "input": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-workspace-overlays.tsx": {
+        "button": 5
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-workspace-sidebar-panels.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/repositories/design-section.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/features/repositories/files-to-copy-section.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/repositories/repositories-panel.tsx": {
+        "button": 3,
+        "textarea": 1
+      },
+      "apps/desktop/src/renderer/features/settings/github-section.tsx": {
+        "button": 2,
+        "input": 1
+      },
+      "apps/desktop/src/renderer/features/settings/providers-panel.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/settings/settings-ui.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/settings/terminal-agents-section.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/features/team/create-team-dialog.tsx": {
+        "button": 3
+      },
+      "apps/desktop/src/renderer/features/team/team-panel.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/app-sidebar.tsx": {
+        "button": 3
+      },
+      "apps/desktop/src/renderer/shell/conversation/chat-tabs.tsx": {
+        "button": 1,
+        "input": 1
+      },
+      "apps/desktop/src/renderer/shell/conversation/conversation-header.tsx": {
+        "button": 1,
+        "input": 1
+      },
+      "apps/desktop/src/renderer/shell/dialogs/feedback-dialog.tsx": {
+        "input": 1
+      },
+      "apps/desktop/src/renderer/shell/dispatcher/agent-model-picker.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/dispatcher/create-from-source.tsx": {
+        "input": 1
+      },
+      "apps/desktop/src/renderer/shell/pr/create-pr-button.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/shell/pr/pr-status-island.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/shell/pr/target-branch-select.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/repository-icon-dialog.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/shell/shortcuts-palette.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/sidebar-repository-header.tsx": {
+        "button": 4
+      },
+      "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tab-strip.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
+        "button": 6,
+        "input": 3
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/changes-diff-viewer.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/changes-tab.tsx": {
+        "button": 3
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/code-editor/source-editor.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/design-files-pane.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
+        "button": 4
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/files-search-sidebar.tsx": {
+        "input": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/review-changes.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/review-checks.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/review-shared-components.tsx": {
+        "button": 3
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/review-tab.tsx": {
+        "button": 4
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/review-timeline.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx": {
+        "button": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/working-directories-panel.tsx": {
+        "button": 2
+      },
+      "apps/desktop/src/renderer/shell/worktree-missing-panel.tsx": {
+        "button": 1
+      }
+    },
+    "status-pairing": {
+      "apps/desktop/src/renderer/features/agent/renderers/event-row.tsx": {
+        "text-red-primary on bg-red-bg": 2
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/tool-detail-surface.tsx": {
+        "text-red-primary on bg-red-bg": 1
+      }
+    },
+    "stock-shadow": {
+      "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
+        "shadow-xs": 1
+      },
+      "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
+        "shadow-xs": 1
+      },
+      "apps/desktop/src/renderer/features/agent/goal-card.tsx": {
+        "shadow-xs": 1
+      },
+      "apps/desktop/src/renderer/features/agent/mention-picker.tsx": {
+        "shadow-lg": 1
+      },
+      "apps/desktop/src/renderer/features/agent/pr-picker.tsx": {
+        "shadow-lg": 1
+      },
+      "apps/desktop/src/renderer/features/agent/slash-command-picker.tsx": {
+        "shadow-lg": 1
+      },
+      "apps/desktop/src/renderer/features/browser/browser-variant-frame.tsx": {
+        "shadow-md": 1
+      },
+      "apps/desktop/src/renderer/features/design-workspace/design-workspace-overlays.tsx": {
+        "shadow-sm": 2
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/badge.tsx": {
+        "shadow": 2
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/button.tsx": {
+        "shadow": 2
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/card.tsx": {
+        "shadow": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/input-group.tsx": {
+        "shadow-xs": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/input.tsx": {
+        "shadow-sm": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/sidebar.tsx": {
+        "shadow-sm": 2
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/slider.tsx": {
+        "shadow": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/switch.tsx": {
+        "shadow-sm": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/tabs.tsx": {
+        "shadow": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/textarea.tsx": {
+        "shadow-sm": 1
+      },
+      "apps/desktop/src/renderer/shell/dispatcher/dispatcher-composer.tsx": {
+        "shadow-xs": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
+        "shadow-lg": 1,
+        "shadow-sm": 3
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/code-editor/source-editor.tsx": {
+        "shadow-sm": 2
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
+        "shadow-sm": 2
+      }
+    },
+    "text-alpha": {
+      "apps/desktop/src/renderer/features/agent/renderers/compaction-card.tsx": {
+        "text-fg2/70": 2
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/highlighted-code.tsx": {
+        "text-fg2/45": 1
+      },
+      "apps/desktop/src/renderer/features/agent/renderers/question-card.tsx": {
+        "text-fg2/70": 3
+      },
+      "apps/desktop/src/renderer/features/repositories/repositories-panel.tsx": {
+        "text-fg2/45": 1
+      },
+      "apps/desktop/src/renderer/features/settings/code-theme-preview.tsx": {
+        "text-fg2/45": 1
+      },
+      "apps/desktop/src/renderer/shared/ui/primitives/sidebar.tsx": {
+        "text-fg1/70": 1
+      },
+      "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
+        "text-fg2/50": 1,
+        "text-fg2/60": 1
+      },
+      "apps/desktop/src/renderer/shell/workspace-glyph.tsx": {
+        "text-fg3/25": 1
+      }
+    },
+    "transition-all": {
+      "apps/desktop/src/renderer/shared/ui/primitives/sidebar.tsx": {
+        "transition-all": 1
+      }
+    }
+  }
+}

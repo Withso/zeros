@@ -5,7 +5,7 @@
 // State badge, check glyphs, author avatars, collapsible group headers,
 // empty/error states — one place so the four sections (changes /
 // commits / checks / reviews) stay visually identical. Recipes follow
-// styles/zeros-foundation.md (§3 surface map, §4 components, §8 radius/motion).
+// docs/design-system.md (surfaces, controls, radius, motion).
 
 import React, { useState } from "react";
 import {

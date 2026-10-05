@@ -123,7 +123,7 @@
   --fg1: hsl(0 0% 94%); /* #F0F0F0 */
   --fg2: hsl(0 0% 72%); /* #B8B8B8 */
   --fg3: hsl(0 0% 63%); /* #A1A1A1 */
-  --muted-fg: hsl(0 0% 44%); /* #707070 */
+  --muted-fg: hsl(0 0% 54%); /* #8A8A8A */
 
   --sidebar-bg: hsl(0 0% 9%); /* #171717 */
   --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 */
@@ -199,9 +199,9 @@
     --bg5: hsl(0 0% 88%); /* #E0E0E0 */
 
     --fg1: hsl(20 7% 16%); /* #2C2826 */
-    --fg2: hsl(20 4% 37%); /* #625D5B */
-    --fg3: hsl(20 4% 44%); /* #756F6C */
-    --muted-fg: hsl(20 4% 56%); /* #938D8A */
+    --fg2: hsl(20 4% 30.5%); /* #514D4B */
+    --fg3: hsl(20 4% 36%); /* #5F5B58 */
+    --muted-fg: hsl(20 4% 41%); /* #6D6764 */
 
     --sidebar-bg: hsl(60 9% 98%); /* #FAFAF9 */
     --sidebar-bg-hover: hsl(60 2% 92%); /* #EBEBEA */
@@ -209,7 +209,7 @@
     --border1: hsl(30 9% 91%); /* #EAE8E6 */
     --border2: hsl(30 9% 88%); /* #E3E0DE */
     --border3: hsl(60 3% 85%); /* #DADAD8 */
-    --border4: hsl(0 1% 83%); /* #D5D4D4 */
+    --border4: hsl(0 1% 78%); /* #C7C6C6 */
 
     --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.12);
     --shadow-product: 0 24px 64px -20px rgba(0, 0, 0, 0.16);
@@ -230,9 +230,9 @@
 
     --green-primary: hsl(142 75% 36%);
     --green-bg: hsl(134 38% 89%);
-    --green-fg: hsl(142 70% 30%);
+    --green-fg: hsl(142 70% 27.5%);
 
-    --yellow-primary: hsl(37 90% 60%);
+    --yellow-primary: hsl(37 90% 28.5%);
     --yellow-bg: hsl(48 97% 89%);
     --yellow-fg: hsl(37 100% 51%);
 

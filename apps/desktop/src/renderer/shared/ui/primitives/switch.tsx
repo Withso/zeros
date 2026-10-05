@@ -10,10 +10,14 @@ const Switch = React.forwardRef<
   <SwitchPrimitive.Root
     className={cn(
       // On (checked): --switch-on-bg, the brown accent (--brown-fg) in every
-      // theme. Off (unchecked): border3 track with a 1px border4 ring. The
-      // border stays transparent when checked so the track doesn't resize.
-      // Both switch tokens live in styles/semantic-tokens.css.
-      "peer focus-visible:ring-highlighted-bright/50 data-[state=unchecked]:bg-border3 data-[state=unchecked]:border-border4 inline-flex h-5 w-8 shrink-0 cursor-pointer items-center rounded-full border border-transparent shadow-sm transition-colors focus-visible:ring-[3px] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-[var(--switch-on-bg)]",
+      // theme. Off (unchecked): border3 track with a 1px --border-control
+      // ring — the outline IS the control, so it holds 3:1 on every surface.
+      // The border stays transparent when checked so the track doesn't
+      // resize. Keyboard focus swaps the ring for the opaque
+      // highlighted-bright core (`not-focus-visible` keeps the unchecked ring
+      // from overriding it). Both switch tokens live in
+      // styles/semantic-tokens.css.
+      "peer focus-visible:ring-highlighted-bright/50 focus-visible:border-highlighted-bright data-[state=unchecked]:bg-border3 data-[state=unchecked]:not-focus-visible:border-border-control inline-flex h-5 w-8 shrink-0 cursor-pointer items-center rounded-full border border-transparent shadow-sm transition-colors focus-visible:ring-[3px] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-[var(--switch-on-bg)]",
       className,
     )}
     {...props}

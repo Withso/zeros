@@ -108,13 +108,17 @@ const FORMER_WARM_DARK = {
  *    bg2      — a point higher so the composer and raised cards lift further
  *               off the canvas.
  *    fg1/fg2  — raised for stronger text contrast on the neutral canvas.
- *    fg3      — the RESERVED middle tier. Neutral Dark places it at L63 (the
- *               former palette sat at L44 before the tier consolidation). */
+ *    fg3      — the middle tier at L63 (the former palette sat at L44 before
+ *               the tier consolidation).
+ *    muted-fg — L54, the lowest lightness that keeps the quietest text tier at
+ *               WCAG AA (4.5:1) on every rest surface; L44 failed it.
+ *               styles/policy/contrast-contract.json owns the thresholds. */
 const NEUTRAL_DARK_LIGHTNESS_OVERRIDES: Record<string, number> = {
   bg2: 13,
   fg1: 94,
   fg2: 72,
   fg3: 63,
+  "muted-fg": 54,
 };
 
 /** Structural primitives neutral Dark defines as an ALIAS rather than a literal
@@ -212,23 +216,18 @@ describe("foreground tier ladder", () => {
   const tiers = ["fg1", "fg2", "fg3", "muted-fg"] as const;
 
   /** Light's foreground tiers, pinned. Dark is already pinned (via
-   *  FORMER_WARM_DARK + NEUTRAL_DARK_LIGHTNESS_OVERRIDES), but nothing pinned
-   *  Light — so a "quick contrast tweak" there was unreviewable.
+   *  FORMER_WARM_DARK + NEUTRAL_DARK_LIGHTNESS_OVERRIDES), so a "quick
+   *  contrast tweak" to either palette is a reviewed edit.
    *
-   *  This matters most for muted-fg. It clears the 3:1 non-text floor on Light's
-   *  bg1 (3.26:1) but sits just under it on raised surfaces (2.93:1 on bg2) — a
-   *  long-standing shortfall inherited unchanged from the former --fg3, NOT a
-   *  regression from the tier consolidation. Deliberately not asserted as a
-   *  threshold (it would fail, and dimming toward compliance is backwards);
-   *  pinned instead, so the value can only move as a reviewed edit.
-   *
-   *  fg3 is L44 — BELOW muted-fg's L56 — because Light inverts the lightness
-   *  axis. See the ladder assertion above. */
+   *  Every tier clears WCAG AA (4.5:1) on every rest surface — the thresholds
+   *  live in styles/policy/contrast-contract.json and contrast-contract.test.ts.
+   *  The ladder mirrors Dark's (≈ 9 / 7 / 5.5 : 1 on bg1). Lightness RISES as
+   *  the tiers get quieter because Light inverts the lightness axis. */
   const LIGHT_FOREGROUND_TIERS: Record<string, [number, number, number]> = {
     fg1: [20, 7, 16],
-    fg2: [20, 4, 37],
-    fg3: [20, 4, 44],
-    "muted-fg": [20, 4, 56],
+    fg2: [20, 4, 30.5],
+    fg3: [20, 4, 36],
+    "muted-fg": [20, 4, 41],
   };
 
   it("pins the light foreground tiers against unreviewed drift", () => {
@@ -254,38 +253,9 @@ describe("foreground tier ladder", () => {
     }
   });
 
-  it("keeps muted-fg at or above the 3:1 non-text floor on each canvas", () => {
-    for (const [name, block] of Object.entries(palettes)) {
-      expect(
-        contrastRatio(
-          tokenTriple(block, "muted-fg"),
-          tokenTriple(block, "bg1"),
-        ),
-        `${name}: muted-fg/bg1`,
-      ).toBeGreaterThanOrEqual(3);
-    }
-  });
-
-  // muted-fg also carries empty-state icons and metadata on RAISED surfaces.
-  // Dark clears 3:1 there with almost no margin (L44 is the lowest value that
-  // does) — lowering it further is what this locks down.
-  // Light is deliberately excluded: its muted-fg sits at 2.95:1 on bg2, a
-  // PRE-EXISTING shortfall inherited unchanged from the former --fg3, not a
-  // regression introduced by the tier consolidation.
-  it("keeps dark muted-fg above the 3:1 floor on raised surfaces too", () => {
-    for (const name of ["neutral dark"] as const) {
-      const block = palettes[name];
-      for (const surface of ["bg2", "bg2-hover"] as const) {
-        expect(
-          contrastRatio(
-            tokenTriple(block, "muted-fg"),
-            tokenTriple(block, surface),
-          ),
-          `${name}: muted-fg/${surface}`,
-        ).toBeGreaterThanOrEqual(3);
-      }
-    }
-  });
+  // Readability thresholds for every tier (and every other declared pairing)
+  // are asserted by contrast-contract.test.ts against
+  // styles/policy/contrast-contract.json, in both themes.
 
   it("declares fg3 as a literal in every palette", () => {
     // fg3 is consumed by the input placeholders and the file tree's ignored
@@ -297,5 +267,38 @@ describe("foreground tier ladder", () => {
         `${name}: fg3 lightness`,
       ).toBeGreaterThan(0);
     }
+  });
+});
+
+/** Diff rows are their own color identity. The renderer derives row fills from
+ *  --diff-addition / --diff-deletion / --diff-neutral, so retuning status TEXT
+ *  (green-primary, red-primary, fg2) for contrast must not re-tint diff rows:
+ *  darker light-mode text anchors once dropped GitHub Light code on an added
+ *  row from 4.66:1 to 3.31:1. */
+describe("diff renderer inputs", () => {
+  const dark = extractBlock(":root");
+  const light = extractBlock('[data-theme="light"]');
+  const diffThemeSource = readFileSync(
+    "apps/desktop/src/renderer/shared/theme/diff-theme.ts",
+    "utf8",
+  );
+
+  it("follows the status anchors in Dark", () => {
+    expect(dark).toMatch(/--diff-addition:\s*var\(--green-primary\)/);
+    expect(dark).toMatch(/--diff-deletion:\s*var\(--red-primary\)/);
+    expect(dark).toMatch(/--diff-neutral:\s*var\(--fg2\)/);
+  });
+
+  it("pins Light's established diff palette", () => {
+    expect(tokenTriple(light, "diff-addition")).toEqual([142, 75, 36]);
+    expect(tokenTriple(light, "diff-deletion")).toEqual([0, 72, 51]);
+    expect(tokenTriple(light, "diff-neutral")).toEqual([20, 4, 37]);
+  });
+
+  it("feeds the diff shadow root only through the diff inputs", () => {
+    expect(diffThemeSource).toContain("var(--diff-addition)");
+    expect(diffThemeSource).toContain("var(--diff-deletion)");
+    expect(diffThemeSource).toContain("var(--diff-neutral)");
+    expect(diffThemeSource).not.toMatch(/var\(--(?:green|red)-primary\)|var\(--fg2\)/);
   });
 });

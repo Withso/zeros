@@ -49,8 +49,8 @@ describe("composer chrome", () => {
   });
 
   it("paints the sent user message on the composer's own surface", () => {
-    // --highlighted-bg is aliased to --bg2 in neutral Dark (see §9.1 of
-    // styles/zeros-foundation.md), so the bubble and the composer read as one
+    // --highlighted-bg is aliased to --bg2 in neutral Dark (see "Neutral Dark"
+    // in docs/design-system-history.md), so the bubble and the composer read as one
     // surface family; border1 is what draws the bubble's edge on either.
     expect(code("../turn-container.tsx")).toContain(
       '"border-border1 bg-highlighted-bg"',

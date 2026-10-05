@@ -137,22 +137,19 @@ export const CHAT_STRIP_SHELL_CLS =
  * matches its inter-tab gap after the toggle. Exported so the no-workspace
  * placeholder band in conversation/pane-layout.tsx seats them identically.
  *
- * `relative z-40` lifts both slots ABOVE the host pane's inactive-window veil
- * (`bg-bg0/30`, z-30 — see ChatPane in conversation/pane-layout.tsx). That veil
- * exists to dim a pane's own chrome and transcript when it isn't the focused
- * window, and it should keep doing that for the pane's tabs, history, "+" and
- * "⋯". These two controls are NOT pane-scoped: they act on the whole workspace
- * (Code↔Design) and the whole column (expand Workbench), and they only borrow a
- * corner of one pane's strip because the column no longer has a row of its own.
- * Dimming them by 30% toward bg0 made the mode toggle read as unavailable
- * whenever the top-left pane happened to be unfocused. z-40 matches the drag
- * drop overlay, which is a LATER sibling and so still paints over the strip
- * mid-drag. The pane's bg0 window fill still shows behind them (a ~1% shift
- * against bg1), so the surrounding strip keeps reading as recessed. */
+ * `relative z-chrome` keeps both slots above anything a pane layers over its own
+ * strip. These two controls are NOT pane-scoped: they act on the whole
+ * workspace (Code↔Design) and the whole column (expand Workbench), and they
+ * only borrow a corner of one pane's strip because the column no longer has a
+ * row of its own, so pane-level treatments must never dim them. (They were
+ * lifted above the former bg0/30 inactive-window veil; inactive panes now
+ * recede through their bg0 window fill alone, which keeps text at full
+ * contrast.) z-chrome (40) matches the drag drop overlay, a LATER sibling that
+ * so still paints over the strip mid-drag. */
 export const CHAT_STRIP_LEADING_CLS =
-  "relative z-40 flex h-full shrink-0 items-center pl-2";
+  "relative z-chrome flex h-full shrink-0 items-center pl-2";
 export const CHAT_STRIP_TRAILING_CLS =
-  "relative z-40 flex h-full shrink-0 items-center pr-2";
+  "relative z-chrome flex h-full shrink-0 items-center pr-2";
 
 /** History, plus, and the "⋯" menu all sit outside the scroll viewport. The lane
  * shrink-wraps while tabs fit, then consumes the available room and scrolls.

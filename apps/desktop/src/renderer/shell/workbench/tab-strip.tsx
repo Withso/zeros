@@ -349,7 +349,7 @@ function TabPill({
           aria-hidden
           className={cn(
             "size-1.5 shrink-0 rounded-full",
-            terminalIndicator.dot === "running" && "bg-yellow-primary",
+            terminalIndicator.dot === "running" && "bg-yellow-icon",
             terminalIndicator.dot === "passed" && "bg-green-primary",
             (terminalIndicator.dot === "failed" ||
               terminalIndicator.dot === "stopped") &&

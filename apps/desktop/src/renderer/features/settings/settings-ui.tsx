@@ -11,7 +11,7 @@
 // Build these ONCE; every panel composes them so User and Repo scopes
 // read identically.
 //
-// Zeros Foundation (styles/zeros-foundation.md): section heading /
+// Design system (docs/design-system.md): section heading /
 // row label `font-medium text-fg1`; hints `text-xs text-fg2`; dividers
 // `border-border1`; default text fg2, focal/selected fg1; 4 px grid.
 //

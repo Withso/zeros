@@ -9,7 +9,7 @@ import { cn } from "@/renderer/shared/ui/cn";
  * a bordered chip in `--border1` with `--fg2` text at 11px. Right-align it in
  * a flex menu row with `className="ml-auto"`. It sits on the bg3 popover
  * surface, where `border1` reads as a subtle-but-visible outline (the design
- * rule lives in zeros-foundation.md §4 — border1 / fg2 / 11px, app-wide).
+ * rule lives in docs/design-system.md — border1 / fg2 / 11px, app-wide).
  */
 function Kbd({ className, ...props }: React.ComponentProps<"span">) {
   return (

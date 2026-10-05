@@ -132,7 +132,7 @@ export function LoginScreen() {
   }
 
   return (
-    <div className="bg-bg1 text-fg2 fixed inset-0 z-50 flex flex-col">
+    <div className="bg-bg1 text-fg2 fixed inset-0 z-modal flex flex-col">
       {/* main content — three rows (logo · prompt · button) with EQUAL gaps,
           left-aligned within a centered column. */}
       <div className="flex flex-1 items-center justify-center px-6">

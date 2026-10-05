@@ -26,8 +26,8 @@
      --bg0                  INACTIVE chat window fill — one step BELOW bg1.
                             The ACTIVE chat window keeps the plain bg1 canvas
                             (indistinguishable from the pre-split app); every
-                            OTHER pane fills bg0 AND veils its content with
-                            bg0 at 30% (the "one active window" cue).
+                            OTHER pane fills bg0 (the "one active window"
+                            cue). Text is never veiled: it keeps full contrast.
                             Consumed via --pane-bg (see below), never directly
                             as a window fill.
      --pane-bg              CONTEXTUAL alias — the surface color of the chat
@@ -86,7 +86,7 @@
    INVERTED (polarity-flipping surface — always the OPPOSITE of bg1):
      --inverted-bg           near-white in dark theme, near-black in light
      --inverted-fg           text/icon on --inverted-bg (always pairs with it)
-     Consumers: primary button fill, switch/toggle ON track. Never use
+     Consumers: primary button fill, checkbox ON fill. Never use
      --inverted-bg without --inverted-fg for the content on it.
 
    COMPONENT ALIASES (button intents, aliases over primitives):
@@ -94,44 +94,12 @@
      --primary-button-hover  own value per theme   (lifted from primary-button-bg)
      --primary-button-fg     → var(--inverted-fg)  (text/icon on top of primary button)
 
-   ─── USAGE RULES (full reference: styles/zeros-foundation.md) ─
-
-   Default page bg = --bg1. Composer = --bg2. Popover/dropdown/menu = --bg3
-   (floating surfaces only — dialogs/sheets are --bg1, hover-cards --bg2).
-   Repository navigation = --sidebar-bg.
-
-   Hover states (surface-scoped):
-     hover on bg1 surface → --bg1-hover
-     hover on bg2 surface → --bg2-hover
-     hover on bg3 surface → --bg3-hover
-     hover on sidebar     → --sidebar-bg-hover
-
-   Foregrounds: default --fg2, selected/highlighted --fg1. Below the default,
-   pick by REFERENCE POINT: --fg3 when the thing it must read quieter than is
-   the --fg2 text beside it (placeholders, ignored file-tree rows); --muted-fg
-   when the content is incidental to the surface itself (timestamps, counts,
-   disabled text, empty-state icons).
-
-   Buttons:
-     Primary    → bg-primary-button-bg + text-primary-button-fg, hover: bg-primary-button-hover
-     Secondary  → bg-bg{N} (matches parent) + border-border3 + text-fg1, hover bg-bg2
-     Tertiary   → bg-bg1-hover + text-fg2, hover bg-bg2-hover (used on bg1)
-     Ghost      → transparent + text-fg2, hover bg-bg2-hover + text-fg1
-     NOTE: never use bg-bg3 as a hover/selected/chip FILL on any surface, in
-     EITHER theme — light bg3 == bg1 (white) so the fill vanishes; dark bg3 ==
-     sidebar-bg (barely above bg1) so it vanishes on bg1 and INVERTS (goes
-     darker) on bg2. bg2-hover is the universal chip fill; selected states on
-     the sidebar use sidebar-bg-hover; items inside a popover use bg3-hover.
-
-   Inputs:
-     bg-bg{N} (matches parent), border-border3, focus border-highlighted-bright
-     value text-fg1, placeholder:text-fg3 (the composer's ProseMirror
-     placeholder uses var(--fg3) directly — same tier, one weight app-wide).
-     A placeholder at --fg2 reads as a FILLED value; do not go back to it.
-
-   Dropdowns:
-     trigger: bg-bg{N} + border-border3, hover bg-bg2-hover + border-border4
-     popover: bg-bg3, items hover bg-bg3-hover
+   ─── USAGE ─────────────────────────────────────────────────
+   Which token paints what, the component rules, and the checks that enforce
+   them: docs/design-system.md. Values and contrast per theme (generated):
+   docs/design-tokens.md. Every declared fg/bg pairing must pass
+   styles/policy/contrast-contract.json in BOTH themes; after editing a value
+   here run `pnpm design:docs` and `pnpm check:ui`.
    ============================================================ */
 
 @import "tailwindcss" source(none);
@@ -152,7 +120,7 @@
  *     electron/ipc, read as the `!` important modifier plus a utility;
  *   - `[electron:rebuild]`, `[updater:debug]` — package.json script names;
  *   - `bg-white`, `text-gray-500`, `space-y-5`, `mt-3.5` — classes BANNED
- *     by zeros-foundation.md §14/§8 and enforced by check:ui, present only
+ *     by docs/design-system.md and enforced by check:ui, present only
  *     because the docs and the design prototypes under styles/Artifacts
  *     name them. Prose describing a class compiled that class, so the ban
  *     was enforced at the call site and quietly undone at build time.
@@ -190,6 +158,14 @@
    so JSX can write bg-primary-button-bg directly. */
 
 @theme inline {
+  /* ── COLOR NAMESPACE RESET ──
+   * Drop Tailwind's built-in palettes (gray, zinc, orange, white, black, …) so
+   * the ONLY color utilities that compile are the Zeros tokens declared below.
+   * `bg-gray-500` or `text-white` then emits nothing, which the compiled-class
+   * gate in `pnpm check:ui` reports. Keywords (transparent, current, inherit)
+   * are not theme colors and keep working. */
+  --color-*: initial;
+
   /* Fonts → font-sans, font-mono */
   --font-sans:
     "Geist Variable", ui-sans-serif, system-ui, -apple-system,
@@ -201,18 +177,23 @@
   /* ── TYPE SCALE — sub-`sm` steps + `xs` override ──
    * Tailwind ships `text-sm` (14px) and up; the app needs finer steps
    * below it, so we name the sizes that used to be written as arbitrary
-   * `text-[Npx]`. Font-size ONLY (no `--text-*--line-height` companion)
-   * so each is a drop-in for the old `text-[Npx]`, which also set
-   * font-size alone — line-height keeps cascading from the parent.
+   * `text-[Npx]`. The xxs steps are font-size ONLY (no line-height
+   * companion): line-height keeps cascading from the parent.
    *   text-xxs    10px   (replaces text-[10px])
    *   text-2xxs   11px   (replaces text-[11px])
    *   text-3xxs   12px   (shortcut-palette category tags; other 12px literals consolidate here)
-   *   text-xs     13px   (overrides Tailwind's 12px default; = text-[13px])
+   *   text-xs     13px on an 18px line (the Button / Select metric)
+   *   text-sm     14px on a 20px line (Tailwind default)
+   * text-xs MUST declare its own line height: overriding only the size
+   * kept Tailwind's 12px ratio (1.333), so 13px text sat on a 17.33px line
+   * and rows measured 25.33 / 29.33px instead of whole pixels. 18 / 13
+   * lands every text-xs line box on exactly 18px.
    * Raw `12px` literals (e.g. CodeMirror theme.ts) are untouched. */
   --text-xxs: 0.625rem;
   --text-2xxs: 0.6875rem;
   --text-3xxs: 0.75rem;
   --text-xs: 0.8125rem;
+  --text-xs--line-height: calc(18 / 13);
   --text-dialog-title: var(--dialog-title-size);
 
   /* ── FONT WEIGHTS — softened from Tailwind's defaults ──
@@ -288,6 +269,9 @@
   --color-border2: var(--border2);
   --color-border3: var(--border3);
   --color-border4: var(--border4);
+  /* Boundary of a control whose outline IS the affordance (checkbox, radio,
+   * switch-off track, slider thumb) — ≥3:1 on every rest surface. */
+  --color-border-control: var(--border-control);
 
   /* ── HIGHLIGHTED (theme-adaptive interaction emphasis) ── */
   --color-highlighted-bg: var(--highlighted-bg);
@@ -306,6 +290,7 @@
   --color-red-primary: var(--red-primary);
   --color-red-secondary: var(--red-secondary);
   --color-red-secondary-fg: var(--red-secondary-fg);
+  --color-red-secondary-hover: var(--red-secondary-hover);
   --color-red-bg: var(--red-bg);
   --color-red-fg: var(--red-fg);
   --color-green-primary: var(--green-primary);
@@ -314,6 +299,7 @@
   --color-yellow-primary: var(--yellow-primary);
   --color-yellow-bg: var(--yellow-bg);
   --color-yellow-fg: var(--yellow-fg);
+  --color-yellow-icon: var(--yellow-icon);
   --color-blue-primary: var(--blue-primary);
   --color-blue-bg: var(--blue-bg);
   --color-blue-fg: var(--blue-fg);
@@ -395,6 +381,27 @@
   --color-brown-950: var(--brown-950);
 }
 
+/* ── STACKING LAYERS → utilities ──
+   Global layers are named, never numbered: z-panel < z-chrome < z-modal =
+   z-dropdown < z-toast. Values live with the other cross-boundary layer rules in
+   styles/global/platform.css. Only z-0…z-2 stay numeric (local stacking inside
+   one component). `pnpm check:ui` flags numeric global z-index. */
+@utility z-panel {
+  z-index: var(--z-panel);
+}
+@utility z-chrome {
+  z-index: var(--z-chrome);
+}
+@utility z-dropdown {
+  z-index: var(--z-dropdown);
+}
+@utility z-modal {
+  z-index: var(--z-modal);
+}
+@utility z-toast {
+  z-index: var(--z-toast);
+}
+
 /* ──────────────────────────────────────────────────────────
    2. PRIMITIVE TOKENS — neutral dark (the default dark theme)
    ──────────────────────────────────────────────────────────
@@ -470,7 +477,11 @@
    * copying this lightness — in Light a higher L means LESS contrast, so
    * copying `60` there would invert the tier order. */
   --fg3: hsl(0 0% 63%); /* #A1A1A1 — middle tier (one step below fg2) */
-  --muted-fg: hsl(0 0% 44%); /* #707070 — quietest tier (app-wide 3rd tier) */
+  /* QUIETEST readable tier: 4.5:1 (WCAG AA) on every rest surface — the
+   * worst is bg2 at 4.66:1. Was L44 (#707070, 3.25:1 on bg2), which failed
+   * AA for the timestamps, counts and SHAs it carries. Hovered rows step it
+   * up to fg3 (styles/policy/contrast-contract.json). */
+  --muted-fg: hsl(0 0% 54%); /* #8A8A8A — quietest tier (app-wide 4th tier) */
 
   /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
   --sidebar-bg: hsl(0 0% 9%); /* #171717 */
@@ -481,6 +492,10 @@
   --border2: hsl(0 0% 18%); /* #2E2E2E — sidebar / composer focus / bg2 */
   --border3: hsl(0 0% 24%); /* #3D3D3D — secondary btn / dropdown / input */
   --border4: hsl(0 0% 30%); /* #4D4D4D — highlighted state of border3 */
+  /* Control boundary: the outline of a checkbox, radio, switch-off track or
+   * slider thumb, where the outline itself identifies the control. ≥3:1 on
+   * every rest surface (WCAG 1.4.11); border1-4 stay decorative. */
+  --border-control: hsl(0 0% 47%); /* #787878 — control boundary (3:1) */
 
   /* ── ELEVATION ──
    * Lift for floating surfaces (popover / dropdown / context menu).
@@ -543,6 +558,10 @@
                                         * fills. THEME-STATIC (white in both themes —
                                         * the red fill stays vivid in light, so fg1,
                                         * which flips dark, can't sit on it). */
+  /* Hover/pressed fill of a SOLID destructive control. A solid step, not an
+   * alpha (`/90`) wash: alpha lightens the fill toward the surface and broke
+   * white-text contrast in Light. */
+  --red-secondary-hover: hsl(7 83% 36%); /* #A82110 — destructive hover fill */
   --red-bg: hsl(3 26% 13.7%); /* #2C1B1A — error container surface */
   --red-fg: hsl(20 97% 72%); /* #FDA274 — text/icon on --red-bg */
 
@@ -555,6 +574,14 @@
   ); /* #E6AB4C — warning · modified · in-progress */
   --yellow-bg: hsl(38 68% 17%); /* #49330E — warning container surface */
   --yellow-fg: hsl(44 100% 50%); /* #FFB900 — text/icon on --yellow-bg */
+  /* Icons, status dots and tinted borders. Dark yellow-primary already reads
+   * at 3:1+ as a graphic, so it IS the icon color; Light needs a separate,
+   * brighter value than its ochre text color. */
+  --yellow-icon: var(--yellow-primary);
+  /* Translucent highlight washes (code-editor search matches at 35% / 55%):
+   * the vivid amber, so a wash reads as a highlighter in both themes. Text on
+   * the wash stays the surrounding text color. */
+  --yellow-wash: var(--yellow-primary);
 
   --blue-primary: hsl(205 80% 73%); /* #83C3F1 — info · links · accents */
   --blue-bg: hsl(226 57% 18%); /* #142048 — info container surface */
@@ -567,6 +594,15 @@
   --brown-primary: hsl(9 46% 72%); /* #D9A298 — file paths · warm accents */
   --brown-bg: hsl(10 15% 15%); /* #2D2321 — brown container surface */
   --brown-fg: hsl(10 80% 72%); /* #F1917E — text/icon on --brown-bg */
+
+  /* ── DIFF INPUTS (shared/theme/diff-theme.ts) ──
+   * The diff renderer derives row fills, word emphasis, gutters and bars from
+   * these three bases. They are their OWN identity, decoupled from status text:
+   * tuning text contrast must never re-tint diff rows. Dark follows the status
+   * anchors; Light pins the diff palette it has always used. */
+  --diff-addition: var(--green-primary);
+  --diff-deletion: var(--red-primary);
+  --diff-neutral: var(--fg2);
 
   /* ── COLOR RAMPS (50–950 — THEME-STATIC absolute scales) ──
    * Full per-family scales for the rare case a specific shade is needed. Wired
@@ -699,19 +735,15 @@
 
   /* ── FOREGROUNDS ── */
   --fg1: hsl(20 7% 16%); /* #2C2826 — selected/highlighted text + icons */
-  --fg2: hsl(
-    20 4% 37%
-  ); /* #625D5B — default text + icon across app; passes AA on white at 6.5:1 */
-  /* MIDDLE tier. Light INVERTS the lightness axis: a
-   * higher L means LESS contrast on a white canvas, so this sits BELOW
-   * --muted-fg's L (44 vs 56), not above it. 4.97:1 on bg1 — the same relative
-   * position between muted-fg and fg2 that neutral Dark's L60 holds. */
-  --fg3: hsl(20 4% 44%); /* #756F6C — middle tier (one step below fg2) */
-  /* Adopts the former --fg3 value (L56, not L68). The ~191 migrated consumers
-   * already rendered at L56, so they stay identical; the 25 review-surface
-   * consumers that were already on --muted-fg rise from 2.24:1 to 3.26:1,
-   * which is the intended fix — L68 was too faint for metadata text. */
-  --muted-fg: hsl(20 4% 56%); /* #938D8A — quietest tier (app-wide 3rd tier) */
+  /* The light text ladder mirrors Dark's (fg2 ≈ 9 / fg3 ≈ 7 / muted ≈ 5.5:1
+   * on bg1) and keeps EVERY tier at WCAG AA on every rest surface, the
+   * worst being highlighted-bg / bg2. Light INVERTS the lightness axis: a
+   * higher L means LESS contrast on white, so the tiers climb in L as they
+   * get quieter. Previous values (L37 / L44 / L56) left fg3 at 4.15:1 and
+   * muted-fg at 2.75:1 on raised surfaces. */
+  --fg2: hsl(20 4% 30.5%); /* #514D4B — default text + icon; 8.4:1 on white */
+  --fg3: hsl(20 4% 36%); /* #5F5B58 — middle tier (one step below fg2) */
+  --muted-fg: hsl(20 4% 41%); /* #6D6764 — quietest tier; 4.67:1 worst rest */
 
   /* ── SIDEBAR ── */
   --sidebar-bg: hsl(60 9% 98%); /* #FAFAF9 */
@@ -721,7 +753,10 @@
   --border1: hsl(30 9% 91%); /* #EAE8E6 — default for bg1 surfaces */
   --border2: hsl(30 9% 88%); /* #E3E0DE — sidebar / composer focus / bg2 */
   --border3: hsl(60 3% 85%); /* #DADAD8 — secondary btn / dropdown / input */
-  --border4: hsl(0 1% 83%); /* #D5D4D4 — highlighted state of border3 */
+  /* border4 is the HOVER/open state of border3, so it must read as a change:
+   * L83 sat at 1.05:1 from border3; L78 makes the step visible. */
+  --border4: hsl(0 1% 78%); /* #C7C6C6 — highlighted state of border3 */
+  --border-control: hsl(30 5% 49%); /* #837D77 — control boundary (3:1) */
 
   /* ── ELEVATION ── softer, wider wash — a light UI reads shadow
    * against white, so lower alpha than the dark theme's 0.35. */
@@ -746,25 +781,33 @@
    * lifted warm charcoal that reads against the near-black fill). */
   --primary-button-hover: hsl(22 6% 25%); /* #433E3B */
 
-  /* ── COLOR PALETTES (6 families — light anchors) ── */
-  --red-primary: hsl(0 72% 51%); /* #DC2728 — −N counts, error accents */
+  /* ── COLOR PALETTES (6 families — light anchors) ──
+   * Each -primary is TEXT-safe: 4.5:1 on every rest AND hover surface (the
+   * worst is bg2-highlight, #E0E0E0). Only lightness moved from the previous values;
+   * hue and saturation are the family's own. Yellow cannot be bright and
+   * readable on white, so its text color is ochre and the vivid golden value
+   * lives on --yellow-icon (icons, dots, tinted borders: 3:1). */
+  --red-primary: hsl(0 72% 44%); /* #C11F1F — −N counts, error accents */
   --red-secondary: hsl(
     0 72% 50%
   ); /* #DC2625 — solid delete fills + delete icons */
+  --red-secondary-hover: hsl(0 72% 45%); /* #C52020 — destructive hover fill */
   --red-bg: hsl(18 87% 91%); /* #FCDFD3 — error container surface */
-  --red-fg: hsl(18 89% 40%); /* #C2410B — text/icon on --red-bg */
+  --red-fg: hsl(18 89% 37.5%); /* #B53E0B — text/icon on --red-bg */
 
-  --green-primary: hsl(142 75% 36%); /* #17A34A — +N counts, success accents */
+  --green-primary: hsl(142 75% 25.5%); /* #107234 — +N counts, success accents */
   --green-bg: hsl(134 38% 89%); /* #D7EDDC — success container surface */
-  --green-fg: hsl(142 70% 30%); /* #17803D — text/icon on --green-bg */
+  --green-fg: hsl(142 70% 27.5%); /* #157739 — text/icon on --green-bg */
 
   --yellow-primary: hsl(
-    37 90% 60%
-  ); /* #F5AE3D — warning · modified · in-progress */
+    37 90% 28.5%
+  ); /* #8A5807 — warning · modified · in-progress (text) */
   --yellow-bg: hsl(48 97% 89%); /* #FEF3C6 — warning container surface */
-  --yellow-fg: hsl(37 100% 51%); /* #FF9F05 — text/icon on --yellow-bg */
+  --yellow-fg: hsl(37 100% 30.5%); /* #9C6000 — text/icon on --yellow-bg */
+  --yellow-icon: hsl(37 90% 36%); /* #AE6F09 — icons, dots, tinted borders */
+  --yellow-wash: hsl(37 90% 60%); /* #F5AE3D — search-match highlight washes */
 
-  --blue-primary: hsl(221 83% 53%); /* #2463EB — info · links · accents */
+  --blue-primary: hsl(221 83% 48.5%); /* #1556E2 — info · links · accents */
   --blue-bg: hsl(214 100% 97%); /* #EFF6FF — info container surface */
   --blue-fg: hsl(224 77% 48%); /* #1C4ED8 — text/icon on --blue-bg */
 
@@ -772,9 +815,14 @@
   --violet-bg: hsl(274 93% 94%); /* #F2E2FE — done container surface */
   --violet-fg: hsl(263 61% 46%); /* #642EBB — text/icon on --violet-bg */
 
-  --brown-primary: hsl(5 35% 50%); /* #AC5A53 — file paths · warm accents */
+  --brown-primary: hsl(5 35% 43%); /* #944E47 — file paths · warm accents */
   --brown-bg: hsl(5 74% 91%); /* #F9DAD7 — brown container surface */
   --brown-fg: hsl(0 20% 40%); /* #7A5252 — text/icon on --brown-bg */
+
+  /* Diff inputs pinned to Light's established diff palette (see :root). */
+  --diff-addition: hsl(142 75% 36%); /* #17A34A — diff addition base */
+  --diff-deletion: hsl(0 72% 51%); /* #DC2728 — diff deletion base */
+  --diff-neutral: hsl(20 4% 37%); /* #625D5B — neutral mixed into diff row fills */
 }
 
 /* ──────────────────────────────────────────────────────────

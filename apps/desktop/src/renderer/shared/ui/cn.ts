@@ -17,7 +17,10 @@ import { extendTailwindMerge } from "tailwind-merge";
 const twMerge = extendTailwindMerge({
   extend: {
     classGroups: {
-      "font-size": [{ text: ["xxs", "2xxs", "3xxs"] }],
+      "font-size": [{ text: ["xxs", "2xxs", "3xxs", "dialog-title"] }],
+      // Named stacking layers (zeros-tokens.css @utility z-*), so
+      // `cn("z-10", "z-modal")` resolves to one z-index like any other pair.
+      z: [{ z: ["panel", "chrome", "dropdown", "modal", "toast"] }],
     },
   },
 });

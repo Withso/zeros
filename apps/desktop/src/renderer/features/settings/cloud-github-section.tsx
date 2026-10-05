@@ -127,7 +127,7 @@ export function CloudGithubSection({
       }
     >
       {(error || snapshot.error) && (
-        <p className="text-error text-xs" role="alert">
+        <p className="text-red-primary text-xs" role="alert">
           {error ?? snapshot.error?.message}
         </p>
       )}

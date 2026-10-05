@@ -1328,7 +1328,7 @@ export function AppShell() {
             (toast / toast.error / toast.success / toast.warning /
             toast.info from @/renderer/shared/ui/primitives/elements) renders through it.
             Rule: never add new inline pills / banners for transient
-            feedback — see /zeros-foundation skill + styles/zeros-foundation.md.
+            feedback — see docs/design-system.md (Feedback).
             Lives ABOVE the AuthGate (with UpdateNotifications) so toasts —
             in particular the auto-update toast — render on the login screen
             too, not just after sign-in. */}

@@ -420,7 +420,7 @@ export function BrowserAgentPictureInPicture({
           <Globe2 className="text-fg2 size-3 shrink-0" aria-hidden="true" />
         )}
         <span
-          className="text-fg1 text-2xs min-w-0 flex-1 truncate text-left"
+          className="text-fg1 text-2xxs min-w-0 flex-1 truncate text-left"
           title={pipTitle}
         >
           {pipTitle}

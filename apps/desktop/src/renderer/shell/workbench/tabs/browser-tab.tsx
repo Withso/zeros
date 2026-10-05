@@ -2079,7 +2079,7 @@ function ElementChip({
     <div
       ref={containerRef}
       data-zeros-element-chip
-      className="pointer-events-auto absolute z-50"
+      className="pointer-events-auto absolute z-dropdown"
       style={{ left, top, width: CHIP_WIDTH }}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}

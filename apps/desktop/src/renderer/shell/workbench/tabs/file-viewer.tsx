@@ -837,7 +837,7 @@ export function FileViewer({
           {sourceShown && sourceReadOnly && (
             <div className="flex h-full min-h-0 flex-col">
               {designReadOnly && (
-                <div className="text-fg3 bg-bg2 border-bd1 shrink-0 border-b px-5 py-2 text-xs">
+                <div className="text-fg3 bg-bg2 border-border1 shrink-0 border-b px-5 py-2 text-xs">
                   Edit this cloud Design source through the Design tools.
                 </div>
               )}

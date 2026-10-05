@@ -95,7 +95,7 @@ export function ShortcutsPalette({
           // (py-2 + h-7) + list padding 8 + 8 × 32px rows; 660px wide keeps
           // the previous 600×312 proportion. Overflowing content scrolls
           // in the list (flex-col + min-h-0).
-          "fixed top-1/2 left-1/2 z-50 flex w-[92vw] max-w-[660px] -translate-x-1/2 -translate-y-1/2 flex-col",
+          "fixed top-1/2 left-1/2 z-modal flex w-[92vw] max-w-[660px] -translate-x-1/2 -translate-y-1/2 flex-col",
           "h-[min(72vh,432px)] gap-0 p-0",
           "border-border2/60 overflow-hidden rounded-lg border shadow-[var(--shadow-dropdown)]",
           // Thick glass (tuned to the user's reference): a --bg2 wash for

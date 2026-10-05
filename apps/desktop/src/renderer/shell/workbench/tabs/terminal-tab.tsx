@@ -1541,7 +1541,7 @@ function SubTab({
           className={cn(
             "ml-1.5 size-1.5 shrink-0 rounded-full",
             dot === "running" &&
-              "bg-yellow-primary ring-yellow-primary/20 ring-[3px]",
+              "bg-yellow-icon ring-yellow-icon/20 ring-[3px]",
             dot === "passed" && "bg-green-primary",
             (dot === "failed" || dot === "stopped") && "bg-red-primary",
           )}

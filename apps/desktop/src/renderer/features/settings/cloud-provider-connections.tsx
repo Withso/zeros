@@ -306,7 +306,7 @@ function CloudProviderConnection({
       <NativeBrowserAvailability provider={agent.id} />
       {snapshot.error && (
         <div className="flex items-center justify-between gap-3">
-          <p className="text-error text-xs" role="alert">
+          <p className="text-red-primary text-xs" role="alert">
             {snapshot.error.message}
           </p>
           <Button variant="ghost" onClick={() => void snapshot.refresh()}>

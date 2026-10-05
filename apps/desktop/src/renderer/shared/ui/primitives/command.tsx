@@ -185,7 +185,7 @@ const CommandItem = React.forwardRef<
       ref={ref}
       data-slot="command-item"
       className={cn(
-        "data-[selected=true]:bg-bg3-hover data-[selected=true]:text-fg1 [&_svg:not([class*='text-'])]:text-fg2 relative flex cursor-default items-center gap-2 px-2 py-1.5 text-xs outline-hidden select-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5",
+        "data-[selected=true]:bg-bg3-hover data-[selected=true]:text-fg1 data-[selected=true]:[&_.text-muted-fg]:text-fg3 [&_svg:not([class*='text-'])]:text-fg2 relative flex cursor-default items-center gap-2 px-2 py-1.5 text-xs outline-hidden select-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5",
         MENU_ITEM_RADIUS,
         className,
       )}

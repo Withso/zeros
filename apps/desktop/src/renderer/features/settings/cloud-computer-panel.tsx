@@ -81,7 +81,7 @@ function CloudComputerScope({
     <div className="flex flex-col gap-6">
       {snapshot.error && (
         <div className="flex items-center justify-between gap-3">
-          <p className="text-error text-xs" role="alert">
+          <p className="text-red-primary text-xs" role="alert">
             {snapshot.error.message}
           </p>
           <Button variant="ghost" onClick={snapshot.refresh}>
@@ -312,7 +312,7 @@ function CloudComputerEditor({
           Each image is sanitized and checked on a fresh clone, then requires exact-image agent qualification before activation.
         </p>
         {error && (
-          <p className="text-error text-xs" role="alert">
+          <p className="text-red-primary text-xs" role="alert">
             {error}
           </p>
         )}
