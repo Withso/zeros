@@ -97,6 +97,12 @@ describe("app shell navigation", () => {
     expect(SIDEBAR).toContain('{...(hidden ? { inert: "" } : {})}');
     expect(SIDEBAR).toContain("{!hidden && <ResourceMonitor />}");
   });
+
+  it("has no archived-workspaces picker in the title band", () => {
+    expect(SIDEBAR).not.toContain("ArchivedWorkspacePicker");
+    expect(SIDEBAR).not.toContain("Archived workspaces");
+    expect(SIDEBAR).not.toContain("Search archived workspaces");
+  });
 });
 
 describe("sidebar workspace list presentations", () => {
@@ -251,8 +257,10 @@ describe("sidebar collapse and geometry", () => {
   it("seats the panel-left toggle after the traffic lights in both states", () => {
     expect(TOGGLE).toContain('import { PanelLeft } from "lucide-react";');
     expect(TOGGLE).toMatch(
-      /export const TRAFFIC_LIGHT_RESERVE_CLS = "h-full w-\[74px\] shrink-0";/,
+      /export const TRAFFIC_LIGHT_RESERVE_CLS = "h-full w-\[80px\] shrink-0";/,
     );
+    // Nudged up 1px onto the traffic lights' ~19px midline in both states.
+    expect(TOGGLE).toMatch(/const TOGGLE_CLS =\s*"[^"]*-translate-y-px/);
     // The open title band and the collapsed band share the reserve and the
     // same 4px gap, so the button never moves when it is pressed.
     expect(TOGGLE).toMatch(
@@ -274,9 +282,9 @@ describe("sidebar collapse and geometry", () => {
     );
     expect(SHELL).toContain('collapsedControlsVisible ? "mt-10" : ""');
     expect(SHELL).toContain("windowControlsInset={sidebarCollapsed}");
-    // 8px leading-slot gutter + 102px spacer = the collapsed band's 110px.
+    // 8px leading-slot gutter + 108px spacer = the collapsed band's 116px.
     expect(PANE).toMatch(
-      /windowControlsInset \? \(\s*<span\s*className="block h-full w-\[102px\] shrink-0"/,
+      /windowControlsInset \? \(\s*<span\s*className="block h-full w-\[108px\] shrink-0"/,
     );
   });
 
