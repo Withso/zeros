@@ -16,8 +16,12 @@ vi.mock("node:child_process", async original => {
 
 const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map(root => fs.rm(root, { recursive: true, force: true }))); });
+// Newer Git detaches automatic maintenance after commit/fetch. A background
+// repack or ref pack would race the capture's directory stability checks.
+const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: "maintenance.auto", GIT_CONFIG_VALUE_0: "false", GIT_CONFIG_KEY_1: "gc.auto", GIT_CONFIG_VALUE_1: "0" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, {
-  cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+  cwd, encoding: "utf8", env: GIT_ENV,
 }).trim();
 async function fixture() {
   const root = await fs.mkdtemp(path.join(tmpdir(), "zeros-native-recovery-")); temporary.push(root);
@@ -520,7 +524,7 @@ describe.runIf(process.platform === "linux")("native cloud checkpoint Git histor
     const tree = git(workspace.repository, "rev-parse", "HEAD^{tree}");
     const orphan = execFileSync("git", ["commit-tree", tree], {
       cwd: workspace.repository, encoding: "utf8", input: "operation-only commit\n",
-      env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      env: GIT_ENV,
     }).trim();
     await fs.writeFile(path.join(workspace.repository, ".git/ORIG_HEAD"), `${orphan}\n`);
     const archive = await captureCloudNativeCheckpoint(workspace);
