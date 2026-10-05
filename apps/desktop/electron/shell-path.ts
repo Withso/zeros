@@ -1,5 +1,6 @@
 import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
+import { getLoginShellPath } from "../src/engine/agents/adapters/shared/login-shell-path";
 
 function restoreDevNodePath(env: NodeJS.ProcessEnv): void {
   const executable = env.ZEROS_DEV_NODE_EXECUTABLE;
@@ -35,6 +36,7 @@ export async function hydrateShellPath(options: {
   const env = options.env ?? process.env;
   try {
     if (options.loadShellPath) await options.loadShellPath();
+    else if (env.ZEROS_LOCAL_DEVELOPMENT === "1") env.PATH = await getLoginShellPath();
     else {
       // fix-path is ESM-only; Electron main is bundled as CommonJS.
       const mod = (await import("fix-path")) as { default: () => void };

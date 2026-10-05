@@ -38,6 +38,7 @@ export const CONFIG_ROOT_ENV_VARS = [
  * small and capability-oriented: ordinary ZEROS_* workspace context continues
  * to work. */
 export const ENGINE_AUTHORITY_ENV_VARS = [
+  "ZEROS_LOCAL_DEVELOPMENT",
   "ZEROS_LOCAL_WS_TOKEN",
   "ZEROS_CLOUD_TOKEN",
   "ZEROS_CLOUD_PORT",
