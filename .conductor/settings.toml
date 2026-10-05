@@ -168,14 +168,18 @@ icon = "cloud"
 available_in = ["local"]
 command = '''
 set -e
-if [ -f scripts/dev-environment/toolchain.sh ]; then
-  . scripts/dev-environment/toolchain.sh
-  zeros_dev_select_tools
-fi
-if ! node -e 'try { const p = JSON.parse(require("node:fs").readFileSync("package.json", "utf8")); process.exit(p.scripts?.["electron:local"] ? 0 : 1); } catch { process.exit(1); }'; then
+if [ ! -f scripts/electron-local.mjs ]; then
   echo 'This branch predates Zeros Local; rebase onto main or use Dev.' >&2
   exit 1
 fi
-exec pnpm electron:local
+exec sh -c '
+  . ./scripts/dev-environment/toolchain.sh
+  zeros_dev_select_tools || exit $?
+  if ! node -e '\''try { const p = JSON.parse(require("node:fs").readFileSync("package.json", "utf8")); process.exit(p.scripts?.["electron:local"] ? 0 : 1); } catch { process.exit(1); }'\''; then
+    echo "This branch predates Zeros Local; rebase onto main or use Dev." >&2
+    exit 1
+  fi
+  exec pnpm electron:local
+'
 '''
 icon = "monitor"

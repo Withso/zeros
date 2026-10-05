@@ -38,8 +38,9 @@ qualification is part of this command.
 
 In Conductor, select **Zeros Local** from the run entries on a Mac. The shared
 settings entry is available in the local environment and does not change either
-existing Dev/backend entry or their defaults. It uses the repository's tool
-selector when present: qualified Node 22.18+ in the 22.x line from
+existing Dev/backend entry or their defaults. It runs the repository's tool
+selector and launch under POSIX `sh`, including when Conductor starts in zsh:
+qualified Node 22.18+ in the 22.x line from
 `~/.zeros-dev/tools/bin`, Homebrew `node@22`, or PATH. Selection does not install
 tools or invoke hosted Setup/hooks. An older branch without `electron:local`
 reports that it must rebase onto main or use Dev.

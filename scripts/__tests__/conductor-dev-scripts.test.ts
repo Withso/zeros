@@ -100,6 +100,7 @@ describe("Conductor Dev actions", () => {
   it("selects qualified tools for Local without invoking hosted setup or hooks", () => {
     const f = fixture();
     fs.writeFileSync(path.join(f.root,"package.json"),JSON.stringify({scripts:{"electron:local":"node scripts/electron-local.mjs"}}));
+    fs.writeFileSync(path.join(f.root,"scripts/electron-local.mjs"), "");
     fs.writeFileSync(path.join(f.root,"scripts/dev-environment/hook.sh"),"exit 91\n");
     fs.writeFileSync(path.join(f.root,"scripts/dev-environment/setup.mjs"),"process.exit(92);\n");
     const result=f.run(scripts.run["Zeros Local"].command);
@@ -115,6 +116,35 @@ describe("Conductor Dev actions", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("This branch predates Zeros Local; rebase onto main or use Dev.");
     expect(f.log()).toEqual([]);
+  });
+
+  describe.each(["/bin/sh", "/bin/zsh"])("Local action under %s", (shell) => {
+    it.skipIf(!fs.existsSync(shell))("selects qualified Node available only on PATH", () => {
+      const f = fixture();
+      const tools = path.join(f.home, ".zeros-dev/tools/bin");
+      const bin = path.join(f.root, "nvm/bin");
+      const selected = path.join(f.root, "selected-node");
+      fs.mkdirSync(bin, { recursive: true });
+      fs.copyFileSync(path.join(tools, "node"), path.join(bin, "node"));
+      fs.writeFileSync(path.join(bin, "pnpm"), `#!/bin/sh\nnode -e 'process.exit(0)' || exit 87\ncommand -v node > ${quote(selected)}\n`, {mode: 0o755});
+      fs.rmSync(tools, { recursive: true });
+      fs.writeFileSync(path.join(f.root, "scripts/electron-local.mjs"), "");
+      fs.writeFileSync(path.join(f.root, "package.json"), JSON.stringify({scripts:{"electron:local":"node scripts/electron-local.mjs"}}));
+      const result = spawnSync(shell, ["-c", scripts.run["Zeros Local"].command], {
+        cwd: f.root, env: { HOME: f.home, PATH: `${bin}:/usr/bin:/bin` }, encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(fs.readFileSync(selected, "utf8").trim()).toBe(path.join(bin, "node"));
+    });
+    it.skipIf(!fs.existsSync(shell))("explains an older branch without requiring Node", () => {
+      const f = fixture();
+      fs.rmSync(path.join(f.home, ".zeros-dev/tools/bin"), {recursive:true});
+      const result = spawnSync(shell, ["-c", scripts.run["Zeros Local"].command], {
+        cwd:f.root, env: {HOME:f.home,PATH:"/usr/bin:/bin"}, encoding:"utf8",
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("This branch predates Zeros Local; rebase onto main or use Dev.");
+    });
   });
 
   it("fails setup before installing dependencies when the available importer reports missing hosted credentials", () => {
