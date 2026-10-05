@@ -3,6 +3,7 @@ import { clearCloudComputersV2 } from "../features/settings/cloud-computer-v2-cl
 import { cloudServiceAccessCache, cloudServiceContextCache } from "./read-caches";
 import { clearCloudGithub } from "../platform/cloud-github";
 import { useEffect } from "react";
+import { isLocalDevelopment } from "../platform/runtime";
 import { cloudWorkspaceCapability } from "../platform/cloud-workspace-access";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
@@ -52,6 +53,7 @@ export function CloudWorkspaceLifecycle() {
   const folder = useWorkspaceStore(selectActiveFolder);
   const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
   useEffect(() => {
+    if (isLocalDevelopment()) return;
     let alive = true;
     let enabled = false;
     let lastRefresh = 0;

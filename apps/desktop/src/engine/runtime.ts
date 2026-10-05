@@ -24,6 +24,16 @@ export function isDevRuntime(): boolean {
   return process.env.ZEROS_DEV === "1" || process.env.ZEROS_RUNTIME_MODE === "dev";
 }
 
+/** Main pins this for its engine child; it does not change transport admission.
+ * Local still uses the ordinary host/origin/token-protected loopback bridge. */
+export function isLocalDevelopmentRuntime(): boolean {
+  return (
+    isDevRuntime() &&
+    channel() === "dev" &&
+    process.env.ZEROS_LOCAL_DEVELOPMENT === "1"
+  );
+}
+
 // Loopback base ports for the engine's HTTP + WebSocket bridge. Every release
 // channel owns a DISJOINT footprint so Stable, Beta, and a `pnpm electron:dev`
 // engine can run AT THE SAME TIME without competing for ports or cross-killing

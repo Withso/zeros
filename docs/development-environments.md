@@ -14,6 +14,11 @@ another Railway environment or PlanetScale branch.
 
 ## Commands
 
+For account-free native UI/local feature testing, use
+[`pnpm electron:local`](local-development.md). It is a separate macOS launcher
+with isolated checkout profiles and no hosted provisioning. The Dev commands
+below retain the complete hosted app and their existing behavior.
+
 | Command | Behavior |
 | --- | --- |
 | `bash scripts/setup-zeros-dev.sh --profile /path/to/zeros-dev-env.json` | Install tools/dependencies on a Mac and securely import the portable profile |

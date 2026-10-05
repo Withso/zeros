@@ -34,7 +34,12 @@ import {
   type AuthSessionInfo,
 } from "./auth-store";
 import { setAuthAccessToken } from "./auth-token";
-import { isElectron, nativeInvoke, nativeListen } from "../../platform/runtime";
+import {
+  isElectron,
+  isLocalDevelopment,
+  nativeInvoke,
+  nativeListen,
+} from "../../platform/runtime";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { CHANNEL } from "../../config/release-channel";
 import { useDismissStartupLoader } from "../../shared/ui/startup-loader";
@@ -91,8 +96,33 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   if (!isElectron()) return <AuthConfigErrorScreen />;
+  if (isLocalDevelopment()) {
+    return (
+      <AuthContext.Provider value={localDevelopmentAuth}>
+        {children}
+      </AuthContext.Provider>
+    );
+  }
   return <AuthProviderInner>{children}</AuthProviderInner>;
 }
+
+// No account, token, auth subscriptions or browser ceremony in Local. Retain
+// signed-out status so account-dependent features never mistake it for login.
+const localDevelopmentAuth: AuthContextValue = {
+  status: "unauthenticated",
+  session: null,
+  userId: null,
+  email: null,
+  startBrowserSignIn: async () => ({
+    ok: false,
+    error: "Zeros Local runs without a Zeros account. Use Zeros Dev to test sign-in.",
+  }),
+  oauthError: null,
+  clearOAuthError: () => {},
+  cancelPendingOAuth: () => {},
+  signOut: async () => {},
+  signOutEverywhere: async () => {},
+};
 
 /** Reconcile main-owned session updates and expose sign-in state, including
  * actionable Dev setup errors, without moving credential storage into React. */

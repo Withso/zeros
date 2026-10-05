@@ -167,6 +167,7 @@ describe("desktop control-plane compatibility requests", () => {
 });
 
 const runtime = vi.hoisted(() => ({
+  isLocalDevelopment: () => false,
   isElectron: vi.fn(() => true),
   nativeInvoke: vi.fn(),
   channel: "alpha",

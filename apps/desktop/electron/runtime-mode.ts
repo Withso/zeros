@@ -28,3 +28,10 @@ export const IS_PACKAGED: boolean =
   !(process as NodeJS.Process & ProcessWithDefaultApp).defaultApp;
 
 export const IS_DEV: boolean = !IS_PACKAGED;
+
+/** Only the explicit native, unpackaged development launch may skip login.
+ * Release channels and packaged executables ignore the request entirely. */
+export const IS_LOCAL_DEVELOPMENT: boolean =
+  IS_DEV &&
+  process.env.ZEROS_LOCAL_DEVELOPMENT === "1" &&
+  (!process.env.ZEROS_CHANNEL || process.env.ZEROS_CHANNEL === "dev");

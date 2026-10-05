@@ -105,6 +105,16 @@ ${existingDescription ? "<key>NSAppleEventsUsageDescription</key><string>Old des
 });
 
 describe("dev callback scheme", () => {
+  it("removes inherited OAuth schemes from Local without changing the shared hardlink", () => {
+    const dir = tmp(), base = path.join(dir, "base.plist"), clone = path.join(dir, "local.plist");
+    const original = '<plist><dict><key>CFBundleName</key><string>Zeros Dev</string><key>CFBundleExecutable</key><string>Zeros Dev</string><key>CFBundleIdentifier</key><string>com.zeros.dev</string><key>CFBundleURLTypes</key><array><dict><key>CFBundleURLSchemes</key><array><string>zeros-dev</string></array></dict></array></dict></plist>';
+    fs.writeFileSync(base, original); fs.linkSync(base, clone);
+    const identity = { name: "Zeros Local checkout", exec: "Zeros Local checkout", bundleId: "com.zeros.local.a123", local: true };
+    expect(patchPlist(clone, identity)).toBe(true);
+    expect(fs.readFileSync(clone, "utf8")).not.toContain("<string>zeros-dev</string>");
+    expect(fs.readFileSync(base, "utf8")).toBe(original);
+    expect(patchPlist(clone, identity)).toBe(false);
+  });
   it("fills an empty callback array and leaves malformed metadata untouched", () => {
     const file = path.join(tmp(), "Info.plist");
     const identity = { name: NAME, exec: NAME, bundleId: `com.zeros.dev.${SLUG}` };

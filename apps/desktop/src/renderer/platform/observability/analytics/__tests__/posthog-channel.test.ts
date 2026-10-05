@@ -14,6 +14,7 @@ vi.mock("@/renderer/config/release-channel", () => ({
   },
 }));
 vi.mock("@/renderer/platform/runtime", () => ({
+  isLocalDevelopment: () => false,
   isElectron: () => true,
   nativeInvoke: async () => ({
     runtimeMode: state.runtimeMode,

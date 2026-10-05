@@ -148,7 +148,7 @@ import { installDevToolsGuard } from "./devtools";
 import { installDevMainRestartCheck } from "./dev-main-restart";
 import { setupDeepLink } from "./deep-link";
 import { setupUpdater } from "./updater";
-import { IS_DEV, IS_PACKAGED } from "./runtime-mode";
+import { IS_DEV, IS_PACKAGED, IS_LOCAL_DEVELOPMENT } from "./runtime-mode";
 import { pushProviderCredentialsToEngine } from "./sidecar";
 import { watchSecrets } from "./secret-store";
 import { setTokenStore as setGithubTokenStore } from "../src/engine/git/github";
@@ -268,6 +268,15 @@ const runningDev = IS_DEV || explicitDevEnv;
 // zeros.db / ~/zeros/workspaces, trampling real user data.
 if (runningDev) process.env.ZEROS_DEV = "1";
 
+// Main is the authority. Packaged/full Dev cannot inherit Local admission;
+// Local cannot read a hosted Dev account store, even from a parent app shell.
+if (IS_LOCAL_DEVELOPMENT) {
+  process.env.ZEROS_ISOLATE = "1";
+  delete process.env.ZEROS_SHARED_SECRETS_DIR;
+} else {
+  delete process.env.ZEROS_LOCAL_DEVELOPMENT;
+}
+
 // (2) ZEROS_CHANNEL — travels by env so the spawned engine AND every in-process
 // db/paths.ts caller resolve the SAME channel. Seed ONCE, before any data-dir /
 // updater code: explicit env wins; else the value baked at electron:compile
@@ -322,11 +331,13 @@ const CHANNEL_DISPLAY_NAME: Record<Channel, string> = {
   beta: "Zeros Beta",
   stable: "Zeros",
 };
-const CHANNEL_NAME = isChannel(process.env.ZEROS_CHANNEL)
-  ? CHANNEL_DISPLAY_NAME[process.env.ZEROS_CHANNEL]
-  : runningDev
-    ? CHANNEL_DISPLAY_NAME.dev
-    : CHANNEL_DISPLAY_NAME.stable;
+const CHANNEL_NAME = IS_LOCAL_DEVELOPMENT
+  ? "Zeros Local"
+  : isChannel(process.env.ZEROS_CHANNEL)
+    ? CHANNEL_DISPLAY_NAME[process.env.ZEROS_CHANNEL]
+    : runningDev
+      ? CHANNEL_DISPLAY_NAME.dev
+      : CHANNEL_DISPLAY_NAME.stable;
 const WINDOW_TITLE = INSTANCE_NAME || CHANNEL_NAME;
 
 // One-time relocation of any legacy name-based Electron state into the new id dir
@@ -335,12 +346,14 @@ const WINDOW_TITLE = INSTANCE_NAME || CHANNEL_NAME;
 // can't decrypt into the new shared key → one-time re-login, per the agreed
 // decision); the Chromium session regenerates.
 try {
-  migrateElectronIdentity({
-    appDataDir: app.getPath("appData"),
-    newUserData: zerosDataDir(),
-    legacyChannelName: CHANNEL_NAME,
-    legacyInstanceName: INSTANCE_LABEL ? `Zeros — ${INSTANCE_LABEL}` : null,
-  });
+  if (!IS_LOCAL_DEVELOPMENT) {
+    migrateElectronIdentity({
+      appDataDir: app.getPath("appData"),
+      newUserData: zerosDataDir(),
+      legacyChannelName: CHANNEL_NAME,
+      legacyInstanceName: INSTANCE_LABEL ? `Zeros — ${INSTANCE_LABEL}` : null,
+    });
+  }
 } catch (err) {
   console.warn("[Zeros] identity migration skipped:", err);
 }
@@ -360,7 +373,11 @@ app.setPath("userData", zerosDataDir());
 // worktree OUT (its secrets stay in its own per-instance userData). Only
 // meaningful in dev (stable/beta have a single instance where the two dirs
 // coincide). Set before secret-store or spawnEngine read it.
-if (process.env.ZEROS_CHANNEL === "dev" && process.env.ZEROS_ISOLATE !== "1") {
+if (
+  !IS_LOCAL_DEVELOPMENT &&
+  process.env.ZEROS_CHANNEL === "dev" &&
+  process.env.ZEROS_ISOLATE !== "1"
+) {
   process.env.ZEROS_SHARED_SECRETS_DIR = zerosChannelDataDir();
 }
 
@@ -406,6 +423,12 @@ function relocateChromiumCache(): void {
   // (com.zeros[.dev|.beta][.<slug>]) — the design.zeros.* scheme is retired, so a
   // logical instance is ONE identifier across Application Support, Caches + Logs.
   const newSessionData = path.join(cacheRoot, appIdentity());
+
+  if (IS_LOCAL_DEVELOPMENT) {
+    fs.mkdirSync(newSessionData, { recursive: true });
+    app.setPath("sessionData", newSessionData);
+    return;
+  }
 
   // Legacy source under the RETIRED design.zeros.* scheme — migrate durable
   // renderer state (composer drafts / theme / Local Storage) forward ONCE. Named
@@ -1259,7 +1282,7 @@ app.whenReady().then(async () => {
       );
     }
     try {
-      await initializeGithubAppFlow();
+      if (!IS_LOCAL_DEVELOPMENT) await initializeGithubAppFlow();
     } catch (err) {
       console.warn(
         `[Zeros] GitHub App refresh scheduling deferred: ${
@@ -1480,59 +1503,63 @@ app.whenReady().then(async () => {
     });
     return true;
   });
-  const authSecurityMonitor = new WorkOSDesktopSecurityMonitor({
-    baseUrl: controlPlaneBaseUrl(),
-    fetch: controlPlaneFetch,
-    getSession: getValidSessionForMain,
-    clearSession: clearWorkOSSessionAfterServerRevocation,
-    emit: emitEvent,
-  });
-  setCommand("auth_security_revalidate", (_args, event) => {
-    trustedBrowserWindow(event);
-    void authSecurityMonitor.revalidate("online", true);
-    return true;
-  });
-  const onAuthWindowFocus = () => {
-    void authSecurityMonitor.revalidate("focus");
-  };
-  const onAuthResume = () => {
-    void authSecurityMonitor.revalidate("resume");
-  };
-  app.on("browser-window-focus", onAuthWindowFocus);
-  powerMonitor.on("resume", onAuthResume);
-  powerMonitor.on("unlock-screen", onAuthResume);
+  let startAuthSecurityMonitor = () => {};
+  if (!IS_LOCAL_DEVELOPMENT) {
+    const authSecurityMonitor = new WorkOSDesktopSecurityMonitor({
+      baseUrl: controlPlaneBaseUrl(),
+      fetch: controlPlaneFetch,
+      getSession: getValidSessionForMain,
+      clearSession: clearWorkOSSessionAfterServerRevocation,
+      emit: emitEvent,
+    });
+    setCommand("auth_security_revalidate", (_args, event) => {
+      trustedBrowserWindow(event);
+      void authSecurityMonitor.revalidate("online", true);
+      return true;
+    });
+    const onAuthWindowFocus = () => {
+      void authSecurityMonitor.revalidate("focus");
+    };
+    const onAuthResume = () => {
+      void authSecurityMonitor.revalidate("resume");
+    };
+    app.on("browser-window-focus", onAuthWindowFocus);
+    powerMonitor.on("resume", onAuthResume);
+    powerMonitor.on("unlock-screen", onAuthResume);
 
-  const disposeGithubSessionSync = onMainAuthSessionChanged(async () => {
-    emitEvent("auth-store-changed", {});
-    void authSecurityMonitor.revalidate("session_changed", true);
-    // Start the cloud-session update first: its writer advances the generation
-    // synchronously, so an older bearer can no longer publish while unrelated
-    // GitHub credential work is awaited.
-    const cloudReplicaSessionUpdate = pushCloudReplicaSessionToEngine();
-    await pushGithubCredentialToEngine();
-    await cloudReplicaSessionUpdate;
-    await scheduleGithubAppRefresh();
-    emitEvent("github-credential-store-changed", {});
-  });
-  // Token refresh is intentionally not a semantic sign-in event. Periodically
-  // renew the engine's in-memory bearer so background replica convergence does
-  // not stall after the original WorkOS access token expires.
-  const disposeCloudReplicaSessionRefresh = startCloudReplicaSessionRefresh({
-    refresh: pushCloudReplicaSessionToEngine,
-    onError: (error: unknown) => {
-      console.warn(
-        `[cloud-replica] periodic session refresh failed (${error instanceof Error ? error.name : "unknown"})`,
-      );
-    },
-  });
-  app.on("will-quit", () => {
-    disposeCloudReplicaSessionRefresh();
-    disposeGithubSessionSync();
-    app.off("browser-window-focus", onAuthWindowFocus);
-    powerMonitor.off("resume", onAuthResume);
-    powerMonitor.off("unlock-screen", onAuthResume);
-    void authSecurityMonitor.stop();
-  });
+    const disposeGithubSessionSync = onMainAuthSessionChanged(async () => {
+      emitEvent("auth-store-changed", {});
+      void authSecurityMonitor.revalidate("session_changed", true);
+      // Start the cloud-session update first: its writer advances the generation
+      // synchronously, so an older bearer can no longer publish while unrelated
+      // GitHub credential work is awaited.
+      const cloudReplicaSessionUpdate = pushCloudReplicaSessionToEngine();
+      await pushGithubCredentialToEngine();
+      await cloudReplicaSessionUpdate;
+      await scheduleGithubAppRefresh();
+      emitEvent("github-credential-store-changed", {});
+    });
+    // Token refresh is intentionally not a semantic sign-in event. Periodically
+    // renew the engine's in-memory bearer so background replica convergence does
+    // not stall after the original WorkOS access token expires.
+    const disposeCloudReplicaSessionRefresh = startCloudReplicaSessionRefresh({
+      refresh: pushCloudReplicaSessionToEngine,
+      onError: (error: unknown) => {
+        console.warn(
+          `[cloud-replica] periodic session refresh failed (${error instanceof Error ? error.name : "unknown"})`,
+        );
+      },
+    });
+    startAuthSecurityMonitor = () => authSecurityMonitor.start();
+    app.on("will-quit", () => {
+      disposeCloudReplicaSessionRefresh();
+      disposeGithubSessionSync();
+      app.off("browser-window-focus", onAuthWindowFocus);
+      powerMonitor.off("resume", onAuthResume);
+      powerMonitor.off("unlock-screen", onAuthResume);
+      void authSecurityMonitor.stop();
+    });
+  }
   setEngineSpawnBarrier(Promise.all([githubAuthReady, browserReady, designCaptureReady]));
   const root = defaultProjectRoot();
   const engineBoot = spawnEngine(root);
@@ -1555,7 +1582,7 @@ app.whenReady().then(async () => {
   const win = createMainWindow();
   browserRendererEpoch += 1;
   setMainWindow(win);
-  authSecurityMonitor.start();
+  startAuthSecurityMonitor();
   win.on("closed", () => {
     browserRendererEpoch += 1;
     void browserService?.revokeConfirmationSurface();

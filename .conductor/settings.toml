@@ -162,3 +162,9 @@ exec pnpm electron:dev
 '''
 default = true
 icon = "cloud"
+
+# Account-free native UI/feature testing; existing Dev/backend defaults stay.
+[scripts.run."Zeros Local"]
+available_in = ["local"]
+command = "exec pnpm electron:local"
+icon = "monitor"

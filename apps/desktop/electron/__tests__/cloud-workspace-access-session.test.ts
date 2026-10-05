@@ -13,7 +13,7 @@ vi.mock("electron", () => ({
 vi.mock("../../src/engine/cloud-workspace-capability", () => ({
   cloudWorkspaceDesktopCapabilityEnabled: () => true,
 }));
-vi.mock("../runtime-mode", () => ({ IS_DEV: true }));
+vi.mock("../runtime-mode", () => ({ IS_DEV: true, IS_LOCAL_DEVELOPMENT: false }));
 vi.mock("../ipc/events", () => ({ emitEvent: state.events }));
 vi.mock("../preview-frame-authorizations", () => ({
   previewFrameAuthorizations: { clear: vi.fn() },

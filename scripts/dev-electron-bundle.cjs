@@ -86,8 +86,8 @@ function readPlistValue(plist, key) {
 /** Dev bundles must declare their scheme before LaunchServices can make them
  * the OAuth callback handler. Replace the whole nested array so a cloned or
  * previously patched bundle cannot also claim Alpha, Beta or stable links. */
-function patchDevProtocol(plist) {
-  const declaration = `<key>CFBundleURLTypes</key>
+function patchDevProtocol(plist, local = false) {
+  const declaration = local ? "<key>CFBundleURLTypes</key><array/>" : `<key>CFBundleURLTypes</key>
 \t<array><dict>
 \t\t<key>CFBundleURLName</key><string>Zeros Dev</string>
 \t\t<key>CFBundleURLSchemes</key><array><string>zeros-dev</string></array>
@@ -115,7 +115,7 @@ function patchDevProtocol(plist) {
   throw new Error("Dev bundle callback declaration is incomplete");
 }
 
-function patchPlist(plistPath, { name, exec, bundleId }) {
+function patchPlist(plistPath, { name, exec, bundleId, local = false }) {
   let plist = fs.readFileSync(plistPath, "utf8");
   let changed = false;
   const targets = {
@@ -150,7 +150,7 @@ function patchPlist(plistPath, { name, exec, bundleId }) {
       changed = true;
     }
   }
-  const withProtocol = patchDevProtocol(plist);
+  const withProtocol = patchDevProtocol(plist, local);
   changed ||= withProtocol !== plist;
   plist = withProtocol;
   if (changed) atomicWrite(plistPath, plist);
@@ -465,4 +465,37 @@ module.exports = {
   pruneStaleBundles,
   discardBundle,
   patchPlist,
+  prepareLocalInstanceBundle,
 };
+
+/** Local clones the base without branding/mutating hosted Dev's shared bundle.
+ * A separate cache and no URL schemes keep it out of hosted OAuth routing. */
+function prepareLocalInstanceBundle({ slug, name }) {
+  if (process.platform !== "darwin") return { ok: false, binPath: null };
+  const base = findBaseElectronApp();
+  if (!base) return { ok: false, binPath: null };
+  const dest = path.join(
+    os.homedir(), ".zeros-local", "dev-instances", slug, `${name}.app`,
+  );
+  const marker = `${dest}.version`;
+  const version = readElectronVersion(base);
+  let cached = "";
+  try {
+    cached = fs.readFileSync(marker, "utf8").trim();
+  } catch { /* first launch */ }
+  if (!version || cached !== version || !fs.existsSync(dest)) {
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    cloneBundleHardlink(base, dest);
+    if (version) fs.writeFileSync(marker, version);
+  }
+  const plistPath = path.join(dest, "Contents", "Info.plist");
+  const current =
+    readPlistValue(fs.readFileSync(plistPath, "utf8"), "CFBundleExecutable") || "Electron";
+  patchExecutable(dest, current, name);
+  patchPlist(plistPath, {
+    name, exec: name, bundleId: `com.zeros.local.${slug}`, local: true,
+  });
+  patchIcon(dest);
+  return { ok: true, binPath: path.join(dest, "Contents", "MacOS", name) };
+}
