@@ -4,12 +4,16 @@ import { createRequire } from "node:module";
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runInNewContext } from "node:vm";
+import { pathToFileURL } from "node:url";
+import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
   cleanupTemplateSetupFork,
@@ -30,8 +34,12 @@ import {
   qualificationResult,
   collectProbeDirectories,
   runQualificationDiagnostics,
+  setupProbeResult,
+  instrumentSetupDiagnosticSource,
+  runLaterSetupDiagnostics,
 } from "../cloud-workspace-validation/template-setup-probe.mjs";
 import { CloudProviderError } from "../../apps/control-plane/src/cloud-workspaces/provider";
+import { attestationFixture, proofPath } from "./cloud-worker-attestation-fixture";
 
 const templateId = "bx_3456789a",
   childId = "bx_23456789";
@@ -135,6 +143,170 @@ function fixture() {
 }
 
 describe("operator template setup reproduction", () => {
+  it("retains the original setup exit and distinguishes false checks from a missing report", () => {
+    const result = setupProbeResult({ status: 125, signal: null, stdout: JSON.stringify({
+      secure: false, unprivileged: true, detachedDescendantsRetired: false, timeoutRetired: true,
+      error: "private output must not escape",
+    }), stderr: "private stderr" }, 127, 30000);
+    expect(result).toEqual({ exitCode: 125, signal: null, errorCode: null, durationMs: 127, timeoutMs: 30000,
+      timedOut: false, outputLimit: false, report: { secure: false, unprivileged: true,
+        detachedDescendantsRetired: false, timeoutRetired: true } });
+    expect(setupProbeResult({ status: null, signal: "SIGTERM", error: { code: "ETIMEDOUT" }, stdout: "" }, 30025, 30000))
+      .toMatchObject({ report: null, timedOut: true, durationMs: 30025, signal: "SIGTERM" });
+  });
+
+  it("keeps stage timing, setup phases and closed errors through both report projections", () => {
+    const report = sanitizeProbeReport({ schema: "zeros.template-setup-probe/v1", paths: [], checks: [{ check: "image", ok: false,
+      attester: { stages: [{ stage: "run_setup", outcome: "failed", durationMs: 127, failedChecks: ["setup_exit", "private"] }],
+        setup: setupProbeResult({ status: 125, stdout: "" }, 127, 30000),
+        events: [{ kind: "error", component: "setup", mode: "worker", phase: "worker_repository", durationMs: 4,
+          error: { name: "Error", message: "image_contract_invalid", code: "private" },
+          contents: "private", environment: { TOKEN: "private" } }],
+      },
+    }] });
+    expect(JSON.parse(serializeProbeReport(report))).toEqual(report);
+    expect(report.checks[0].attester.stages).toEqual([{ stage: "run_setup", outcome: "failed", durationMs: 127, failedChecks: ["setup_exit"] }]);
+    expect(report.checks[0].attester.events[0]).toEqual({ kind: "error", component: "setup", mode: "worker", phase: "worker_repository", durationMs: 4,
+      error: { name: "Error", message: "image_contract_invalid" } });
+    expect(JSON.stringify(report)).not.toContain("private");
+  });
+
+  it("bounds setup trace metadata without dropping the setup failure or its elapsed time", () => {
+    const report = { schema: "zeros.template-setup-probe/v1", paths: [], checks: [{ check: "image", ok: false, attester: {
+      stages: [{ stage: "run_setup", outcome: "failed", durationMs: 10001, failedChecks: ["setup_exit"] }],
+      setup: setupProbeResult({ status: 125, stdout: "" }, 10001, 30000),
+      events: Array.from({ length: 64 }, () => ({ kind: "error", component: "setup", mode: "worker", phase: "worker_repository", durationMs: 10,
+        error: { name: "Error", message: "image_contract_invalid" },
+        observed: { path: "/srv/" + "long/".repeat(790), realpath: "/srv/" + "long/".repeat(790) },
+      })),
+    } }] };
+    const serialized = serializeProbeReport(report);
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(65536);
+    const parsed = JSON.parse(serialized).checks[0].attester;
+    expect(parsed.setup).toEqual(report.checks[0].attester.setup);
+    expect(parsed.stages).toEqual(report.checks[0].attester.stages);
+    expect(parsed.events).toHaveLength(64);
+    expect(parsed.truncated).toBe(true);
+  });
+
+  it("observes a setup helper exception without changing its exit code or printing the exception", () => {
+    const source = `function worker() { throw new Error("image_contract_invalid"); }
+try { worker(); } catch {
+    process.stderr.write("Cloud setup process could not be admitted\\n");
+    process.exitCode = 125;
+  }`;
+    const observed = instrumentSetupDiagnosticSource(source, "cloud-setup-process.mjs");
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `globalThis.__zerosTemplateSetupEvent=(kind,value)=>console.log(JSON.stringify({kind,message:value.error?.message}));${observed}`], { encoding: "utf8" });
+    expect(result.status).toBe(125);
+    expect(result.stdout.trim().split("\n").map(line => JSON.parse(line)).at(-1)).toEqual({ kind: "error", message: "image_contract_invalid" });
+    expect(result.stderr).toBe("Cloud setup process could not be admitted\n");
+  });
+
+  it("continues independent later probes after failure and never fabricates an admission proof", async () => {
+    const consume = vi.fn();
+    const launch = vi.fn(() => { throw new Error("Unsafe cloud primary mount target"); });
+    const branch = vi.fn(() => ({}));
+    const result = await runLaterSetupDiagnostics({ imagePassed: false, operations: {
+      consume_proof: consume, serve_view: launch, checkout_branch: branch,
+    } });
+    expect(consume).not.toHaveBeenCalled();
+    expect(launch).toHaveBeenCalledOnce();
+    expect(branch).toHaveBeenCalledOnce();
+    expect(result.find(item => item.stage === "consume_proof")).toMatchObject({ outcome: "precondition", requires: ["successful_attestation"] });
+    expect(result.find(item => item.stage === "serve_view")).toMatchObject({ outcome: "failed", error: { message: "Unsafe cloud primary mount target" } });
+    expect(result.find(item => item.stage === "checkout_branch")).toMatchObject({ outcome: "passed" });
+    expect(result.find(item => item.stage === "engine_registration")).toMatchObject({ outcome: "precondition", requires: ["fresh_setup_materials", "registered_engine"] });
+  });
+
+  it("observes all original attester stages without changing success or failed security gates", () => {
+    for (const secure of [true, false]) {
+      const tree = attestationFixture();
+      const stages: string[] = [];
+      const completions: unknown[] = [];
+      try {
+        tree.setupQualification.secure = secure;
+        const baseline = tree.execute();
+        const observed = tree.execute("attest-cloud-worker.mjs", undefined, {
+          transform: instrumentSetupDiagnosticSource,
+          globals: {
+            __zerosTemplateSetupEvent: (kind: string, value: any) => { if (kind === "stage") stages.push(value.stage); },
+            __zerosTemplateSetupObserve: (error: any, stage: string) => completions.push({ stage, check: error?.check }),
+          },
+        });
+        expect(observed).toEqual(baseline);
+        expect(stages).toEqual(["validate_input", "lock", "verify_tree", "qualify_engine", "run_setup", ...(secure ? ["publish_proof"] : [])]);
+        expect(completions).toEqual([{ stage: secure ? "done" : "run_setup", check: secure ? undefined : "setup_exit" }]);
+        if (!secure) expect(() => readFileSync(tree.physical(proofPath))).toThrow();
+      } finally { tree.dispose(); }
+    }
+  });
+
+  it("locates the actual setup worker repository exception before privilege drop", async () => {
+    const file = path.resolve("scripts/cloud-workspace-validation/sandbox/cloud-setup-process.mjs");
+    const original = readFileSync(file, "utf8");
+    const source = instrumentSetupDiagnosticSource(original, path.basename(file)).replaceAll("import.meta.url", JSON.stringify(pathToFileURL(file).href));
+    const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+    const input = Buffer.from(JSON.stringify({ version: 1, command: "true", environment: {}, timeoutMs: 1000 }));
+    let read = false, stderr = "";
+    const events: any[] = [];
+    const fakeProcess = { argv: [process.execPath, file, "--worker"], platform: "linux", getuid: () => 0,
+      exitCode: 0, stderr: { write: (text: string) => { stderr += text; } } };
+    const exports = {};
+    const spawn = vi.fn();
+    await runInNewContext(`(async () => {${compiled}})()`, { exports, module: { exports }, process: fakeProcess, Buffer,
+      __zerosTemplateSetupEvent: (kind: string, value: any) => events.push({ kind, ...value }),
+      require: (name: string) => {
+        if (name === "node:fs") return { readSync: (fd: number, target: Buffer) => {
+          if (fd === 3) { target[0] = 42; return 1; }
+          if (read) return 0; read = true; input.copy(target); return input.length;
+        } };
+        if (name === "node:child_process") return { spawnSync: spawn };
+        if (name === "./cloud-runtime-root.mjs") return { resolveCloudRuntimeChild: () => ({ profile: "v4", binRoot: "/opt/runtime/bin" }) };
+        if (name === "./cloud-computer-checkout.mjs") return { cloudComputerHostRepository: () => { throw new Error("image_contract_invalid"); } };
+        if (name === "./cloud-engine-cgroup.mjs" || name === "./runtime-layout.json") return {};
+        return createRequire(import.meta.url)(name);
+      },
+    });
+    expect(fakeProcess.exitCode).toBe(125);
+    expect(stderr).toBe("Cloud setup process could not be admitted\n");
+    expect(spawn).not.toHaveBeenCalled();
+    expect(events.filter(event => event.kind === "phase").map(event => event.phase))
+      .toEqual(["worker_runtime", "worker_gate", "worker_payload", "worker_repository"]);
+    expect(events.at(-1)?.error.message).toBe("image_contract_invalid");
+  });
+
+  it("propagates the observer through real setup children without changing argv or their result", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "zeros-v2-test-observer-"));
+    try {
+      const probe = path.join(directory, "probe.mjs"), helper = path.join(directory, "cloud-setup-process.mjs");
+      writeFileSync(probe, readFileSync(new URL("../cloud-workspace-validation/template-setup-probe.mjs", import.meta.url)));
+      writeFileSync(helper, `import {spawn} from 'node:child_process';
+if (process.argv[2] === '--worker') process.exitCode = process.argv.length === 3 && typeof globalThis.__zerosTemplateSetupEvent === 'function' ? 0 : 125;
+else {
+  const child=spawn(process.execPath,[process.argv[1],'--worker'],{env:{PATH:'/usr/bin:/bin'},stdio:'ignore'});
+  child.on('exit',code=>{console.log(JSON.stringify({secure:code===0,unprivileged:true,detachedDescendantsRetired:true,timeoutRetired:true}));process.exitCode=code;});
+}`);
+      const result = spawnSync(process.execPath, ["--import", pathToFileURL(probe).href + "?observer", "--input-type=module", "-e",
+        `import {spawnSync} from 'node:child_process'; const result=spawnSync(process.execPath,[${JSON.stringify(helper)},'--qualify'],{encoding:'utf8',timeout:30000,env:{PATH:'/usr/bin:/bin'}}); process.stdout.write(result.stdout); process.exitCode=result.status;`],
+        { encoding: "utf8", timeout: 10000 });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toEqual({ secure: true, unprivileged: true, detachedDescendantsRetired: true, timeoutRetired: true });
+      expect(JSON.parse(readFileSync(probe + ".setup.json", "utf8"))).toMatchObject({ exitCode: 0, signal: null,
+        timedOut: false, timeoutMs: 30000, durationMs: expect.any(Number), report: JSON.parse(result.stdout) });
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  it("retains a later preflight failure even when original image admission succeeds", async () => {
+    const f = fixture();
+    f.dependencies.probe = vi.fn(async () => ({ schema: "zeros.template-setup-probe/v1", paths: [],
+      checks: [{ check: "image", ok: true }], later: [{ stage: "serve_view", outcome: "failed", durationMs: 1 }] })) as any;
+    const result = await runTemplateSetupRepro(f.journal, billingOrg, f.dependencies);
+    expect(result.failedChecks).toEqual(["probe_failed"]);
+    expect(result.cleanup).toBe("verified");
+    expect(result.probe.later).toEqual([{ stage: "serve_view", outcome: "failed", durationMs: 1 }]);
+  });
+
   it("reads source as the operator role without requiring membership in zeros_app", async () => {
     const query = vi.fn(async (sql: string) => {
       if (/SET\s+LOCAL\s+ROLE/i.test(sql))
@@ -420,10 +592,10 @@ describe("operator template setup reproduction", () => {
         "-I",
         "-c",
         `
-import ast,json,pathlib,sys
+import ast,base64,gzip,json,pathlib,sys
 tree=ast.parse(sys.stdin.read())
 assignment=next(node for node in ast.walk(tree) if isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id=='data' for target in node.targets))
-data=json.loads(ast.literal_eval(assignment.value.args[0]))
+data=json.loads(gzip.decompress(base64.b64decode(ast.literal_eval(assignment.value.args[0].args[0].args[0]))))
 source=pathlib.Path('scripts/cloud-workspace-validation/template-setup-probe.mjs').read_text()
 qualification=pathlib.Path('scripts/cloud-workspace-validation/template-setup-qualification.py').read_text()
 ast.parse(data['qualificationSource'])
