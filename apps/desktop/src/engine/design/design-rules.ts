@@ -43,9 +43,14 @@ export const GENERATED_DESIGN_RULES = [
   LEGACY_DESIGN_RULES,
 ];
 
-export function upgradedDesignRules(source: string | null, canvasVersion: 1 | 2 = 1): string {
+export function upgradedDesignRules(
+  source: string | null,
+  canvasVersion: 1 | 2 = 1,
+): string {
   const current = canvasVersion === 2 ? DESIGN_RULES : ROOT_DESIGN_RULES;
   if (source === null) return current;
-  const generated = GENERATED_DESIGN_RULES.find((rules) => source.startsWith(rules));
+  const generated = GENERATED_DESIGN_RULES.find((rules) =>
+    source.startsWith(rules),
+  );
   return generated ? current + source.slice(generated.length) : source;
 }

@@ -551,20 +551,6 @@ export function useDesignWorkspaceView(
   );
 }
 
-/** Validate only after an authoritative frame snapshot settles. Cold data must
- * never erase a remembered selection. */
-export function validateDesignWorkspaceSelection(
-  workspaceId: string,
-  availableFrames: readonly string[],
-): string | null {
-  const current = designWorkspaceView(workspaceId).selectedFrame;
-  if (current && availableFrames.includes(current)) return current;
-  const fallback = availableFrames[0] ?? null;
-  if (current === fallback) return fallback;
-  useDesignWorkspaceUiStore.getState().setSelectedFrame(workspaceId, fallback);
-  return fallback;
-}
-
 export function forgetDesignWorkspaceView(workspaceId: string): void {
   useDesignWorkspaceUiStore.getState().forgetWorkspace(workspaceId);
 }

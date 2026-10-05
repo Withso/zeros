@@ -7,7 +7,12 @@ const reservedFolders = new Set(["meta", "assets", "components"]);
 /** Authored spelling is identity. Never normalize traversal or encoded aliases
  * into a different registered frame. Legacy flat basenames remain accepted. */
 export function isDesignPageFolder(value: unknown): value is string {
-  return typeof value === "string" && pageFolder.test(value) && !value.endsWith(".") && !reservedFolders.has(value.toLowerCase());
+  return (
+    typeof value === "string" &&
+    pageFolder.test(value) &&
+    !value.endsWith(".") &&
+    !reservedFolders.has(value.toLowerCase())
+  );
 }
 
 export function isDesignFrameFile(value: unknown): value is string {
@@ -15,11 +20,11 @@ export function isDesignFrameFile(value: unknown): value is string {
   const parts = value.split("/");
   return parts.length === 1
     ? flatFrame.test(value)
-    : parts.length === 2 && isDesignPageFolder(parts[0]) && flatFrame.test(parts[1]);
+    : parts.length === 2 &&
+        isDesignPageFolder(parts[0]) &&
+        flatFrame.test(parts[1]);
 }
 
-export const designFrameFileSchema = z.string().refine(isDesignFrameFile, "Invalid Design frame file.");
-
-export function assertDesignFrameFile(value: unknown): string {
-  return designFrameFileSchema.parse(value);
-}
+export const designFrameFileSchema = z
+  .string()
+  .refine(isDesignFrameFile, "Invalid Design frame file.");

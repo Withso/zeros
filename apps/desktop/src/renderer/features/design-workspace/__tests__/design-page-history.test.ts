@@ -65,9 +65,17 @@ describe("Design history page ownership", () => {
     );
   });
   it("reveals the affected frame when semantic history switches to another page", async () => {
-    await restoreDesignPageHistorySelection("workspace", captureDesignPageOwner("workspace"),
-      { ...reply, historySelection: undefined }, "undo");
-    expect(selectFrame).toHaveBeenCalledWith("workspace", restored, expect.objectContaining({ selected: true }));
+    await restoreDesignPageHistorySelection(
+      "workspace",
+      captureDesignPageOwner("workspace"),
+      { ...reply, historySelection: undefined },
+      "undo",
+    );
+    expect(selectFrame).toHaveBeenCalledWith(
+      "workspace",
+      restored,
+      expect.objectContaining({ selected: true }),
+    );
   });
   it("does not switch or select after the user leaves the submitting page", async () => {
     const owner = captureDesignPageOwner("workspace");
@@ -80,8 +88,15 @@ describe("Design history page ownership", () => {
     expect(selectFrame).not.toHaveBeenCalled();
   });
   it("ignores a reply from a replacement directory", async () => {
-    await restoreDesignPageHistorySelection("workspace", captureDesignPageOwner("workspace"),
-      { ...reply, snapshot: { ...reply.snapshot!, directoryId: "replacement" } }, "undo");
+    await restoreDesignPageHistorySelection(
+      "workspace",
+      captureDesignPageOwner("workspace"),
+      {
+        ...reply,
+        snapshot: { ...reply.snapshot!, directoryId: "replacement" },
+      },
+      "undo",
+    );
     expect(designWorkspaceView("workspace").activePageId).toBe("a");
     expect(selectFrame).not.toHaveBeenCalled();
   });

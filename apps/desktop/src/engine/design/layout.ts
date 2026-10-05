@@ -18,18 +18,33 @@ export function resolveDesignManifestLayout(
   manifest: ParsedDesignManifest,
 ): DesignDirectoryLayout {
   const parent = path.posix.dirname(manifestFile);
-  if (path.posix.basename(manifestFile) !== DESIGN_MANIFEST_FILE ||
-      sanitizeDesignDirectoryName(parent) !== parent)
+  if (
+    path.posix.basename(manifestFile) !== DESIGN_MANIFEST_FILE ||
+    sanitizeDesignDirectoryName(parent) !== parent
+  )
     throw new Error("Invalid Design manifest path.");
-  const directory = manifest.version === 3 ? path.posix.dirname(parent) : parent;
-  if (manifest.version === 3 && (path.posix.basename(parent) !== "meta" ||
-      sanitizeDesignDirectoryName(directory) !== directory))
-    throw new Error("Design manifest v3 must be at <Design directory>/meta/design.toml.");
+  const directory =
+    manifest.version === 3 ? path.posix.dirname(parent) : parent;
+  if (
+    manifest.version === 3 &&
+    (path.posix.basename(parent) !== "meta" ||
+      sanitizeDesignDirectoryName(directory) !== directory)
+  )
+    throw new Error(
+      "Design manifest v3 must be at <Design directory>/meta/design.toml.",
+    );
   return {
     directory,
-    kind: manifest.version === 3 ? "meta-v3" : manifest.version === 2 ? "root-v2" : "inline-v1",
+    kind:
+      manifest.version === 3
+        ? "meta-v3"
+        : manifest.version === 2
+          ? "root-v2"
+          : "inline-v1",
     manifestFile,
-    documentFile: manifest.canvas ? `${parent}/${manifest.canvas}` : manifestFile,
+    documentFile: manifest.canvas
+      ? `${parent}/${manifest.canvas}`
+      : manifestFile,
     rulesFile: `${directory}/rules.md`,
     canvasVersion: manifest.version === 3 ? 2 : 1,
   };

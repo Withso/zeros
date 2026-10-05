@@ -22,7 +22,11 @@ export async function restoreDesignPageHistorySelection(
   const snapshot = result.snapshot
     ? normalizeDesignPagesSnapshot(result.snapshot)
     : undefined;
-  if (snapshot?.directoryId !== undefined && snapshot.directoryId !== owner.directoryId) return;
+  if (
+    snapshot?.directoryId !== undefined &&
+    snapshot.directoryId !== owner.directoryId
+  )
+    return;
   const affected = result.historyFrame ?? result.historySelection;
   const page = affected
     ? snapshot?.pages.find(
@@ -38,10 +42,17 @@ export async function restoreDesignPageHistorySelection(
       .getState()
       .setActivePage(workspaceId, page.id, owner.directoryId);
   if (result.historySelection === undefined) {
-    const frame = snapshot?.frames.find(frame => frame.file === affected);
-    if (page && page.id !== owner.pageId && frame && designWorkspaceView(workspaceId).selectedFrame !== frame.file) {
+    const frame = snapshot?.frames.find((frame) => frame.file === affected);
+    if (
+      page &&
+      page.id !== owner.pageId &&
+      frame &&
+      designWorkspaceView(workspaceId).selectedFrame !== frame.file
+    ) {
       await selectDesignFrame(workspaceId, frame, {
-        selected: true, reveal: true, owner: captureDesignPageOwner(workspaceId),
+        selected: true,
+        reveal: true,
+        owner: captureDesignPageOwner(workspaceId),
       });
     }
     return;

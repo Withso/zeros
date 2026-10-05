@@ -1,5 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { zerosDataDir } from "../db/paths";
@@ -117,7 +133,9 @@ export function readDesignStorageFile(
     const content = bytes.subarray(0, offset);
     const source = content.toString("utf8");
     if (strictUtf8 && !Buffer.from(source, "utf8").equals(content))
-      throw new Error("Design source is not valid UTF-8; repair it before migration.");
+      throw new Error(
+        "Design source is not valid UTF-8; repair it before migration.",
+      );
     return source;
   } finally {
     closeSync(fd);
@@ -146,7 +164,13 @@ export interface DesignStorageAtomicOptions {
   /** Recheck migration inputs after preparing the temporary, before publish. */
   beforePublish?: () => void;
 }
-function atomicWrite(root: string, relative: string, source: string, mode = 0o600, options?: DesignStorageAtomicOptions): void {
+function atomicWrite(
+  root: string,
+  relative: string,
+  source: string,
+  mode = 0o600,
+  options?: DesignStorageAtomicOptions,
+): void {
   const target = assertSafeDesignStoragePath(root, relative, true);
   if (options && !/^[a-f0-9]{32}$/.test(options.temporaryToken))
     throw new Error("Invalid Design migration temporary identity.");
@@ -198,4 +222,7 @@ export function writePrivateDesignState(
   return path.join(root, name);
 }
 
-export { atomicWrite as atomicWriteDesignStorageFile, syncDirectory as syncDesignStorageDirectory };
+export {
+  atomicWrite as atomicWriteDesignStorageFile,
+  syncDirectory as syncDesignStorageDirectory,
+};

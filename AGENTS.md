@@ -17,8 +17,9 @@ These instructions apply to the entire repository. Read and follow
 - For a bug, add a failing regression test first, implement the fix, and retain
   the test.
 - Run adjacent Vitest suites after each meaningful edit, not only at handoff.
-- A Zeros `design.toml` registers a Design directory. Local Code and Design
-  use the same normal provider Read/Write/Edit/patch/shell tools and permissions.
+- A Zeros `meta/design.toml` registers a Design directory; legacy root
+  `design.toml` remains readable. Local Code and Design use the same normal
+  provider Read/Write/Edit/patch/shell tools and permissions.
   The Design tag means edit Design source by default; a frame attached in Code
   context means implement application code from that reference. Explicit user
   instructions take precedence; mixed work needs no mode switch. Read `rules.md`,
@@ -39,11 +40,12 @@ These instructions apply to the entire repository. Read and follow
   Local managed Git integrates Code and Design together; conflicts pause the
   canvas until shared source resolution/continue or abort completes. Provider
   permissions and Plan remain unchanged. Cloud retains API authoring for now.
-- Commit each Design folder with its `design.toml`, `canvas.json`, `rules.md` and
-  referenced source. Authorized managed Git operations may include both Code
-  and Design. Saving never implicitly stages or commits. `.zeros/` is private
-  local state, ignored by default. Private `[design] directory_id` selects the
-  active folder; legacy directory pointers, inline manifest documents,
+- Commit each Design folder with its `meta/design.toml`, `meta/canvas.json`,
+  `rules.md`, page folders and referenced source. Authorized managed Git
+  operations may include both Code and Design. Saving never implicitly stages
+  or commits. `.zeros/` is private local state, ignored by default. Private
+  `[design] directory_id` selects the active folder; legacy directory pointers,
+  inline manifest documents,
   `.zeros/design-dir.toml`, `.zeros/design/` metadata and `.zeros-canvas.json`
   remain readable. Explicit Design authoring upgrades them recoverably.
 

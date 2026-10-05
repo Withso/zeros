@@ -7,7 +7,7 @@ import {
   normalizeDesignWorkspaceView,
   resetDesignWorkspaceUiForTests,
   useDesignWorkspaceUiStore,
-  validateDesignWorkspaceSelection,
+  bindDesignWorkspacePages,
 } from "../state/design-workspace-ui";
 
 describe("design workspace UI memory", () => {
@@ -166,19 +166,27 @@ describe("design workspace UI memory", () => {
     ]);
   });
 
-  it("validates remembered selection only against an authoritative frame list", () => {
+  it("validates remembered selection only against a settled page catalog", () => {
     useDesignWorkspaceUiStore
       .getState()
       .setSelectedFrame("workspace-a", "removed.html");
 
-    expect(
-      validateDesignWorkspaceSelection("workspace-a", [
-        "home.html",
-        "pricing.html",
-      ]),
-    ).toBe("home.html");
+    const pages = [{
+      id: "main",
+      title: "Page 1",
+      folder: "",
+      frameFiles: ["home.html", "pricing.html"],
+    }];
+    bindDesignWorkspacePages("workspace-a", undefined, pages, false);
+    expect(designWorkspaceView("workspace-a").selectedFrame).toBe(
+      "removed.html",
+    );
+    bindDesignWorkspacePages("workspace-a", undefined, pages);
     expect(designWorkspaceView("workspace-a").selectedFrame).toBe("home.html");
-    expect(validateDesignWorkspaceSelection("workspace-a", [])).toBeNull();
+    bindDesignWorkspacePages("workspace-a", undefined, [{
+      ...pages[0],
+      frameFiles: [],
+    }]);
     expect(designWorkspaceView("workspace-a").selectedFrame).toBeNull();
   });
 

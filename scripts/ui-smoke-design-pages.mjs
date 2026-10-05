@@ -1,4 +1,3 @@
-import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
 import { designCanvasPoint } from "./ui-smoke-design-helpers.mjs";
 
@@ -60,7 +59,6 @@ async function exercisePages({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?pages=1`,
     { waitUntil: "networkidle" },
   );
-  await mkdir(".context/m4-screens", { recursive: true });
   const picker = () => page.getByRole("button", { name: /^Page: / });
   const viewport = page.locator("[data-design-canvas-viewport]");
   const view = () =>
@@ -90,9 +88,7 @@ async function exercisePages({ page, check }) {
     });
   const switchTo = async (title) => {
     await picker().click();
-    await page
-      .getByRole("menuitemcheckbox", { name: title, exact: true })
-      .click();
+    await page.getByRole("menuitemradio", { name: title, exact: true }).click();
     await expect(picker()).toHaveAccessibleName("Page: " + title);
   };
   const setBackground = async (hex) => {
@@ -128,12 +124,17 @@ async function exercisePages({ page, check }) {
       '[data-design-frame="page-1/home.html"] iframe[data-design-document-ready]',
     ),
   ).toBeVisible();
-  await page.screenshot({ path: ".context/m4-screens/1-picker-closed.png" });
   await picker().focus();
   await page.keyboard.press("Enter");
   await expect(
-    page.getByRole("menuitemcheckbox", { name: "Page 1", exact: true }),
+    page.getByRole("menuitemradio", { name: "Page 1", exact: true }),
   ).toBeFocused();
+  await expect(
+    page.getByRole("group", { name: "Pages", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("menuitemradio", { checked: true })).toHaveCount(
+    1,
+  );
   await page.keyboard.press("Escape");
   await expect(picker()).toBeFocused();
   await setBackground("345678");
@@ -155,11 +156,16 @@ async function exercisePages({ page, check }) {
   await pan(-80, -40);
   const beta = await view();
   await picker().click();
-  await expect(page.getByRole("menuitemcheckbox")).toHaveCount(2);
+  await expect(page.getByRole("menuitemradio")).toHaveCount(2);
+  await expect(
+    page.getByRole("menuitemradio", { name: "Page 2", exact: true }),
+  ).toBeChecked();
+  await expect(page.getByRole("menuitemradio", { checked: true })).toHaveCount(
+    1,
+  );
   await expect(page.getByRole("menu")).toHaveCSS("opacity", "1");
-  await page.screenshot({ path: ".context/m4-screens/2-picker-menu.png" });
   await page
-    .getByRole("menuitemcheckbox", { name: "Page 1", exact: true })
+    .getByRole("menuitemradio", { name: "Page 1", exact: true })
     .click();
   await expect(
     page.locator('[data-design-frame="page-1/home.html"]'),
@@ -233,7 +239,6 @@ async function exercisePages({ page, check }) {
   const input = page.getByRole("textbox", { name: "Page title" });
   await expect(input).toBeFocused();
   await input.fill("Landing screens");
-  await page.screenshot({ path: ".context/m4-screens/3-inline-rename.png" });
   await input.press("Enter");
   await expect(picker()).toHaveAccessibleName("Page: Landing screens");
   await expect(picker()).toBeFocused();
@@ -298,9 +303,6 @@ async function exercisePages({ page, check }) {
   await expect(
     files.locator('[data-item-path="North One - Design/tokens.css"]'),
   ).toBeVisible();
-  await page.screenshot({
-    path: ".context/m4-screens/5-files-design-section.png",
-  });
   check(
     "Files Design files section includes meta, page folders, rules and shared tokens",
     true,
@@ -320,7 +322,6 @@ async function exercisePages({ page, check }) {
     }),
   ).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCSS("opacity", "1");
-  await page.screenshot({ path: ".context/m4-screens/4-delete-dialog.png" });
   await page.getByRole("button", { name: "Delete page", exact: true }).click();
   await expect(picker()).toHaveAccessibleName("Page: Page 2");
   await page.reload({ waitUntil: "networkidle" });

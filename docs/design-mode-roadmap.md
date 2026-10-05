@@ -1,9 +1,10 @@
 # Design mode: architecture, implementation, and roadmap
 
-**Status: shared-session HTML/CSS v1 implemented; later feature phases remain
-planned. Consolidated 2026-09-18.** This is the single Design engineering
-reference: current product behavior, source formats, ownership, compatibility,
-resource limits, qualification, and the remaining roadmap. Code, schemas, and
+**Status: shared-session HTML/CSS v1 and Design directory Pages implemented;
+later feature phases remain planned. Updated 2026-10-05.** This is the single
+Design engineering reference: current product behavior, source formats,
+ownership, compatibility, resource limits, qualification, and the remaining
+roadmap. Code, schemas, and
 tests are authoritative when prose and behavior disagree. Implementation is not
 proof that a feature is released or qualified on every provider and host.
 
@@ -29,17 +30,21 @@ User-selected or user-authorized agent switches preserve the session and inject
 fresh instructions. There is no Code Restriction toggle, designer-only workspace,
 separate Design provider, or mode-selected sandbox in v1.
 
-Local Code and Design contexts author HTML, CSS, assets and `canvas.json` with ordinary
-provider Read/Write/Edit/patch/shell tools. No API apply/import/publish step is
-required. Optional API inspection and semantic editing, and human visual edits,
-operate on those same files. Cloud worker execution policy is separate: its
+Local Code and Design contexts author HTML, CSS, assets and `meta/canvas.json`
+with ordinary provider Read/Write/Edit/patch/shell tools. No API
+apply/import/publish step is required. Optional API inspection and semantic
+editing, and human visual edits, operate on those same files. Cloud worker
+execution policy is separate: its
 Design authoring uses the API and cannot fall back to native Design writes.
 
-`design.toml` v2 registers the folder and stable directory ID; `canvas.json` v1
-owns the single-page scene and stable frame IDs. Registration and generated
-`rules.md` remain lifecycle-managed. Explicit Design authoring migrates legacy
-storage recoverably; inspection does not rewrite the branch. Native edits are
-ordinary file saves, not semantic transaction receipts or automatic Git commits.
+`meta/design.toml` v3 registers the Design root and stable directory ID;
+`meta/canvas.json` v2 owns its page catalog and stable frame IDs. Each page has
+one folder under that root; tokens, components, assets and rules stay shared.
+Root v1/v2 registrations and canvas v1 remain readable. Registration and
+generated `rules.md` remain lifecycle-managed. Explicit Design authoring migrates
+legacy storage recoverably; inspection does not rewrite the branch. Native edits
+are ordinary file saves, not semantic transaction receipts or automatic Git
+commits.
 
 The private authored-store/publication system and separate Design-session
 admission were removed. Keep checkout-backed `DesignDraftStore`: it supplies
@@ -52,7 +57,8 @@ never delete them to bypass admission or silently discard unpublished work.
 | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
 | Shared workbench, directory lifecycle, selection and bounded retained canvases       | Implemented                                                               |
 | Composer tag, persisted mode/revision, continuation instructions and API mode checks | Implemented                                                               |
-| Local native HTML/CSS authoring, `canvas.json`, migration and watcher refresh        | Implemented                                                               |
+| Local native HTML/CSS authoring, `meta/canvas.json`, migration and watcher refresh   | Implemented                                                               |
+| Page lifecycle, inspector picker, per-page views and page-aware frame writes          | Implemented; framework Code page routes remain Phase 3                    |
 | Foundation, visual editing, semantic transactions, history and sandboxed previews    | Implemented                                                               |
 | Scoped inspection, semantic helpers, request receipts and optional capture           | Implemented; capture requires a qualified host                            |
 | Shared Files/Changes/Review and mixed managed Git                                     | Implemented; Design checkpoint compatibility retained internally         |
@@ -71,6 +77,7 @@ that every generated design completes within a particular time.
 
 Current contracts: [source and registration](#source-metadata-and-personal-state),
 [migration](#migration-and-git), [canvas format](#canvas-format),
+[page operations](#page-operations-and-agent-targeting),
 [composer and sessions](#composer-and-shared-agent-lifecycle),
 [authoring and tools](#native-authoring-and-optional-tools),
 [visual editor](#renderer-and-editor-contract),
@@ -87,6 +94,7 @@ and [compatibility](#identity-and-compatibility-reference).
 | `engine/agents/session-tools.ts`, `agents/gateway.ts`                            | Product tool admission/disposal and prompt/steer preparation in the existing execution             |
 | `engine/design/code-tool-admission.ts`, `conversation-tools.ts`, `code-tools.ts` | Workspace/directory ownership, mode checks, native context and scoped API tools                    |
 | `engine/design/manifest.ts`, `canvas-file.ts`, `metadata.ts`, `directory.ts`     | Registration, scene formats, discovery and recoverable migration                                   |
+| `engine/design/layout.ts`, `pages-migration.ts`, `page-lifecycle.ts`, `page-selection.ts` | Layout resolution, per-directory migration, page operations and prompt hints                  |
 | `packages/design-core`, `packages/design-web`                                    | Foundation schemas/history and HTML/CSS parsing, provenance, semantic edits and headless rendering |
 | `engine/design/document.ts` and its storage/transaction/lifecycle/render modules | Compatible public facade over checkout-backed source and transactions                              |
 | `engine/design/routes.ts`, `workspace/service.ts`                                | Design routes behind workspace policy, directory leases and mutation coordination                  |
@@ -107,7 +115,7 @@ Git index. Code and Design are concurrent views of that checkout; they are not
 separate worktrees, branches, copies, projections, or execution backends.
 
 ```text
-Shared native agent + Design mode ─► HTML/CSS/assets/canvas.json in the checkout
+Shared native agent + Design mode ─► HTML/CSS/assets/meta/canvas.json in the checkout
                                                ▲
 Human canvas + optional Design API ─► DesignDraftStore (checked transactions)
                                                │
@@ -115,9 +123,10 @@ Human canvas + optional Design API ─► DesignDraftStore (checked transactions
 ```
 
 The active Design directory comes from the private `[design] directory_id`
-selection and the `design.toml` manifests in this checkout. Legacy `[design]
-directory` paths remain readable. `Zeros Design/` is the unconfigured pointer
-default; the explicit Create Design directory action creates `<repo name> -
+selection and the `meta/design.toml` manifests in this checkout (legacy root
+`design.toml` remains readable). Legacy `[design] directory` paths remain
+readable. `Zeros Design/` is the unconfigured pointer default; the explicit
+Create Design directory action creates `<repo name> -
 Design/` when no Design folder exists. Opening the tab alone does not create
 files. A single discovered folder is reused. The Design directory menu selects
 a workspace-local stable ID; Settings manages repository defaults and rename.
@@ -142,6 +151,10 @@ the canvas is full bleed and its chrome floats over it, 8px from its edges
   double-click resets), the inspector below. The panel's left edge resizes
   its width. Its title folds the Layers tree down to its header so the
   inspector can take the panel.
+- **Page picker** (inspector, above Background): with no frame/node selected,
+  the File-icon header shows the active page title and a chevron. Its shared
+  radio menu lists pages, New page, Rename page… and Delete page…. With a
+  selection, the inspector keeps its frame/node header.
 - **Motion timeline**: floats along the bottom and ends beside the panel, so
   keyframes and the inspector fields they animate stay usable together.
 
@@ -172,9 +185,17 @@ selection opens Design once; subsequent choices survive reload without forcing
 Design again. These fields do not authorize human Design editing. The implemented
 composer modes and provider tool gating use separate conversation-owned state.
 
-Frame/node selection, camera, layer disclosure and panel visibility are keyed
-by workspace. A stable directory ID survives rename; replacing it resets the
-old document selection/camera and runtime foundations. Switching back to an
+Each workspace binds one Design directory. `activePageId` and a bounded `byPage`
+map retain 32 recent page views: camera, frame/node selection, source view and
+canvas background. The existing flat fields remain the active projection under
+`zeros:design-workspace-ui-v1`. A switch saves/restores that projection in one
+synchronous store update, with no bridge read or await on the click path. Legacy
+flat fields lift into the first confirmed page once; reload restores the active
+page and its views. Only a settled matching catalog can prune remembered pages
+or selections; a removed page falls back to the first page. Panel visibility
+remains workspace-wide and layer disclosure uses page-qualified frame files.
+A stable directory ID survives rename; replacing it resets the old page views,
+selection/camera and runtime foundations. Switching back to an
 older directory starts a fresh document view; it does not restore a second
 per-directory editor history. The serialized view keeps its field names:
 `inspectorVisible` is the floating panel's visibility and `layersVisible`
@@ -185,7 +206,18 @@ the inspector at least 200px); both are boot CSS variables. Layers height
 commits synchronize retained canvases and other windows. The retired Layers
 width key stays readable. At most two visited Design canvases are retained.
 Inactive tabs/owners and a collapsed workbench are inert, hidden and inactive,
-with stable iframe DOM order.
+with stable iframe DOM order. Pages do not add retained canvases. A memoized
+projection shows only the active page's frames in Canvas and Layers and keeps
+unchanged frame references stable; tokens, assets and lint remain directory-wide.
+
+Mutation callers capture workspace, directory, page and frame at submission.
+Late selection, camera and presentation replies cannot affect another visible
+owner. Page switching cancels gestures, hover/marquee state, inline editors and
+frame-anchored menus; an inspector blur still commits to its captured original
+page. Background edits update that page's private view memory. Directory-level
+undo/redo reveals the affected frame's page and restores its selection while
+the submitting owner is still current. Deleted-page history fails safely and
+cannot recreate its source.
 
 `design.initialize` is an explicit managed-workspace operation. It creates
 or adopts metadata without changing workspace kind, HEAD or the index. Directory
@@ -209,18 +241,22 @@ restrictions and ordinary remote file/credential filtering remain independent.
 ```text
 <repo>/
   Product - Design/
-    design.toml         engine-managed registration and stable directory ID
-    canvas.json         editable scene, frame IDs, sources and geometry
+    meta/
+      design.toml       manifest v3, registration and stable directory ID
+      canvas.json       canvas v2, pages, frame IDs, sources and geometry
     rules.md            short native-authoring and compatibility instructions
-    home.html           authored frames
     tokens.css          shared tokens
     components/         shared components
     assets/             images and other assets
+    page-1/
+      home.html         authored frame on Page 1
+    checkout/
+      home.html         another page may use the same basename
   .zeros/               ignored private settings and local state
 ```
 
 Local Code and Design contexts use normal provider tools to author HTML, CSS,
-assets and `canvas.json` when requested. The Design tag chooses the default
+assets and `meta/canvas.json` when requested. The Design tag chooses the default
 editing target; a selected frame in Code context is normally an application
 implementation reference. Explicit instructions override that default. Shared
 Files editing, partial staging, discard and restore support Design source,
@@ -228,9 +264,12 @@ including repair of existing malformed or conflicted metadata. Creation of
 registration remains lifecycle-managed. Cloud/remote authoring retains its
 existing policy. Mode instructions do not provide a filesystem sandbox.
 
-Commit the folder, `design.toml`, `canvas.json`, `rules.md` and referenced source
-together. Uncommitted work is local to the checkout. Registration and generated
-rules are managed by Zeros lifecycle operations.
+Commit the folder, `meta/design.toml`, `meta/canvas.json`, `rules.md`, page folders
+and referenced source together. New directories have one generated stable page
+ID, title "Page 1", folder `page-1`, root rules/tokens and no frames. The empty
+folder is created without `.gitkeep`; a fresh clone may omit it, and its first
+frame write recreates it. Uncommitted work is local to the checkout. Registration
+and generated rules are managed by Zeros lifecycle operations.
 
 Repository Settings → Design → Directory scans the main checkout, including
 untracked Zeros manifests, without requiring any worktrees. Its folder list
@@ -240,7 +279,8 @@ when another row is renamed.
 
 The trash action is **Remove Design registration**, with an explicit confirmation.
 It preserves the directory and all authored source/assets, removes only its
-manifest, legacy registry entry/document metadata, and unmodified generated rules,
+`meta/design.toml` registration (or its legacy root manifest), legacy registry
+entry/document metadata, and unmodified generated rules,
 and forgets this checkout's remembered registration. Custom rules are preserved.
 The preserved source becomes ordinary Code, including a folder named `Zeros
 Design`; the legacy default read path alone does not establish Design ownership.
@@ -250,23 +290,32 @@ open workspaces for this repository must be archived before removal; every
 workspace may now be editing Design, regardless of its legacy kind. The operation is local-only
 and uses the engine's Design-owner handoff and workspace mutation lane. Other
 worktrees retain their own committed copies until updated through normal Git.
-Choosing the folder again preserves `canvas.json`; old metadata can also be
+`meta/canvas.json` is preserved, matching legacy root `canvas.json` behavior;
+unregistered files in `meta/` and page folders are also kept. Choosing the
+folder again preserves that canvas; old metadata can also be
 recovered from Git. Source-only rebuilding is the explicit fallback.
 
-The current manifest is registration-only:
+The current registration-only manifest is at `<Design root>/meta/design.toml`:
 
 ```toml
 format = "zeros-design"
-version = 2
+version = 3
 id = "design_example"
 canvas = "canvas.json"
 ```
 
-`canvas.json` v1 contains stable frame IDs, a single page, flat HTML source paths,
-geometry, titles and Foundation metadata. It contains no node tree or duplicate
-HTML. Unknown supported extensions survive engine writes; camera state, grants,
-journals and caches remain private. The scene example and bounds follow below. Legacy v1 manifests with inline document v3
-and null-pointer encoding remain readable and migrate on explicit authoring.
+`canvas = "canvas.json"` resolves beside the manifest, to `meta/canvas.json`.
+V3 is valid only in a folder named exactly `meta`; its parent is the registered
+Design root, never `meta/` itself. A pure layout resolver is shared by worktree,
+index, HEAD and checkpoint readers. Root `design.toml` v2 with canvas v1 and
+legacy v1 inline document v3/null-pointer encoding remain readable and migrate
+on explicit authoring. Newer/unsupported formats fail closed; older clients
+reject v3 rather than rewriting it as v2.
+
+Canvas v2 stores pages, stable frame IDs, page-qualified HTML sources, geometry,
+titles and Foundation metadata. It contains no node tree or duplicate HTML.
+Supported extensions round-trip; camera state, grants, journals and caches stay
+private. The scene example and bounds follow below.
 
 Discovery validates `format = "zeros-design"`; a file named `design.toml` alone
 does not make a folder Design territory. Working-tree discovery is bounded,
@@ -279,7 +328,8 @@ symlinks, hard links, malformed metadata and competing copies pause writes.
 The Files tab receives validated Design roots alongside its file listing through
 both the native and engine bridge paths. Root-level Design folders appear in the
 separate **Design files** section, including uncommitted portable manifests and
-legacy registrations. Nested folders keep their existing place in the tree.
+legacy registrations, with `meta/`, page folders, `rules.md` and `tokens.css`
+visible inside the root. Nested folders keep their existing place in the tree.
 The listing and ownership share one cached snapshot per checkout, so refreshing
 metadata without changing filenames still updates the split. An unrelated
 `design.toml` never establishes ownership. Older engines that omit the ownership
@@ -288,9 +338,12 @@ field retain the legacy canvas-marker fallback.
 Repository Settings → Design → Directory → **Use existing folder** explicitly adopts a source folder
 inside the repository. The preview first uses existing metadata, then looks for
 saved metadata in the index and HEAD (including older formats). Without saved
-metadata it rebuilds frame information from source, leaving authored files
-untouched. Canvas positions and other metadata-only values cannot be recovered
-from source alone. The preview identifies that case before confirmation and is
+metadata it creates the v3 layout and rebuilds frame information from source;
+registered frame HTML moves into its page folder with reference rebasing.
+Other authored files stay in place. Existing unrelated `meta/` contents are
+preserved; conflicting registration/canvas files pause adoption. Canvas positions
+and other metadata-only values cannot be recovered from source alone. The preview
+identifies that case before confirmation and is
 checked again before writing. If selecting it would invalidate a live worktree,
 the folder is registered while existing selections stay active. Commit it and
 update those worktrees before using the normal folder selector. Deleting
@@ -303,12 +356,57 @@ without a central registry.
 Read-only access remains compatible with `.zeros/design-dir.toml`,
 `.zeros/design/design-dir.toml`, `.zeros/design/design.toml`, each central
 `<id>/document.json` or `metadata.json`, and source `.zeros-canvas.json` markers.
-On explicit Design prompt entry or a Design write, every entry in a central registry migrates into its source
-folder before the old storage becomes private. IDs, geometry, Foundation data
-and extensions are preserved. Recoverable transactions write canvas files and registration manifests
-before removing predecessor files. Legacy canvas markers and inline frame
-metadata migrate through the Design API. Interrupted older transactions remain
-recoverable. Reading an older branch does not rewrite it.
+Read-only inspection, navigation and reading older branches never migrate or
+heal authored metadata. Explicit Design prompt entry or a Design write first
+uses the existing legacy → v2-root upgrade unchanged; its central-registry
+all-entries invariant still applies. The authored directory then upgrades from
+root `design.toml` v2 + root canvas v1 to the v3 meta layout independently.
+Other v2 directories remain unchanged until authored.
+
+The existing page retains its ID/title; absent `pages` becomes "Page 1". Its
+folder is `page-1`, made unique against root entries. Only registered frame HTML
+moves. Frame IDs, titles, geometry, per-page z, Foundation data and supported
+extensions survive. Shared CSS/assets/components and unregistered HTML stay in
+place. Root `rules.md` upgrades only recognized generated text, preserving
+appended project guidance and custom rules.
+
+A per-directory private journal records paths, before/after hashes, phases and
+private payload-file names; it embeds no HTML payloads. Durable phases are
+prepared → sources → metadata → deleted → invalidated → complete. Preflight
+checks destinations, links, ignores and pending journals. Sources and metadata
+are atomically written and verified before predecessors are removed. Recovery
+recognizes only journal-owned intermediate manifests and resumes each write or
+delete idempotently; repeating a completed migration is a no-op. Competing root
+and meta manifests outside such a journal pause writes. Changed inputs or
+successors pause recovery with an actionable error. Migration never changes
+the Git index, even with staged or dirty source.
+
+Reference edits use parser offsets and URL tokens, preserving unrelated bytes
+rather than reserializing documents. Moved HTML rebases ordinary relative
+`href`, `src`, `srcset`, `poster`, inline/style-block CSS `url(...)` and
+`@import` against its old/new locations; moved targets follow their new paths.
+Query/hash suffixes survive. Well-formed outside-root relative references also
+rebase lexically to preserve their meaning; render containment still rejects
+outside-root resources. Absolute/scheme URLs, protocol-relative URLs and
+fragments stay unchanged. Encoded path spellings, backslash and control-character
+references stay unchanged. This includes encoded relative paths that render
+after decoding; their targets can change when the containing frame moves.
+Malformed inline/style-block CSS uses the
+URL-token fallback.
+
+Stationary Design-root HTML/CSS, including components, is parsed only when a
+case-insensitive moved-basename prefilter matches. Only references resolving to
+moved frames are rewritten; every other reference stays byte-identical and
+cannot refuse migration. Unrelated malformed CSS is skipped. Component HTML
+retains its established Design-root URL origin. Ambiguous moved-file case/NFC
+aliases and applicable `<base href>` semantics fail preflight. Nothing outside
+the Design root is edited. Ordinary rendering resolves assets/stylesheets
+relative to their containing source, rebases component expansion URL origins,
+and accepts only contained `../` paths.
+
+Filename-keyed private caches and visual history for that directory are
+invalidated after migration. Old flat frame/context/evidence references become
+missing/stale; they never resolve by basename to a frame on another page.
 
 Design Stage, Unstage and Commit include the selected source folder and its
 manifest. During migration, projection of shared legacy registry entries keeps
@@ -320,7 +418,8 @@ remote/API-only authoring keeps its existing guard.
 Archives finish recoverable writes before capturing source and metadata.
 
 Design writes maintain an idempotent block in the root `.gitignore`: ignore
-`/.zeros/` and keep Design manifests and rules visible. The previous
+`/.zeros/` and keep `meta/design.toml`, `meta/canvas.json` and root `rules.md`
+visible, along with legacy manifests/canvases. The previous
 `.zeros/design/` exception is removed. Existing exclusions for other files,
 including private files inside a chosen folder, are preserved.
 A higher-priority ignore rule that still hides Design metadata pauses the write
@@ -357,23 +456,47 @@ Provider permission/Plan modes are independent of composer authoring intent.
 
 #### Canvas format
 
-A minimal canvas index is:
+A canvas v2 index at `<Design root>/meta/canvas.json` can contain:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "id": "main",
   "title": "Product",
-  "pages": [{ "id": "main", "title": "Screens", "frames": ["home"] }],
+  "pages": [
+    {
+      "id": "page_home",
+      "title": "Page 1",
+      "folder": "page-1",
+      "frames": ["home"]
+    },
+    {
+      "id": "page_checkout",
+      "title": "Checkout",
+      "folder": "checkout",
+      "frames": ["checkout_home"]
+    }
+  ],
   "frames": {
     "home": {
       "kind": "html",
-      "source": "home.html",
+      "source": "page-1/home.html",
       "title": "Home",
       "x": 0,
       "y": 0,
       "width": 1440,
-      "height": 900
+      "height": 900,
+      "z": 0
+    },
+    "checkout_home": {
+      "kind": "html",
+      "source": "checkout/home.html",
+      "title": "Checkout",
+      "x": 0,
+      "y": 0,
+      "width": 1440,
+      "height": 900,
+      "z": 0
     }
   }
 }
@@ -384,11 +507,26 @@ source and change its `source` reference while preserving the ID. Add/remove
 the corresponding page membership when adding/removing a frame. IDs start with
 a letter, contain letters/digits/underscores/hyphens, and are at most 128
 characters. The supported kinds are `html` and the existing canvas `text`
-frame. Source references are flat relative `.html` filenames, unique under
-portable case folding. Unregistered HTML remains source, not an implicit frame.
-The format admits one page, at most 256 frames, dimensions 1–16384 and positions
-within ±1,000,000. Unsupported versions/kinds, duplicate references, unsafe
-paths and missing referenced sources produce errors instead of being rewritten.
+frame. Sources are Design-root-relative `<page.folder>/<name>.html` paths with
+exactly one folder segment, unique globally under NFC/case folding. Each frame
+must appear exactly once in its page's `frames` array and point inside that
+page's folder. Unregistered HTML remains source, not an implicit frame.
+
+The format admits 1–64 pages and at most 256 frames directory-wide. Page folders
+match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, cannot end in `.`, cannot be
+dot-prefixed, and exclude `meta`, `assets` and `components` case-insensitively.
+Folders and page IDs are unique; folder comparisons use case folding. Generated
+names are lowercase slugs, unique against all root entries, and stay fixed after
+creation. Page titles are authored; rename trims to 1–120 characters without
+control characters. Missing empty page folders are valid.
+
+Legacy canvas v1 decodes as one root page with flat sources and re-encodes
+byte-compatibly; the resolved layout chooses output version. Unsupported
+versions/kinds, duplicate references and unsafe paths produce errors instead of
+being rewritten. Read-only snapshots keep missing/unrenderable registered
+membership in the page catalog and report lint while omitting those renders;
+direct frame reads and authoring validation still reject missing source.
+Geometry remains dimensions 1–16384 and positions within ±1,000,000.
 `frame.set-geometry` rejects geometry outside those bounds (and a `z` outside
 0–256) with a plain reason before any journal is admitted, so storage never
 normalizes a committed revision. Canvas move/resize, a newly drawn
@@ -397,12 +535,59 @@ settle inside them, and automatic placement widens its three-column grid
 rather than placing a frame past ±1,000,000.
 
 Canvas/page titles and existing Foundation metadata are portable authored
-content. Page membership normally determines stacking order; optional `z`
-preserves historical absolute ordering. Unknown supported extension fields
-survive engine writes. Legacy geometry extensions use `geometryMetadata` to
+content. Membership order and optional `z` determine stacking within each page;
+z is independent between pages. New-frame placement considers that page only.
+Unknown supported canvas/page/frame extension fields survive engine writes.
+Legacy geometry extensions use `geometryMetadata` to
 avoid colliding with frame extensions. Camera, credentials, grants, recovery
 journals, captures and caches do not belong in this file. No DOM/node tree or
 copy of the HTML is stored here.
+
+#### Page operations and agent targeting
+
+Page lifecycle uses the existing workspace policy → directory lease → mutation
+lane → write-authority path and returns a confirmed directory snapshot/catalog:
+
+- `design.page.create { title? }` creates a stable ID and lowercase slug folder.
+  Without a title it scans from `pages.length + 1` for the first unused "Page N"
+  title whose unsuffixed `page-n` folder is also free. The 64-page ceiling applies.
+- `design.page.rename { pageId, title }` changes the title only; folder/path
+  identity remains fixed.
+- `design.page.delete { pageId, expectedFrameIds }` refuses the last page and
+  changed membership. Its journal removes the page and registered HTML only,
+  tolerates already-missing sources, preserves all other files and removes the
+  folder only if empty, never recursively. It uses confirmed membership rather
+  than a whole-canvas revision CAS.
+
+These are explicit authoring operations and migrate a v2-root directory first.
+Cloud lifecycle calls require edit authority. Page create/rename/delete are not
+Cmd-Z history in v1. The picker selects a confirmed created page, prevents
+duplicate pending submissions, renames inline with Enter/blur save and Escape
+cancel, and disables last-page deletion. A nonempty page requires confirmation
+with its displayed frame IDs; an empty page deletes immediately. Deletion selects
+a neighbor. Engine failures use the existing Design feedback/toast path.
+
+Frame/text creation, duplicate, paste and detach-to-new-frame submit explicit
+page IDs from the renderer. API/agent create/duplicate accepts optional `pageId`:
+one page supplies the default; several pages require it with a clear error.
+The UI hint never selects a mutation target. Seeds in page folders link
+`../tokens.css`; restore points retain the page and fail safely if it was removed.
+Undo/redo replies expose the affected frame for page reveal.
+
+`design.page.select { directoryId, pageId }` is a read-class, best-effort hint
+stored in engine memory per workspace. It validates the directory owner, waits
+for neither a lease nor the write lane, writes no authored state and is sent
+without waiting on bind/switch/create. Prompt/API context validates it against
+the current catalog and names the viewed page/folder. Without a valid hint,
+context uses the sole page or lists several pages and defaults guidance to the
+first. Explicit target errors remain visible. No prompt/control-plane fields,
+protocol bump or `design_page_*` agent tools are added. Native agents add a page
+record `{ "id", "title", "folder", "frames": [] }` to `meta/canvas.json` and
+create its folder, following the same portable folder rule.
+
+Folder rename, moving frames between pages, page reorder, authored backgrounds,
+nested page folders and page-level undo remain follow-ups. Background is private
+per-page renderer state in this version.
 
 ### Native verification and selected-frame context
 
@@ -418,9 +603,9 @@ The existing engine CLI now implements:
 
 ```sh
 <engine-command> design list --url <verification-url>
-<engine-command> design validate --url <verification-url> --frame phone.html
-<engine-command> design capture --url <verification-url> --frame phone.html --output .context/phone.png
-<engine-command> design preview --url <verification-url> --frame phone.html
+<engine-command> design validate --url <verification-url> --frame page-1/phone.html
+<engine-command> design capture --url <verification-url> --frame page-1/phone.html --output /tmp/phone.png
+<engine-command> design preview --url <verification-url> --frame page-1/phone.html
 ```
 
 Prompt/frame context supplies the actual executable command and local URL. The
@@ -626,9 +811,10 @@ A local task runs as follows:
    uses the revision supplied in the current prompt. Provider permissions apply.
 2. Prompt preparation resolves the selected directory and migrates legacy
    metadata if necessary. If absent, use Create design directory in Design.
-3. Read `rules.md` and `canvas.json`, then only the relevant source files.
+3. Read `rules.md` and `meta/canvas.json`, then only the relevant source files.
 4. Write a complete HTML frame and add its stable ID/source/bounds to the canvas
-   index, or patch an existing file. No required capabilities/apply/save call.
+   index and that page's membership, or patch an existing file. Use the viewed
+   page unless instructed otherwise. No required capabilities/apply/save call.
 5. Saved files appear in the existing canvas. Inspect/validate/capture only as
    needed. Visual changes edit those same files; stale edits must re-read.
 6. Continue authorized Code work in the same conversation. Git operations retain
@@ -638,7 +824,8 @@ Native changes are not semantic API transactions or durable API receipts.
 External edits invalidate semantic undo; native undo uses provider edit history
 or authorized Git workflows. API lost replies still require checking the
 original receipt before replay. On a stale revision, re-read and prepare a new
-edit. `design.toml` and generated `rules.md` stay under engine lifecycle ownership.
+edit. `meta/design.toml` and generated `rules.md` stay under engine lifecycle
+ownership.
 The source formats and migration rules above apply to all authoring paths.
 
 #### Native edit and refresh behavior
@@ -792,7 +979,7 @@ separate, explicit actions.
 
 Confirmed edits are written to `<workspace>/<selected Design folder>` by the
 engine; agents may also author files directly in Design mode. HTML, CSS, assets,
-`canvas.json`, `design.toml`, and `rules.md` are ordinary
+`meta/canvas.json`, `meta/design.toml`, and root `rules.md` are ordinary
 versioned source. A gesture previews locally until release; typed fields publish
 on their editor's commit boundary (usually Enter/blur). An unsubmitted field is
 not yet a durable edit. Cmd/Ctrl+S publishes the focused field and waits behind
@@ -1387,6 +1574,12 @@ The following Foundation limits are compatibility and denial-of-service
 boundaries, not targets to relax casually:
 
 - textual state: 1,024 files, 2 MiB per file, 16 MiB total;
+- canvas catalog: 1–64 pages, 256 frames directory-wide; one portable page-folder
+  segment, 64 characters maximum, and per-page stacking;
+- page view memory: 32 recent pages per workspace, with two retained workspace
+  canvases in total; page switching allocates no retained canvas;
+- page migration: 8 MiB hash/path journal with private payload files, 20,000
+  discovered entries, 2 MiB source files and 16 MiB metadata files;
 - transactions: 256 operations and a 4 MiB aggregate input envelope;
 - default history: 100 entries/1 MiB operations and 512 receipts/4 MiB;
 - recovery journal: 32 MiB with validated paths, revisions, source limits, and
@@ -1462,10 +1655,12 @@ paths. `git.commit` uses workspace authority, capturing the exact staged lane
 Internal callers with Code-only authority still refuse Design content; Design
 review retains its narrower lane. Boundary-crossing Design-only renames remain
 rejected. No action silently stages missing metadata companions. A touched
-portable Design folder must include regular `design.toml` and `rules.md` files;
-v2 registrations also require valid staged `canvas.json` and its frame sources
-in that captured index; full-folder deletion and recognized legacy metadata
-remain supported. Validation does not read a newer unstaged draft to decide
+portable Design folder requires regular `meta/design.toml` v3,
+`meta/canvas.json` v2, root `rules.md` and each nested registered frame source
+from that captured index. The shared layout resolver registers the parent of
+`meta/`, not `meta/`. Root v2 + canvas v1, inline v1, full-folder deletion and
+recognized legacy metadata remain supported. Empty page folders need no tracked
+placeholder. Validation does not read a newer unstaged draft to decide
 whether an earlier staged checkpoint is valid.
 
 Pull, merge, rebase, checkout, reset, cherry-pick, revert, and push are
@@ -1560,15 +1755,18 @@ continue using the checkout-backed store without migration.
 
 | Layer             | Current contract                                                                        | Change rule                                                                                             |
 | ----------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Directory         | Committed `design.toml` v2 ID; private active `directory_id`                            | Replacement IDs revoke grants and old selections; names do not grant authority                          |
-| Scene             | `canvas.json` v1, one page, stable frame IDs, `html`/`text` source references           | Native source rename preserves frame ID and updates its reference; new kinds need a versioned migration |
-| Internal document | Directory ID + `frame:<portable HTML filename>`; internal canvas v3 maps `frame`/`text` | Preserve bridge/document addresses and explicit mapping to scene IDs                                    |
+| Directory         | Committed `meta/design.toml` v3 ID; root v1/v2 readable; private active `directory_id` | Replacement IDs revoke grants and old selections; `meta/` never becomes the root                         |
+| Scene             | `meta/canvas.json` v2, 1–64 pages, stable frame IDs, `html`/`text`; canvas v1 readable | Preserve source IDs, page membership and supported extensions; legacy output remains byte-compatible    |
+| Page              | Stable page ID and fixed portable folder; title-only rename; per-page z              | Delete checks displayed frame membership; lifecycle is outside directory undo                           |
+| Renderer view     | Existing storage key, flat active projection plus bounded `activePageId`/`byPage`    | Restore synchronously, prune settled owners, reset on directory replacement                             |
+| Internal document | Directory ID + `frame:<Design-root-relative HTML path>`; internal canvas v3            | Preserve bridge/document addresses; no basename fallback after migration or page deletion               |
 | Foundation        | Schema v1; compatible legacy migration                                                  | Version independently from registration, scene and transport                                            |
 | Semantic revision | 96-bit conflict key over source/Foundation/geometry                                     | External edits invalidate apply/undo expectations                                                       |
 | Render            | Composed source generation, dependencies, viewport and mounted runtime generation       | Source equality never authorizes a replaced runtime                                                     |
 | Iframe protocol   | Runtime v2 over a private port                                                          | Validate version, generation, bounds and cancellation                                                   |
 | Context reference | v1 workspace/directory/frame/optional-node/revision, optional stable frame ID           | Read-only ready/stale/missing/wrong-directory; removable source and optional PNG composer attachments  |
 | Legacy storage    | Inline manifests, central registry/JSON and `.zeros-canvas.json`                        | Read without migration; explicit authoring journals the upgrade                                         |
+| Published manifest schema | Stable `design.schema.json` still describes the legacy v1 envelope | Engine validation covers v2/v3 registration; a combined editor schema is a follow-up |
 
 Unsupported kinds and versions fail closed. They must never be rewritten into
 an older shape. Future inert unknown-kind posters require a validated common
@@ -1722,10 +1920,11 @@ separate crash/watchdog qualification and can remain deferred.
 
 ### 2.3 Persistence and compatibility
 
-- Version Foundation v1, Design API v1, DOM runtime v2, registration v2 and
-  authored canvas.json v1 independently; internal/legacy canvas v3 remains readable. Choose a new canvas version before persisting non-HTML
-  surfaces. Negotiate versions and capabilities in engine and client; a new
-  IPC schema alone is insufficient.
+- Version Foundation v1, Design API v1, DOM runtime v2, registration v3 and
+  authored `meta/canvas.json` v2 independently; root registration v1/v2, canvas
+  v1 and internal/legacy canvas v3 remain readable. Choose a new canvas version
+  before persisting non-HTML surfaces. Negotiate versions and capabilities in
+  engine and client; a new IPC schema alone is insufficient.
 - The current canvas index already carries stable frame IDs, kind, source
   references and geometry. Extend it with a versioned kind-specific descriptor
   when a real new surface ships. Preserve the internal file-keyed mapping; do not cosmetically
@@ -1746,11 +1945,11 @@ separate crash/watchdog qualification and can remain deferred.
   registered repository/package root. Private session state includes cookies,
   absolute paths, preview tokens, signed URLs, and temporary captures. It
   does not belong in committed surface descriptors.
-- Reads never migrate. Explicit Design entry/lifecycle upgrades journal affected files,
-  preserve supported extensions, retain recovery information, and keep
-  `design.toml`, `canvas.json` and `rules.md` in the normal Design Git lane. Test clone,
-  directory rename, branch switch, newer-file/older-client, and interrupted
-  migration paths. Unsupported tools/dependencies open inertly.
+- Reads never migrate. Explicit Design authoring/prompt entry journals affected
+  files, preserves supported extensions, retains recovery information, and keeps
+  `meta/design.toml`, `meta/canvas.json` and root `rules.md` in the normal Design
+  Git lane. Test clone, directory rename, branch switch, newer-file/older-client,
+  and interrupted migration paths. Unsupported tools/dependencies open inertly.
 
 ### 2.4 Where things run: local Mac and cloud sandbox
 
@@ -1882,8 +2081,9 @@ editing authority. See [Composer and shared agent lifecycle](#composer-and-share
 - Keep source operations independent of the visible tab and usable headlessly.
   UI and agents share the engine mutation authority and change events. The
   legacy workspace view selection is not the new agent permission state.
-- Native HTML/CSS/assets/canvas.json authoring is the primary Design-mode path.
-  Only registration (`design.toml`) and generated rules remain engine-owned.
+- Native HTML/CSS/assets/`meta/canvas.json` authoring is the primary Design-mode
+  path. Only registration (`meta/design.toml`) and generated rules remain
+  engine-owned.
   Approved managed Git operations may stage/commit/integrate Design; Git-as-editor
   cannot bypass authoring instructions. Native writes are ordinary file edits,
   not API receipts or semantic undo entries. Renderer/browser isolation and
@@ -2165,8 +2365,8 @@ below retain their original feature packages.
   Git foundations and conflict pause remain. No new proposal-review, mixed Git
   workflow or Design conflict-resolution UI in v1.
 
-Exit flow: select Design, create/edit HTML and canvas.json with native tools,
-optionally inspect/validate/capture through the API, see the existing canvas
+Exit flow: select Design, create/edit page HTML and `meta/canvas.json` with native
+tools, optionally inspect/validate/capture through the API, see the existing canvas
 update, remove the tag or authorize a return to Code in the same conversation.
 Verify restart, concurrent edits, stale mode calls, stopped work, duplicate
 receipts and separate-conversation ownership. Qualify native/cloud hosts before
@@ -2209,7 +2409,8 @@ actual Code/build identity, including dirty Code and historical evidence.
 - Add a separately versioned preview protocol: handshake/capabilities,
   describe, mount, set props/fixtures, readiness, measure, optional capture,
   diagnostics, reload, and dispose. Bind ports to source/runtime generation.
-- Ship generic page routes and one opt-in React adapter, sharing the workspace
+- Ship generic framework page routes (distinct from Design directory Pages)
+  and one opt-in React adapter, sharing the workspace
   dev server. Discovery is lazy and bounded in monorepos. Framework-specific
   providers/router/auth and prop schemas are harness concerns, never assumed
   from `framework-detector.ts` alone.

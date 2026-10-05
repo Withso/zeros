@@ -15,9 +15,10 @@ import {
   DialogHeader,
   DialogTitle,
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   Input,
@@ -262,16 +263,22 @@ export function DesignPagePicker({
               }
             }}
           >
-            {pages.map((candidate) => (
-              <DropdownMenuCheckboxItem
-                key={candidate.id}
-                checked={candidate.id === page.id}
-                className="h-7"
-                onSelect={() => switchPage(candidate.id)}
-              >
-                <span className="truncate">{candidate.title}</span>
-              </DropdownMenuCheckboxItem>
-            ))}
+            <DropdownMenuRadioGroup
+              aria-label="Pages"
+              value={page.id}
+              onValueChange={switchPage}
+            >
+              {pages.map((candidate) => (
+                <DropdownMenuRadioItem
+                  key={candidate.id}
+                  value={candidate.id}
+                  indicator="check"
+                  className="h-7"
+                >
+                  <span className="truncate">{candidate.title}</span>
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="h-7"

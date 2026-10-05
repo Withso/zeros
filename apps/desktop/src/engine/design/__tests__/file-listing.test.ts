@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -20,7 +26,11 @@ afterEach(() => {
 it("lists meta metadata, root guidance and nested page source under the registered Design root", async () => {
   const source = {
     "Screens/meta/design.toml": serializeDesignRegistration("design_pages", 3),
-    "Screens/meta/canvas.json": JSON.stringify({ version: 2, pages: [{ id: "page", title: "Page 1", folder: "page-1", frames: [] }], frames: {} }),
+    "Screens/meta/canvas.json": JSON.stringify({
+      version: 2,
+      pages: [{ id: "page", title: "Page 1", folder: "page-1", frames: [] }],
+      frames: {},
+    }),
     "Screens/rules.md": "Keep custom guidance",
     "Screens/tokens.css": ":root {}",
     "Screens/page-1/home.html": "<main>Home</main>",
@@ -42,7 +52,10 @@ it("lists meta metadata, root guidance and nested page source under the register
 
 it("retains the Design root in Files while the staged meta manifest is removed from the worktree", async () => {
   mkdirSync(path.join(root, "Screens/meta"), { recursive: true });
-  writeFileSync(path.join(root, "Screens/meta/design.toml"), serializeDesignRegistration("design_pages", 3));
+  writeFileSync(
+    path.join(root, "Screens/meta/design.toml"),
+    serializeDesignRegistration("design_pages", 3),
+  );
   await runGit(root, ["add", "Screens/meta/design.toml"]);
   rmSync(path.join(root, "Screens/meta/design.toml"));
   const listing = await listWorkspaceFilesWithDesign(root);
