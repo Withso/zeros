@@ -1,4 +1,4 @@
-import { parse, type DefaultTreeAdapterTypes } from "parse5";
+import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 import postcss from "postcss";
 
 /** Resolve URLs against the containing source file, bounded by the Design root.
@@ -61,9 +61,64 @@ export function isContainedDesignReference(
 }
 
 export interface DesignReferenceRebaseOptions {
+  /** With strict rebasing, a move plan preserves other URLs' authored spelling. */
   movedFiles?: Readonly<Record<string, string>>;
-  /** Migration safety, independent of render containment. */
+  /** Authoring safety, independent of render containment. */
   strict?: boolean;
+}
+
+const HTML_CHARACTER_REFERENCE =
+  /&(?:#(?:x[0-9a-f]+|[0-9]+)|[a-z][a-z0-9]*);?/gi;
+
+function decodeHtmlAttributeValue(value: string): string {
+  if (!value.includes("&")) return value;
+  const fragment = parseFragment(
+    '<i data-reference="' + value.replace(/"/g, "&quot;") + '">',
+  );
+  const element = fragment.childNodes[0];
+  return element && "attrs" in element ? element.attrs[0]!.value : value;
+}
+
+/** Attribute parsing decodes entities, while edits must address their original
+ * spans. URL boundaries never split a character reference. */
+function migrationHtmlAttributeSource(source: string): {
+  value: string;
+  offset: (index: number) => number;
+} {
+  if (!source.includes("&")) return { value: source, offset: (index) => index };
+  let value = "";
+  let cursor = 0;
+  const offsets = [0];
+  const append = (raw: string, decoded: string, start: number) => {
+    value += decoded;
+    for (let index = 0; index < decoded.length; index++)
+      offsets.push(
+        raw === decoded
+          ? start + index + 1
+          : index === decoded.length - 1
+            ? start + raw.length
+            : start,
+      );
+  };
+  for (const match of source.matchAll(HTML_CHARACTER_REFERENCE)) {
+    append(
+      source.slice(cursor, match.index),
+      source.slice(cursor, match.index),
+      cursor,
+    );
+    const end = match.index + match[0].length;
+    // A following '=' or letter affects semicolonless named references.
+    const following = source.slice(end, end + 1);
+    const decoded = decodeHtmlAttributeValue(match[0] + following);
+    append(
+      match[0],
+      following ? decoded.slice(0, -following.length) : decoded,
+      match.index,
+    );
+    cursor = end;
+  }
+  append(source.slice(cursor), source.slice(cursor), cursor);
+  return { value, offset: (index) => offsets[index]! };
 }
 
 /** Stationary source only needs inspection when it might name a moved frame.
@@ -72,7 +127,16 @@ export function mayReferenceMovedDesignFrame(
   source: string,
   movedFiles: Readonly<Record<string, string>> = {},
 ): boolean {
-  const text = source.normalize("NFC").toLowerCase();
+  const text = decodeHtmlAttributeValue(source)
+    .replace(/(?:%[0-9a-f]{2})+/gi, (value) => {
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        return value;
+      }
+    })
+    .normalize("NFC")
+    .toLowerCase();
   return Object.keys(movedFiles).some((file) =>
     text.includes(file.split("/").at(-1)!.normalize("NFC").toLowerCase()),
   );
@@ -81,23 +145,56 @@ export function mayReferenceMovedDesignFrame(
 function resolveMigrationReference(
   reference: string,
   sourceFile: string,
-): string | null {
-  // Keep excluded spellings literal; do not create a different reference.
+  htmlAttribute: boolean,
+): { target: string | null; suffix: string; trailingSlash: string } | null {
   if (/[\\\u0000-\u001f\u007f]/.test(reference)) return null;
-  const value = reference.trim();
-  const pathname = value.split(/[?#]/, 1)[0]!;
-  // A character reference's hash belongs to its excluded path spelling.
-  if (pathname.endsWith("&") && value[pathname.length] === "#") return null;
-  if (pathname.includes("%") || /&(?:#|[a-z][a-z0-9]*;)/i.test(pathname))
+  const raw = reference.trim();
+  const decoded = htmlAttribute
+    ? migrationHtmlAttributeSource(raw)
+    : { value: raw, offset: (index: number) => index };
+  const value = decoded.value;
+  if (
+    !value ||
+    value.startsWith("#") ||
+    value.startsWith("/") ||
+    /^[a-z][a-z0-9+.-]*:/i.test(value) ||
+    /[\\\u0000-\u001f\u007f]/.test(value)
+  )
     return null;
-  if (!pathname) return sourceFile || ".";
+  const suffixIndex = value.search(/[?#]/);
+  const pathname = value.split(/[?#]/, 1)[0]!;
+  const suffix = suffixIndex < 0 ? "" : raw.slice(decoded.offset(suffixIndex));
+  const rawPath =
+    suffixIndex < 0 ? raw : raw.slice(0, decoded.offset(suffixIndex));
+  const result = {
+    target: sourceFile || ".",
+    suffix,
+    trailingSlash: pathname.endsWith("/") ? "/" : "",
+  };
+  if (!pathname) return result;
+  if (/%(?:2f|5c)/i.test(pathname)) return null;
   const parts = sourceFile.split("/").slice(0, -1);
-  for (const part of pathname.split("/")) {
+  let invalidEncoding = false;
+  for (const authored of rawPath.split("/")) {
+    let part: string;
+    try {
+      part = decodeURIComponent(
+        htmlAttribute ? decodeHtmlAttributeValue(authored) : authored,
+      );
+    } catch {
+      invalidEncoding = true;
+      continue;
+    }
+    if (
+      /[\/\\\u0000-\u001f\u007f]/.test(part) ||
+      ((part === "." || part === "..") && part !== authored)
+    )
+      return null;
     if (!part || part === ".") continue;
     if (part === ".." && parts.length && parts.at(-1) !== "..") parts.pop();
     else parts.push(part);
   }
-  return parts.join("/") || ".";
+  return { ...result, target: invalidEncoding ? null : parts.join("/") || "." };
 }
 
 function unsafeReference(reference: string): never {
@@ -107,12 +204,95 @@ function unsafeReference(reference: string): never {
   );
 }
 
+function relativeDesignPath(target: string, toFile: string): string {
+  const base = toFile.split("/").slice(0, -1);
+  const destination = target === "." || !target ? [] : target.split("/");
+  let shared = 0;
+  while (shared < base.length && base[shared] === destination[shared]) shared++;
+  return (
+    [
+      ...base.slice(shared).map(() => ".."),
+      ...destination.slice(shared).map(encodeURIComponent),
+    ].join("/") || "."
+  );
+}
+
+function rebaseMigrationReference(
+  reference: string,
+  fromFile: string,
+  toFile: string,
+  options: DesignReferenceRebaseOptions,
+  htmlAttribute = false,
+): string {
+  const value = reference.trim();
+  if (!options.movedFiles) {
+    // Duplicate/detach retain their existing normalization and exclusions.
+    const pathname = value.split(/[?#]/, 1)[0]!;
+    if (
+      pathname.includes("%") ||
+      (pathname.endsWith("&") && value[pathname.length] === "#") ||
+      /&(?:#|[a-z][a-z0-9]*;)/i.test(pathname)
+    )
+      return reference;
+  }
+  const resolved = resolveMigrationReference(
+    reference,
+    fromFile,
+    htmlAttribute,
+  );
+  if (!resolved) return reference;
+  const moved =
+    resolved.target !== null &&
+    options.movedFiles &&
+    Object.hasOwn(options.movedFiles, resolved.target)
+      ? options.movedFiles[resolved.target]
+      : undefined;
+  if (
+    !moved &&
+    resolved.target !== null &&
+    Object.keys(options.movedFiles ?? {}).some(
+      (file) =>
+        file.normalize("NFC").toLowerCase() ===
+        resolved.target!.normalize("NFC").toLowerCase(),
+    )
+  )
+    unsafeReference(reference);
+  if (!moved && fromFile === toFile) return reference;
+  const leading = reference.match(/^\s*/)?.[0] ?? "";
+  const trailing = reference.match(/\s*$/)?.[0] ?? "";
+  const fromDirectory = fromFile.split("/").slice(0, -1).join("/");
+  const toDirectory = toFile.split("/").slice(0, -1).join("/");
+  const target = moved ?? (options.movedFiles ? null : resolved.target);
+  if (target !== null) {
+    if (!moved && fromDirectory === toDirectory && !value.startsWith("?"))
+      return reference;
+    return (
+      leading +
+      relativeDesignPath(target, toFile) +
+      resolved.trailingSlash +
+      resolved.suffix +
+      trailing
+    );
+  }
+  if (fromDirectory === toDirectory) return reference;
+  const prefix = relativeDesignPath(fromDirectory, toFile);
+  // Preserve the URL itself, including invalid escapes and dot segments.
+  return (
+    leading +
+    (prefix === "." ? "" : prefix + "/") +
+    value.replace(/^\.\//, "") +
+    trailing
+  );
+}
+
 export function rebaseDesignReference(
   reference: string,
   fromFile: string,
   toFile: string,
   options: DesignReferenceRebaseOptions = {},
 ): string {
+  if (options.strict)
+    return rebaseMigrationReference(reference, fromFile, toFile, options);
   if (fromFile === toFile && !options.movedFiles && !options.strict)
     return reference;
   const value = reference.trim();
@@ -123,33 +303,13 @@ export function rebaseDesignReference(
     /^[a-z][a-z0-9+.-]*:/i.test(value)
   )
     return reference;
-  const target = options.strict
-    ? resolveMigrationReference(reference, fromFile)
-    : resolveDesignLocalReference(reference, fromFile);
+  const target = resolveDesignLocalReference(reference, fromFile);
   if (!target) return reference;
   const moved =
     options.movedFiles && Object.hasOwn(options.movedFiles, target)
       ? options.movedFiles[target]
       : undefined;
-  if (
-    options.strict &&
-    !moved &&
-    Object.keys(options.movedFiles ?? {}).some(
-      (file) =>
-        file.normalize("NFC").toLowerCase() ===
-        target.normalize("NFC").toLowerCase(),
-    )
-  )
-    unsafeReference(reference);
   if (fromFile === toFile && !moved) return reference;
-  if (
-    options.strict &&
-    !moved &&
-    !value.startsWith("?") &&
-    fromFile.split("/").slice(0, -1).join("/") ===
-      toFile.split("/").slice(0, -1).join("/")
-  )
-    return reference;
   const base = toFile.split("/").slice(0, -1);
   const destination =
     (moved ?? target) === "." ? [] : (moved ?? target).split("/");
@@ -313,6 +473,16 @@ export function rebaseDesignCssReferences(
   toFile: string,
   options: DesignReferenceRebaseOptions = {},
 ): string {
+  return rebaseCssReferences(source, fromFile, toFile, options);
+}
+
+function rebaseCssReferences(
+  source: string,
+  fromFile: string,
+  toFile: string,
+  options: DesignReferenceRebaseOptions,
+  htmlAttribute = false,
+): string {
   if (fromFile === toFile && !options.movedFiles && !options.strict)
     return source;
   if (
@@ -321,17 +491,37 @@ export function rebaseDesignCssReferences(
     !mayReferenceMovedDesignFrame(source, options.movedFiles)
   )
     return source;
+  const css = htmlAttribute
+    ? migrationHtmlAttributeSource(source)
+    : { value: source, offset: (index: number) => index };
+  const referenceEdit = (reference: ReferenceSpan, offset = 0) => {
+    const start = css.offset(offset + reference.start);
+    const end = css.offset(offset + reference.end);
+    const url = source.slice(start, end);
+    return {
+      start,
+      end,
+      text: options.strict
+        ? rebaseMigrationReference(
+            url,
+            fromFile,
+            toFile,
+            options,
+            htmlAttribute,
+          )
+        : rebaseDesignReference(url, fromFile, toFile, options),
+    };
+  };
   let root: postcss.Root;
   try {
-    root = postcss.parse(source);
+    root = postcss.parse(css.value);
   } catch (error) {
     if (!options.strict) throw error;
     return applyEdits(
       source,
-      migrationCssReferences(source, options).map((ref) => ({
-        ...ref,
-        text: rebaseDesignReference(ref.url, fromFile, toFile, options),
-      })),
+      migrationCssReferences(css.value, options).map((ref) =>
+        referenceEdit(ref),
+      ),
     );
   }
   const edits: Array<{ start: number; end: number; text: string }> = [];
@@ -339,22 +529,12 @@ export function rebaseDesignCssReferences(
     const start = declaration.source?.start?.offset;
     const end = declaration.source?.end?.offset;
     if (start === undefined || end === undefined) return;
-    const authored = source.slice(start, end + 1);
+    const authored = css.value.slice(start, end + 1);
     for (const reference of options.strict
       ? migrationCssReferences(authored, options)
       : designCssUrlReferences(authored)) {
-      const next = rebaseDesignReference(
-        reference.url,
-        fromFile,
-        toFile,
-        options,
-      );
-      if (next === reference.url) continue;
-      edits.push({
-        start: start + reference.start,
-        end: start + reference.end,
-        text: next,
-      });
+      const edit = referenceEdit(reference, start);
+      if (edit.text !== source.slice(edit.start, edit.end)) edits.push(edit);
     }
   });
   root.walkAtRules((rule) => {
@@ -364,7 +544,7 @@ export function rebaseDesignCssReferences(
     if (start === undefined || end === undefined) {
       return;
     }
-    const authored = source.slice(start, end + 1);
+    const authored = css.value.slice(start, end + 1);
     const references = options.strict
       ? migrationCssReferences(authored, options)
       : designCssUrlReferences(authored);
@@ -384,18 +564,8 @@ export function rebaseDesignCssReferences(
       });
     }
     for (const reference of references) {
-      const next = rebaseDesignReference(
-        reference.url,
-        fromFile,
-        toFile,
-        options,
-      );
-      if (next !== reference.url)
-        edits.push({
-          start: start + reference.start,
-          end: start + reference.end,
-          text: next,
-        });
+      const edit = referenceEdit(reference, start);
+      if (edit.text !== source.slice(edit.start, edit.end)) edits.push(edit);
     }
   });
   return applyEdits(source, edits);
@@ -487,11 +657,12 @@ export function rebaseDesignHtmlReferences(
           continue;
         }
         const authoredValue = raw.slice(contentStart, contentEnd);
-        // Migration edits raw values, retaining query entities and unrelated
-        // bytes. Encoded paths retain their authored spelling by policy.
+        // Migration edits raw values; decoding is only for target detection.
         const original = options.strict ? authoredValue : attribute.value;
         const checkPath = (url: string) =>
-          rebaseDesignReference(url, fromFile, toFile, options);
+          options.strict
+            ? rebaseMigrationReference(url, fromFile, toFile, options, true)
+            : rebaseDesignReference(url, fromFile, toFile, options);
         let next = original;
         if (
           ["href", "src", "poster", "action", "formaction"].includes(
@@ -508,12 +679,12 @@ export function rebaseDesignHtmlReferences(
             })),
           );
         } else if (attribute.name === "style") {
-          if (options.strict && /&(?:quot|apos|#)/i.test(next)) continue;
-          next = rebaseDesignCssReferences(
+          next = rebaseCssReferences(
             "a{" + next + "}",
             fromFile,
             toFile,
             options,
+            options.strict,
           ).slice(2, -1);
         }
         if (next === original) continue;

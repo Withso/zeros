@@ -16,6 +16,7 @@ import { discoverDesignDirectories } from "../directory";
 import { withDesignDirectoryNameLease } from "../directory-registry";
 import {
   initializeDesignDocument,
+  readDesignFrame,
   readDesignWorkspaceSnapshot,
 } from "../document";
 import { readCanvas } from "../document-storage";
@@ -196,6 +197,106 @@ describe("recoverable per-directory Design pages migration", () => {
   it("preserves scene identity, extensions and source while moving only registered frames", () => {
     migrateDesignDirectoryPages(root, directory);
     assertMigrated();
+  });
+
+  it("preserves encoded, entity and raw-space assets through migration and rendering", async () => {
+    const source = `<!doctype html><html><head>
+<link rel="stylesheet" href="./tokens.css?v=1#x">
+<style>.image { background: url("assets/a%20b.png") }</style>
+</head><body>
+<img data-oid="encoded" src="assets/Hero%20Image.png">
+<img data-oid="space" src="assets/Hero Image.png">
+<img data-oid="entity" src="assets/r&amp;d.png">
+<img data-oid="numeric" src="ass&#x65;ts/Hero%20Image.png">
+<img data-oid="set" srcset="assets/Hero%20Image.png 1x, assets/a%20b.png 2x">
+<div style='background: url("assets/a%20b.png")'></div>
+<div style="background: url(&quot;assets/a%20b.png&quot;)"></div>
+<a href="details.html">Details</a>
+</body></html>`;
+    write("home.html", source);
+    write("assets/Hero Image.png", "hero-image");
+    write("assets/a b.png", "background-image");
+    write("assets/r&d.png", "entity-image");
+    const assertAssets = (html: string) => {
+      const images = html.match(/<img\b[^>]*>/g) ?? [];
+      for (const [oid, payload] of [
+        ["encoded", "hero-image"],
+        ["space", "hero-image"],
+        ["entity", "entity-image"],
+        ["numeric", "hero-image"],
+      ])
+        expect(
+          images.find((tag) => tag.includes(`data-oid="${oid}"`)),
+        ).toContain(
+          `src="data:image/png;base64,${Buffer.from(payload).toString("base64")}"`,
+        );
+      expect(html).toContain(
+        `srcset="data:image/png;base64,${Buffer.from("hero-image").toString("base64")} 1x, data:image/png;base64,${Buffer.from("background-image").toString("base64")} 2x"`,
+      );
+      expect(
+        html.split(Buffer.from("background-image").toString("base64")).length -
+          1,
+      ).toBe(4);
+    };
+    await withDesignDirectoryNameLease(root, directory, async () => {
+      assertAssets(
+        (
+          await readDesignFrame(root, "home.html", undefined, {
+            writeBack: false,
+          })
+        ).srcDoc,
+      );
+    });
+    expect(read("home.html")).toBe(source);
+    migrateDesignDirectoryPages(root, directory);
+    const migrated = source
+      .replace("./tokens.css?v=1#x", "../tokens.css?v=1#x")
+      .replaceAll("assets/", "../assets/")
+      .replace("ass&#x65;ts/", "../ass&#x65;ts/");
+    expect(read("page-1/home.html")).toBe(migrated);
+    await withDesignDirectoryNameLease(root, directory, async () => {
+      const frame = await readDesignFrame(root, "page-1/home.html");
+      assertAssets(frame.srcDoc);
+      const snapshot = await readDesignWorkspaceSnapshot(root);
+      expect(
+        snapshot.lint.violations.filter(
+          (row) => row.ruleId === "local-refs-only",
+        ),
+      ).toEqual([]);
+    });
+    expect(read("page-1/home.html")).toBe(migrated);
+  });
+
+  it("rebases decoded moved links and stationary inbound references only", () => {
+    write(
+      "home.html",
+      '<a href="deta%69ls.html?q=1#top">Details</a><img src="assets/Hero%20Image.png">',
+    );
+    write(
+      "notes.html",
+      '<a href="h%6fme.html">Home</a><img src="assets/Hero%20Image.png">',
+    );
+    write(
+      "components/card.html",
+      '<a href="deta&#x69;ls.html">Details</a><img src="assets/Hero Image.png">',
+    );
+    write(
+      "shared.css",
+      '@import "h%6fme.html"; .a { background:url("assets/a%20b.png") }',
+    );
+    migrateDesignDirectoryPages(root, directory);
+    expect(read("page-1/home.html")).toBe(
+      '<a href="details.html?q=1#top">Details</a><img src="../assets/Hero%20Image.png">',
+    );
+    expect(read("notes.html")).toBe(
+      '<a href="page-1/home.html">Home</a><img src="assets/Hero%20Image.png">',
+    );
+    expect(read("components/card.html")).toBe(
+      '<a href="page-1/details.html">Details</a><img src="assets/Hero Image.png">',
+    );
+    expect(read("shared.css")).toBe(
+      '@import "page-1/home.html"; .a { background:url("assets/a%20b.png") }',
+    );
   });
 
   it("is an exact no-op on a completed repeat migration", () => {

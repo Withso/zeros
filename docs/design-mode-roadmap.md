@@ -382,27 +382,29 @@ successors pause recovery with an actionable error. Migration never changes
 the Git index, even with staged or dirty source.
 
 Reference edits use parser offsets and URL tokens, preserving unrelated bytes
-rather than reserializing documents. Moved HTML rebases ordinary relative
+rather than reserializing documents. Moved HTML rebases relative
 `href`, `src`, `srcset`, `poster`, inline/style-block CSS `url(...)` and
-`@import` against its old/new locations; moved targets follow their new paths.
-Query/hash suffixes survive. Well-formed outside-root relative references also
-rebase lexically to preserve their meaning; render containment still rejects
-outside-root resources. Absolute/scheme URLs, protocol-relative URLs and
-fragments stay unchanged. Encoded path spellings, backslash and control-character
-references stay unchanged. This includes encoded relative paths that render
-after decoding; their targets can change when the containing frame moves.
-Malformed inline/style-block CSS uses the
-URL-token fallback.
+`@import` against its old/new locations. Decoded paths identify moved-frame
+targets, which follow their new relative paths. Every other relative URL gains
+the directory-depth prefix (`../` for root → page), stripping one leading `./`
+and preserving percent escapes, HTML character references, raw spaces, dot
+segments and query/hash bytes. For example, `assets/Hero%20Image.png` becomes
+`../assets/Hero%20Image.png`, and `../outside/logo.png` becomes
+`../../outside/logo.png`. Invalid percent escapes also retain their spelling
+with the prefix. Absolute/scheme URLs, protocol-relative URLs and fragments
+stay unchanged, as do backslash/control references and ambiguous encoded
+separators or whole `.`/`..` segments. Malformed inline/style-block CSS uses
+the URL-token fallback. Render containment still rejects outside-root resources.
 
 Stationary Design-root HTML/CSS, including components, is parsed only when a
-case-insensitive moved-basename prefilter matches. Only references resolving to
-moved frames are rewritten; every other reference stays byte-identical and
-cannot refuse migration. Unrelated malformed CSS is skipped. Component HTML
-retains its established Design-root URL origin. Ambiguous moved-file case/NFC
-aliases and applicable `<base href>` semantics fail preflight. Nothing outside
-the Design root is edited. Ordinary rendering resolves assets/stylesheets
-relative to their containing source, rebases component expansion URL origins,
-and accepts only contained `../` paths.
+case-insensitive moved-basename prefilter matches, including decoded spellings.
+Only references resolving to moved frames are rewritten; every other reference
+stays byte-identical and cannot refuse migration. Unrelated malformed CSS is
+skipped. Component HTML retains its established Design-root URL origin. Ambiguous
+moved-file case/NFC aliases and applicable `<base href>` semantics fail preflight.
+Nothing outside the Design root is edited. Ordinary rendering resolves
+assets/stylesheets relative to their containing source, rebases component
+expansion URL origins, and accepts only contained `../` paths.
 
 Filename-keyed private caches and visual history for that directory are
 invalidated after migration. Old flat frame/context/evidence references become

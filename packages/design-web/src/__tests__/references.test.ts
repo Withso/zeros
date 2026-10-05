@@ -57,6 +57,33 @@ describe("contained source-relative Design references", () => {
   });
 });
 
+describe("frame transfer reference rebasing", () => {
+  it("keeps normalized shared dependencies when no migration move plan is supplied", () => {
+    const source =
+      '<link href="../tokens.css"><a href="local.html">Local</a><style>.a { background:url(../assets/a.png) }</style><div style="background:url(../assets/a.png)"></div>';
+    expect(
+      rebaseDesignHtmlReferences(
+        source,
+        "page-1/home.html",
+        "checkout/home-copy.html",
+        { strict: true },
+      ),
+    ).toBe(source.replace('href="local.html"', 'href="../page-1/local.html"'));
+  });
+
+  it("keeps query-only links targeting the original frame on same-page copies", () => {
+    const source = '<a href="?theme=night#top">Theme</a>';
+    expect(
+      rebaseDesignHtmlReferences(
+        source,
+        "page-1/home.html",
+        "page-1/home-copy.html",
+        { strict: true },
+      ),
+    ).toBe(source.replace('href="?', 'href="home.html?'));
+  });
+});
+
 describe("migration reference rebasing", () => {
   const options = {
     movedFiles: {
@@ -210,11 +237,135 @@ describe("migration reference rebasing", () => {
   });
 
   it.each([
+    ["assets/Hero%20Image.png", "../assets/Hero%20Image.png"],
+    ["assets/Hero Image.png", "../assets/Hero Image.png"],
+    ["assets/r&amp;d.png", "../assets/r&amp;d.png"],
+    ["ass&#101;ts/a.png", "../ass&#101;ts/a.png"],
+    ["ass&#x65;ts/a.png", "../ass&#x65;ts/a.png"],
+    ["assets/bad%escape.png", "../assets/bad%escape.png"],
+    ["./tokens.css?v=1#x", "../tokens.css?v=1#x"],
+    ["../outside/a%20b.png", "../../outside/a%20b.png"],
+    ["assets/../assets/./a%20b.png", "../assets/../assets/./a%20b.png"],
+    ["././assets/a.png", ".././assets/a.png"],
+  ])("adjusts depth without changing %s", (url, expected) => {
+    const source = `<img src="${url}" title="Keep &#65;">`;
+    expect(
+      rebaseDesignHtmlReferences(
+        source,
+        "home.html",
+        "page-1/home.html",
+        options,
+      ),
+    ).toBe(source.replace(`src="${url}"`, `src="${expected}"`));
+  });
+
+  it("preserves encoded srcset candidates and their descriptors", () => {
+    const source =
+      '<img srcset="assets/Hero%20Image.png 1x, ass&#101;ts/a.png?x=1&amp;y=2#top 2x">';
+    expect(
+      rebaseDesignHtmlReferences(
+        source,
+        "home.html",
+        "page-1/home.html",
+        options,
+      ),
+    ).toBe(
+      source
+        .replace('srcset="assets/', 'srcset="../assets/')
+        .replace(", ass&#101;", ", ../ass&#101;"),
+    );
+  });
+
+  it.each([
+    `<div style='background: url("assets/a%20b.png")'></div>`,
+    '<style>.a { background: url("assets/a%20b.png") }</style>',
+    '<div style="background: url(&quot;assets/a%20b.png&quot;)"></div>',
+    '<div style="background: url(ass&#101;ts/a.png)"></div>',
+  ])("preserves authored CSS URL spellings: %s", (source) => {
+    expect(
+      rebaseDesignHtmlReferences(
+        source,
+        "home.html",
+        "page-1/home.html",
+        options,
+      ),
+    ).toBe(
+      source
+        .replace("assets/a%20b.png", "../assets/a%20b.png")
+        .replace("ass&#101;ts/a.png", "../ass&#101;ts/a.png"),
+    );
+  });
+
+  it.each([
+    "details.html",
+    "deta%69ls.html",
+    "deta&#105;ls.html",
+    "deta&#x69;ls.html",
+  ])(
+    "detects the moved target of %s before preserving other spellings",
+    (url) => {
+      const source = `<a href="${url}?x=1&amp;y=2#top">Details</a>`;
+      expect(
+        rebaseDesignHtmlReferences(
+          source,
+          "home.html",
+          "page-1/home.html",
+          options,
+        ),
+      ).toBe(source.replace(url, "details.html"));
+    },
+  );
+
+  it("detects encoded stationary inbound targets without changing unrelated URLs", () => {
+    const source =
+      '<a href="h%6fme.html">Home</a><a href="deta&#105;ls.html">Details</a><img src="assets/Hero%20Image.png">';
+    expect(
+      rebaseDesignHtmlReferences(source, "notes.html", "notes.html", options),
+    ).toBe(
+      source
+        .replace("h%6fme.html", "page-1/home.html")
+        .replace("deta&#105;ls.html", "page-1/details.html"),
+    );
+    const css =
+      '@import "h%6fme.html"; .a { background: url("assets/a%20b.png") }';
+    expect(
+      rebaseDesignCssReferences(css, "tokens.css", "tokens.css", options),
+    ).toBe(css.replace("h%6fme.html", "page-1/home.html"));
+  });
+
+  it.each([
+    "https&#58;//example.test/a.png",
+    "&sol;outside.png",
+    "&num;section",
+  ])("keeps decoded absolute/scheme/fragment URLs unchanged: %s", (url) => {
+    const source = `<a href="${url}">Link</a>`;
+    expect(
+      rebaseDesignHtmlReferences(
+        source,
+        "home.html",
+        "page-1/home.html",
+        options,
+      ),
+    ).toBe(source);
+  });
+
+  it("rejects decoded case aliases of moved files", () => {
+    expect(() =>
+      rebaseDesignHtmlReferences(
+        '<a href="H%4fME.html">Home</a>',
+        "home.html",
+        "page-1/home.html",
+        options,
+      ),
+    ).toThrow(/safely|ambiguous/i);
+  });
+
+  it.each([
     '<img src="assets/%2e%2e/a.png">',
-    '<img src="assets/%20a.png">',
-    '<img src="ass&#101;ts/a.png">',
-    '<img src="ass&#x65;ts/a.png">',
-    '<img srcset="ass&#101;ts/a.png 1x, ass&#x65;ts/b.png 2x">',
+    '<img src="assets/%2E/a.png">',
+    '<img src="assets/a%2fb.png">',
+    '<img src="assets/a%5cb.png">',
+    '<img src="assets/a%01b.png">',
     '<img src="..\\outside.png">',
     '<img src="assets/\u0001a.png">',
     "<style>.a { background:url(h\\6fme.html) }</style>",
