@@ -288,9 +288,10 @@ cascade contract. `<html data-theme="dark|light">` is the resolved appearance
 `--bg1` for the native window background. JS-painted surfaces (xterm, canvas)
 read tokens through `shared/theme/resolve-tokens.ts` and repaint on the theme id.
 
-Other consumers of these tokens: `apps/marketing` clones 26 public tokens
-(guarded by `apps/marketing/src/lib/__tests__/marketing-tokens.test.ts`), and
-`apps/web` slices `styles/zeros-tokens.css` at build time for the dashboard.
+Two other apps consume these tokens. The marketing site (`apps/marketing`)
+clones 26 public tokens, generated from the same sources and guarded by
+`apps/marketing/src/lib/__tests__/marketing-tokens.test.ts`; `apps/web` slices
+`styles/zeros-tokens.css` at build time for the dashboard.
 
 ## 10. Changing the system
 

@@ -13,3 +13,5 @@ bccd4f86d9a31106a335aab910905ffb6413d160:docs/cloud-workspace/compute-credits.md
 bccd4f86d9a31106a335aab910905ffb6413d160:apps/desktop/src/engine/agents/adapters/codex/__tests__/cloud-exec-server.test.ts:generic-api-key:72
 # Synthetic redaction fixture (not a credential); later commits carry gitleaks:allow.
 d3a6ad6ded51c245086eb7588efbf998f4f19ce5:apps/desktop/src/engine/agents/containment/__tests__/cloud-customization-recovery.test.ts:generic-api-key:8
+# Design-system prose naming the `apps/marketing` path after "tokens:"; not a credential. A later commit rewords it.
+91b92832da23ea5da2adadb833d87b9cb7d0f1ff:docs/design-system.md:generic-api-key:248
