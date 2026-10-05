@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 
-import { assertDesignComponentDefinitionIdentities } from "@zeros/design-web";
+import { assertDesignComponentDefinitionIdentities, rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
 
 import { designDirectoryNameFor } from "./directory-registry";
 import { readSafeRegularFile } from "./safe-files";
@@ -302,9 +302,22 @@ export async function expandDesignComponents(
   workspacePath: string,
   source: string,
   sources?: Readonly<Record<string, string>>,
+  entryFile = "",
 ): Promise<DesignComponentExpansion> {
   const loaded = await loadDefinitions(workspacePath, source, sources);
   const definitions = loaded.definitions;
+  // Existing definitions use Design-root URL origins. Rebase only definition
+  // markup/styles; frame-authored slot children keep the entry file's origin.
+  if (entryFile.includes("/")) {
+    for (const definition of definitions.values()) {
+      try {
+        definition.body = rebaseDesignHtmlReferences(definition.body, "", entryFile);
+        definition.styles = definition.styles.map((style) => rebaseDesignCssReferences(style, "", entryFile));
+      } catch {
+        loaded.errors.push({ component: definition.name, message: "Component URLs could not be prepared; repair its authored HTML/CSS." });
+      }
+    }
+  }
   const used = new Set<string>();
   const errors: DesignComponentExpansionError[] = [];
 

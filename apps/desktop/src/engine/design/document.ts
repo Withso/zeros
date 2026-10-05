@@ -81,6 +81,8 @@ import {
   type DesignWorkspaceSnapshot,
   type InlineStyleDeclaration,
 } from "./document-model";
+import { designCanvasPageCatalog } from "./pages";
+import { readDirectoryDesignLayout } from "./metadata";
 import {
   assertFrameFile,
   atomicWriteDesignSource,
@@ -433,7 +435,7 @@ async function mutationResultUnlocked(
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: geometry.w,
     height: geometry.h,
-  });
+  }, file);
   const knownTokens = await knownTokenNames(workspacePath);
   const linted = await lintFrame(
     workspacePath,
@@ -516,7 +518,7 @@ async function mutateDesignFrameSource(
     const current = await prepareFrameRenderSource(workspacePath, before, {
       width: geometry?.w ?? meta.width,
       height: geometry?.h ?? meta.height,
-    });
+    }, undefined, undefined, file);
     if (current.sourceVersion !== input.sourceVersion) {
       throw new Error(
         `Design frame changed before the mutation: ${file}. Re-read it and retry.`,
@@ -992,7 +994,7 @@ async function readDesignFrameFromSummary(
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: summary.width,
     height: summary.height,
-  });
+  }, summary.file);
   return {
     ...summary,
     sourceVersion: composed.sourceVersion,
@@ -1013,7 +1015,7 @@ async function readDesignCanvasFrameFromSummary(
   const render = await prepareFrameRenderSource(workspacePath, source, {
     width: summary.width,
     height: summary.height,
-  });
+  }, undefined, undefined, summary.file);
   return { ...summary, sourceVersion: render.sourceVersion };
 }
 
@@ -1059,6 +1061,11 @@ export async function readDesignWorkspaceSnapshot(
       includeRuntimeAudits: false,
     });
     const summaries = await listDesignFramesUnlocked(workspacePath, writeBack);
+    const pages = designCanvasPageCatalog(
+      await readCanvas(workspacePath),
+      summaries.map((frame) => frame.file),
+      readDirectoryDesignLayout(workspacePath, designDirectoryNameFor(workspacePath))?.canvasVersion === 2,
+    );
     const renderBudgetViolations: DesignLintViolation[] = [];
     const [renderedFrames, tokensDocument, assets] = await Promise.all([
       mapDesignFramesBounded(summaries, (summary) =>
@@ -1082,7 +1089,8 @@ export async function readDesignWorkspaceSnapshot(
       getDesignRuntimeAudit(workspacePath, frame.file, frame.sourceVersion),
     );
     return {
-      frames,
+      pages,
+      frames: frames.map((frame) => ({ ...frame, pageId: pages.find((page) => page.frameFiles.includes(frame.file))!.id })),
       tokens: tokensDocument.tokens,
       tokenSourceVersion: tokensDocument.sourceVersion,
       assets,
@@ -1130,18 +1138,17 @@ function designRenderBudgetViolation(
 }
 
 async function cssSourceFiles(workspacePath: string): Promise<string[]> {
-  let entries;
-  try {
-    entries = await readdir(designDirectory(workspacePath), {
-      withFileTypes: true,
-    });
-  } catch {
-    return [];
-  }
-  return entries
-    .filter((entry) => entry.isFile() && /\.css$/i.test(entry.name))
-    .map((entry) => entry.name)
-    .sort();
+  const directory = designDirectory(workspacePath);
+  const layout = readDirectoryDesignLayout(workspacePath, designDirectoryNameFor(workspacePath));
+  const folders = layout?.canvasVersion === 2
+    ? (await readCanvas(workspacePath)).pages!.map((page) => page.folder!)
+    : [];
+  const files = await Promise.all(["", ...folders].map(async (folder) => {
+    const entries = await readdir(path.join(directory, folder), { withFileTypes: true }).catch(() => []);
+    return entries.filter((entry) => entry.isFile() && /\.css$/i.test(entry.name))
+      .map((entry) => folder ? `${folder}/${entry.name}` : entry.name);
+  }));
+  return files.flat().sort();
 }
 
 async function knownTokenNames(workspacePath: string): Promise<Set<string>> {
@@ -1303,6 +1310,7 @@ async function lintFrame(
         const local = safeLocalReference(
           designDirectory(workspacePath),
           attribute.value,
+          file,
         );
         if (external) {
           violations.push(
@@ -1397,6 +1405,8 @@ async function lintFrame(
   const componentExpansion = await expandDesignComponents(
     workspacePath,
     source,
+    undefined,
+    file,
   );
   const usedComponents = new Set(componentExpansion.usedComponents);
   const componentRecords = designNodeRecords(document).filter(({ element }) =>

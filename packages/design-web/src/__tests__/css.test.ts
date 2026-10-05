@@ -7,11 +7,17 @@ import {
   mutateDesignNodeStyles,
   readDesignKeyframes,
   readDesignStyleProvenance,
+  validateDesignCssValue,
 } from "../css";
 import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState } from "./fixtures";
 
 describe("CSS provenance and mutation", () => {
+  it("validates parent references relative to the containing stylesheet", () => {
+    expect(validateDesignCssValue("background-image", "url(../assets/a.png)", "page-1/styles.css")).toBe("url(../assets/a.png)");
+    expect(() => validateDesignCssValue("background-image", "url(../../outside.png)", "page-1/styles.css")).toThrow();
+    expect(() => validateDesignCssValue("background-image", "url(../assets/a.png)")).toThrow();
+  });
   it("keeps automatic body edits local when frames share a stylesheet", () => {
     const html =
       '<html><head><link rel="stylesheet" href="shared.css"></head><body><div data-oid="child">Keep</div></body></html>';

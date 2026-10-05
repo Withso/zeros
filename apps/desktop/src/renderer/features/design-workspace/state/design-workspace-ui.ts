@@ -7,6 +7,7 @@
 // state into another. The persisted map is validated, bounded, and LRU-pruned.
 
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import { create } from "zustand";
 import { normalizeDesignCanvasBackground } from "../design-canvas-background";
 
@@ -92,8 +93,7 @@ export function normalizeDesignWorkspaceView(
   }
   const record = value as Record<string, unknown>;
   const selectedFrame =
-    typeof record.selectedFrame === "string" &&
-    /^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(record.selectedFrame)
+    isDesignFrameFile(record.selectedFrame)
       ? record.selectedFrame
       : null;
   const selectedNodeId =

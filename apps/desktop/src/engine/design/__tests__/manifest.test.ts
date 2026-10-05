@@ -4,10 +4,16 @@ import { parseDesignManifest, serializeDesignManifest, serializeDesignRegistrati
 describe("portable Design manifest", () => {
   it("registers an editable canvas without embedding its authored document", () => {
     const source = serializeDesignRegistration("design_example");
-    expect(parseDesignManifest(source)).toEqual({ id: "design_example", canvas: "canvas.json" });
+    expect(parseDesignManifest(source)).toEqual({ version: 2, id: "design_example", canvas: "canvas.json" });
     expect(source).not.toContain("document");
     expect(() => parseDesignManifest(source.replace("canvas.json", "../canvas.json"))).toThrow();
     expect(() => parseDesignManifest(source + "\n[document]\nversion = 3")).toThrow();
+  });
+  it("retains v3 registration version and rejects unsupported future versions", () => {
+    const source = serializeDesignRegistration("design_example", 3);
+    expect(parseDesignManifest(source)).toEqual({ version: 3, id: "design_example", canvas: "canvas.json" });
+    expect(source).toContain("version = 3");
+    expect(() => parseDesignManifest(source.replace("version = 3", "version = 4"))).toThrow();
   });
   it("round trips JSON metadata, including nulls and extension fields", () => {
     const document = JSON.parse(
@@ -16,6 +22,7 @@ describe("portable Design manifest", () => {
     const source = serializeDesignManifest("design_example", document);
     expect(source).toContain('format = "zeros-design"');
     expect(parseDesignManifest(source)).toEqual({
+      version: 1,
       id: "design_example",
       document,
     });

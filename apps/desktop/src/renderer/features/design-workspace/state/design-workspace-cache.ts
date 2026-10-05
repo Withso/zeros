@@ -692,6 +692,7 @@ function sameFrame(
   return (
     left.file === right.file &&
     left.frameId === right.frameId &&
+    left.pageId === right.pageId &&
     left.title === right.title &&
     left.kind === right.kind &&
     left.width === right.width &&
@@ -883,6 +884,9 @@ export function stabilizeDesignWorkspaceSnapshot(
   next: DesignWorkspaceSnapshotWire,
 ): DesignWorkspaceSnapshotWire {
   if (!previous || previous.directoryId !== next.directoryId) return next;
+  const pages = previous.pages && next.pages ? stableArray(previous.pages, next.pages, (left, right) =>
+    left.id === right.id && left.title === right.title && left.folder === right.folder &&
+    left.frameFiles.length === right.frameFiles.length && left.frameFiles.every((file, index) => file === right.frameFiles[index])) : next.pages;
   const frames = stableArray(previous.frames, next.frames, sameFrame);
   const tokens = stableArray(previous.tokens, next.tokens, sameToken);
   const assets = stableArray(previous.assets, next.assets, sameAsset);
@@ -902,6 +906,7 @@ export function stabilizeDesignWorkspaceSnapshot(
       ? previous.lint
       : { ...next.lint, violations };
   return frames === previous.frames &&
+    pages === previous.pages &&
     next.directory === previous.directory &&
     next.protocolCapability === previous.protocolCapability &&
     tokens === previous.tokens &&
@@ -912,6 +917,7 @@ export function stabilizeDesignWorkspaceSnapshot(
     : {
         directoryId: next.directoryId,
         directory: next.directory,
+        ...(pages ? { pages } : {}),
         protocolCapability: next.protocolCapability,
         frames,
         tokens,

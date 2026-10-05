@@ -106,7 +106,15 @@ export function designFrameGeometryError(geometry: {
     return "Frame layer must be between 0 and 256.";
   return null;
 }
-export const designDocumentIdSchema = designPortableIdSchema;
+/** Document identities may include one portable source-folder segment. The
+ * owning adapter validates frame paths; node/component IDs keep their bounds. */
+export const designDocumentIdSchema = z.string().trim().min(1).max(512).refine(
+  (value) => {
+    const parts = value.split("/");
+    return parts.length <= 2 && parts.every((part) => SAFE_ID.test(part) && !/^(?:.*:)?\.{1,2}$/.test(part));
+  },
+  "Document ID must be portable",
+);
 export const designRevisionSchema = z
   .string()
   .min(8)

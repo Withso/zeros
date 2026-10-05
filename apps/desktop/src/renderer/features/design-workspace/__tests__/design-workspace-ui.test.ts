@@ -11,6 +11,13 @@ import {
 } from "../state/design-workspace-ui";
 
 describe("design workspace UI memory", () => {
+  it("preserves exact nested frame selection and rejects unsafe aliases", () => {
+    expect(normalizeDesignWorkspaceView({ selectedFrame: "page-1/home.html", selectedNodeId: "title" })).toMatchObject({
+      selectedFrame: "page-1/home.html", selectedNodeId: "title",
+    });
+    for (const selectedFrame of ["page-1/sub/home.html", "meta/home.html", "page-1%2fhome.html"])
+      expect(normalizeDesignWorkspaceView({ selectedFrame }).selectedFrame).toBeNull();
+  });
   beforeEach(() => {
     resetDesignWorkspaceUiForTests();
     vi.restoreAllMocks();

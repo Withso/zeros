@@ -14,6 +14,12 @@ import {
 import { FRAME_HTML, webState } from "./fixtures";
 
 describe("HTML source adapter", () => {
+  it("validates contained parent references using the source file's location", () => {
+    const html = '<!doctype html><html><head><link rel="stylesheet" href="../tokens.css"><style>.hero { background-image:url(../assets/image.png); }</style></head><body><img src="../assets/image.png" style="background-image:url(./local.png)"></body></html>';
+    expect(() => assertSafeDesignHtmlDocument(html, "page-1/home.html")).not.toThrow();
+    expect(() => assertSafeDesignHtmlDocument(html)).toThrow();
+    expect(() => assertSafeDesignHtmlDocument(html.replaceAll("../assets", "../../assets"), "page-1/home.html")).toThrow();
+  });
   it.each([
     '<!doctype html><html><body><main data-oid="red"></main></body></html>',
     '<!doctype html><html><head><title>Design</title></head><main data-oid="red"></main></html>',

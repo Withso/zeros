@@ -989,7 +989,7 @@ export async function prepareFrameRenderSourceForFile(
   const render = await prepareFrameRenderSource(workspacePath, source, {
     width,
     height,
-  });
+  }, undefined, undefined, file);
   return {
     document,
     meta,

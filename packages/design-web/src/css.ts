@@ -3,6 +3,7 @@ import postcss, { type AtRule, type Declaration, type Rule } from "postcss";
 import { DESIGN_DOCUMENT_BODY_ID } from "@zeros/design-core";
 import { designDocumentBody, withExplicitDesignBody } from "./document-body";
 import { identifyDesignHtmlNodes } from "./html";
+import { isContainedDesignReference } from "./references";
 
 import type {
   DesignAuthoredKeyframes,
@@ -95,6 +96,7 @@ export function normalizeDesignCssProperty(value: string): string {
 export function validateDesignCssValue(
   property: string,
   value: string,
+  sourceFile = "",
 ): string {
   const normalized = value.trim();
   if (!normalized || normalized.length > 2_048) {
@@ -132,34 +134,13 @@ export function validateDesignCssValue(
   }
   for (const match of urlFunctions) {
     const reference = (match[2] ?? match[3] ?? "").trim();
-    if (!isContainedDesignReference(reference)) {
+    if (!isContainedDesignReference(reference, sourceFile)) {
       throw new Error(
         `Invalid CSS value for ${property}: URL must stay inside the design document.`,
       );
     }
   }
   return normalized;
-}
-
-function isContainedDesignReference(reference: string): boolean {
-  if (!reference || reference.startsWith("#")) return true;
-  if (
-    /[\\\u0000-\u001f\u007f]/.test(reference) ||
-    reference.startsWith("/") ||
-    reference.startsWith("//") ||
-    /^[a-z][a-z0-9+.-]*:/i.test(reference) ||
-    /%(?:2e|2f|5c)/i.test(reference)
-  ) {
-    return false;
-  }
-  const pathname = reference.split(/[?#]/, 1)[0] ?? "";
-  try {
-    return decodeURIComponent(pathname)
-      .split("/")
-      .every((segment) => segment !== "..");
-  } catch {
-    return false;
-  }
 }
 
 function inlineDeclarations(value: string): InlineDeclaration[] {

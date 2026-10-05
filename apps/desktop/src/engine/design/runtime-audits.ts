@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
 
 import type { DesignLintViolation } from "./document";
 
@@ -30,7 +31,7 @@ function auditKey(workspacePath: string, frame: string): string {
 }
 
 export function setDesignRuntimeAudit(input: DesignRuntimeAuditInput): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(input.frame)) {
+  if (!isDesignFrameFile(input.frame)) {
     throw new Error(`Invalid design frame file: ${input.frame}`);
   }
   if (!/^[a-f0-9]{24}$/.test(input.sourceVersion)) {

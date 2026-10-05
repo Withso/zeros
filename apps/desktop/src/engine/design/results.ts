@@ -78,6 +78,8 @@ export async function createDesignResult(
           before.files[before.entryFile]!,
           viewport,
           before.files,
+          undefined,
+          before.entryFile,
         );
         const afterRender =
           after === before
@@ -87,6 +89,8 @@ export async function createDesignResult(
                 after.files[after.entryFile]!,
                 viewport,
                 after.files,
+                undefined,
+                after.entryFile,
               );
         return {
           before,

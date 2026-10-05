@@ -153,7 +153,7 @@ describe("portable Design metadata", () => {
       ).toBe(directory);
       expect(existsSync(path.join(root, directory, "design.toml"))).toBe(false);
       ensureDesignMetadataLayout(root, directory);
-      expect(manifest()).toEqual({ id: "design_existing", canvas: "canvas.json" });
+      expect(manifest()).toEqual({ version: 2, id: "design_existing", canvas: "canvas.json" });
       expect(readCanvasFixture(root, directory)).toMatchObject(model);
       expect(existsSync(path.join(root, registryFile))).toBe(false);
       expect(
@@ -174,6 +174,7 @@ describe("portable Design metadata", () => {
     write(".zeros/design/design_other/metadata.json", json);
     commitDesignMetadata(root, directory, json);
     expect(parseDesignManifest(read("Other/design.toml"))).toEqual({
+      version: 2,
       id: "design_other",
       canvas: "canvas.json",
     });

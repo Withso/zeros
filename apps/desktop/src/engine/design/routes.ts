@@ -604,7 +604,7 @@ export async function handleDesignWorkspaceRoute(
       return host.withDesignReadWorkspace(reference.workspaceId, false, async ({ root, designDirectory }) => {
         if ((await inspectDesignContext(root, reference)).status !== "ready") throw new Error("The selected frame changed. Send again to capture its current revision.");
         const access = await openDesignVerification({ workspaceId: reference.workspaceId, workspacePath: root, directory: designDirectory, directoryId: reference.directoryId });
-        const response = await fetch(`${access.url}/${encodeURIComponent(reference.frame)}/capture?revision=${reference.revision}&frameId=${encodeURIComponent(reference.frameId ?? "")}`, { signal: AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 3_000), redirect: "error" });
+        const response = await fetch(`${access.url}/${reference.frame.split("/").map(encodeURIComponent).join("/")}/capture?revision=${reference.revision}&frameId=${encodeURIComponent(reference.frameId ?? "")}`, { signal: AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 3_000), redirect: "error" });
         if (!response.ok) {
           const error = await response.json() as { error: string };
           throw new Error(error.error);

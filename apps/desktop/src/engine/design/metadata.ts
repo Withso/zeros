@@ -31,6 +31,8 @@ import {
   serializeDesignRegistration,
 } from "./manifest";
 import { DESIGN_CANVAS_FILE, decodeCanvasFile, encodeCanvasFile } from "./canvas-file";
+import { resolveDesignManifestLayout } from "./layout";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import {
   assertDesignFilesNotIgnored,
   designGitignoreSource,
@@ -303,7 +305,7 @@ export function refreshDesignManifestDiscovery(workspace: string): void {
       relative &&
       entries.some((entry) => entry.name === DESIGN_MANIFEST_FILE)
     )
-      directories.add(relative);
+      directories.add(`${relative}/${DESIGN_MANIFEST_FILE}`);
     for (const entry of entries) {
       if (
         !entry.isDirectory() ||
@@ -330,17 +332,44 @@ export function refreshDesignManifestDiscovery(workspace: string): void {
 function rememberManifest(workspace: string, directory: string): void {
   const key = designDiscoveryKey(workspace);
   if (!manifestCandidates.has(key)) refreshDesignManifestDiscovery(workspace);
-  manifestCandidates.get(key)!.add(directory);
+  manifestCandidates.get(key)!.add(readDirectoryDesignLayout(workspace, directory)?.manifestFile ?? `${directory}/${DESIGN_MANIFEST_FILE}`);
 }
-export function readDirectoryDesignManifest(
+export function readDirectoryDesignLayout(
   workspace: string,
   directory: string,
 ) {
-  const source = readDesignStorageFile(
-    workspace,
-    `${directory}/${DESIGN_MANIFEST_FILE}`,
-  );
-  return source === null ? null : parseDesignManifest(source);
+  const rootFile = `${directory}/${DESIGN_MANIFEST_FILE}`;
+  const sources = [{ file: rootFile, source: readDesignStorageFile(workspace, rootFile) }];
+  // A legacy root may have an unrelated file called meta. It cannot contain a
+  // registration; leave that collision to explicit v3 migration preflight.
+  const metaEntries = (() => {
+    try {
+      return readdirSync(path.join(workspace, directory), { withFileTypes: true })
+        .filter((entry) => portable(entry.name) === "meta");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  })();
+  for (const meta of metaEntries) {
+    if (meta.isFile()) continue;
+    const file = `${directory}/${meta.name}/${DESIGN_MANIFEST_FILE}`;
+    sources.push({ file, source: readDesignStorageFile(workspace, file) });
+  }
+  const layouts = sources.flatMap(({ file, source }) => {
+    const manifest = source === null ? null : parseDesignManifest(source);
+    if (!manifest) return [];
+    const layout = resolveDesignManifestLayout(file, manifest);
+    if (layout.directory !== directory)
+      throw new Error("The Design manifest belongs to a different directory layout.");
+    return [{ ...layout, manifest }];
+  });
+  if (layouts.length > 1)
+    throw new Error("Competing root and meta Design manifests exist. Resolve both registrations before editing.");
+  return layouts[0] ?? null;
+}
+export function readDirectoryDesignManifest(workspace: string, directory: string) {
+  return readDirectoryDesignLayout(workspace, directory)?.manifest ?? null;
 }
 export function readDesignDirectoryRegistry(
   workspace: string,
@@ -358,13 +387,16 @@ export function readDesignDirectoryRegistry(
   // A move can be observed before the watcher event reaches the engine.
   if (
     [...manifestCandidates.get(key)!].some(
-      (directory) => !existsSync(path.join(workspace, directory)),
+      (file) => !existsSync(path.dirname(path.join(workspace, file))),
     )
   )
     refreshDesignManifestDiscovery(workspace);
-  for (const directory of manifestCandidates.get(key)!) {
-    const manifest = readDirectoryDesignManifest(workspace, directory);
-    if (!manifest) continue;
+  for (const file of manifestCandidates.get(key)!) {
+    const source = readDesignStorageFile(workspace, file);
+    const candidate = source === null ? null : parseDesignManifest(source);
+    if (!candidate) continue;
+    const { directory } = resolveDesignManifestLayout(file, candidate);
+    const manifest = readDirectoryDesignManifest(workspace, directory)!;
     const existing = registry.directories[manifest.id];
     if (existing && existing.path !== directory)
       throw new Error(
@@ -535,8 +567,8 @@ export function designDocumentMetadataPath(
   workspace: string,
   directory: string,
 ): string {
-  const manifestFile = `${directory}/${DESIGN_MANIFEST_FILE}`;
-  const manifest = readDirectoryDesignManifest(workspace, directory);
+  const layout = readDirectoryDesignLayout(workspace, directory);
+  const manifest = layout?.manifest;
   const entry = designDirectoryEntry(workspace, directory);
   if (manifest) {
     if (
@@ -548,7 +580,7 @@ export function designDocumentMetadataPath(
       throw new Error(
         "Both legacy and registered Design metadata exist. Resolve the conflict before editing.",
       );
-    return path.join(workspace, manifest.canvas ? `${directory}/${manifest.canvas}` : manifestFile);
+    return path.join(workspace, layout!.documentFile);
   }
   return path.join(
     workspace,
@@ -895,7 +927,8 @@ export function commitDesignMetadata(
   );
   migrating.set(id, directory);
   for (const [entryId, folder] of migrating) {
-    const metadata = `${folder}/${DESIGN_MANIFEST_FILE}`;
+    const layout = readDirectoryDesignLayout(workspace, folder);
+    const metadata = layout?.manifestFile ?? `${folder}/${DESIGN_MANIFEST_FILE}`;
     const before = readDesignStorageFile(workspace, metadata);
     const manifest = before === null ? null : parseDesignManifest(before);
     if (before !== null && !manifest)
@@ -917,7 +950,7 @@ export function commitDesignMetadata(
       throw new Error(
         "Both legacy and registered Design metadata exist. Resolve the conflict before editing.",
       );
-    const canvasFile = `${folder}/${DESIGN_CANVAS_FILE}`;
+    const canvasFile = layout?.manifest.canvas ? layout.documentFile : `${folder}/${DESIGN_CANVAS_FILE}`;
     const canvasBefore = readDesignStorageFile(workspace, canvasFile);
     if (canvasBefore !== null && !manifest?.canvas && expected?.file !== canvasFile)
       throw new Error(`The existing ${canvasFile} conflicts with legacy Design metadata. Preserve both files before migrating.`);
@@ -936,7 +969,7 @@ export function commitDesignMetadata(
       const names = new Set([
         ...Object.keys(normalized.frames),
         ...(existsSync(path.join(workspace, folder)) ? readdirSync(path.join(workspace, folder), { withFileTypes: true }) : [])
-          .filter((entry) => entry.isFile() && /^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(entry.name))
+          .filter((entry) => entry.isFile() && isDesignFrameFile(entry.name))
           .map((entry) => entry.name),
       ]);
       for (const file of [...names].sort()) {
@@ -954,7 +987,7 @@ export function commitDesignMetadata(
       }
       model = { ...normalized };
     }
-    const canvasAfter = encodeCanvasFile(model);
+    const canvasAfter = encodeCanvasFile(model, { version: layout?.canvasVersion ?? 1 });
     // Preserve formatting when the authored scene itself is unchanged.
     const unchanged = canvasBefore !== null &&
       isDeepStrictEqual(JSON.parse(canvasBefore), JSON.parse(canvasAfter));

@@ -6,6 +6,7 @@ import {
 } from "./result-store";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ComposerModeSnapshot } from "@zeros/protocol/composer-mode";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
@@ -42,8 +43,8 @@ import {
 
 const documentId = z
   .string()
-  .regex(/^frame:[A-Za-z0-9][A-Za-z0-9._-]*\.[hH][tT][mM][lL]$/)
-  .max(260);
+  .refine((value) => value.startsWith("frame:") && isDesignFrameFile(value.slice("frame:".length)))
+  .max(512);
 const revision = z.string().min(1).max(128);
 const exactDocument = { documentId, expectedRevision: revision };
 const requestId = designRequestIdSchema;

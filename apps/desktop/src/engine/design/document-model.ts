@@ -19,6 +19,7 @@ import { type DesignAssetSummary } from "./assets";
 
 import { type DesignFoundationManifest } from "@zeros/design-core";
 import { type DesignMetadataSnapshot } from "./metadata";
+import { type DesignPageSummary } from "@zeros/protocol/design-pages";
 
 
 
@@ -82,6 +83,7 @@ export interface DesignFrameRestorePoint {
 export interface DesignFrameSummary {
   file: string;
   frameId?: string;
+  pageId?: string;
   title: string;
   /** Text-backed frames give loose canvas text durable HTML ownership without
    * visually pretending that the text is a conventional artboard. */
@@ -185,6 +187,7 @@ export interface DesignMutationResult {
 }
 
 export interface DesignWorkspaceSnapshot {
+  pages: DesignPageSummary[];
   /** Lightweight frames in canvas z-order. The custom protocol hydrates only
    * the bounded live-frame set, avoiding an all-frame HTML/srcDoc IPC payload. */
   frames: DesignCanvasFrame[];
@@ -201,12 +204,21 @@ export interface DesignReadOptions {
 }
 
 export const canvasReadSnapshot = Symbol("canvasReadSnapshot");
+export interface CanvasPage {
+  id: string;
+  title: string;
+  /** Absent on legacy documents; do not add it during observational reads. */
+  folder?: string;
+  frames: string[];
+  [extension: string]: unknown;
+}
 export interface CanvasDocument {
   [canvasReadSnapshot]?: DesignMetadataSnapshot;
   version: 3;
   frames: Record<string, DesignFrameGeometry>;
   frame_info: Record<string, Pick<FrameMeta, "id" | "title" | "kind">>;
   foundation: DesignFoundationManifest;
+  pages?: CanvasPage[];
   view?: {
     x: number;
     y: number;

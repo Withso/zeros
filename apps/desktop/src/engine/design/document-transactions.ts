@@ -39,6 +39,7 @@ import path from "node:path";
 
 import {
   designFrameGeometryError,
+  designRelativeFileSchema,
   migrateDesignFoundationManifest,
 } from "@zeros/design-core";
 import {
@@ -93,6 +94,7 @@ import {
   writePrivateDesignState,
 } from "./metadata";
 import { readSafeRegularFile } from "./safe-files";
+import { safeLocalReference } from "./assets";
 
 async function unlinkDesignArtifact(target: string): Promise<void> {
   await unlink(target);
@@ -354,7 +356,7 @@ export function designTransactionJournalPath(workspacePath: string): string {
 function isDesignWebSourceFile(file: string, entryFile: string): boolean {
   return (
     file === entryFile ||
-    /^[A-Za-z0-9][A-Za-z0-9._-]*\.css$/i.test(file) ||
+    (file.toLowerCase().endsWith(".css") && designRelativeFileSchema.safeParse(file).success) ||
     /^components\/[a-z][a-z0-9-]*\.html$/.test(file)
   );
 }
@@ -412,6 +414,20 @@ async function readDesignWebDocumentStateUnlocked(
       MAX_DESIGN_TEXT_BYTES,
     );
     if (safe) retainSource(item.name, safe);
+  }
+  // Root styles remain available for tokens/provenance. Also retain each CSS
+  // link from this entry at its actual source path for immutable composition.
+  const document = parse(files[file]!, { sourceCodeLocationInfo: true });
+  for (const { element } of elementRecords(document)) {
+    if (element.tagName !== "link" || !element.attrs.some((attribute) =>
+      attribute.name === "rel" && attribute.value.split(/\s+/).some((value) => value.toLowerCase() === "stylesheet"))) continue;
+    const href = element.attrs.find((attribute) => attribute.name === "href")?.value ?? "";
+    const target = safeLocalReference(directory, href, file);
+    if (!target?.toLowerCase().endsWith(".css")) continue;
+    const sourceFile = path.relative(directory, target).split(path.sep).join("/");
+    if (Object.hasOwn(files, sourceFile)) continue;
+    const safe = await readSafeRegularFile(directory, target, MAX_DESIGN_TEXT_BYTES);
+    if (safe) retainSource(sourceFile, safe);
   }
   const componentDirectory = path.join(directory, "components");
   const componentEntries = await readdir(componentDirectory, {

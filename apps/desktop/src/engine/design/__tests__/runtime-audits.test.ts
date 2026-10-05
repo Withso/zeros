@@ -7,6 +7,16 @@ import {
 } from "../runtime-audits";
 
 describe("design runtime audit registry", () => {
+  it("accepts nested frame paths and keeps same basenames isolated", () => {
+    resetDesignRuntimeAuditsForTests();
+    const input = { workspacePath: "/work/a", frame: "page-1/home.html", sourceVersion: "a".repeat(24), warnings: [{
+      ruleId: "contrast" as const, severity: "warning" as const, message: "Contrast", file: "page-1/home.html", line: 1, column: 1,
+    }] };
+    setDesignRuntimeAudit(input);
+    expect(getDesignRuntimeAudit(input.workspacePath, input.frame, input.sourceVersion)).toHaveLength(1);
+    expect(getDesignRuntimeAudit(input.workspacePath, "checkout/home.html", input.sourceVersion)).toEqual([]);
+    expect(() => setDesignRuntimeAudit({ ...input, frame: "page-1/../home.html" })).toThrow();
+  });
   it("isolates exact source generations and bounds stale frame audits", () => {
     resetDesignRuntimeAuditsForTests();
     setDesignRuntimeAudit({

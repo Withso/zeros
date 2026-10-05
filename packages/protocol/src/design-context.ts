@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { designFrameFileSchema } from "./design-path";
 
 /** Portable context identity, deliberately separate from tool/write authority. */
 export const designContextReferenceSchema = z
@@ -6,7 +7,7 @@ export const designContextReferenceSchema = z
     version: z.literal(1),
     workspaceId: z.string().min(1).max(4096),
     directoryId: z.string().min(1).max(128),
-    frame: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i),
+    frame: designFrameFileSchema,
     /** Optional for references saved before stable frame identity was included. */
     frameId: z.string().min(1).max(256).regex(/^[^\x00-\x1f\x7f]+$/).optional(),
     nodeId: z

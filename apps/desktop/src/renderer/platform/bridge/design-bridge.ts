@@ -17,6 +17,7 @@ import type {
   DesignStyleProvenance,
 } from "@zeros/design-web";
 import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-runtime";
+import { designPageCatalogSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
 
 import type { RuntimeClient } from "./ws-client";
 import { workspaceOp as rawWorkspaceOp } from "./workspace-bridge";
@@ -42,6 +43,7 @@ const DESIGN_AGGREGATE_READ_TIMEOUT_MS = 30_000;
 export interface DesignFrameSummaryWire {
   file: string;
   frameId?: string;
+  pageId?: string;
   title: string;
   /** Omitted by older remote engines; absence is a conventional frame. */
   kind?: "frame" | "text";
@@ -140,6 +142,8 @@ export interface DesignWorkspaceSnapshotWire {
   /** Absent only on older engines and pre-migration boot snapshots. */
   directoryId?: string;
   directory?: string;
+  /** Optional for older engines; normalized to a single legacy root page. */
+  pages?: DesignPageSummary[];
   /** Host-local resource authority. Null on remote/srcDoc renderers. */
   protocolCapability: string | null;
   frames: DesignCanvasFrameWire[];
@@ -164,6 +168,16 @@ export function isDesignWorkspaceSnapshotWire(
 ): value is DesignWorkspaceSnapshotWire {
   const snapshot = value as DesignWorkspaceSnapshotWire | undefined;
   if (!snapshot || !validProtocolCapability(snapshot)) return false;
+  if (snapshot.pages !== undefined) {
+    if (!designPageCatalogSchema.safeParse(snapshot.pages).success) return false;
+    const files = new Set<string>();
+    if (!Array.isArray(snapshot.frames) || snapshot.frames.some((frame) => {
+      if (!frame || typeof frame.file !== "string" || files.has(frame.file)) return true;
+      files.add(frame.file);
+      const page = snapshot.pages!.find((page) => page.frameFiles.includes(frame.file));
+      return !page || (frame.pageId !== undefined && frame.pageId !== page.id);
+    })) return false;
+  }
   return (
     Array.isArray(snapshot.frames) &&
     Array.isArray(snapshot.tokens) &&
@@ -174,6 +188,10 @@ export function isDesignWorkspaceSnapshotWire(
     Array.isArray(snapshot.lint.violations) &&
     typeof snapshot.lint.healedOids === "number"
   );
+}
+
+export function normalizeDesignWorkspaceSnapshotPages(snapshot: DesignWorkspaceSnapshotWire): DesignWorkspaceSnapshotWire {
+  return normalizeDesignPagesSnapshot(snapshot);
 }
 
 export interface DesignMutationResultWire {
@@ -471,7 +489,7 @@ export async function bridgeDesignSnapshot(
   if (!isDesignWorkspaceSnapshotWire(result?.snapshot)) {
     throw new Error("design.snapshot: malformed engine response");
   }
-  return result.snapshot;
+  return normalizeDesignWorkspaceSnapshotPages(result.snapshot);
 }
 
 function designMutationReply(

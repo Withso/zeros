@@ -6,14 +6,14 @@ export const DESIGN_MANIFEST_FILE = "design.toml";
 export const DESIGN_MANIFEST_FORMAT = "zeros-design";
 const registrationSchema = z.object({
   format: z.literal(DESIGN_MANIFEST_FORMAT),
-  version: z.literal(2),
+  version: z.union([z.literal(2), z.literal(3)]),
   id: z.string().regex(DESIGN_DIRECTORY_ID_PATTERN),
   canvas: z.literal("canvas.json"),
 }).strict();
 
-export function serializeDesignRegistration(id: string): string {
+export function serializeDesignRegistration(id: string, version: 2 | 3 = 2): string {
   return stringify(registrationSchema.parse({
-    format: DESIGN_MANIFEST_FORMAT, version: 2, id, canvas: "canvas.json",
+    format: DESIGN_MANIFEST_FORMAT, version, id, canvas: "canvas.json",
   })) + "\n";
 }
 export const designManifestSchema = z
@@ -89,9 +89,13 @@ export function serializeDesignManifest(
 
 /** A filename alone never claims a folder. A damaged Zeros manifest fails
  * closed; unrelated TOML belongs to the repository and is left alone. */
+export type ParsedDesignManifest =
+  | { version: 1; id: string; document: Record<string, unknown>; canvas?: never }
+  | { version: 2 | 3; id: string; canvas: "canvas.json"; document?: never };
+
 export function parseDesignManifest(
   source: string,
-): { id: string; document?: Record<string, unknown>; canvas?: "canvas.json" } | null {
+): ParsedDesignManifest | null {
   if (Buffer.byteLength(source) > 16 * 1024 * 1024)
     throw new Error("Design manifest is too large.");
   let raw: Record<string, unknown>;
@@ -102,9 +106,9 @@ export function parseDesignManifest(
     return null;
   }
   if (raw.format !== DESIGN_MANIFEST_FORMAT) return null;
-  if (raw.version === 2) {
+  if (raw.version === 2 || raw.version === 3) {
     const registration = registrationSchema.parse(raw);
-    return { id: registration.id, canvas: registration.canvas };
+    return { version: registration.version, id: registration.id, canvas: registration.canvas };
   }
   const envelope = designManifestSchema.parse(raw);
   const document = mapJson(envelope.document, () => {
@@ -141,5 +145,5 @@ export function parseDesignManifest(
       configurable: true,
     });
   }
-  return { id: envelope.id, document };
+  return { version: 1, id: envelope.id, document };
 }

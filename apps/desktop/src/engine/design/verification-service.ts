@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { DesignContextReference, DesignVerificationAccess } from "@zeros/protocol/design-context";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import { DESIGN_CAPTURE_TIMEOUT_MS, DESIGN_STATIC_RENDER_CSS, designCaptureRasterSize } from "@zeros/protocol/design-capture";
 import { createDesignCaptureRenderer, type DesignEvidenceRenderer } from "./capture-client";
 import { assertDesignCapturePng } from "./capture-service";
@@ -13,7 +14,6 @@ import { prepareFrameRenderSource } from "./render-preparation";
 
 const LEASE_MS = 30 * 60_000;
 const MAX_LEASES = 32;
-const FRAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i;
 const PASSIVE_CSP = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-same-origin";
 
 export interface DesignVerificationOwner {
@@ -144,14 +144,18 @@ async function startVerificationServer(options: DesignVerificationOptions) {
     }
     if (request.method !== "GET" || (request.url?.length ?? 0) > 2048) { fail(405, "Use GET for Design verification."); return; }
     const url = new URL(request.url!, origin);
-    const [, token, file, action = ""] = url.pathname.split("/");
+    const [, token, ...resource] = url.pathname.split("/");
+    let action = "";
+    if (resource.at(-1) === "") resource.pop();
+    else if (["state", "validate", "document", "capture"].includes(resource.at(-1) ?? "")) action = resource.pop()!;
+    const file = resource.join("/");
     const lease = token ? leases.get(token) : undefined;
     if (!lease || lease.expiresAt <= now()) {
       if (token) leases.delete(token);
       fail(410, "This Design preview expired. Open a fresh preview from the canvas or send the frame again."); return;
     }
     if (active >= 4) { fail(429, "Design verification is busy. Retry when the current request finishes."); return; }
-    if (file !== "frames" && (!file || !FRAME.test(file))) { fail(404, "Unknown Design frame."); return; }
+    if (file !== "frames" && !isDesignFrameFile(file)) { fail(404, "Unknown Design frame."); return; }
     active++;
     const controller = new AbortController();
     controllers.add(controller);
@@ -200,7 +204,7 @@ async function startVerificationServer(options: DesignVerificationOptions) {
         const { workspacePath: _root, ...report } = await lintDesignDocument(lease.workspacePath, file, { healOids: false, includeRuntimeAudits: false });
         await assertRevision(); send(JSON.stringify({ ...state, report }), "application/json"); return;
       }
-      const composed = await prepareFrameRenderSource(lease.workspacePath, inspection.source, state);
+      const composed = await prepareFrameRenderSource(lease.workspacePath, inspection.source, state, undefined, undefined, file);
       if (composed.sourceVersion !== reference.revision) { fail(409, "Frame resources changed. Retry verification."); return; }
       if (action === "document") {
         await assertRevision();
@@ -286,5 +290,5 @@ export async function stopDesignVerification(): Promise<void> {
 export async function revokeDesignVerification(workspaceId: string): Promise<void> { if (shared) (await shared).revoke(workspaceId); }
 
 export function designFramePreviewUrl(access: Pick<DesignVerificationAccess, "url">, reference: DesignContextReference): string {
-  return `${access.url}/${encodeURIComponent(reference.frame)}/?frameId=${encodeURIComponent(reference.frameId ?? "")}`;
+  return `${access.url}/${reference.frame.split("/").map(encodeURIComponent).join("/")}/?frameId=${encodeURIComponent(reference.frameId ?? "")}`;
 }

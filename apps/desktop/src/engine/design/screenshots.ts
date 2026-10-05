@@ -94,7 +94,7 @@ export function normalizeDesignScreenshot(
   input: DesignScreenshot,
 ): DesignScreenshot {
   if (!input.workspaceId.trim()) throw new Error("workspaceId is required.");
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(input.frame)) {
+  if (!isDesignFrameFile(input.frame)) {
     throw new Error(`Invalid design frame file: ${input.frame}`);
   }
   if (
@@ -164,3 +164,4 @@ export function forgetDesignScreenshots(workspaceId: string): void {
 export function resetDesignScreenshotsForTests(): void {
   screenshots.clear();
 }
+import { isDesignFrameFile } from "@zeros/protocol/design-path";

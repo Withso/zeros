@@ -6,6 +6,8 @@
 // Every hydrated entry is marked stale by the owner cache and revalidated.
 
 import { designContextReferenceSchema } from "@zeros/protocol/design-context";
+import { designPageCatalogSchema, normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/git";
 import { getSetting, setSetting } from "../../../platform/settings";
 
@@ -59,6 +61,9 @@ export function safeDesignWorkspaceBootSnapshot(
 ): DesignWorkspaceSnapshotWire | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<DesignWorkspaceSnapshotWire>;
+  const pagesResult = candidate.pages === undefined ? undefined : designPageCatalogSchema.safeParse(candidate.pages);
+  if (pagesResult && !pagesResult.success) return null;
+  const pages = pagesResult?.success ? pagesResult.data : undefined;
   if (candidate.directoryId !== undefined && (typeof candidate.directoryId !== "string" || !/^design_[a-zA-Z0-9_-]{1,64}$/.test(candidate.directoryId))) return null;
   if (candidate.directory !== undefined && (typeof candidate.directory !== "string" || !candidate.directory || candidate.directory.length > 4096)) return null;
   if (
@@ -94,6 +99,7 @@ export function safeDesignWorkspaceBootSnapshot(
     const modifiedAt = finiteNumber(frame?.modifiedAt);
     if (
       !file ||
+      !isDesignFrameFile(file) ||
       !title ||
       !sourceVersion ||
       !SOURCE_VERSION_PATTERN.test(sourceVersion) ||
@@ -125,9 +131,12 @@ export function safeDesignWorkspaceBootSnapshot(
       return null;
     }
     const layerCount = finiteNumber(frame?.layerCount);
+    const page = pages?.find((page) => page.frameFiles.includes(file));
+    if (pages && (!page || (frame.pageId !== undefined && frame.pageId !== page.id))) return null;
     frames.push({
       file,
       ...(frameId.data !== undefined ? { frameId: frameId.data } : {}),
+      ...(page ? { pageId: page.id } : {}),
       title,
       ...(frame.kind ? { kind: frame.kind } : {}),
       width,
@@ -267,12 +276,13 @@ export function safeDesignWorkspaceBootSnapshot(
     256,
   );
   if (!tokenSourceVersion) return null;
-  return {
+  return normalizeDesignPagesSnapshot({
     // Capabilities derive from an engine-process secret and must never survive
     // that process or cross launches.
     protocolCapability: null,
     ...(candidate.directoryId ? { directoryId: candidate.directoryId } : {}),
     ...(candidate.directory ? { directory: candidate.directory } : {}),
+    ...(pages ? { pages } : {}),
     frames,
     tokens,
     tokenSourceVersion,
@@ -283,7 +293,7 @@ export function safeDesignWorkspaceBootSnapshot(
       violations,
       healedOids,
     },
-  };
+  });
 }
 
 function normalizedWorkspacePath(value: string): string {

@@ -3,6 +3,7 @@ import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 export { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
 import { DESIGN_MANIFEST_FILE, parseDesignManifest } from "./manifest";
 import { DESIGN_CANVAS_FILE, decodeCanvasFile } from "./canvas-file";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import {
   DesignRenderBudgetError,
   MAX_DESIGN_TEXT_BYTES,
@@ -34,7 +35,7 @@ import path from "node:path";
 
 import { migrateDesignFoundationManifest } from "@zeros/design-core";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
-import { readDesignRegistrySource, readDirectoryDesignManifest } from "./metadata";
+import { assertSafeDesignStoragePath, readDesignRegistrySource, readDirectoryDesignLayout, readDirectoryDesignManifest } from "./metadata";
 
 import { designDirectoryNameFor } from "./directory-registry";
 import {
@@ -80,11 +81,7 @@ function canvasPath(workspacePath: string): string {
 }
 
 export function isFrameFile(value: string): boolean {
-  return (
-    /^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(value) &&
-    value !== "." &&
-    value !== ".."
-  );
+  return isDesignFrameFile(value);
 }
 
 export function assertFrameFile(value: string): string {
@@ -128,7 +125,8 @@ export async function readCanvas(workspacePath: string): Promise<CanvasDocument>
   const target = canvasPath(workspacePath);
   const file = path.relative(workspacePath, target).split(path.sep).join("/");
   const source = readDesignStorageFile(workspacePath, file);
-  const registrationFile = `${designDirectoryNameFor(workspacePath)}/${DESIGN_MANIFEST_FILE}`;
+  const layout = readDirectoryDesignLayout(workspacePath, designDirectoryNameFor(workspacePath));
+  const registrationFile = layout?.manifestFile ?? `${designDirectoryNameFor(workspacePath)}/${DESIGN_MANIFEST_FILE}`;
   const registrationSource = readDesignStorageFile(workspacePath, registrationFile);
   const retainSnapshot = (canvas: CanvasDocument): CanvasDocument =>
     Object.defineProperty(canvas, canvasReadSnapshot, {
@@ -179,7 +177,7 @@ export async function readCanvas(workspacePath: string): Promise<CanvasDocument>
       file.endsWith(`/${DESIGN_MANIFEST_FILE}`)
         ? parseDesignManifest(source)?.document
         : file.endsWith(`/${DESIGN_CANVAS_FILE}`)
-          ? decodeCanvasFile(source)
+          ? decodeCanvasFile(source, { version: layout?.canvasVersion ?? 1 })
           : JSON.parse(source)
     ) as typeof raw;
   } catch (error) {
@@ -189,6 +187,10 @@ export async function readCanvas(workspacePath: string): Promise<CanvasDocument>
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     throw new Error("Design canvas metadata must be an object.");
+  if (layout?.kind === "meta-v3") {
+    for (const page of (raw as CanvasDocument).pages ?? [])
+      assertSafeDesignStoragePath(workspacePath, `${layout.directory}/${page.folder}/.zeros-validation`);
+  }
   if (
     raw.version !== undefined &&
     raw.version !== 1 &&

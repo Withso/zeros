@@ -1165,6 +1165,20 @@ describe("design workspace cache", () => {
     expect(stable).toBe(previous);
   });
 
+  it("retains page catalog references and publishes page-only changes", () => {
+    const previous = snapshot([{ file: "page-1/home.html" }]);
+    previous.pages = [{ id: "screens", title: "Screens", folder: "page-1", frameFiles: ["page-1/home.html"] }];
+    previous.frames[0].pageId = "screens";
+    const next = structuredClone(previous);
+    expect(stabilizeDesignWorkspaceSnapshot(previous, next)).toBe(previous);
+    next.pages![0].title = "New title";
+    const changed = stabilizeDesignWorkspaceSnapshot(previous, next);
+    expect(changed.pages?.[0].title).toBe("New title");
+    expect(changed.frames).toBe(previous.frames);
+    next.frames[0].pageId = "new-owner";
+    expect(stabilizeDesignWorkspaceSnapshot(changed, next).frames[0].pageId).toBe("new-owner");
+  });
+
   it("replaces only the changed frame and retains every unaffected collection", () => {
     const previous = snapshot([
       { file: "home.html" },
@@ -2126,7 +2140,8 @@ describe("design workspace cache", () => {
     const boot =
       reloaded.designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
 
-    expect(boot.data?.frames).toEqual(expected.frames);
+    expect(boot.data?.frames).toEqual(expected.frames.map((frame) => ({ ...frame, pageId: "main" })));
+    expect(boot.data?.pages).toEqual([{ id: "main", title: "Design", folder: "", frameFiles: expected.frames.map((frame) => frame.file) }]);
     expect(boot.data?.tokens).toEqual(expected.tokens);
     // The HTTP capability is derived from the engine's per-process secret and
     // embedded asset bytes can be large; neither belongs in a renderer boot

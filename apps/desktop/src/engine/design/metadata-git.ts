@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
 import { DESIGN_MANIFEST_FILE, parseDesignManifest } from "./manifest";
+import { resolveDesignManifestLayout } from "./layout";
 import { sanitizeDesignDirectoryName } from "./directory-path";
 import { stringify } from "smol-toml";
 import { runGit } from "../git/git-exec";
@@ -37,12 +38,13 @@ export async function designRegistryAtGitRef(
   const entries = listing.stdout.split("\0").filter(Boolean);
   const files = entries.map((entry) => entry.slice(entry.indexOf("\t") + 1));
   const manifestIds = new Set<string>();
+  const manifestRoots = new Set<string>();
   for (const entry of entries) {
     const file = entry.slice(entry.indexOf("\t") + 1);
-    const directory = path.posix.dirname(file);
+    const manifestParent = path.posix.dirname(file);
     if (
       !file.endsWith(`/${DESIGN_MANIFEST_FILE}`) ||
-      sanitizeDesignDirectoryName(directory) !== directory
+      sanitizeDesignDirectoryName(manifestParent) !== manifestParent
     )
       continue;
     const match = /^(100644|100755) (?:blob )?([a-f0-9]{40,64})(?: 0)?\t/.exec(
@@ -59,6 +61,10 @@ export async function designRegistryAtGitRef(
     });
     const manifest = parseDesignManifest(blob.stdout);
     if (!manifest) continue;
+    const { directory } = resolveDesignManifestLayout(file, manifest);
+    if (manifestRoots.has(directory))
+      throw new Error("Competing root and meta Design manifests exist in Git.");
+    manifestRoots.add(directory);
     const previous = registry.directories[manifest.id];
     if (
       manifestIds.has(manifest.id) ||

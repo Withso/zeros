@@ -246,7 +246,7 @@ describe("Code Design target admission", () => {
       expect(await readFile(manifestFile, "utf8")).toBe(legacy);
       mode = "design";
       expect(await tools!.preparePrompt!()).toContain("normal Read, Write, Edit");
-      expect(parseDesignManifest(await readFile(manifestFile, "utf8"))).toEqual({ id, canvas: "canvas.json" });
+      expect(parseDesignManifest(await readFile(manifestFile, "utf8"))).toEqual({ version: 2, id, canvas: "canvas.json" });
       expect(JSON.parse(await readFile(canvasFile, "utf8")).version).toBe(1);
     } finally { await tools!.dispose(); }
   });

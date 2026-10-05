@@ -1,3 +1,5 @@
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
+
 const CAPABILITY_PATTERN = /^[a-f0-9]{64}$/;
 const SOURCE_VERSION_PATTERN = /^[a-f0-9]{24}$/;
 const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -12,10 +14,7 @@ export function designProtocolFrameUrl(input: {
 }): string | null {
   if (
     !WORKSPACE_ID_PATTERN.test(input.workspaceId) ||
-    !input.frame ||
-    input.frame === "." ||
-    input.frame === ".." ||
-    /[\\/\0]/.test(input.frame) ||
+    !isDesignFrameFile(input.frame) ||
     !input.capability ||
     !CAPABILITY_PATTERN.test(input.capability) ||
     !SOURCE_VERSION_PATTERN.test(input.sourceVersion)
@@ -24,6 +23,6 @@ export function designProtocolFrameUrl(input: {
   }
   return (
     `zeros-design://workspace/${encodeURIComponent(input.workspaceId)}/` +
-    `${input.capability}/${encodeURIComponent(input.frame)}?v=${input.sourceVersion}`
+    `${input.capability}/${input.frame.split("/").map(encodeURIComponent).join("/")}?v=${input.sourceVersion}`
   );
 }

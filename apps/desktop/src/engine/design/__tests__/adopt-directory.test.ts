@@ -121,6 +121,7 @@ describe("explicit existing Design folder adoption", () => {
     expect(preview.metadataSource).toBe("git");
     await adoptExistingDesignDirectory(root, "Brand", preview.revision);
     expect(manifest()).toEqual({
+      version: 2,
       id: "design_old",
       canvas: "canvas.json",
     });

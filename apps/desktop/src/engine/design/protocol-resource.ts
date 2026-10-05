@@ -9,6 +9,8 @@ import {
   readDesignFrameRenderSourceFromSource,
 } from "./document";
 import { readSafeRegularFile } from "./safe-files";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import { discoverFrameFiles } from "./document-storage";
 
 const MAX_TEXT_RESOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_BINARY_RESOURCE_BYTES = 10 * 1024 * 1024;
@@ -164,14 +166,14 @@ export async function readDesignProtocolResource(
       ? input.sourceVersion
       : null;
   const extension = path.extname(relativePath).toLowerCase();
-  const topLevelHtml =
-    extension === ".html" && !relativePath.includes("/") ? relativePath : null;
+  const frameHtml = isDesignFrameFile(relativePath) ? relativePath : null;
   const allowedResource =
     (extension === ".css" && !relativePath.includes("/")) ||
     (relativePath.startsWith("assets/") && MIME_TYPES[extension]);
-  if (!topLevelHtml && !allowedResource) return response(404, "Not found.");
+  if (!frameHtml && !allowedResource) return response(404, "Not found.");
+  if (frameHtml?.includes("/") && !(await discoverFrameFiles(workspacePath)).includes(frameHtml)) return response(404, "Not found.");
   const byteLimit =
-    topLevelHtml || extension === ".css"
+    frameHtml || extension === ".css"
       ? MAX_TEXT_RESOURCE_BYTES
       : MAX_BINARY_RESOURCE_BYTES;
   const designRoot = path.join(
@@ -186,13 +188,13 @@ export async function readDesignProtocolResource(
   if (!safe) return response(404, "Not found.");
   if (safe.size > byteLimit) return response(413, "Resource is too large.");
 
-  if (topLevelHtml) {
+  if (frameHtml) {
     const authored = safe.body.toString("utf8");
     let renderSource;
     try {
       renderSource = await readDesignFrameRenderSourceFromSource(
         workspacePath,
-        topLevelHtml,
+        frameHtml,
         authored,
       );
     } catch (error) {

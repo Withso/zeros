@@ -69,6 +69,18 @@ afterEach(() => {
 });
 
 describe("headless HTML preparation budgets", () => {
+  it("resolves stylesheet hrefs relative to the nested HTML entry", () => {
+    const document = createDesignWebDocumentState({
+      documentId: "nested", entryFile: "page-1/home.html", files: {
+        "page-1/home.html": '<!doctype html><html><head><link rel="stylesheet" href="../tokens.css"><link rel="stylesheet" href="./styles.css"></head><body><main data-oid="root">Home</main></body></html>',
+        "tokens.css": "main { color: red; }", "page-1/styles.css": "main { background: blue; }",
+      },
+    });
+    const html = prepareDesignHeadlessHtml(document);
+    expect(html).toContain("main { color: red; }");
+    expect(html).toContain("main { background: blue; }");
+    expect(html).not.toContain("<link");
+  });
   it("rejects pathological repeated stylesheet expansion", () => {
     const links = Array.from(
       { length: 129 },

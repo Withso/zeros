@@ -233,6 +233,7 @@ describe("native Design file authoring", () => {
     expect(await readFile(manifestPath, "utf8")).toBe(legacy);
     ensureDesignMetadataLayout(root, DESIGN_DIRECTORY_NAME);
     expect(parseDesignManifest(await readFile(manifestPath, "utf8"))).toEqual({
+      version: 2,
       id,
       canvas: "canvas.json",
     });
