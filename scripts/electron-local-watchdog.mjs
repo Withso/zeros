@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { groupAlive, signalGroup } from "./electron-local-process-group.mjs";
+import {
+  groupAlive,
+  groupExists,
+  signalGroup,
+} from "./electron-local-process-group.mjs";
 
 const parent = Number(process.argv[2]);
 const group = Number(process.argv[3]);
@@ -14,22 +17,20 @@ if (
   process.exit(1);
 
 function parentAlive() {
+  // The guardian is the launcher's direct child; reparenting detects even a
+  // zombie launcher without a subprocess. The concurrently job uses kill(0).
+  if (group) return process.ppid === parent;
   try {
     process.kill(parent, 0);
-    return !execFileSync("ps", ["-o", "stat=", "-p", String(parent)], {
-      encoding: "utf8",
-      timeout: 2000,
-    })
-      .trim()
-      .startsWith("Z");
+    return true;
   } catch (error) {
-    return error.code === "EPERM";
+    return error.code !== "ESRCH";
   }
 }
 
 while (parentAlive()) {
-  if (group && !groupAlive(group)) process.exit(0);
-  await delay(250);
+  if (group && !groupExists(group)) process.exit(0);
+  await delay(750);
 }
 // The stack's watchdog exits to trigger concurrently -k. A separate guardian
 // also owns preparation and enforces escalation if the launcher was SIGKILLed.

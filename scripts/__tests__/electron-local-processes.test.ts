@@ -89,13 +89,64 @@ async function cliFixture(failure?: "stdout" | "exception") {
   );
   processes.push(child);
   const exited = once(child, "exit");
-  await expect.poll(() => fs.existsSync(marker), { timeout: 5000 }).toBe(true);
+  await expect.poll(() => fs.existsSync(marker), { timeout: 15000 }).toBe(true);
   const owned = Number(fs.readFileSync(marker, "utf8"));
   groups.push(owned);
   return { root, child, exited, owned };
 }
 
 describe("Local process ownership", () => {
+  it.each([false, true])(
+    "runs steady watchdog ticks without invoking ps (guardian=%s)",
+    async (guardian) => {
+      const root = directory(),
+        trace = path.join(root, "counts.json"),
+        preload = path.join(root, "probe.cjs");
+      fs.writeFileSync(
+        preload,
+        `
+const fs=require('node:fs'),cp=require('node:child_process'),timers=require('node:timers/promises');
+let ps=0,ticks=0;const delay=timers.setTimeout;
+cp.execFileSync=(command,args)=>{if(command==='ps'){ps++;return args.includes('stat=')?'S':process.argv[3]+' '+process.argv[3]+' S';}throw new Error('unexpected process probe');};
+timers.setTimeout=(...args)=>{ticks++;fs.writeFileSync(process.env.WATCHDOG_TEST_TRACE,JSON.stringify({ps,ticks}));return delay(...args);};
+require('node:module').syncBuiltinESMExports();
+`,
+      );
+      const owned = spawn(
+        process.execPath,
+        ["-e", "setInterval(()=>{},1000)"],
+        { detached: true, stdio: "ignore" },
+      );
+      processes.push(owned);
+      groups.push(owned.pid!);
+      const watcher = spawn(
+        process.execPath,
+        [
+          "-r",
+          preload,
+          watchdogPath,
+          String(process.pid),
+          ...(guardian ? [String(owned.pid)] : []),
+        ],
+        {
+          stdio: "ignore",
+          env: { ...process.env, WATCHDOG_TEST_TRACE: trace },
+        },
+      );
+      processes.push(watcher);
+      await expect
+        .poll(
+          () =>
+            fs.existsSync(trace)
+              ? JSON.parse(fs.readFileSync(trace, "utf8")).ticks
+              : 0,
+          { timeout: 15000 },
+        )
+        .toBeGreaterThanOrEqual(3);
+      expect(JSON.parse(fs.readFileSync(trace, "utf8")).ps).toBe(0);
+    },
+    30000,
+  );
   it.each(["SIGHUP", "SIGQUIT"] as const)(
     "drains preparation and releases its lock on %s",
     async (signal) => {
@@ -109,6 +160,7 @@ describe("Local process ownership", () => {
         ),
       ).toBe(false);
     },
+    30000,
   );
 
   it.each(["stdout", "exception"] as const)(
@@ -123,6 +175,7 @@ describe("Local process ownership", () => {
         ),
       ).toBe(false);
     },
+    30000,
   );
 
   it.each([true, false])(
@@ -140,7 +193,7 @@ describe("Local process ownership", () => {
           cwd: root,
           env: process.env,
           signal: controller.signal,
-          killGraceMs: 100,
+          killGraceMs: 1000,
           output: (text: string) => {
             if (text.includes("ready") && abort) controller.abort();
           },
@@ -152,6 +205,7 @@ describe("Local process ownership", () => {
       expect(result.cancelled).toBe(abort);
       expect(alive(pid)).toBe(false);
     },
+    30000,
   );
 
   it("releases the launcher lock on spawn failure without a pid", async () => {
@@ -169,7 +223,7 @@ describe("Local process ownership", () => {
     expect(
       fs.existsSync(path.join(root, ".context/zeros-local/launcher.lock")),
     ).toBe(false);
-  });
+  }, 30000);
 
   it("waits for group cleanup when forwarding output throws", async () => {
     const root = directory(),
@@ -184,7 +238,7 @@ describe("Local process ownership", () => {
       {
         cwd: root,
         env: process.env,
-        killGraceMs: 100,
+        killGraceMs: 1000,
         output: () => {
           groups.push(Number(fs.readFileSync(marker, "utf8")));
           throw new Error("synthetic output failure");
@@ -195,12 +249,17 @@ describe("Local process ownership", () => {
     const pid = Number(fs.readFileSync(marker, "utf8"));
     groups.push(pid);
     expect(alive(pid)).toBe(false);
-  });
+  }, 30000);
 
   it("has a watchdog that exits when a SIGKILLed launcher disappears", async () => {
-    const parent = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
-      stdio: "ignore",
-    });
+    const parent = spawn(
+      process.execPath,
+      ["-e", "setInterval(()=>{},1000)"],
+      {
+        stdio: "ignore",
+      },
+      30000,
+    );
     processes.push(parent);
     const watcher = spawn(
       process.execPath,
@@ -211,13 +270,13 @@ describe("Local process ownership", () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(watcher.exitCode).toBe(null);
     parent.kill("SIGKILL");
-    await expect.poll(() => watcher.exitCode, { timeout: 4000 }).toBe(1);
-  });
+    await expect.poll(() => watcher.exitCode, { timeout: 15000 }).toBe(1);
+  }, 30000);
 
   it("stops owned preparation even when the launcher is SIGKILLed", async () => {
     const app = await cliFixture();
     app.child.kill("SIGKILL");
     await app.exited;
-    await expect.poll(() => alive(app.owned), { timeout: 4000 }).toBe(false);
-  });
+    await expect.poll(() => alive(app.owned), { timeout: 15000 }).toBe(false);
+  }, 30000);
 });

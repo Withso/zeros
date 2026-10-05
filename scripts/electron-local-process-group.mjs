@@ -1,5 +1,15 @@
 import { execFileSync } from "node:child_process";
 
+export function groupExists(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return error.code !== "ESRCH";
+  }
+}
+
 export function groupAlive(pid) {
   if (!pid) return false;
   try {
