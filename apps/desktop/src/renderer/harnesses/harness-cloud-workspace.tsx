@@ -14,12 +14,13 @@ import {
   cloudScopedId,
   cloudWorkspaceKey,
 } from "../platform/bridge/cloud-workspace-key";
-import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudWorkspaceDetails } from "../state/cloud-workspace-catalog";
+import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudWorkspaceDetails, getCloudWorkspaceRows } from "../state/cloud-workspace-catalog";
 import { useWorkspaceDispatch, useWorkspaceStore, type ChatThread } from "../state/store";
 import type { CloudWorkspaceActorRole, CloudWorkspaceDocument } from "../platform/cloud-workspaces";
 import { acceptOrganizationSnapshot, clearTeamStore } from "../features/team/team-store";
 import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { Toaster } from "../shared/ui/primitives/elements/toast";
+import { SetupView } from "../shell/workbench/tabs/setup-tab";
 
 const target = {
   organizationId: "11111111-1111-4111-8111-111111111111",
@@ -124,6 +125,7 @@ const chats: ChatThread[] = Array.from({ length: 12 }, (_, i) => ({
 function Harness() {
   const dispatch = useWorkspaceDispatch();
   const [cloud, setCloud] = useState(true);
+  const [failedSetup, setFailedSetup] = useState(false);
   const [selected, setSelected] = useState(chats[0].id);
   return (
     <ActionsCtx.Provider value={{} as SessionsActions}>
@@ -143,6 +145,12 @@ function Harness() {
               <Button onClick={() => dispatch({ type: "SET_ACTIVE_PAGE", page: "workspace" })}>Show workspace</Button>
             </>}
           </div>
+          {!sharingFixture && <Button onClick={() => {
+            acceptCloudWorkspaceDocument({ ...workspaceDocument, status: "stopped", version: 2,
+              setupFailure: { code: "setup_image_contract_invalid", hasLog: false },
+              error: { code: "cloud_workspace_safety_failure", message: "Managed compute stopped after a safety check failed" } });
+            setFailedSetup(true);
+          }}>Failed setup fixture</Button>}
           <section className="border-border1 bg-bg1 h-[500px] max-w-[740px] overflow-hidden rounded-lg border [--pane-bg:var(--bg1)]">
             <ChatTabs
               workspaceFolder={cloud ? folder : "/fixture/local"}
@@ -160,6 +168,9 @@ function Harness() {
               canSplitRight={false}
               canSplitDown={false}
             />
+            {cloud && failedSetup && <section aria-label="Cloud Setup tab" className="h-64">
+              <SetupView workspace={getCloudWorkspaceRows()[0]} visible onBusyChange={() => {}} />
+            </section>}
           </section>
         </main>
       </TooltipProvider>

@@ -73,7 +73,7 @@ import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import {DatabaseComputeUserFunding} from "./compute-funding.js";
 import {readProComputeUsage} from "./pro-allowance.js";
 import {publicCloudError} from "./public-contract.js";
-import {publicCloudIncident} from "./cloud-diagnostics.js";
+import {diagnosticCode, publicCloudIncident} from "./cloud-diagnostics.js";
 import {computeMicroUsd} from "./provider-compute.js";
 import { authorizeCloudWorkspaceCleanup, authorizeCloudWorkspaceActor, DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 import type { CloudWorkspaceProviderName } from "./provider.js";
@@ -333,6 +333,7 @@ type WorkspaceRow = CloudRuntimePinRow & {
   last_error_code: string | null;
   last_error_message: string | null;
   diagnostic_incident: { id: string; reason: string } | null;
+  setup_failure: { code: string | null; hasLog: boolean } | null;
   last_observed_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -434,6 +435,10 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
          cw.repository_forge, cw.repository_owner, cw.repository_name,
          cw.repository_revision, cw.status, cw.desired_state,
          cw.current_generation, cw.version, cw.last_error_code,
+         (SELECT CASE WHEN setup.state='failed' THEN jsonb_build_object(
+           'code',setup.error_code,'hasLog',btrim(setup.log_excerpt)<>'') ELSE NULL END
+          FROM cloud_workspace_setup_runs setup WHERE setup.workspace_id=cw.id AND setup.org_id=cw.org_id
+            AND setup.generation=cw.current_generation ORDER BY setup.attempt DESC LIMIT 1) AS setup_failure,
          (SELECT jsonb_build_object('id',incident.id,'reason',incident.reason)
           FROM cloud_workspace_diagnostic_incidents incident WHERE incident.workspace_id=cw.id AND incident.org_id=cw.org_id
             AND incident.generation=cw.current_generation AND incident.recovered_at IS NULL
@@ -552,6 +557,7 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
       lastObservedAt: iso(row.provider_last_observed_at),
     },
     version: Number(row.version),
+    setupFailure: row.setup_failure ? { code: diagnosticCode(row.setup_failure.code), hasLog: row.setup_failure.hasLog } : null,
     error:
       row.diagnostic_incident ? publicCloudIncident(row.diagnostic_incident) : row.last_error_code === null
         ? null

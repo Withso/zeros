@@ -35,6 +35,23 @@ beforeEach(() => {
   };
 });
 describe("cloud checkpoint recovery controls", () => {
+  it.each(["failed", "stopping", "stopped"])("keeps the failed setup visible while the workspace is %s", status => {
+    Object.assign(state.workspace!, { status, recovery: null, setupFailure: { code: "setup_image_contract_invalid", hasLog: false } });
+    const html = render();
+    expect(html).toContain("Setup failed");
+    expect(html).toContain("setup_image_contract_invalid");
+    expect(html).toContain("The workspace image could not be verified.");
+    expect(html).toContain("The failure happened before your setup script ran.");
+    expect(html).not.toContain("Setup succeeded");
+    expect(html).not.toContain("Setting up");
+  });
+  it("does not claim setup failed before the script ran when a log exists", () => {
+    Object.assign(state.workspace!, { recovery: null, setupFailure: { code: "setup_command_failed", hasLog: true } });
+    const html = render();
+    expect(html).toContain("Setup failed");
+    expect(html).toContain("setup_command_failed");
+    expect(html).not.toContain("The failure happened before your setup script ran.");
+  });
   it("offers recovery without a Start action on a quarantined stopped source", () => {
     const html = render();
     expect(html).toContain("Recovery needs attention");

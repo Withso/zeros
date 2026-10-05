@@ -36,6 +36,24 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await page.keyboard.press("Escape");
   await expect(details).toHaveCount(0);
   await expect(button).toBeFocused();
+  const failedFixture = page.getByRole("button", { name: "Failed setup fixture", exact: true });
+  await failedFixture.focus();
+  await failedFixture.press("Enter");
+  const setup = page.getByRole("region", { name: "Cloud Setup tab" });
+  await expect(setup.getByText("Setup failed", { exact: true })).toBeVisible();
+  await expect(setup.getByText("setup_image_contract_invalid", { exact: true })).toBeVisible();
+  await expect(setup.getByText("The failure happened before your setup script ran.", { exact: true })).toBeVisible();
+  await expect(setup.locator('[aria-busy="true"]')).toHaveCount(0);
+  await expect(setup.getByRole("button", { name: /setup/i })).toHaveCount(0);
+  await button.click();
+  await expect(details).toContainText("Setup failed");
+  await expect(details).toContainText("The workspace image could not be verified.");
+  await expect(details).toContainText("setup_image_contract_invalid");
+  await expect(details).not.toContainText(/Setup succeeded|Setting up|safety check failed/);
+  await expect(details).toHaveCSS("opacity", "1");
+  await page.screenshot({ path: ".context/cloud-setup-failure-ui.png" });
+  await page.keyboard.press("Escape");
+  await expect(button).toBeFocused();
   await page
     .getByRole("button", { name: "Local fixture", exact: true })
     .click();
@@ -45,6 +63,7 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
     "Cloud details stay fixed beside the existing chat tabs, show capacities, and restore keyboard focus",
     true,
   );
+  check("Failed cloud setup shows its closed code and pre-script explanation in details and Setup without a loader or rerun action", true);
 
   await page.clock.install();
   await page.goto(`${harnessBase}/harness-cloud-native-access.html`);

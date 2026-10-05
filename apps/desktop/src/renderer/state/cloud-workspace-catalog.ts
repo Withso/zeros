@@ -168,7 +168,7 @@ function rebuild(documentsChanged = false): void {
         lastActiveAt: engine?.lastActiveAt ?? null,
         present: true,
         setupState:
-          ["failed", "error"].includes(doc.status)
+          doc.setupFailure || ["failed", "error"].includes(doc.status)
             ? "failed"
             : ["ready", "busy", "stopped", "archived"].includes(doc.status)
               ? "passed"
