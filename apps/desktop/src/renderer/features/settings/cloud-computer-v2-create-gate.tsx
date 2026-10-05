@@ -91,6 +91,9 @@ export function useCloudComputerV2CreateGate(active: boolean) {
   };
   return {
     reason,
+    enabled,
+    key,
+    snapshot,
     required: reason === cloudComputerV2BuildRequired,
     canManage:
       Boolean(snapshot.data?.canManage) &&

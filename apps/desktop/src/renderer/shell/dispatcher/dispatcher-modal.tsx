@@ -68,10 +68,14 @@ import {
 import type { ChatThread } from "../../state/store";
 import { createDispatcherChat } from "./dispatcher-chat";
 import { useCloudCreate } from "./cloud-create";
+import { cloudCreateRequest, refreshChangedCloudComputer } from "./cloud-create-request";
+import { CloudComputerRepositoryPicker } from "./cloud-computer-repository-picker";
+import { CloudComputerSourcePicker, computerSourceReadKey, warmComputerSources } from "./cloud-computer-source";
+import type { DispatcherBase } from "./dispatcher-source";
 import { CloudComputerV2CreateNotice } from "../../features/settings/cloud-computer-v2-create-gate";
 import { registerCloudDesignCreation } from "../../state/cloud-creation-mode";
 import { createCloudWorkspaceDocument } from "../../platform/cloud-workspaces";
-import { acceptCloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { cloudProjectForFolder, acceptCloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { spawnPreparedDefaultChat } from "../../state/spawn-default-chat";
 import { prepareProjectFolder } from "../project-folder-setup";
@@ -178,6 +182,8 @@ export function DispatcherPage({
     setSelectedProjectId(project.id);
   const [sourceSelection, setSourceSelection] =
     useState<DispatcherSourceSelection | null>(null);
+  const [computerSource, setComputerSource] = useState<{ owner: string; base: DispatcherBase } | null>(null);
+  const [computerCreateNotice, setComputerCreateNotice] = useState<{ owner: string; message: string } | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [designBusy, setDesignBusy] = useState(false);
@@ -237,7 +243,9 @@ export function DispatcherPage({
     : sourceForProject(sourceSelection, selectedProject);
   const canCreateDesign = designWorkspaceCreationAvailable;
   const mode: WorkspaceMode = canCreateDesign ? requestedMode : "code";
-  const cloud = useCloudCreate(selectedProject, base, active);
+  const cloud = useCloudCreate(selectedProject, base, active, computerSource);
+  const computerReadKey = cloud.computerOwner && cloud.computerRepository
+    ? computerSourceReadKey(cloud.computerOwner, cloud.computerRepository) : null;
   // Ownership selects the backend synchronously; an unavailable cloud backend
   // never falls back to creating an organization workspace on this device.
   const placement = cloud.organization && !cloud.organization.isPersonal
@@ -246,7 +254,7 @@ export function DispatcherPage({
 
   const handleCreateCloud = async (payload?: DispatcherCreatePayload) => {
     const project = selectedProject;
-    if (!active || !project || cloud.reason || !cloud.organization || !cloud.repository || !cloud.revision || !cloud.installationId || createInFlight.current) return;
+    if (!active || (!project && !cloud.computerRepository) || cloud.reason || !cloud.organization || createInFlight.current) return;
     const currentOrganization = getActiveOrganizationSnapshot();
     if (currentOrganization?.id !== cloud.organization.id || !canCreateWorkspaceIn(currentOrganization, "cloud")) return;
     const creationGeneration = getOrganizationStoreGeneration();
@@ -254,16 +262,14 @@ export function DispatcherPage({
       toast.error("Additional local folders cannot be used in a cloud workspace");
       return;
     }
-    const request = {
-      organizationId: cloud.organization.id,
-      ...(cloud.organization.defaultTeamId ? { teamId: cloud.organization.defaultTeamId } : {}),
-      repository: { forge: "github.com" as const, owner: cloud.repository.owner, name: cloud.repository.repo, revision: cloud.revision, githubInstallationId: cloud.installationId },
-    };
+    const request = cloudCreateRequest(cloud);
+    if (!request) return;
     const createMode = mode;
     const fingerprint = JSON.stringify([request, createMode]);
     if (cloudCreateIntent.current?.fingerprint !== fingerprint) cloudCreateIntent.current = { fingerprint, key: crypto.randomUUID() };
     const idempotencyKey = cloudCreateIntent.current.key;
     createInFlight.current = true;
+    setComputerCreateNotice(null);
     setBusy(true);
     try {
       const document = await createCloudWorkspaceDocument({ ...request, idempotencyKey });
@@ -273,7 +279,8 @@ export function DispatcherPage({
       markWorkspaceSettling(folder);
       if (createMode === "design") registerCloudDesignCreation(folder);
       cloudCreateIntent.current = null;
-      notifyWorkspacesChanged(project.repoSlug);
+      const createdProject = cloud.computerMode ? cloudProjectForFolder(folder) : project;
+      notifyWorkspacesChanged(createdProject?.repoSlug);
       // Creation remains owned by the organization captured at submission.
       // A late confirmation must not pull Personal (or another organization)
       // into that cloud chat. The original prompt remains in this composer.
@@ -284,10 +291,17 @@ export function DispatcherPage({
         });
         return;
       }
-      if (payload) createDispatcherChat({ dispatch, repoRoot: project.repoRoot, folder, payload, validationPending: true });
-      else spawnPreparedDefaultChat({ folder, repoRoot: project.repoRoot, dispatch });
+      const repoRoot = createdProject?.repoRoot ?? folder;
+      if (payload) createDispatcherChat({ dispatch, repoRoot, folder, payload, validationPending: true });
+      else spawnPreparedDefaultChat({ folder, repoRoot, dispatch });
     } catch (error) {
-      toast.error("Couldn't confirm cloud workspace creation", { description: error instanceof Error ? error.message : "Retry to check the same creation request." });
+      const changed = cloud.computerMode ? refreshChangedCloudComputer(error, cloud.refreshComputer) : null;
+      if (changed && cloud.computerOwner) {
+        cloudCreateIntent.current = null;
+        setComputerCreateNotice({ owner: cloud.computerOwner, message: changed });
+      } else {
+        toast.error("Couldn't confirm cloud workspace creation", { description: error instanceof Error ? error.message : "Retry to check the same creation request." });
+      }
     } finally { createInFlight.current = false; setBusy(false); }
   };
 
@@ -313,7 +327,7 @@ export function DispatcherPage({
       routedProjectId: initialProjectId,
       selectedProjectId,
       projectIds,
-      sourceAvailable: !needsGitSetup && !busy && !designBusy,
+      sourceAvailable: !cloud.computerMode && !needsGitSetup && !busy && !designBusy,
     });
     if (decision === "wait") return;
     consumeCreateFromSourceRequest(sourceRequest.id);
@@ -322,6 +336,7 @@ export function DispatcherPage({
     active,
     busy,
     designBusy,
+    cloud.computerMode,
     initialProjectId,
     needsGitSetup,
     projectIds,
@@ -334,7 +349,7 @@ export function DispatcherPage({
   // page is active so flipping the toggle answers from the cache; a hidden
   // Create page reads nothing.
   const designTarget = useDesignDirectoryTarget(
-    active && canCreateDesign && selectedProject
+    active && !cloud.computerMode && canCreateDesign && selectedProject
       ? designDirectoryTargetKeyForRepo(selectedProject.repoRoot)
       : null,
   );
@@ -568,6 +583,19 @@ export function DispatcherPage({
             className="flex min-w-0 items-center gap-1 px-1"
           >
             {/* Project selector */}
+            {cloud.computerMode ? <CloudComputerRepositoryPicker
+              repositories={cloud.computerRepositories ?? []}
+              selected={cloud.computerRepository}
+              active={active}
+              open={projectMenuOpen}
+              onOpenChange={setProjectMenuOpen}
+              disabled={busy || designBusy}
+              onSelect={cloud.selectComputerRepository}
+              warm={repository => { if (active && cloud.computerOwner) {
+                cloud.warmComputerRepository(repository);
+                warmComputerSources(computerSourceReadKey(cloud.computerOwner, repository));
+              } }}
+            /> : (
             <DropdownMenu
               open={active && projectMenuOpen}
               onOpenChange={setProjectMenuOpen}
@@ -637,9 +665,19 @@ export function DispatcherPage({
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+            )}
 
             {/* Source selection is metadata until Create is pressed. */}
-            {!needsGitSetup && (
+            {cloud.computerMode ? <CloudComputerSourcePicker
+              key={cloud.sourceOwner}
+              readKey={computerReadKey}
+              repository={cloud.computerRepository}
+              defaultBranch={cloud.defaultBranch}
+              value={cloud.computerBase}
+              active={active}
+              disabled={busy || designBusy}
+              onChange={next => setComputerSource(next && cloud.sourceOwner ? { owner: cloud.sourceOwner, base: next } : null)}
+            /> : !needsGitSetup && (
               <CreateFromSource
                 key={JSON.stringify([
                   selectedProject?.id,
@@ -677,20 +715,23 @@ export function DispatcherPage({
             )}
           </div>
 
+          {computerCreateNotice?.owner === cloud.computerOwner && cloud.computerOwner && (
+            <p className="text-fg3 mb-2 px-2 text-xs" role="status">{computerCreateNotice.message}</p>
+          )}
           {placementReason && (cloud.computerRequired
             ? <CloudComputerV2CreateNotice required canManage={cloud.canManageComputer} warm={cloud.warmComputer} />
             : <p className="text-fg3 mb-2 px-2 text-xs" role="status">{placementReason}</p>)}
-          <section aria-label="Workspace prompt" onPointerEnter={cloud.warmComputer} onFocus={cloud.warmComputer}>
+          <section aria-label="Workspace prompt" onPointerEnter={cloud.warm} onFocus={cloud.warm}>
             <DispatcherComposer
               agents={agents}
-              cwd={selectedProject?.repoRoot ?? null}
-              originUrl={selectedProject?.originUrl ?? null}
+              cwd={cloud.computerMode ? null : selectedProject?.repoRoot ?? null}
+              originUrl={cloud.computerRepository ? `https://github.com/${cloud.computerRepository.owner}/${cloud.computerRepository.name}.git` : selectedProject?.originUrl ?? null}
               onCreate={handleCreate}
               busy={busy || designBusy}
-              disabled={!selectedProject || Boolean(placementReason)}
+              disabled={(!selectedProject && !cloud.computerRepository) || Boolean(placementReason)}
               mode={mode}
               design={{
-                projectName: selectedProject?.name ?? null,
+                projectName: cloud.computerRepository?.name ?? selectedProject?.name ?? null,
                 target: designTarget.data,
                 loading: designTarget.loading,
                 onCreate: () => void handleCreateDesign(),

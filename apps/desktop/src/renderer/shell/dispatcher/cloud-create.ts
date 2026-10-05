@@ -20,16 +20,28 @@ import {
 } from "../../state/read-caches";
 import { gitRepoBranchCatalog, type RepoRemote } from "../../platform/git";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { useComputerRepositorySelection } from "./cloud-computer-repository-selection";
 import { useCloudComputerV2CreateGate } from "../../features/settings/cloud-computer-v2-create-gate";
 
 const capabilityCache = new KeyedAsyncCache<{ enabled: boolean }>(1);
 const optionsCache = new KeyedAsyncCache<CloudWorkspaceCreateOptions>(32);
+type ComputerSourceGrant = { repositoryId: string; installationId: string };
+function optionsKey(user: string, organization: string, repository: { owner: string; repo: string }, computer?: ComputerSourceGrant) {
+  return JSON.stringify([user, organization, repository.owner, repository.repo,
+    ...(computer ? [computer.repositoryId, computer.installationId] : [])]);
+}
+function readOptions(value: string) {
+  const [, org, owner, repo, repositoryId] = JSON.parse(value) as [string, string, string, string, string?];
+  return repositoryId ? getCloudWorkspaceCreateOptions(org, owner, repo, { cloudComputerV2: true })
+    : getCloudWorkspaceCreateOptions(org, owner, repo);
+}
 
 // Both create surfaces consume the same confirmed source metadata. Clicks
 // submit that snapshot; token/proof and branch reads happen on visible intent.
 export function useCloudCreateSource(
   repository: ReturnType<typeof parseRemote>,
   active: boolean,
+  computer?: ComputerSourceGrant,
 ) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
@@ -37,11 +49,7 @@ export function useCloudCreateSource(
   const readCloud = active && canCreateCloud;
   const capability = useCachedRead(capabilityCache, readCloud ? "desktop" : null, cloudWorkspaceCapability, { maxAgeMs: Infinity });
   const key = readCloud && organization && !organization.isPersonal && repository?.host === "github.com" && me
-    ? JSON.stringify([me.user.id, organization.id, repository.owner, repository.repo]) : null;
-  const readOptions = (value: string) => {
-    const [, org, owner, repo] = JSON.parse(value) as string[];
-    return getCloudWorkspaceCreateOptions(org, owner, repo);
-  };
+    ? optionsKey(me.user.id, organization.id, repository, computer) : null;
   const options = useCachedRead(optionsCache, key, readOptions, { maxAgeMs: 30_000 });
   const reason = !canCreateCloud ? "Select an organization with Cloud access."
     : !capability.data?.enabled ? capability.loading ? "Checking Cloud availability…" : "Cloud workspaces are not enabled in this desktop build."
@@ -56,7 +64,12 @@ export function useCloudCreateSource(
     void capabilityCache.load("desktop", cloudWorkspaceCapability, { maxAgeMs: Infinity }).catch(() => {});
     if (key) void optionsCache.load(key, () => readOptions(key), { maxAgeMs: 30_000 }).catch(() => {});
   };
-  return { organization, canCreateCloud, readCloud, options, reason, warm };
+  const warmRepository = (next: { owner: string; repo: string } & ComputerSourceGrant) => {
+    if (!readCloud || !computer || !organization || !me) return;
+    const nextKey = optionsKey(me.user.id, organization.id, next, next);
+    void optionsCache.load(nextKey, () => readOptions(nextKey), { maxAgeMs: 30_000 }).catch(() => {});
+  };
+  return { organization, canCreateCloud, readCloud, options, reason, warm, warmRepository };
 }
 
 export function cloudSourceRepositoryReason(
@@ -108,25 +121,28 @@ export function useCloudCreate(
   project: Project | null,
   base: DispatcherBase | null,
   active: boolean,
-): {
-  reason: string | null;
-  organization: ReturnType<typeof useActiveOrganization>;
-  repository: { host: string; owner: string; repo: string } | null;
-  revision: string | null;
-  installationId: string | null;
-  computerRequired: boolean;
-  canManageComputer: boolean;
-  warmComputer: () => void;
-} {
-  const repository = useMemo(
-    () => parseRemote(project?.originUrl ?? null),
-    [project?.originUrl],
+  computerSource: { owner: string; base: DispatcherBase } | null = null,
+) {
+  const computer = useCloudComputerV2CreateGate(active);
+  const computerMode = Boolean(computer.enabled && computer.snapshot.data && computer.reason === null);
+  const selection = useComputerRepositorySelection(computer.key ?? null, computer.snapshot?.data?.activeRepositories, active);
+  const computerRepository = computerMode ? selection.repository : null;
+  const repository: { host: string; owner: string; repo: string } | null = useMemo(
+    () => computerMode
+      ? computerRepository ? { host: "github.com", owner: computerRepository.owner, repo: computerRepository.name } : null
+      : parseRemote(project?.originUrl ?? null),
+    [computerMode, computerRepository, project?.originUrl],
   );
-  const { organization, canCreateCloud, readCloud, options, reason: sourceReason } = useCloudCreateSource(repository, active);
+  const { organization, canCreateCloud, readCloud, options, reason: sourceReason, warm, warmRepository } = useCloudCreateSource(repository, active,
+    computerRepository ? { repositoryId: computerRepository.id, installationId: computerRepository.installationId } : undefined);
   // The first/default Cloud create needs no live checkout. An explicit branch
   // keeps its existing remote-identity checks; local projects retain their
   // configured target branch through the normal catalog.
-  const cloudDefault = Boolean(project && isCloudWorkspace(project.repoRoot) && !base);
+  const sourceOwner = computerMode && computerRepository
+    ? JSON.stringify([computer.key, computerRepository]) : null;
+  const computerBase = computerSource?.owner === sourceOwner ? computerSource?.base ?? null : null;
+  const selectedBase = computerMode ? computerBase : base;
+  const cloudDefault = computerMode || Boolean(project && isCloudWorkspace(project.repoRoot) && !base);
   const catalogKey = project && !cloudDefault
     ? JSON.stringify([project.repoRoot, project.originUrl])
     : null;
@@ -142,7 +158,7 @@ export function useCloudCreate(
     { maxAgeMs: GIT_READ_MAX_AGE_MS },
   );
   const source = cloudSourceRevision(
-    base,
+    selectedBase,
     cloudDefault ? options.data?.repository?.defaultBranch ?? null
       : catalog.data?.branchSource === "remote" ? catalog.data.effectiveBase : null,
   );
@@ -152,10 +168,11 @@ export function useCloudCreate(
     catalog.data?.listedRemote ?? null,
     project?.originUrl ?? null,
   );
-  const computer = useCloudComputerV2CreateGate(readCloud);
   const reason = !canCreateCloud
     ? "Select an organization with Cloud access."
-    : computer.reason ?? (!project
+    : computer.reason ?? (computerMode && !computerRepository
+      ? "Add a repository to your Cloud Computer."
+      : !computerMode && !project
       ? "Choose a project first."
       : sourceReason ?? source.reason ?? repositoryReason);
   return {
@@ -163,7 +180,18 @@ export function useCloudCreate(
     organization,
     repository,
     revision: source.revision,
-    installationId: options.data?.installations[0]?.id ?? null,
+    installationId: computerRepository?.installationId ?? options.data?.installations[0]?.id ?? null,
+    computerMode,
+    computerOwner: computer.key,
+    computerRepository,
+    computerRepositories: computer.snapshot?.data?.activeRepositories,
+    selectComputerRepository: selection.select,
+    sourceOwner,
+    computerBase,
+    defaultBranch: options.data?.repository?.defaultBranch ?? null,
+    refreshComputer: () => { computer.snapshot?.refresh(); options.refresh?.(); },
+    warmComputerRepository: (next: NonNullable<typeof computerRepository>) => warmRepository({ owner: next.owner, repo: next.name, repositoryId: next.id, installationId: next.installationId }),
+    warm: () => { warm(); computer.warm(); },
     computerRequired: computer.required,
     canManageComputer: computer.canManage,
     warmComputer: computer.warm,

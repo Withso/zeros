@@ -7,6 +7,32 @@ returns `409 cloud_computer_build_required` before repository lookup or provider
 allocation. This path has no shared-base fallback. Non-staff and organizations
 without a v2 head retain the existing image and v4-base selection behavior.
 
+The desktop Create composer uses the active build's ordered `activeRepositories`
+when its internal `cloudComputerV2` gate is active and the template is ready.
+Draft-only additions are excluded. A repository choice is restored synchronously
+per user and organization, then pruned against the active list. Add repository
+opens Cloud Computer settings; no registered local project is required.
+
+The composer reads the default branch through `create-options` with
+`cloudComputerV2=true`. For engineering staff and an active-config repository,
+this read uses the existing organization grant and repository resolver, without
+personal GitHub proof or database writes. Other requests retain the personal-proof
+path. The read rechecks organization access and active build identity after GitHub
+returns, and exposes the existing options response shape with no credentials.
+
+Desktop GitHub branch and open-PR reads are optional, cached by user, organization
+and repository grant, and warmed on pointer/focus intent. Branch listing uses the
+first 100 GitHub rows with search over that page. These read failures appear inline
+and do not block default-branch creation. Branches use `refs/heads/<name>` and
+pull requests use `refs/pull/<number>/head`.
+
+Code and Design create requests include the selected repository's installation
+record ID and omit the retired `cloudComputerBuild` builder field. Create chooses
+the active template at submission: a newer build containing the same repository
+is valid. Computer/repository/template admission conflicts show
+“Cloud Computer changed — refresh”, revalidate the state and picker selection,
+and preserve the composer prompt.
+
 ## Accepted source and runtime
 
 The primary repository must belong to the active build's immutable config.

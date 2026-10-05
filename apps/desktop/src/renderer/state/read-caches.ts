@@ -15,6 +15,7 @@ import type { DesignCheckoutStatus } from "@zeros/protocol/design-context";
 import type {
   Branch,
   GithubOwner,
+  GithubBranch,
   PR,
   RepoBranchCatalog,
   WorkingDirectoriesWire,
@@ -109,6 +110,14 @@ export function invalidateCreateSourceCaches(network = true): void {
 
 /** Keyed by origin URL — open PRs for create-from pickers. */
 export const openPrsCache = new KeyedAsyncCache<PR[]>(32);
+/** Checkout-free Cloud Computer sources: JSON([user, org, repository id,
+ * owner, name, installation id]). Account/organization changes never share rows. */
+export const computerBranchesCache = new KeyedAsyncCache<GithubBranch[]>({
+  maxEntries: 32, reconcile: (previous, next) => JSON.stringify(previous) === JSON.stringify(next) ? previous! : next,
+});
+export const computerPrsCache = new KeyedAsyncCache<PR[]>({
+  maxEntries: 32, reconcile: (previous, next) => JSON.stringify(previous) === JSON.stringify(next) ? previous! : next,
+});
 
 /** Composer results belong to an exact checkout, origin and cloud account
  * generation. Identical origins must not share Local/cloud authorization. */
@@ -423,6 +432,8 @@ export function invalidateAllEngineReadCaches(): void {
   remoteBranchesCache.invalidateAll();
   allBranchesCache.invalidateAll();
   openPrsCache.invalidateAll();
+  computerBranchesCache.invalidateAll();
+  computerPrsCache.invalidateAll();
   composerPrsCache.invalidateAll();
   pickerWorkspacesCache.invalidateAll();
   ghAuthStatusCache.invalidateAll();
