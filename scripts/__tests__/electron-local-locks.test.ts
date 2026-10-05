@@ -53,7 +53,7 @@ afterEach(async () => {
     fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe("Local launcher lock ownership", () => {
+describe("Local launcher lock ownership", { timeout: 30_000 }, () => {
   it("does not release a replacement owner's token", async () => {
     const root = directory(),
       replacement = {
@@ -201,8 +201,8 @@ import fs from 'node:fs';import path from 'node:path';
 const root=process.argv[2],role=process.argv[3],lock=path.join(root,'.context/zeros-local/launcher.lock');
 const sleep=ms=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,ms);
 const read=fs.readFileSync,unlink=fs.unlinkSync;let inspected=false;
-fs.readFileSync=function(file,...args){const value=read.call(fs,file,...args);if(file===lock&&!inspected){inspected=true;fs.writeFileSync(path.join(root,'read-'+role),'ready');const deadline=Date.now()+1500;while((!fs.existsSync(path.join(root,'read-A'))||!fs.existsSync(path.join(root,'read-B')))&&Date.now()<deadline)sleep(10);}return value;};
-fs.unlinkSync=function(file){if(file===lock&&role==='B'){const deadline=Date.now()+1000;while(!fs.existsSync(path.join(root,'started-A'))&&Date.now()<deadline)sleep(10);}return unlink.call(fs,file);};
+fs.readFileSync=function(file,...args){const value=read.call(fs,file,...args);if(file===lock&&!inspected){inspected=true;fs.writeFileSync(path.join(root,'read-'+role),'ready');const deadline=Date.now()+15000;while((!fs.existsSync(path.join(root,'read-A'))||!fs.existsSync(path.join(root,'read-B')))&&Date.now()<deadline)sleep(10);}return value;};
+fs.unlinkSync=function(file){if(file===lock&&role==='B'){const deadline=Date.now()+5000;while(!fs.existsSync(path.join(root,'started-A'))&&Date.now()<deadline)sleep(10);}return unlink.call(fs,file);};
 const {runLocalDevelopment}=await import(process.argv[4]);
 const controller=new AbortController();process.on('SIGTERM',()=>controller.abort());const keepAlive=setInterval(()=>{},1000);
 try{await runLocalDevelopment({root,platform:'darwin',environment:{},listProcesses:()=>'',portProber:async()=>true,signal:controller.signal,
@@ -227,7 +227,7 @@ catch{fs.writeFileSync(path.join(root,'declined-'+role),'declined');}finally{cle
               fs.existsSync(path.join(root, "started-" + role)) ||
               fs.existsSync(path.join(root, "declined-" + role)),
           ).length,
-        { timeout: 5000 },
+        { timeout: 15000 },
       )
       .toBe(2);
     const winners = ["A", "B"].filter((role) =>

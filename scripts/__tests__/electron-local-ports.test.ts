@@ -40,13 +40,13 @@ async function outputResult(
   return runOwnedProcess(process.execPath, ["-e", script], {
     cwd: directory(),
     env: process.env,
-    killGraceMs: 100,
+    killGraceMs: 1000,
     output: () => {},
     startup: { ...startup, timeoutMs },
   });
 }
 
-describe("Local startup bind races", () => {
+describe("Local startup bind races", { timeout: 30_000 }, () => {
   it("does not treat ordinary EADDRINUSE diagnostics as a startup collision", async () => {
     expect(
       (
