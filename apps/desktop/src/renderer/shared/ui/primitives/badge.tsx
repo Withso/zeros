@@ -13,10 +13,10 @@ const badgeVariants = cva(
         secondary:
           "border-transparent bg-bg2-hover text-fg1 hover:bg-bg2-hover/80",
         destructive:
-          "border-transparent bg-red-secondary text-red-secondary-fg shadow hover:bg-red-secondary/80",
+          "border-transparent bg-red-secondary text-red-secondary-fg shadow hover:bg-red-secondary-hover",
         outline: "text-fg1",
         // Filled STATUS pair — soft token bg with its matching fg (on a
-        // `--<family>-bg` surface use `--<family>-fg`; zeros-foundation.md).
+        // `--<family>-bg` surface use `--<family>-fg`; docs/design-system.md).
         // Non-interactive: no hover shift (these read as state, not actions).
         success: "border-transparent bg-green-bg text-green-fg",
         failure: "border-transparent bg-red-bg text-red-fg",

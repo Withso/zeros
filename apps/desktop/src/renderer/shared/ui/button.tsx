@@ -37,9 +37,9 @@ const SIZE_MAP: Record<LegacySize, PrimitiveSize> = {
   sm: "sm",
   md: "default",
   lg: "lg",
-  // Legacy names map to the closest step on the shared 24/28/32px scale.
-  // `icon-sm` previously rendered at 28px; `icon` previously rendered at
-  // 36px and therefore maps to the 32px scale ceiling.
+  // Every legacy name renders the standard 28px control; the primitive's
+  // icon squares are all 28px (its compact 24px sizes are not exposed by this
+  // compatibility API).
   icon: "icon-lg",
   "icon-sm": "icon",
 };

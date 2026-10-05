@@ -196,7 +196,7 @@ export function AttachmentPill(props: NodeViewProps) {
         "composer-pill mx-[1.5px] gap-2 px-1.5",
         props.selected && "ring-highlighted-bright/40 ring-2",
         invalid &&
-          "border-yellow-primary/40 text-fg2 opacity-85 [&_[data-composer-pill-icon]]:grayscale",
+          "border-yellow-icon/40 text-fg2 opacity-85 [&_[data-composer-pill-icon]]:grayscale",
       )}
       contentEditable={false}
     >

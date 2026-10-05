@@ -88,7 +88,7 @@ export function ReleaseCanaryControl({ userId, organizationId, credential, surfa
         </> : <span>This connection type is not part of release checks.</span>}
       </div>
       {(error || snapshot.error) && <div className="flex items-center justify-between gap-3">
-        <p role="alert" className="text-error text-xs">{error ?? "Release checks are unavailable for this channel owner."}</p>
+        <p role="alert" className="text-red-primary text-xs">{error ?? "Release checks are unavailable for this channel owner."}</p>
         <Button variant="ghost" disabled={!surfaceActive || busy} onClick={() => pending.current ? void submit(pending.current) : snapshot.refresh()}>
           {pending.current ? "Retry change" : "Refresh"}
         </Button>

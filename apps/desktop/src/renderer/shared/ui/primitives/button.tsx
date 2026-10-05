@@ -41,7 +41,7 @@ const buttonVariants = cva(
         // DESTRUCTIVE (primary) — solid red fill (--red-secondary); text is the
         // static --red-secondary-fg (white in both themes — fg1 would flip dark in light).
         destructive:
-          "bg-red-secondary text-red-secondary-fg shadow hover:bg-red-secondary/90",
+          "bg-red-secondary text-red-secondary-fg shadow hover:bg-red-secondary-hover",
         // DESTRUCTIVE (secondary) — same neutral surface as Secondary
         // (transparent fill + border3 → hover bg2-highlight/border4);
         // red-primary text carries the danger cue.
@@ -63,18 +63,25 @@ const buttonVariants = cva(
         "secondary-on":
           "border-border4 bg-bg2-highlight text-fg1 hover:bg-bg2-highlight",
       },
-      // One height for every button (28px — see the base). The text sizes are
-      // kept as names so call sites don't churn, but they no longer differ:
-      // sm / default / lg are the same control. The icon-only squares pin the
-      // same 28px box (size-7) and drop the text padding. (2026-09-15: was
-      // 24 / 28 / 32px; unified with the dropdown trigger.)
+      // Two control heights (docs/design-system.md → Controls):
+      //   standard 28px — every button by default, identical to the Select
+      //     trigger. `sm` / `default` / `lg` are kept as names so call sites
+      //     don't churn, but they are the same 28px control (2026-09-15:
+      //     unified with the dropdown trigger).
+      //   compact 24px — dense rows: inline toolbars, tab/row trailing
+      //     actions, chips. 2px vertical padding on the same 18px line box;
+      //     unsized glyphs drop to 12px (text and icon-only alike).
+      // Never mix the two in one row; size the whole row with one of them.
       size: {
         sm: "",
         default: "",
         lg: "",
+        compact: "py-0.5 [&_:where(svg:not([class*='size-']))]:size-3",
         "icon-sm": "size-7 p-0",
         icon: "size-7 p-0",
         "icon-lg": "size-7 p-0",
+        "icon-compact":
+          "size-6 p-0 [&_:where(svg:not([class*='size-']))]:size-3",
       },
     },
     defaultVariants: {

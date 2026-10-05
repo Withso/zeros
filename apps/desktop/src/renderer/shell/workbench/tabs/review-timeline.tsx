@@ -322,7 +322,7 @@ function TimelineCard({
         {verdict && (
           <span
             className={cn(
-              "shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium",
+              "text-xxs shrink-0 rounded-sm px-1.5 py-0.5 font-medium",
               verdict.cls,
             )}
           >

@@ -122,7 +122,7 @@ export function CloudWorkspaceSharingManager({ workspace, active }: { workspace:
         <p className="text-fg3 text-xs">{data?.writers ? `${data.writers.used} / ${data.writers.limit} writer slots used` : data ? "Organization-funded sharing" : "Loading collaborators…"}</p>
         <Button size="sm" variant="ghost" disabled={busy} onClick={refresh} aria-label="Refresh collaborators"><RefreshCw size={14} /></Button>
       </div>
-      {read.error && <p className="text-error text-xs" role="alert">{read.error.message}</p>}
+      {read.error && <p className="text-red-primary text-xs" role="alert">{read.error.message}</p>}
       {changed && <p className="text-fg3 text-xs" role="status">Sharing changed. Refresh to use the latest settings.</p>}
       {data && (
         <>

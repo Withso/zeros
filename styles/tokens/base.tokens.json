@@ -1,0 +1,2188 @@
+{
+  "$schema": "https://www.designtokens.org/schemas/2025.10/format.json",
+  "$description": "Dark default and theme-independent tokens.",
+  "tokens": {
+    "weight-medium": {
+      "$type": "fontWeight",
+      "$value": 450,
+      "$description": "medium font weight; softened from Tailwind 500",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--weight-medium",
+          "section": "base-weight-medium"
+        }
+      }
+    },
+    "weight-semibold": {
+      "$type": "fontWeight",
+      "$value": 500,
+      "$description": "semibold font weight; softened from Tailwind 600",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--weight-semibold",
+          "section": "base-weight-medium"
+        }
+      }
+    },
+    "weight-bold": {
+      "$type": "fontWeight",
+      "$value": 600,
+      "$description": "bold font weight; softened from Tailwind 700",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--weight-bold",
+          "section": "base-weight-medium"
+        }
+      }
+    },
+    "bg0": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 5.0]
+      },
+      "$description": "INACTIVE chat window fill (below bg1)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg0",
+          "section": "base-bg0",
+          "utility": "--color-bg0",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 0
+        }
+      }
+    },
+    "bg1": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 7.0]
+      },
+      "$description": "default canvas / app backdrop + active chat window",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg1",
+          "section": "base-bg0",
+          "utility": "--color-bg1",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 1,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "pane-bg": {
+      "$type": "color",
+      "$value": "{tokens.bg1}",
+      "$description": "contextual chat-pane surface; unfocused panes override it to bg0",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--pane-bg",
+          "section": "base-pane-bg"
+        }
+      }
+    },
+    "bg1-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 12.0]
+      },
+      "$description": "hover on bg1 (tool calls, tabs)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg1-hover",
+          "section": "base-pane-bg",
+          "utility": "--color-bg1-hover",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 2
+        }
+      }
+    },
+    "bg1-highlight": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 9.0]
+      },
+      "$description": "highlighted content above bg1",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg1-highlight",
+          "section": "base-pane-bg",
+          "utility": "--color-bg1-highlight",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 3
+        }
+      }
+    },
+    "bg1-bright": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 11.0]
+      },
+      "$description": "filled section card on bg1",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg1-bright",
+          "section": "base-pane-bg",
+          "utility": "--color-bg1-bright",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 4
+        }
+      }
+    },
+    "bg2": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 13.0]
+      },
+      "$description": "composer surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg2",
+          "section": "base-pane-bg",
+          "utility": "--color-bg2",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 5
+        }
+      }
+    },
+    "bg2-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 15.0]
+      },
+      "$description": "hover on bg2",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg2-hover",
+          "section": "base-pane-bg",
+          "utility": "--color-bg2-hover",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 6
+        }
+      }
+    },
+    "bg2-highlight": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 18.0]
+      },
+      "$description": "dropdown trigger hover/open",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg2-highlight",
+          "section": "base-pane-bg",
+          "utility": "--color-bg2-highlight",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 7
+        }
+      }
+    },
+    "bg3": {
+      "$type": "color",
+      "$value": "{tokens.sidebar-bg}",
+      "$description": "floating popover surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg3",
+          "section": "base-bg3",
+          "utility": "--color-bg3",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 8
+        }
+      }
+    },
+    "bg3-hover": {
+      "$type": "color",
+      "$value": "{tokens.sidebar-bg-hover}",
+      "$description": "hover on bg3 (menu items)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg3-hover",
+          "section": "base-bg3",
+          "utility": "--color-bg3-hover",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 9,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "bg4": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 24.0]
+      },
+      "$description": "rare",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg4",
+          "section": "base-bg3",
+          "utility": "--color-bg4",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 10
+        }
+      }
+    },
+    "bg5": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 37.0]
+      },
+      "$description": "rare",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg5",
+          "section": "base-bg3",
+          "utility": "--color-bg5",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 11
+        }
+      }
+    },
+    "fg1": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 94.0]
+      },
+      "$description": "selected/highlighted text + icons",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--fg1",
+          "section": "base-fg1",
+          "utility": "--color-fg1",
+          "utilitySection": "utilities-fg1",
+          "utilityOrder": 13
+        }
+      }
+    },
+    "fg2": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 72.0]
+      },
+      "$description": "default text + icon across app",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--fg2",
+          "section": "base-fg1",
+          "utility": "--color-fg2",
+          "utilitySection": "utilities-fg1",
+          "utilityOrder": 14
+        }
+      }
+    },
+    "fg3": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 63.0]
+      },
+      "$description": "middle tier (one step below fg2)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--fg3",
+          "section": "base-fg3",
+          "utility": "--color-fg3",
+          "utilitySection": "utilities-fg1",
+          "utilityOrder": 15
+        }
+      }
+    },
+    "muted-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 42.0]
+      },
+      "$description": "supplemental metadata; 3:1 floor, fg3 on hover/selection",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--muted-fg",
+          "section": "base-muted-fg",
+          "utility": "--color-muted-fg",
+          "utilitySection": "utilities-fg1",
+          "utilityOrder": 16
+        }
+      }
+    },
+    "sidebar-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 9.0]
+      },
+      "$description": "repository sidebar background",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--sidebar-bg",
+          "section": "base-sidebar-bg",
+          "utility": "--color-sidebar-bg",
+          "utilitySection": "utilities-sidebar-bg",
+          "utilityOrder": 17
+        }
+      }
+    },
+    "sidebar-bg-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 15.0]
+      },
+      "$description": "sidebar row hover and selected state",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--sidebar-bg-hover",
+          "section": "base-sidebar-bg",
+          "utility": "--color-sidebar-bg-hover",
+          "utilitySection": "utilities-sidebar-bg",
+          "utilityOrder": 18
+        }
+      }
+    },
+    "border1": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 14.0]
+      },
+      "$description": "default for bg1 surfaces",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--border1",
+          "section": "base-border1",
+          "utility": "--color-border1",
+          "utilitySection": "utilities-border1",
+          "utilityOrder": 19
+        }
+      }
+    },
+    "border2": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 18.0]
+      },
+      "$description": "sidebar / composer focus / bg2",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--border2",
+          "section": "base-border1",
+          "utility": "--color-border2",
+          "utilitySection": "utilities-border1",
+          "utilityOrder": 20
+        }
+      }
+    },
+    "border3": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 24.0]
+      },
+      "$description": "secondary btn / dropdown / input",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--border3",
+          "section": "base-border1",
+          "utility": "--color-border3",
+          "utilitySection": "utilities-border1",
+          "utilityOrder": 21
+        }
+      }
+    },
+    "border4": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 30.0]
+      },
+      "$description": "highlighted state of border3",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--border4",
+          "section": "base-border1",
+          "utility": "--color-border4",
+          "utilitySection": "utilities-border1",
+          "utilityOrder": 22
+        }
+      }
+    },
+    "shadow-dropdown": {
+      "$type": "shadow",
+      "$value": {
+        "color": {
+          "colorSpace": "srgb",
+          "components": [0, 0, 0],
+          "alpha": 0.35
+        },
+        "offsetX": {
+          "value": 0,
+          "unit": "px"
+        },
+        "offsetY": {
+          "value": 8,
+          "unit": "px"
+        },
+        "blur": {
+          "value": 24,
+          "unit": "px"
+        },
+        "spread": {
+          "value": 0,
+          "unit": "px"
+        }
+      },
+      "$description": "floating surface shadow",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--shadow-dropdown",
+          "section": "base-shadow-dropdown"
+        }
+      }
+    },
+    "dialog-title-size": {
+      "$type": "dimension",
+      "$value": {
+        "value": 0.9375,
+        "unit": "rem"
+      },
+      "$description": "15px shared popup heading",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--dialog-title-size",
+          "section": "base-dialog-title-size"
+        }
+      }
+    },
+    "dialog-close-radius": {
+      "$type": "dimension",
+      "$value": {
+        "value": 999.0,
+        "unit": "px"
+      },
+      "$description": "circular popup close button",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--dialog-close-radius",
+          "section": "base-dialog-title-size"
+        }
+      }
+    },
+    "scrim": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "srgb",
+        "components": [0.0, 0.0, 0.0],
+        "alpha": 0.5
+      },
+      "$description": "modal overlay veil",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--scrim",
+          "section": "base-dialog-title-size",
+          "utility": "--color-scrim",
+          "utilitySection": "utilities-scrim",
+          "utilityOrder": 12
+        }
+      }
+    },
+    "highlighted-bg": {
+      "$type": "color",
+      "$value": "{tokens.bg2}",
+      "$description": "user msg bg (text: fg1/fg2)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--highlighted-bg",
+          "section": "base-highlighted-bg",
+          "utility": "--color-highlighted-bg",
+          "utilitySection": "utilities-highlighted-bg",
+          "utilityOrder": 23
+        }
+      }
+    },
+    "highlighted-bright": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 65.0]
+      },
+      "$description": "input focus border, brighter accents",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--highlighted-bright",
+          "section": "base-highlighted-bg",
+          "utility": "--color-highlighted-bright",
+          "utilitySection": "utilities-highlighted-bg",
+          "utilityOrder": 24,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "inverted-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 92.0]
+      },
+      "$description": "near-white on dark",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--inverted-bg",
+          "section": "base-inverted-bg",
+          "utility": "--color-inverted-bg",
+          "utilitySection": "utilities-inverted-bg",
+          "utilityOrder": 25
+        }
+      }
+    },
+    "inverted-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 5.0]
+      },
+      "$description": "dark text/icon on the inverted fill",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--inverted-fg",
+          "section": "base-inverted-bg",
+          "utility": "--color-inverted-fg",
+          "utilitySection": "utilities-inverted-bg",
+          "utilityOrder": 26,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "primary-button-bg": {
+      "$type": "color",
+      "$value": "{tokens.inverted-bg}",
+      "$description": "filled focal CTA; one per view",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--primary-button-bg",
+          "section": "base-primary-button-bg",
+          "utility": "--color-primary-button-bg",
+          "utilitySection": "utilities-primary-button-bg",
+          "utilityOrder": 27
+        }
+      }
+    },
+    "primary-button-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 83.0]
+      },
+      "$description": "lifted neutral",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--primary-button-hover",
+          "section": "base-primary-button-bg",
+          "utility": "--color-primary-button-hover",
+          "utilitySection": "utilities-primary-button-bg",
+          "utilityOrder": 28
+        }
+      }
+    },
+    "primary-button-fg": {
+      "$type": "color",
+      "$value": "{tokens.inverted-fg}",
+      "$description": "text/icon on the primary button",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--primary-button-fg",
+          "section": "base-primary-button-bg",
+          "utility": "--color-primary-button-fg",
+          "utilitySection": "utilities-primary-button-bg",
+          "utilityOrder": 29
+        }
+      }
+    },
+    "red-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 91.0, 71.0]
+      },
+      "$description": "−N counts, error accents",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-primary",
+          "section": "base-red-primary",
+          "utility": "--color-red-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 30
+        }
+      }
+    },
+    "red-secondary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [7.0, 83.0, 39.0]
+      },
+      "$description": "solid delete fills + delete icons",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-secondary",
+          "section": "base-red-primary",
+          "utility": "--color-red-secondary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 31,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "red-secondary-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 100.0]
+      },
+      "$description": "text/icon on SOLID --red-secondary fills. THEME-STATIC (white in both themes — the red fill stays vivid in light, so fg1, which flips dark, can't sit on it).",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-secondary-fg",
+          "section": "base-red-primary",
+          "utility": "--color-red-secondary-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 32,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "red-secondary-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [7.0, 83.0, 36.0]
+      },
+      "$description": "destructive hover fill",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-secondary-hover",
+          "section": "base-red-secondary-hover",
+          "utility": "--color-red-secondary-hover",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 33
+        }
+      }
+    },
+    "red-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [3.0, 26.0, 13.7]
+      },
+      "$description": "error container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-bg",
+          "section": "base-red-secondary-hover",
+          "utility": "--color-red-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 34
+        }
+      }
+    },
+    "red-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [20.0, 97.0, 72.0]
+      },
+      "$description": "text/icon on --red-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-fg",
+          "section": "base-red-secondary-hover",
+          "utility": "--color-red-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 35
+        }
+      }
+    },
+    "green-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 69.0, 58.0]
+      },
+      "$description": "+N counts, success accents",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-primary",
+          "section": "base-red-secondary-hover",
+          "utility": "--color-green-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 36
+        }
+      }
+    },
+    "green-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [120.0, 23.0, 17.0]
+      },
+      "$description": "success container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-bg",
+          "section": "base-red-secondary-hover",
+          "utility": "--color-green-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 37
+        }
+      }
+    },
+    "green-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 75.0, 73.0]
+      },
+      "$description": "text/icon on --green-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-fg",
+          "section": "base-red-secondary-hover",
+          "utility": "--color-green-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 38
+        }
+      }
+    },
+    "yellow-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [37.0, 75.0, 60.0]
+      },
+      "$description": "warning · modified · in-progress",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-primary",
+          "section": "base-red-secondary-hover",
+          "utility": "--color-yellow-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 39,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "yellow-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [38.0, 68.0, 17.0]
+      },
+      "$description": "warning container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-bg",
+          "section": "base-red-secondary-hover",
+          "utility": "--color-yellow-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 40
+        }
+      }
+    },
+    "yellow-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [44.0, 100.0, 50.0]
+      },
+      "$description": "text/icon on --yellow-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-fg",
+          "section": "base-red-secondary-hover",
+          "utility": "--color-yellow-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 41
+        }
+      }
+    },
+    "yellow-icon": {
+      "$type": "color",
+      "$value": "{tokens.yellow-primary}",
+      "$description": "icons, status dots and tinted borders",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-icon",
+          "section": "base-yellow-icon",
+          "utility": "--color-yellow-icon",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 42
+        }
+      }
+    },
+    "yellow-wash": {
+      "$type": "color",
+      "$value": "{tokens.yellow-primary}",
+      "$description": "code-editor search-match washes",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-wash",
+          "section": "base-yellow-wash"
+        }
+      }
+    },
+    "blue-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [205.0, 80.0, 73.0]
+      },
+      "$description": "info · links · accents",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-primary",
+          "section": "base-yellow-wash",
+          "utility": "--color-blue-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 43
+        }
+      }
+    },
+    "blue-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [226.0, 57.0, 18.0]
+      },
+      "$description": "info container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-bg",
+          "section": "base-yellow-wash",
+          "utility": "--color-blue-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 44
+        }
+      }
+    },
+    "blue-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [211.0, 96.0, 78.0]
+      },
+      "$description": "text/icon on --blue-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-fg",
+          "section": "base-yellow-wash",
+          "utility": "--color-blue-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 45
+        }
+      }
+    },
+    "violet-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [271.0, 80.0, 73.0]
+      },
+      "$description": "done · merged",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-primary",
+          "section": "base-yellow-wash",
+          "utility": "--color-violet-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 46
+        }
+      }
+    },
+    "violet-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [255.0, 21.0, 18.0]
+      },
+      "$description": "done container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-bg",
+          "section": "base-yellow-wash",
+          "utility": "--color-violet-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 47
+        }
+      }
+    },
+    "violet-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [265.0, 66.0, 77.0]
+      },
+      "$description": "text/icon on --violet-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-fg",
+          "section": "base-yellow-wash",
+          "utility": "--color-violet-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 48
+        }
+      }
+    },
+    "brown-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [9.0, 46.0, 72.0]
+      },
+      "$description": "file paths · warm accents",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-primary",
+          "section": "base-yellow-wash",
+          "utility": "--color-brown-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 49
+        }
+      }
+    },
+    "brown-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [10.0, 15.0, 15.0]
+      },
+      "$description": "brown container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-bg",
+          "section": "base-yellow-wash",
+          "utility": "--color-brown-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 50
+        }
+      }
+    },
+    "brown-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [10.0, 80.0, 72.0]
+      },
+      "$description": "text/icon on --brown-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-fg",
+          "section": "base-yellow-wash",
+          "utility": "--color-brown-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 51
+        }
+      }
+    },
+    "diff-addition": {
+      "$type": "color",
+      "$value": "{tokens.green-primary}",
+      "$description": "diff addition base",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--diff-addition",
+          "section": "base-diff-addition"
+        }
+      }
+    },
+    "diff-deletion": {
+      "$type": "color",
+      "$value": "{tokens.red-primary}",
+      "$description": "diff deletion base",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--diff-deletion",
+          "section": "base-diff-addition"
+        }
+      }
+    },
+    "diff-neutral": {
+      "$type": "color",
+      "$value": "{tokens.fg2}",
+      "$description": "neutral mixed into diff row fills",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--diff-neutral",
+          "section": "base-diff-addition"
+        }
+      }
+    },
+    "red-50": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 85.0, 97.0]
+      },
+      "$description": "private red 50 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-50",
+          "section": "base-red-50",
+          "utility": "--color-red-50",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 52
+        }
+      }
+    },
+    "red-100": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 85.0, 93.0]
+      },
+      "$description": "private red 100 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-100",
+          "section": "base-red-50",
+          "utility": "--color-red-100",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 53
+        }
+      }
+    },
+    "red-200": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 85.0, 86.0]
+      },
+      "$description": "private red 200 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-200",
+          "section": "base-red-50",
+          "utility": "--color-red-200",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 54
+        }
+      }
+    },
+    "red-300": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 85.0, 79.0]
+      },
+      "$description": "private red 300 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-300",
+          "section": "base-red-50",
+          "utility": "--color-red-300",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 55
+        }
+      }
+    },
+    "red-400": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 85.0, 71.0]
+      },
+      "$description": "private red 400 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-400",
+          "section": "base-red-50",
+          "utility": "--color-red-400",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 56
+        }
+      }
+    },
+    "red-500": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 91.0, 71.0]
+      },
+      "$description": "private red 500 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-500",
+          "section": "base-red-50",
+          "utility": "--color-red-500",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 57
+        }
+      }
+    },
+    "red-600": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [3.0, 84.0, 52.0]
+      },
+      "$description": "private red 600 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-600",
+          "section": "base-red-50",
+          "utility": "--color-red-600",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 58
+        }
+      }
+    },
+    "red-700": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [7.0, 83.0, 39.0]
+      },
+      "$description": "private red 700 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-700",
+          "section": "base-red-50",
+          "utility": "--color-red-700",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 59
+        }
+      }
+    },
+    "red-750": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [10.0, 58.0, 31.0]
+      },
+      "$description": "muted brick · PR-status closed chip border (off-ramp accent, mirrors --violet-750)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-750",
+          "section": "base-red-50",
+          "utility": "--color-red-750",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 60,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "red-800": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [10.0, 82.0, 27.0]
+      },
+      "$description": "private red 800 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-800",
+          "section": "base-red-50",
+          "utility": "--color-red-800",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 61
+        }
+      }
+    },
+    "red-900": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [13.0, 81.0, 14.0]
+      },
+      "$description": "private red 900 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-900",
+          "section": "base-red-50",
+          "utility": "--color-red-900",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 62
+        }
+      }
+    },
+    "red-950": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [13.0, 81.0, 10.0]
+      },
+      "$description": "private red 950 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-950",
+          "section": "base-red-50",
+          "utility": "--color-red-950",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 63
+        }
+      }
+    },
+    "green-50": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 71.0, 97.0]
+      },
+      "$description": "private green 50 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-50",
+          "section": "base-red-50",
+          "utility": "--color-green-50",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 64
+        }
+      }
+    },
+    "green-100": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 71.0, 91.0]
+      },
+      "$description": "private green 100 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-100",
+          "section": "base-red-50",
+          "utility": "--color-green-100",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 65
+        }
+      }
+    },
+    "green-200": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 71.0, 80.0]
+      },
+      "$description": "private green 200 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-200",
+          "section": "base-red-50",
+          "utility": "--color-green-200",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 66
+        }
+      }
+    },
+    "green-300": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 71.0, 68.0]
+      },
+      "$description": "private green 300 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-300",
+          "section": "base-red-50",
+          "utility": "--color-green-300",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 67
+        }
+      }
+    },
+    "green-400": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 71.0, 57.0]
+      },
+      "$description": "private green 400 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-400",
+          "section": "base-red-50",
+          "utility": "--color-green-400",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 68
+        }
+      }
+    },
+    "green-500": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 69.0, 58.0]
+      },
+      "$description": "private green 500 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-500",
+          "section": "base-red-50",
+          "utility": "--color-green-500",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 69
+        }
+      }
+    },
+    "green-600": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [136.0, 59.0, 38.0]
+      },
+      "$description": "private green 600 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-600",
+          "section": "base-red-50",
+          "utility": "--color-green-600",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 70
+        }
+      }
+    },
+    "green-700": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [131.0, 47.0, 31.0]
+      },
+      "$description": "private green 700 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-700",
+          "section": "base-red-50",
+          "utility": "--color-green-700",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 71
+        }
+      }
+    },
+    "green-800": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [125.0, 35.0, 24.0]
+      },
+      "$description": "private green 800 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-800",
+          "section": "base-red-50",
+          "utility": "--color-green-800",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 72
+        }
+      }
+    },
+    "green-900": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [120.0, 23.0, 17.0]
+      },
+      "$description": "private green 900 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-900",
+          "section": "base-red-50",
+          "utility": "--color-green-900",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 73
+        }
+      }
+    },
+    "green-950": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [120.0, 23.0, 12.0]
+      },
+      "$description": "private green 950 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-950",
+          "section": "base-red-50",
+          "utility": "--color-green-950",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 74
+        }
+      }
+    },
+    "yellow-50": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [36.0, 96.0, 97.0]
+      },
+      "$description": "private yellow 50 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-50",
+          "section": "base-red-50",
+          "utility": "--color-yellow-50",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 75
+        }
+      }
+    },
+    "yellow-100": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [36.0, 96.0, 93.0]
+      },
+      "$description": "private yellow 100 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-100",
+          "section": "base-red-50",
+          "utility": "--color-yellow-100",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 76
+        }
+      }
+    },
+    "yellow-200": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [36.0, 97.0, 85.0]
+      },
+      "$description": "private yellow 200 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-200",
+          "section": "base-red-50",
+          "utility": "--color-yellow-200",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 77
+        }
+      }
+    },
+    "yellow-300": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [36.0, 98.0, 76.0]
+      },
+      "$description": "private yellow 300 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-300",
+          "section": "base-red-50",
+          "utility": "--color-yellow-300",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 78
+        }
+      }
+    },
+    "yellow-400": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [36.0, 99.0, 68.0]
+      },
+      "$description": "private yellow 400 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-400",
+          "section": "base-red-50",
+          "utility": "--color-yellow-400",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 79
+        }
+      }
+    },
+    "yellow-500": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [37.0, 75.0, 60.0]
+      },
+      "$description": "private yellow 500 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-500",
+          "section": "base-red-50",
+          "utility": "--color-yellow-500",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 80
+        }
+      }
+    },
+    "yellow-600": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [37.0, 92.0, 49.0]
+      },
+      "$description": "private yellow 600 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-600",
+          "section": "base-red-50",
+          "utility": "--color-yellow-600",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 81
+        }
+      }
+    },
+    "yellow-700": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [37.0, 84.0, 39.0]
+      },
+      "$description": "private yellow 700 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-700",
+          "section": "base-red-50",
+          "utility": "--color-yellow-700",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 82
+        }
+      }
+    },
+    "yellow-800": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [37.0, 76.0, 28.0]
+      },
+      "$description": "private yellow 800 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-800",
+          "section": "base-red-50",
+          "utility": "--color-yellow-800",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 83
+        }
+      }
+    },
+    "yellow-900": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [38.0, 68.0, 17.0]
+      },
+      "$description": "private yellow 900 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-900",
+          "section": "base-red-50",
+          "utility": "--color-yellow-900",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 84
+        }
+      }
+    },
+    "yellow-950": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [38.0, 68.0, 12.0]
+      },
+      "$description": "private yellow 950 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-950",
+          "section": "base-red-50",
+          "utility": "--color-yellow-950",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 85
+        }
+      }
+    },
+    "blue-50": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [205.0, 90.0, 97.0]
+      },
+      "$description": "private blue 50 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-50",
+          "section": "base-red-50",
+          "utility": "--color-blue-50",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 86
+        }
+      }
+    },
+    "blue-100": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [205.0, 90.0, 94.0]
+      },
+      "$description": "private blue 100 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-100",
+          "section": "base-red-50",
+          "utility": "--color-blue-100",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 87
+        }
+      }
+    },
+    "blue-200": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [205.0, 90.0, 89.0]
+      },
+      "$description": "private blue 200 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-200",
+          "section": "base-red-50",
+          "utility": "--color-blue-200",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 88
+        }
+      }
+    },
+    "blue-300": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [205.0, 90.0, 84.0]
+      },
+      "$description": "private blue 300 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-300",
+          "section": "base-red-50",
+          "utility": "--color-blue-300",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 89
+        }
+      }
+    },
+    "blue-400": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [205.0, 90.0, 78.0]
+      },
+      "$description": "private blue 400 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-400",
+          "section": "base-red-50",
+          "utility": "--color-blue-400",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 90
+        }
+      }
+    },
+    "blue-500": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [205.0, 80.0, 73.0]
+      },
+      "$description": "private blue 500 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-500",
+          "section": "base-red-50",
+          "utility": "--color-blue-500",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 91
+        }
+      }
+    },
+    "blue-600": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [210.0, 82.0, 59.0]
+      },
+      "$description": "private blue 600 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-600",
+          "section": "base-red-50",
+          "utility": "--color-blue-600",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 92
+        }
+      }
+    },
+    "blue-700": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [215.0, 73.0, 45.0]
+      },
+      "$description": "private blue 700 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-700",
+          "section": "base-red-50",
+          "utility": "--color-blue-700",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 93
+        }
+      }
+    },
+    "blue-800": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [221.0, 65.0, 32.0]
+      },
+      "$description": "private blue 800 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-800",
+          "section": "base-red-50",
+          "utility": "--color-blue-800",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 94
+        }
+      }
+    },
+    "blue-900": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [226.0, 57.0, 18.0]
+      },
+      "$description": "private blue 900 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-900",
+          "section": "base-red-50",
+          "utility": "--color-blue-900",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 95
+        }
+      }
+    },
+    "blue-950": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [226.0, 57.0, 13.0]
+      },
+      "$description": "private blue 950 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-950",
+          "section": "base-red-50",
+          "utility": "--color-blue-950",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 96
+        }
+      }
+    },
+    "violet-50": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [271.0, 96.0, 97.0]
+      },
+      "$description": "private violet 50 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-50",
+          "section": "base-red-50",
+          "utility": "--color-violet-50",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 97
+        }
+      }
+    },
+    "violet-100": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [271.0, 96.0, 94.0]
+      },
+      "$description": "private violet 100 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-100",
+          "section": "base-red-50",
+          "utility": "--color-violet-100",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 98
+        }
+      }
+    },
+    "violet-200": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [271.0, 97.0, 89.0]
+      },
+      "$description": "private violet 200 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-200",
+          "section": "base-red-50",
+          "utility": "--color-violet-200",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 99
+        }
+      }
+    },
+    "violet-300": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [271.0, 98.0, 84.0]
+      },
+      "$description": "private violet 300 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-300",
+          "section": "base-red-50",
+          "utility": "--color-violet-300",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 100
+        }
+      }
+    },
+    "violet-400": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [271.0, 99.0, 78.0]
+      },
+      "$description": "private violet 400 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-400",
+          "section": "base-red-50",
+          "utility": "--color-violet-400",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 101
+        }
+      }
+    },
+    "violet-500": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [271.0, 80.0, 73.0]
+      },
+      "$description": "private violet 500 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-500",
+          "section": "base-red-50",
+          "utility": "--color-violet-500",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 102
+        }
+      }
+    },
+    "violet-600": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [267.0, 80.0, 59.0]
+      },
+      "$description": "private violet 600 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-600",
+          "section": "base-red-50",
+          "utility": "--color-violet-600",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 103
+        }
+      }
+    },
+    "violet-700": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [263.0, 61.0, 46.0]
+      },
+      "$description": "private violet 700 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-700",
+          "section": "base-red-50",
+          "utility": "--color-violet-700",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 104
+        }
+      }
+    },
+    "violet-750": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [259.0, 41.0, 42.0]
+      },
+      "$description": "muted violet · PR-status chip border (off-ramp accent)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-750",
+          "section": "base-red-50",
+          "utility": "--color-violet-750",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 105,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "violet-800": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [259.0, 41.0, 32.0]
+      },
+      "$description": "private violet 800 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-800",
+          "section": "base-red-50",
+          "utility": "--color-violet-800",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 106
+        }
+      }
+    },
+    "violet-900": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [255.0, 21.0, 18.0]
+      },
+      "$description": "private violet 900 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-900",
+          "section": "base-red-50",
+          "utility": "--color-violet-900",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 107
+        }
+      }
+    },
+    "violet-950": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [255.0, 21.0, 13.0]
+      },
+      "$description": "private violet 950 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-950",
+          "section": "base-red-50",
+          "utility": "--color-violet-950",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 108
+        }
+      }
+    },
+    "brown-50": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [8.0, 75.0, 97.0]
+      },
+      "$description": "private brown 50 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-50",
+          "section": "base-red-50",
+          "utility": "--color-brown-50",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 109
+        }
+      }
+    },
+    "brown-100": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [7.0, 74.0, 93.0]
+      },
+      "$description": "private brown 100 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-100",
+          "section": "base-red-50",
+          "utility": "--color-brown-100",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 110
+        }
+      }
+    },
+    "brown-200": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [7.0, 70.0, 88.0]
+      },
+      "$description": "private brown 200 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-200",
+          "section": "base-red-50",
+          "utility": "--color-brown-200",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 111
+        }
+      }
+    },
+    "brown-300": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [7.0, 62.0, 83.0]
+      },
+      "$description": "private brown 300 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-300",
+          "section": "base-red-50",
+          "utility": "--color-brown-300",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 112
+        }
+      }
+    },
+    "brown-400": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [8.0, 53.0, 77.0]
+      },
+      "$description": "private brown 400 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-400",
+          "section": "base-red-50",
+          "utility": "--color-brown-400",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 113
+        }
+      }
+    },
+    "brown-500": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [9.0, 46.0, 72.0]
+      },
+      "$description": "private brown 500 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-500",
+          "section": "base-red-50",
+          "utility": "--color-brown-500",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 114
+        }
+      }
+    },
+    "brown-600": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [7.0, 38.0, 58.0]
+      },
+      "$description": "private brown 600 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-600",
+          "section": "base-red-50",
+          "utility": "--color-brown-600",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 115
+        }
+      }
+    },
+    "brown-700": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [6.0, 30.0, 45.0]
+      },
+      "$description": "private brown 700 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-700",
+          "section": "base-red-50",
+          "utility": "--color-brown-700",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 116
+        }
+      }
+    },
+    "brown-800": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [7.0, 23.0, 35.0]
+      },
+      "$description": "muted brown · PR-status chip border (raised from the ramp for a visible outline)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-800",
+          "section": "base-red-50",
+          "utility": "--color-brown-800",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 117,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "brown-900": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [10.0, 15.0, 15.0]
+      },
+      "$description": "private brown 900 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-900",
+          "section": "base-red-50",
+          "utility": "--color-brown-900",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 118
+        }
+      }
+    },
+    "brown-950": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [10.0, 15.0, 10.0]
+      },
+      "$description": "private brown 950 palette step; theme independent",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-950",
+          "section": "base-red-50",
+          "utility": "--color-brown-950",
+          "utilitySection": "utilities-red-50",
+          "utilityOrder": 119
+        }
+      }
+    }
+  }
+}

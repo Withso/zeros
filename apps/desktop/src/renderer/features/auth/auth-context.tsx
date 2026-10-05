@@ -534,7 +534,7 @@ function AuthConfigErrorScreen() {
   useDismissStartupLoader(true);
 
   return (
-    <div className="bg-bg1 text-fg2 fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 px-6 text-center">
+    <div className="bg-bg1 text-fg2 fixed inset-0 z-modal flex flex-col items-center justify-center gap-3 px-6 text-center">
       <div className="text-fg1 text-sm font-medium">
         Sign-in isn't available
       </div>

@@ -329,7 +329,7 @@ export function DispatcherComposer({
           submitRef.current();
         }}
       >
-        <PromptInputBody className="items-stretch gap-0 rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0 dark:bg-transparent">
+        <PromptInputBody className="items-stretch gap-0 rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0">
           {/* Design mode: the editor's slot carries what entry will do to the
               repository. Same min height as the editor so the card does not
               jump when the toggle flips. */}

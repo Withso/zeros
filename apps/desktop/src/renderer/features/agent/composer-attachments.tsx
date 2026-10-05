@@ -160,7 +160,7 @@ export const ComposerAttachmentChips = memo(function ComposerAttachmentChips({
               className={[
                 "bg-bg2-hover hover:border-highlighted-bright inline-flex max-w-[220px] items-center gap-1.5 rounded-sm py-[3px] pr-1 pl-2 text-xs transition-[background-color,border-color] duration-150 ease-out",
                 invalid
-                  ? "border-yellow-primary/40 text-fg2 border opacity-85 [&_img]:grayscale [&>button_span:first-child]:grayscale"
+                  ? "border-yellow-icon/40 text-fg2 border opacity-85 [&_img]:grayscale [&>button_span:first-child]:grayscale"
                   : "border-border1 text-fg2 border",
                 isImage ? "cursor-pointer" : "",
               ]
@@ -191,7 +191,7 @@ export const ComposerAttachmentChips = memo(function ComposerAttachmentChips({
                     <Icon size={11} />
                   </span>
                 )}
-                <span className="overflow-hidden pl-[2px] text-ellipsis whitespace-nowrap">
+                <span className="overflow-hidden pl-0.5 text-ellipsis whitespace-nowrap">
                   {a.name}
                 </span>
               </button>

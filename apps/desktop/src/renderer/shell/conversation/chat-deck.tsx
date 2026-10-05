@@ -197,8 +197,8 @@ export function ChatDeck({
               // --pane-bg is the chat-WINDOW fill, inherited from the pane
               // this layer is portaled into: bg1 on the focused pane (the
               // active window looks like the plain app canvas), bg0 on
-              // unfocused panes (plus the pane's bg0/30 veil) so inactive
-              // windows read as recessed. See --pane-bg in zeros-tokens.css.
+              // unfocused panes so inactive windows read as recessed while
+              // their text keeps full contrast. See --pane-bg in zeros-tokens.css.
               "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden bg-(--pane-bg)",
               isActive
                 ? "pointer-events-auto visible"

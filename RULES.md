@@ -72,46 +72,64 @@ implementation in it. Prefer direct, explicit imports inside an app.
 
 ## 3. UI and styling
 
-Zeros uses dense professional desktop chrome, a restrained accent, three text
-tiers, a 4px spacing rhythm, and tonal borders. Existing visual behavior is a
-contract: structural work must not alter it without explicit design approval.
+Zeros uses dense professional desktop chrome, a restrained accent, four text
+tiers, a 4px spacing rhythm (half steps inside controls), and tonal borders.
+Existing visual behavior is a contract: structural work must not alter it
+without explicit design approval. [docs/design-system.md](docs/design-system.md)
+is the normative guide; token values and contrast results are generated into
+`docs/design-tokens.md`.
 
 ### Tokens and cascade
 
-- `styles/zeros-tokens.css` owns primitive values, Tailwind theme wiring, and
-  the small core alias set exposed as utilities.
-- `styles/semantic-tokens.css` owns feature-specific semantic aliases that
-  reference those primitives.
-- `styles/globals.css` is the ordered entrypoint for the focused modules in
-  `styles/global/`. Its import order is a cascade contract.
-- Components consume semantic tokens and shared primitives. Do not reference raw
-  palette primitives from feature code.
+- `styles/tokens/*.tokens.json` owns DTCG 2025.10 primitive values for both
+  themes; its resolver defines the appearance overrides. `pnpm design:docs`
+  generates the marked declarations in `styles/zeros-tokens.css`; never edit
+  their values by hand. The CSS entry keeps authored Tailwind setup and named
+  utilities. `styles/semantic-tokens.css` owns feature aliases over those
+  primitives. `styles/globals.css` imports the focused modules in
+  `styles/global/`; CSS names and import order are compatibility contracts.
+- Components consume semantic tokens and shared primitives. Never use raw palette
+  steps, color literals, Tailwind's built-in palettes (reset — they do not
+  compile), or arbitrary visual values (`text-[14px]`, `z-[1000]`) in feature
+  code.
+- Every foreground/background pairing is declared in
+  `styles/policy/contrast-contract.json` and must meet its role's floor in both
+  themes: WCAG AA for text, 3:1 for focus/graphics, and owner-reviewed floors
+  for supplemental metadata and subtle control outlines. A token change that
+  fails the contract does not ship.
+- Add a primitive or semantic alias only with its first real caller, then run
+  `pnpm design:docs`.
 - Do not add feature styling to a global stylesheet. Keep component-owned rules
   with the component or in a focused local stylesheet. A global rule is valid
   only when it must cross ownership boundaries, such as document defaults,
   Electron drag regions, runtime-generated markup, portal/vendor selectors,
   shared keyframes, or scrollbars.
-- Prefer an existing semantic token. Add a new primitive and semantic alias only
-  with its first real caller; do not create aliases for hypothetical use.
 
 ### Component rules
 
 - Reuse primitives from `renderer/shared/ui/` for buttons, inputs, menus, tabs,
   dialogs, tooltips, badges, and other standard controls. Extend a primitive
   when behavior is genuinely shared; do not duplicate it in a feature.
-- Use semantic CSS variables instead of raw hex, RGB(A), shadow, transition,
-  typography, or global z-index values.
 - Raw values are allowed only at real boundaries: runtime user colors,
   canvas/WebGL/library APIs that cannot resolve CSS variables, local stacking
-  (`z-index: 1` or `2`), one-pixel geometry, and component-specific dimensions.
+  (`z-1` or `z-2`), one-pixel geometry, and component-specific dimensions.
   Leave a short reason when the exception is not self-evident.
 - Use CSS for visual hover and focus behavior. Inline styles are for dynamic
   runtime values, not static design declarations.
-- Global overlays use the shared layer tokens and primitives. Never solve a
-  stacking problem with an arbitrary high `z-index`.
-- Controls use the established 24/28/32px desktop scale. Same-row controls
-  match heights. Preserve accessible names, focus visibility, keyboard behavior,
-  reduced-motion behavior, and inertness of hidden content.
+- Global overlays use the named layers (`z-panel`, `z-chrome`, `z-dropdown`,
+  `z-modal`, `z-toast`) and shared primitives. Never solve a stacking problem
+  with an arbitrary high `z-index`.
+- Controls are 28px (standard) or 24px (compact); same-row controls match
+  heights. Preserve accessible names, an opaque focus indicator, keyboard
+  behavior, reduced-motion behavior, and inertness of hidden content.
+
+### Enforcement
+
+- `pnpm check:ui` compiles every class against the app's Tailwind entry and
+  enforces the design-system policy with a ratchet: findings recorded in
+  `styles/policy/ui-debt.json` may only shrink, and new ones fail. Never raise
+  the ledger, add an ignore directive, or loosen the contrast contract to get a
+  green run; intentional deviations are reviewed `exceptions` with a reason.
 - Run `pnpm check:ui` for every UI/style change and `pnpm build:ui` whenever the
   cascade, entrypoint, or renderer build could be affected.
 

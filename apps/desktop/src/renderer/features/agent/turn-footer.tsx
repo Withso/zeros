@@ -73,6 +73,7 @@ import {
   useWorkspaceFileDiffSnapshot,
   type WorkspaceFileDiffQuery,
 } from "@/renderer/shell/workspace-file-data-cache";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 const PILL_PAGE = 10;
 
@@ -231,9 +232,6 @@ export function turnFooterDuration(
   );
   return Math.max(0, end - (turn?.startedAt ?? startedAt));
 }
-
-const ICON_BTN =
-  "flex size-5 shrink-0 items-center justify-center rounded-sm text-fg2 transition-colors hover:bg-bg2-hover hover:text-fg1";
 // Matches the tool-call FileTag recipe (renderers/file-tag.tsx) so a footer
 // pill reads identically to the Edit/Read row pill: 20px tall, 4px radius,
 // bg --bg1, border --border3, hover --bg2-hover. The ±counts render INSIDE the
@@ -644,31 +642,33 @@ export const TurnFooter = memo(function TurnFooter({
           startedAt={turn?.startedAt ?? startedAt} endedAt={(turn?.startedAt ?? startedAt) + durationMs}
           durationMs={durationMs} enabled={surfaceActive} />
         <Tooltip label={copied ? "Copied" : "Copy output"}>
-          <button
+          <IconButton
             type="button"
             onClick={onCopy}
             disabled={!outputText}
-            aria-label={copied ? "Copied" : "Copy output"}
-            className={cn(ICON_BTN, !outputText && "cursor-default")}
+            label={copied ? "Copied" : "Copy output"}
+            motion="colors"
+            className={cn("flex shrink-0", !outputText && "cursor-default")}
           >
             {copied ? (
               <Check className="size-3.5" strokeWidth={2} />
             ) : (
               <Copy className="size-3.5" strokeWidth={2} />
             )}
-          </button>
+          </IconButton>
         </Tooltip>
         {!readOnly && (
           <DropdownMenu>
             <Tooltip label="Turn actions">
               <DropdownMenuTrigger asChild>
-                <button
+                <IconButton
                   type="button"
-                  aria-label="Turn actions"
-                  className={ICON_BTN}
+                  label="Turn actions"
+                  motion="colors"
+                  className="flex shrink-0"
                 >
                   <MoreHorizontal className="size-4" strokeWidth={2} />
-                </button>
+                </IconButton>
               </DropdownMenuTrigger>
             </Tooltip>
             <DropdownMenuContent

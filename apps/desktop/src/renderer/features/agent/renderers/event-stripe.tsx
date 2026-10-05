@@ -57,6 +57,8 @@ import {
   cachedBrowserFavicon,
   useConversationBrowserActivity,
 } from "../../browser/browser-session-activity-store";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
+import { ListRow } from "@/renderer/shared/ui/primitives/list-row";
 
 interface EventStripeProps {
   events: AgentMessage[];
@@ -144,12 +146,12 @@ export const EventStripe = memo(function EventStripe({
   return (
     <div className="flex flex-col">
       {showHeader && (
-        <button
+        <ListRow
           type="button"
           // Content-width chip (`w-fit`, lane-capped via `max-w-full`) so the
           // hover tint wraps the summary + icons, not the empty lane to the
           // right; hover should fit the content.
-          className="group/event-stripe hover:bg-bg2-hover/40 -ml-1 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors"
+          className="group/event-stripe -ml-1 min-w-0 px-1 transition-colors"
           onClick={() => setUserExpanded((v) => !v)}
           aria-expanded={expanded}
         >
@@ -168,7 +170,7 @@ export const EventStripe = memo(function EventStripe({
             chatId={ctx.chatId}
             active={ctx.attachmentImagesActive !== false}
           />
-        </button>
+        </ListRow>
       )}
       {expanded && (
         // `zeros-working-feed` tags the group so runtime-content.css mutes it to fg3 and
@@ -279,7 +281,7 @@ function StripeIcons({
   if (!hasBrowser && icons.length === 0 && nativeTools.length === 0)
     return null;
   return (
-    <div className="flex shrink-0 items-center gap-1" aria-hidden="true">
+    <Inline gap={1} align="center" className="shrink-0" aria-hidden="true">
       {hasBrowser ? (
         <span className="text-fg2 inline-flex size-3 items-center justify-center">
           <ToolIdentityIcon
@@ -321,6 +323,6 @@ function StripeIcons({
           <Icon className="size-3" />
         </span>
       ))}
-    </div>
+    </Inline>
   );
 }

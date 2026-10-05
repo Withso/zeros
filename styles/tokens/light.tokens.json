@@ -1,0 +1,922 @@
+{
+  "$schema": "https://www.designtokens.org/schemas/2025.10/format.json",
+  "$description": "Light appearance overrides only; all other tokens inherit the base set.",
+  "tokens": {
+    "bg0": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 98.0]
+      },
+      "$description": "INACTIVE chat window fill (below bg1)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg0",
+          "section": "light-bg0",
+          "utility": "--color-bg0",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 0
+        }
+      }
+    },
+    "bg1": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 100.0]
+      },
+      "$description": "default canvas / app backdrop + active chat window",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg1",
+          "section": "light-bg0",
+          "utility": "--color-bg1",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 1,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "bg1-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 4.0, 95.0]
+      },
+      "$description": "hover on bg1 (tool calls, tabs)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg1-hover",
+          "section": "light-bg0",
+          "utility": "--color-bg1-hover",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 2
+        }
+      }
+    },
+    "bg1-highlight": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 97.0]
+      },
+      "$description": "highlighted content above bg1",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg1-highlight",
+          "section": "light-bg0",
+          "utility": "--color-bg1-highlight",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 3
+        }
+      }
+    },
+    "bg1-bright": {
+      "$type": "color",
+      "$value": "{tokens.bg2}",
+      "$description": "filled section card on bg1",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg1-bright",
+          "section": "light-bg0",
+          "utility": "--color-bg1-bright",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 4
+        }
+      }
+    },
+    "bg2": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [60.0, 4.0, 95.0]
+      },
+      "$description": "composer surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg2",
+          "section": "light-bg0",
+          "utility": "--color-bg2",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 5
+        }
+      }
+    },
+    "bg2-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [60.0, 4.0, 91.0]
+      },
+      "$description": "hover on bg2",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg2-hover",
+          "section": "light-bg0",
+          "utility": "--color-bg2-hover",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 6
+        }
+      }
+    },
+    "bg2-highlight": {
+      "$type": "color",
+      "$value": "{tokens.bg5}",
+      "$description": "dropdown trigger hover/open",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg2-highlight",
+          "section": "light-bg0",
+          "utility": "--color-bg2-highlight",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 7
+        }
+      }
+    },
+    "bg3": {
+      "$type": "color",
+      "$value": "{tokens.bg1}",
+      "$description": "floating popover surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg3",
+          "section": "light-bg3",
+          "utility": "--color-bg3",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 8
+        }
+      }
+    },
+    "bg3-hover": {
+      "$type": "color",
+      "$value": "{tokens.bg1-hover}",
+      "$description": "hover on bg3 (menu items)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg3-hover",
+          "section": "light-bg3",
+          "utility": "--color-bg3-hover",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 9
+        }
+      }
+    },
+    "bg4": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 94.0]
+      },
+      "$description": "rare (deepest chip grey)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg4",
+          "section": "light-bg3",
+          "utility": "--color-bg4",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 10
+        }
+      }
+    },
+    "bg5": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 88.0]
+      },
+      "$description": "rare (one step past bg4)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg5",
+          "section": "light-bg3",
+          "utility": "--color-bg5",
+          "utilitySection": "utilities-bg0",
+          "utilityOrder": 11
+        }
+      }
+    },
+    "fg1": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [20.0, 7.0, 16.0]
+      },
+      "$description": "selected/highlighted text + icons",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--fg1",
+          "section": "light-fg1",
+          "utility": "--color-fg1",
+          "utilitySection": "utilities-fg1",
+          "utilityOrder": 13
+        }
+      }
+    },
+    "fg2": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [20.0, 4.0, 30.5]
+      },
+      "$description": "default text + icon; 8.4:1 on white",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--fg2",
+          "section": "light-fg2",
+          "utility": "--color-fg2",
+          "utilitySection": "utilities-fg1",
+          "utilityOrder": 14
+        }
+      }
+    },
+    "fg3": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [20.0, 4.0, 36.0]
+      },
+      "$description": "middle tier (one step below fg2)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--fg3",
+          "section": "light-fg2",
+          "utility": "--color-fg3",
+          "utilitySection": "utilities-fg1",
+          "utilityOrder": 15
+        }
+      }
+    },
+    "muted-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 42.0]
+      },
+      "$description": "supplemental metadata; 3:1 floor, fg3 on hover/selection",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--muted-fg",
+          "section": "light-fg2",
+          "utility": "--color-muted-fg",
+          "utilitySection": "utilities-fg1",
+          "utilityOrder": 16
+        }
+      }
+    },
+    "sidebar-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [60.0, 9.0, 98.0]
+      },
+      "$description": "repository sidebar background",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--sidebar-bg",
+          "section": "light-sidebar-bg",
+          "utility": "--color-sidebar-bg",
+          "utilitySection": "utilities-sidebar-bg",
+          "utilityOrder": 17
+        }
+      }
+    },
+    "sidebar-bg-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [60.0, 2.0, 92.0]
+      },
+      "$description": "sidebar row hover and selected state",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--sidebar-bg-hover",
+          "section": "light-sidebar-bg",
+          "utility": "--color-sidebar-bg-hover",
+          "utilitySection": "utilities-sidebar-bg",
+          "utilityOrder": 18
+        }
+      }
+    },
+    "border1": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [30.0, 9.0, 91.0]
+      },
+      "$description": "default for bg1 surfaces",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--border1",
+          "section": "light-border1",
+          "utility": "--color-border1",
+          "utilitySection": "utilities-border1",
+          "utilityOrder": 19
+        }
+      }
+    },
+    "border2": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [30.0, 9.0, 88.0]
+      },
+      "$description": "sidebar / composer focus / bg2",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--border2",
+          "section": "light-border1",
+          "utility": "--color-border2",
+          "utilitySection": "utilities-border1",
+          "utilityOrder": 20
+        }
+      }
+    },
+    "border3": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [60.0, 3.0, 78.0]
+      },
+      "$description": "control outline at rest",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--border3",
+          "section": "light-border3",
+          "utility": "--color-border3",
+          "utilitySection": "utilities-border1",
+          "utilityOrder": 21
+        }
+      }
+    },
+    "border4": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [60.0, 3.0, 72.0]
+      },
+      "$description": "control outline on hover/open",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--border4",
+          "section": "light-border3",
+          "utility": "--color-border4",
+          "utilitySection": "utilities-border1",
+          "utilityOrder": 22
+        }
+      }
+    },
+    "shadow-dropdown": {
+      "$type": "shadow",
+      "$value": {
+        "color": {
+          "colorSpace": "srgb",
+          "components": [0, 0, 0],
+          "alpha": 0.12
+        },
+        "offsetX": {
+          "value": 0,
+          "unit": "px"
+        },
+        "offsetY": {
+          "value": 8,
+          "unit": "px"
+        },
+        "blur": {
+          "value": 24,
+          "unit": "px"
+        },
+        "spread": {
+          "value": 0,
+          "unit": "px"
+        }
+      },
+      "$description": "floating surface shadow",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--shadow-dropdown",
+          "section": "light-shadow-dropdown"
+        }
+      }
+    },
+    "scrim": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "srgb",
+        "components": [0.0, 0.0, 0.0],
+        "alpha": 0.5
+      },
+      "$description": "modal overlay veil",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--scrim",
+          "section": "light-scrim",
+          "utility": "--color-scrim",
+          "utilitySection": "utilities-scrim",
+          "utilityOrder": 12
+        }
+      }
+    },
+    "highlighted-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [30.0, 5.0, 92.0]
+      },
+      "$description": "user msg bg (text on it: fg1/fg2)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--highlighted-bg",
+          "section": "light-highlighted-bg",
+          "utility": "--color-highlighted-bg",
+          "utilitySection": "utilities-highlighted-bg",
+          "utilityOrder": 23,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "highlighted-bright": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [25.0, 5.0, 45.0]
+      },
+      "$description": "input focus border, brighter accents",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--highlighted-bright",
+          "section": "light-highlighted-bg",
+          "utility": "--color-highlighted-bright",
+          "utilitySection": "utilities-highlighted-bg",
+          "utilityOrder": 24,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "inverted-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [20.0, 7.0, 16.0]
+      },
+      "$description": "warm near-black",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--inverted-bg",
+          "section": "light-inverted-bg",
+          "utility": "--color-inverted-bg",
+          "utilitySection": "utilities-inverted-bg",
+          "utilityOrder": 25
+        }
+      }
+    },
+    "inverted-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 100.0]
+      },
+      "$description": "text/icon on the inverted fill",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--inverted-fg",
+          "section": "light-inverted-bg",
+          "utility": "--color-inverted-fg",
+          "utilitySection": "utilities-inverted-bg",
+          "utilityOrder": 26
+        }
+      }
+    },
+    "primary-button-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [22.0, 6.0, 25.0]
+      },
+      "$description": "lifted primary button fill",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--primary-button-hover",
+          "section": "light-primary-button-hover",
+          "utility": "--color-primary-button-hover",
+          "utilitySection": "utilities-primary-button-bg",
+          "utilityOrder": 28
+        }
+      }
+    },
+    "red-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 72.0, 44.0]
+      },
+      "$description": "−N counts, error accents",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-primary",
+          "section": "light-red-primary",
+          "utility": "--color-red-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 30
+        }
+      }
+    },
+    "red-secondary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 72.0, 50.0]
+      },
+      "$description": "solid delete fills + delete icons",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-secondary",
+          "section": "light-red-primary",
+          "utility": "--color-red-secondary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 31,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "red-secondary-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 72.0, 45.0]
+      },
+      "$description": "destructive hover fill",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-secondary-hover",
+          "section": "light-red-primary",
+          "utility": "--color-red-secondary-hover",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 33
+        }
+      }
+    },
+    "red-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [18.0, 87.0, 91.0]
+      },
+      "$description": "error container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-bg",
+          "section": "light-red-primary",
+          "utility": "--color-red-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 34
+        }
+      }
+    },
+    "red-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [18.0, 89.0, 37.5]
+      },
+      "$description": "text/icon on --red-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--red-fg",
+          "section": "light-red-primary",
+          "utility": "--color-red-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 35
+        }
+      }
+    },
+    "green-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 75.0, 25.5]
+      },
+      "$description": "+N counts, success accents",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-primary",
+          "section": "light-red-primary",
+          "utility": "--color-green-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 36
+        }
+      }
+    },
+    "green-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [134.0, 38.0, 89.0]
+      },
+      "$description": "success container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-bg",
+          "section": "light-red-primary",
+          "utility": "--color-green-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 37
+        }
+      }
+    },
+    "green-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 70.0, 27.5]
+      },
+      "$description": "text/icon on --green-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-fg",
+          "section": "light-red-primary",
+          "utility": "--color-green-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 38
+        }
+      }
+    },
+    "yellow-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [37.0, 90.0, 28.5]
+      },
+      "$description": "warning · modified · in-progress (text)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-primary",
+          "section": "light-red-primary",
+          "utility": "--color-yellow-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 39,
+          "cssFormat": "multiline"
+        }
+      }
+    },
+    "yellow-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [48.0, 97.0, 89.0]
+      },
+      "$description": "warning container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-bg",
+          "section": "light-red-primary",
+          "utility": "--color-yellow-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 40
+        }
+      }
+    },
+    "yellow-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [37.0, 100.0, 30.5]
+      },
+      "$description": "text/icon on --yellow-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-fg",
+          "section": "light-red-primary",
+          "utility": "--color-yellow-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 41
+        }
+      }
+    },
+    "yellow-icon": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [37.0, 90.0, 36.0]
+      },
+      "$description": "icons, dots, tinted borders",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-icon",
+          "section": "light-red-primary",
+          "utility": "--color-yellow-icon",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 42
+        }
+      }
+    },
+    "yellow-wash": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [37.0, 90.0, 60.0]
+      },
+      "$description": "search-match highlight washes",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--yellow-wash",
+          "section": "light-red-primary"
+        }
+      }
+    },
+    "blue-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [221.0, 83.0, 48.5]
+      },
+      "$description": "info · links · accents",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-primary",
+          "section": "light-red-primary",
+          "utility": "--color-blue-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 43
+        }
+      }
+    },
+    "blue-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [214.0, 100.0, 97.0]
+      },
+      "$description": "info container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-bg",
+          "section": "light-red-primary",
+          "utility": "--color-blue-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 44
+        }
+      }
+    },
+    "blue-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [224.0, 77.0, 48.0]
+      },
+      "$description": "text/icon on --blue-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-fg",
+          "section": "light-red-primary",
+          "utility": "--color-blue-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 45
+        }
+      }
+    },
+    "violet-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [271.0, 80.0, 51.0]
+      },
+      "$description": "done · merged",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-primary",
+          "section": "light-red-primary",
+          "utility": "--color-violet-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 46
+        }
+      }
+    },
+    "violet-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [274.0, 93.0, 94.0]
+      },
+      "$description": "done container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-bg",
+          "section": "light-red-primary",
+          "utility": "--color-violet-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 47
+        }
+      }
+    },
+    "violet-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [263.0, 61.0, 46.0]
+      },
+      "$description": "text/icon on --violet-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-fg",
+          "section": "light-red-primary",
+          "utility": "--color-violet-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 48
+        }
+      }
+    },
+    "brown-primary": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [5.0, 35.0, 43.0]
+      },
+      "$description": "file paths · warm accents",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-primary",
+          "section": "light-red-primary",
+          "utility": "--color-brown-primary",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 49
+        }
+      }
+    },
+    "brown-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [5.0, 74.0, 91.0]
+      },
+      "$description": "brown container surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-bg",
+          "section": "light-red-primary",
+          "utility": "--color-brown-bg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 50
+        }
+      }
+    },
+    "brown-fg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 20.0, 40.0]
+      },
+      "$description": "text/icon on --brown-bg",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--brown-fg",
+          "section": "light-red-primary",
+          "utility": "--color-brown-fg",
+          "utilitySection": "utilities-red-primary",
+          "utilityOrder": 51
+        }
+      }
+    },
+    "diff-addition": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 75.0, 36.0]
+      },
+      "$description": "diff addition base",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--diff-addition",
+          "section": "light-diff-addition"
+        }
+      }
+    },
+    "diff-deletion": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 72.0, 51.0]
+      },
+      "$description": "diff deletion base",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--diff-deletion",
+          "section": "light-diff-addition"
+        }
+      }
+    },
+    "diff-neutral": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [20.0, 4.0, 37.0]
+      },
+      "$description": "neutral mixed into diff row fills",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--diff-neutral",
+          "section": "light-diff-addition"
+        }
+      }
+    }
+  }
+}

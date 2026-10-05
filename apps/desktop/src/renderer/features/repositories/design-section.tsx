@@ -402,7 +402,7 @@ function DesignFolderName({
     <div className="group flex min-w-0 items-center gap-1">
       <button
         type="button"
-        className="text-fg1 focus-visible:ring-border1 min-w-0 truncate rounded font-mono text-[13px] focus-visible:ring-1 focus-visible:outline-none"
+        className="text-fg1 focus-visible:ring-border1 min-w-0 truncate rounded-sm font-mono text-[13px] focus-visible:ring-1 focus-visible:outline-none"
         disabled={disabled}
         onDoubleClick={edit}
         onKeyDown={(event) => {

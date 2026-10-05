@@ -5,8 +5,8 @@
 // SINGLE source of transient feedback for the entire Mac app.
 // All errors, successes, warnings, and status messages MUST
 // flow through this surface — no inline pills, no banners
-// scattered through the chat. Rule lives in /zeros-foundation skill and
-// styles/zeros-foundation.md.
+// scattered through the chat. Rule lives in docs/design-system.md
+// (Feedback).
 //
 // Visual recipe (matches the reference screenshots):
 //   • Anchored bottom-right of the viewport, ~24px inset

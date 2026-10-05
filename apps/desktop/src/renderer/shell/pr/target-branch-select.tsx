@@ -58,6 +58,7 @@ import {
   type Branch,
   type Workspace,
 } from "../../platform/git";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 // The dropdown itself wears the shared Select-trigger chrome (6px corners,
 // 13px text, 14px glyph, bg2-highlight hover) so it is indistinguishable from
@@ -244,7 +245,7 @@ export function TargetBranchButton({
   const [open, setOpen] = useState(false);
   const remote = useGitRemote(workspace.repoRoot);
   return (
-    <div className="flex min-w-0 items-center gap-2">
+    <Inline gap={2} align="center" className="min-w-0">
       <span className="text-fg2 min-w-0 truncate text-xs tabular-nums">
         {workspace.branch}
       </span>
@@ -267,6 +268,6 @@ export function TargetBranchButton({
           <ChevronsUpDown className="size-3.5 shrink-0 opacity-50" />
         </button>
       </TargetBranchPopover>
-    </div>
+    </Inline>
   );
 }

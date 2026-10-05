@@ -66,7 +66,7 @@ export function Checkbox({
       <span
         aria-hidden
         className={cn(
-          "peer-focus-visible:ring-highlighted-bright/50 grid size-3.5 shrink-0 place-items-center rounded-sm border peer-focus-visible:ring-[3px]",
+          "peer-focus-visible:ring-highlighted-bright/50 peer-focus-visible:border-highlighted-bright grid size-3.5 shrink-0 place-items-center rounded-sm border peer-focus-visible:ring-[3px]",
           off
             ? "border-border4"
             : "bg-inverted-bg border-inverted-bg text-inverted-fg",

@@ -5,7 +5,7 @@
 // State badge, check glyphs, author avatars, collapsible group headers,
 // empty/error states — one place so the four sections (changes /
 // commits / checks / reviews) stay visually identical. Recipes follow
-// styles/zeros-foundation.md (§3 surface map, §4 components, §8 radius/motion).
+// docs/design-system.md (surfaces, controls, radius, motion).
 
 import React, { useState } from "react";
 import {
@@ -94,7 +94,7 @@ export function AuthorAvatar({
   return (
     <Avatar size="sm" className={cn("size-5", className)}>
       {avatarUrl ? <AvatarImage src={avatarUrl} alt={login} /> : null}
-      <AvatarFallback className="text-[10px] uppercase">
+      <AvatarFallback className="text-xxs uppercase">
         {login.slice(0, 1) || "?"}
       </AvatarFallback>
     </Avatar>

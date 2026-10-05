@@ -147,7 +147,7 @@ export function CloudWorkspaceDetailsContent({
         <div className="mt-3"><CloudWorkspaceSetupFailure failure={workspace.setupFailure} /></div>
       )}
       {workspace.error && !recoveryState && !workspace.setupFailure && (
-        <p className="text-error mt-3 text-xs" role="alert">
+        <p className="text-red-primary mt-3 text-xs" role="alert">
           {workspace.error.message}
         </p>
       )}

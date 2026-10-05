@@ -142,7 +142,7 @@ export const ContextGauge = memo(function ContextGauge({
             type="button"
             aria-label={tooltip}
             className={cn(
-              "hover:bg-bg2-hover text-fg2 hover:text-fg1 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-[6px] border-0 bg-transparent p-0 transition-colors",
+              "hover:bg-bg2-hover text-fg2 hover:text-fg1 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
               !data && "text-muted-fg",
             )}
           >
@@ -191,7 +191,7 @@ export const ContextGauge = memo(function ContextGauge({
                   type="button"
                   disabled={compactDisabled}
                   onClick={onCompactNow}
-                  className="hover:bg-bg3-hover text-fg2 hover:text-fg1 w-full cursor-pointer rounded-[6px] border-0 bg-transparent px-2 py-1 text-left text-xs font-medium transition-colors disabled:cursor-default disabled:opacity-50"
+                  className="hover:bg-bg3-hover text-fg2 hover:text-fg1 w-full cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-left text-xs font-medium transition-colors disabled:cursor-default disabled:opacity-50"
                 >
                   Compact now
                 </button>

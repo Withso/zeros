@@ -43,6 +43,7 @@ import { Kbd } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 
 import { SHORTCUT_CATEGORIES, shortcutSearchValue } from "./shortcuts-catalog";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 export interface ShortcutsPaletteProps {
   open: boolean;
@@ -95,7 +96,7 @@ export function ShortcutsPalette({
           // (py-2 + h-7) + list padding 8 + 8 × 32px rows; 660px wide keeps
           // the previous 600×312 proportion. Overflowing content scrolls
           // in the list (flex-col + min-h-0).
-          "fixed top-1/2 left-1/2 z-50 flex w-[92vw] max-w-[660px] -translate-x-1/2 -translate-y-1/2 flex-col",
+          "fixed top-1/2 left-1/2 z-modal flex w-[92vw] max-w-[660px] -translate-x-1/2 -translate-y-1/2 flex-col",
           "h-[min(72vh,432px)] gap-0 p-0",
           "border-border2/60 overflow-hidden rounded-lg border shadow-[var(--shadow-dropdown)]",
           // Thick glass (tuned to the user's reference): a --bg2 wash for
@@ -194,7 +195,7 @@ export function ShortcutsPalette({
                       {category.label}
                     </span>
                   )}
-                  <span className="flex shrink-0 items-center gap-1">
+                  <Inline as="span" gap={1} align="center" className="shrink-0">
                     {shortcut.keys.map((chord) => (
                       <Kbd
                         key={chord}
@@ -203,7 +204,7 @@ export function ShortcutsPalette({
                         {chord}
                       </Kbd>
                     ))}
-                  </span>
+                  </Inline>
                 </CommandItem>
               ))}
             </CommandList>

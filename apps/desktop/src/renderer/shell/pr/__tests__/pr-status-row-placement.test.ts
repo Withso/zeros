@@ -39,12 +39,18 @@ describe("shared PR status row placement", () => {
     expect(headerClasses).toBeDefined();
     expect(headerClasses?.split(/\s+/)).not.toContain("border-b");
 
-    const emptyRowClasses = row.match(
-      /return \(\s*<div className="([^"]+)"/,
-    )?.[1];
-    expect(emptyRowClasses).toBeDefined();
-    expect(emptyRowClasses?.split(/\s+/)).toContain("border-b");
-    expect(emptyRowClasses?.split(/\s+/)).toContain("border-border1");
+    expect(row).toMatch(
+      /return \(\s*<PanelHeader size="window" className="gap-2"/,
+    );
+    const primitive = source(
+      "apps/desktop/src/renderer/shared/ui/primitives/panel-header.tsx",
+    );
+    const emptyRowClasses = primitive.match(/window:\s*"([^"]+)"/)?.[1];
+    expect(new Set(emptyRowClasses?.split(/\s+/))).toEqual(
+      new Set(
+        "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b px-2".split(/\s+/),
+      ),
+    );
 
     expect(island).toMatch(
       /data-pr-island=""[\s\S]*?"flex h-10 shrink-0 items-center gap-2\.5 border-y px-2"/,

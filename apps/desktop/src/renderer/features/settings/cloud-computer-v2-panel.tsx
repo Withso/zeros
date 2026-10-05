@@ -143,7 +143,7 @@ function CloudComputerV2Scope({
     >
       {snapshot.error && (
         <div className="flex items-center justify-between gap-3">
-          <p className="text-error text-xs" role="alert">
+          <p className="text-red-primary text-xs" role="alert">
             Cloud Computer could not be refreshed. Your edits and confirmed
             state are preserved.
           </p>
@@ -536,7 +536,7 @@ function CloudComputerV2Form({
             </p>
           )}
         {error && (
-          <p className="text-error text-xs" role="alert">
+          <p className="text-red-primary text-xs" role="alert">
             {error}
           </p>
         )}
@@ -706,7 +706,7 @@ function CloudComputerV2Form({
           />
         </SettingsRow>
         {!valid && (
-          <p className="text-error text-xs" role="alert">
+          <p className="text-red-primary text-xs" role="alert">
             Check the draft. Scripts must be at most 16 KiB and the timeout must
             be between 1 and 900 seconds.
           </p>

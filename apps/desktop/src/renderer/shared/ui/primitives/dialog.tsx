@@ -69,7 +69,7 @@ const DialogOverlay = React.forwardRef<
     data-slot="dialog-overlay"
     ref={ref}
     className={cn(
-      "bg-scrim data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 fixed inset-0 z-50",
+      "bg-scrim data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 fixed inset-0 z-modal",
       className,
     )}
     {...props}
@@ -166,7 +166,7 @@ const DialogContent = React.forwardRef<
             // center and scales symmetrically. (This is a v3→v4 migration trap: v3
             // composed translate INTO `transform`, so the slide helpers were
             // required there.)
-            "bg-bg1 fixed top-[50%] left-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-0 border p-0 shadow-[var(--shadow-dropdown)]",
+            "bg-bg1 fixed top-[50%] left-[50%] z-modal grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-0 border p-0 shadow-[var(--shadow-dropdown)]",
             // Smooth, subtle motion: 3% scale, decelerate in / accelerate out.
             "origin-center duration-200 ease-out data-[state=closed]:duration-150 data-[state=closed]:ease-in",
             "data-[state=open]:animate-in data-[state=closed]:animate-out",

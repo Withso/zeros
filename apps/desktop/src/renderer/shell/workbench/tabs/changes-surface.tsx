@@ -89,6 +89,7 @@ import {
   prefetchWorkspaceFileRead,
   type WorkspaceFileDiffQuery,
 } from "../../workspace-file-data-cache";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 interface TabBodyProps {
   tab: WorkbenchTab;
@@ -757,7 +758,7 @@ function ChangesSurface({
 
   // Filters stay before the file path, independently of sidebar visibility.
   const toolbar = (
-    <div className="flex shrink-0 items-center gap-1">
+    <Inline gap={1} align="center" className="shrink-0">
       <ChangesScopeMenu
         scope={model.scope}
         commits={model.commits}
@@ -771,7 +772,7 @@ function ChangesSurface({
         turnsError={model.turnsError}
         onRetry={() => onChanged(folder)}
       />
-    </div>
+    </Inline>
   );
 
   const sidebarToggle = (

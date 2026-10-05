@@ -342,28 +342,23 @@ describe("Code seats its column controls in the chat strip", () => {
     );
   });
 
-  it("keeps both column controls at full brightness in an unfocused pane", () => {
-    // ChatPane washes every pane that isn't the focused window with bg-bg0/30 at
-    // z-30, covering its strip. That must keep dimming the PANE's own chrome —
-    // its tabs, history, "+", "⋯" — but not these two, which act on the whole
-    // workspace/column and only borrow a corner of one pane's strip. Without the
-    // lift, opening a split left the mode toggle looking unavailable whenever
-    // the top-left pane wasn't focused (measured: glyph peak 240 → 171).
-    const veil = paneLayoutSource.match(
-      /className="bg-bg0\/30 pointer-events-none absolute inset-0 z-(\d+)"/,
-    )?.[1];
-    expect(veil).toBe("30");
+  it("dims an unfocused pane through its window fill, never over its text", () => {
+    // An unfocused pane recedes by swapping its window fill to bg0. It must not
+    // lay a wash OVER its content: the former bg0/30 veil pushed the pane's
+    // text, tabs and controls below WCAG AA (styles/policy/contrast-contract.json).
+    expect(paneLayoutSource).toContain('!isFocused && "[--pane-bg:var(--bg0)]"');
+    expect(paneLayoutSource).not.toMatch(/bg-bg0\/\d+ pointer-events-none absolute inset-0/);
 
+    // The two column-level controls still sit above pane-level layers: they act
+    // on the whole workspace/column and only borrow a corner of one pane's strip.
     for (const cls of ["CHAT_STRIP_LEADING_CLS", "CHAT_STRIP_TRAILING_CLS"]) {
       const classes = classList(chatTabsSource, cls);
-      expect(classes).toContain("z-40");
+      expect(classes).toContain("z-chrome");
       // z-index needs a positioned element to apply at all.
       expect(classes).toContain("relative");
-      expect(Number(veil)).toBeLessThan(40);
     }
 
-    // The pane's OWN strip controls stay under the veil — that dimming is the
-    // point of the unfocused-window treatment.
+    // The pane's OWN strip controls need no lift of their own.
     for (const cls of ["HISTORY_CONTROL_CLS", "PANE_MENU_CONTROL_CLS"]) {
       expect(classString(chatTabsSource, cls)).not.toMatch(/\bz-\d+\b/);
     }

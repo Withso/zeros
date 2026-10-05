@@ -65,7 +65,12 @@ function RadioGroupItem({
       >
         <span
           className={cn(
-            "border-border3 group-hover:border-border4 group-data-[state=checked]:border-fg1 group-focus-visible:border-highlighted-bright flex size-4 shrink-0 items-center justify-center rounded-full border transition-colors",
+            // The subtle border3 ring steps up to border4 on hover and fg1
+            // once checked. Keyboard focus draws a separate opaque
+            // highlighted-bright outline: a border swap lost to the checked
+            // border, so a focused, selected radio showed no focus at all.
+            // highlighted-bright stays reserved for focus, never hover.
+            "border-border3 group-hover:border-border4 group-data-[state=checked]:border-fg1 group-focus-visible:outline-2 group-focus-visible:outline-offset-2 group-focus-visible:outline-highlighted-bright flex size-4 shrink-0 items-center justify-center rounded-full border transition-colors",
           )}
         >
           <RadioGroupPrimitive.Indicator className="bg-fg1 size-2 rounded-full" />

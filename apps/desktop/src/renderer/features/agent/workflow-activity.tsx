@@ -13,6 +13,7 @@ import type {
   WorkflowPhaseProgress,
   WorkflowProgress,
 } from "../../platform/bridge/agent-events";
+import { ListRow } from "@/renderer/shared/ui/primitives/list-row";
 
 /** Fixed density from the settled design: task volume changes the filled
  * proportion, never the number or height of the horizontal cells. */
@@ -104,14 +105,14 @@ export const WorkflowActivity = memo(function WorkflowActivity({
   return (
     <HoverCard openDelay={150} closeDelay={120}>
       <HoverCardTrigger asChild>
-        <button
+        <ListRow
           type="button"
-          className="group/workflow-row -ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-bg2-hover/40"
+          className="group/workflow-row min-w-0 transition-colors"
           aria-label={`${label}: ${workflow.name}`}
         >
           <Workflow className="text-fg2 size-3 shrink-0" aria-hidden="true" />
           <span className="text-fg1 truncate text-sm">{label}</span>
-        </button>
+        </ListRow>
       </HoverCardTrigger>
       <HoverCardContent
         side="top"
@@ -192,7 +193,7 @@ const WorkflowPhaseRow = memo(function WorkflowPhaseRow({
     <div className="grid min-h-8 min-w-0 grid-cols-[minmax(72px,auto)_minmax(0,1fr)_auto] items-center gap-2">
       <span className="text-fg1 max-w-28 truncate text-xs">{phase.title}</span>
       <div
-        className="flex h-2 min-w-0 gap-[2px]"
+        className="flex h-2 min-w-0 gap-0.5"
         role="progressbar"
         aria-label={`${phase.title} progress`}
         aria-valuemin={0}

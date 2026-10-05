@@ -113,7 +113,7 @@ export function CloudComputerV2AdminAction({
         </span>
       </div>
       {error && (
-        <p className="text-error text-xs" role="alert">
+        <p className="text-red-primary text-xs" role="alert">
           {error}
         </p>
       )}

@@ -32,6 +32,7 @@ import {
 import { SettingsEmptyCard, SettingsSection } from "../settings/settings-ui";
 import type { Project } from "../../state/projects-store";
 import type { EditableRepoLayer } from "./repositories-panel";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 interface ActionDraft {
   id: string;
@@ -423,7 +424,7 @@ function ActionCard({
               Default (⌘R)
             </label>
           </div>
-          <div className="flex shrink-0 items-center gap-1">
+          <Inline gap={1} align="center" className="shrink-0">
             <Tooltip label="Delete action">
               <Button
                 variant="ghost"
@@ -444,7 +445,7 @@ function ActionCard({
             >
               Save
             </Button>
-          </div>
+          </Inline>
         </div>
       </div>
     </div>

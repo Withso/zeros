@@ -28,6 +28,7 @@ import { CreatePrButton } from "./create-pr-button";
 import { TargetBranchButton } from "./target-branch-select";
 import { useWorkspaceHasChanges } from "./use-workspace-has-changes";
 import { isGithubDotComRemote } from "./github-url";
+import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
 
 export function PrStatusRow({
   workspace,
@@ -59,7 +60,7 @@ export function PrStatusRow({
     );
   }
   return (
-    <div className="border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-2 border-b px-2">
+    <PanelHeader size="window" className="gap-2">
       {prWorkspace ? (
         <>
           {/* Left: pick the base branch (remote-only). Right: Create PR. */}
@@ -84,6 +85,6 @@ export function PrStatusRow({
           No workspace selected.
         </span>
       )}
-    </div>
+    </PanelHeader>
   );
 }

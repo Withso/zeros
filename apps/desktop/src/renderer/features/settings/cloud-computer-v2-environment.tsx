@@ -125,7 +125,7 @@ export function CloudComputerV2Environment({
             </Button>
           </div>
           {error && (
-            <p className="text-error text-xs" role="alert">
+            <p className="text-red-primary text-xs" role="alert">
               Use a supported environment name and a nonempty value of at most
               64 KiB.
             </p>

@@ -666,7 +666,7 @@ export function GitHubSection({
                     ? "border-border4 bg-bg1-highlight"
                     : "border-border2 bg-bg1 hover:border-border3",
                   githubHealthNeedsAttention(summary) &&
-                    "border-yellow-primary/30",
+                    "border-yellow-icon/30",
                 )}
               >
                 <input
@@ -825,7 +825,7 @@ export function GitHubSection({
                           onClose={() => void finishCliTerminal()}
                         />
                       ) : (
-                        <div className="border-border1 bg-sidebar flex flex-col gap-2.5 rounded-md border p-3">
+                        <div className="border-border1 flex flex-col gap-2.5 rounded-md border p-3">
                           <h3 className="text-fg1 m-0 text-xs font-medium">
                             Sign in with GitHub CLI
                           </h3>
@@ -873,7 +873,7 @@ export function GitHubSection({
                         </div>
                       )
                     ) : method === "github-app" ? (
-                      <div className="border-border1 bg-sidebar flex flex-col gap-2.5 rounded-md border p-3">
+                      <div className="border-border1 flex flex-col gap-2.5 rounded-md border p-3">
                         <h3 className="text-fg1 m-0 text-xs font-medium">
                           {appWaiting
                             ? "Finish on GitHub"
@@ -938,7 +938,7 @@ export function GitHubSection({
                         ) : null}
                       </div>
                     ) : (
-                      <div className="border-border1 bg-sidebar flex flex-col gap-2.5 rounded-md border p-3">
+                      <div className="border-border1 flex flex-col gap-2.5 rounded-md border p-3">
                         <div className="flex items-center justify-between gap-3">
                           <h3 className="text-fg1 m-0 text-xs font-medium">
                             Connect with a Personal Access Token

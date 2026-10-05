@@ -740,7 +740,7 @@ function TurnPromptEditor({
           }`}
           {...(submitting ? {} : dragHandlers)}
         >
-          <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0 dark:bg-transparent">
+          <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0">
             {suggestionPopup}
             {/* TipTap editor — the whole message inline: text + mention pills +
                 attachment pills (originals reconstructed in place + any new

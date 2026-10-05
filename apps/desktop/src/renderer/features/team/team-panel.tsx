@@ -112,7 +112,7 @@ export function TeamLogo({
         "bg-bg2-hover text-fg1 flex shrink-0 items-center justify-center rounded-lg font-medium",
         // Initial sizes off the type scale (RULES 1.3): 15px in the
         // 40px row avatar, 13px in the 28px switcher, 10px at list size.
-        size >= 36 ? "text-[15px]" : size >= 24 ? "text-xs" : "text-[10px]",
+        size >= 36 ? "text-[15px]" : size >= 24 ? "text-xs" : "text-xxs",
         className,
       )}
       style={{ width: size, height: size }}

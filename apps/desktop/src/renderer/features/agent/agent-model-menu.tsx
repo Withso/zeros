@@ -879,7 +879,7 @@ function ModelConfigurationPopover({
           aria-label={`Edit settings for ${label}`}
           data-model-row-end-action
           className={cn(
-            "text-fg2 hover:text-fg1 focus-visible:text-fg1 mr-1 flex h-[18px] shrink-0 items-center justify-center rounded-sm px-1.5 text-[12px] outline-none",
+            "text-fg2 hover:text-fg1 focus-visible:text-fg1 mr-1 flex h-[18px] shrink-0 items-center justify-center rounded-sm px-1.5 text-3xxs outline-none",
             MODEL_ROW_ACTION_VISIBILITY,
           )}
           onPointerDown={(event) => {

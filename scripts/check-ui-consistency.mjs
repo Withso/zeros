@@ -5,23 +5,30 @@
 // Lint guardrail for the UI and styling section of RULES.md.
 //
 // Scans desktop source plus styles/global/**/*.{css} and reports:
-//   • Hex colors outside tokens.css
-//   • rgba() literals outside tokens.css / primitives.css
-//   • Off-scale font-size: Npx (N not in {10,11,12,13,15,18})
-//   • Off-scale border-radius: Npx (N not in {4,6,8,12})
-//   • Odd space values (3,5,7,9,11,13,15) in CSS padding/gap/margin
-//   • Numeric z-index in component files (not in tokens/primitives)
-//   • Tailwind color classes: bg|text|border-(red|blue|...)-\d+
-//   • Primitive tokens referenced outside tokens.css
+//   • Hex colors outside zeros-tokens.css
+//   • rgba() / hsl() / oklch() literals outside zeros-tokens.css
+//   • Off-scale font-size: Npx (CSS; see ALLOWED_FONT_SIZES_PX)
+//   • Off-scale border-radius: Npx (CSS; see ALLOWED_RADII_PX)
+//   • Off-scale padding/gap/margin px values (CSS; see ALLOWED_SPACE_PX)
+//   • Numeric z-index in CSS (use the --z-* layer tokens)
+//   • Banned Tailwind palettes and raw Zeros ramp steps (red-500, …)
 //   • Inline style with static visual properties
 //   • `Inter` or other web font names
 //   • Class names in files no Tailwind @source scans (see below)
+//   • Classes that compile to NOTHING against the app's Tailwind entry
+//     (scripts/design-system/check-compiled-classes.mjs)
 //
-// Zero dependencies. Run: `node scripts/check-ui-consistency.mjs`
+// Rules and rationale: docs/design-system.md. Run: `pnpm check:ui`.
 // Exit code is 0 (clean) or 1 (violations).
 // ============================================================
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, extname, join, relative, sep } from "node:path";
 
 const ROOT = process.cwd();
@@ -61,9 +68,9 @@ const ALLOWED_FONT_SIZES_PX = new Set([
   8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20,
 ]);
 const ALLOWED_RADII_PX = new Set([0, 4, 6, 8, 12]);
-// Spacing scale — matches --space-1..--space-12 in tokens.css.
-// 1px is also allowed for column seams and dividers. Everything else must snap
-// to the shared spacing scale.
+// Spacing scale for hand-written CSS — the same px steps the Tailwind spacing
+// utilities produce (0.5 → 2px … 12 → 48px), see docs/design-system.md.
+// 1px is also allowed for column seams and dividers.
 const ALLOWED_SPACE_PX = new Set([
   0, 1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48,
 ]);
@@ -229,6 +236,9 @@ const BG3_FILL_RE = /(?<![\w-])bg-bg3(?:-hover)?(?![\w/-])/;
 // Add a file here ONLY if it owns a floating bg3 panel; chips on bg1/bg2
 // surfaces take bg-bg2-hover, sidebar takes sidebar-bg-hover.
 const BG3_SURFACE_FILES = new Set([
+  // The shared Surface wrapper's `floating` kind is the sanctioned owner of
+  // the floating fill (shared/ui/layout/surface.tsx).
+  "apps/desktop/src/renderer/shared/ui/layout/surface.tsx",
   "apps/desktop/src/renderer/shared/ui/primitives/dropdown-menu.tsx",
   "apps/desktop/src/renderer/shared/ui/primitives/context-menu.tsx",
   "apps/desktop/src/renderer/shared/ui/primitives/popover.tsx",
@@ -385,7 +395,7 @@ function scanFile(absPath) {
       push(
         rel,
         ln,
-        "Primitive token referenced outside tokens.css — use a SEMANTIC token (e.g. --surface-0, --text-muted, --primary).",
+        "Primitive token referenced outside zeros-tokens.css — use a semantic token (e.g. --bg1, --fg2, --red-primary; see docs/design-system.md).",
       );
     }
 
@@ -417,7 +427,7 @@ function scanFile(absPath) {
         push(
           rel,
           ln,
-          `Raw palette ramp "${m[0]}" — numeric steps (red-50…950) are private. Use a family anchor: text-<family>-primary | bg-<family>-bg | text-<family>-fg (see zeros-foundation.md §2.4).`,
+          `Raw palette ramp "${m[0]}" — numeric steps (red-50…950) are private. Use a family anchor: text-<family>-primary | bg-<family>-bg | text-<family>-fg (see docs/design-system.md).`,
         );
       }
     }
@@ -427,7 +437,7 @@ function scanFile(absPath) {
       push(
         rel,
         ln,
-        "Web font referenced directly — use var(--font-ui) or var(--font-mono).",
+        "Web font referenced directly — use var(--font-sans) or var(--font-mono).",
       );
     }
 
@@ -537,7 +547,7 @@ function scanFile(absPath) {
           push(
             rel,
             ln,
-            `Off-scale border-radius: ${n}px — use --radius-xs|sm|md|lg|pill|circle.`,
+            `Off-scale border-radius: ${n}px — use var(--radius-sm|md|lg) (4/6/8px) or a documented derived surface radius.`,
           );
         }
       }
@@ -547,7 +557,7 @@ function scanFile(absPath) {
         push(
           rel,
           ln,
-          `Numeric z-index: ${zi[1]} — use --z-chrome|panel|dropdown|modal|toast.`,
+          `Numeric z-index: ${zi[1]} — use var(--z-panel|chrome|dropdown|modal|toast) (styles/global/platform.css).`,
         );
       }
       // --- odd space values in padding / gap / margin ---
@@ -561,7 +571,7 @@ function scanFile(absPath) {
             push(
               rel,
               ln,
-              `Off-scale ${spaceMatch[1]} value: ${n}px — snap to even step via --space-N.`,
+              `Off-scale ${spaceMatch[1]} value: ${n}px — snap to the spacing scale (docs/design-system.md).`,
             );
           }
         }
@@ -883,6 +893,99 @@ for (const f of files) scanFile(f);
 checkTokenCommentDrift();
 checkTailwindSourceCoverage();
 checkAllowlistFresh();
+{
+  const { checkCompiledClasses, loadDesignSystem, rendererSourceFiles } =
+    await import("./design-system/check-compiled-classes.mjs");
+  const { extractClassContexts } = await import(
+    "./design-system/class-candidates.mjs"
+  );
+  const designSystem = await loadDesignSystem(ROOT);
+  const sourceFiles = rendererSourceFiles(ROOT);
+  // One AST pass feeds both the compiled-class gate and the policy rules.
+  const contexts = extractClassContexts({ files: sourceFiles, root: ROOT });
+  for (const v of await checkCompiledClasses({
+    root: ROOT,
+    designSystem,
+    occurrences: contexts.occurrences,
+  })) {
+    push(v.file, v.line, v.message);
+  }
+
+  // Docs agents follow must name only things that exist, and generated
+  // design docs / agent skills must match their sources.
+  const { checkDesignDocs } = await import("./design-system/check-design-docs.mjs");
+  for (const v of await checkDesignDocs({ root: ROOT, designSystem })) {
+    push(v.file, v.line, v.message);
+  }
+  const { checkGeneratedDocs } = await import("./design-system/build-design-docs.mjs");
+  const { checkGeneratedTokens } = await import("./design-system/build-tokens.mjs");
+  const tokenViolations = checkGeneratedTokens(ROOT);
+  for (const v of tokenViolations) push(v.file, v.line, v.message);
+  // Invalid token sources already fail the gate; do not try rendering docs
+  // from them until design:docs can regenerate the whole set successfully.
+  if (tokenViolations.length === 0) {
+    for (const v of checkGeneratedDocs(ROOT)) push(v.file, v.line, v.message);
+  }
+
+  // Design-system policy ratchet (scripts/design-system/ui-policy.mjs):
+  // recorded debt may only shrink; anything new fails.
+  const { DEBT_FILE, collectFindings, compareToLedger, tally } = await import(
+    "./design-system/ui-policy.mjs"
+  );
+  const ledgerPath = join(ROOT, DEBT_FILE);
+  const ledgerFile = existsSync(ledgerPath)
+    ? JSON.parse(readFileSync(ledgerPath, "utf8"))
+    : { debt: {}, exceptions: [] };
+  const findings = collectFindings({ root: ROOT, files: sourceFiles, contexts });
+  const writeLedger = (debt) => {
+    const next = {
+      description: ledgerFile.description,
+      exceptions: ledgerFile.exceptions ?? [],
+      debt,
+    };
+    writeFileSync(ledgerPath, `${JSON.stringify(next, null, 2)}\n`);
+  };
+  const recordArg = process.argv.find(
+    (arg) => arg === "--record-debt" || arg.startsWith("--record-debt="),
+  );
+  if (recordArg) {
+    // Migration tool for INTRODUCING rules: `--record-debt` creates the initial
+    // ledger; `--record-debt=<rule>` records the existing findings of one rule
+    // that has no debt yet. It never overwrites recorded debt (that would
+    // launder new findings) and never runs in CI.
+    if (process.env.CI) {
+      console.error("check:ui --record-debt is a migration tool and never runs in CI.");
+      process.exit(2);
+    }
+    const rule = recordArg.includes("=") ? recordArg.split("=")[1] : null;
+    const recorded = ledgerFile.debt ?? {};
+    if (rule ? rule in recorded : Object.keys(recorded).length > 0) {
+      console.error(
+        `check:ui ${recordArg} refused: ${rule ? `ui/${rule} already has recorded debt` : `${DEBT_FILE} already records debt — use --record-debt=<new-rule>`}. Fix new findings, or add a reviewed exception with a reason.`,
+      );
+      process.exit(2);
+    }
+    const live = findings.filter(
+      (f) =>
+        (!rule || f.rule === rule) &&
+        !(ledgerFile.exceptions ?? []).some((e) => e.rule === f.rule && e.file === f.file && e.key === f.key),
+    );
+    ledgerFile.debt = { ...recorded, ...tally(live) };
+    writeLedger(ledgerFile.debt);
+    console.log(`check:ui — recorded ${live.length} existing finding(s)${rule ? ` for ui/${rule}` : ""} as debt in ${DEBT_FILE}`);
+  }
+  const { violations: policyViolations, pruned } = compareToLedger(findings, ledgerFile);
+  if (process.argv.includes("--prune-debt")) {
+    // Prune only shrinks paid debt; every other ledger problem still fails.
+    writeLedger(pruned);
+    console.log(`check:ui — pruned ${DEBT_FILE} to current counts (it can only shrink).`);
+    for (const v of policyViolations.filter((v) => v.kind !== "debt-paid")) {
+      push(v.file, v.line, v.message);
+    }
+  } else {
+    for (const v of policyViolations) push(v.file, v.line, v.message);
+  }
+}
 
 if (violations.length === 0) {
   console.log("check:ui — clean");
@@ -907,6 +1010,6 @@ for (const [file, vs] of [...byFile.entries()].sort()) {
   console.log("");
 }
 console.log(
-  'Fix violations above. See RULES.md — "Quick Decision Table" maps UI needs to tokens.',
+  "Fix violations above. docs/design-system.md maps UI needs to components and tokens.",
 );
 process.exit(1);

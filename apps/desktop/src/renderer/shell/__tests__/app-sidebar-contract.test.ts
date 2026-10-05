@@ -164,9 +164,17 @@ describe("sidebar workspace rows", () => {
     const cls = classConstant(ROW, "SIDEBAR_WORKSPACE_ROW_CLS");
     expect(cls).toMatch(/\bw-full\b/);
     expect(cls).toMatch(/\bh-7\.5\b/);
-    expect(cls).toMatch(/\bhover:bg-sidebar-bg-hover\b/);
-    expect(cls).toMatch(/data-\[active=true\]:bg-sidebar-bg-hover\b/);
+    expect(cls).toContain("hover:bg-(--surface-hover)");
+    expect(cls).toContain("focus-within:bg-(--surface-hover)");
+    expect(cls).toContain("data-[active=true]:bg-(--surface-hover)");
     expect(cls).toMatch(/data-\[active=true\]:text-fg1\b/);
+    expect(SIDEBAR).toMatch(/<Surface\s+as="nav"\s+kind="sidebar"/);
+    const surface = source(
+      "apps/desktop/src/renderer/shared/ui/layout/surface.tsx",
+    );
+    expect(surface).toMatch(
+      /sidebar:\s*"bg-sidebar-bg \[--surface-hover:var\(--sidebar-bg-hover\)\]/,
+    );
   });
 
   it("keep the draft pencil at the row's end with Archive in its slot", () => {

@@ -71,6 +71,7 @@ import { isUsableTerminalDimensions } from "../../terminal/terminal-dimensions";
 import { parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../../state/cloud-workspace-catalog";
 import { CloudWorkspaceSetupFailure } from "../../conversation/cloud-workspace-setup-failure";
+import { Stack } from "@/renderer/shared/ui/layout/stack";
 
 /** How often to re-pull the setup buffer while a run is live. The buffer is the
  *  source of truth; we delta-append, so polling is exact (no dup/gap). */
@@ -657,10 +658,15 @@ function SetupLoading() {
  *  the only indicator is this centered beat (no bottom-right pill). */
 function SetupStarting() {
   return (
-    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center">
+    <Stack
+      gap={3}
+      align="center"
+      justify="center"
+      className="h-full min-h-0 px-6 text-center"
+    >
       <ZerosSpinner size={16} />
       <div className="text-fg2 text-xs">Starting setup…</div>
-    </div>
+    </Stack>
   );
 }
 
@@ -678,11 +684,16 @@ function SetupEmptyLayout({
   description: string;
 }) {
   return (
-    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center">
+    <Stack
+      gap={3}
+      align="center"
+      justify="center"
+      className="h-full min-h-0 px-6 text-center"
+    >
       <Icon className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
       {action}
       <div className="text-fg2 max-w-sm text-xs">{description}</div>
-    </div>
+    </Stack>
   );
 }
 
