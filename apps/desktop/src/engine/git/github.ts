@@ -1944,6 +1944,19 @@ export async function getPr(
   return parsed;
 }
 
+export interface GithubBranch { name: string; isDefault: boolean }
+/** Desktop GitHub access, without a checkout. One bounded page; pickers search
+ * these rows and obtain the default independently from create-options. */
+export async function listRepositoryBranches(opts: { owner: string; repo: string }): Promise<GithubBranch[]> {
+  if (![opts.owner, opts.repo].every(value => /^[A-Za-z0-9_.-]{1,100}$/.test(value) && value !== "." && value !== ".."))
+    throw new GitError({ code: "VALIDATION_FAILED", message: "Choose a valid GitHub repository." });
+  const repository = await withAuthRetry(oct => oct.repos.get(opts));
+  const branches = await withAuthRetry(oct => oct.repos.listBranches({ ...opts, per_page: 100, page: 1 }));
+  return branches.data.slice(0, 100).map(branch => ({
+    name: branch.name, isDefault: branch.name === repository.data.default_branch,
+  }));
+}
+
 export interface ListPrsOptions {
   /** Owner/repo from the originUrl. Different IPC shape from PR write
    *  ops because the listing isn't tied to a single workspace. */

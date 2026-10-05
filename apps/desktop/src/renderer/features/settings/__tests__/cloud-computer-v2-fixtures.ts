@@ -44,6 +44,7 @@ export function computerState(
       environment: [],
     },
     active: null,
+    activeRepositories: [],
     previous: null,
     latestBuild: null,
     unbuiltChanges: false,

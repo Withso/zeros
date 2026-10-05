@@ -190,3 +190,14 @@ describe("Cloud Computer v2 request contracts", () => {
     );
   });
 });
+
+describe("active Cloud Computer repository metadata", () => {
+  it("accepts only the active create identity on both protocol boundaries", () => {
+    const repository = { id: "123", owner: "example", name: "project", installationId: randomUUID() };
+    for (const schema of [wire.CloudComputerV2ActiveRepositorySchema, backend.CloudComputerV2ActiveRepositorySchema]) {
+      expect(schema.parse(repository)).toEqual(repository);
+      expect(schema.safeParse({ ...repository, requestedRef: "main" }).success).toBe(false);
+      expect(schema.safeParse({ ...repository, installationId: "invalid" }).success).toBe(false);
+    }
+  });
+});

@@ -87,6 +87,33 @@ export async function resolveComputerRepositoryGrant(tx: Tx, input: {
   return { id: repo.installation_id, githubInstallationId, repositoryId: repo.repository_id };
 }
 
+/** Composer metadata uses the same active-config grant as create, without
+ * selecting a runtime, retaining a source, or borrowing personal proof. */
+export async function readActiveComputerRepositoryGrant(tx: Tx, input: {
+  organizationId: string; actorUserId: string; owner: string; name: string;
+}) {
+  const active = (await tx.query<{ build_id: string; config_id: string; installation_id: string; account_login: string }>(
+    `SELECT build.id AS build_id,build.config_id,repo.installation_id,installation.account_login
+     FROM cloud_computer_v2_heads head
+     JOIN cloud_computer_v2_builds build ON build.id=head.active_build_id AND build.org_id=head.org_id
+     JOIN cloud_computer_templates template ON template.build_id=build.id AND template.org_id=build.org_id
+     JOIN cloud_computer_v2_config_repositories repo ON repo.config_id=build.config_id AND repo.org_id=build.org_id
+     JOIN github_installations installation ON installation.id=repo.installation_id
+     JOIN organizations org ON org.id=head.org_id
+     JOIN users actor ON actor.id=$2
+     WHERE head.org_id=$1 AND NOT org.is_personal AND build.state='succeeded' AND template.state='ready'
+       AND template.stopped_at IS NOT NULL AND template.protected_contract_digest IS NOT NULL
+       AND actor.staff_role IN ('developer','platform_owner') AND actor.auth_status='active' AND actor.deleted_at IS NULL
+       AND repo.repository_owner=lower($3) AND repo.repository_name=lower($4)`,
+    [input.organizationId, input.actorUserId, input.owner, input.name])).rows[0];
+  if (!active) return null;
+  const grant = await resolveComputerRepositoryGrant(tx, {
+    organizationId: input.organizationId, configId: active.config_id, owner: input.owner, name: input.name,
+    installationId: active.installation_id,
+  });
+  return { buildId: active.build_id, accountLogin: active.account_login, ...grant };
+}
+
 /** Only the engineering-staff create path calls this. The organization and
  * head locks serialize enrollment/activation/retirement with source retention.
  * No provider or GitHub request runs while these locks are held. */

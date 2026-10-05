@@ -4850,6 +4850,22 @@ describe("WorkspaceService", () => {
     } finally { list.mockRestore(); }
   });
 
+  it("lists checkout-free desktop GitHub branches and binds remote reads to the admitted repository", async () => {
+    const rows = [{ name: "main", isDefault: true }];
+    const list = vi.spyOn(git, "listRepositoryBranches").mockResolvedValue(rows);
+    const resolve = vi.spyOn(git.githubForgeAdapter, "resolveRepository").mockResolvedValue({
+      schemaVersion: 1, forge: "github", host: "github.com", owner: "allowed", name: "project",
+    });
+    try {
+      expect(await svc.handle("gh.branchList", { owner: "desktop", repo: "project" })).toEqual(rows);
+      expect(list).toHaveBeenLastCalledWith({ owner: "desktop", repo: "project" });
+      await svc.handle("gh.branchList", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, owner: "unrelated", repo: "private" }, { remote: true, cloudWorker: true });
+      expect(list).toHaveBeenLastCalledWith({ owner: "allowed", repo: "project" });
+      list.mockClear();
+      await expect(svc.handle("gh.branchList", { owner: "unrelated", repo: "private" }, { remote: true })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      expect(list).not.toHaveBeenCalled();
+    } finally { resolve.mockRestore(); list.mockRestore(); }
+  });
   it("preserves the Local create-from repository PR discovery contract", async () => {
     const list = vi.spyOn(git, "listPrs").mockResolvedValue([]);
     try {

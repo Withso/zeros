@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import type { AuthedUser } from "../auth.js";
 import { HttpError, type StaffRole } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { createCloudComputerV2Routes } from "./computer-v2-routes.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
+import { CloudComputerV2ActiveRepositorySchema, CloudComputerV2RepositorySchema } from "./computer-v2-contract.js";
 
 const pool = {} as pg.Pool,
   config = {} as CloudWorkspaceBackendConfig;
@@ -23,6 +25,7 @@ const draft = {
 const operation = () => ({ expectedRevision: 0, operationId: randomUUID() });
 const paths = [
   ["GET", "", undefined, "read"],
+  ["GET", "?activeRepositories=true", undefined, "read"],
   ["PUT", "/draft", draft, "saveDraft"],
   ["POST", "/discard", { expectedRevision: 0 }, "discard"],
   ["POST", "/builds", operation(), "build"],
@@ -89,6 +92,31 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe("Cloud Computer v2 staff route boundary", () => {
+  it("keeps the legacy strict response byte-identical unless active repositories are explicitly requested", async () => {
+    const { request, service } = configure();
+    const legacy = {
+      state: "not_built", revision: 0,
+      draft: { configId: null, repositories: [], installScript: "", timeoutSeconds: 900, environment: [] },
+      active: null, previous: null, latestBuild: null, unbuiltChanges: false,
+      history: { builds: [], nextCursor: null }, canManage: false,
+    };
+    service.read.mockResolvedValue({ ...legacy, activeRepositories: [] });
+    const body = await (await request("GET", "")).text();
+    expect(body).toBe(JSON.stringify(legacy));
+    // The shipped strict schema's not-built variant, including every legacy key.
+    const shippedStrictSchema = z.object({
+      state: z.literal("not_built"), revision: z.number().int().nonnegative(),
+      draft: z.object({ configId: z.string().uuid().nullable(), repositories: z.array(CloudComputerV2RepositorySchema),
+        installScript: z.string(), timeoutSeconds: z.number(), environment: z.array(z.object({ name: z.string(), set: z.boolean() }).strict()) }).strict(),
+      active: z.null(), previous: z.null(), latestBuild: z.null(), unbuiltChanges: z.boolean(),
+      history: z.object({ builds: z.array(z.never()), nextCursor: z.string().nullable() }).strict(), canManage: z.boolean(),
+    }).strict();
+    expect(shippedStrictSchema.safeParse(JSON.parse(body)).success).toBe(true);
+    expect(await (await request("GET", "?activeRepositories=false")).text()).toBe(body);
+    const optedIn = await request("GET", "?activeRepositories=true");
+    expect(optedIn.status).toBe(200);
+    expect(shippedStrictSchema.extend({ activeRepositories: z.array(CloudComputerV2ActiveRepositorySchema) }).parse(await optedIn.json())).toEqual({ ...legacy, activeRepositories: [] });
+  });
   it.each([null, "support_admin"] as const)(
     "denies every endpoint to %s before service access",
     async (role) => {
@@ -149,6 +177,7 @@ describe("Cloud Computer v2 staff route boundary", () => {
       ],
       ["GET", "?limit=101", undefined],
       ["GET", `?organization=${org}`, undefined],
+      ["GET", "?activeRepositories=invalid", undefined],
       ["GET", `/builds/${buildId}/log?after=-1`, undefined],
       ["GET", `/builds/${buildId}/log?limit=101`, undefined],
       ["GET", "/builds/not-an-id", undefined],
