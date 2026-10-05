@@ -44,10 +44,14 @@ directly. For a cloud workspace with file sync, run it from the synced checkout
 on the Mac: the Linux VM cannot launch the native macOS application, and file
 sync does not install the Mac's dependencies.
 
-Stop with Ctrl+C or Conductor Stop. Cancellation signals the owned preparation
+Stop with Ctrl+C or Conductor Stop. Hangup and SIGQUIT also cancel the launch.
+Cancellation signals the owned preparation
 or development process group and waits for shutdown; the existing native main
 supervisor and sidecar clean up the engine and its children. Forced escalation
-is bounded to 20 seconds. One launcher per checkout is allowed. A dead
+is bounded to 20 seconds and completion waits for all live group members, even
+when the direct child exits first. A watchdog tears down owned processes if the
+launcher is killed or crashes; fatal launcher/output errors cancel and release
+the lock. One launcher per checkout is allowed. A dead
 launcher's `.context/zeros-local/launcher.lock` is recovered on the next run;
 an incomplete lock reports an actionable error instead of stealing a live run.
 

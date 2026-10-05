@@ -6,11 +6,16 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 import { portFree } from "./dev-ports.mjs";
+import { groupAlive, signalGroup } from "./electron-local-process-group.mjs";
 
 const require = createRequire(import.meta.url);
 const bundle = require("./dev-electron-bundle.cjs");
+const watchdogPath = fileURLToPath(
+  new URL("./electron-local-watchdog.mjs", import.meta.url),
+);
 const ENGINE_BASE = 31000,
   ENGINE_SLOTS = 512,
   STRIDE = 10;
@@ -140,58 +145,96 @@ export function runOwnedProcess(
       detached: true,
       stdio: ["inherit", "pipe", "pipe"],
     });
+    const terminated = new Promise((done) => {
+      child.once("exit", done);
+      child.once("error", done);
+    });
+    const guardian = child.pid
+      ? spawn(
+          process.execPath,
+          [
+            watchdogPath,
+            String(process.pid),
+            String(child.pid),
+            String(killGraceMs),
+          ],
+          {
+            detached: true,
+            stdio: "ignore",
+            env: {},
+          },
+        )
+      : null;
+    const guardianExited = guardian
+      ? new Promise((done) => {
+          guardian.once("exit", done);
+          guardian.once("error", done);
+        })
+      : Promise.resolve();
     let collision = false,
       recent = "",
-      timer;
-    const stop = () => {
-      try {
-        process.kill(-child.pid, "SIGTERM");
-      } catch {
-        /* already stopped */
-      }
-      timer ??= setTimeout(() => {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          /* already stopped */
-        }
-      }, killGraceMs);
+      stopping = false,
+      failure;
+    const stop = async (error) => {
+      failure ??= error;
+      if (stopping) return;
+      stopping = true;
+      signalGroup(child.pid, "SIGTERM");
+      const deadline = Date.now() + killGraceMs;
+      while (groupAlive(child.pid) && Date.now() < deadline) await delay(25);
+      if (groupAlive(child.pid)) signalGroup(child.pid, "SIGKILL");
+      while (groupAlive(child.pid)) await delay(25);
+      await terminated;
+      guardian?.kill("SIGTERM");
+      await guardianExited;
+      signal?.removeEventListener("abort", abort);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      if (failure) reject(failure);
+      else
+        resolve({
+          code: signal?.aborted ? 0 : collision ? 98 : (child.exitCode ?? 1),
+          cancelled: signal?.aborted ?? false,
+        });
     };
-    const abort = () => stop();
+    const abort = () => {
+      void stop();
+    };
     signal?.addEventListener("abort", abort, { once: true });
     for (const [stream, target] of [
       [child.stdout, process.stdout],
       [child.stderr, process.stderr],
     ]) {
       stream.on("data", (chunk) => {
-        if (output) output(chunk.toString());
-        else target.write(chunk);
+        try {
+          if (output) output(chunk.toString());
+          else target.write(chunk);
+        } catch (error) {
+          void stop(error);
+        }
         recent = (recent + chunk.toString()).slice(-4096);
         if (
           !collision &&
           /EADDRINUSE|Port [0-9]+ is already in use/.test(recent)
         ) {
           collision = true;
-          stop();
+          void stop();
         }
       });
-    }
-    const cleanup = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-    };
-    child.once("error", (error) => {
-      cleanup();
-      reject(error);
-    });
-    child.once("close", (code) => {
-      cleanup();
-      resolve({
-        code: signal?.aborted ? 0 : collision ? 98 : (code ?? 1),
-        cancelled: signal?.aborted ?? false,
+      stream.on("error", (error) => {
+        void stop(error);
       });
+    }
+    child.once("error", (error) => {
+      void stop(error);
     });
-    if (signal?.aborted) stop();
+    guardian?.once("error", (error) => {
+      void stop(error);
+    });
+    child.once("exit", () => {
+      void stop();
+    });
+    if (signal?.aborted) abort();
   });
 }
 
@@ -313,13 +356,14 @@ export async function runLocalDevelopment({
           "--kill-timeout",
           "20000",
           "-n",
-          "vite,engine,main,app",
+          "vite,engine,main,app,watchdog",
           "-c",
-          "cyan,yellow,magenta,green",
+          "cyan,yellow,magenta,green,gray",
           "pnpm dev",
           "tsup --watch",
           "tsup --config apps/desktop/electron/tsup.config.ts --watch",
           app,
+          `${quote(process.execPath)} ${quote(watchdogPath)} ${process.pid}`,
         ],
         { cwd: root, env, signal },
       );
@@ -340,12 +384,22 @@ if (
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
 ) {
   const controller = new AbortController();
-  for (const signal of ["SIGINT", "SIGTERM"])
+  let failed = false;
+  const fatal = () => {
+    failed = true;
+    controller.abort();
+  };
+  process.on("uncaughtException", fatal);
+  process.on("unhandledRejection", fatal);
+  process.stdout.on("error", fatal);
+  process.stderr.on("error", fatal);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"])
     process.on(signal, () => controller.abort());
   try {
-    process.exitCode = await runLocalDevelopment({ signal: controller.signal });
+    const code = await runLocalDevelopment({ signal: controller.signal });
+    process.exitCode = failed ? 1 : code;
   } catch (error) {
-    console.error(`[electron:local] ${error.message}`);
+    if (!failed) console.error(`[electron:local] ${error.message}`);
     process.exitCode = 1;
   }
 }
