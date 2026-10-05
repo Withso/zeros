@@ -159,11 +159,12 @@ describe("Local launch ownership", () => {
         >;
       };
     };
-    expect(settings.scripts.run["Zeros Local"]).toEqual({
+    expect(settings.scripts.run["Zeros Local"]).toMatchObject({
       available_in: ["local"],
-      command: "exec pnpm electron:local",
       icon: "monitor",
     });
+    expect(settings.scripts.run["Zeros Local"]).not.toHaveProperty("default");
+    expect(settings.scripts.run["Zeros Local"].command).toContain("zeros_dev_select_tools");
     expect(settings.scripts.run.dev.default).toBe(true);
     expect(settings.scripts.run.backend.default).toBe(true);
   });

@@ -38,7 +38,12 @@ qualification is part of this command.
 
 In Conductor, select **Zeros Local** from the run entries on a Mac. The shared
 settings entry is available in the local environment and does not change either
-existing Dev/backend entry or their defaults. Conductor reads shared settings
+existing Dev/backend entry or their defaults. It uses the repository's tool
+selector when present: qualified Node 22.18+ in the 22.x line from
+`~/.zeros-dev/tools/bin`, Homebrew `node@22`, or PATH. Selection does not install
+tools or invoke hosted Setup/hooks. An older branch without `electron:local`
+reports that it must rebase onto main or use Dev.
+Conductor reads shared settings
 from the default branch; until this change is merged, run the package command
 directly. For a cloud workspace with file sync, run it from the synced checkout
 on the Mac: the Linux VM cannot launch the native macOS application, and file

@@ -97,6 +97,26 @@ function fixture(hosted = true) {
 }
 
 describe("Conductor Dev actions", () => {
+  it("selects qualified tools for Local without invoking hosted setup or hooks", () => {
+    const f = fixture();
+    fs.writeFileSync(path.join(f.root,"package.json"),JSON.stringify({scripts:{"electron:local":"node scripts/electron-local.mjs"}}));
+    fs.writeFileSync(path.join(f.root,"scripts/dev-environment/hook.sh"),"exit 91\n");
+    fs.writeFileSync(path.join(f.root,"scripts/dev-environment/setup.mjs"),"process.exit(92);\n");
+    const result=f.run(scripts.run["Zeros Local"].command);
+    expect(result.status,result.stderr).toBe(0);
+    expect(f.log()).toEqual(["pnpm electron:local"]);
+    expect(scripts.run["Zeros Local"].available_in).toEqual(["local"]);
+    expect(scripts.run["Zeros Local"]).not.toHaveProperty("default");
+  });
+
+  it("explains the Local entry on branches that predate the package command", () => {
+    const f=fixture();
+    const result=f.run(scripts.run["Zeros Local"].command);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("This branch predates Zeros Local; rebase onto main or use Dev.");
+    expect(f.log()).toEqual([]);
+  });
+
   it("fails setup before installing dependencies when the available importer reports missing hosted credentials", () => {
     const f = fixture();
     fs.writeFileSync(path.join(f.root, "scripts/dev-environment/setup.mjs"), "console.error('Supply a private hosted profile');process.exit(33);");
