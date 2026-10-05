@@ -528,7 +528,8 @@ export async function runCloudComputerV2Smoke({
       await create().click();
       await expect.poll(() => writes("/cloud-workspaces").length).toBe(4);
       expect(writes("/cloud-workspaces")[3].input).not.toHaveProperty("cloudComputerBuild");
-      expect(await page.evaluate(() => window.cloudComputerSourceFixture.pendingDesign().length)).toBe(1);
+      // The Design intent is registered after the create response is accepted.
+      await expect.poll(() => page.evaluate(() => window.cloudComputerSourceFixture.pendingDesign().length)).toBe(1);
       await button("Code mode").click();
       holdNextCreateConflict = true;
       await message.fill("Keep this prompt through hidden recovery");
@@ -552,7 +553,7 @@ export async function runCloudComputerV2Smoke({
       await page.clock.runFor(30_001);
       await button("Create section").click();
       await expect(choose()).toContainText("example/project");
-      expect(await page.evaluate(() => JSON.parse(localStorage.getItem("zeros:cloud-computer-repository:v1"))
+      await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("zeros:cloud-computer-repository:v1"))
         .find(([owner]) => owner === JSON.stringify(["44444444-4444-4444-8444-444444444444", "11111111-1111-4111-8111-111111111111"]))[1])).toBe("123");
       await page.evaluate(() => { window.cloudComputerSourceFixture.unavailable = true; });
       await source().click();
