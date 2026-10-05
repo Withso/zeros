@@ -588,6 +588,9 @@
       "apps/desktop/src/renderer/shell/dispatcher/agent-model-picker.tsx": {
         "button": 1
       },
+      "apps/desktop/src/renderer/shell/dispatcher/cloud-computer-source.tsx": {
+        "input": 1
+      },
       "apps/desktop/src/renderer/shell/dispatcher/create-from-source.tsx": {
         "input": 1
       },
