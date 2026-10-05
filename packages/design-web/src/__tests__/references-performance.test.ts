@@ -1,5 +1,10 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
-import { describe, expect, it } from "vitest";
+import { build } from "esbuild";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const inputs = [
   ["interior whitespace", "assets/a.png" + " ".repeat(100_000) + "x"],
@@ -69,14 +74,17 @@ for (const [method, call] of calls) {
 parentPort.postMessage({ done: true });
 `;
 
-async function scanTimings(input: string): Promise<Timing[]> {
+async function scanTimings(
+  input: string,
+  moduleUrl: string,
+): Promise<Timing[]> {
   const worker = new Worker(
     new URL("data:text/javascript," + encodeURIComponent(workerSource)),
     {
-      execArgv: ["--import", "tsx"],
+      execArgv: [],
       workerData: {
         input,
-        module: new URL("../references.ts", import.meta.url).href,
+        module: moduleUrl,
       },
     },
   );
@@ -117,10 +125,41 @@ async function scanTimings(input: string): Promise<Timing[]> {
 }
 
 describe("linear Design reference scanning", () => {
+  let bundleDirectory: string | undefined;
+  let moduleUrl: string;
+
+  beforeAll(async () => {
+    const result = await build({
+      entryPoints: [
+        fileURLToPath(new URL("../references.ts", import.meta.url)),
+      ],
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      write: false,
+      target: "node22",
+      // Bundled PostCSS uses CommonJS requires for Node builtins.
+      banner: {
+        js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);',
+      },
+    });
+    bundleDirectory = await mkdtemp(
+      join(tmpdir(), "zeros-reference-scanners-"),
+    );
+    const bundlePath = join(bundleDirectory, "references.mjs");
+    await writeFile(bundlePath, result.outputFiles[0]!.text);
+    moduleUrl = pathToFileURL(bundlePath).href;
+  });
+
+  afterAll(async () => {
+    if (bundleDirectory)
+      await rm(bundleDirectory, { recursive: true, force: true });
+  });
+
   it.each(inputs)(
     "bounds every exported scanner/rebaser for %s",
     async (_name, input) => {
-      const timings = await scanTimings(input);
+      const timings = await scanTimings(input, moduleUrl);
       expect(timings).toHaveLength(13);
       for (const timing of timings) {
         // Parser-backed rebasing has a larger constant than a character loop;
