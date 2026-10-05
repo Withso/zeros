@@ -25,6 +25,11 @@ import {
   safeProbePath,
   sanitizeProbeReport,
   serializeProbeReport,
+  summarizeQualification,
+  sanitizeLauncherError,
+  qualificationResult,
+  collectProbeDirectories,
+  runQualificationDiagnostics,
 } from "../cloud-workspace-validation/template-setup-probe.mjs";
 import { CloudProviderError } from "../../apps/control-plane/src/cloud-workspaces/provider";
 
@@ -420,12 +425,18 @@ tree=ast.parse(sys.stdin.read())
 assignment=next(node for node in ast.walk(tree) if isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id=='data' for target in node.targets))
 data=json.loads(ast.literal_eval(assignment.value.args[0]))
 source=pathlib.Path('scripts/cloud-workspace-validation/template-setup-probe.mjs').read_text()
-print(json.dumps({'sourceMatches':data['source']==source,'cpu':data['material']['image']['resources']['cpuMillicores']}))
+qualification=pathlib.Path('scripts/cloud-workspace-validation/template-setup-qualification.py').read_text()
+ast.parse(data['qualificationSource'])
+print(json.dumps({'sourceMatches':data['source']==source,'qualificationMatches':data['qualificationSource']==qualification,'cpu':data['material']['image']['resources']['cpuMillicores']}))
 `,
       ],
       { input: program, encoding: "utf8" },
     );
-    expect(JSON.parse(decoded)).toEqual({ sourceMatches: true, cpu: 4000 });
+    expect(JSON.parse(decoded)).toEqual({
+      sourceMatches: true,
+      qualificationMatches: true,
+      cpu: 4000,
+    });
     for (const invalid of [
       { success: false },
       { exitCode: 1 },
@@ -465,6 +476,316 @@ print(json.dumps({'sourceMatches':data['source']==source,'cpu':data['material'][
     expect(JSON.parse(output).checks).toEqual(report.checks);
     expect(JSON.parse(output).paths.length).toBeGreaterThan(0);
     expect(JSON.parse(output).paths.length).toBeLessThan(100);
+  });
+
+  it("retains detailed qualification checks and redacts bounded section errors", () => {
+    const token = ["ghs", "syntheticqualificationcredential"].join("_");
+    const document = {
+      version: 1,
+      secure: false,
+      identity: {
+        secure: true,
+        hostUid: 10003,
+        namespaceUid: 0,
+        noNewPrivs: 1,
+        seccompMode: 2,
+        checks: [{ name: "worker-file-ownership-preserved", status: "pass" }],
+        contents: "private file contents",
+      },
+      workload: {
+        secure: false,
+        error: `${"diagnostic ".repeat(300)}Bearer ${token} https://private.invalid unix:///run/private.sock BOAT_API_KEY=${token}`,
+        contents: "private file contents",
+      },
+      capture: null,
+      humanServices: {
+        secure: false,
+        error: "Cloud human service qualification failed",
+      },
+      actorTools: {
+        secure: false,
+        error: "Cloud actor tool qualification failed",
+      },
+      contents: "private file contents",
+    };
+    const summary = summarizeQualification(document);
+    const python = execFileSync(
+      "python3",
+      [
+        "-I",
+        "-c",
+        `
+import importlib.util,json,sys
+sys.dont_write_bytecode=True
+spec=importlib.util.spec_from_file_location('probe','scripts/cloud-workspace-validation/template-setup-qualification.py')
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+print(json.dumps(module.summarize(json.loads(sys.stdin.read()))))
+`,
+      ],
+      { input: JSON.stringify(document), encoding: "utf8" },
+    );
+    expect(JSON.parse(python)).toEqual(summary);
+    expect(summary).toMatchObject({
+      secure: false,
+      identity: {
+        secure: true,
+        hostUid: 10003,
+        checks: [{ name: "worker-file-ownership-preserved", status: "pass" }],
+      },
+      workload: { secure: false },
+      capture: null,
+    });
+    expect(summary.workload.error.length).toBeLessThanOrEqual(2000);
+    expect(JSON.stringify(summary)).not.toContain(token);
+    expect(JSON.stringify(summary)).not.toContain("://");
+    expect(JSON.stringify(summary)).not.toContain("private file contents");
+    expect(summarizeQualification(summary)).toEqual(summary);
+    const projected = sanitizeProbeReport({
+      schema: "zeros.template-setup-probe/v1",
+      checks: [
+        {
+          check: "image",
+          ok: false,
+          qualification: { exitCode: 1, timedOut: false, report: summary },
+        },
+      ],
+      paths: [],
+    });
+    expect(projected.checks[0].qualification.report).toEqual(summary);
+  });
+
+  it("retains a closed launcher exception when qualification throws before producing a report", () => {
+    const safe = sanitizeLauncherError(
+      Object.assign(new Error("Unexpected cloud engine mount contents"), {
+        contents: "private file contents",
+      }),
+    );
+    expect(safe).toEqual({
+      name: "Error",
+      message: "Unexpected cloud engine mount contents",
+    });
+    expect(
+      sanitizeLauncherError({
+        name: "private credential",
+        message: "private credential",
+        code: "private credential",
+      }),
+    ).toEqual({ name: "UnknownError", message: "<withheld>" });
+    const result = qualificationResult({
+      status: 125,
+      stdout: "",
+      stderr:
+        JSON.stringify({
+          schema: "zeros.template-setup-launcher-error/v1",
+          ...safe,
+        }) + "\n",
+    });
+    expect(result).toEqual({
+      exitCode: 125,
+      timedOut: false,
+      outputLimit: false,
+      report: null,
+      launcherError: safe,
+    });
+    const projected = sanitizeProbeReport({
+      schema: "zeros.template-setup-probe/v1",
+      checks: [{ check: "image", ok: false, qualification: result }],
+      paths: [],
+    });
+    expect(projected.checks[0].qualification.launcherError).toEqual(safe);
+  });
+
+  it("runs B4's network-isolated qualifier and requests launch_detail only when no report exists", () => {
+    const execute = vi
+      .fn()
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: JSON.stringify({ exitCode: 125, report: null }),
+      })
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: JSON.stringify({
+          exitCode: 125,
+          report: null,
+          launcherError: {
+            name: "Error",
+            message: "Unexpected cloud engine mount contents",
+          },
+        }),
+      });
+    const runtime = { root: `/opt/zeros-infra/r1-${"a".repeat(64)}` };
+    const result = runQualificationDiagnostics(runtime, {
+      execute,
+      now: () => 0,
+      deadlineMs: 400000,
+    });
+    expect(result.launchDetail.launcherError.message).toBe(
+      "Unexpected cloud engine mount contents",
+    );
+    expect(execute.mock.calls.map(([, args]) => args.at(-2))).toEqual([
+      "qualify",
+      "launch_detail",
+    ]);
+    expect(execute.mock.calls[0]![0]).toBe("/usr/bin/python3");
+    const assertions = execFileSync(
+      "python3",
+      [
+        "-I",
+        "-c",
+        `
+import ast,importlib.util,json,sys
+sys.dont_write_bytecode=True
+spec=importlib.util.spec_from_file_location('probe','scripts/cloud-workspace-validation/template-setup-qualification.py')
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+calls=[]
+def capture(command,environment,timeout):
+ calls.append((command,environment,timeout));return {'exitCode':125,'timedOut':False,'outputLimit':False,'stdout':'','stderr':''}
+module.capture=capture
+module.qualify('/opt/zeros-infra/fixture','/run/zeros/zeros-v2-test-s1-home',False,'/run/zeros/probe.mjs',330)
+module.qualify('/opt/zeros-infra/fixture','/run/zeros/zeros-v2-test-s1-home',True,'/run/zeros/probe.mjs',330)
+tree=ast.parse(calls[1][0][-1])
+invocation=next(node for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute) and node.func.attr=='execve')
+detail=ast.literal_eval(invocation.args[1])[-1]
+print(json.dumps({'network':all(c[0][:3]==['/usr/bin/unshare','--net','--'] for c in calls),
+ 'loopback':all('fcntl.ioctl' in c[0][-1] and "b'lo'" in c[0][-1] for c in calls),
+ 'minimalEnv':all(set(c[1])=={'PATH','LANG','HOME','TMPDIR'} for c in calls),
+ 'detail':"operation:'qualify'" in detail and 'sanitizeLauncherError(e)' in detail and '.stack' not in detail}))
+`,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(JSON.parse(assertions)).toEqual({
+      network: true,
+      loopback: true,
+      minimalEnv: true,
+      detail: true,
+    });
+    execute.mockReset().mockReturnValue({
+      status: 0,
+      stdout: JSON.stringify({
+        exitCode: 1,
+        report: {
+          version: 1,
+          secure: false,
+          identity: { secure: false, checks: [] },
+        },
+      }),
+    });
+    expect(
+      runQualificationDiagnostics(runtime, {
+        execute,
+        now: () => 0,
+        deadlineMs: 400000,
+      }).report.identity.secure,
+    ).toBe(false);
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("lists only fixed directory names and metadata, bounded to 64 entries without following links", () => {
+    const listed: string[] = [];
+    const filesystem = {
+      lstatSync: vi.fn((file: string) => ({
+        uid: 0,
+        gid: 0,
+        mode: 0o40755,
+        nlink: 1,
+        isDirectory: () => file === "/run/zeros",
+        isFile: () => file !== "/run/zeros" && file.startsWith("/run/zeros/"),
+        isSymbolicLink: () => file === "/srv/zeros/home",
+      })),
+      realpathSync: vi.fn((file: string) => file),
+      opendirSync: vi.fn((file: string) => {
+        listed.push(file);
+        let index = 0;
+        return {
+          readSync: () => (index < 100 ? { name: `entry-${index++}` } : null),
+          closeSync: vi.fn(),
+        };
+      }),
+      readFileSync: vi.fn(() => {
+        throw new Error("file contents must never be read");
+      }),
+    };
+    const directories = collectProbeDirectories({ filesystem });
+    expect(directories).toHaveLength(14);
+    expect(listed).toEqual(["/run/zeros"]);
+    expect(filesystem.readFileSync).not.toHaveBeenCalled();
+    const listing = directories.find((item) => item.path === "/run/zeros");
+    expect(listing).toMatchObject({
+      truncated: true,
+      entries: expect.any(Array),
+    });
+    expect(listing.entries).toHaveLength(64);
+    expect(listing.entries[0]).toMatchObject({
+      name: "entry-0",
+      uid: 0,
+      gid: 0,
+      mode: "0755",
+    });
+    expect(listing.entries[0]).not.toHaveProperty("contents");
+    expect(listing.entries[0]).not.toHaveProperty("path");
+    expect(
+      sanitizeProbeReport({
+        schema: "zeros.template-setup-probe/v1",
+        checks: [{ check: "image", ok: false }],
+        paths: [],
+        directories,
+      }).directories,
+    ).toEqual(directories);
+  });
+
+  it("keeps all directory headers and failure evidence within the commands API stdout budget", () => {
+    const directories = collectProbeDirectories({
+      filesystem: {
+        lstatSync: () => ({
+          uid: 0,
+          gid: 0,
+          mode: 0o40755,
+          nlink: 1,
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        }),
+        realpathSync: (file: string) => file,
+        opendirSync: () => {
+          let index = 0;
+          return {
+            readSync: () =>
+              index < 64 ? { name: `${"entry.".repeat(40)}-${index++}` } : null,
+            closeSync: () => {},
+          };
+        },
+      },
+    });
+    const output = serializeProbeReport({
+      schema: "zeros.template-setup-probe/v1",
+      checks: [
+        {
+          check: "image",
+          ok: false,
+          sites: [
+            {
+              source: "attest-cloud-worker.mjs",
+              function: "runV4Probe",
+              line: 886,
+            },
+          ],
+        },
+      ],
+      paths: [],
+      directories,
+    });
+    const report = JSON.parse(output);
+    expect(Buffer.byteLength(output)).toBeLessThanOrEqual(65536);
+    expect(report.directories).toHaveLength(14);
+    expect(report.directories.every((item) => item.entries.length <= 64)).toBe(
+      true,
+    );
+    expect(report.directories.some((item) => item.truncated)).toBe(true);
+    expect(report.checks[0].sites[0]).toMatchObject({
+      function: "runV4Probe",
+      line: 886,
+    });
   });
 
   it.each(["DatabaseError", "error"])(

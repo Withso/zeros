@@ -548,15 +548,16 @@ function privateFile(file, maximum = 256 * 1024) {
 
 // B4's commands API runs this program under sudo Python. It carries only the
 // probe source and secret-free expected material; no SSH or API stdin stream.
-function probeProgram(source, material) {
+function probeProgram(source, qualificationSource, material) {
   return `import json,os,shutil,subprocess,sys,tempfile
 os.umask(0o077)
 directory=None
 try:
- data=json.loads(${JSON.stringify(JSON.stringify({ source, material }))})
+ data=json.loads(${JSON.stringify(JSON.stringify({ source, qualificationSource, material }))})
  directory=tempfile.mkdtemp(prefix='zeros-v2-test-s1-',dir='/run/zeros')
  file=directory+'/probe.mjs'
  with open(file,'x') as stream: stream.write(data['source'])
+ with open(directory+'/template-setup-qualification.py','x') as stream: stream.write(data['qualificationSource'])
  node=os.path.realpath('/opt/zeros/current/bin/node')
  result=subprocess.run([node,file],input=json.dumps(data['material']).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=420,env={'PATH':'/usr/bin:/bin','HOME':'/root'})
  if len(result.stdout)>65536: raise ValueError()
@@ -582,6 +583,10 @@ export async function runTemplateSetupProbe(
     new URL("./template-setup-probe.mjs", import.meta.url),
     "utf8",
   );
+  const qualificationSource = readFileSync(
+    new URL("./template-setup-qualification.py", import.meta.url),
+    "utf8",
+  );
   const response = await remote(
     {
       boat: async (method, pathname, input) => {
@@ -603,7 +608,7 @@ export async function runTemplateSetupProbe(
       },
     },
     childId,
-    pythonProbe(probeProgram(source, material), "verify"),
+    pythonProbe(probeProgram(source, qualificationSource, material), "verify"),
     480,
   );
   const result = response.body;

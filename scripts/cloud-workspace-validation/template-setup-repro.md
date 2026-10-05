@@ -47,8 +47,9 @@ The probe uses B4's `remote(..., pythonProbe(program, "verify"), 480)` transport
 the Boat commands API executes the bounded program under `sudo python3`. The
 request carries only probe source and secret-free expected material, with no
 SSH connection or separate stdin stream. Command and stdout sizes are bounded
-to 64 KiB. Optional filesystem snapshots are trimmed to fit the stdout budget;
-check results and failure metadata are retained.
+to 64 KiB. Optional filesystem snapshots, listing tails and qualification check
+details are trimmed to fit the stdout budget and marked as truncated. Directory
+headers, identity checks, secure/error fields and failure metadata are retained.
 
 The probe loads the **installed** runtime helpers and follows setup's host
 profile/directory checks, supervisor prepare, `verifyCloudComputerTemplate`,
@@ -68,12 +69,32 @@ inside this diagnostic process; their bodies remain unchanged. No runtime
 file, runtime manifest, template or base is rewritten. Failure-site line numbers
 refer to the installed runtime source, which can differ from this checkout.
 
+Before preparation, `directories` records the 14 requested engine/file/runtime
+roots. Listings use lstat metadata only, do not follow directory links, and stop
+at 64 entries each. They contain entry names, uid/gid/mode/type, never contents.
+Missing roots and truncated listings are explicit.
+
+An image failure at `qualify_engine` with `containment_smoke` also reports
+`attesterQualification` from that original launcher attempt. `qualification`
+then repeats B4's `containment_repro.py` qualifier: a private HOME/TMPDIR, the
+same launcher and scope, `unshare --net`, and loopback brought up before exec.
+It preserves B4's `summarize()` fields: identity checks/resource limits and
+workload/capture/humanServices/actorTools secure/error/check details. Diagnostic
+text uses B4's redaction and a maximum of 2000 characters (200 for string checks).
+If no report is produced, `qualification.launchDetail` imports the same
+`launchCloudEngine({operation: 'qualify'})` and catches the launcher's error name,
+allowlisted message and code. It emits no stack or arbitrary stdout/stderr.
+These retries share a 400-second probe deadline; timeout capture sends SIGTERM
+for scope retirement before SIGKILL. They never launch the product engine.
+
 The console and mode-0600 journal contain only resource/run IDs, fixed check
 names, booleans, source/function/line sites, and path/uid/gid/mode/realpath/type/link
 metadata. Unknown paths and credential-like path components are withheld or
 redacted. Runtime digest path components are replaced with `<runtime>`. File
-contents, exception messages, provider bodies, process environments and URLs
-are never emitted. The first failed check stops subsequent admission probes.
+contents, arbitrary launcher exception messages, provider bodies, process
+environments and URLs are never emitted. Selected qualification diagnostic text
+is redacted as described above. The first failed check stops subsequent admission
+probes; the containment failure alone permits the diagnostic retries above.
 Caught phase and top-level failures emit closed diagnostics to stderr: a fixed
 phase, allowlisted error name and code/check, and known SQLSTATE when available.
 Send both the JSON report and these stderr diagnostics to the orchestrator.

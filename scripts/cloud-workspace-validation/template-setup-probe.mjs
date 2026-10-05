@@ -19,6 +19,7 @@ const native = Object.fromEntries(
     "fstatSync",
     "readFileSync",
     "readdirSync",
+    "opendirSync",
     "closeSync",
   ].map((name) => [name, fs[name]]),
 );
@@ -93,6 +94,242 @@ const STAGES = new Set([
   "done",
 ]);
 const OPERATIONS = new Set(Object.keys(native));
+const DIRECTORY_ROOTS = [
+  "/srv/zeros/files/home",
+  "/srv/zeros/files/home/agent",
+  "/srv/zeros/files/home/capture",
+  "/srv/zeros/files/state",
+  "/srv/zeros/files/managed-settings",
+  "/srv/zeros/files/.zeros-setup",
+  "/srv/zeros/state",
+  "/srv/zeros/home",
+  "/srv/zeros/home/agent",
+  "/srv/zeros/home/capture",
+  "/srv/zeros/managed-settings",
+  "/srv/zeros/runtime-installs",
+  "/run/zeros",
+  "/opt/zeros/sessions",
+];
+const QUALIFICATION_SECTIONS = [
+  "identity",
+  "workload",
+  "capture",
+  "humanServices",
+  "actorTools",
+];
+const LAUNCHER_NAMES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "OSError",
+  "FileNotFoundError",
+  "PermissionError",
+  "ValueError",
+  "AssertionError",
+]);
+const LAUNCHER_CODES = new Set([
+  "ENOENT",
+  "EACCES",
+  "EPERM",
+  "EEXIST",
+  "ENOTDIR",
+  "ELOOP",
+  "ENOSPC",
+  "EIO",
+  "ETIMEDOUT",
+  "ERR_MODULE_NOT_FOUND",
+  "ERR_INVALID_ARG_TYPE",
+  "ERR_DLOPEN_FAILED",
+]);
+const LAUNCHER_MESSAGES = new Set([
+  "Noncanonical cloud launch source",
+  "Unsafe cloud launch source",
+  "Unexpected cloud engine file projection",
+  "Unsafe cloud repository projection",
+  "Unsafe cloud launch state directory",
+  "Unsafe cloud launch document",
+  "Cloud launch document is too large",
+  "Unsupported cloud kernel parameter",
+  "Unsupported cloud user namespace restriction",
+  "Unsupported cloud kernel identity map",
+  "Unsafe cloud computer repository parent",
+  "Unexpected cloud computer repository projection",
+  "Unsafe cloud computer repository projection",
+  "Isolated cloud engine profile required",
+  "Invalid cloud engine scope identity",
+  "Unexpected cloud engine mount contents",
+  "Unsafe cloud primary mount target",
+  "Unsupported kernel overflow identity",
+  "Invalid cloud disk epoch",
+  "Cloud engine child could not start",
+  "Cloud engine launch was cancelled",
+  "Cloud engine launch barrier is unavailable",
+  "Cloud engine launch barrier failed",
+  "Cloud engine requires an admitted cgroup v2 scope",
+  "Cloud engine cgroup ancestry is unsafe",
+  "Invalid cgroup control",
+  "Cloud engine cgroup control is unsafe",
+  "Cloud engine cgroup evidence is too large",
+  "Cloud engine cgroup write was not confirmed",
+  "Invalid cgroup population evidence",
+  "Previous cloud engine scope has not retired",
+  "Cloud engine resource limit was not confirmed",
+  "Invalid cloud engine process identity",
+  "Cloud engine process placement was not confirmed",
+  "Invalid cloud engine retirement deadline",
+  "Cloud engine retirement is unconfirmed",
+  "Invalid cloud engine launch operation",
+  "Invalid cloud engine profile version",
+  "Invalid cloud engine runtime projection",
+  "Invalid cloud engine repository projection",
+]);
+
+// Match B4 containment_repro.py's redact()/summarize() projection. Messages
+// from qualification sections are bounded; launch exceptions stay closed.
+function redactQualificationText(value, maximum = 2000) {
+  return String(value)
+    .replace(/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s<>"']+/g, "[url]")
+    .replace(/\bBearer\s+[^\s"']+/gi, "[authorization]")
+    .replace(
+      /\b(?:gh[spou]_|github_pat_|condw_|sk[_-])[A-Za-z0-9_-]+/g,
+      "[token]",
+    )
+    .replace(
+      /\b[A-Z_][A-Z0-9_]*\s*=\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)/g,
+      "[assignment]",
+    )
+    .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[jwt]")
+    .replace(/\b[a-fA-F0-9]{32,}\b/g, "[hex]")
+    .replace(/[A-Za-z0-9+/_-]{48,}={0,2}/g, "[opaque]")
+    .replace(/\b(?:curl|wget)\b/g, "download-tool")
+    .slice(-maximum);
+}
+
+export function summarizeQualification(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = {
+    version: Number.isSafeInteger(value.version) ? value.version : null,
+    secure: value.secure === true,
+  };
+  for (const name of QUALIFICATION_SECTIONS) {
+    const section = value[name];
+    if (!section || typeof section !== "object" || Array.isArray(section)) {
+      result[name] = null;
+      continue;
+    }
+    const selected = { secure: section.secure === true };
+    for (const field of ["error", "phase", "failureCode", "signal"])
+      if (typeof section[field] === "string")
+        selected[field] = redactQualificationText(section[field]);
+    for (const field of [
+      "exitCode",
+      "hostUid",
+      "namespaceUid",
+      "noNewPrivs",
+      "seccompMode",
+    ])
+      if (Number.isSafeInteger(section[field]))
+        selected[field] = section[field];
+    if (Array.isArray(section.checks))
+      selected.checks = section.checks.slice(0, 128).flatMap((item) => {
+        if (typeof item === "string")
+          return [redactQualificationText(item, 200)];
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        return [
+          Object.fromEntries(
+            ["name", "status", "detail"]
+              .filter((key) => typeof item[key] === "string")
+              .map((key) => [key, redactQualificationText(item[key])]),
+          ),
+        ];
+      });
+    if (
+      name === "identity" &&
+      section.resources &&
+      typeof section.resources === "object"
+    )
+      selected.resources = Object.fromEntries(
+        Object.entries(section.resources)
+          .filter(([key]) =>
+            ["finite", "memoryMax", "pidsMax", "cpuMax"].includes(key),
+          )
+          .map(([key, val]) => [
+            key,
+            val === null || typeof val === "boolean"
+              ? val
+              : redactQualificationText(val),
+          ]),
+      );
+    result[name] = selected;
+  }
+  return result;
+}
+
+export function sanitizeLauncherError(error) {
+  const result = {
+    name: LAUNCHER_NAMES.has(error?.name) ? error.name : "UnknownError",
+    message: LAUNCHER_MESSAGES.has(error?.message)
+      ? error.message
+      : "<withheld>",
+  };
+  if (LAUNCHER_CODES.has(error?.code)) result.code = error.code;
+  return result;
+}
+
+function projectQualification(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const result = {
+    exitCode:
+      Number.isSafeInteger(value.exitCode) &&
+      value.exitCode >= -128 &&
+      value.exitCode <= 255
+        ? value.exitCode
+        : null,
+    timedOut: value.timedOut === true,
+    outputLimit: value.outputLimit === true,
+    report: summarizeQualification(value.report),
+  };
+  if (value.launcherError)
+    result.launcherError = sanitizeLauncherError(value.launcherError);
+  if (value.launchDetail)
+    result.launchDetail = projectQualification({
+      ...value.launchDetail,
+      launchDetail: undefined,
+    });
+  if (value.truncated === true) result.truncated = true;
+  return result;
+}
+
+export function qualificationResult(result) {
+  let report = null,
+    launcherError;
+  try {
+    report = summarizeQualification(JSON.parse(result.stdout));
+  } catch {
+    /* No raw output. */
+  }
+  for (const line of String(result.stderr ?? "")
+    .trim()
+    .split("\n")
+    .slice(-4)) {
+    try {
+      const value = JSON.parse(line);
+      if (value?.schema === "zeros.template-setup-launcher-error/v1")
+        launcherError = sanitizeLauncherError(value);
+    } catch {
+      /* CLI stderr and unknown JSON remain private. */
+    }
+  }
+  return projectQualification({
+    exitCode: result.status,
+    timedOut: result.error?.code === "ETIMEDOUT",
+    outputLimit: result.error?.code === "ENOBUFS",
+    report,
+    ...(launcherError ? { launcherError } : {}),
+  });
+}
 
 export function safeProbePath(value) {
   if (
@@ -128,13 +365,13 @@ export function safeProbePath(value) {
     .replace(/\b(?:[a-f0-9]{40,}|[A-Za-z0-9_+-]{80,})\b/g, "<redacted>");
 }
 
-function metadata(value, operation) {
+function metadata(value, operation, filesystem = native) {
   const result = {
     path: safeProbePath(value),
     ...(OPERATIONS.has(operation) ? { operation } : {}),
   };
   try {
-    const stat = native.lstatSync(value);
+    const stat = filesystem.lstatSync(value);
     Object.assign(result, {
       uid: stat.uid,
       gid: stat.gid,
@@ -149,7 +386,7 @@ function metadata(value, operation) {
             : "other",
     });
     try {
-      result.realpath = safeProbePath(native.realpathSync(value));
+      result.realpath = safeProbePath(filesystem.realpathSync(value));
     } catch {
       result.realpath = "<unavailable>";
     }
@@ -177,6 +414,89 @@ function projectMetadata(value) {
   if (value.missing === true) result.missing = true;
   if (value.realpath !== undefined) result.realpath = safe(value.realpath);
   return result;
+}
+
+function projectDirectoryEntry(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const name =
+    typeof value.name === "string" &&
+    /^[A-Za-z0-9_+@. [\]<>-]{1,255}$/.test(value.name)
+      ? redactQualificationText(value.name, 255)
+      : "<withheld>";
+  const projected = projectMetadata({ ...value, path: "/" });
+  return {
+    name,
+    ...Object.fromEntries(
+      Object.entries(projected).filter(([key]) =>
+        ["uid", "gid", "mode", "type", "missing"].includes(key),
+      ),
+    ),
+  };
+}
+
+function projectDirectoryListing(value) {
+  if (!DIRECTORY_ROOTS.includes(value?.path) || !Array.isArray(value.entries))
+    return undefined;
+  return {
+    ...projectMetadata(value),
+    entries: value.entries
+      .slice(0, 64)
+      .map(projectDirectoryEntry)
+      .filter(Boolean),
+    truncated: value.truncated === true || value.entries.length > 64,
+    ...(value.unavailable === true ? { unavailable: true } : {}),
+  };
+}
+
+export function collectProbeDirectories({ filesystem = native } = {}) {
+  return DIRECTORY_ROOTS.map((directory) => {
+    const listing = {
+      ...metadata(directory, undefined, filesystem),
+      entries: [],
+      truncated: false,
+    };
+    if (listing.type !== "directory") return listing;
+    let handle;
+    try {
+      handle = filesystem.opendirSync(directory);
+      for (let index = 0; index <= 64; index++) {
+        const entry = handle.readSync();
+        if (!entry) break;
+        if (index === 64) {
+          listing.truncated = true;
+          break;
+        }
+        const file = path.join(directory, entry.name);
+        let observed;
+        try {
+          const stat = filesystem.lstatSync(file);
+          observed = {
+            uid: stat.uid,
+            gid: stat.gid,
+            mode: (stat.mode & 0o7777).toString(8).padStart(4, "0"),
+            type: stat.isDirectory()
+              ? "directory"
+              : stat.isFile()
+                ? "file"
+                : stat.isSymbolicLink()
+                  ? "symlink"
+                  : "other",
+          };
+        } catch {
+          observed = { missing: true };
+        }
+        listing.entries.push(
+          projectDirectoryEntry({ name: entry.name, ...observed }),
+        );
+      }
+    } catch {
+      listing.unavailable = true;
+    } finally {
+      handle?.closeSync();
+    }
+    listing.entries.sort((a, b) => a.name.localeCompare(b.name));
+    return listing;
+  });
 }
 
 export function sanitizeProbeReport(value) {
@@ -222,12 +542,23 @@ export function sanitizeProbeReport(value) {
       result.failedChecks = item.failedChecks
         .filter((check) => V4_CHECKS.has(check))
         .slice(0, 32);
+    if (item.check === "image")
+      for (const key of ["qualification", "attesterQualification"])
+        if (item[key]) result[key] = projectQualification(item[key]);
     return result;
   });
   return {
     schema: value.schema,
     checks,
     paths: value.paths.map(projectMetadata).filter(Boolean),
+    ...(Array.isArray(value.directories)
+      ? {
+          directories: value.directories
+            .slice(0, DIRECTORY_ROOTS.length)
+            .map(projectDirectoryListing)
+            .filter(Boolean),
+        }
+      : {}),
   };
 }
 
@@ -237,8 +568,60 @@ export function serializeProbeReport(value) {
   const report = sanitizeProbeReport(value);
   let output = JSON.stringify(report) + "\n";
   while (Buffer.byteLength(output) > 65536) {
-    if (!report.paths.length) throw new Error("probe_invalid");
-    report.paths.pop();
+    if (report.paths.length) report.paths.pop();
+    else {
+      const listing = report.directories?.reduce(
+        (largest, item) =>
+          !largest || item.entries.length > largest.entries.length
+            ? item
+            : largest,
+        undefined,
+      );
+      if (listing?.entries.length) {
+        listing.entries.pop();
+        listing.truncated = true;
+      } else {
+        // B4 can include 128 detailed checks per section. Preserve secure/error
+        // fields and drop optional detail/check tails only if the API requires it.
+        const qualification = report.checks
+          .flatMap((item) => [
+            item.qualification,
+            item.attesterQualification,
+            item.qualification?.launchDetail,
+          ])
+          .filter(Boolean);
+        const details = qualification.flatMap((value) =>
+          QUALIFICATION_SECTIONS.flatMap((name) =>
+            (value.report?.[name]?.checks ?? [])
+              .filter(
+                (item) =>
+                  item &&
+                  typeof item === "object" &&
+                  Object.hasOwn(item, "detail"),
+              )
+              .map((item) => ({ value, item })),
+          ),
+        );
+        if (details.length) {
+          delete details[0].item.detail;
+          details[0].value.truncated = true;
+        } else {
+          const section = qualification
+            .flatMap((value) =>
+              QUALIFICATION_SECTIONS.filter((name) => name !== "identity").map(
+                (name) => ({ value, section: value.report?.[name] }),
+              ),
+            )
+            .filter(({ section: item }) => item?.checks?.length)
+            .sort(
+              (a, b) => b.section.checks.length - a.section.checks.length,
+            )[0];
+          if (!section) throw new Error("probe_invalid");
+          section.section.checks.pop();
+          section.value.truncated = true;
+        }
+      }
+    }
     output = JSON.stringify(report) + "\n";
   }
   return output;
@@ -291,7 +674,8 @@ export function probeFailureSites(error) {
 }
 
 const self = fileURLToPath(import.meta.url),
-  traceFile = self + ".attester.json";
+  traceFile = self + ".attester.json",
+  qualificationFile = self + ".qualification.json";
 const observerUrl = pathToFileURL(self).href + "?observer";
 
 function observeAttester() {
@@ -356,9 +740,70 @@ function observeAttester() {
         observerUrl,
         ...args.slice(index + 1),
       ];
-    return spawnSync(file, args, options);
+    const result = spawnSync(file, args, options);
+    if (
+      file === process.execPath &&
+      args?.[0]?.endsWith("/cloud-engine-launcher.mjs") &&
+      args[1] === "--qualify"
+    ) {
+      try {
+        fs.writeFileSync(
+          qualificationFile,
+          JSON.stringify(qualificationResult(result)),
+          { mode: 0o600 },
+        );
+      } catch {
+        /* Observation cannot alter the original gate. */
+      }
+    }
+    return result;
   };
   syncBuiltinESMExports();
+}
+
+export function runQualificationDiagnostics(
+  runtime,
+  {
+    execute = processes.spawnSync,
+    now = Date.now,
+    deadlineMs = now() + 400000,
+  } = {},
+) {
+  const run = (mode) => {
+    const seconds = Math.min(330, Math.floor((deadlineMs - now()) / 1000) - 25);
+    if (seconds < 1)
+      return projectQualification({ timedOut: true, report: null });
+    const result = execute(
+      "/usr/bin/python3",
+      [
+        "-I",
+        path.join(path.dirname(self), "template-setup-qualification.py"),
+        runtime.root,
+        self,
+        mode,
+        String(seconds),
+      ],
+      {
+        cwd: "/",
+        env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: "/root" },
+        encoding: "utf8",
+        timeout: (seconds + 20) * 1000,
+        maxBuffer: 1024 * 1024,
+      },
+    );
+    if (result.status === 0 && !result.error && !result.signal) {
+      try {
+        return projectQualification(JSON.parse(result.stdout));
+      } catch {
+        /* Closed capture failure below. */
+      }
+    }
+    return qualificationResult(result);
+  };
+  const result = run("qualify");
+  if (!result.report && !result.timedOut && !result.outputLimit)
+    result.launchDetail = run("launch_detail");
+  return result;
 }
 
 function exposeSetupHelpers() {
@@ -389,6 +834,7 @@ function exposeSetupHelpers() {
 
 async function main() {
   process.umask(0o077);
+  const deadlineMs = Date.now() + 400000;
   let input = "";
   for await (const chunk of process.stdin) {
     input += chunk;
@@ -400,6 +846,7 @@ async function main() {
     schema: "zeros.template-setup-probe/v1",
     checks: [],
     paths: [],
+    directories: collectProbeDirectories(),
   };
   const step = async (check, run) => {
     const entry = { check, ok: false };
@@ -549,6 +996,21 @@ async function main() {
           );
         } catch {
           /* Closed setup gates remain. */
+        }
+        if (
+          entry.stage === "qualify_engine" &&
+          entry.failedChecks?.includes("containment_smoke")
+        ) {
+          try {
+            entry.attesterQualification = projectQualification(
+              JSON.parse(native.readFileSync(qualificationFile, "utf8")),
+            );
+          } catch {
+            /* The original launcher may have returned no report. */
+          }
+          entry.qualification = runQualificationDiagnostics(runtime, {
+            deadlineMs,
+          });
         }
         throw error;
       }
