@@ -4,15 +4,20 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const { fixPath } = vi.hoisted(() => ({ fixPath: vi.fn() }));
+vi.mock("fix-path", () => ({ default: fixPath }));
+
 import { hydrateShellPath } from "../shell-path";
 
 const directories: string[] = [];
 beforeEach(() => {
+  fixPath.mockReset();
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const directory of directories.splice(0)) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -49,6 +54,40 @@ function fixture() {
 describe.skipIf(process.platform === "win32")(
   "desktop shell PATH hydration",
   () => {
+    it.each([false, true])(
+      "uses fix-path with the same PATH semantics (Local=%s)",
+      async (local) => {
+        vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", "1");
+        vi.stubEnv("PATH", process.env.PATH);
+        let inherited: string | undefined;
+        fixPath.mockImplementation(() => {
+          inherited = execFileSync(
+            "/bin/sh",
+            ["-c", 'printf "%s" "$ZEROS_LOCAL_DEVELOPMENT"'],
+            { encoding: "utf8" },
+          );
+          process.env.PATH = "/fix-path-result";
+        });
+        await hydrateShellPath({ development: false, localDevelopment: local });
+        expect(fixPath).toHaveBeenCalledOnce();
+        expect(inherited).toBe(local ? "" : "1");
+        expect(process.env.PATH).toBe("/fix-path-result");
+        expect(process.env.ZEROS_LOCAL_DEVELOPMENT).toBe("1");
+      },
+    );
+
+    it("restores Local admission when synchronous fix-path fails", async () => {
+      vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", "1");
+      fixPath.mockImplementation(() => {
+        expect(process.env.ZEROS_LOCAL_DEVELOPMENT).toBeUndefined();
+        throw new Error("synthetic shell failure");
+      });
+      await hydrateShellPath({ development: false, localDevelopment: true });
+      expect(fixPath).toHaveBeenCalledOnce();
+      expect(console.warn).toHaveBeenCalledOnce();
+      expect(process.env.ZEROS_LOCAL_DEVELOPMENT).toBe("1");
+    });
+
     it("keeps the launched Dev Node ahead of a broken Node from login-shell initialization", async () => {
       const f = fixture();
       await hydrateShellPath({ ...f, development: true });

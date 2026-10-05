@@ -9,38 +9,31 @@ import {
   getLoginShellPath,
   resetLoginShellPathForTests,
 } from "../../agents/adapters/shared/login-shell-path";
-import { hydrateShellPath } from "../../../../electron/shell-path";
 import { materializeMcpServerRegistration } from "../../agents/mcp-registration";
 
 afterEach(() => vi.unstubAllEnvs());
 
 describe("Local admission at external process boundaries", () => {
-  it.each([false, true])(
-    "keeps Local admission out of login-shell initialization (main=%s)",
-    async (main) => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-local-shell-"));
-      const shell = path.join(root, "shell");
-      fs.writeFileSync(
-        shell,
-        '#!/bin/sh\nif [ -n "$ZEROS_LOCAL_DEVELOPMENT" ]; then echo /leaked-local; else echo /clean-local; fi\n',
-        { mode: 0o700 },
-      );
-      vi.stubEnv("SHELL", shell);
-      vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", "1");
-      vi.stubEnv("PATH", process.env.PATH);
+  it("keeps Local admission out of provider login-shell initialization", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-local-shell-"));
+    const shell = path.join(root, "shell");
+    fs.writeFileSync(
+      shell,
+      '#!/bin/sh\nif [ -n "$ZEROS_LOCAL_DEVELOPMENT" ]; then echo /leaked-local; else echo /clean-local; fi\n',
+      { mode: 0o700 },
+    );
+    vi.stubEnv("SHELL", shell);
+    vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", "1");
+    vi.stubEnv("PATH", process.env.PATH);
+    resetLoginShellPathForTests();
+    try {
+      expect(await getLoginShellPath()).toBe("/clean-local");
+      expect(process.env.ZEROS_LOCAL_DEVELOPMENT).toBe("1");
+    } finally {
       resetLoginShellPathForTests();
-      try {
-        if (main) {
-          await hydrateShellPath({ development: true });
-          expect(process.env.PATH).toContain("/clean-local");
-        } else expect(await getLoginShellPath()).toBe("/clean-local");
-        expect(process.env.ZEROS_LOCAL_DEVELOPMENT).toBe("1");
-      } finally {
-        resetLoginShellPathForTests();
-        fs.rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
   it("strips explicit Local admission from managed MCP server overrides", () => {
     const server = materializeMcpServerRegistration(
       {

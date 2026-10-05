@@ -5,8 +5,9 @@ import {
   LOCAL_DEVELOPMENT_BUILD_ERROR,
 } from "./runtime-mode";
 
-// Shared outputs belong to one launcher mode. Fail before identity or services
-// can consume configuration rebuilt by a different launcher in this checkout.
+// Shared outputs belong to one launcher mode. Fail before main initializes
+// identity, data directories, secrets, auth or the engine. Imported modules
+// must remain free of initialization side effects: ES imports evaluate first.
 if (LOCAL_DEVELOPMENT_BUILD_ERROR) {
   console.error(LOCAL_DEVELOPMENT_BUILD_ERROR);
   process.exit(1);
@@ -1281,6 +1282,7 @@ app.whenReady().then(async () => {
   // get_engine_port awaits this same promise; no renderer ever guesses a port.
   const shellPathReady = hydrateShellPath({
     development: runningDev && !IS_PACKAGED,
+    localDevelopment: IS_LOCAL_DEVELOPMENT,
   });
   const githubAuthReady = shellPathReady.then(async () => {
     try {
