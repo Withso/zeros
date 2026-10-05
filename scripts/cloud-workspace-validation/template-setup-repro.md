@@ -18,8 +18,9 @@ Use Node 22.23.1 or newer with the installed repository dependencies. Run
 `.env.agent` must be a private regular file, with these entries:
 
 - `ZEROS_PLANETSCALE_ALPHA_DATABASE=zeros-control-plane-alpha`
-- `ZEROS_S1_ALPHA_DATABASE_URL`: a direct, verified TLS connection to Alpha;
-  the existing `ZEROS_C5_ALPHA_DATABASE_URL` is also accepted when S1 is absent.
+- `ZEROS_S1_ALPHA_DATABASE_URL`: a direct PlanetScale connection to Alpha with
+  `sslmode=verify-full`. `sslmode=require` is rejected as `input_invalid`.
+  The existing `ZEROS_C5_ALPHA_DATABASE_URL` is also accepted when S1 is absent.
 - `BOAT_API_KEY`
 - `BOAT_BILLING_ORG`: the same wallet recorded for the saved template.
 
@@ -30,12 +31,24 @@ arguments. Use the affected workspace UUID and its recorded template sandbox ID:
 pnpm exec tsx scripts/cloud-workspace-validation/template-setup-repro.mjs --run --workspace WORKSPACE_UUID --template TEMPLATE_SANDBOX_ID
 ```
 
+The operator's database role needs read access to the saved source tables
+(the TTL `pg_read_all_data` role is sufficient). The script uses `BEGIN READ ONLY`
+and transaction-local `app.system=on` for the system RLS policies. It does not
+switch to `zeros_app` or require membership in that role.
+
 The fork POST has C5's `type`, `ttlSeconds`, `noEnv: true`, and `env: {}` fields,
 without a `from` field. The resource size comes from the accepted generation;
 the diagnostic lease is bounded to 1800 seconds. The child is named
 `zeros-v2-test-s1-<run UUID>` immediately after allocation. The script waits for
 the same `bootstrap.py status` schema, base identity, and host state that the
 production Boat setup runner requires.
+
+The probe uses B4's `remote(..., pythonProbe(program, "verify"), 480)` transport:
+the Boat commands API executes the bounded program under `sudo python3`. The
+request carries only probe source and secret-free expected material, with no
+SSH connection or separate stdin stream. Command and stdout sizes are bounded
+to 64 KiB. Optional filesystem snapshots are trimmed to fit the stdout budget;
+check results and failure metadata are retained.
 
 The probe loads the **installed** runtime helpers and follows setup's host
 profile/directory checks, supervisor prepare, `verifyCloudComputerTemplate`,
@@ -61,17 +74,26 @@ metadata. Unknown paths and credential-like path components are withheld or
 redacted. Runtime digest path components are replaced with `<runtime>`. File
 contents, exception messages, provider bodies, process environments and URLs
 are never emitted. The first failed check stops subsequent admission probes.
+Caught phase and top-level failures emit closed diagnostics to stderr: a fixed
+phase, allowlisted error name and code/check, and known SQLSTATE when available.
+Send both the JSON report and these stderr diagnostics to the orchestrator.
 
 ## Cleanup and result
 
 Cleanup always runs in `finally`. A lost fork reply is replayed with the recorded
 idempotency key and identical body to recover the child. Only the recorded child
-can be deleted; the template ID is explicitly rejected. Cleanup is confirmed
-only by a completed deletion-operation receipt for that child. A 404 or a DELETE
+can be deleted; the template ID is explicitly rejected. Cleanup requires a
+deletion-operation receipt for that child and a subsequent sandbox 404. The
+receipt must be completed, or blocked at one of the documented storage-only
+stages: `waiting_for_uploads`, `kept_for_newer_snapshots`, `waiting_for_restore`
+(the same compute-release rule as builder cleanup in #315). A 404 or a DELETE
 acceptance alone is not confirmation.
 
 The journal is `.context/zeros-v2-test-s1/<run UUID>.json`. `cleanup: "verified"`
-means the fork was deleted; `not_created` means no fork request was sent.
+means the fork's compute was released, without proving storage erasure.
+`cleanupStorageStage` records the storage-only blocked stage, or is null for a
+completed receipt. Existing journals without this field remain readable.
+`not_created` means no fork request was sent.
 `cleanup: "pending"` requires recovery using the saved journal:
 
 ```sh

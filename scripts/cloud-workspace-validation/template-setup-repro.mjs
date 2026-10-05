@@ -20,15 +20,102 @@ import {
   BOAT_BILLING_ORG_PATTERN,
   BOAT_RESOURCE_ID_PATTERN,
 } from "../../apps/control-plane/src/cloud-workspaces/boat-client.ts";
-import { executeBoatPinnedSsh } from "../../apps/control-plane/src/cloud-workspaces/boat-pinned-ssh.ts";
+import { CloudProviderError } from "../../apps/control-plane/src/cloud-workspaces/provider.ts";
 import { RuntimeBaseStatusSchema } from "../../apps/control-plane/src/cloud-workspaces/runtime-contract.ts";
 import { computerWorkspaceTemplateManifest } from "../../apps/control-plane/src/cloud-workspaces/computer-workspace-source.ts";
 import { parseCloudComputerSetup } from "./sandbox/cloud-computer-checkout.mjs";
 import { sanitizeProbeReport } from "./template-setup-probe.mjs";
+import {
+  BaseFailure,
+  pythonProbe,
+  remote,
+} from "./boat-image/runtime-base-v4.ts";
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][a-f0-9]{3}-[0-9a-f]{12}$/;
 const DELETION = /^bdop_[a-f0-9]{32}$/;
+const STORAGE_STAGES = new Set([
+  "waiting_for_uploads",
+  "kept_for_newer_snapshots",
+  "waiting_for_restore",
+]);
+const PHASES = new Set([
+  "top_level",
+  "source",
+  "fork",
+  "bootstrap",
+  "probe",
+  "cleanup",
+]);
+const ERROR_NAMES = new Set([
+  "Error",
+  "TypeError",
+  "SyntaxError",
+  "RangeError",
+  "ReferenceError",
+  "AggregateError",
+  "AbortError",
+  "TimeoutError",
+  "DatabaseError",
+  "error", // pg-protocol's ErrorResponse name.
+  "CloudProviderError",
+]);
+const ERROR_CODES = new Set([
+  "input_invalid",
+  "source_invalid",
+  "fork_unknown",
+  "child_invalid",
+  "cleanup_pending",
+  "probe_invalid",
+  "probe_failed",
+  "probe_transport_failed",
+  "bootstrap_timeout",
+  "verification_failed",
+  "provider_not_found",
+  "provider_credential_rejected",
+  "provider_budget_exhausted",
+  "provider_rate_limited",
+  "provider_request_failed",
+  "provider_response_invalid",
+  "provider_response_too_large",
+  "provider_request_timeout",
+  "provider_request_unavailable",
+  "ERR_MODULE_NOT_FOUND",
+  "MODULE_NOT_FOUND",
+  "ERR_PACKAGE_PATH_NOT_EXPORTED",
+  "ERR_REQUIRE_ESM",
+  "ENOENT",
+  "EACCES",
+  "EPERM",
+  "ENOSPC",
+  "EPIPE",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+]);
+const SQLSTATES = new Set([
+  "08001",
+  "08003",
+  "08006",
+  "0A000",
+  "25006",
+  "25P02",
+  "28000",
+  "28P01",
+  "3D000",
+  "3F000",
+  "40001",
+  "40P01",
+  "42501",
+  "42601",
+  "42703",
+  "42704",
+  "42883",
+  "42P01",
+  "53300",
+  "57014",
+  "57P01",
+]);
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const pause = () => new Promise((resolve) => setTimeout(resolve, 5000));
 const requireCheck = (pass, code) => {
@@ -37,6 +124,48 @@ const requireCheck = (pass, code) => {
 const key = (journal) => `zeros-v2-test-s1-${journal.id}`;
 const STATUS_COMMAND =
   "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
+
+/** Error messages, stacks, arbitrary names/codes and provider bodies are never
+ * diagnostics. Local check messages are admitted only by exact closed identity. */
+export function templateSetupErrorDiagnostic(phase, error) {
+  const diagnostic = {
+    schema: "zeros.template-setup-error/v1",
+    phase: PHASES.has(phase) ? phase : "top_level",
+    name:
+      error instanceof BaseFailure
+        ? "BaseFailure"
+        : ERROR_NAMES.has(error?.name)
+          ? error.name
+          : "UnknownError",
+  };
+  const code = ERROR_CODES.has(error?.code)
+    ? error.code
+    : ERROR_CODES.has(error?.message)
+      ? error.message
+      : undefined;
+  if (code) diagnostic.code = code;
+  if (SQLSTATES.has(error?.code)) diagnostic.sqlstate = error.code;
+  const check =
+    error instanceof BaseFailure
+      ? error.diagnostic.failedChecks[0]
+      : error?.check;
+  if (
+    [
+      "input_schema",
+      "provider_request",
+      "timeout",
+      "diagnostic_missing",
+    ].includes(check)
+  )
+    diagnostic.check = check;
+  return diagnostic;
+}
+
+function reportTemplateSetupError(phase, error) {
+  process.stderr.write(
+    JSON.stringify(templateSetupErrorDiagnostic(phase, error)) + "\n",
+  );
+}
 
 /** Operator-only: .env.agent is the sole credential source. The Alpha database
  * is read-only; no workspace admission, GitHub token, hook or engine is issued. */
@@ -90,6 +219,7 @@ export function newTemplateSetupJournal(
     deletionId: null,
     phase: "source",
     cleanup: "pending",
+    cleanupStorageStage: null,
     failedChecks: [],
     probe: null,
   };
@@ -161,7 +291,13 @@ async function recoverFork(journal, { request, save }) {
 }
 
 export async function cleanupTemplateSetupFork(journal, dependencies) {
-  const { request, save, wait = pause, attempts = 120 } = dependencies;
+  const {
+    request,
+    save,
+    wait = pause,
+    attempts = 120,
+    diagnose = reportTemplateSetupError,
+  } = dependencies;
   if (!journal.createAttempted) {
     journal.cleanup = "not_created";
     save(journal);
@@ -199,16 +335,33 @@ export async function cleanupTemplateSetupFork(journal, dependencies) {
           operation.kind === "sandbox",
         "cleanup_pending",
       );
-      if (
+      const completed =
         operation.status === "completed" &&
         typeof operation.completedAt === "string" &&
-        Number.isFinite(Date.parse(operation.completedAt))
-      ) {
-        journal.cleanup = "verified";
-        save(journal);
-        return;
+        Number.isFinite(Date.parse(operation.completedAt));
+      const storagePending =
+        operation.status === "blocked" && STORAGE_STAGES.has(operation.stage);
+      if (completed || storagePending) {
+        // Match builder cleanup (#315): a storage-only receipt plus 404 proves
+        // compute release. It does not prove snapshot/storage erasure.
+        try {
+          await request(`/sandboxes/${journal.childId}`);
+        } catch (error) {
+          if (
+            !(
+              error instanceof CloudProviderError &&
+              error.code === "provider_not_found"
+            )
+          )
+            throw error;
+          journal.cleanup = "verified";
+          journal.cleanupStorageStage = storagePending ? operation.stage : null;
+          save(journal);
+          return;
+        }
       }
-    } catch {
+    } catch (error) {
+      diagnose("cleanup", error);
       /* Keep the key, ID and receipt for retry; never print a remote body. */
     }
     if (attempt + 1 < attempts) await wait();
@@ -217,7 +370,14 @@ export async function cleanupTemplateSetupFork(journal, dependencies) {
 }
 
 export async function runTemplateSetupRepro(journal, billingOrg, dependencies) {
-  const { request, load, ready, probe, save } = dependencies;
+  const {
+    request,
+    load,
+    ready,
+    probe,
+    save,
+    diagnose = reportTemplateSetupError,
+  } = dependencies;
   save(journal);
   try {
     const material = await load(journal);
@@ -253,12 +413,14 @@ export async function runTemplateSetupRepro(journal, billingOrg, dependencies) {
     journal.probe = sanitizeProbeReport(await probe(journal, material));
     if (journal.probe.checks.some((check) => !check.ok))
       journal.failedChecks.push("probe_failed");
-  } catch {
+  } catch (error) {
+    diagnose(journal.phase, error);
     journal.failedChecks.push("verification_failed");
   } finally {
     try {
       await cleanupTemplateSetupFork(journal, dependencies);
-    } catch {
+    } catch (error) {
+      diagnose("cleanup", error);
       journal.failedChecks.push("cleanup_pending");
     }
     save(journal);
@@ -272,7 +434,6 @@ export async function readTemplateSetupSource(pool, journal) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN READ ONLY");
-    await client.query("SET LOCAL ROLE zeros_app");
     await client.query("SELECT set_config('app.system', 'on', true)");
     const { rows } = await client.query(
       `SELECT source.org_id,source.build_id,source.config_id,
@@ -385,27 +546,79 @@ function privateFile(file, maximum = 256 * 1024) {
   }
 }
 
-// This fixed launcher writes only to a private /run directory on the child.
-// Code and secret-free expected material travel over the pinned SSH stdin.
-const PROBE_LAUNCHER = `import json,os,shutil,subprocess,sys,tempfile
+// B4's commands API runs this program under sudo Python. It carries only the
+// probe source and secret-free expected material; no SSH or API stdin stream.
+function probeProgram(source, material) {
+  return `import json,os,shutil,subprocess,sys,tempfile
 os.umask(0o077)
-data=json.loads(sys.stdin.buffer.read(256*1024))
-directory=tempfile.mkdtemp(prefix='zeros-v2-test-s1-',dir='/run/zeros')
+directory=None
 try:
+ data=json.loads(${JSON.stringify(JSON.stringify({ source, material }))})
+ directory=tempfile.mkdtemp(prefix='zeros-v2-test-s1-',dir='/run/zeros')
  file=directory+'/probe.mjs'
  with open(file,'x') as stream: stream.write(data['source'])
  node=os.path.realpath('/opt/zeros/current/bin/node')
  result=subprocess.run([node,file],input=json.dumps(data['material']).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=420,env={'PATH':'/usr/bin:/bin','HOME':'/root'})
- if len(result.stdout)>128*1024: raise ValueError()
+ if len(result.stdout)>65536: raise ValueError()
  sys.stdout.buffer.write(result.stdout)
  sys.exit(result.returncode)
-except Exception:
- print('probe_transport_failed',file=sys.stderr)
+except Exception as error:
+ name=type(error).__name__
+ if name not in ('ValueError','OSError','FileNotFoundError','PermissionError','TimeoutExpired'): name='UnknownError'
+ print(json.dumps({'schema':'zeros.template-setup-error/v1','phase':'probe','name':name,'code':'probe_transport_failed'},separators=(',',':')),file=sys.stderr)
  sys.exit(1)
 finally:
- shutil.rmtree(directory)
+ if directory is not None: shutil.rmtree(directory)
 `;
-const shellQuote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+}
+
+export async function runTemplateSetupProbe(
+  childId,
+  material,
+  { request, diagnose = reportTemplateSetupError },
+) {
+  requireCheck(BOAT_RESOURCE_ID_PATTERN.test(childId), "child_invalid");
+  const source = readFileSync(
+    new URL("./template-setup-probe.mjs", import.meta.url),
+    "utf8",
+  );
+  const response = await remote(
+    {
+      boat: async (method, pathname, input) => {
+        try {
+          return {
+            status: 200,
+            body: await request(pathname, {
+              method,
+              body: input.body,
+              timeoutMs: input.timeoutMs,
+            }),
+          };
+        } catch (error) {
+          // remote wraps failures in BaseFailure; retain the provider's closed
+          // identity before that wrapper discards the original error.
+          diagnose("probe", error);
+          throw error;
+        }
+      },
+    },
+    childId,
+    pythonProbe(probeProgram(source, material), "verify"),
+    480,
+  );
+  const result = response.body;
+  requireCheck(
+    response.status === 200 &&
+      result?.success === true &&
+      result.exitCode === 0 &&
+      !result.timedOut &&
+      !result.stdoutTruncated &&
+      typeof result.stdout === "string" &&
+      Buffer.byteLength(result.stdout) <= 65536,
+    "probe_invalid",
+  );
+  return JSON.parse(result.stdout);
+}
 
 async function main() {
   const args = process.argv.slice(2),
@@ -446,6 +659,11 @@ async function main() {
   );
   if (journal.probe !== null)
     journal.probe = sanitizeProbeReport(journal.probe);
+  requireCheck(
+    journal.cleanupStorageStage == null ||
+      STORAGE_STAGES.has(journal.cleanupStorageStage),
+    "input_invalid",
+  );
   const config = templateSetupReproConfig(
     parseEnv(privateFile(path.join(root, ".env.agent"))),
   );
@@ -481,7 +699,7 @@ async function main() {
     application_name: "zeros-v2-test-s1",
     options: "-c role=none -c default_transaction_read_only=on",
   });
-  pool.on("error", () => {});
+  pool.on("error", (error) => reportTemplateSetupError("source", error));
   const dependencies = {
     save,
     request: boat.request.bind(boat),
@@ -521,39 +739,18 @@ async function main() {
             ["idle", "waiting_for_runtime"].includes(parsed.data.hostState)
           )
             return;
-        } catch {
+        } catch (error) {
+          reportTemplateSetupError("bootstrap", error);
           /* Restore and /run publication can still be in progress. */
         }
         await pause();
       }
       throw new Error("bootstrap_timeout");
     },
-    probe: async (_journal, material) => {
-      const result = await executeBoatPinnedSsh(
-        {
-          resourceId: journal.childId,
-          command: `/usr/bin/python3 -I -c ${shellQuote(PROBE_LAUNCHER)}`,
-          stdin: JSON.stringify({
-            source: readFileSync(
-              new URL("./template-setup-probe.mjs", import.meta.url),
-              "utf8",
-            ),
-            material,
-          }),
-          timeoutSeconds: 480,
-        },
-        { client: boat, maxOutputBytes: 256 * 1024 },
-        globalThis.AbortSignal.timeout(540000),
-      );
-      requireCheck(
-        result.exitCode === 0 &&
-          !result.stdoutTruncated &&
-          typeof result.stdout === "string" &&
-          Buffer.byteLength(result.stdout) <= 128 * 1024,
-        "probe_invalid",
-      );
-      return JSON.parse(result.stdout);
-    },
+    probe: (_journal, material) =>
+      runTemplateSetupProbe(journal.childId, material, {
+        request: boat.request.bind(boat),
+      }),
   };
   try {
     if (cleanupOnly) await cleanupTemplateSetupFork(journal, dependencies);
@@ -565,6 +762,7 @@ async function main() {
         childId: journal.childId,
         phase: journal.phase,
         cleanup: journal.cleanup,
+        cleanupStorageStage: journal.cleanupStorageStage ?? null,
         failedChecks: journal.failedChecks,
         probe: journal.probe,
       }) + "\n",
@@ -583,9 +781,7 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 )
-  main().catch(() => {
-    process.stderr.write(
-      "Template setup reproduction failed; retain the cleanup journal.\n",
-    );
+  main().catch((error) => {
+    reportTemplateSetupError("top_level", error);
     process.exitCode = 1;
   });

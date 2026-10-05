@@ -231,6 +231,19 @@ export function sanitizeProbeReport(value) {
   };
 }
 
+/** Preserve check/failure evidence first; optional filesystem snapshots yield
+ * to the commands API's 64 KiB stdout budget. */
+export function serializeProbeReport(value) {
+  const report = sanitizeProbeReport(value);
+  let output = JSON.stringify(report) + "\n";
+  while (Buffer.byteLength(output) > 65536) {
+    if (!report.paths.length) throw new Error("probe_invalid");
+    report.paths.pop();
+    output = JSON.stringify(report) + "\n";
+  }
+  return output;
+}
+
 /** Observe the original fs calls, preserving their arguments/results/errors.
  * The last operation and a filtered stack locate a compound failing predicate. */
 export function installFilesystemTrace() {
@@ -545,7 +558,7 @@ async function main() {
   } finally {
     trace.restore();
   }
-  process.stdout.write(JSON.stringify(sanitizeProbeReport(report)) + "\n");
+  process.stdout.write(serializeProbeReport(report));
 }
 
 if (new URL(import.meta.url).searchParams.has("observer")) observeAttester();

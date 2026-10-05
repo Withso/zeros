@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import {
   mkdirSync,
@@ -15,14 +15,18 @@ import {
   cleanupTemplateSetupFork,
   newTemplateSetupJournal,
   runTemplateSetupRepro,
+  runTemplateSetupProbe,
   readTemplateSetupSource,
+  templateSetupErrorDiagnostic,
   templateSetupForkBody,
   templateSetupReproConfig,
 } from "../cloud-workspace-validation/template-setup-repro.mjs";
 import {
   safeProbePath,
   sanitizeProbeReport,
+  serializeProbeReport,
 } from "../cloud-workspace-validation/template-setup-probe.mjs";
+import { CloudProviderError } from "../../apps/control-plane/src/cloud-workspaces/provider";
 
 const templateId = "bx_3456789a",
   childId = "bx_23456789";
@@ -61,6 +65,13 @@ function fixture() {
       deleted = true;
       return { operation: { id: deletionId, targetId: childId } };
     }
+    if (deleted && pathname === `/sandboxes/${childId}`)
+      throw new CloudProviderError(
+        "provider_not_found",
+        "private provider body",
+        false,
+        { httpStatus: 404 },
+      );
     return {
       sandbox: {
         id: pathname.split("/").at(-1),
@@ -106,6 +117,7 @@ function fixture() {
     save: vi.fn((value) => saves.push(JSON.stringify(value))),
     wait: vi.fn(async () => {}),
     attempts: 2,
+    diagnose: vi.fn(),
   };
   return {
     journal,
@@ -118,6 +130,32 @@ function fixture() {
 }
 
 describe("operator template setup reproduction", () => {
+  it("reads source as the operator role without requiring membership in zeros_app", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (/SET\s+LOCAL\s+ROLE/i.test(sql))
+        throw Object.assign(new Error("permission denied to set role"), {
+          code: "42501",
+        });
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const pool = { connect: vi.fn(async () => ({ query, release })) };
+    await expect(
+      readTemplateSetupSource(pool, fixture().journal),
+    ).rejects.toThrow(/^source_invalid$/);
+    expect(
+      query.mock.calls
+        .map(([sql]) => sql)
+        .some((sql) => /SET\s+LOCAL\s+ROLE/i.test(sql)),
+    ).toBe(false);
+    expect(query.mock.calls[0]?.[0]).toBe("BEGIN READ ONLY");
+    expect(query.mock.calls[1]?.[0]).toBe(
+      "SELECT set_config('app.system', 'on', true)",
+    );
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(release).toHaveBeenCalledOnce();
+  });
+
   it.skipIf(!process.env.TEST_DATABASE_URL)(
     "executes the saved-source query against the migrated local Postgres schema",
     async () => {
@@ -269,6 +307,241 @@ describe("operator template setup reproduction", () => {
     expect(f.saves.join("\n")).not.toContain("untrusted stderr");
   });
 
+  it.each([
+    "waiting_for_uploads",
+    "kept_for_newer_snapshots",
+    "waiting_for_restore",
+  ])(
+    "confirms compute release with a %s storage receipt and child 404",
+    async (stage) => {
+      const f = fixture(),
+        implementation = f.request.getMockImplementation()!;
+      f.request.mockImplementation(async (pathname, input) =>
+        pathname.startsWith("/deletion-operations/")
+          ? {
+              operation: {
+                id: deletionId,
+                kind: "sandbox",
+                targetId: childId,
+                status: "blocked",
+                stage,
+              },
+            }
+          : implementation(pathname, input),
+      );
+      const result = await runTemplateSetupRepro(
+        f.journal,
+        billingOrg,
+        f.dependencies,
+      );
+      expect(result).toMatchObject({
+        cleanup: "verified",
+        cleanupStorageStage: stage,
+        failedChecks: ["probe_failed"],
+      });
+      expect(
+        f.request.mock.calls.some(
+          ([pathname, input]) =>
+            pathname === `/sandboxes/${childId}` && !input?.method,
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    { status: "blocked", stage: "unknown_stage", absent: true },
+    { status: "blocked", stage: "waiting_for_uploads", absent: false },
+    { status: "completed", completedAt: "2026-10-05T00:00:00Z", absent: false },
+  ])(
+    "keeps cleanup pending without qualified receipt and child absence: %j",
+    async ({ absent, ...operation }) => {
+      const f = fixture(),
+        implementation = f.request.getMockImplementation()!;
+      f.request.mockImplementation(async (pathname, input) => {
+        if (pathname.startsWith("/deletion-operations/"))
+          return {
+            operation: {
+              id: deletionId,
+              kind: "sandbox",
+              targetId: childId,
+              ...operation,
+            },
+          };
+        if (!absent && pathname === `/sandboxes/${childId}` && !input?.method)
+          return { sandbox: { id: childId, state: "deleting" } };
+        return implementation(pathname, input);
+      });
+      const result = await runTemplateSetupRepro(
+        f.journal,
+        billingOrg,
+        f.dependencies,
+      );
+      expect(result).toMatchObject({
+        cleanup: "pending",
+        failedChecks: ["probe_failed", "cleanup_pending"],
+      });
+    },
+  );
+
+  it("uses B4's sudo Python transport over the commands API with a bounded response", async () => {
+    const f = fixture(),
+      report = await f.dependencies.probe();
+    const request = vi.fn(async () => ({
+      success: true,
+      exitCode: 0,
+      stdout: JSON.stringify(report),
+      timedOut: false,
+      stdoutTruncated: false,
+    }));
+    expect(
+      await runTemplateSetupProbe(childId, f.material, { request }),
+    ).toEqual(report);
+    const [pathname, input] = request.mock.calls[0]! as any;
+    expect(pathname).toBe(`/sandboxes/${childId}/commands`);
+    expect(input.method).toBe("POST");
+    expect(input.timeoutMs).toBe(510000);
+    expect(input.body.timeoutSeconds).toBe(480);
+    expect(
+      input.body.command.startsWith(
+        "/usr/bin/sudo -n /usr/bin/python3 -I - <<'PYV4'\n",
+      ),
+    ).toBe(true);
+    expect(Buffer.byteLength(input.body.command)).toBeLessThanOrEqual(65536);
+    expect(Object.hasOwn(input, "stdin")).toBe(false);
+    const program = input.body.command.split("\n").slice(1, -1).join("\n");
+    const decoded = execFileSync(
+      "python3",
+      [
+        "-I",
+        "-c",
+        `
+import ast,json,pathlib,sys
+tree=ast.parse(sys.stdin.read())
+assignment=next(node for node in ast.walk(tree) if isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id=='data' for target in node.targets))
+data=json.loads(ast.literal_eval(assignment.value.args[0]))
+source=pathlib.Path('scripts/cloud-workspace-validation/template-setup-probe.mjs').read_text()
+print(json.dumps({'sourceMatches':data['source']==source,'cpu':data['material']['image']['resources']['cpuMillicores']}))
+`,
+      ],
+      { input: program, encoding: "utf8" },
+    );
+    expect(JSON.parse(decoded)).toEqual({ sourceMatches: true, cpu: 4000 });
+    for (const invalid of [
+      { success: false },
+      { exitCode: 1 },
+      { timedOut: true },
+      { stdoutTruncated: true },
+      { stdout: "x".repeat(65537) },
+    ]) {
+      request.mockResolvedValueOnce({
+        success: true,
+        exitCode: 0,
+        stdout: JSON.stringify(report),
+        timedOut: false,
+        stdoutTruncated: false,
+        ...invalid,
+      });
+      await expect(
+        runTemplateSetupProbe(childId, f.material, { request }),
+      ).rejects.toThrow(/^probe_invalid$/);
+    }
+  });
+
+  it("bounds snapshot output while retaining the first failing check and its metadata", async () => {
+    const report = await fixture().dependencies.probe();
+    const longPath = `/srv/zeros/${"directory/".repeat(390)}file`;
+    const output = serializeProbeReport({
+      ...report,
+      paths: Array.from({ length: 100 }, () => ({
+        path: longPath,
+        realpath: longPath,
+        uid: 0,
+        gid: 0,
+        mode: "0755",
+        type: "directory",
+      })),
+    });
+    expect(Buffer.byteLength(output)).toBeLessThanOrEqual(65536);
+    expect(JSON.parse(output).checks).toEqual(report.checks);
+    expect(JSON.parse(output).paths.length).toBeGreaterThan(0);
+    expect(JSON.parse(output).paths.length).toBeLessThan(100);
+  });
+
+  it.each(["DatabaseError", "error"])(
+    "emits closed %s phase diagnostics including SQLSTATE without messages or arbitrary codes",
+    async (name) => {
+      const f = fixture();
+      f.dependencies.load.mockRejectedValue(
+        Object.assign(new Error("private URL and credential"), {
+          name,
+          code: "42501",
+        }),
+      );
+      await runTemplateSetupRepro(f.journal, billingOrg, f.dependencies);
+      expect(f.dependencies.diagnose).toHaveBeenCalledWith(
+        "source",
+        expect.objectContaining({ code: "42501" }),
+      );
+      expect(
+        templateSetupErrorDiagnostic(
+          "source",
+          f.dependencies.diagnose.mock.calls[0]![1],
+        ),
+      ).toEqual({
+        schema: "zeros.template-setup-error/v1",
+        phase: "source",
+        name,
+        sqlstate: "42501",
+      });
+      expect(
+        templateSetupErrorDiagnostic(
+          "probe",
+          new CloudProviderError(
+            "provider_request_failed",
+            "private provider body",
+            true,
+          ),
+        ),
+      ).toMatchObject({
+        name: "CloudProviderError",
+        code: "provider_request_failed",
+      });
+      expect(
+        JSON.stringify(
+          templateSetupErrorDiagnostic("private URL", {
+            name: "private credential",
+            code: "private credential",
+            check: "private credential",
+            message: "private credential",
+          }),
+        ),
+      ).not.toContain("private");
+    },
+  );
+
+  it("prints a closed top-level diagnostic for invalid CLI input", () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        path.resolve(
+          "scripts/cloud-workspace-validation/template-setup-repro.mjs",
+        ),
+        "--invalid",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toEqual({
+      schema: "zeros.template-setup-error/v1",
+      phase: "top_level",
+      name: "Error",
+      code: "input_invalid",
+    });
+  });
+
   it("accepts credentials only from the Alpha declaration and rejects database routing overrides", () => {
     const database = new URL(
       "postgresql://fixture.psdb.cloud/zeros?sslmode=verify-full",
@@ -286,6 +559,12 @@ describe("operator template setup reproduction", () => {
     });
     for (const changes of [
       { ZEROS_PLANETSCALE_ALPHA_DATABASE: "zeros-control-plane-beta" },
+      {
+        ZEROS_S1_ALPHA_DATABASE_URL: values.ZEROS_S1_ALPHA_DATABASE_URL.replace(
+          "verify-full",
+          "require",
+        ),
+      },
       {
         ZEROS_S1_ALPHA_DATABASE_URL:
           values.ZEROS_S1_ALPHA_DATABASE_URL + "&host=other",
