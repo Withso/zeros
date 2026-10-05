@@ -9,9 +9,11 @@ vi.mock("../cloud-workspace-validation/sandbox/cloud-computer-checkout.mjs", asy
 }));
 vi.mock("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs", async (original) => {
   const module = await original<typeof import("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs")>();
-  return { ...module, resolveCloudRuntimeChild: () => fixture.template
-    ? { profile: "v4", binRoot: "/opt/zeros-infra/fixture/bin", node: process.execPath,
-      helpers: { setupProcess: path.resolve("scripts/cloud-workspace-validation/sandbox/cloud-setup-process.mjs") } } : module.resolveCloudRuntimeChild() };
+  const templateRuntime = () => ({ profile: "v4", binRoot: "/opt/zeros-infra/fixture/bin", node: process.execPath,
+    helpers: { setupProcess: path.resolve("scripts/cloud-workspace-validation/sandbox/cloud-setup-process.mjs") } });
+  return { ...module,
+    resolveCloudRuntime: () => fixture.template ? templateRuntime() : module.resolveCloudRuntime(),
+    resolveCloudRuntimeChild: () => fixture.template ? templateRuntime() : module.resolveCloudRuntimeChild() };
 });
 vi.mock("node:child_process", async (original) => ({
   ...await original<typeof import("node:child_process")>(),
