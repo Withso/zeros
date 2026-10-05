@@ -445,12 +445,12 @@ export function ConversationPane({
                 readOnly={readOnly}
                 emptyContent={emptyHistory}
                 onMinimumSizeChange={setPaneMinimumSize}
-                // The collapsed sidebar's window controls are 110px wide; the
+                // The collapsed sidebar's window controls are 116px wide; the
                 // leading slot's own 8px gutter plus this spacer clears them.
                 stripLeading={
                   windowControlsInset ? (
                     <span
-                      className="block h-full w-[102px] shrink-0"
+                      className="block h-full w-[108px] shrink-0"
                       aria-hidden="true"
                       data-window-controls-reserve=""
                     />

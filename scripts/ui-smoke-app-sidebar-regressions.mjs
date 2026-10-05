@@ -18,27 +18,19 @@ export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
     name: "App resources",
     exact: true,
   });
-  const archive = page.getByRole("button", {
-    name: "Archived workspaces for Zeros",
-  });
   await expect(resources).toBeVisible();
   await expect(resources).toHaveText("");
+  await expect(
+    page.getByRole("button", { name: /Archived workspaces/ }),
+  ).toHaveCount(0);
   const sidebarBox = await page.locator("[data-app-sidebar]").boundingBox();
   expect(sidebarBox.width).toBe(200);
-  for (const button of [resources, archive]) {
-    const box = await button.boundingBox();
-    expect(box.width).toBe(28);
-    expect(box.x).toBeGreaterThanOrEqual(sidebarBox.x);
-    expect(box.x + box.width).toBeLessThanOrEqual(
-      sidebarBox.x + sidebarBox.width,
-    );
-  }
-  await archive.click();
-  await expect(page.getByRole("dialog")).toBeVisible();
-  await expect(
-    page.getByPlaceholder("Search archived workspaces…"),
-  ).toBeVisible();
-  await page.keyboard.press("Escape");
+  const box = await resources.boundingBox();
+  expect(box.width).toBe(28);
+  expect(box.x).toBeGreaterThanOrEqual(sidebarBox.x);
+  expect(box.x + box.width).toBeLessThanOrEqual(
+    sidebarBox.x + sidebarBox.width,
+  );
   await resources.click();
   const details = page.getByRole("dialog", { name: "App resources" });
   await expect(details).toBeVisible();
@@ -46,7 +38,7 @@ export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
   await expect(details).toContainText("CPU");
   await page.keyboard.press("Escape");
   check(
-    "Resource details stay available from an icon and Archive fits at 200px",
+    "Resource details stay available from an icon at 200px, with no Archive picker",
     true,
   );
 }
@@ -78,7 +70,9 @@ export async function checkSidebarUnopenedFolder({ page, check, harnessBase }) {
       page.getByRole("tab", { name: "Environment", exact: true }),
     ).toHaveAttribute("aria-selected", "true");
     await page.getByRole("tab", { name: "Paths", exact: true }).click();
-    await page.getByRole("button", { name: "Remove folder", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Remove folder", exact: true })
+      .click();
     const removal = page.getByRole("dialog", { name: "Remove Empty folder?" });
     await expect(removal).toBeVisible();
     await removal.getByRole("button", { name: "Cancel", exact: true }).click();

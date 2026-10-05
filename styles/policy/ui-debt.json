@@ -528,7 +528,7 @@
         "button": 1
       },
       "apps/desktop/src/renderer/shell/app-sidebar.tsx": {
-        "button": 3
+        "button": 1
       },
       "apps/desktop/src/renderer/shell/conversation/chat-tabs.tsx": {
         "input": 1
