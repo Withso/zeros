@@ -62,6 +62,7 @@ import {
   type ResourceSortKey,
   type ResourceViewNode,
 } from "./resource-monitor-model";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 // --- CONSTANTS ---
 
@@ -636,7 +637,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 </div>
               )}
             </div>
-            <div className="flex shrink-0 items-center gap-1">
+            <Inline gap={1} align="center" className="shrink-0">
               <Tooltip
                 label={
                   currentTerminalFilterAvailable
@@ -711,7 +712,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                   <Copy aria-hidden="true" />
                 </Button>
               </Tooltip>
-            </div>
+            </Inline>
           </div>
 
           {totals && displaySnapshot && (

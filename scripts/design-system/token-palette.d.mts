@@ -30,12 +30,14 @@ export interface LadderResult {
   theme: string;
   upper: string;
   lower: string;
+  on: string;
   step: number;
   minStep: number;
   pass: boolean;
 }
 
 export const TOKENS_FILE: string;
+export function extractBlockRange(css: string, selector: string): [number, number];
 export function extractBlock(css: string, selector: string): string;
 export function declarations(block: string): ThemeMap;
 export function readThemes(root?: string, css?: string): Themes;

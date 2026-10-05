@@ -17,6 +17,7 @@ import { asDisplayString, toolCompletionUnreported } from "./raw-output";
 import { toolRecord } from "./native-tool-presentation";
 import { toolPresentationReady } from "./tool-readiness";
 import { ToolDetailSurface } from "./tool-detail-surface";
+import { ListRow } from "@/renderer/shared/ui/primitives/list-row";
 
 const NO_CHILDREN: AgentMessage[] = [];
 
@@ -72,9 +73,9 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
     if (!toolPresentationReady(tool)) return null;
     return (
       <div className="flex min-w-0 flex-col" data-agent-group="">
-        <button
+        <ListRow
           type="button"
-          className="group/subagent-row hover:bg-bg2-hover/40 -ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors"
+          className="group/subagent-row min-w-0 transition-colors"
           onClick={() => setOpen((value) => !value)}
           aria-label={`Agent ${headerText}`}
           aria-description={failed ? "Agent failed" : undefined}
@@ -122,7 +123,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
           >
             {headerText}
           </span>
-        </button>
+        </ListRow>
         {open && (
           <div
             id={bodyId}
@@ -133,16 +134,15 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
           >
             {promptHtml && (
               <div className="flex min-w-0 flex-col">
-                <button
+                <ListRow
                   type="button"
-                  className="hover:bg-bg2-hover/40 -ml-2 flex w-fit max-w-full items-center gap-2 rounded-md px-2 py-1 text-left"
                   onClick={() => setPromptOpen((value) => !value)}
                   aria-expanded={promptOpen}
                   aria-controls={promptId}
                 >
                   <MessageSquare className="text-fg2 size-3 shrink-0" />
                   <span className="text-fg1 text-sm">Prompt</span>
-                </button>
+                </ListRow>
                 {promptOpen && (
                   <div
                     id={promptId}

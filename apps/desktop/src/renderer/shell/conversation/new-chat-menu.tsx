@@ -19,7 +19,6 @@ import { useChatPanesStore } from "../../state/chat-panes-store";
 import { spawnNewChatTab } from "../../state/spawn-default-chat";
 import { spawnTerminalTab } from "../../state/spawn-terminal-tab";
 import { useWorkspaceDispatch } from "../../state/store";
-import { Button } from "../../shared/ui";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,9 +27,7 @@ import {
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
 import { Tooltip } from "../../shared/ui/primitives";
-
-const PLUS_BUTTON_CLS =
-  "size-7 shrink-0 rounded-sm text-fg2 hover:bg-bg2-hover/40 hover:text-fg1 transition-[background-color,color] duration-120 ease-out";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 export interface NewChatMenuProps {
   /** Cwd / workspace path the new tab should attach to. */
@@ -67,15 +64,15 @@ export function NewChatMenu({
   }, [dispatch, workspaceFolder, paneId, beginAssignNextChat]);
 
   const plusButton = (
-    <Button
-      variant="ghost"
-      size="icon-sm"
-      className={PLUS_BUTTON_CLS}
-      aria-label={terminalAgentsEnabled ? "New tab" : "New chat"}
+    <IconButton
+      size="standard"
+      hover="subtle"
+      className="shrink-0"
+      label={terminalAgentsEnabled ? "New tab" : "New chat"}
       onClick={terminalAgentsEnabled ? undefined : openChat}
     >
       <Plus className="size-3.5" />
-    </Button>
+    </IconButton>
   );
 
   if (!terminalAgentsEnabled) {

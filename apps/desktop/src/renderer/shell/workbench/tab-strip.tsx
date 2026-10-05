@@ -72,6 +72,7 @@ import {
   forgetBrowserTabFavicon,
   useBrowserTabFavicon,
 } from "../../features/browser/browser-tab-favicon-store";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 interface WorkbenchTabStripProps {
   /** The persisted workbench home + open-File tab list — see Workbench. */
@@ -365,15 +366,15 @@ function TabPill({
       {browserWorking ? (
         <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-9 items-center justify-end bg-gradient-to-l from-55% to-transparent pr-1.5 pl-3">
           <Tooltip label="Stop agent browser work">
-            <button
+            <IconButton
               type="button"
               onClick={stopAgentBrowser}
               disabled={stoppingBrowser}
-              aria-label="Stop agent browser work"
-              className="text-fg2 hover:bg-bg2-hover hover:text-fg1 pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm transition-[background-color,color] duration-120 ease-out disabled:opacity-50"
+              label="Stop agent browser work"
+              className="pointer-events-auto shrink-0 disabled:opacity-50"
             >
               <CircleStop className="size-3.5" aria-hidden="true" />
-            </button>
+            </IconButton>
           </Tooltip>
         </div>
       ) : canClose ? (
@@ -392,17 +393,17 @@ function TabPill({
               tab.type === "files" && tab.fixed ? "Close file" : "Close tab"
             }
           >
-            <button
+            <IconButton
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 onClose(e, browserActivity?.browserSessionId);
               }}
-              aria-label={`Close ${tab.title}`}
-              className="text-fg2 hover:bg-bg2-hover hover:text-fg1 pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm transition-[background-color,color] duration-120 ease-out"
+              label={`Close ${tab.title}`}
+              className="pointer-events-auto shrink-0"
             >
               <X className="size-3.5" />
-            </button>
+            </IconButton>
           </Tooltip>
         </div>
       ) : null}

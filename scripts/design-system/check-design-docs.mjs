@@ -21,6 +21,7 @@ import {
   compileCandidates,
   KNOWN_HOOK_CLASSES,
   ownedStylesheets,
+  rendererSourceFiles,
 } from "./check-compiled-classes.mjs";
 
 // Agent-facing design docs. A `section` limits a shared file to its UI part.
@@ -70,6 +71,12 @@ function declaredCustomProperties(root) {
   const names = new Set();
   for (const file of ownedStylesheets(root)) {
     for (const match of readFileSync(file, "utf8").matchAll(/(--[a-z0-9-]+)\s*:/g)) names.add(match[1]);
+  }
+  // Contextual properties set through Tailwind arbitrary-property utilities
+  // (`[--surface-hover:var(--bg1-hover)]` in shared/ui/layout/surface.tsx,
+  // `[--pane-bg:var(--bg0)]`) are declarations too.
+  for (const file of rendererSourceFiles(root)) {
+    for (const match of readFileSync(file, "utf8").matchAll(/\[(--[a-z0-9-]+):/g)) names.add(match[1]);
   }
   return names;
 }

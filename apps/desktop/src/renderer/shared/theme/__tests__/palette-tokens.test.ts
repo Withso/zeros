@@ -110,15 +110,15 @@ const FORMER_WARM_DARK = {
  *    fg1/fg2  — raised for stronger text contrast on the neutral canvas.
  *    fg3      — the middle tier at L63 (the former palette sat at L44 before
  *               the tier consolidation).
- *    muted-fg — L54, the lowest lightness that keeps the quietest text tier at
- *               WCAG AA (4.5:1) on every rest surface; L44 failed it.
+ *    muted-fg — L42, the owner-chosen supplemental tier: a 3:1 floor at rest,
+ *               below AA by design; hovered/selected rows step up to fg3.
  *               styles/policy/contrast-contract.json owns the thresholds. */
 const NEUTRAL_DARK_LIGHTNESS_OVERRIDES: Record<string, number> = {
   bg2: 13,
   fg1: 94,
   fg2: 72,
   fg3: 63,
-  "muted-fg": 54,
+  "muted-fg": 42,
 };
 
 /** Structural primitives neutral Dark defines as an ALIAS rather than a literal
@@ -219,15 +219,14 @@ describe("foreground tier ladder", () => {
    *  FORMER_WARM_DARK + NEUTRAL_DARK_LIGHTNESS_OVERRIDES), so a "quick
    *  contrast tweak" to either palette is a reviewed edit.
    *
-   *  Every tier clears WCAG AA (4.5:1) on every rest surface — the thresholds
-   *  live in styles/policy/contrast-contract.json and contrast-contract.test.ts.
-   *  The ladder mirrors Dark's (≈ 9 / 7 / 5.5 : 1 on bg1). Lightness RISES as
-   *  the tiers get quieter because Light inverts the lightness axis. */
+   *  fg1–fg3 clear AA; muted-fg is neutral grey in both themes with a reviewed
+   *  supplemental 3:1 floor. Thresholds live in the contrast contract.
+   *  Lightness RISES as the tiers get quieter because Light inverts the axis. */
   const LIGHT_FOREGROUND_TIERS: Record<string, [number, number, number]> = {
     fg1: [20, 7, 16],
     fg2: [20, 4, 30.5],
     fg3: [20, 4, 36],
-    "muted-fg": [20, 4, 41],
+    "muted-fg": [0, 0, 42],
   };
 
   it("pins the light foreground tiers against unreviewed drift", () => {
@@ -267,6 +266,17 @@ describe("foreground tier ladder", () => {
         `${name}: fg3 lightness`,
       ).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("control outline palette", () => {
+  it("pins the reviewed rest and hover outlines in both themes", () => {
+    const dark = extractBlock(":root");
+    const light = extractBlock('[data-theme="light"]');
+    expect(tokenTriple(dark, "border3")).toEqual([0, 0, 24]);
+    expect(tokenTriple(dark, "border4")).toEqual([0, 0, 30]);
+    expect(tokenTriple(light, "border3")).toEqual([60, 3, 78]);
+    expect(tokenTriple(light, "border4")).toEqual([60, 3, 72]);
   });
 });
 

@@ -14,6 +14,7 @@ import { useFilesSidebarFraction } from "../workbench/tabs/files-sidebar-width";
 import { useSidebarResizeDrag } from "../workbench/tabs/use-sidebar-drag";
 import { useResizeHint } from "../use-resize-hint";
 import { CloudTerminalIndicator } from "./cloud-terminal-indicator";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 export interface TerminalNavigationEntry {
   id: string;
@@ -132,7 +133,7 @@ export function TerminalWorkbenchLayout({
             />
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <Inline gap={1} align="center" className="shrink-0">
           <Tooltip label="Move terminal to bottom panel">
             <Button
               variant="ghost"
@@ -185,7 +186,7 @@ export function TerminalWorkbenchLayout({
               />
             </Button>
           </Tooltip>
-        </div>
+        </Inline>
       </div>
       <div
         ref={containerRef}

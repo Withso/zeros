@@ -68,6 +68,7 @@ describe("generated design docs", () => {
     expect(reference).toMatch(/^# Zeros design tokens \(generated\)/);
     expect(reference).toContain("| `--fg2` |");
     expect(reference).toContain("## Contrast contract");
+    expect(reference).toContain("| border4 → border3 | bg2 | 1.15× |");
     expect(reference).not.toContain("✗");
   });
 

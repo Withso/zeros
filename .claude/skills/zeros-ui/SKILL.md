@@ -12,19 +12,23 @@ The full guide is `docs/design-system.md`; token values are in
 `docs/design-tokens.md`.
 
 1. **Compose, don't restyle.** Use the shared primitives in
-   `apps/desktop/src/renderer/shared/ui/primitives/` (Button, Input, Textarea,
-   Select, Checkbox, Switch, Tabs, DropdownMenu, Popover, Dialog, Tooltip, Kbd,
-   Badge, Pill, …). Missing a variant? Extend the primitive in `shared/ui/` —
-   never hand-build a `<button>`, `<input>`, `<select>`, or `<textarea>` in
-   feature code.
+   `apps/desktop/src/renderer/shared/ui/primitives/` (Button, IconButton,
+   Input, Textarea, Select, Checkbox, Switch, Tabs, DropdownMenu, Popover,
+   Dialog, Tooltip, Kbd, Badge, Pill, PanelHeader, ListRow, …) and the layout
+   blocks in `shared/ui/layout/` (`Inline`, `Stack`, `Surface`). Missing a
+   variant? Extend the primitive in `shared/ui/` — never hand-build a
+   `<button>`, `<input>`, `<select>`, or `<textarea>` in feature code.
 2. **Tokens only.** Color comes from token utilities (`bg-bg1`, `text-fg2`,
    `border-border1`, `text-red-primary`, …). No hex/rgb/hsl, no Tailwind palette
    colors (they do not compile), no arbitrary values such as `text-[14px]`,
-   `z-[1000]`, or `rounded-[18px]`.
+   `z-[1000]`, or `rounded-[18px]`. Token values live in
+   `styles/tokens/*.tokens.json`; the CSS token blocks are generated.
 3. **Surfaces decide hovers.** On `bg-bg1` hover with `hover:bg-bg1-hover`, on
    `bg-bg2` with `hover:bg-bg2-hover`, in a menu with `hover:bg-bg3-hover`, in
-   the sidebar with `hover:bg-sidebar-bg-hover`. `bg-bg3` is only for floating
-   menus and popovers. Selected = the hover state that stays.
+   the sidebar with `hover:bg-sidebar-bg-hover`. Inside a `Surface`, use
+   `hover:bg-(--surface-hover)` and the surface picks the right one. `bg-bg3`
+   is only for floating menus and popovers. Selected = the hover state that
+   stays.
 4. **Text tiers:** `text-fg1` emphasis/selected, `text-fg2` default, `text-fg3`
    secondary and placeholders, `text-muted-fg` metadata. Never fake a tier with
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is

@@ -5,6 +5,7 @@ import {
   WorkspaceFileTree,
   type WorkspaceFileTreeHandle,
 } from "./workspace-file-tree";
+import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
 
 interface FilesSearchSidebarProps {
   active?: boolean;
@@ -64,7 +65,7 @@ export function FilesSearchSidebar({
       data-testid="files-search-sidebar"
       className="bg-bg1 flex h-full min-h-0 flex-col overflow-hidden"
     >
-      <div className="border-border1 flex h-9 shrink-0 items-center gap-2 border-b px-3">
+      <PanelHeader size="panel" className="shrink-0">
         <Search className="text-fg3 size-4 shrink-0" />
         <input
           autoFocus={active}
@@ -75,7 +76,7 @@ export function FilesSearchSidebar({
           onKeyDown={handleSearchKeyDown}
           className="placeholder:text-fg3 text-fg1 h-full min-w-0 flex-1 bg-transparent text-xs outline-hidden"
         />
-      </div>
+      </PanelHeader>
       {search.trim() && (
         <div className="min-h-0 flex-1">
           <WorkspaceFileTree

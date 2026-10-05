@@ -22,6 +22,7 @@ import {
   DiffStat,
   ErrorCallout,
 } from "./review-shared-components";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 export function ReviewCommitsSection({
   commits,
@@ -76,7 +77,7 @@ function CommitRow({ commit: c }: { commit: PrCommitSummary }) {
     .join(", ");
   return (
     <div className="hover:bg-bg1-hover flex flex-col gap-1 px-3 py-2 transition-colors duration-120 ease-out">
-      <div className="flex min-w-0 items-center gap-2">
+      <Inline gap={2} align="center" className="min-w-0">
         <span className="text-fg1 min-w-0 truncate text-xs font-medium">
           {c.message.split("\n")[0]}
         </span>
@@ -85,7 +86,7 @@ function CommitRow({ commit: c }: { commit: PrCommitSummary }) {
           deletions={c.deletions ?? 0}
           className="text-2xxs"
         />
-      </div>
+      </Inline>
       <div className="flex min-w-0 items-center gap-1.5">
         <span className="flex shrink-0 -space-x-1.5">
           <AuthorAvatar

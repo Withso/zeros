@@ -7399,7 +7399,7 @@ export function DesignCanvas({
         <div
           data-design-canvas-tools-rail=""
           data-motion-open={motionTimelineOpen ? "" : undefined}
-          className="zd-design-tools-rail pointer-events-none absolute left-2 z-40 flex items-center"
+          className="zd-design-tools-rail pointer-events-none absolute left-2 z-chrome flex items-center"
         >
           <Toolbar
             data-design-controls

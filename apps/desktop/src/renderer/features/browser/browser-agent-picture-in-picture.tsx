@@ -23,6 +23,7 @@ import {
   requestImmediateNativeBrowserSurfacePark,
 } from "./native-browser-overlay";
 import { listenForNativeSurfaceOverlayIntent } from "../../shared/ui/native-surface-overlay";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 interface BrowserAgentPictureInPictureProps {
   visible: boolean;
@@ -373,7 +374,7 @@ export function BrowserAgentPictureInPicture({
   });
   return (
     <section
-      className="border-border2 bg-bg1 fixed right-4 bottom-4 z-40 flex overflow-hidden rounded-lg border shadow-[0_14px_42px_rgba(0,0,0,.38)]"
+      className="border-border2 bg-bg1 z-chrome fixed right-4 bottom-4 flex overflow-hidden rounded-lg border shadow-[0_14px_42px_rgba(0,0,0,.38)]"
       style={{
         width: pipSize.width,
         height: pipSize.height,
@@ -425,9 +426,10 @@ export function BrowserAgentPictureInPicture({
         >
           {pipTitle}
         </span>
-        <button
+        <IconButton
           type="button"
-          className="text-fg2 hover:bg-bg2-hover hover:text-fg1 pointer-events-auto inline-flex size-5 items-center justify-center rounded-sm"
+          motion="none"
+          className="pointer-events-auto"
           disabled={stopping}
           onClick={(event) => {
             event.stopPropagation();
@@ -438,26 +440,28 @@ export function BrowserAgentPictureInPicture({
               .catch(() => undefined)
               .finally(() => setStopping(false));
           }}
-          aria-label="Stop agent browser work"
+          label="Stop agent browser work"
         >
           <CircleStop className="size-3" aria-hidden="true" />
-        </button>
-        <button
+        </IconButton>
+        <IconButton
           type="button"
-          className="text-fg2 hover:bg-bg2-hover hover:text-fg1 pointer-events-auto inline-flex size-5 items-center justify-center rounded-sm"
+          motion="none"
+          className="pointer-events-auto"
           onClick={() => setHiddenSessionId(browserSessionId ?? null)}
-          aria-label="Hide browser picture in picture"
+          label="Hide browser picture in picture"
         >
           <Minus className="size-3" aria-hidden="true" />
-        </button>
-        <button
+        </IconButton>
+        <IconButton
           type="button"
-          className="text-fg2 hover:bg-bg2-hover hover:text-fg1 pointer-events-auto inline-flex size-5 items-center justify-center rounded-sm"
+          motion="none"
+          className="pointer-events-auto"
           onClick={restoreBrowser}
-          aria-label="Restore browser column"
+          label="Restore browser column"
         >
           <Maximize2 className="size-3" aria-hidden="true" />
-        </button>
+        </IconButton>
       </div>
       <div ref={hostRef} className="bg-bg1 absolute inset-0">
         {parked && capture ? (

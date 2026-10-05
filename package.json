@@ -71,6 +71,8 @@
     "check:deps": "node scripts/check-deps-installed.mjs",
     "check:ui": "node scripts/check-ui-consistency.mjs",
     "design:docs": "node scripts/design-system/build-design-docs.mjs",
+    "tokens:build": "node scripts/design-system/build-tokens.mjs",
+    "check:tokens": "node scripts/design-system/build-tokens.mjs --check",
     "check:preload": "node scripts/check-preload-allowlist.mjs",
     "check:cursor-asar": "node scripts/check-cursor-asar-unpack.mjs",
     "check:migrations": "tsx scripts/check-migrations-forward-only.mts",

@@ -118,6 +118,7 @@ import {
 } from "../../use-sticky-tab-strip";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { runOverlayWrapperClass } from "./run-overlay-layout";
+import { Stack } from "@/renderer/shared/ui/layout/stack";
 
 /** Sync the engine's SHARED terminal registry into a folder's tab strip:
  *  fetch the terminals the engine knows about, ADD those whose cwd
@@ -1224,13 +1225,23 @@ function RunActionOverlay({
       // itself back in — see the note there.)
       <div className="pointer-events-auto absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden">
         {running ? (
-          <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center">
+          <Stack
+            gap={3}
+            align="center"
+            justify="center"
+            className="h-full min-h-0 px-6 text-center"
+          >
             <ZerosSpinner size={16} />
             <div className="text-fg2 text-xs">Starting {action.name}…</div>
-          </div>
+          </Stack>
         ) : (
           <>
-            <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center">
+            <Stack
+              gap={3}
+              align="center"
+              justify="center"
+              className="h-full min-h-0 px-6 text-center"
+            >
               <DynamicIcon
                 name={action.icon}
                 className="text-muted-fg size-10"
@@ -1248,7 +1259,7 @@ function RunActionOverlay({
               <div className="text-muted-fg max-w-sm truncate font-mono text-xs">
                 {outcome ? RUN_LAST_RUN_COPY[outcome] : action.command}
               </div>
-            </div>
+            </Stack>
             {outcome && (
               <div className="absolute right-3 bottom-3">
                 <RunStatusBadge outcome={outcome} />
@@ -1288,7 +1299,12 @@ function RunActionOverlay({
 function RunAddEmpty() {
   const openRunActions = useOpenScriptsSettings("run-actions");
   return (
-    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center">
+    <Stack
+      gap={3}
+      align="center"
+      justify="center"
+      className="h-full min-h-0 px-6 text-center"
+    >
       <Play className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
       <Button variant="secondary" size="sm" onClick={() => openRunActions()}>
         Add run script
@@ -1296,7 +1312,7 @@ function RunAddEmpty() {
       <div className="text-fg2 max-w-sm text-xs">
         Run a dev server or test command in this workspace.
       </div>
-    </div>
+    </Stack>
   );
 }
 

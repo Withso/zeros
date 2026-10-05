@@ -23,18 +23,13 @@
         "z-[5]": 1,
         "z-[6]": 1
       },
-      "apps/desktop/src/renderer/features/agent/agent-model-menu.tsx": {
-        "text-[12px]": 1
-      },
       "apps/desktop/src/renderer/features/agent/chat-transcript-pills.tsx": {
         "ml-[22px]": 1
       },
       "apps/desktop/src/renderer/features/agent/checkpoint-rail.tsx": {
-        "text-[13px]": 1,
         "z-[8]": 1
       },
       "apps/desktop/src/renderer/features/agent/composer-attachments.tsx": {
-        "pl-[2px]": 1,
         "py-[3px]": 1
       },
       "apps/desktop/src/renderer/features/agent/composer-editor/pill-views.tsx": {
@@ -53,7 +48,6 @@
         "rounded-[18px]": 1
       },
       "apps/desktop/src/renderer/features/agent/context-gauge.tsx": {
-        "rounded-[6px]": 2,
         "text-[12.5px]": 2
       },
       "apps/desktop/src/renderer/features/agent/mention-picker.tsx": {
@@ -68,9 +62,6 @@
       "apps/desktop/src/renderer/features/agent/renderers/budget-stop-card.tsx": {
         "text-[11.5px]": 1
       },
-      "apps/desktop/src/renderer/features/agent/renderers/event-row.tsx": {
-        "text-[10px]": 1
-      },
       "apps/desktop/src/renderer/features/agent/renderers/highlighted-code.tsx": {
         "leading-[1.6]": 4
       },
@@ -82,9 +73,6 @@
       },
       "apps/desktop/src/renderer/features/agent/slash-command-picker.tsx": {
         "z-[25]": 1
-      },
-      "apps/desktop/src/renderer/features/agent/workflow-activity.tsx": {
-        "gap-[2px]": 1
       },
       "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx": {
         "rounded-[2px]": 1,
@@ -98,9 +86,6 @@
       "apps/desktop/src/renderer/features/design-workspace/design-color-picker.tsx": {
         "bg-[linear-gradient(to_right,white,transparent)]": 1,
         "bg-[linear-gradient(to_top,black,transparent)]": 1
-      },
-      "apps/desktop/src/renderer/features/design-workspace/design-inspector.tsx": {
-        "text-[12px]": 1
       },
       "apps/desktop/src/renderer/features/design-workspace/design-layout-tools-overlay.tsx": {
         "z-[45]": 1,
@@ -139,7 +124,6 @@
         "text-[13px]": 3
       },
       "apps/desktop/src/renderer/features/settings/settings-ui.tsx": {
-        "text-[12px]": 2,
         "text-[13px]": 1,
         "text-[14px]": 4
       },
@@ -147,7 +131,6 @@
         "text-[14px]": 1
       },
       "apps/desktop/src/renderer/features/team/team-panel.tsx": {
-        "text-[10px]": 1,
         "text-[14px]": 1,
         "text-[15px]": 1
       },
@@ -182,15 +165,8 @@
       "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
         "text-[0.85em]": 1
       },
-      "apps/desktop/src/renderer/shell/workbench/tabs/review-changes.tsx": {
-        "text-[10px]": 1
-      },
       "apps/desktop/src/renderer/shell/workbench/tabs/review-shared-components.tsx": {
-        "leading-[1.55]": 1,
-        "text-[10px]": 1
-      },
-      "apps/desktop/src/renderer/shell/workbench/tabs/review-timeline.tsx": {
-        "text-[10px]": 1
+        "leading-[1.55]": 1
       }
     },
     "ignore-directive": {
@@ -258,18 +234,14 @@
         "z-10": 1
       },
       "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx": {
-        "z-10": 1,
-        "z-40": 1
+        "z-10": 1
       },
       "apps/desktop/src/renderer/features/design-workspace/design-canvas.tsx": {
-        "z-40": 2
+        "z-40": 1
       },
       "apps/desktop/src/renderer/features/design-workspace/design-layout-tools-overlay.tsx": {
         "z-20": 2,
         "z-50": 1
-      },
-      "apps/desktop/src/renderer/features/design-workspace/design-motion-timeline.tsx": {
-        "z-40": 2
       },
       "apps/desktop/src/renderer/features/design-workspace/design-panel-resize-handle.tsx": {
         "z-20": 2
@@ -301,8 +273,7 @@
         "z-10": 1
       },
       "apps/desktop/src/renderer/shell/conversation/pane-layout.tsx": {
-        "z-10": 1,
-        "z-40": 1
+        "z-10": 1
       },
       "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx": {
         "z-10": 1
@@ -442,13 +413,7 @@
       "apps/desktop/src/renderer/features/agent/queued-messages-card.tsx": {
         "button": 2
       },
-      "apps/desktop/src/renderer/features/agent/renderers/browser-activity-card.tsx": {
-        "button": 1
-      },
       "apps/desktop/src/renderer/features/agent/renderers/event-row.tsx": {
-        "button": 1
-      },
-      "apps/desktop/src/renderer/features/agent/renderers/event-stripe.tsx": {
         "button": 1
       },
       "apps/desktop/src/renderer/features/agent/renderers/text-message.tsx": {
@@ -457,9 +422,6 @@
       "apps/desktop/src/renderer/features/agent/renderers/tool-resource-link.tsx": {
         "button": 1
       },
-      "apps/desktop/src/renderer/features/agent/renderers/tool-subagent.tsx": {
-        "button": 2
-      },
       "apps/desktop/src/renderer/features/agent/slash-command-picker.tsx": {
         "button": 1
       },
@@ -467,19 +429,13 @@
         "button": 2
       },
       "apps/desktop/src/renderer/features/agent/turn-footer.tsx": {
-        "button": 5
+        "button": 3
       },
       "apps/desktop/src/renderer/features/agent/turn-usage-card.tsx": {
         "button": 1
       },
-      "apps/desktop/src/renderer/features/agent/workflow-activity.tsx": {
-        "button": 1
-      },
       "apps/desktop/src/renderer/features/auth/login-screen.tsx": {
         "button": 2
-      },
-      "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx": {
-        "button": 3
       },
       "apps/desktop/src/renderer/features/browser/browser-variant-frame.tsx": {
         "button": 2
@@ -575,7 +531,6 @@
         "button": 3
       },
       "apps/desktop/src/renderer/shell/conversation/chat-tabs.tsx": {
-        "button": 1,
         "input": 1
       },
       "apps/desktop/src/renderer/shell/conversation/conversation-header.tsx": {
@@ -612,12 +567,6 @@
       "apps/desktop/src/renderer/shell/sidebar-repository-header.tsx": {
         "button": 4
       },
-      "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx": {
-        "button": 1
-      },
-      "apps/desktop/src/renderer/shell/workbench/tab-strip.tsx": {
-        "button": 2
-      },
       "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
         "button": 6,
         "input": 3
@@ -626,7 +575,7 @@
         "button": 1
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/changes-tab.tsx": {
-        "button": 3
+        "button": 2
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/code-editor/source-editor.tsx": {
         "button": 1

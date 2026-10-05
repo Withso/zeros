@@ -3,7 +3,7 @@
 // ------------------------------------------------------------
 // Reads the color primitives in styles/zeros-tokens.css as data: the dark
 // `:root` block and the `[data-theme="light"]` override (light inherits every
-// token it does not redeclare). Resolves `var(--x)` aliases and `hsl()`
+// token it does not redeclare). Resolves `var(--x)` aliases and HSL/RGB/RGBA
 // literals to sRGB and computes WCAG 2.x contrast, including alpha
 // composites such as `red-secondary/0.9@bg1` (the /90 hover fill over bg1).
 //
@@ -16,17 +16,33 @@ import { join } from "node:path";
 
 export const TOKENS_FILE = "styles/zeros-tokens.css";
 
-export function extractBlock(css, selector) {
-  const start = css.indexOf(`${selector} {`);
+/** Body offsets in the original CSS, ignoring comments and quoted syntax. */
+export function extractBlockRange(css, selector) {
+  const syntax = css.replace(
+    /\/\*[\s\S]*?(?:\*\/|$)|"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)/g,
+    (text) => text.replace(/[^\r\n]/g, " "),
+  );
+  const header = `${selector} {`;
+  let start = css.indexOf(header);
+  // Search the original text so quoted selector values retain their identity.
+  // The syntax mask distinguishes real selectors/braces from commented text.
+  while (start >= 0 && (syntax[start] !== css[start] || syntax[start + header.length - 1] !== "{")) {
+    start = css.indexOf(header, start + 1);
+  }
   if (start < 0) throw new Error(`Missing CSS block: ${selector}`);
-  const open = css.indexOf("{", start);
+  const open = start + header.length - 1;
   let depth = 0;
-  for (let i = open; i < css.length; i += 1) {
-    if (css[i] === "{") depth += 1;
-    if (css[i] === "}") depth -= 1;
-    if (depth === 0) return css.slice(open + 1, i);
+  for (let i = open; i < syntax.length; i += 1) {
+    if (syntax[i] === "{") depth += 1;
+    if (syntax[i] === "}") depth -= 1;
+    if (depth === 0) return [open + 1, i];
   }
   throw new Error(`Unclosed CSS block: ${selector}`);
+}
+
+export function extractBlock(css, selector) {
+  const [start, end] = extractBlockRange(css, selector);
+  return css.slice(start, end);
 }
 
 export function declarations(block) {
@@ -65,12 +81,14 @@ export function resolveValue(theme, name, seen = new Set()) {
   return alias ? resolveValue(theme, alias[1], seen) : value;
 }
 
-/** sRGB channels (0–1), quantized to 8 bits like the rendered color. */
+/** Intrinsic sRGB channels (0–1), quantized to 8 bits; no alpha compositing. */
 export function resolveRgb(theme, name) {
   const value = resolveValue(theme, name);
   const hsl = value.match(/^hsl\(\s*([\d.]+)\s+([\d.]+)%\s+([\d.]+)%\s*\)$/);
-  if (!hsl) throw new Error(`--${name} is not an hsl() literal: ${value}`);
-  return hslToRgb(+hsl[1], +hsl[2], +hsl[3]).map((c) => Math.round(c * 255) / 255);
+  if (hsl) return hslToRgb(+hsl[1], +hsl[2], +hsl[3]).map((c) => Math.round(c * 255) / 255);
+  const rgb = value.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*[\d.]+)?\s*\)$/);
+  if (rgb) return rgb.slice(1, 4).map((channel) => Math.round(+channel) / 255);
+  throw new Error(`--${name} is not a supported color literal: ${value}`);
 }
 
 /**
@@ -157,6 +175,7 @@ export function evaluateLadders(contract, themes) {
           theme: themeName,
           upper: ladder.tiers[i - 1],
           lower: ladder.tiers[i],
+          on: ladder.on,
           step,
           minStep: ladder.minStep,
           pass: step >= ladder.minStep,

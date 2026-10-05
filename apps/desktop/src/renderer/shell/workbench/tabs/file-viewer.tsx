@@ -91,6 +91,7 @@ import {
 } from "../../workspace-file-data-cache";
 import { setDiffStyle, useDiffStyle } from "./diff-style-store";
 import { statusForGeneration } from "./changes-tab";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 interface FileViewerProps {
   /** Owning workbench tab. Used to close only this tab if an external delete leaves
@@ -632,7 +633,7 @@ export function FileViewer({
         headerBorder && "border-border1 border-b",
       )}
     >
-      <div className="flex min-w-0 items-center gap-2">
+      <Inline gap={2} align="center" className="min-w-0">
         {headerLeading}
         <div
           data-testid="file-path-actions"
@@ -646,8 +647,8 @@ export function FileViewer({
             />
           )}
         </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-1">
+      </Inline>
+      <Inline gap={1} align="center" className="shrink-0">
         {isGitConflict && !sourceShown && (
           <Button variant="ghost" onClick={() => onViewerModeChange?.("edit")}>
             Resolve conflicts
@@ -740,7 +741,7 @@ export function FileViewer({
           </div>
         )}
         {headerTrailing}
-      </div>
+      </Inline>
     </div>
   );
 

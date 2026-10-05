@@ -28,6 +28,8 @@ import {
   GroupHeader,
   OutcomeGlyph,
 } from "./review-shared-components";
+import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 function checkDuration(c: PrCheck, now = Date.now()): string {
   if (!c.startedAt) return "";
@@ -119,14 +121,16 @@ export function ReviewChecksSection({
       </span>
       {c.detailsUrl && (
         <Tooltip label="Open logs">
-          <a
-            href={c.detailsUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-5 shrink-0 items-center justify-center rounded-sm transition-colors duration-120 ease-out"
+          <IconButton
+            asChild
+            label="Open logs"
+            motion="colors-hover"
+            className="flex shrink-0"
           >
-            <ExternalLink className="size-3" />
-          </a>
+            <a href={c.detailsUrl} target="_blank" rel="noreferrer">
+              <ExternalLink className="size-3" />
+            </a>
+          </IconButton>
         </Tooltip>
       )}
     </div>
@@ -137,7 +141,7 @@ export function ReviewChecksSection({
       {/* Summary strip (only when real checks reported — deployments alone
           carry their own per-card status) */}
       {summary.tone !== "none" && (
-        <div className="border-border1 flex h-9 items-center gap-2 border-b px-3">
+        <PanelHeader size="panel">
           <OutcomeGlyph
             outcome={
               summary.tone === "failure"
@@ -184,7 +188,7 @@ export function ReviewChecksSection({
               <Wrench className="size-3.5" /> Fix in chat
             </Button>
           )}
-        </div>
+        </PanelHeader>
       )}
 
       {buckets.failed.length > 0 && (

@@ -4,6 +4,45 @@ Why the system looks the way it does. This file is a record, not a rulebook:
 the rules are in [design-system.md](design-system.md) and the values in
 [design-tokens.md](design-tokens.md). Newest first.
 
+## 2026-10-05 — DTCG token source with generated declarations
+
+- Primitive values moved to `styles/tokens/base.tokens.json` and
+  `styles/tokens/light.tokens.json` in DTCG 2025.10 format. The resolver applies
+  the base set before the Dark/Light appearance modifier. Aliases stay CSS
+  `var()` references so contextual overrides and theme inheritance keep working.
+- The dependency-free generator writes only explicitly marked declaration
+  groups in the existing `:root`, Light and Tailwind color-wiring blocks.
+  Imports, explanatory headers, selector order, native hints, type/radius/weight
+  wiring, named utilities and base rules remain authored. CSS names, raw token
+  values and resolved sRGB values are preserved from the corrected palette.
+- `pnpm design:docs` now regenerates token CSS as well as docs and provider
+  guidance; `pnpm check:ui` rejects stale CSS or malformed token sources.
+  Permanent tests cover value identity, alias resolution, round trips and errors.
+- `pnpm design:docs` and `pnpm tokens:build` also generate marketing's 26 cloned
+  colors in both appearances from the resolver export list, preserving raw value
+  strings and leaving art-direction tokens/selectors hand-written while retaining
+  independent parity tests and freshness gates.
+
+## 2026-10-05 — Supplemental metadata and subtle control outlines
+
+- **Metadata.** Both themes now use neutral `hsl(0 0% 42%)` (`#6B6B6B`) for
+  `muted-fg`: Dark L54 (`#8A8A8A`) → L42; Light warm H20/S4/L41
+  (`#6D6764`) → neutral H0/S0/L42. This is the owner's quietest supplemental
+  tier, with a reviewed 3:1 floor below AA by design (worst rest ratios:
+  Dark 3.02:1, Light 4.48:1). Hovered/selected metadata steps up to fg3.
+- **Outlines.** The extra high-contrast control token was removed and the
+  original checkbox border4, radio border3 → border4 hover → fg1 checked,
+  switch border3 track/border4 outline, and slider half-alpha focus-color
+  outline recipes restored. Opaque keyboard focus borders/outlines and halos
+  remain. Resting outlines are subtle by reviewed design, below WCAG
+  1.4.11's 3:1; focus is the strong cue.
+- **Light borders.** border3 H60/S3/L85 (`#DADAD8`) → H60/S3/L78
+  (`#C9C9C5`); border4 H0/S1/L78 (`#C7C6C6`) → H60/S3/L72 (`#BABAB5`).
+  Dark border3/4 stay unchanged. Both themes now enforce border3 ≥1.45:1,
+  border4 ≥1.6:1 on control surfaces, plus a ≥1.15× border4/border3 contrast
+  step on bg2. These are perceptibility floors, not WCAG claims; the
+  user-message bubble is excluded because controls do not sit on it.
+
 ## 2026-10-04 — Enforced design system and contrast contract
 
 - **Compiled-class gate.** `pnpm check:ui` now compiles every class candidate
@@ -47,11 +86,11 @@ the rules are in [design-system.md](design-system.md) and the values in
 - **Destructive hover.** `hover:bg-red-secondary/90` lightened the fill toward
   the surface and dropped white text to 4.37:1 in Light. Replaced by the solid
   `--red-secondary-hover`.
-- **Control boundary.** New `--border-control` (≥ 3:1 on rest and hover fills)
-  for checkbox, radio, switch-off track, and slider thumb outlines;
-  `border1`–`4` stay decorative. Light `border4` L83 → 78 so the hover state of
-  `border3` is visible. A checked radio now shows keyboard focus (an opaque
-  outline; the checked border used to win over the focus border).
+- **Control boundary experiment.** Checkbox, radio, switch-off track, and
+  slider outlines temporarily gained a separate ≥3:1 token (removed after
+  owner review on 2026-10-05). Light `border4` L83 → 78 made hover more visible.
+  A checked radio gained keyboard focus through an opaque outline; the
+  checked border used to win over the focus border. That improvement remains.
 - **Menu metadata steps up.** Selected command, menu, context-menu, and select
   rows lift nested `text-muted-fg` to `fg3`, which the contract clears on hover
   fills.

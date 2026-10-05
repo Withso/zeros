@@ -2,6 +2,9 @@
 // this entrypoint over deep imports when they need several primitives.
 
 export { Button, buttonVariants, type ButtonProps } from "./button";
+export { IconButton, type IconButtonProps } from "./icon-button";
+export { PanelHeader, type PanelHeaderProps } from "./panel-header";
+export { ListRow, type ListRowProps } from "./list-row";
 export { Pill, type PillProps } from "./pill";
 export {
   Card,

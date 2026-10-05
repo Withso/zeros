@@ -236,6 +236,9 @@ const BG3_FILL_RE = /(?<![\w-])bg-bg3(?:-hover)?(?![\w/-])/;
 // Add a file here ONLY if it owns a floating bg3 panel; chips on bg1/bg2
 // surfaces take bg-bg2-hover, sidebar takes sidebar-bg-hover.
 const BG3_SURFACE_FILES = new Set([
+  // The shared Surface wrapper's `floating` kind is the sanctioned owner of
+  // the floating fill (shared/ui/layout/surface.tsx).
+  "apps/desktop/src/renderer/shared/ui/layout/surface.tsx",
   "apps/desktop/src/renderer/shared/ui/primitives/dropdown-menu.tsx",
   "apps/desktop/src/renderer/shared/ui/primitives/context-menu.tsx",
   "apps/desktop/src/renderer/shared/ui/primitives/popover.tsx",
@@ -915,7 +918,14 @@ checkAllowlistFresh();
     push(v.file, v.line, v.message);
   }
   const { checkGeneratedDocs } = await import("./design-system/build-design-docs.mjs");
-  for (const v of checkGeneratedDocs(ROOT)) push(v.file, v.line, v.message);
+  const { checkGeneratedTokens } = await import("./design-system/build-tokens.mjs");
+  const tokenViolations = checkGeneratedTokens(ROOT);
+  for (const v of tokenViolations) push(v.file, v.line, v.message);
+  // Invalid token sources already fail the gate; do not try rendering docs
+  // from them until design:docs can regenerate the whole set successfully.
+  if (tokenViolations.length === 0) {
+    for (const v of checkGeneratedDocs(ROOT)) push(v.file, v.line, v.message);
+  }
 
   // Design-system policy ratchet (scripts/design-system/ui-policy.mjs):
   // recorded debt may only shrink; anything new fails.

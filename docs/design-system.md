@@ -21,19 +21,23 @@ The full guide is `docs/design-system.md`; token values are in
 `docs/design-tokens.md`.
 
 1. **Compose, don't restyle.** Use the shared primitives in
-   `apps/desktop/src/renderer/shared/ui/primitives/` (Button, Input, Textarea,
-   Select, Checkbox, Switch, Tabs, DropdownMenu, Popover, Dialog, Tooltip, Kbd,
-   Badge, Pill, …). Missing a variant? Extend the primitive in `shared/ui/` —
-   never hand-build a `<button>`, `<input>`, `<select>`, or `<textarea>` in
-   feature code.
+   `apps/desktop/src/renderer/shared/ui/primitives/` (Button, IconButton,
+   Input, Textarea, Select, Checkbox, Switch, Tabs, DropdownMenu, Popover,
+   Dialog, Tooltip, Kbd, Badge, Pill, PanelHeader, ListRow, …) and the layout
+   blocks in `shared/ui/layout/` (`Inline`, `Stack`, `Surface`). Missing a
+   variant? Extend the primitive in `shared/ui/` — never hand-build a
+   `<button>`, `<input>`, `<select>`, or `<textarea>` in feature code.
 2. **Tokens only.** Color comes from token utilities (`bg-bg1`, `text-fg2`,
    `border-border1`, `text-red-primary`, …). No hex/rgb/hsl, no Tailwind palette
    colors (they do not compile), no arbitrary values such as `text-[14px]`,
-   `z-[1000]`, or `rounded-[18px]`.
+   `z-[1000]`, or `rounded-[18px]`. Token values live in
+   `styles/tokens/*.tokens.json`; the CSS token blocks are generated.
 3. **Surfaces decide hovers.** On `bg-bg1` hover with `hover:bg-bg1-hover`, on
    `bg-bg2` with `hover:bg-bg2-hover`, in a menu with `hover:bg-bg3-hover`, in
-   the sidebar with `hover:bg-sidebar-bg-hover`. `bg-bg3` is only for floating
-   menus and popovers. Selected = the hover state that stays.
+   the sidebar with `hover:bg-sidebar-bg-hover`. Inside a `Surface`, use
+   `hover:bg-(--surface-hover)` and the surface picks the right one. `bg-bg3`
+   is only for floating menus and popovers. Selected = the hover state that
+   stays.
 4. **Text tiers:** `text-fg1` emphasis/selected, `text-fg2` default, `text-fg3`
    secondary and placeholders, `text-muted-fg` metadata. Never fake a tier with
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is
@@ -63,7 +67,7 @@ The full guide is `docs/design-system.md`; token values are in
    `features/design-workspace/design-inspector-kit.tsx`). Extend a primitive
    when the behavior is genuinely shared.
 2. Choose tokens from the tables below. Add a token only with its first real
-   caller (§9).
+   caller (§10).
 3. Run `pnpm check:ui`. It compiles every class against the app's Tailwind
    entry, enforces the policy rules in §2, and checks that generated docs are
    fresh. Then `pnpm typecheck`, `pnpm lint`, the adjacent `__tests__` suites,
@@ -77,6 +81,7 @@ The full guide is `docs/design-system.md`; token values are in
 | --- | --- |
 | Every statically readable class compiles to CSS (no `text-error`, `bg-sidebar`, `rounded-xl`) | `check:ui` · `scripts/design-system/check-compiled-classes.mjs` |
 | Only Zeros colors exist; Tailwind's palettes are reset | `--color-*: initial` in `styles/zeros-tokens.css` + the compile check |
+| Token values come from DTCG JSON; generated CSS declarations are fresh | `check:ui` · `scripts/design-system/build-tokens.mjs` |
 | No hex / rgb / hsl / oklch literals in components | `check:ui` line rules |
 | No numeric palette steps (`text-red-500`, `var(--red-500)`) | `check:ui` line rules |
 | No arbitrary visual values (`text-[14px]`, `leading-[1.6]`, `z-[1000]`) | `ui/arbitrary-value` |
@@ -88,7 +93,7 @@ The full guide is `docs/design-system.md`; token values are in
 | `-fg` on `-bg` for tinted containers | `ui/status-pairing` |
 | No raw `<button>` / `<input>` / `<select>` / `<textarea>` outside `shared/ui/` | `ui/raw-control` |
 | `bg-bg3` only on floating panels | `check:ui` (`BG3_SURFACE_FILES`) |
-| Every declared color pairing meets WCAG 2.2 in both themes | `shared/theme/__tests__/contrast-contract.test.ts` · `styles/policy/contrast-contract.json` |
+| Every declared pairing meets its role's contrast floor in both themes (AA text, focus, and reviewed supplemental/boundary floors) | `shared/theme/__tests__/contrast-contract.test.ts` · `styles/policy/contrast-contract.json` |
 | No new `check:ui ignore` directives | `ui/ignore-directive` |
 | Existing policy debt only shrinks | `styles/policy/ui-debt.json` ratchet (`pnpm check:ui --prune-debt` after paying debt) |
 | Generated docs and agent files are fresh | `check:ui` (`pnpm design:docs` regenerates) |
@@ -126,10 +131,12 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Emphasis | `text-fg1` | Selected rows, titles, transcript body | ≥ 12:1 |
 | Default | `text-fg2` | Everyday text and icons | ≥ 7:1 |
 | Secondary | `text-fg3` | Placeholders, secondary labels, ignored files | ≥ 5.6:1 |
-| Metadata | `text-muted-fg` | Timestamps, counts, SHAs, empty-state icons | ≥ 4.5:1 |
+| Supplemental metadata | `text-muted-fg` | Timestamps, counts, SHAs, empty-state icons | ≥ 3:1; steps up to fg3 on hover/selection |
 
-- Every tier meets WCAG AA on every rest surface in both themes; `fg1`–`fg3`
-  also clear AA on hover fills. Hovered or selected rows step text **up** one
+- `fg1`–`fg3` meet WCAG AA on every rest and hover surface in both themes.
+  `muted-fg` is the quietest supplemental tier: neutral `#6B6B6B` in both
+  themes, with an owner-chosen 3:1 floor at rest, below AA by design.
+  Hovered or selected rows step text **up** one
   tier (labels `text-fg2` → `text-fg1`, metadata `text-muted-fg` →
   `text-fg3`); menu, command, and select rows from `shared/ui/primitives/` do
   this for nested `text-muted-fg` automatically.
@@ -178,10 +185,13 @@ its own scale in `styles/global/runtime-content.css`.
 ## 6. Borders, focus, elevation, layers, motion
 
 - **Borders** `border-border1` (default on `bg1`) → `border-border2` (raised,
-  floating, sidebar) → `border-border3` (inputs, secondary buttons, triggers) →
-  `border-border4` (their hover/open state). These are decorative and quiet.
-- **Control boundary** `border-border-control` (≥ 3:1): only where the outline IS
-  the control — checkbox, radio, switch-off track, slider thumb.
+  floating, sidebar) → `border-border3` (control outline at rest: inputs,
+  secondary buttons, triggers, radios) → `border-border4` (hover/open; also
+  unchecked checkbox and switch outlines). Resting outlines are subtle by
+  design: a reviewed decision below WCAG 1.4.11's 3:1. The contract enforces
+  perceptibility floors of 1.45:1 for border3 and 1.6:1 for border4 on every
+  surface controls sit on, and a ≥1.15× hover step on bg2. The user-message
+  bubble is excluded because controls do not sit on it. Focus is the strong cue.
 - **Focus** is an opaque `border-highlighted-bright`, `ring-highlighted-bright`,
   or `outline-highlighted-bright` (the radio uses an outline so its checked
   border cannot override it); the `ring-highlighted-bright/50` halo is
@@ -228,7 +238,40 @@ through the single app-wide toast surface — `toast` / `toast.error` /
 pill or banner (**judgment**). Persistent state (a failed row, a form error next
 to its field) stays inline with the status colors in §5.
 
-## 8. Theming runtime
+## 8. Building blocks
+
+Compose recurring structure from shared blocks instead of re-writing class
+recipes. Keep semantic element types, and keep feature behavior (handlers,
+state, `aria-*`, `data-*` hooks) at the caller.
+
+| Need | Use | Contract |
+| --- | --- | --- |
+| A surface that owns its descendants' hover/selected fill | `Surface` (`shared/ui/layout/surface.tsx`) | `kind="canvas" \| "raised" \| "floating" \| "sidebar"`, optional semantic `as`. Paints the surface fill and binds `--surface-hover` / `--surface-border` for descendants. `floating` is for real menus and popovers. |
+| Horizontal layout on the spacing scale | `Inline` (`shared/ui/layout/inline.tsx`) | `gap`, `align`, `justify`, `wrap`, `as`; flex with no implicit constraints. |
+| Vertical layout on the spacing scale | `Stack` (`shared/ui/layout/stack.tsx`) | Same props; adds `flex-col`. |
+| An icon-only action | `IconButton` | Required `label` (its accessible name); `size="inline"` = 20px action inside a row or tab, `size="standard"` = 28px chrome action (Button `icon-sm` geometry). Defaults: raised hover, 120ms color motion, `type="button"`; `asChild` keeps link semantics. |
+| Window chrome or a panel heading | `PanelHeader` | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider; optional `div` / `section` / `header`. |
+| A compact tool disclosure or hover trigger | `ListRow` | Width-fit button row; the caller owns `aria-expanded`, `aria-controls`, labels, state, and events. |
+
+- `Inline` / `Stack` accept only the gap steps `0`, `0.5`, `1`, `1.5`, `2`,
+  `2.5`, `3`, `4`, `6`, `8`. Their `className` is for outer layout (sizing,
+  shrinking, positioning), never visual styling or extra gap/alignment classes.
+- Put repository navigation inside `Surface kind="sidebar"` and use
+  `hover:bg-(--surface-hover)` for hover, selected, and focus-within fills; a
+  standalone preview of a sidebar row needs the same Surface. Settings
+  navigation keeps its own surface. Don't override a Surface's fill while its
+  contextual tokens still describe another surface.
+- New callers use the defaults. `IconButton` `hover="subtle"`, its
+  `motion="colors" | "colors-hover" | "none"` options, window-header `h-9` /
+  `gap-2` overrides, and `ListRow` `transition-colors` overrides exist only to
+  keep migrated recipes identical; they are deprecated until the UI iteration
+  unifies them.
+- Don't add wrapper elements just to adopt a block. A new pattern component
+  needs a real caller and a permanent markup contract; migrations prove the
+  rendered tag and complete class set are unchanged (see
+  `shared/ui/primitives/__tests__/`).
+
+## 9. Theming runtime
 
 ```
 styles/zeros-tokens.css      Tailwind import, @source allowlist, @theme wiring,
@@ -249,15 +292,23 @@ Other consumers of these tokens: `apps/marketing` clones 26 public tokens
 (guarded by `apps/marketing/src/lib/__tests__/marketing-tokens.test.ts`), and
 `apps/web` slices `styles/zeros-tokens.css` at build time for the dashboard.
 
-## 9. Changing the system
+## 10. Changing the system
 
-- **New token:** declare it in `styles/zeros-tokens.css` for both themes (and
-  its `--color-*` wiring if it needs utilities), add its pairings to
-  `styles/policy/contrast-contract.json`, then `pnpm design:docs`. Feature-only
+- **New token:** add a DTCG token to `styles/tokens/base.tokens.json` and its
+  Light override to `styles/tokens/light.tokens.json` when needed. Put the
+  existing CSS name, declaration section, and optional utility wiring in
+  its `org.zeros` extension (see [token source guide](../styles/tokens/README.md)).
+  Add pairings to `styles/policy/contrast-contract.json`, then run
+  `pnpm design:docs` to regenerate CSS, docs, and agent files. Feature-only
   aliases go in `styles/semantic-tokens.css`.
-- **Token value change:** the contrast contract must pass; keep the marketing
-  clone in sync; regenerate docs. Hue changes to a status family need design
-  approval.
+- **Token value change:** edit `styles/tokens/*.tokens.json`, run
+  `pnpm design:docs` to regenerate app and marketing declarations, and pass
+  the contrast contract.
+  Hue changes to a status family need design approval. CSS declarations inside
+  `@generated` markers are generated; imports, explanations, type/radius/weight
+  wiring, native appearance hints, named utilities and base rules stay authored.
+  `styles/tokens/zeros.resolver.json` defines the base set followed by the
+  appearance modifier; CSS names and cascade order remain compatibility contracts.
 - **Primitive change:** in `shared/ui/primitives/` with a test in
   `shared/ui/primitives/__tests__/`; keep the API compatible.
 - **Paying debt:** fix the finding, then `pnpm check:ui --prune-debt`.

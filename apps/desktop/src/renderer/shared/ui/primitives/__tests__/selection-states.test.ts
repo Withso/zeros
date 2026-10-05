@@ -31,7 +31,11 @@ describe("RadioGroup focus", () => {
         createElement(RadioGroupItem, { value: "a", label: "A" }),
       ),
     );
-    expect(markup).toContain("border-border-control");
+    expect(markup).toContain("border-border3");
+    expect(markup).toContain("group-hover:border-border4");
+    expect(markup).toContain("group-data-[state=checked]:border-fg1");
+    expect(markup).toContain("group-focus-visible:outline-2");
+    expect(markup).toContain("group-focus-visible:outline-offset-2");
     expect(markup).toContain("group-focus-visible:outline-highlighted-bright");
     // The focus cue is an outline, not a border swap the checked state wins.
     expect(markup).not.toContain("group-focus-visible:border-highlighted-bright");

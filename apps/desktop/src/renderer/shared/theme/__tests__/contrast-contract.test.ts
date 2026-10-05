@@ -28,14 +28,41 @@ describe("contrast contract", () => {
     expect(failures).toEqual([]);
   });
 
-  it("keeps the foreground tiers a visible ladder in both themes", () => {
+  it("keeps text tiers and control outlines a visible ladder in both themes", () => {
     const failures = evaluateLadders(contract, themes)
       .filter((result) => !result.pass)
       .map(
         (r) =>
-          `${r.theme}: ${r.upper} → ${r.lower} step ${r.step.toFixed(2)}× (needs ${r.minStep}×)`,
+          `${r.theme}: ${r.upper} → ${r.lower} on ${r.on} step ${r.step.toFixed(2)}× (needs ${r.minStep}×)`,
       );
     expect(failures).toEqual([]);
+  });
+
+  it("declares supplemental metadata separately from AA text", () => {
+    expect(contract.roles.supplemental.min).toBe(3);
+    expect(contract.pairs).toContainEqual(expect.objectContaining({
+      role: "supplemental", fg: ["muted-fg"], on: "@rest",
+    }));
+    for (const pair of contract.pairs.filter((pair: { role: string }) => pair.role === "text")) {
+      expect(pair.fg).not.toContain("muted-fg");
+    }
+  });
+
+  it("checks subtle outlines on control surfaces and their hover step on bg2", () => {
+    const surfaces = ["bg0", "bg1", "bg1-highlight", "bg1-bright", "bg2", "bg3", "sidebar-bg"];
+    expect(contract.roles.boundary.min).toBe(1.45);
+    expect(contract.roles["boundary-hover"].min).toBe(1.6);
+    expect(contract.pairs).toContainEqual(expect.objectContaining({
+      role: "boundary", fg: ["border3"], on: surfaces,
+    }));
+    expect(contract.pairs).toContainEqual(expect.objectContaining({
+      role: "boundary-hover", fg: ["border4"], on: surfaces,
+    }));
+    expect(contract.ladders).toContainEqual(expect.objectContaining({
+      tiers: ["border4", "border3"], on: "bg2", minStep: 1.15,
+    }));
+    const steps = evaluateLadders(contract, themes).filter((result) => result.upper === "border4");
+    expect(steps.map((result) => result.on)).toEqual(["bg2", "bg2"]);
   });
 
   it("rejects a misspelled or empty surface set instead of dropping assertions", () => {

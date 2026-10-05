@@ -191,7 +191,7 @@ export const ComposerAttachmentChips = memo(function ComposerAttachmentChips({
                     <Icon size={11} />
                   </span>
                 )}
-                <span className="overflow-hidden pl-[2px] text-ellipsis whitespace-nowrap">
+                <span className="overflow-hidden pl-0.5 text-ellipsis whitespace-nowrap">
                   {a.name}
                 </span>
               </button>

@@ -61,6 +61,8 @@ import {
   type FilesSidebarSelection,
 } from "./files-sidebar-mode";
 import { treeSelectionMirrorTarget } from "./tree-paths";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
+import { Stack } from "@/renderer/shared/ui/layout/stack";
 
 interface TabBodyProps {
   tab: WorkbenchTab;
@@ -280,14 +282,16 @@ export const FilesTab = React.memo(function FilesTab({
   ) : null;
 
   const sidebarActions = (
-    <div
+    <Inline
       data-testid="files-sidebar-actions"
-      className="flex shrink-0 items-center gap-1"
+      gap={1}
+      align="center"
+      className="shrink-0"
     >
       {directoriesTrigger}
       {searchTrigger}
       {treeToggle}
-    </div>
+    </Inline>
   );
 
   const sidebarPane = sidebarMode ? (
@@ -322,7 +326,12 @@ export const FilesTab = React.memo(function FilesTab({
               designFilter="exclude-design"
               emptyWorkspaceState={
                 !layout.hasFile ? (
-                  <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center">
+                  <Stack
+                    gap={3}
+                    align="center"
+                    justify="center"
+                    className="h-full min-h-0 px-6 text-center"
+                  >
                     <File
                       className="text-muted-fg size-10"
                       strokeWidth={1}
@@ -331,7 +340,7 @@ export const FilesTab = React.memo(function FilesTab({
                     <p className="text-fg2 max-w-sm text-xs">
                       No files in this workspace
                     </p>
-                  </div>
+                  </Stack>
                 ) : undefined
               }
               initialSelectedPath={tab.filePath}

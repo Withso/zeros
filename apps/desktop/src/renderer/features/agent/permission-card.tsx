@@ -50,6 +50,7 @@ import type {
 } from "../../platform/bridge/agent-events";
 import { isInFocusedPane } from "./pane-focus";
 import { newPolicyId, type PolicyRule } from "./policies";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 /** Ignore card shortcuts for a beat after mount / request swap — long enough
  *  to absorb a keystroke already in flight when the card lands above the
@@ -365,7 +366,7 @@ export const PermissionCard = memo(function PermissionCard({
       ) : null}
 
       {label || detail ? (
-        <div className="flex min-w-0 items-center gap-2">
+        <Inline gap={2} align="center" className="min-w-0">
           <Icon className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
           {label && (
             <span className="text-fg1 max-w-[45%] shrink-0 truncate text-sm">
@@ -377,7 +378,7 @@ export const PermissionCard = memo(function PermissionCard({
               {detail}
             </span>
           )}
-        </div>
+        </Inline>
       ) : null}
 
       <div className="flex flex-col gap-1.5">

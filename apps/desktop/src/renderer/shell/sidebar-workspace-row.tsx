@@ -87,6 +87,7 @@ import {
   workspacePrTone,
 } from "./workspace-glyph";
 import { workspaceLabel, workspaceTabDescription } from "./workspace-tabs";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 // --- CONSTANTS ---
 
@@ -94,7 +95,7 @@ import { workspaceLabel, workspaceTabDescription } from "./workspace-tabs";
 // colour-only (fg1 on sidebar-bg-hover); rows never shift. `transition-none`
 // keeps a switch from cross-fading the old and new selection.
 const SIDEBAR_WORKSPACE_ROW_CLS =
-  "group/workspace relative flex h-7.5 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1";
+  "group/workspace relative flex h-7.5 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1";
 // Grouped rows sit under their repository header: the state glyph centres on
 // the header's name column. Ungrouped rows (repository icon first) and
 // standalone folder rows align with the headers' own icon column instead.
@@ -117,8 +118,6 @@ const SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS =
 // its own slot.
 const SIDEBAR_WORKSPACE_DRAFT_ACTION_OVERLAY_CLS =
   "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-sm bg-sidebar-bg-hover opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
-const SIDEBAR_WORKSPACE_ACTION_CLS =
-  "pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-fg2 transition-[background-color,color] duration-120 ease-out hover:bg-bg2-hover hover:text-fg1";
 // State glyphs stay on fg2 even in the selected row (only the name lifts to
 // fg1); the workspace square sets its own rest, working and PR colours.
 const GLYPH_BOX_CLS =
@@ -281,10 +280,10 @@ export function SidebarWorkspaceRow({
       }
     >
       <Tooltip label={action.tooltip} side="right">
-        <button
+        <IconButton
           type="button"
-          className={SIDEBAR_WORKSPACE_ACTION_CLS}
-          aria-label={action.label}
+          className="pointer-events-auto shrink-0"
+          label={action.label}
           onClick={(event) => {
             event.stopPropagation();
             action.run();
@@ -292,7 +291,7 @@ export function SidebarWorkspaceRow({
           onKeyDown={(event) => event.stopPropagation()}
         >
           {action.icon}
-        </button>
+        </IconButton>
       </Tooltip>
     </span>
   );

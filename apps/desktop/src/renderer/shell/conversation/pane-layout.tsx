@@ -1487,7 +1487,7 @@ function PaneDropOverlay({
 
   return (
     <div
-      className="absolute inset-0 z-40"
+      className="absolute inset-0 z-chrome"
       onDragOver={handleDragOver}
       onDragLeave={() => setZone(null)}
       onDrop={handleDrop}

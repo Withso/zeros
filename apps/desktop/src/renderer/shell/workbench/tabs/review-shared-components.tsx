@@ -94,7 +94,7 @@ export function AuthorAvatar({
   return (
     <Avatar size="sm" className={cn("size-5", className)}>
       {avatarUrl ? <AvatarImage src={avatarUrl} alt={login} /> : null}
-      <AvatarFallback className="text-[10px] uppercase">
+      <AvatarFallback className="text-xxs uppercase">
         {login.slice(0, 1) || "?"}
       </AvatarFallback>
     </Avatar>

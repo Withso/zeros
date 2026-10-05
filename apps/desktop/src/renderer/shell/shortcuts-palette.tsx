@@ -43,6 +43,7 @@ import { Kbd } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 
 import { SHORTCUT_CATEGORIES, shortcutSearchValue } from "./shortcuts-catalog";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 export interface ShortcutsPaletteProps {
   open: boolean;
@@ -194,7 +195,7 @@ export function ShortcutsPalette({
                       {category.label}
                     </span>
                   )}
-                  <span className="flex shrink-0 items-center gap-1">
+                  <Inline as="span" gap={1} align="center" className="shrink-0">
                     {shortcut.keys.map((chord) => (
                       <Kbd
                         key={chord}
@@ -203,7 +204,7 @@ export function ShortcutsPalette({
                         {chord}
                       </Kbd>
                     ))}
-                  </span>
+                  </Inline>
                 </CommandItem>
               ))}
             </CommandList>

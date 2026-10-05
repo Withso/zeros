@@ -51,6 +51,7 @@ import {
 } from "../context-graph-data";
 import { recentSummaryContext, summaryDestinationTab } from "./summary-model";
 import { isWorkspaceReviewAvailable } from "../workbench/tab-capabilities";
+import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 const DESTINATIONS = [
   "changes",
@@ -219,8 +220,10 @@ export function SummaryContents({
                   </Tooltip>
                 </Button>
                 {running && (
-                  <div
-                    className="flex shrink-0 items-center gap-1"
+                  <Inline
+                    gap={1}
+                    align="center"
+                    className="shrink-0"
                     role="group"
                     aria-label={`${action.name} run controls`}
                   >
@@ -269,7 +272,7 @@ export function SummaryContents({
                         </Button>
                       </span>
                     </Tooltip>
-                  </div>
+                  </Inline>
                 )}
               </div>
             );

@@ -81,17 +81,22 @@ is the normative guide; token values and contrast results are generated into
 
 ### Tokens and cascade
 
-- `styles/zeros-tokens.css` owns primitive values for both themes, Tailwind theme
-  wiring, and named utilities. `styles/semantic-tokens.css` owns feature aliases
-  over those primitives. `styles/globals.css` imports the focused modules in
-  `styles/global/`; its import order is a cascade contract.
+- `styles/tokens/*.tokens.json` owns DTCG 2025.10 primitive values for both
+  themes; its resolver defines the appearance overrides. `pnpm design:docs`
+  generates the marked declarations in `styles/zeros-tokens.css`; never edit
+  their values by hand. The CSS entry keeps authored Tailwind setup and named
+  utilities. `styles/semantic-tokens.css` owns feature aliases over those
+  primitives. `styles/globals.css` imports the focused modules in
+  `styles/global/`; CSS names and import order are compatibility contracts.
 - Components consume semantic tokens and shared primitives. Never use raw palette
   steps, color literals, Tailwind's built-in palettes (reset — they do not
   compile), or arbitrary visual values (`text-[14px]`, `z-[1000]`) in feature
   code.
 - Every foreground/background pairing is declared in
-  `styles/policy/contrast-contract.json` and must meet WCAG 2.2 AA in both
-  themes. A token change that fails the contract does not ship.
+  `styles/policy/contrast-contract.json` and must meet its role's floor in both
+  themes: WCAG AA for text, 3:1 for focus/graphics, and owner-reviewed floors
+  for supplemental metadata and subtle control outlines. A token change that
+  fails the contract does not ship.
 - Add a primitive or semantic alias only with its first real caller, then run
   `pnpm design:docs`.
 - Do not add feature styling to a global stylesheet. Keep component-owned rules

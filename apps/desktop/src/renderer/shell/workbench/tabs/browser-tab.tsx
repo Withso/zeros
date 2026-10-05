@@ -110,6 +110,7 @@ import {
   requestImmediateNativeBrowserSurfacePark,
 } from "@/renderer/features/browser/native-browser-overlay";
 import { listenForNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
+import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
 
 // URL normalization lives in ./localhost-url. Browser navigation accepts
 // ordinary http(s) sites; Design/Canvas are gated separately to loopback URLs.
@@ -471,7 +472,7 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
 
   return (
     <div className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="border-border1 bg-bg1 flex h-9 shrink-0 items-center gap-1 border-b px-2">
+      <PanelHeader size="window" className="h-9">
         <Tooltip label="Back">
           <Button
             variant="ghost"
@@ -577,7 +578,7 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-      </div>
+      </PanelHeader>
       <div
         ref={hostRef}
         className="bg-bg1 relative min-h-0 flex-1"
@@ -1802,7 +1803,7 @@ function BrowserChrome({
   return (
     // 36px (h-9) chrome — 24px (size-6) icon buttons + the 24px search bar sit
     // centered with breathing room.
-    <div className="border-border1 bg-bg1 flex h-9 shrink-0 items-center gap-1 border-b px-2">
+    <PanelHeader size="window" className="h-9">
       {/* Navigation buttons */}
       <Tooltip label="Back">
         <Button
@@ -1985,7 +1986,7 @@ function BrowserChrome({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-    </div>
+    </PanelHeader>
   );
 }
 

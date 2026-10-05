@@ -2,8 +2,11 @@
    ZEROS TOKENS — primitive token system (dark mode default)
    ────────────────────────────────────────────────────────────
 
-   PRIMITIVE TOKENS — the sole source of truth for color in the
-   Zeros Mac app. All components consume these names directly.
+   PRIMITIVE TOKENS — generated declarations from the DTCG 2025.10
+   source in styles/tokens/ (base, Light overrides, appearance resolver).
+   Edit token values there, then run `pnpm design:docs`; the marked
+   declaration groups below must never be edited by hand.
+   All components consume these names directly.
    No shadcn aliases. No canonical depth tokens. No `--tint`
    family. Component aliases (primary-button-*) are thin
    aliases over the primitives.
@@ -63,9 +66,9 @@
                             Reach for this (not --muted-fg) whenever the
                             reference point is --fg2 rather than the canvas.
      --muted-fg             QUIETEST tier — supplemental metadata (timestamps,
-                            counts, SHAs), disabled content, empty-state icons.
-                            Two steps below --fg2; appropriate only where the
-                            content is genuinely incidental.
+                            counts, SHAs), empty-state icons. Owner-chosen 3:1
+                            floor at rest, below AA by design. Hovered/selected
+                            rows step up to fg3.
 
    REPOSITORY NAVIGATION (not the settings sidebar):
      --sidebar-bg           workspace sidebar background
@@ -99,7 +102,7 @@
    them: docs/design-system.md. Values and contrast per theme (generated):
    docs/design-tokens.md. Every declared fg/bg pairing must pass
    styles/policy/contrast-contract.json in BOTH themes; after editing a value
-   here run `pnpm design:docs` and `pnpm check:ui`.
+   in styles/tokens/ run `pnpm design:docs` and `pnpm check:ui`.
    ============================================================ */
 
 @import "tailwindcss" source(none);
@@ -239,146 +242,163 @@
   --radius-lg: 8px;
 
   /* ── BACKGROUNDS — `bg-bg0`..`bg-bg5` + hovers ── */
-  --color-bg0: var(--bg0);
-  --color-bg1: var(--bg1);
-  --color-bg1-hover: var(--bg1-hover);
-  --color-bg1-highlight: var(--bg1-highlight);
-  --color-bg1-bright: var(--bg1-bright);
-  --color-bg2: var(--bg2);
-  --color-bg2-hover: var(--bg2-hover);
-  --color-bg2-highlight: var(--bg2-highlight);
-  --color-bg3: var(--bg3);
-  --color-bg3-hover: var(--bg3-hover);
-  --color-bg4: var(--bg4);
-  --color-bg5: var(--bg5);
+  /* @generated tokens:utilities-bg0:start */
+  --color-bg0: var(--bg0); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
+  --color-bg1: var(--bg1); /* #121212 — default canvas / app backdrop + active chat window */
+  --color-bg1-hover: var(--bg1-hover); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
+  --color-bg1-highlight: var(--bg1-highlight); /* #171717 — highlighted content above bg1 */
+  --color-bg1-bright: var(--bg1-bright); /* #1C1C1C — filled section card on bg1 */
+  --color-bg2: var(--bg2); /* #212121 — composer surface */
+  --color-bg2-hover: var(--bg2-hover); /* #262626 — hover on bg2 */
+  --color-bg2-highlight: var(--bg2-highlight); /* #2E2E2E — dropdown trigger hover/open */
+  --color-bg3: var(--bg3); /* #171717 — floating popover surface */
+  --color-bg3-hover: var(--bg3-hover); /* #262626 — hover on bg3 (menu items) */
+  --color-bg4: var(--bg4); /* #3D3D3D — rare */
+  --color-bg5: var(--bg5); /* #5E5E5E — rare */
+  /* @generated tokens:utilities-bg0:end */
   /* Modal overlay veil — `bg-scrim` (dialog/sheet overlays; theme-scoped). */
-  --color-scrim: var(--scrim);
+  /* @generated tokens:utilities-scrim:start */
+  --color-scrim: var(--scrim); /* #00000080 — modal overlay veil */
+  /* @generated tokens:utilities-scrim:end */
 
   /* ── FOREGROUNDS — `text-fg1` / `text-fg2` / `text-fg3` / `text-muted-fg` ── */
-  --color-fg1: var(--fg1);
-  --color-fg2: var(--fg2);
-  --color-fg3: var(--fg3);
-  --color-muted-fg: var(--muted-fg);
+  /* @generated tokens:utilities-fg1:start */
+  --color-fg1: var(--fg1); /* #F0F0F0 — selected/highlighted text + icons */
+  --color-fg2: var(--fg2); /* #B8B8B8 — default text + icon across app */
+  --color-fg3: var(--fg3); /* #A1A1A1 — middle tier (one step below fg2) */
+  --color-muted-fg: var(--muted-fg); /* #6B6B6B — supplemental metadata; 3:1 floor, fg3 on hover/selection */
+  /* @generated tokens:utilities-fg1:end */
 
   /* ── REPOSITORY NAVIGATION ── */
-  --color-sidebar-bg: var(--sidebar-bg);
-  --color-sidebar-bg-hover: var(--sidebar-bg-hover);
+  /* @generated tokens:utilities-sidebar-bg:start */
+  --color-sidebar-bg: var(--sidebar-bg); /* #171717 — repository sidebar background */
+  --color-sidebar-bg-hover: var(--sidebar-bg-hover); /* #262626 — sidebar row hover and selected state */
+  /* @generated tokens:utilities-sidebar-bg:end */
 
   /* ── BORDERS — `border-border1`..`border-border4` ── */
-  --color-border1: var(--border1);
-  --color-border2: var(--border2);
-  --color-border3: var(--border3);
-  --color-border4: var(--border4);
-  /* Boundary of a control whose outline IS the affordance (checkbox, radio,
-   * switch-off track, slider thumb) — ≥3:1 on every rest surface. */
-  --color-border-control: var(--border-control);
+  /* @generated tokens:utilities-border1:start */
+  --color-border1: var(--border1); /* #242424 — default for bg1 surfaces */
+  --color-border2: var(--border2); /* #2E2E2E — sidebar / composer focus / bg2 */
+  --color-border3: var(--border3); /* #3D3D3D — secondary btn / dropdown / input */
+  --color-border4: var(--border4); /* #4D4D4D — highlighted state of border3 */
+  /* @generated tokens:utilities-border1:end */
 
   /* ── HIGHLIGHTED (theme-adaptive interaction emphasis) ── */
-  --color-highlighted-bg: var(--highlighted-bg);
-  --color-highlighted-bright: var(--highlighted-bright);
+  /* @generated tokens:utilities-highlighted-bg:start */
+  --color-highlighted-bg: var(--highlighted-bg); /* #212121 — user msg bg (text: fg1/fg2) */
+  --color-highlighted-bright: var(--highlighted-bright); /* #A6A6A6 — input focus border, brighter accents */
+  /* @generated tokens:utilities-highlighted-bg:end */
 
   /* ── INVERTED (polarity-flipping pair — buttons, checkbox ON) ── */
-  --color-inverted-bg: var(--inverted-bg);
-  --color-inverted-fg: var(--inverted-fg);
+  /* @generated tokens:utilities-inverted-bg:start */
+  --color-inverted-bg: var(--inverted-bg); /* #EBEBEB — near-white on dark */
+  --color-inverted-fg: var(--inverted-fg); /* #0D0D0D — dark text/icon on the inverted fill */
+  /* @generated tokens:utilities-inverted-bg:end */
 
   /* ── COMPONENT ALIASES (button intents) ── */
-  --color-primary-button-bg: var(--primary-button-bg);
-  --color-primary-button-hover: var(--primary-button-hover);
-  --color-primary-button-fg: var(--primary-button-fg);
+  /* @generated tokens:utilities-primary-button-bg:start */
+  --color-primary-button-bg: var(--primary-button-bg); /* #EBEBEB — filled focal CTA; one per view */
+  --color-primary-button-hover: var(--primary-button-hover); /* #D4D4D4 — lifted neutral */
+  --color-primary-button-fg: var(--primary-button-fg); /* #0D0D0D — text/icon on the primary button */
+  /* @generated tokens:utilities-primary-button-bg:end */
 
   /* ── COLOR PALETTES (families → bg-/text-/border- utilities) ── */
-  --color-red-primary: var(--red-primary);
-  --color-red-secondary: var(--red-secondary);
-  --color-red-secondary-fg: var(--red-secondary-fg);
-  --color-red-secondary-hover: var(--red-secondary-hover);
-  --color-red-bg: var(--red-bg);
-  --color-red-fg: var(--red-fg);
-  --color-green-primary: var(--green-primary);
-  --color-green-bg: var(--green-bg);
-  --color-green-fg: var(--green-fg);
-  --color-yellow-primary: var(--yellow-primary);
-  --color-yellow-bg: var(--yellow-bg);
-  --color-yellow-fg: var(--yellow-fg);
-  --color-yellow-icon: var(--yellow-icon);
-  --color-blue-primary: var(--blue-primary);
-  --color-blue-bg: var(--blue-bg);
-  --color-blue-fg: var(--blue-fg);
-  --color-violet-primary: var(--violet-primary);
-  --color-violet-bg: var(--violet-bg);
-  --color-violet-fg: var(--violet-fg);
-  --color-brown-primary: var(--brown-primary);
-  --color-brown-bg: var(--brown-bg);
-  --color-brown-fg: var(--brown-fg);
+  /* @generated tokens:utilities-red-primary:start */
+  --color-red-primary: var(--red-primary); /* #F87272 — −N counts, error accents */
+  --color-red-secondary: var(--red-secondary); /* #B62411 — solid delete fills + delete icons */
+  --color-red-secondary-fg: var(--red-secondary-fg); /* #FFFFFF — text/icon on SOLID --red-secondary fills. THEME-STATIC (white in both themes — the red fill stays vivid in light, so fg1, which flips dark, can't sit on it). */
+  --color-red-secondary-hover: var(--red-secondary-hover); /* #A82110 — destructive hover fill */
+  --color-red-bg: var(--red-bg); /* #2C1B1A — error container surface */
+  --color-red-fg: var(--red-fg); /* #FDA172 — text/icon on --red-bg */
+  --color-green-primary: var(--green-primary); /* #4ADE80 — +N counts, success accents */
+  --color-green-bg: var(--green-bg); /* #213521 — success container surface */
+  --color-green-fg: var(--green-fg); /* #87EEAC — text/icon on --green-bg */
+  --color-yellow-primary: var(--yellow-primary); /* #E6AB4C — warning · modified · in-progress */
+  --color-yellow-bg: var(--yellow-bg); /* #49330E — warning container surface */
+  --color-yellow-fg: var(--yellow-fg); /* #FFBB00 — text/icon on --yellow-bg */
+  --color-yellow-icon: var(--yellow-icon); /* #E6AB4C — icons, status dots and tinted borders */
+  --color-blue-primary: var(--blue-primary); /* #83C3F1 — info · links · accents */
+  --color-blue-bg: var(--blue-bg); /* #142048 — info container surface */
+  --color-blue-fg: var(--blue-fg); /* #91C5FD — text/icon on --blue-bg */
+  --color-violet-primary: var(--violet-primary); /* #BC83F1 — done · merged */
+  --color-violet-bg: var(--violet-bg); /* #292438 — done container surface */
+  --color-violet-fg: var(--violet-fg); /* #BE9EEB — text/icon on --violet-bg */
+  --color-brown-primary: var(--brown-primary); /* #D8A197 — file paths · warm accents */
+  --color-brown-bg: var(--brown-bg); /* #2C2221 — brown container surface */
+  --color-brown-fg: var(--brown-fg); /* #F1927E — text/icon on --brown-bg */
+  /* @generated tokens:utilities-red-primary:end */
 
   /* ── COLOR RAMPS → Tailwind utilities (bg-red-500, text-green-300, …) ── */
-  --color-red-50: var(--red-50);
-  --color-red-100: var(--red-100);
-  --color-red-200: var(--red-200);
-  --color-red-300: var(--red-300);
-  --color-red-400: var(--red-400);
-  --color-red-500: var(--red-500);
-  --color-red-600: var(--red-600);
-  --color-red-700: var(--red-700);
-  --color-red-750: var(--red-750);
-  --color-red-800: var(--red-800);
-  --color-red-900: var(--red-900);
-  --color-red-950: var(--red-950);
-  --color-green-50: var(--green-50);
-  --color-green-100: var(--green-100);
-  --color-green-200: var(--green-200);
-  --color-green-300: var(--green-300);
-  --color-green-400: var(--green-400);
-  --color-green-500: var(--green-500);
-  --color-green-600: var(--green-600);
-  --color-green-700: var(--green-700);
-  --color-green-800: var(--green-800);
-  --color-green-900: var(--green-900);
-  --color-green-950: var(--green-950);
-  --color-yellow-50: var(--yellow-50);
-  --color-yellow-100: var(--yellow-100);
-  --color-yellow-200: var(--yellow-200);
-  --color-yellow-300: var(--yellow-300);
-  --color-yellow-400: var(--yellow-400);
-  --color-yellow-500: var(--yellow-500);
-  --color-yellow-600: var(--yellow-600);
-  --color-yellow-700: var(--yellow-700);
-  --color-yellow-800: var(--yellow-800);
-  --color-yellow-900: var(--yellow-900);
-  --color-yellow-950: var(--yellow-950);
-  --color-blue-50: var(--blue-50);
-  --color-blue-100: var(--blue-100);
-  --color-blue-200: var(--blue-200);
-  --color-blue-300: var(--blue-300);
-  --color-blue-400: var(--blue-400);
-  --color-blue-500: var(--blue-500);
-  --color-blue-600: var(--blue-600);
-  --color-blue-700: var(--blue-700);
-  --color-blue-800: var(--blue-800);
-  --color-blue-900: var(--blue-900);
-  --color-blue-950: var(--blue-950);
-  --color-violet-50: var(--violet-50);
-  --color-violet-100: var(--violet-100);
-  --color-violet-200: var(--violet-200);
-  --color-violet-300: var(--violet-300);
-  --color-violet-400: var(--violet-400);
-  --color-violet-500: var(--violet-500);
-  --color-violet-600: var(--violet-600);
-  --color-violet-700: var(--violet-700);
-  --color-violet-750: var(--violet-750);
-  --color-violet-800: var(--violet-800);
-  --color-violet-900: var(--violet-900);
-  --color-violet-950: var(--violet-950);
-  --color-brown-50: var(--brown-50);
-  --color-brown-100: var(--brown-100);
-  --color-brown-200: var(--brown-200);
-  --color-brown-300: var(--brown-300);
-  --color-brown-400: var(--brown-400);
-  --color-brown-500: var(--brown-500);
-  --color-brown-600: var(--brown-600);
-  --color-brown-700: var(--brown-700);
-  --color-brown-800: var(--brown-800);
-  --color-brown-900: var(--brown-900);
-  --color-brown-950: var(--brown-950);
+  /* @generated tokens:utilities-red-50:start */
+  --color-red-50: var(--red-50); /* #FEF1F1 — private red 50 palette step; theme independent */
+  --color-red-100: var(--red-100); /* #FCDEDE — private red 100 palette step; theme independent */
+  --color-red-200: var(--red-200); /* #FABDBD — private red 200 palette step; theme independent */
+  --color-red-300: var(--red-300); /* #F79C9C — private red 300 palette step; theme independent */
+  --color-red-400: var(--red-400); /* #F47676 — private red 400 palette step; theme independent */
+  --color-red-500: var(--red-500); /* #F87272 — private red 500 palette step; theme independent */
+  --color-red-600: var(--red-600); /* #EB281E — private red 600 palette step; theme independent */
+  --color-red-700: var(--red-700); /* #B62411 — private red 700 palette step; theme independent */
+  --color-red-750: var(--red-750); /* #7D3021 — muted brick · PR-status closed chip border (off-ramp accent, mirrors --violet-750) */
+  --color-red-800: var(--red-800); /* #7D1F0C — private red 800 palette step; theme independent */
+  --color-red-900: var(--red-900); /* #411307 — private red 900 palette step; theme independent */
+  --color-red-950: var(--red-950); /* #2E0E05 — private red 950 palette step; theme independent */
+  --color-green-50: var(--green-50); /* #F2FDF6 — private green 50 palette step; theme independent */
+  --color-green-100: var(--green-100); /* #D8F8E4 — private green 100 palette step; theme independent */
+  --color-green-200: var(--green-200); /* #A8F0C2 — private green 200 palette step; theme independent */
+  --color-green-300: var(--green-300); /* #73E79E — private green 300 palette step; theme independent */
+  --color-green-400: var(--green-400); /* #43DF7D — private green 400 palette step; theme independent */
+  --color-green-500: var(--green-500); /* #4ADE80 — private green 500 palette step; theme independent */
+  --color-green-600: var(--green-600); /* #289A46 — private green 600 palette step; theme independent */
+  --color-green-700: var(--green-700); /* #2A7438 — private green 700 palette step; theme independent */
+  --color-green-800: var(--green-800); /* #28532B — private green 800 palette step; theme independent */
+  --color-green-900: var(--green-900); /* #213521 — private green 900 palette step; theme independent */
+  --color-green-950: var(--green-950); /* #182618 — private green 950 palette step; theme independent */
+  --color-yellow-50: var(--yellow-50); /* #FFF9F0 — private yellow 50 palette step; theme independent */
+  --color-yellow-100: var(--yellow-100); /* #FEF1DC — private yellow 100 palette step; theme independent */
+  --color-yellow-200: var(--yellow-200); /* #FEE0B4 — private yellow 200 palette step; theme independent */
+  --color-yellow-300: var(--yellow-300); /* #FECE86 — private yellow 300 palette step; theme independent */
+  --color-yellow-400: var(--yellow-400); /* #FEBE5D — private yellow 400 palette step; theme independent */
+  --color-yellow-500: var(--yellow-500); /* #E6AB4C — private yellow 500 palette step; theme independent */
+  --color-yellow-600: var(--yellow-600); /* #F0980A — private yellow 600 palette step; theme independent */
+  --color-yellow-700: var(--yellow-700); /* #B77710 — private yellow 700 palette step; theme independent */
+  --color-yellow-800: var(--yellow-800); /* #7E5411 — private yellow 800 palette step; theme independent */
+  --color-yellow-900: var(--yellow-900); /* #49330E — private yellow 900 palette step; theme independent */
+  --color-yellow-950: var(--yellow-950); /* #33240A — private yellow 950 palette step; theme independent */
+  --color-blue-50: var(--blue-50); /* #F0F8FE — private blue 50 palette step; theme independent */
+  --color-blue-100: var(--blue-100); /* #E2F2FD — private blue 100 palette step; theme independent */
+  --color-blue-200: var(--blue-200); /* #CAE7FC — private blue 200 palette step; theme independent */
+  --color-blue-300: var(--blue-300); /* #B1DCFB — private blue 300 palette step; theme independent */
+  --color-blue-400: var(--blue-400); /* #94CFF9 — private blue 400 palette step; theme independent */
+  --color-blue-500: var(--blue-500); /* #83C3F1 — private blue 500 palette step; theme independent */
+  --color-blue-600: var(--blue-600); /* #4196EC — private blue 600 palette step; theme independent */
+  --color-blue-700: var(--blue-700); /* #1F65C7 — private blue 700 palette step; theme independent */
+  --color-blue-800: var(--blue-800); /* #1D3E87 — private blue 800 palette step; theme independent */
+  --color-blue-900: var(--blue-900); /* #142048 — private blue 900 palette step; theme independent */
+  --color-blue-950: var(--blue-950); /* #0E1734 — private blue 950 palette step; theme independent */
+  --color-violet-50: var(--violet-50); /* #F8F0FF — private violet 50 palette step; theme independent */
+  --color-violet-100: var(--violet-100); /* #F0E1FE — private violet 100 palette step; theme independent */
+  --color-violet-200: var(--violet-200); /* #E4C8FE — private violet 200 palette step; theme independent */
+  --color-violet-300: var(--violet-300); /* #D8AEFE — private violet 300 palette step; theme independent */
+  --color-violet-400: var(--violet-400); /* #C98FFE — private violet 400 palette step; theme independent */
+  --color-violet-500: var(--violet-500); /* #BC83F1 — private violet 500 palette step; theme independent */
+  --color-violet-600: var(--violet-600); /* #8E43EA — private violet 600 palette step; theme independent */
+  --color-violet-700: var(--violet-700); /* #652EBD — private violet 700 palette step; theme independent */
+  --color-violet-750: var(--violet-750); /* #5B3F97 — muted violet · PR-status chip border (off-ramp accent) */
+  --color-violet-800: var(--violet-800); /* #453073 — private violet 800 palette step; theme independent */
+  --color-violet-900: var(--violet-900); /* #292438 — private violet 900 palette step; theme independent */
+  --color-violet-950: var(--violet-950); /* #1E1A28 — private violet 950 palette step; theme independent */
+  --color-brown-50: var(--brown-50); /* #FDF3F2 — private brown 50 palette step; theme independent */
+  --color-brown-100: var(--brown-100); /* #FAE3E0 — private brown 100 palette step; theme independent */
+  --color-brown-200: var(--brown-200); /* #F6D0CB — private brown 200 palette step; theme independent */
+  --color-brown-300: var(--brown-300); /* #EFBFB9 — private brown 300 palette step; theme independent */
+  --color-brown-400: var(--brown-400); /* #E3AEA5 — private brown 400 palette step; theme independent */
+  --color-brown-500: var(--brown-500); /* #D8A197 — private brown 500 palette step; theme independent */
+  --color-brown-600: var(--brown-600); /* #BD756B — private brown 600 palette step; theme independent */
+  --color-brown-700: var(--brown-700); /* #955750 — private brown 700 palette step; theme independent */
+  --color-brown-800: var(--brown-800); /* #6E4A45 — muted brown · PR-status chip border (raised from the ramp for a visible outline) */
+  --color-brown-900: var(--brown-900); /* #2C2221 — private brown 900 palette step; theme independent */
+  --color-brown-950: var(--brown-950); /* #1D1716 — private brown 950 palette step; theme independent */
+  /* @generated tokens:utilities-red-50:end */
 }
 
 /* ── STACKING LAYERS → utilities ──
@@ -433,26 +453,32 @@
    * Consume them as the Tailwind utilities (`font-medium`) from JSX, or
    * as `var(--weight-medium)` from the hand-written CSS in styles/global/;
    * never as a bare number, which silently opts out of the scale. */
-  --weight-medium: 450;
-  --weight-semibold: 500;
-  --weight-bold: 600;
+  /* @generated tokens:base-weight-medium:start */
+  --weight-medium: 450; /* 450 — medium font weight; softened from Tailwind 500 */
+  --weight-semibold: 500; /* 500 — semibold font weight; softened from Tailwind 600 */
+  --weight-bold: 600; /* 600 — bold font weight; softened from Tailwind 700 */
+  /* @generated tokens:base-weight-medium:end */
 
   /* ── BACKGROUNDS ── */
+  /* @generated tokens:base-bg0:start */
   --bg0: hsl(0 0% 5%); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
   --bg1: hsl(
     0 0% 7%
   ); /* #121212 — default canvas / app backdrop + active chat window */
+  /* @generated tokens:base-bg0:end */
   /* Contextual chat-window surface. Defaults to bg1 so the ACTIVE window (and
    * any chat chrome rendered outside a pane) looks exactly like the plain app
    * canvas; ChatPane overrides it to bg0 on unfocused panes. Consumers use
    * bg-(--pane-bg) / from-(--pane-bg) so they re-tint with their pane. */
-  --pane-bg: var(--bg1);
+  /* @generated tokens:base-pane-bg:start */
+  --pane-bg: var(--bg1); /* #121212 — contextual chat-pane surface; unfocused panes override it to bg0 */
   --bg1-hover: hsl(0 0% 12%); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
   --bg1-highlight: hsl(0 0% 9%); /* #171717 — highlighted content above bg1 */
   --bg1-bright: hsl(0 0% 11%); /* #1C1C1C — filled section card on bg1 */
   --bg2: hsl(0 0% 13%); /* #212121 — composer surface */
   --bg2-hover: hsl(0 0% 15%); /* #262626 — hover on bg2 */
   --bg2-highlight: hsl(0 0% 18%); /* #2E2E2E — dropdown trigger hover/open */
+  /* @generated tokens:base-pane-bg:end */
   /* bg3 is a FLOATING-SURFACE-ONLY token (popover / dropdown / menu / select /
    * command) — always on TOP of a background, NEVER a fill/chip/selected state.
    * Aliased to --sidebar-bg so a floating panel sits one subtle step above the
@@ -460,52 +486,59 @@
    * border2 + --shadow-dropdown, mirroring the light theme where bg3 == bg1.
    * (--sidebar-bg / --sidebar-bg-hover are defined a few lines below; CSS
    * custom properties resolve var() lazily, so the forward reference is fine.) */
-  --bg3: var(--sidebar-bg); /* = #171717 — floating popover surface */
+  /* @generated tokens:base-bg3:start */
+  --bg3: var(--sidebar-bg); /* #171717 — floating popover surface */
   --bg3-hover: var(
     --sidebar-bg-hover
-  ); /* = #262626 — hover on bg3 (menu items) */
+  ); /* #262626 — hover on bg3 (menu items) */
   --bg4: hsl(0 0% 24%); /* #3D3D3D — rare */
   --bg5: hsl(0 0% 37%); /* #5E5E5E — rare */
+  /* @generated tokens:base-bg3:end */
 
   /* ── FOREGROUNDS (text + icons only — NEVER used for borders) ── */
+  /* @generated tokens:base-fg1:start */
   --fg1: hsl(0 0% 94%); /* #F0F0F0 — selected/highlighted text + icons */
   --fg2: hsl(0 0% 72%); /* #B8B8B8 — default text + icon across app */
+  /* @generated tokens:base-fg1:end */
   /* MIDDLE tier — one step below --fg2 (see TOKEN TAXONOMY).
-   * Placed 60% of the way from --muted-fg up to --fg2 in log-contrast space:
-   * 6.58:1 on bg1, between fg2's 9.41:1 and muted-fg's 3.80:1. Light
-   * re-derives the SAME relative position in its own band rather than
-   * copying this lightness — in Light a higher L means LESS contrast, so
-   * copying `60` there would invert the tier order. */
+   * Both themes keep it above the supplemental metadata tier; Light inverts
+   * the lightness axis, so its own literal preserves the contrast order. */
+  /* @generated tokens:base-fg3:start */
   --fg3: hsl(0 0% 63%); /* #A1A1A1 — middle tier (one step below fg2) */
-  /* QUIETEST readable tier: 4.5:1 (WCAG AA) on every rest surface — the
-   * worst is bg2 at 4.66:1. Was L44 (#707070, 3.25:1 on bg2), which failed
-   * AA for the timestamps, counts and SHAs it carries. Hovered rows step it
-   * up to fg3 (styles/policy/contrast-contract.json). */
-  --muted-fg: hsl(0 0% 54%); /* #8A8A8A — quietest tier (app-wide 4th tier) */
+  /* @generated tokens:base-fg3:end */
+  /* SUPPLEMENTAL tier: owner-chosen 3:1 floor at rest, below AA by design.
+   * Hovered/selected rows step up to fg3 (contrast-contract.json). */
+  /* @generated tokens:base-muted-fg:start */
+  --muted-fg: hsl(0 0% 42%); /* #6B6B6B — supplemental metadata; 3:1 floor, fg3 on hover/selection */
+  /* @generated tokens:base-muted-fg:end */
 
   /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
-  --sidebar-bg: hsl(0 0% 9%); /* #171717 */
-  --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 */
+  /* @generated tokens:base-sidebar-bg:start */
+  --sidebar-bg: hsl(0 0% 9%); /* #171717 — repository sidebar background */
+  --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 — sidebar row hover and selected state */
+  /* @generated tokens:base-sidebar-bg:end */
 
   /* ── BORDERS ── */
+  /* @generated tokens:base-border1:start */
   --border1: hsl(0 0% 14%); /* #242424 — default for bg1 surfaces */
   --border2: hsl(0 0% 18%); /* #2E2E2E — sidebar / composer focus / bg2 */
   --border3: hsl(0 0% 24%); /* #3D3D3D — secondary btn / dropdown / input */
   --border4: hsl(0 0% 30%); /* #4D4D4D — highlighted state of border3 */
-  /* Control boundary: the outline of a checkbox, radio, switch-off track or
-   * slider thumb, where the outline itself identifies the control. ≥3:1 on
-   * every rest surface (WCAG 1.4.11); border1-4 stay decorative. */
-  --border-control: hsl(0 0% 47%); /* #787878 — control boundary (3:1) */
+  /* @generated tokens:base-border1:end */
 
   /* ── ELEVATION ──
    * Lift for floating surfaces (popover / dropdown / context menu).
    * Defined here once so component files reference the token instead of
    * inlining an rgba() shadow. */
-  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.35);
+  /* @generated tokens:base-shadow-dropdown:start */
+  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.35); /* #00000059 — floating surface shadow */
+  /* @generated tokens:base-shadow-dropdown:end */
   /* Shared modal chrome and overlay veil in both themes. */
-  --dialog-title-size: 0.9375rem; /* 15px shared popup heading */
-  --dialog-close-radius: 999px;
-  --scrim: rgba(0, 0, 0, 0.5);
+  /* @generated tokens:base-dialog-title-size:start */
+  --dialog-title-size: 0.9375rem; /* 0.9375rem — 15px shared popup heading */
+  --dialog-close-radius: 999px; /* 999px — circular popup close button */
+  --scrim: rgba(0, 0, 0, 0.5); /* #00000080 — modal overlay veil */
+  /* @generated tokens:base-dialog-title-size:end */
 
   /* ── HIGHLIGHTED (neutral interaction emphasis) ── */
   /* User-message bubble. Neutral Dark ALIASES this to bg2 so the bubble reads
@@ -514,28 +547,34 @@
    * gives the bubble its faint outline — keep any hover chip painted on this
    * surface at bg2-hover (15%) or above, or it disappears into the fill
    * (turn-container.tsx "More" pill). */
-  --highlighted-bg: var(--bg2); /* = #212121 — user msg bg (text: fg1/fg2) */
+  /* @generated tokens:base-highlighted-bg:start */
+  --highlighted-bg: var(--bg2); /* #212121 — user msg bg (text: fg1/fg2) */
   --highlighted-bright: hsl(
     0 0% 65%
   ); /* #A6A6A6 — input focus border, brighter accents */
+  /* @generated tokens:base-highlighted-bg:end */
 
   /* ── INVERTED (polarity-flipping pair) ──
    * The one surface that is always the OPPOSITE of bg1: near-white
    * in the dark theme, near-black in light. --inverted-fg is the
    * text/icon color ON it — the pair always ships together.
    * Consumers: primary button (via the aliases below), switch ON track. */
+  /* @generated tokens:base-inverted-bg:start */
   --inverted-bg: hsl(0 0% 92%); /* #EBEBEB — near-white on dark */
   --inverted-fg: hsl(
     0 0% 5%
   ); /* #0D0D0D — dark text/icon on the inverted fill */
+  /* @generated tokens:base-inverted-bg:end */
 
   /* ── COMPONENT ALIASES (button intents) ──
    * primary-button-bg / primary-button-fg are aliases over the
    * inverted pair. The hover is its own value per theme (a lifted
    * neutral that reads against primary-button-bg). */
-  --primary-button-bg: var(--inverted-bg); /* #EBEBEB */
+  /* @generated tokens:base-primary-button-bg:start */
+  --primary-button-bg: var(--inverted-bg); /* #EBEBEB — filled focal CTA; one per view */
   --primary-button-hover: hsl(0 0% 83%); /* #D4D4D4 — lifted neutral */
-  --primary-button-fg: var(--inverted-fg); /* #0D0D0D */
+  --primary-button-fg: var(--inverted-fg); /* #0D0D0D — text/icon on the primary button */
+  /* @generated tokens:base-primary-button-bg:end */
 
   /* ── COLOR PALETTES (6 families — explicit HSL, beyond neutral) ──────
    * primary = vivid accent / icon / border · bg = dark tinted surface ·
@@ -548,61 +587,63 @@
    * fills + delete icons. Full 50–950 ramps live in the palette preview
    * (styles/Artifacts/color-palette-preview.html); add a shade here only if a
    * specific step is actually needed. */
+  /* @generated tokens:base-red-primary:start */
   --red-primary: hsl(0 91% 71%); /* #F87272 — −N counts, error accents */
   --red-secondary: hsl(
     7 83% 39%
-  ); /* #B72311 — solid delete fills + delete icons */
+  ); /* #B62411 — solid delete fills + delete icons */
   --red-secondary-fg: hsl(
     0 0% 100%
-  ); /* #FFFFFF — text/icon on SOLID --red-secondary
-                                        * fills. THEME-STATIC (white in both themes —
-                                        * the red fill stays vivid in light, so fg1,
-                                        * which flips dark, can't sit on it). */
+  ); /* #FFFFFF — text/icon on SOLID --red-secondary fills. THEME-STATIC (white in both themes — the red fill stays vivid in light, so fg1, which flips dark, can't sit on it). */
+  /* @generated tokens:base-red-primary:end */
   /* Hover/pressed fill of a SOLID destructive control. A solid step, not an
    * alpha (`/90`) wash: alpha lightens the fill toward the surface and broke
    * white-text contrast in Light. */
+  /* @generated tokens:base-red-secondary-hover:start */
   --red-secondary-hover: hsl(7 83% 36%); /* #A82110 — destructive hover fill */
   --red-bg: hsl(3 26% 13.7%); /* #2C1B1A — error container surface */
-  --red-fg: hsl(20 97% 72%); /* #FDA274 — text/icon on --red-bg */
-
+  --red-fg: hsl(20 97% 72%); /* #FDA172 — text/icon on --red-bg */
   --green-primary: hsl(142 69% 58%); /* #4ADE80 — +N counts, success accents */
   --green-bg: hsl(120 23% 17%); /* #213521 — success container surface */
   --green-fg: hsl(142 75% 73%); /* #87EEAC — text/icon on --green-bg */
-
   --yellow-primary: hsl(
     37 75% 60%
   ); /* #E6AB4C — warning · modified · in-progress */
   --yellow-bg: hsl(38 68% 17%); /* #49330E — warning container surface */
-  --yellow-fg: hsl(44 100% 50%); /* #FFB900 — text/icon on --yellow-bg */
+  --yellow-fg: hsl(44 100% 50%); /* #FFBB00 — text/icon on --yellow-bg */
+  /* @generated tokens:base-red-secondary-hover:end */
   /* Icons, status dots and tinted borders. Dark yellow-primary already reads
    * at 3:1+ as a graphic, so it IS the icon color; Light needs a separate,
    * brighter value than its ochre text color. */
-  --yellow-icon: var(--yellow-primary);
+  /* @generated tokens:base-yellow-icon:start */
+  --yellow-icon: var(--yellow-primary); /* #E6AB4C — icons, status dots and tinted borders */
+  /* @generated tokens:base-yellow-icon:end */
   /* Translucent highlight washes (code-editor search matches at 35% / 55%):
    * the vivid amber, so a wash reads as a highlighter in both themes. Text on
    * the wash stays the surrounding text color. */
-  --yellow-wash: var(--yellow-primary);
-
+  /* @generated tokens:base-yellow-wash:start */
+  --yellow-wash: var(--yellow-primary); /* #E6AB4C — code-editor search-match washes */
   --blue-primary: hsl(205 80% 73%); /* #83C3F1 — info · links · accents */
   --blue-bg: hsl(226 57% 18%); /* #142048 — info container surface */
-  --blue-fg: hsl(211 96% 78%); /* #92C5FD — text/icon on --blue-bg */
-
+  --blue-fg: hsl(211 96% 78%); /* #91C5FD — text/icon on --blue-bg */
   --violet-primary: hsl(271 80% 73%); /* #BC83F1 — done · merged */
-  --violet-bg: hsl(255 21% 18%); /* #2A2539 — done container surface */
+  --violet-bg: hsl(255 21% 18%); /* #292438 — done container surface */
   --violet-fg: hsl(265 66% 77%); /* #BE9EEB — text/icon on --violet-bg */
-
-  --brown-primary: hsl(9 46% 72%); /* #D9A298 — file paths · warm accents */
-  --brown-bg: hsl(10 15% 15%); /* #2D2321 — brown container surface */
-  --brown-fg: hsl(10 80% 72%); /* #F1917E — text/icon on --brown-bg */
+  --brown-primary: hsl(9 46% 72%); /* #D8A197 — file paths · warm accents */
+  --brown-bg: hsl(10 15% 15%); /* #2C2221 — brown container surface */
+  --brown-fg: hsl(10 80% 72%); /* #F1927E — text/icon on --brown-bg */
+  /* @generated tokens:base-yellow-wash:end */
 
   /* ── DIFF INPUTS (shared/theme/diff-theme.ts) ──
    * The diff renderer derives row fills, word emphasis, gutters and bars from
    * these three bases. They are their OWN identity, decoupled from status text:
    * tuning text contrast must never re-tint diff rows. Dark follows the status
    * anchors; Light pins the diff palette it has always used. */
-  --diff-addition: var(--green-primary);
-  --diff-deletion: var(--red-primary);
-  --diff-neutral: var(--fg2);
+  /* @generated tokens:base-diff-addition:start */
+  --diff-addition: var(--green-primary); /* #4ADE80 — diff addition base */
+  --diff-deletion: var(--red-primary); /* #F87272 — diff deletion base */
+  --diff-neutral: var(--fg2); /* #B8B8B8 — neutral mixed into diff row fills */
+  /* @generated tokens:base-diff-addition:end */
 
   /* ── COLOR RAMPS (50–950 — THEME-STATIC absolute scales) ──
    * Full per-family scales for the rare case a specific shade is needed. Wired
@@ -616,85 +657,82 @@
    * to coincide: 500 ≈ primary, 900 ≈ bg, red 700 ≈ secondary — except red,
    * whose --red-bg was retuned to a desaturated brown-red while --red-900
    * keeps its place in the 50→950 scale. Do NOT resync them.) */
-  --red-50: hsl(0 85% 97%);
-  --red-100: hsl(0 85% 93%);
-  --red-200: hsl(0 85% 86%);
-  --red-300: hsl(0 85% 79%);
-  --red-400: hsl(0 85% 71%);
-  --red-500: hsl(0 91% 71%);
-  --red-600: hsl(3 84% 52%);
-  --red-700: hsl(7 83% 39%);
+  /* @generated tokens:base-red-50:start */
+  --red-50: hsl(0 85% 97%); /* #FEF1F1 — private red 50 palette step; theme independent */
+  --red-100: hsl(0 85% 93%); /* #FCDEDE — private red 100 palette step; theme independent */
+  --red-200: hsl(0 85% 86%); /* #FABDBD — private red 200 palette step; theme independent */
+  --red-300: hsl(0 85% 79%); /* #F79C9C — private red 300 palette step; theme independent */
+  --red-400: hsl(0 85% 71%); /* #F47676 — private red 400 palette step; theme independent */
+  --red-500: hsl(0 91% 71%); /* #F87272 — private red 500 palette step; theme independent */
+  --red-600: hsl(3 84% 52%); /* #EB281E — private red 600 palette step; theme independent */
+  --red-700: hsl(7 83% 39%); /* #B62411 — private red 700 palette step; theme independent */
   --red-750: hsl(
     10 58% 31%
-  ); /* #7b3021 — muted brick · PR-status closed chip border (off-ramp accent, mirrors --violet-750) */
-  --red-800: hsl(10 82% 27%);
-  --red-900: hsl(13 81% 14%);
-  --red-950: hsl(13 81% 10%);
-
-  --green-50: hsl(142 71% 97%);
-  --green-100: hsl(142 71% 91%);
-  --green-200: hsl(142 71% 80%);
-  --green-300: hsl(142 71% 68%);
-  --green-400: hsl(142 71% 57%);
-  --green-500: hsl(142 69% 58%);
-  --green-600: hsl(136 59% 38%);
-  --green-700: hsl(131 47% 31%);
-  --green-800: hsl(125 35% 24%);
-  --green-900: hsl(120 23% 17%);
-  --green-950: hsl(120 23% 12%);
-
-  --yellow-50: hsl(36 96% 97%);
-  --yellow-100: hsl(36 96% 93%);
-  --yellow-200: hsl(36 97% 85%);
-  --yellow-300: hsl(36 98% 76%);
-  --yellow-400: hsl(36 99% 68%);
-  --yellow-500: hsl(37 75% 60%);
-  --yellow-600: hsl(37 92% 49%);
-  --yellow-700: hsl(37 84% 39%);
-  --yellow-800: hsl(37 76% 28%);
-  --yellow-900: hsl(38 68% 17%);
-  --yellow-950: hsl(38 68% 12%);
-
-  --blue-50: hsl(205 90% 97%);
-  --blue-100: hsl(205 90% 94%);
-  --blue-200: hsl(205 90% 89%);
-  --blue-300: hsl(205 90% 84%);
-  --blue-400: hsl(205 90% 78%);
-  --blue-500: hsl(205 80% 73%);
-  --blue-600: hsl(210 82% 59%);
-  --blue-700: hsl(215 73% 45%);
-  --blue-800: hsl(221 65% 32%);
-  --blue-900: hsl(226 57% 18%);
-  --blue-950: hsl(226 57% 13%);
-
-  --violet-50: hsl(271 96% 97%);
-  --violet-100: hsl(271 96% 94%);
-  --violet-200: hsl(271 97% 89%);
-  --violet-300: hsl(271 98% 84%);
-  --violet-400: hsl(271 99% 78%);
-  --violet-500: hsl(271 80% 73%);
-  --violet-600: hsl(267 80% 59%);
-  --violet-700: hsl(263 61% 46%);
+  ); /* #7D3021 — muted brick · PR-status closed chip border (off-ramp accent, mirrors --violet-750) */
+  --red-800: hsl(10 82% 27%); /* #7D1F0C — private red 800 palette step; theme independent */
+  --red-900: hsl(13 81% 14%); /* #411307 — private red 900 palette step; theme independent */
+  --red-950: hsl(13 81% 10%); /* #2E0E05 — private red 950 palette step; theme independent */
+  --green-50: hsl(142 71% 97%); /* #F2FDF6 — private green 50 palette step; theme independent */
+  --green-100: hsl(142 71% 91%); /* #D8F8E4 — private green 100 palette step; theme independent */
+  --green-200: hsl(142 71% 80%); /* #A8F0C2 — private green 200 palette step; theme independent */
+  --green-300: hsl(142 71% 68%); /* #73E79E — private green 300 palette step; theme independent */
+  --green-400: hsl(142 71% 57%); /* #43DF7D — private green 400 palette step; theme independent */
+  --green-500: hsl(142 69% 58%); /* #4ADE80 — private green 500 palette step; theme independent */
+  --green-600: hsl(136 59% 38%); /* #289A46 — private green 600 palette step; theme independent */
+  --green-700: hsl(131 47% 31%); /* #2A7438 — private green 700 palette step; theme independent */
+  --green-800: hsl(125 35% 24%); /* #28532B — private green 800 palette step; theme independent */
+  --green-900: hsl(120 23% 17%); /* #213521 — private green 900 palette step; theme independent */
+  --green-950: hsl(120 23% 12%); /* #182618 — private green 950 palette step; theme independent */
+  --yellow-50: hsl(36 96% 97%); /* #FFF9F0 — private yellow 50 palette step; theme independent */
+  --yellow-100: hsl(36 96% 93%); /* #FEF1DC — private yellow 100 palette step; theme independent */
+  --yellow-200: hsl(36 97% 85%); /* #FEE0B4 — private yellow 200 palette step; theme independent */
+  --yellow-300: hsl(36 98% 76%); /* #FECE86 — private yellow 300 palette step; theme independent */
+  --yellow-400: hsl(36 99% 68%); /* #FEBE5D — private yellow 400 palette step; theme independent */
+  --yellow-500: hsl(37 75% 60%); /* #E6AB4C — private yellow 500 palette step; theme independent */
+  --yellow-600: hsl(37 92% 49%); /* #F0980A — private yellow 600 palette step; theme independent */
+  --yellow-700: hsl(37 84% 39%); /* #B77710 — private yellow 700 palette step; theme independent */
+  --yellow-800: hsl(37 76% 28%); /* #7E5411 — private yellow 800 palette step; theme independent */
+  --yellow-900: hsl(38 68% 17%); /* #49330E — private yellow 900 palette step; theme independent */
+  --yellow-950: hsl(38 68% 12%); /* #33240A — private yellow 950 palette step; theme independent */
+  --blue-50: hsl(205 90% 97%); /* #F0F8FE — private blue 50 palette step; theme independent */
+  --blue-100: hsl(205 90% 94%); /* #E2F2FD — private blue 100 palette step; theme independent */
+  --blue-200: hsl(205 90% 89%); /* #CAE7FC — private blue 200 palette step; theme independent */
+  --blue-300: hsl(205 90% 84%); /* #B1DCFB — private blue 300 palette step; theme independent */
+  --blue-400: hsl(205 90% 78%); /* #94CFF9 — private blue 400 palette step; theme independent */
+  --blue-500: hsl(205 80% 73%); /* #83C3F1 — private blue 500 palette step; theme independent */
+  --blue-600: hsl(210 82% 59%); /* #4196EC — private blue 600 palette step; theme independent */
+  --blue-700: hsl(215 73% 45%); /* #1F65C7 — private blue 700 palette step; theme independent */
+  --blue-800: hsl(221 65% 32%); /* #1D3E87 — private blue 800 palette step; theme independent */
+  --blue-900: hsl(226 57% 18%); /* #142048 — private blue 900 palette step; theme independent */
+  --blue-950: hsl(226 57% 13%); /* #0E1734 — private blue 950 palette step; theme independent */
+  --violet-50: hsl(271 96% 97%); /* #F8F0FF — private violet 50 palette step; theme independent */
+  --violet-100: hsl(271 96% 94%); /* #F0E1FE — private violet 100 palette step; theme independent */
+  --violet-200: hsl(271 97% 89%); /* #E4C8FE — private violet 200 palette step; theme independent */
+  --violet-300: hsl(271 98% 84%); /* #D8AEFE — private violet 300 palette step; theme independent */
+  --violet-400: hsl(271 99% 78%); /* #C98FFE — private violet 400 palette step; theme independent */
+  --violet-500: hsl(271 80% 73%); /* #BC83F1 — private violet 500 palette step; theme independent */
+  --violet-600: hsl(267 80% 59%); /* #8E43EA — private violet 600 palette step; theme independent */
+  --violet-700: hsl(263 61% 46%); /* #652EBD — private violet 700 palette step; theme independent */
   --violet-750: hsl(
     259 41% 42%
-  ); /* #5B3F96 — muted violet · PR-status chip border (off-ramp accent) */
-  --violet-800: hsl(259 41% 32%);
-  --violet-900: hsl(255 21% 18%);
-  --violet-950: hsl(255 21% 13%);
-
-  --brown-50: hsl(8 75% 97%);
-  --brown-100: hsl(7 74% 93%);
-  --brown-200: hsl(7 70% 88%);
-  --brown-300: hsl(7 62% 83%);
-  --brown-400: hsl(8 53% 77%);
-  --brown-500: hsl(9 46% 72%);
-  --brown-600: hsl(7 38% 58%);
-  --brown-700: hsl(6 30% 45%);
+  ); /* #5B3F97 — muted violet · PR-status chip border (off-ramp accent) */
+  --violet-800: hsl(259 41% 32%); /* #453073 — private violet 800 palette step; theme independent */
+  --violet-900: hsl(255 21% 18%); /* #292438 — private violet 900 palette step; theme independent */
+  --violet-950: hsl(255 21% 13%); /* #1E1A28 — private violet 950 palette step; theme independent */
+  --brown-50: hsl(8 75% 97%); /* #FDF3F2 — private brown 50 palette step; theme independent */
+  --brown-100: hsl(7 74% 93%); /* #FAE3E0 — private brown 100 palette step; theme independent */
+  --brown-200: hsl(7 70% 88%); /* #F6D0CB — private brown 200 palette step; theme independent */
+  --brown-300: hsl(7 62% 83%); /* #EFBFB9 — private brown 300 palette step; theme independent */
+  --brown-400: hsl(8 53% 77%); /* #E3AEA5 — private brown 400 palette step; theme independent */
+  --brown-500: hsl(9 46% 72%); /* #D8A197 — private brown 500 palette step; theme independent */
+  --brown-600: hsl(7 38% 58%); /* #BD756B — private brown 600 palette step; theme independent */
+  --brown-700: hsl(6 30% 45%); /* #955750 — private brown 700 palette step; theme independent */
   --brown-800: hsl(
     7 23% 35%
-  ); /* #6D4944 — muted brown · PR-status chip border (raised from the ramp for a visible outline) */
-  --brown-900: hsl(10 15% 15%);
-  --brown-950: hsl(10 15% 10%);
+  ); /* #6E4A45 — muted brown · PR-status chip border (raised from the ramp for a visible outline) */
+  --brown-900: hsl(10 15% 15%); /* #2C2221 — private brown 900 palette step; theme independent */
+  --brown-950: hsl(10 15% 10%); /* #1D1716 — private brown 950 palette step; theme independent */
+  /* @generated tokens:base-red-50:end */
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -716,70 +754,90 @@
   color-scheme: light;
 
   /* ── BACKGROUNDS ── */
+  /* @generated tokens:light-bg0:start */
   --bg0: hsl(0 0% 98%); /* #FAFAFA — INACTIVE chat window fill (below bg1) */
   --bg1: hsl(
     0 0% 100%
   ); /* #FFFFFF — default canvas / app backdrop + active chat window */
   --bg1-hover: hsl(0 4% 95%); /* #F3F2F2 — hover on bg1 (tool calls, tabs) */
   --bg1-highlight: hsl(0 0% 97%); /* #F7F7F7 — highlighted content above bg1 */
-  --bg1-bright: var(--bg2); /* = #F3F3F2 — filled section card on bg1 */
+  --bg1-bright: var(--bg2); /* #F3F3F2 — filled section card on bg1 */
   --bg2: hsl(60 4% 95%); /* #F3F3F2 — composer surface */
   --bg2-hover: hsl(60 4% 91%); /* #E9E9E7 — hover on bg2 */
-  --bg2-highlight: var(--bg5); /* = #E0E0E0 — dropdown trigger hover/open */
+  --bg2-highlight: var(--bg5); /* #E0E0E0 — dropdown trigger hover/open */
+  /* @generated tokens:light-bg0:end */
   /* Floating popover surface = the bg1 canvas itself; lift is border2 +
    * --shadow-dropdown (bg3 == bg1 in light — see the dark block's note). */
-  --bg3: var(--bg1); /* = #FFFFFF — floating popover surface */
-  --bg3-hover: var(--bg1-hover); /* = #F3F2F2 — hover on bg3 (menu items) */
+  /* @generated tokens:light-bg3:start */
+  --bg3: var(--bg1); /* #FFFFFF — floating popover surface */
+  --bg3-hover: var(--bg1-hover); /* #F3F2F2 — hover on bg3 (menu items) */
   --bg4: hsl(0 0% 94%); /* #F0F0F0 — rare (deepest chip grey) */
   --bg5: hsl(0 0% 88%); /* #E0E0E0 — rare (one step past bg4) */
+  /* @generated tokens:light-bg3:end */
 
   /* ── FOREGROUNDS ── */
+  /* @generated tokens:light-fg1:start */
   --fg1: hsl(20 7% 16%); /* #2C2826 — selected/highlighted text + icons */
-  /* The light text ladder mirrors Dark's (fg2 ≈ 9 / fg3 ≈ 7 / muted ≈ 5.5:1
-   * on bg1) and keeps EVERY tier at WCAG AA on every rest surface, the
-   * worst being highlighted-bg / bg2. Light INVERTS the lightness axis: a
-   * higher L means LESS contrast on white, so the tiers climb in L as they
-   * get quieter. Previous values (L37 / L44 / L56) left fg3 at 4.15:1 and
-   * muted-fg at 2.75:1 on raised surfaces. */
+  /* @generated tokens:light-fg1:end */
+  /* fg1–fg3 keep AA on rest and hover surfaces. The quietest metadata tier
+   * uses the same neutral grey in both themes and a reviewed 3:1 floor.
+   * Light INVERTS the lightness axis: higher L means LESS contrast on white. */
+  /* @generated tokens:light-fg2:start */
   --fg2: hsl(20 4% 30.5%); /* #514D4B — default text + icon; 8.4:1 on white */
   --fg3: hsl(20 4% 36%); /* #5F5B58 — middle tier (one step below fg2) */
-  --muted-fg: hsl(20 4% 41%); /* #6D6764 — quietest tier; 4.67:1 worst rest */
+  --muted-fg: hsl(0 0% 42%); /* #6B6B6B — supplemental metadata; 3:1 floor, fg3 on hover/selection */
+  /* @generated tokens:light-fg2:end */
 
   /* ── SIDEBAR ── */
-  --sidebar-bg: hsl(60 9% 98%); /* #FAFAF9 */
-  --sidebar-bg-hover: hsl(60 2% 92%); /* #EBEBEA */
+  /* @generated tokens:light-sidebar-bg:start */
+  --sidebar-bg: hsl(60 9% 98%); /* #FAFAF9 — repository sidebar background */
+  --sidebar-bg-hover: hsl(60 2% 92%); /* #EBEBEA — sidebar row hover and selected state */
+  /* @generated tokens:light-sidebar-bg:end */
 
   /* ── BORDERS ── */
+  /* @generated tokens:light-border1:start */
   --border1: hsl(30 9% 91%); /* #EAE8E6 — default for bg1 surfaces */
   --border2: hsl(30 9% 88%); /* #E3E0DE — sidebar / composer focus / bg2 */
-  --border3: hsl(60 3% 85%); /* #DADAD8 — secondary btn / dropdown / input */
-  /* border4 is the HOVER/open state of border3, so it must read as a change:
-   * L83 sat at 1.05:1 from border3; L78 makes the step visible. */
-  --border4: hsl(0 1% 78%); /* #C7C6C6 — highlighted state of border3 */
-  --border-control: hsl(30 5% 49%); /* #837D77 — control boundary (3:1) */
+  /* @generated tokens:light-border1:end */
+  /* Subtle rest/hover outlines on control surfaces, below WCAG 1.4.11's
+   * 3:1 by reviewed design. Keyboard focus remains the strong opaque cue. */
+  /* @generated tokens:light-border3:start */
+  --border3: hsl(60 3% 78%); /* #C9C9C5 — control outline at rest */
+  --border4: hsl(60 3% 72%); /* #BABAB5 — control outline on hover/open */
+  /* @generated tokens:light-border3:end */
 
   /* ── ELEVATION ── softer, wider wash — a light UI reads shadow
    * against white, so lower alpha than the dark theme's 0.35. */
-  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.12);
+  /* @generated tokens:light-shadow-dropdown:start */
+  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.12); /* #0000001F — floating surface shadow */
+  /* @generated tokens:light-shadow-dropdown:end */
   /* Lighter veil — 80% black over a white UI reads as a blackout. */
-  --scrim: rgba(0, 0, 0, 0.5);
+  /* @generated tokens:light-scrim:start */
+  --scrim: rgba(0, 0, 0, 0.5); /* #00000080 — modal overlay veil */
+  /* @generated tokens:light-scrim:end */
 
   /* ── HIGHLIGHTED ── */
+  /* @generated tokens:light-highlighted-bg:start */
   --highlighted-bg: hsl(
     30 5% 92%
   ); /* #ECEBEA — user msg bg (text on it: fg1/fg2) */
   --highlighted-bright: hsl(
     25 5% 45%
-  ); /* #79726D — input focus border, brighter accents */
+  ); /* #78726D — input focus border, brighter accents */
+  /* @generated tokens:light-highlighted-bg:end */
 
   /* ── INVERTED (near-black in light) ── */
+  /* @generated tokens:light-inverted-bg:start */
   --inverted-bg: hsl(20 7% 16%); /* #2C2826 — warm near-black */
   --inverted-fg: hsl(0 0% 100%); /* #FFFFFF — text/icon on the inverted fill */
+  /* @generated tokens:light-inverted-bg:end */
 
   /* ── COMPONENT ALIASES ── bg/fg follow the inverted pair via the
    * :root aliases; only the hover needs its own light value (a
    * lifted warm charcoal that reads against the near-black fill). */
-  --primary-button-hover: hsl(22 6% 25%); /* #433E3B */
+  /* @generated tokens:light-primary-button-hover:start */
+  --primary-button-hover: hsl(22 6% 25%); /* #443F3C — lifted primary button fill */
+  /* @generated tokens:light-primary-button-hover:end */
 
   /* ── COLOR PALETTES (6 families — light anchors) ──
    * Each -primary is TEXT-safe: 4.5:1 on every rest AND hover surface (the
@@ -787,42 +845,41 @@
    * hue and saturation are the family's own. Yellow cannot be bright and
    * readable on white, so its text color is ochre and the vivid golden value
    * lives on --yellow-icon (icons, dots, tinted borders: 3:1). */
+  /* @generated tokens:light-red-primary:start */
   --red-primary: hsl(0 72% 44%); /* #C11F1F — −N counts, error accents */
   --red-secondary: hsl(
     0 72% 50%
-  ); /* #DC2625 — solid delete fills + delete icons */
+  ); /* #DB2424 — solid delete fills + delete icons */
   --red-secondary-hover: hsl(0 72% 45%); /* #C52020 — destructive hover fill */
-  --red-bg: hsl(18 87% 91%); /* #FCDFD3 — error container surface */
+  --red-bg: hsl(18 87% 91%); /* #FCE0D4 — error container surface */
   --red-fg: hsl(18 89% 37.5%); /* #B53E0B — text/icon on --red-bg */
-
   --green-primary: hsl(142 75% 25.5%); /* #107234 — +N counts, success accents */
-  --green-bg: hsl(134 38% 89%); /* #D7EDDC — success container surface */
+  --green-bg: hsl(134 38% 89%); /* #D8EEDD — success container surface */
   --green-fg: hsl(142 70% 27.5%); /* #157739 — text/icon on --green-bg */
-
   --yellow-primary: hsl(
     37 90% 28.5%
   ); /* #8A5807 — warning · modified · in-progress (text) */
-  --yellow-bg: hsl(48 97% 89%); /* #FEF3C6 — warning container surface */
+  --yellow-bg: hsl(48 97% 89%); /* #FEF3C8 — warning container surface */
   --yellow-fg: hsl(37 100% 30.5%); /* #9C6000 — text/icon on --yellow-bg */
   --yellow-icon: hsl(37 90% 36%); /* #AE6F09 — icons, dots, tinted borders */
   --yellow-wash: hsl(37 90% 60%); /* #F5AE3D — search-match highlight washes */
-
   --blue-primary: hsl(221 83% 48.5%); /* #1556E2 — info · links · accents */
-  --blue-bg: hsl(214 100% 97%); /* #EFF6FF — info container surface */
-  --blue-fg: hsl(224 77% 48%); /* #1C4ED8 — text/icon on --blue-bg */
-
+  --blue-bg: hsl(214 100% 97%); /* #F0F6FF — info container surface */
+  --blue-fg: hsl(224 77% 48%); /* #1C4ED9 — text/icon on --blue-bg */
   --violet-primary: hsl(271 80% 51%); /* #851EE6 — done · merged */
-  --violet-bg: hsl(274 93% 94%); /* #F2E2FE — done container surface */
-  --violet-fg: hsl(263 61% 46%); /* #642EBB — text/icon on --violet-bg */
-
+  --violet-bg: hsl(274 93% 94%); /* #F2E1FE — done container surface */
+  --violet-fg: hsl(263 61% 46%); /* #652EBD — text/icon on --violet-bg */
   --brown-primary: hsl(5 35% 43%); /* #944E47 — file paths · warm accents */
   --brown-bg: hsl(5 74% 91%); /* #F9DAD7 — brown container surface */
   --brown-fg: hsl(0 20% 40%); /* #7A5252 — text/icon on --brown-bg */
+  /* @generated tokens:light-red-primary:end */
 
   /* Diff inputs pinned to Light's established diff palette (see :root). */
-  --diff-addition: hsl(142 75% 36%); /* #17A34A — diff addition base */
-  --diff-deletion: hsl(0 72% 51%); /* #DC2728 — diff deletion base */
+  /* @generated tokens:light-diff-addition:start */
+  --diff-addition: hsl(142 75% 36%); /* #17A149 — diff addition base */
+  --diff-deletion: hsl(0 72% 51%); /* #DC2828 — diff deletion base */
   --diff-neutral: hsl(20 4% 37%); /* #625D5B — neutral mixed into diff row fills */
+  /* @generated tokens:light-diff-addition:end */
 }
 
 /* ──────────────────────────────────────────────────────────

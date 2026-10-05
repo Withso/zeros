@@ -218,7 +218,7 @@ export const EventRow = memo(function EventRow({
         ) : null)}
       {transportTruncated && (
         <span
-          className="bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium"
+          className="bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium"
           title="The provider truncated this tool payload"
         >
           Truncated

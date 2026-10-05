@@ -1,0 +1,71 @@
+{
+  "$schema": "https://www.designtokens.org/schemas/2025.10/resolver.json",
+  "version": "2025.10",
+  "name": "Zeros appearance",
+  "description": "Base tokens are Dark by default. The Light modifier overrides only explicitly authored values.",
+  "sets": {
+    "base": {
+      "description": "Dark defaults and theme-independent values.",
+      "sources": [
+        {
+          "$ref": "base.tokens.json"
+        }
+      ]
+    }
+  },
+  "modifiers": {
+    "appearance": {
+      "description": "Resolved app appearance; System is resolved by the runtime before applying these tokens.",
+      "contexts": {
+        "dark": [],
+        "light": [
+          {
+            "$ref": "light.tokens.json"
+          }
+        ]
+      },
+      "default": "dark"
+    }
+  },
+  "resolutionOrder": [
+    {
+      "$ref": "#/sets/base"
+    },
+    {
+      "$ref": "#/modifiers/appearance"
+    }
+  ],
+  "$extensions": {
+    "org.zeros": {
+      "marketing": {
+        "groups": {
+          "bg0": ["tokens.bg0", "tokens.bg1"],
+          "bg1-hover": [
+            "tokens.bg1-hover",
+            "tokens.bg1-highlight",
+            "tokens.bg2",
+            "tokens.bg2-hover",
+            "tokens.bg3"
+          ],
+          "bg4": ["tokens.bg4", "tokens.bg5"],
+          "fg1": ["tokens.fg1", "tokens.fg2", "tokens.fg3", "tokens.muted-fg"],
+          "sidebar-bg": ["tokens.sidebar-bg", "tokens.sidebar-bg-hover"],
+          "border1": [
+            "tokens.border1",
+            "tokens.border2",
+            "tokens.border3",
+            "tokens.border4"
+          ],
+          "highlighted-bg": [
+            "tokens.highlighted-bg",
+            "tokens.highlighted-bright"
+          ],
+          "inverted-bg": ["tokens.inverted-bg", "tokens.inverted-fg"],
+          "primary-button-hover": ["tokens.primary-button-hover"],
+          "green-fg": ["tokens.green-fg"],
+          "yellow-primary": ["tokens.yellow-primary"]
+        }
+      }
+    }
+  }
+}

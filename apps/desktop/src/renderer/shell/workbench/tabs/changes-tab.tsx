@@ -120,6 +120,8 @@ import {
   type CachedChangesSection,
   type ChangesSectionKind,
 } from "./changes-snapshot-cache";
+import { Stack } from "@/renderer/shared/ui/layout/stack";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 export type ViewMode = "flat" | "tree";
 /** One header-less file list per scope (no groups). `changes` = the uncommitted
@@ -491,7 +493,12 @@ export function NotAGitRepo({
   }, [repoRoot, busy, onInitialized]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center">
+    <Stack
+      gap={3}
+      align="center"
+      justify="center"
+      className="h-full min-h-0 px-6 text-center"
+    >
       <GitBranch
         className="text-muted-fg size-10"
         strokeWidth={1}
@@ -523,7 +530,7 @@ export function NotAGitRepo({
           {error}
         </div>
       )}
-    </div>
+    </Stack>
   );
 }
 
@@ -1638,21 +1645,19 @@ function RowBtn({
 }) {
   return (
     <Tooltip label={title} className="pointer-events-none">
-      <button
+      <IconButton
         type="button"
-        aria-label={title}
+        label={title}
         disabled={disabled}
         onClick={(e) => {
           e.stopPropagation();
           onClick();
         }}
-        className={cn(
-          "text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-5 items-center justify-center rounded-sm transition-colors disabled:opacity-30",
-          className,
-        )}
+        motion="colors"
+        className={cn("flex disabled:opacity-30", className)}
       >
         {children}
-      </button>
+      </IconButton>
     </Tooltip>
   );
 }

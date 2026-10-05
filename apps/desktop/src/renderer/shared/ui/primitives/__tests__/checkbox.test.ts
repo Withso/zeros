@@ -21,7 +21,7 @@ describe("Checkbox", () => {
     expect(markup).toContain("peer-focus-visible:border-highlighted-bright");
   });
 
-  it("outlines the unchecked box with the 3:1 control boundary", () => {
+  it("outlines the unchecked box with the subtle border4 recipe", () => {
     const markup = renderToStaticMarkup(
       createElement(Checkbox, {
         checked: false,
@@ -30,6 +30,6 @@ describe("Checkbox", () => {
       }),
     );
 
-    expect(markup).toContain("border-border-control");
+    expect(markup).toContain("border-border4");
   });
 });
