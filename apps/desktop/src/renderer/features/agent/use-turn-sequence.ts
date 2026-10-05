@@ -9,6 +9,7 @@ export function useTurnSequence(
   events: AgentMessage[],
   live: boolean,
   owner: string | null,
+  failureTurnId?: string,
 ): TurnSegment[] {
   const committed = useRef<{
     owner: string | null;
@@ -18,12 +19,12 @@ export function useTurnSequence(
     () =>
       partitionTurnSequence(
         events,
-        { live },
+        { live, failureTurnId },
         committed.current && committed.current.owner === owner
           ? committed.current.sequence
           : undefined,
       ),
-    [events, live, owner],
+    [events, live, owner, failureTurnId],
   );
   // An abandoned concurrent render must not become the identity baseline.
   useLayoutEffect(() => {

@@ -13,6 +13,31 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("cloud preview opt-in", () => {
+  it("shares read-only intent metadata and consumes it without pre-admitting a frame", async () => {
+    vi.stubEnv("VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES", "preview.example.test");
+    const context = { authorityId: "11111111-1111-4111-8111-111111111111", deviceId: "33333333-3333-4333-8333-333333333333", keyVersion: 1 };
+    const invoke = native.nativeInvoke as ReturnType<typeof vi.fn>;
+    invoke.mockReset().mockResolvedValue(context);
+    const policy = await import("../cloud-workspace-access");
+    await Promise.all([policy.warmCloudPreviewContext(), policy.warmCloudPreviewContext()]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("cloud_workspace_access_context", {});
+    invoke.mockResolvedValueOnce({ accessId: "access-warmed", expiresAt: new Date(Date.now() + 60_000).toISOString() }).mockResolvedValueOnce(context);
+    await policy.openCloudWorkspacePreview({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222", port: 5173, frameName: "zeros-browser-warmed" });
+    expect(invoke.mock.calls.map(call => call[0])).toEqual(["cloud_workspace_access_context", "browser:open-cloud-preview", "cloud_workspace_access_context"]);
+  });
+
+  it("retires a late preview response after the device authority changes", async () => {
+    vi.stubEnv("VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES", "preview.example.test");
+    const first = { authorityId: "11111111-1111-4111-8111-111111111111", deviceId: "33333333-3333-4333-8333-333333333333", keyVersion: 1 };
+    const invoke = native.nativeInvoke as ReturnType<typeof vi.fn>;
+    invoke.mockReset();
+    invoke.mockResolvedValueOnce(first).mockResolvedValueOnce({ accessId: "access-issued", logicalUrl: "http://localhost:5173/", origin: "https://preview.example.test", admissionUrl: "https://preview.example.test/", expiresAt: new Date(Date.now() + 60_000).toISOString() }).mockResolvedValueOnce({ ...first, keyVersion: 2 }).mockResolvedValueOnce(true);
+    const policy = await import("../cloud-workspace-access");
+    await expect(policy.openCloudWorkspacePreview({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222", port: 5173, frameName: "zeros-browser-test" })).rejects.toThrow("device changed");
+    expect(invoke).toHaveBeenLastCalledWith("cloud_workspace_access_revoke", { accessId: "access-issued" });
+    invoke.mockReset().mockResolvedValue({ accessId: "synthetic-access" });
+  });
   it("hides only cloud preview surfaces when suffixes are unset", async () => {
     const policy = await import("../cloud-workspace-access");
     expect(policy.cloudWorkspacePreviewsConfigured()).toBe(false);

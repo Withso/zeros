@@ -1,8 +1,22 @@
 import {describe,expect,it,vi} from "vitest";
 import type {CloudProviderExecution} from "../../../cloud-provider-execution";
-import {cloudCodexImage,cloudCodexRequest,cloudCodexToolCall,CLOUD_CODEX_CONFIG} from "../cloud-policy";
+import {cloudCodexConfig,cloudCodexImage,cloudCodexRequest,cloudCodexToolCall,CLOUD_CODEX_CONFIG} from "../cloud-policy";
 const context=()=>({lease:{assertLive:vi.fn(),admission:{model:"qualified-model"}},tools:{inputSchema:{type:"object"},call:vi.fn()}}) as unknown as CloudProviderExecution;
 describe("Codex cloud native authority",()=>{
+  it("limits shell inheritance to admitted names and managed paths, including an empty org environment",()=>{
+    for(const values of [{},{ORG_SECRET:"synthetic-env-value",OPENAI_API_KEY:"synthetic-provider-value"}]){
+      const execution=context();Object.assign(execution.lease,{environment:{values}});
+      const config=cloudCodexConfig(execution);
+      expect(config).toMatchObject({"shell_environment_policy.inherit":"all","shell_environment_policy.ignore_default_excludes":true,
+        "shell_environment_policy.include_only":["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME",...(values.ORG_SECRET?["ORG_SECRET"]:[])]});
+      for(const method of ["thread/start","thread/resume"]){
+        expect(cloudCodexRequest(execution,"env",method,{threadId:"native",config:{"shell_environment_policy.include_only":["*"],"shell_environment_policy.set":{OPENAI_API_KEY:"injected"}}}))
+          .toMatchObject({config});
+      }
+      expect(JSON.stringify(config)).not.toContain("synthetic-");
+      expect(config).not.toHaveProperty("shell_environment_policy.set");
+    }
+  });
   it("routes the exact workspace tool through its execution and rejects foreign names without reflecting errors",async()=>{
     const execution=context(),input={threadId:"thread",turnId:"turn",callId:"call",namespace:null,tool:"zeros_workspace",arguments:{operation:"lsp",request:{kind:"start",language:"python"}}};
     vi.mocked(execution.tools.call).mockResolvedValue({ok:true,data:{state:"running"}});

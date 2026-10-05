@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
   workspacesChanged: vi.fn(),
   projectsChanged: vi.fn(),
 }));
+vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => false }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useEffect: (fn: () => void | (() => void)) => state.effects.push(fn),
@@ -129,4 +130,3 @@ it("an unchanged poll with two cloud owners preserves ordering and every row ref
   expect(getCloudWorkspaceRows()).toBe(rows);
   expect(listener).not.toHaveBeenCalled();
 });
-

@@ -1,6 +1,8 @@
 import {z} from "zod";
-import { CloudRepositoryMcpSchema, CloudCustomizationSnapshotSchema } from "./cloud-customization";
+import { CloudRepositoryMcpSchema, CloudCustomizationSnapshotSchema, CloudCustomizationHistoryAuthoritySchema } from "./cloud-customization";
+import { CloudComputerV2EnvironmentOperationSchema } from "./cloud-computer-v2";
 import type { CloudCustomizationOperation } from "./cloud-customization";
+import type { CloudComputerToolExecutionRequest } from "./cloud-computer-tools";
 
 export const CloudGitAuthorSchema=z.object({
   name:z.string().min(1).max(256).regex(/^[^\x00-\x1f\x7f<>]+$/),
@@ -11,6 +13,17 @@ export type CloudGitAuthor=z.infer<typeof CloudGitAuthorSchema>;
 /** Private control-plane ↔ trusted engine protocol. Material never belongs in
  * a workspace RPC, event, durable record, tool request, or diagnostic object. */
 const uuid=z.uuid(),identity=z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
+const environmentBytes=(value:string)=>new TextEncoder().encode(value).byteLength;
+/** Private execution material only. Never serialize it into workspace RPCs,
+ * provider argv, managed settings, or engine diagnostics. */
+export const CloudComputerEnvironmentValuesSchema=z.record(
+  z.string().refine(name=>CloudComputerV2EnvironmentOperationSchema.safeParse({op:"preserve",name}).success),
+  z.string().max(65_536).refine(value=>!value.includes("\0")&&environmentBytes(value)<=65_536),
+).refine(values=>Object.keys(values).length<=128&&Object.values(values).reduce((sum,value)=>sum+environmentBytes(value),0)<=512*1024&&environmentBytes(JSON.stringify(values))<=768*1024);
+export const CloudComputerExecutionEnvironmentSchema=z.object({version:z.literal(1),revision:z.string().regex(/^[a-f0-9]{64}$/),
+  values:CloudComputerEnvironmentValuesSchema,history:CloudCustomizationHistoryAuthoritySchema}).strict();
+export type CloudComputerExecutionEnvironment=z.infer<typeof CloudComputerExecutionEnvironmentSchema>;
+export const CloudComputerTerminalEnvironmentSchema=z.object({version:z.literal(1),environment:CloudComputerEnvironmentValuesSchema.nullable()}).strict();
 export const CloudNativeCapabilitiesSchema=z.object({version:z.literal(1),
   goals:z.boolean(),nativeFork:z.boolean(),transcriptFork:z.boolean(),nativeReview:z.boolean(),connectedApps:z.boolean(),multiAgent:z.boolean(),
 }).strict();
@@ -32,13 +45,15 @@ export type CloudBackgroundOperation={kind:"retain"|"sync";conversationId:string
   {kind:"resume";conversationId:string;admission:CloudAgentExecutionAdmission}|{kind:"read";conversationId:string};
 const token=z.string().min(16).max(16_384).regex(/^[A-Za-z0-9._~+\/-]+={0,2}$/);
 export const CloudAgentProviderSchema=z.enum(["claude","cursor","codex"]);
+export const CloudWorkerRuntimeProfileSchema=z.enum(["zeros-cloud-worker-v3","zeros-cloud-worker-v4"]);
+export type CloudWorkerRuntimeProfile=z.infer<typeof CloudWorkerRuntimeProfileSchema>;
 /** Public diagnostic only: independent of the strict v1 native qualification
  * and private authority responses, so older workers/control planes remain
  * compatible. Absence or an unknown version never implies Browser readiness. */
 const cloudBrowserScope = {
   version: z.literal(1),
   provider: CloudAgentProviderSchema,
-  runtimeProfile: z.literal("zeros-cloud-worker-v3"),
+  runtimeProfile: CloudWorkerRuntimeProfileSchema,
   credentialKind: z.enum(["claude-api-key", "claude-setup-token", "cursor-api-key", "codex-api-key", "codex-chatgpt", "unknown"]),
 };
 export const CloudBrowserCapabilitySchema = z.discriminatedUnion("state", [
@@ -68,9 +83,12 @@ export const CloudAgentAccessMaterialSchema=z.discriminatedUnion("kind",[
 const codexAccess=z.object({kind:z.literal("codex-chatgpt"),accessToken:token,accountId:z.string().min(1).max(256).regex(/^[A-Za-z0-9_-]+$/),
   expiresAt:z.number().int().positive().max(4_102_444_800)}).strict();
 export const CloudAgentExecutionLeaseSchema=z.object({leaseId:uuid,expiresAt:z.iso.datetime(),credentialVersion:z.number().int().positive().safe(),
+  environmentRevision:z.string().regex(/^[a-f0-9]{64}$/).optional(),
   nativeCapabilities:CloudNativeCapabilitiesSchema.optional(),
   rotation:z.object({authorityId:z.string().regex(/^[a-f0-9]{64}$/),material:codexAccess}).strict().optional()}).strict();
 export const CloudAgentExecutionAuthoritySchema=CloudAgentExecutionLeaseSchema.extend({authorityId:z.string().regex(/^[a-f0-9]{64}$/),
+  computerToolsVersion:z.literal(1).optional(),
+  environment:CloudComputerExecutionEnvironmentSchema.optional(),
   backgroundTasksVersion:z.literal(1).optional(),
   credentialKind:z.enum(["claude-api-key","claude-setup-token","cursor-api-key","codex-api-key","codex-chatgpt"]),
   provider:CloudAgentProviderSchema,model:z.string().min(1).max(256),material:CloudAgentAccessMaterialSchema,
@@ -83,8 +101,10 @@ export type CloudAgentAccessMaterial=z.infer<typeof CloudAgentAccessMaterialSche
 export type CloudAgentExecutionAuthority=z.infer<typeof CloudAgentExecutionAuthoritySchema>;
 export type CloudAgentExecutionLease=z.infer<typeof CloudAgentExecutionLeaseSchema>;
 export const CloudAgentActionAuthoritySchema=z.object({authorized:z.literal(true),executionId:identity,actorSessionId:uuid}).strict();
-export type CloudAgentExecutionRequest={kind:"admit";admission:CloudAgentExecutionAdmission;includeGitAuthor?:boolean;nativeCapabilitiesVersion?:1;backgroundTasksVersion?:1}|{kind:"validate";leaseId:string;renew?:boolean;credentialVersion?:number;nativeCapabilitiesVersion?:1}|
+export type CloudAgentExecutionRequest={kind:"admit";admission:CloudAgentExecutionAdmission;includeGitAuthor?:boolean;nativeCapabilitiesVersion?:1;backgroundTasksVersion?:1;computerToolsVersion?:1;environmentVersion?:1}|{kind:"validate";leaseId:string;renew?:boolean;credentialVersion?:number;nativeCapabilitiesVersion?:1}|
+  CloudComputerToolExecutionRequest|
   {kind:"refresh-codex";leaseId:string;credentialVersion:number;nativeCapabilitiesVersion?:1}|{kind:"release";leaseId:string}|
   {kind:"background";leaseId:string;operation:CloudBackgroundOperation}|
   {kind:"authorize-action";executionId:string;actorSessionId:string}|
-  {kind:"customization";actorSessionId:string;operation:CloudCustomizationOperation;params:Record<string,unknown>};
+  {kind:"customization";actorSessionId:string;operation:CloudCustomizationOperation;params:Record<string,unknown>}|
+  {kind:"terminal-environment";actorSessionId:string};

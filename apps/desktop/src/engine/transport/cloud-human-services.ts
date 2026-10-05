@@ -1,3 +1,4 @@
+import {resolveCloudRuntime} from "../agents/containment/cloud-runtime-root.mjs";
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
@@ -89,7 +90,7 @@ export class CloudRuntimeHumanServices {
     const info = lstatSync(launch.script);
     if (!info.isFile() || info.isSymbolicLink() || !isCloudDeploymentOwner(launch.script, info.uid) || (info.mode & 0o022) !== 0) throw new Error('Cloud SSH worker is unavailable');
     const child = spawn(launch.command, launch.args, { cwd: '/', env: {
-      HOME: '/srv/zeros/home/agent', PATH: '/opt/zeros-runtime/bin:/usr/bin:/bin', LANG: 'C.UTF-8',
+      HOME: '/srv/zeros/home/agent', PATH: `${resolveCloudRuntime().binRoot}:/usr/bin:/bin`, LANG: 'C.UTF-8',
     }, stdio: ['pipe','pipe','pipe'] });
     child.stdin.on('error', () => {}); child.stdout.on('error', () => {}); child.stderr.resume();
     let closed = false;

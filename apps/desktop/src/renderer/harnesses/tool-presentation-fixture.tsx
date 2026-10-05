@@ -18,6 +18,7 @@ import {
 import { HighlightedCode } from "../features/agent/renderers/highlighted-code";
 import { reconcileHistoryMessages } from "../features/agent/history-message-identity";
 import type { RendererContext } from "../features/agent/renderers/types";
+import { ToolSpacingFixture } from "./tool-spacing-fixture";
 
 const tool = (
   id: string,
@@ -142,6 +143,7 @@ export function ToolPresentationFixture({ ctx }: { ctx: RendererContext }) {
       id="tool-presentation-fixture"
       className="mx-auto max-w-3xl space-y-3"
     >
+      <ToolSpacingFixture ctx={ctx} />
       <div className="flex flex-wrap gap-2">
         <Button
           onClick={() =>

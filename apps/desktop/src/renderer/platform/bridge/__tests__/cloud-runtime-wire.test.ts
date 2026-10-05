@@ -17,6 +17,27 @@ const scope: CloudRuntimeScope = {
 const key = cloudWorkspaceKey(scope);
 
 describe("cloud runtime wire routing", () => {
+  it.each([
+    "identity", "list", "create", "pause", "resume", "remove", "divergences", "sync", "relocate",
+  ])("keeps cloudReplica.%s on this Mac even with a cloud workspace parameter", (operation) => {
+    expect(cloudRequestTarget({
+      type: "WORKSPACE_REQUEST",
+      op: `cloudReplica.${operation}`,
+      params: { workspaceId: key, cwd: key, replicaId: "local-replica" },
+    })).toBeNull();
+  });
+
+  it("scopes the preview response envelope while retaining the engine's opaque native target", () => {
+    const target = { executionId: "execution-native", portId: "A".repeat(32) };
+    const response = cloudIncoming(scope, { type: "AGENT_BOUNDARY_PORT_OPENED",
+      executionId: target.executionId, portId: target.portId, nativeTarget: target,
+      url: "http://localhost:5173/", admissionUrl: "http://localhost:5173/" });
+    expect(response.executionId).toBe(cloudScopedId(scope, target.executionId));
+    expect(response.nativeTarget).toBe(target);
+    expect(cloudOutgoing(scope, { type: "AGENT_OPEN_BOUNDARY_PORT", executionId: response.executionId, portId: target.portId }))
+      .toMatchObject({ executionId: target.executionId, portId: target.portId });
+  });
+
   it("routes file operations by stable workspace identity and preserves relative file paths", () => {
     const message = {
       type: "WORKSPACE_REQUEST",

@@ -25,6 +25,26 @@ const pool = {
 
 const emailConfig = { from: null, token: null, apiUrl: "", inviteLinkBase: "" };
 
+it("checks native grant authority before account auth without exposing or admitting a stream", async () => {
+  const expiresAtMs = Date.now() + 10_000;
+  const check = vi.fn(async (_request: Request): Promise<number | null> => expiresAtMs);
+  const app = createApp(config(null), pool, emailConfig as never, { cloudRuntimeServiceAccess: { check } as never });
+  const path = "https://api.example.test/v1/cloud-workspaces/services/tunnel/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const missing = await app.request(path);
+  expect(missing.status).toBe(401);
+  expect(check).not.toHaveBeenCalled();
+  const headers = { "x-zeros-runtime-service": `zsh_${"a".repeat(43)}` };
+  const response = await app.request(path.replace("https:", "http:"), { headers: { ...headers, "x-forwarded-proto": "https", "x-forwarded-host": "ignored.example.test" } });
+  expect(response.status).toBe(200);
+  expect(check.mock.calls[0]![0].url).toBe(path);
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(await response.json()).toEqual({ expiresAtMs });
+  check.mockResolvedValueOnce(null);
+  const revoked = await app.request(path, { headers });
+  expect(revoked.status).toBe(401);
+  expect(revoked.headers.get("cache-control")).toBe("no-store");
+});
+
 it("requires app authentication before a paid chat title request", async () => {
   const fetchSpy = vi.spyOn(globalThis, "fetch");
   try {

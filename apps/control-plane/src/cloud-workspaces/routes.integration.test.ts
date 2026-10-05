@@ -1,4 +1,4 @@
-import {seedProviderLossAttestation,withCloudFixtureOwnerTx} from "./test-fixtures.js";
+import {seedProviderLossAttestation,seedReadyProCloudWorkspace,withCloudFixtureOwnerTx} from "./test-fixtures.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   afterAll,
@@ -21,10 +21,19 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import type { CloudWorkspaceAccessService } from "./access.js";
 import type { CloudWorkspaceRepositoryResolver } from "./github-repositories.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
+import { WorkspaceReplicaError } from "./replicas.js";
 import { sealCloudProviderCredential } from "./provider-connections.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import { reserveWriterSlot } from "./pro-sharing.js";
+import { DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 import { DatabaseProMonthlyAllowance } from "./pro-allowance.js";
+import { runtimeBase, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { CloudWorkspaceReconciler } from "./reconciler.js";
+import type { CloudWorkspaceProvider } from "./provider.js";
+import { ensureCloudComputerIdentity } from "./computer.js";
+import { seedComputerTemplate, computerTestAccount, computerTestWallet } from "./computer-workspace-test-fixtures.js";
+import { copyComputerWorkspaceSource, resolveComputerTemplateFork } from "./computer-workspace-source.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -100,14 +109,21 @@ d("cloud workspace API contracts", () => {
     });
   };
 
-  const signup = (name: string) => {
+  let fixtureSignupTime = Date.now();
+  const signup = async (name: string) => {
     const sub = randomUUID();
-    return ensureUser(pool, {
-      provider: "auth0",
-      providerSubject: sub,
-      email: `${name.toLowerCase()}-${sub}@example.com`,
-      displayName: name,
-    });
+    // Disposable fixture identities must not share the production signup
+    // window across database resets. Auth0 fixtures use this clock only there.
+    fixtureSignupTime += 60 * 60 * 1000 + 1;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(fixtureSignupTime);
+    try {
+      return await ensureUser(pool, {
+        provider: "auth0",
+        providerSubject: sub,
+        email: `${name.toLowerCase()}-${sub}@example.com`,
+        displayName: name,
+      });
+    } finally { clock.mockRestore(); }
   };
 
   const request = (
@@ -117,11 +133,13 @@ d("cloud workspace API contracts", () => {
       key?: string;
       body?: Record<string, unknown>;
       accessCredential?: string;
+      headers?: Record<string, string>;
     },
   ) =>
     app.request(path, {
       method: init?.method ?? "GET",
       headers: {
+        ...init?.headers,
         ...(init?.body ? { "content-type": "application/json" } : {}),
         ...(init?.key ? { "idempotency-key": init.key } : {}),
         ...(init?.accessCredential
@@ -141,6 +159,747 @@ d("cloud workspace API contracts", () => {
       githubInstallationId: installationId,
     },
     ...overrides,
+  });
+
+  const v4Config = (staffOnly = true): CloudWorkspaceBackendConfig => ({
+    ...cloudConfig, provider: "boat", snapshotId: "zeros-v2-test-legacy",
+    imageRef: `boat:zeros-v2-test-legacy@sha256:${"0".repeat(64)}`,
+    runtime: { newWorkspaceProfile: "v4", staffOnly, qualificationMode: "full" },
+  });
+  const seedV4 = () => withSystemTx(pool, async tx => {
+    await seedRuntimeBase(tx);
+    return seedRuntimeBundle(tx);
+  });
+  const generationPin = (workspaceId: string) => pool.query(`SELECT image_ref, source_commit, architecture, storage_mib,
+    runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id, runtime_profile,
+    runtime_engine_protocol_version FROM cloud_workspace_generations WHERE workspace_id=$1 ORDER BY generation`, [workspaceId]);
+
+  async function createV4LifecycleWorkspace(status: "ready" | "stopped" = "ready") {
+    await seedV4();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, v4Config());
+    const created = await request(`/v1/organizations/${orgId}/cloud-workspaces`, {
+      method: "POST", key: randomUUID(), body: createBody(),
+    });
+    expect(created.status).toBe(202);
+    const workspace = (await created.json()).workspace;
+    await withSystemTx(pool, async tx => {
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1", [workspace.id]);
+      await tx.query("UPDATE cloud_workspaces SET status=$2,desired_state=$3 WHERE id=$1", [workspace.id, status, status === "ready" ? "running" : "stopped"]);
+      await tx.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$2,observed_state=$3 WHERE workspace_id=$1", [workspace.id, `sandbox-${workspace.id}`, status === "ready" ? "running" : "stopped"]);
+    });
+    return workspace;
+  }
+
+  it("refuses wake of a revoked runtime with an explicit upgrade result", async () => {
+    const workspace = await createV4LifecycleWorkspace("stopped");
+    const saved = (await generationPin(workspace.id)).rows;
+    await withSystemTx(pool, async tx => {
+      await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 });
+      await tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [workspace.generation.runtime.runtimeId]);
+    });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}/wake`, { method: "POST", key: randomUUID() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_revoked", message: expect.stringContaining("upgrade") } });
+    expect((await generationPin(workspace.id)).rows).toEqual(saved);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='wake'", [workspace.id])).rowCount).toBe(0);
+  });
+
+  it("copies every v4 pin and the saved base through ordinary generation replacement", async () => {
+    const workspace = await createV4LifecycleWorkspace();
+    const saved = (await generationPin(workspace.id)).rows[0];
+    await withSystemTx(pool, async tx => {
+      await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 });
+      await seedRuntimeBase(tx, { ...runtimeBase, id: "zeros-v2-test-new-base", imageRef: "boat:zeros-v2-test-new-base" }, new Date(Date.now() + 1_000));
+    });
+    configureApp(false, { ...v4Config(), runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full" } });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}/generations`, {
+      method: "POST", key: randomUUID(), body: { operation: "upgrade" },
+    });
+    expect(response.status).toBe(202);
+    expect((await generationPin(workspace.id)).rows).toEqual([saved, saved]);
+  });
+
+  it("rechecks a revoked pin before the reconciler dispatches an accepted wake", async () => {
+    const workspace = await createV4LifecycleWorkspace("stopped");
+    const path = `/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}`;
+    expect((await request(`${path}/wake`, { method: "POST", key: randomUUID() })).status).toBe(202);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [workspace.generation.runtime.runtimeId]));
+    const providerCall = vi.fn(async () => { throw new Error("A revoked runtime must not contact its provider"); });
+    const provider: CloudWorkspaceProvider = { name: "boat", find: providerCall, inspect: providerCall,
+      create: providerCall, start: providerCall, stop: providerCall, archive: providerCall, delete: providerCall, async *listManaged() {} };
+    expect(await new CloudWorkspaceReconciler({ pool, provider, intervalMs: 1000 }).runOnce()).toBe(true);
+    expect(providerCall).not.toHaveBeenCalled();
+    expect((await (await request(path)).json()).workspace.error).toMatchObject({ code: "cloud_runtime_revoked", message: expect.stringContaining("upgrade") });
+  });
+
+  it("selects a same-base runtime once and replays it after the channel advances", async () => {
+    const workspace = await createV4LifecycleWorkspace();
+    const original = (await generationPin(workspace.id)).rows[0];
+    const next = await withSystemTx(pool, async tx => {
+      const runtime = await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 });
+      await seedRuntimeBase(tx, { ...runtimeBase, id: "zeros-v2-test-new-base", imageRef: "boat:zeros-v2-test-new-base",
+        compatibilityId: `bc1-${"8".repeat(64)}` }, new Date(Date.now() + 1_000));
+      return runtime;
+    });
+    const path = `/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}/runtime-upgrade`;
+    const body = { expectedGeneration: 1, operationId: randomUUID() };
+    const response = await request(path, { method: "POST", body });
+    expect(response.status).toBe(202);
+    const accepted = await response.json();
+    expect(accepted).toEqual({ operationId: body.operationId, sourceGeneration: 1, generation: 2,
+      runtimeId: next.pin.runtimeId, transitionId: expect.any(String), unchanged: false });
+    expect((await generationPin(workspace.id)).rows).toEqual([original, { ...original,
+      runtime_id: next.pin.runtimeId, runtime_manifest_sha256: next.pin.manifestSha256 }]);
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "3", releaseOrder: 3 }));
+    const replay = await request(path, { method: "POST", body });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(await replay.json()).toEqual(accepted);
+    expect((await generationPin(workspace.id)).rows).toHaveLength(2);
+  });
+
+  const templateConfig = (): CloudWorkspaceBackendConfig => ({
+    ...v4Config(),
+    runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full" },
+    boat: { accountScope: computerTestAccount, billingOrg: computerTestWallet, ttlSeconds: 1800 },
+  });
+  const seedTemplate = (options: { version?: number; primaryName?: string } = {}) => withSystemTx(pool, tx =>
+    seedComputerTemplate(tx, { organizationId: orgId, ownerUserId: owner.id, installationId, ...options }));
+
+  describe("private Cloud Computer admin workspaces", () => {
+    const adminBody = (expectedActiveVersion = 1, operationId = randomUUID()) => ({ expectedActiveVersion, operationId });
+    const adminPath = () => `/v1/organizations/${orgId}/cloud-computer/v2/admin-workspaces`;
+    const createAdmin = (body: Record<string, unknown> = adminBody()) => request(adminPath(), { method: "POST", body });
+    const prepareAdmin = async () => {
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [owner.id]);
+      actor = { ...owner, staffRole: "developer" };
+      await seedV4();
+      const template = await seedTemplate();
+      configureApp(false, templateConfig());
+      const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+      vi.mocked(repositoryResolver.resolve).mockImplementation(async input => ({ ...await resolve(input),
+        resolvedRevision: /^[a-f0-9]{40}$/.test(input.revision ?? "") ? input.revision! : "4".repeat(40) }));
+      return template;
+    };
+
+    const shareAdminWorkspace = async () => {
+      await prepareAdmin();
+      const workspace = (await (await createAdmin()).json()).workspace;
+      await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({ workspaceId: workspace.id,
+        organizationId: orgId, actorUserId: owner.id, sharingMode: "organization", expectedRevision: workspace.accessRevision });
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [outsider.id]);
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [orgId, outsider.id]);
+      await pool.query("INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,'viewer')",
+        [workspace.id, orgId, outsider.id]);
+      await pool.query("UPDATE organization_entitlements SET seat_limit=2 WHERE org_id=$1", [orgId]);
+      await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')", [orgId, outsider.id]);
+      return workspace.id as string;
+    };
+    const adminWorkspaceReads = [
+      { name: "organization GET", list: false, path: (id: string) => `/v1/organizations/${orgId}/cloud-workspaces/${id}` },
+      { name: "global GET", list: false, path: (id: string) => `/v1/cloud-workspaces/${id}` },
+      { name: "organization list", list: true, path: (_id: string) => `/v1/organizations/${orgId}/cloud-workspaces` },
+      { name: "global list", list: true, path: (_id: string) => "/v1/cloud-workspaces" },
+    ];
+
+    it.each(adminWorkspaceReads)("omits admin metadata from $name for an authorized non-admin viewer", async ({ path, list }) => {
+      const workspaceId = await shareAdminWorkspace();
+      actor = { ...outsider, staffRole: "developer" };
+      const role = await withSystemTx(pool, async tx =>
+        (await tx.query("SELECT cloud_workspace_actor_role($1,$2) AS role", [workspaceId, outsider.id])).rows[0].role);
+      expect(role).toBe("viewer");
+      const response = await request(path(workspaceId));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const workspace = list ? body.workspaces[0] : body.workspace;
+      expect(workspace.id).toBe(workspaceId);
+      expect(workspace).not.toHaveProperty("adminWorkspace");
+    });
+
+    it("retains metadata for a shared workspace's live engineering admin and creator", async () => {
+      const workspaceId = await shareAdminWorkspace();
+      actor = { ...outsider, staffRole: "developer" };
+      const metadata = { creatorUserId: owner.id };
+      await pool.query("UPDATE organization_members SET role='admin' WHERE org_id=$1 AND user_id=$2", [orgId, outsider.id]);
+      for (const { path, list } of adminWorkspaceReads) {
+        const response = await request(path(workspaceId));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect((list ? body.workspaces[0] : body.workspace).adminWorkspace).toEqual(metadata);
+      }
+      await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [orgId, outsider.id]);
+      for (const { path, list } of adminWorkspaceReads) {
+        const response = await request(path(workspaceId));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(list ? body.workspaces[0] : body.workspace).not.toHaveProperty("adminWorkspace");
+      }
+      actor = owner;
+      await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [owner.id]);
+      await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [orgId, owner.id]);
+      for (const { path, list } of adminWorkspaceReads) {
+        const response = await request(path(workspaceId));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect((list ? body.workspaces[0] : body.workspace).adminWorkspace).toEqual(metadata);
+      }
+    });
+
+    it.each([null, "support_admin"] as const)("rejects non-engineering staff (%s) without creating a workspace", async staffRole => {
+      await prepareAdmin();
+      actor = { ...owner, staffRole };
+      const response = await createAdmin();
+      expect(response.status).toBe(404);
+      expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+      expect((await pool.query("SELECT 1 FROM cloud_workspaces")).rowCount).toBe(0);
+    });
+
+    it("rechecks the live staff and organization admin roles", async () => {
+      await prepareAdmin();
+      await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [owner.id]);
+      expect((await createAdmin()).status).toBe(404);
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [owner.id]);
+      await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [orgId, owner.id]);
+      expect((await createAdmin()).status).toBe(403);
+      expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
+    });
+
+    it("requires an active ready template and at least one configured repository", async () => {
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [owner.id]);
+      actor = { ...owner, staffRole: "developer" };
+      configureApp(false, templateConfig());
+      expect(await (await createAdmin()).json()).toMatchObject({ error: { code: "cloud_computer_build_required" } });
+      await seedV4();
+      const empty = await withSystemTx(pool, tx => seedComputerTemplate(tx, {
+        organizationId: orgId, ownerUserId: owner.id, installationId, repositories: [],
+      }));
+      const response = await createAdmin();
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { message: expect.stringMatching(/at least one repository/i) } });
+      await pool.query("UPDATE cloud_computer_templates SET state='retired',retired_at=now() WHERE build_id=$1", [empty.buildId]);
+      expect(await (await createAdmin()).json()).toMatchObject({ error: { code: "cloud_computer_build_required" } });
+      expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
+    });
+
+    it.each(["developer", "platform_owner"] as const)("creates a private first-repository template fork owned and billed to its %s creator", async staffRole => {
+      const template = await prepareAdmin();
+      await pool.query("UPDATE users SET staff_role=$2 WHERE id=$1", [owner.id, staffRole]);
+      await pool.query("UPDATE organization_members SET role='admin' WHERE org_id=$1 AND user_id=$2", [orgId, owner.id]);
+      actor = { ...owner, staffRole };
+      const response = await createAdmin();
+      expect(response.status).toBe(202);
+      const created = await response.json();
+      expect(created).toMatchObject({ reused: false, replayed: false, workspace: {
+        createdBy: owner.id, ownerUserId: owner.id, sharingMode: "private", adminWorkspace: { creatorUserId: owner.id },
+        repository: { owner: "withso", name: "zeros", revision: "1".repeat(40) },
+      } });
+      expect(repositoryResolver.resolve).toHaveBeenCalledWith(expect.objectContaining({ repository: "zeros", revision: "1".repeat(40) }));
+      const workspaceId = created.workspace.id;
+      expect((await generationPin(workspaceId)).rows[0]).toMatchObject({ image_ref: `boat-template:${template.sourceSandboxId}`, runtime_profile: "zeros-cloud-worker-v4" });
+      expect((await pool.query("SELECT created_by,owner_user_id,assignee_user_id FROM cloud_workspaces WHERE id=$1", [workspaceId])).rows[0])
+        .toEqual({ created_by: owner.id, owner_user_id: owner.id, assignee_user_id: owner.id });
+      expect((await pool.query("SELECT billing_owner_user_id FROM workspace_billing_epochs WHERE workspace_id=$1", [workspaceId])).rows[0])
+        .toEqual({ billing_owner_user_id: owner.id });
+      expect((await pool.query("SELECT build_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [workspaceId])).rows[0])
+        .toEqual({ build_id: template.buildId, config_id: template.configId });
+      expect((await pool.query("SELECT creator_user_id FROM cloud_computer_admin_workspaces WHERE workspace_id=$1", [workspaceId])).rows[0])
+        .toEqual({ creator_user_id: owner.id });
+      expect((await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}`)).status).toBe(200);
+      expect((await (await request(`/v1/organizations/${orgId}/cloud-workspaces`)).json()).workspaces[0].adminWorkspace)
+        .toEqual({ creatorUserId: owner.id });
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')", [orgId, outsider.id]);
+      actor = { ...outsider, staffRole: "developer" };
+      expect((await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}`)).status).toBe(404);
+      expect((await (await request(`/v1/organizations/${orgId}/cloud-workspaces`)).json()).workspaces).toEqual([]);
+    });
+
+    it("deduplicates concurrent requests, reuses only the creator's version, and replays accepted receipts after activation", async () => {
+      await prepareAdmin();
+      const originalBody = adminBody();
+      const responses = await Promise.all([createAdmin(originalBody), createAdmin(originalBody)]);
+      expect(responses.map(response => response.status).sort()).toEqual([200, 202]);
+      const [original, duplicate] = await Promise.all(responses.map(response => response.json()));
+      expect(duplicate.workspace.id).toBe(original.workspace.id);
+      const reuseBody = adminBody();
+      const reusedResponse = await createAdmin(reuseBody);
+      expect(reusedResponse.status).toBe(200);
+      const reused = await reusedResponse.json();
+      expect(reused).toMatchObject({ reused: true, replayed: false, workspace: { id: original.workspace.id }, intent: { id: original.intent.id } });
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(1);
+      await seedTemplate({ version: 2 });
+      const stale = await createAdmin(adminBody());
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toMatchObject({ error: { code: "cloud_computer_changed" } });
+      for (const [body, wasReused] of [[originalBody, false], [reuseBody, true]] as const) {
+        const replay = await createAdmin(body);
+        expect(replay.status).toBe(200);
+        expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+        expect(await replay.json()).toMatchObject({ replayed: true, reused: wasReused, workspace: { id: original.workspace.id } });
+      }
+      const changed = await createAdmin({ ...originalBody, expectedActiveVersion: 2 });
+      expect(changed.status).toBe(409);
+      const next = await (await createAdmin(adminBody(2))).json();
+      expect(next.workspace.id).not.toBe(original.workspace.id);
+      expect(next.reused).toBe(false);
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(2);
+    });
+
+    it("keeps another admin's request and workspace private and creates their own fork", async () => {
+      await prepareAdmin();
+      const body = adminBody();
+      const original = await (await createAdmin(body)).json();
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [outsider.id]);
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')", [orgId, outsider.id]);
+      await pool.query("INSERT INTO team_members(team_id,org_id,user_id,role) VALUES($1,$2,$3,'maintainer')", [teamId, orgId, outsider.id]);
+      actor = { ...outsider, staffRole: "developer" };
+      expect((await createAdmin(body)).status).toBe(404);
+      const created = await createAdmin();
+      expect(created.status).toBe(202);
+      const other = await created.json();
+      expect(other.workspace.id).not.toBe(original.workspace.id);
+      expect(other.workspace.adminWorkspace).toEqual({ creatorUserId: outsider.id });
+      expect((await pool.query("SELECT billing_owner_user_id FROM workspace_billing_epochs WHERE workspace_id=$1", [other.workspace.id])).rows[0])
+        .toEqual({ billing_owner_user_id: outsider.id });
+    });
+
+    it("reuses a saved eligible runtime across head changes but creates a new fork when that runtime is revoked", async () => {
+      await prepareAdmin();
+      const original = await (await createAdmin()).json();
+      await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "1", releaseOrder: 2 }));
+      const reused = await (await createAdmin()).json();
+      expect(reused).toMatchObject({ reused: true, workspace: { id: original.workspace.id } });
+      await pool.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [`r1-${"a".repeat(64)}`]);
+      const replacement = await createAdmin();
+      expect(replacement.status).toBe(202);
+      const created = await replacement.json();
+      expect(created.workspace.id).not.toBe(original.workspace.id);
+      expect(created.workspace.generation.runtime.runtimeId).toBe(`r1-${"1".repeat(64)}`);
+    });
+
+    it("rechecks activation and creator authority after the external repository lookup", async () => {
+      await prepareAdmin();
+      const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+      vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+        await seedTemplate({ version: 2 });
+        return resolve(input);
+      });
+      expect((await createAdmin()).status).toBe(409);
+      vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+        await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [orgId, owner.id]);
+        return resolve(input);
+      });
+      expect((await createAdmin(adminBody(2))).status).toBe(403);
+      for (const table of ["cloud_workspaces", "cloud_workspace_generations", "cloud_computer_admin_workspaces"])
+        expect((await pool.query(`SELECT 1 FROM ${table}`)).rowCount).toBe(0);
+    });
+
+    it("rolls back the workspace, generation and lifecycle acceptance if sidecar insertion fails", async () => {
+      await prepareAdmin();
+      await pool.query(`CREATE FUNCTION zeros_v2_test_reject_admin_marker() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'synthetic marker failure'; END $$`);
+      await pool.query(`CREATE TRIGGER zeros_v2_test_reject_admin_marker BEFORE INSERT ON cloud_computer_admin_workspaces
+        FOR EACH ROW EXECUTE FUNCTION zeros_v2_test_reject_admin_marker()`);
+      await expect(createAdmin()).rejects.toThrow("synthetic marker failure");
+      for (const table of ["cloud_workspaces", "cloud_workspace_generations", "cloud_workspace_lifecycle_intents", "cloud_computer_admin_workspaces"])
+        expect((await pool.query(`SELECT 1 FROM ${table}`)).rowCount).toBe(0);
+    });
+
+    it("rejects client-supplied admin identity and keeps ordinary workspaces unmarked", async () => {
+      await prepareAdmin();
+      for (const field of ["adminWorkspace", "creatorUserId", "repository", "sharingMode"])
+        expect((await createAdmin({ ...adminBody(), [field]: "spoofed" })).status).toBe(422);
+      const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+      expect(response.status).toBe(202);
+      expect((await response.json()).workspace).not.toHaveProperty("adminWorkspace");
+      expect((await pool.query("SELECT 1 FROM cloud_computer_admin_workspaces")).rowCount).toBe(0);
+    });
+
+    it("keeps request receipts immutable and hidden from user transactions", async () => {
+      await prepareAdmin();
+      await createAdmin();
+      expect((await withUserTx(pool, owner.id, tx => tx.query("SELECT * FROM cloud_computer_admin_workspace_requests"))).rows).toEqual([]);
+      await expect(pool.query("UPDATE cloud_computer_admin_workspace_requests SET expected_active_version=2 WHERE org_id=$1", [orgId]))
+        .rejects.toMatchObject({ code: "23514" });
+      await expect(pool.query("DELETE FROM cloud_computer_admin_workspace_requests WHERE org_id=$1", [orgId]))
+        .rejects.toMatchObject({ code: "23514" });
+    });
+  });
+
+  it("requires an active ready v2 template before lookup or allocation, independently of the base switch", async () => {
+    await seedV4();
+    await withSystemTx(pool, async tx => {
+      await ensureCloudComputerIdentity(tx, orgId, owner.id);
+      await tx.query("INSERT INTO cloud_computer_v2_heads(org_id) VALUES($1)", [orgId]);
+    });
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_computer_build_required" } });
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+    for (const table of ["cloud_workspace_generations", "cloud_workspace_provider_bindings", "cloud_workspace_provider_operations"])
+      expect((await pool.query(`SELECT 1 FROM ${table}`)).rowCount).toBe(0);
+  });
+
+  it("keeps non-engineering creation unchanged for an enrolled v2 org", async () => {
+    await seedV4();
+    await seedTemplate();
+    actor = { ...owner, staffRole: "support_admin" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(202);
+    expect((await generationPin((await response.json()).workspace.id)).rows[0].runtime_id).toBeNull();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources")).rowCount).toBe(0);
+  });
+
+  it("accepts the template/runtime/config/SHA tuple using the org grant and replays it after activation", async () => {
+    await seedV4();
+    const source = await seedTemplate();
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "3", releaseOrder: 2 }));
+    await pool.query("DELETE FROM cloud_github_source_access");
+    // The installation was approved by a different org admin. The member
+    // creating this workspace has no personal installation or GitHub proof.
+    await pool.query("UPDATE github_installations SET owner_user_id=$2 WHERE id=$1", [installationId, outsider.id]);
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const key = randomUUID();
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key, body: createBody() });
+    expect(response.status).toBe(202);
+    const created = await response.json();
+    const workspaceId = created.workspace.id;
+    const saved = (await generationPin(workspaceId)).rows[0];
+    expect(saved).toMatchObject({ image_ref: `boat-template:${source.sourceSandboxId}`, runtime_id: `r1-${"a".repeat(64)}` });
+    expect((await pool.query("SELECT build_id,template_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [workspaceId])).rows)
+      .toEqual([{ build_id: source.buildId, template_id: source.templateId, config_id: source.configId }]);
+    expect((await pool.query("SELECT repository_revision FROM cloud_workspace_setup_specs WHERE workspace_id=$1", [workspaceId])).rows)
+      .toEqual([{ repository_revision: "4".repeat(40) }]);
+    expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros",
+      repositoryId: "123456789", revision: "main" });
+    await seedTemplate({ version: 2 });
+    const replay = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key, body: createBody() });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect((await replay.json()).workspace.generation.runtime).toEqual(created.workspace.generation.runtime);
+    expect((await generationPin(workspaceId)).rows).toEqual([saved]);
+    expect(repositoryResolver.resolve).toHaveBeenCalledOnce();
+  });
+
+  it.each(["revoked", "unqualified", "protocol"])("uses the qualified head when the template runtime is %s", async reason => {
+    await seedV4();
+    await seedTemplate();
+    const head = await withSystemTx(pool, async tx => {
+      if (reason === "revoked") await tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [`r1-${"a".repeat(64)}`]);
+      else {
+        const older = await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2,
+          ...(reason === "unqualified" ? { kinds: ["codex-chatgpt"] } : { engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION - 1 }) });
+        // Accepted build runtime identity is immutable; seed another active version.
+        await seedComputerTemplate(tx, { organizationId: orgId, ownerUserId: owner.id, installationId, version: 2, runtimeId: older.pin.runtimeId });
+      }
+      return seedRuntimeBundle(tx, { digit: "3", releaseOrder: 3 });
+    });
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(202);
+    expect((await response.json()).workspace.generation.runtime).toEqual(head.pin);
+  });
+
+  it.each(["activated", "cleared"])("rejects an active version %s during external resolution before saving a generation", async change => {
+    await seedV4();
+    await seedTemplate();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+    vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+      if (change === "activated") await seedTemplate({ version: 2 });
+      else await pool.query("UPDATE cloud_computer_v2_heads SET active_build_id=NULL WHERE org_id=$1", [orgId]);
+      return resolve(input);
+    });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_computer_changed", message: expect.stringMatching(/refresh/i) } });
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
+  });
+
+  it("retains a ready template when fork acceptance wins the concurrent retirement claim", async () => {
+    await seedV4();
+    const source = await seedTemplate();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const barrier = await pool.connect();
+    let acceptance: ReturnType<typeof request> | undefined;
+    let retirement: Promise<number | null> | undefined;
+    try {
+      await barrier.query("BEGIN");
+      const barrierPid = (await barrier.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      // Pause the final transaction after source selection, before its INSERTs
+      // can commit. The provider is never invoked by this API transaction.
+      await barrier.query("LOCK TABLE cloud_workspace_generations IN SHARE MODE");
+      acceptance = request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+      let acceptancePid = 0;
+      await vi.waitFor(async () => {
+        const waiting = await pool.query(`SELECT pid FROM pg_locks WHERE relation='cloud_workspace_generations'::regclass
+          AND NOT granted AND $1=ANY(pg_blocking_pids(pid))`, [barrierPid]);
+        expect(waiting.rows).toHaveLength(1);
+        acceptancePid = waiting.rows[0].pid;
+      }, { timeout: 5000 });
+      // KEY SHARE conflicts with UPDATE, but not SHARE: enforce C6's exact
+      // head-lock contract, rather than just incidental template-row locking.
+      await expect(withSystemTx(pool, tx => tx.query(
+        "SELECT org_id FROM cloud_computer_v2_heads WHERE org_id=$1 FOR KEY SHARE NOWAIT", [orgId],
+      ))).rejects.toMatchObject({ code: "55P03" });
+      retirement = withSystemTx(pool, async tx => {
+        await tx.query("SELECT org_id FROM cloud_computer_v2_heads WHERE org_id=$1 FOR UPDATE", [orgId]);
+        const claimed = await tx.query(`UPDATE cloud_computer_templates template SET state='retiring'
+          WHERE template.org_id=$1 AND template.build_id=$2 AND template.state='ready'
+          AND NOT EXISTS (SELECT 1 FROM cloud_workspace_computer_sources source
+            WHERE source.org_id=template.org_id AND source.template_id=template.build_id)`, [orgId, source.buildId]);
+        return claimed.rowCount;
+      });
+      await vi.waitFor(async () => {
+        const waiting = await pool.query("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [acceptancePid]);
+        expect(waiting.rows).toHaveLength(1);
+      }, { timeout: 5000 });
+      await barrier.query("COMMIT");
+      expect((await acceptance).status).toBe(202);
+      expect(await retirement).toBe(0);
+      expect((await pool.query(`SELECT template.state FROM cloud_workspace_computer_sources source
+        JOIN cloud_computer_templates template ON template.build_id=source.template_id AND template.org_id=source.org_id
+        WHERE source.org_id=$1`, [orgId])).rows).toEqual([{ state: "ready" }]);
+    } finally {
+      await barrier.query("ROLLBACK");
+      barrier.release();
+      await acceptance?.catch(() => {});
+      await retirement?.catch(() => {});
+    }
+  });
+
+  it("rejects the fork before allocation when the concurrent retirement claim wins", async () => {
+    await seedV4();
+    const source = await seedTemplate();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    let enteredLookup!: () => void, releaseLookup!: () => void;
+    const lookupEntered = new Promise<void>(resolve => { enteredLookup = resolve; });
+    const lookupReleased = new Promise<void>(resolve => { releaseLookup = resolve; });
+    const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+    vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+      enteredLookup();
+      await lookupReleased;
+      return resolve(input);
+    });
+    const retirement = await pool.connect();
+    let acceptance: ReturnType<typeof request> | undefined;
+    try {
+      acceptance = request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+      await lookupEntered;
+      await retirement.query("BEGIN");
+      const retirementPid = (await retirement.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      await retirement.query("SELECT org_id FROM cloud_computer_v2_heads WHERE org_id=$1 FOR UPDATE", [orgId]);
+      releaseLookup();
+      await vi.waitFor(async () => {
+        const waiting = await pool.query("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [retirementPid]);
+        expect(waiting.rows).toHaveLength(1);
+      }, { timeout: 5000 });
+      const claimed = await retirement.query(`UPDATE cloud_computer_templates template SET state='retiring'
+        WHERE template.org_id=$1 AND template.build_id=$2 AND template.state='ready'
+        AND NOT EXISTS (SELECT 1 FROM cloud_workspace_computer_sources source
+          WHERE source.org_id=template.org_id AND source.template_id=template.build_id)`, [orgId, source.buildId]);
+      expect(claimed.rowCount).toBe(1);
+      await retirement.query("COMMIT");
+      const response = await acceptance;
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { code: "cloud_computer_build_required" } });
+      for (const table of ["cloud_workspace_computer_sources", "cloud_workspace_generations", "cloud_workspace_provider_operations"])
+        expect((await pool.query(`SELECT 1 FROM ${table}`)).rowCount).toBe(0);
+      expect((await pool.query("SELECT state FROM cloud_computer_templates WHERE build_id=$1", [source.buildId])).rows)
+        .toEqual([{ state: "retiring" }]);
+    } finally {
+      releaseLookup();
+      await retirement.query("ROLLBACK");
+      retirement.release();
+      await acceptance?.catch(() => {});
+    }
+  });
+
+  it("retains the exact source in the lifecycle copy seam despite a newer active template", async () => {
+    await seedV4();
+    const source = await seedTemplate();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(202);
+    const workspaceId = (await response.json()).workspace.id;
+    await seedTemplate({ version: 2 });
+    const insertCandidate = async (tx: Parameters<typeof copyComputerWorkspaceSource>[0]) => {
+      await tx.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,sandbox_class,
+        architecture,cpu_millicores,memory_mib,storage_mib,source_commit,created_by,provider_connection_id,
+        runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version)
+        SELECT workspace_id,2,org_id,provider,image_ref,sandbox_class,architecture,cpu_millicores,memory_mib,storage_mib,
+        source_commit,created_by,provider_connection_id,runtime_id,runtime_manifest_sha256,runtime_base_image_id,
+        runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version FROM cloud_workspace_generations
+        WHERE workspace_id=$1 AND generation=1`, [workspaceId]);
+      await copyComputerWorkspaceSource(tx, { workspaceId, organizationId: orgId, sourceGeneration: 1, targetGeneration: 2 });
+    };
+    await expect(withSystemTx(pool, async tx => { await insertCandidate(tx); throw new Error("rollback fixture"); })).rejects.toThrow("rollback fixture");
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=2", [workspaceId])).rowCount).toBe(0);
+    await withSystemTx(pool, insertCandidate);
+    expect((await pool.query("SELECT build_id,template_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=2", [workspaceId])).rows)
+      .toEqual([{ build_id: source.buildId, template_id: source.templateId, config_id: source.configId }]);
+    await withSystemTx(pool, tx => copyComputerWorkspaceSource(tx, { workspaceId, organizationId: randomUUID(), sourceGeneration: 1, targetGeneration: 3 }));
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [workspaceId])).rowCount).toBe(2);
+  });
+
+  it("authorizes a fork only from its saved generation and matching provider account/wallet", async () => {
+    await seedV4();
+    const source = await seedTemplate();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(202);
+    const input = { workspaceId: (await response.json()).workspace.id as string, generation: 1,
+      imageRef: `boat-template:${source.sourceSandboxId}`, architecture: "linux/amd64" as const,
+      cpuMillicores: 2000, memoryMiB: 4096, storageMiB: runtimeBase.storageMiB, idempotencyKey: randomUUID() };
+    await seedTemplate({ version: 2 });
+    await expect(resolveComputerTemplateFork(pool, computerTestAccount, computerTestWallet, input)).resolves.toBe(source.sourceSandboxId);
+    for (const override of [{ generation: 2 }, { workspaceId: randomUUID() }, { imageRef: "boat-template:another-template" }])
+      await expect(resolveComputerTemplateFork(pool, computerTestAccount, computerTestWallet, { ...input, ...override }))
+        .rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    await expect(resolveComputerTemplateFork(pool, "another-account", computerTestWallet, input)).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    await expect(resolveComputerTemplateFork(pool, computerTestAccount, "another-wallet", input)).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+  });
+
+  it("rejects a primary absent from the active configuration before GitHub lookup", async () => {
+    await seedV4();
+    await seedTemplate({ primaryName: "other" });
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, templateConfig());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_computer_repository_not_configured" } });
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
+  });
+
+  it("pins the latest eligible runtime under the create lock and replays the saved pin after the head advances", async () => {
+    await seedV4();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, v4Config());
+    const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+    vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+      await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "1", releaseOrder: 2 }));
+      return resolve(input);
+    });
+    const key = randomUUID();
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key, body: createBody() });
+    expect(response.status).toBe(202);
+    const created = await response.json();
+    const saved = (await generationPin(created.workspace.id)).rows[0];
+    expect(saved).toMatchObject({ image_ref: runtimeBase.imageRef, source_commit: runtimeBase.sourceCommit,
+      architecture: runtimeBase.architecture, runtime_id: `r1-${"1".repeat(64)}`, runtime_manifest_sha256: "1".repeat(64),
+      runtime_base_image_id: runtimeBase.id, runtime_base_compatibility_id: runtimeBase.compatibilityId, runtime_profile: "zeros-cloud-worker-v4" });
+    expect(Number(saved.storage_mib)).toBe(runtimeBase.storageMiB);
+    expect(created.workspace.generation.runtime).toEqual({ runtimeId: saved.runtime_id, manifestSha256: saved.runtime_manifest_sha256,
+      baseImageId: saved.runtime_base_image_id, baseCompatibilityId: saved.runtime_base_compatibility_id,
+      profile: saved.runtime_profile, engineProtocolVersion: saved.runtime_engine_protocol_version });
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "2", releaseOrder: 3 }));
+    configureApp(false, cloudConfig); // Replays also survive disabling new v4 creates.
+    const replay = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key, body: createBody() });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect((await replay.json()).workspace.generation.runtime).toEqual(created.workspace.generation.runtime);
+    expect((await generationPin(created.workspace.id)).rows).toEqual([saved]);
+    expect(repositoryResolver.resolve).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an unavailable v4 head before any workspace or provider allocation", async () => {
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, v4Config());
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_unavailable" } });
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_bindings")).rowCount).toBe(0);
+  });
+
+  it("rejects v4 create before allocation when setup uses an allowed older protocol override", async () => {
+    await seedV4();
+    const olderProtocol = CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION - 1;
+    await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "1", releaseOrder: 2, engineProtocolVersion: olderProtocol }));
+    actor = { ...owner, staffRole: "developer" };
+    const setupExecution = {
+      controlPlaneOrigin: "https://api.example.test", allowedToolboxOrigins: [], setupSecretEncryptionKeys: {},
+      currentSetupSecretEncryptionKeyVersion: 1, setupSecretKeyV1: null, engineProtocolVersion: olderProtocol,
+      enginePort: 4317, engineHeartbeatIntervalMs: 5000, intervalMs: 1000, timeoutSeconds: 1800, leaseMs: 60000, admissionTtlSeconds: 120,
+    };
+    configureApp(false, { ...v4Config(), setupExecution });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_unavailable" } });
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_workspaces WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_generations WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_operations WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+
+    // The supported rolling-deployment override remains valid for legacy creates.
+    configureApp(false, { ...cloudConfig, setupExecution });
+    const legacy = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(legacy.status).toBe(202);
+    expect((await generationPin((await legacy.json()).workspace.id)).rows[0].runtime_id).toBeNull();
+  });
+
+  it("rechecks v4 head revocation after repository resolution, before inserting the generation", async () => {
+    await seedV4();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, v4Config());
+    const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+    vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+      await withSystemTx(pool, tx => tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [`r1-${"a".repeat(64)}`]));
+      return resolve(input);
+    });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_unavailable" } });
+    expect((await pool.query("SELECT 1 FROM cloud_workspaces WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_operations WHERE org_id=$1", [orgId])).rowCount).toBe(0);
+  });
+
+  it("wakes the saved v4 generation after the head advances and new v4 creation is disabled", async () => {
+    await seedV4();
+    actor = { ...owner, staffRole: "developer" };
+    configureApp(false, v4Config());
+    const created = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(created.status).toBe(202);
+    const workspace = (await created.json()).workspace;
+    const saved = (await generationPin(workspace.id)).rows[0];
+    await withSystemTx(pool, async tx => {
+      await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 });
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1", [workspace.id]);
+      await tx.query("UPDATE cloud_workspaces SET status='stopped',desired_state='stopped' WHERE id=$1", [workspace.id]);
+      await tx.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$2,observed_state='stopped' WHERE workspace_id=$1", [workspace.id, `sandbox-${workspace.id}`]);
+    });
+    configureApp(false, { ...v4Config(), runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full" } });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}/wake`, { method: "POST", key: randomUUID() });
+    expect(response.status).toBe(202);
+    expect((await response.json()).workspace.generation.runtime).toEqual(workspace.generation.runtime);
+    expect((await generationPin(workspace.id)).rows).toEqual([saved]);
+  });
+
+  it("preserves legacy creation for non-engineering actors until staff-only is disabled", async () => {
+    await seedV4();
+    actor = { ...owner, staffRole: "support_admin" };
+    configureApp(false, v4Config());
+    const legacy = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(legacy.status).toBe(202);
+    expect((await generationPin((await legacy.json()).workspace.id)).rows[0].runtime_id).toBeNull();
+    configureApp(false, v4Config(false));
+    const v4 = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(v4.status).toBe(202);
+    expect((await generationPin((await v4.json()).workspace.id)).rows[0].runtime_id).toBe(`r1-${"a".repeat(64)}`);
   });
 
   it("returns only the signed-in member's compute balance with no caching",async()=>{
@@ -472,10 +1231,19 @@ d("cloud workspace API contracts", () => {
           webUrl: "https://github.com/withso/zeros",
           defaultBranch: "main",
           visibility: "private" as const,
+          ...("revision" in input ? { resolvedRevision: "4".repeat(40) } : {}),
         };
       }),
     };
     configureApp();
+  });
+
+  it("keeps route fixtures usable beyond the live signup budget", async () => {
+    const actors = [];
+    for (let index = 0; index < 201; index++) actors.push(await signup("Fixture"));
+    expect(new Set(actors.map(user => user.id)).size).toBe(201);
+    expect((await pool.query("SELECT count(*)::int AS count FROM user_identities")).rows[0].count).toBe(203);
+    expect((await pool.query("SELECT count(*)::int AS count FROM organizations WHERE is_personal")).rows[0].count).toBe(203);
   });
 
   it("replays a create against its accepted image after the deployment default changes", async () => {
@@ -787,6 +1555,35 @@ d("cloud workspace API contracts", () => {
     await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2",[orgId,outsider.id]);
     expect((await request(`/v1/cloud-workspaces/${workspaceId}`)).status).toBe(404);
   });
+
+  it.each(["owner", "manager", "developer", "prompter", "viewer"])("projects the exact %s role and edit capability in detail and catalog reads", async role => {
+    const fixture = await seedReadyProCloudWorkspace(pool);
+    if (role === "owner") actor = { ...owner, id: fixture.userId };
+    else {
+      // Staff and organization administration do not confer workspace authority.
+      actor = { ...outsider, staffRole: "developer" };
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [actor.id]);
+      await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')", [actor.id]);
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')", [fixture.organizationId, actor.id]);
+      if (role !== "viewer") {
+        await pool.query("INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,$4)", [fixture.workspaceId, fixture.organizationId, actor.id, role]);
+        await withSystemTx(pool, tx => reserveWriterSlot(tx, fixture.workspaceId, { userId: actor.id }));
+      }
+    }
+    const expected = {
+      actorRole: role,
+      capabilities: {
+        canWrite: role !== "viewer",
+        canEdit: ["owner", "manager", "developer"].includes(role),
+        canManage: ["owner", "manager"].includes(role),
+      },
+    };
+    const detail = await request(`/v1/cloud-workspaces/${fixture.workspaceId}`);
+    expect(detail.status).toBe(200);
+    expect((await detail.json()).workspace).toMatchObject(expected);
+    const catalog = await (await request("/v1/cloud-workspaces")).json();
+    expect(catalog.workspaces.find((workspace: { id: string }) => workspace.id === fixture.workspaceId)).toMatchObject(expected);
+  });
   it("keeps stored infrastructure diagnostics out of workspace responses",async()=>{
     const created=await createWorkspace();
     await pool.query("UPDATE cloud_workspaces SET last_error_code='boat_allocation_failed',last_error_message='Boat snapshot secret-target failed' WHERE id=$1",[created.body.workspace.id]);
@@ -964,6 +1761,39 @@ d("cloud workspace API contracts", () => {
         headerName: "x-zeros-preview-capability",
       },
     });
+  });
+
+  it("gates native previews by engineering staff and returns a closed proof rejection", async () => {
+    const workspaceId = randomUUID();
+    const path = `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/access/previews`;
+    const target = { executionId: "execution-native", portId: "A".repeat(32) };
+    actor = { ...owner, staffRole: null };
+    const denied = await request(path, { method: "POST", key: randomUUID(),
+      body: { port: 5173, expiresInMinutes: 15, native: true, target } });
+    expect(denied.status).toBe(404);
+    expect(accessService.issue).not.toHaveBeenCalled();
+    actor = { ...owner, staffRole: "developer" };
+    vi.mocked(accessService.issue).mockRejectedValueOnce(new WorkspaceReplicaError("device_proof_rejected", "Device authority changed"));
+    const rejected = await request(path, { method: "POST", key: randomUUID(),
+      body: { port: 5173, expiresInMinutes: 15, native: true, target },
+      headers: { "x-zeros-device-id": DEVICE_ID, "x-zeros-device-key-version": "1",
+        "x-zeros-device-timestamp": String(Date.now()), "x-zeros-device-nonce": "A".repeat(32),
+        "x-zeros-device-signature": Buffer.alloc(64).toString("base64url") } });
+    expect(rejected.status).toBe(403);
+    await expect(rejected.json()).resolves.toMatchObject({ error: { code: "workspace_replica_device_proof_rejected" } });
+    expect(accessService.issue).toHaveBeenCalledWith(expect.objectContaining({ previewTarget: target, proof: expect.objectContaining({ deviceId: DEVICE_ID, keyVersion: 1 }) }));
+  });
+
+  it("forwards a scalar preview device proof even when native and target hints are omitted", async () => {
+    const workspaceId = randomUUID();
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/access/previews`, {
+      method: "POST", key: randomUUID(), body: { port: 5173, expiresInMinutes: 15 },
+      headers: { "x-zeros-device-id": DEVICE_ID, "x-zeros-device-key-version": "1",
+        "x-zeros-device-timestamp": String(Date.now()), "x-zeros-device-nonce": "A".repeat(32),
+        "x-zeros-device-signature": Buffer.alloc(64).toString("base64url") },
+    });
+    expect(response.status).toBe(201);
+    expect(accessService.issue).toHaveBeenCalledWith(expect.objectContaining({ proof: expect.objectContaining({ deviceId: DEVICE_ID, keyVersion: 1 }) }));
   });
 
   it("requires an exact one-time credential when revoking client access", async () => {
@@ -1446,6 +2276,90 @@ d("cloud workspace API contracts", () => {
     expect(billing).toEqual({billing_owner_user_id:owner.id,entitlement_scope:'account',entitlement_plan:'pro'});
     expect((await pool.query("SELECT requested_by FROM cloud_workspace_lifecycle_intents WHERE id=$1",[body.intent.id])).rows[0].requested_by).toBe(outsider.id);
     expect((await pool.query("SELECT 1 FROM team_members WHERE team_id=$1 AND user_id=$2",[teamId,outsider.id])).rowCount).toBe(0);
+  });
+
+  const stoppedSharedWorkspace = async (role: "viewer" | "prompter" | "developer", guest = false) => {
+    const created = await createWorkspace();
+    expect(created.response.status).toBe(202);
+    const workspaceId = created.body.workspace.id as string;
+    await withSystemTx(pool, async tx => {
+      await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [orgId]);
+      await tx.query("UPDATE cloud_workspaces SET single_member_mode=false,status='stopped',desired_state='stopped' WHERE id=$1", [workspaceId]);
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1", [workspaceId]);
+      await tx.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$2,observed_state='stopped' WHERE workspace_id=$1", [workspaceId, `sandbox-${workspaceId}`]);
+      if (guest) {
+        await tx.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,expires_at)
+          VALUES($1,$2,$3,$4,$5,now()+interval '1 hour')`, [randomUUID(), workspaceId, orgId, outsider.id, role]);
+      } else {
+        await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [orgId, outsider.id]);
+        await tx.query("INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,$4)", [workspaceId, orgId, outsider.id, role]);
+      }
+      if (role !== "viewer") await reserveWriterSlot(tx, workspaceId, { userId: outsider.id });
+    });
+    actor = outsider;
+    return workspaceId;
+  };
+
+  it.each([
+    ["prompter", false], ["developer", false], ["prompter", true], ["developer", true],
+  ] as const)("lets a run-authorized %s wake with guest=%s while keeping cleanup separate", async (role, guest) => {
+    const workspaceId = await stoppedSharedWorkspace(role, guest);
+    const endpoint = `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}`;
+    const key = randomUUID();
+    const before = (await generationPin(workspaceId)).rows;
+    const response = await request(`${endpoint}/wake`, { method: "POST", key });
+    expect(response.status).toBe(202);
+    const result = await response.json();
+    expect(result.workspace).toMatchObject({ id: workspaceId, status: "waking", ownerUserId: owner.id });
+    expect(result.workspace.capabilities).toMatchObject({ canWrite: true, canManage: false });
+    const replay = await request(`${endpoint}/wake`, { method: "POST", key });
+    expect(replay.status).toBe(200);
+    expect((await replay.json()).intent.id).toBe(result.intent.id);
+    expect((await generationPin(workspaceId)).rows).toEqual(before);
+    expect((await pool.query(`SELECT requested_by FROM cloud_workspace_lifecycle_intents
+      WHERE workspace_id=$1 AND operation='wake'`, [workspaceId])).rows).toEqual([{ requested_by: outsider.id }]);
+    expect((await pool.query(`SELECT billing_owner_user_id FROM workspace_billing_epochs
+      WHERE workspace_id=$1 ORDER BY billing_epoch DESC LIMIT 1`, [workspaceId])).rows).toEqual([{ billing_owner_user_id: owner.id }]);
+    for (const operation of ["stop", "archive", "delete"] as const) {
+      const denied = await request(`${endpoint}${operation === "delete" ? "" : `/${operation}`}`, {
+        method: operation === "delete" ? "DELETE" : "POST", key: randomUUID(),
+      });
+      expect(denied.status).toBeGreaterThanOrEqual(400);
+    }
+    if (guest) {
+      expect((await request(`/v1/organizations/${orgId}/cloud-workspaces`)).status).toBe(404);
+      await pool.query("UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1 WHERE workspace_id=$1", [workspaceId]);
+      expect((await request(`${endpoint}/wake`, { method: "POST", key })).status).toBe(404);
+    }
+  });
+
+  it.each(["viewer", "expired", "revoked", "no-slot", "other-workspace"])("does not wake for a %s guest", async restriction => {
+    const workspaceId = await stoppedSharedWorkspace(restriction === "viewer" ? "viewer" : "developer", true);
+    if (restriction === "expired") await pool.query("UPDATE cloud_workspace_guest_grants SET expires_at=now()-interval '1 second' WHERE workspace_id=$1", [workspaceId]);
+    if (restriction === "revoked") await pool.query("UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1 WHERE workspace_id=$1", [workspaceId]);
+    if (restriction === "no-slot") await withSystemTx(pool, tx => tx.query("DELETE FROM cloud_workspace_writer_slots WHERE workspace_id=$1 AND user_id=$2", [workspaceId, outsider.id]));
+    let targetId = workspaceId;
+    if (restriction === "other-workspace") {
+      actor = owner;
+      targetId = (await createWorkspace()).body.workspace.id;
+      actor = outsider;
+    }
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${targetId}/wake`, { method: "POST", key: randomUUID() });
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE operation='wake'")).rowCount).toBe(0);
+  });
+
+  it.each(["sponsor", "quota"])("retains %s admission for a guest wake", async restriction => {
+    const workspaceId = await stoppedSharedWorkspace("developer", true);
+    if (restriction === "sponsor") {
+      await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [owner.id]);
+      await pool.query("UPDATE account_entitlements SET status='expired',revision=revision+1 WHERE user_id=$1", [owner.id]);
+    } else {
+      await pool.query("UPDATE cloud_workspace_quotas SET max_running_workspaces=1,max_cpu_millicores=1 WHERE org_id=$1", [orgId]);
+    }
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/wake`, { method: "POST", key: randomUUID() });
+    expect(response.status).toBe(restriction === "sponsor" ? 403 : 409);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='wake'", [workspaceId])).rowCount).toBe(0);
   });
 
   it("requires a new workspace or checkpoint recovery after a conclusively rejected allocation", async () => {

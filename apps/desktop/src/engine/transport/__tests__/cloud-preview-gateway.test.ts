@@ -40,10 +40,12 @@ const headers = { "x-zeros-runtime-access": credential };
 async function gateway(
   verify: (token: string) => Promise<CloudRuntimeServiceAccess | null>,
   forbidden: number[] = [],
+  resolveAgentTarget?: (target: { executionId: string; portId: string }) => { targetHost: "127.0.0.1"; targetPort: number; current(): boolean } | null,
 ) {
   const handler = new CloudRuntimePreviewGateway({
     verify,
     forbiddenPorts: () => forbidden,
+    resolveAgentTarget,
   });
   gateways.push(handler);
   const port = await serve((req, res) => {
@@ -71,6 +73,54 @@ afterEach(async () => {
 });
 
 describe("Zeros runtime preview gateway", () => {
+  it("rejects a listener retired during the application response handshake", async () => {
+    let live = true;
+    const application = await serve((_req, res) => { live = false; res.end("retired application"); });
+    const port = await gateway(async () => ({ ...admission(5173), previewTarget: { executionId: "execution-native", portId: "A".repeat(32) } }), [], () => ({ targetHost: "127.0.0.1", targetPort: application, current: () => live }));
+    expect((await fetch(`http://127.0.0.1:${port}/`, { headers })).status).toBe(401);
+  });
+  it("relays agent HMR through the opaque mapping and closes it when that lease disappears", async () => {
+    const displayed = await serve((_req, res) => res.end("unrelated server"));
+    const application = await serve((_req, res) => res.end());
+    const wss = new WebSocketServer({ server: servers.at(-1), perMessageDeflate: false });
+    wss.on("connection", socket => socket.on("message", data => socket.send(data)));
+    let live = true;
+    const previewTarget = { executionId: "execution-native", portId: "A".repeat(32) };
+    const port = await gateway(async () => ({ ...admission(displayed), previewTarget, expiresAtMs: Date.now() + 250 }), [], () => ({ targetHost: "127.0.0.1", targetPort: application, current: () => live }));
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/hmr`, ["vite-hmr"], { headers });
+    try {
+      await new Promise<void>((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+      const update = new Promise<string>(resolve => socket.once("message", data => resolve(data.toString())));
+      socket.send("native hot update"); expect(await update).toBe("native hot update");
+      const closed = new Promise<void>(resolve => socket.once("close", () => resolve()));
+      live = false;
+      await closed;
+    } finally { socket.terminate(); for (const client of wss.clients) client.terminate(); wss.close(); }
+  });
+
+  it.each([22222, 39393])("rejects a resolved reserved listener %s", async reserved => {
+    const port = await gateway(async () => ({ ...admission(5173), previewTarget: { executionId: "execution-native", portId: "A".repeat(32) } }), [39393], () => ({ targetHost: "127.0.0.1", targetPort: reserved, current: () => true }));
+    expect((await fetch(`http://127.0.0.1:${port}/`, { headers })).status).toBe(401);
+  });
+  it("resolves opaque agent identity instead of connecting to the displayed port", async () => {
+    const displayed = await serve((_req, res) => res.end("wrong application"));
+    const application = await serve((_req, res) => res.end("owned application"));
+    const previewTarget = { executionId: "execution-native", portId: "A".repeat(32) };
+    const resolve = vi.fn(() => ({ targetHost: "127.0.0.1" as const, targetPort: application, current: () => true }));
+    const port = await gateway(async () => ({ ...admission(displayed), previewTarget }), [], resolve);
+    const response = await fetch(`http://127.0.0.1:${port}/asset`, { headers });
+    expect(await response.text()).toBe("owned application");
+    expect(resolve).toHaveBeenCalledWith(previewTarget);
+  });
+
+  it("fails closed for a stale opaque target without a display-port fallback", async () => {
+    const connected = vi.fn();
+    const application = await serve((_req, res) => { connected(); res.end("wrong application"); });
+    const port = await gateway(async () => ({ ...admission(application), previewTarget: { executionId: "retired", portId: "A".repeat(32) } }), [], () => null);
+    expect((await fetch(`http://127.0.0.1:${port}/`, { headers })).status).toBe(401);
+    expect(connected).not.toHaveBeenCalled();
+  });
+
   it("relays HMR WebSockets with protocols and strips the runtime credential", async () => {
     const application = await serve((_request, response) => response.end());
     const wss = new WebSocketServer({ server: servers.at(-1), perMessageDeflate: false });

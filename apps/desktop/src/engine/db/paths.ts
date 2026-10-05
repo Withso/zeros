@@ -22,7 +22,8 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { channel } from "../runtime";
+import { channel, isLocalDevelopmentRuntime } from "../runtime";
+import { localInstanceStateRoot } from "./local-development-paths.cjs";
 
 /** Reverse-DNS application id for the macOS/Windows app-data folder. */
 const APP_ID = "com.zeros";
@@ -47,14 +48,22 @@ function devInstanceSlug(): string {
 /** Reverse-DNS id leaf for macOS/Windows: com.zeros[.dev|.beta][.<slug>]. */
 function macWinId(inst: string): string {
   const ch = channel();
-  const suffix = ch === "stable" ? "" : `.${ch}`; // "" | ".dev" | ".beta"
+  const suffix = isLocalDevelopmentRuntime()
+    ? ".local"
+    : ch === "stable"
+      ? ""
+      : `.${ch}`;
   return `${APP_ID}${suffix}${inst ? `.${inst}` : ""}`;
 }
 
 /** XDG flat name for Linux: zeros[-dev|-beta][-<slug>]. */
 function nixName(inst: string): string {
   const ch = channel();
-  const base = ch === "stable" ? "zeros" : `zeros-${ch}`; // zeros | zeros-dev | zeros-beta
+  const base = isLocalDevelopmentRuntime()
+    ? "zeros-local"
+    : ch === "stable"
+      ? "zeros"
+      : `zeros-${ch}`;
   return inst ? `${base}-${inst}` : base;
 }
 
@@ -136,6 +145,7 @@ export function appIdentity(): string {
  *  why none of this was ever reproducible in dev. Keyed on channel() now, so it
  *  stays correct as channels are added. */
 export function zerosDotDirName(): string {
+  if (isLocalDevelopmentRuntime()) return ".zeros-local";
   const ch = channel();
   return ch === "stable" ? ".zeros" : `.zeros-${ch}`;
 }
@@ -145,6 +155,9 @@ export function zerosDotDirName(): string {
  *  sentinel, and (dev) the per-worktree launcher bundles. Everything channel-scoped
  *  MUST resolve through here so no channel writes into another's state. */
 export function zerosStateRoot(): string {
+  if (isLocalDevelopmentRuntime()) {
+    return localInstanceStateRoot(devInstanceSlug());
+  }
   return path.join(homedir(), zerosDotDirName());
 }
 
@@ -168,7 +181,11 @@ export function zerosDbPath(): string {
 export function zerosWorkspacesRoot(): string {
   if (process.env.ZEROS_WORKSPACES_DIR) return process.env.ZEROS_WORKSPACES_DIR;
   const ch = channel();
-  const base = ch === "stable" ? "zeros" : `zeros-${ch}`; // zeros | zeros-dev | zeros-beta
+  const base = isLocalDevelopmentRuntime()
+    ? "zeros-local"
+    : ch === "stable"
+      ? "zeros"
+      : `zeros-${ch}`;
   // Per-worktree dev instance keeps its own visible worktrees root too, so two
   // instances never write worktrees into a directory the other's registry owns.
   const inst = ch === "dev" ? devInstanceSlug() : "";

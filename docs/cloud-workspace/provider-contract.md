@@ -184,9 +184,10 @@ see [compute credits](compute-credits.md). CPU/memory default to 4000 millicores
 account, or reuse an old scope for a different provider account.
 
 `BOAT_BILLING_ORG` names the Boat organization wallet (`team_…`) billed for every
-new sandbox. Without it Boat bills the account's dashboard-selected wallet, which
-can change outside Zeros. Every create dispatch sends it as the `X-Boat-Org`
-request scope; the body and journaled request digest are unchanged. Boat matches
+sandbox and named snapshot operation. Without it Boat bills the account's
+dashboard-selected wallet, which can change outside Zeros. Every sandbox,
+snapshot and allowance request sends it as the `X-Boat-Org` request scope; the
+body and journaled request digest are unchanged. Boat matches
 an idempotent create on account, key and body, so a retry returns an earlier
 allocation with whatever wallet it was billed to. A sandbox keeps its creation
 wallet for resume and usage. Compute is granted only after Boat reports the

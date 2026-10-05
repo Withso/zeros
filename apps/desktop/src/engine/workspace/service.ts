@@ -2432,7 +2432,7 @@ export class WorkspaceService {
       };
       cloudFiles = new QualifiedCloudFilePolicy(this.root, {
         canEdit: cloudActorCan(opts.cloudFileActor.role, "edit"), authorized: opts.cloudFileActor.authorized,
-        privateRoots: [zerosStateRoot(), os.homedir(), "/srv/zeros/state", "/srv/zeros/home", "/opt/zeros", "/etc/zeros"],
+        privateRoots: [zerosStateRoot(), os.homedir(), "/srv/zeros/state", "/srv/zeros/home", "/opt/zeros", "/etc/zeros", "/zeros", "/opt/zeros-infra", "/opt/zeros-bootstrap", "/srv/zeros/runtime-installs"],
         ownerRoots: currentOwners,
       });
       cloudFiles.assertAuthorized(["file.write", "context.graph.scaffold", "workspace.setWorkingDirectories"].includes(op) || (isCodeReviewOperation(op) && op !== "codeReview.list") || (isGitReviewOperation(op) && op !== "git.reviewHunks"));

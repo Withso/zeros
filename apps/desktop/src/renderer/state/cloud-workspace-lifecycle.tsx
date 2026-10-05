@@ -1,10 +1,15 @@
 import { clearCloudComputers } from "../features/settings/cloud-computer-client";
+import { clearCloudComputersV2 } from "../features/settings/cloud-computer-v2-client";
+import { cloudServiceAccessCache, cloudServiceContextCache } from "./read-caches";
 import { clearCloudGithub } from "../platform/cloud-github";
 import { useEffect } from "react";
+import { isLocalDevelopment } from "../platform/runtime";
 import { cloudWorkspaceCapability } from "../platform/cloud-workspace-access";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
-import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
+import { useInternalFeatureActive } from "../features/settings/internal-features";
+import { subscribeCloudWorkspaceOpens } from "./cloud-workspace-open-intent";
 import {
   getSession,
   onAuthStateChange,
@@ -46,7 +51,9 @@ import { clearCloudLatencySpans, pruneCloudLatencySpans } from "./cloud-workspac
  * controller. It never replaces the conversation or workbench renderers. */
 export function CloudWorkspaceLifecycle() {
   const folder = useWorkspaceStore(selectActiveFolder);
+  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
   useEffect(() => {
+    if (isLocalDevelopment()) return;
     let alive = true;
     let enabled = false;
     let lastRefresh = 0;
@@ -140,6 +147,9 @@ export function CloudWorkspaceLifecycle() {
       clearCloudProviderConnections();
       clearCloudGithub();
       clearCloudComputers();
+      clearCloudComputersV2();
+      cloudServiceAccessCache.clear();
+      cloudServiceContextCache.clear();
     };
     const install = (session: AuthSessionInfo | null) => {
       if (!alive) return;
@@ -305,5 +315,41 @@ export function CloudWorkspaceLifecycle() {
       document.removeEventListener("visibilitychange", attach);
     };
   }, [folder]);
+
+  useEffect(() => {
+    if (!cloudComputerV2) return;
+    let pending: { key: string; controller: AbortController } | undefined;
+    const cancel = () => { pending?.controller.abort(); pending = undefined; };
+    const ownsView = (key: string) => {
+      const state = useWorkspaceStore.getState();
+      return document.visibilityState !== "hidden" && state.activePage === "workspace" && selectActiveFolder(state) === key;
+    };
+    const off = subscribeCloudWorkspaceOpens(target => {
+      const key = cloudWorkspaceKey(target);
+      if (!ownsView(key) || pending?.key === key || !cloudWorkspaceDocument(target)?.capabilities.canWrite) return;
+      const bridge = getActiveBridge();
+      if (!(bridge instanceof WorkspaceRuntimeClient)) return;
+      cancel();
+      const intent = { key, controller: new AbortController() };
+      pending = intent;
+      void bridge.openWorkspace(target, { signal: intent.controller.signal })
+        .catch(error => {
+          if (!intent.controller.signal.aborted && ownsView(key)) toast.error("Couldn't open this cloud workspace", {
+            id: `cloud-connect:${key}`,
+            description: error instanceof Error ? error.message : "Open it again to retry.",
+          });
+        })
+        .finally(() => { if (pending === intent) pending = undefined; });
+    });
+    const changed = () => { if (pending && !ownsView(pending.key)) cancel(); };
+    const offSelection = useWorkspaceStore.subscribe(changed);
+    document.addEventListener("visibilitychange", changed);
+    return () => {
+      cancel();
+      off();
+      offSelection();
+      document.removeEventListener("visibilitychange", changed);
+    };
+  }, [cloudComputerV2]);
   return null;
 }

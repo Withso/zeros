@@ -92,7 +92,7 @@ export function useIsInternalUser(): boolean {
 /** The set of internal feature flags.
  *  - `copyLogs` — ⇧⌘L copies the scrubbed recent-log tail (the exact
  *    bytes a feedback submission shares) to the clipboard. */
-export type InternalFeature = "copyLogs" | "releaseCanaries";
+export type InternalFeature = "copyLogs" | "releaseCanaries" | "cloudComputerV2";
 
 const STORAGE_KEY = "zeros.internalFeatures";
 

@@ -26,6 +26,7 @@ import { ToolPresentationFixture } from "./tool-presentation-fixture";
 import { ToolWaitFixture } from "./tool-wait-fixture";
 import { ModelFallbackFixture } from "./model-fallback-fixture";
 import { AgentNoticeFixture } from "./agent-notice-fixture";
+import { TurnFailureFixture } from "./turn-failure-fixture";
 
 const initial: SessionUpdate[] = [
   {
@@ -276,6 +277,7 @@ function Harness() {
           <output id="fresh-retry-count">{freshRetries}</output>
         </div>
         <AgentNoticeFixture ctx={ctx} />
+        <TurnFailureFixture ctx={ctx} />
         <ClaudeBackgroundFixture ctx={ctx} />
         <ToolPresentationFixture ctx={ctx} />
         <ToolWaitFixture ctx={ctx} />

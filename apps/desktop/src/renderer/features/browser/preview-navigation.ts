@@ -14,6 +14,8 @@ export interface PreviewNavigationInput {
   readonly url: string;
   readonly admissionUrl: string;
   readonly expiresAt?: number;
+  /** Native frame admission injects authority in Electron, never a URL. */
+  readonly native?: boolean;
 }
 
 interface NormalizedPreviewNavigation {
@@ -86,7 +88,9 @@ function normalizedPreviewNavigation(
   }
   if (
     url.searchParams.has("__zsr_cap") ||
-    !admission.searchParams.get("__zsr_cap")
+    (input.native
+      ? !isLoopbackLogicalUrl(url) || admission.protocol !== "https:" || admission.searchParams.has("__zsr_cap")
+      : !admission.searchParams.get("__zsr_cap"))
   ) {
     throw new Error("preview admission capability is invalid");
   }
@@ -241,6 +245,39 @@ export function isPreviewRuntimeUrlForTab(
     );
   } catch {
     return false;
+  }
+}
+
+/** Reconcile a trusted frame observation without retaining its grant origin or
+ * changing authority. The exact tab/logical URL must still own this runtime. */
+export function reconcilePreviewRuntimeUrlForTab(
+  tabId: string,
+  persistedUrl: string,
+  candidateUrl: string,
+): string | null {
+  purgeExpired();
+  const runtime = runtimes.get(tabId);
+  if (!runtime?.volatileOrigin) return null;
+  try {
+    const logical = parsedHttpUrl(persistedUrl, "URL");
+    const observed = parsedHttpUrl(candidateUrl, "observed URL");
+    if (
+      logical.toString() !== runtime.persistedUrl ||
+      observed.origin !== runtime.runtimeOrigin
+    ) return null;
+    observed.searchParams.delete("__zsr_cap");
+    logical.pathname = observed.pathname;
+    logical.search = observed.search;
+    logical.hash = observed.hash;
+    const url = logical.toString();
+    runtimes.set(tabId, {
+      ...runtime,
+      persistedUrl: url,
+      runtimeUrl: observed.toString(),
+    });
+    return url;
+  } catch {
+    return null;
   }
 }
 

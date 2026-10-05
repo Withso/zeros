@@ -693,7 +693,7 @@ describe("repository layout contracts", () => {
     expect(launcher).toContain(
       '"$RUNTIME" "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR"',
     );
-    expect(launcher).toContain('"$RUNTIME" /opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs');
+    expect(launcher).toContain('"$RUNTIME" "$RUNTIME_LIB/cloud-engine-launcher.mjs"');
     expect(launcher).not.toContain('node "$REPO_DIR/dist-engine/cli.js"');
   });
 
@@ -759,6 +759,10 @@ describe("repository layout contracts", () => {
       "checkpoint-native-format.md",
       "client-runtime-contract.md",
       "compute-credits.md",
+      "computer-environment.md",
+      "computer-template-builds.md",
+      "computer-template-retention.md",
+      "computer-tools.md",
       "data-and-sync.md",
       "database-qualification.md",
       "engineering-reference.md",
@@ -767,6 +771,8 @@ describe("repository layout contracts", () => {
       "infrastructure-and-operations.md",
       "lifecycle-diagnostics.md",
       "mcp-and-skills.md",
+      "native-access-acceptance.md",
+      "native-preview-acceptance.md",
       "organization-setup.md",
       "pro-backend.md",
       "product-contract.md",
@@ -776,7 +782,10 @@ describe("repository layout contracts", () => {
       "relay-capacity.md",
       "release-worker-qualification.md",
       "root-coordinator-threat-model.md",
+      "runtime-bundles.md",
+      "runtime-lifecycle-acceptance.md",
       "security.md",
+      "template-forks.md",
     ];
 
     expect(readdirSync(cloudDocs).sort()).toEqual(expected);

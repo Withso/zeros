@@ -6,6 +6,31 @@ import { acquireCloudNativeHistory } from "../cloud-native-history";
 import { CloudCustomizationRedactor } from "../../cloud-customization-redaction";
 
 describe.runIf(process.platform === "linux")("native customization ownership", () => {
+  it.each([4097, 65536])("creates and resumes history with a %i-byte environment literal", async size => {
+    const root = await mkdtemp("/tmp/zeros-env-history-"), key = randomBytes(32).toString("base64url");
+    const secret = size === 4097 ? "s".repeat(size) : "é".repeat(size / 2);
+    const authority = { owner: "a".repeat(64), currentKeyVersion: 1, keys: { "1": key } };
+    const input = { root, conversationId: "environment-history", provider: "codex" as const, uid: process.getuid!(), gid: process.getgid!(),
+      customization: { authority, secrets: [secret] } };
+    let held: Awaited<ReturnType<typeof acquireCloudNativeHistory>> | undefined;
+    try {
+      held = await acquireCloudNativeHistory(input);
+      expect(held.redactor!.value(secret)).toBe("[redacted]");
+      const encrypted = await readFile(path.join(path.dirname(held.mount.directory), ".customization-codex.json"), "utf8");
+      expect(encrypted).not.toContain(secret);
+      await held.release();
+      held = await acquireCloudNativeHistory({ ...input, customization: { authority, secrets: [] } });
+      expect(held.redactor!.value(secret)).toBe("[redacted]");
+      await held.release(); held = undefined;
+      await expect(acquireCloudNativeHistory({ ...input, customization: { authority, secrets: ["é".repeat(32769)] } })).rejects.toThrow();
+      if(size===65536){
+        const oversized=Array.from({length:64},(_,index)=>`${index}`.padStart(2,"0")+"x".repeat(65534));
+        await expect(acquireCloudNativeHistory({...input,customization:{authority,secrets:oversized}})).rejects.toThrow("exceeds its limit");
+        held=await acquireCloudNativeHistory({...input,customization:{authority,secrets:[]}});
+        expect(held.redactor!.value(secret)).toBe("[redacted]");
+      }
+    } finally { await held?.release(); await rm(root, { recursive: true, force: true }); }
+  });
   it.each(["claude", "cursor", "codex"] as const)("retains encrypted historical filters across %s restart, rotation and owner handoff", async provider => {
     const root = await mkdtemp("/tmp/zeros-custom-history-"), key = randomBytes(32).toString("base64url");
     const old = "synthetic-old-member-literal", current = "synthetic-rotated-literal";

@@ -17,6 +17,7 @@
 // at-a-glance inventory of the entire native surface.
 // ──────────────────────────────────────────────────────────
 
+import { IS_LOCAL_DEVELOPMENT } from "../runtime-mode";
 import { ipcMain, type IpcMainInvokeEvent } from "electron";
 
 export const IPC_INVOKE_CHANNEL = "zeros:invoke";
@@ -80,6 +81,8 @@ const commandTable: Record<string, CommandHandler> = {
   cloud_workspace_ssh_ide: notImpl("cloud_workspace_ssh_ide", 3),
   cloud_workspace_tunnel_start: notImpl("cloud_workspace_tunnel_start", 3),
   cloud_workspace_access_revoke: notImpl("cloud_workspace_access_revoke", 3),
+  cloud_workspace_access_context: notImpl("cloud_workspace_access_context", 3),
+  cloud_workspace_access_list: notImpl("cloud_workspace_access_list", 3),
   cloud_workspace_runtime_open: notImpl("cloud_workspace_runtime_open", 3),
   cloud_workspace_capability: notImpl("cloud_workspace_capability", 3),
   cloud_workspace_runtime_refresh: notImpl(
@@ -226,6 +229,10 @@ export function listCommandNames(): string[] {
 /** Called from main.ts after app.whenReady. Idempotent — re-registering
  *  removes the previous handler first. */
 export function registerIpcHandlers(): void {
+  ipcMain.removeAllListeners("zeros:local-development");
+  ipcMain.on("zeros:local-development", (event) => {
+    event.returnValue = IS_LOCAL_DEVELOPMENT;
+  });
   ipcMain.removeHandler(IPC_INVOKE_CHANNEL);
   ipcMain.handle(IPC_INVOKE_CHANNEL, async (event, raw: unknown) => {
     if (!raw || typeof raw !== "object") {
@@ -237,6 +244,16 @@ export function registerIpcHandlers(): void {
     };
     if (!cmd || typeof cmd !== "string") {
       throw new Error("[Zeros] IPC: missing 'cmd' string");
+    }
+    // Native admission, never a renderer selector. Provider CLI/PAT credentials
+    // remain available; Zeros account and hosted services cannot run in Local.
+    if (
+      IS_LOCAL_DEVELOPMENT &&
+      (cmd.startsWith("auth_") ||
+        cmd.startsWith("cloud_") ||
+        ["gh_app_connect", "gh_cloud", "browser:open-cloud-preview"].includes(cmd))
+    ) {
+      throw new Error("Account and cloud services are unavailable in Zeros Local.");
     }
     const handler = commandTable[cmd];
     if (!handler) {

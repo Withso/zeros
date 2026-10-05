@@ -1,5 +1,6 @@
 import { loadCloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
 import { stripEngineAuthorityEnv } from "../agents/adapters/shared/config-isolation";
+import { withoutLocalDevelopment } from "../env/local-development";
 
 type GitIdentity = { uid: number; gid: number };
 let deploymentGitIdentity: Readonly<GitIdentity> | null | undefined;
@@ -30,6 +31,6 @@ export function gitProcessOptions(
       ? stripEngineAuthorityEnv(Object.fromEntries(Object.entries(env).filter(
           (entry): entry is [string, string] => typeof entry[1] === "string",
         )))
-      : env,
+      : withoutLocalDevelopment(env),
   };
 }

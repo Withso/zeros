@@ -3,6 +3,7 @@ import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { BoatApiClient } from "./boat-client.js";
 import { BoatWorkspaceProvider } from "./boat-provider.js";
 import { resolveComputerSnapshot } from "./computer-image.js";
+import { resolveComputerTemplateFork } from "./computer-workspace-source.js";
 import type { CloudProviderCreateInput } from "./provider.js";
 import { BoatRuntimeAccessProvider } from "./boat-runtime-access.js";
 import { BoatRuntimeEndpointResolver } from "./boat-runtime-endpoint.js";
@@ -105,6 +106,7 @@ export function createCloudProviderDeployment(
       access,
       ttlSeconds: cloud.boat.ttlSeconds,
       resolveSnapshot: (input: CloudProviderCreateInput) => resolveComputerSnapshot(pool, cloud.boat!.accountScope, client, input),
+      resolveTemplate: (input: CloudProviderCreateInput) => resolveComputerTemplateFork(pool, cloud.boat!.accountScope, cloud.boat!.billingOrg, input),
     };
     const provider = new BoatWorkspaceProvider({
       ...providerOptions,

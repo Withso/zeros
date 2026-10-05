@@ -18,6 +18,9 @@ import {
   releaseImageAttestationStatus,
 } from "./computer-image-scripts.js";
 
+// Snapshot saves and command startup waits can exceed a short read deadline.
+const LONG_OPERATION_TIMEOUT_MS = 120_000;
+
 const snapshot = z.object({
   name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
   snapshotId: z.string().min(1).max(256).nullable().optional(),
@@ -76,7 +79,7 @@ export class BoatComputerImageDriver implements ComputerImageDriver {
     let cursor: string | undefined;
     for (let page = 0; page < 100; page++) {
       const reply = await this.client.request(`/named-snapshots${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
-      const parsed = z.object({ snapshots: z.array(snapshot).max(100), nextCursor: z.string().min(1).max(1024).nullish(), hasMore: z.boolean().optional() }).safeParse(reply);
+      const parsed = z.object({ snapshots: z.array(snapshot), nextCursor: z.string().min(1).max(1024).nullish(), hasMore: z.boolean().optional() }).safeParse(reply);
       if (!parsed.success || parsed.data.hasMore && !parsed.data.nextCursor) throw new ComputerImageError("image_capacity_reached");
       for (const row of parsed.data.snapshots) {
         if (names.has(row.name)) throw new ComputerImageError("image_capacity_reached");
@@ -120,6 +123,7 @@ export class BoatComputerImageDriver implements ComputerImageDriver {
     await beforeDispatch();
     const reply = await this.client.request("/sandboxes", {
       method: "POST",
+      timeoutMs: LONG_OPERATION_TIMEOUT_MS,
       idempotencyKey: `computer-image.${image.id}.${role}`,
       body: {
         from: name,
@@ -152,13 +156,14 @@ export class BoatComputerImageDriver implements ComputerImageDriver {
       .parse(reply.sandbox);
     if (row.team.id !== this.wallet)
       throw new ComputerImageError("image_billing_scope_mismatch");
-    if (row.state === "error" || row.state === "archived")
+    if (row.state === "error" || row.state === "archived" || row.state === "cancelled")
       throw new ComputerImageError("image_builder_stopped");
     return ["ready", "idle", "running"].includes(row.state);
   }
   private async command(id: string, command: string) {
     const result = await this.client.request(`/sandboxes/${id}/commands`, {
       method: "POST",
+      timeoutMs: LONG_OPERATION_TIMEOUT_MS,
       body: { command, timeoutSeconds: 30 },
     });
     if (
@@ -231,6 +236,7 @@ export class BoatComputerImageDriver implements ComputerImageDriver {
   async capture(image: ComputerImage) {
     const result = await this.client.request("/named-snapshots", {
       method: "POST",
+      timeoutMs: LONG_OPERATION_TIMEOUT_MS,
       body: { sandboxId: image.builder_id, name: image.snapshot_name },
     });
     const captured = decode(result.snapshot);

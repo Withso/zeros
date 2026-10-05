@@ -262,6 +262,8 @@ export interface AgentSessionControls {
     bubbleAttachments?: AgentTextMessageAttachment[],
     /** Ordered composer content (text + inline pills) for the sent bubble. */
     segments?: MessageContentSegment[],
+    /** Called once the session provider owns this pending submission. */
+    onAccepted?: () => void,
   ): Promise<void>;
   /** Cancel the in-flight prompt (if any). */
   cancel(): Promise<void>;

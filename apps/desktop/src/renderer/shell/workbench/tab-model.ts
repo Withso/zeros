@@ -39,6 +39,9 @@ export type ViewerMode = "diff" | "preview" | "edit";
 export interface BrowserPreviewSource {
   chatId: string;
   port: number;
+  /** Exact non-authority native identities; never reselect by display port. */
+  executionId?: string;
+  portId?: string;
 }
 
 export interface WorkbenchTab {
@@ -208,7 +211,7 @@ function normalizedPreviewSource(
   if (!isLoopbackBrowserUrl(url) || !raw || typeof raw !== "object") {
     return undefined;
   }
-  const value = raw as { chatId?: unknown; port?: unknown };
+  const value = raw as { chatId?: unknown; port?: unknown; executionId?: unknown; portId?: unknown };
   const chatId = typeof value.chatId === "string" ? value.chatId.trim() : "";
   if (
     !chatId ||
@@ -219,7 +222,9 @@ function normalizedPreviewSource(
   ) {
     return undefined;
   }
-  return { chatId, port: Number(value.port) };
+  const identity = typeof value.executionId === "string" && value.executionId.length <= 512 && typeof value.portId === "string" && /^[A-Za-z0-9_-]{32}$/.test(value.portId)
+    ? { executionId: value.executionId, portId: value.portId } : {};
+  return { chatId, port: Number(value.port), ...identity };
 }
 
 /** Build a closable File tab for a real repo-relative path. `opts` carries the

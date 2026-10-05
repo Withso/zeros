@@ -68,6 +68,7 @@ import {
 import type { ChatThread } from "../../state/store";
 import { createDispatcherChat } from "./dispatcher-chat";
 import { useCloudCreate } from "./cloud-create";
+import { CloudComputerV2CreateNotice } from "../../features/settings/cloud-computer-v2-create-gate";
 import { registerCloudDesignCreation } from "../../state/cloud-creation-mode";
 import { createCloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { acceptCloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
@@ -676,8 +677,10 @@ export function DispatcherPage({
             )}
           </div>
 
-          {placementReason && <p className="text-fg3 mb-2 px-2 text-xs" role="status">{placementReason}</p>}
-          <section aria-label="Workspace prompt">
+          {placementReason && (cloud.computerRequired
+            ? <CloudComputerV2CreateNotice required canManage={cloud.canManageComputer} warm={cloud.warmComputer} />
+            : <p className="text-fg3 mb-2 px-2 text-xs" role="status">{placementReason}</p>)}
+          <section aria-label="Workspace prompt" onPointerEnter={cloud.warmComputer} onFocus={cloud.warmComputer}>
             <DispatcherComposer
               agents={agents}
               cwd={selectedProject?.repoRoot ?? null}

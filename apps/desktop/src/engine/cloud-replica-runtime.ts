@@ -741,6 +741,20 @@ export class CloudReplicaRuntime {
     return { accountUserId: session.accountUserId, api };
   }
 
+  /** Public desktop metadata only; proofs and session material stay private.
+   * Available before the account/device has created its first replica. */
+  identity(): { accountUserId: string; deviceId: string } {
+    // Lifecycle operations quiesce the broker without ending this session.
+    const session = this.session;
+    if (this.disposed || !session || this.currentAccessToken() === null) {
+      throw new CloudReplicaRuntimeError("signed_out", "A current WorkOS desktop session is required");
+    }
+    if (!session.device.deviceId) {
+      throw new CloudReplicaRuntimeError("device_enrollment_pending", "Cloud device enrollment is still completing");
+    }
+    return { accountUserId: session.accountUserId, deviceId: session.device.deviceId };
+  }
+
   list(): CloudReplicaLocalState[] {
     const session = this.session;
     if (!session?.device.deviceId) return [];

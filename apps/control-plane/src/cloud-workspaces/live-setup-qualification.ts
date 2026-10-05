@@ -911,6 +911,7 @@ async function main(): Promise<void> {
     });
     const executor = new DaytonaCloudWorkspaceSetupExecutor({
       admissionBroker: admission,
+      runtimeArtifacts: null,
       commandRunner: runner,
       engineProtocolVersion: ENGINE_PROTOCOL_VERSION,
       timeoutSeconds: 1_800,

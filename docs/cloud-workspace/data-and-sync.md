@@ -3,8 +3,9 @@
 This document defines the product and engineering contract for creating a
 Zeros workspace locally or in cloud, making integrity-checked copies between
 those placements, and keeping private device replicas. The append-only cloud
-migration ladder and desktop engine services implement the non-UI foundation. End-user wiring and protected live qualification remain separate
-release work.
+migration ladder and desktop engine services implement the foundation. Alpha
+staff can control receive-only Mac replicas from cloud workspace details.
+Protected signed-client qualification remains separate release work.
 
 ## The three independent dimensions
 
@@ -62,19 +63,19 @@ repository has no usable default. The workspace UI then shows a placement badge
 (`This Mac` or `Cloud`) and, for cloud workspaces, a separate `Local copy`
 status. Do not use a single ambiguous `Local` status for both.
 
-Later copy and replica phases use verbs that state their consequence. These
-actions are not part of the current Boat parity UI:
+Copy and replica actions use verbs that state their consequence. Workspace
+fork/copy UI remains deferred; Alpha's internal sync controls expose the replica
+actions below:
 
 - **Create cloud copy** forks a new cloud workspace and retains the local
   source.
 - **Create local copy** forks a new private local workspace and retains the
   cloud source.
-- **Sync to this Mac** creates or resumes the authorized member's receive-only local
-  replica; cloud remains authoritative.
-- **Pause sync on this Mac** affects only that replica and leaves its files on
-  disk.
-- **Remove local copy** affects only that replica and requires explicit
-  confirmation before deleting its directory.
+- **Choose folder…** in **Sync files to this Mac** creates the authorized
+  member's receive-only replica in an empty folder; cloud remains authoritative.
+- **Pause** and **Resume** affect only that member/device/workspace replica.
+- **Remove…** asks for confirmation, stops that replica, and keeps every
+  downloaded file. Deleting the retained directory is a separate user action.
 - The destination tenant is selected explicitly. Copying Organization-owned
   work to Personal is a policy-checked export, never an implicit side effect of
   choosing a Mac path.
@@ -335,6 +336,49 @@ Directory sync is strictly cloud-to-device. Automatic bidirectional sync and
 Apply-local-changes uploads are outside the product plan. Explicit workspace
 copying remains a separate operation with a fresh destination identity.
 
+### Alpha Mac controls
+
+Cloud workspace details contains **Sync files to this Mac**, gated by
+`useInternalFeatureActive("cloudComputerV2")`. Controls require the native Mac
+host and an explicit `capabilities.canEdit === true`; an absent capability
+fails closed. E5 owns that server-derived capability. A new replica also
+requires a running workspace. Opening details or refreshing metadata never
+wakes the cloud workspace.
+
+The native folder picker only chooses a destination. It does not register a
+Local project, change the selected workspace, or promote the replica to an
+authoritative checkout. Downloads cover the primary repository only (ACD-3).
+The UI explains receive-only behavior and the existing exclusions: `.git`,
+`node_modules`, `.env` files, credential files, and private Zeros state. Existing
+replicas also display their additional excluded prefixes.
+
+Status and the local folder stay visible during revalidation. **Local changes**
+lists divergent paths. **Use cloud version…** requires a second confirmation;
+the existing runtime first saves local bytes under
+`<root>.zeros-local-changes/<replicaId>/<detectedAt>/<path>`, then receives cloud
+content. Cancel leaves the divergence intact. **Remove…** affects only the
+selected replica and keeps both downloaded files and saved local changes.
+**Detached** explains that the Mac has lost live sync authority and keeps its
+files; it offers no resume or cloud replacement action.
+
+All `cloudReplica.*` calls use the **Local engine**, including while a cloud
+workspace is selected and has a remote engine connection. The selected cloud
+organization/workspace is an RPC parameter. The additive `cloudReplica.identity`
+read returns only account and enrolled device UUIDs. Scoped renderer requests
+are checked against the current account/device and, for replica operations,
+the exact organization/workspace; existing unscoped foundation RPCs keep their
+serialized shapes. Electron retains tokens, keys, and private host proofs.
+
+Renderer replica snapshots use the exact account UUID, sign-in generation,
+device UUID, organization UUID, and workspace UUID. Enrollment metadata has an
+eight-entry account cache; replica snapshots have a 32-entry / 4 MiB cache.
+Pointer/focus intent and open details share read-only requests. Equal snapshots
+retain their references, failed reads retain the last confirmed same-key value,
+and obsolete account/connection responses cannot publish or mutate another
+owner. Authentication changes clear both caches. Metadata revalidates on Local
+reconnect, foreground intent, and a 15-second visible poll. Hidden or closed
+controls stop polling and fence pending folder selection.
+
 ## Copy and sync workflows
 
 ### Create a cloud workspace from local
@@ -405,9 +449,9 @@ lifecycle controls. That decision is not part of the copy transaction.
 
 ## Multiplayer replica behavior
 
-The backend authorizes each replica independently. Client UI and signed-client
-lifecycle qualification remain open; the cloud engine stays authoritative for
-every admitted member:
+The backend authorizes each replica independently. Alpha's internal Mac
+controls are wired; signed-client lifecycle qualification remains open. The
+cloud engine stays authoritative for every admitted member:
 
 ```text
                          cloud engine
@@ -674,3 +718,66 @@ Before Phase 6A multiplayer can ship, extend the same matrix to two or more
 members and prove independent device paths/cursors, role and membership
 revocation, owner transfer, billing-epoch cutover, and the absence of
 cross-member replica side effects.
+
+### Alpha signed-Mac acceptance runbook for E3
+
+This runbook is executed by the orchestrator on Alpha after E5 and the C5, B8,
+and B10 source/wake/persistence prerequisites are qualified. Chromium's
+`harness-cloud-replicas.html` exercises the real controls and cache with
+synthetic Local RPCs and a synthetic picker; it does not qualify a native Mac,
+provider persistence, or live grants.
+
+Preparation:
+
+1. In the orchestrator's credentialed checkout, run `pnpm agent:check` to verify
+   `.env.agent` read-only. Use its existing Alpha fixture/qualification scripts
+   for provider setup and cleanup. E3 requires no direct provider API commands.
+2. Use an isolated Alpha test organization, dedicated test accounts/devices,
+   and two signed Alpha Macs with independently enrolled trusted devices.
+   Enable **Cloud Computer v2** in Internal settings.
+   Use owner/developer accounts for sync and prompter/viewer accounts to verify
+   unavailable controls. Record app commit, runtime/base/template revisions,
+   accepted pins, account/device IDs, and B10 qualification receipts privately.
+3. Fork a sanitized Cloud Computer template through C5 into a disposable
+   `zeros-v2-test-e3-<run>` workspace. Record its organization/workspace IDs and
+   provider resource IDs in the private run log. Use the primary repository for
+   every file fixture; secondary repositories are outside this acceptance.
+4. Prepare separate empty `zeros-v2-test-e3-<run>-mac-a` and
+   `zeros-v2-test-e3-<run>-mac-b` folders. Record their absolute paths. Use public
+   marker text only, including in secret-like exclusion fixtures.
+
+Execute and record each result:
+
+| Step | Action | Required observation |
+| --- | --- | --- |
+| Gate and authority | Open workspace details on each Mac, then with the internal toggle disabled and with a prompter/viewer role. | The surface is absent without the staff gate. Edit controls are unavailable for `canEdit: false` or an older document without `canEdit`; the other details still work. |
+| Initial download | In the Cloud terminal, create a primary `zeros-v2-test-e3-source.txt` marker. On each Mac choose its own empty folder. Record the independent replica IDs and initial/final cursors using private Local engine diagnostics. | Checkpoint download and ordered catch-up reach **In sync** with identical allowed content and different device/path bindings. An existing nonempty folder is rejected without overwriting its files. |
+| Exclusions | Create harmless markers at `node_modules/zeros-v2-test-e3.txt`, `.env.zeros-v2-test-e3`, and `.zeros/zeros-v2-test-e3.txt` in the primary cloud root. Inspect both downloaded folders and the existing cloud `.git` boundary. | `.git`, dependency directories, secret-like files, and private Zeros state are absent on both Macs. Allowed source changes still arrive. Additional replica exclusions are visible when configured. |
+| Cloud edits | Update the source marker twice, add another allowed marker, and delete that marker through the Cloud terminal. | Both replicas converge to the final cloud bytes and deletion in event order. Cloud remains authoritative. |
+| Local divergence | Edit the source marker on Mac A, then change the same cloud path. | A preserves its local bytes and shows **Local changes** with that path; B receives the cloud version. A's edit never appears in the cloud source or B. |
+| Explicit replacement | Choose **Use cloud version…**, cancel once, then confirm **Save local changes and receive cloud**. | Cancellation preserves A's divergence. Confirmation preserves its local bytes in the recorded sibling `.zeros-local-changes` backup and converges A to cloud content. No local content is uploaded. |
+| Independent pause | Pause A, change the cloud marker, then resume A. | A reports **Paused** and keeps its files; B keeps receiving changes. A catches up after resume under current authority. |
+| Independent remove | Choose **Remove…** on A, cancel once, then confirm **Remove sync**. Change the cloud marker again. | Cancellation keeps A attached. Confirmation shows **Off**, preserves A's files and backup, and stops further downloads to that folder. B continues. Re-enable A using a new empty fixture folder and record the new replica ID/path. |
+| Picker fencing | Hold the native folder picker open, then close details, switch workspace/account, or remove edit access before selecting a folder. | The obsolete selection creates no replica and writes no files. Reopening details reads only the current owner. |
+| Restart | Quit and restart the signed Alpha app on A while the workspace remains selected. | Its existing account/device/workspace binding, path, and cursor are retained; no duplicate replica or new Local workspace is created. |
+| Offline catch-up | Take A offline, make multiple allowed cloud updates through B, then reconnect A. Also interrupt A's Local engine connection and reopen details. | Existing files and confirmed same-key metadata remain available. Reconnect renews authorization and catches up from durable state; local modifications still become divergence. An unavailable Local connection shows retained status rather than another device's snapshot. |
+| Idle sleep/wake | Allow normal idle sleep, then wake through the authorized workspace action. Record generation/authority and accepted pin checks from B8's existing diagnostics. | Metadata reads do not initiate wake. After wake the existing replica rebinds through a fresh grant and converges, retaining the selected template/runtime identity and B10 persistence proofs. |
+| Account/role changes | Switch A to another account and back; downgrade its workspace role to prompter/viewer, then restore it. | No prior account's folder/status/actions leak into the new account. Edit controls fail closed on downgrade and become available only after confirmed authorization returns. |
+| Membership loss | Remove A's test member from the organization/workspace using the owner account; continue editing through B. | Server access is revoked, A detaches safely and retains downloaded bytes, and B stays independent. If restoring membership permits the same live binding, any resumed download requires fresh authorization. |
+| Device revocation | Revoke A's test device through the existing trusted-device management flow. | A becomes **Detached** and cannot resume its terminal replica identity. A pending cloud-replacement confirmation disappears. Already downloaded files remain, and B continues receiving changes. |
+
+Cleanup and evidence:
+
+1. Remove every remaining live test replica through **Remove sync**, including
+   replicas created after removal or re-enrollment. Record terminal bindings.
+2. Delete the disposable cloud workspace through the owner's normal lifecycle
+   action and run the existing fixture cleanup script from the orchestrator's
+   credentialed checkout. Record confirmation for every created provider
+   resource ID and terminal fixture state. Record any tombstones/checkpoints
+   retained by the existing lifecycle separately from provider deletion.
+3. Delete only the recorded local fixture folders and sibling local-change
+   backups, after recording their preservation results. Restore test account
+   roles/device settings as applicable.
+4. Keep screenshots, IDs, cursors, revisions, and cleanup receipts in the
+   private run log. Publish only the closed pass/fail results and blockers, with
+   no credentials, private file contents, or native grant/proof material.

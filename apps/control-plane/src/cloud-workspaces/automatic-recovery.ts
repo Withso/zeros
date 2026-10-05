@@ -14,6 +14,8 @@ import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 import type { CloudWorkspaceSetupExecution } from "./setup-worker.js";
 import { parseSetupDiagnostic } from "./cloud-diagnostics.js";
 import { advanceCloudWorkspaceGenerationTransitionAfterDrain, cancelCloudWorkspaceGenerationTransition, rollbackCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
+import { copyGenerationPins, requireGenerationRuntime } from "./generation-pins.js";
+import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 
 export type QuotaRow = {
   max_workspaces: number;
@@ -144,14 +146,14 @@ type RecoveryPoint = { id: string; integrity_sha256: Buffer; content_revision: s
 
 // SQL fragments take only fixed caller expressions, never request data. Keep
 // the desktop acknowledgement and worker's lossless decision identical.
-export function cloudRecoveryPointLosslessSql(sourceGenerationSql: string): string {
+export function cloudRecoveryPointLosslessSql(sourceGenerationSql: string, allowBeforeRebuild = false): string {
   return `(checkpoint.generation=${sourceGenerationSql} AND checkpoint.content_revision=head.current_revision
     AND checkpoint.record_revision>=coalesce((SELECT current_revision FROM workspace_record_heads
       WHERE workspace_id=checkpoint.workspace_id AND org_id=checkpoint.org_id),0)
     AND EXISTS (SELECT 1 FROM workspace_checkpoint_requests request
       WHERE request.workspace_id=checkpoint.workspace_id AND request.org_id=checkpoint.org_id
         AND request.generation=${sourceGenerationSql} AND request.checkpoint_id=checkpoint.id AND request.state='succeeded'
-        AND request.reason IN ('before_stop','before_archive'))
+        AND request.reason IN ('before_stop','before_archive'${allowBeforeRebuild ? ",'before_rebuild'" : ""}))
     AND NOT EXISTS (SELECT 1 FROM cloud_workspace_engine_instances engine
       WHERE engine.workspace_id=checkpoint.workspace_id AND engine.generation=${sourceGenerationSql}
         AND engine.registered_at>checkpoint.durable_at)
@@ -162,10 +164,10 @@ export function cloudRecoveryPointLosslessSql(sourceGenerationSql: string): stri
 
 /** Shared by explicit recovery and automatic recovery, under the workspace
  * lock. A periodic snapshot is usable explicitly, but never proves zero loss. */
-export async function requireCloudRecoveryPoint(tx: Tx, input: RecoveryScope): Promise<RecoveryPoint> {
+export async function requireCloudRecoveryPoint(tx: Tx, input: RecoveryScope & { allowBeforeRebuild?: boolean }): Promise<RecoveryPoint> {
   const point = (await tx.query<RecoveryPoint>(`SELECT checkpoint.id,checkpoint.integrity_sha256,checkpoint.content_revision,
       checkpoint.record_revision,checkpoint.durable_at,
-      ${cloudRecoveryPointLosslessSql("$4")} AS lossless
+      ${cloudRecoveryPointLosslessSql("$4", input.allowBeforeRebuild)} AS lossless
     FROM workspace_checkpoints checkpoint
     JOIN workspace_content_heads head ON head.workspace_id=checkpoint.workspace_id AND head.org_id=checkpoint.org_id
       AND head.current_checkpoint_id=checkpoint.id
@@ -224,10 +226,12 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
      FROM cloud_workspace_generations g JOIN cloud_workspace_setup_specs ss USING(workspace_id,generation,org_id)
      WHERE g.workspace_id=$1 AND g.generation=$2 AND g.org_id=$3`,[input.workspaceId,input.sourceGeneration,input.organizationId])).rows[0];
   if(!source)throw new HttpError(404,"cloud_generation_not_qualified","Source generation is unavailable");
-  const baseProfile=cloudWorkspaceProvisioningProfile(input.config,source.provider);
+  const qualificationMode=input.config.runtime?.qualificationMode??cloudRuntimeQualificationMode();
+  const pins=await requireGenerationRuntime(tx,{...input,generation:input.sourceGeneration},qualificationMode);
+  const baseProfile=pins.runtime?pins.profile:cloudWorkspaceProvisioningProfile(input.config,source.provider);
   const connection=await loadGenerationCloudProviderConnection(tx,{...input,generation:input.sourceGeneration});
   if(!connection||connection.provider!==baseProfile.provider)throw new HttpError(409,"cloud_provider_connection_unavailable","The cloud provider connection is unavailable");
-  const profile=connection.credentialSource==='hosted'&&!authorization.isPersonal
+  const profile=!pins.runtime&&connection.credentialSource==='hosted'&&!authorization.isPersonal
     ? await resolveComputerImage(tx,input.organizationId,baseProfile) : baseProfile;
   if(!profile.sourceCommit)throw new HttpError(409,"recovery_image_unavailable","A qualified recovery image is unavailable");
   const quota=await loadQuota(tx,input.organizationId),usage=await loadUsage(tx,input.organizationId);
@@ -237,8 +241,8 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
   const digest=typeof input.requestDigest==='function'?input.requestDigest(profile):input.requestDigest;
   const generation=(await tx.query<{generation:number}>("SELECT coalesce(max(generation),0)::integer+1 AS generation FROM cloud_workspace_generations WHERE workspace_id=$1",[input.workspaceId])).rows[0]!.generation;
   const transitionId=randomUUID(),intentId=input.drainIntentId??randomUUID();
-  await tx.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,source_commit,created_by,provider_connection_id,sandbox_class,recovery_checkpoint_id)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,[input.workspaceId,generation,input.organizationId,profile.provider,profile.imageRef,profile.architecture,profile.cpuMillicores,profile.memoryMiB,profile.storageMiB,profile.sourceCommit,input.actorUserId,connection.id,profile.sandboxClass??null,point.id]);
+  await copyGenerationPins(tx,{...input,targetGeneration:generation,providerConnectionId:connection.id,
+    legacyProfile:profile,qualificationMode,recoveryCheckpointId:point.id});
   const resolved=await resolveDatabaseCloudWorkspaceSettings(tx,{organizationId:input.organizationId,repositoryId:workspace.repository_id,workspaceId:input.workspaceId,generation,actorUserId:input.actorUserId,
     isPersonal:authorization.isPersonal,secretEncryptionKeys:input.config.settingsSecretEncryptionKeys,currentSecretEncryptionKeyVersion:input.config.currentSettingsSecretEncryptionKeyVersion});
   const settings=await persistDatabaseCloudWorkspaceSettings(tx,{...input,generation,settings:resolved});
@@ -446,10 +450,10 @@ export async function advanceCloudAutomaticRecovery(pool: pg.Pool, config: Cloud
       const capacity=['cloud_replacement_headroom_exceeded','cloud_quota_not_configured','cloud_quota_exceeded'].includes(error.code);
       const funding=/^cloud_(?:compute|account_entitlement)/.test(error.code);
       const state=capacity?'waiting_for_capacity':funding?'waiting_for_funding':'recovery_needed';
-      const code=capacity?'recovery_waiting_for_capacity':funding?'recovery_waiting_for_funding':'recovery_needed';
+      const code=capacity?'recovery_waiting_for_capacity':funding?'recovery_waiting_for_funding':error.code==='cloud_runtime_revoked'?error.code:'recovery_needed';
       await tx.query("UPDATE cloud_workspace_restore_incidents SET state=$2,reason=$3,next_attempt_at=now()+interval '30 seconds',updated_at=now() WHERE id=$1",[job.id,state,error.code]);
       await tx.query("UPDATE cloud_workspaces SET last_error_code=$2,last_error_message=$3,version=version+1,updated_at=now() WHERE id=$1",[scope.workspace_id,code,
-        capacity?'Recovery is waiting for capacity':funding?'Recovery is waiting for compute funding':'Recovery needs attention. The source is preserved.']);
+        capacity?'Recovery is waiting for capacity':funding?'Recovery is waiting for compute funding':error.code==='cloud_runtime_revoked'?error.message:'Recovery needs attention. The source is preserved.']);
     }
     return true;
   });

@@ -1,3 +1,4 @@
+import {resolveCloudRuntime} from "../../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
 import { readCloudAgentRuntimeAttestation } from "../../../apps/desktop/src/engine/cloud-runtime-attestation";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
@@ -33,10 +34,10 @@ let languages: CloudRuntimeLanguageServices | undefined;
 
 async function main() {
   const worker = loadCloudWorkerConfiguration();
-  assert.equal(worker?.version, 3);
+  assert(worker?.version === 3 || worker?.version === 4);
   assert(worker);
   const runtime=readCloudAgentRuntimeAttestation(worker);
-  assert.equal(runtime.profile,"zeros-cloud-worker-v3");
+  assert.equal(runtime.profile,worker.profile);
   checks.push("immutable-engine-registration-attestation");
   for (const [name, contents] of [
     [source, "export function welcome(name: string) { return name; }\nwel\n"],
@@ -51,7 +52,7 @@ async function main() {
   phase = "workload";
   workload = await new ZsrExecutionBoundary({
     projectRoot: workspace,
-    supervisorScript: "/opt/zeros/binaries/zsr-supervisor.mjs",
+    supervisorScript: `${resolveCloudRuntime().workerRoot}/binaries/zsr-supervisor.mjs`,
     cloudWorker: worker,
     cloudWorkerToolchain: worker.toolchain,
   }).prepare({

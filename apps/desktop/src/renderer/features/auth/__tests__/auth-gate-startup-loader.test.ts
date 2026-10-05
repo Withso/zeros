@@ -5,7 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const auth = vi.hoisted(() => ({
   status: "loading" as "loading" | "authenticated" | "unauthenticated",
+  local: false,
 }));
+
+vi.mock("../../../platform/runtime", () => ({ isLocalDevelopment: () => auth.local }));
 
 vi.mock("../use-auth", () => ({
   useAuth: () => auth,
@@ -38,7 +41,20 @@ const visibleText = (markup: string) => {
 describe("AuthGate startup loader", () => {
   afterEach(() => {
     auth.status = "loading";
+    auth.local = false;
     vi.unstubAllGlobals();
+  });
+
+  it("opens the real shell in native Local without inventing an authenticated account", () => {
+    auth.local = true;
+    auth.status = "unauthenticated";
+    const markup = renderToStaticMarkup(createElement(AuthGate, null, createElement("main", null, "app")));
+    expect(markup).toBe("<main>app</main>");
+  });
+
+  it("keeps ordinary Dev and packaged signed-out users behind login", () => {
+    auth.status = "unauthenticated";
+    expect(renderToStaticMarkup(createElement(AuthGate, null, createElement("main", null, "app")))).not.toContain("<main>");
   });
 
   it("keeps the HTML-owned logo instead of mounting a second loader", () => {

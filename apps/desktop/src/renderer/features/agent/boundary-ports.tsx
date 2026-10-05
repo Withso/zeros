@@ -54,9 +54,11 @@ export function boundaryPortProblemCopy(
 export const BoundaryPortsPill = memo(function BoundaryPortsPill({
   snapshot,
   onOpenPort,
+  onIntent,
 }: {
   snapshot: ExecutionBoundaryPortsSnapshot | null;
   onOpenPort?: (port: ExecutionBoundaryPortStatus) => void;
+  onIntent?: () => void;
 }) {
   if (!snapshot) return null;
   const issue = snapshot.discovery.issue;
@@ -81,6 +83,8 @@ export const BoundaryPortsPill = memo(function BoundaryPortsPill({
           size="sm"
           className="text-fg2 hover:text-fg1 h-7 gap-1.5 px-2"
           aria-label={problem?.title ?? label}
+          onPointerEnter={onIntent}
+          onFocus={onIntent}
         >
           <RadioTower size={14} aria-hidden="true" />
           {count > 0 && <span className="text-xs tabular-nums">{count}</span>}

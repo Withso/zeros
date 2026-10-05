@@ -11,6 +11,7 @@ import {
   realpathSync,
 } from "node:fs";
 import path from "node:path";
+import { validateCloudRuntimeMarker, resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 
 /** A VM broker need not inherit a provider container's seccomp filter. Version
  * 2 must prove the actual isolated engine's filter and no-new-privileges bit;
@@ -20,7 +21,7 @@ export function cloudRuntimeProcessSecurityQualified(
   hostSeccomp,
   identity,
 ) {
-  return (version === 2 || version === 3)
+  return (version === 2 || version === 3 || version === 4)
     ? identity?.secure === true &&
         identity.noNewPrivs === 1 &&
         identity.seccompMode === 2
@@ -28,6 +29,7 @@ export function cloudRuntimeProcessSecurityQualified(
 }
 
 export function cloudHostRuntimeProfile(marker) {
+  if (marker?.version === 4) validateCloudRuntimeMarker(marker);
   if (
     !marker ||
     typeof marker !== "object" ||
@@ -38,7 +40,8 @@ export function cloudHostRuntimeProfile(marker) {
     !(
       (marker.version === 1 && marker.profile === "zeros-cloud-worker-v1") ||
       (marker.version === 2 && marker.profile === "zeros-cloud-worker-v2") ||
-      (marker.version === 3 && marker.profile === "zeros-cloud-worker-v3")
+      (marker.version === 3 && marker.profile === "zeros-cloud-worker-v3") ||
+      (marker.version === 4 && marker.profile === "zeros-cloud-worker-v4")
     )
   )
     throw new Error("Unsupported cloud host runtime profile");
@@ -58,7 +61,8 @@ export function cloudHostRuntimeProfile(marker) {
 
 export function ensureCloudHostRuntimeDirectory(profile) {
   const accepted = cloudHostRuntimeProfile({
-    ...profile,
+    version: profile.version,
+    profile: profile.profile,
     backend: "cloud-worker",
     uid: 10001,
     gid: 10001,
@@ -150,9 +154,9 @@ export function readCloudHostRuntimeProfile(
     const buffer = Buffer.alloc(4097);
     const bytes = readSync(descriptor, buffer, 0, buffer.length, 0);
     if (bytes !== metadata.size) throw new Error("Cloud host profile changed");
-    return cloudHostRuntimeProfile(
-      JSON.parse(buffer.toString("utf8", 0, bytes)),
-    );
+    const marker = JSON.parse(buffer.toString("utf8", 0, bytes));
+    if (marker.version === 4) resolveCloudRuntime();
+    return cloudHostRuntimeProfile(marker);
   } finally {
     closeSync(descriptor);
   }

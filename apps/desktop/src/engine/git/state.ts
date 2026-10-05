@@ -26,7 +26,6 @@ import {
   rmdirSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import path from "node:path";
 import {
   openZerosDb,
@@ -38,7 +37,7 @@ import {
 import {
   worktreeSeedPath,
   worktreeSeedsRoot,
-  zerosDotDirName,
+  zerosStateRoot as databaseStateRoot,
 } from "../db/paths";
 import type {
   Workspace,
@@ -71,13 +70,7 @@ export function setStateRootForTesting(root: string | null): void {
 /** Pick the on-disk root for git state + worktrees. Split PER CHANNEL so no
  *  channel can trample another's worktrees, state.db or detach.lock. */
 export function zerosStateRoot(): string {
-  if (rootOverride) return rootOverride;
-  // Delegated to db/paths.ts's zerosDotDirName() so there is exactly ONE
-  // implementation. This used to inline a TWO-way `isDevRuntime()` split, which
-  // left Beta and Production sharing `~/.zeros` — including detach.lock, the
-  // single-instance lock (see detachLockPath below and git/detach.ts:17). With
-  // Beta holding that lock, Production could not enter detach mode at all.
-  return path.join(homedir(), zerosDotDirName());
+  return rootOverride ?? databaseStateRoot();
 }
 
 /** The visible worktrees root: ~/zeros/workspaces. Deliberately NOT a hidden

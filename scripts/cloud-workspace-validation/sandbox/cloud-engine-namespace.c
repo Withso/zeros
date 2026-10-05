@@ -14,6 +14,7 @@
 #include <linux/capability.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
+#include <limits.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
@@ -31,6 +32,10 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t child_pid;
+static char runtime_root[128] = "/opt/zeros-runtime";
+static char worker_root[144] = "/opt/zeros";
+static char runtime_node[160] = "/opt/zeros-runtime/bin/node";
+static int runtime_version = 2;
 
 static void fail(void) {
   fputs("cloud engine namespace admission failed\n", stderr);
@@ -44,12 +49,48 @@ static void forward_signal(int signal_number) {
 static void require_path(const char *name, int directory, int read_only) {
   struct stat metadata;
   struct statfs filesystem;
-  if (lstat(name, &metadata) || metadata.st_uid != 0 ||
+  char physical[PATH_MAX];
+  if (!realpath(name, physical) || strcmp(physical, name) ||
+      lstat(name, &metadata) || metadata.st_uid != 0 ||
       (metadata.st_mode & 0022) ||
       (directory ? !S_ISDIR(metadata.st_mode) :
        (!S_ISREG(metadata.st_mode) || metadata.st_nlink != 1)) ||
       statfs(name, &filesystem) ||
       (read_only && !(filesystem.f_flags & MS_RDONLY))) fail();
+}
+
+/* Only the root launcher supplies this ID. No caller-selected path, command,
+ * environment root, or facade is accepted at the native transition. */
+static void select_runtime(const char *id) {
+  if (strlen(id) != 67 || strncmp(id, "r1-", 3)) fail();
+  for (size_t i = 3; i < 67; i++)
+    if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f'))) fail();
+  int length = snprintf(runtime_root, sizeof(runtime_root), "/opt/zeros-infra/%s", id);
+  if (length <= 0 || (size_t)length >= sizeof(runtime_root)) fail();
+  length = snprintf(worker_root, sizeof(worker_root), "%s/worker", runtime_root);
+  if (length <= 0 || (size_t)length >= sizeof(worker_root)) fail();
+  length = snprintf(runtime_node, sizeof(runtime_node), "%s/bin/node", runtime_root);
+  if (length <= 0 || (size_t)length >= sizeof(runtime_node)) fail();
+  runtime_version = 4;
+}
+
+static void worker_path(char *output, size_t size, const char *relative) {
+  int length = snprintf(output, size, "%s/%s", worker_root, relative);
+  if (length <= 0 || (size_t)length >= size) fail();
+}
+
+static void require_worker_path(const char *relative, int directory) {
+  char file[PATH_MAX];
+  worker_path(file, sizeof(file), relative);
+  require_path(file, directory, 1);
+}
+
+static void require_link(const char *file, const char *target) {
+  struct stat metadata;
+  char buffer[PATH_MAX];
+  ssize_t size = readlink(file, buffer, sizeof(buffer));
+  if (lstat(file, &metadata) || !S_ISLNK(metadata.st_mode) || metadata.st_uid != 0 ||
+      size < 0 || (size_t)size != strlen(target) || memcmp(buffer, target, (size_t)size)) fail();
 }
 
 static void require_kernel_control(const char *name) {
@@ -71,17 +112,33 @@ static void validate_view(int qualification) {
   if (statfs("/", &root) || root.f_type != 0x01021994 ||
       !(root.f_flags & MS_RDONLY)) fail();
   const char *directories[] = {
-    "/", "/usr", "/opt", "/opt/zeros", "/opt/zeros/dist-engine",
-    "/opt/zeros-runtime", "/opt/zeros-runtime/bin", "/etc", "/etc/zeros",
+    "/", "/usr", "/opt", "/etc", "/etc/zeros", runtime_root, worker_root,
   };
   for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); i++)
     require_path(directories[i], 1, 1);
-  const char *files[] = {
-    "/opt/zeros-runtime/bin/node", "/opt/zeros/dist-engine/cli.js",
-    "/etc/zeros/cloud-worker.json",
-  };
-  for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++)
-    require_path(files[i], 0, 1);
+  char bin[160];
+  int length = snprintf(bin, sizeof(bin), "%s/bin", runtime_root);
+  if (length <= 0 || (size_t)length >= sizeof(bin)) fail();
+  require_path(bin, 1, 1);
+  require_path(runtime_node, 0, 1);
+  require_worker_path("dist-engine", 1);
+  require_worker_path("dist-engine/cli.js", 0);
+  require_path("/etc/zeros/cloud-worker.json", 0, 1);
+  if (runtime_version == 4) {
+    require_path("/opt/zeros-infra", 1, 1);
+    require_path("/opt/zeros", 1, 1);
+    require_path("/run/zeros/active-runtime.json", 0, 1);
+    char target[160];
+    length = snprintf(target, sizeof(target), "../zeros-infra/%s", strrchr(runtime_root, '/') + 1);
+    if (length <= 0 || (size_t)length >= sizeof(target)) fail();
+    require_link("/opt/zeros/current", target);
+    require_link("/zeros", "/opt/zeros");
+    require_link("/opt/zeros/bin", "current/bin");
+    require_link("/opt/zeros/worker", "current/worker");
+    require_link("/opt/zeros/manifest.json", "current/manifest.json");
+    require_link("/opt/zeros/logs", "/srv/zeros/log");
+    require_link("/opt/zeros/state", "/srv/zeros/state");
+  }
   /* Procfs must retain VM-root ownership, which becomes unmapped. Do not
    * overmount individual entries: that prevents fresh proc mounts in nested
    * PID namespaces. Global sysctl writes still require unmapped host authority. */
@@ -95,16 +152,17 @@ static void validate_view(int qualification) {
   for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++)
     require_kernel_control(controls[i]);
   if (qualification) {
-    require_path("/opt/zeros/scripts", 1, 1);
-    require_path("/opt/zeros/scripts/cloud-workspace-validation", 1, 1);
-    require_path("/opt/zeros/scripts/cloud-workspace-validation/sandbox", 1, 1);
-    require_path(qualification == 2 ?
-      "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-agent.ts" :
-      "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", 0, 1);
+    require_worker_path("scripts", 1);
+    require_worker_path("scripts/cloud-workspace-validation", 1);
+    require_worker_path("scripts/cloud-workspace-validation/sandbox", 1);
+    require_worker_path(qualification == 2 ?
+      "scripts/cloud-workspace-validation/sandbox/qualify-cloud-agent.ts" :
+      "scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", 0);
   }
   const char *absent[] = {
     "/root", "/home/user", "/srv/zeros/broker", "/etc/shadow", "/etc/ssh",
     "/run/zeros/cloud-worker-supervisor.sock", "/run/zeros-privilege", "/srv/zeros/setup",
+    "/opt/zeros-bootstrap", "/srv/zeros/runtime-installs",
   };
   for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
     struct stat metadata;
@@ -130,7 +188,7 @@ static void write_map(pid_t child, const char *kind, int version) {
   int length = snprintf(file, sizeof(file), "/proc/%ld/%s_map", (long)child, kind);
   if (length <= 0 || (size_t)length >= sizeof(file)) fail();
   int descriptor = open(file, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
-  const char *mapping = version == 3 ? "0 10003 1\n10001 10001 2\n10004 10004 1\n" : "0 10003 1\n10001 10001 2\n";
+  const char *mapping = (version == 3 || version == 4) ? "0 10003 1\n10001 10001 2\n10004 10004 1\n" : "0 10003 1\n10001 10001 2\n";
   size_t length_bytes = strlen(mapping);
   if (descriptor < 0 || write(descriptor, mapping, length_bytes) !=
       (ssize_t)length_bytes || close(descriptor)) fail();
@@ -178,10 +236,14 @@ static void restrict_syscalls(void) {
 }
 
 static void restrict_capabilities(void) {
+  /* Nested bwrap UID-0 maps require SETFCAP, including across exec into the
+   * ZSR supervisor. This user namespace maps root to host UID 10003; the
+   * inherited NoNewPrivs below prevents file capabilities granting privileges. */
   const unsigned long long allowed =
     (1ULL << CAP_CHOWN) | (1ULL << CAP_DAC_OVERRIDE) | (1ULL << CAP_FOWNER) |
     (1ULL << CAP_KILL) | (1ULL << CAP_SETGID) | (1ULL << CAP_SETUID) |
-    (1ULL << CAP_SETPCAP) | (1ULL << CAP_SYS_CHROOT) | (1ULL << CAP_SYS_ADMIN);
+    (1ULL << CAP_SETPCAP) | (1ULL << CAP_SYS_CHROOT) | (1ULL << CAP_SYS_ADMIN) |
+    (1ULL << CAP_SETFCAP);
   for (int capability = 0; capability < 64; capability++) {
     int present = prctl(PR_CAPBSET_READ, capability, 0, 0, 0);
     if (present < 0) { if (errno == EINVAL) continue; fail(); }
@@ -210,11 +272,14 @@ int main(int argc, char **argv) {
     execv(argv[1], argv + 1);
     fail();
   }
-  const int version = argc >= 2 && strcmp(argv[1], "--v3") == 0 ? 3 : 2;
-  const int option = version == 3 ? 2 : 1;
+  const int selected = argc >= 3 && strcmp(argv[1], "--runtime-id") == 0;
+  if (selected) select_runtime(argv[2]);
+  const int version = selected ? 4 : (argc >= 2 && strcmp(argv[1], "--v3") == 0 ? 3 : 2);
+  runtime_version = version;
+  const int option = version == 4 ? 3 : version == 3 ? 2 : 1;
   const int qualification = argc == option + 1 ?
     (strcmp(argv[option], "--qualify") == 0 ? 1 :
-      (version == 3 && strcmp(argv[option], "--qualify-agent") == 0 ? 2 : 0)) : 0;
+      (version >= 3 && strcmp(argv[option], "--qualify-agent") == 0 ? 2 : 0)) : 0;
   if ((argc != option && !qualification) || getuid() != 0 || geteuid() != 0 || getgid() != 0 ||
       setgroups(0, NULL)) fail();
   validate_view(qualification);
@@ -241,16 +306,19 @@ int main(int argc, char **argv) {
         getgroups(0, NULL) != 0) fail();
     restrict_capabilities();
     restrict_syscalls();
+    char engine[PATH_MAX], qualify[PATH_MAX], agent[PATH_MAX];
+    worker_path(engine, sizeof(engine), "dist-engine/cli.js");
+    worker_path(qualify, sizeof(qualify), "scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs");
+    worker_path(agent, sizeof(agent), "scripts/cloud-workspace-validation/sandbox/qualify-cloud-agent.ts");
     char *arguments[] = {
-      "/opt/zeros-runtime/bin/node", "/opt/zeros/dist-engine/cli.js",
+      runtime_node, engine,
       "serve", "--root", "/srv/zeros/workspace", NULL,
     };
     char *qualification_arguments[] = {
-      "/opt/zeros-runtime/bin/node", "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", NULL,
+      runtime_node, qualify, NULL,
     };
     char *agent_qualification_arguments[] = {
-      "/opt/zeros-runtime/bin/node", "--import", "tsx",
-      "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-agent.ts", NULL,
+      runtime_node, "--import", "tsx", agent, NULL,
     };
     execv(arguments[0], qualification == 2 ? agent_qualification_arguments :
       (qualification ? qualification_arguments : arguments));

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 
 export const CLOUD_COORDINATOR_UID = 10004;
 export const CLOUD_COORDINATOR_HOME = "/home/zeros-agent";
@@ -7,22 +8,23 @@ const PRIVATE_ROOT = "/run/zeros/coordinators";
 
 /** Only an engine-created, one-execution directory can enter this view. The
  * model never chooses a mount, uid, executable override or control endpoint. */
-export function cloudCoordinatorArguments(directory, command, args = [], history) {
+export function cloudCoordinatorArguments(directory, command, args = [], history, runtime = resolveCloudRuntime()) {
   if (typeof directory !== "string" || path.dirname(directory) !== PRIVATE_ROOT ||
     !/^[a-f0-9]{32}$/.test(path.basename(directory))) throw new Error("Invalid private coordinator directory");
   if (typeof command !== "string" || !path.isAbsolute(command) || command.includes("\0") ||
     path.resolve(command) !== command ||
-    !(command.startsWith("/opt/zeros/") || command.startsWith("/opt/zeros-runtime/") || command.startsWith("/usr/")) ||
+    !(command.startsWith(`${runtime.workerRoot}/`) || command.startsWith(`${runtime.root}/`) || command.startsWith("/usr/")) ||
     !Array.isArray(args) || args.some(arg => typeof arg !== "string" || arg.includes("\0")))
     throw new Error("Invalid private coordinator command");
   const output = ["--die-with-parent", "--new-session", "--unshare-ipc", "--unshare-uts", "--unshare-pid"];
   // The engine deliberately uses umask 077. Synthetic mount ancestors must
   // still be traversable after dropping UID; no private host parent is bound.
-  for(const directory of ["/opt","/etc","/home","/srv","/srv/zeros"])
+  for(const directory of ["/opt","/etc","/home","/srv","/srv/zeros",...(runtime.profile === "v4" ? ["/opt/zeros-infra"] : [])])
     output.push("--perms","0755","--dir",directory);
   output.push("--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
     "--symlink", "usr/sbin", "/sbin", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
-    "--ro-bind", "/opt/zeros", "/opt/zeros", "--ro-bind", "/opt/zeros-runtime", "/opt/zeros-runtime",
+    ...(runtime.profile === "v4" ? [] : ["--ro-bind", runtime.workerRoot, runtime.workerRoot]),
+    "--ro-bind", runtime.root, runtime.root,
     "--dev", "/dev", "--proc", "/proc",
     "--perms", "1777", "--size", "67108864", "--tmpfs", "/tmp",
     "--perms", "1777", "--size", "67108864", "--tmpfs", "/dev/shm",
@@ -48,11 +50,11 @@ export function cloudCoordinatorArguments(directory, command, args = [], history
 
 /** Complete allowlisted environment; neither caller env nor the engine's HOME,
  * keys, proxy routing, loader knobs or control-plane authority are inherited. */
-export function cloudCoordinatorEnvironment(material, model, settings = {}) {
+export function cloudCoordinatorEnvironment(material, model, settings = {}, runtime = resolveCloudRuntime()) {
   if (typeof model !== "string" || model.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/.test(model))
     throw new Error("Invalid private coordinator model");
   const env = {
-    PATH: "/opt/zeros-runtime/bin:/usr/local/bin:/usr/bin:/bin",
+    PATH: `${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,
     HOME: CLOUD_COORDINATOR_HOME, USER: "zeros-coordinator", LOGNAME: "zeros-coordinator",
     LANG: "C.UTF-8", SHELL: "/bin/bash", TMPDIR: "/tmp",
     XDG_CONFIG_HOME: `${CLOUD_COORDINATOR_HOME}/.config`,

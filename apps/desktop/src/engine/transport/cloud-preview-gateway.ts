@@ -9,6 +9,13 @@ import { Transform, type Duplex } from "node:stream";
 import { createHash } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import type { CloudRuntimeServiceAccess } from "../cloud-runtime-registration";
+import type { CloudAgentPreviewTarget } from "@zeros/protocol/containment";
+
+export interface CloudResolvedPreviewTarget {
+  targetHost: "127.0.0.1" | "::1";
+  targetPort: number;
+  current(): boolean;
+}
 
 const MAX_REQUESTS = 32;
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
@@ -65,6 +72,7 @@ export class CloudRuntimePreviewGateway {
     private readonly options: {
       verify: (token: string) => Promise<CloudRuntimeServiceAccess | null>;
       forbiddenPorts: () => readonly number[];
+      resolveAgentTarget?: (target: CloudAgentPreviewTarget) => CloudResolvedPreviewTarget | null;
     },
   ) {}
 
@@ -101,6 +109,8 @@ export class CloudRuntimePreviewGateway {
       const grant = await this.verify(token);
       if (finished) return;
       if (!this.allowed(grant)) { reject(401); return; }
+      const target = this.target(grant);
+      if (!target) { reject(401); return; }
       const renew = (current: CloudRuntimeServiceAccess) => {
         clearTimeout(accessDeadline);
         const remaining = current.expiresAtMs - Date.now(); accessExpiresAt = current.expiresAtMs;
@@ -108,7 +118,7 @@ export class CloudRuntimePreviewGateway {
         renewal = setTimeout(() => {
           void this.verify(token).then(next => {
             if (finished) return;
-            if (Date.now() >= accessExpiresAt || !this.allowed(next) || next.grantId !== grant.grantId ||
+            if (Date.now() >= accessExpiresAt || !target.current() || !this.sameTarget(grant, next) || !this.allowed(next) || next.grantId !== grant.grantId ||
               next.accountUserId !== grant.accountUserId || next.authorityEpoch !== grant.authorityEpoch || next.remotePort !== grant.remotePort) { abort(); return; }
             renew(next);
           }, abort);
@@ -116,13 +126,14 @@ export class CloudRuntimePreviewGateway {
       };
       renew(grant);
       const headers = proxyHeaders(req.headers);
-      headers.host = `127.0.0.1:${grant.remotePort}`; headers.connection = "Upgrade"; headers.upgrade = "websocket";
-      upstream = request({ host: "127.0.0.1", port: grant.remotePort!, method: "GET", path: req.url,
+      headers.host = `${target.targetHost === "::1" ? "[::1]" : target.targetHost}:${target.targetPort}`; headers.connection = "Upgrade"; headers.upgrade = "websocket";
+      upstream = request({ host: target.targetHost, port: target.targetPort, method: "GET", path: req.url,
         headers, agent: false, maxHeaderSize: 32 * 1024 });
       upstream.once("response", response => { response.destroy(); reject(502); });
       upstream.once("error", () => reject(502));
       upstream.once("upgrade", (response, connected, upstreamHead) => {
         if (finished) { connected.destroy(); return; }
+        if (!target.current()) { connected.destroy(); reject(401); return; }
         const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
         const offered = (req.headers["sec-websocket-protocol"] ?? "").split(",").map(value => value.trim());
         const selected = response.headers["sec-websocket-protocol"];
@@ -155,7 +166,24 @@ export class CloudRuntimePreviewGateway {
       !this.options.forbiddenPorts().includes(value.remotePort!) && value.expiresAtMs > Date.now() && value.expiresAtMs <= Date.now() + 10_000);
   }
 
+  private sameTarget(left: CloudRuntimeServiceAccess, right: CloudRuntimeServiceAccess | null): boolean {
+    return left.previewTarget?.executionId === right?.previewTarget?.executionId &&
+      left.previewTarget?.portId === right?.previewTarget?.portId;
+  }
+
+  private target(grant: CloudRuntimeServiceAccess): CloudResolvedPreviewTarget | null {
+    const target = grant.previewTarget
+      ? this.options.resolveAgentTarget?.(grant.previewTarget)
+      : { targetHost: "127.0.0.1" as const, targetPort: grant.remotePort!, current: () => true };
+    if (!target || !target.current() || !["127.0.0.1", "::1"].includes(target.targetHost) ||
+      !Number.isInteger(target.targetPort) || target.targetPort < 1024 || target.targetPort > 65535 ||
+      target.targetPort === 22222 || this.options.forbiddenPorts().includes(target.targetPort)) return null;
+    return target;
+  }
+
   handle(req: IncomingMessage, res: ServerResponse): boolean {
+    // Human previews select their admitted scalar port. Agent previews resolve
+    // opaque execution/lease identity through the trusted gateway below.
     if (req.headers[HEADER] === undefined) return false;
     const deny = (status: number) => {
       res.writeHead(status, {
@@ -222,6 +250,8 @@ export class CloudRuntimePreviewGateway {
         finish();
         return;
       }
+      const target = this.target(grant);
+      if (!target) { deny(401); finish(); return; }
       // Expiry closes the connection even if renewal hangs. A successful
       // renewal may extend only the same grant, authority and destination.
       const renew = (current: CloudRuntimeServiceAccess) => {
@@ -236,6 +266,8 @@ export class CloudRuntimePreviewGateway {
               if (finished) return;
               if (
                 Date.now() >= accessExpiresAt ||
+                !target.current() ||
+                !this.sameTarget(grant, next) ||
                 !this.allowed(next) ||
                 next.grantId !== grant.grantId ||
                 next.accountUserId !== grant.accountUserId ||
@@ -255,11 +287,11 @@ export class CloudRuntimePreviewGateway {
       res.once("close", () => clearTimeout(accessDeadline));
       renew(grant);
       const headers = proxyHeaders(req.headers);
-      headers.host = `127.0.0.1:${grant.remotePort}`;
+      headers.host = `${target.targetHost === "::1" ? "[::1]" : target.targetHost}:${target.targetPort}`;
       upstream = request(
         {
-          host: "127.0.0.1",
-          port: grant.remotePort!,
+          host: target.targetHost,
+          port: target.targetPort,
           method: req.method,
           path: req.url,
           headers,
@@ -271,6 +303,7 @@ export class CloudRuntimePreviewGateway {
             response.destroy();
             return;
           }
+          if (!target.current()) { response.destroy(); deny(401); finish(); return; }
           const size = Number(response.headers["content-length"] ?? 0);
           if (size > MAX_RESPONSE_BYTES) {
             response.destroy();

@@ -1,5 +1,6 @@
 import { CloudActorRuntimeGrantSchema, type CloudActorRuntimeGrant } from "@zeros/protocol/cloud-actors";
 import type { CloudReplicaDeviceProof } from "../src/engine/cloud-replica-device";
+import { isCloudAgentPreviewTarget, type CloudAgentPreviewTarget } from "@zeros/protocol/containment";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -53,6 +54,7 @@ const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
 };
 
 type AccessKind = "ssh" | "tunnel" | "preview";
+export type CloudPreviewProofPayload = { organizationId: string; workspaceId: string; port: number; target: CloudAgentPreviewTarget | null; expiresInMinutes: number; idempotencyKey: string };
 
 export type CloudWorkspaceAccessGrant = {
   id: string;
@@ -100,6 +102,7 @@ export type CloudWorkspacePreviewAccess = {
     remotePort: number;
   };
   preview: {
+    target?: CloudAgentPreviewTarget;
     logicalUrl: string;
     origin: string;
     capability: string;
@@ -144,7 +147,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function safeBaseUrl(value: string, allowInsecureLoopback: boolean): string {
+export function safeBaseUrl(value: string, allowInsecureLoopback: boolean): string {
   let url: URL;
   try {
     url = new URL(value);
@@ -214,7 +217,7 @@ function idempotencyKey(value: string): string {
   return value;
 }
 
-function bearer(value: string): string {
+export function bearer(value: string): string {
   if (
     typeof value !== "string" ||
     value.length < 8 ||
@@ -231,7 +234,7 @@ function bearer(value: string): string {
   return value;
 }
 
-async function boundedJson(response: Response): Promise<unknown> {
+export async function boundedJson(response: Response): Promise<unknown> {
   const declared = Number(response.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
     throw new Error("response too large");
@@ -334,6 +337,7 @@ function validatedGrant(
 
 export class CloudWorkspaceAccessClient {
   private readonly signEngineAdmission?: EngineAdmissionSigner;
+  private readonly signPreview?: (accessToken: string, payload: CloudPreviewProofPayload) => Promise<CloudReplicaDeviceProof>;
   private readonly baseUrl: string;
   private readonly fetch: Fetch;
   private readonly now: () => number;
@@ -343,6 +347,7 @@ export class CloudWorkspaceAccessClient {
   constructor(input: {
     baseUrl: string;
     signEngineAdmission?: EngineAdmissionSigner;
+    signPreview?: (accessToken: string, payload: CloudPreviewProofPayload) => Promise<CloudReplicaDeviceProof>;
     fetch?: Fetch;
     now?: () => number;
     allowedSshHosts?: readonly string[];
@@ -354,6 +359,7 @@ export class CloudWorkspaceAccessClient {
       input.allowInsecureLoopback === true,
     );
     this.signEngineAdmission = input.signEngineAdmission;
+    this.signPreview = input.signPreview;
     this.fetch = input.fetch ?? globalThis.fetch;
     this.now = input.now ?? Date.now;
     const hosts = input.allowedSshHosts ?? DEFAULT_SSH_HOSTS;
@@ -727,11 +733,14 @@ export class CloudWorkspaceAccessClient {
       organizationId: string;
       workspaceId: string;
       port: number;
+      target?: CloudAgentPreviewTarget;
       expiresInMinutes: number;
       idempotencyKey: string;
     },
   ): Promise<CloudWorkspacePreviewAccess> {
     const remotePort = port(input.port, "Preview port");
+    if (input.target !== undefined && !isCloudAgentPreviewTarget(input.target))
+      throw new CloudWorkspaceAccessClientError(0, "invalid_input", "Cloud preview target is invalid");
     const expiresInMinutes = ttl(input.expiresInMinutes);
     if (this.allowedPreviewHostSuffixes.size === 0) {
       throw new CloudWorkspaceAccessClientError(
@@ -744,7 +753,11 @@ export class CloudWorkspaceAccessClient {
       method: "POST",
       path: `${this.path(input.organizationId, input.workspaceId)}/previews`,
       expectedStatus: 201,
-      body: { port: remotePort, expiresInMinutes },
+      body: { port: remotePort, expiresInMinutes, ...(input.target ? { target: input.target } : {}), ...(this.signPreview ? { native: true } : {}) },
+      ...(this.signPreview ? { deviceProof: await this.signPreview(accessToken, {
+        organizationId: input.organizationId, workspaceId: input.workspaceId, port: remotePort,
+        target: input.target ?? null, expiresInMinutes, idempotencyKey: input.idempotencyKey,
+      }) } : {}),
       idempotencyKey: input.idempotencyKey,
     });
     const record = isRecord(body) ? body : null;
@@ -779,6 +792,9 @@ export class CloudWorkspaceAccessClient {
     if (
       !grant ||
       !preview ||
+      (input.target !== undefined
+        ? !isCloudAgentPreviewTarget(preview.target) || preview.target.executionId !== input.target.executionId || preview.target.portId !== input.target.portId
+        : preview.target !== undefined) ||
       logicalUrl !== `http://localhost:${remotePort}/` ||
       typeof previewOrigin !== "string" ||
       !origin ||
@@ -808,6 +824,7 @@ export class CloudWorkspaceAccessClient {
         origin: previewOrigin,
         capability,
         headerName: "x-zeros-preview-capability",
+        ...(input.target ? { target: input.target } : {}),
       },
     };
   }

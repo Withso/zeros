@@ -87,6 +87,30 @@ d("connected Dev agent qualification discovery", () => {
     expect(await inspectDevAgents(pool,input)).toMatchObject({organizationImages:[]});
     await expect(inspectDevAgents(pool,{...input,organizationImage} as any)).rejects.toThrow(/image/);
   });
+  it.each(["image", "source"] as const)("enables organization-image credentials only for the image contract (%s approval)", async qualifiedContract => {
+    const credential = await connect();
+    const computers = new DatabaseCloudComputerService(pool, {} as CloudWorkspaceBackendConfig);
+    await computers.save(fixture.organizationId, fixture.userId, { expectedRevision: 0, operationId: randomUUID(),
+      document: { repositories: [], installScript: "mkdir -p $PREFIX/bin", timeoutSeconds: 30 }, sources: [] });
+    const id = randomUUID(), snapshotId = `zeros-org-${id.replaceAll("-", "")}`, buildSha256 = "e".repeat(64);
+    const sourceContractSha256 = "d".repeat(64), imageContractSha256 = "f".repeat(64), imageRef = `boat:${snapshotId}@sha256:${buildSha256}`;
+    await pool.query(`INSERT INTO cloud_computer_builds(id,org_id,profile_id,version,repository_owner,repository_name,state)
+      SELECT $1,org_id,profile_id,draft_version,'fixture','repository','succeeded' FROM cloud_computers WHERE org_id=$2`, [id, fixture.organizationId]);
+    await pool.query(`INSERT INTO cloud_computer_images(id,org_id,account_scope,snapshot_name,snapshot_id,image_ref,base_image_ref,
+      base_source_commit,recipe_sha256,build_sha256,source_contract,image_contract,profile,state,attested_at,attestation_sha256)
+      VALUES($1,$2,'fixture',$3,'immutable-provider-id',$4,$5,$6,$7,$8,$7,$9,'{}','attested',now(),$7)`,
+    [id, fixture.organizationId, snapshotId, imageRef, `boat:${request.image.snapshotId}@sha256:${request.image.buildSha256}`,
+      request.image.sourceCommit, sourceContractSha256, buildSha256, imageContractSha256]);
+    await pool.query(`INSERT INTO cloud_agent_runtime_qualifications(provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled,qualified_at)
+      VALUES('boat',$1,$2,'claude-setup-token','zeros-cloud-worker-v3',true,clock_timestamp())`,
+    [imageRef, qualifiedContract === "image" ? imageContractSha256 : sourceContractSha256]);
+    const status = await inspectDevAgents(pool, { ...request, accountScope: "fixture",
+      organizationImage: { id, snapshotId, buildSha256, sourceCommit: request.image.sourceCommit } });
+    const enabled = qualifiedContract === "image";
+    expect.soft(status).toMatchObject({ connections: [{ credentialId: credential.id, enabled }] });
+    expect(status).toMatchObject({ organizationImages: [{ id, snapshotId, buildSha256, contractSha256: imageContractSha256,
+      connections: [{ credentialId: credential.id, enabled }] }] });
+  });
   it("never borrows another organization or revoked credential", async () => {
     const credential = await connect();
     expect(await inspectDevAgents(pool, { ...request, fixture: { ...request.fixture, workosOrganizationId: "org_other" } })).toEqual({ needsSeed: true });

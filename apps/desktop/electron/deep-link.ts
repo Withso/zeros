@@ -33,6 +33,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { app, shell } from "electron";
+import { IS_LOCAL_DEVELOPMENT } from "./runtime-mode";
 import {
   assertIsDirectory,
   isPlausibleProject,
@@ -66,6 +67,7 @@ function scheme(): string {
  *  the beta pack rewrites it to zeros-beta in scripts/electron-after-pack.cjs);
  *  this runtime call is a safety net for dev. */
 export function registerProtocol(): void {
+  if (IS_LOCAL_DEVELOPMENT) return;
   const s = scheme();
   // Electron's helper — on macOS this ultimately updates
   // LaunchServices; on Win/Linux it edits the registry / .desktop file.
@@ -100,6 +102,7 @@ export async function openDesktopAuthBrowser(url: string): Promise<void> {
  *
  *  Exported for tests; production callers go through setupDeepLink(). */
 export async function handleUrl(rawUrl: string): Promise<void> {
+  if (IS_LOCAL_DEVELOPMENT) return;
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);

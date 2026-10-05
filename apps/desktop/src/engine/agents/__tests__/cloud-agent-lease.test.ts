@@ -13,6 +13,24 @@ function fixture(){
 }
 afterEach(()=>vi.useRealTimers());
 describe("private agent execution lifetime",()=>{
+  it("freezes actor environment and retires the process when consent changes", async () => {
+    vi.useFakeTimers(); const f=fixture();
+    const environment={version:1,revision:"b".repeat(64),values:{ORG_SECRET:"synthetic-org-value"},
+      history:{owner:"c".repeat(64),currentKeyVersion:1,keys:{1:"a".repeat(43)}}};
+    f.request.mockResolvedValueOnce({...f.grant,environment});
+    const lease=await CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time);
+    const domain={stopAndProve:vi.fn().mockResolvedValue(undefined)}; lease.attach(domain);
+    try {
+      expect(lease.environment).toEqual(environment); expect(Object.isFrozen(lease.environment?.values)).toBe(true);
+      environment.values.ORG_SECRET="changed-external-object";
+      expect(lease.environment?.values.ORG_SECRET).toBe("synthetic-org-value");
+      f.request.mockResolvedValueOnce({leaseId:f.grant.leaseId,expiresAt:f.grant.expiresAt,credentialVersion:1,environmentRevision:"b".repeat(64)});
+      await lease.validate();
+      f.request.mockResolvedValueOnce({leaseId:f.grant.leaseId,expiresAt:f.grant.expiresAt,credentialVersion:1,environmentRevision:"d".repeat(64)});
+      await expect(lease.validate(true)).rejects.toThrow("authority changed");
+      expect(domain.stopAndProve).toHaveBeenCalledOnce();
+    } finally {await lease.close();}
+  });
   it("pins a private customization snapshot and rejects absent or inconsistent admission", async () => {
     vi.useFakeTimers(); const f=fixture(), request={...admission,customization:{version:1 as const,repositoryServers:[]}};
     const content={version:1 as const,repositoryDigest:cloudMcpDigest([]),servers:[],skills:[{name:"test",content:"# Example"}],cursorTeamSettings:"disabled" as const};
@@ -35,7 +53,7 @@ describe("private agent execution lifetime",()=>{
     f.request.mockResolvedValueOnce({ ...f.grant, gitAuthor: author });
     const lease = await CloudAgentLease.admit(admission, f.request, new AbortController().signal, { onRetirementFailure: vi.fn() }, f.time);
     try {
-      expect(f.request).toHaveBeenCalledWith({ kind: "admit", admission, includeGitAuthor: true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1 }, expect.any(AbortSignal));
+      expect(f.request).toHaveBeenCalledWith({ kind: "admit", admission, includeGitAuthor: true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1,computerToolsVersion:1,environmentVersion:1 }, expect.any(AbortSignal));
       expect(lease.gitAuthor).toEqual(author);
       author.name = "Changed outside the lease";
       expect(lease.gitAuthor?.name).toBe("Member"); expect(Object.isFrozen(lease.gitAuthor)).toBe(true);

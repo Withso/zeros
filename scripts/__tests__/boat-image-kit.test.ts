@@ -128,20 +128,24 @@ function heredocBody(script: string) {
 }
 
 describe("Boat image kit", () => {
-  it("preserves the qualified build recipe apart from the explicit file-layout migration", () => {
+  it("preserves the qualified build recipe apart from the layout migration and shared helpers", () => {
     const script = fillTemplate("build.sh", {
       SOURCE_COMMIT: "aa11196c97a69ec4d1ef430dc1c6d0b36256f41d",
       IMAGE_CONTRACT_SHA256: "4b8ae9a31462b29cd502d3a0274edea1daf0058d758e3ab19ede1d2f32d8e2ed",
     });
     const migration = "node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs\n";
     expect(script).toContain(migration);
+    const resolver = " cloud-runtime-root.mjs";
+    expect(script).toContain(`cloud-runtime-profile.mjs${resolver} cloud-engine-cgroup.mjs`);
+    const checkout = " cloud-computer-checkout.mjs";
+    expect(script).toContain(`cloud-setup-process.mjs${checkout} cloud-engine-view.mjs`);
     // Historical recipe compatibility, not qualification of the new image.
     // The new layout/source still requires fresh immutable-image attestation.
-    expect(sha256(script.replace(migration, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
+    expect(sha256(script.replace(migration, "").replace(resolver, "").replace(checkout, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
   });
 
   it("keeps templates free of build identities and private paths", () => {
-    for (const name of fs.readdirSync(TEMPLATES)) {
+    for (const name of fs.readdirSync(TEMPLATES).filter(name => fs.statSync(path.join(TEMPLATES, name)).isFile())) {
       const text = fs.readFileSync(path.join(TEMPLATES, name), "utf8");
       expect(text, name).not.toMatch(/[a-f0-9]{32}/);
       expect(text, name).not.toMatch(/\b(bx|team)_[a-z0-9]/);
@@ -320,7 +324,7 @@ describe("Boat image kit", () => {
 
   it("saves the snapshot only after attestation and fresh sanitation, then reports the Railway values", async () => {
     const saves: Call[] = [];
-    const { commit, deps, dir } = await prepared({
+    const { commit, deps, dir, fake } = await prepared({
       "GET /named-snapshots": () => ({ status: 200, body: { snapshots: [{ name: "zeros-qualification-aa11196c97a6" }] } }),
       "POST /named-snapshots": (call) => {
         saves.push(call);
@@ -335,6 +339,7 @@ describe("Boat image kit", () => {
     expect(fs.readFileSync(path.join(dir, "sanitize.sh"), "utf8")).toContain(`buildHash=='${BUILD}'`);
     await expect(main(["snapshot", "save"], deps)).resolves.toEqual({ requested: true, name, state: "saving" });
     expect(saves.map((call) => call.body)).toEqual([{ sandboxId: "bx_builder1", name }]);
+    expect(fake.calls.map(call => call.headers?.["x-boat-org"])).toEqual(fake.calls.map(() => ORG));
     await expect(main(["snapshot", "save"], deps)).rejects.toThrow("already requested");
     await expect(main(["builder", "delete"], deps)).rejects.toThrow(`${name} from this builder is not ready`);
 
@@ -369,10 +374,10 @@ describe("Boat image kit", () => {
     await expect(main(["snapshot", "save"], stale.deps)).rejects.toThrow("Attestation gate");
   });
 
-  it("captures beyond ten snapshots after complete pagination and saves its pending intent before POST", async () => {
+  it.each([false, true])("captures with more than 100 snapshot names per response after complete inventory (paginated=%s)", async paginated => {
     let pendingFile = "";
     const f = await prepared({
-      "GET /named-snapshots": () => ({ status: 200, body: { snapshots: Array.from({ length: 20 }, (_, i) => ({ name: `retained-${i}` })), hasMore: true, nextCursor: "second/page" } }),
+      "GET /named-snapshots": () => ({ status: 200, body: { snapshots: Array.from({ length: 150 }, (_, i) => ({ name: `retained-${i}` })), allowance: { used: 150 }, ...(paginated ? { hasMore: true, nextCursor: "second/page" } : {}) } }),
       "GET /named-snapshots?cursor=second%2Fpage": () => ({ status: 200, body: { snapshots: [{ name: "last-retained" }], hasMore: false } }),
       "POST /named-snapshots": ({ body }) => {
         expect(JSON.parse(fs.readFileSync(pendingFile, "utf8"))).toMatchObject({ name: body.name, state: "save-pending" });
@@ -383,7 +388,7 @@ describe("Boat image kit", () => {
     await main(["attestation", "status"], f.deps); await main(["generate-post"], f.deps);
     await expect(main(["snapshot", "save"], f.deps)).resolves.toMatchObject({ requested: true });
     expect(f.fake.calls.filter(call => call.path.startsWith("/named-snapshots")).map(call => call.path))
-      .toEqual(["/named-snapshots", "/named-snapshots?cursor=second%2Fpage", "/named-snapshots"]);
+      .toEqual(["/named-snapshots", ...(paginated ? ["/named-snapshots?cursor=second%2Fpage"] : []), "/named-snapshots"]);
   });
 
   it.each(["missing cursor", "looping cursor", "duplicate name", "candidate on later page"])("refuses %s before saving any pending intent or snapshot", async scenario => {

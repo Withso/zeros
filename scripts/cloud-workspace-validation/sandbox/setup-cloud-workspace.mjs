@@ -28,7 +28,20 @@ import {
 import { createRequire } from "node:module";
 import net from "node:net";
 import path from "node:path";
+import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
+import {
+  CLOUD_V4_IDENTITY_FIELDS,
+  parseCloudV4Document,
+  validV4Diagnostic,
+} from "./attest-cloud-worker.mjs";
 import { runScopedCloudSetup } from "./cloud-setup-process.mjs";
+import {
+  CLOUD_COMPUTER_WORKSPACE_ADMISSION,
+  createCloudComputerWorkspaceAdmission,
+  checkoutCloudComputerPrimary,
+  parseCloudComputerSetup,
+  verifyCloudComputerTemplate,
+} from "./cloud-computer-checkout.mjs";
 import {
   validCloudResourceContract,
   cloudResourcesMeetContract,
@@ -64,8 +77,9 @@ const ENGINE_REGISTRATION_PATH =
 const SETUP_RECOVERY_PATH = "/internal/v1/cloud-workspaces/setup/recovery";
 const TARGET_REPOSITORY = runtimeLayout.repository;
 const SEEDED_REPOSITORY_BACKUP = runtimeLayout.seedBackup;
-const ATTESTER = "/opt/zeros-runtime/lib/zeros/attest-cloud-worker.mjs";
-const ASKPASS = "/opt/zeros-runtime/lib/zeros/cloud-git-askpass.mjs";
+const RUNTIME = resolveCloudRuntime();
+const ATTESTER = RUNTIME.helpers.attester;
+const ASKPASS = RUNTIME.helpers.gitAskpass;
 const GITHUB_REVOKE_URL = "https://api.github.com/installation/token";
 const WORKER_UID = 10_001;
 const WORKER_GID = 10_001;
@@ -91,8 +105,8 @@ const GITHUB_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
 
 // Both deployed setup and the bundled engine use the same immutable native
 // checkpoint parser. Its path is deployment-owned, never selected by a grant.
-const CHECKPOINT_HELPER_URL = fileURLToPath(import.meta.url) === "/opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs"
-  ? pathToFileURL(path.join(runtimeLayout.engine, "apps/desktop/src/engine/agents/containment/cloud-checkpoint-artifacts.mjs"))
+const CHECKPOINT_HELPER_URL = fileURLToPath(import.meta.url) === RUNTIME.helpers.setup
+  ? pathToFileURL(path.join(RUNTIME.workerRoot, "apps/desktop/src/engine/agents/containment/cloud-checkpoint-artifacts.mjs"))
   : new URL("../../../apps/desktop/src/engine/agents/containment/cloud-checkpoint-artifacts.mjs", import.meta.url);
 
 export const CLOUD_WORKSPACE_UNPRIVILEGED_SET_PRIV_ARGS = Object.freeze([
@@ -116,6 +130,40 @@ class SetupFailure extends Error {
 
 function failure(code) {
   return new SetupFailure(code);
+}
+
+/** Only the immutable helper has the execution's literals. Filter them before
+ * either the root journal or the bounded private result receives command text. */
+export function redactCloudWorkspaceSetupHookLog(output, values, truncated = false) {
+  const normalize = text => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+  output = normalize(output);
+  const literals = [...new Set(values.filter(value => typeof value === "string" && value.length).flatMap(value => [value, normalize(value)])
+    .filter(Boolean).flatMap(value => [value, JSON.stringify(value).slice(1, -1)]))]
+    .sort((a, b) => b.length - a.length);
+  const maximum = 16 * 1024;
+  const source = output.slice(0, maximum + (literals[0]?.length ?? 0));
+  truncated ||= source.length < output.length;
+  const pattern = literals.length ? new RegExp(literals.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g") : null;
+  let text = pattern ? source.replace(pattern, "[redacted]") : source;
+  // A stopped or overflowing hook may end midway through a literal. Withhold
+  // such suffixes at line boundaries, just like execution transcript filtering.
+  text = text.split("\n").map(line => {
+    let keep = 0;
+    for (const literal of literals) {
+      for (let start = line.indexOf(literal[0], Math.max(0, line.length - literal.length + 1)); start >= 0 && start < line.length - keep; start = line.indexOf(literal[0], start + 1)) {
+        if (literal.startsWith(line.slice(start))) { keep = line.length - start; break; }
+      }
+    }
+    return keep ? line.slice(0, -keep) + "[redacted]" : line;
+  }).join("\n");
+  text = text.replace(/(?:gh[opsu]_)[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|Bearer\s+[^\s]+/gi, "[redacted]");
+  const bytes = Buffer.from(text);
+  if (bytes.length > maximum) {
+    // Avoid persisting a partial UTF-8 code point.
+    let end = maximum; while ((bytes[end] & 0xc0) === 0x80) end--;
+    text = bytes.subarray(0, end).toString("utf8"); truncated = true;
+  }
+  return { version: 1, text, truncated };
 }
 
 function isRecord(value) {
@@ -353,6 +401,7 @@ export function parseCloudWorkspaceSetupMaterials(
       "engine",
       "execution",
       "image",
+      ...(raw.computer === undefined ? [] : ["computer"]),
       ...(raw.recovery === undefined ? [] : ["recovery"]),
       "repository",
       "settings",
@@ -506,6 +555,10 @@ export function parseCloudWorkspaceSetupMaterials(
   ) {
     throw new Error("cloud workspace setup materials are invalid");
   }
+  if (raw.image.ref.startsWith("boat-template:") !== (raw.computer !== undefined) ||
+    (raw.computer !== undefined && raw.version !== 2))
+    throw new Error("cloud workspace setup materials are invalid");
+  if (raw.computer !== undefined) parseCloudComputerSetup(raw.computer, raw.repository);
 
   const document = parseSetupDocument(
     raw.settings.documentB64,
@@ -1269,7 +1322,7 @@ export function parseRecoveryDesignSelection(value) {
   return value;
 }
 
-async function redeemMaterials(request) {
+export async function redeemMaterials(request) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   timer.unref?.();
@@ -1293,6 +1346,16 @@ async function redeemMaterials(request) {
         setupRunId: request.execution.setupRunId,
         executionFence: request.execution.executionFence,
         expected: request.expected,
+        ...(RUNTIME.profile === "v4" ? {
+          runtime: {
+            runtimeId: RUNTIME.runtimeId,
+            manifestSha256: RUNTIME.manifestSha256,
+            baseCompatibilityId: RUNTIME.baseCompatibilityId,
+            installerReceiptSha256: RUNTIME.installerReceiptSha256,
+            bootId: RUNTIME.bootId,
+            supervisorSessionId: RUNTIME.supervisorSessionId,
+          },
+        } : {}),
       }),
     });
   } catch {
@@ -1301,6 +1364,13 @@ async function redeemMaterials(request) {
     clearTimeout(timer);
   }
   if (!response.ok) {
+    if (response.status === 409) {
+      let code;
+      try { code = (await boundedResponseJson(response, 1024))?.error?.code; }
+      catch { /* Provider text is never a setup diagnostic. */ }
+      if (code === "computer_environment_revoked") throw failure(code);
+      throw failure("request_invalid");
+    }
     await response.body?.cancel().catch(() => undefined);
     if (response.status === 422) throw failure("settings_invalid");
     if (response.status === 429 || response.status >= 500) {
@@ -1518,6 +1588,7 @@ function parseJournal(raw) {
   if (
     !isRecord(raw) ||
     !exactKeys(raw, [
+      ...(raw.commandState === undefined ? [] : ["commandState"]),
       "commandsCompleted",
       "executionFence",
       "generation",
@@ -1529,6 +1600,7 @@ function parseJournal(raw) {
       "workspaceId",
     ]) ||
     raw.version !== 1 ||
+    (raw.commandState !== undefined && !["running", "failed"].includes(raw.commandState)) ||
     !UUID_PATTERN.test(raw.workspaceId ?? "") ||
     !UUID_PATTERN.test(raw.organizationId ?? "") ||
     !UUID_PATTERN.test(raw.setupRunId ?? "") ||
@@ -1553,7 +1625,7 @@ function parseJournal(raw) {
   return raw;
 }
 
-function saveJournal(file, identity, material, commandsCompleted) {
+function saveJournal(file, identity, material, commandsCompleted, commandState) {
   atomicWrite(
     file,
     `${JSON.stringify({
@@ -1561,6 +1633,7 @@ function saveJournal(file, identity, material, commandsCompleted) {
       setupRunId: material.execution.setupRunId,
       executionFence: material.execution.executionFence,
       commandsCompleted,
+      ...(commandState ? { commandState } : {}),
     })}\n`,
     { mode: 0o600 },
   );
@@ -1592,7 +1665,7 @@ async function gitCommand(repositoryDirectory, homeDirectory, args, token) {
     GIT_TERMINAL_PROMPT: "0",
     HOME: homeDirectory,
     LANG: "C.UTF-8",
-    PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin",
+    PATH: `${RUNTIME.binRoot}:/usr/bin:/bin`,
     ...(token
       ? {
           ZEROS_GIT_ASKPASS_HOST: "github.com",
@@ -1736,7 +1809,8 @@ export function recoverInterruptedCloudWorkspaceClone({
 }
 
 async function cloneRepository(material,profile) {
-  const workspace = runtimeLayout.root;
+  const { stagingParent: workspace, seededRepositoryBackup } = clonePaths(profile);
+  if (profile.version === 4) assertRootDirectory(workspace, 0o710, WORKER_GID);
   const workspaceStat = lstatSync(workspace);
   if (
     !workspaceStat.isDirectory() ||
@@ -1744,7 +1818,7 @@ async function cloneRepository(material,profile) {
     workspaceStat.uid !== 0 ||
     (workspaceStat.mode & 0o022) !== 0 ||
     realpathSync(workspace) !== workspace ||
-    existsSync(SEEDED_REPOSITORY_BACKUP)
+    existsSync(seededRepositoryBackup)
   ) {
     throw failure("image_contract_invalid");
   }
@@ -1831,16 +1905,16 @@ async function cloneRepository(material,profile) {
       ) {
         throw failure("image_contract_invalid");
       }
-      renameSync(TARGET_REPOSITORY, SEEDED_REPOSITORY_BACKUP);
+      renameSync(TARGET_REPOSITORY, seededRepositoryBackup);
     }
     try {
       renameSync(repositoryDirectory, TARGET_REPOSITORY);
     } catch (error) {
       if (
-        existsSync(SEEDED_REPOSITORY_BACKUP) &&
+        existsSync(seededRepositoryBackup) &&
         !existsSync(TARGET_REPOSITORY)
       ) {
-        renameSync(SEEDED_REPOSITORY_BACKUP, TARGET_REPOSITORY);
+        renameSync(seededRepositoryBackup, TARGET_REPOSITORY);
       }
       throw error;
     }
@@ -1850,9 +1924,19 @@ async function cloneRepository(material,profile) {
   }
 }
 
+function clonePaths(profile) {
+  if (profile.version !== 4)
+    return { stagingParent: runtimeLayout.root, seededRepositoryBackup: SEEDED_REPOSITORY_BACKUP };
+  // Both staging and the seed must share the checkout's bind mount. Root
+  // controls this parent's entries; the agent group can only traverse it to
+  // the per-operation 0700 repository/home. The engine view masks the parent.
+  const stagingParent = path.join(runtimeLayout.engineFilesRoot, ".zeros-setup");
+  return { stagingParent, seededRepositoryBackup: path.join(stagingParent, "seed") };
+}
+
 async function stringifyManagedSettings(values) {
   try {
-    const requireFromEngine = createRequire("/opt/zeros/package.json");
+    const requireFromEngine = createRequire(path.join(RUNTIME.workerRoot,"package.json"));
     const modulePath = requireFromEngine.resolve("smol-toml");
     const module = await import(pathToFileURL(modulePath).href);
     const source = module.stringify(values);
@@ -1869,6 +1953,7 @@ async function stringifyManagedSettings(values) {
 }
 
 export async function prepareRepositoryAndSettings(material, profile, stringify = stringifyManagedSettings) {
+  const repositoryDirectory = hostRepository(material);
   const journalFile = path.join(profile.setupDirectory, "repository.json");
   const managedSettings = path.join(
     profile.managedSettingsDirectory,
@@ -1897,18 +1982,8 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   // different checkout. Fresh clones validate their pin before recovery.
   const completedSetup = journal !== null &&
     journal.commandsCompleted === material.settings.setupCommands.length;
-  if (!journal) recoverInterruptedCloudWorkspaceClone();
-  let commit = await repositoryIdentity(
-    TARGET_REPOSITORY,
-    runtimeLayout.agentHome,
-    material.repository.cloneUrl,
-  );
+  const commit = await prepareCloudWorkspaceRepository(material, profile, journal);
   if (!journal) {
-    if (existsSync(SEEDED_REPOSITORY_BACKUP)) {
-      if (!commit) throw failure("image_contract_invalid");
-    } else {
-      commit = await cloneRepository(material,profile);
-    }
     const identity = journalIdentity(material, commit, managedTomlSha256);
     saveJournal(journalFile, identity, material, 0);
     journal = parseJournal(readPhysicalJson(journalFile, 64 * 1024));
@@ -1927,6 +2002,11 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   ) {
     throw failure("repository_revision_invalid");
   }
+  if (profile.version === 4 && journal.commandState && journal.setupRunId === material.execution.setupRunId) {
+    const error = failure("setup_hook_retry_required");
+    error.hookLog = { version: 1, text: "The previous setup hook did not complete. Retry setup explicitly.\n", truncated: false };
+    throw error;
+  }
   for (
     let index = journal.commandsCompleted;
     index < material.settings.setupCommands.length;
@@ -1934,12 +2014,14 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   ) {
     const command = material.settings.setupCommands[index];
     const commandEnvironment = Object.fromEntries(
-      material.settings.setupEnvironment.map((entry) => [
+      material.settings.setupEnvironment.filter(entry => profile.version !== 4 || !["LANG", "LOGNAME", "USER", "SHELL", "TMPDIR"].includes(entry.name)).map((entry) => [
         entry.name,
         entry.value,
       ]),
     );
-    const result =
+    if (profile.version === 4) saveJournal(journalFile, identity, material, index, "running");
+    let result;
+    try { result =
       profile.version >= 2
         ? await runScopedCloudSetup({
             version: 1,
@@ -1958,19 +2040,23 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
               command.command,
             ],
             {
-              cwd: TARGET_REPOSITORY,
+              cwd: repositoryDirectory,
               timeoutMs: command.timeoutSeconds * 1_000,
               env: {
                 ...commandEnvironment,
                 HOME: runtimeLayout.agentHome,
                 LANG: "C.UTF-8",
                 LOGNAME: "zeros-agent",
-                PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin",
+                PATH: `${RUNTIME.binRoot}:/usr/bin:/bin`,
                 SHELL: "/bin/bash",
                 USER: "zeros-agent",
               },
             },
           );
+    } catch (error) {
+      if (profile.version !== 4) throw error;
+      result = { code: null, signal: null, timedOut: false, overflow: false, stdout: "", stderr: "Setup hook could not complete.\n" };
+    }
     for (const name of Object.keys(commandEnvironment)) {
       commandEnvironment[name] = "";
     }
@@ -1980,12 +2066,20 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
       result.overflow ||
       result.signal
     ) {
-      throw failure("setup_command_failed");
+      const error = failure("setup_command_failed");
+      if (profile.version === 4) {
+        error.hookLog = redactCloudWorkspaceSetupHookLog(`${result.stdout}${result.stderr}`, [
+          ...material.settings.setupEnvironment.map(entry => entry.value), material.repository.credential?.token,
+        ], result.overflow);
+        atomicWrite(path.join(profile.setupDirectory, "setup-hook-log.json"), `${JSON.stringify(error.hookLog)}\n`, { mode: 0o600 });
+        saveJournal(journalFile, identity, material, index, "failed");
+      }
+      throw error;
     }
     saveJournal(journalFile, identity, material, index + 1);
   }
   const verifiedCommit = await repositoryIdentity(
-    TARGET_REPOSITORY,
+    repositoryDirectory,
     runtimeLayout.agentHome,
     material.repository.cloneUrl,
   );
@@ -1998,6 +2092,59 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
     material,
     material.settings.setupCommands.length,
   );
+  return commit;
+}
+
+function hostRepository(material) {
+  return material.computer ? verifyCloudComputerTemplate(material.computer, material.repository) : TARGET_REPOSITORY;
+}
+
+/** The template branch never visits clone recovery, staging, or the image seed.
+ * Host steps use the physical clone; only the engine mounts the primary alias.
+ * A journaled setup preserves edits and still checks the full journal identity. */
+export async function prepareCloudWorkspaceRepository(material, profile, journal, {
+  readIdentity = () => repositoryIdentity(hostRepository(material), runtimeLayout.agentHome, material.repository.cloneUrl),
+  recoverClone = () => recoverInterruptedCloudWorkspaceClone({ seededRepositoryBackup: clonePaths(profile).seededRepositoryBackup }),
+  hasSeed = () => existsSync(clonePaths(profile).seededRepositoryBackup),
+  clone = () => cloneRepository(material, profile),
+  checkoutComputer = () => checkoutCloudComputerPrimary(material.computer, material.repository, {
+    git: async (directory, args, token) => {
+      const result = await gitCommand(directory, runtimeLayout.agentHome,
+        ["-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", ...args], token);
+      if (result.code !== 0 || result.signal || result.timedOut || result.overflow)
+        throw failure(args[0] === "fetch" ? "repository_temporarily_unavailable" : "repository_revision_invalid");
+      return result.stdout.trim();
+    },
+  }),
+  restoreCheckpoint = () => restoreCloudWorkspaceCheckpoint(material, hostRepository(material), { uid: profile.engineUid, gid: profile.engineGid }),
+  revokeReadToken = () => revokeCloudComputerReadToken(material),
+} = {}) {
+  if (material.computer) {
+    try {
+      if (!journal) {
+        await checkoutComputer();
+        if (material.recovery) await restoreCheckpoint();
+      }
+      const commit = await readIdentity();
+      if (!commit) throw failure("repository_revision_invalid");
+      return commit;
+    } catch (error) {
+      if (error?.message === "repository_revision_invalid" || error?.message === "image_contract_invalid")
+        throw failure(error.message);
+      throw error;
+    } finally {
+      // No repository hook or engine receives this org read grant. Revocation
+      // must be confirmed before setup proceeds, including on a journal replay.
+      await revokeReadToken();
+    }
+  }
+  if (!journal) recoverClone();
+  let commit = await readIdentity();
+  if (!journal) {
+    if (hasSeed()) {
+      if (!commit) throw failure("image_contract_invalid");
+    } else commit = await clone();
+  }
   return commit;
 }
 
@@ -2154,6 +2301,24 @@ function installGithubProjection(material, profile, now = Date.now()) {
   });
 }
 
+/** V4 emits a report followed by a closed completion diagnostic. Never admit
+ * a report on its own, ambiguous JSON keys, or extra/truncated child output. */
+function readCloudWorkspaceV4Attestation(result) {
+  try {
+    if (typeof result.stdout !== "string" || Buffer.byteLength(result.stdout) > MAX_PROCESS_OUTPUT_BYTES) return null;
+    const lines = result.stdout.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    if (lines.length !== 2) return null;
+    const diagnostic = parseCloudV4Document(Buffer.from(lines[1]), "diagnostic_missing");
+    if (!validV4Diagnostic(diagnostic) || diagnostic.stage !== "done" || !diagnostic.ok ||
+      diagnostic.exitCode !== result.code) return null;
+    const report = parseCloudV4Document(Buffer.from(lines[0]), "diagnostic_missing");
+    return isRecord(report) ? report : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Bounded operator diagnostics contain only fixed gate names and booleans.
  * Attestation stdout/stderr can contain workload output and stays private. */
 export function cloudWorkspaceImageAdmissionChecks(
@@ -2162,6 +2327,27 @@ export function cloudWorkspaceImageAdmissionChecks(
   result,
   report,
 ) {
+  if (profile.version === 4) {
+    return {
+      execution: result.code === 0 && !result.timedOut && !result.overflow,
+      report: isRecord(report) && report.version === 1,
+      profile: profile.profile === "zeros-cloud-worker-v4" && report?.profile === profile.profile,
+      qualified: report?.qualified === true,
+      // Keep the setup diagnostic's metadata gate. For v4 it checks RUNTIME,
+      // the validated descriptor pinned before redemption and sent as its
+      // witness to the control plane, never an attester-supplied identity.
+      metadata: RUNTIME.profile === "v4" && isRecord(report?.runtime) &&
+        exactKeys(report.runtime, CLOUD_V4_IDENTITY_FIELDS) &&
+        CLOUD_V4_IDENTITY_FIELDS.every(key => report.runtime[key] === RUNTIME[key]),
+      helpers:
+        report?.helpers?.deploymentTrusted?.setupHelper === true &&
+        report?.helpers?.deploymentTrusted?.workerSupervisor === true,
+      resources:
+        report?.resources?.finite === true &&
+        cloudResourcesMeetContract(material.image.resources, report.resources),
+      runtime: report?.qualification?.secure === true,
+    };
+  }
   return {
     execution: result.code === 0 && !result.timedOut && !result.overflow,
     report: isRecord(report) && report.version === 1,
@@ -2305,7 +2491,7 @@ export function cloudWorkspaceImageDigests(build, observed) {
   return result;
 }
 
-async function attestImage(material, profile, recordChecks) {
+export async function attestImage(material, profile, recordChecks) {
   if (
     material.repository.credential.expiresAtMs - Date.now() < 5 * 60_000 ||
     material.engine.registration.expiresAtMs - Date.now() < 5 * 60_000
@@ -2314,7 +2500,7 @@ async function attestImage(material, profile, recordChecks) {
   }
   const result = await runProcess(
     profile.version >= 2
-      ? "/opt/zeros-runtime/bin/node"
+      ? RUNTIME.node
       : "/usr/local/bin/node",
     [ATTESTER],
     {
@@ -2322,10 +2508,14 @@ async function attestImage(material, profile, recordChecks) {
     },
   );
   let report;
-  try {
-    report = JSON.parse(result.stdout);
-  } catch {
-    report = null;
+  if (profile.version === 4) {
+    report = readCloudWorkspaceV4Attestation(result);
+  } else {
+    try {
+      report = JSON.parse(result.stdout);
+    } catch {
+      report = null;
+    }
   }
   const checks = cloudWorkspaceImageAdmissionChecks(
     material,
@@ -2335,12 +2525,13 @@ async function attestImage(material, profile, recordChecks) {
   );
   recordChecks(checks, cloudWorkspaceImageAdmissionDiagnostic(report));
   if (!Object.values(checks).every((value) => value === true)) {
+    if (profile.version === 4) throw failure("image_contract_invalid");
     const observed = {};
     try {
       const inventory = await import("./image-build-contract.mjs");
       try { observed.inventory = inventory.readCloudImageNativeInventory(); } catch { /* Unknown remains failed. */ }
-      try { observed.source = inventory.cloudImageSourceIdentity(runtimeLayout.engine); } catch { /* No raw error retained. */ }
-      try { observed.artifacts = inventory.cloudImageArtifactHashes(runtimeLayout.engine); } catch { /* Fixed artifacts only. */ }
+      try { observed.source = inventory.cloudImageSourceIdentity(RUNTIME.workerRoot); } catch { /* No raw error retained. */ }
+      try { observed.artifacts = inventory.cloudImageArtifactHashes(RUNTIME.workerRoot); } catch { /* Fixed artifacts only. */ }
     } catch { /* Broken images may lack the diagnostic helper too. */ }
     recordChecks({ ...checks, ...cloudWorkspaceImageIdentityDiagnostic(report?.metadata?.build, observed) }, undefined, cloudWorkspaceImageDigests(report?.metadata?.build, observed));
     throw failure("image_contract_invalid");
@@ -2417,12 +2608,12 @@ async function waitForReadiness(material) {
   throw failure("engine_readiness_failed");
 }
 
-async function revokeGithubToken(token) {
+async function revokeGithubToken(token, { required = false, fetchImpl = fetch } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   timer.unref?.();
   try {
-    const response = await fetch(GITHUB_REVOKE_URL, {
+    const response = await fetchImpl(GITHUB_REVOKE_URL, {
       method: "DELETE",
       redirect: "error",
       cache: "no-store",
@@ -2435,11 +2626,19 @@ async function revokeGithubToken(token) {
       },
     });
     await response.body?.cancel().catch(() => undefined);
+    if (required && ![204, 401].includes(response.status)) throw failure("repository_temporarily_unavailable");
   } catch {
+    if (required) throw failure("repository_temporarily_unavailable");
     // The installation token is short-lived; failure is safe to retry later.
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function revokeCloudComputerReadToken(material, fetchImpl = fetch) {
+  if (!material.repository.credential.token) return;
+  await revokeGithubToken(material.repository.credential.token, { required: true, fetchImpl });
+  material.repository.credential.token = "";
 }
 
 function readyResult(material, commit, engine) {
@@ -2510,6 +2709,16 @@ async function executeSetup(encoded) {
     record("supervisor");
     const session = await prepareSupervisor();
     supervisorPrepared = true;
+    if (material.computer) {
+      if (RUNTIME.profile !== "v4") throw failure("image_contract_invalid");
+      // The root-only, boot/session-bound document routes all host work and
+      // selects the primary alias for each fresh engine mount namespace.
+      verifyCloudComputerTemplate(material.computer, material.repository);
+      atomicWrite(CLOUD_COMPUTER_WORKSPACE_ADMISSION,
+        `${JSON.stringify(createCloudComputerWorkspaceAdmission(material, RUNTIME))}\n`, { mode: 0o600 });
+      for (const name of ["github-credential.json", "github-credential-refresh.json"])
+        removeRootRuntimeFile(path.join(profile.runtimeDirectory, name), profile.engineUid);
+    }
     // Reject an unqualified image or undersized allocation before running any
     // repository setup hook. Reattest below to mint a fresh launch proof after
     // potentially long hooks; that proof is intentionally short-lived.
@@ -2520,7 +2729,7 @@ async function executeSetup(encoded) {
     record("repository");
     const commit = await prepareRepositoryAndSettings(material, profile);
     record("credential-projection");
-    installGithubProjection(material, profile);
+    if (!material.computer) installGithubProjection(material, profile);
     removeRootRuntimeFile(
       path.join(profile.runtimeDirectory, "github-credential-refresh.json"),
       profile.engineUid,
@@ -2545,10 +2754,10 @@ async function executeSetup(encoded) {
       ...(diagnostic.checks ? { checks: diagnostic.checks } : {}),
       ...(diagnostic.digests ? { digests: diagnostic.digests } : {}),
       files: {
-        node: existsSync("/opt/zeros-runtime/bin/node"),
-        supervisor: existsSync("/opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs"),
-        setup: existsSync("/opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs"),
-        engine: existsSync(path.join(runtimeLayout.engine, "dist-engine/cli.js")),
+        node: existsSync(RUNTIME.node),
+        supervisor: existsSync(RUNTIME.profile === "v4" ? RUNTIME.helpers.supervisor : RUNTIME.helpers.ensureSupervisor),
+        setup: existsSync(RUNTIME.helpers.setup),
+        engine: existsSync(path.join(RUNTIME.workerRoot, "dist-engine/cli.js")),
       },
     };
     throw normalized;
@@ -2570,7 +2779,7 @@ async function executeSetup(encoded) {
     }
     if (!successful) {
       if (supervisorPrepared) await prepareSupervisor().catch(() => undefined);
-      await revokeGithubToken(material.repository.credential.token);
+      if (material.repository.credential.token) await revokeGithubToken(material.repository.credential.token);
       try {
         if (profile)
           removeRootRuntimeFile(
@@ -2581,6 +2790,7 @@ async function executeSetup(encoded) {
         // Best-effort removal; the token is also revoked/short-lived.
       }
     }
+    if (material.computer) material.repository.credential.token = "";
   }
 }
 
@@ -2655,12 +2865,13 @@ async function main() {
   } catch (error) {
     exitCode = 1;
     response = {
-      version: error instanceof SetupFailure && error.diagnostic ? 2 : 1,
+      version: error instanceof SetupFailure && error.hookLog ? 3 : error instanceof SetupFailure && error.diagnostic ? 2 : 1,
       audience: CLOUD_WORKSPACE_SETUP_RESULT_AUDIENCE,
       outcome: "error",
       code:
         error instanceof SetupFailure ? error.code : "image_contract_invalid",
       ...(error instanceof SetupFailure && error.diagnostic ? { diagnostic: error.diagnostic } : {}),
+      ...(error instanceof SetupFailure && error.hookLog ? { hookLog: error.hookLog } : {}),
     };
   }
   process.stdout.write(JSON.stringify(response));

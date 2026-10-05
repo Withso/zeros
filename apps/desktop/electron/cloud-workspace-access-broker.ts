@@ -1,5 +1,8 @@
 import type { CloudActorRuntimeGrant } from "@zeros/protocol/cloud-actors";
 import { randomUUID } from "node:crypto";
+import type { CloudRuntimeServiceAccess, CloudRuntimeServiceApi } from "./cloud-runtime-service-client";
+import type { CloudServiceHandle, CloudServiceTunnel } from "./cloud-runtime-service-transport";
+import type { CloudNativeSshHandle } from "./cloud-workspace-ssh-runtime";
 
 import {
   CloudWorkspaceAccessClientError,
@@ -8,6 +11,7 @@ import {
   type CloudWorkspaceSshAccess,
   type CloudWorkspaceTunnelAccess,
 } from "./cloud-workspace-access-client";
+import type { CloudAgentPreviewTarget } from "@zeros/protocol/containment";
 
 const ACCESS_TTL_MINUTES = 30;
 const MAX_ACTIVE_ACCESS = 64;
@@ -62,6 +66,7 @@ export interface CloudWorkspaceAccessBrokerApi {
       organizationId: string;
       workspaceId: string;
       port: number;
+      target?: CloudAgentPreviewTarget;
       expiresInMinutes: number;
       idempotencyKey: string;
     },
@@ -83,6 +88,21 @@ export interface CloudWorkspaceTunnelHandle {
 }
 
 type AccessTarget = { organizationId: string; workspaceId: string };
+export type CloudServiceContext = { authorityId: string; deviceId: string | null; keyVersion: number | null };
+export type CloudServiceReceipt = {
+  accessId: string; kind: "ssh" | "tunnel"; generation: number; expiresAt: string;
+  localPort: number | null; remotePort: number | null; closing: boolean;
+};
+type NativeServices = {
+  api: CloudRuntimeServiceApi;
+  readDeviceIdentity(): { deviceId: string; keyVersion: number } | null;
+  prepareSsh(access: CloudRuntimeServiceAccess): Promise<CloudNativeSshHandle>;
+  startTunnel(access: CloudRuntimeServiceAccess, localPort: number): Promise<CloudServiceTunnel>;
+};
+type NativeLease = AccessTarget & {
+  access: CloudRuntimeServiceAccess; token: string; handle: CloudServiceHandle;
+  localPort: number | null; closing: boolean; retiring?: Promise<void>;
+};
 type SshLaunch = {
   sshUsername: string;
   sshHost: string;
@@ -169,6 +189,9 @@ function safeFrameName(value: string): string {
 }
 
 export class CloudWorkspaceAccessBroker {
+  private readonly nativeServices?: NativeServices;
+  private readonly nativeLeases = new Map<string, NativeLease>();
+  private readonly nativeAuthorityId = randomUUID();
   private readonly api: CloudWorkspaceAccessBrokerApi;
   private readonly getAccessToken: () => Promise<string | null>;
   private readonly getAccountSessionKey: () => string | null;
@@ -203,6 +226,7 @@ export class CloudWorkspaceAccessBroker {
   private disposed = false;
 
   constructor(input: {
+    nativeServices?: NativeServices;
     api: CloudWorkspaceAccessBrokerApi;
     getAccessToken: () => Promise<string | null>;
     getAccountSessionKey: () => string | null;
@@ -221,6 +245,7 @@ export class CloudWorkspaceAccessBroker {
     ) => Promise<CloudWorkspaceTunnelHandle>;
     disposeLocalAccess?: () => Promise<void>;
   }) {
+    this.nativeServices = input.nativeServices;
     this.api = input.api;
     this.getAccessToken = input.getAccessToken;
     this.getAccountSessionKey = input.getAccountSessionKey;
@@ -268,6 +293,11 @@ export class CloudWorkspaceAccessBroker {
 
   private pruneExpired(): void {
     const now = this.now();
+    for (const [id, lease] of this.nativeLeases) {
+      if (Date.parse(lease.access.grant.expiresAt) > now) continue;
+      this.nativeLeases.delete(id);
+      void this.retireNativeLease(lease).catch(() => undefined);
+    }
     for (const [id, runtime] of this.actorRuntimes) if(runtime.retainUntil<=now)this.actorRuntimes.delete(id);
     for (const [id, lease] of this.leases) {
       if (Date.parse(lease.expiresAt) > now) continue;
@@ -306,7 +336,7 @@ export class CloudWorkspaceAccessBroker {
       );
     }
     this.pruneExpired();
-    if (this.leases.size + this.actorRuntimes.size + this.pendingAccess >= MAX_ACTIVE_ACCESS) {
+    if (this.leases.size + this.nativeLeases.size + this.actorRuntimes.size + this.pendingAccess >= MAX_ACTIVE_ACCESS) {
       throw new CloudWorkspaceAccessClientError(
         429,
         "cloud_access_local_limit",
@@ -440,8 +470,117 @@ export class CloudWorkspaceAccessBroker {
     }
   }
 
+  /** Read-only local metadata: no enrollment, token refresh, or new grant. The
+   * renderer must send this exact account/device authority back on list reads. */
+  serviceContext(): CloudServiceContext {
+    if (!this.hasCurrentSession() || !this.nativeServices) throw new CloudWorkspaceAccessClientError(401, "signed_out", "Cloud service authority is unavailable.");
+    const device = this.nativeServices.readDeviceIdentity();
+    for (const lease of this.nativeLeases.values()) {
+      if (lease.access.grant.deviceId !== device?.deviceId || lease.access.deviceKeyVersion !== device.keyVersion)
+        void this.retireNativeLease(lease).catch(() => undefined);
+    }
+    return { authorityId: this.nativeAuthorityId, deviceId: device?.deviceId ?? null, keyVersion: device?.keyVersion ?? null };
+  }
+
+  listServices(input: AccessTarget & CloudServiceContext): CloudServiceReceipt[] {
+    const current = this.serviceContext();
+    if (input.authorityId !== current.authorityId || input.deviceId !== current.deviceId || input.keyVersion !== current.keyVersion)
+      throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "Cloud service authority changed. Refresh access.");
+    this.pruneExpired();
+    return [...this.nativeLeases.values()].filter(lease => lease.organizationId === input.organizationId && lease.workspaceId === input.workspaceId &&
+      lease.access.grant.deviceId === current.deviceId && lease.access.deviceKeyVersion === current.keyVersion).map(lease => ({
+      accessId: lease.access.grant.id, kind: lease.access.grant.kind, generation: lease.access.grant.generation,
+      expiresAt: lease.access.grant.expiresAt, localPort: lease.localPort, remotePort: lease.access.grant.remotePort, closing: lease.closing,
+    }));
+  }
+
+  private assertNativeAuthority(access: CloudRuntimeServiceAccess): void {
+    if (!this.hasCurrentSession()) throw new CloudWorkspaceAccessClientError(401, "signed_out", "Cloud service authority has ended.");
+    const device = this.nativeServices!.readDeviceIdentity();
+    if (device?.deviceId !== access.grant.deviceId || device.keyVersion !== access.deviceKeyVersion || Date.parse(access.grant.expiresAt) <= this.now())
+      throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "Cloud service device authority has changed or expired.");
+  }
+
+  private retireNativeLease(lease: NativeLease): Promise<void> {
+    if (lease.retiring) return lease.retiring;
+    lease.closing = true;
+    // Close locally before any auth/network wait. Refresh only within this
+    // issuing session; retirement after sign-out uses its last captured token.
+    const local = lease.handle.stop();
+    // Publish the in-flight retirement before a token refresh can discover an
+    // account switch and enter dispose(), which also retires these leases.
+    lease.retiring = Promise.resolve().then(async () => {
+      const remote = async () => {
+        let token = this.lastAccessToken ?? lease.token;
+        if (!this.disposed) {
+          try { token = await this.token(); } catch { /* retain issuing-account authority only */ }
+        }
+        lease.token = token;
+        await this.nativeServices!.api.revoke(token, {
+          organizationId: lease.organizationId, workspaceId: lease.workspaceId, grantId: lease.access.grant.id,
+        });
+      };
+      const results = await Promise.allSettled([local, remote()]);
+      if (results[1]!.status === "fulfilled" && this.nativeLeases.get(lease.access.grant.id) === lease) this.nativeLeases.delete(lease.access.grant.id);
+      for (const result of results) if (result.status === "rejected") throw result.reason;
+    }).finally(() => { lease.retiring = undefined; });
+    return lease.retiring;
+  }
+
+  private async openNativeService(input: AccessTarget, action: "copy" | "terminal" | { remotePort: number; localPort: number }): Promise<{
+    accessId: string; expiresAt: string; localHost: "127.0.0.1"; localPort: number | null; remotePort: number | null;
+  }> {
+    const release = this.reserveCapacity();
+    const services = this.nativeServices!;
+    let token: string | undefined, access: CloudRuntimeServiceAccess | undefined, handle: CloudServiceHandle | undefined, lease: NativeLease | undefined;
+    try {
+      const initiatingDevice = services.readDeviceIdentity();
+      const tunnel = typeof action === "object" ? { remotePort: applicationPort(action.remotePort, "Remote port"), localPort: applicationPort(action.localPort, "Local port") } : null;
+      token = await this.token();
+      access = await services.api.issue(token, { ...input, kind: tunnel ? "tunnel" : "ssh", ...(tunnel ? { remotePort: tunnel.remotePort } : {}),
+        expiresInMinutes: 15, idempotencyKey: this.key(tunnel ? "tunnel" : "ssh") });
+      this.assertNativeAuthority(access);
+      if (initiatingDevice && (access.grant.deviceId !== initiatingDevice.deviceId || access.deviceKeyVersion !== initiatingDevice.keyVersion))
+        throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "Cloud service device authority changed during admission.");
+      let localPort: number | null = null;
+      if (tunnel) {
+        const forwarded = await services.startTunnel(access, tunnel.localPort); handle = forwarded; localPort = forwarded.localPort;
+        if (localPort !== tunnel.localPort) throw new Error("Cloud forwarding bound an unexpected local port.");
+      } else {
+        handle = await services.prepareSsh(access);
+      }
+      this.assertNativeAuthority(access);
+      lease = { ...input, access, token, handle, localPort, closing: false };
+      const current = lease;
+      this.nativeLeases.set(access.grant.id, current);
+      void handle.closed.then(() => {
+        if (this.nativeLeases.get(current.access.grant.id) === current) void this.retireNativeLease(current).catch(() => undefined);
+      });
+      if (!tunnel) {
+        const ssh = handle as CloudNativeSshHandle;
+        if (action === "copy") await this.writeClipboard(ssh.command); else await ssh.launchTerminal();
+      }
+      this.assertNativeAuthority(access);
+      if (lease.closing || this.nativeLeases.get(access.grant.id) !== lease) throw new Error("Cloud service connection has ended.");
+      return { accessId: access.grant.id, expiresAt: access.grant.expiresAt, localHost: "127.0.0.1", localPort, remotePort: access.grant.remotePort };
+    } catch (error) {
+      if (lease) await this.retireNativeLease(lease).catch(() => undefined);
+      else if (access && token) {
+        // Admission may have succeeded before a local bind/preparation failed.
+        // Keep an unsuccessful retirement visible to this issuing session so
+        // the user can retry it instead of blocking idle until grant expiry.
+        const cleanup: NativeLease = { ...input, access, token,
+          handle: handle ?? { closed: Promise.resolve(), stop: async () => {} },
+          localPort: typeof action === "object" ? action.localPort : null, closing: true };
+        if (this.hasCurrentSession()) this.nativeLeases.set(access.grant.id, cleanup);
+        await this.retireNativeLease(cleanup).catch(() => undefined);
+      }
+      throw error;
+    } finally { release(); }
+  }
+
   async openPreview(
-    input: AccessTarget & { port: number; frameName: string },
+    input: AccessTarget & { port: number; frameName: string; target?: CloudAgentPreviewTarget } & Partial<CloudServiceContext>,
     authorize: PreviewAuthorizer,
   ): Promise<{
     accessId: string;
@@ -451,6 +590,13 @@ export class CloudWorkspaceAccessBroker {
     expiresAt: string;
   }> {
     const frameName = safeFrameName(input.frameName);
+    const context = this.nativeServices ? this.serviceContext() : null;
+    const assertContext = () => {
+      if (context && (JSON.stringify(this.serviceContext()) !== JSON.stringify(context) ||
+        (input.authorityId !== undefined && (input.authorityId !== context.authorityId || input.deviceId !== context.deviceId || input.keyVersion !== context.keyVersion))))
+        throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "Cloud preview authority changed.");
+    };
+    assertContext();
     const releaseFrame = await this.lockPreviewFrame(frameName);
     try {
       const prior = this.previewByFrame.get(frameName);
@@ -462,6 +608,7 @@ export class CloudWorkspaceAccessBroker {
           organizationId: input.organizationId,
           workspaceId: input.workspaceId,
           port: applicationPort(input.port, "Preview port"),
+          ...(input.target ? { target: input.target } : {}),
           expiresInMinutes: ACCESS_TTL_MINUTES,
           idempotencyKey: this.key("preview"),
         });
@@ -481,6 +628,7 @@ export class CloudWorkspaceAccessBroker {
         let authorized = false;
         let previewAuthorizationCleanup: (() => void) | undefined;
         try {
+          assertContext();
           const authorization = authorize({
             frameName,
             origin: response.preview.origin,
@@ -549,6 +697,10 @@ export class CloudWorkspaceAccessBroker {
   async copySshCommand(
     input: AccessTarget,
   ): Promise<{ accessId: string; expiresAt: string }> {
+    if (this.nativeServices) {
+      const { accessId, expiresAt } = await this.openNativeService(input, "copy");
+      return { accessId, expiresAt };
+    }
     const { token, response, releaseCapacity } = await this.issueSsh(input);
     try {
       try {
@@ -595,6 +747,10 @@ export class CloudWorkspaceAccessBroker {
   async openSshTerminal(
     input: AccessTarget,
   ): Promise<{ accessId: string; expiresAt: string }> {
+    if (this.nativeServices) {
+      const { accessId, expiresAt } = await this.openNativeService(input, "terminal");
+      return { accessId, expiresAt };
+    }
     const { token, response, releaseCapacity } = await this.issueSsh(input);
     try {
       try {
@@ -645,6 +801,7 @@ export class CloudWorkspaceAccessBroker {
   async openSshIde(
     input: AccessTarget & { appId: "cursor" | "vscode" },
   ): Promise<{ accessId: string; expiresAt: string }> {
+    if (this.nativeServices) throw new Error("Native cloud IDE connections have not been qualified. Use Terminal or Copy SSH command.");
     const { token, response, releaseCapacity } = await this.issueSsh(input);
     try {
       try {
@@ -707,6 +864,10 @@ export class CloudWorkspaceAccessBroker {
     remotePort: number;
     expiresAt: string;
   }> {
+    if (this.nativeServices) {
+      const result = await this.openNativeService({ organizationId: input.organizationId, workspaceId: input.workspaceId }, { remotePort: input.remotePort, localPort: input.localPort });
+      return { ...result, localPort: result.localPort!, remotePort: result.remotePort! };
+    }
     const releaseCapacity = this.reserveCapacity();
     try {
       const remotePort = applicationPort(input.remotePort, "Remote port");
@@ -1163,6 +1324,8 @@ export class CloudWorkspaceAccessBroker {
 
   async revoke(accessId: string): Promise<boolean> {
     this.pruneExpired();
+    const native = this.nativeLeases.get(accessId);
+    if (native) { await this.retireNativeLease(native); return true; }
     const lease = this.leases.get(accessId);
     if (!lease) return false;
     let localCleanupError: unknown;
@@ -1225,6 +1388,7 @@ export class CloudWorkspaceAccessBroker {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    const nativeCleanup = Promise.allSettled([...this.nativeLeases.values()].map(lease => this.retireNativeLease(lease)));
     const runtimeIds = [...this.actorRuntimes.keys(), ...this.runtimeById.keys()];
     try { this.onRuntimeRetired(runtimeIds); } catch { /* local cleanup must continue */ }
     const actorRuntimes=[...this.actorRuntimes.values()];this.actorRuntimes.clear();
@@ -1240,6 +1404,8 @@ export class CloudWorkspaceAccessBroker {
       ...leases.map((lease) => lease.tunnel?.stop() ?? Promise.resolve()),
       localCleanup,
     ]);
+    await nativeCleanup;
+    this.nativeLeases.clear();
     const localCleanupResult = cleanupResults.at(-1);
     const localCleanupError =
       localCleanupResult?.status === "rejected"

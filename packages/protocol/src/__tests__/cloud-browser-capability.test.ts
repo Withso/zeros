@@ -25,4 +25,14 @@ describe("versioned cloud native browser diagnostic", () => {
     expect(resolveCloudBrowserCapability("codex", { ...scope, state: "disabled" })).toEqual({ ...scope, state: "disabled" });
     expect(cloudBrowserUnavailable("claude", "claude-setup-token")).toEqual({ version: 1, provider: "claude", runtimeProfile: "zeros-cloud-worker-v3", credentialKind: "claude-setup-token", state: "unavailable", reason: "claude-direct-login-required" });
   });
+  it.each(["zeros-cloud-worker-v3", "zeros-cloud-worker-v4"] as const)("accepts %s unavailable reports without inferring Browser readiness", runtimeProfile => {
+    const unavailable = { ...scope, runtimeProfile, state: "unavailable", reason: "codex-runtime-unavailable" } as const;
+    expect(CloudBrowserCapabilitySchema.safeParse(unavailable).success).toBe(true);
+    expect(resolveCloudBrowserCapability("codex", unavailable, "codex-chatgpt")).toEqual(unavailable);
+    expect(cloudBrowserUnavailable("codex", "codex-chatgpt", "codex-runtime-unavailable", runtimeProfile)).toEqual(unavailable);
+  });
+  it("fails closed for missing, unknown or malformed runtime profiles", () => {
+    for (const runtimeProfile of [undefined, null, "zeros-cloud-worker-v5", "zeros-cloud-native-v1"])
+      expect(resolveCloudBrowserCapability("codex", { ...scope, runtimeProfile, state: "unavailable", reason: "codex-runtime-unavailable" })).toMatchObject({ state: "unavailable", reason: "not-reported" });
+  });
 });

@@ -4,7 +4,7 @@ import {z} from "zod";
 import {HttpError} from "../authz.js";
 import {withSystemTx} from "../db.js";
 import {rateLimit} from "../ratelimit.js";
-import {DatabaseCloudWorkspaceCollaborationService,type WorkspaceInvitationDeliveryConfig} from "./actors.js";
+import {authorizeCloudWorkspaceActor,DatabaseCloudWorkspaceCollaborationService,type WorkspaceInvitationDeliveryConfig} from "./actors.js";
 
 export function createCloudWorkspaceCollaborationRoutes(pool:pg.Pool,delivery:WorkspaceInvitationDeliveryConfig|null):Hono {
   const app=new Hono(),service=new DatabaseCloudWorkspaceCollaborationService(pool,delivery??undefined);
@@ -24,11 +24,26 @@ export function createCloudWorkspaceCollaborationRoutes(pool:pg.Pool,delivery:Wo
   app.get(`${base}/collaborators`,async c=>{
     const page=parse(z.object({pageSize:z.coerce.number().int().min(1).max(100).optional(),guestCursor:z.string().uuid().optional(),
       invitationCursor:z.string().uuid().optional(),memberCursor:z.string().uuid().optional()}).strict(),c.req.query());
-    return c.json(await service.list({...await scope(c),
+    const binding=await scope(c);
+    const pageResult=await service.list({...binding,
       ...(page.pageSize===undefined?{}:{pageSize:page.pageSize}),
       ...(page.guestCursor===undefined?{}:{guestCursor:page.guestCursor}),
       ...(page.invitationCursor===undefined?{}:{invitationCursor:page.invitationCursor}),
-      ...(page.memberCursor===undefined?{}:{memberCursor:page.memberCursor})}));
+      ...(page.memberCursor===undefined?{}:{memberCursor:page.memberCursor})});
+    // Names are bounded metadata for these already-authorized page participants.
+    // Recheck management after the service read; never return emails or tokens.
+    const profiles=await withSystemTx(pool,async tx=>{
+      const authority=await authorizeCloudWorkspaceActor(tx,{...binding,capability:"manage"});
+      if(authority.accessRevision!==pageResult.accessRevision)
+        throw new HttpError(409,"cloud_workspace_access_conflict","Workspace sharing changed");
+      const userIds=[...new Set([...pageResult.guests,...pageResult.members].map(row=>row.userId))];
+      return (await tx.query<{id:string;display_name:string|null}>(
+        "SELECT id,display_name FROM users WHERE id=ANY($1::uuid[]) AND deleted_at IS NULL",[userIds])).rows;
+    });
+    const names=new Map(profiles.map(row=>[row.id,row.display_name?.slice(0,200)??null]));
+    return c.json({workspaceId:binding.workspaceId,organizationId:binding.organizationId,...pageResult,
+      guests:pageResult.guests.map(row=>({...row,displayName:names.get(row.userId)??null})),
+      members:pageResult.members.map(row=>({...row,displayName:names.get(row.userId)??null}))});
   });
   app.patch(`${base}/collaborators/:user`,async c=>{
     const {role}=parse(z.object({role:z.enum(["viewer","developer"])}).strict(),await c.req.json().catch(()=>null));

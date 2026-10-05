@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
+import { isCloudAgentPreviewTarget, type CloudAgentPreviewTarget } from "./preview-target.js";
 import { withSystemTx } from "../db.js";
 import {authorizeCloudWorkspaceActor} from "./actors.js";
 import {HttpError} from "../authz.js";
@@ -39,6 +40,7 @@ export type CloudRuntimeAccessAdmission = {
   authorityEpoch: number;
   kind: "preview" | "ssh" | "tunnel";
   remotePort: number | null;
+  previewTarget?: CloudAgentPreviewTarget;
   expiresAtMs: number;
   leaseDurationMs?: number;
 };
@@ -69,6 +71,7 @@ export class DatabaseCloudRuntimeAccessAdmissionService {
           remote_port: number | null;
           expires_at: Date;
           actor_fingerprint:string|null;
+          preview_target?: unknown;
         };
         const result = input.token.startsWith("zsh_") ? await tx.query<AccessRow>(
           `SELECT access.id, access.account_user_id, access.kind, access.remote_port, access.expires_at,access.actor_fingerprint
@@ -84,7 +87,7 @@ export class DatabaseCloudRuntimeAccessAdmissionService {
           [input.workspaceId, input.organizationId, input.generation,
             createHash("sha256").update(input.token).digest(), input.engineInstanceId, authority.authorityEpoch],
         ) : await tx.query<AccessRow>(
-          `SELECT access.id, access.account_user_id, access.kind, access.remote_port, access.expires_at,access.actor_fingerprint
+          `SELECT access.id, access.account_user_id, access.kind, access.remote_port, access.expires_at,access.actor_fingerprint,access.preview_target
           FROM cloud_workspace_client_access_grants access
           JOIN cloud_workspace_provider_bindings binding
             ON binding.workspace_id = access.workspace_id AND binding.org_id = access.org_id
@@ -99,6 +102,12 @@ export class DatabaseCloudRuntimeAccessAdmissionService {
           WHERE access.workspace_id = $1 AND access.org_id = $2 AND access.generation = $3
             AND access.token_hash = $4
             AND access.state = 'active' AND access.expires_at > now()
+            AND ((access.preview_device_id IS NULL AND access.preview_target IS NULL
+              AND generation.provider='daytona' AND connection.provider='daytona'
+              AND generation.runtime_id IS NULL AND generation.runtime_profile IS NULL) OR EXISTS (
+              SELECT 1 FROM devices device WHERE device.id=access.preview_device_id AND device.user_id=access.account_user_id
+                AND device.key_version=access.preview_device_key_version AND device.trust_state='trusted' AND device.revoked_at IS NULL
+            ))
             AND (access.kind <> 'tunnel' OR EXISTS (
               SELECT 1 FROM port_forward_sessions session JOIN devices device
                 ON device.id = session.device_id AND device.user_id = session.user_id
@@ -116,6 +125,8 @@ export class DatabaseCloudRuntimeAccessAdmissionService {
           ],
         );
         const grant = result.rows[0];
+        if (grant?.preview_target != null && (grant.kind !== "preview" || !isCloudAgentPreviewTarget(grant.preview_target)))
+          throw new CloudRuntimeAccessAdmissionError();
         if (
           !grant ||
           (grant.kind === "preview") !== input.token.startsWith("zwp_")
@@ -137,6 +148,7 @@ export class DatabaseCloudRuntimeAccessAdmissionService {
           authorityEpoch: authority.authorityEpoch,
           kind: grant.kind,
           remotePort: grant.remote_port,
+          ...(isCloudAgentPreviewTarget(grant.preview_target) ? { previewTarget: grant.preview_target } : {}),
           expiresAtMs: Math.min(
             grant.expires_at.getTime(),
             Date.now() + 10_000,

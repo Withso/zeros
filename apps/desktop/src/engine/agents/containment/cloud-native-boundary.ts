@@ -10,6 +10,7 @@ import { CLOUD_CODEX_STATE_DIRECTORIES, CLOUD_NATIVE_HOME, CLOUD_NATIVE_SKILL_HO
 import { loadCloudWorkerConfiguration } from "./cloud-worker-config";
 import type { BoundaryLaunchSpec, BoundaryProcess, BoundarySpawnRequest, PortRequest, PreparedBoundary } from "./types";
 import {hasCloudBackgroundServers} from "./cloud-background-processes";
+import { cloudComputerExecutionHistory, cloudComputerProcessEnvironment } from "../cloud-computer-environment";
 
 import { cloudGitAuthorEnvironment } from "../../git/cloud-git-author";
 import { createNativeGithubBroker } from "../../git/github-native-broker";
@@ -25,6 +26,17 @@ try{fs.readFileSync(process.argv[2]);process.exit(93);}catch(error){if(!['EACCES
 const file=process.env.HOME+'/.zeros-canary';fs.writeFileSync(file,'canary',{flag:'wx'});fs.unlinkSync(file);
 if(!fs.statSync('/srv/zeros/workspace/.git').isDirectory()&&!fs.statSync('/srv/zeros/workspace/.git').isFile())process.exit(95);
 process.stdout.write('zeros-native-provider-v1');`;
+
+/** Runtime home translation applies to managed values, never to an org or
+ * personal literal that happens to start with the same path. */
+export function cloudNativeProviderEnvironment(material: CloudAgentAccessMaterial, model: string,
+  settings: Record<string, string> | undefined, values: Record<string, string> | undefined): Record<string, string> {
+  const original = cloudCoordinatorEnvironment(material, model, settings);
+  const managed = Object.fromEntries(Object.entries(original).map(([name, value]) =>
+    [name, value === CLOUD_COORDINATOR_HOME || value.startsWith(`${CLOUD_COORDINATOR_HOME}/`)
+      ? `${CLOUD_NATIVE_HOME}${value.slice(CLOUD_COORDINATOR_HOME.length)}` : value]));
+  return cloudComputerProcessEnvironment(managed, values, "agent");
+}
 
 /** The provider and its native tools execute in the same admitted workspace
  * boundary. Only the active connection enters this private, disposable HOME;
@@ -90,7 +102,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
   static async prepare(lease: CloudAgentLease, workload: PreparedBoundary, conversationId: string,
     settings?: Record<string, string>): Promise<CloudNativeBoundary> {
     const configuration = loadCloudWorkerConfiguration();
-    if (configuration?.version !== 3 || workload.status.backend !== "cloud-worker")
+    if ((configuration?.version !== 3 && configuration?.version !== 4) || workload.status.backend !== "cloud-worker")
       throw new Error("Native cloud agents require a qualified cloud worker");
     lease.assertLive(); await workload.attestation; lease.assertLive();
     await mkdir(ROOT, { recursive: true, mode: 0o700 });
@@ -105,8 +117,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
       if (lease.customization && !lease.customization.history) throw new Error("Cloud customization history requires an updated control plane and runtime.");
       history = await acquireCloudNativeHistory({ root: CLOUD_NATIVE_HISTORY_ROOT, conversationId,
         provider: lease.admission.provider, uid: configuration.uid, gid: configuration.gid,
-        ...(lease.customization?.history ? { customization: { authority: lease.customization.history, secrets: lease.customization.servers.flatMap(({server}) =>
-          Object.values(server.transport === "stdio" ? server.env ?? {} : server.headers ?? {})) } } : {}) });
+        customization: cloudComputerExecutionHistory(lease) });
       await mkdir(`${directory}/home`, { mode: 0o700 });
       await chown(`${directory}/home`, configuration.uid, configuration.gid);
       const providerHome = `${directory}/home/.${lease.admission.provider}`;
@@ -120,10 +131,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
         await prepareCloudCodexConfigView(directory);
         await chown(`${directory}/codex-installation-id`, configuration.uid, configuration.gid);
       }
-      const original = cloudCoordinatorEnvironment(lease.takeMaterial(), lease.admission.model, settings);
-      const env = Object.fromEntries(Object.entries(original).map(([name, value]) =>
-        [name, value === CLOUD_COORDINATOR_HOME || value.startsWith(`${CLOUD_COORDINATOR_HOME}/`)
-          ? `${CLOUD_NATIVE_HOME}${value.slice(CLOUD_COORDINATOR_HOME.length)}` : value]));
+      const env = cloudNativeProviderEnvironment(lease.takeMaterial(), lease.admission.model, settings, lease.environment?.values);
       env.USER = env.LOGNAME = "zeros-agent";
       for (const key of Object.keys(env)) if (/^(GH_|GITHUB_)/.test(key)) delete env[key];
       {

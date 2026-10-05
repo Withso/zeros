@@ -2,14 +2,14 @@ export type BrowserIframeControl =
   | { action: "back" }
   | { action: "forward" }
   | { action: "reload" }
-  | { action: "navigate"; url: string };
+  | { action: "navigate" | "replace"; url: string };
 
 export type BrowserIframeControlRequest =
   | ({ frameName: string } & Exclude<
       BrowserIframeControl,
-      { action: "navigate" }
+      { action: "navigate" | "replace" }
     >)
-  | { frameName: string; action: "navigate"; url: string };
+  | { frameName: string; action: "navigate" | "replace"; url: string };
 
 interface ControllableBrowserFrame {
   isDestroyed(): boolean;
@@ -32,11 +32,13 @@ export function parseBrowserIframeControl(
     (action !== "back" &&
       action !== "forward" &&
       action !== "reload" &&
-      action !== "navigate")
+      action !== "navigate" &&
+      action !== "replace")
   ) {
     return null;
   }
-  if (action !== "navigate") return { frameName, action };
+  if (action !== "navigate" && action !== "replace")
+    return { frameName, action };
   if (typeof value.url !== "string" || value.url.length > 8_192) return null;
   try {
     const url = new URL(value.url);
@@ -64,7 +66,9 @@ export async function controlBrowserIframe(
         ? "history.back()"
         : control.action === "forward"
           ? "history.forward()"
-          : `location.assign(${JSON.stringify(control.url)})`;
+          : control.action === "replace"
+            ? `location.replace(${JSON.stringify(control.url)})`
+            : `location.assign(${JSON.stringify(control.url)})`;
     await frame.executeJavaScript(code, true);
     return true;
   } catch {

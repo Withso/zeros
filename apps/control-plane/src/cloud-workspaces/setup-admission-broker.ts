@@ -7,9 +7,10 @@ import {
   issueCloudWorkspaceGrant,
   normalizeCloudWorkspaceGrantAudience,
 } from "./grants.js";
-import type {
-  CloudWorkspaceSetupAdmission,
-  CloudWorkspaceSetupAdmissionBroker,
+import {
+  CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS,
+  type CloudWorkspaceSetupAdmission,
+  type CloudWorkspaceSetupAdmissionBroker,
 } from "./daytona-setup-executor.js";
 import {
   CloudWorkspaceSetupError,
@@ -67,7 +68,9 @@ export class DatabaseCloudWorkspaceSetupAdmissionBroker implements CloudWorkspac
             executionFence: execution.executionFence,
           },
           audience: this.endpoint,
-          ttlSeconds: this.ttlSeconds,
+          // V4 installs before its only redemption. Legacy retains its
+          // configured short TTL; both grants stay run/fence-bound and one-use.
+          ttlSeconds: execution.runtime ? CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS : this.ttlSeconds,
           issuedBy: null,
           workosEnabled: this.workosEnabled,
         }),

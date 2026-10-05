@@ -1,3 +1,4 @@
+import { resolveCloudRuntime, resolveCloudRuntimePackagePath } from "../../containment/cloud-runtime-root.mjs";
 // ──────────────────────────────────────────────────────────
 // Codex binary resolution.
 // ──────────────────────────────────────────────────────────
@@ -118,15 +119,19 @@ async function resolveNpmSandboxRuntimeRoot(
  * Resolve the exact image dependency to its native ELF in both bundled CJS and
  * source ESM. The immutable image admission owns the package tree. */
 export async function resolveCloudCodexBinaryFromImage(
-  imageRoot = "/opt/zeros",
+  imageRoot = resolveCloudRuntime().workerRoot,
 ): Promise<CodexBinarySource> {
   const invalid = () => new Error("Cloud Codex requires the pinned native executable");
   const target = platformRuntimeTarget();
   if (process.platform !== "linux" || !target) throw invalid();
+  const runtime = resolveCloudRuntime();
+  const physicalPath = (file: string) => runtime.profile === "v4"
+    ? resolveCloudRuntimePackagePath(file) : fsp.realpath(file);
   const root = await fsp.realpath(imageRoot);
+  if (runtime.profile === "v4" && root !== runtime.workerRoot) throw invalid();
   const inside = (file: string) => file.startsWith(root + path.sep);
   const readPackage = async (file: string) => {
-    const physical = await fsp.realpath(file);
+    const physical = await physicalPath(file);
     if (!inside(physical)) throw invalid();
     return JSON.parse(await fsp.readFile(physical, "utf8")) as {
       version?: string; dependencies?: Record<string, string>;
@@ -137,6 +142,7 @@ export async function resolveCloudCodexBinaryFromImage(
   const pin = image.dependencies?.["@openai/codex"];
   if (!pin || !/^\d+\.\d+\.\d+$/.test(pin)) throw invalid();
   const fromImage = createRequire(manifest);
+  if (runtime.profile === "v4") resolveCloudRuntimePackagePath(path.join(root, "node_modules/@openai/codex/package.json"));
   const wrapperPath = fromImage.resolve("@openai/codex/package.json");
   if ((await readPackage(wrapperPath)).version !== pin) throw invalid();
   const fromWrapper = createRequire(wrapperPath);
@@ -144,7 +150,7 @@ export async function resolveCloudCodexBinaryFromImage(
   if ((await readPackage(platformPath)).version !== `${pin}-linux-${process.arch}`)
     throw invalid();
   const nativePath = path.join(path.dirname(platformPath), "vendor", target.triple, "bin", "codex");
-  const binary = await fsp.realpath(nativePath);
+  const binary = await physicalPath(nativePath);
   if (!inside(binary)) throw invalid();
   await fsp.access(binary, fsConstants.X_OK);
   const file = await fsp.open(binary, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
@@ -152,7 +158,7 @@ export async function resolveCloudCodexBinaryFromImage(
     const stat = await file.stat();
     const magic = Buffer.alloc(4);
     const read = await file.read(magic, 0, 4, 0);
-    if (!stat.isFile() || read.bytesRead !== 4 || !magic.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])))
+    if (!stat.isFile() || (runtime.profile === "v4" && stat.nlink !== 1) || read.bytesRead !== 4 || !magic.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])))
       throw invalid();
   } finally { await file.close(); }
   return {path: binary, source: "bundled", sandboxRuntimeRoot: path.dirname(path.dirname(binary))};

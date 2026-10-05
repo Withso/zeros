@@ -101,6 +101,10 @@ describe("cloud worker deployment configuration", () => {
     );
     const privateProvider={...marker,version:3,profile:"zeros-cloud-worker-v3"};
     expect(parseCloudWorkerConfiguration(JSON.stringify(privateProvider))).toEqual(privateProvider);
+    const runtimeRoot = `/opt/zeros-infra/r1-${"a".repeat(64)}`;
+    const v4 = {...marker, version:4, profile:"zeros-cloud-worker-v4", toolchain:{...toolchain,
+      node:`${runtimeRoot}/bin/node`, supervisor:`${runtimeRoot}/worker/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`}};
+    expect(parseCloudWorkerConfiguration(JSON.stringify(v4))).toEqual(v4);
     for (const changed of [
       { version: 1 },
       { profile: "zeros-cloud-worker-v1" },

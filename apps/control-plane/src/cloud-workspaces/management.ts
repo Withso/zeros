@@ -2070,7 +2070,19 @@ export class DatabaseCloudWorkspaceManagementService {
           { currentVersion },
         );
       }
-      const version = currentVersion + 1;
+      // V2 computer drafts append unpublished versions under the same binding
+      // lock. Publication must allocate past those pins, not current_version.
+      const version = safeVersion(
+        (
+          await tx.query<{ version: string }>(
+            `SELECT coalesce(max(version), 0) + 1 AS version
+           FROM secret_binding_versions
+           WHERE binding_id = $1 AND org_id = $2`,
+            [input.id, input.organizationId],
+          )
+        ).rows[0]!.version,
+        "secret binding",
+      );
       let sealed;
       try {
         sealed = sealCloudWorkspaceSecretBinding(
@@ -2117,8 +2129,13 @@ export class DatabaseCloudWorkspaceManagementService {
         await tx.query(
           `UPDATE secret_binding_versions
            SET retired_at = coalesce(retired_at, now())
-           WHERE binding_id = $1 AND version = $2`,
-          [input.id, currentVersion],
+           WHERE binding_id = $1 AND version = $2 AND org_id = $3
+             AND NOT EXISTS (
+               SELECT 1 FROM cloud_computer_environment_refs ref
+               WHERE ref.binding_id = $1 AND ref.binding_version = $2
+                 AND ref.org_id = $3
+             )`,
+          [input.id, currentVersion, input.organizationId],
         );
       }
       await audit(
@@ -2213,12 +2230,19 @@ export class DatabaseCloudWorkspaceManagementService {
       }
       const affected = await tx.query<{ workspace_id: string }>(
         `SELECT DISTINCT workspace.id AS workspace_id
-         FROM cloud_workspace_generation_secret_bindings link
-         JOIN cloud_workspaces workspace
-           ON workspace.id = link.workspace_id AND workspace.org_id = link.org_id
-          AND workspace.current_generation = link.generation
-         WHERE link.binding_id = $1 AND link.org_id = $2
-           AND workspace.deleted_at IS NULL
+         FROM cloud_workspaces workspace
+         WHERE workspace.org_id = $2 AND workspace.deleted_at IS NULL
+           AND (EXISTS (
+             SELECT 1 FROM cloud_workspace_generation_secret_bindings link
+             WHERE link.workspace_id = workspace.id AND link.org_id = workspace.org_id
+               AND link.generation = workspace.current_generation AND link.binding_id = $1
+           ) OR EXISTS (
+             SELECT 1 FROM cloud_workspace_computer_sources source
+             JOIN cloud_computer_environment_refs ref
+               ON ref.config_id = source.config_id AND ref.org_id = source.org_id
+             WHERE source.workspace_id = workspace.id AND source.org_id = workspace.org_id
+               AND source.generation = workspace.current_generation AND ref.binding_id = $1
+           ))
          ORDER BY workspace.id`,
         [input.id, input.organizationId],
       );
@@ -3387,6 +3411,10 @@ export class DatabaseCloudWorkspaceManagementService {
                 created_at, updated_at
          FROM cloud_workspace_lifecycle_intents
          WHERE workspace_id = $1 AND org_id = $2
+           -- Runtime no-op receipts use the idempotency ledger but never stop a VM.
+           AND NOT (operation = 'stop' AND NOT affects_workspace
+             AND generation_transition_id IS NULL AND state = 'succeeded'
+             AND idempotency_key LIKE 'runtime-upgrade:%')
          ORDER BY created_at DESC, id DESC LIMIT 20`,
         [input.workspaceId, input.organizationId],
       );

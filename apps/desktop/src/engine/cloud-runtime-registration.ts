@@ -1,4 +1,5 @@
 import type { CloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
+import { isCloudAgentPreviewTarget } from "@zeros/protocol/containment";
 import { configureNativeGithubTransport } from "./git/github-native-client";
 import { requestCloudGithubWrite, type CloudGithubWriteRequest } from "./cloud-github-write-client";
 import type { CloudCommandEngineRequest } from "@zeros/protocol/cloud-commands";
@@ -28,6 +29,21 @@ const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
 const MAX_RUNTIME_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
+
+// This module is also imported by server-side setup contracts. Keep the wire
+// check pure; only the engine's attester may read the installed runtime.
+function isCloudAgentRuntimeAttestation(value: unknown): value is CloudAgentRuntimeAttestation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const fields = value as Record<string, unknown>;
+  const digest = (field: unknown): field is string => typeof field === "string" && /^[a-f0-9]{64}$/.test(field);
+  const uuid = (field: unknown): field is string => typeof field === "string" && field === field.toLowerCase() && UUID_PATTERN.test(field);
+  if (fields.profile === "zeros-cloud-worker-v3") return digest(fields.contractSha256);
+  return fields.profile === "zeros-cloud-worker-v4" &&
+    Object.keys(fields).sort().join("\0") === ["baseCompatibilityId", "bootId", "installerReceiptSha256", "manifestSha256", "profile", "runtimeId", "supervisorSessionId"].join("\0") &&
+    digest(fields.manifestSha256) && fields.runtimeId === `r1-${fields.manifestSha256}` &&
+    typeof fields.baseCompatibilityId === "string" && /^bc1-[a-f0-9]{64}$/.test(fields.baseCompatibilityId) &&
+    digest(fields.installerReceiptSha256) && uuid(fields.bootId) && uuid(fields.supervisorSessionId);
+}
 
 export type CloudRuntimeAuthority = {
   heartbeatEndpoint: string;
@@ -96,6 +112,7 @@ export type CloudRuntimeServiceAccess = {
   authorityEpoch: number;
   kind: "preview" | "ssh" | "tunnel";
   remotePort: number | null;
+  previewTarget?: import("@zeros/protocol/containment").CloudAgentPreviewTarget;
   expiresAtMs: number;
 };
 
@@ -391,7 +408,7 @@ export class CloudRuntimeRegistration {
     readonly config: CloudRuntimeConfig,
     dependencies: CloudRuntimeRegistrationDependencies,
   ) {
-    if (dependencies.agentRuntime?.profile !== "zeros-cloud-worker-v3" || !/^[a-f0-9]{64}$/.test(dependencies.agentRuntime.contractSha256)) {
+    if (!isCloudAgentRuntimeAttestation(dependencies.agentRuntime)) {
       throw new Error("cloud engine runtime attestation is required");
     }
     this.agentRuntime = Object.freeze({ ...dependencies.agentRuntime });
@@ -682,6 +699,7 @@ export class CloudRuntimeRegistration {
           "remotePort",
           "expiresAtMs",
           ...(relativeLease ? ["leaseDurationMs"] : []),
+          ...(raw.previewTarget !== undefined ? ["previewTarget"] : []),
         ]) ||
         raw.version !== 1 ||
         raw.audience !== "zeros-cloud-runtime-access-admission-v1" ||
@@ -691,6 +709,7 @@ export class CloudRuntimeRegistration {
         !positiveInteger(raw.authorityEpoch) ||
         !["preview", "ssh", "tunnel"].includes(String(raw.kind)) ||
         (raw.kind === "preview") !== token.startsWith("zwp_") ||
+        (raw.previewTarget !== undefined && (raw.kind !== "preview" || !isCloudAgentPreviewTarget(raw.previewTarget))) ||
         (raw.kind === "ssh"
           ? raw.remotePort !== null
           : !positiveInteger(raw.remotePort, 65535) ||

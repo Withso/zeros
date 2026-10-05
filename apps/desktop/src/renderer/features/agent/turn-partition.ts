@@ -1,4 +1,5 @@
 import { toolPresentationReady } from "./renderers/tool-readiness";
+import { isTurnFailureNotice } from "./turn-failure";
 // Split working narration/tools from provider-declared final answers.
 // Live events retain their source order and become inspectable immediately.
 
@@ -16,6 +17,9 @@ export interface TurnPartition {
 export interface PartitionOptions {
   /** Live phase-less text remains working narration until the turn settles. */
   live?: boolean;
+  /** This provider turn has a footer that owns its settled terminal failures.
+   * Omit for child feeds, standalone records and transcript export. */
+  failureTurnId?: string;
 }
 
 /** Replaced legacy fragments retain their durable ids with empty text so a
@@ -96,7 +100,12 @@ export function partitionTurn(
 ): TurnPartition {
   events = events.filter(isVisibleTranscriptEvent);
   const finalOutputIndexes = new Set<number>();
+  const failureTurnId = options?.failureTurnId;
+  let liveFailureIndex = -1;
   events.forEach((event, index) => {
+    if (options?.live && failureTurnId && isTurnFailureNotice(event, failureTurnId)) {
+      liveFailureIndex = index;
+    }
     if (
       event.kind === "text" &&
       event.role === "agent" &&
@@ -115,12 +124,17 @@ export function partitionTurn(
       break;
     }
   }
-  if (finalOutputIndexes.size === 0) {
-    return { working: events.slice(), finalOutput: [] };
-  }
   const working: AgentMessage[] = [];
   const finalOutput: AgentMessage[] = [];
   events.forEach((event, index) => {
+    // Keep the native event as an answer boundary above: dropping a failure
+    // before partitioning would turn unfinished phase-less prose into output.
+    // Before settlement, show the latest terminal notice outside activity.
+    // Afterwards, the footer owns the card and its recovery actions.
+    if (failureTurnId && isTurnFailureNotice(event, failureTurnId)) {
+      if (index === liveFailureIndex) finalOutput.push(event);
+      return;
+    }
     (finalOutputIndexes.has(index) ? finalOutput : working).push(event);
   });
   return { working, finalOutput };

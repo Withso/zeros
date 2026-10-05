@@ -16,6 +16,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { useEffect, useSyncExternalStore } from "react";
+import { isLocalDevelopment } from "../../platform/runtime";
 import { getSettingMigrated, setSetting } from "../../platform/settings";
 import { pruneScopedSettingsSelections } from "../settings/settings-scope";
 import {
@@ -198,6 +199,7 @@ export function acceptOrganizationSnapshot(
 /** Fetch `/v1/me` (single-flight) and reconcile the active organization.
  *  Errors land in `state.error` AND reject-free: callers just re-render. */
 export function refreshTeams(): Promise<Me | null> {
+  if (isLocalDevelopment()) return Promise.resolve(null);
   if (!CONTROL_PLANE_URL) return Promise.resolve(null);
   if (inflight) return inflight;
   const gen = generation;
@@ -283,7 +285,9 @@ export function useTeams(): TeamStoreState & {
 } {
   const snapshot = useSyncExternalStore(subscribe, getTeamStoreState);
   useEffect(() => {
-    if (snapshot.status === "idle" && CONTROL_PLANE_URL) void refreshTeams();
+    if (!isLocalDevelopment() && snapshot.status === "idle" && CONTROL_PLANE_URL) {
+      void refreshTeams();
+    }
   }, [snapshot.status]);
   return { ...snapshot, reload: refreshTeams };
 }

@@ -163,6 +163,99 @@ function fixture(extraOptions: { billingOrg?: string } = {}) {
   };
 }
 
+describe("Boat Cloud Computer template forks", () => {
+  const sourceId = "bx_3456789a";
+  const input = { ...INPUT, imageRef: `boat-template:${sourceId}` };
+  function forkFixture() {
+    const f = fixture();
+    const resolveTemplate = vi.fn(async () => sourceId);
+    const provider = new BoatWorkspaceProvider({ ...f.options, imageRef: input.imageRef, ttlSeconds: 1800, resolveTemplate });
+    const source = sandbox("archived", { id: sourceId, lastSnapshotStatus: "completed" });
+    const child = sandbox("ready", { sourceSandboxId: sourceId });
+    return { ...f, provider, resolveTemplate, source, child };
+  }
+  it("journals a secret-free, finite fork in the org wallet and reconciles duplicate calls by GET", async () => {
+    const f = forkFixture();
+    f.fetcher.mockResolvedValueOnce(json(f.source))
+      .mockResolvedValueOnce(json({ ok: true, sandboxId: RESOURCE }, 202))
+      .mockResolvedValueOnce(json(f.child)).mockResolvedValueOnce(json(f.child));
+    expect((await f.provider.create(input)).resourceId).toBe(RESOURCE);
+    expect((await f.provider.create(input)).resourceId).toBe(RESOURCE);
+    const posts = f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(posts[0]?.[0]).toBe(`https://boat.dev/api/v1/sandboxes/${sourceId}/fork`);
+    expect(JSON.parse(posts[0]?.[1]?.body as string)).toEqual({ type: "default", ttlSeconds: 1800, noEnv: true, env: {} });
+    expect(walletOf(posts[0]?.[1])).toBe(WALLET);
+    expect(new Headers(posts[0]?.[1]?.headers).get("idempotency-key")).toBe(INPUT.idempotencyKey);
+    expect(f.operations.beginCreateAttempt).toHaveBeenCalledOnce();
+    expect(f.operations.bindResource).toHaveBeenCalledOnce();
+    expect(f.fetcher.mock.calls.filter(([url, init]) => String(url).endsWith(`/${RESOURCE}`) && init?.method === "GET")).toHaveLength(2);
+  });
+  it("replays a lost fork reply with its original key and body, then reads the recovered child", async () => {
+    const f = forkFixture();
+    f.fetcher.mockResolvedValueOnce(json(f.source)).mockRejectedValueOnce(new Error("lost reply"))
+      .mockResolvedValueOnce(json(f.source)).mockResolvedValueOnce(json({ ok: true, sandbox: { id: RESOURCE } }, 202))
+      .mockResolvedValueOnce(json(f.child));
+    await expect(f.provider.create(input)).rejects.toMatchObject({ code: "provider_request_unavailable" });
+    expect(f.stored().resourceId).toBeNull();
+    expect(await f.provider.verifyAbsence(input)).toBe(false);
+    expect((await f.provider.create(input)).resourceId).toBe(RESOURCE);
+    const posts = f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(posts[0]?.[1]?.body).toBe(posts[1]?.[1]?.body);
+    expect(new Headers(posts[0]?.[1]?.headers).get("idempotency-key"))
+      .toBe(new Headers(posts[1]?.[1]?.headers).get("idempotency-key"));
+    expect(f.operations.bindResource).toHaveBeenCalledOnce();
+  });
+  it("allows concurrent retries only with the same journaled fork identity", async () => {
+    const f = forkFixture();
+    f.fetcher.mockImplementation(async (url, init) => {
+      if (init?.method === "POST") return json({ ok: true, sandboxId: RESOURCE }, 202);
+      return json(String(url).endsWith(`/${sourceId}`) ? f.source : f.child);
+    });
+    const results = await Promise.all([f.provider.create(input), f.provider.create(input)]);
+    expect(results.map(row => row.resourceId)).toEqual([RESOURCE, RESOURCE]);
+    const posts = f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(new Set(posts.map(([, init]) => new Headers(init?.headers).get("idempotency-key"))).size).toBe(1);
+    expect(new Set(posts.map(([, init]) => init?.body)).size).toBe(1);
+  });
+  it.each(["wallet", "source", "running"])("refuses a template with a mismatched %s before dispatch", async kind => {
+    const f = forkFixture();
+    f.fetcher.mockResolvedValueOnce(json(sandbox(kind === "running" ? "ready" : "archived", {
+      id: kind === "source" ? "zeros-v2-test-wrong-source" : sourceId,
+      team: { id: kind === "wallet" ? OTHER_WALLET : WALLET }, lastSnapshotStatus: "completed",
+    })));
+    await expect(f.provider.create(input)).rejects.toBeInstanceOf(CloudProviderError);
+    expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+  it.each(["wallet", "source"])("retains the child cleanup identity when GET reports a %s mismatch", async kind => {
+    const f = forkFixture();
+    f.fetcher.mockResolvedValueOnce(json(f.source)).mockResolvedValueOnce(json({ ok: true, sandboxId: RESOURCE }, 202))
+      .mockResolvedValueOnce(json(sandbox("ready", { team: { id: kind === "wallet" ? OTHER_WALLET : WALLET },
+        sourceSandboxId: kind === "source" ? "zeros-v2-test-wrong-source" : sourceId })));
+    await expect(f.provider.create(input)).rejects.toMatchObject({ code: kind === "wallet" ? "provider_billing_scope_mismatch" : "provider_template_identity_mismatch" });
+    expect(f.stored().resourceId).toBe(RESOURCE);
+  });
+  it("never binds the source as the child and rejects conflicting receipt IDs", async () => {
+    for (const receipt of [{ sandboxId: sourceId }, { sandboxId: RESOURCE, sandbox: { id: "bx_456789ab" } }]) {
+      const f = forkFixture();
+      f.fetcher.mockResolvedValueOnce(json(f.source)).mockResolvedValueOnce(json({ ok: true, ...receipt }, 202));
+      await expect(f.provider.create(input)).rejects.toBeInstanceOf(CloudProviderError);
+      expect(f.operations.bindResource).not.toHaveBeenCalled();
+    }
+  });
+  it("requires saved source authorization and a finite TTL", async () => {
+    const f = fixture();
+    const provider = new BoatWorkspaceProvider({ ...f.options, imageRef: input.imageRef });
+    await expect(provider.create(input)).rejects.toBeInstanceOf(CloudProviderError);
+    expect(f.fetcher).not.toHaveBeenCalled();
+    const unauthorized = new BoatWorkspaceProvider({ ...f.options, imageRef: input.imageRef, ttlSeconds: 1800,
+      resolveTemplate: async () => "zeros-v2-test-other-source" });
+    await expect(unauthorized.create(input)).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+});
+
 describe("Boat allocation lifecycle", () => {
   it.each(["create", "start", "renew"])("blocks expired Dev %s at provider admission without dispatching", async operation => {
     const f = fixture();
@@ -372,6 +465,32 @@ describe("Boat allocation lifecycle", () => {
       .mockResolvedValueOnce(json(sandbox("archived", { lastSnapshotStatus: "completed", team: { id: OTHER_WALLET, name: "Other" } })));
     await expect(f.provider.stop(RESOURCE)).resolves.toMatchObject({ state: "archived" });
     expect(f.fetcher.mock.calls.some(([url, init]) => String(url).endsWith("/stop") && init?.method === "POST")).toBe(true);
+  });
+
+  it("retains a cancelled create as failed, stopped compute without certifying its later disappearance", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json(sandbox("cancelled")));
+    await expect(f.provider.create(INPUT)).resolves.toMatchObject({ resourceId: RESOURCE, state: "failed", computeStopped: true });
+    expect(f.stored().resourceId).toBe(RESOURCE);
+    expect(await f.provider.verifyAbsence(INPUT)).toBe(false);
+    f.fetcher.mockResolvedValueOnce(json({ ok: false }, 404));
+    await expect(f.provider.inspect(RESOURCE)).rejects.toMatchObject({ code: "provider_not_found" });
+    f.fetcher.mockResolvedValueOnce(json({ ok: false }, 404));
+    await expect(f.provider.delete(RESOURCE)).rejects.toMatchObject({ code: "provider_not_found" });
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+    expect(await f.provider.verifyAbsence(INPUT)).toBe(false);
+  });
+
+  it("never resumes or stops a cancelled allocation as if it were a live machine", async () => {
+    const f = fixture();
+    await f.allocate();
+    f.fetcher.mockClear();
+    f.fetcher.mockResolvedValueOnce(json(sandbox("cancelled")));
+    await expect(f.provider.start(RESOURCE)).rejects.toMatchObject({ code: "provider_snapshot_unavailable", retryable: false });
+    f.fetcher.mockResolvedValueOnce(json(sandbox("cancelled"))).mockResolvedValueOnce(json(sandbox("cancelled")));
+    await expect(f.provider.stop(RESOURCE)).resolves.toMatchObject({ state: "failed", computeStopped: true });
+    expect(f.access.revokeSshAccess).toHaveBeenCalledOnce();
+    expect(f.fetcher.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
   });
 
   it("never grants compute to a mis-billed allocation on a create retry or resume, and refuses its renewal", async () => {
@@ -729,6 +848,11 @@ describe('Boat compute metering and lease authority', () => {
     f.fetcher.mockResolvedValueOnce(json(sandbox('running', { archiveAfter: expiresAt })));
     expect(await f.provider.renewComputeLease(RESOURCE, 3600)).toEqual({ expiresAt });
     expect(f.fetcher.mock.calls.at(-1)![1]).toMatchObject({ method: 'PATCH', body: JSON.stringify({ ttlSeconds: 3600 }) });
+  });
+  it('never confirms renewed compute for a cancelled allocation', async () => {
+    const f = fixture(); await f.allocate();
+    f.fetcher.mockResolvedValueOnce(json(sandbox('cancelled', { archiveAfter: new Date(NOW + 3600_000).toISOString() })));
+    await expect(f.provider.renewComputeLease(RESOURCE, 3600)).rejects.toMatchObject({ code: 'provider_lease_unconfirmed' });
   });
   it.each([0, -1, Infinity, 1.5, 2592001])('rejects an unsafe renewal horizon: %s', async ttl => {
     const f = fixture(); await expect(f.provider.renewComputeLease(RESOURCE, ttl)).rejects.toMatchObject({ code: 'provider_lease_invalid' });

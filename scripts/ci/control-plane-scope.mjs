@@ -35,6 +35,7 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   // Desktop clients and protocol schemas the admission contracts import.
   "apps/desktop/electron/cloud-workspace-access-client.ts",
   "apps/desktop/electron/tsconfig.json",
+  "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
   "apps/desktop/src/engine/cloud-agent-execution-client.ts",
   "apps/desktop/src/engine/cloud-command-client.ts",
   "apps/desktop/src/engine/cloud-event-client.ts",
@@ -47,7 +48,11 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "packages/protocol/src/cloud-actors.ts",
   "packages/protocol/src/cloud-agent-execution.ts",
   "packages/protocol/src/cloud-commands.ts",
+  "packages/protocol/src/cloud-computer-tools.ts",
+  "packages/protocol/src/cloud-computer-v2.ts",
   "packages/protocol/src/cloud-customization.ts",
+  "packages/protocol/src/cloud-runtime-bundle.ts",
+  "packages/protocol/src/containment.ts",
   "packages/protocol/src/github-auth.ts",
   "packages/protocol/src/messages.ts",
   // Dev provisioning/qualification modules the Dev integration suites import.

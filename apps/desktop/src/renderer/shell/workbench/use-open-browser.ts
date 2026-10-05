@@ -10,6 +10,11 @@ import type { Action } from "@/renderer/state/workspace-store";
 import { workbenchScopeForFolder } from "@/renderer/state/workspace-store";
 import { isLoopbackUrl } from "./tabs/localhost-url";
 import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { useInternalFeatureActive } from "../../features/settings/internal-features";
+import type { BrowserPreviewSource } from "./tab-model";
+import type { ExecutionBoundaryPortsSnapshot } from "@zeros/protocol/containment";
+import { cloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import {
   canonicalBrowsableHttpUrl,
   createBrowserTab,
@@ -20,6 +25,7 @@ import {
 export interface BrowserOpenOptions {
   url?: string;
   title?: string;
+  previewSource?: BrowserPreviewSource;
 }
 
 /** Resolve a browser-open intent without I/O. Exact URLs reuse their mounted
@@ -34,14 +40,14 @@ export function planBrowserOpen(
     const url = canonicalBrowsableHttpUrl(options.url);
     if (!url) return null;
     const existing = tabs.find(
-      (tab) => tab.type === "browser" && tab.url === url,
+      (tab) => tab.type === "browser" && tab.url === url && JSON.stringify(tab.previewSource) === JSON.stringify(options.previewSource),
     );
     if (existing) {
       return { type: "ACTIVATE_WORKBENCH_TAB", id: existing.id };
     }
     return {
       type: "ADD_WORKBENCH_TAB",
-      tab: createBrowserTab({ url, title: options.title }),
+      tab: createBrowserTab({ url, title: options.title, previewSource: options.previewSource }),
     };
   }
 
@@ -75,15 +81,28 @@ export function useOpenBrowserInWorkbench(
 }
 
 /** A retained chat must never open its preview in a different workspace. */
-export function useOpenChatPreviewInWorkbench(): (cwd: string | undefined, url: string) => boolean {
-  return useCallback((cwd, url) => {
-    if (!cwd || !workspacePreviewAvailable(cwd) || !isLoopbackUrl(url)) return false;
+export function useOpenChatPreviewInWorkbench(): (cwd: string | undefined, url: string, agent?: { chatId: string; executionId?: string; ports?: ExecutionBoundaryPortsSnapshot }) => boolean {
+  const cloudPreviews = useInternalFeatureActive("cloudComputerV2");
+  return useCallback((cwd, url, agent) => {
+    if (!cwd || !isLoopbackUrl(url)) return false;
+    const cloud = isCloudWorkspace(cwd);
+    // Consume cloud-local URLs even when unavailable; the OS must never open
+    // them against a coincidental listener on this Mac.
+    if (!workspacePreviewAvailable(cwd) || (cloud && (!cloudPreviews || !cloudWorkspaceCanEdit(cwd)))) return cloud;
+    let previewSource: BrowserPreviewSource | undefined;
+    if (cloud) {
+      const parsed = new URL(url);
+      const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+      const listener = agent?.ports?.ports.find(candidate => candidate.port === port);
+      if (!agent?.executionId || !listener) return true;
+      previewSource = { chatId: agent.chatId, port, executionId: agent.executionId, portId: listener.id };
+    }
     const scope = workbenchScopeForFolder(cwd);
     const state = useWorkspaceStore.getState();
     const current = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
-    const action = planBrowserOpen(current.tabs, current.activeId, { url });
+    const action = planBrowserOpen(current.tabs, current.activeId, { url, previewSource });
     if (!action) return false;
     state.dispatch({ ...action, scope });
     return true;
-  }, []);
+  }, [cloudPreviews]);
 }

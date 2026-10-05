@@ -181,4 +181,25 @@ export async function runAgentNoticesSmoke({ page, check }) {
   await expect(fixture.locator("#agent-notice-actions")).toContainText('"freshRetries":1');
   await expect(fixture.locator("#agent-notice-actions")).toContainText('"signIns":1');
   check("Verification and cloud credential cards preserve provider links and offer only explicit same-chat retry", true);
+
+  for (const provider of ["Claude", "Codex", "Cursor"]) {
+    const transcript = page.locator(`[data-failure-provider="${provider}"]`);
+    await expect(transcript.getByText(`${provider}: Selected model is at capacity.`, { exact: true })).toHaveCount(1);
+    await expect(transcript.locator(".zeros-working-feed [data-agent-notice]")).toHaveCount(0);
+    await expect(transcript.locator("[data-turn-failure-card]")).toHaveCount(0);
+    await transcript.getByRole("button", { name: `Settle ${provider} turn` }).click();
+    for (const reloaded of [false, true]) {
+      if (reloaded) await transcript.getByRole("button", { name: `Reload ${provider} history` }).click();
+      const failure = transcript.locator("[data-turn-failure-card]");
+      await expect(failure).toBeVisible();
+      await expect(failure.getByRole("button", { name: "Retry", exact: true })).toBeEnabled();
+      await expect(failure.getByRole("button", { name: "Retry in new chat" })).toBeEnabled();
+      await transcript.getByRole("button", { name: /^1 tool call$/ }).click();
+      await expect(transcript.getByText(`${provider}: Selected model is at capacity.`, { exact: true })).toHaveCount(1);
+      await expect(transcript.locator(".zeros-working-feed [data-agent-notice]")).toHaveCount(0);
+      await transcript.getByRole("button", { name: /pnpm verify/ }).click();
+      await expect(transcript.getByText("Verification failed", { exact: true })).toBeVisible();
+    }
+  }
+  check("Claude, Codex and Cursor keep one failure card outside expanded activity after settlement and reload, retaining failed tool details", true);
 }

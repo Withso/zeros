@@ -36,11 +36,12 @@
 import { memo, useMemo, useState } from "react";
 import { FileEdit } from "lucide-react";
 import { Button } from "@/renderer/shared/ui";
+import { cn } from "@/renderer/shared/ui/cn";
 import { diffLines, structuredPatch } from "diff";
 
 import type { Renderer, RendererContext } from "./types";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
-import { EventRow } from "./event-row";
+import { EventRow, WORKING_FEED_GAP } from "./event-row";
 import type { EventMeta } from "./event-meta";
 import { DiffHoverPreview } from "./diff-hover-preview";
 import { toolCompletionUnreported } from "./raw-output";
@@ -93,7 +94,7 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
       <EditFileRow tool={tool} ctx={ctx} source={null} baseline={baseline} />
     );
   return (
-    <>
+    <div className={cn("flex flex-col", WORKING_FEED_GAP)}>
       {visible.map((source, index) => (
         <EditFileRow
           key={`${source.path}:${index}`}
@@ -105,11 +106,11 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
         />
       ))}
       {visible.length < sources.length && (
-        <Button variant="ghost" size="sm" onClick={() => setShowAll(true)}>
+        <Button variant="ghost" size="sm" className="self-start" onClick={() => setShowAll(true)}>
           Show {sources.length - visible.length} more files
         </Button>
       )}
-    </>
+    </div>
   );
 });
 

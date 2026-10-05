@@ -34,7 +34,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { patch as tomlPatch } from "@decimalturn/toml-patch";
-import { legacySharedStateRoot, zerosDotDirName } from "../db/paths";
+import { legacySharedStateRoot, zerosDotDirName, zerosStateRoot } from "../db/paths";
+import { isLocalDevelopmentRuntime } from "../runtime";
 import {
   SCHEMA_URL_REPO,
   SCHEMA_URL_USER,
@@ -55,6 +56,7 @@ export const REPO_SETTINGS_DIRNAME = ".zeros";
  *  in the other (mcp-registry.ts reads these layers). Override with
  *  ZEROS_USER_SETTINGS_DIR (tests, cloud sandboxes). */
 export function userSettingsDir(): string {
+  if (isLocalDevelopmentRuntime()) return zerosStateRoot();
   if (process.env.ZEROS_USER_SETTINGS_DIR)
     return process.env.ZEROS_USER_SETTINGS_DIR;
   return path.join(homedir(), zerosDotDirName());
@@ -115,6 +117,7 @@ export function seedUserSettingsFromLegacyRoot(
   opts: { dest?: string; legacy?: string } = {},
 ): void {
   const injected = opts.dest !== undefined || opts.legacy !== undefined;
+  if (!injected && isLocalDevelopmentRuntime()) return;
   const dest = opts.dest ?? userSettingsDir();
   const legacy = opts.legacy ?? legacySharedStateRoot();
   // Stable already IS the legacy root — nothing to inherit from itself.

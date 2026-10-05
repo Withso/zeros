@@ -4,12 +4,16 @@ import {CLOUD_NATIVE_EXECUTION_PROFILE,cloudNativeProviderRestrictions,cloudBrow
 import {CloudAgentLease,type CloudAgentLeaseSupervisor} from "./cloud-agent-lease";
 import {CloudWorkloadTools} from "./cloud-workload-tools";
 import {CloudNativeBoundary} from "./containment/cloud-native-boundary";
+import {resolveCloudRuntime} from "./containment/cloud-runtime-root.mjs";
 import type {PreparedBoundary} from "./containment/types";
 import type {McpServerRegistration} from "./types";
 import {materializeMcpServerRegistrations} from "./mcp-registration";
 import { readCloudRepositoryMcp, cloudCodexMcpServer, freezeCloudSnapshot } from "./cloud-mcp";
 import { CloudCustomizationRedactor } from "./cloud-customization-redaction";
 import {CloudBackgroundExecution} from "./cloud-background-execution";
+import {CloudComputerMcpServer} from "./cloud-computer-tools";
+import {CLOUD_COMPUTER_TOOLS_SERVER} from "@zeros/protocol/cloud-computer-tools";
+import {CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE} from "@zeros/protocol/system-instructions";
 
 export type CloudAgentSelection=Omit<CloudAgentExecutionAdmission,"executionId"|"provider"|"customization">;
 export type CloudProviderExecution={
@@ -27,6 +31,11 @@ const admitted=new WeakMap<PreparedBoundary,CloudProviderExecution>();
  * an SDK message, a client flag, or a caller-supplied method implementation. */
 export function cloudProviderExecution(boundary?:PreparedBoundary):CloudProviderExecution|null{
   return boundary?admitted.get(boundary)??null:null;
+}
+/** Only CP-admitted computer tools identify the marked admin execution. */
+export function adminWorkspaceSystemInstruction(boundary:PreparedBoundary|undefined,instruction?:string):string|undefined{
+  return cloudProviderExecution(boundary)?.lease.computerToolsVersion===1
+    ? [instruction,CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE].filter(Boolean).join("\n\n") : instruction;
 }
 /** An execution uses its admitted snapshot, never the mutable Local registry. */
 export function executionMcpServers(execution:CloudProviderExecution|null,registrations:readonly McpServerRegistration[]|undefined):McpServerRegistration[]|undefined{
@@ -50,8 +59,8 @@ export function createCloudAgentExecutionFactory(options:{
       signal.throwIfAborted();
       const requested=customization?{...admission,customization:{version:2 as const,repositoryServers:await readCloudRepositoryMcp(cwd)}}:admission;
       lease=await CloudAgentLease.admit(requested,options.request,signal,options.supervisor);
-      redactor=new CloudCustomizationRedactor((lease.customization?.servers??[]).flatMap(({server})=>
-        Object.values(server.transport==="stdio"?server.env??{}:server.headers??{})));
+      redactor=new CloudCustomizationRedactor([...Object.values(lease.environment?.values??{}),...(lease.customization?.servers??[]).flatMap(({server})=>
+        Object.values(server.transport==="stdio"?server.env??{}:server.headers??{}))]);
       lease.attach(workload);
       const tools=new CloudWorkloadTools(lease,workload,cwd);
       const coordinator=await CloudNativeBoundary.prepare(lease,workload,conversationId,providerSettings);
@@ -59,17 +68,27 @@ export function createCloudAgentExecutionFactory(options:{
       lease.assertLive();
       const productServers=materializeMcpServerRegistrations(productTools?.servers??[],productTools?.env??{});
       if(productServers.some(server=>server.transport==="stdio"))throw new Error("Cloud product tools require a scoped remote transport");
+      if(productServers.some(server=>server.name===CLOUD_COMPUTER_TOOLS_SERVER))throw new Error("Cloud Computer tools require private execution admission");
+      if(lease.computerToolsVersion===1){
+        if(resolveCloudRuntime().profile!=="v4")throw new Error("Update the cloud runtime to configure this computer.");
+        const ownedLease=lease;
+        const computer=await lease.launch(()=>CloudComputerMcpServer.start(ownedLease));
+        productServers.push(computer.registration);
+      }
       const userServers=lease.customization?.servers.map(({server})=>admission.provider==="codex"?cloudCodexMcpServer(server):server)??[];
       if(userServers.some(server=>productServers.some(product=>product.name===server.name)))throw new Error("Cloud MCP server name conflicts with a product tool");
       const owned=lease;
+      // B1 extends the shared diagnostic union; keep this runtime-only change
+      // independent of the parallel protocol PR while preserving the wire value.
+      const runtimeProfile=`zeros-cloud-worker-${resolveCloudRuntime().profile}` as ReturnType<typeof cloudBrowserUnavailable>["runtimeProfile"];
       // Gateway retirement closes both domains through the lease. This facade
       // is deliberately not attached back to the lease (which would deadlock).
       const boundary:PreparedBoundary={
         generation:workload.generation,status:{...coordinator.status,
-          browser:cloudBrowserUnavailable(admission.provider,lease.credentialKind),
+          browser:{...cloudBrowserUnavailable(admission.provider,lease.credentialKind),runtimeProfile},
           parity:{level:"restricted",restrictions:[...new Set([...coordinator.status.parity.restrictions.filter(value=>!lease!.customization||value!=="user-mcp-disabled"),
             ...cloudNativeProviderRestrictions(admission.provider,lease.nativeCapabilities),...(!lease.customization?["user-mcp-disabled" as const]:[])])].sort()},cloudExecution:{version:1,
-          profile:CLOUD_NATIVE_EXECUTION_PROFILE,runtimeProfile:"zeros-cloud-worker-v3",provider:admission.provider,
+          profile:CLOUD_NATIVE_EXECUTION_PROFILE,runtimeProfile,provider:admission.provider,
           ...(lease.nativeCapabilities?{capabilities:{...lease.nativeCapabilities,connectedApps:lease.nativeCapabilities.connectedApps&&!!lease.codexAuth()}}:{}),
           designApi:productServers.some(server=>server.name==="design-draft"&&server.transport==="http")?"admitted":"unavailable"}},attestation:coordinator.attestation,
         providerHomePath:coordinator.providerHomePath,
@@ -84,6 +103,7 @@ export function createCloudAgentExecutionFactory(options:{
         revoke:()=>owned.close(),stopAndProve:()=>owned.close(),
       };
       redactor=coordinator.redactor??redactor;
+      redactor.addSecrets(productServers.flatMap(server=>server.transport==="stdio"?[]:Object.values(server.headers??{})));
       const background=new CloudBackgroundExecution(lease,conversationId,()=>coordinator.hasBackgroundServers());
       admitted.set(boundary,{lease,tools,coordinator,background,productServers:freezeCloudSnapshot(structuredClone(productServers)),userServers:freezeCloudSnapshot(structuredClone(userServers)),redactor});
       return {boundary,env:coordinator.environment(),authorityId:lease.authorityId};

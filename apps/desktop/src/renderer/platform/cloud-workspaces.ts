@@ -1,5 +1,6 @@
 import { authorizeCloudGithubSource } from "./cloud-github";
 import { z } from "zod";
+import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
@@ -9,6 +10,9 @@ import {
 } from "../features/team/control-plane";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
+export const CloudWorkspaceActorRoleSchema = z.enum(["viewer", "prompter", "developer", "manager", "owner"]);
+export type CloudWorkspaceActorRole = z.infer<typeof CloudWorkspaceActorRoleSchema>;
+
 export const CloudWorkspaceDocumentSchema = z.object({
   id: z.string().uuid(),
   organizationId: z.string().uuid(),
@@ -16,6 +20,10 @@ export const CloudWorkspaceDocumentSchema = z.object({
   name: z.string().min(1).max(120),
   createdBy: z.string().uuid(),
   ownerUserId: z.string().uuid().optional(),
+  adminWorkspace: CloudComputerAdminWorkspaceSchema.optional(),
+  actorRole: CloudWorkspaceActorRoleSchema.nullable().optional(),
+  sharingMode: z.enum(["private", "organization"]).optional(),
+  accessRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   recovery: z.object({
     state: z.string().nullable(),
     checkpointId: z.string().uuid().nullable(),
@@ -27,6 +35,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
   status: z.string().min(1).max(64),
   capabilities: z.object({
     canWrite: z.boolean(),
+    // Older servers do not project edit authority. Consumers must fail closed.
+    canEdit: z.boolean().optional(),
     canManage: z.boolean(),
     canStart: z.boolean(),
     startUnavailableReason: z.string().nullable(),
@@ -92,7 +102,7 @@ async function readCloudJson(response: Response): Promise<unknown> {
 export async function cloudAccountRequest<T>(
   path: string,
   schema: z.ZodType<T>,
-  input?: { body: unknown; idempotencyKey: string; method?: "POST" | "DELETE" | "PUT" },
+  input?: { body: unknown; idempotencyKey: string; method?: "POST" | "DELETE" | "PUT" | "PATCH" },
 ): Promise<T> {
   if (!CONTROL_PLANE_URL)
     throw new Error("Cloud workspaces are not configured");

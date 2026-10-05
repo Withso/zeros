@@ -31,6 +31,7 @@ const SandboxSchema = z.object({
     "archiving",
     "archived",
     "error",
+    "cancelled",
   ]),
   type: z.enum(["small", "default", "large"]).optional(),
   vcpu: z.number().int().positive().optional(),
@@ -66,6 +67,7 @@ const STATES: Record<
   archiving: "archiving",
   archived: "archived",
   error: "failed",
+  cancelled: "failed",
 };
 // Provider retention is 24h. Leave a margin for request transit and provider
 // clock differences; after this deadline an unknown create requires recovery.
@@ -95,6 +97,8 @@ export type BoatWorkspaceProviderOptions = BoatApiClientOptions & {
   /** Organization snapshots must resolve through their immutable artifact and
    * saved generation before dispatch, never through today's active selection. */
   resolveSnapshot?: (input: CloudProviderCreateInput) => Promise<string>;
+  /** Resolves the saved generation's C1 source pin, account and org wallet. */
+  resolveTemplate?: (input: CloudProviderCreateInput) => Promise<string>;
   now?: () => number;
 };
 
@@ -112,15 +116,17 @@ export class BoatWorkspaceProvider
   implements CloudWorkspaceProvider, CloudWorkspaceAccessProvider, CloudWorkspaceComputeProvider
 {
   readonly name = "boat";
-  private readonly snapshotName: string;
+  private readonly snapshotName: string | null;
+  private readonly templateSandboxId: string | null;
   private readonly client: BoatApiClient;
   private readonly now: () => number;
   constructor(private readonly options: BoatWorkspaceProviderOptions) {
     const image = /^boat:([a-z0-9][a-z0-9-]{0,62})@sha256:([a-f0-9]{64})$/.exec(
       options.imageRef,
     );
+    const template = /^boat-template:([A-Za-z0-9_-]{1,128})$/.exec(options.imageRef);
     if (
-      !image ||
+      !template && (!image ||
       [
         "latest",
         "tree",
@@ -130,10 +136,11 @@ export class BoatWorkspaceProvider
         "current",
         "self",
         "new",
-      ].includes(image[1]!)
+      ].includes(image[1]!))
     )
       throw new Error("Invalid qualified Boat snapshot name");
-    this.snapshotName = image[1]!;
+    this.snapshotName = image?.[1] ?? null;
+    this.templateSandboxId = template?.[1] ?? null;
     if (
       !Number.isSafeInteger(options.qualifiedStorageMiB) ||
       options.qualifiedStorageMiB < 1024 ||
@@ -192,15 +199,17 @@ export class BoatWorkspaceProvider
     // Live compute on an unconfirmed wallet is never reported as usable, so no
     // lifecycle or metering path can admit or renew it. Stop still applies.
     const billingScope = this.billingScope(value);
+    const sourceMismatch = !this.templateSourceMatches(value);
     return {
       workspaceId: record.workspaceId,
       generation: record.generation,
       resourceId: sandbox.id,
-      state: billingScope !== "match" && (state === "running" || state === "provisioning") ? "failed" : state,
-      computeStopped: sandbox.state === "archived",
+      state: (billingScope !== "match" || sourceMismatch) && (state === "running" || state === "provisioning") ? "failed" : state,
+      computeStopped: sandbox.state === "archived" || sandbox.state === "cancelled",
       target: null,
       metadata: {
         ...(billingScope !== "match" ? { billingScope } : {}),
+        ...(sourceMismatch ? { templateSource: "mismatch" } : {}),
         ...(sandbox.archiveAfter !== undefined ? { archiveAfter: sandbox.archiveAfter, computeLeaseExpiresAt: sandbox.archiveAfter } : {}),
         ...(sandbox.type ? { machineType: sandbox.type } : {}),
         ...(sandbox.vcpu ? { vcpu: sandbox.vcpu } : {}),
@@ -262,12 +271,18 @@ export class BoatWorkspaceProvider
       input.storageMiB !== this.options.qualifiedStorageMiB
     )
       throw failure("provider_profile_unsupported");
-    const resolvedName = this.options.resolveSnapshot ? await this.options.resolveSnapshot(input) : this.snapshotName;
-    if (resolvedName !== this.snapshotName || (this.snapshotName.startsWith("zeros-org-") && !this.options.resolveSnapshot))
+    if (this.templateSandboxId) {
+      if (ttlSeconds === null) throw failure("provider_compute_lease_invalid");
+      this.assertFiniteLease(ttlSeconds);
+      if (!this.options.resolveTemplate || await this.options.resolveTemplate(input) !== this.templateSandboxId)
+        throw failure("provider_template_identity_mismatch");
+    }
+    const resolvedName = this.templateSandboxId ? null : this.options.resolveSnapshot ? await this.options.resolveSnapshot(input) : this.snapshotName;
+    if (resolvedName !== this.snapshotName || (this.snapshotName?.startsWith("zeros-org-") && !this.options.resolveSnapshot))
       throw failure("provider_snapshot_identity_mismatch");
     const body = {
       type,
-      from: resolvedName,
+      ...(this.templateSandboxId ? {} : { from: resolvedName }),
       ttlSeconds,
       noEnv: true,
       env: {},
@@ -289,6 +304,14 @@ export class BoatWorkspaceProvider
     const age = this.now() - record.createdAt.getTime();
     if (!Number.isFinite(age) || age < -60_000 || age >= CREATE_RETRY_WINDOW_MS)
       throw failure("provider_create_outcome_unknown");
+    if (this.templateSandboxId) {
+      const response = await this.client.request(`/sandboxes/${this.templateSandboxId}`);
+      const source = SandboxSchema.safeParse(response.sandbox);
+      if (!source.success || source.data.id !== this.templateSandboxId || source.data.state !== "archived" ||
+        source.data.snapshotAvailable !== true || source.data.lastSnapshotStatus !== "completed")
+        throw failure("provider_template_identity_mismatch");
+      if (this.billingScope(response.sandbox) !== "match") throw failure("provider_billing_scope_mismatch");
+    }
     // Persist every dispatch before I/O. A timeout remains unknown even when
     // another request using the same key receives a definite refusal later.
     const attemptId = randomUUID();
@@ -296,7 +319,7 @@ export class BoatWorkspaceProvider
     if (dispatch.resourceId) return this.allocatableResource(dispatch);
     let response: Record<string, unknown>;
     try {
-      response = await this.client.request("/sandboxes", {
+      response = await this.client.request(this.templateSandboxId ? `/sandboxes/${this.templateSandboxId}/fork` : "/sandboxes", {
         method: "POST", body, idempotencyKey: record.idempotencyKey,
       });
     } catch (error) {
@@ -309,6 +332,21 @@ export class BoatWorkspaceProvider
     const id = z
       .object({ id: z.string().regex(BOAT_RESOURCE_ID_PATTERN) })
       .safeParse(response.sandbox);
+    if (this.templateSandboxId) {
+      const top = response.sandboxId;
+      if (top !== undefined && (typeof top !== "string" || !BOAT_RESOURCE_ID_PATTERN.test(top)))
+        throw failure("provider_response_invalid");
+      const childId = id.success ? id.data.id : top;
+      if (typeof childId !== "string" || childId === this.templateSandboxId ||
+        (id.success && top !== undefined && top !== childId)) throw failure("provider_template_identity_mismatch");
+      const bound = await this.options.operations.bindResource(input, childId);
+      if (!this.templateSourceMatches(response) || !this.templateSourceMatches(response.sandbox))
+        throw failure("provider_template_identity_mismatch");
+      // Fork is a 202 action receipt, not readiness. Read the bound child even
+      // when the response includes a sandbox; lost replies replay the same
+      // journal key to recover its ID and follow this identical GET path.
+      return this.allocatableResource(bound);
+    }
     if (!id.success) throw failure("provider_response_invalid");
     const bound = await this.options.operations.bindResource(input, id.data.id);
     return this.allocatableResource(bound, response.sandbox);
@@ -324,6 +362,15 @@ export class BoatWorkspaceProvider
     return parsed.data.id.toLowerCase() === this.options.billingOrg ? "match" : "mismatch";
   }
 
+  private templateSourceMatches(value: unknown): boolean {
+    if (!this.templateSandboxId || !value || typeof value !== "object") return true;
+    // Some action/sandbox responses echo their source. The authoritative source
+    // is the saved generation + journaled request path, checked before dispatch;
+    // a conflicting provider echo can never authorize the allocation.
+    const source = (value as { sourceSandboxId?: unknown }).sourceSandboxId;
+    return source === undefined || source === this.templateSandboxId;
+  }
+
   /** Compute is granted only to an allocation positively billed to the
    * configured wallet: create, create retry, resume and renewal. Anything else
    * is read back once. A refusal keeps the bound cleanup identity; inspection,
@@ -337,6 +384,7 @@ export class BoatWorkspaceProvider
       this.resource(record, sandbox);
       throw failure(`provider_billing_scope_${scope}`);
     }
+    if (!this.templateSourceMatches(sandbox)) throw failure("provider_template_identity_mismatch");
     return this.resource(record, sandbox);
   }
 

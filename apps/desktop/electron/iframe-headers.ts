@@ -76,7 +76,7 @@ function frameTreeNodeIds(frame: WebFrameMain | null | undefined): number[] {
  *  Pass `win.webContents.session` from createMainWindow(). */
 export function installIframeHeaderStripping(session: Session): void {
   session.webRequest.onBeforeSendHeaders(
-    { urls: ["https://*/*"] },
+    { urls: ["https://*/*", "wss://*/*"] },
     (details, callback) => {
       let ancestry: number[] = [];
       try {

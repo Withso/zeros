@@ -10,6 +10,8 @@
 // ──────────────────────────────────────────────────────────
 
 import { getSettingMigrated, setSetting } from "../../platform/settings";
+import { isLocalDevelopment } from "../../platform/runtime";
+import { PERSONAL_ORGANIZATION_ID } from "./personal-organization";
 
 const KEY = "team:active-id";
 /** Pre-2026-07-25 name, when a Team was called an Organization. Losing this
@@ -25,6 +27,7 @@ const listeners = new Set<() => void>();
 let activeOrganizationIsPersonalHint: boolean | null = null;
 
 export function getActiveTeamId(): string | null {
+  if (isLocalDevelopment()) return PERSONAL_ORGANIZATION_ID;
   return getSettingMigrated<string | null>(KEY, LEGACY_KEY, null);
 }
 
@@ -36,6 +39,10 @@ export function setActiveOrganizationSelection(
   organizationId: string | null,
   isPersonal: boolean | null,
 ): void {
+  if (isLocalDevelopment()) {
+    organizationId = PERSONAL_ORGANIZATION_ID;
+    isPersonal = true;
+  }
   const idChanged = getActiveTeamId() !== organizationId;
   const hintChanged = activeOrganizationIsPersonalHint !== isPersonal;
   if (!idChanged && !hintChanged) return;
@@ -48,6 +55,7 @@ export function setActiveOrganizationSelection(
 }
 
 export function getActiveOrganizationIsPersonalHint(): boolean | null {
+  if (isLocalDevelopment()) return true;
   return activeOrganizationIsPersonalHint;
 }
 

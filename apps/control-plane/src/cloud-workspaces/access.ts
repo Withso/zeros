@@ -5,12 +5,14 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import type pg from "pg";
+import { isCloudAgentPreviewTarget, type CloudAgentPreviewTarget } from "./preview-target.js";
+import { consumeCloudWorkspaceDeviceProof, WorkspaceReplicaError, type CloudWorkspaceDeviceProof } from "./replicas.js";
 
 import { PreviewRequestLease } from "./preview-request-lease.js";
 import type { CloudPreviewSocketGrant } from "./preview-websocket-relay.js";
 
 import { audit } from "../audit.js";
-import { HttpError } from "../authz.js";
+import { HttpError, requireOrganizationCreationCapability, type StaffRole } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import {
   lockCloudWorkspaceScope,
@@ -86,6 +88,7 @@ export type CloudWorkspaceAccessDocument = {
     origin: string;
     capability: string;
     headerName: "x-zeros-preview-capability";
+    target?: CloudAgentPreviewTarget;
   };
 };
 
@@ -100,6 +103,8 @@ export type CloudWorkspaceAccessService = {
     deviceId?: string;
     requestedLocalPort?: number;
     remotePort?: number;
+    previewTarget?: CloudAgentPreviewTarget;
+    proof?: CloudWorkspaceDeviceProof;
     expiresInMinutes: number;
     idempotencyKey: string;
   }): Promise<CloudWorkspaceAccessDocument>;
@@ -130,6 +135,7 @@ export type CloudWorkspaceAccessService = {
 };
 
 type AuthorizedWorkspace = {
+  native_preview: boolean;
   actorFingerprint:string;
   single_member_mode:boolean;
   team_id: string;
@@ -227,9 +233,14 @@ export async function authorizeReadyCloudWorkspaceAccess(tx:Tx,input:{
   catch(error){if(error instanceof HttpError&&error.status===404)throw absent();throw error;}
   const selected=await tx.query<AuthorizedWorkspace>(`SELECT cw.team_id,cw.owner_user_id,cw.single_member_mode,
       cw.current_generation AS generation,cw.authority_epoch,cw.status,cw.desired_state,
-      binding.provider_resource_id,binding.updated_at AS provider_binding_updated_at
+      binding.provider_resource_id,binding.updated_at AS provider_binding_updated_at,
+      NOT (generation.provider='daytona' AND connection.provider='daytona'
+        AND generation.runtime_id IS NULL AND generation.runtime_profile IS NULL) AS native_preview
     FROM cloud_workspaces cw JOIN cloud_workspace_provider_bindings binding
       ON binding.workspace_id=cw.id AND binding.org_id=cw.org_id AND binding.generation=cw.current_generation
+    JOIN cloud_workspace_generations generation
+      ON generation.workspace_id=cw.id AND generation.org_id=cw.org_id AND generation.generation=cw.current_generation
+    JOIN provider_connections connection ON connection.id=generation.provider_connection_id AND connection.org_id=cw.org_id
     WHERE cw.id=$1 AND cw.org_id=$2 AND cw.deleted_at IS NULL
       AND binding.provider_resource_id IS NOT NULL AND binding.observed_state='running'
       AND (NOT $5::boolean OR (cw.single_member_mode AND cw.owner_user_id=$3))
@@ -491,12 +502,17 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     deviceId?: string;
     requestedLocalPort?: number;
     remotePort?: number;
+    previewTarget?: CloudAgentPreviewTarget;
+    proof?: CloudWorkspaceDeviceProof;
     expiresInMinutes: number;
     idempotencyKey: string;
   }): Promise<CloudWorkspaceAccessDocument> {
     assertUuid(input.organizationId, "Organization");
     assertUuid(input.workspaceId, "Cloud workspace");
     assertUuid(input.accountUserId, "Account");
+    if (input.previewTarget !== undefined && (input.kind !== "preview" || !isCloudAgentPreviewTarget(input.previewTarget)))
+      throw new HttpError(422, "invalid_input", "Cloud preview target is invalid");
+    if (input.previewTarget && !input.proof) throw new HttpError(422, "invalid_input", "A trusted device is required for native previews");
     if (!IDEMPOTENCY_PATTERN.test(input.idempotencyKey)) {
       throw new HttpError(
         422,
@@ -559,6 +575,8 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
       deviceId: deviceId ?? null,
       requestedLocalPort,
       remotePort,
+      ...(input.previewTarget ? { previewTarget: input.previewTarget } : {}),
+      ...(input.proof ? { deviceId: input.proof.deviceId, deviceKeyVersion: input.proof.keyVersion } : {}),
       expiresInMinutes,
     });
     const requestedExpiresAt = new Date(Date.now() + expiresInMinutes * 60_000);
@@ -573,6 +591,17 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         workosEnabled: this.workosEnabled,
         legacyProviderAccess:input.kind!=="preview"||purpose==="engine-runtime",
       });
+      if (input.kind === "preview" && (workspace.native_preview || input.previewTarget || input.proof)) {
+        const account = (await tx.query<{ staff_role: StaffRole | null }>(
+          "SELECT staff_role FROM users WHERE id=$1 AND auth_status='active' AND deleted_at IS NULL FOR SHARE", [input.accountUserId])).rows[0];
+        requireOrganizationCreationCapability(account?.staff_role ?? null);
+        if (!input.proof) throw new WorkspaceReplicaError("device_proof_rejected", "A trusted device is required for native previews");
+      }
+      const previewDevice = input.kind === "preview" && input.proof ? await consumeCloudWorkspaceDeviceProof(tx, {
+        accountUserId: input.accountUserId, action: "preview.issue", proof: input.proof,
+        payload: { organizationId: input.organizationId, workspaceId: input.workspaceId, port: remotePort,
+          target: input.previewTarget ?? null, expiresInMinutes, idempotencyKey: input.idempotencyKey },
+      }) : null;
       if (
         input.expectedGeneration !== undefined &&
         workspace.generation !== input.expectedGeneration
@@ -597,8 +626,8 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         `INSERT INTO cloud_workspace_client_access_grants (
            id, workspace_id, generation, org_id, account_user_id, kind,
            remote_port, provider_resource_id, preview_proxy_label,
-           idempotency_key, request_sha256, requested_expires_at,actor_fingerprint
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,$13)
+           idempotency_key, request_sha256, requested_expires_at,actor_fingerprint,preview_target,preview_device_id,preview_device_key_version
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,$13,$14,$15,$16)
          ON CONFLICT (org_id, account_user_id, idempotency_key) DO NOTHING
          RETURNING id`,
         [
@@ -615,6 +644,8 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           digest,
           requestedExpiresAt,
           workspace.actorFingerprint,
+          input.previewTarget ?? null,
+          previewDevice?.id ?? null, previewDevice?.key_version ?? null,
         ],
       );
       if ((inserted.rowCount ?? 0) !== 1) {
@@ -691,13 +722,16 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         // Prove the exact private provider endpoint now; the raw provider
         // token is intentionally discarded and resolved again only in proxy
         // memory while a request is authorized.
-        assertProviderPreviewEndpoint(
-          await provider.getPreviewEndpoint(
+        const endpoint = await provider.getPreviewEndpoint(
             prepared.provider_resource_id,
             remotePort!,
             { grantId, credential },
-          ),
-        );
+          );
+        assertProviderPreviewEndpoint(endpoint);
+        if (endpoint.headerName === "x-zeros-runtime-access" && !input.proof)
+          throw new Error("native previews require device admission");
+        if (input.previewTarget && endpoint.headerName !== "x-zeros-runtime-access")
+          throw new Error("opaque previews require native runtime admission");
       } else {
         ssh = await provider.createSshAccess(
           prepared.provider_resource_id,
@@ -901,6 +935,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         origin: `https://${previewProxyLabel}.${this.previewBaseDomain}`,
         capability: credential,
         headerName: "x-zeros-preview-capability",
+        ...(input.previewTarget ? { target: input.previewTarget } : {}),
       },
     };
   }
@@ -1222,6 +1257,12 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           AND pb.provider_resource_id = access.provider_resource_id
          WHERE access.preview_proxy_label = $1 AND access.kind = 'preview'
            AND access.state = 'active' AND access.expires_at > now()
+           AND ((access.preview_device_id IS NULL AND access.preview_target IS NULL
+             AND generation.provider='daytona' AND provider_connection.provider='daytona'
+             AND generation.runtime_id IS NULL AND generation.runtime_profile IS NULL) OR EXISTS (
+             SELECT 1 FROM devices device WHERE device.id=access.preview_device_id AND device.user_id=access.account_user_id
+               AND device.key_version=access.preview_device_key_version AND device.trust_state='trusted' AND device.revoked_at IS NULL
+           ))
            AND cw.deleted_at IS NULL AND cw.desired_state = 'running'
            AND access.actor_fingerprint=cloud_workspace_actor_fingerprint(cw.id,access.account_user_id)
            AND cloud_workspace_actor_role(cw.id,access.account_user_id) IN ('developer','manager','owner')

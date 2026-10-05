@@ -1,4 +1,5 @@
 import type { McpServerRegistration } from "./types";
+import { withoutLocalDevelopment } from "../env/local-development";
 
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
@@ -11,6 +12,9 @@ export function materializeMcpServerRegistration(
   registration: McpServerRegistration,
   env: Readonly<Record<string, string | undefined>>,
 ): McpServerRegistration {
+  if (registration.transport === "stdio" && registration.env && "ZEROS_LOCAL_DEVELOPMENT" in registration.env) {
+    return { ...registration, env: withoutLocalDevelopment(registration.env) };
+  }
   if (
     registration.transport === "stdio" ||
     !registration.headersFromEnv ||

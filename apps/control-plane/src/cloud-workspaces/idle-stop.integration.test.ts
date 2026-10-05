@@ -16,6 +16,7 @@ import { runMigrations } from "../migrate.js";
 import { withSystemTx } from "../db.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import { DatabaseCloudIdleStop } from "./idle-stop.js";
+import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { completeWorkspaceCheckpointRequest, deliverWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -77,6 +78,31 @@ suite("verified inactivity shutdown", () => {
     expect(delivered).toEqual(directive);
     const intent = (await pool.query("SELECT state,operation FROM cloud_workspace_lifecycle_intents WHERE id=(SELECT lifecycle_intent_id FROM workspace_checkpoint_requests WHERE id=$1)", [directive!.id])).rows[0];
     expect(intent).toEqual({ state: "queued", operation: "stop" });
+  });
+  it.each(["queued", "delivered"])("explicit ready-state wake cancels a %s idle capture before resuming one paused message", async state => {
+    const commands = new DatabaseCloudWorkspaceCommandService({ pool });
+    const paused = await commands.mutate(scope(), { conversationId: "paused-chat", operationId: randomUUID(),
+      expectedRevision: 0, action: { kind: "pause" } });
+    await oldEngine();
+    const checkpoint = (await request())!;
+    expect(checkpoint).toMatchObject({ idleStop: true });
+    if (state === "delivered") await withSystemTx(pool, tx => deliverWorkspaceCheckpointRequest(tx, scope()));
+    expect((await pool.query("SELECT status FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].status).toBe("ready");
+    const resume = { conversationId: "paused-chat", operationId: randomUUID(), expectedRevision: paused.revision,
+      action: { kind: "resume" as const } };
+    await expect(commands.mutate(scope(), resume)).rejects.toMatchObject({ code: "command_conflict" });
+    const response = await lifecycle("wake");
+    expect(response.status).toBe(202);
+    expect((await response.json()).workspace.status).toBe("ready");
+    expect((await pool.query("SELECT state FROM workspace_checkpoint_requests WHERE id=$1", [checkpoint.id])).rows[0].state).toBe("cancelled");
+    const running = await commands.mutate(scope(), resume);
+    const message = { conversationId: "paused-chat", operationId: randomUUID(), expectedRevision: running.revision,
+      action: { kind: "enqueue" as const, commandId: randomUUID(), payload: { agentId: "codex", userMessageId: randomUUID(),
+        prompt: [{ type: "text" as const, text: "Run once after capture cancellation" }], modeRevision: 0 } } };
+    await commands.mutate(scope(), message);
+    expect((await commands.mutate(scope(), message)).replayed).toBe(true);
+    expect((await commands.claim(scope(), "paused-chat", "execution"))?.commandId).toBe(message.action.commandId);
+    expect(await commands.claim(scope(), "paused-chat", "execution")).toBeNull();
   });
   it("keeps a workspace alive during a PR write and after fresh work races the checkpoint", async () => {
     await oldEngine(); await githubWrite(); expect(await request()).toBeNull();

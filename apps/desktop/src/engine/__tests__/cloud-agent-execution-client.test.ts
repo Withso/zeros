@@ -7,6 +7,48 @@ const admission={executionId:randomUUID(),delegationId:randomUUID(),provider:"cu
 const grant={leaseId:randomUUID(),authorityId:"a".repeat(64),expiresAt:new Date(Date.now()+45_000).toISOString(),credentialVersion:1,credentialKind:"cursor-api-key",
   provider:"cursor",model:"grok-4.6",material:{kind:"cursor-api-key",apiKey:"synthetic-private-cursor-token"}};
 describe("private agent execution client",()=>{
+  it("preserves only typed computer conflicts and never retries the mutation",async()=>{
+    const input={kind:"computer-tool" as const,leaseId:randomUUID(),toolCallId:"native-call",
+      tool:{name:"CreateComputerConfiguration" as const,arguments:{installScript:"echo ready",expectedRevision:1,previousBuildId:null}}};
+    const conflict={conflict:true,revision:3,latestBuildId:randomUUID()};
+    const requestFetch=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({result:conflict}),{status:409}));
+    expect(await requestCloudAgentExecution(authority,input,new AbortController().signal,requestFetch)).toEqual(conflict);
+    expect(requestFetch).toHaveBeenCalledOnce();
+    for(const value of [{...conflict,secret:"forbidden"},{revision:3},{...conflict,conflict:false}]){
+      requestFetch.mockResolvedValueOnce(new Response(JSON.stringify({result:value}),{status:409}));
+      await expect(requestCloudAgentExecution(authority,input,new AbortController().signal,requestFetch)).rejects.toThrow("authority is unavailable");
+    }
+  });
+  it("preserves the current settings version on setup CAS conflicts without retrying",async()=>{
+    const input={kind:"computer-tool" as const,leaseId:randomUUID(),toolCallId:"native-setup",
+      tool:{name:"UpdateRepositorySetupScript" as const,arguments:{repositoryId:randomUUID(),expectedSettingsVersion:0,script:"echo ready",timeoutSeconds:30}}};
+    const conflict={conflict:true,version:1};
+    const requestFetch=vi.fn().mockResolvedValue(new Response(JSON.stringify({result:conflict}),{status:409}));
+    expect(await requestCloudAgentExecution(authority,input,new AbortController().signal,requestFetch)).toEqual(conflict);
+    expect(requestFetch).toHaveBeenCalledOnce();
+  });
+  it("surfaces a closed update-required response for marked older executions",async()=>{
+    const requestFetch=vi.fn().mockResolvedValue(new Response(JSON.stringify({error:"cloud_computer_tools_update_required"}),{status:409}));
+    await expect(requestCloudAgentExecution(authority,{kind:"admit",admission},new AbortController().signal,requestFetch))
+      .rejects.toThrow("Update the cloud runtime and control plane");
+    expect(requestFetch).toHaveBeenCalledOnce();
+  });
+  it("accepts bounded terminal env only over the private engine request and rejects malformed maps",async()=>{
+    const request={kind:"terminal-environment" as const,actorSessionId:randomUUID()};
+    const values={ORG_VALUE:"synthetic-org-value",EMPTY_OVERRIDE:"",LARGE_VALUE:"v".repeat(65_536)};
+    const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({result:{version:1,environment:values}})));
+    await expect(requestCloudAgentExecution(authority,request,AbortSignal.timeout(1000),fetcher)).resolves.toEqual({version:1,environment:values});
+    expect(JSON.parse(fetcher.mock.calls[0]![1].body).request).toEqual(request);
+    expect(fetcher.mock.calls[0]![1].body).not.toContain(values.ORG_VALUE);
+    for(const environment of [{NODE_OPTIONS:"private"},{ORG_VALUE:"v".repeat(65_537)},{ORG_VALUE:"bad\0value"}]){
+      fetcher.mockResolvedValueOnce(new Response(JSON.stringify({result:{version:1,environment}})));
+      await expect(requestCloudAgentExecution(authority,request,AbortSignal.timeout(1000),fetcher)).rejects.toThrow(/^Cloud agent execution authority is unavailable$/);
+    }
+    fetcher.mockResolvedValueOnce(new Response("private-diagnostic",{status:409}));
+    await expect(requestCloudAgentExecution(authority,request,AbortSignal.timeout(1000),fetcher)).rejects.toThrow(/^Cloud agent execution authority is unavailable$/);
+    fetcher.mockResolvedValueOnce(new Response("x".repeat(2*1024*1024+1)));
+    await expect(requestCloudAgentExecution(authority,request,AbortSignal.timeout(1000),fetcher)).rejects.toThrow(/^Cloud agent execution authority is unavailable$/);
+  });
   it("negotiates background retention with a legacy backend only after a definite schema rejection",async()=>{
     const fetcher=vi.fn().mockResolvedValueOnce(new Response("legacy schema",{status:422})).mockResolvedValueOnce(new Response(JSON.stringify({result:grant})));
     await expect(requestCloudAgentExecution(authority,{kind:"admit",admission,backgroundTasksVersion:1},new AbortController().signal,fetcher)).resolves.toEqual(grant);

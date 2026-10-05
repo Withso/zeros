@@ -1,3 +1,4 @@
+import {resolveCloudRuntimeChild} from "../agents/containment/cloud-runtime-root.mjs";
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
@@ -186,7 +187,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
     const session = createCloudSshSession(stream, {
       cwd,
       sftpServer: '/usr/lib/openssh/sftp-server',
-      env: { HOME: '/srv/zeros/home/agent', PATH: '/opt/zeros-runtime/bin:/usr/local/bin:/usr/bin:/bin',
+      env: { HOME: '/srv/zeros/home/agent', PATH: `${resolveCloudRuntimeChild().binRoot}:/usr/local/bin:/usr/bin:/bin`,
         LANG: 'C.UTF-8', USER: 'zeros-worker', LOGNAME: 'zeros-worker', SHELL: '/bin/bash' },
     });
     process.stdout.write(JSON.stringify({ version: 1, kind: 'ssh', publicKey: session.publicKey, hostKeySha256: session.hostKeySha256 }) + '\n', () => session.start());

@@ -1,6 +1,8 @@
 /** Customer errors never reuse infrastructure diagnostic text. Internal
  * records retain the original code/message for the operator's investigation. */
 const messages: Record<string, string> = {
+  cloud_runtime_revoked: "This workspace runtime was revoked. Request an explicit runtime upgrade to continue.",
+  cloud_runtime_unavailable: "The pinned cloud runtime is unavailable. Request an explicit runtime upgrade to continue.",
   cloud_computer_capacity_reached: "Image capacity reached. Retire an unreferenced custom or Dev image, or try again when another build finishes.",
   not_found: "Cloud workspace not found",
   cloud_workspace_not_found: "Cloud workspace access is unavailable",

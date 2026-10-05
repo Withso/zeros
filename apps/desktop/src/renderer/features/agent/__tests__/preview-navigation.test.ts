@@ -7,6 +7,7 @@ import {
   previewNavigationForTab,
   previewRuntimeOriginForTab,
   previewRuntimeStateForTab,
+  reconcilePreviewRuntimeUrlForTab,
   redactPreviewRuntimeTextForTab,
   stagePreviewNavigation,
   takePreviewNavigation,
@@ -14,6 +15,42 @@ import {
 
 describe("ephemeral preview navigation", () => {
   beforeEach(clearPreviewNavigationsForTest);
+  it("reconciles page paths into the logical URL while retaining the admitted origin and expiry", () => {
+    const url = "http://localhost:5173/assets?version=2";
+    const origin = "https://preview.example.test";
+    const expiresAt = Date.now() + 60_000;
+    stagePreviewNavigation("browser-page", {
+      url, admissionUrl: `${origin}/assets?version=2`, expiresAt, native: true,
+    });
+    const next = "http://localhost:5173/next?from=spa#view";
+    expect(reconcilePreviewRuntimeUrlForTab("browser-page", url, `${origin}/next?from=spa#view`)).toBe(next);
+    expect(previewRuntimeStateForTab("browser-page", next)).toEqual({ origin, expiresAt, volatileOrigin: true });
+    expect(previewRuntimeStateForTab("browser-page", url)).toBeNull();
+    expect(previewNavigationForTab("browser-page", next)).toBe(`${origin}/next?from=spa#view`);
+    expect(reconcilePreviewRuntimeUrlForTab("browser-page", next, `${origin}/linked?__zsr_cap=fixture&from=page`)).toBe("http://localhost:5173/linked?from=page");
+  });
+
+  it("does not translate another tab, logical URL, host or port into preview authority", () => {
+    const url = "http://localhost:5173/assets";
+    const origin = "https://preview.example.test";
+    stagePreviewNavigation("browser-page", { url, admissionUrl: `${origin}/assets`, native: true });
+    expect(reconcilePreviewRuntimeUrlForTab("sibling", url, `${origin}/next`)).toBeNull();
+    expect(reconcilePreviewRuntimeUrlForTab("browser-page", "http://localhost:5174/assets", `${origin}/next`)).toBeNull();
+    for (const candidate of ["https://external.example.test/next", "https://preview.example.test:8443/next", "http://preview.example.test/next", "https://user@preview.example.test/next"]) {
+      expect(reconcilePreviewRuntimeUrlForTab("browser-page", url, candidate)).toBeNull();
+    }
+    expect(previewRuntimeOriginForTab("browser-page", url)).toBe(origin);
+  });
+
+  it("keeps native header admission outside the persisted logical URL", () => {
+    const url = "http://localhost:5173/assets?version=2";
+    const admissionUrl = "https://preview.example.test/assets?version=2";
+    stagePreviewNavigation("browser-native", { url, admissionUrl, expiresAt: Date.now() + 60_000, native: true });
+    expect(previewNavigationForTab("browser-native", url)).toBe(admissionUrl);
+    expect(isPreviewRuntimeUrlForTab("browser-native", url, admissionUrl)).toBe(true);
+    expect(url).not.toContain("preview.example.test");
+    expect(() => stagePreviewNavigation("browser-native-invalid", { url, admissionUrl: "http://preview.example.test/", native: true })).toThrow("capability");
+  });
 
   it("keeps the one-use admission URL out of persisted tab state", () => {
     const persisted = "http://127.0.0.1:45678/";

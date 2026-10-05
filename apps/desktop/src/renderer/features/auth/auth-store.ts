@@ -9,7 +9,7 @@
 // persistence fallback.
 // ──────────────────────────────────────────────────────────
 
-import { nativeInvoke } from "../../platform/runtime";
+import { isLocalDevelopment, nativeInvoke } from "../../platform/runtime";
 
 export type AuthUser = {
   sub: string;
@@ -35,6 +35,7 @@ function notify(next: AuthSessionInfo | null): void {
  *  it's near expiry) + decoded identity. Null on either call failing/absent —
  *  treated as signed-out, same as a getSession() cache-miss used to be. */
 export async function getSession(): Promise<AuthSessionInfo | null> {
+  if (isLocalDevelopment()) return null;
   // Token refresh can atomically update identity metadata. Read the user only
   // after main settles that refresh so both values describe one stored record.
   const tokenRes = await nativeInvoke<{ access_token: string | null }>(

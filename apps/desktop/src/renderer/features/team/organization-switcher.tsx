@@ -20,6 +20,7 @@ import {
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
 import { shellOpenUrl } from "../../platform/app";
+import { isLocalDevelopment } from "../../platform/runtime";
 import { useAuth, type AuthStatus } from "../auth";
 import { setActiveOrganizationSelection } from "./active-team";
 import { organizationDashboardUrl } from "./organization-links";
@@ -43,11 +44,17 @@ function openDashboard(
 export function organizationSwitcherSessionActions(
   authStatus: AuthStatus,
   canCreateOrganization: boolean,
+  localDevelopment = isLocalDevelopment(),
 ): {
   showManagement: boolean;
   showCreateOrganization: boolean;
   sessionAction: "sign-in" | "log-out" | null;
 } {
+  if (localDevelopment) return {
+    showManagement: false,
+    showCreateOrganization: false,
+    sessionAction: null,
+  };
   return authStatus === "authenticated"
     ? {
         showManagement: true,

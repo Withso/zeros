@@ -249,6 +249,9 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
 - Use a compact icon, stable operation name, and concise target. Standard names
   include **Bash**, **Read**, **Edit**, **Glob**, **Grep**, **List**, and **Fetch**.
   Native MCP/app and browser actions keep their established semantic names.
+- Keep an 8px gap between tool rows, including each file in a batched edit or
+  read. Use the same rhythm in live feeds, expanded history and nested Agent
+  groups; expanded details stay attached to their own row.
 - Prefer a native command's meaningful `description` as its operation label;
   use **Bash** when absent. Preview the actual command with whitespace collapsed
   in the header. Preserve spacing and newlines in the expanded body. Do not
@@ -456,6 +459,13 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
 
 ## Colors and readable errors
 
+- Settled root turn failures appear once in the failure card outside the
+  collapsible activity feed, for Claude, Codex and Cursor. Keep native and
+  persisted notices intact for recovery and export; do not repeat them when
+  activity is expanded. The provider turn owns this presentation across steer
+  segments. Before settlement, show the latest terminal notice outside activity
+  until the footer takes over. Feeds without a turn footer remain inspectable,
+  as do recoverable warnings, child errors and individual failed tool results.
 - Claude's native `verification_required` and `cloud_credential_error` remain
   distinct from a Claude sign-in failure, model unavailability and transport
   failure. Preserve the provider's explanation, credential/provider name and

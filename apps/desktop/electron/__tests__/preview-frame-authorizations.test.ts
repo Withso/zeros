@@ -270,6 +270,38 @@ describe("PreviewFrameAuthorizations", () => {
     ).toBeNull();
   });
 
+  it("normalizes WSS to the exact admitted HTTPS host and port without admitting siblings", () => {
+    const grants = new PreviewFrameAuthorizations();
+    const now = 1_800_000_000_000;
+    const capability = `zwp_${"a".repeat(43)}`;
+    expect(
+      grants.authorizeCloudPreview(
+        {
+          frameName: "zeros-browser-hmr",
+          origin: "https://owned.preview.test:8443",
+          expiresAt: now + 60_000,
+          capability,
+        },
+        101,
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      grants.requestHeaders(
+        "wss://owned.preview.test:8443/hmr",
+        [101],
+        now + 1,
+      )?.["x-zeros-preview-capability"],
+    ).toBe(capability);
+    for (const [url, ids] of [
+      ["wss://owned.preview.test:8443/hmr", [102]],
+      ["wss://owned.preview.test:8444/hmr", [101]],
+      ["ws://owned.preview.test:8443/hmr", [101]],
+      ["wss://other.preview.test:8443/hmr", [101]],
+    ] as const)
+      expect(grants.requestHeaders(url, ids, now + 1)).toBeNull();
+  });
+
   it("allows nested preview frames but never a sibling renderer request", () => {
     const grants = new PreviewFrameAuthorizations();
     const now = 1_800_000_000_000;

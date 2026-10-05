@@ -1,0 +1,1 @@
+{"component":"installer","exitCode":1,"failedChecks":["manifest_digest","manifest_digest"],"ok":false,"schema":"zeros.diagnostic/v1","stage":"verify_manifest","timedOut":false}

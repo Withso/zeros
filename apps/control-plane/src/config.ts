@@ -1,4 +1,6 @@
 import type { CodexFingerprintKeys } from "./cloud-workspaces/codex-fingerprint-keys.js";
+import type { RuntimeOidcConfig } from "./cloud-workspaces/runtime-oidc.js";
+import type { RuntimeArtifactStoreConfig } from "./cloud-workspaces/runtime-artifact-store.js";
 import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type CloudAgentCredentialConfig } from "./cloud-workspaces/agent-credential-config.js";
 // ──────────────────────────────────────────────────────────
 // Config — every knob comes from the environment, validated at boot.
@@ -22,6 +24,7 @@ import { validateDatabaseConnections } from "./database-config.js";
 import { developmentIdentity, type DevelopmentIdentity } from "./development-environment.js";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
+import { loadCloudRuntimeConfig, type CloudRuntimeConfig } from "./cloud-workspaces/runtime-config.js";
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
 import { validateReleaseLedgerUrl } from "./client-compatibility.js";
@@ -187,6 +190,7 @@ export type FeedbackBackendConfig = {
 };
 
 export type CloudWorkspaceBackendConfig = {
+  runtime?: CloudRuntimeConfig;
   /** Managed default only. Explicit customer connections select independently. */
   provider: CloudWorkspaceProviderName;
   providerProfiles?: Readonly<
@@ -198,6 +202,7 @@ export type CloudWorkspaceBackendConfig = {
    * legacy flat endpoint/target is used only when Daytona is the default. */
   daytonaConnection?: { apiUrl: string; target: string };
   boat?: { accountScope: string; ttlSeconds: number | null; billingOrg: string };
+  computerMaxConcurrentBuilds?: number;
   computePolicy?: import("./cloud-workspaces/compute-leases.js").ManagedComputePolicy;
   apiKey: string;
   apiUrl: string;
@@ -342,6 +347,13 @@ export type Config = {
   cloudWorkspaces: CloudWorkspaceBackendConfig | null;
   cloudAgentCredentials?: CloudAgentCredentialConfig;
   selectedCloudWorker?: SelectedCloudWorker | null;
+  cloudRuntimePublication?: CloudRuntimePublicationConfig;
+  /** Metadata for release identity; workspace selection is owned separately. */
+  cloudWorkspaceNewRuntimeProfile?: "legacy" | "v4";
+};
+
+export type CloudRuntimePublicationConfig = RuntimeOidcConfig & RuntimeArtifactStoreConfig & {
+  enabled: boolean;
 };
 
 export type SelectedCloudWorker = {
@@ -355,6 +367,7 @@ export type SelectedCloudWorker = {
 const CloudWorkspaceEnvSchema = z.object({
   CLOUD_WORKSPACES_ENABLED: z.literal("true"),
   CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
+  CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: z.coerce.number().int().min(1).max(32).default(2),
   // Managed Boat Linux VMs are the default; Daytona must be selected explicitly.
   CLOUD_WORKSPACE_PROVIDER: z.enum(["daytona", "boat"]).default("boat"),
   DAYTONA_API_KEY: z.string().trim().min(16).max(4096).optional(),
@@ -1076,6 +1089,7 @@ function loadCloudWorkspaceConfig(
   env: NodeJS.ProcessEnv,
   github: GithubBackendConfig | null,
 ): CloudWorkspaceBackendConfig | null {
+  const runtime = loadCloudRuntimeConfig(env);
   const enabled = env.CLOUD_WORKSPACES_ENABLED?.trim().toLowerCase();
   const backgroundEnabled = env.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED?.trim().toLowerCase();
   if (backgroundEnabled && backgroundEnabled !== "true" && backgroundEnabled !== "false") {
@@ -1507,6 +1521,7 @@ function loadCloudWorkspaceConfig(
     };
   }
   return {
+    runtime,
     provider: value.CLOUD_WORKSPACE_PROVIDER,
     ...(value.CLOUD_WORKSPACE_PROVIDER === "boat"
       ? {
@@ -1556,6 +1571,7 @@ function loadCloudWorkspaceConfig(
     autoArchiveMinutes: value.CLOUD_WORKSPACE_AUTO_ARCHIVE_MINUTES,
     reconcileIntervalMs: value.CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS,
     backgroundWorkersEnabled: value.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED === "true",
+    computerMaxConcurrentBuilds: value.CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS,
     providerCredentialKeys,
     settingsSecretEncryptionKeys,
     ...(codexRefreshFingerprints?{codexRefreshFingerprints}:{}),
@@ -1662,6 +1678,49 @@ function validateRailwayEnvironment(
   }
 }
 
+const CloudRuntimePublicationEnvSchema = z.object({
+  CLOUD_RUNTIME_PUBLICATION_ENABLED: z.enum(["true", "false"]).default("false"),
+  CLOUD_RUNTIME_OIDC_AUDIENCE: z.string().trim().min(1).max(256).refine(value => !/\s/.test(value)).optional(),
+  CLOUD_RUNTIME_OIDC_REPOSITORY: z.string().max(140).regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/).default("Withso/zeros"),
+  CLOUD_RUNTIME_OIDC_ENVIRONMENT: z.enum(["alpha", ""]).default("alpha"),
+  CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: z.enum(["legacy", "v4"]).default("legacy"),
+});
+
+function loadCloudRuntimePublicationConfig(env: NodeJS.ProcessEnv, channel: Config["deploymentChannel"]): {
+  publication: CloudRuntimePublicationConfig; newWorkspaceProfile: "legacy" | "v4";
+} {
+  const parsed = CloudRuntimePublicationEnvSchema.safeParse(env);
+  if (!parsed.success) {
+    // Enum/url validators can quote their input in issue messages. Diagnostics
+    // at this credential boundary expose environment variable names only.
+    throw new Error("Invalid runtime publication environment: " + parsed.error.issues.map(issue => issue.path.join(".")).join(", "));
+  }
+  const values = parsed.data;
+  const enabled = values.CLOUD_RUNTIME_PUBLICATION_ENABLED === "true";
+  let s3: CloudRuntimePublicationConfig["s3"] = null;
+  if (enabled) {
+    if (channel !== "alpha") throw new Error("Invalid runtime publication environment: publication requires the Alpha channel");
+    const artifacts = CloudWorkspaceDurabilityEnvSchema.pick({ CLOUD_WORKSPACE_S3_ENDPOINT: true, CLOUD_WORKSPACE_S3_REGION: true,
+      CLOUD_WORKSPACE_S3_BUCKET: true, CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: true, CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: true }).safeParse(env);
+    if (!artifacts.success || !artifacts.data.CLOUD_WORKSPACE_S3_ENDPOINT || !artifacts.data.CLOUD_WORKSPACE_S3_BUCKET ||
+        !artifacts.data.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID || !artifacts.data.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY) {
+      throw new Error("Invalid runtime publication environment: all CLOUD_WORKSPACE_S3 endpoint, bucket and credential fields are required");
+    }
+    const store = artifacts.data;
+    let endpoint: string;
+    try {
+      endpoint = validatedServiceUrl(store.CLOUD_WORKSPACE_S3_ENDPOINT!, "CLOUD_WORKSPACE_S3_ENDPOINT", { allowPath: false });
+    } catch {
+      throw new Error("Invalid runtime publication environment: CLOUD_WORKSPACE_S3_ENDPOINT must be an HTTPS origin");
+    }
+    s3 = { endpoint, region: store.CLOUD_WORKSPACE_S3_REGION, bucket: store.CLOUD_WORKSPACE_S3_BUCKET!,
+      accessKeyId: store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID!, secretAccessKey: store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY! };
+  }
+  return { publication: { enabled, audience: values.CLOUD_RUNTIME_OIDC_AUDIENCE ?? `zeros-control-plane-${channel}`,
+    repository: values.CLOUD_RUNTIME_OIDC_REPOSITORY, environment: values.CLOUD_RUNTIME_OIDC_ENVIRONMENT || null, s3 },
+    newWorkspaceProfile: values.CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE };
+}
+
 /** Alerting is optional: an unusable mailbox disables it with a warning
  * instead of failing boot. */
 function loadOperationsAlertEmail(env: NodeJS.ProcessEnv, diagnostics: ConfigDiagnostics): string | null {
@@ -1683,6 +1742,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     throw new Error(`Invalid environment: ${missing}`);
   }
   const e = parsed.data;
+  const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development").trim().toLowerCase();
+  const deploymentChannel = channel === "alpha" || channel === "beta" || channel === "production" ? channel : "development";
+  const runtime = loadCloudRuntimePublicationConfig(env, deploymentChannel);
   validateDatabaseConnections(e);
   const migrationRole = validateMigrationRole(e.DATABASE_MIGRATION_ROLE);
   const auth = loadAuthConfig(e);
@@ -1747,21 +1809,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     ...(development ? { development } : {}),
     isProduction: e.NODE_ENV === "production",
     desktopReleaseLedgerUrl: validateReleaseLedgerUrl(e.DESKTOP_RELEASE_LEDGER_URL),
-    deploymentChannel: (() => {
-      const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development")
-        .trim()
-        .toLowerCase();
-      return channel === "alpha" ||
-        channel === "beta" ||
-        channel === "production"
-        ? channel
-        : "development";
-    })(),
+    deploymentChannel,
     github,
     feedback: loadFeedbackConfig(env, diagnostics),
     chatTitleApiKey: e.CHAT_TITLE_OPENAI_API_KEY || null,
     cloudWorkspaces: loadCloudWorkspaceConfig(env, github),
     cloudAgentCredentials: loadCloudAgentCredentialConfig(env),
     selectedCloudWorker: loadSelectedCloudWorker(env),
+    cloudRuntimePublication: runtime.publication,
+    cloudWorkspaceNewRuntimeProfile: runtime.newWorkspaceProfile,
   };
 }

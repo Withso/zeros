@@ -122,19 +122,7 @@ async function exerciseDesignWorkbench({ page, check }) {
     ),
   );
   for (const suffix of ["second", "third"]) {
-    await page.evaluate(async (value) => {
-      const { useWorkspaceStore } =
-        await import("/apps/desktop/src/renderer/state/store.tsx");
-      useWorkspaceStore.setState({
-        activeChatId: null,
-        newAgentFolder: `/Users/demo/zeros/design workspaces/north-one/launch-system-${value}`,
-      });
-    }, suffix);
-    await page
-      .locator(
-        `[data-design-retained-workspace="ws_design_harness_${suffix}"] [data-design-canvas-viewport]`,
-      )
-      .waitFor({ state: "visible" });
+    await switchWorkspace(page, `-${suffix}`);
   }
   check(
     "the Design canvas deck retains at most two workspace owners",
@@ -161,37 +149,45 @@ async function exerciseDesignWorkbench({ page, check }) {
   );
 }
 
+async function switchWorkspace(page, suffix) {
+  // Unlike evaluate, this wait re-enters after navigation destroys its context.
+  // Keep selection idempotent; the active canvas below signals completion.
+  await page.waitForFunction(async (value) => {
+    const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/store.tsx");
+    const newAgentFolder = `/Users/demo/zeros/design workspaces/north-one/launch-system${value}`;
+    const current = useWorkspaceStore.getState();
+    if (current.activeChatId !== null || current.newAgentFolder !== newAgentFolder) {
+      useWorkspaceStore.setState({ activeChatId: null, newAgentFolder });
+    }
+    return true;
+  }, suffix);
+  const workspaceId = `ws_design_harness${suffix.replace("-", "_")}`;
+  await page
+    .locator(`[data-design-retained-workspace="${workspaceId}"]:not([inert]) [data-design-canvas-viewport]`)
+    .waitFor({ state: "visible" });
+}
+
 /** Both owners remain mounted while an app-wide preference changes. */
 async function exerciseSharedLayersHeight({ page, check, canvas }) {
   const second = page.locator('[data-design-retained-workspace="ws_design_harness_second"]');
-  const switchWorkspace = async (suffix) => {
-    await page.evaluate(async (value) => {
-      const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/store.tsx");
-      useWorkspaceStore.setState({
-        activeChatId: null,
-        newAgentFolder: `/Users/demo/zeros/design workspaces/north-one/launch-system${value}`,
-      });
-    }, suffix);
-    await (suffix ? second : canvas).locator("[data-design-canvas-viewport]").waitFor({ state: "visible" });
-  };
   const split = (owner) => owner.getByRole("separator", { name: "Resize Layers panel" });
   const height = async (owner) => Math.round((await owner.locator("[data-design-layers-slot]").boundingBox()).height);
   await split(canvas).dblclick();
-  await switchWorkspace("-second");
+  await switchWorkspace(page, "-second");
   await page.evaluate(() => {
     window.__retainedSecondLayers = document.querySelector('[data-design-retained-workspace="ws_design_harness_second"] [data-design-layers-slot]');
   });
-  await switchWorkspace("");
+  await switchWorkspace(page, "");
   await split(canvas).press("Shift+ArrowDown");
   const committed = await height(canvas);
-  await switchWorkspace("-second");
+  await switchWorkspace(page, "-second");
   check(
     "a retained workspace adopts the app-wide Layers height before it is shown",
     committed === 272 && (await height(second)) === committed &&
       await page.evaluate(() => window.__retainedSecondLayers === document.querySelector('[data-design-retained-workspace="ws_design_harness_second"] [data-design-layers-slot]')),
   );
   await split(second).press("Shift+ArrowDown");
-  await switchWorkspace("");
+  await switchWorkspace(page, "");
   check(
     "resizing the second workspace also updates the first retained Layers panel",
     (await height(canvas)) === committed + 32 &&
@@ -203,13 +199,13 @@ async function exerciseSharedLayersHeight({ page, check, canvas }) {
     localStorage.setItem(key, "336");
     window.dispatchEvent(new StorageEvent("storage", { key, newValue: "336" }));
   });
-  await switchWorkspace("-second");
+  await switchWorkspace(page, "-second");
   check(
     "a height preference from another window reaches retained panels and separator values",
     (await height(second)) === 336 &&
       Number(await split(second).getAttribute("aria-valuenow")) === 336,
   );
-  await switchWorkspace("");
+  await switchWorkspace(page, "");
   await split(canvas).dblclick();
 }
 

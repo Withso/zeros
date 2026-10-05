@@ -1,6 +1,8 @@
 import { devConnectionRuntime } from "../dev-connections/runtime.js";
-import {createHash,randomUUID} from "node:crypto";
-import { CloudRepositoryMcpSchema } from "./mcp-contract.js";
+import {createHash,createHmac,randomUUID} from "node:crypto";
+import { CloudRepositoryMcpSchema, customizationHistoryAuthority } from "./mcp-contract.js";
+import { resolveCloudComputerExecutionEnvironment } from "./computer-environment.js";
+import type { SecretEncryptionConfiguration } from "./settings.js";
 import { admitCustomization, validateCustomizationSnapshot } from "./mcp-admission.js";
 import { cloudWorkspaceCustomization, type CloudCustomizationOperationSchema } from "./customization-workspace.js";
 import type pg from "pg";
@@ -16,6 +18,11 @@ import {readCloudAgentComputeTrust} from "./agent-compute-trust.js";
 import {DatabaseCodexAuthRenewal} from "./codex-auth-renewal.js";
 import {openCloudAgentCredential,type CloudAgentCredentialKind,type CloudAgentCredentialKeys} from "./agent-credential-envelope.js";
 import {CloudBackgroundOperationSchema,readCloudBackgroundTasks,writeCloudBackgroundTasks} from "./agent-background-tasks.js";
+import {cloudRuntimeQualificationMode} from "./runtime-config.js";
+import {runtimeCredentialQualificationJoin} from "./runtime-selection.js";
+import {adminComputerToolsVersion,computerToolsRejected} from "./computer-admin-workspaces.js";
+import {CloudComputerToolExecutionRequestSchema} from "./computer-tools-contract.js";
+import {ComputerToolConflictError,executeComputerTool,type ComputerToolsDependencies} from "./computer-tools.js";
 
 const uuid=z.string().uuid(),identity=z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
 export const CloudAgentExecutionAdmissionSchema=z.object({executionId:identity,delegationId:uuid,provider:z.enum(["claude","cursor","codex"]),model:CloudAgentModelSchema,
@@ -40,7 +47,7 @@ function leaseAdmission(lease:Lease):Admission{
 type Session={id:string;actor_user_id:string;device_id:string;device_key_version:string;actor_fingerprint:string};
 type Binding={material_mode?:string;id:string;owner_user_id:string;kind:CloudAgentCredentialKind;revision:string;current_version:number;key_version:number;
   nonce:Buffer;ciphertext:Buffer;auth_tag:Buffer;lease_expires_at:Date;grantee_user_id:string;owner_fingerprint:string;grantee_fingerprint:string;
-  compute_fingerprint:string;compute_trust:string;material_ready:boolean;refresh_due:boolean;native_capabilities:Record<string,unknown>|null};
+  compute_fingerprint:string;compute_trust:string;material_ready:boolean;refresh_due:boolean;native_capabilities:Record<string,unknown>|null;computer_environment:boolean};
 function rejected():never{throw new HttpError(403,"cloud_agent_authority_rejected","Agent execution authority is unavailable");}
 
 class CredentialPublicationBusy extends HttpError {
@@ -97,6 +104,8 @@ async function credentialBinding(tx:Tx,scope:EngineScope,input:Admission,actor:N
     const row=(await tx.query<Binding>(`SELECT credential.id,credential.owner_user_id,credential.kind,credential.revision,credential.current_version,
         material.material_mode,material.key_version,material.nonce,material.ciphertext,material.auth_tag,delegation.grantee_user_id,delegation.owner_fingerprint,delegation.grantee_fingerprint,
         delegation.compute_fingerprint,delegation.compute_trust,qualification.native_capabilities,
+        EXISTS (SELECT 1 FROM cloud_workspace_computer_sources source WHERE source.workspace_id=generation.workspace_id
+          AND source.generation=generation.generation AND source.org_id=generation.org_id) AS computer_environment,
         (material.material_expires_at IS NULL OR material.material_expires_at>clock_timestamp()+interval '1 minute') AS material_ready,
         material.material_expires_at<=clock_timestamp()+interval '10 minutes' AS refresh_due,
         least(clock_timestamp()+interval '45 seconds',delegation.expires_at,material.material_expires_at) AS lease_expires_at
@@ -107,16 +116,13 @@ async function credentialBinding(tx:Tx,scope:EngineScope,input:Admission,actor:N
       JOIN cloud_workspace_engine_instances engine ON engine.id=$5 AND engine.workspace_id=delegation.workspace_id AND engine.org_id=delegation.org_id
         AND engine.generation=$6 AND engine.actor_protocol_version=2
       JOIN cloud_workspace_generations generation ON generation.workspace_id=engine.workspace_id AND generation.org_id=engine.org_id AND generation.generation=engine.generation
-      JOIN cloud_agent_runtime_qualifications qualification ON qualification.provider=generation.provider::text AND qualification.image_ref=generation.image_ref
-        AND qualification.runtime_contract_sha256=engine.agent_runtime_contract_sha256 AND qualification.profile=engine.agent_runtime_profile
-        AND qualification.credential_kind=credential.kind AND qualification.enabled
-        AND (NOT $8::boolean OR qualification.mcp_qualified)
+      ${runtimeCredentialQualificationJoin("$10", "$8::boolean")}
         AND ($9::text IS NULL OR (qualification.native_capabilities->>'version'='1' AND qualification.native_capabilities->>$9='true'))
       WHERE delegation.id=$1 AND delegation.workspace_id=$2 AND delegation.org_id=$3 AND delegation.grantee_user_id=$4
         AND credential.revoked_at IS NULL AND delegation.revoked_at IS NULL AND delegation.expires_at>clock_timestamp()+interval '5 seconds'
         AND $7=ANY(delegation.models)
       FOR SHARE OF delegation,material`,
-    [input.delegationId,scope.workspaceId,scope.organizationId,actor.actorUserId,scope.engineInstanceId,scope.generation,input.model,!!input.customization,actor.nativeCapability??null])).rows[0];
+    [input.delegationId,scope.workspaceId,scope.organizationId,actor.actorUserId,scope.engineInstanceId,scope.generation,input.model,!!input.customization,actor.nativeCapability??null,cloudRuntimeQualificationMode()])).rows[0];
     if(!row||(!allowStale&&!row.material_ready))rejected();
     if(!row.kind.startsWith(`${input.provider}-`))rejected();
     const compute=await readCloudAgentComputeTrust(tx,scope.workspaceId);
@@ -154,6 +160,8 @@ export async function assertCloudAgentExecutionActor(tx:Tx,scope:EngineScope,exe
   if(lease.background_deadline&&actor.actorUserId!==original.actorUserId)rejected();
   if(lease.customization_digest)await validateCustomizationSnapshot(tx,lease.id,actor.actorUserId);
   const originalBinding=await credentialBinding(tx,scope,input,original);
+  // A shared credential grant never grants another member's personal env.
+  if(originalBinding.computer_environment&&actor.actorUserId!==original.actorUserId)rejected();
   if(originalBinding.revision!==lease.credential_revision||originalBinding.id!==lease.credential_id)rejected();
   const grant=(await tx.query<{id:string}>(`SELECT id FROM cloud_agent_credential_delegations
     WHERE credential_id=$1 AND credential_revision=$2 AND workspace_id=$3 AND org_id=$4 AND grantee_user_id=$5
@@ -177,13 +185,34 @@ export async function assertCloudAgentExecutionActor(tx:Tx,scope:EngineScope,exe
  * a qualified provider/image. It cannot substitute the compute sponsor. */
 export class DatabaseCloudAgentExecutionService {
   constructor(private readonly pool:pg.Pool,private readonly encryption:CloudAgentCredentialKeys,private readonly workosEnabled:boolean,
-    private readonly codexRenewal=new DatabaseCodexAuthRenewal(pool,encryption)){}
+    private readonly codexRenewal=new DatabaseCodexAuthRenewal(pool,encryption),
+    private readonly computerTools?:ComputerToolsDependencies,private readonly settingsEncryption:SecretEncryptionConfiguration={}){}
 
   private transaction<T>(operation:(tx:Tx)=>Promise<T>){
     return withCloudAgentCredentialRetry(()=>withSystemTx(this.pool,operation));
   }
   customization(scope:EngineScope,actorSessionId:string,operation:z.infer<typeof CloudCustomizationOperationSchema>,params:unknown){
     return cloudWorkspaceCustomization(this.pool,this.encryption,this.workosEnabled,scope,actorSessionId,operation,params);
+  }
+  private async environment(tx:Tx,scope:EngineScope,actorUserId:string) {
+    const values=await resolveCloudComputerExecutionEnvironment(tx,scope,actorUserId,this.settingsEncryption);
+    if(values===null)rejected();
+    const history=customizationHistoryAuthority(scope.organizationId,scope.workspaceId,actorUserId,this.encryption);
+    const key=Buffer.from(this.encryption.keys[this.encryption.currentKeyVersion]!,"base64url");
+    try {
+      const revision=createHmac("sha256",key).update(JSON.stringify(["zeros-computer-environment-v1",scope.workspaceId,scope.generation,actorUserId,values])).digest("hex");
+      return {version:1 as const,revision,values,history};
+    } finally { key.fill(0); }
+  }
+  async terminalEnvironment(scope:EngineScope,actorSessionId:string) {
+    return this.transaction(async tx=>{
+      await assertCurrentCloudEngineAuthority(tx,{...scope,workosEnabled:this.workosEnabled});
+      const actor=await assertCloudActorSession(tx,scope,actorSessionId,"run");
+      const environment=await resolveCloudComputerExecutionEnvironment(tx,scope,actor.actorUserId,this.settingsEncryption);
+      await assertCloudActorSession(tx,scope,actorSessionId,"run");
+      await assertCloudEngineAuthorityDeadline(tx,scope.engineInstanceId,this.workosEnabled);
+      return {version:1 as const,environment};
+    });
   }
   private async material(binding:Binding,tx:Tx,scope:EngineScope,input:Admission,forceVersion?:number){
     if(binding.material_mode==='dev-reference') {
@@ -204,10 +233,10 @@ export class DatabaseCloudAgentExecutionService {
     if(material.kind==="codex-chatgpt")return {kind:material.kind,accessToken:material.accessToken,accountId:material.accountId,expiresAt:material.expiresAt};
     return material.kind==="claude-setup-token"?{kind:material.kind,accessToken:material.accessToken}:{kind:material.kind,apiKey:material.apiKey};
   }
-  private authority(scope:EngineScope,input:Admission,actor:CloudRecordedActor,binding:Binding,customizationDigest?:string){
+  private authority(scope:EngineScope,input:Admission,actor:CloudRecordedActor,binding:Binding,customizationDigest?:string,environmentRevision?:string){
     return createHash("sha256").update(JSON.stringify([scope.workspaceId,scope.generation,scope.engineInstanceId,actor.actorUserId,
       actor.fingerprint,actor.sourceSessionId,input.delegationId,binding.id,binding.revision,input.model,binding.kind,binding.compute_fingerprint,binding.compute_trust,
-      ...(customizationDigest?[customizationDigest]:[])])).digest("hex");
+      ...(customizationDigest?[customizationDigest]:[]),...(environmentRevision?[environmentRevision]:[])])).digest("hex");
   }
 
   private async publicationAuthority(tx:Tx,scope:EngineScope,input:Admission,actor:CloudRecordedActor,retained:boolean){
@@ -227,7 +256,7 @@ export class DatabaseCloudAgentExecutionService {
     });
   }
 
-  async admit(scope:EngineScope,value:unknown,includeGitAuthor=false,nativeCapabilitiesVersion?:1,backgroundTasksVersion?:1){
+  async admit(scope:EngineScope,value:unknown,includeGitAuthor=false,nativeCapabilitiesVersion?:1,backgroundTasksVersion?:1,computerToolsVersion?:1,environmentVersion?:1){
     const parsed=CloudAgentExecutionAdmissionSchema.safeParse(value);if(!parsed.success)rejected();const input=parsed.data;
     const dev=devConnectionRuntime(this.pool,this.encryption);
     if(dev)await dev.consumeInvalidations();
@@ -243,6 +272,7 @@ export class DatabaseCloudAgentExecutionService {
         if(!(await tx.query("SELECT 1 FROM cloud_agent_execution_leases WHERE id=$1 AND expires_at>clock_timestamp()",[previous.id])).rowCount)rejected();
       }
       const actor=await source(tx,scope,input,previous?.actor_source_session_id),binding=await credentialBinding(tx,scope,input,actor,true);
+      if(binding.computer_environment&&environmentVersion!==1)throw new HttpError(409,"computer_environment_runtime_required","Update the cloud runtime to use this environment.");
       if(dev&&binding.material_mode!=='dev-reference')rejected();
       if(previous&&previous.credential_revision!==binding.revision)rejected();
       if(binding.material_mode!=="dev-reference"&&attempt===0&&binding.kind==="codex-chatgpt"&&binding.refresh_due){
@@ -264,6 +294,7 @@ export class DatabaseCloudAgentExecutionService {
       if(backgroundTasksVersion===1&&!previous)await tx.query("UPDATE cloud_agent_execution_leases SET background_enabled=true WHERE id=$1",[leaseId]);
       const customization=input.customization?await admitCustomization(tx,{organizationId:scope.organizationId,workspaceId:scope.workspaceId,actorUserId:actor.actorUserId},
         leaseId,input.customization.repositoryServers,this.encryption,!!previous,input.customization.version===2):undefined;
+      const environment=binding.computer_environment?await this.environment(tx,scope,actor.actorUserId):undefined;
       await this.publicationAuthority(tx,scope,input,actor,!!previous);
       if(customization&&!(await tx.query("SELECT 1 FROM cloud_agent_execution_leases WHERE id=$1 AND released_at IS NULL AND expires_at>clock_timestamp()",[leaseId])).rowCount)rejected();
       const material=await this.material(binding,tx,scope,input);
@@ -274,8 +305,18 @@ export class DatabaseCloudAgentExecutionService {
           WHERE id=$1 AND released_at IS NULL AND expires_at>clock_timestamp() AND $2>clock_timestamp() RETURNING expires_at`,[leaseId,binding.lease_expires_at])).rows[0];
         if(!bounded)rejected();publishedExpiry=bounded.expires_at;
       }
-      const authorityId=this.authority(scope,input,actor,binding,customization?.digest);
+      const authorityId=this.authority(scope,input,actor,binding,customization?.digest,environment?.revision);
+      const computerVersion=await adminComputerToolsVersion(tx,scope,actor.actorUserId,binding.kind);
+      if(computerVersion&&(!this.computerTools||computerToolsVersion!==1))
+        throw new HttpError(409,"cloud_computer_tools_update_required","Update the cloud runtime to configure this computer.");
+      // The staff/marker/runtime checks can wait; never publish an expired lease.
+      if(computerVersion){
+        await this.publicationAuthority(tx,scope,input,actor,!!previous);
+        if(!(await tx.query("SELECT 1 FROM cloud_agent_execution_leases WHERE id=$1 AND released_at IS NULL AND expires_at>clock_timestamp()",[leaseId])).rowCount)rejected();
+      }
       return {leaseId,authorityId,expiresAt:publishedExpiry.toISOString(),credentialVersion:binding.current_version,
+        ...(computerVersion?{computerToolsVersion:computerVersion}:{}),
+        ...(environment?{environment}:{}),
         ...(backgroundTasksVersion===1&&(!previous||previous.background_enabled)?{backgroundTasksVersion:1 as const}:{}),
         credentialKind:binding.kind,provider:input.provider,model:input.model,material,...(nativeCapabilitiesVersion===1&&binding.native_capabilities?{nativeCapabilities:binding.native_capabilities}:{}),...(customization?{customization}:{}),
         ...(includeGitAuthor?{gitAuthor:await readGithubGitAuthor(tx,actor.actorUserId)}:{})};
@@ -317,10 +358,12 @@ export class DatabaseCloudAgentExecutionService {
         WHERE id=$1 AND released_at IS NULL AND expires_at>clock_timestamp()
           AND (background_deadline IS NULL OR background_deadline>clock_timestamp())`,[leaseId,renew,binding.lease_expires_at]);
       if(!current.rowCount)rejected();
+      const environment=binding.computer_environment?await this.environment(tx,scope,actor.actorUserId):undefined;
       await this.publicationAuthority(tx,scope,input,actor,true);
       return {leaseId,expiresAt:(renew?binding.lease_expires_at:lease.expires_at).toISOString(),credentialVersion:binding.current_version,
+        ...(environment?{environmentRevision:environment.revision}:{}),
         ...(nativeCapabilitiesVersion===1&&binding.native_capabilities?{nativeCapabilities:binding.native_capabilities}:{}),
-        ...(credentialVersion!==undefined&&credentialVersion<binding.current_version?{rotation:{authorityId:this.authority(scope,input,actor,binding,lease.customization_digest??undefined),material:remoteMaterial??await this.material(binding,tx,scope,input)}}:{})};
+        ...(credentialVersion!==undefined&&credentialVersion<binding.current_version?{rotation:{authorityId:this.authority(scope,input,actor,binding,lease.customization_digest??undefined,environment?.revision),material:remoteMaterial??await this.material(binding,tx,scope,input)}}:{})};
     });
     if("renewal" in result){await this.codexRenewal.complete(result.renewal!);continue;}
     return result;
@@ -403,6 +446,59 @@ export class DatabaseCloudAgentExecutionService {
         WHERE task.lease_id=lease.id AND lease.id=$1 AND lease.workspace_id=$2 AND lease.org_id=$3 AND lease.engine_instance_id=$4 AND lease.generation=$5`,
         [leaseId,scope.workspaceId,scope.organizationId,scope.engineInstanceId,scope.generation]);
       return {released:true};
+    });
+  }
+
+  async computerTool(scope:EngineScope,value:unknown){
+    const parsed=CloudComputerToolExecutionRequestSchema.safeParse(value);if(!parsed.success)rejected();
+    const request=parsed.data;
+    const dev=devConnectionRuntime(this.pool,this.encryption);if(dev)await dev.consumeInvalidations();
+    return this.transaction(async tx=>{
+      await assertCurrentCloudEngineAuthority(tx,{...scope,workosEnabled:this.workosEnabled});
+      const lease=(await tx.query<Lease>(`SELECT * FROM cloud_agent_execution_leases
+        WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND engine_instance_id=$4 AND generation=$5
+          AND released_at IS NULL AND expires_at>clock_timestamp()
+          AND (background_deadline IS NULL OR background_deadline>clock_timestamp()) FOR UPDATE`,
+        [request.leaseId,scope.workspaceId,scope.organizationId,scope.engineInstanceId,scope.generation])).rows[0];
+      if(!lease)rejected();
+      const input=leaseAdmission(lease),actor=await source(tx,scope,input,lease.actor_source_session_id);
+      // Recheck the admitted consent/revision without opening credential values.
+      // The admin check below shares admission/renewal's complete runtime
+      // qualification predicate and always requires MCP qualification.
+      const consent=(await tx.query<{
+        kind:string;owner_user_id:string;owner_fingerprint:string;grantee_fingerprint:string;compute_fingerprint:string;compute_trust:string;
+      }>(`SELECT credential.kind,credential.owner_user_id,delegation.owner_fingerprint,delegation.grantee_fingerprint,
+          delegation.compute_fingerprint,delegation.compute_trust
+        FROM cloud_agent_credentials credential
+        JOIN cloud_agent_credential_versions material ON material.credential_id=credential.id AND material.version=credential.current_version
+        JOIN cloud_agent_credential_delegations delegation ON delegation.credential_id=credential.id AND delegation.credential_revision=credential.revision
+        WHERE credential.id=$1 AND credential.revision=$2 AND delegation.id=$3
+          AND delegation.workspace_id=$4 AND delegation.org_id=$5 AND delegation.grantee_user_id=$6
+          AND credential.revoked_at IS NULL AND delegation.revoked_at IS NULL
+          AND delegation.expires_at>clock_timestamp() AND $7=ANY(delegation.models)
+          AND (material.material_expires_at IS NULL OR material.material_expires_at>clock_timestamp())
+        FOR SHARE OF credential,delegation,material SKIP LOCKED`,
+        [lease.credential_id,lease.credential_revision,lease.delegation_id,scope.workspaceId,scope.organizationId,actor.actorUserId,lease.model])).rows[0];
+      if(!consent||!consent.kind.startsWith(`${lease.provider}-`)||consent.grantee_fingerprint!==actor.fingerprint)rejected();
+      const compute=await readCloudAgentComputeTrust(tx,scope.workspaceId);
+      const owner=await authorizeCloudWorkspaceActor(tx,{...scope,actorUserId:consent.owner_user_id,capability:"run"});
+      if(!compute||compute.fingerprint!==consent.compute_fingerprint||compute.trust!==consent.compute_trust||owner.fingerprint!==consent.owner_fingerprint)rejected();
+      if(await adminComputerToolsVersion(tx,scope,actor.actorUserId,consent.kind)!==1||!this.computerTools)computerToolsRejected();
+      if(lease.customization_digest)await validateCustomizationSnapshot(tx,lease.id,actor.actorUserId);
+      const recheck=async()=>{
+        await this.publicationAuthority(tx,scope,input,actor,true);
+        if(!(await tx.query(`SELECT 1 FROM cloud_agent_execution_leases WHERE id=$1 AND released_at IS NULL
+          AND expires_at>clock_timestamp() AND (background_deadline IS NULL OR background_deadline>clock_timestamp())`,[lease.id])).rowCount)rejected();
+      };
+      try{
+        const result=await executeComputerTool(tx,{orgId:scope.organizationId,actorUserId:actor.actorUserId},request,this.computerTools);
+        await recheck();return result;
+      }catch(error){
+        // An authorized CAS conflict remains a typed 409, but never leaks head
+        // metadata after its execution deadline elapsed while waiting.
+        if(error instanceof ComputerToolConflictError)await recheck();
+        throw error;
+      }
     });
   }
 }

@@ -16,35 +16,8 @@
 # ──────────────────────────────────────────────────────────
 set -euo pipefail
 
-export PATH="/opt/zeros-runtime/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 unset BASH_ENV ENV NODE_OPTIONS NODE_PATH LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD
-
-ENGINE_DIR="/opt/zeros"
-REPO_DIR="${ZEROS_REPO_DIR:-/srv/zeros/workspace}"
-RUNTIME="/opt/zeros-runtime/bin/node"
-if [[ ! -x "$RUNTIME" ]]; then RUNTIME="/usr/local/bin/node"; fi
-
-LOG="/srv/zeros/log/engine.log"
-WORKER_UID="10001"
-WORKER_GID="10001"
-
-# Deployment authority is fixed by the image and root-owned marker. Sandbox
-# create-time variables may configure the connection and provider credentials,
-# but can never redirect a privileged runtime into the writable checkout.
-export HOME="/srv/zeros/home/agent"
-export USER="zeros-agent"
-export LOGNAME="zeros-agent"
-export SHELL="/bin/bash"
-export ZEROS_DATA_DIR="/srv/zeros/state"
-export ZEROS_WORKSPACES_DIR="/srv/zeros/state/workspaces"
-export ZEROS_PTY_HOST_RUNTIME="$RUNTIME"
-export ZEROS_PTY_HOST_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/pty/pty-host.cjs"
-export ZEROS_CURSOR_HOST_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs"
-export ZEROS_ZSR_SUPERVISOR_RUNTIME="$RUNTIME"
-export ZEROS_ZSR_SUPERVISOR_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs"
-export ZEROS_ZSR_BWRAP_PATH="/usr/bin/bwrap"
-export ZEROS_ZSR_SETPRIV_PATH="/usr/bin/setpriv"
-
 
 if [[ -z "${ZEROS_CLOUD_PORT:-}" ]]; then
   echo "[start-engine] FATAL: ZEROS_CLOUD_PORT is not set" >&2
@@ -72,15 +45,92 @@ if [[ ! -f /etc/zeros/cloud-worker.json || -L /etc/zeros/cloud-worker.json ]]; t
   echo "[start-engine] FATAL: immutable cloud-worker marker is missing" >&2
   exit 1
 fi
-PROFILE_VERSION=$("$RUNTIME" --input-type=module -e 'import {readCloudHostRuntimeProfile} from "/opt/zeros-runtime/lib/zeros/cloud-runtime-profile.mjs"; process.stdout.write(String(readCloudHostRuntimeProfile().version));')
+
+# Bootstrap only from this installed physical script. The shared resolver is
+# the sole descriptor reader; neither argv nor environment can select a root.
+CLOUD_START_SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}")
+if [[ "$CLOUD_START_SCRIPT" != /opt/zeros-runtime/bin/start-engine.sh &&
+      ! "$CLOUD_START_SCRIPT" =~ ^/opt/zeros-infra/r1-[a-f0-9]{64}/bin/start-engine\.sh$ ]]; then
+  echo "[start-engine] FATAL: unsafe installed launcher" >&2
+  exit 1
+fi
+CLOUD_BOOT_ROOT="${CLOUD_START_SCRIPT%/bin/start-engine.sh}"
+CLOUD_BOOT_NODE="$CLOUD_BOOT_ROOT/bin/node"
+if [[ "$CLOUD_BOOT_ROOT" == /opt/zeros-runtime && ! -x "$CLOUD_BOOT_NODE" ]]; then CLOUD_BOOT_NODE=/usr/local/bin/node; fi
+cloud_root_file() {
+  local candidate="$1" ancestor="$1"
+  [[ -f "$candidate" && ! -L "$candidate" && "$(stat -c '%h' -- "$candidate")" == 1 && "$(readlink -f -- "$candidate")" == "$candidate" ]] || return 1
+  while :; do
+    [[ ! -L "$ancestor" && "$(stat -c '%u' -- "$ancestor")" == 0 && $((8#$(stat -c '%a' -- "$ancestor") & 8#022)) == 0 ]] || return 1
+    [[ "$ancestor" == / ]] && break
+    ancestor="$(dirname -- "$ancestor")"
+    [[ -d "$ancestor" ]] || return 1
+  done
+}
+cloud_root_file "$CLOUD_START_SCRIPT"
+cloud_root_file "$CLOUD_BOOT_NODE"
+cloud_root_file "$CLOUD_BOOT_ROOT/lib/zeros/cloud-runtime-root.mjs"
+[[ "$(id -u)" == 0 && -x "$CLOUD_BOOT_NODE" ]]
+CLOUD_SELECTION=$("$CLOUD_BOOT_NODE" --input-type=module - "$CLOUD_START_SCRIPT" <<'ZEROS_RUNTIME_SELECTION'
+import path from "node:path";
+import {pathToFileURL} from "node:url";
+const installed=process.argv[2], lib=path.join(path.dirname(path.dirname(installed)),"lib/zeros");
+const {resolveCloudRuntime}=await import(pathToFileURL(`${lib}/cloud-runtime-root.mjs`));
+const runtime=resolveCloudRuntime();
+if(runtime.startEngine!==installed || runtime.profile==="v4" && runtime.node!==process.execPath)
+  throw new Error("Cloud launch runtime changed");
+const {readCloudHostRuntimeProfile}=await import(pathToFileURL(runtime.helpers.profile));
+const profile=readCloudHostRuntimeProfile();
+process.stdout.write([runtime.workerRoot,runtime.libRoot,runtime.binRoot,
+  profile.version===1?process.execPath:runtime.node,String(profile.version)].join("\n"));
+ZEROS_RUNTIME_SELECTION
+)
+mapfile -t CLOUD_PATHS <<< "$CLOUD_SELECTION"
+[[ "${#CLOUD_PATHS[@]}" == 5 ]]
+ENGINE_DIR="${CLOUD_PATHS[0]}"
+RUNTIME_LIB="${CLOUD_PATHS[1]}"
+export PATH="${CLOUD_PATHS[2]}:/usr/bin:/bin:/usr/sbin:/sbin"
+RUNTIME="${CLOUD_PATHS[3]}"
+PROFILE_VERSION="${CLOUD_PATHS[4]}"
+unset CLOUD_SELECTION CLOUD_PATHS CLOUD_BOOT_ROOT CLOUD_BOOT_NODE CLOUD_START_SCRIPT
+REPO_DIR="${ZEROS_REPO_DIR:-/srv/zeros/workspace}"
+
+LOG="/srv/zeros/log/engine.log"
+WORKER_UID="10001"
+WORKER_GID="10001"
+
+# Deployment authority is fixed by the image and root-owned marker. Sandbox
+# create-time variables may configure the connection and provider credentials,
+# but can never redirect a privileged runtime into the writable checkout.
+export HOME="/srv/zeros/home/agent"
+export USER="zeros-agent"
+export LOGNAME="zeros-agent"
+export SHELL="/bin/bash"
+export ZEROS_DATA_DIR="/srv/zeros/state"
+export ZEROS_WORKSPACES_DIR="/srv/zeros/state/workspaces"
+export ZEROS_PTY_HOST_RUNTIME="$RUNTIME"
+export ZEROS_PTY_HOST_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/pty/pty-host.cjs"
+export ZEROS_CURSOR_HOST_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs"
+export ZEROS_ZSR_SUPERVISOR_RUNTIME="$RUNTIME"
+export ZEROS_ZSR_SUPERVISOR_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs"
+export ZEROS_ZSR_BWRAP_PATH="/usr/bin/bwrap"
+export ZEROS_ZSR_SETPRIV_PATH="/usr/bin/setpriv"
+
+
 case "$PROFILE_VERSION" in
   1) RUNTIME_DIRECTORY="/run/zeros"; ENGINE_UID="0"; SETTINGS_DIRECTORY="/srv/zeros/state/user-settings" ;;
   2) RUNTIME_DIRECTORY="/run/zeros/engine"; ENGINE_UID="10003"; SETTINGS_DIRECTORY="/srv/zeros/managed-settings"; REPO_DIR="/srv/zeros/workspace" ;;
   # This shell still runs on the host. The v3 engine view subsequently maps
   # the physical checkout to /srv/zeros/workspace inside its namespace.
-  3) RUNTIME_DIRECTORY="/run/zeros/engine"; ENGINE_UID="10003"; SETTINGS_DIRECTORY="/srv/zeros/managed-settings"; REPO_DIR="/srv/zeros/files/workspace" ;;
+  3|4) RUNTIME_DIRECTORY="/run/zeros/engine"; ENGINE_UID="10003"; SETTINGS_DIRECTORY="/srv/zeros/managed-settings"; REPO_DIR="/srv/zeros/files/workspace" ;;
   *) echo "[start-engine] FATAL: unsupported runtime profile" >&2; exit 1 ;;
 esac
+
+TEMPLATE_WORKSPACE=0
+if [[ "$PROFILE_VERSION" == "4" ]]; then
+  REPO_DIR=$("$RUNTIME" "$RUNTIME_LIB/cloud-computer-checkout.mjs" --host-repository) || exit 1
+  if [[ "$REPO_DIR" != "/srv/zeros/files/workspace" ]]; then TEMPLATE_WORKSPACE=1; fi
+fi
 
 SETUP_BOOT="${ZEROS_CLOUD_SETUP_BOOT:-}"
 if [[ -n "$SETUP_BOOT" && "$SETUP_BOOT" != "1" ]]; then
@@ -115,19 +165,19 @@ if [[ ! -f "$ENGINE_DIR/dist-engine/cli.js" || -L "$ENGINE_DIR" ]]; then
   echo "[start-engine] FATAL: immutable engine installation is missing" >&2
   exit 1
 fi
-if [[ ! -x /opt/zeros-runtime/lib/zeros/consume-cloud-admission.mjs || -L /opt/zeros-runtime/lib/zeros/consume-cloud-admission.mjs ]]; then
+if [[ ! -x "$RUNTIME_LIB/consume-cloud-admission.mjs" || -L "$RUNTIME_LIB/consume-cloud-admission.mjs" ]]; then
   echo "[start-engine] FATAL: cloud admission verifier is missing" >&2
   exit 1
 fi
-if [[ ! -x /opt/zeros-runtime/lib/zeros/install-cloud-preview-links.mjs || -L /opt/zeros-runtime/lib/zeros/install-cloud-preview-links.mjs ]]; then
+if [[ ! -x "$RUNTIME_LIB/install-cloud-preview-links.mjs" || -L "$RUNTIME_LIB/install-cloud-preview-links.mjs" ]]; then
   echo "[start-engine] FATAL: cloud preview installer is missing" >&2
   exit 1
 fi
-if [[ ! -x /opt/zeros-runtime/lib/zeros/install-cloud-github-credential.mjs || -L /opt/zeros-runtime/lib/zeros/install-cloud-github-credential.mjs ]]; then
+if [[ ! -x "$RUNTIME_LIB/install-cloud-github-credential.mjs" || -L "$RUNTIME_LIB/install-cloud-github-credential.mjs" ]]; then
   echo "[start-engine] FATAL: cloud GitHub credential installer is missing" >&2
   exit 1
 fi
-if [[ ! -x /opt/zeros-runtime/lib/zeros/cloud-github-refresh-request.mjs || -L /opt/zeros-runtime/lib/zeros/cloud-github-refresh-request.mjs ]]; then
+if [[ ! -x "$RUNTIME_LIB/cloud-github-refresh-request.mjs" || -L "$RUNTIME_LIB/cloud-github-refresh-request.mjs" ]]; then
   echo "[start-engine] FATAL: cloud GitHub refresh request helper is missing" >&2
   exit 1
 fi
@@ -139,7 +189,7 @@ if [[ "$SETUP_BOOT" != "1" && ( ! -f ${RUNTIME_DIRECTORY}/cloud-preview-links.js
   echo "[start-engine] FATAL: root-owned cloud preview ingress is unavailable" >&2
   exit 1
 fi
-if [[ ! -f ${RUNTIME_DIRECTORY}/github-credential.json || -L ${RUNTIME_DIRECTORY}/github-credential.json || "$(stat -c '%u:%a:%h' ${RUNTIME_DIRECTORY}/github-credential.json)" != "$ENGINE_UID:600:1" ]]; then
+if [[ "$TEMPLATE_WORKSPACE" != "1" && ( ! -f ${RUNTIME_DIRECTORY}/github-credential.json || -L ${RUNTIME_DIRECTORY}/github-credential.json || "$(stat -c '%u:%a:%h' ${RUNTIME_DIRECTORY}/github-credential.json)" != "$ENGINE_UID:600:1" ) ]]; then
   echo "[start-engine] FATAL: root-owned cloud GitHub credential projection is unavailable" >&2
   exit 1
 fi
@@ -164,7 +214,7 @@ fi
 # The attester creates a root-only, namespace/container-instance-bound proof.
 # Consumption is atomic and one-use, so a parallel or stale launcher cannot
 # start the privileged coordinator without completing the live ZSR harness.
-"$RUNTIME" /opt/zeros-runtime/lib/zeros/consume-cloud-admission.mjs
+"$RUNTIME" "$RUNTIME_LIB/consume-cloud-admission.mjs"
 
 cd "$REPO_DIR"
 umask 0002
@@ -185,7 +235,7 @@ echo "[start-engine] backend=cloud-worker token_gate=on worker=$WORKER_UID:$WORK
 # ZEROS_CLOUD_PORT is set — CloudTransport on 0.0.0.0:$ZEROS_CLOUD_PORT. Keep
 # Node as the direct supervised process. A tee sibling would retain the one-use
 # registration material in its inherited environment for the engine lifetime.
-if [[ "$PROFILE_VERSION" == "2" || "$PROFILE_VERSION" == "3" ]]; then
-  exec "$RUNTIME" /opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs >>"$LOG" 2>&1
+if [[ "$PROFILE_VERSION" == "2" || "$PROFILE_VERSION" == "3" || "$PROFILE_VERSION" == "4" ]]; then
+  exec "$RUNTIME" "$RUNTIME_LIB/cloud-engine-launcher.mjs" >>"$LOG" 2>&1
 fi
 exec "$RUNTIME" "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR" >>"$LOG" 2>&1

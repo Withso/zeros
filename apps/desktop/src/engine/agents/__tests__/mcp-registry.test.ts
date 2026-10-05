@@ -40,6 +40,12 @@ const stdio = (
 });
 
 describe("dedupeMcpServers", () => {
+  it("does not register the reserved computer server from settings", () => {
+    expect(mcpServersFromSettings({ mcp: { servers: [
+      http("cloud-computer", "https://external.example.test/mcp"),
+      http("ordinary", "https://ordinary.example.test/mcp"),
+    ] } })).toEqual([http("ordinary", "https://ordinary.example.test/mcp")]);
+  });
   it("returns an empty list unchanged (today's inert registry)", () => {
     expect(dedupeMcpServers([])).toEqual([]);
   });

@@ -3,6 +3,7 @@ import type {DynamicToolCallParams} from "./generated/v2/DynamicToolCallParams";
 import type {DynamicToolCallResponse} from "./generated/v2/DynamicToolCallResponse";
 import { z } from "zod";
 import { CloudGoalUpdateSchema } from "@zeros/protocol/cloud-commands";
+import {cloudComputerProcessEnvironment} from "../../cloud-computer-environment";
 const cwd="/srv/zeros/workspace";
 const record=(value:unknown):Record<string,unknown>=>value&&typeof value==="object"&&!Array.isArray(value)?value as Record<string,unknown>:{};
 const reads=new Set(["model/list","account/read","account/rateLimits/read","config/read","configRequirements/read","permissionProfile/list",
@@ -66,6 +67,14 @@ export function cloudCodexCapabilities(execution: CloudProviderExecution) {
 }
 export function cloudCodexConfig(execution: CloudProviderExecution): Record<string, unknown> {
   const config: Record<string, unknown> = {...CLOUD_CODEX_CONFIG};
+  if(execution.lease.environment){
+    // These config entries also reach app-server argv: pass names only. The
+    // executor inherits values from its private, credential-free launch env.
+    const names=Object.keys(cloudComputerProcessEnvironment({},execution.lease.environment.values,"agent"));
+    config["shell_environment_policy.inherit"]="all";
+    config["shell_environment_policy.ignore_default_excludes"]=true;
+    config["shell_environment_policy.include_only"]=["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME",...names];
+  }
   config["features.multi_agent"]=cloudCodexCapabilities(execution).multiAgent;
   if (cloudCodexCapabilities(execution).connectedApps) {
     delete config["mcp_servers.codex_apps.enabled"];
