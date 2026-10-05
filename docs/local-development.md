@@ -63,6 +63,8 @@ an incomplete lock reports an actionable error instead of stealing a live run.
 ## Accounts and network services
 
 Local has no Zeros user, access token, WorkOS session or substitute account.
+The organization menu has no sign-in action. Settings → Account explains the
+account-free mode and directs sign-in testing to Zeros Dev.
 Native main enables it only for the explicit unpackaged development launch.
 Preload obtains that decision directly from main before the renderer starts.
 Packaged Alpha/Beta/Production and full Dev retain their login boundary; Vite
