@@ -1,14 +1,95 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import fs from "node:fs/promises";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
+import { describe, expect, it, vi } from "vitest";
 import { cloudEngineWorkspacePaths } from "../cloud-workspace-validation/sandbox/cloud-engine-view.mjs";
+import { createAttachmentTemporaryDirectory } from "../../apps/desktop/src/engine/files/attachment-temporary-directory";
 
 const require = createRequire(import.meta.url);
 const engine = path.join(process.cwd(), "apps/desktop/src/engine");
+// Execute the qualification's actual publication operations. Transport is a
+// fixture; both the allocator and native mount test use production code.
+const qualification = ts.createSourceFile("qualify-cloud-human-services.ts", readFileSync(new URL(
+  "../cloud-workspace-validation/sandbox/qualify-cloud-human-services.ts", import.meta.url,
+), "utf8"), ts.ScriptTarget.Latest, true);
+const main = qualification.statements.find((node): node is ts.FunctionDeclaration =>
+  ts.isFunctionDeclaration(node) && node.name?.text === "main");
+assert(main?.body);
+const statements = [...main.body.statements];
+const phase = (node: ts.Statement, name: string) => ts.isExpressionStatement(node) &&
+  ts.isBinaryExpression(node.expression) && node.expression.left.getText(qualification) === "phase" &&
+  ts.isStringLiteral(node.expression.right) && node.expression.right.text === name;
+const start = statements.findIndex(node => phase(node, "attachment-publication"));
+const end = statements.findIndex(node => phase(node, "exec-pty"));
+assert(start >= 0 && end > start);
+const attachmentQualification = statements.slice(start, end).map(node => node.getText(qualification)).join("\n");
+
+it.each([false, true])("qualifies atomic human attachment publication with a computer projection: %s", async template => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "zeros-v2-test-qualification-"));
+  const workspace = "/srv/zeros/workspace", staging = "/srv/zeros/attachment-staging";
+  const mapping = template ? cloudEngineWorkspacePaths("/srv/zeros/files/repos/example/primary") : null;
+  const publication = mapping?.repositoryAlias ?? workspace;
+  const translate = (candidate: string) => mapping && (candidate === workspace || candidate.startsWith(workspace + "/"))
+    ? mapping.repositoryAlias + candidate.slice(workspace.length) : candidate;
+  const physical = (candidate: string) => path.join(root, translate(candidate).slice("/srv/zeros/".length));
+  const mount = (candidate: string) => template && (candidate === workspace || candidate.startsWith(workspace + "/"))
+    ? "primary-bind" : "files-bind";
+  const temporaries: Awaited<ReturnType<typeof createAttachmentTemporaryDirectory>>[] = [];
+  const checks: string[] = [];
+  let published = false;
+  try {
+    await mkdir(physical(workspace), { recursive: true });
+    await mkdir(physical(staging), { mode: 0o700 });
+    await mkdir(path.join(root, "state"));
+    vi.stubEnv("ZEROS_DATA_DIR", path.join(root, "state"));
+    vi.stubEnv("ZEROS_ATTACHMENT_TEMP_DIR", physical(staging));
+    vi.spyOn(os, "tmpdir").mockReturnValue(physical(workspace));
+    await runInNewContext(`(async () => { let temporary; ${attachmentQualification} })()`, {
+      assert, checks, transfer: workspace + "/attachment",
+      cloudWorkspacePublicationPath: translate,
+      createAttachmentTemporaryDirectory: async (candidate: string) => {
+        expect(candidate).toBe(workspace);
+        const temporary = await createAttachmentTemporaryDirectory(physical(publication));
+        temporaries.push(temporary);
+        expect(path.dirname(temporary.path)).toBe(physical(staging));
+        expect((await fs.stat(temporary.path)).mode & 0o777).toBe(0o700);
+        return { ...temporary, path: staging + "/" + path.basename(temporary.path) };
+      },
+      writeFile: (candidate: string, contents: string, options: Parameters<typeof fs.writeFile>[2]) =>
+        fs.writeFile(physical(candidate), contents, options),
+      readFile: (candidate: string, encoding: BufferEncoding) => fs.readFile(physical(candidate), encoding),
+      rename: async (from: string, to: string) => {
+        // Linux gives distinct bind mounts distinct mount IDs despite st_dev
+        // and inode equality. A logical-primary rename must fail with EXDEV.
+        if (mount(from) !== mount(to)) throw Object.assign(new Error("Cross-device rename"), { code: "EXDEV" });
+        await fs.rename(physical(from), physical(to));
+        published = true;
+      },
+      rmSync: (candidate: string) => rmSync(physical(candidate)),
+      exec: async (command: string) => {
+        expect(command.startsWith("cat " + staging + "/")).toBe(true);
+        expect((await fs.stat(path.dirname(physical(command.slice(4))))).mode & 0o777).toBe(0o700);
+        return { code: 1 };
+      },
+    }, { timeout: 1000 });
+    expect(published).toBe(true);
+    expect(checks).toEqual(["private-attachment-staging", "same-mount-atomic-attachment-publication"]);
+    expect(await fs.readdir(physical(staging))).toEqual([]);
+    expect(await fs.readdir(physical(workspace))).toEqual([]);
+  } finally {
+    vi.restoreAllMocks(); vi.unstubAllEnvs();
+    for (const temporary of temporaries) await temporary.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 const nativeNamespaces = process.platform === "linux" && spawnSync("sudo", [
   "-n", "/usr/bin/bwrap", "--ro-bind", "/", "/", "--unshare-pid", "--proc", "/proc", "--", "/usr/bin/true",
 ], { stdio: "ignore" }).status === 0;
@@ -24,6 +105,8 @@ import { transferContextAttachment } from ${JSON.stringify(path.join(engine, "fi
 import { stageContextGraphAttachment } from ${JSON.stringify(path.join(engine, "files/context-graph.ts"))};
 import { prepareZsrPolicy } from ${JSON.stringify(path.join(engine, "agents/containment/policy.ts"))};
 import { loadCloudWorkspacePaths } from ${JSON.stringify(path.join(engine, "agents/containment/cloud-workspace-paths.ts"))};
+import { cloudWorkspacePublicationPath } from ${JSON.stringify(path.join(engine, "agents/containment/cloud-workspace-paths.ts"))};
+import { rmSync } from 'node:fs';
 import { wrapCommandWithSandboxLinux } from ${JSON.stringify(require.resolve("@anthropic-ai/sandbox-runtime/dist/sandbox/linux-sandbox-utils.js"))};
 const workspace = '/srv/zeros/workspace', alias = '/srv/zeros/repos/example/primary';
 await fs.mkdir('/tmp/home', { recursive: true });
@@ -45,9 +128,23 @@ if (process.argv[2] === 'invalid') {
     assert.equal(await mountId(temporary.path), await mountId(publication));
     assert(temporary.path.startsWith('/srv/zeros/attachment-staging/'));
     await fs.writeFile(temporary.path + '/contents', 'complete');
+    if (template) await assert.rejects(fs.rename(temporary.path + '/contents', workspace + '/published.txt'), { code: 'EXDEV' });
     await fs.rename(temporary.path + '/contents', publication + '/published.txt');
     assert.equal(await fs.readFile(workspace + '/published.txt', 'utf8'), 'complete');
   } finally { await temporary.dispose(); }
+  // The image qualification must exercise the same atomic publication as the
+  // attachment services, including the separate logical-primary bind mount.
+  const { writeFile, readFile, rename } = fs;
+  const transfer = workspace + '/qualified.txt', checks = [];
+  let phase;
+  const exec = async command => ({ code: spawnSync('/usr/bin/setpriv',
+    ['--reuid', '10001', '--regid', '10001', '--clear-groups', '--', '/usr/bin/cat', command.slice(4)],
+    { stdio: 'ignore' }).status });
+  let qualificationTemporary;
+  try {
+    await (async () => { let temporary; ${attachmentQualification.replace("temporary = await createAttachmentTemporaryDirectory", "temporary = qualificationTemporary = await createAttachmentTemporaryDirectory")} })();
+    assert.deepEqual(checks, ['private-attachment-staging', 'same-mount-atomic-attachment-publication']);
+  } finally { await qualificationTemporary?.dispose(); }
   const common = { attachmentId: 'chunked', filename: 'upload.txt', mimeType: 'text/plain', uploadId: 'upload', totalBytes: 6 };
   assert.equal((await transferContextAttachment(workspace, { ...common, offset: 0, base64: Buffer.from('abc').toString('base64') })).pending, true);
   const saved = await transferContextAttachment(workspace, { ...common, offset: 3, base64: Buffer.from('def').toString('base64') });

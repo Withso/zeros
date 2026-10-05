@@ -128,6 +128,41 @@ not replayed into a possible new allocation. Keep its journal for reconciliation
 An interrupted process can retain an unconfirmed child; keep its journal and run
 the cleanup command before discarding the credential-bearing workspace.
 
+## Confirmed attachment qualification failure (2026-10-05)
+
+The orchestrator's run of `d63e6622` on fork `bx_cmscg8v2` reported
+`humanServices.secure=false`, phase `attachment-publication`; identity, workload
+and capture passed, and the engine roots were clean. The orchestrator confirmed
+the fork's cleanup. A local regression reproduces the failing qualification
+operation with real Linux bind mounts: renaming from private attachment staging
+to the logical primary root fails with `EXDEV`.
+
+The staging layout already supports computer workspaces. The launcher binds
+`/srv/zeros/files` at `/srv/zeros`, exposing both `attachment-staging` and
+`repos/<owner>/<name>` on one mount, then binds the primary separately at
+`/srv/zeros/workspace` (`sandbox/cloud-engine-view.mjs:83`, `:96`). Its root-owned
+admission publishes the matching repository alias (`cloud-engine-launcher.mjs:345`).
+The allocator selects staging against that alias
+(`apps/desktop/src/engine/files/attachment-temporary-directory.ts:85`), and real
+attachment publication already translates its destination
+(`apps/desktop/src/engine/files/context-graph.ts:546`, `:571`). The qualification
+previously skipped that destination translation. It now uses the same validated
+`cloudWorkspacePublicationPath` for its atomic rename
+(`sandbox/qualify-cloud-human-services.ts:62`), retaining the worker read-denial
+check and the single-rename publication check. Engine-private staging remains
+10003:10003 mode 0700; repositories remain owned by 10001:10001.
+
+This is a runtime-only fix; no new base image or template sanitation change is
+required. Publish and qualify the corrected runtime on Alpha, rebuild/activate
+the org's Cloud Computer using that runtime, then create a new workspace through
+Zeros Dev. Rebuilding is necessary for adoption because workspace creation
+prefers the template build's still-qualified runtime pin
+(`apps/control-plane/src/cloud-workspaces/computer-workspace-source.ts:144`,
+`:149`); publishing a newer runtime alone does not replace that pin. Existing
+failed generations keep their saved source and runtime. The fix requires no
+desktop protocol or application update. Live verification of the corrected
+runtime remains for the owner/orchestrator.
+
 ## Source trace and candidate mismatches
 
 These are candidates from code inspection, not a live root-cause claim. References
